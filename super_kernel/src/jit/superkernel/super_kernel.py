@@ -689,7 +689,7 @@ indent_code_func(f'    auto_gen_{super_operator.kernel_name}_kernel_{arch}();\n'
 
     try:
         with os.fdopen(os.open(super_operator.kernel_file, \
-            os.O_RDWR | os.O_CREAT, stat.S_IWUSR | stat.S_IRUSR), 'w') as ofd:
+            os.O_RDWR | os.O_CREAT | os.O_TRUNC, stat.S_IWUSR | stat.S_IRUSR), 'w') as ofd:
             ofd.write(super_kernel_file)
     except Exception as err:
         CommonUtility().ascendc_raise_python_err(ERR_CODE, "gen super kernel func file failed, reason is:", err)
@@ -1035,7 +1035,7 @@ not have any send event, op:{sub_operator.kernel_name}, event_list:{sub_operator
     super_kernel_file += "}\n\n"
     try:
         with os.fdopen(os.open(super_operator.kernel_file, \
-            os.O_RDWR | os.O_CREAT, stat.S_IWUSR | stat.S_IRUSR), 'w') as ofd:
+            os.O_RDWR | os.O_CREAT | os.O_TRUNC, stat.S_IWUSR | stat.S_IRUSR), 'w') as ofd:
             ofd.write(super_kernel_file)
     except Exception as err:
         CommonUtility().ascendc_raise_python_err(ERR_CODE, ("gen super kernel func file failed, reason is:", err))
