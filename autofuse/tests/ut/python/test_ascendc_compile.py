@@ -129,6 +129,28 @@ def _make_copy_so_to_output_case(tmpdir, wrapper_in_output_dir=False):
     )
 
 
+def _make_soc_type_args(soc_version):
+    return type("Args", (), {"soc_version": soc_version})()
+
+
+def test_get_soc_type_maps_supported_soc_versions(ascendc_compile_module):
+    get_soc_type = ascendc_compile_module.get_soc_type
+
+    assert get_soc_type(_make_soc_type_args("Ascend910B4")) == "dav-2201"
+    assert get_soc_type(_make_soc_type_args("Ascend910_9391")) == "dav-2201"
+    assert get_soc_type(_make_soc_type_args("Ascend950PR_9579")) == "dav-3510"
+    assert get_soc_type(_make_soc_type_args("Ascend350_355e")) == "dav-3510"
+    assert get_soc_type(_make_soc_type_args("Ascend350_354f")) == "dav-3510"
+
+
+def test_get_soc_type_rejects_unknown_soc_version(ascendc_compile_module):
+    with pytest.raises(ValueError, match="Unsupported soc_version"):
+        ascendc_compile_module.get_soc_type(_make_soc_type_args("Ascend310P"))
+    # Ascend350_355e 仅支持全等匹配，其他 Ascend350 前缀变体不受支持
+    with pytest.raises(ValueError, match="Unsupported soc_version"):
+        ascendc_compile_module.get_soc_type(_make_soc_type_args("Ascend350_355"))
+
+
 def test_link_shared_adds_requested_libraries(ascendc_compile_module):
     captured = {}
 
