@@ -624,8 +624,17 @@ af::Status BuildPostReduceLayout(const af::AscNodePtr &reduce, PostReduceLayout 
   for (size_t i = 0UL; i < layout.axes.size(); ++i) {
     const auto input_zero = af::SymbolicUtils::StaticCheckEq(input_strides[i], af::ops::Zero);
     const auto output_zero = af::SymbolicUtils::StaticCheckEq(output_strides[i], af::ops::Zero);
-    if (input_zero == af::TriBool::kUnknown || output_zero == af::TriBool::kUnknown ||
-        (input_zero == af::TriBool::kTrue && output_zero == af::TriBool::kFalse)) {
+    // 仅拒绝可静态证明矛盾的布局（输入广播 stride=0 但输出非零）。符号 stride 的
+    // 零性为 kUnknown 不能作为非法依据：动态 shape 下保留轴 stride 恒为符号表达式，
+    // 归约/保留划分由 CalcReduceAxes 依据 dst stride 是否为常量 0 推导。
+    if (input_zero == af::TriBool::kTrue && output_zero == af::TriBool::kFalse) {
+      return af::SUCCESS;
+    }
+    // 归约轴输出 repeat 恒为 1 且 stride 恒为 0。若某轴输出 repeat=1 但其
+    // 输出 stride 的零性无法静态判定，则无法确认它是否为归约轴（可能被改写为
+    // 非法布局），保守拒绝；真正保留轴的 repeat 不会退化为常量 1。
+    if (af::SymbolicUtils::StaticCheckEq(output->attr.repeats[i], af::sym::kSymbolOne) == af::TriBool::kTrue &&
+        output_zero == af::TriBool::kUnknown) {
       return af::SUCCESS;
     }
     if (input_zero == af::TriBool::kTrue && output_zero == af::TriBool::kTrue) {
@@ -2876,6 +2885,24 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
   GELOGD("[IndirectLoad] Apply graph pass for node[%s], template_id[%d].", indirect_load->GetNamePtr(),
          static_cast<int32_t>(template_id));
   is_candidate_legal = true;
+  const auto value_dtype = indirect_load->inputs()[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype;
+  const bool is_64bit_value = value_dtype == af::DT_INT64 || value_dtype == af::DT_UINT64;
+  const bool is_1byte_value = value_dtype == af::DT_INT8 || value_dtype == af::DT_UINT8 || value_dtype == af::DT_BOOL;
+  // 64 位值（int64/uint64）由 SIMD 8 字节 ValuePolicy（RegTraitNumTwo）与 SIMT 支持；
+  // 1 字节值（int8/uint8/bool）当前仅 SIMT 标量路径支持（SIMD b8 gather 语义待定）。
+  // SK 的 AscendC::Gather 对 8 字节与 1 字节均不支持，需跳过。
+  if ((is_64bit_value || is_1byte_value) && template_id == ascir::TemplateId::kIndirectLoadSK) {
+    is_candidate_legal = false;
+    GELOGI("[IndirectLoad] value dtype[%d] is unsupported by SK, skip template[%d] for node[%s].",
+           static_cast<int32_t>(value_dtype), static_cast<int32_t>(template_id), indirect_load->GetNamePtr());
+    return af::SUCCESS;
+  }
+  if (is_1byte_value && template_id != ascir::TemplateId::kIndirectLoadSimt) {
+    is_candidate_legal = false;
+    GELOGI("[IndirectLoad] 1-byte value dtype[%d] only supports SIMT, skip template[%d] for node[%s].",
+           static_cast<int32_t>(value_dtype), static_cast<int32_t>(template_id), indirect_load->GetNamePtr());
+    return af::SUCCESS;
+  }
   if (template_id == ascir::TemplateId::kIndirectLoadSK) {
     // [SK段SIMT化] index 源头不收敛且全量窗口超出单核 UB 的形态（如
     // gather(axis=0) 逐元素 index + 尾轴大 R）：IndirectLoadSk 行窗口模型退化为

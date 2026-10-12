@@ -138,6 +138,8 @@ INDIRECT_LOAD_SIMD_SUPPORTED_VALUE_TYPE(bfloat16_t);
 INDIRECT_LOAD_SIMD_SUPPORTED_VALUE_TYPE(int32_t);
 INDIRECT_LOAD_SIMD_SUPPORTED_VALUE_TYPE(uint32_t);
 INDIRECT_LOAD_SIMD_SUPPORTED_VALUE_TYPE(float);
+INDIRECT_LOAD_SIMD_SUPPORTED_VALUE_TYPE(int64_t);
+INDIRECT_LOAD_SIMD_SUPPORTED_VALUE_TYPE(uint64_t);
 #undef INDIRECT_LOAD_SIMD_SUPPORTED_VALUE_TYPE
 
 template <typename X, size_t Size = sizeof(X)>
@@ -156,6 +158,24 @@ struct IndirectLoadSimdValuePolicy<X, sizeof(uint32_t)> {
     (void)element_count;
     (void)input_actual_size;
     MicroAPI::RegTensor<X> value;
+    MicroAPI::DataCopyGather(value, x, source_index, valid_mask);
+    MicroAPI::DataCopy(y, value, lane_mask);
+  }
+};
+
+// 8 字节值（int64/uint64）：一个元素占两个 32 位寄存器，使用 RegTraitNumTwo 承载 64 位
+// 向量寄存器；DataCopyGather/DataCopy 的 64 位路径与 gather.h 的 int64 处理一致。
+template <typename X>
+struct IndirectLoadSimdValuePolicy<X, sizeof(uint64_t)> {
+  static constexpr bool kSupported = IndirectLoadSimdValueSupported<X>::kSupported;
+
+  __simd_callee__ inline static void GatherAndStore(__ubuf__ X *x, __ubuf__ X *y,
+                                                    MicroAPI::RegTensor<uint32_t> &source_index,
+                                                    MicroAPI::MaskReg lane_mask, MicroAPI::MaskReg valid_mask,
+                                                    uint32_t element_count, uint32_t input_actual_size) {
+    (void)element_count;
+    (void)input_actual_size;
+    MicroAPI::RegTensor<X, MicroAPI::RegTraitNumTwo> value;
     MicroAPI::DataCopyGather(value, x, source_index, valid_mask);
     MicroAPI::DataCopy(y, value, lane_mask);
   }
@@ -384,8 +404,11 @@ struct IndirectLoadSimdRegTraits {
   using ValuePolicy = IndirectLoadSimdValuePolicy<X>;
   static constexpr bool kSupported =
       IndexPolicy::kSupported && ValuePolicy::kSupported && Rank > 0 && Axis >= 0 && Axis < Rank;
+  // 16 位：每个 32 位 lane 打包 2 个元素；64 位：每个元素占 2 个 lane，故每 repeat 元素数减半。
   static constexpr uint32_t kElementsPerRepeat =
-      sizeof(X) == sizeof(uint16_t) ? VECTOR_REG_WIDTH / sizeof(uint16_t) : IndexPolicy::kElementsPerRepeat;
+      sizeof(X) == sizeof(uint16_t) ? VECTOR_REG_WIDTH / sizeof(uint16_t)
+                                    : (sizeof(X) == sizeof(uint64_t) ? VECTOR_REG_WIDTH / sizeof(uint32_t) / 2U
+                                                                     : IndexPolicy::kElementsPerRepeat);
 };
 
 template <IndirectLoadSimdAddressMode Mode, typename X, typename Index, int32_t Rank, int32_t Axis>

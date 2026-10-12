@@ -2094,7 +2094,7 @@ af::Status TilingCodeGenImpl::GenTilingCaseImpl(const ModelInfo &model_info) {
   }
   GE_ASSERT_SUCCESS(GenDoTiling(model_info), "Generate dotiling failed.");
   GE_ASSERT_SUCCESS(GenPostTiling(model_info), "Generate posttiling failed.");
-  if (config_.is_inductor_scene && is_uniq_group_) {
+  if (config_.is_inductor_scene) {
     GenInductorExecutePGOSolver(model_info);
   }
   tiling_func_.AddLine("};");

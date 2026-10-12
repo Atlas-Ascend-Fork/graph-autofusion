@@ -36,7 +36,7 @@ constexpr char kSimtValueNamePrefix[] = "v_";
 
 Status GenerateSimtContextDefinition(const std::string &context_name,
                                      const std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> &gm_tensors,
-                                     std::stringstream &ss) {
+                                     bool has_output_inner_size, std::stringstream &ss) {
   ss << "struct " << context_name << " {" << std::endl;
   for (const auto &tensor : gm_tensors) {
     std::string dtype;
@@ -46,6 +46,11 @@ Status GenerateSimtContextDefinition(const std::string &context_name,
     } else {
       ss << "  __gm__ " << dtype << " *" << kSimtGmFieldNamePrefix << tensor.value_tensor_id << ";" << std::endl;
     }
+  }
+  // 后置 Reduce 的局部输出按 Inner size 对齐写回；该 size 可能是运行期符号
+  // （如 t->ksN），不能内联进文件作用域的 Store，需经 Context 传入。
+  if (has_output_inner_size) {
+    ss << "  uint64_t output_inner_size;" << std::endl;
   }
   ss << "};" << std::endl;
   return af::SUCCESS;
@@ -770,6 +775,16 @@ bool IsLosslessSimtCastChain(const std::vector<af::AscNodePtr> &nodes, ascir::Te
   return true;
 }
 
+namespace {
+// 后置 Reduce 的局部输出按 Inner size 对齐写回。该 size 仅当不是编译期常量（如动态 shape
+// 下的 t->ksN）时才需经 Context 运行期传入；编译期常量应直接内联，避免每个输出元素做
+// 一次运行期整型除/模而破坏常量折叠。
+bool UseRuntimeOutputInnerSize(bool has_post_reduce,
+                               const ascgen_utils::indirect_load::TemplateLogicalView &logical_view) {
+  return has_post_reduce && !logical_view.output.sizes.empty() && !logical_view.output.sizes.back().IsConstExpr();
+}
+}  // namespace
+
 af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const std::string &offset_type,
                                         ascir::TensorId value_tensor_id, const std::vector<SimtOutputChain> &chains,
                                         const std::vector<af::AscNodePtr> &nodes,
@@ -835,12 +850,16 @@ af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const st
   ss << "    return outputs;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  __simt_callee__ __aicore__ inline static void Store(const OutputTargets &targets, " << offset_type
-     << " output_index, " << offset_type << " local_index, const OutputPack &outputs) {" << std::endl;
+     << " output_index, " << offset_type << " local_index, const Context &context, const OutputPack &outputs) {"
+     << std::endl;
   for (size_t i = 0UL; i < chains.size(); ++i) {
     std::string output_offset = "output_index";
     if (chains[i].local_target) {
       if (!logical_view.output.sizes.empty()) {
-        const auto inner_size = tpipe.tiler.Size(logical_view.output.sizes.back());
+        // 编译期常量直接内联；仅运行期符号（如 t->ksN）经 Context 传入，避免在静态 Store 中引用 t->。
+        const std::string inner_size = UseRuntimeOutputInnerSize(has_post_reduce, logical_view)
+                                           ? "static_cast<" + offset_type + ">(context.output_inner_size)"
+                                           : tpipe.tiler.Size(logical_view.output.sizes.back());
         std::string dtype;
         GE_ASSERT_SUCCESS(Tensor::DtypeName(chains[i].dtype, dtype));
         const auto row_stride = "KernelUtils::SizeAlign(" + inner_size + ", 32/sizeof(" + dtype + "))";
@@ -999,7 +1018,7 @@ void EmitSimtPolicyParams(const TPipe &tpipe, const ascgen_utils::indirect_load:
 
 af::Status GenerateSimtContextInitializer(
     const std::string &context_name, const std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> &gm_tensors,
-    const TPipe &tpipe, std::stringstream &ss) {
+    const TPipe &tpipe, const std::string &output_inner_size_expr, std::stringstream &ss) {
   ss << "  " << context_name << " context{";
   for (size_t i = 0UL; i < gm_tensors.size(); ++i) {
     const auto &gm_tensor = gm_tensors[i];
@@ -1013,6 +1032,9 @@ af::Status GenerateSimtContextInitializer(
       ss << (i == 0UL ? "" : ", ") << "(__gm__ " << dtype << " *)" << kGlobalTensorNamePrefix << gm_tensor.gm_tensor_id
          << ".GetPhyAddr()";
     }
+  }
+  if (!output_inner_size_expr.empty()) {
+    ss << (gm_tensors.empty() ? "" : ", ") << output_inner_size_expr;
   }
   ss << "};" << std::endl;
   return af::SUCCESS;
@@ -1257,7 +1279,8 @@ Status IndirectLoadRegApiCall::GenerateFuncDefinition(const TPipe &tpipe, const 
   // name, so guard the definition while keeping every variant's invocation available.
   ss << "#ifndef " << body_guard << std::endl;
   ss << "#define " << body_guard << std::endl;
-  GE_ASSERT_SUCCESS(GenerateSimtContextDefinition(context_name, simt_gm_tensors_, ss));
+  GE_ASSERT_SUCCESS(GenerateSimtContextDefinition(context_name, simt_gm_tensors_,
+                                                  UseRuntimeOutputInnerSize(has_post_reduce_, logical_view_), ss));
   ss << "struct " << body_name << " {" << std::endl;
   ss << "  using Context = " << context_name << ";" << std::endl;
   const size_t ub_output_count = static_cast<size_t>(std::count_if(
@@ -1528,7 +1551,11 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
   ss << "{" << std::endl;
   ss << "  __gm__ " << input_dtype << " *input_ptr = (__gm__ " << input_dtype << " *)" << input << ".GetPhyAddr();"
      << std::endl;
-  GE_ASSERT_SUCCESS(GenerateSimtContextInitializer(context_name, simt_gm_tensors_, tpipe, ss));
+  std::string output_inner_size_expr;
+  if (UseRuntimeOutputInnerSize(has_post_reduce_, logical_view_)) {
+    output_inner_size_expr = "static_cast<uint64_t>(" + tpipe.tiler.Size(logical_view_.output.sizes.back()) + ")";
+  }
+  GE_ASSERT_SUCCESS(GenerateSimtContextInitializer(context_name, simt_gm_tensors_, tpipe, output_inner_size_expr, ss));
   GE_ASSERT_SUCCESS(GenerateSimtInvocation(tpipe, input_dtype, outer_tb_var, ss));
   ss << "}" << std::endl;
   result = ss.str();

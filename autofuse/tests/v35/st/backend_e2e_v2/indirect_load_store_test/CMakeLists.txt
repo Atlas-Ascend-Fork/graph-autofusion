@@ -101,6 +101,71 @@ function(add_indirect_load_graph_case test_name kernel_stem tiling_key)
     mark_indirect_load_codegen_and_e2e(${test_name} ${ARGN})
 endfunction()
 
+# Sweep registration: aggregates several IndirectLoad variants into ONE ST case.
+#
+# Every variant still gets its own codegen/e2e binary because the generated
+# kernel/tiling units export fixed symbols (`AutofuseTiling`, the tiling-data
+# struct, ...) and bake the value dtype into the kernel, so linking variants into
+# a single binary is not possible without mass symbol renaming.  Instead the
+# variants are built as private targets (NO_TEST) and one driver test runs them
+# sequentially, keeping the case count at one per sweep axis.
+#
+# Usage:
+#   add_indirect_load_sweep_variant(<sweep> <variant> <tiling_key> <defs...>)
+#   finalize_indirect_load_sweep(<sweep>)
+function(add_indirect_load_sweep_variant sweep_name variant_name tiling_key)
+    set(case_workdir ${CMAKE_CURRENT_BINARY_DIR}/${variant_name})
+    file(MAKE_DIRECTORY ${case_workdir})
+    do_backend_e2e_st_test(${variant_name}
+        WORKDIR ${case_workdir}
+        CODEGEN indirect_load_store_backend_generator.cpp
+        TILING_KEY ${tiling_key}
+        KERNEL_SRC
+            ${variant_name}_kernel.cpp
+            ${variant_name}_tiling.cpp
+            autofuse_tiling_data.h
+        TEST_SRC test_e2e_indirect_load_store_kernel.cpp
+        NO_TEST)
+    mark_indirect_load_codegen_and_e2e(${variant_name} ${ARGN})
+    set(${sweep_name}_variants "${${sweep_name}_variants}" "${variant_name}" PARENT_SCOPE)
+endfunction()
+
+function(finalize_indirect_load_sweep sweep_name)
+    set(variants ${${sweep_name}_variants})
+    if(NOT variants)
+        message(FATAL_ERROR "sweep '${sweep_name}' has no variant")
+    endif()
+    set(codegen_deps)
+    set(e2e_deps)
+    set(codegen_content "set(SWEEP_NAME \"${sweep_name}_codegen\")\n")
+    string(APPEND codegen_content "set(SWEEP_REPORT_DIR \"${CMAKE_INSTALL_PREFIX}/report/v35/st\")\n")
+    string(APPEND codegen_content "set(SWEEP_LD_LIBRARY_PATH \"${BACKEND_E2E_RUNTIME_LD_LIBRARY_PATH}\")\n")
+    string(APPEND codegen_content "set(SWEEP_EXES\n")
+    set(e2e_content "set(SWEEP_NAME \"${sweep_name}_e2e\")\n")
+    string(APPEND e2e_content "set(SWEEP_REPORT_DIR \"${CMAKE_INSTALL_PREFIX}/report/v35/st\")\n")
+    string(APPEND e2e_content "set(SWEEP_EXES\n")
+    foreach(variant IN LISTS variants)
+        list(APPEND codegen_deps ${variant}_codegen_v2)
+        list(APPEND e2e_deps ${variant}_e2e_v2)
+        string(APPEND codegen_content "  \"$<TARGET_FILE:${variant}_codegen_v2>\"\n")
+        string(APPEND e2e_content "  \"$<TARGET_FILE:${variant}_e2e_v2>\"\n")
+    endforeach()
+    string(APPEND codegen_content ")\ninclude(\"${CMAKE_CURRENT_LIST_DIR}/run_indirect_load_sweep.cmake\")\n")
+    string(APPEND e2e_content ")\ninclude(\"${CMAKE_CURRENT_LIST_DIR}/run_indirect_load_sweep.cmake\")\n")
+    file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${sweep_name}_codegen_runner.cmake CONTENT "${codegen_content}")
+    file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${sweep_name}_e2e_runner.cmake CONTENT "${e2e_content}")
+
+    # Custom targets so `make <sweep>_codegen_v2/_e2e_v2` builds all variants.
+    add_custom_target(${sweep_name}_codegen_v2 DEPENDS ${codegen_deps})
+    add_custom_target(${sweep_name}_e2e_v2 DEPENDS ${e2e_deps})
+
+    add_test(NAME ${sweep_name}_codegen_v2
+             COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/${sweep_name}_codegen_runner.cmake)
+    set_tests_properties(${sweep_name}_codegen_v2 PROPERTIES LABELS "st;build_backend_test1;${sweep_name}_codegen_v2")
+    add_test(NAME ${sweep_name}_e2e_v2
+             COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/${sweep_name}_e2e_runner.cmake)
+    set_tests_properties(${sweep_name}_e2e_v2 PROPERTIES LABELS "st;build_backend_test2;${sweep_name}_e2e_v2")
+endfunction()
 function(mark_indirect_load_implementation test_name implementation)
     mark_indirect_load_codegen(${test_name}
         IL_SELECTED_IMPLEMENTATION=${implementation})
@@ -372,6 +437,41 @@ add_indirect_load_graph_case(indirect_load_user_position_bias
 # User graph: embedding + Sum over the lookup axis.
 add_indirect_load_graph_case(indirect_load_user_embedding_sum indirect_load_user_embedding_sum 1
     IL_CASE_BROADCAST_WHERE IL_USER_EMBEDDING_SUM)
+
+# IndirectLoad sweep：把值 dtype / 强制模板 / 动态 shape 三个关注点各自聚合成 1 个 ST 用例，
+# 避免 dtype × 场景 × 模板 的笛卡尔积；每个 variant 仍是独立的 codegen/e2e 二进制。
+
+# 值 dtype 轴：embedding 场景遍历 int64/uint64（8 字节，SIMD+SIMT 选择）与
+# int8/uint8/bool（1 字节，仅 SIMT），SK 均排除。
+add_indirect_load_sweep_variant(indirect_load_user_dtype_sweep indirect_load_user_dtype_sweep_int64 0
+    IL_CASE_BROADCAST_WHERE IL_USER_DTYPE_INT64)
+add_indirect_load_sweep_variant(indirect_load_user_dtype_sweep indirect_load_user_dtype_sweep_uint64 0
+    IL_CASE_BROADCAST_WHERE IL_USER_DTYPE_UINT64)
+add_indirect_load_sweep_variant(indirect_load_user_dtype_sweep indirect_load_user_dtype_sweep_int8 0
+    IL_CASE_BROADCAST_WHERE IL_USER_DTYPE_INT8)
+add_indirect_load_sweep_variant(indirect_load_user_dtype_sweep indirect_load_user_dtype_sweep_uint8 0
+    IL_CASE_BROADCAST_WHERE IL_USER_DTYPE_UINT8)
+add_indirect_load_sweep_variant(indirect_load_user_dtype_sweep indirect_load_user_dtype_sweep_bool 0
+    IL_CASE_BROADCAST_WHERE IL_USER_DTYPE_BOOL)
+finalize_indirect_load_sweep(indirect_load_user_dtype_sweep)
+
+# 强制模板轴：dense int64 gather 遍历 auto / SIMD(kRegisterGather,kGatherApi) / SIMT。
+add_indirect_load_sweep_variant(indirect_load_user_int64_dense_sweep indirect_load_user_int64_dense_sweep_auto 0
+    IL_CASE_BROADCAST_WHERE IL_USER_INT64_GATHER_DENSE)
+add_indirect_load_sweep_variant(indirect_load_user_int64_dense_sweep indirect_load_user_int64_dense_sweep_simd 0
+    IL_CASE_BROADCAST_WHERE IL_USER_INT64_GATHER_DENSE IL_USER_INT64_GATHER_DENSE_SIMD)
+add_indirect_load_sweep_variant(indirect_load_user_int64_dense_sweep indirect_load_user_int64_dense_sweep_simt 0
+    IL_CASE_BROADCAST_WHERE IL_USER_INT64_GATHER_DENSE IL_USER_INT64_GATHER_DENSE_SIMT)
+finalize_indirect_load_sweep(indirect_load_user_int64_dense_sweep)
+
+# 动态 shape 轴：两个用户 GraphHint（gather_sum_transpose / abs_embedding_sum）。
+add_indirect_load_sweep_variant(indirect_load_user_dynamic_shape_sweep
+    indirect_load_user_dynamic_shape_sweep_gather_sum_transpose 0
+    IL_CASE_BROADCAST_WHERE IL_USER_GATHER_SUM_TRANSPOSE)
+add_indirect_load_sweep_variant(indirect_load_user_dynamic_shape_sweep
+    indirect_load_user_dynamic_shape_sweep_abs_embedding_sum 0
+    IL_CASE_BROADCAST_WHERE IL_USER_ABS_EMBEDDING_SUM)
+finalize_indirect_load_sweep(indirect_load_user_dynamic_shape_sweep)
 
 # Rank-2 embedding view followed by Reduce on the payload dimension.  Keep the
 # original rank-3 lookup-reduction case above unchanged as a regression guard.

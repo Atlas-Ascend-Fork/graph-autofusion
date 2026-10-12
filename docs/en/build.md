@@ -234,18 +234,22 @@ In environments without any external network access, pre-download third-party so
    To manually verify that the mockcpp patch can be applied before compilation, run the following git commands in a temporary directory. This is not required for normal builds because CMake performs this step automatically.
 
    ```shell
-   # Run from the source root. This example uses the preferred patch path.
-   GRAPH_AUTOFUSION_HOME=$(pwd)
-   rm -rf /tmp/mockcpp_patch_check
-   mkdir -p /tmp/mockcpp_patch_check
-   tar -zxf output/third_party/mockcpp/mockcpp-2.7.tar.gz -C /tmp/mockcpp_patch_check --strip-components=1
-   cd /tmp/mockcpp_patch_check
-   git init
-   git apply --check ${GRAPH_AUTOFUSION_HOME}/output/third_party/mockcpp-2.7-h5.patch
+   (
+     # Run from the source root. This example uses the preferred patch path.
+     GRAPH_AUTOFUSION_HOME=$(pwd)
+     rm -rf /tmp/mockcpp_patch_check
+     mkdir -p /tmp/mockcpp_patch_check
+     tar -zxf output/third_party/mockcpp/mockcpp-2.7.tar.gz -C /tmp/mockcpp_patch_check --strip-components=1
+     cd /tmp/mockcpp_patch_check
+     git init
+     git apply --check ${GRAPH_AUTOFUSION_HOME}/output/third_party/mockcpp-2.7-h5.patch
 
-   # To apply the patch manually, continue with:
-   git apply ${GRAPH_AUTOFUSION_HOME}/output/third_party/mockcpp-2.7-h5.patch
+     # To apply the patch manually, continue with:
+     git apply ${GRAPH_AUTOFUSION_HOME}/output/third_party/mockcpp-2.7-h5.patch
+   )
    ```
+   The check runs in a subshell, so the calling shell remains at the repository root for the subsequent build command.
+
 
    If the patch is placed in the fallback path, replace the patch path above with `${GRAPH_AUTOFUSION_HOME}/output/third_party/pkg/mockcpp-2.7-h5.patch`.
 

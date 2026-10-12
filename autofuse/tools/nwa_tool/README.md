@@ -23,6 +23,7 @@
 |------|----------|----------|
 | NPY 文件未找到 | 跳过 | `FILE_NOT_FOUND` |
 | NPY 加载失败 | 跳过 | `NPY_LOAD_ERROR` |
+| 数组形状与声明布局不匹配，转换失败 | 跳过当前 pair | `FORMAT_CONVERSION_ERROR` |
 | format 不一致，支持转换 | NC1HWC0→NHWC/ND、NDC1HWC0→NDHWC/ND | `FORMAT_CONVERTED` |
 | format 不一致，不支持转换 | 跳过 | `FORMAT_UNSUPPORTED` |
 | dtype 不一致 | 低精度提升为高精度 | `DTYPE_CAST` |

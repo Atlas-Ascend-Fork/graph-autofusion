@@ -150,6 +150,8 @@ def extract_input_mappings(op, fused_op_name):
         parts = ref.rsplit(":", 1)
         source_op_name = parts[0]
         source_output_index = int(parts[1])
+        if source_output_index == -1:
+            continue
         fused_format = None
         if idx < len(input_descs):
             fused_format = input_descs[idx].get("layout")
@@ -224,7 +226,9 @@ def normalize_op_name(name):
 
 def find_npy(data_dir, op_name, kind, index):
     normalized = normalize_op_name(op_name)
-    pattern = os.path.join(data_dir, f"*.{normalized}.*.{kind}.{index}.npy")
+    pattern = os.path.join(
+        glob.escape(data_dir), f"*.{glob.escape(normalized)}.*.{kind}.{index}.npy"
+    )
     matches = glob.glob(pattern)
     if not matches:
         return None
@@ -263,11 +267,25 @@ SUPPORTED_FORMAT_CONVERSIONS = {
 def compute_metrics(a, b):
     a_flat = a.flatten().astype(np.float64)
     b_flat = b.flatten().astype(np.float64)
-    dot = np.dot(a_flat, b_flat)
-    norm_a = np.linalg.norm(a_flat)
-    norm_b = np.linalg.norm(b_flat)
-    cosine = float(dot / (norm_a * norm_b + 1e-8))
-    abs_diff = np.abs(np.subtract(a_flat, b_flat))
+    scale_a = float(np.max(np.abs(a_flat)))
+    scale_b = float(np.max(np.abs(b_flat)))
+    if scale_a == 0 or scale_b == 0:
+        cosine = 0.0
+    else:
+        scaled_a = a_flat / scale_a
+        scaled_b = b_flat / scale_b
+        dot = np.dot(scaled_a, scaled_b)
+        norm_a = np.linalg.norm(scaled_a)
+        norm_b = np.linalg.norm(scaled_b)
+        cosine = float(dot / (norm_a * norm_b + 1e-8 / scale_a / scale_b))
+    if a.dtype.kind in "biu" and b.dtype.kind in "biu":
+        abs_diff = np.fromiter(
+            (abs(int(lhs) - int(rhs)) for lhs, rhs in zip(a.flat, b.flat)),
+            dtype=np.float64,
+            count=a.size,
+        )
+    else:
+        abs_diff = np.abs(np.subtract(a_flat, b_flat))
     max_abs = float(np.max(abs_diff))
     denom = np.maximum(np.abs(a_flat), np.abs(b_flat)) + 1e-8
     rel_err = abs_diff / denom
@@ -316,9 +334,15 @@ def compare_data(fused_src: NpySource, origin_src: NpySource):
 
     status_parts = []
 
-    fused_data, origin_data, fmt_parts = apply_format_conversion(
-        fused_data, origin_data, fused_src.fmt, origin_src.fmt
-    )
+    try:
+        fused_data, origin_data, fmt_parts = apply_format_conversion(
+            fused_data, origin_data, fused_src.fmt, origin_src.fmt
+        )
+    except (ValueError, TypeError) as error:
+        print(
+            f"WARNING: Format conversion failed - {fused_src.label} / {origin_src.label}: {error}"
+        )
+        return None, None, None, "FORMAT_CONVERSION_ERROR"
     if fmt_parts is None:
         print(
             f"WARNING: Unsupported format conversion - {fused_src.label}: {fused_src.fmt}"
@@ -329,8 +353,9 @@ def compare_data(fused_src: NpySource, origin_src: NpySource):
 
     if fused_data.dtype != origin_data.dtype:
         promoted = np.promote_types(fused_data.dtype, origin_data.dtype)
-        fused_data = fused_data.astype(promoted)
-        origin_data = origin_data.astype(promoted)
+        if not (fused_data.dtype.kind in "biu" and origin_data.dtype.kind in "biu"):
+            fused_data = fused_data.astype(promoted)
+            origin_data = origin_data.astype(promoted)
         status_parts.append("DTYPE_CAST")
 
     if fused_data.shape != origin_data.shape:

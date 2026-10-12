@@ -183,6 +183,9 @@ def render_svg(
     max_row_h = 0
     for col_idx, gid in enumerate(group_ids):
         col = col_idx % cols_per_row
+        if col == 0 and col_idx > 0:
+            body_y += max_row_h + _GROUP_GAP
+            max_row_h = 0
         x = _MARGIN + col * (col_w + _GROUP_GAP)
         y = body_y
 
@@ -193,8 +196,7 @@ def render_svg(
         inner_parts.append(frag)
         max_row_h = max(max_row_h, gh)
 
-    total_rows = (n_groups + cols_per_row - 1) // cols_per_row
-    total_h = _OP_TITLE_H + max_row_h * total_rows + _OP_GAP
+    total_h = body_y + max_row_h + _OP_GAP
 
     fragment = "<g>\n" + "\n".join(inner_parts) + "\n</g>"
     return fragment, total_h

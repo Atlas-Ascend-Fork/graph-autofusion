@@ -696,7 +696,7 @@ void ExpectPostReduceSimtFramework(const std::string &kernel) {
   const std::string simt_kernel = GetFunctionContaining(kernel, "inline void IndirectLoadSimtKernel(");
   EXPECT_NE(simt_kernel.find("FusedBody::Outputs(value, output_index, address.index_offset, context)"),
             std::string::npos);
-  EXPECT_NE(simt_kernel.find("FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), outputs)"),
+  EXPECT_NE(simt_kernel.find("FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), context, outputs)"),
             std::string::npos);
   EXPECT_NE(kernel.find("__ubuf__"), std::string::npos);
   const std::string function = GetFunctionContaining(kernel, "// IndirectLoad SIMT");
@@ -744,7 +744,7 @@ void ExpectSimtKernelStructure(const std::string &kernel) {
   EXPECT_EQ(simt_kernel.find("indirect_index >="), std::string::npos);
   EXPECT_NE(simt_kernel.find("FusedBody::Outputs(value, output_index, address.index_offset, context)"),
             std::string::npos);
-  EXPECT_NE(simt_kernel.find("FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), outputs)"),
+  EXPECT_NE(simt_kernel.find("FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), context, outputs)"),
             std::string::npos);
   EXPECT_EQ(kernel.find("IndirectLoadSimtUbKernel"), std::string::npos);
   EXPECT_TRUE(ContainsInOrder(kernel, {"LaunchIndirectLoadSimt<128U", "LaunchIndirectLoadSimt<256U",
@@ -2777,7 +2777,10 @@ TEST_F(TestBackendIndirectLoadBroadcastE2e, IndirectLoadBroadcastCodegen) {
     defined(IL_USER_MASKED_EMBEDDING_SUM_FULL) || defined(IL_USER_POSITION_BIAS) || defined(IL_USER_EMBEDDING_SUM) || \
     defined(IL_USER_EMBEDDING_MUL) || defined(IL_USER_LAYERNORM) || defined(IL_USER_LAYERNORM_SIMD) ||                \
     defined(IL_USER_EMBEDDING_EXP_ABS_ADD) || defined(IL_USER_SOFTMAX) || defined(IL_DUAL_IL_GATHER) ||               \
-    defined(IL_GRAPH_HINT_EMBEDDING_SLICE) || defined(IL_USER_POSITION_BIAS_EXP_SUM)
+    defined(IL_GRAPH_HINT_EMBEDDING_SLICE) || defined(IL_USER_POSITION_BIAS_EXP_SUM) ||                               \
+    defined(IL_USER_GATHER_SUM_TRANSPOSE) || defined(IL_USER_ABS_EMBEDDING_SUM) || defined(IL_USER_DTYPE_INT64) ||    \
+    defined(IL_USER_INT64_GATHER_DENSE) || defined(IL_USER_DTYPE_INT8) || defined(IL_USER_DTYPE_UINT8) ||             \
+    defined(IL_USER_DTYPE_BOOL) || defined(IL_USER_DTYPE_UINT64)
 /**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -2830,6 +2833,46 @@ inline void InitScalarBroadcast(const char *scalar_name, const char *value, af::
   graph.AddNode(broadcast);
   broadcast.x = scalar.y;
   SetView(broadcast, axes, repeats, strides, dtype);
+}
+
+inline void InitIndirectLoad(const af::AscOpOutput &table, const af::AscOpOutput &index, int32_t axis,
+                             const af::Expression &max, af::ascir_op::IndirectLoad &indirect_load, af::AscGraph &graph,
+                             const std::vector<af::AxisId> &axes, const std::vector<af::Expression> &repeats,
+                             const std::vector<af::Expression> &strides, af::DataType dtype) {
+  graph.AddNode(indirect_load);
+  indirect_load.x1 = table;
+  indirect_load.x2 = index;
+  indirect_load.ir_attr.SetAxis(axis);
+  indirect_load.ir_attr.SetNegative_index_support(true);
+  indirect_load.ir_attr.SetNeed_check_bound(true);
+  indirect_load.ir_attr.SetMax(max);
+  SetView(indirect_load, axes, repeats, strides, dtype);
+}
+
+inline void InitStoreOutput(const af::AscOpOutput &source, af::ascir_op::Store &store, af::ascir_op::Output &output,
+                            af::AscGraph &graph, const std::vector<af::AxisId> &axes,
+                            const std::vector<af::Expression> &repeats, const std::vector<af::Expression> &strides,
+                            af::DataType dtype) {
+  graph.AddNode(store);
+  store.ir_attr.SetOffset(af::sym::kSymbolZero);
+  store.x = source;
+  SetView(store, axes, repeats, strides, dtype);
+  graph.AddNode(output);
+  output.ir_attr.SetIndex(0);
+  output.x = store.y;
+  output.y.dtype = dtype;
+}
+
+// Standard backend codegen path shared by the user-graph cases: independent
+// optimize and generate steps so callers can assert template selection in between.
+inline void OptimizeForBackend(const af::ComputeGraphPtr &graph, ascir::FusedScheduledResult &scheduled_result) {
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);
+}
+
+inline void GenerateForBackend(const ascir::FusedScheduledResult &scheduled_result, codegen::CodegenResult &result) {
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
 }
 
 #if defined(IL_USER_FANOUT)
@@ -4754,6 +4797,185 @@ std::shared_ptr<af::AscGraph> CreateGraphHintReduceSubGraph() {
   output.y.dtype = af::DT_FLOAT;
   return view.graph;
 }
+#elif defined(IL_USER_GATHER_SUM_TRANSPOSE)
+// Exact reproduction of the user-provided GraphHint
+// autofused_gather_sum_transpose_9d393a67d2eb1a45f6dd4ea95c860eac:
+//   data1 f32 [ks0, ks3, ks1, ks2] (index 0), data i64 [ks0, ks1, ks1, ks2] (index 1),
+//   IndirectLoad(axis=1, max=ks3) -> Sum over a2 -> Store/Output.
+constexpr int64_t kUserGatherSumKs0 = 2;
+constexpr int64_t kUserGatherSumKs1 = 4;
+constexpr int64_t kUserGatherSumKs2 = 3;
+constexpr int64_t kUserGatherSumKs3 = 6;
+constexpr char kUserGatherSumGraphName[] = "autofused_gather_sum_transpose_9d393a67d2eb1a45f6dd4ea95c860eac";
+
+std::shared_ptr<af::AscGraph> CreateUserGatherSumTransposeSubGraph() {
+  auto graph = std::make_shared<af::AscGraph>(kUserGatherSumGraphName);
+  // Symbolic size vars: the backend E2E sets the concrete values in the runtime
+  // tiling data, so this graph exercises the dynamic-shape tiling path.
+  const auto ks0 = graph->CreateSizeVar("ks0");
+  const auto ks1 = graph->CreateSizeVar("ks1");
+  const auto ks2 = graph->CreateSizeVar("ks2");
+  const auto ks3 = graph->CreateSizeVar("ks3");
+  const auto a0 = graph->CreateAxis("a0", ks0).id;
+  const auto a1 = graph->CreateAxis("a1", ks1).id;
+  const auto a2 = graph->CreateAxis("a2", ks1).id;
+  const auto a3 = graph->CreateAxis("a3", ks2).id;
+  const std::vector<af::AxisId> axes = {a0, a1, a2, a3};
+  af::AscGraphUtils::GetComputeGraph(*graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis = axes;
+
+  af::ascir_op::Load load("graph_hint/load");
+  InitDataLoad("graph_hint/data", 1, load, *graph, axes, {ks0, ks1, ks1, ks2},
+               {ks1 * ks1 * ks2, ks1 * ks2, ks2, af::ops::One}, af::DT_INT64);
+  af::ascir_op::Load load1("graph_hint/load1");
+  InitDataLoad("graph_hint/data1", 0, load1, *graph, axes, {ks0, ks3, ks1, ks2},
+               {ks1 * ks2 * ks3, ks1 * ks2, ks2, af::ops::One}, af::DT_FLOAT);
+  af::ascir_op::IndirectLoad indirectload("graph_hint/indirectload");
+  InitIndirectLoad(load1.y, load.y, 1, ks3, indirectload, *graph, axes, {ks0, ks1, ks1, ks2},
+                   {ks1 * ks1 * ks2, ks1 * ks2, ks2, af::ops::One}, af::DT_FLOAT);
+
+  af::ascir_op::Sum sum("graph_hint/sum");
+  graph->AddNode(sum);
+  sum.x = indirectload.y;
+  SetView(sum, axes, {ks0, ks1, af::ops::One, ks2}, {ks1 * ks2, ks2, af::ops::Zero, af::ops::One}, af::DT_FLOAT);
+  af::ascir_op::Store store("graph_hint/store");
+  af::ascir_op::Output output("graph_hint/output");
+  InitStoreOutput(sum.y, store, output, *graph, axes, {ks0, ks1, af::ops::One, ks2},
+                  {ks1 * ks2, ks2, af::ops::Zero, af::ops::One}, af::DT_FLOAT);
+  return graph;
+}
+#elif defined(IL_USER_ABS_EMBEDDING_SUM)
+// Exact reproduction of the user-provided GraphHint
+// autofused_abs_embedding_sum_1ee65c13970c2252fddcc2b670e5212d:
+//   data1 f32 [ks3, ks2] (index 0), data i64 [ks0*ks1, 1] (index 1) -> Broadcast,
+//   IndirectLoad(axis=0, max=ks3) -> Abs -> Sum over a1 -> Store/Output.
+constexpr int64_t kUserAbsEmbRows = 6;
+constexpr int64_t kUserAbsEmbDim = 8;
+constexpr int64_t kUserAbsEmbTableRows = 16;
+constexpr char kUserAbsEmbGraphName[] = "autofused_abs_embedding_sum_1ee65c13970c2252fddcc2b670e5212d";
+
+std::shared_ptr<af::AscGraph> CreateUserAbsEmbeddingSumSubGraph() {
+  auto graph = std::make_shared<af::AscGraph>(kUserAbsEmbGraphName);
+  // Symbolic size vars: the backend E2E sets the concrete values in the runtime
+  // tiling data, so this graph exercises the dynamic-shape tiling path.
+  const auto ks0 = graph->CreateSizeVar("ks0");
+  const auto ks1 = graph->CreateSizeVar("ks1");
+  const auto ks2 = graph->CreateSizeVar("ks2");
+  const auto ks3 = graph->CreateSizeVar("ks3");
+  const auto rows = ks0 * ks1;
+  const auto dim = ks2;
+  const auto table_rows = ks3;
+  const auto a0 = graph->CreateAxis("a0", rows).id;
+  const auto a1 = graph->CreateAxis("a1", dim).id;
+  const std::vector<af::AxisId> axes = {a0, a1};
+  af::AscGraphUtils::GetComputeGraph(*graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis = axes;
+
+  af::ascir_op::Load load("graph_hint/load");
+  af::ascir_op::Broadcast broadcast("graph_hint/broadcast");
+  InitDataLoadBroadcast("graph_hint/data", 1, load, broadcast, *graph, axes, {rows, af::ops::One},
+                        {af::ops::One, af::ops::Zero}, {rows, dim}, {dim, af::ops::One}, af::DT_INT64);
+  af::ascir_op::Load load1("graph_hint/load1");
+  InitDataLoad("graph_hint/data1", 0, load1, *graph, axes, {table_rows, dim}, {dim, af::ops::One}, af::DT_FLOAT);
+  af::ascir_op::IndirectLoad indirectload("graph_hint/indirectload");
+  InitIndirectLoad(load1.y, broadcast.y, 0, table_rows, indirectload, *graph, axes, {rows, dim}, {dim, af::ops::One},
+                   af::DT_FLOAT);
+
+  af::ascir_op::Abs abs("graph_hint/abs");
+  graph->AddNode(abs);
+  abs.x = indirectload.y;
+  SetView(abs, axes, {rows, dim}, {dim, af::ops::One}, af::DT_FLOAT);
+  af::ascir_op::Sum sum("graph_hint/sum");
+  graph->AddNode(sum);
+  sum.x = abs.y;
+  SetView(sum, axes, {rows, af::ops::One}, {af::ops::One, af::ops::Zero}, af::DT_FLOAT);
+  af::ascir_op::Store store("graph_hint/store");
+  af::ascir_op::Output output("graph_hint/output");
+  InitStoreOutput(sum.y, store, output, *graph, axes, {rows, af::ops::One}, {af::ops::One, af::ops::Zero},
+                  af::DT_FLOAT);
+  return graph;
+}
+#elif defined(IL_USER_DTYPE_INT64) || defined(IL_USER_DTYPE_UINT64) || defined(IL_USER_DTYPE_INT8) || \
+    defined(IL_USER_DTYPE_UINT8) || defined(IL_USER_DTYPE_BOOL)
+// 值 dtype embedding（int64/uint64/int8/uint8/bool）：形状一致，仅值 dtype 不同；
+// 8 字节走 SIMD+SIMT，1 字节仅 SIMT，SK 对两者均排除。
+#if defined(IL_USER_DTYPE_INT64)
+constexpr char kUserDtypeEmbGraphName[] = "user_dtype_int64_embedding";
+constexpr af::DataType kUserDtypeEmbValue = af::DT_INT64;
+#elif defined(IL_USER_DTYPE_UINT64)
+constexpr char kUserDtypeEmbGraphName[] = "user_dtype_uint64_embedding";
+constexpr af::DataType kUserDtypeEmbValue = af::DT_UINT64;
+#elif defined(IL_USER_DTYPE_INT8)
+constexpr char kUserDtypeEmbGraphName[] = "user_dtype_int8_embedding";
+constexpr af::DataType kUserDtypeEmbValue = af::DT_INT8;
+#elif defined(IL_USER_DTYPE_UINT8)
+constexpr char kUserDtypeEmbGraphName[] = "user_dtype_uint8_embedding";
+constexpr af::DataType kUserDtypeEmbValue = af::DT_UINT8;
+#else
+constexpr char kUserDtypeEmbGraphName[] = "user_dtype_bool_embedding";
+constexpr af::DataType kUserDtypeEmbValue = af::DT_BOOL;
+#endif
+constexpr int64_t kUserDtypeEmbRows = 8;
+constexpr int64_t kUserDtypeEmbDim = 16;
+constexpr int64_t kUserDtypeEmbTableRows = 32;
+
+std::shared_ptr<af::AscGraph> CreateUserDtypeEmbeddingSubGraph() {
+  auto graph = std::make_shared<af::AscGraph>(kUserDtypeEmbGraphName);
+  const auto rows = graph->CreateSizeVar(kUserDtypeEmbRows);
+  const auto dim = graph->CreateSizeVar(kUserDtypeEmbDim);
+  const auto table_rows = graph->CreateSizeVar(kUserDtypeEmbTableRows);
+  const auto a0 = graph->CreateAxis("a0", rows).id;
+  const auto a1 = graph->CreateAxis("a1", dim).id;
+  const std::vector<af::AxisId> axes = {a0, a1};
+  af::AscGraphUtils::GetComputeGraph(*graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis = axes;
+
+  af::ascir_op::Load load("graph_hint/load");
+  af::ascir_op::Broadcast broadcast("graph_hint/broadcast");
+  InitDataLoadBroadcast("graph_hint/data", 1, load, broadcast, *graph, axes, {rows, af::ops::One},
+                        {af::ops::One, af::ops::Zero}, {rows, dim}, {dim, af::ops::One}, af::DT_INT64);
+  af::ascir_op::Load load1("graph_hint/load1");
+  InitDataLoad("graph_hint/data1", 0, load1, *graph, axes, {table_rows, dim}, {dim, af::ops::One}, kUserDtypeEmbValue);
+  af::ascir_op::IndirectLoad indirectload("graph_hint/indirectload");
+  InitIndirectLoad(load1.y, broadcast.y, 0, table_rows, indirectload, *graph, axes, {rows, dim}, {dim, af::ops::One},
+                   kUserDtypeEmbValue);
+  af::ascir_op::Store store("graph_hint/store");
+  af::ascir_op::Output output("graph_hint/output");
+  InitStoreOutput(indirectload.y, store, output, *graph, axes, {rows, dim}, {dim, af::ops::One}, kUserDtypeEmbValue);
+  return graph;
+}
+#elif defined(IL_USER_INT64_GATHER_DENSE)
+// dense int64 图：index 与 table 均为 dense，触发 SIMD 的 kRegisterGather / kGatherApi 子模板。
+constexpr int64_t kUserInt64DenseD0 = 4;
+constexpr int64_t kUserInt64DenseTableAxis1 = 16;
+constexpr int64_t kUserInt64DenseIndexAxis1 = 8;
+constexpr int64_t kUserInt64DenseD2 = 6;
+constexpr char kUserInt64DenseGraphName[] = "user_int64_gather_dense";
+
+std::shared_ptr<af::AscGraph> CreateUserInt64GatherDenseSubGraph() {
+  auto graph = std::make_shared<af::AscGraph>(kUserInt64DenseGraphName);
+  const auto d0 = graph->CreateSizeVar(kUserInt64DenseD0);
+  const auto table_axis1 = graph->CreateSizeVar(kUserInt64DenseTableAxis1);
+  const auto index_axis1 = graph->CreateSizeVar(kUserInt64DenseIndexAxis1);
+  const auto d2 = graph->CreateSizeVar(kUserInt64DenseD2);
+  const auto a0 = graph->CreateAxis("a0", d0).id;
+  const auto a1 = graph->CreateAxis("a1", index_axis1).id;
+  const auto a2 = graph->CreateAxis("a2", d2).id;
+  const std::vector<af::AxisId> axes = {a0, a1, a2};
+  af::AscGraphUtils::GetComputeGraph(*graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis = axes;
+
+  af::ascir_op::Load load("graph_hint/load");
+  InitDataLoad("graph_hint/data", 0, load, *graph, axes, {d0, table_axis1, d2}, {table_axis1 * d2, d2, af::ops::One},
+               af::DT_INT64);
+  af::ascir_op::Load load1("graph_hint/load1");
+  InitDataLoad("graph_hint/data1", 1, load1, *graph, axes, {d0, index_axis1, d2}, {index_axis1 * d2, d2, af::ops::One},
+               af::DT_INT64);
+  af::ascir_op::IndirectLoad indirectload("graph_hint/indirectload");
+  InitIndirectLoad(load.y, load1.y, 1, table_axis1, indirectload, *graph, axes, {d0, index_axis1, d2},
+                   {index_axis1 * d2, d2, af::ops::One}, af::DT_INT64);
+  af::ascir_op::Store store("graph_hint/store");
+  af::ascir_op::Output output("graph_hint/output");
+  InitStoreOutput(indirectload.y, store, output, *graph, axes, {d0, index_axis1, d2},
+                  {index_axis1 * d2, d2, af::ops::One}, af::DT_INT64);
+  return graph;
+}
 #elif defined(IL_EMBEDDING_REDUCE)
 constexpr int64_t kEmbRows = 2;
 constexpr int64_t kEmbColumns = 2;
@@ -5603,6 +5825,104 @@ TEST_F(TestBackendIndirectLoadEmbReduceE2e, GeneratesEmbeddingReduceSimtKernel) 
   indirect_load_test::ExpectSimtCaseTag(result.kernel, ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding);
   EXPECT_NE(result.kernel.find("ReduceSum"), std::string::npos);
   EXPECT_NE(result.kernel.find("Outputs(float value, uint32_t output_index, uint32_t index_offset"), std::string::npos);
+  // 静态 shape：后置 Reduce 的 inner size 为编译期常量，应内联进 Store，Context 不得携带
+  // output_inner_size；否则每个输出元素会多做一次运行期整型除/模（性能回退看护）。
+  EXPECT_EQ(result.kernel.find("output_inner_size"), std::string::npos);
+  indirect_load_test::WriteGeneratedFiles(result);
+}
+#elif defined(IL_USER_GATHER_SUM_TRANSPOSE)
+using TestBackendUserGatherSumTransposeE2e = indirect_load_test::PrecisionBackendE2e;
+
+TEST_F(TestBackendUserGatherSumTransposeE2e, GeneratesUserGatherSumTransposeKernel) {
+  indirect_load_test::BackendGraph backend(kUserGatherSumGraphName, "input0", "input1", af::DT_FLOAT, af::DT_INT64);
+  const auto graph = backend.Finalize(CreateUserGatherSumTransposeSubGraph(), "output");
+  ASSERT_NE(graph, nullptr);
+  ascir::FusedScheduledResult scheduled_result;
+  OptimizeForBackend(graph, scheduled_result);
+  ASSERT_TRUE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSK));
+  codegen::CodegenResult result;
+  GenerateForBackend(scheduled_result, result);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SK"), std::string::npos);
+  // 动态 shape：后置 Reduce 的 inner size 为运行期符号（t->ksN），无法内联进静态 Store，
+  // 必须经 Context 传入；保证常量 fast path 优化不误伤动态 shape 路径。
+  EXPECT_NE(result.kernel.find("output_inner_size"), std::string::npos);
+  indirect_load_test::WriteGeneratedFiles(result);
+}
+#elif defined(IL_USER_DTYPE_INT64) || defined(IL_USER_DTYPE_UINT64) || defined(IL_USER_DTYPE_INT8) || \
+    defined(IL_USER_DTYPE_UINT8) || defined(IL_USER_DTYPE_BOOL)
+using TestBackendUserDtypeEmbeddingE2e = indirect_load_test::PrecisionBackendE2e;
+
+TEST_F(TestBackendUserDtypeEmbeddingE2e, GeneratesUserDtypeEmbeddingKernel) {
+  // int8/uint8/bool（1 字节）仅 SIMT；int64/uint64（8 字节）SIMD+SIMT；SK 对两者均排除。
+  indirect_load_test::BackendGraph backend(kUserDtypeEmbGraphName, "input0", "input1", kUserDtypeEmbValue,
+                                           af::DT_INT64);
+  const auto graph = backend.Finalize(CreateUserDtypeEmbeddingSubGraph(), "output");
+  ASSERT_NE(graph, nullptr);
+  codegen::CodegenResult result;
+#if defined(IL_USER_DTYPE_INT8) || defined(IL_USER_DTYPE_UINT8) || defined(IL_USER_DTYPE_BOOL)
+  ascir::FusedScheduledResult scheduled_result;
+  OptimizeForBackend(graph, scheduled_result);
+  EXPECT_TRUE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSimt));
+  EXPECT_FALSE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSimd));
+  EXPECT_FALSE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSK));
+  GenerateForBackend(scheduled_result, result);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SIMT"), std::string::npos);
+#else
+  ascir::FusedScheduledResult scheduled_result;
+  OptimizeForBackend(graph, scheduled_result);
+  EXPECT_TRUE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSimd));
+  EXPECT_TRUE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSimt));
+  EXPECT_FALSE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSK));
+  GenerateForBackend(scheduled_result, result);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SIMD"), std::string::npos);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SIMT"), std::string::npos);
+#endif
+  indirect_load_test::WriteGeneratedFiles(result);
+}
+#elif defined(IL_USER_INT64_GATHER_DENSE)
+using TestBackendUserInt64GatherDenseE2e = indirect_load_test::PrecisionBackendE2e;
+
+TEST_F(TestBackendUserInt64GatherDenseE2e, GeneratesUserInt64GatherDenseKernel) {
+  // dense int64：SIMD 的两个子模板（kRegisterGather / kGatherApi）都应生成，SK 跳过。
+  indirect_load_test::BackendGraph backend(kUserInt64DenseGraphName, "input0", "input1", af::DT_INT64, af::DT_INT64);
+  const auto graph = backend.Finalize(CreateUserInt64GatherDenseSubGraph(), "output");
+  ASSERT_NE(graph, nullptr);
+  codegen::CodegenResult result;
+#if defined(IL_USER_INT64_GATHER_DENSE_SIMD)
+  indirect_load_test::GenerateForTemplate(graph, {}, ascir::TemplateId::kIndirectLoadSimd, result);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SIMD"), std::string::npos);
+  EXPECT_NE(result.kernel.find("IndirectLoadSimd<int64_t"), std::string::npos);
+  EXPECT_NE(result.kernel.find("IndirectLoadSimdGatherApi<int64_t"), std::string::npos);
+#elif defined(IL_USER_INT64_GATHER_DENSE_SIMT)
+  indirect_load_test::GenerateForTemplate(graph, {}, ascir::TemplateId::kIndirectLoadSimt, result);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SIMT"), std::string::npos);
+  EXPECT_NE(result.kernel.find("IndirectLoadSimt<int64_t"), std::string::npos);
+#else
+  ascir::FusedScheduledResult scheduled_result;
+  OptimizeForBackend(graph, scheduled_result);
+  EXPECT_TRUE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSimd));
+  EXPECT_TRUE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSimt));
+  EXPECT_FALSE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSK));
+  GenerateForBackend(scheduled_result, result);
+  EXPECT_NE(result.kernel.find("IndirectLoadSimd<int64_t"), std::string::npos);
+  EXPECT_NE(result.kernel.find("IndirectLoadSimdGatherApi<int64_t"), std::string::npos);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SIMT"), std::string::npos);
+#endif
+  indirect_load_test::WriteGeneratedFiles(result);
+}
+#elif defined(IL_USER_ABS_EMBEDDING_SUM)
+using TestBackendUserAbsEmbeddingSumE2e = indirect_load_test::PrecisionBackendE2e;
+
+TEST_F(TestBackendUserAbsEmbeddingSumE2e, GeneratesUserAbsEmbeddingSumKernel) {
+  indirect_load_test::BackendGraph backend(kUserAbsEmbGraphName, "input0", "input1", af::DT_FLOAT, af::DT_INT64);
+  const auto graph = backend.Finalize(CreateUserAbsEmbeddingSumSubGraph(), "output");
+  ASSERT_NE(graph, nullptr);
+  ascir::FusedScheduledResult scheduled_result;
+  OptimizeForBackend(graph, scheduled_result);
+  ASSERT_TRUE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSK));
+  codegen::CodegenResult result;
+  GenerateForBackend(scheduled_result, result);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SK"), std::string::npos);
   indirect_load_test::WriteGeneratedFiles(result);
 }
 #else

@@ -234,18 +234,22 @@ bash build.sh --pkg
    如需在编译前手动验证 mockcpp 补丁是否可以应用，可在临时目录中执行以下 git 命令。正常编译时无需执行，CMake 会自动完成该步骤。
 
    ```shell
-   # 在源码根目录下执行，使用推荐 patch 放置路径进行验证
-   GRAPH_AUTOFUSION_HOME=$(pwd)
-   rm -rf /tmp/mockcpp_patch_check
-   mkdir -p /tmp/mockcpp_patch_check
-   tar -zxf output/third_party/mockcpp/mockcpp-2.7.tar.gz -C /tmp/mockcpp_patch_check --strip-components=1
-   cd /tmp/mockcpp_patch_check
-   git init
-   git apply --check ${GRAPH_AUTOFUSION_HOME}/output/third_party/mockcpp-2.7-h5.patch
+   (
+     # 在源码根目录下执行，使用推荐 patch 放置路径进行验证
+     GRAPH_AUTOFUSION_HOME=$(pwd)
+     rm -rf /tmp/mockcpp_patch_check
+     mkdir -p /tmp/mockcpp_patch_check
+     tar -zxf output/third_party/mockcpp/mockcpp-2.7.tar.gz -C /tmp/mockcpp_patch_check --strip-components=1
+     cd /tmp/mockcpp_patch_check
+     git init
+     git apply --check ${GRAPH_AUTOFUSION_HOME}/output/third_party/mockcpp-2.7-h5.patch
 
-   # 如需手动应用补丁，可继续执行
-   git apply ${GRAPH_AUTOFUSION_HOME}/output/third_party/mockcpp-2.7-h5.patch
+     # 如需手动应用补丁，可继续执行
+     git apply ${GRAPH_AUTOFUSION_HOME}/output/third_party/mockcpp-2.7-h5.patch
+   )
    ```
+   上述校验在子Shell中执行，退出后仍位于源码根目录，可继续执行后续构建命令。
+
 
    如果 patch 放在备用路径，请将上述命令中的 patch 路径替换为 `${GRAPH_AUTOFUSION_HOME}/output/third_party/pkg/mockcpp-2.7-h5.patch`。
 

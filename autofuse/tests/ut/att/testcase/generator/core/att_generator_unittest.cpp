@@ -2197,6 +2197,39 @@ TEST(GeneratorUT, GenHardwareJudgeSkipsRelatedCoreNumExpression) {
   EXPECT_EQ(output.find("block_dim expr"), std::string::npos);
 }
 
+TEST(GeneratorUT, InductorTilingCasesGenerateSearchOverrideForSingleAndMultipleGroups) {
+  for (const bool is_uniq_group : {true, false}) {
+    auto model_info = CreateModelInfo();
+    model_info.schedule_group_ident = {0UL, 0UL, 0UL};
+    TilingCodeGenConfig config;
+    config.is_inductor_scene = true;
+    config.tiling_data_type_name = is_uniq_group ? "AutofuseTilingData" : "AscGraph0ScheduleResult0G0TilingData";
+    MockHighPerfTilingCodeGenImpl gen_impl(op_name, config, {model_info}, {}, is_uniq_group);
+
+    ASSERT_EQ(gen_impl.GenTilingCaseImpl(model_info), af::SUCCESS);
+    const std::string output = gen_impl.tiling_func_.GetOutputStr();
+    const std::string solver = ExtractGuardBody(output, "const SearchConfig *search_cfg=nullptr) override");
+    ASSERT_FALSE(solver.empty()) << "is_uniq_group=" << is_uniq_group;
+    EXPECT_NE(output.find("const SearchConfig *search_cfg=nullptr) override"), std::string::npos);
+    EXPECT_NE(solver.find("pending_search_cfg_ = search_cfg;"), std::string::npos);
+    EXPECT_NE(solver.find("tiling_data_list.push_back(tiling_perf);"), std::string::npos);
+    EXPECT_NE(solver.find("pending_search_cfg_ = nullptr;"), std::string::npos);
+    EXPECT_EQ(solver.find("EmitFinalTiling"), std::string::npos);
+    EXPECT_EQ(solver.find("GetTilingDataRepr"), std::string::npos);
+    if (is_uniq_group) {
+      EXPECT_NE(solver.find("tiling_perf.tiling_data = tiling_data;"), std::string::npos);
+    } else {
+      EXPECT_NE(solver.find("autofuse_tiling_data->graph0_result0_g0_tiling_data = tiling_data;"), std::string::npos);
+      EXPECT_NE(solver.find("tiling_perf.tiling_data = *autofuse_tiling_data;"), std::string::npos);
+    }
+
+    gen_impl.config_.is_inductor_scene = false;
+    gen_impl.tiling_func_.Reset();
+    ASSERT_EQ(gen_impl.GenTilingCaseImpl(model_info), af::SUCCESS);
+    EXPECT_EQ(gen_impl.tiling_func_.GetOutputStr().find("bool ExecutePGOSolver("), std::string::npos);
+  }
+}
+
 // Task 3: Inductor scene triggers ATT PGO main search skeleton, PGOSearchTilingKey and perf extraction
 
 TEST(GeneratorUT, InductorSceneTriggersPGOSkeletonAndSearchTilingKey) {

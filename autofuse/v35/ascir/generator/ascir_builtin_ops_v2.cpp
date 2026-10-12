@@ -1062,11 +1062,11 @@ REG_ASC_IR(IndirectLoad)
     .Attr<bool>("need_check_bound")
     .Attr<Expression>("max")
     .ComputeType(ComputeType::kComputeLoad)
-    .Impl(v2_soc_versions,
-          {af::ascir::AscIrImplCreator<af::ascir::IndirectLoadAscIrAttImplV2>(),
-           af::ascir::AscIrImplCreator<af::ascir::IndirectLoadAscIrCodegenImplV2>(),
-           {{"T1", TensorType{DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_FLOAT16, DT_BF16, DT_FLOAT}},
-            {"T2", TensorType{DT_INT32, DT_INT64}}}});
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::IndirectLoadAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::IndirectLoadAscIrCodegenImplV2>(),
+                            {{"T1", TensorType{DT_INT8, DT_UINT8, DT_BOOL, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32,
+                                               DT_INT64, DT_UINT64, DT_FLOAT16, DT_BF16, DT_FLOAT}},
+                             {"T2", TensorType{DT_INT32, DT_INT64}}}});
 
 REG_ASC_IR(Transpose).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::TransposeAscIrAttImplV2>(),
                                              af::ascir::AscIrImplCreator<af::ascir::TransposeAscIrCodegenImplV2>(),

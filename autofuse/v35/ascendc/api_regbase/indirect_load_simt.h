@@ -547,7 +547,7 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(ThreadNum) inline void IndirectLoadSimtKerne
     const X value = x[input_offset];
     const typename FusedBody::OutputPack outputs =
         FusedBody::Outputs(value, output_index, address.index_offset, context);
-    FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), outputs);
+    FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), context, outputs);
   }
 }
 
@@ -597,7 +597,7 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(ThreadNum) inline void IndirectLoadSimtEmbed
                                input_offset += static_cast<OffsetT>(warpSize) * payload_stride) {
       const X value = x[input_offset];
       const typename FusedBody::OutputPack outputs = FusedBody::Outputs(value, output_index, index_offset, context);
-      FusedBody::Store(targets, output_index, output_index - output_offset, outputs);
+      FusedBody::Store(targets, output_index, output_index - output_offset, context, outputs);
     }
   }
 }

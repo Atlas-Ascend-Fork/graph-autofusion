@@ -23,6 +23,7 @@ The tool supports two running modes:
 |----------|----------|--------|
 | NPY file not found | Skip | `FILE_NOT_FOUND` |
 | NPY load failure | Skip | `NPY_LOAD_ERROR` |
+| Array shape does not match the declared layout | Skip current pair | `FORMAT_CONVERSION_ERROR` |
 | Format mismatch, conversion supported | NC1HWC0 to NHWC/ND, NDC1HWC0 to NDHWC/ND | `FORMAT_CONVERTED` |
 | Format mismatch, conversion unsupported | Skip | `FORMAT_UNSUPPORTED` |
 | dtype mismatch | Promote lower precision to higher | `DTYPE_CAST` |

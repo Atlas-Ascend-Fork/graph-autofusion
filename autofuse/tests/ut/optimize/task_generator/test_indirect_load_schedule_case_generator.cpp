@@ -1902,18 +1902,23 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceSkipsCommonZeroStrideAxes)
   }
 }
 
-TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceRejectsBothTemplatesForUnknownOrIllegalInputStride) {
+TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceHandlesUnknownOrIllegalInputStride) {
   struct StrideCase {
     const char *name;
     const char *suffix;
     size_t stride_index;
     bool use_unknown;
     bool mutate_output;
+    // mutate_output 为 true 时有效：保留轴的符号 stride（动态 shape）允许生成
+    // SIMD/SIMT；归约轴（输出 repeat=1）的输出 stride 无法确认时必须被拒绝。
+    bool expect_templates_present;
   };
-  const std::vector<StrideCase> cases = {
-      {"outer_input_unknown", "RRR", 0UL, true, false},        {"outer_output_unknown", "RRR", 0UL, true, true},
-      {"outer_zero_output_nonzero", "RRR", 0UL, false, false}, {"inner_input_unknown", "RRR", 1UL, true, false},
-      {"inner_output_unknown", "RRR", 1UL, true, true},        {"inner_zero_output_nonzero", "ARR", 1UL, false, false}};
+  const std::vector<StrideCase> cases = {{"outer_input_unknown", "RRR", 0UL, true, false, false},
+                                         {"outer_output_unknown", "RRR", 0UL, true, true, true},
+                                         {"outer_zero_output_nonzero", "RRR", 0UL, false, false, false},
+                                         {"inner_input_unknown", "RRR", 1UL, true, false, false},
+                                         {"inner_output_unknown", "RRR", 1UL, true, true, false},
+                                         {"inner_zero_output_nonzero", "ARR", 1UL, false, false, false}};
   for (const auto &test_case : cases) {
     auto graph = BuildPostReduceGraph(test_case.suffix);
     const auto reduce = graph.FindNode("sum");
@@ -1950,12 +1955,20 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceRejectsBothTemplatesForUnk
       EXPECT_TRUE(graphs.empty()) << "case=" << test_case.name;
       continue;
     }
-    // 改 reduce 输出 stride 不影响 IL 输出视图，属于模板相关的 post-reduce 校验拒绝，SK 兜底。
+    // 改 reduce 输出 stride 不影响 IL 输出视图：保留轴的符号 stride（动态 shape）允许
+    // 生成 SIMD/SIMT；归约轴（输出 repeat=1）的输出 stride 无法确认为 0 时拒绝并回退 SK。
     ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS) << "case=" << test_case.name;
-    EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd), graphs.end())
-        << "case=" << test_case.name;
-    EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end())
-        << "case=" << test_case.name;
+    if (test_case.expect_templates_present) {
+      EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd), graphs.end())
+          << "case=" << test_case.name;
+      EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end())
+          << "case=" << test_case.name;
+    } else {
+      EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd), graphs.end())
+          << "case=" << test_case.name;
+      EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end())
+          << "case=" << test_case.name;
+    }
   }
 }
 

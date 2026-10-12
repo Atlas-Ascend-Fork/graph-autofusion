@@ -933,6 +933,9 @@ build_backend() {
                       indirect_load_user_masked_embedding_sum_full_auto_e2e_v2 \
                       indirect_load_user_embedding_sum_e2e_v2 \
                       indirect_load_user_embedding_sum_rank2_e2e_v2 \
+                      indirect_load_user_dtype_sweep_e2e_v2 \
+                      indirect_load_user_int64_dense_sweep_e2e_v2 \
+                      indirect_load_user_dynamic_shape_sweep_e2e_v2 \
                       indirect_load_user_embedding_sum_simd_e2e_v2 \
                       indirect_load_user_layernorm_e2e_v2 \
                       indirect_load_user_embedding_exp_abs_add_simt_e2e_v2 \

@@ -81,6 +81,21 @@ void CompileAndVerifyKernels(const std::string &tiling_def, const std::string &d
       << "dynamic kernel should not have constexpr tiling";
 }
 
+TEST_F(TestBackendInductorTopnConcatSplitCompile, TopnSearchProducesCandidatesBeforeDefaultFallback) {
+  std::string tiling_def, host_code, device_code;
+  PrepareInputs(tiling_def, host_code, device_code);
+
+  // Reject fallback-only results so a successful public TopN call proves that ATT search produced candidates.
+  const std::string fallback = "response.candidate_solutions.push_back(default_solution);";
+  const auto fallback_pos = host_code.find(fallback);
+  ASSERT_NE(fallback_pos, std::string::npos);
+  host_code.insert(fallback_pos, "if (response.candidate_solutions.empty()) { return -1; }\n    ");
+
+  const std::string host_bin = OUTPUT_DIR "/inductor_topn_concat_search_host.so";
+  ASSERT_EQ(autofuse::tests::RunHostCompile(tiling_def, host_code, host_bin, "inductor_topn_concat", "-Werror"), 0);
+  ASSERT_EQ(autofuse::tests::RunHostHelper(host_bin, OUTPUT_DIR "/search_tiling_repr.txt"), 0);
+}
+
 TEST_F(TestBackendInductorTopnConcatSplitCompile, SplitCompileChainWorks) {
   std::string tiling_def, host_code, device_code;
   PrepareInputs(tiling_def, host_code, device_code);
