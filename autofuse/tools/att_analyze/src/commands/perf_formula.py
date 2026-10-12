@@ -109,20 +109,23 @@ def _render_group(
         for c in cases:
             for node in c.nodes:
                 for si in node.sub_items:
-                    item_vals.setdefault(si.name, []).append(si.value)
+                    metric = (node.node_name, node.pipe_type, si.name)
+                    item_vals.setdefault(metric, []).append((c, si.value))
         if item_vals:
             max_var_name = max(
                 item_vals,
-                key=lambda k: statistics.variance(item_vals[k])
+                key=lambda k: statistics.variance(value for _, value in item_vals[k])
                 if len(item_vals[k]) > 1
                 else 0,
             )
-            vals = item_vals[max_var_name]
+            # Keep the contributing cases paired with their own metric values.
+            cases = [case for case, _ in item_vals[max_var_name]]
+            vals = [value for _, value in item_vals[max_var_name]]
             parts.append(
                 _text(
                     x,
                     y + h + _FONT_SIZE,
-                    f"敏感参数: {max_var_name}（跨 case 方差最大）",
+                    f"敏感参数: {max_var_name[2]}（{max_var_name[0]}/{max_var_name[1]}；跨 case 方差最大）",
                     fill="#b85c00",
                 )
             )
