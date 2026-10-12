@@ -1,0 +1,6 @@
+input_dtype,outer_loop,cal_count,model_predict_cycles,measured_cycles
+float32,100,64,5500,5906.91777
+float32,100,128,6200,6045.453072
+float32,100,256,7600,7216.819363
+float32,100,512,10400,10080.168867
+float32,100,1024,16000,16004.026238
