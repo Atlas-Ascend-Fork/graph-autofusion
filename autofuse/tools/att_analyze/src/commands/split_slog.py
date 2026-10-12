@@ -37,6 +37,8 @@ class SlogSplitter:
     @staticmethod
     def _case_id(content: str, fallback: int) -> int:
         match = re.search(r"tiling case id\s+(?:R)?(\d+)", content, re.I)
+        if match:
+            return int(match.group(1))
         if not match:
             match = _PROF_CASE.search(content)
             if match:
@@ -67,7 +69,7 @@ class SlogSplitter:
             m = _INNER_BEGIN.search(line)
             if m and current_group:
                 in_inner = True
-                current_case_lines = []
+                current_case_lines = [line]
                 continue
 
             m = _INNER_END.search(line)
