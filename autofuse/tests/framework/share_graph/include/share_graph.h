@@ -141,6 +141,12 @@ struct ShareGraph {
   static af::ComputeGraphPtr AxpyAbsHalfFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr AxpyAddFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr TailBrcTailReduceFusedGraph(size_t dims_size);
+  // 交叉 norm-like 场景: 多引用切分源的非锚点引用被切分后, 下游多输入节点的另一路输入
+  // 可反向连通到切分前的节点, 用于覆盖 norm-like 环路探测与子图内副本合并路径
+  static af::ComputeGraphPtr ReduceNormLikeFusedGraph(size_t dims_size);
+  // 多引用同 reduce 场景: 同一源的两条引用汇聚到同一 reduce, 两次切分产生的同名副本落在
+  // 同一子图, 用于覆盖子图内重复副本合并路径
+  static af::ComputeGraphPtr MultiCitationReduceFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadPowAllInputIsScalarStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr AddAbsFusedConstGraph(size_t dims_size, std::vector<int> dims);
   static af::ComputeGraphPtr SubTransposeAbsFusedConstGraph(size_t dims_size, vector<size_t> perms,

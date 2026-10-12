@@ -63,3 +63,29 @@ TEST_F(TestBackendAddAbsE2e, AddAbsE2eCodegen) {
 
   EXPECT_EQ(gen_success, true);
 }
+
+// reduce 多引用切分 + 交叉 norm-like 场景的优化流程回归: 覆盖切分、norm-like 环路探测
+// 与子图内副本合并路径, 不生成 kernel 文件, 不影响后续 kernel 执行用例
+TEST_F(TestBackendAddAbsE2e, ReduceNormLikeOptimize) {
+  auto graph = ascir::ShareGraph::ReduceNormLikeFusedGraph(2);
+  ASSERT_NE(graph, nullptr);
+
+  ascir::FusedScheduledResult fused_schedule_result;
+  std::vector<::ascir::ScheduledResult> schedule_results;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  EXPECT_EQ(optimizer.Optimize(graph, fused_schedule_result), 0);
+}
+
+// 多引用同 reduce 场景的优化流程回归: 同一源的两条引用汇聚到同一 reduce, 两次切分产生的
+// 同名副本落在同一子图, 覆盖子图内重复副本合并路径
+TEST_F(TestBackendAddAbsE2e, MultiCitationReduceOptimize) {
+  auto graph = ascir::ShareGraph::MultiCitationReduceFusedGraph(2);
+  ASSERT_NE(graph, nullptr);
+
+  ascir::FusedScheduledResult fused_schedule_result;
+  std::vector<::ascir::ScheduledResult> schedule_results;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  EXPECT_EQ(optimizer.Optimize(graph, fused_schedule_result), 0);
+}
