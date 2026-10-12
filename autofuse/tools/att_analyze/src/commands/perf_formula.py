@@ -148,6 +148,7 @@ def render_svg(
     op_name: str,
     cases: List[CasePerfInfo],
     selected_case: Optional[Tuple[int, int, int]],
+    graph_id: int = 0,
 ) -> Tuple[str, int]:
     """
     生成单算子的 SVG <g> 片段，返回 (fragment, height)。
@@ -165,7 +166,7 @@ def render_svg(
     selected_str = ""
     if selected_case:
         r, g, c = selected_case
-        selected_str = f"Selected: graph0_result{r}_g{g}_case{c}"
+        selected_str = f"Selected: graph{graph_id}_result{r}_g{g}_case{c}"
 
     inner_parts = [
         f'<rect width="{_CANVAS_W}" height="{_OP_TITLE_H}" fill="#f0f4f8" rx="4"/>',
@@ -239,7 +240,8 @@ def run(args):
         group_cases = log_parser.extract_all_group_cases(
             full_content, op, graph_id, result_id
         )
-        perf_cases = parse_perf_lines(full_content, op)
+        perf_cases = parse_perf_lines(full_content, op, graph_id=graph_id)
+        perf_cases = [c for c in perf_cases if c.graph_id == graph_id]
 
         if case_filter:
             perf_cases = [
@@ -265,7 +267,7 @@ def run(args):
             first_gid = min(group_cases.keys())
             selected_case = (result_id, first_gid, group_cases[first_gid])
 
-        frag, h = render_svg(op, perf_cases, selected_case)
+        frag, h = render_svg(op, perf_cases, selected_case, graph_id=graph_id)
         sections.append((frag, h))
 
     out_path = os.path.join(out_dir, "perf_formula.svg")
