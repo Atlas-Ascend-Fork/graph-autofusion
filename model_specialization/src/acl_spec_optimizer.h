@@ -102,13 +102,14 @@ class AclSpecOptimizer final {
   aclError SetTaskAdmission(std::vector<TaskIdentity> &identities, bool isScopeJit) const;
   aclError Collect(aclmdlRI model, const model_spec::FeatureManager &featureManager, std::string_view outputDirectory,
                    std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
-                   std::vector<aclmdlRITask> &scopeMarkers) const;
+                   std::vector<ScopeTaskRecord> &scopeMarkers) const;
   bool TryBuildRequest(const aclmdlRITaskParams &originalParams, std::string_view kernelEntry,
                        const model_spec::FeatureManager &featureManager, std::string_view outputDirectory,
                        KernelSpecRequest &request) const;
   void SpecializeKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
   aclError LoadKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
-  aclError UpdateTasks(aclmdlRI model, const std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
+  aclError UpdateTasks(aclmdlRI model, const std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
+                       const std::vector<ScopeTaskRecord> &markersToDisable) const;
 
   SpecOutputDirectory outputDirectory_;
 };

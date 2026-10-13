@@ -79,13 +79,16 @@ aclError AclSpecOptimizer::Init(aclmdlRI model) {
 
 aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featureManager) const {
   std::vector<std::unique_ptr<KernelSpecRequest>> requests;
-  std::vector<aclmdlRITask> scopeMarkers;
+  std::vector<ScopeTaskRecord> scopeMarkers;
   aclError result = Collect(model, featureManager, outputDirectory_.Path(), requests, scopeMarkers);
   if (result != ACL_SUCCESS) {
     SK_DLOGE("aclmdlRISpecOptimize collection failed: model=%p ret=%d", model, result);
     return result;
   }
-  if (requests.empty()) {
+  if (featureManager.Get<Feature::IS_SCOPE_JIT>()) {
+    scopeMarkers.clear();
+  }
+  if (requests.empty() && scopeMarkers.empty()) {
     SK_DLOGW("aclmdlRISpecOptimize finished with nothing to specialize: model=%p", model);
     return ACL_SUCCESS;
   }
@@ -95,7 +98,7 @@ aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featur
     SK_DLOGE("aclmdlRISpecOptimize load failed: model=%p ret=%d", model, result);
     return result;
   }
-  result = UpdateTasks(model, requests);
+  result = UpdateTasks(model, requests, scopeMarkers);
   const aclError retained = RetainBinaries(model, requests);
   SK_DLOGI("aclmdlRISpecOptimize finished: model=%p commit=%d retain=%d", model, result, retained);
   return result != ACL_SUCCESS ? result : retained;
@@ -214,7 +217,7 @@ aclError AclSpecOptimizer::SetTaskAdmission(std::vector<TaskIdentity> &identitie
 aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &featureManager,
                                    std::string_view outputDirectory,
                                    std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
-                                   std::vector<aclmdlRITask> &scopeMarkers) const {
+                                   std::vector<ScopeTaskRecord> &scopeMarkers) const {
   if (model == nullptr || outputDirectory.empty()) {
     SK_DLOGE("aclmdlRISpecOptimize collect rejected: model=%p outputDirectoryEmpty=%d", model,
              static_cast<int>(outputDirectory.empty()));
@@ -243,7 +246,7 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
   }
   std::vector<TaskIdentity> identities;
   std::vector<std::unique_ptr<KernelSpecRequest>> collected;
-  std::vector<aclmdlRITask> collectedMarkers;
+  std::vector<ScopeTaskRecord> collectedMarkers;
   const bool isScopeJit = featureManager.Get<Feature::IS_SCOPE_JIT>();
   for (uint32_t streamIndex = 0; streamIndex < streamCount; ++streamIndex) {
     if (streams[streamIndex] == nullptr) {
@@ -288,7 +291,7 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
         continue;
       }
       if (identity.record.kind == ScopeTaskKind::BEGIN || identity.record.kind == ScopeTaskKind::END) {
-        collectedMarkers.push_back(identity.record.task);
+        collectedMarkers.push_back(identity.record);
       }
       identities.push_back(std::move(identity));
     }
@@ -418,8 +421,8 @@ aclError AclSpecOptimizer::LoadKernels(std::vector<std::unique_ptr<KernelSpecReq
   return ACL_SUCCESS;
 }
 
-aclError AclSpecOptimizer::UpdateTasks(aclmdlRI model,
-                                       const std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const {
+aclError AclSpecOptimizer::UpdateTasks(aclmdlRI model, const std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
+                                       const std::vector<ScopeTaskRecord> &markersToDisable) const {
   for (const auto &request : requests) {
     auto params = request->originalParams;
     params.kernelTaskParams.funcHandle = request->specFuncHandle;
@@ -429,6 +432,15 @@ aclError AclSpecOptimizer::UpdateTasks(aclmdlRI model,
       // functions, and the caller decides what to do with the model. Their binaries must therefore
       // stay loaded, which is why the caller retains them either way.
       SK_DLOGE("aclmdlRISpecOptimize SetParams failed: model=%p task=%p ret=%d", model, request->task, result);
+      return result;
+    }
+  }
+  for (const auto &marker : markersToDisable) {
+    const aclError result = aclmdlRITaskDisable(marker.task);
+    if (result != ACL_SUCCESS) {
+      SK_DLOGE("aclmdlRISpecOptimize Disable failed: model=%p task=%p stream=%u taskIndex=%u kind=%s ret=%d", model,
+               marker.task, marker.streamIndex, marker.taskIndex, marker.kind == ScopeTaskKind::BEGIN ? "BEGIN" : "END",
+               result);
       return result;
     }
   }
