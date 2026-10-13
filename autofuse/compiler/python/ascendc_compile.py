@@ -940,12 +940,42 @@ def compile_device_obj(args: argparse.Namespace, temp_dir):
     return f"{temp_dir}/device/{base_device_file}.o"
 
 
+def generate_get_kernel_obj(args: argparse.Namespace, temp_dir, kernel_obj_path):
+    """从 device .o 抽出 aicore 二进制并生成导出 GetKernelBin 的 host 对象。
+
+    device .o 内嵌 .aicore_binary section（真正的 aicore 二进制），同时定义 legacy 的
+    AutofuseLaunch host 下发符号。rtLaunch 链路不再链接 device .o（即去掉 AutofuseLaunch），
+    改为抽出二进制、由 GetKernelBin 导出，供 wrapper 经 rtRegisterAllKernel 注册后用
+    rtKernelLaunchWithHandleV2 下发。
+    """
+    bin_file = os.path.join(temp_dir, "kernel.aicore_binary_elf_v1")
+    extract_aicore_binary(kernel_obj_path, bin_file)
+
+    from autofuse.pyautofuse import CodeGen
+
+    get_kernel_src = CodeGen().get_kernel_and_json_generator(bin_file, "")
+    if not get_kernel_src:
+        raise CompileError("get_kernel_and_json_generator returned empty source")
+    host_dir = os.path.join(temp_dir, "host")
+    os.makedirs(host_dir, exist_ok=True)
+    get_kernel_cpp = os.path.join(host_dir, "autofuse_get_kernel.cpp")
+    with open(get_kernel_cpp, "w", encoding="utf-8") as source_file:
+        source_file.write(get_kernel_src)
+    return compile_host_obj_file(args, temp_dir, get_kernel_cpp)
+
+
 @inductor_compile_duration("LinkKernelSo")
 def link_kernel_so(
     args: argparse.Namespace, tiling_obj_paths, temp_dir, kernel_obj_path
 ):
     if not kernel_obj_path:
         raise ValueError("kernel_obj_path is required for linking")
+
+    # rtLaunch 链路：把 device .o 换成导出 GetKernelBin 的 host .o。bin_mode 仅由新增的
+    # *_bin 接口开启（compile_adapter 传入），旧接口仍直接链 device .o，保留 AutofuseLaunch
+    # 供 CV 融合等尚未迁移的场景使用。
+    if getattr(args, "bin_mode", False):
+        kernel_obj_path = generate_get_kernel_obj(args, temp_dir, kernel_obj_path)
 
     target_file = os.path.join(temp_dir, os.path.basename(args.output_file))
     obj_files = [kernel_obj_path]

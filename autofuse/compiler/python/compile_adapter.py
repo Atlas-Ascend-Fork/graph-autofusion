@@ -451,10 +451,11 @@ def get_pgo_env_flag():
     return result.get("autofuse_enable_pgo", "false").lower() == "true"
 
 
-def prepare_compile_context(argv, stage, tiling_repr):
+def prepare_compile_context(argv, stage, tiling_repr, bin_mode=False):
     args = parse_compile_args(argv)
     args.stage = stage
     args.tiling_repr = tiling_repr
+    args.bin_mode = bin_mode
     get_pgo_cache_root = getattr(ascendc_compile, "get_pgo_cache_root", None)
     args.pgo_cache_root = (
         get_pgo_cache_root(args.output_file)
@@ -559,14 +560,19 @@ def _compile_result(args, result):
 
 
 def compile_core(
-    sources, argv: List[str], stage="all", tiling_repr=None, trace_stage=None
+    sources,
+    argv: List[str],
+    stage="all",
+    tiling_repr=None,
+    trace_stage=None,
+    bin_mode=False,
 ):
     args = None
     total_start = time.time_ns()
     try:
         prepare_start = time.time_ns()
         args, temp_dir_ctx, auto_cleanup = prepare_compile_context(
-            argv, stage, tiling_repr
+            argv, stage, tiling_repr, bin_mode
         )
         args.trace_stage = trace_stage if trace_stage is not None else stage
         prepare_end = time.time_ns()
@@ -606,6 +612,25 @@ def jit_compile(tiling_def, host_tiling, op_kernel, argv: List[str]):
     )
 
 
+def jit_compile_bin(tiling_def, host_tiling, op_kernel, argv: List[str]):
+    """jit 编译的 rtLaunch 变体：链接产物导出 GetKernelBin 而非 AutofuseLaunch。
+
+    与 ``jit_compile`` 的区别仅在链接阶段——device .o 不再直接链入 so，而是抽出
+    aicore 二进制并由 ``GetKernelBin`` 导出。旧 ``jit_compile`` 保持不变，供 CV 融合
+    等尚未迁移到 rtKernelLaunchWithHandleV2 的场景继续使用。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def,
+            SOURCES_HOST_IMPL: host_tiling,
+            SOURCES_KERNEL_IMPL: op_kernel,
+        },
+        argv,
+        trace_stage="jit_compile_bin",
+        bin_mode=True,
+    )
+
+
 def host_compile(tiling_def_code, tiling_impl_code, argv: List[str]):
     return compile_core(
         {
@@ -632,6 +657,28 @@ def kernel_compile(
         "device",
         tiling_repr,
         trace_stage="kernel_compile",
+    )
+
+
+def kernel_compile_bin(
+    tiling_def_code, kernel_impl_code, argv: List[str], *, tiling_repr=None
+):
+    """静态 shape（TopN）kernel 编译的 rtLaunch 变体：链接产物导出 GetKernelBin。
+
+    与 ``kernel_compile`` 的区别仅在链接阶段——静态 kernel.so 仅导出 GetKernelBin，
+    tiling 已由 ``tiling_repr`` 固化进 device 代码。旧 ``kernel_compile`` 保持不变。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def_code,
+            SOURCES_HOST_IMPL: None,
+            SOURCES_KERNEL_IMPL: kernel_impl_code,
+        },
+        argv,
+        "device",
+        tiling_repr,
+        trace_stage="kernel_compile_bin",
+        bin_mode=True,
     )
 
 
@@ -678,6 +725,27 @@ def build_kernel_so(tiling_def_code, argv: List[str], *, tiling_repr=None):
         "link",
         tiling_repr,
         trace_stage="build_kernel_so",
+    )
+
+
+def build_kernel_so_bin(tiling_def_code, argv: List[str], *, tiling_repr=None):
+    """链接 host.o + GetKernelBin host.o，产出导出 GetKernelBin 的 kernel.so。
+
+    对应 ``build_kernel_so`` 的 rtLaunch 变体：链接阶段把 device .o 抽出 aicore 二进制
+    并生成 GetKernelBin host 对象后链入，不再链接 AutofuseLaunch。旧 ``build_kernel_so``
+    保持不变，供 CV 融合等尚未迁移的场景继续使用。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def_code,
+            SOURCES_HOST_IMPL: None,
+            SOURCES_KERNEL_IMPL: None,
+        },
+        argv,
+        "link",
+        tiling_repr,
+        trace_stage="build_kernel_so_bin",
+        bin_mode=True,
     )
 
 
