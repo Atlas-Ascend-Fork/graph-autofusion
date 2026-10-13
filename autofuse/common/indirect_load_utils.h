@@ -18,6 +18,7 @@
 #include <vector>
 #include "ascir.h"
 #include "graph/ascendc_ir/ascendc_ir_core/ascendc_ir.h"
+#include "graph/symbolizer/symbolic_utils.h"
 
 namespace ascgen_utils::indirect_load {
 constexpr size_t kInputTensorIndex = 0UL;
@@ -198,6 +199,113 @@ struct SimtLoweringMetadata {
   af::DataType index_dtype = af::DT_UNDEFINED;
   af::DataType output_dtype = af::DT_UNDEFINED;
 };
+
+// [SIMT index 闭包预计算] SIMT body 的 Index() 逐元素求值 index 链（含软件展开的
+// Ln，~25 条标量指令/元素）是 gather 形态向量管线的主要开销。当 index 链是输出
+// 坐标的纯函数（无 GM Load）且值域可静态证明 fp32 精确时，可按 tile 向量化预计算
+// 为 UB int32 索引表，body 的 Index() 退化为一次表读。表复用 value tensor 的存储
+// （int32 视图，值 dtype ≥4B 时同宽），scratch 走 tmp buffer 协议（CalcTmpBufSize
+// → b0_<id>，与 SIMD offsets buffer 同机制）。本计划由调度期（tmp 尺寸规划）与
+// codegen 期（发射）共用，保证两处判定位点一致。
+enum class SimtIndexPrepassNodeKind : uint8_t {
+  kLeafArangeInnerRamp,    // 尾轴坐标：tile 内 ramp（每行复用 [0, inner)）
+  kLeafArangeRowConstant,  // 外轴坐标：行内常量（按行 Duplicate）
+  kLeafScalar,             // 编译期常量（*s 变体标量或 Duplicate 物化）
+  kOpBinary,               // Add/Sub/Mul/Min/Max（含标量操作数）
+  kOpUnary,                // Abs/Ln
+  kOpCompare,              // Gt/Ge/Lt/Le/Eq/Ne → uint8 mask
+  kOpWhere,                // Select(mask, a, b)（标量分支 Duplicate 物化）
+  kCastNoop,               // 值域已证 fp32 精确：int↔float 同域透传
+  kCastTruncToInt,         // float→int 截断：经 int32 槽往返两段 Cast 还原截断语义
+  kPassthrough             // Store/Transpose：值透传
+};
+
+// 预计算节点的操作数描述：链内节点引用（下标）或标量字面量。
+struct SimtIndexPrepassOperand {
+  bool is_node = false;
+  size_t node_index = 0UL;   // is_node 时：plan.nodes 下标
+  std::string scalar_value;  // 标量字面量（已按值 dtype 格式化）
+};
+
+// Arange 叶的坐标参数（发射期还原坐标表达式用）。
+struct SimtIndexPrepassArangeInfo {
+  af::Expression view_stride;  // 逻辑输出视图上该轴的 stride
+  af::Expression view_size;    // 逻辑输出视图上该轴的 size
+  af::Expression base;         // Arange base 属性
+  af::Expression step;         // Arange step 属性
+};
+
+struct SimtIndexPrepassNodePlan {
+  SimtIndexPrepassNodeKind kind = SimtIndexPrepassNodeKind::kPassthrough;
+  size_t op_code = 0UL;  // kOpBinary/kOpUnary/kOpCompare/kOpWhere 的算子分发码
+  std::vector<SimtIndexPrepassOperand> operands;
+  size_t slot = 0UL;  // 输出所在 4B 槽位（kOpCompare 为 mask 槽位）
+  // 节点内获取即释放的临时槽：kLeafArangeInnerRamp 的 int32 ramp、kCastTruncToInt
+  // 的 int32 往返、kOpWhere 的标量分支物化（Duplicate），均计入峰值。
+  std::vector<size_t> temp_slots;
+  SimtIndexPrepassArangeInfo arange;
+};
+
+struct SimtIndexPrepassPlan {
+  bool eligible = false;
+  size_t four_byte_slot_count = 0UL;            // fp32/int32 scratch 槽数峰值（含临时槽）
+  size_t mask_slot_count = 0UL;                 // uint8 比较 mask 槽数
+  af::Expression inner_size;                    // 逻辑输出尾轴尺寸（scratch 尺寸表达式用）
+  size_t result_slot = 0UL;                     // 链结果（透传解析后）所在 4B 槽位
+  std::vector<SimtIndexPrepassNodePlan> nodes;  // 拓扑序，与链节点一一对应
+};
+
+// 判定 SIMT index 链可否向量化预计算并给出发射计划。纯图结构推导（不依赖调度
+// 状态）：从 IL 节点 index 输入反向收集闭包，逐节点校验算子集、Arange 叶形状
+// （尾轴 ramp / 行常量）、值域区间（fp32 精确性）与 scratch 槽位需求。任一条件
+// 不满足时 eligible=false，调用方回退既有逐元素路径。
+af::Status BuildSimtIndexPrepassPlan(const af::AscNode &indirect_load, SimtIndexPrepassPlan &plan);
+
+// [SIMT index 闭包预计算] 调度期 stash 的 tmp 需求：CalcTmpBufSize 所在的 impl 注册
+// 库不能回调本库符号，scratch 字节数经节点 ext attr 传递；读写均为头文件内联
+// （两库各自弱符号，与既有内联工具同模式）。
+struct SimtIndexPrepassTmpDemand {
+  bool eligible = false;
+  af::Expression tmp_bytes;  // Align 后的 scratch 字节数
+};
+constexpr char kSimtPrepassTmpDemandAttr[] = "af.internal.indirect_load.simt_prepass_tmp_demand";
+
+// 预计算 scratch 字节数：4B 槽与 uint8 mask 槽共用槽宽 Align(inner*4,32)（mask 槽
+// 按 4B 槽宽对齐覆盖），总量 32B 对齐。调度期 stash 与 codegen 期漂移复验共用此式。
+inline af::Expression CalcSimtIndexPrepassTmpBytes(const SimtIndexPrepassPlan &plan) {
+  const af::Expression slot_bytes = af::sym::Align(plan.inner_size * af::Symbol(4U), 32U);
+  return af::sym::Align(af::Symbol(plan.four_byte_slot_count + plan.mask_slot_count) * slot_bytes, 32U);
+}
+
+inline af::Status SetSimtIndexPrepassTmpDemand(const af::AscNodePtr &node, const SimtIndexPrepassPlan &plan) {
+  const auto op_desc = node == nullptr ? nullptr : node->GetOpDesc();
+  if (op_desc == nullptr || !plan.eligible) {
+    return af::SUCCESS;
+  }
+  const SimtIndexPrepassTmpDemand demand{true, CalcSimtIndexPrepassTmpBytes(plan)};
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtPrepassTmpDemandAttr, demand),
+                 "Set IndirectLoad SIMT prepass tmp demand failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+inline SimtIndexPrepassTmpDemand GetSimtIndexPrepassTmpDemand(const af::AscNode &node) {
+  const auto op_desc = node.GetOpDesc();
+  if (op_desc == nullptr) {
+    return SimtIndexPrepassTmpDemand{};
+  }
+  return op_desc->TryGetExtAttr(kSimtPrepassTmpDemandAttr, SimtIndexPrepassTmpDemand{});
+}
+
+// [漂移防护] codegen 期重建 plan 后的 scratch 需求复验：预留尺寸以调度期 stash 的
+// tmp_bytes 为准，两份图副本之间图可能被改写，重建链需要更多槽位时越界写会穿透
+// 同 b0 的其他 tmp 用户——超出预留（含不可判定）一律回退逐元素路径。
+inline bool SimtIndexPrepassPlanFitsTmpDemand(const SimtIndexPrepassPlan &plan,
+                                              const SimtIndexPrepassTmpDemand &demand) {
+  if (!plan.eligible || !demand.eligible) {
+    return false;
+  }
+  return af::SymbolicUtils::StaticCheckLe(CalcSimtIndexPrepassTmpBytes(plan), demand.tmp_bytes) == af::TriBool::kTrue;
+}
 
 struct IndirectLoadLoweringMetadata {
   uint32_t version = 1U;

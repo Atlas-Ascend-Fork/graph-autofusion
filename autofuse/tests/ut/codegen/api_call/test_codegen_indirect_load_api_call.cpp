@@ -34,9 +34,9 @@ namespace {
 
 TEST(IndirectLoadCodegenImplTest, LoadsApiHeadersInDeclarationOrder) {
   const auto headers = af::ascir::IndirectLoadAscIrCodegenImplV2().LoadApiHeaderFiles(false);
-  const std::vector<std::string> expected = {"datacopy_reg_base.h", "indirect_load_simd_policy_reg_base.h",
+  const std::vector<std::string> expected = {"datacopy_reg_base.h",           "indirect_load_simd_policy_reg_base.h",
                                              "indirect_load_simd_reg_base.h", "indirect_load_sk_reg_base.h",
-                                             "indirect_load_simt_reg_base.h"};
+                                             "indirect_load_simt_reg_base.h", "transpose_reg_base.h"};
   EXPECT_EQ(headers, expected);
 }
 
@@ -1476,6 +1476,103 @@ TEST(IndirectLoadApiCallTest, GenerateSimtPostReduceKeepsParallelStoreChain) {
 }
 
 // ==================== SIMT post-reduce Init ====================
+
+// ======================== SIMT index 闭包预计算 ========================
+
+TEST(IndirectLoadApiCallTest, BuildSimtIndexPrepassPlanAcceptsArangeChain) {
+  ILTestGraph g("prepass_arange", 4, 8, 2, 16);
+  BuildSimtPostReduceGraph(g);
+
+  // 用“尾轴 ramp Arange + 常量”加法链替换 GM 装载的 index 输入。
+  Arange col("prepass_col");
+  col.ir_attr.SetBase(af::Symbol(0));
+  col.ir_attr.SetStep(af::Symbol(1));
+  col.attr.sched.axis = {g.z2.id, g.z3.id};
+  col.y.dtype = af::DT_INT64;
+  *col.y.axis = {g.z2.id, g.z3.id};
+  *col.y.repeats = {af::Symbol(1), g.s3};
+  *col.y.strides = {af::sym::kSymbolZero, af::sym::kSymbolOne};
+  ASSERT_NE(g.graph.AddNode(col), nullptr);
+
+  Scalar offset("prepass_offset", g.graph);
+  offset.ir_attr.SetValue("16");
+  offset.y.dtype = af::DT_INT64;
+  auto offset_node = g.graph.FindNode("prepass_offset");
+  ASSERT_NE(offset_node, nullptr);
+
+  Add idx_add("prepass_index_add");
+  g.graph.AddNode(idx_add);
+  idx_add.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx_add.y.axis = {g.z2.id, g.z3.id};
+  *idx_add.y.repeats = {g.s2, g.s3};
+  *idx_add.y.strides = {g.s3, af::sym::kSymbolOne};
+  idx_add.x1 = col.y;
+  idx_add.x2 = offset.y;
+  auto add_node = g.graph.FindNode("prepass_index_add");
+  ASSERT_NE(add_node, nullptr);
+
+  auto il = g.graph.FindNode("indirect_load");
+  auto idx_load = g.graph.FindNode("idx_load");
+  auto x_load = g.graph.FindNode("x_load");
+  ASSERT_NE(il, nullptr);
+  ASSERT_NE(idx_load, nullptr);
+  ASSERT_NE(x_load, nullptr);
+  // 索引表复用 value tensor 存储：值 dtype 至少 4B（fp16 图需提升为 fp32）。
+  x_load->outputs[0].attr.dtype = af::DT_FLOAT;
+  ASSERT_EQ(af::GraphUtils::ReplaceEdgeSrc(idx_load->GetOutDataAnchor(0), il->GetInDataAnchor(1),
+                                           add_node->GetOutDataAnchor(0)),
+            af::SUCCESS);
+  ASSERT_EQ(af::AscGraphUtils::GetComputeGraph(g.graph)->TopologicalSorting(), af::SUCCESS);
+  AnnotateSimtTemplate(g.graph);
+
+  SimtIndexPrepassPlan plan;
+  ASSERT_EQ(BuildSimtIndexPrepassPlan(*il, plan), af::SUCCESS);
+  EXPECT_TRUE(plan.eligible);
+  EXPECT_GE(plan.four_byte_slot_count, 1UL);
+  EXPECT_LE(plan.four_byte_slot_count, 6UL);
+  EXPECT_EQ(plan.mask_slot_count, 0UL);
+  EXPECT_LT(plan.result_slot, plan.four_byte_slot_count);
+}
+
+TEST(IndirectLoadApiCallTest, BuildSimtIndexPrepassPlanRejectsLoadedIndex) {
+  ILTestGraph g("prepass_load", 4, 8, 2, 16);
+  BuildSimtPostReduceGraph(g);
+  AnnotateSimtTemplate(g.graph);
+
+  auto il = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il, nullptr);
+  SimtIndexPrepassPlan plan;
+  ASSERT_EQ(BuildSimtIndexPrepassPlan(*il, plan), af::SUCCESS);
+  // index 直接来自 GM 装载（数据依赖闭包）：不可预计算，必须回退逐元素路径。
+  EXPECT_FALSE(plan.eligible);
+}
+
+// [漂移防护] 调度期 stash 与 codegen 期重建各算一次 scratch 需求，两份图副本之间
+// 图可能被改写：预留必须覆盖重建需求（等价或更小均可），出现缺口或不可判定时
+// 一律拒绝，回退逐元素路径。
+TEST(IndirectLoadApiCallTest, SimtIndexPrepassPlanFitsTmpDemandGuardsDrift) {
+  SimtIndexPrepassPlan plan;
+  plan.eligible = true;
+  plan.four_byte_slot_count = 4UL;
+  plan.mask_slot_count = 1UL;
+  plan.inner_size = af::Symbol(2048);
+  const SimtIndexPrepassTmpDemand reserved{true, CalcSimtIndexPrepassTmpBytes(plan)};
+  // 一致（无漂移）：允许。
+  EXPECT_TRUE(SimtIndexPrepassPlanFitsTmpDemand(plan, reserved));
+  // 漂移使链变复杂（调度期少 stash 一个槽）：重建需求超出预留，必须拒绝。
+  SimtIndexPrepassPlan drifted = plan;
+  drifted.four_byte_slot_count = plan.four_byte_slot_count + 1UL;
+  EXPECT_FALSE(SimtIndexPrepassPlanFitsTmpDemand(drifted, reserved));
+  // 漂移使链变简单（预留覆盖重建）：安全，允许。
+  SimtIndexPrepassPlan simplified = plan;
+  simplified.four_byte_slot_count = plan.four_byte_slot_count - 1UL;
+  EXPECT_TRUE(SimtIndexPrepassPlanFitsTmpDemand(simplified, reserved));
+  // 调度期未 stash 需求（attr 缺失）：回退。
+  EXPECT_FALSE(SimtIndexPrepassPlanFitsTmpDemand(plan, SimtIndexPrepassTmpDemand{}));
+  // 重建 plan 本身不可行：回退。
+  plan.eligible = false;
+  EXPECT_FALSE(SimtIndexPrepassPlanFitsTmpDemand(plan, reserved));
+}
 
 TEST(IndirectLoadApiCallTest, InitSimtPostReduceSucceeds) {
   ILTestGraph g("simt_post");

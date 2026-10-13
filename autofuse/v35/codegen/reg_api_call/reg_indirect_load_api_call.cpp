@@ -36,7 +36,8 @@ constexpr char kSimtValueNamePrefix[] = "v_";
 
 Status GenerateSimtContextDefinition(const std::string &context_name,
                                      const std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> &gm_tensors,
-                                     bool has_output_inner_size, std::stringstream &ss) {
+                                     bool has_output_inner_size, bool has_idx_table, const std::string &offset_type,
+                                     std::stringstream &ss) {
   ss << "struct " << context_name << " {" << std::endl;
   for (const auto &tensor : gm_tensors) {
     std::string dtype;
@@ -51,6 +52,14 @@ Status GenerateSimtContextDefinition(const std::string &context_name,
   // （如 t->ksN），不能内联进文件作用域的 Store，需经 Context 传入。
   if (has_output_inner_size) {
     ss << "  uint64_t output_inner_size;" << std::endl;
+  }
+  // [SIMT index 闭包预计算] 索引表（驻留 value tensor 存储的 int32 视图）与行寻
+  // 址参数；Index() 退化为一次表读。表在 UB：成员须带 __ubuf__ 地址空间限定，
+  // 否则 bisheng 拒绝用 (__ubuf__ int32_t *) 实参初始化。
+  if (has_idx_table) {
+    ss << "  const __ubuf__ int32_t *idx_table;" << std::endl;
+    ss << "  " << offset_type << " idx_base;" << std::endl;
+    ss << "  " << offset_type << " idx_row_stride;" << std::endl;
   }
   ss << "};" << std::endl;
   return af::SUCCESS;
@@ -896,10 +905,22 @@ af::Status GenSimtIndexEvaluator(const std::string &index_dtype, const std::stri
                                  ascir::TensorId result_tensor_id, const std::vector<af::AscNodePtr> &nodes,
                                  const SimtLoadMetadataMap &load_metadata,
                                  const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
-                                 const TPipe &tpipe, bool has_post_reduce, std::stringstream &ss) {
+                                 const TPipe &tpipe, bool has_post_reduce, bool use_idx_table,
+                                 const std::string &idx_inner_expr, std::stringstream &ss) {
   std::map<ascir::TensorId, std::string> values;
   ss << "  __simt_callee__ __aicore__ inline static " << index_dtype << " Index(" << offset_type << " output_index, "
      << offset_type << " index_offset, const Context &context) {" << std::endl;
+  if (use_idx_table) {
+    // [SIMT index 闭包预计算] 链值已按 tile 预计算进索引表：本调用点元素相对表基址
+    // 定位（行布局与 Store 一致），Index() 退化为一次表读。
+    ss << "    const " << offset_type << " local_index = output_index - context.idx_base;" << std::endl;
+    ss << "    return context.idx_table[static_cast<uint64_t>((local_index / " << idx_inner_expr
+       << ") * "
+          "context.idx_row_stride + local_index % "
+       << idx_inner_expr << ")];" << std::endl;
+    ss << "  }" << std::endl;
+    return af::SUCCESS;
+  }
   SimtLoadIndexOffsetExpressions offsets;
   GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(logical_view, nodes, load_metadata, tpipe, offset_type,
                                                            "output_index", "index_offset", has_post_reduce, offsets,
@@ -930,6 +951,202 @@ af::Status CalcVectorizedElementCount(const Tensor &tensor, af::Expression &elem
     GE_ASSERT_TRUE(axis_pos < tensor.axis_size.size(), "IndirectLoad SIMT output axis is invalid.");
     element_count = af::sym::Mul(element_count, tensor.axis_size[axis_pos]);
   }
+  return af::SUCCESS;
+}
+
+// [SIMT index 闭包预计算] 发射 pre-pass：按行（逻辑输出尾轴宽度）向量化重放 index
+// 链。值为 fp32 域（区间分析已证 int 值逐位精确；float→int 截断经 int32 槽往返，
+// 用向量 Cast 支持的 CAST_TRUNC（to-zero）模式），比较落 uint8 mask 槽，Select 回
+// 值域；行末将链结果截断写入
+// 驻留 value tensor 存储的 int32 索引表（行布局与 Store 一致，行宽 = SizeAlign(inner,
+// 32B/dtype_size)，表容量由 value tensor 自身的行对齐需求保证）。scratch 槽布局与
+// CalcTmpBufSize 的申请一致：槽 i 位于 tmp 偏移 i*Align(inner*4,32B)，mask 槽位于
+// 4B 槽区之后按 4B 槽宽对齐覆盖。
+af::Status EmitSimtIndexPrepass(const ascgen_utils::indirect_load::SimtIndexPrepassPlan &plan, const TPipe &tpipe,
+                                const std::string &offset_type, const std::string &local_target_name, int64_t tmp_id,
+                                const std::string &inner_expr, const std::string &slot_stride_expr,
+                                const std::string &row_stride_expr, const std::string &actual_size_expr,
+                                const std::string &output_offset_expr, std::stringstream &ss) {
+  using ascgen_utils::indirect_load::SimtIndexPrepassNodeKind;
+  const std::string tmp_name = tpipe.tmp_buf.name + "_" + std::to_string(tmp_id);
+  const auto four_byte_slot = [&slot_stride_expr](size_t slot) {
+    return "pp_val[" + std::to_string(slot) + " * (" + slot_stride_expr + ")]";
+  };
+  const auto int32_slot = [&slot_stride_expr](size_t slot) {
+    return "pp_i32[" + std::to_string(slot) + " * (" + slot_stride_expr + ")]";
+  };
+  const auto mask_slot = [&plan, &tmp_name, &slot_stride_expr](size_t slot) {
+    return tmp_name + "[" + std::to_string(plan.four_byte_slot_count + slot) + " * (4U * (" + slot_stride_expr + "))]";
+  };
+  const auto scalar_expr = [](const std::string &value) { return "static_cast<float>(" + value + ")"; };
+  // Where 掩码来源：沿透传/同域 Cast 回溯到比较节点的 mask 槽。
+  const auto resolve_mask_slot = [&plan](const ascgen_utils::indirect_load::SimtIndexPrepassOperand &operand) {
+    size_t cursor = operand.node_index;
+    for (size_t hop = 0UL; hop < plan.nodes.size() && cursor < plan.nodes.size(); ++hop) {
+      const auto &current = plan.nodes[cursor];
+      if (current.kind == SimtIndexPrepassNodeKind::kOpCompare) {
+        return current.slot;
+      }
+      if ((current.kind == SimtIndexPrepassNodeKind::kPassthrough ||
+           current.kind == SimtIndexPrepassNodeKind::kCastNoop) &&
+          !current.operands.empty() && current.operands.front().is_node) {
+        cursor = current.operands.front().node_index;
+        continue;
+      }
+      break;
+    }
+    return static_cast<size_t>(-1);
+  };
+  bool has_row_constant = false;
+  for (const auto &node_plan : plan.nodes) {
+    has_row_constant = has_row_constant || node_plan.kind == SimtIndexPrepassNodeKind::kLeafArangeRowConstant;
+  }
+  ss << "  // [IndirectLoad SIMT] index 闭包向量化预计算（fp32 域重放，表写 value tensor 存储）。" << std::endl;
+  ss << "  {" << std::endl;
+  ss << "    const uint32_t pp_inner = " << inner_expr << ";" << std::endl;
+  ss << "    const uint32_t pp_rows = (static_cast<uint32_t>(" << actual_size_expr << ") + pp_inner - 1U) / pp_inner;"
+     << std::endl;
+  ss << "    const uint32_t pp_stride = " << slot_stride_expr << ";" << std::endl;
+  ss << "    const uint32_t pp_row_stride = " << row_stride_expr << ";" << std::endl;
+  ss << "    LocalTensor<float> pp_val = " << tmp_name << ".ReinterpretCast<float>();" << std::endl;
+  ss << "    LocalTensor<int32_t> pp_i32 = " << tmp_name << ".ReinterpretCast<int32_t>();" << std::endl;
+  ss << "    LocalTensor<int32_t> pp_idx = " << local_target_name << ".ReinterpretCast<int32_t>();" << std::endl;
+  ss << "    for (uint32_t pp_r = 0U; pp_r < pp_rows; ++pp_r) {" << std::endl;
+  if (has_row_constant) {
+    ss << "      const " << offset_type << " pp_row_base = " << output_offset_expr << " + static_cast<" << offset_type
+       << ">(pp_r) * static_cast<" << offset_type << ">(pp_inner);" << std::endl;
+  }
+  for (const auto &node_plan : plan.nodes) {
+    switch (node_plan.kind) {
+      case SimtIndexPrepassNodeKind::kLeafArangeInnerRamp: {
+        // 列坐标 ramp [0, inner)：int32 ramp → fp32，叠加 base/step。
+        const size_t ramp_slot = node_plan.temp_slots.front();
+        ss << "      GenOneInnerDimTransposeIndex<int32_t>((__ubuf__ int32_t *)" << int32_slot(ramp_slot)
+           << ".GetPhyAddr(), 1, pp_inner);" << std::endl;
+        ss << "      AscendC::Cast(" << four_byte_slot(node_plan.slot) << ", " << int32_slot(ramp_slot)
+           << ", AscendC::RoundMode::CAST_NONE, pp_inner);" << std::endl;
+        int64_t base_const = 0L;
+        int64_t step_const = 1L;
+        (void)node_plan.arange.base.GetConstValue(base_const);
+        (void)node_plan.arange.step.GetConstValue(step_const);
+        if (step_const != 1L) {
+          ss << "      AscendC::Muls(" << four_byte_slot(node_plan.slot) << ", " << four_byte_slot(node_plan.slot)
+             << ", " << scalar_expr(std::to_string(step_const)) << ", pp_inner);" << std::endl;
+        }
+        if (base_const != 0L) {
+          ss << "      AscendC::Adds(" << four_byte_slot(node_plan.slot) << ", " << four_byte_slot(node_plan.slot)
+             << ", " << scalar_expr(std::to_string(base_const)) << ", pp_inner);" << std::endl;
+        }
+        break;
+      }
+      case SimtIndexPrepassNodeKind::kLeafArangeRowConstant: {
+        // 行常量坐标：coord = (row_base / stride) % size，value = base + coord*step。
+        int64_t base_const = 0L;
+        int64_t step_const = 1L;
+        (void)node_plan.arange.base.GetConstValue(base_const);
+        (void)node_plan.arange.step.GetConstValue(step_const);
+        const std::string stride_expr = PromoteSizeExpr(tpipe.tiler.Size(node_plan.arange.view_stride), offset_type);
+        const std::string size_expr = PromoteSizeExpr(tpipe.tiler.Size(node_plan.arange.view_size), offset_type);
+        ss << "      AscendC::Duplicate(" << four_byte_slot(node_plan.slot) << ", static_cast<float>((static_cast<"
+           << "int64_t>(" << base_const << ") + static_cast<int64_t>((pp_row_base / " << stride_expr << ") % "
+           << size_expr << ") * static_cast<int64_t>(" << step_const << "))), pp_inner);" << std::endl;
+        break;
+      }
+      case SimtIndexPrepassNodeKind::kOpBinary: {
+        const auto &lhs = node_plan.operands[0];
+        const auto &rhs = node_plan.operands[1];
+        const std::string &dst = four_byte_slot(node_plan.slot);
+        static const char *kTensorApis[] = {"Add", "Sub", "Mul", "Min", "Max"};
+        static const char *kScalarApis[] = {"Adds", "Subs", "Muls", "Mins", "Maxs"};
+        if (lhs.is_node && rhs.is_node) {
+          ss << "      AscendC::" << kTensorApis[node_plan.op_code] << "(" << dst << ", "
+             << four_byte_slot(plan.nodes[lhs.node_index].slot) << ", "
+             << four_byte_slot(plan.nodes[rhs.node_index].slot) << ", pp_inner);" << std::endl;
+        } else {
+          // 标量操作数走 *s 变体；Add/Mul/Min/Max 可交换（标量在左时换边），Sub 的
+          // 被减数为标量的形态在计划期已拒绝。
+          const auto &tensor_operand = lhs.is_node ? lhs : rhs;
+          const auto &scalar_operand = lhs.is_node ? rhs : lhs;
+          ss << "      AscendC::" << kScalarApis[node_plan.op_code] << "(" << dst << ", "
+             << four_byte_slot(plan.nodes[tensor_operand.node_index].slot) << ", "
+             << scalar_expr(scalar_operand.scalar_value) << ", pp_inner);" << std::endl;
+        }
+        break;
+      }
+      case SimtIndexPrepassNodeKind::kOpUnary: {
+        const std::string api = node_plan.op_code == 0UL ? "Abs" : "Ln";
+        ss << "      AscendC::" << api << "(" << four_byte_slot(node_plan.slot) << ", "
+           << four_byte_slot(plan.nodes[node_plan.operands.front().node_index].slot) << ", pp_inner);" << std::endl;
+        break;
+      }
+      case SimtIndexPrepassNodeKind::kOpCompare: {
+        static const char *kCmpModes[] = {"GT", "GE", "LT", "LE", "EQ", "NE"};
+        static const char *kMirroredModes[] = {"LT", "LE", "GT", "GE", "EQ", "NE"};
+        const auto &lhs = node_plan.operands[0];
+        const auto &rhs = node_plan.operands[1];
+        if (lhs.is_node && rhs.is_node) {
+          ss << "      AscendC::Compare(" << mask_slot(node_plan.slot) << ", "
+             << four_byte_slot(plan.nodes[lhs.node_index].slot) << ", "
+             << four_byte_slot(plan.nodes[rhs.node_index].slot)
+             << ", AscendC::CMPMODE::" << kCmpModes[node_plan.op_code] << ", pp_inner);" << std::endl;
+        } else {
+          // 标量比较走 Compares；标量在左时按镜像模式换边（a>b 等价 b<a）。
+          const auto &tensor_operand = lhs.is_node ? lhs : rhs;
+          const auto &scalar_operand = lhs.is_node ? rhs : lhs;
+          const char *mode = lhs.is_node ? kCmpModes[node_plan.op_code] : kMirroredModes[node_plan.op_code];
+          ss << "      AscendC::Compares(" << mask_slot(node_plan.slot) << ", "
+             << four_byte_slot(plan.nodes[tensor_operand.node_index].slot) << ", "
+             << scalar_expr(scalar_operand.scalar_value) << ", AscendC::CMPMODE::" << mode << ", pp_inner);"
+             << std::endl;
+        }
+        break;
+      }
+      case SimtIndexPrepassNodeKind::kOpWhere: {
+        const size_t mask_slot_index = resolve_mask_slot(node_plan.operands[0]);
+        GE_ASSERT_TRUE(mask_slot_index != static_cast<size_t>(-1),
+                       "IndirectLoad SIMT prepass Where mask slot is unresolved.");
+        size_t temp_cursor = 0UL;
+        std::string branch_exprs[2];
+        for (size_t branch_pos = 0UL; branch_pos < 2UL; ++branch_pos) {
+          const auto &operand = node_plan.operands[1UL + branch_pos];
+          if (operand.is_node) {
+            branch_exprs[branch_pos] = four_byte_slot(plan.nodes[operand.node_index].slot);
+          } else {
+            // 标量分支物化到节点内临时槽。
+            const size_t temp = node_plan.temp_slots[temp_cursor++];
+            ss << "      AscendC::Duplicate(" << four_byte_slot(temp) << ", " << scalar_expr(operand.scalar_value)
+               << ", pp_inner);" << std::endl;
+            branch_exprs[branch_pos] = four_byte_slot(temp);
+          }
+        }
+        ss << "      AscendC::Select(" << four_byte_slot(node_plan.slot) << ", " << mask_slot(mask_slot_index) << ", "
+           << branch_exprs[0] << ", " << branch_exprs[1] << ", AscendC::SELMODE::VSEL_TENSOR_TENSOR_MODE, pp_inner);"
+           << std::endl;
+        break;
+      }
+      case SimtIndexPrepassNodeKind::kCastTruncToInt: {
+        // float→int 截断：向量 Cast 无 CAST_ZERO 模式（dav 仅 SIMT 标量路径支持，
+        // 其余落入 impl 的 default 分支并 ASCENDC_ASSERT 报 illegal cast mode），
+        // CAST_TRUNC（to-zero）与参考链 (int64_t)float 截断语义一致。
+        const size_t roundtrip = node_plan.temp_slots.front();
+        ss << "      AscendC::Cast(" << int32_slot(roundtrip) << ", "
+           << four_byte_slot(plan.nodes[node_plan.operands.front().node_index].slot)
+           << ", AscendC::RoundMode::CAST_TRUNC, pp_inner);" << std::endl;
+        ss << "      AscendC::Cast(" << four_byte_slot(node_plan.slot) << ", " << int32_slot(roundtrip)
+           << ", AscendC::RoundMode::CAST_NONE, pp_inner);" << std::endl;
+        break;
+      }
+      case SimtIndexPrepassNodeKind::kPassthrough:
+      case SimtIndexPrepassNodeKind::kCastNoop:
+      case SimtIndexPrepassNodeKind::kLeafScalar:
+        break;
+    }
+  }
+  ss << "      AscendC::Cast(pp_idx[pp_r * pp_row_stride], " << four_byte_slot(plan.result_slot)
+     << ", AscendC::RoundMode::CAST_TRUNC, pp_inner);" << std::endl;
+  ss << "    }" << std::endl;
+  ss << "    AscendC::PipeBarrier<PIPE_V>();" << std::endl;
+  ss << "  }" << std::endl;
   return af::SUCCESS;
 }
 
@@ -1018,7 +1235,8 @@ void EmitSimtPolicyParams(const TPipe &tpipe, const ascgen_utils::indirect_load:
 
 af::Status GenerateSimtContextInitializer(
     const std::string &context_name, const std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> &gm_tensors,
-    const TPipe &tpipe, const std::string &output_inner_size_expr, std::stringstream &ss) {
+    const TPipe &tpipe, const std::string &output_inner_size_expr, const std::string &idx_table_expr,
+    const std::string &idx_base_expr, const std::string &idx_row_stride_expr, std::stringstream &ss) {
   ss << "  " << context_name << " context{";
   for (size_t i = 0UL; i < gm_tensors.size(); ++i) {
     const auto &gm_tensor = gm_tensors[i];
@@ -1035,6 +1253,12 @@ af::Status GenerateSimtContextInitializer(
   }
   if (!output_inner_size_expr.empty()) {
     ss << (gm_tensors.empty() ? "" : ", ") << output_inner_size_expr;
+  }
+  // [SIMT index 闭包预计算] 索引表与行寻址参数（表基址 = 本 tile 的 value tensor 局
+  // 部目标首地址，分配已提升到本初始化之前）。
+  if (!idx_table_expr.empty()) {
+    ss << (gm_tensors.empty() && output_inner_size_expr.empty() ? "" : ", ") << idx_table_expr << ", " << idx_base_expr
+       << ", " << idx_row_stride_expr;
   }
   ss << "};" << std::endl;
   return af::SUCCESS;
@@ -1279,8 +1503,12 @@ Status IndirectLoadRegApiCall::GenerateFuncDefinition(const TPipe &tpipe, const 
   // name, so guard the definition while keeping every variant's invocation available.
   ss << "#ifndef " << body_guard << std::endl;
   ss << "#define " << body_guard << std::endl;
+  // [SIMT index 闭包预计算] Index() 形态与调用点 pre-pass 发射共用同一位点。
+  ascgen_utils::indirect_load::SimtIndexPrepassPlan prepass_plan;
+  const bool use_prepass = CanUseSimtIndexPrepass(tpipe, prepass_plan);
   GE_ASSERT_SUCCESS(GenerateSimtContextDefinition(context_name, simt_gm_tensors_,
-                                                  UseRuntimeOutputInnerSize(has_post_reduce_, logical_view_), ss));
+                                                  UseRuntimeOutputInnerSize(has_post_reduce_, logical_view_),
+                                                  use_prepass, offset_type, ss));
   ss << "struct " << body_name << " {" << std::endl;
   ss << "  using Context = " << context_name << ";" << std::endl;
   const size_t ub_output_count = static_cast<size_t>(std::count_if(
@@ -1288,8 +1516,10 @@ Status IndirectLoadRegApiCall::GenerateFuncDefinition(const TPipe &tpipe, const 
   ss << "  static constexpr uint32_t kGmOutputCount = " << output_chains_.size() - ub_output_count << "U;" << std::endl;
   ss << "  static constexpr uint32_t kUbOutputCount = " << ub_output_count << "U;" << std::endl;
 
+  const std::string idx_inner_expr = use_prepass ? tpipe.tiler.Size(prepass_plan.inner_size) : "";
   GE_ASSERT_SUCCESS(GenSimtIndexEvaluator(index_dtype, offset_type, index_result_tensor_id_, index_nodes_,
-                                          simt_index_loads_, logical_view_, tpipe, has_post_reduce_, ss));
+                                          simt_index_loads_, logical_view_, tpipe, has_post_reduce_, use_prepass,
+                                          idx_inner_expr, ss));
   if (simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding &&
       CanGenerateAicoreIndexEvaluator(index_nodes_, simt_index_loads_)) {
     GE_ASSERT_SUCCESS(GenAicoreIndexEvaluator(index_dtype, offset_type, index_result_tensor_id_, index_nodes_,
@@ -1456,8 +1686,9 @@ Status IndirectLoadRegApiCall::GenerateSimd(const TPipe &tpipe, const std::vecto
   return af::SUCCESS;
 }
 
-Status IndirectLoadRegApiCall::GenerateSimtInvocation(const TPipe &tpipe, const std::string &input_dtype,
-                                                      const std::string &outer_tb_var, std::stringstream &ss) const {
+Status IndirectLoadRegApiCall::GenerateSimtInvocation(
+    const TPipe &tpipe, const std::string &input_dtype, const std::string &outer_tb_var,
+    const ascgen_utils::indirect_load::SimtIndexPrepassPlan *prepass_plan, std::stringstream &ss) const {
   const size_t rank = logical_view_.input.sizes.size();
   const std::string offset_type = GetSimtOffsetType(simt_policy_);
   const std::string body_name = kSimtBodyNamePrefix + ascgen_utils::GenValidName(node_name);
@@ -1473,10 +1704,11 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(const TPipe &tpipe, const 
     GE_ASSERT_NOTNULL(value_tensor, "IndirectLoad SIMT value tensor is missing.");
     // 后置 Reduce 的目标是 IndirectLoad value tensor，而 API 调用的输出会重定向到最终
     // GM result tensor。自行管理 UB 生命周期的模板已暴露该 local tensor；其他模板则需在
-    // 提升后的调用前显式分配。
+    // 提升后的调用前显式分配（pre-pass 开启时分配已提升到 Context 初始化之前，表基
+    // 址需先于 Context 就位）。
     const bool skips_ub_lifecycle =
         node != nullptr && ascgen_utils::indirect_load::GetTemplateBehavior(node).skips_ub_lifecycle;
-    if (!skips_ub_lifecycle && !local_target->no_need_realloc) {
+    if (prepass_plan == nullptr && !skips_ub_lifecycle && !local_target->no_need_realloc) {
       std::string local_target_alloc;
       GE_ASSERT_SUCCESS(tpipe.TensorAlloc(*local_target, local_target_alloc));
       ss << local_target_alloc;
@@ -1487,6 +1719,21 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(const TPipe &tpipe, const 
     const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
     output_offset_expr = "(static_cast<" + offset_type + ">(block_dim_offset) + static_cast<" + offset_type + ">(" +
                          outer_tb_var + ")) * " + PromoteSizeExpr(local_tile_size_expr, offset_type);
+    if (prepass_plan != nullptr) {
+      // [SIMT index 闭包预计算] 行/槽寻址参数与 Store 行布局一致；scratch 槽宽与
+      // CalcTmpBufSize 的申请同源（Align(inner*4,32B)/4 == Align(inner,8)）。
+      const std::string inner_expr = PromoteSizeExpr(tpipe.tiler.Size(prepass_plan->inner_size), "uint32_t");
+      const std::string slot_stride_expr =
+          PromoteSizeExpr(tpipe.tiler.Size(af::sym::Align(prepass_plan->inner_size, 8U)), "uint32_t");
+      const uint32_t dtype_size = static_cast<uint32_t>(af::GetSizeByDataType(value_tensor->dtype));
+      const std::string row_stride_expr =
+          PromoteSizeExpr(tpipe.tiler.Size(af::sym::Align(prepass_plan->inner_size, 32U / dtype_size)), "uint32_t");
+      const auto tmp_iter = tmp_buf_id.find(-1L);
+      GE_ASSERT_TRUE(tmp_iter != tmp_buf_id.end(), "IndirectLoad SIMT prepass requires an API-level tmp buffer.");
+      GE_ASSERT_SUCCESS(EmitSimtIndexPrepass(*prepass_plan, tpipe, offset_type, local_target->name, tmp_iter->second,
+                                             inner_expr, slot_stride_expr, row_stride_expr, actual_size_expr,
+                                             output_offset_expr, ss));
+    }
   } else {
     actual_size_expr = outer_tb_var + "_loop_size";
     output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
@@ -1529,6 +1776,60 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(const TPipe &tpipe, const 
   return af::SUCCESS;
 }
 
+bool IndirectLoadRegApiCall::CanUseSimtIndexPrepass(const TPipe &tpipe,
+                                                    ascgen_utils::indirect_load::SimtIndexPrepassPlan &plan) const {
+  plan = ascgen_utils::indirect_load::SimtIndexPrepassPlan{};
+  if (template_id_ != ascir::TemplateId::kIndirectLoadSimt || !has_post_reduce_ || node == nullptr ||
+      logical_view_.output.sizes.empty()) {
+    return false;
+  }
+  if (ascgen_utils::indirect_load::BuildSimtIndexPrepassPlan(*node, plan) != af::SUCCESS || !plan.eligible) {
+    return false;
+  }
+  // scratch 必须已由调度期 CalcTmpBufSize 申请（同一判定；两处图副本结构漂移时以此
+  // 为准回退逐元素路径）。
+  if (tmp_buf_id.find(-1L) == tmp_buf_id.end()) {
+    return false;
+  }
+  // [漂移防护] 调度期与 codegen 期各构建一次 plan，两份图副本之间图可能被改写
+  // （真机日志实证 chain[40]→[36]）：scratch 预留尺寸以调度期 stash 的需求为准，
+  // 重建需求超出预留时越界写会穿透同 b0 的其他 tmp 用户，必须回退逐元素路径。
+  if (!ascgen_utils::indirect_load::SimtIndexPrepassPlanFitsTmpDemand(
+          plan, ascgen_utils::indirect_load::GetSimtIndexPrepassTmpDemand(*node))) {
+    return false;
+  }
+  // tile 整行对齐：向量化元素数须被尾轴整除（tile 基址 = 整数×元素数），否则
+  // ramp/行常量叶的行内一致性不成立。
+  const Tensor *value_tensor = tpipe.GetTensor(simt_value_tensor_id_);
+  if (value_tensor == nullptr) {
+    return false;
+  }
+  af::Expression element_count;
+  GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, element_count));
+  const af::Expression row_aligned = af::sym::Mul(af::sym::Div(element_count, plan.inner_size), plan.inner_size);
+  return af::SymbolicUtils::StaticCheckEq(row_aligned, element_count) == af::TriBool::kTrue;
+}
+
+Status IndirectLoadRegApiCall::GenerateSimtLocalTargetAlloc(const TPipe &tpipe, std::stringstream &ss) const {
+  if (!has_post_reduce_) {
+    return af::SUCCESS;
+  }
+  const auto local_chain = std::find_if(output_chains_.begin(), output_chains_.end(),
+                                        [](const SimtOutputChain &chain) { return chain.local_target; });
+  GE_ASSERT_TRUE(local_chain != output_chains_.end(), "IndirectLoad SIMT post Reduce local output is missing.");
+  const Tensor *local_target = tpipe.GetTensor(local_chain->target_tensor_id);
+  GE_ASSERT_NOTNULL(local_target, "IndirectLoad SIMT post Reduce local target is missing.");
+  const bool skips_ub_lifecycle =
+      node != nullptr && ascgen_utils::indirect_load::GetTemplateBehavior(node).skips_ub_lifecycle;
+  if (skips_ub_lifecycle || local_target->no_need_realloc) {
+    return af::SUCCESS;
+  }
+  std::string local_target_alloc;
+  GE_ASSERT_SUCCESS(tpipe.TensorAlloc(*local_target, local_target_alloc));
+  ss << local_target_alloc;
+  return af::SUCCESS;
+}
+
 Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis,
                                             const Tensor &input, std::string &result) const {
   GE_ASSERT_TRUE(logical_view_.input.kind != ascgen_utils::indirect_load::IndirectLoadLayoutKind::kUnsupported &&
@@ -1546,17 +1847,47 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
   GE_ASSERT_SUCCESS(Tensor::DtypeName(input.dtype, input_dtype));
   const std::string valid_node_name = ascgen_utils::GenValidName(node_name);
   const std::string context_name = kSimtContextNamePrefix + valid_node_name;
+  // [SIMT index 闭包预计算] 判定与计划：Context 的表字段、Index() 表读形态与调用点
+  // pre-pass 发射共用同一位点，避免形态漂移。
+  ascgen_utils::indirect_load::SimtIndexPrepassPlan prepass_plan;
+  const bool use_prepass = CanUseSimtIndexPrepass(tpipe, prepass_plan);
+  const std::string offset_type = GetSimtOffsetType(simt_policy_);
   std::stringstream ss;
   ss << "// IndirectLoad SIMT" << std::endl;
   ss << "{" << std::endl;
   ss << "  __gm__ " << input_dtype << " *input_ptr = (__gm__ " << input_dtype << " *)" << input << ".GetPhyAddr();"
      << std::endl;
   std::string output_inner_size_expr;
+  std::string idx_table_expr;
+  std::string idx_base_expr;
+  std::string idx_row_stride_expr;
   if (UseRuntimeOutputInnerSize(has_post_reduce_, logical_view_)) {
     output_inner_size_expr = "static_cast<uint64_t>(" + tpipe.tiler.Size(logical_view_.output.sizes.back()) + ")";
   }
-  GE_ASSERT_SUCCESS(GenerateSimtContextInitializer(context_name, simt_gm_tensors_, tpipe, output_inner_size_expr, ss));
-  GE_ASSERT_SUCCESS(GenerateSimtInvocation(tpipe, input_dtype, outer_tb_var, ss));
+  if (use_prepass) {
+    // local target 分配提升到 Context 之前：索引表基址需先于 Context 就位。
+    GE_ASSERT_SUCCESS(GenerateSimtLocalTargetAlloc(tpipe, ss));
+    const auto local_chain = std::find_if(output_chains_.begin(), output_chains_.end(),
+                                          [](const SimtOutputChain &chain) { return chain.local_target; });
+    GE_ASSERT_TRUE(local_chain != output_chains_.end(), "IndirectLoad SIMT post Reduce local output is missing.");
+    const Tensor *local_target = tpipe.GetTensor(local_chain->target_tensor_id);
+    GE_ASSERT_NOTNULL(local_target, "IndirectLoad SIMT post Reduce local target is missing.");
+    const Tensor *value_tensor = tpipe.GetTensor(simt_value_tensor_id_);
+    GE_ASSERT_NOTNULL(value_tensor, "IndirectLoad SIMT value tensor is missing.");
+    af::Expression local_element_count;
+    GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
+    const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
+    const uint32_t dtype_size = static_cast<uint32_t>(af::GetSizeByDataType(value_tensor->dtype));
+    idx_table_expr = "(__ubuf__ int32_t *)" + local_target->name + ".GetPhyAddr()";
+    idx_base_expr = "(static_cast<" + offset_type + ">(block_dim_offset) + static_cast<" + offset_type + ">(" +
+                    outer_tb_var + ")) * " + PromoteSizeExpr(local_tile_size_expr, offset_type);
+    idx_row_stride_expr =
+        PromoteSizeExpr(tpipe.tiler.Size(af::sym::Align(prepass_plan.inner_size, 32U / dtype_size)), offset_type);
+  }
+  GE_ASSERT_SUCCESS(GenerateSimtContextInitializer(context_name, simt_gm_tensors_, tpipe, output_inner_size_expr,
+                                                   idx_table_expr, idx_base_expr, idx_row_stride_expr, ss));
+  GE_ASSERT_SUCCESS(
+      GenerateSimtInvocation(tpipe, input_dtype, outer_tb_var, use_prepass ? &prepass_plan : nullptr, ss));
   ss << "}" << std::endl;
   result = ss.str();
   return af::SUCCESS;

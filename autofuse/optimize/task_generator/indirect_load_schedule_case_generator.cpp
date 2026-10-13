@@ -707,6 +707,16 @@ af::Status IsSimtArPostReduce(const af::AscNodePtr &reduce, bool &is_ar) {
   return af::SUCCESS;
 }
 
+// 形状保持的专用 Norm 节点：归约发生在算子内部、输出沿归约轴仍为满 stride，
+// BuildPostReduceLayout 的 stride 推导识别不出其归约轴（first_reduce 恒等于 rank）。
+// pattern fusion 仅匹配尾轴归约，ValidateTemplate 的专用分流已据此覆写 boundary
+// 为尾轴前一位（outer=保留轴、inner=尾轴 R），各行归约互相独立，与 AR 后置
+// Reduce 的行并行语义一致。当前成员为 Softmax（softmax pattern fusion 的产出）；
+// 后续新增专用 Norm 算子（如独立的 LayerNorm/RmsNorm 节点）在此处扩展。
+bool IsShapePreservingTailAxisNorm(const af::AscNodePtr &reduce) {
+  return reduce != nullptr && af::ops::IsOps<af::ascir_op::Softmax>(reduce);
+}
+
 af::Status ValidateSimdPostReduceLayout(const af::AscNodePtr &indirect_load, const af::AscNodePtr &reduce,
                                         bool &is_legal) {
   is_legal = true;
@@ -1552,7 +1562,7 @@ af::Status NormalizeSimtAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
   // 固定 tile 轴：tile 行数交由调度期 TileTiling 走通用 TileSplit 按 UB 容量求解，使单个
   // tile 覆盖多行，消除逐行 SIMT/向量交替（VF_CALL 启动与 PipeBarrier 次数随行数下降）。
   // 无 post-Reduce 的 SIMT boundary 保持输出 rank，维持固定单行 tile 语义不变。
-  // 对 AR 后置 Reduce，solve_tile_size 允许调度期按 UB 容量求解多行 tile。
+  // 对 AR 后置 Reduce 与形状保持的专用 Norm 节点，solve_tile_size 允许调度期按 UB 容量求解多行 tile。
   // SIMT index evaluator 使用完整 output_index 重建每个 Index Load 的逻辑偏移，
   // 因而 direct index 与 Cast/Add/Where 等复合 index 共用该路径。
   GE_ASSERT_SUCCESS(
@@ -2573,6 +2583,11 @@ af::Status NormalizeTemplateAxes(af::AscGraph &graph, const af::AscNodePtr &indi
     // 后缀误并入同一 Reduce API 窗口。
     bool solve_tile = false;
     GE_ASSERT_SUCCESS(IsSimtArPostReduce(analysis.post_reduce, solve_tile));
+    // 形状保持的专用 Norm 节点走不了 stride 推导，其尾轴内部归约、各行独立的
+    // 语义与 AR 后置 Reduce 一致，同样开启可求解 tile。
+    if (IsShapePreservingTailAxisNorm(analysis.post_reduce)) {
+      solve_tile = true;
+    }
     GE_ASSERT_SUCCESS(NormalizeSimtAxesForTemplate(graph, indirect_load, boundary, solve_tile));
   }
   if (is_softmax_post) return af::SUCCESS;
