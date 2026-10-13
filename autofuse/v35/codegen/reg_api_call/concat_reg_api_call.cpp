@@ -136,7 +136,7 @@ af::Status ConcatRegApiCall::GenerateDefault(const vector<std::reference_wrapper
     ss << ", " << "true";
   }
   ss << ">("
-     << "(" << dtype_name << " *)" << y << ".GetPhyAddr()"
+     << "(__ubuf__ " << dtype_name << " *)" << y << ".GetPhyAddr()"
      << ", " << "concat_src_addrs, " << t_pipe.tmp_buf << "_" << std::to_string(tmp_buf_id) << ", concat_tiling);"
      << std::endl;
   return af::SUCCESS;
@@ -162,7 +162,7 @@ af::Status ConcatRegApiCall::GenerateForGather(const vector<std::reference_wrapp
   NormalizeDtype(dtype_name);
   GenSrcAddrs(inputs, dtype_name, ss);
   ss << "concat::ConcatExtendByGather<" << dtype_name << ", " << inputs.size() << ">("
-     << "(" << dtype_name << " *)" << y << ".GetPhyAddr()"
+     << "(__ubuf__ " << dtype_name << " *)" << y << ".GetPhyAddr()"
      << ", " << "concat_src_addrs, " << t_pipe.tmp_buf << "_" << std::to_string(tmp_buf_id) << ", concat_tiling);"
      << std::endl;
   GELOGD("use ConcatExtendByGather");
@@ -312,10 +312,10 @@ void ConcatRegApiCall::DefineConcatTilingGather(const ConcatTiling &tiling, cons
 
 void ConcatRegApiCall::GenSrcAddrs(const vector<std::reference_wrapper<const Tensor>> &inputs, const string &dtype_name,
                                    std::stringstream &ss) {
-  ss << dtype_name << " *concat_src_addrs[] { ";
+  ss << "__ubuf__ " << dtype_name << " *concat_src_addrs[] { ";
   for (auto &input : inputs) {
     const auto &x = input.get();
-    ss << "(" << dtype_name << " *)" << x << ".GetPhyAddr(), ";
+    ss << "(__ubuf__ " << dtype_name << " *)" << x << ".GetPhyAddr(), ";
   }
   ss << "};" << std::endl;
 }
@@ -350,7 +350,7 @@ Status ConcatRegApiCall::GenerateForOneAxis(const vector<std::reference_wrapper<
 
   GenSrcAddrs(inputs, dtype_name, ss);
   ss << "concat::ConcatOneAxis<" << dtype_name << ", " << inputs.size() << ">("
-     << "(" << dtype_name << " *)" << y << ".GetPhyAddr()"
+     << "(__ubuf__ " << dtype_name << " *)" << y << ".GetPhyAddr()"
      << ", " << "concat_src_addrs, concat_tiling);" << std::endl;
   return af::SUCCESS;
 }

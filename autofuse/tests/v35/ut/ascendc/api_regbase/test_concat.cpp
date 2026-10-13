@@ -31,7 +31,7 @@ class RegbaseApiConcatTest : public testing::Test {
     TPipe tpipe;
     TBuf<TPosition::VECCALC> x_bufs[N];
     LocalTensor<T> input_tensors[N];
-    T *src_addrs[N];
+    __ubuf__ T *src_addrs[N];
     const auto &tiling = param.tiling;
     std::set<uint32_t> distinct_cols;
     for (size_t i = 0; i < N; ++i) {
@@ -39,7 +39,7 @@ class RegbaseApiConcatTest : public testing::Test {
       auto x_size = tiling.num_rows * tiling.num_srcs_cols[i];
       tpipe.InitBuffer(x_bufs[i], sizeof(T) * x_size);
       input_tensors[i] = x_bufs[i].template Get<T>();
-      src_addrs[i] = input_tensors[i].GetPhyAddr();
+      src_addrs[i] = (__ubuf__ T *)input_tensors[i].GetPhyAddr();
       GmToUb(input_tensors[i], param.x[i], x_size);
     }
     TBuf<TPosition::VECCALC> ybuf, tmp;
@@ -50,11 +50,11 @@ class RegbaseApiConcatTest : public testing::Test {
     LocalTensor<uint8_t> l_tmp = tmp.Get<uint8_t>();
 
     auto tmp_buf = tmp.Get<uint8_t>();
-    // concat::ConcatExtend<T, 2>(l_y.GetPhyAddr(), src_addrs, tmp_buf, param.tiling);
+    // concat::ConcatExtend<T, 2>((__ubuf__ T *)l_y.GetPhyAddr(), src_addrs, tmp_buf, param.tiling);
     if (distinct_cols.size() == 1) {
-      concat::ConcatExtendDyn<T, N>(l_y.GetPhyAddr(), src_addrs, tmp_buf, param.tiling);
+      concat::ConcatExtendDyn<T, N>((__ubuf__ T *)l_y.GetPhyAddr(), src_addrs, tmp_buf, param.tiling);
     } else {
-      concat::ConcatExtend<T, N>(l_y.GetPhyAddr(), src_addrs, tmp_buf, param.tiling);
+      concat::ConcatExtend<T, N>((__ubuf__ T *)l_y.GetPhyAddr(), src_addrs, tmp_buf, param.tiling);
     }
     UbToGm(param.y, l_y, y_size);
   }

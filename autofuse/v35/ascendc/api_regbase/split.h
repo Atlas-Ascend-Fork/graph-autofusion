@@ -67,7 +67,7 @@ __aicore__ inline void DataCopyGatherVf(__ubuf__ T *dst_addr, __ubuf__ T *src_ad
     uint32_t mask1 = num;
     uint32_t mask2 = tail;
 
-    __ubuf__ T *curDstPtr = (__ubuf__ T *)((uint64_t)dst_addr + (uint64_t)(num * sizeof(T)));
+    __ubuf__ T *curDstPtr = dst_addr + num;
     __ubuf__ U *dstPtr = (__ubuf__ U *)dst_addr;
 
     __VEC_SCOPE__ {
@@ -127,33 +127,34 @@ __aicore__ inline void DataCopyGatherVf(__ubuf__ T *dst_addr, __ubuf__ T *src_ad
 }
 
 template <typename T, typename U, typename Y, size_t OUTPUT_NUM>
-__aicore__ inline void SplitExtendInner(T *src_addr, T *dst_addrs[OUTPUT_NUM], AscendC::LocalTensor<uint8_t> &tmp_buf,
-                                        const SplitTiling<OUTPUT_NUM> &tiling) {
+__aicore__ inline void SplitExtendInner(__ubuf__ T *src_addr, __ubuf__ T *dst_addrs[OUTPUT_NUM],
+                                        AscendC::LocalTensor<uint8_t> &tmp_buf, const SplitTiling<OUTPUT_NUM> &tiling) {
   const uint32_t kGatherMaxLen = AscendC::VECTOR_REG_WIDTH / sizeof(T);
 
   uint32_t src_col_offset = 0;
   for (size_t i = 0UL; i < OUTPUT_NUM; ++i) {
     if (tiling.num_dsts_cols[i] > kGatherMaxLen) {
       // by copy
-      SplitCopy((__ubuf__ T *)(uint64_t)src_addr + src_col_offset, (__ubuf__ T *)(uint64_t)dst_addrs[i],
-                tiling.num_rows, tiling.num_dsts_cols[i], tiling.num_src_cols);
+      SplitCopy(src_addr + src_col_offset, dst_addrs[i], tiling.num_rows, tiling.num_dsts_cols[i], tiling.num_src_cols);
     } else {
-      DataCopyGatherVf<T, U, Y>((__ubuf__ T *)(uint64_t)dst_addrs[i], (__ubuf__ T *)(uint64_t)src_addr, tiling.num_rows,
-                                tiling.num_src_cols, tiling.num_dsts_cols[i], src_col_offset, tmp_buf);
+      DataCopyGatherVf<T, U, Y>(dst_addrs[i], src_addr, tiling.num_rows, tiling.num_src_cols, tiling.num_dsts_cols[i],
+                                src_col_offset, tmp_buf);
     }
     src_col_offset += tiling.num_dsts_cols[i];
   }
 }
 
 template <typename T, size_t OUTPUT_NUM>
-__aicore__ inline void SplitExtend(T *src_addr, T *out_addrs[OUTPUT_NUM], AscendC::LocalTensor<uint8_t> &tmp_buf,
-                                   const SplitTiling<OUTPUT_NUM> &tiling) {
+__aicore__ inline void SplitExtend(__ubuf__ T *src_addr, __ubuf__ T *out_addrs[OUTPUT_NUM],
+                                   AscendC::LocalTensor<uint8_t> &tmp_buf, const SplitTiling<OUTPUT_NUM> &tiling) {
   if constexpr (sizeof(T) == sizeof(uint32_t)) {
-    SplitExtendInner<uint32_t, uint32_t, int32_t, OUTPUT_NUM>(
-        reinterpret_cast<uint32_t *>(src_addr), reinterpret_cast<uint32_t **>(out_addrs), tmp_buf, tiling);
+    SplitExtendInner<uint32_t, uint32_t, int32_t, OUTPUT_NUM>(reinterpret_cast<__ubuf__ uint32_t *>(src_addr),
+                                                              reinterpret_cast<__ubuf__ uint32_t **>(out_addrs),
+                                                              tmp_buf, tiling);
   } else {
-    SplitExtendInner<uint16_t, uint16_t, int16_t, OUTPUT_NUM>(
-        reinterpret_cast<uint16_t *>(src_addr), reinterpret_cast<uint16_t **>(out_addrs), tmp_buf, tiling);
+    SplitExtendInner<uint16_t, uint16_t, int16_t, OUTPUT_NUM>(reinterpret_cast<__ubuf__ uint16_t *>(src_addr),
+                                                              reinterpret_cast<__ubuf__ uint16_t **>(out_addrs),
+                                                              tmp_buf, tiling);
   }
 }
 }  // namespace split

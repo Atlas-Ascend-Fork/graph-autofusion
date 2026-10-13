@@ -402,9 +402,10 @@ TEST_F(ConcatRegApiCallUTest, Unaligned_B8) {
   EXPECT_EQ(
       result,
       "const concat::ConcatTiling<2> concat_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0),\n  .num_dst_cols = "
-      "(((16 + t->s2_1) * 3))/(1),\n  .num_srcs_cols = {((3 * t->s2_1))/(1), 48, },\n};\nuint8_t *concat_src_addrs[] { "
-      "(uint8_t *)local_0.GetPhyAddr(), (uint8_t *)local_2.GetPhyAddr(), };\nconcat::ConcatExtendDyn<uint8_t, 2, "
-      "true>((uint8_t *)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, concat_tiling);\n");
+      "(((16 + t->s2_1) * 3))/(1),\n  .num_srcs_cols = {((3 * t->s2_1))/(1), 48, },\n};\n__ubuf__ uint8_t "
+      "*concat_src_addrs[] { (__ubuf__ uint8_t *)local_0.GetPhyAddr(), (__ubuf__ uint8_t *)local_2.GetPhyAddr(), "
+      "};\nconcat::ConcatExtendDyn<uint8_t, 2, true>((__ubuf__ uint8_t *)local_3.GetPhyAddr(), concat_src_addrs, "
+      "tmp_buf_0, concat_tiling);\n");
 }
 
 TEST_F(ConcatRegApiCallUTest, Unaligned_B8ToB16) {
@@ -442,9 +443,10 @@ TEST_F(ConcatRegApiCallUTest, Unaligned_B8ToB16) {
   EXPECT_EQ(
       result,
       "const concat::ConcatTiling<2> concat_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0),\n  .num_dst_cols = "
-      "((16 + t->s2_1))/(1),\n  .num_srcs_cols = {(t->s2_1)/(1), 16, },\n};\nuint16_t *concat_src_addrs[] { (uint16_t "
-      "*)local_0.GetPhyAddr(), (uint16_t *)local_2.GetPhyAddr(), };\nconcat::ConcatExtendDyn<uint16_t, 2, "
-      "true>((uint16_t *)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, concat_tiling);\n");
+      "((16 + t->s2_1))/(1),\n  .num_srcs_cols = {(t->s2_1)/(1), 16, },\n};\n__ubuf__ uint16_t *concat_src_addrs[] { "
+      "(__ubuf__ uint16_t *)local_0.GetPhyAddr(), (__ubuf__ uint16_t *)local_2.GetPhyAddr(), "
+      "};\nconcat::ConcatExtendDyn<uint16_t, 2, true>((__ubuf__ uint16_t *)local_3.GetPhyAddr(), concat_src_addrs, "
+      "tmp_buf_0, concat_tiling);\n");
 }
 
 TEST_F(ConcatRegApiCallUTest, Unaligned_B16) {
@@ -482,9 +484,10 @@ TEST_F(ConcatRegApiCallUTest, Unaligned_B16) {
   EXPECT_EQ(
       result,
       "const concat::ConcatTiling<2> concat_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0),\n  .num_dst_cols = "
-      "(((16 + t->s2_1) * 2))/(1),\n  .num_srcs_cols = {((2 * t->s2_1))/(1), 32, },\n};\nhalf *concat_src_addrs[] { "
-      "(half *)local_0.GetPhyAddr(), (half *)local_2.GetPhyAddr(), };\nconcat::ConcatExtendDyn<half, 2, true>((half "
-      "*)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, concat_tiling);\n");
+      "(((16 + t->s2_1) * 2))/(1),\n  .num_srcs_cols = {((2 * t->s2_1))/(1), 32, },\n};\n__ubuf__ half "
+      "*concat_src_addrs[] { (__ubuf__ half *)local_0.GetPhyAddr(), (__ubuf__ half *)local_2.GetPhyAddr(), "
+      "};\nconcat::ConcatExtendDyn<half, 2, true>((__ubuf__ half *)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, "
+      "concat_tiling);\n");
 }
 
 TEST_F(ConcatRegApiCallUTest, Unaligned_B32) {
@@ -522,9 +525,10 @@ TEST_F(ConcatRegApiCallUTest, Unaligned_B32) {
   EXPECT_EQ(
       result,
       "const concat::ConcatTiling<2> concat_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0),\n  .num_dst_cols = "
-      "(((16 + t->s2_1) * 2))/(1),\n  .num_srcs_cols = {((2 * t->s2_1))/(1), 32, },\n};\nint32_t *concat_src_addrs[] { "
-      "(int32_t *)local_0.GetPhyAddr(), (int32_t *)local_2.GetPhyAddr(), };\nconcat::ConcatExtendDyn<int32_t, 2, "
-      "true>((int32_t *)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, concat_tiling);\n");
+      "(((16 + t->s2_1) * 2))/(1),\n  .num_srcs_cols = {((2 * t->s2_1))/(1), 32, },\n};\n__ubuf__ int32_t "
+      "*concat_src_addrs[] { (__ubuf__ int32_t *)local_0.GetPhyAddr(), (__ubuf__ int32_t *)local_2.GetPhyAddr(), "
+      "};\nconcat::ConcatExtendDyn<int32_t, 2, true>((__ubuf__ int32_t *)local_3.GetPhyAddr(), concat_src_addrs, "
+      "tmp_buf_0, concat_tiling);\n");
 }
 
 TEST_F(ConcatRegApiCallUTest, Unalign_B64) {
@@ -562,9 +566,10 @@ TEST_F(ConcatRegApiCallUTest, Unalign_B64) {
   EXPECT_EQ(
       result,
       "const concat::ConcatTiling<2> concat_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0),\n  .num_dst_cols = "
-      "(((16 + t->s2_1) * 4))/(1),\n  .num_srcs_cols = {((4 * t->s2_1))/(1), 64, },\n};\nuint32_t *concat_src_addrs[] "
-      "{ (uint32_t *)local_0.GetPhyAddr(), (uint32_t *)local_2.GetPhyAddr(), };\nconcat::ConcatExtendDyn<uint32_t, 2, "
-      "true>((uint32_t *)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, concat_tiling);\n");
+      "(((16 + t->s2_1) * 4))/(1),\n  .num_srcs_cols = {((4 * t->s2_1))/(1), 64, },\n};\n__ubuf__ uint32_t "
+      "*concat_src_addrs[] { (__ubuf__ uint32_t *)local_0.GetPhyAddr(), (__ubuf__ uint32_t *)local_2.GetPhyAddr(), "
+      "};\nconcat::ConcatExtendDyn<uint32_t, 2, true>((__ubuf__ uint32_t *)local_3.GetPhyAddr(), concat_src_addrs, "
+      "tmp_buf_0, concat_tiling);\n");
 }
 
 TEST_F(ConcatRegApiCallUTest, Unaligned_B32_padded) {
@@ -638,9 +643,10 @@ TEST_F(ConcatRegApiCallUTest, Unaligned_B32_padded_concat_last_dim) {
       "const concat::ConcatTilingPadded<2> concat_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0),\n  "
       ".num_dst_cols = ((16 + t->s2_1))/(1),\n  .num_srcs_cols = {(t->s2_1)/(1), 16, },\n  .src_row_strides = {((8 * "
       "Ceiling((Rational(1 , 8) * t->s2_1))))/(1), 16, },\n  .src_second_last_dim_strides = {((8 * Ceiling((Rational(1 "
-      ", 8) * t->s2_1))))/(1), 0, },\n  .gather_mask_dim_sizes = {t->s2_1, 0, },\n};\nint32_t *concat_src_addrs[] { "
-      "(int32_t *)local_0.GetPhyAddr(), (int32_t *)local_2.GetPhyAddr(), };\nconcat::ConcatExtend<int32_t, 2>((int32_t "
-      "*)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, concat_tiling);\n");
+      ", 8) * t->s2_1))))/(1), 0, },\n  .gather_mask_dim_sizes = {t->s2_1, 0, },\n};\n__ubuf__ int32_t "
+      "*concat_src_addrs[] { (__ubuf__ int32_t *)local_0.GetPhyAddr(), (__ubuf__ int32_t *)local_2.GetPhyAddr(), "
+      "};\nconcat::ConcatExtend<int32_t, 2>((__ubuf__ int32_t *)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, "
+      "concat_tiling);\n");
 }
 
 TEST_F(ConcatRegApiCallUTest, OneAxis) {

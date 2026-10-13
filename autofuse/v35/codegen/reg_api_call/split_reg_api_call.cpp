@@ -234,7 +234,7 @@ af::Status SplitRegApiCall::GenerateDefault(const vector<std::reference_wrapper<
 
   GenDstAddrs(outputs, dtype_name, ss);
   ss << "split::SplitExtend<" << dtype_name << ", " << outputs.size() << ">("
-     << "(" << dtype_name << " *)" << x << ".GetPhyAddr()"
+     << "(__ubuf__ " << dtype_name << " *)" << x << ".GetPhyAddr()"
      << ", " << "split_dst_addrs, " << t_pipe.tmp_buf << "_" << std::to_string(tmp_buf_id) << ", split_tiling);"
      << std::endl;
   return af::SUCCESS;
@@ -265,10 +265,10 @@ void SplitRegApiCall::DefineSplitTiling(SplitRegApiCall::SplitTiling &tiling, co
 
 void SplitRegApiCall::GenDstAddrs(const vector<std::reference_wrapper<const Tensor>> &outputs, const string &dtype_name,
                                   std::stringstream &ss) {
-  ss << dtype_name << " *split_dst_addrs[] { ";
+  ss << "__ubuf__ " << dtype_name << " *split_dst_addrs[] { ";
   for (auto &output : outputs) {
     const auto &x = output.get();
-    ss << "(" << dtype_name << " *)" << x << ".GetPhyAddr(), ";
+    ss << "(__ubuf__ " << dtype_name << " *)" << x << ".GetPhyAddr(), ";
   }
   ss << "};" << std::endl;
 }
