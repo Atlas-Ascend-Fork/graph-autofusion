@@ -32,6 +32,17 @@
 
 namespace model_spec {
 
+enum class ScopeTaskKind { OTHER, KERNEL, BEGIN, END };
+
+struct ScopeTaskRecord {
+  // Borrowed from Runtime; this record does not own or destroy the task.
+  aclmdlRITask task = nullptr;
+  uint32_t streamIndex = 0;
+  uint32_t taskIndex = 0;
+  ScopeTaskKind kind = ScopeTaskKind::OTHER;
+  bool allowSpecialization = false;
+};
+
 class KernelSpecRequest {
  public:
   static void UnloadBinary(aclrtBinHandle binary);
@@ -80,9 +91,19 @@ class AclSpecOptimizer final {
   aclError Optimize(aclmdlRI model, const model_spec::FeatureManager &featureManager) const;
 
  private:
+  // Keep the identity bound to its task so candidate construction never re-queries it.
+  struct TaskIdentity {
+    ScopeTaskRecord record;
+    aclmdlRITaskParams params{};
+    std::string kernelEntry;
+  };
+
+  aclError ReadTaskIdentity(TaskIdentity &identity) const;
+  aclError SetTaskAdmission(std::vector<TaskIdentity> &identities, bool isScopeJit) const;
   aclError Collect(aclmdlRI model, const model_spec::FeatureManager &featureManager, std::string_view outputDirectory,
-                   std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
-  bool TryBuildRequest(aclmdlRITask task, uint32_t streamIndex, uint32_t taskIndex,
+                   std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
+                   std::vector<aclmdlRITask> &scopeMarkers) const;
+  bool TryBuildRequest(const aclmdlRITaskParams &originalParams, std::string_view kernelEntry,
                        const model_spec::FeatureManager &featureManager, std::string_view outputDirectory,
                        KernelSpecRequest &request) const;
   void SpecializeKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
