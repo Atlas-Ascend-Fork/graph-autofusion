@@ -74,7 +74,17 @@ struct aclmdlRISpecOptions {
  * decides what to do with it.
  */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecOptimize(aclmdlRI modelRI, aclmdlRISpecOptions *options);
+/**
+ * @brief Dispatch a Begin marker into an actively captured non-null stream.
+ * One standalone marker is dispatched per call. The caller owns capture and Scope pairing.
+ * @retval ACL_ERROR_RT_STREAM_NOT_CAPTURED The stream is not captured.
+ * @retval ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED Capture has been invalidated.
+ * Capture query errors are returned unchanged. ACL_SUCCESS after the generated void launcher
+ * indicates dispatch was attempted; synchronous launch errors are printed by ASC generated code,
+ * and it does not confirm device execution. No thread LastError state is read or cleared.
+ */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeBegin(aclrtStream stream);
+/** @brief Dispatch an End marker with the same capture and error contract as ScopeBegin. */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeEnd(aclrtStream stream);
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecOptimizeByFlag(aclmdlRI modelRI, aclmdlRISpecOptions *options);
 

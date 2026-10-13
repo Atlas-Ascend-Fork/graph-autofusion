@@ -27,7 +27,18 @@ static const int ACL_ERROR_BAD_ALLOC = 200000;
 static const int ACL_ERROR_INTERNAL_ERROR = 500000;
 static const int ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY = 107039;
 
+static const int ACL_ERROR_FEATURE_UNSUPPORTED = 200006;
+static const int ACL_ERROR_RT_STREAM_NOT_CAPTURED = 107029;
+static const int ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED = 507903;
+
 extern "C" {
+typedef enum aclmdlRICaptureStatus {
+  ACL_MODEL_RI_CAPTURE_STATUS_NONE = 0,
+  ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE,
+  ACL_MODEL_RI_CAPTURE_STATUS_INVALIDATED,
+} aclmdlRICaptureStatus;
+aclError aclmdlRICaptureGetInfo(aclrtStream stream, aclmdlRICaptureStatus *status, aclmdlRI *modelRI);
+
 
 typedef struct aclrtcKernelSpecRequest {
   const char *resourceId;

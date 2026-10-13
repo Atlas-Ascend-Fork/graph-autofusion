@@ -21,6 +21,7 @@
 #include "acl_spec_optimizer.h"
 #include "feature_manager.h"
 #include "sk_log.h"
+#include "spec_scope_launch.h"
 
 using model_spec::AclSpecOptimizer;
 using model_spec::FeatureManager;
@@ -54,4 +55,37 @@ aclError aclmdlRISpecOptimize(aclmdlRI modelRI, aclmdlRISpecOptions *options) {
     SK_DLOGE("aclmdlRISpecOptimize unknown exception: model=%p", modelRI);
     return ACL_ERROR_FAILURE;
   }
+}
+
+namespace {
+aclError SpecScopeEntry(aclrtStream stream, model_spec::SpecScopeMarkerKind kind) {
+  const char *apiName =
+      kind == model_spec::SpecScopeMarkerKind::Begin ? "aclmdlRISpecScopeBegin" : "aclmdlRISpecScopeEnd";
+  try {
+    return model_spec::LaunchSpecScopeMarker(stream, kind);
+  } catch (const std::bad_alloc &) {
+    SK_DLOGE("%s allocation exception: stream=%p", apiName, stream);
+    return ACL_ERROR_BAD_ALLOC;
+  } catch (const std::length_error &) {
+    SK_DLOGE("%s length exception: stream=%p", apiName, stream);
+    return ACL_ERROR_BAD_ALLOC;
+  } catch (const std::invalid_argument &) {
+    SK_DLOGE("%s invalid argument exception: stream=%p", apiName, stream);
+    return ACL_ERROR_INVALID_PARAM;
+  } catch (const std::exception &error) {
+    SK_DLOGE("%s exception: stream=%p reason=%s", apiName, stream, error.what());
+    return ACL_ERROR_FAILURE;
+  } catch (...) {
+    SK_DLOGE("%s unknown exception: stream=%p", apiName, stream);
+    return ACL_ERROR_FAILURE;
+  }
+}
+}  // namespace
+
+aclError aclmdlRISpecScopeBegin(aclrtStream stream) {
+  return SpecScopeEntry(stream, model_spec::SpecScopeMarkerKind::Begin);
+}
+
+aclError aclmdlRISpecScopeEnd(aclrtStream stream) {
+  return SpecScopeEntry(stream, model_spec::SpecScopeMarkerKind::End);
 }
