@@ -171,6 +171,12 @@ bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
   SK_LOGI("front-wait process state updated: streamId=%u, remainFrontWaitAfterDec=%u", scopeStreamInfo.streamIdx,
           needFrontWaitCount);
 
+  const uint64_t syntheticNodeId = graph.AllocateSyntheticNodeId();
+  if (syntheticNodeId == INVALID_TASK_ID) {
+    extInfo.processStatus = ScopeProcessStatus::UNRECOVERABLE_FAIL;
+    return false;
+  }
+
   // apply value memory addr
   void *addr = nullptr;
   aclError allocRet = SkResourceManager::ValueMemory(&addr);
@@ -183,6 +189,7 @@ bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
   auto resetNode =
       SuperKernelNodeFactory::CreateNode(std::make_unique<aclmdlRITask>(nullptr), ACL_MODEL_RI_TASK_EVENT_RESET,
                                          INVALID_TASK_ID, scopeStreamInfo.streamIdx, INVALID_STREAM_ID, lastNodeId);
+  resetNode->SetNodeId(syntheticNodeId);
   resetNode->SetNodeType(SkNodeType::NODE_RESET);
   resetNode->nodeInfos.syncInfos.eventId = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(addr));
   resetNode->nodeInfos.syncInfos.addrValue = addr;
@@ -220,10 +227,17 @@ bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
   return true;
 }
 
-bool ProcessBackBlockForStream(ScopeExtInfo &extInfo, const std::vector<ScopeStreamInfo> &scopeStreamInfos,
+bool ProcessBackBlockForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
+                               const std::vector<ScopeStreamInfo> &scopeStreamInfos,
                                std::vector<StreamPostPlan> &plans, uint32_t curStreamIdx, uint64_t lastNodeId) {
   auto &scopeStreamInfo = scopeStreamInfos[curStreamIdx];
   SK_LOGI("back-block process begin: streamId=%u", scopeStreamInfo.streamIdx);
+
+  const uint64_t syntheticNodeId = graph.AllocateSyntheticNodeId();
+  if (syntheticNodeId == INVALID_TASK_ID) {
+    extInfo.processStatus = ScopeProcessStatus::UNRECOVERABLE_FAIL;
+    return false;
+  }
 
   // apply value memory addr
   void *addr = nullptr;
@@ -237,6 +251,7 @@ bool ProcessBackBlockForStream(ScopeExtInfo &extInfo, const std::vector<ScopeStr
   auto notifyNode =
       SuperKernelNodeFactory::CreateNode(std::make_unique<aclmdlRITask>(nullptr), ACL_MODEL_RI_TASK_EVENT_RECORD,
                                          INVALID_TASK_ID, scopeStreamInfo.streamIdx, INVALID_STREAM_ID, lastNodeId);
+  notifyNode->SetNodeId(syntheticNodeId);
   notifyNode->SetNodeType(SkNodeType::NODE_NOTIFY);
   notifyNode->nodeInfos.syncInfos.eventId = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(addr));
   notifyNode->nodeInfos.syncInfos.addrValue = addr;
@@ -600,16 +615,20 @@ bool SuperKernelScopePostProcessor::ProcessSubStreamSyncEvents(
       SK_LOGE("process front-wait failed streamId=%u, nodeSize=%lu, FrontWait=%u",
               scopeStreamInfos[curStreamIdx].streamIdx, scopeStreamInfos[curStreamIdx].nodeSize,
               plans[curStreamIdx].needFrontWait);
-      tempExtInfo.processStatus = ScopeProcessStatus::RESOURCE_INSUFFICIENT;
+      if (tempExtInfo.processStatus != ScopeProcessStatus::UNRECOVERABLE_FAIL) {
+        tempExtInfo.processStatus = ScopeProcessStatus::RESOURCE_INSUFFICIENT;
+      }
       return false;
     }
 
     if (plans[curStreamIdx].needBackBlock &&
-        !ProcessBackBlockForStream(tempExtInfo, scopeStreamInfos, plans, curStreamIdx, lastNodeId)) {
+        !ProcessBackBlockForStream(graph, tempExtInfo, scopeStreamInfos, plans, curStreamIdx, lastNodeId)) {
       SK_LOGE("process back-block failed streamId=%u, nodeSize=%lu, BackBlock=%u",
               scopeStreamInfos[curStreamIdx].streamIdx, scopeStreamInfos[curStreamIdx].nodeSize,
               plans[curStreamIdx].needBackBlock);
-      tempExtInfo.processStatus = ScopeProcessStatus::RESOURCE_INSUFFICIENT;
+      if (tempExtInfo.processStatus != ScopeProcessStatus::UNRECOVERABLE_FAIL) {
+        tempExtInfo.processStatus = ScopeProcessStatus::RESOURCE_INSUFFICIENT;
+      }
       return false;
     }
   }

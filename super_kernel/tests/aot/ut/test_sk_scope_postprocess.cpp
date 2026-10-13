@@ -369,6 +369,8 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_FrontWait_Success) {
   EXPECT_FALSE(scopeInfo.extInfo_.filteredNodes.empty());
   EXPECT_FALSE(scopeInfo.scopeStreamInfos_.empty());
   EXPECT_NE(scopeInfo.extInfo_.skMainNodeId, INVALID_TASK_ID);
+  ASSERT_EQ(scopeInfo.extInfo_.eventNodes.size(), 1);
+  EXPECT_NE(scopeInfo.extInfo_.eventNodes.front()->GetNodeId(), INVALID_TASK_ID);
 }
 
 TEST_F(SuperKernelScopePostprocessTest, PostProcess_BackBlock_Success) {

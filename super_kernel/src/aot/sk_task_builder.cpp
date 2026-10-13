@@ -2275,8 +2275,7 @@ SkHostEntryInfo SkTaskBuilder::GenEntryInfo(SkTask &skTaskCube, SkTask &skTaskVe
 
 // generate the final launch info for super kernel execution
 SkBuildResult SkTaskBuilder::Build(std::string skFuncName, const std::vector<SuperKernelBaseNode *> &tasks,
-                                   const std::vector<SuperKernelBaseNode *> &customTasks, uint16_t scopeId,
-                                   const ScopeCoreInfo &scopeCoreInfo) {
+                                   uint16_t scopeId, const ScopeCoreInfo &scopeCoreInfo) {
   // Post-process should already guarantee non-empty tasks.
   if (tasks.empty()) {
     SK_LOGE("Build failed: no task to build for super kernel");
@@ -2363,12 +2362,6 @@ SkBuildResult SkTaskBuilder::Build(std::string skFuncName, const std::vector<Sup
       SK_LOGE("Build failed: apply early-start sync pass failed");
       return {};
     }
-  }
-
-  // ========== Phase 3: attach sync metadata for custom tasks ==========
-  if (!customTasks.empty()) {
-    SK_LOGI("add sync info for custom tasks, customTaskCount=%zu", customTasks.size());
-    taskSyncInfos_.back().crossSyncInfo[static_cast<size_t>(SkQueueType::AIC)] = SyncDirection::ALL_SYNC;
   }
 
   // In debug mode, force all tasks into ALL_SYNC for traceability.
@@ -2504,62 +2497,6 @@ SkBuildResult SkTaskBuilder::Build(std::string skFuncName, const std::vector<Sup
   }
   SK_LOGI("Finish build tasks for super kernel: aicTaskCnt=%u, aivTaskCnt=%u", aicTask.GetTaskQue()->taskCnt,
           aivTask.GetTaskQue()->taskCnt);
-
-  if (!customTasks.empty()) {
-    SK_LOGI("start process custom tasks");
-    SK_LOGI("direct add custom tasks");
-    constexpr size_t kInvalidCustomTaskIndex = static_cast<size_t>(std::numeric_limits<uint32_t>::max());
-    std::unordered_map<uint64_t, const SuperKernelBaseNode *> kernelNodeCache;
-    SkQueueType firstKernelEventQueueType = InferFirstKernelEventQueueType(tasks, aicAvailable_, aivAvailable_);
-    for (size_t i = 0; i < customTasks.size(); i++) {
-      auto *node = customTasks[i];
-      // Synthesized event nodes do not belong to a physical graph stream.
-      // Keep the existing low-impact convention: reuse the scope-tail anchor
-      // stored in preNodeId and infer queue type from nearest previous kernel.
-      SkQueueType queueType;
-      auto *kernel = FindKernelNodeInDirection(node->GetPreNodeId(), graph_, SearchDirection::PREV, kernelNodeCache);
-      if (kernel == nullptr) {
-        if (firstKernelEventQueueType == SkQueueType::UNKNOWN) {
-          SK_LOGE(
-              "Build failed: custom task %zu failed to resolve previous KERNEL node and fallback queue type is "
-              "UNKNOWN, nodeId=%lu",
-              i, node->GetNodeId());
-          return {};
-        }
-        queueType = firstKernelEventQueueType;
-        SK_LOGI("custom task %zu: unable to resolve previous KERNEL node, nodeId=%lu, fallback = %s", i,
-                node->GetNodeId(), to_string(queueType));
-      } else {
-        queueType = ToEventQueueType(ToQueueType(GetKernelInfos(kernel).kernelType), aicAvailable_, aivAvailable_);
-      }
-
-      // Custom tasks are event nodes (notify/wait/reset), use EventTask dispatch.
-      if (node->GetNodeType() == SkNodeType::NODE_NOTIFY) {
-        if (!DispatchEventTask(aicTask, aivTask, node, kInvalidCustomTaskIndex, SkTaskType::TYPE_EVENT_NOTIFY,
-                               queueType)) {
-          SK_LOGE("Build failed: custom task %zu notify dispatch failed, nodeId=%lu", i, node->GetNodeId());
-          return {};
-        }
-      } else if (node->GetNodeType() == SkNodeType::NODE_WAIT) {
-        if (!DispatchEventTask(aicTask, aivTask, node, kInvalidCustomTaskIndex, SkTaskType::TYPE_EVENT_WAIT,
-                               queueType)) {
-          SK_LOGE("Build failed: custom task %zu wait dispatch failed, nodeId=%lu", i, node->GetNodeId());
-          return {};
-        }
-      } else if (node->GetNodeType() == SkNodeType::NODE_RESET) {
-        if (!DispatchEventTask(aicTask, aivTask, node, kInvalidCustomTaskIndex, SkTaskType::TYPE_EVENT_RESET,
-                               queueType)) {
-          SK_LOGE("Build failed: custom task %zu reset dispatch failed, nodeId=%lu", i, node->GetNodeId());
-          return {};
-        }
-      } else {
-        SK_LOGE("Build failed: custom task %zu has unsupported node type %s, nodeId=%lu", i,
-                to_string(node->GetNodeType()), node->GetNodeId());
-        return {};
-      }
-    }
-    SK_LOGI("finish process custom tasks");
-  }
 
   bool useSimtEntry = false;
   size_t skMaxDcacheSize = 0;
