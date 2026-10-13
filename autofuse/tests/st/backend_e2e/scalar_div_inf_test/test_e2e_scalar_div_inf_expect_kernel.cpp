@@ -14,7 +14,7 @@
 #include "autofuse_tiling_data.h"
 extern "C" __global__ __aicore__ void scalar_div_inf_test(GM_ADDR x1, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling);
 extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1, uint32_t s2, AutofuseTilingData *tiling,
-                                  uint32_t *workspaceSize, uint64_t *blockDim, uint32_t aiv_num, uint32_t ub_size);
+                                  uint64_t *workspaceSize, uint64_t *blockDim, uint32_t aiv_num, uint32_t ub_size);
 
 class E2E_BackendScalarDivInf_Code : public testing::Test, public testing::WithParamInterface<std::vector<int>> {};
 
@@ -43,7 +43,7 @@ TEST_P(E2E_BackendScalarDivInf_Code, CalculateCorrect) {
   }
 
   // Launch
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
   AutofuseTiling(test_shape[0], test_shape[1], test_shape[2], &tiling_data, &ws_size, &block_dim, 48, 192 * 1024);
   printf("tiling key: %d, core_num: %d\n", tiling_data.tiling_key, tiling_data.block_dim);
 

@@ -114,7 +114,7 @@ void RecordBlockDim(const AutofuseTilingData &tiling_data) {
   g_stats.sampled_block_dims.insert(tiling_data.get_block_dim());
 }
 
-long FakeSingleCallback(PgoTensorArgs *, void *, uint32_t, AutofuseTilingData *tiling_data, double *cost_time) {
+long FakeSingleCallback(PgoTensorArgs *, void *, uint64_t, AutofuseTilingData *tiling_data, double *cost_time) {
   if (tiling_data == nullptr || cost_time == nullptr) {
     return -1;
   }
@@ -127,7 +127,7 @@ long FakeSingleCallback(PgoTensorArgs *, void *, uint32_t, AutofuseTilingData *t
   return 0;
 }
 
-long FakeBatchCallback(PgoTensorArgs *, void *, uint32_t, std::vector<AutofuseTilingDataPerf> *profiles) {
+long FakeBatchCallback(PgoTensorArgs *, void *, uint64_t, std::vector<AutofuseTilingDataPerf> *profiles) {
   if (profiles == nullptr) {
     return -1;
   }
@@ -142,11 +142,11 @@ long FakeBatchCallback(PgoTensorArgs *, void *, uint32_t, std::vector<AutofuseTi
   return 0;
 }
 
-long FailingBatchCallback(PgoTensorArgs *, void *, uint32_t, std::vector<AutofuseTilingDataPerf> *) {
+long FailingBatchCallback(PgoTensorArgs *, void *, uint64_t, std::vector<AutofuseTilingDataPerf> *) {
   return -1;
 }
 
-long InvalidatingBatchCallback(PgoTensorArgs *, void *, uint32_t, std::vector<AutofuseTilingDataPerf> *profiles) {
+long InvalidatingBatchCallback(PgoTensorArgs *, void *, uint64_t, std::vector<AutofuseTilingDataPerf> *profiles) {
   if (profiles == nullptr) {
     return -1;
   }
@@ -276,12 +276,12 @@ uint64_t HashTiling(const AutofuseTilingData &tiling_data) {
 
 bool WriteResult(const std::string &path, const TopnRunResult &result) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  const uint32_t version = 1U;
+  const uint32_t version = 2U;
   const uint32_t flags = 0U;
   const uint32_t count = static_cast<uint32_t>(result.tiling_datas.size());
   const uint32_t tiling_size = sizeof(AutofuseTilingData);
   const uint32_t record_header_size = 32U;
-  out.write("AUTOFUSE_PGO_TOPN_V1", 20);
+  out.write("AUTOFUSE_PGO_TOPN_V2", 20);
   WriteValue(out, version);
   WriteValue(out, flags);
   WriteValue(out, count);
@@ -291,7 +291,7 @@ bool WriteResult(const std::string &path, const TopnRunResult &result) {
     const uint64_t repr_size = result.reprs[i].size();
     const uint64_t hash = HashTiling(result.tiling_datas[i]);
     WriteValue(out, repr_size);
-    WriteValue(out, result.workspaces[i]);
+    WriteValue(out, static_cast<uint64_t>(result.workspaces[i]));
     WriteValue(out, result.block_dims[i]);
     WriteValue(out, hash);
     WriteValue(out, result.tiling_datas[i]);

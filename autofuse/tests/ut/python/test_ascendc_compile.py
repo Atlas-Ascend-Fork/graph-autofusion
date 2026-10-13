@@ -408,9 +408,9 @@ def test_publish_pgo_bundle_binds_hashes_and_replaces_tiling_last(
     assert replace_events[-2][1] == paths["generation_dir"]
     assert open(paths["tiling_so"], "rb").read() == b"tiling"
     manifest = json.loads(open(paths["manifest"]).read())
-    assert manifest["bundle_schema_version"] == 1
+    assert manifest["bundle_schema_version"] == 2
     assert manifest["generation"] == "generation1"
-    assert manifest["result_protocol_version"] == 1
+    assert manifest["result_protocol_version"] == 2
     assert (
         not {
             "protocol",

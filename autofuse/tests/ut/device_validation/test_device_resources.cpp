@@ -128,11 +128,13 @@ class FakeLoader final : public ModuleLoader {
   static size_t GetSize() {
     return 24;
   }
-  static ge::graphStatus Tiling(void *data, uint32_t *workspace, uint32_t *block, void *extra) {
+  static ge::graphStatus Tiling(void *data, uint64_t *workspace, uint32_t *block, void *extra) {
     tiling_data = data;
     tiling_workspace = workspace;
     tiling_block = block;
     tiling_extra = extra;
+    *workspace = 0x120000000;
+    *block = 8;
     return tiling_status;
   }
   static uint32_t Launch(uint32_t block, void *stream, void **inputs, int32_t input_count, void **outputs,
@@ -157,7 +159,7 @@ class FakeLoader final : public ModuleLoader {
   int unload_calls = 0;
   inline static ge::graphStatus tiling_status = ge::GRAPH_SUCCESS;
   inline static void *tiling_data = nullptr;
-  inline static uint32_t *tiling_workspace = nullptr;
+  inline static uint64_t *tiling_workspace = nullptr;
   inline static uint32_t *tiling_block = nullptr;
   inline static void *tiling_extra = nullptr;
   inline static uint32_t launch_status = 0;
@@ -501,7 +503,7 @@ void ExpectTilingSetupAndLaunchCapture() {
   size_t size = 0;
   EXPECT_EQ(module.GetTilingDataSize(&size), Status::kOk);
   EXPECT_EQ(size, 24U);
-  uint32_t workspace = 0;
+  uint64_t workspace = 0;
   uint32_t block = 0;
   int tiling_data = 0;
   void *extra = reinterpret_cast<void *>(0x5);
@@ -510,6 +512,8 @@ void ExpectTilingSetupAndLaunchCapture() {
   EXPECT_EQ(FakeLoader::tiling_workspace, &workspace);
   EXPECT_EQ(FakeLoader::tiling_block, &block);
   EXPECT_EQ(FakeLoader::tiling_extra, extra);
+  EXPECT_EQ(workspace, 0x120000000U);
+  EXPECT_EQ(block, 8U);
   void *inputs[] = {reinterpret_cast<void *>(0x6)};
   void *outputs[] = {reinterpret_cast<void *>(0x7)};
   FakeRuntime runtime_api;
@@ -532,7 +536,7 @@ struct KernelGuardTestContext {
   FakeRuntime runtime_api;
   AclRuntime runtime{&runtime_api};
   AclRuntime uninitialized{&runtime_api};
-  uint32_t workspace = 0;
+  uint64_t workspace = 0;
   uint32_t block = 0;
   int tiling_data = 0;
   void *extra = reinterpret_cast<void *>(0x5);

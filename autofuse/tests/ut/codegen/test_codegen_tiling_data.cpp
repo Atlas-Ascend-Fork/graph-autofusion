@@ -14,6 +14,7 @@
 #include "ascir_ops_utils.h"
 #include "codegen_kernel.h"
 #include "codegen_tiling_data.h"
+#include "tests/common/codegen_workspace_test_utils.h"
 
 class TestCodegenTilingData : public testing::Test, public codegen::TilingData {
  protected:
@@ -92,6 +93,23 @@ struct AutofuseTilingDataPerf {
 #endif
 )rawliteral";
   EXPECT_EQ(this->Generate(fused_schedule_result), test_res);
+}
+
+TEST_F(TestCodegenTilingData, GenerateWorkspaceFieldsShouldUseUint64) {
+  auto fused_schedule_result = autofuse::tests::MakeWorkspaceFusedScheduleResult(2UL);
+  const auto result = this->Generate(fused_schedule_result);
+
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(uint64_t, workspace1);"), std::string::npos);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(uint64_t, workspace2);"), std::string::npos);
+  EXPECT_EQ(result.find("TILING_DATA_FIELD_DEF_T(uint32_t, workspace"), std::string::npos);
+}
+
+TEST_F(TestCodegenTilingData, GenerateConstWorkspaceSizeShouldUseUint64) {
+  auto fused_schedule_result = autofuse::tests::MakeWorkspaceFusedScheduleResult(2UL);
+  const auto result = this->GenerateConst(fused_schedule_result);
+
+  EXPECT_NE(result.find("uint64_t workspace_size;"), std::string::npos);
+  EXPECT_EQ(result.find("uint32_t workspace_size;"), std::string::npos);
 }
 
 TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingDataWithTranspose) {
@@ -209,7 +227,7 @@ std::string GenTilingDataFieldConstValueFunc(uint32_t value) {
 
 
 extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub_size) {
-  uint32_t workspace_size;
+  uint64_t workspace_size;
   uint32_t block_dim;
   ResLimit limit;
   limit.aiv_num = aiv_num;
@@ -372,7 +390,7 @@ std::string GenTilingDataFieldConstValueFunc(uint32_t value) {
 
 
 extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub_size) {
-  uint32_t workspace_size;
+  uint64_t workspace_size;
   uint32_t block_dim;
   ResLimit limit;
   limit.aiv_num = aiv_num;

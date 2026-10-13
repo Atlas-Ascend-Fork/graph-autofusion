@@ -22,7 +22,7 @@ from jit_adapter import (
 )
 
 SIX_ARG_TILING = """
-extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1, AutofuseTilingData* tiling, uint32_t* workspaceSize, uint32_t *blockDim, ResLimit *res_limit)
+extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1, AutofuseTilingData* tiling, uint64_t* workspaceSize, uint32_t *blockDim, ResLimit *res_limit)
 {
  return 0;
 }
@@ -32,7 +32,7 @@ struct ResLimit {
 """
 
 FOUR_ARG_TILING = """
-extern "C" int64_t AutofuseTiling(AutofuseTilingData* tiling, uint32_t* workspaceSize, uint32_t *blockDim, ResLimit *res_limit)
+extern "C" int64_t AutofuseTiling(AutofuseTilingData* tiling, uint64_t* workspaceSize, uint32_t *blockDim, ResLimit *res_limit)
 {
  return 0;
 }

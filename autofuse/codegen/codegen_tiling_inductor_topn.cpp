@@ -564,9 +564,14 @@ void TilingLib::GenTopnMeasuredCoreSearch(std::stringstream &ss, const std::stri
 
 void TilingLib::GenTopnMeasuredBatchProfiling(std::stringstream &ss) const {
   ss << "  std::vector<AutofuseTilingDataPerf> raw_candidates;" << std::endl;
-  ss << "  uint32_t workspace_size = 0U;" << std::endl;
+  ss << "  uint64_t workspace_size = 0U;" << std::endl;
   ss << "  for (const auto &tiling_data : measured_tiling_datas) {" << std::endl;
-  ss << "    workspace_size = std::max(workspace_size, GetWorkspaceSize(tiling_data));" << std::endl;
+  ss << "    uint64_t candidate_workspace_size = 0U;" << std::endl;
+  ss << "    if (!GetWorkspaceSize(tiling_data, candidate_workspace_size)) {" << std::endl;
+  ss << "      response.error_message = \"GetWorkspaceSize failed for measured topn candidate\";" << std::endl;
+  ss << "      return -1;" << std::endl;
+  ss << "    }" << std::endl;
+  ss << "    workspace_size = std::max(workspace_size, candidate_workspace_size);" << std::endl;
   ss << "    raw_candidates.push_back({tiling_data, DBL_MAX});" << std::endl;
   ss << "  }" << std::endl;
   ss << "  if (raw_candidates.empty()) {" << std::endl;
@@ -590,7 +595,11 @@ void TilingLib::GenTopnAppendMeasuredDefault(std::stringstream &ss) const {
   ss << "      return -1;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    double default_perf = DBL_MAX;" << std::endl;
-  ss << "    const uint32_t default_workspace = GetWorkspaceSize(default_tiling);" << std::endl;
+  ss << "    uint64_t default_workspace = 0U;" << std::endl;
+  ss << "    if (!GetWorkspaceSize(default_tiling, default_workspace)) {" << std::endl;
+  ss << "      response.error_message = \"GetWorkspaceSize failed for default topn candidate\";" << std::endl;
+  ss << "      return -1;" << std::endl;
+  ss << "    }" << std::endl;
   ss << "    const auto callback_ret = PgoConfig::Instance().single_callback(PgoConfig::Instance().tensor_args, "
         "PgoConfig::Instance().stream, default_workspace, &default_tiling, &default_perf);"
      << std::endl;
@@ -713,21 +722,33 @@ void TilingLib::GenGenerateTopnSolutionsEntry(std::stringstream &ss,
   ss << "  }" << std::endl;
   ss << "  OP_LOGI(OP_NAME, \"SelectTopn: %zu solutions after dedup+sort+truncate (topn=%ld)\", "
      << "response.candidate_solutions.size(), static_cast<long>(topn));" << std::endl;
+  ss << "  std::vector<" << tiling << "> export_tilings;" << std::endl;
+  ss << "  std::vector<int64_t> export_workspaces;" << std::endl;
+  ss << "  std::vector<int64_t> export_block_dims;" << std::endl;
   ss << "  for (const auto &sol : response.candidate_solutions) {" << std::endl;
-  ss << "    tiling_datas.push_back(sol.tiling_data);" << std::endl;
-  ss << "    workspaces.push_back(static_cast<int64_t>(GetWorkspaceSize(sol.tiling_data)));" << std::endl;
-  ss << "    block_dims.push_back(static_cast<int64_t>(sol.tiling_data.get_block_dim()));" << std::endl;
+  ss << "    uint64_t workspace_size = 0U;" << std::endl;
+  ss << "    if (!GetWorkspaceSize(sol.tiling_data, workspace_size) ||" << std::endl;
+  ss << "        workspace_size > static_cast<uint64_t>(INT64_MAX)) {" << std::endl;
+  ss << "      OP_LOGE(OP_NAME, \"GenerateTopnSolutions failed: workspace size exceeds INT64_MAX.\");" << std::endl;
+  ss << "      return -1;" << std::endl;
+  ss << "    }" << std::endl;
+  ss << "    export_tilings.push_back(sol.tiling_data);" << std::endl;
+  ss << "    export_workspaces.push_back(static_cast<int64_t>(workspace_size));" << std::endl;
+  ss << "    export_block_dims.push_back(static_cast<int64_t>(sol.tiling_data.get_block_dim()));" << std::endl;
   ss << "    OP_LOGI(OP_NAME, \"output[%zu]: perf=%.6f is_default=%d block_dim=%ld repr_len=%zu\", "
-     << "tiling_datas.size() - 1, sol.modeled_perf, sol.is_default, "
+     << "export_tilings.size() - 1, sol.modeled_perf, sol.is_default, "
      << "static_cast<long>(sol.tiling_data.get_block_dim()), sol.canonical_repr.size());" << std::endl;
   ss << "    const std::string &repr = sol.canonical_repr;" << std::endl;
   ss << "    const size_t chunk = 800;" << std::endl;
   ss << "    for (size_t off = 0; off < repr.size(); off += chunk) {" << std::endl;
   ss << "      OP_LOGI(OP_NAME, \"  output[%zu] repr[%zu..%zu]: %.*s\", "
-     << "tiling_datas.size() - 1, off, std::min(off + chunk, repr.size()), "
+     << "export_tilings.size() - 1, off, std::min(off + chunk, repr.size()), "
      << "static_cast<int>(std::min(chunk, repr.size() - off)), repr.c_str() + off);" << std::endl;
   ss << "    }" << std::endl;
   ss << "  }" << std::endl;
+  ss << "  tiling_datas.swap(export_tilings);" << std::endl;
+  ss << "  workspaces.swap(export_workspaces);" << std::endl;
+  ss << "  block_dims.swap(export_block_dims);" << std::endl;
   ss << "  return 0;" << std::endl;
   ss << "}" << std::endl;
 }

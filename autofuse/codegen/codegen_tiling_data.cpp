@@ -99,7 +99,7 @@ std::string codegen::TilingData::GetCommonTilingField(bool is_group,
     // 非const模式
     ss << common_tiling_filed << std::endl;
     for (auto tId : workspace_tensor_id) {
-      ss << "  TILING_DATA_FIELD_DEF_T(uint32_t, workspace" << std::to_string(tId) << ");" << std::endl;
+      ss << "  TILING_DATA_FIELD_DEF_T(uint64_t, workspace" << std::to_string(tId) << ");" << std::endl;
     }
     if (is_group || ((fused_schedule_result.node_idx_to_scheduled_results.size() == 1) &&
                      (fused_schedule_result.node_idx_to_scheduled_results[0].size() == 1) &&
@@ -255,7 +255,7 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
        << "    uint8_t ub_mode; // 0:no db; 1:db\n"
        << "    uint8_t cv_aic_num;\n"
        << "    uint8_t cv_aiv_num;\n"
-       << "    uint32_t cv_vec_wss;\n"
+       << "    uint64_t cv_vec_wss;\n"
        << "    uint8_t mix_mode;\n"
        << "};\n"
        << "#define CV_TILING_ALIGN_UP(value, align) ((((value) + (align) - 1) / (align)) * (align))\n"
@@ -754,7 +754,7 @@ std::string codegen::TilingData::GenerateConst(const ascir::FusedScheduledResult
 
   const_gen_ss << "extern \"C\" const char* GenConstTilingData(char* config_file, int aiv_num, int ub_size) {"
                << std::endl;
-  const_gen_ss << "  uint32_t workspace_size;" << std::endl;
+  const_gen_ss << "  uint64_t workspace_size;" << std::endl;
   const_gen_ss << "  uint32_t block_dim;" << std::endl;
   const_gen_ss << "  ResLimit limit;" << std::endl;
   const_gen_ss << "  limit.aiv_num = aiv_num;" << std::endl;

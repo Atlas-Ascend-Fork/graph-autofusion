@@ -109,9 +109,9 @@ extern "C" size_t GetTilingDataSize()
   return sizeof(AutofuseTilingData);
 }
 
-uint32_t GetWorkspaceSize(const AutofuseTilingData &t) {
+uint64_t GetWorkspaceSize(const AutofuseTilingData &t) {
   using namespace optiling;
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
 
   ws_size = (ws_size + 512 - 1) / 512 * 512;
   return ws_size;
@@ -125,7 +125,7 @@ struct ResLimit {
   uint32_t resv[10];
 };
 constexpr ResLimit g_no_limit_res = {1, 2201, 0, 2201, {}};
-extern "C" int64_t AutofuseTiling(AutofuseTilingData* tiling, uint32_t* workspaceSize, uint32_t *blockDim, uint32_t aiv_num, uint32_t ub_size)
+extern "C" int64_t AutofuseTiling(AutofuseTilingData* tiling, uint64_t* workspaceSize, uint32_t *blockDim, uint32_t aiv_num, uint32_t ub_size)
 {
   tiling->set_block_dim(aiv_num);
   tiling->set_ub_size(ub_size - 256);
@@ -138,7 +138,7 @@ extern "C" int64_t AutofuseTiling(AutofuseTilingData* tiling, uint32_t* workspac
 
   return 0;
 }
-extern "C" int64_t AutofuseTilingWithConfig(const char *config_file, AutofuseTilingData *tiling, uint32_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, int32_t tiling_case_id = -1)
+extern "C" int64_t AutofuseTilingWithConfig(const char *config_file, AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, int32_t tiling_case_id = -1)
 {
  const ResLimit *limit = (res_limit == nullptr) ? &g_no_limit_res : res_limit;
   tiling->set_block_dim(limit->aiv_num);
@@ -229,7 +229,7 @@ extern "C" ge::graphStatus TilingFunc(gert::TilingSymbolEvalContext *context)
   auto extend_context = reinterpret_cast<const gert::KernelContext *>(context);
   auto input_data_num =  extend_context->GetInputValue<size_t>(0U);
   auto parse = extend_context->GetInputValue<AfTilingParseData*>(input_data_num + 1);
-  uint32_t workspace_size;
+  uint64_t workspace_size;
   uint32_t block_dim;
   static const char* config_file = nullptr;
   auto tiling_data =  context->GetTilingData<AutofuseTilingData>();
@@ -303,7 +303,7 @@ std::string GenTilingDataFieldConstValueFunc(uint32_t value) {
 
 
 extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub_size) {
-  uint32_t workspace_size;
+  uint64_t workspace_size;
   uint32_t block_dim;
   ResLimit limit;
   limit.aiv_num = aiv_num;
@@ -664,7 +664,7 @@ typedef uint64_t (*GetTilingKeyCountType)(void);
 GetTilingKeyCountType get_tiling_key_count_fn = reinterpret_cast<GetTilingKeyCountType>(GetFunc("GetTilingKeyCount"));
 typedef int64_t (*FindBestTilingKeyType)(AutofuseTilingData &t);
 FindBestTilingKeyType find_best_tiling_key_fn = reinterpret_cast<FindBestTilingKeyType>(GetFunc("FindBestTilingKey"));
-int WrapperOnlyLaunch(uint32_t workspace_size, AutofuseTilingData *tiling_data) {
+int WrapperOnlyLaunch(uint64_t workspace_size, AutofuseTilingData *tiling_data) {
   static bool inited = false;
   static aclrtBinHandle bin_handle = nullptr;
   if (get_tiling_key_count_fn == nullptr) {
@@ -829,7 +829,7 @@ void TearDownMspti(msptiSubscriberHandle *subscriber) {
   msptiUnsubscribe(*subscriber);
   msptiActivityFlushAll(1);
 }
-int ProfilingBatchProcess(uint32_t workspace_size, std::vector<AutofuseTilingDataPerf>::iterator begin, std::vector<AutofuseTilingDataPerf>::iterator end) {
+int ProfilingBatchProcess(uint64_t workspace_size, std::vector<AutofuseTilingDataPerf>::iterator begin, std::vector<AutofuseTilingDataPerf>::iterator end) {
   uint64_t batch_size = end - begin;
   g_profiling_map.clear();
   msptiSubscriberHandle subscriber;
@@ -897,7 +897,7 @@ int ProfilingBatchProcess(uint32_t workspace_size, std::vector<AutofuseTilingDat
   return 0;
 }
 
-extern "C" long int PGOGetProfilingBatch(PgoTensorArgs *tensor_args, void* stream, uint32_t workspace_size, std::vector<AutofuseTilingDataPerf> *profiles) {
+extern "C" long int PGOGetProfilingBatch(PgoTensorArgs *tensor_args, void* stream, uint64_t workspace_size, std::vector<AutofuseTilingDataPerf> *profiles) {
   int case_num = profiles->size();
   DLOGI("PGOGetProfilingBatch case_num:%d", case_num);
   if (workspace_size > 0) {
@@ -932,7 +932,7 @@ extern "C" long int PGOGetProfilingBatch(PgoTensorArgs *tensor_args, void* strea
   return 0;
 }
 
-extern "C" long int PGOGetProfiling(PgoTensorArgs *tensor_args, void *stream, uint32_t workspace_size, AutofuseTilingData *tiling_data, double *outCostTime) {
+extern "C" long int PGOGetProfiling(PgoTensorArgs *tensor_args, void *stream, uint64_t workspace_size, AutofuseTilingData *tiling_data, double *outCostTime) {
   if (workspace_size > 0) {
     auto ret = aclrtMalloc(&g_workspace, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
@@ -1014,12 +1014,12 @@ extern "C" long int PGOGetProfiling(PgoTensorArgs *tensor_args, void *stream, ui
   return 0;
 }
 
-typedef int64_t (*PGOSearchType)(char *search_file, char *config_file, AutofuseTilingData *tiling_data, uint32_t *workspace_size, uint32_t *blockDim, void *resource_limit, PgoTensorArgs *tensor_args, void *stream, void *prof_callback, void *prof_batch_callback);
+typedef int64_t (*PGOSearchType)(char *search_file, char *config_file, AutofuseTilingData *tiling_data, uint64_t *workspace_size, uint32_t *blockDim, void *resource_limit, PgoTensorArgs *tensor_args, void *stream, void *prof_callback, void *prof_batch_callback);
 static PGOSearchType pgo_search_fn = reinterpret_cast<PGOSearchType>(GetFunc("PgoTilingSearch"));
 int pgo() {
   AutofuseTilingData tiling_data = {0};
   PgoTensorArgs *tensor_args = &g_pgo_tensor_args;
-  uint32_t workspace_size = 0;
+  uint64_t workspace_size = 0;
   uint32_t block_dim = 0;
   if (pgo_search_fn == nullptr) {
     DLOGE("pgo search func not found");
@@ -1033,7 +1033,7 @@ int pgo() {
   return 0;
 }
 
-typedef int64_t (*AutofuseTilingWithConfigType)(const char *config_file, AutofuseTilingData *tiling, uint32_t *workspace_size, uint32_t *blockDim, ResLimit *res_limit);
+typedef int64_t (*AutofuseTilingWithConfigType)(const char *config_file, AutofuseTilingData *tiling, uint64_t *workspace_size, uint32_t *blockDim, ResLimit *res_limit);
 static AutofuseTilingWithConfigType autofuse_tiling_with_config_fn = reinterpret_cast<AutofuseTilingWithConfigType>(GetFunc("AutofuseTilingWithConfig"));
 int static_pgo(const char* config_file) {
   if (autofuse_tiling_with_config_fn == nullptr) {
@@ -1042,7 +1042,7 @@ int static_pgo(const char* config_file) {
   }
   AutofuseTilingData tiling_data = {0};
   PgoTensorArgs *tensor_args = &g_pgo_tensor_args;
-  uint32_t workspace_size = 0;
+  uint64_t workspace_size = 0;
   uint32_t block_dim = 0;
   int64_t result = autofuse_tiling_with_config_fn(config_file, &tiling_data, &workspace_size, &block_dim, &g_res_limit);
   if (result != 0) {
@@ -1190,8 +1190,8 @@ struct PgoTensorArgs {
   uint32_t output_num = 0;
 };
 #endif
-typedef long int (*ProfilingCallback)(PgoTensorArgs *tensor_args, void *stream, uint32_t workspaceSize, AutofuseTilingData *tiling_data, double *cost_time);
-typedef long int (*ProfilingBatchCallback)(PgoTensorArgs *tensor_args, void *stream, uint32_t workspaceSize, std::vector<AutofuseTilingDataPerf> *profiles);
+typedef long int (*ProfilingCallback)(PgoTensorArgs *tensor_args, void *stream, uint64_t workspaceSize, AutofuseTilingData *tiling_data, double *cost_time);
+typedef long int (*ProfilingBatchCallback)(PgoTensorArgs *tensor_args, void *stream, uint64_t workspaceSize, std::vector<AutofuseTilingDataPerf> *profiles);
 class PgoConfig {
 public:
   static PgoConfig& Instance() {
@@ -1254,7 +1254,7 @@ inline bool IsEqual(double a, double b) {
   return true;
 }
 struct SearchConfig;
-bool PGOSearchTilingKey(std::vector<AutofuseTilingDataPerf>& tiling_data_list, AutofuseTilingData &tiling_data, int32_t tilingCaseId, AutofuseTilingData* output_tiling_data, PgoTensorArgs *tensor_args, void* stream, uint32_t workspaceSize, double& out_best_perf, std::unordered_map<int64_t, uint64_t> &workspace_map, std::vector<uint32_t*> block_dim_vec={}, const SearchConfig *search_cfg=nullptr) {
+bool PGOSearchTilingKey(std::vector<AutofuseTilingDataPerf>& tiling_data_list, AutofuseTilingData &tiling_data, int32_t tilingCaseId, AutofuseTilingData* output_tiling_data, PgoTensorArgs *tensor_args, void* stream, uint64_t workspaceSize, double& out_best_perf, std::unordered_map<int64_t, uint64_t> &workspace_map, std::vector<uint32_t*> block_dim_vec={}, const SearchConfig *search_cfg=nullptr) {
   return true;
 }
 bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingData>& tiling_data_list, AutofuseTilingData* tiling_data, uint32_t max_block_dim=48) {
@@ -1270,9 +1270,9 @@ extern "C" size_t GetTilingDataSize()
   return sizeof(AutofuseTilingData);
 }
 
-uint32_t GetWorkspaceSize(const AutofuseTilingData &t) {
+uint64_t GetWorkspaceSize(const AutofuseTilingData &t) {
   using namespace optiling;
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
 
   ws_size = (ws_size + 512 - 1) / 512 * 512;
   return ws_size;
@@ -1286,7 +1286,7 @@ struct ResLimit {
   uint32_t resv[10];
 };
 constexpr ResLimit g_no_limit_res = {1, 2201, 0, 2201, {}};
-extern "C" int64_t AutofuseTiling(AutofuseTilingData* tiling, uint32_t* workspaceSize, uint32_t *blockDim, uint32_t aiv_num, uint32_t ub_size)
+extern "C" int64_t AutofuseTiling(AutofuseTilingData* tiling, uint64_t* workspaceSize, uint32_t *blockDim, uint32_t aiv_num, uint32_t ub_size)
 {
   tiling->set_block_dim(aiv_num);
   tiling->set_ub_size(ub_size - 256);
@@ -1343,7 +1343,7 @@ bool PGOGetTilingKey(const char *config_file_path, AutofuseTilingData &tiling_da
   return true;
 }
 
-extern "C" int64_t AutofuseTilingWithConfig(const char *config_file, AutofuseTilingData *tiling, uint32_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, int32_t tiling_case_id = -1)
+extern "C" int64_t AutofuseTilingWithConfig(const char *config_file, AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, int32_t tiling_case_id = -1)
 {
  const ResLimit *limit = (res_limit == nullptr) ? &g_no_limit_res : res_limit;
   tiling->set_block_dim(limit->aiv_num);
@@ -1409,7 +1409,7 @@ void SavePGOConfigTilingData(char *file, std::vector<AutofuseTilingDataPerf> &ti
 
   return;
 }
-extern "C" int64_t PgoTilingSearchByCoreNum(char *search_file, char *config_file, AutofuseTilingData *tiling, uint32_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, PgoTensorArgs *tensor_args = nullptr, void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback prof_batch_callback=nullptr) {
+extern "C" int64_t PgoTilingSearchByCoreNum(char *search_file, char *config_file, AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, PgoTensorArgs *tensor_args = nullptr, void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback prof_batch_callback=nullptr) {
   const ResLimit *limit = (res_limit == nullptr) ? &g_no_limit_res : res_limit;
   double best_perf = DBL_MAX;
   uint32_t max_block_dim = limit->aiv_num;
@@ -1456,7 +1456,7 @@ extern "C" int64_t PgoTilingSearchByCoreNum(char *search_file, char *config_file
   SavePGOConfigTilingData(config_file, tiling_data_perf_list, best_perf);
   return 0;
 }
-extern "C" int64_t PgoTilingSearchPGO(char *search_file, char *config_file, AutofuseTilingData *tiling, uint32_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, PgoTensorArgs *tensor_args = nullptr, void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback prof_batch_callback=nullptr) {
+extern "C" int64_t PgoTilingSearchPGO(char *search_file, char *config_file, AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, PgoTensorArgs *tensor_args = nullptr, void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback prof_batch_callback=nullptr) {
   const ResLimit *limit = (res_limit == nullptr) ? &g_no_limit_res : res_limit;
   std::vector<AutofuseTilingDataPerf> tiling_data_list;
   double best_perf = DBL_MAX;
@@ -1489,7 +1489,7 @@ extern "C" int64_t PgoTilingSearchPGO(char *search_file, char *config_file, Auto
 
   return 0;
 }
-extern "C" int64_t PgoTilingSearch(char *search_file, char *config_file, AutofuseTilingData *tiling, uint32_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, PgoTensorArgs *tensor_args = nullptr, void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback prof_batch_callback=nullptr) {
+extern "C" int64_t PgoTilingSearch(char *search_file, char *config_file, AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr, PgoTensorArgs *tensor_args = nullptr, void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback prof_batch_callback=nullptr) {
   const char* var = std::getenv("AUTOFUSE_DFX_FLAGS");
   if ((var != nullptr) && (std::string(var).find("autofuse_pgo_algo=pruning") != std::string::npos)) {
     PgoConfig::Instance().pgo_algorithm = 0;
@@ -1584,7 +1584,7 @@ extern "C" ge::graphStatus TilingFunc(gert::TilingSymbolEvalContext *context)
   auto extend_context = reinterpret_cast<const gert::KernelContext *>(context);
   auto input_data_num =  extend_context->GetInputValue<size_t>(0U);
   auto parse = extend_context->GetInputValue<AfTilingParseData*>(input_data_num + 1);
-  uint32_t workspace_size;
+  uint64_t workspace_size;
   uint32_t block_dim;
   static const char* config_file = "/test_graph_config.txt";
   auto tiling_data =  context->GetTilingData<AutofuseTilingData>();
@@ -1658,7 +1658,7 @@ std::string GenTilingDataFieldConstValueFunc(uint32_t value) {
 
 
 extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub_size) {
-  uint32_t workspace_size;
+  uint64_t workspace_size;
   uint32_t block_dim;
   ResLimit limit;
   limit.aiv_num = aiv_num;

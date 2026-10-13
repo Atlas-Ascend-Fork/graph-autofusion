@@ -51,7 +51,7 @@ class HostCaseRunner {
   virtual int64_t ResultBlockDim(size_t index) const = 0;
   virtual std::string ResultRepr(size_t index) const = 0;
   virtual std::string DefaultRepr() const = 0;
-  virtual uint32_t DefaultWorkspace() const = 0;
+  virtual uint64_t DefaultWorkspace() const = 0;
   virtual uint32_t DefaultBlockDim() const = 0;
   virtual bool VerifyExtraTopnResult() const {
     return true;

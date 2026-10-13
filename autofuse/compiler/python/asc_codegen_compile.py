@@ -843,7 +843,7 @@ def static_shape_cv_common_compile(
         import ctypes
 
         # 创建变量接收返回值
-        workspace_size = ctypes.c_uint32()
+        workspace_size = ctypes.c_uint64()
         block_dim = ctypes.c_uint32()
         ret = lib.GenTilingDataValueBlockDimAndWss(
             ctypes.c_char_p(pgo_config_path.encode("utf-8")),

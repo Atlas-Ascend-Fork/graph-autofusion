@@ -53,10 +53,10 @@ def patch_single_operator_tiling(host_code, rows, cols):
     adapter = (
         "struct ResLimit;\n"
         'extern "C" int64_t AutofuseTilingS0S1(uint32_t s0, uint32_t s1, '
-        "AutofuseTilingData *tiling, uint32_t *workspaceSize, uint32_t *blockDim, "
+        "AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim, "
         "ResLimit *res_limit);\n"
         'extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, '
-        "uint32_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit) {\n"
+        "uint64_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit) {\n"
         f"  return AutofuseTilingS0S1({rows}, {cols}, tiling, workspaceSize, "
         "blockDim, res_limit);\n"
         "}\n"

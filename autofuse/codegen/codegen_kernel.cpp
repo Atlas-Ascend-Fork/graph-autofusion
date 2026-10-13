@@ -2276,7 +2276,7 @@ Status Kernel::ParseGraph(const ascir::ImplGraph &graph, const ascir::FusedSched
   for (auto tId : workspace_tensor_id) {
     std::string workspaceStr = "workspace";
     workspaceStr = workspaceStr + std::to_string(tId);
-    kernel.workspaces.emplace_back(Uint32(workspaceStr.c_str()));
+    kernel.workspaces.emplace_back(Uint64(workspaceStr));
     kernel.workspace_tensors[tId] = "0";
   }
 
@@ -2931,7 +2931,7 @@ Status Kernel::GenCubeCommonFuncForAICMix(const ascir::FusedScheduledResult &fus
   cube_ss << "        }" << std::endl;
   cube_ss << "      }" << std::endl;
   cube_ss << "    #endif" << std::endl;
-  cube_ss << "    uint32_t vec_wss =  0U;" << std::endl;
+  cube_ss << "    uint64_t vec_wss =  0U;" << std::endl;
   cube_ss << "    #ifdef CV_VEC_WSS" << std::endl;
   cube_ss << "        vec_wss =  CV_VEC_WSS;" << std::endl;
   cube_ss << "    #endif" << std::endl;
@@ -2954,7 +2954,7 @@ Status Kernel::GenCubeCommonFuncForAIC(const ascir::FusedScheduledResult &fused_
   cube_ss << "            return;" << std::endl;
   cube_ss << "        }" << std::endl;
   cube_ss << "    #endif" << std::endl;
-  cube_ss << "    uint32_t vec_wss =  0U;" << std::endl;
+  cube_ss << "    uint64_t vec_wss =  0U;" << std::endl;
   cube_ss << "    #ifdef CV_VEC_WSS" << std::endl;
   cube_ss << "        vec_wss =  CV_VEC_WSS;" << std::endl;
   cube_ss << "    #endif" << std::endl;
@@ -3175,7 +3175,7 @@ Status Kernel::GenCubeCommonFuncForAICDynamic(const ascir::FusedScheduledResult 
   cube_ss << "            return;" << std::endl;
   cube_ss << "        }" << std::endl;
   cube_ss << "    }" << std::endl;
-  cube_ss << "    uint32_t vec_wss =  0U;" << std::endl;
+  cube_ss << "    uint64_t vec_wss =  0U;" << std::endl;
   cube_ss << "    if (cv_tiling_data.cv_vec_wss != 0) {" << std::endl;
   cube_ss << "        vec_wss = cv_tiling_data.cv_vec_wss;" << std::endl;
   cube_ss << "    }" << std::endl;
@@ -3200,7 +3200,7 @@ Status Kernel::GenCubeCommonFuncForAICMixDynamic(const ascir::FusedScheduledResu
   cube_ss << "        }" << std::endl;
   cube_ss << "      }" << std::endl;
   cube_ss << "    }" << std::endl;
-  cube_ss << "    uint32_t vec_wss =  0U;" << std::endl;
+  cube_ss << "    uint64_t vec_wss =  0U;" << std::endl;
   cube_ss << "    if (cv_tiling_data.cv_vec_wss != 0) {" << std::endl;
   cube_ss << "        vec_wss =  cv_tiling_data.cv_vec_wss;" << std::endl;
   cube_ss << "    }" << std::endl;
@@ -3218,7 +3218,7 @@ Status Kernel::GenCubeCommonFuncForAIVMixDynamic(const ascir::FusedScheduledResu
                                                  std::stringstream &ss, std::stringstream &cube_ss,
                                                  const bool use_list_tensor,
                                                  std::unordered_set<const std::string *> &kernel_file_ptr) {
-  cube_ss << "    uint32_t vec_wss =  0U;" << std::endl;
+  cube_ss << "    uint64_t vec_wss =  0U;" << std::endl;
   cube_ss << "    if (cv_tiling_data.cv_vec_wss != 0) {" << std::endl;
   cube_ss << "        vec_wss =  cv_tiling_data.cv_vec_wss;" << std::endl;
   cube_ss << "    }" << std::endl;

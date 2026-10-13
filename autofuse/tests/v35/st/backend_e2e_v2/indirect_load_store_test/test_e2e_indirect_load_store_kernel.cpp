@@ -24,8 +24,8 @@
 
 #if !defined(IL_CASE_STORE) && !defined(IL_CASE_MIXED)
 struct ResLimit;
-extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint32_t *, uint32_t *, uint32_t, uint32_t);
-extern "C" int64_t AutofuseTilingWithConfig(const char *, AutofuseTilingData *, uint32_t *, uint32_t *, ResLimit *,
+extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint32_t);
+extern "C" int64_t AutofuseTilingWithConfig(const char *, AutofuseTilingData *, uint64_t *, uint32_t *, ResLimit *,
                                             int32_t);
 #endif
 
@@ -104,7 +104,7 @@ struct KernelTiling {
   }
 
   AutofuseTilingData data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   std::unique_ptr<uint8_t, decltype(&GmFree)> workspace;
 };
@@ -155,11 +155,11 @@ extern "C" __global__ __aicore__ void indirect_load_store_test(GM_ADDR x, GM_ADD
                                                                GM_ADDR tiling);
 #endif
 #ifdef IL_STATIC_SHAPE
-extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint32_t *, uint32_t *, uint32_t, uint32_t);
+extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint32_t);
 #endif
 #if IL_RANK == 2
 #ifndef IL_STATIC_SHAPE
-extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3, AutofuseTilingData *, uint32_t *,
+extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3, AutofuseTilingData *, uint64_t *,
                                   uint32_t *, uint32_t, uint32_t);
 #endif
 constexpr std::array<int32_t, 2> kInputShape = {IL_X_S0, IL_X_S1};
@@ -167,14 +167,14 @@ constexpr std::array<int32_t, 2> kIndexShape = {IL_INDEX_S0, IL_INDEX_S1};
 #elif IL_RANK == 3
 #ifndef IL_STATIC_SHAPE
 extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3, uint32_t s4, uint32_t s5,
-                                  AutofuseTilingData *, uint32_t *, uint32_t *, uint32_t, uint32_t);
+                                  AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint32_t);
 #endif
 constexpr std::array<int32_t, 3> kInputShape = {IL_X_S0, IL_X_S1, IL_X_S2};
 constexpr std::array<int32_t, 3> kIndexShape = {IL_INDEX_S0, IL_INDEX_S1, IL_INDEX_S2};
 #elif IL_RANK == 4
 #ifndef IL_STATIC_SHAPE
 extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3, uint32_t s4, uint32_t s5,
-                                  uint32_t s6, uint32_t s7, AutofuseTilingData *, uint32_t *, uint32_t *, uint32_t,
+                                  uint32_t s6, uint32_t s7, AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t,
                                   uint32_t);
 #endif
 constexpr std::array<int32_t, 4> kInputShape = {IL_X_S0, IL_X_S1, IL_X_S2, IL_X_S3};
@@ -223,7 +223,7 @@ float BesselK0Reference(float x) {
   return -std::log(x * 0.5F) * series_sum + poly;
 }
 
-void RunTiling(AutofuseTilingData &tiling, uint32_t &workspace_size, uint32_t &block_dim) {
+void RunTiling(AutofuseTilingData &tiling, uint64_t &workspace_size, uint32_t &block_dim) {
 #ifdef IL_FORCE_TILING_CASE
   ASSERT_EQ(AutofuseTilingWithConfig(nullptr, &tiling, &workspace_size, &block_dim, nullptr, IL_FORCE_TILING_CASE), 0);
   ASSERT_EQ(tiling.graph0_tiling_key, 0U);
@@ -486,7 +486,7 @@ void RunMixedElementwiseCase() {
     output.get()[i] = static_cast<DataType>(0.0F);
   }
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   RunTiling(tiling_data, workspace_size, block_dim);
 #if IL_EXPECT_SIMT
@@ -548,7 +548,7 @@ TEST(E2EIndirectLoadStore, GeneratedKernelMatchesReference) {
   std::fill_n(output.get(), result_count, static_cast<OutputType>(0.0F));
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   RunTiling(tiling_data, workspace_size, block_dim);
 #ifdef IL_POST_REDUCE
@@ -1152,7 +1152,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   std::fill_n(output, kRows * kDim, 0.0F);
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1229,7 +1229,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   tiling_data.set_s44(kIndexStride);
 #endif
 #endif
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1289,7 +1289,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   std::fill_n(raw_output, kRows * kDim, static_cast<bfloat16_t>(0.0F));
   std::fill_n(square_output, kRows, static_cast<bfloat16_t>(0.0F));
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1340,7 +1340,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   }
   std::fill_n(output, kRows * kOutputWidth, 0.0F);
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1381,7 +1381,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
 
 #include "autofuse_tiling_data.h"
 
-extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint32_t *, uint32_t *, uint32_t, uint32_t);
+extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint32_t);
 
 #ifndef IL_ADD_IL_REDUCE
 #if defined(IL_USER_POSITION_BIAS)
@@ -1445,7 +1445,8 @@ TEST(E2EUserPositionBias, GeneratedKernelMatchesReference) {
   for (int64_t i = 0; i < output_count; ++i) input.get()[i] = static_cast<float>(i % 97) * 0.01F;
   std::fill_n(output.get(), output_count, 0.0F);
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U, block_dim = 48U;
+  uint64_t workspace_size = 0U;
+  uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
   ASSERT_TRUE(workspace_size == 0U || workspace != nullptr);
@@ -1507,7 +1508,7 @@ TEST(E2EUserPositionBiasExpSum, GeneratedKernelMatchesReference) {
   std::fill_n(output.get(), row_bias_count, 0.0F);
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1709,7 +1710,7 @@ TEST(E2EIndirectLoadGraphHintSimdRepro, GeneratedKernelMatchesReference) {
   std::fill_n(output, output_count, 0.0F);
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1765,7 +1766,7 @@ TEST(E2EIndirectLoadGraphHintReduce, GeneratedKernelMatchesReference) {
   }
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0;
+  uint64_t workspace_size = 0;
   uint32_t block_dim = 48;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1827,7 +1828,7 @@ TEST(E2EIndirectLoadEmbeddingReduce, GeneratedKernelMatchesReference) {
   }
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0;
+  uint64_t workspace_size = 0;
   uint32_t block_dim = 48;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1899,7 +1900,7 @@ TEST(E2EIndirectLoadBroadcastWhere, GeneratedKernelMatchesReference) {
   }
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0;
+  uint64_t workspace_size = 0;
   uint32_t block_dim = 48;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -1955,7 +1956,7 @@ TEST(E2EIndirectLoadAddIlReduce, GeneratedKernelMatchesReference) {
   }
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0;
+  uint64_t workspace_size = 0;
   uint32_t block_dim = 48;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
   void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
@@ -2133,7 +2134,7 @@ TEST(E2EIndirectLoadStrideZero, GeneratedKernelMatchesPhysicalStrideReference) {
 extern "C" __global__ __aicore__ void indirect_load_torch_gather_strided_test(GM_ADDR data, GM_ADDR index,
                                                                               GM_ADDR output, GM_ADDR workspace,
                                                                               GM_ADDR tiling);
-extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint32_t *, uint32_t *, uint32_t, uint32_t);
+extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint32_t);
 
 namespace {
 constexpr int32_t kInputStride0 = IL_INPUT_STRIDE0;
@@ -2214,7 +2215,7 @@ TEST(E2EIndirectLoadTorchGatherStrided, GeneratedKernelMatchesReference) {
   std::fill_n(output.get(), kOutputSize, 0.0F);
 
   AutofuseTilingData tiling_data{};
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
 #if IL_EXPECT_SIMT

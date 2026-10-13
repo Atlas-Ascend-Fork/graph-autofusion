@@ -77,7 +77,7 @@ std::string TilingLib::GenPgoAutofuseTiling(const ascir::FusedScheduledResult &f
 
   ss << "extern \"C\" int64_t AutofuseTilingWithConfig(const char *config_file, ";
   ss << pgo_shape_dim.shape_dim_def.str();
-  ss << tiling << " *tiling, uint32_t *workspaceSize, uint32_t *blockDim,";
+  ss << tiling << " *tiling, uint64_t *workspaceSize, uint32_t *blockDim,";
   ss << " ResLimit *res_limit = nullptr, int32_t tiling_case_id = -1)" << std::endl;
   ss << "{" << std::endl;
 
@@ -118,9 +118,13 @@ std::string TilingLib::GenPgoAutofuseTiling(const ascir::FusedScheduledResult &f
     ss << "  *blockDim = tiling->get_block_dim();" << std::endl;
     ss << "  using namespace optiling;" << std::endl;
   }
-  ss << "  *workspaceSize = GetWorkspaceSize(*tiling);" << std::endl;
+  ss << "  if (!GetWorkspaceSize(*tiling, *workspaceSize)) {" << std::endl;
+  ss << "    return -1;" << std::endl;
+  ss << "  }" << std::endl;
   if (!is_inductor_scene) {
-    ss << "  *workspaceSize += 16 * 1024 * 1024;" << std::endl;
+    ss << "  if (!CheckedWorkspaceAdd(*workspaceSize, 16ULL * 1024ULL * 1024ULL, *workspaceSize)) {" << std::endl;
+    ss << "    return -1;" << std::endl;
+    ss << "  }" << std::endl;
   }
   ss << std::endl;
 
@@ -139,14 +143,20 @@ std::string TilingLib::GenProfilingAllTilingData(std::string tiling_data_list_na
   ss << "  *workspaceSize = 0;" << std::endl;
   ss << "  std::vector<AutofuseTilingDataPerf> raw_search_candidates;" << std::endl;
   ss << "  for (const auto &tiling_data_item : " << tiling_data_list_name << ") {" << std::endl;
-  ss << "    *workspaceSize = std::max(GetWorkspaceSize(tiling_data_item), *workspaceSize);" << std::endl;
+  ss << "    uint64_t candidate_workspace_size = 0U;" << std::endl;
+  ss << "    if (!GetWorkspaceSize(tiling_data_item, candidate_workspace_size)) {" << std::endl;
+  ss << "      return -1;" << std::endl;
+  ss << "    }" << std::endl;
+  ss << "    *workspaceSize = std::max(candidate_workspace_size, *workspaceSize);" << std::endl;
   ss << "    AutofuseTilingDataPerf tiling_data_perf;" << std::endl;
   ss << "    tiling_data_perf.tiling_data = tiling_data_item;" << std::endl;
   ss << "    tiling_data_perf.best_perf = DBL_MAX;" << std::endl;
   ss << "    raw_search_candidates.push_back(tiling_data_perf);" << std::endl;
   ss << "  }" << std::endl;
   if (!is_inductor_scene) {
-    ss << "  *workspaceSize += 16 * 1024 * 1024;" << std::endl;
+    ss << "    if (!CheckedWorkspaceAdd(*workspaceSize, 16ULL * 1024ULL * 1024ULL, *workspaceSize)) {" << std::endl;
+    ss << "      return -1;" << std::endl;
+    ss << "    }" << std::endl;
   }
   ss << "  auto normalized_search_candidates = NormalizePgoMeasuredCandidates(std::move(raw_search_candidates));"
      << std::endl;
@@ -164,7 +174,7 @@ std::string TilingLib::GenPgoTilingSearchByCoreNum(const ascir::FusedScheduledRe
   std::stringstream ss;
   ss << "extern \"C\" int64_t PgoTilingSearchByCoreNum(char *search_file, char *config_file, ";
   ss << pgo_shape_dim.shape_dim_def.str();
-  ss << tiling << " *tiling, uint32_t *workspaceSize, uint32_t *blockDim,";
+  ss << tiling << " *tiling, uint64_t *workspaceSize, uint32_t *blockDim,";
   ss << " ResLimit *res_limit = nullptr, ";
   ss << PGOSearchFuncInputOutputDef(fused_schedule_result);
   ss << "void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback "
@@ -218,7 +228,7 @@ std::string TilingLib::GenPgoTilingSearch(const ascir::FusedScheduledResult &fus
 
   ss << "extern \"C\" int64_t PgoTilingSearch(char *search_file, char *config_file, ";
   ss << pgo_shape_dim.shape_dim_def.str();
-  ss << tiling << " *tiling, uint32_t *workspaceSize, uint32_t *blockDim,";
+  ss << tiling << " *tiling, uint64_t *workspaceSize, uint32_t *blockDim,";
   ss << " ResLimit *res_limit = nullptr, ";
   ss << PGOSearchFuncInputOutputDef(fused_schedule_result);
   ss << "void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback "
@@ -234,12 +244,12 @@ std::string TilingLib::GenPgoTilingSearch(const ascir::FusedScheduledResult &fus
   ss << "  PgoConfig::Instance().single_callback = prof_callback;" << std::endl;
   ss << "  PgoConfig::Instance().batch_callback = prof_batch_callback;" << std::endl;
   ss << "  if (PgoConfig::Instance().pgo_algorithm == 0) {" << std::endl;
-  ss << "    PgoTilingSearchPGO(search_file, config_file, " << pgo_shape_dim.shape_dim_use.str()
+  ss << "    return PgoTilingSearchPGO(search_file, config_file, " << pgo_shape_dim.shape_dim_use.str()
      << " tiling, workspaceSize, blockDim, res_limit, ";
   ss << PGOSearchFuncInputOutputCall(fused_schedule_result)
      << "stream, PgoConfig::Instance().single_callback, PgoConfig::Instance().batch_callback);" << std::endl;
   ss << "  } else if (PgoConfig::Instance().pgo_algorithm == 1) {" << std::endl;
-  ss << "    PgoTilingSearchByCoreNum(search_file, config_file, " << pgo_shape_dim.shape_dim_use.str()
+  ss << "    return PgoTilingSearchByCoreNum(search_file, config_file, " << pgo_shape_dim.shape_dim_use.str()
      << " tiling, workspaceSize, blockDim, res_limit, ";
   ss << PGOSearchFuncInputOutputCall(fused_schedule_result)
      << "stream, PgoConfig::Instance().single_callback, PgoConfig::Instance().batch_callback);" << std::endl;
@@ -294,7 +304,7 @@ std::string TilingLib::GenPgoTilingSearchPGO(const ascir::FusedScheduledResult &
   std::stringstream ss;
 
   ss << "extern \"C\" int64_t PgoTilingSearchPGO(char *search_file, char *config_file, "
-     << pgo_shape_dim.shape_dim_def.str() << tiling << " *tiling, uint32_t *workspaceSize, uint32_t *blockDim,"
+     << pgo_shape_dim.shape_dim_def.str() << tiling << " *tiling, uint64_t *workspaceSize, uint32_t *blockDim,"
      << " ResLimit *res_limit = nullptr, " << PGOSearchFuncInputOutputDef(fused_schedule_result)
      << "void *stream=nullptr, ProfilingCallback prof_callback=nullptr, ProfilingBatchCallback "
      << "prof_batch_callback=nullptr) {" << std::endl;

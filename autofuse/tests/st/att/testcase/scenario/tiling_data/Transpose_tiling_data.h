@@ -98,9 +98,9 @@ struct AutofuseTilingDataPerf {
   AutofuseTilingData tiling_data;
   double best_perf;
 };
-typedef long int (*ProfilingCallback)(void *stream, uint32_t workspaceSize, AutofuseTilingData *tiling_data,
+typedef long int (*ProfilingCallback)(void *stream, uint64_t workspaceSize, AutofuseTilingData *tiling_data,
                                       double *cost_time);
-typedef long int (*ProfilingBatchCallback)(void *stream, uint32_t workspaceSize,
+typedef long int (*ProfilingBatchCallback)(void *stream, uint64_t workspaceSize,
                                            std::vector<AutofuseTilingDataPerf> *profiles);
 class PgoConfig {
  public:
@@ -126,7 +126,7 @@ class PgoConfig {
 bool GetTiling(graph_normalTilingData &tiling_data, int32_t tilingCaseId = -1);
 }  // namespace optiling
 using optiling::AutofuseTilingData;
-static uint32_t GetWorkspaceSize(const AutofuseTilingData &tiling_data) {
+static uint64_t GetWorkspaceSize(const AutofuseTilingData &tiling_data) {
   return 0;
 }
 #endif

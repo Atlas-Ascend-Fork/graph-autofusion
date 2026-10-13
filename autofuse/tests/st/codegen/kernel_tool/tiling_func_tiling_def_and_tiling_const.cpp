@@ -16,9 +16,9 @@ extern "C" size_t GetTilingDataSize() {
   return sizeof(AutofuseTilingData);
 }
 
-uint32_t GetWorkspaceSize(const AutofuseTilingData &t) {
+uint64_t GetWorkspaceSize(const AutofuseTilingData &t) {
   using namespace optiling;
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
   if (t.tiling_key == 0) {
     ws_size += 0;
   }
@@ -35,7 +35,7 @@ struct ResLimit {
   uint32_t resv[10];
 };
 constexpr ResLimit g_no_limit_res = {1, 48, 0, 192 * 1024, {}};
-extern "C" int64_t AutofuseTiling(uint32_t s2, uint32_t s3, AutofuseTilingData *tiling, uint32_t *workspaceSize,
+extern "C" int64_t AutofuseTiling(uint32_t s2, uint32_t s3, AutofuseTilingData *tiling, uint64_t *workspaceSize,
                                   uint32_t *blockDim, uint32_t aiv_num, uint32_t ub_size) {
   tiling->set_s2(s2);
   tiling->set_s3(s3);
@@ -51,7 +51,7 @@ extern "C" int64_t AutofuseTiling(uint32_t s2, uint32_t s3, AutofuseTilingData *
   return 0;
 }
 extern "C" int64_t AutofuseTilingWithConfig(const char *config_file, uint32_t s2, uint32_t s3,
-                                            AutofuseTilingData *tiling, uint32_t *workspaceSize, uint32_t *blockDim,
+                                            AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim,
                                             ResLimit *res_limit = nullptr) {
   const ResLimit *limit = (res_limit == nullptr) ? &g_no_limit_res : res_limit;
   tiling->set_s2(s2);
@@ -154,7 +154,7 @@ extern "C" ge::graphStatus TilingFunc(gert::TilingSymbolEvalContext *context) {
     }
     return tensor->GetOriginShape().GetDim(1);
   }();
-  uint32_t workspace_size;
+  uint64_t workspace_size;
   uint32_t block_dim;
   static const char *config_file = "./autofuse_pointwise_0__abs__add_config.txt";
   auto tiling_data = context->GetTilingData<AutofuseTilingData>();

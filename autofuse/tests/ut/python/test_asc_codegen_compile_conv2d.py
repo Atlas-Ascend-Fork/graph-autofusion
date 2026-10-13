@@ -565,9 +565,7 @@ class TestStaticShapeCompileHasattrCheck:
         """CV common block dim/wss Calculation uses the passed vector_core_num"""
 
         def fill_outputs(config_path, aiv_num, ub_size, workspace_size, block_dim):
-            ctypes.cast(
-                workspace_size, ctypes.POINTER(ctypes.c_uint32)
-            ).contents.value = 16
+            workspace_size._obj.value = 0x120000000
             ctypes.cast(
                 block_dim, ctypes.POINTER(ctypes.c_uint32)
             ).contents.value = aiv_num.value
@@ -580,15 +578,21 @@ class TestStaticShapeCompileHasattrCheck:
             asc_codegen_compile_module, monkeypatch, fake_lib
         )
 
-        vec_block_dim, _ = asc_codegen_compile_module.static_shape_cv_common_compile(
-            kernel_name="kernel",
-            temp_dir=str(tmpdir),
-            graph_name="graph",
-            vector_core_num=4,
+        vec_block_dim, workspace_size = (
+            asc_codegen_compile_module.static_shape_cv_common_compile(
+                kernel_name="kernel",
+                temp_dir=str(tmpdir),
+                graph_name="graph",
+                vector_core_num=4,
+            )
         )
 
         assert fake_lib.GenTilingDataValueBlockDimAndWss.calls[0][1].value == 4
         assert vec_block_dim == 4
+        assert workspace_size == 0x120000000
+        assert isinstance(
+            fake_lib.GenTilingDataValueBlockDimAndWss.calls[0][3]._obj, ctypes.c_uint64
+        )
 
     @staticmethod
     def test_template_decider_passes_vector_core_num_to_cv_static_compile(

@@ -37,6 +37,7 @@
 #include "autofuse_config/auto_fuse_config.h"
 #include "util/base_types_printer.h"
 #include "util/duration.h"
+#include "generator/solver_pass_gen/axes_reorder_solver/axes_reorder_solver_gen.h"
 
 const std::string op_name = "OpTest";
 
@@ -512,7 +513,9 @@ TEST(GeneratorUT, AutofuseAtomicHeadersOwnPgoConfigAndGlobalApiTypes) {
   EXPECT_NE(pgo_header.find("class PgoConfigRuntimeGuard"), std::string::npos);
   EXPECT_NE(pgo_header.find("void *stream = nullptr;"), std::string::npos);
   EXPECT_NE(api_header.find("struct AutofuseTilingData;\nstruct AutofuseTilingDataPerf;"), std::string::npos);
-  EXPECT_NE(api_header.find("uint32_t GetWorkspaceSize(const AutofuseTilingData &tiling_data);"), std::string::npos);
+  EXPECT_NE(api_header.find("bool GetWorkspaceSize(const AutofuseTilingData &tiling_data, uint64_t &workspace_size);"),
+            std::string::npos);
+  EXPECT_EQ(api_header.find("uint32_t GetWorkspaceSize"), std::string::npos);
   EXPECT_EQ(api_header.find("namespace optiling {\nstruct AutofuseTilingData;"), std::string::npos);
 }
 
@@ -1274,7 +1277,7 @@ TEST(GeneratorUT, TilingCodeGenImplPGO) {
   virtual int32_t CalcScore(const TilingData &tiling_data) { (void)tiling_data; return 0;}
   virtual void GetTilingData(TilingDataCopy &from_tiling, TilingData &to_tiling) { (void)from_tiling; (void)to_tiling; }
   virtual void SetTilingData(TilingData &from_tiling, TilingDataCopy &to_tiling) { (void)from_tiling; (void)to_tiling; }
-  virtual void SetWorkspaceSize(TilingData &tiling_data, std::unordered_map<int64_t, uint64_t> &workspace_map) { (void)tiling_data; (void)workspace_map; }
+  virtual bool SetWorkspaceSize(TilingData &tiling_data, std::unordered_map<int64_t, uint64_t> &workspace_map) { (void)tiling_data; (void)workspace_map; return true; }
 )rawliteral";
   EXPECT_EQ(genImpl.tiling_func_.output_.str(), expectCode);
 }
@@ -1594,8 +1597,48 @@ TEST(GeneratorUT, PGOGetAllSchedulesResultsDoesNotPushGraphTilingTmpOutsideSched
   EXPECT_NE(tiling_func_output.find("has_valid_tiling = true;"), std::string::npos);
 }
 
+TEST(GeneratorUT, PGOCallbacksUseUint64WorkspaceSize) {
+  TilingCodeGenConfig config;
+  config.tiling_data_type_name = "AutofuseTilingData";
+  config.enable_autofuse_pgo = true;
+  config.force_template_op_name = "test";
+  config.force_schedule_result = 0L;
+  TilingModelInfo tiling_model_info;
+  ModelInfo group0_info;
+  group0_info.schedule_group_ident.asc_graph_id = 0;
+  group0_info.schedule_group_ident.impl_graph_id = 0;
+  group0_info.schedule_group_ident.group_id = 0;
+  tiling_model_info.push_back(group0_info);
+  ModelInfo group1_info;
+  group1_info.schedule_group_ident.asc_graph_id = 0;
+  group1_info.schedule_group_ident.impl_graph_id = 0;
+  group1_info.schedule_group_ident.group_id = 1;
+  tiling_model_info.push_back(group1_info);
+  ScoreFuncs score_funcs;
+  MockHighPerfTilingCodeGenImpl genImpl("test", config, tiling_model_info, score_funcs, false);
+  ge::CodePrinter pgo_header;
+
+  genImpl.GenPgoCallbackDefs(pgo_header);
+
+  std::map<size_t, std::pair<std::string, std::string>> graph_info;
+  graph_info[0] = std::make_pair("ScheduleResult0", "group0");
+  graph_info[1] = std::make_pair("ScheduleResult0", "group1");
+  std::map<std::string, std::set<std::string>> hardware_map;
+  hardware_map["group0"].insert("block_dim");
+  hardware_map["group1"].insert("block_dim");
+  genImpl.tiling_func_.Reset();
+  ASSERT_EQ(genImpl.GenPGOGetScheduleResult(0, 0, graph_info, hardware_map), af::SUCCESS);
+
+  const std::string callback_output = pgo_header.GetOutputStr();
+  const std::string schedule_output = genImpl.tiling_func_.GetOutputStr();
+  EXPECT_NE(callback_output.find("void* stream, uint64_t workspaceSize"), std::string::npos);
+  EXPECT_EQ(callback_output.find("void* stream, uint32_t workspaceSize"), std::string::npos);
+  EXPECT_NE(schedule_output.find("void* stream, uint64_t workspaceSize"), std::string::npos);
+  EXPECT_EQ(schedule_output.find("void* stream, uint32_t workspaceSize"), std::string::npos);
+}
+
 static const std::string kExpectPGOCode =
-    R"rawliteral(inline bool GetScheduleResult0PGO(std::vector<AutofuseTilingDataPerf>& tiling_data_list, const uint32_t ori_block_dim, const int32_t tiling_case_id,AutofuseTilingData &tiling_data, double &cur_perf, double &best_perf, uint32_t &cur_block_dim,void* stream, uint32_t workspaceSize, std::vector<uint32_t*> multi_group_block_dim_list = {}, const SearchConfig *search_cfg=nullptr) {
+    R"rawliteral(inline bool GetScheduleResult0PGO(std::vector<AutofuseTilingDataPerf>& tiling_data_list, const uint32_t ori_block_dim, const int32_t tiling_case_id,AutofuseTilingData &tiling_data, double &cur_perf, double &best_perf, uint32_t &cur_block_dim,void* stream, uint64_t workspaceSize, std::vector<uint32_t*> multi_group_block_dim_list = {}, const SearchConfig *search_cfg=nullptr) {
   (void)cur_perf; (void)cur_block_dim;
   std::vector<AutofuseTilingDataPerf> tiling_data_list_tmp{};
   workspaceSize = 0;
@@ -1624,12 +1667,18 @@ static const std::string kExpectPGOCode =
       uint32_t max_block_dim = tiling_data.group0_tiling_data.get_block_dim();
       max_block_dim = Max(max_block_dim, tiling_data.group1_tiling_data.get_block_dim());
       tiling_data.set_block_dim(max_block_dim);
-      auto workspaceSizeTmp = GetWorkspaceSize(tiling_data);
+      uint64_t workspaceSizeTmp = 0U;
+      if (!GetWorkspaceSize(tiling_data, workspaceSizeTmp)) {
+        return false;
+      }
       if (workspaceSizeTmp > workspaceSize) {
         workspaceSize = workspaceSizeTmp;
       }
     }
-    workspaceSize += 16 * 1024 * 1024;
+    if (__builtin_add_overflow(workspaceSize, 16ULL * 1024ULL * 1024ULL, &workspaceSize)) {
+      OP_LOGE(OP_NAME, "Workspace size overflow in PGO group profiling.");
+      return false;
+    }
     if (PgoConfig::Instance().batch_callback) {
       if (PgoConfig::Instance().batch_callback(PgoConfig::Instance().tensor_args, stream, workspaceSize, &tiling_data_list_tmp) != 0) {
         return false;
@@ -1664,12 +1713,18 @@ static const std::string kExpectPGOCode =
       uint32_t max_block_dim = tiling_data.group0_tiling_data.get_block_dim();
       max_block_dim = Max(max_block_dim, tiling_data.group1_tiling_data.get_block_dim());
       tiling_data.set_block_dim(max_block_dim);
-      auto workspaceSizeTmp = GetWorkspaceSize(tiling_data);
+      uint64_t workspaceSizeTmp = 0U;
+      if (!GetWorkspaceSize(tiling_data, workspaceSizeTmp)) {
+        return false;
+      }
       if (workspaceSizeTmp > workspaceSize) {
         workspaceSize = workspaceSizeTmp;
       }
     }
-    workspaceSize += 16 * 1024 * 1024;
+    if (__builtin_add_overflow(workspaceSize, 16ULL * 1024ULL * 1024ULL, &workspaceSize)) {
+      OP_LOGE(OP_NAME, "Workspace size overflow in PGO group profiling.");
+      return false;
+    }
     if (PgoConfig::Instance().batch_callback) {
       if (PgoConfig::Instance().batch_callback(PgoConfig::Instance().tensor_args, stream, workspaceSize, &tiling_data_list_tmp) != 0) {
         return false;
@@ -1896,8 +1951,72 @@ TEST(GeneratorUT, GenWorkspaceRelatedVarsGuardsDynamicDenominator) {
 
   EXPECT_NE(code.find("double a1t_size = tiling_data.get_a1t_size();"), std::string::npos);
   EXPECT_NE(code.find("if (a1t_size <= 0) {"), std::string::npos);
-  EXPECT_NE(code.find("return;"), std::string::npos);
+  EXPECT_NE(code.find("return false;"), std::string::npos);
   EXPECT_LT(code.find("if (a1t_size <= 0) {"), code.find("static_cast<uint64_t>(Ceiling(512/a1t_size))"));
+}
+
+TEST(GeneratorUT, WorkspaceOffsetHelpersUseUint64AndCheckedAdd) {
+  TilingCodeGenConfig config;
+  TilingModelInfo model_infos{CreateModelInfo()};
+  ScoreFuncs score_funcs;
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, model_infos, score_funcs, false);
+  gen_impl.workspace_tensor_id_set_[0][0] = {1, 2};
+
+  gen_impl.tiling_func_.Reset();
+  gen_impl.GenWorkspaceOffsetHelpers();
+  const auto code = gen_impl.tiling_func_.GetOutputStr();
+
+  EXPECT_NE(code.find("inline bool FinalizeWorkspaceOffsets("), std::string::npos);
+  EXPECT_NE(code.find("uint64_t workspace_offset = 0U;"), std::string::npos);
+  EXPECT_NE(code.find("__builtin_add_overflow(workspace_offset, workspace_size_1, &workspace_offset)"),
+            std::string::npos);
+  EXPECT_NE(code.find("return false;"), std::string::npos);
+  EXPECT_EQ(code.find("uint32_t workspace_offset"), std::string::npos);
+}
+
+TEST(GeneratorUT, GenUpdateWorkspaceDoesNotNarrowWorkspaceMapValue) {
+  TilingCodeGenConfig config;
+  TilingModelInfo model_infos{CreateModelInfo()};
+  ScoreFuncs score_funcs;
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, model_infos, score_funcs, false);
+  gen_impl.workspace_tensor_id_set_[0][0] = {1};
+
+  gen_impl.tiling_func_.Reset();
+  gen_impl.GenUpdateWorkspace(0, 0);
+  const auto code = gen_impl.tiling_func_.GetOutputStr();
+
+  EXPECT_NE(code.find("tiling_data.set_workspace1(it1->second);"), std::string::npos);
+  EXPECT_EQ(code.find("static_cast<uint32_t>(it1->second)"), std::string::npos);
+}
+
+TEST(GeneratorUT, WorkspaceSetFailurePropagatesThroughUpdateBetterTiling) {
+  TilingCodeGenConfig config;
+  TilingModelInfo model_infos{CreateModelInfo()};
+  ScoreFuncs score_funcs;
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, model_infos, score_funcs, false);
+
+  gen_impl.tiling_func_.Reset();
+  gen_impl.GenVirtualDataTransferFuncs();
+  gen_impl.GenUpdateBetterTiling();
+  const auto code = gen_impl.tiling_func_.GetOutputStr();
+
+  EXPECT_NE(code.find("virtual bool SetWorkspaceSize("), std::string::npos);
+  EXPECT_EQ(code.find("virtual void SetWorkspaceSize("), std::string::npos);
+  EXPECT_NE(code.find("bool UpdateBetterTiling("), std::string::npos);
+  const auto check_pos = code.find("if (!tilingCaseImplPtr->SetWorkspaceSize(tiling_data, workspace_map)) {");
+  ASSERT_NE(check_pos, std::string::npos);
+  EXPECT_NE(code.find("return false;", check_pos), std::string::npos);
+}
+
+TEST(GeneratorUT, PgoCandidateSkipsWhenSetWorkspaceSizeFails) {
+  AxesReorderSolverGen solver_gen("0", "AutofuseTilingData");
+
+  const auto code = solver_gen.GenPGOSolverFuncImpl();
+  const auto check_pos = code.find("if (!SetWorkspaceSize(new_auto_tiling, workspace_map)) {");
+
+  ASSERT_NE(check_pos, std::string::npos);
+  EXPECT_NE(code.find("continue;", check_pos), std::string::npos);
+  EXPECT_EQ(code.find("SetWorkspaceSize(new_auto_tiling, workspace_map);\n"), std::string::npos);
 }
 
 // UT测试：验证tiling_data.set参数溢出修复

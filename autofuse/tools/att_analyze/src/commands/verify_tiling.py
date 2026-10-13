@@ -281,7 +281,7 @@ def execute_tiling(so_path: str, input_params: Dict, scene: str) -> Dict:
     dynamic_dims = [c_uint32(dim) for dim in input_params.get("dynamic_dims", [])]
 
     tiling_buf = ctypes.create_string_buffer(tiling_size)
-    ws = c_uint32(0)
+    ws = c_uint64(0)
     abi = input_params["abi"]
     bd_type = c_uint64 if abi["block_dim_width"] == 64 else c_uint32
     bd = bd_type(0)
@@ -289,7 +289,7 @@ def execute_tiling(so_path: str, input_params: Dict, scene: str) -> Dict:
     dims = input_params.get("dynamic_dims", [])
     if len(dims) != abi["shape_dims"]:
         raise ValueError("dynamic_dims count does not match abi.shape_dims")
-    common_args = [c_void_p, ctypes.POINTER(c_uint32), ctypes.POINTER(bd_type)]
+    common_args = [c_void_p, ctypes.POINTER(c_uint64), ctypes.POINTER(bd_type)]
     if scene == "inductor" and abi["kind"] == "inductor":
         lib.AutofuseTiling.argtypes = (
             [c_uint32] * len(dynamic_dims) + common_args + [c_void_p]
@@ -315,7 +315,10 @@ def execute_tiling(so_path: str, input_params: Dict, scene: str) -> Dict:
 
     block_dim_val = bd.value
     result = {"block_dim": block_dim_val, "workspace_size": ws.value}
-    if any(not 0 <= value <= 0xFFFFFFFF for value in result.values()):
+    if (
+        not 0 <= result["block_dim"] <= 0xFFFFFFFF
+        or not 0 <= result["workspace_size"] <= 0xFFFFFFFFFFFFFFFF
+    ):
         raise ValueError("AutofuseTiling returned an invalid value")
     return result
 

@@ -37,13 +37,13 @@ struct ResLimit {
   uint32_t resv[10];
 };
 
-typedef long int (*ProfilingCallback)(PgoTensorArgs *tensor_args, void *stream, uint32_t workspaceSize,
+typedef long int (*ProfilingCallback)(PgoTensorArgs *tensor_args, void *stream, uint64_t workspaceSize,
                                       AutofuseTilingData *tiling_data, double *cost_time);
-typedef long int (*ProfilingBatchCallback)(PgoTensorArgs *tensor_args, void *stream, uint32_t workspaceSize,
+typedef long int (*ProfilingBatchCallback)(PgoTensorArgs *tensor_args, void *stream, uint64_t workspaceSize,
                                            std::vector<AutofuseTilingDataPerf> *profiles);
 
 extern "C" int64_t PgoTilingSearch(char *search_file, char *config_file, AutofuseTilingData *tiling,
-                                   uint32_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr,
+                                   uint64_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr,
                                    PgoTensorArgs *tensor_args = nullptr, void *stream = nullptr,
                                    ProfilingCallback prof_callback = nullptr,
                                    ProfilingBatchCallback prof_batch_callback = nullptr);
@@ -58,7 +58,7 @@ struct PgoTensorArgPack {
 };
 
 inline int RunPgoTilingSearch(const std::filesystem::path &case_file, AutofuseTilingData *tiling,
-                              uint32_t *workspace_size, uint32_t *block_dim, ResLimit *res_limit,
+                              uint64_t *workspace_size, uint32_t *block_dim, ResLimit *res_limit,
                               PgoTensorArgs *tensor_args, ProfilingCallback prof_callback,
                               ProfilingBatchCallback prof_batch_callback) {
   const std::string search_file = (case_file.parent_path() / "search.txt").string();
@@ -69,7 +69,7 @@ inline int RunPgoTilingSearch(const std::filesystem::path &case_file, AutofuseTi
 }
 
 inline int RunPgoTilingSearchWithPruning(const std::filesystem::path &case_file, AutofuseTilingData *tiling,
-                                         uint32_t *workspace_size, uint32_t *block_dim, ResLimit *res_limit,
+                                         uint64_t *workspace_size, uint32_t *block_dim, ResLimit *res_limit,
                                          PgoTensorArgs *tensor_args, ProfilingCallback prof_callback,
                                          ProfilingBatchCallback prof_batch_callback) {
   const char *saved_flags = std::getenv("AUTOFUSE_DFX_FLAGS");

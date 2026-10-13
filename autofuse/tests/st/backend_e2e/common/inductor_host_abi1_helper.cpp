@@ -60,7 +60,7 @@ struct AutofuseTilingSignature;
 
 template <size_t... Indexes>
 struct AutofuseTilingSignature<std::index_sequence<Indexes...>> {
-  using Type = int64_t (*)(TilingDynamicArg<Indexes>..., AutofuseTilingData *, uint32_t *, uint32_t *, ResLimit *);
+  using Type = int64_t (*)(TilingDynamicArg<Indexes>..., AutofuseTilingData *, uint64_t *, uint32_t *, ResLimit *);
 };
 
 struct TopnResult {
@@ -123,7 +123,7 @@ class TypedHostRunner : public HostCaseRunner {
   std::string DefaultRepr() const override {
     return repr_(&default_tiling_data_);
   }
-  uint32_t DefaultWorkspace() const override {
+  uint64_t DefaultWorkspace() const override {
     return default_workspace_;
   }
   uint32_t DefaultBlockDim() const override {
@@ -151,7 +151,7 @@ class TypedHostRunner : public HostCaseRunner {
   ResLimit res_limit_ = {1, 48, 0, 192 * 1024, {0}};
   TopnResult topn_result_;
   AutofuseTilingData default_tiling_data_ = {};
-  uint32_t default_workspace_ = 0;
+  uint64_t default_workspace_ = 0;
   uint32_t default_block_dim_ = 0;
   GenerateTopnSolutionsFn gen_ = nullptr;
   AutofuseTilingFn autofuse_tiling_ = nullptr;

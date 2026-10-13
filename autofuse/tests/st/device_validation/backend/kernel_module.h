@@ -20,7 +20,7 @@
 
 namespace device_validation {
 using GetTilingDataSizeFunc = size_t (*)();
-using AutofuseTilingFunc = ge::graphStatus (*)(void *, uint32_t *, uint32_t *, void *);
+using AutofuseTilingFunc = ge::graphStatus (*)(void *, uint64_t *, uint32_t *, void *);
 using AutofuseLaunchV2Func = uint32_t (*)(uint32_t, void *, void **, int32_t, void **, int32_t, void *, void *);
 using AutofuseLaunchLegacy1In1OutFunc = int64_t (*)(uint32_t, void *, void *, void *, void *, void *);
 using AutofuseLaunchLegacy2In1OutFunc = int64_t (*)(uint32_t, void *, void *, void *, void *, void *, void *);
@@ -53,7 +53,7 @@ class KernelModule {
   Status Load(const std::filesystem::path &, const AbiSpec &);
   Status Unload();
   Status GetTilingDataSize(size_t *);
-  Status RunTiling(void *, uint32_t *, uint32_t *, void *);
+  Status RunTiling(void *, uint64_t *, uint32_t *, void *);
   Status LaunchV2(uint32_t, void *, void **, int32_t, void **, int32_t, void *, void *);
   Status LaunchLegacy(uint32_t, void *, void **, int32_t, void **, int32_t, void *, void *);
   bool ValidLaunchRequest(AclRuntime *, void *, void *, int32_t, int32_t, void **, void **) const;

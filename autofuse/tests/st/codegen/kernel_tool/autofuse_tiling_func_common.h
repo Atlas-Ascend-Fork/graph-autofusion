@@ -120,7 +120,7 @@ inline uint64_t GetTid() {
 
 namespace optiling {};
 using namespace optiling;
-uint32_t GetWorkspaceSize(const AutofuseTilingData &tiling_data);
+uint64_t GetWorkspaceSize(const AutofuseTilingData &tiling_data);
 namespace optiling {
 using namespace std;
 

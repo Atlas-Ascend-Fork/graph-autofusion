@@ -64,6 +64,8 @@ The Device-side code is the core fusion kernel code written in AscendC, includin
 - **Infer Shape**: Calculate the output shape according to the input shape for dynamic shape scenarios, ensuring the correctness of the subsequent calculation process.
 - **Tiling Data**: Fixed tiling parameter data and structure definitions, shared by multiple runs.
 
+Workspace sizes and byte offsets use `uint64_t`, so a single workspace larger than 2 GiB and an accumulated size larger than 4 GiB are not truncated. The direct tiling ABI uses `uint64_t *workspace_size`; host-side accumulation and 512-byte alignment use checked calculations and return failure on overflow. Non-Inductor direct tiling retains the existing 16 MiB reserved-workspace semantics after workspace accumulation.
+
 ## Main Workflow
 
 1. **Parse Scheduled Result**: Read the fused graph structure, tiling grouping, memory planning and other information from the scheduling result.

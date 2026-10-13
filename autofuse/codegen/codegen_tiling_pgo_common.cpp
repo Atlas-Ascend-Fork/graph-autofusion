@@ -593,7 +593,7 @@ void TilingLib::GenPgoWrapperInit(const ascir::FusedScheduledResult &fused_sched
   if (direct_link) {
     ss << "static aclrtBinHandle g_pgo_bin_handle = nullptr;" << std::endl;
   }
-  ss << "int WrapperOnlyLaunch(uint32_t workspace_size, AutofuseTilingData *tiling_data) {" << std::endl;
+  ss << "int WrapperOnlyLaunch(uint64_t workspace_size, AutofuseTilingData *tiling_data) {" << std::endl;
   if (!direct_link) {
     ss << "  PgoDsoCallGuard dso_guard;" << std::endl;
     ss << "  if (!dso_guard) { return FAILED; }" << std::endl;
@@ -960,7 +960,7 @@ void TilingLib::GenPgoBatchCallback(std::stringstream &ss) const {
 }
 
 void TilingLib::GenPgoDirectBatchProcess(std::stringstream &ss) const {
-  ss << R"(int ProfilingBatchProcess(uint32_t workspace_size, std::vector<AutofuseTilingDataPerf>::iterator begin,
+  ss << R"(int ProfilingBatchProcess(uint64_t workspace_size, std::vector<AutofuseTilingDataPerf>::iterator begin,
                           std::vector<AutofuseTilingDataPerf>::iterator end) {
   const uint64_t batch_size = end - begin;
   ResetProfilingRound();
@@ -1000,7 +1000,7 @@ void TilingLib::GenPgoBatchProcess(std::stringstream &ss, bool direct_link) cons
     GenPgoDirectBatchProcess(ss);
     return;
   }
-  ss << "int ProfilingBatchProcess(uint32_t workspace_size, std::vector<AutofuseTilingDataPerf>::iterator begin, "
+  ss << "int ProfilingBatchProcess(uint64_t workspace_size, std::vector<AutofuseTilingDataPerf>::iterator begin, "
         "std::vector<AutofuseTilingDataPerf>::iterator end) {"
      << std::endl;
   ss << "  uint64_t batch_size = end - begin;" << std::endl;
@@ -1036,9 +1036,13 @@ void TilingLib::GenPgoProfilingBatchSetup(std::stringstream &ss, bool direct_lin
   ss << "  int case_num = profiles->size();" << std::endl;
   ss << "  DLOGI(\"PGOGetProfilingBatch case_num:%d\", case_num);" << std::endl;
   ss << "  if (workspace_size > 0) {" << std::endl;
+  ss << "    if (workspace_size > SIZE_MAX) {" << std::endl;
+  ss << "      DLOGE(\"workspace size exceeds SIZE_MAX: %\" PRIu64, workspace_size);" << std::endl;
+  ss << "      return FAILED;" << std::endl;
+  ss << "    }" << std::endl;
   ss << "    auto ret = aclrtMalloc(&g_workspace, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);" << std::endl;
   ss << "    if (ret != ACL_SUCCESS) {" << std::endl;
-  ss << "      DLOGE(\"malloc workspace failed, size: %u, ERROR: %d\", workspace_size, ret);" << std::endl;
+  ss << "      DLOGE(\"malloc workspace failed, size: %\" PRIu64 \", ERROR: %d\", workspace_size, ret);" << std::endl;
   ss << "      return FAILED;" << std::endl;
   ss << "    }" << std::endl;
   ss << "  }" << std::endl;
@@ -1047,7 +1051,7 @@ void TilingLib::GenPgoProfilingBatchSetup(std::stringstream &ss, bool direct_lin
 void TilingLib::GenPgoGetProfilingBatch(const ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
                                         bool direct_link) const {
   ss << "extern \"C\" long int PGOGetProfilingBatch(" << PGOSearchFuncInputOutputCallBackDef(fused_schedule_result)
-     << "void* stream, uint32_t workspace_size, std::vector<AutofuseTilingDataPerf> *profiles) {" << std::endl;
+     << "void* stream, uint64_t workspace_size, std::vector<AutofuseTilingDataPerf> *profiles) {" << std::endl;
   if (!direct_link) {
     ss << "  PgoDsoCallGuard dso_guard;" << std::endl;
     ss << "  if (!dso_guard) { return FAILED; }" << std::endl;
@@ -1181,9 +1185,13 @@ void TilingLib::GenPgoProfilingSetup(std::stringstream &ss, bool direct_link) co
     ss << "  (void)stream;" << std::endl;
   }
   ss << "  if (workspace_size > 0) {" << std::endl;
+  ss << "    if (workspace_size > SIZE_MAX) {" << std::endl;
+  ss << "      DLOGE(\"workspace size exceeds SIZE_MAX: %\" PRIu64, workspace_size);" << std::endl;
+  ss << "      return FAILED;" << std::endl;
+  ss << "    }" << std::endl;
   ss << "    auto ret = aclrtMalloc(&g_workspace, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);" << std::endl;
   ss << "    if (ret != ACL_SUCCESS) {" << std::endl;
-  ss << "      DLOGE(\"malloc workspace failed, size: %u, ERROR: %d\", workspace_size, ret);" << std::endl;
+  ss << "      DLOGE(\"malloc workspace failed, size: %\" PRIu64 \", ERROR: %d\", workspace_size, ret);" << std::endl;
   ss << "      return FAILED;" << std::endl;
   ss << "    }" << std::endl;
   ss << "  }" << std::endl;
@@ -1250,7 +1258,7 @@ void TilingLib::GenPgoProfilingWorkspaceCleanup(std::stringstream &ss, bool dire
 void TilingLib::GenPgoGetProfiling(const ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
                                    bool direct_link) const {
   ss << "extern \"C\" long int PGOGetProfiling(" << PGOSearchFuncInputOutputCallBackDef(fused_schedule_result)
-     << "void *stream, uint32_t workspace_size, AutofuseTilingData *tiling_data, double *outCostTime) {" << std::endl;
+     << "void *stream, uint64_t workspace_size, AutofuseTilingData *tiling_data, double *outCostTime) {" << std::endl;
   if (!direct_link) {
     ss << "  PgoDsoCallGuard dso_guard;" << std::endl;
     ss << "  if (!dso_guard) { return FAILED; }" << std::endl;
@@ -1269,7 +1277,7 @@ void TilingLib::GenPgoFunc(const ascir::FusedScheduledResult &fused_schedule_res
   ss << "  if (!dso_guard) { return FAILED; }" << std::endl;
   ss << "  AutofuseTilingData tiling_data = {0};" << std::endl;
   ss << "  PgoTensorArgs *tensor_args = &g_pgo_tensor_args;" << std::endl;
-  ss << "  uint32_t workspace_size = 0;" << std::endl;
+  ss << "  uint64_t workspace_size = 0;" << std::endl;
   ss << "  uint32_t block_dim = 0;" << std::endl;
   ss << "  if (pgo_search_fn == nullptr) {" << std::endl;
   ss << "    DLOGE(\"pgo search func not found\");" << std::endl;
@@ -1299,7 +1307,7 @@ void TilingLib::GenPgoStaticFunc(const ascir::FusedScheduledResult &fused_schedu
   ss << "  }" << std::endl;
   ss << "  AutofuseTilingData tiling_data = {0};" << std::endl;
   ss << "  PgoTensorArgs *tensor_args = &g_pgo_tensor_args;" << std::endl;
-  ss << "  uint32_t workspace_size = 0;" << std::endl;
+  ss << "  uint64_t workspace_size = 0;" << std::endl;
   ss << "  uint32_t block_dim = 0;" << std::endl;
   ss << "  int64_t result = autofuse_tiling_with_config_fn(config_file, &tiling_data, &workspace_size, &block_dim, "
         "&g_res_limit);"
@@ -1325,15 +1333,15 @@ void TilingLib::GenPgoStaticFunc(const ascir::FusedScheduledResult &fused_schedu
 
 void TilingLib::GenPgoProfiling(const ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss) const {
   ss << "typedef int64_t (*PGOSearchType)(char *search_file, char *config_file, AutofuseTilingData *tiling_data, "
-        "uint32_t *workspace_size, uint32_t *blockDim, void *resource_limit, "
+        "uint64_t *workspace_size, uint32_t *blockDim, void *resource_limit, "
      << PGOSearchFuncInputOutputCallBackDef(fused_schedule_result)
      << "void *stream, void *prof_callback, void *prof_batch_callback);" << std::endl;
   ss << "static PGOSearchType pgo_search_fn = reinterpret_cast<PGOSearchType>(GetFunc(\"PgoTilingSearch\"));"
      << std::endl;
   GenPgoFunc(fused_schedule_result, ss);
-  ss << "typedef int64_t (*AutofuseTilingWithConfigType)(const char *config_file, AutofuseTilingData *tiling, uint32_t "
-        "*"
-     << "workspace_size, uint32_t *blockDim, ResLimit *res_limit);" << std::endl;
+  ss << "typedef int64_t (*AutofuseTilingWithConfigType)(const char *config_file, AutofuseTilingData *tiling, "
+        "uint64_t *workspace_size, uint32_t *blockDim, ResLimit *res_limit);"
+     << std::endl;
   ss << "static AutofuseTilingWithConfigType autofuse_tiling_with_config_fn = "
      << "reinterpret_cast<AutofuseTilingWithConfigType>(GetFunc(\"AutofuseTilingWithConfig\"));" << std::endl;
   GenPgoStaticFunc(fused_schedule_result, ss);

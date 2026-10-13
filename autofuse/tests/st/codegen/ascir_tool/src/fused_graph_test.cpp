@@ -23,7 +23,7 @@ static const int32_t SUCCESS = 0;
 static const int32_t FAILED = -1;
 
 using json = nlohmann::json;
-using TilingFunc = ge::graphStatus (*)(void *, uint32_t *, uint32_t *, void *);
+using TilingFunc = ge::graphStatus (*)(void *, uint64_t *, uint32_t *, void *);
 using LaunchFunc = uint32_t (*)(uint32_t, void *, void **, int32_t, void **, int32_t, void *, void *);
 using GetTilingSizeFunc = size_t (*)();
 
@@ -304,7 +304,7 @@ int32_t AutofuseKernelInfo::ParseTaskRunParam() {
   return af::SUCCESS;
 }
 
-int32_t AutofuseKernelInfo::DoTiling(std::unique_ptr<uint8_t[]> &tiling_data_holder, uint32_t &workspace_size) {
+int32_t AutofuseKernelInfo::DoTiling(std::unique_ptr<uint8_t[]> &tiling_data_holder, uint64_t &workspace_size) {
   std::string tiling_func_name = "AutofuseTiling";
   const auto tiling_func = reinterpret_cast<TilingFunc>(mmDlsym(handles_, tiling_func_name.c_str()));
   if (tiling_func == nullptr) {
@@ -321,9 +321,9 @@ int32_t AutofuseKernelInfo::DoTiling(std::unique_ptr<uint8_t[]> &tiling_data_hol
   return af::SUCCESS;
 }
 
-int32_t AutofuseKernelInfo::MallocWorkSpace(uint32_t &size) {
+int32_t AutofuseKernelInfo::MallocWorkSpace(uint64_t &size) {
   if (size == 0) {
-    LOG_PRINT("WARN: workspace size is %u\n", size);
+    LOG_PRINT("WARN: workspace size is %" PRIu64 "\n", size);
     return af::SUCCESS;
   }
 
@@ -418,10 +418,10 @@ int FuseGraphTest(int deviceId, aclrtStream &stream, const std::string config_pa
   CHECK_FREE_RET(tiling_data_holder != nullptr, LOG_PRINT("ERROR: tiling_data_holder is nullptr\n"); return FAILED);
 
   // tiling & malloc workspace addr
-  uint32_t workspace_size = 0U;
+  uint64_t workspace_size = 0U;
   ret = fuse_kernel.DoTiling(tiling_data_holder, workspace_size);
   CHECK_FREE_RET(ret == SUCCESS, LOG_PRINT("ERROR: DoTiling failed.\n"); return FAILED);
-  LOG_PRINT("workspace_size: %u\n", workspace_size);
+  LOG_PRINT("workspace_size: %" PRIu64 "\n", workspace_size);
 
   ret = fuse_kernel.MallocWorkSpace(workspace_size);
   CHECK_FREE_RET(ret == SUCCESS, LOG_PRINT("ERROR: MallocWorkSpace failed.\n"); return FAILED);

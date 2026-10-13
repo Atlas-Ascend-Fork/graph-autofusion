@@ -95,7 +95,7 @@ void set_g_basen_basem_align(int32_t value) {
 }
 
 extern "C" int64_t GenCVFusionTilingKey(char* config_file, int aiv_num, int ub_size) {
-  uint32_t workspace_size;
+  uint64_t workspace_size;
   uint32_t block_dim;
   ResLimit limit;
   limit.aiv_num = aiv_num;
@@ -126,7 +126,7 @@ extern "C" int64_t GenCVFusionTilingKey(char* config_file, int aiv_num, int ub_s
 
 std::string TilingLib::GenTilingDataBlockDimAndWss() const {
   std::string get_block_dim_and_wss = R"(
-extern "C" int GenTilingDataValueBlockDimAndWss(char* config_file, uint32_t aiv_num, uint32_t ub_size, uint32_t* workspace_size, uint32_t* block_dim) {
+extern "C" int GenTilingDataValueBlockDimAndWss(char* config_file, uint32_t aiv_num, uint32_t ub_size, uint64_t* workspace_size, uint32_t* block_dim) {
     ResLimit limit;
     limit.aiv_num = aiv_num;
     limit.ub_size = ub_size - 256;

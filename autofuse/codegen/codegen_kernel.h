@@ -38,6 +38,7 @@ const Type kIntT{"int"};
 const Type kInt32T{"int32_t"};
 const Type kInt64T{"int64_t"};
 const Type kUint32T{"uint32_t"};
+const Type kUint64T{"uint64_t"};
 const Type kHalfT{"half"};
 const Type kGmAddrT{"GM_ADDR"};
 
@@ -71,6 +72,10 @@ struct GM_ADDR : public Variable {
 
 struct Uint32 : public Variable {
   explicit inline Uint32(const std::string &uint32_name) : Variable(kUint32T, uint32_name) {}
+};
+
+struct Uint64 : public Variable {
+  explicit inline Uint64(const std::string &uint64_name) : Variable(kUint64T, uint64_name) {}
 };
 
 class Axis : public ascir::Axis, public Variable {
@@ -401,7 +406,7 @@ class Kernel {
   std::vector<ascir::TensorId> output_tensors;
   std::vector<ascir::TensorId> constant_tensors;
   std::vector<ascir::TensorId> ub_scalar_tensors;
-  std::vector<Uint32> workspaces;
+  std::vector<Uint64> workspaces;
   std::map<ascir::TensorId, std::string> workspace_tensors;
   std::set<std::pair<std::string, std::string>> pre_api_extract_dup;
 

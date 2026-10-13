@@ -105,9 +105,9 @@ void TilingLib::GenInductorPgoResultProtocol(std::stringstream &ss) const {
 void TilingLib::GenInductorPgoResultTypes(std::stringstream &ss) const {
   ss << R"(
 namespace {
-constexpr char kPgoTopnMagic[] = "AUTOFUSE_PGO_TOPN_V1";
+constexpr char kPgoTopnMagic[] = "AUTOFUSE_PGO_TOPN_V2";
 constexpr size_t kPgoTopnMagicSize = 20U;
-constexpr uint32_t kPgoTopnProtocolVersion = 1U;
+constexpr uint32_t kPgoTopnProtocolVersion = 2U;
 constexpr uint32_t kPgoTopnProtocolFlags = 0U;
 constexpr uint32_t kPgoTopnRecordHeaderSize = 32U;
 constexpr size_t kMaxPgoReprSize = 16U * 1024U * 1024U;
@@ -120,9 +120,9 @@ using GenerateMeasuredTopnSolutionsType = int64_t (*)(
     const std::vector<std::map<std::string, std::string>> &, int64_t,
     std::vector<AutofuseTilingData> &, std::vector<int64_t> &, std::vector<int64_t> &, ResLimit *);
 using InductorPgoProfilingCallback = long int (*)(
-    PgoTensorArgs *, void *, uint32_t, AutofuseTilingData *, double *);
+    PgoTensorArgs *, void *, uint64_t, AutofuseTilingData *, double *);
 using InductorPgoProfilingBatchCallback = long int (*)(
-    PgoTensorArgs *, void *, uint32_t, std::vector<AutofuseTilingDataPerf> *);
+    PgoTensorArgs *, void *, uint64_t, std::vector<AutofuseTilingDataPerf> *);
 using SetTopnPgoContextType = int64_t (*)(
     PgoTensorArgs *, void *, InductorPgoProfilingCallback, InductorPgoProfilingBatchCallback,
     std::vector<AutofuseTilingDataPerf> *);
@@ -158,13 +158,13 @@ uint64_t HashPgoBytes(const void *data, size_t size) {
 }
 
 bool WritePgoRecord(std::ofstream &out, const AutofuseTilingData &tiling_data,
-                    int64_t workspace, int64_t block_dim) {
+                    uint64_t workspace, int64_t block_dim) {
   PgoDsoCallGuard dso_guard;
   if (!dso_guard) { return false; }
   if (get_tiling_data_repr_fn == nullptr) { return false; }
   const std::string repr = get_tiling_data_repr_fn(&tiling_data);
-  if (repr.empty() || repr.size() > kMaxPgoReprSize || workspace < 0 || block_dim <= 0 ||
-      block_dim > UINT32_MAX) {
+  if (repr.empty() || repr.size() > kMaxPgoReprSize ||
+      workspace > static_cast<uint64_t>(INT64_MAX) || block_dim <= 0 || block_dim > UINT32_MAX) {
     return false;
   }
   const uint64_t repr_len = repr.size();
@@ -196,7 +196,8 @@ int WritePgoTopnResult(const std::string &path, const std::vector<AutofuseTiling
     out.close(); std::remove(tmp_path.c_str()); return FAILED;
   }
   for (size_t i = 0; i < tiling_datas.size(); ++i) {
-    if (!WritePgoRecord(out, tiling_datas[i], workspaces[i], block_dims[i])) {
+    if (workspaces[i] < 0 ||
+        !WritePgoRecord(out, tiling_datas[i], static_cast<uint64_t>(workspaces[i]), block_dims[i])) {
       out.close(); std::remove(tmp_path.c_str()); return FAILED;
     }
   }

@@ -54,14 +54,14 @@ void AppendInductorPgoProxyDeclarations(std::stringstream &ss, const std::string
   ss << "}  // namespace inductor_pgo_fallback" << std::endl;
   ss << R"(
 namespace {
-constexpr uint32_t kPgoBundleSchemaVersion = 1U;
+constexpr uint32_t kPgoBundleSchemaVersion = 2U;
 constexpr int64_t kMaxPgoTopn = 1024;
 constexpr size_t kMaxPgoManifestSize = 1024U * 1024U;
 constexpr size_t kMaxPgoArtifactSize = 512U * 1024U * 1024U;
 constexpr size_t kMaxPgoResultSize = 256U * 1024U * 1024U;
 constexpr char kPgoKernelFormat[] = "aicore_binary_elf_v1";
-constexpr char kPgoTopnMagic[] = "AUTOFUSE_PGO_TOPN_V1";
-constexpr uint32_t kPgoTopnProtocolVersion = 1U;
+constexpr char kPgoTopnMagic[] = "AUTOFUSE_PGO_TOPN_V2";
+constexpr uint32_t kPgoTopnProtocolVersion = 2U;
 constexpr uint32_t kPgoTopnRecordHeaderSize = 32U;
 constexpr char kPgoGeneration[] = AUTOFUSE_PGO_GENERATION;
 static_assert(std::is_trivially_copyable<AutofuseTilingData>::value);
@@ -269,23 +269,31 @@ uint64_t HashProxyTiling(const void *data, size_t size) {
       count == 0U || count > static_cast<uint64_t>(topn) || tiling_size != sizeof(AutofuseTilingData) ||
       record_header_size != kPgoTopnRecordHeaderSize) { return false; }
 )";
-  ss << "  std::vector<" << tiling << "> parsed_tilings; std::vector<int64_t> parsed_workspaces;" << std::endl;
+  ss << "  std::vector<" << tiling << "> parsed_tilings; std::vector<uint64_t> parsed_workspaces;" << std::endl;
   ss << R"(  std::vector<int64_t> parsed_block_dims; parsed_tilings.reserve(count);
   for (uint32_t i = 0; i < count; ++i) {
-    uint64_t repr_len = 0; int64_t workspace = 0; int64_t block_dim = 0; uint64_t tiling_hash = 0;
+    uint64_t repr_len = 0; uint64_t workspace = 0; int64_t block_dim = 0; uint64_t tiling_hash = 0;
     AutofuseTilingData tiling_data = {};
     if (!ReadPgoResultValue(data, offset, repr_len) || !ReadPgoResultValue(data, offset, workspace) ||
         !ReadPgoResultValue(data, offset, block_dim) || !ReadPgoResultValue(data, offset, tiling_hash) ||
         !ReadPgoResultValue(data, offset, tiling_data) || repr_len == 0U || repr_len > 16U * 1024U * 1024U ||
-        repr_len > data.size() - offset || workspace < 0 || block_dim <= 0 || block_dim > UINT32_MAX) { return false; }
+        repr_len > data.size() - offset || workspace > static_cast<uint64_t>(INT64_MAX) || block_dim <= 0 ||
+        block_dim > UINT32_MAX) { return false; }
     const std::string repr(reinterpret_cast<const char *>(data.data() + offset), repr_len); offset += repr_len;
+    uint64_t expected_workspace = 0;
     if (HashProxyTiling(&tiling_data, sizeof(tiling_data)) != tiling_hash ||
-        GetTilingDataRepr(&tiling_data) != repr || static_cast<int64_t>(GetWorkspaceSize(tiling_data)) != workspace ||
+        GetTilingDataRepr(&tiling_data) != repr || !GetWorkspaceSize(tiling_data, expected_workspace) ||
+        expected_workspace != workspace ||
         static_cast<int64_t>(tiling_data.get_block_dim()) != block_dim) { return false; }
     parsed_tilings.push_back(tiling_data); parsed_workspaces.push_back(workspace); parsed_block_dims.push_back(block_dim);
   }
   if (offset != data.size()) { return false; }
-  tiling_datas.swap(parsed_tilings); workspaces.swap(parsed_workspaces); block_dims.swap(parsed_block_dims); return true;
+  tiling_datas.swap(parsed_tilings); block_dims.swap(parsed_block_dims);
+  workspaces.resize(parsed_workspaces.size());
+  for (size_t i = 0; i < parsed_workspaces.size(); ++i) {
+    workspaces[i] = static_cast<int64_t>(parsed_workspaces[i]);
+  }
+  return true;
 }
 )";
 }

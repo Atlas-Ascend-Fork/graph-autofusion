@@ -279,7 +279,7 @@ Status SetupOutputBuffers(const RunRequest &request, AclRuntime *runtime, std::v
 }
 
 Status RunTilingSetup(KernelModule *module, const DeviceProfile &profile, std::vector<uint8_t> *tiling_data,
-                      uint32_t *workspace_size, uint32_t *block_dim, double *tiling_us, RunResult *result) {
+                      uint64_t *workspace_size, uint32_t *block_dim, double *tiling_us, RunResult *result) {
   size_t tiling_size = 0;
   const auto tiling_start = std::chrono::steady_clock::now();
   if (module->GetTilingDataSize(&tiling_size) != Status::kOk || tiling_size == 0 ||
@@ -299,10 +299,18 @@ Status RunTilingSetup(KernelModule *module, const DeviceProfile &profile, std::v
   return Status::kOk;
 }
 
-Status SetupWorkspace(uint32_t workspace_size, const DeviceProfile &profile, AclRuntime *runtime,
+Status SetupWorkspace(uint64_t workspace_size, const DeviceProfile &profile, AclRuntime *runtime,
                       TensorBuffer *workspace, RunResult *result) {
-  if ((profile.max_workspace_bytes != 0 && workspace_size > profile.max_workspace_bytes) ||
-      (workspace_size != 0 && workspace->Allocate({{workspace_size}, "uint8"}, runtime) != Status::kOk)) {
+  if (profile.max_workspace_bytes != 0 && workspace_size > profile.max_workspace_bytes) {
+    return Fail(result, Status::kRuntimeError, "workspace", "workspace_size_limit_or_allocation",
+                "workspace size exceeds profile limit or allocation failed");
+  }
+  if (workspace_size > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return Fail(result, Status::kRuntimeError, "workspace", "workspace_size_limit_or_allocation",
+                "workspace size exceeds tensor shape limit");
+  }
+  if (workspace_size != 0 &&
+      workspace->Allocate({{static_cast<int64_t>(workspace_size)}, "uint8"}, runtime) != Status::kOk) {
     return Fail(result, Status::kRuntimeError, "workspace", "workspace_size_limit_or_allocation",
                 "workspace size exceeds profile limit or allocation failed");
   }
@@ -382,7 +390,7 @@ Status FetchAndDecodeOutputs(const RunRequest &request, std::vector<TensorBuffer
 }
 
 Status SummarizeRunPerformance(const RunRequest &request, const std::vector<double> &samples, bool kernel_timing,
-                               bool profiler_available, double tiling_us, uint32_t workspace_size, uint32_t block_dim,
+                               bool profiler_available, double tiling_us, uint64_t workspace_size, uint32_t block_dim,
                                ProfileScope *profiler_scope, RunResult *result) {
   try {
     const bool kernel_timing_used = kernel_timing && !samples.empty();
@@ -498,7 +506,7 @@ Status AscendCBackend::Run(RunRequest &request, RunResult *result) {
     return result->status;
 
   std::vector<uint8_t> tiling_data;
-  uint32_t workspace_size = 0;
+  uint64_t workspace_size = 0;
   uint32_t block_dim = 0;
   double tiling_us = 0.0;
   if (RunTilingSetup(&module, profile_, &tiling_data, &workspace_size, &block_dim, &tiling_us, result) != Status::kOk)

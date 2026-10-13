@@ -1483,7 +1483,9 @@ std::string AxesReorderSolverGen::GenPgoSetTiling() {
     code += "      new_auto_tiling.set_" + Str(mc_args_[i]) + "(item[" +
             std::to_string(i + local_buffer_tiling_vars_.size()) + "]);\n";
   }
-  code += "      SetWorkspaceSize(new_auto_tiling, workspace_map);\n";
+  code += "      if (!SetWorkspaceSize(new_auto_tiling, workspace_map)) {\n";
+  code += "        continue;\n";
+  code += "      }\n";
   code += "      DoApiTiling(new_auto_tiling);\n";
   code += "      GeneralTiling(new_auto_tiling);\n";
   code += GenPgoSetMaxBlockDim();

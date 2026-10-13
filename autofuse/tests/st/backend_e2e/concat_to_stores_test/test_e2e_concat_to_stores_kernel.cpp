@@ -15,7 +15,7 @@
 #include "autofuse_tiling_data.h"
 extern "C" __global__ __aicore__ void concat_to_stores_test(GM_ADDR data0, GM_ADDR data1, GM_ADDR output,
                                                             GM_ADDR workspace, GM_ADDR gm_tiling_data);
-extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint32_t *workspaceSize, uint64_t *blockDim,
+extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint64_t *workspaceSize, uint64_t *blockDim,
                                   uint32_t aiv_num, uint32_t ub_size);
 
 class E2E_BackendConcatToStores_Code : public testing::Test, public testing::WithParamInterface<std::vector<int>> {};
@@ -47,7 +47,7 @@ TEST_P(E2E_BackendConcatToStores_Code, CalculateCorrect) {
   }
 
   // Launch
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
   AutofuseTiling(&tiling_data, &ws_size, &block_dim, 48, 192 * 1024);
   printf("tiling key: %d, core_num: %d\n", tiling_data.graph0_tiling_key, tiling_data.block_dim);
   EXPECT_EQ(tiling_data.graph0_tiling_key, 1U);

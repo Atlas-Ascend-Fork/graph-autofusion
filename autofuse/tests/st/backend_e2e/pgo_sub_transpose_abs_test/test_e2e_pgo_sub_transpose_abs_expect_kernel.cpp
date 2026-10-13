@@ -17,10 +17,10 @@
 ResLimit g_no_limit_res = {1, 10, 0, 192 * 1024, {}};
 extern "C" __global__ __aicore__ void sub_transpose_abs_test(GM_ADDR x1, GM_ADDR x2, GM_ADDR y, GM_ADDR workspace,
                                                              GM_ADDR tiling);
-extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint32_t *workspaceSize, uint64_t *blockDim,
+extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint64_t *workspaceSize, uint64_t *blockDim,
                                   uint32_t aiv_num, uint32_t ub_size);
 
-extern "C" int64_t StubPgoGetProfilingBatch(PgoTensorArgs *tensor_args, void *stream, uint32_t workspaceSize,
+extern "C" int64_t StubPgoGetProfilingBatch(PgoTensorArgs *tensor_args, void *stream, uint64_t workspaceSize,
                                             std::vector<AutofuseTilingDataPerf> *profiles) {
   (void)tensor_args;
   (void)stream;
@@ -36,7 +36,7 @@ extern "C" int64_t StubPgoGetProfilingBatch(PgoTensorArgs *tensor_args, void *st
 static float *g_expect_data = nullptr;
 static int g_test_size = 0;
 
-extern "C" int64_t StubPgoGetProfiling(PgoTensorArgs *tensor_args, void *stream, uint32_t workspaceSize,
+extern "C" int64_t StubPgoGetProfiling(PgoTensorArgs *tensor_args, void *stream, uint64_t workspaceSize,
                                        AutofuseTilingData *tiling_data, double *cost_time) {
   (void)stream;
   (void)workspaceSize;
@@ -124,7 +124,7 @@ class E2E_BackendSubTransposeAbs_Code : public testing::Test, public testing::Wi
 };
 
 TEST_P(E2E_BackendSubTransposeAbs_Code, PgoByCoreNum) {
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
   PgoTensorArgPack tensor_args(input1, input2, y);
   int result = RunPgoTilingSearch(std::filesystem::path(__FILE__), &tiling_data, &ws_size, &block_dim, &g_no_limit_res,
                                   &tensor_args.tensor_args, StubPgoGetProfiling, StubPgoGetProfilingBatch);
@@ -133,7 +133,7 @@ TEST_P(E2E_BackendSubTransposeAbs_Code, PgoByCoreNum) {
 
 TEST_P(E2E_BackendSubTransposeAbs_Code, PgoByFilter) {
   GTEST_SKIP() << "pgo pruning path is unstable in this build";
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
   PgoTensorArgPack tensor_args(input1, input2, y);
   int result = RunPgoTilingSearchWithPruning(std::filesystem::path(__FILE__), &tiling_data, &ws_size, &block_dim,
                                              &g_no_limit_res, &tensor_args.tensor_args, StubPgoGetProfiling,

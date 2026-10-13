@@ -51,6 +51,25 @@ constexpr uint64_t kInt64TilingKeyCapacity = static_cast<uint64_t>(std::numeric_
 // fp32且K轴不小于该阈值且未启用hf32时, CV融合UB模板存在精度问题, 需走common兜底模板
 constexpr int64_t kFp32LargeKThreshold = 2048;
 
+std::string GenWorkspaceCheckedHelpers() {
+  std::stringstream ss;
+  ss << "inline bool CheckedWorkspaceAdd(uint64_t lhs, uint64_t rhs, uint64_t &result) {\n"
+     << "  return !__builtin_add_overflow(lhs, rhs, &result);\n"
+     << "}\n"
+     << "inline bool CheckedWorkspaceAlign(uint64_t size, uint64_t alignment, uint64_t &result) {\n"
+     << "  if (alignment == 0U) {\n"
+     << "    return false;\n"
+     << "  }\n"
+     << "  uint64_t aligned = 0U;\n"
+     << "  if (__builtin_add_overflow(size, alignment - 1U, &aligned)) {\n"
+     << "    return false;\n"
+     << "  }\n"
+     << "  result = aligned / alignment * alignment;\n"
+     << "  return true;\n"
+     << "}\n";
+  return ss.str();
+}
+
 std::string GenUint64Literal(uint64_t value) {
   return std::to_string(value) + (value >= kInt64TilingKeyCapacity ? "ULL" : "");
 }
@@ -83,12 +102,17 @@ void GenInductorCvSafetyFallback(std::stringstream &ss, uint64_t count, const st
   ss << indent << "const bool is_cv_safety_mix = is_cv_safety_mix_mode(cube_tiling_key);" << std::endl;
   ss << indent << "const bool use_launch_aic_num = is_cv_safety_blockidx_scheduled_mode(cube_tiling_key);" << std::endl;
   ss << indent << "uint32_t vec_block_dim = tiling->tiling_data.get_block_dim();" << std::endl;
-  ss << indent << "int64_t vec_wss = GetWorkspaceSize(tiling->tiling_data);" << std::endl;
+  ss << indent << "uint64_t vec_wss = 0U;" << std::endl;
+  ss << indent << "if (!GetWorkspaceSize(tiling->tiling_data, vec_wss)) {" << std::endl;
+  ss << indent << "  return -1;" << std::endl;
+  ss << indent << "}" << std::endl;
   ss << indent
      << "*blockDim = is_cv_safety_aiv_only ? vec_block_dim : "
         "((cube_block_dim * 2 < vec_block_dim) ? (vec_block_dim + 1) / 2 : cube_block_dim);"
      << std::endl;
-  ss << indent << "*workspaceSize = vec_wss + ws_size;" << std::endl;
+  ss << indent << "if (!CheckedWorkspaceAdd(vec_wss, static_cast<uint64_t>(ws_size), *workspaceSize)) {" << std::endl;
+  ss << indent << "  return -1;" << std::endl;
+  ss << indent << "}" << std::endl;
   ss << indent << "tiling->cv_tiling_data.fusion_mode = 1;" << std::endl;
   ss << indent << "tiling->cv_tiling_data.ub_mode = 0;" << std::endl;
   ss << indent << "tiling->cv_tiling_data.mix_mode = is_cv_safety_aiv_only ? 2 : (is_cv_safety_mix ? 1 : 0);"
@@ -505,7 +529,7 @@ void GenWorkspaceDenominatorGuards(std::stringstream &ss, const af::Expression &
     ss << indent << "if (" << symbol << " <= 0) {" << std::endl;
     ss << indent << "  OP_LOGW(OP_NAME, \"Invalid workspace denominator " << symbol << "=%lf.\", static_cast<double>("
        << symbol << "));" << std::endl;
-    ss << indent << "  return ws_size;" << std::endl;
+    ss << indent << "  return false;" << std::endl;
     ss << indent << "}" << std::endl;
   }
 }
@@ -748,7 +772,7 @@ std::string TilingLib::GetStubTilingHeaders(const ascir::FusedScheduledResult &f
     ss << "bool PGOSearchTilingKey(std::vector<AutofuseTilingDataPerf>& tiling_data_list, "
        << "AutofuseTilingData &tiling_data, int32_t tilingCaseId, AutofuseTilingData* output_tiling_data, "
        << PGOSearchFuncInputOutputCallBackDef(fused_schedule_result)
-       << "void* stream, uint32_t workspaceSize, double& out_best_perf, "
+       << "void* stream, uint64_t workspaceSize, double& out_best_perf, "
        << "std::unordered_map<int64_t, uint64_t> &workspace_map, "
        << "std::vector<uint32_t*> block_dim_vec={}, const SearchConfig *search_cfg=nullptr) {" << std::endl;
     ss << "  return true;" << std::endl;
@@ -776,7 +800,7 @@ std::string TilingLib::GetStubTilingApi(const ascir::FusedScheduledResult &fused
       "std::vector<AutofuseTilingDataPerf> &tiling_data_list, AutofuseTilingData &tiling_data, "
       "int32_t tiling_case_id, AutofuseTilingData *output_tiling_data, " +
       PGOSearchFuncInputOutputCallBackDef(fused_schedule_result) +
-      "void *stream, uint32_t workspace_size, double &out_best_perf";
+      "void *stream, uint64_t workspace_size, double &out_best_perf";
   ss << "inline bool PGOSearchTilingKey(" << common_params
      << ", std::unordered_map<int64_t, uint64_t> &workspace_map, "
         "std::vector<uint32_t *> block_dim_vec = {}, const SearchConfig *search_cfg = nullptr) {\n";
@@ -1001,21 +1025,35 @@ std::string TilingLib::GenImplGraphWorkspaceSize(const ascir::ImplGraph &graph, 
      << std::endl;
   ws_size = ascgen_utils::CalculateWorkspaceSize(ws_nodes);
   std::vector<af::Expression> ori_symbols = ws_size.FreeSymbols();
-  std::vector<std::pair<af::Expression, af::Expression>> sizes;
+  std::vector<std::pair<af::Expression, std::string>> symbol_tiling_vars;
   for (auto &ori : ori_symbols) {
     if (!(ori.IsConstExpr())) {
-      std::string tiling_var = tiling_data + "." + af::SymbolicUtils::ToString(ori);
-      af::Expression tiling_sizevar = af::Symbol(tiling_var.c_str());
+      const std::string tiling_var = tiling_data + "." + af::SymbolicUtils::ToString(ori);
       GELOGD("GenImplGraphWorkspaceSize make tiling var set[%s:%s]", af::SymbolicUtils::ToString(ori).c_str(),
              tiling_var.c_str());
-      sizes.emplace_back(std::make_pair(ori, tiling_sizevar));
+      symbol_tiling_vars.emplace_back(ori, tiling_var);
     }
   }
+
+  std::vector<std::pair<af::Expression, af::Expression>> sizes;
+  for (size_t i = 0UL; i < symbol_tiling_vars.size(); i++) {
+    const auto &symbol_tiling_var = symbol_tiling_vars[i];
+    const std::string local_var = "workspace_size_symbol_" + std::to_string(i);
+    // Workspace formulas multiply uint32_t tiling fields. Promote them before Max and arithmetic to avoid
+    // intermediate uint32_t overflow.
+    ss << "      const uint64_t " << local_var << " = static_cast<uint64_t>(" << symbol_tiling_var.second << ");"
+       << std::endl;
+    sizes.emplace_back(symbol_tiling_var.first, af::Symbol(local_var.c_str()));
+  }
+
   af::Expression replaced_ws_size = ws_size.Replace(sizes);
   std::string ws_size_str = af::SymbolicUtils::ToString(replaced_ws_size);
 
   GenWorkspaceDenominatorGuards(ss, replaced_ws_size, "      ");
-  ss << "      ws_size += " << ws_size_str << ";" << std::endl;
+  ss << "      if (!CheckedWorkspaceAdd(ws_size, " << ws_size_str << ", ws_size)) {" << std::endl;
+  ss << "        OP_LOGE(OP_NAME, \"Workspace size add overflow.\");" << std::endl;
+  ss << "        return false;" << std::endl;
+  ss << "      }" << std::endl;
   ss << "    }" << std::endl;
   return ss.str();
 }
@@ -1027,12 +1065,13 @@ std::string TilingLib::GenGetWorkspaceSizeFunc(const std::string &tiling,
   std::unordered_map<std::string, std::string> ori_sym_tiling_map;
   TilingMappingSymbolToTiling(fused_schedule_result, ori_sym_tiling_map);
 
-  ss << "uint32_t GetWorkspaceSize(const " << tiling << " &t) {" << std::endl;
+  ss << GenWorkspaceCheckedHelpers();
+  ss << "bool GetWorkspaceSize(const " << tiling << " &t, uint64_t &workspace_size) {" << std::endl;
 
   if (!ascgen_utils::IsJustCubeFixpip(fused_schedule_result)) {
     ss << "  using namespace optiling;" << std::endl;
   }
-  ss << "  uint32_t ws_size = 0;" << std::endl;
+  ss << "  uint64_t ws_size = 0;" << std::endl;
   for (size_t graph_id = 0; graph_id < fused_schedule_result.node_idx_to_scheduled_results.size(); graph_id++) {
     auto scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[graph_id];
     if ((fused_schedule_result.node_idx_to_scheduled_results.size() == 1) && (scheduled_results.size() == 1) &&
@@ -1060,8 +1099,12 @@ std::string TilingLib::GenGetWorkspaceSizeFunc(const std::string &tiling,
   }
 
   ss << std::endl;
-  ss << "  ws_size = (ws_size + 512 - 1) / 512 * 512;" << std::endl;
-  ss << "  return ws_size;" << std::endl;
+  ss << "  if (!CheckedWorkspaceAlign(ws_size, 512U, ws_size)) {" << std::endl;
+  ss << "    OP_LOGE(OP_NAME, \"Workspace size align overflow.\");" << std::endl;
+  ss << "    return false;" << std::endl;
+  ss << "  }" << std::endl;
+  ss << "  workspace_size = ws_size;" << std::endl;
+  ss << "  return true;" << std::endl;
   ss << "}" << std::endl;
 
   return ss.str();
@@ -1191,7 +1234,12 @@ std::string TilingLib::GenCubeFusionTilingBodyInductor(const ascir::FusedSchedul
 
   GenInductorGetTilingBranch(ss, count, cube_info.type_size);
   ss << "  *blockDim = cube_block_dim;" << std::endl;
-  ss << "  *workspaceSize = GetWorkspaceSize(tiling->tiling_data) + ws_size;" << std::endl;
+  ss << "  uint64_t vector_workspace_size = 0U;" << std::endl;
+  ss << "  if (!GetWorkspaceSize(tiling->tiling_data, vector_workspace_size) ||" << std::endl;
+  ss << "      !CheckedWorkspaceAdd(vector_workspace_size, static_cast<uint64_t>(ws_size), *workspaceSize)) {"
+     << std::endl;
+  ss << "    return -1;" << std::endl;
+  ss << "  }" << std::endl;
   ss << "  return 0;" << std::endl;
   ss << "}" << std::endl;
   return ss.str();
@@ -1289,7 +1337,9 @@ std::string TilingLib::GenPlainInductorTilingTail(const ascir::FusedScheduledRes
   ss << "  if (!optiling::GetTiling(*tiling, -1, nullptr)) {return -1;}" << std::endl;
   ss << "  *blockDim = tiling->get_block_dim();" << std::endl;  // Only consider 48 for now
   ss << "  using namespace optiling;" << std::endl;
-  ss << "  *workspaceSize = GetWorkspaceSize(*tiling);" << std::endl;
+  ss << "  if (!GetWorkspaceSize(*tiling, *workspaceSize)) {" << std::endl;
+  ss << "    return -1;" << std::endl;
+  ss << "  }" << std::endl;
   ss << std::endl;
   ss << "  return 0;" << std::endl;
   ss << "}" << std::endl;
@@ -1326,9 +1376,9 @@ std::string TilingLib::GenTilingFuncForInductor(const ascir::FusedScheduledResul
   ss << "extern \"C\" int64_t " << func << "(";
   ss << pgo_shape_dim.shape_dim_def.str();
   if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result)) {
-    ss << "CVAutofuseTilingData* tiling, uint32_t* workspaceSize, uint32_t *blockDim,";
+    ss << "CVAutofuseTilingData* tiling, uint64_t* workspaceSize, uint32_t *blockDim,";
   } else {
-    ss << tiling << "* tiling, uint32_t* workspaceSize, uint32_t *blockDim,";
+    ss << tiling << "* tiling, uint64_t* workspaceSize, uint32_t *blockDim,";
   }
   ss << " ResLimit *res_limit = nullptr)" << std::endl;
   ss << "{" << std::endl;
@@ -1369,7 +1419,7 @@ std::string TilingLib::GenTilingFunc(const std::map<std::string, std::string> &s
   // AutofuseTiling
   ss << "extern \"C\" int64_t " << func << "(";
   ss << pgo_shape_dim.shape_dim_def.str();
-  ss << tiling << "* tiling, uint32_t* workspaceSize, uint32_t *blockDim,";
+  ss << tiling << "* tiling, uint64_t* workspaceSize, uint32_t *blockDim,";
   ss << " uint32_t aiv_num, uint32_t ub_size)" << std::endl;
   ss << "{" << std::endl;
 
@@ -1384,8 +1434,10 @@ std::string TilingLib::GenTilingFunc(const std::map<std::string, std::string> &s
     ss << "  }" << std::endl;
   }
   ss << "  *blockDim = tiling->get_block_dim();" << std::endl;  // Only consider 48 for now
-  ss << "  *workspaceSize = GetWorkspaceSize(*tiling);" << std::endl;
-  ss << "  *workspaceSize += 16 * 1024 * 1024;" << std::endl;
+  ss << "  if (!GetWorkspaceSize(*tiling, *workspaceSize) ||" << std::endl;
+  ss << "      !CheckedWorkspaceAdd(*workspaceSize, 16ULL * 1024ULL * 1024ULL, *workspaceSize)) {" << std::endl;
+  ss << "    return -1;" << std::endl;
+  ss << "  }" << std::endl;
   ss << std::endl;
 
   ss << "  return 0;" << std::endl;
@@ -1572,13 +1624,18 @@ static void AppendCubeFusionUbModeCode(std::stringstream &ss) {
   ss << "    // Subtract 2 from tiling_key because case 0/1 are reserved for CV UB normal/fallback tiling."
      << std::endl;
   ss << "    uint32_t vec_block_dim = tiling_data->tiling_data.get_block_dim();" << std::endl;
-  ss << "    uint32_t vec_wss = GetWorkspaceSize(tiling_data->tiling_data);" << std::endl;
+  ss << "    uint64_t vec_wss = 0U;" << std::endl;
+  ss << "    if (!GetWorkspaceSize(tiling_data->tiling_data, vec_wss)) {return ge::GRAPH_FAILED;}" << std::endl;
+  ss << "    uint64_t total_workspace_size = 0U;" << std::endl;
+  ss << "    if (!CheckedWorkspaceAdd(vec_wss, static_cast<uint64_t>(ws_size), total_workspace_size)) {return "
+        "ge::GRAPH_FAILED;}"
+     << std::endl;
   ss << "    uint32_t new_block_dim = (cube_block_dim * 2 < vec_block_dim) ? (vec_block_dim + 1) / 2 : cube_block_dim;"
      << std::endl;
   ss << "    const bool is_cv_safety_mix = is_cv_safety_mix_mode(cube_tiling_key);" << std::endl;
   ss << "    const bool use_launch_aic_num = is_cv_safety_blockidx_scheduled_mode(cube_tiling_key);" << std::endl;
   ss << "    context->SetBlockDim(new_block_dim);" << std::endl;
-  ss << "    *context->GetWorkspaceSizes(1) = vec_wss + ws_size;" << std::endl;
+  ss << "    *context->GetWorkspaceSizes(1) = static_cast<int64_t>(total_workspace_size);" << std::endl;
   ss << "    tiling_data->cv_tiling_data.fusion_mode = 1;" << std::endl;
   ss << "    tiling_data->cv_tiling_data.ub_mode = 0;" << std::endl;
   ss << "    tiling_data->cv_tiling_data.mix_mode = is_cv_safety_mix ? 1 : 0;" << std::endl;
@@ -1707,7 +1764,7 @@ std::string TilingLib::GenExternTilingFuncBody(const ascir::FusedScheduledResult
   ss << "  auto input_data_num =  extend_context->GetInputValue<size_t>(0U);" << std::endl;
   ss << "  auto parse = extend_context->GetInputValue<AfTilingParseData*>(input_data_num + 1);" << std::endl;
   ss << shape_dim_def.str();
-  ss << "  uint32_t workspace_size;" << std::endl << "  uint32_t block_dim;" << std::endl;
+  ss << "  uint64_t workspace_size;" << std::endl << "  uint32_t block_dim;" << std::endl;
   if (enable_autofuse_pgo_) {
     ss << "  static const char* config_file = \"" << pgo_dir << "/" << graph_name << "_config.txt\";" << std::endl;
   } else {

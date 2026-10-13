@@ -16,7 +16,7 @@
 extern "C" __global__ __aicore__ void load_pow_all_input_is_scalar_store_test(GM_ADDR scalar1, GM_ADDR scalar2,
                                                                               GM_ADDR output, GM_ADDR workspace,
                                                                               GM_ADDR gm_tiling_data);
-extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint32_t *workspaceSize, uint32_t *blockDim,
+extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim,
                                   uint32_t aiv_num, uint32_t ub_size);
 
 class E2E_LoadPowAllInputIsScalarStore_Code : public testing::Test,
@@ -43,7 +43,7 @@ TEST_P(E2E_LoadPowAllInputIsScalarStore_Code, CalculateCorrect) {
   }
 
   // Launch
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
   AutofuseTiling(&tiling_data, &ws_size, &block_dim, 48, 192 * 1024);
   printf("tiling key: %d, core_num: %d\n", tiling_data.tiling_key, tiling_data.block_dim);
 

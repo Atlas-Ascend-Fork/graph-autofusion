@@ -10,6 +10,8 @@
 
 #include <string>
 #include <cstring>
+#include <cinttypes>
+#include <cstdint>
 #include "graph/types_af.h"
 #include "experiment/mmpa/mmpa_api.h"
 #include "acl/acl.h"
@@ -100,12 +102,12 @@ class AutofuseKernelInfo {
   int32_t Init(void *stream, const std::string &config_path);
   int32_t LoadSoHandles();
   int32_t ParseTaskRunParam();
-  int32_t DoTiling(std::unique_ptr<uint8_t[]> &tiling_data_holder, uint32_t &workspace_size);
+  int32_t DoTiling(std::unique_ptr<uint8_t[]> &tiling_data_holder, uint64_t &workspace_size);
   int32_t Distribute(uint64_t *tiling_data);
   size_t &GetTilingSize() {
     return tiling_size_;
   }
-  int32_t MallocWorkSpace(uint32_t &size);
+  int32_t MallocWorkSpace(uint64_t &size);
   int32_t SetGraphNameSnake(const std::string &name_snake) {
     graph_name_snake_ = name_snake;
   }

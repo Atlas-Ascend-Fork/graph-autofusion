@@ -14,7 +14,7 @@
 #include "autofuse_tiling_data.h"
 extern "C" __global__ __aicore__ void load_unalign_pad_test(GM_ADDR x1, GM_ADDR x2, GM_ADDR y1, GM_ADDR workspace,
                                                             GM_ADDR tiling);
-extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint32_t *workspaceSize, uint64_t *blockDim,
+extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint64_t *workspaceSize, uint64_t *blockDim,
                                   uint32_t aiv_num, uint32_t ub_size);
 
 class E2E_BackendLoadUnalignPad_Code : public testing::Test, public testing::WithParamInterface<std::vector<int>> {};
@@ -41,7 +41,7 @@ TEST_P(E2E_BackendLoadUnalignPad_Code, CalculateCorrect) {
   }
 
   // Launch
-  uint32_t ws_size = 0;
+  uint64_t ws_size = 0;
   AutofuseTiling(&tiling_data, &ws_size, &block_dim, 48, 192 * 1024);
 
   printf("tiling key: %d, core_num: %d\n", tiling_data.tiling_key, tiling_data.block_dim);

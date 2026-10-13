@@ -3815,6 +3815,9 @@ TEST(CodegenKernel, TwoWorkspaceCodegen) {
 
   codegen::Kernel kernel(graph.GetName());
   codegen::Kernel::ParseGraph(graph, fused_schedule_result, kernel);
+  ASSERT_EQ(kernel.workspaces.size(), 2UL);
+  EXPECT_EQ(kernel.workspaces[0].AsArg(), "uint64_t workspace1");
+  EXPECT_EQ(kernel.workspaces[1].AsArg(), "uint64_t workspace2");
   std::string result;
   kernel.GlobalTensorInit(result);
   EXPECT_EQ(result,

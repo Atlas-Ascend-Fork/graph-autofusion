@@ -1025,7 +1025,7 @@ TEST_F(TestGenModelInfo, gen_workspace_with_tensor_id) {
   CombineTilings(tiling_funcs, tiling_func);
   // 选中新候选时先清空本子图全部 workspace 占用，再直接写入当前候选的 size（无复用场景不做 max）
   EXPECT_NE(tiling_func.find("tiling_data.set_workspace0(0U);"), std::string::npos);
-  EXPECT_NE(tiling_func.find("tiling_data.set_workspace0(static_cast<uint32_t>(it0->second));"), std::string::npos);
+  EXPECT_NE(tiling_func.find("tiling_data.set_workspace0(it0->second);"), std::string::npos);
   EXPECT_EQ(tiling_func.find("std::max(tiling_data.get_workspace0()"), std::string::npos);
 }
 

@@ -65,7 +65,7 @@ std::string GenDenominatorGuard(const std::set<std::string> &denominator_symbols
   for (const auto &symbol : denominator_symbols) {
     guard_code += "    if (" + symbol + " <= 0) {\n";
     guard_code += "      OP_LOGW(OP_NAME, \"Invalid workspace denominator " + symbol + "=%lf.\", " + symbol + ");\n";
-    guard_code += "      return;\n";
+    guard_code += "      return false;\n";
     guard_code += "    }\n";
   }
   return guard_code;

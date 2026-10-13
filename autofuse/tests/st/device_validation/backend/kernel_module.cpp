@@ -103,7 +103,7 @@ Status KernelModule::GetTilingDataSize(size_t *size) {
   return Status::kOk;
 }
 
-Status KernelModule::RunTiling(void *tiling_data, uint32_t *workspace_size, uint32_t *block_dim, void *extra) {
+Status KernelModule::RunTiling(void *tiling_data, uint64_t *workspace_size, uint32_t *block_dim, void *extra) {
   if (tiling_ == nullptr || tiling_data == nullptr || workspace_size == nullptr || block_dim == nullptr)
     return Status::kInvalidArgument;
   return tiling_(tiling_data, workspace_size, block_dim, extra) == ge::GRAPH_SUCCESS ? Status::kOk

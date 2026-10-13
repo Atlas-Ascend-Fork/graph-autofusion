@@ -420,10 +420,10 @@ std::string TilingLib::PGOProfilingCallbackDef(const ascir::FusedScheduledResult
   ss << PGOTensorArgsDef();
   ss << "typedef long int (*ProfilingCallback)(";
   ss << PGOSearchFuncInputOutputCallBackDef(fused_schedule_result);
-  ss << "void *stream, uint32_t workspaceSize, " << tiling << " *tiling_data, double *cost_time);" << std::endl;
+  ss << "void *stream, uint64_t workspaceSize, " << tiling << " *tiling_data, double *cost_time);" << std::endl;
   ss << "typedef long int (*ProfilingBatchCallback)(";
   ss << PGOSearchFuncInputOutputCallBackDef(fused_schedule_result);
-  ss << "void *stream, uint32_t workspaceSize, std::vector<AutofuseTilingDataPerf> *profiles);" << std::endl;
+  ss << "void *stream, uint64_t workspaceSize, std::vector<AutofuseTilingDataPerf> *profiles);" << std::endl;
   AppendPgoConfigDef(ss);
   ss << std::endl;
 

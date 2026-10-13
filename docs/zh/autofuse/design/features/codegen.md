@@ -131,6 +131,8 @@ for (int z0Tb = 0; z0Tb < z0Tb_loop_size; z0Tb++) {
 
 总体而言，Codegen 是依据 ImplGraph 生成 kernel 代码的，但要持续提升 kernel 代码的性能，仍需在 Codegen 框架优化和 API 内部优化两方面不断挖掘。
 
+workspace 字节数与字节偏移均使用 `uint64_t`，单块超过 2 GiB、累计超过 4 GiB 时不会截断。直接 tiling ABI 使用 `uint64_t *workspace_size`；Host 侧累加与 512B 对齐使用受检计算，溢出时返回失败。非 Inductor 直接 tiling 在累计 workspace 后保留既有 16 MiB reserved workspace 语义。
+
 ## 相关链接
 
 - 返回 [AutoFuse 架构介绍](../../introduction/architecture.md)
