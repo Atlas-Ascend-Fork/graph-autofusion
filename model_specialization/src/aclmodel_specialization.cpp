@@ -26,11 +26,13 @@
 using model_spec::AclSpecOptimizer;
 using model_spec::FeatureManager;
 
-aclError aclmdlRISpecOptimize(aclmdlRI modelRI, aclmdlRISpecOptions *options) {
+namespace {
+aclError OptimizeModelImpl(aclmdlRI modelRI, aclmdlRISpecOptions *options, bool isScopeJit) {
+  const char *apiName = isScopeJit ? "aclmdlRISpecOptimizeByFlag" : "aclmdlRISpecOptimize";
   try {
     FeatureManager featureManager;
-    if (!featureManager.Init(options)) {
-      SK_DLOGE("aclmdlRISpecOptimize invalid configuration: model=%p", modelRI);
+    if (!featureManager.Init(options, isScopeJit)) {
+      SK_DLOGE("%s invalid configuration: model=%p", apiName, modelRI);
       return ACL_ERROR_INVALID_PARAM;
     }
     AclSpecOptimizer optimizer;
@@ -40,24 +42,23 @@ aclError aclmdlRISpecOptimize(aclmdlRI modelRI, aclmdlRISpecOptions *options) {
     }
     return optimizer.Optimize(modelRI, featureManager);
   } catch (const std::bad_alloc &) {
-    SK_DLOGE("aclmdlRISpecOptimize allocation exception: model=%p", modelRI);
+    SK_DLOGE("%s allocation exception: model=%p", apiName, modelRI);
     return ACL_ERROR_BAD_ALLOC;
   } catch (const std::length_error &) {
-    SK_DLOGE("aclmdlRISpecOptimize length exception: model=%p", modelRI);
+    SK_DLOGE("%s length exception: model=%p", apiName, modelRI);
     return ACL_ERROR_BAD_ALLOC;
   } catch (const std::invalid_argument &) {
-    SK_DLOGE("aclmdlRISpecOptimize invalid argument exception: model=%p", modelRI);
+    SK_DLOGE("%s invalid argument exception: model=%p", apiName, modelRI);
     return ACL_ERROR_INVALID_PARAM;
   } catch (const std::exception &error) {
-    SK_DLOGE("aclmdlRISpecOptimize exception: model=%p reason=%s", modelRI, error.what());
+    SK_DLOGE("%s exception: model=%p reason=%s", apiName, modelRI, error.what());
     return ACL_ERROR_FAILURE;
   } catch (...) {
-    SK_DLOGE("aclmdlRISpecOptimize unknown exception: model=%p", modelRI);
+    SK_DLOGE("%s unknown exception: model=%p", apiName, modelRI);
     return ACL_ERROR_FAILURE;
   }
 }
 
-namespace {
 aclError SpecScopeEntry(aclrtStream stream, model_spec::SpecScopeMarkerKind kind) {
   const char *apiName =
       kind == model_spec::SpecScopeMarkerKind::Begin ? "aclmdlRISpecScopeBegin" : "aclmdlRISpecScopeEnd";
@@ -81,6 +82,14 @@ aclError SpecScopeEntry(aclrtStream stream, model_spec::SpecScopeMarkerKind kind
   }
 }
 }  // namespace
+
+aclError aclmdlRISpecOptimize(aclmdlRI modelRI, aclmdlRISpecOptions *options) {
+  return OptimizeModelImpl(modelRI, options, false);
+}
+
+aclError aclmdlRISpecOptimizeByFlag(aclmdlRI modelRI, aclmdlRISpecOptions *options) {
+  return OptimizeModelImpl(modelRI, options, true);
+}
 
 aclError aclmdlRISpecScopeBegin(aclrtStream stream) {
   return SpecScopeEntry(stream, model_spec::SpecScopeMarkerKind::Begin);

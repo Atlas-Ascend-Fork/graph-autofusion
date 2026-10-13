@@ -27,6 +27,12 @@
 #include "aclmodel_specialization.h"
 #include "ut_common_stubs.h"
 #include <mockcpp/mockcpp.hpp>
+#include <mockcpp/mokc.h>
+#include <mockcpp/ApiHook.h>
+#include <new>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -1066,5 +1072,128 @@ TEST_F(AclSpecOptimizerCollectionTest, ZeroSizeNullArgsAndParameterQueryFailureA
   EXPECT_EQ(Collect(), ACL_SUCCESS);
   EXPECT_TRUE(requests.empty());
 }
+
+namespace {
+using OptimizeEntry = aclError (*)(aclmdlRI, aclmdlRISpecOptions *);
+OptimizeEntry GetOptimizeEntry(bool isScopeJit) {
+  return isScopeJit ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
+}
+
+std::vector<std::pair<aclmdlRI, bool>> entryModes;
+aclError InspectEntryMode(AclSpecOptimizer *, aclmdlRI model, const FeatureManager &manager) {
+  entryModes.emplace_back(model, manager.Get<Feature::IS_SCOPE_JIT>());
+  return ACL_SUCCESS;
+}
+
+class AclSpecOptimizerEntryTest : public testing::TestWithParam<bool> {
+ protected:
+  void SetUp() override {
+    SkUtResetTestControls();
+    entryModes.clear();
+  }
+  void TearDown() override {
+    GlobalMockObject::verify();
+    SkUtResetTestControls();
+  }
+};
+
+TEST_P(AclSpecOptimizerEntryTest, PassesModeWithoutLeakingBetweenModels) {
+  MOCKER_CPP(&AclSpecOptimizer::Optimize).stubs().will(invoke(InspectEntryMode));
+  int first = 0;
+  int second = 0;
+  int third = 0;
+  int fourth = 0;
+  EXPECT_EQ(GetOptimizeEntry(GetParam())(&first, nullptr), ACL_SUCCESS);
+  EXPECT_EQ(GetOptimizeEntry(!GetParam())(&second, nullptr), ACL_SUCCESS);
+  EXPECT_EQ(GetOptimizeEntry(!GetParam())(&third, nullptr), ACL_SUCCESS);
+  EXPECT_EQ(GetOptimizeEntry(GetParam())(&fourth, nullptr), ACL_SUCCESS);
+  EXPECT_EQ(entryModes,
+            (std::vector<std::pair<aclmdlRI, bool>>{
+                {&first, GetParam()}, {&second, !GetParam()}, {&third, !GetParam()}, {&fourth, GetParam()}}));
+}
+
+TEST_P(AclSpecOptimizerEntryTest, RejectsConfigurationBeforeInitializingModel) {
+  MOCKER_CPP(&AclSpecOptimizer::Init).expects(never());
+  MOCKER_CPP(&AclSpecOptimizer::Optimize).expects(never());
+  aclmdlRISpecOptions options{};
+  options.specCompileOptionCount = 1;
+  int model = 0;
+  EXPECT_EQ(GetOptimizeEntry(GetParam())(nullptr, &options), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(GetOptimizeEntry(GetParam())(&model, &options), ACL_ERROR_INVALID_PARAM);
+}
+
+TEST_P(AclSpecOptimizerEntryTest, PropagatesInitializationErrorWithoutOptimizing) {
+  MOCKER_CPP(&AclSpecOptimizer::Optimize).expects(never());
+  SkUtSetAclmdlRIGetIdRet(ACL_ERROR_BAD_ALLOC);
+  int model = 0;
+  EXPECT_EQ(GetOptimizeEntry(GetParam())(&model, nullptr), ACL_ERROR_BAD_ALLOC);
+}
+
+TEST_P(AclSpecOptimizerEntryTest, RejectsNullModelWithValidConfiguration) {
+  MOCKER_CPP(&AclSpecOptimizer::Optimize).expects(never());
+  aclmdlRISpecOptions options{};
+  EXPECT_EQ(GetOptimizeEntry(GetParam())(nullptr, &options), ACL_ERROR_INVALID_PARAM);
+}
+
+TEST_P(AclSpecOptimizerEntryTest, PropagatesOptimizationError) {
+  MOCKER_CPP(&AclSpecOptimizer::Optimize).expects(once()).will(returnValue(ACL_ERROR_INVALID_PARAM));
+  int model = 0;
+  EXPECT_EQ(GetOptimizeEntry(GetParam())(&model, nullptr), ACL_ERROR_INVALID_PARAM);
+}
+
+INSTANTIATE_TEST_SUITE_P(PublicEntries, AclSpecOptimizerEntryTest, testing::Bool());
+
+int entryException = 0;
+aclError ThrowEntryException(const AclSpecOptimizer *, aclmdlRI, const FeatureManager &) {
+  switch (entryException) {
+    case 0:
+      throw std::bad_alloc();
+    case 1:
+      throw std::length_error("entry test");
+    case 2:
+      throw std::invalid_argument("entry test");
+    case 3:
+      throw std::runtime_error("entry test");
+    default:
+      throw 1;
+  }
+}
+
+aclError ThrowInitEntryException(AclSpecOptimizer *optimizer, aclmdlRI model) {
+  return ThrowEntryException(optimizer, model, FeatureManager());
+}
+
+class AclSpecOptimizerEntryExceptionTest : public testing::TestWithParam<std::tuple<bool, int, bool>> {
+ protected:
+  void SetUp() override {
+    SkUtResetTestControls();
+  }
+  void TearDown() override {
+    GlobalMockObject::verify();
+    SkUtResetTestControls();
+  }
+};
+
+TEST_P(AclSpecOptimizerEntryExceptionTest, ConvertsExceptionAtPublicBoundary) {
+  entryException = std::get<1>(GetParam());
+  // ChainableMockMethod catches std::exception and converts it to a mock failure.
+  // A direct RAII hook preserves the exception type for the public API boundary.
+  const bool failInit = std::get<2>(GetParam());
+  if (failInit) {
+    MOCKER_CPP(&AclSpecOptimizer::Optimize).expects(never());
+  }
+  mockcpp::ApiHook hook(failInit ? mockcpp::Details::methodToAddr(&AclSpecOptimizer::Init)
+                                 : mockcpp::Details::methodToAddr(&AclSpecOptimizer::Optimize),
+                        failInit ? reinterpret_cast<const void *>(&ThrowInitEntryException)
+                                 : reinterpret_cast<const void *>(&ThrowEntryException));
+  const std::array<aclError, 5> expected{ACL_ERROR_BAD_ALLOC, ACL_ERROR_BAD_ALLOC, ACL_ERROR_INVALID_PARAM,
+                                         ACL_ERROR_FAILURE, ACL_ERROR_FAILURE};
+  int model = 0;
+  EXPECT_EQ(GetOptimizeEntry(std::get<0>(GetParam()))(&model, nullptr), expected[entryException]);
+}
+
+INSTANTIATE_TEST_SUITE_P(PublicEntries, AclSpecOptimizerEntryExceptionTest,
+                         testing::Combine(testing::Bool(), testing::Range(0, 5), testing::Bool()));
+}  // namespace
 
 }  // namespace model_spec

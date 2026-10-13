@@ -19,12 +19,13 @@ void InitModelLevelOptions(const aclmdlRISpecOptions *options, uint64_t &compile
 }
 }  // namespace
 
-bool FeatureManager::Init(const aclmdlRISpecOptions *options) {
+bool FeatureManager::Init(const aclmdlRISpecOptions *options, bool isScopeJit) {
   FeatureManager temporary;
   if (!temporary.compileOptions_.Init(options)) {
     return false;
   }
   InitModelLevelOptions(options, temporary.compileJobs_, temporary.enableSk_);
+  temporary.isScopeJit_ = isScopeJit;
   temporary.initialized_ = true;
   Swap(temporary);
   return true;
@@ -37,6 +38,7 @@ void FeatureManager::Swap(FeatureManager &other) noexcept {
   swap(compileOptions_, other.compileOptions_);
   swap(compileJobs_, other.compileJobs_);
   swap(enableSk_, other.enableSk_);
+  swap(isScopeJit_, other.isScopeJit_);
   swap(initialized_, other.initialized_);
 }
 

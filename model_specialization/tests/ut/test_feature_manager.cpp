@@ -54,6 +54,65 @@ TEST_F(FeatureManagerTest, JobsAndEnableSkAreModelLevelOptions) {
   EXPECT_EQ(manager.Get<Feature::SK_COMPILE_OPTIONS>("add"), (Arguments{"--enable-super-kernel"}));
 }
 
+TEST_F(FeatureManagerTest, ScopeModeDefaultsAndSuccessfulReinitialization) {
+  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
+  ASSERT_TRUE(manager.Init(nullptr));
+  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
+
+  ASSERT_TRUE(manager.Init(nullptr, true));
+  EXPECT_TRUE(manager.Get<Feature::IS_SCOPE_JIT>());
+  ASSERT_TRUE(manager.Init(nullptr, false));
+  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
+  ASSERT_TRUE(manager.Init(nullptr, true));
+  ASSERT_TRUE(manager.Init(nullptr));
+  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
+}
+
+TEST_F(FeatureManagerTest, FailedReinitializationPreservesScopeModeAndConfiguration) {
+  const char *args[] = {"-O2"};
+  aclmdlRISpecCompileOption basic{"add.*", 1, args};
+  const char *names[] = {"add.*"};
+  aclmdlRISpecSKFeature feature{"DEBUG_PER_OP_MAX_CORE_NUM", 1, names};
+  for (bool isScopeJit : {false, true}) {
+    options = {};
+    options.jobs = 4;
+    options.enableSK = true;
+    options.specCompileOptionCount = 1;
+    options.specCompileOptions = &basic;
+    options.specSKFeatureCount = 1;
+    options.specSKFeatures = &feature;
+    feature.kernelNames = names;
+    ASSERT_TRUE(manager.Init(&options, isScopeJit));
+
+    const char *replacementArgs[] = {"-O3"};
+    aclmdlRISpecCompileOption replacementBasic{"add.*", 1, replacementArgs};
+    options.jobs = 16;
+    options.enableSK = false;
+    options.specCompileOptions = &replacementBasic;
+    feature.kernelNames = nullptr;
+    EXPECT_FALSE(manager.Init(&options, !isScopeJit));
+    EXPECT_EQ(manager.Get<Feature::IS_SCOPE_JIT>(), isScopeJit);
+    EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), 4U);
+    EXPECT_TRUE(manager.Get<Feature::ENABLE_SK>());
+    EXPECT_EQ(manager.Get<Feature::BASIC_COMPILE_OPTIONS>("add"), (Arguments{"-O2"}));
+    EXPECT_EQ(manager.Get<Feature::SK_COMPILE_OPTIONS>("add"),
+              (Arguments{"--enable-super-kernel", "-D__ASCENDC_SUPER_KERNEL_DEBUG__"}));
+  }
+}
+
+TEST_F(FeatureManagerTest, ScopeModeIsIndependentBetweenManagers) {
+  FeatureManager other;
+  ASSERT_TRUE(manager.Init(nullptr, true));
+  ASSERT_TRUE(other.Init(nullptr));
+  EXPECT_TRUE(manager.Get<Feature::IS_SCOPE_JIT>());
+  EXPECT_FALSE(other.Get<Feature::IS_SCOPE_JIT>());
+
+  ASSERT_TRUE(other.Init(nullptr, true));
+  ASSERT_TRUE(manager.Init(nullptr, false));
+  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
+  EXPECT_TRUE(other.Get<Feature::IS_SCOPE_JIT>());
+}
+
 TEST_F(FeatureManagerTest, BasicCompileOptionsUseGlobalAndPatternRules) {
   const char *globalArgs[] = {"-DGLOBAL=1"};
   const char *addArgs[] = {"-O2", "-DADD=1"};
