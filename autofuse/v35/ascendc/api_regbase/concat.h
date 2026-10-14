@@ -333,8 +333,8 @@ __aicore__ inline void ScatterInputPadded(__ubuf__ T *dst_addr, __ubuf__ T *src_
 }
 
 template <typename T, size_t INPUT_NUM>
-__aicore__ inline void ConcatExtend(T *dst_addr, T *src_addrs[INPUT_NUM], LocalTensor<uint8_t> &tmp_buf,
-                                    const ConcatTiling<INPUT_NUM> &tiling) {
+__aicore__ inline void ConcatExtend(__ubuf__ T *dst_addr, __ubuf__ T *src_addrs[INPUT_NUM],
+                                    LocalTensor<uint8_t> &tmp_buf, const ConcatTiling<INPUT_NUM> &tiling) {
   using U = std::conditional_t<sizeof(T) == sizeof(uint32_t), uint32_t, uint16_t>;
   const uint32_t kScatterMaxLen = VECTOR_REG_WIDTH / sizeof(T) / 2;
   auto seq_tensor = tmp_buf[512].ReinterpretCast<U>();
@@ -346,20 +346,18 @@ __aicore__ inline void ConcatExtend(T *dst_addr, T *src_addrs[INPUT_NUM], LocalT
   uint32_t dst_col_offset = 0;
   for (size_t i = 0UL; i < INPUT_NUM; ++i) {
     if (tiling.num_srcs_cols[i] > kScatterMaxLen) {
-      Copy((__ubuf__ T *)(uint64_t)dst_addr + dst_col_offset, (__ubuf__ T *)(uint64_t)src_addrs[i], tiling.num_rows,
-           tiling.num_srcs_cols[i], tiling.num_dst_cols);
+      Copy(dst_addr + dst_col_offset, src_addrs[i], tiling.num_rows, tiling.num_srcs_cols[i], tiling.num_dst_cols);
     } else {
       GenScatterIndex(tiling.num_srcs_cols[i], tiling.num_dst_cols, dst_col_offset, seq_addr, index_addr);
-      ScatterInput((__ubuf__ T *)(uint64_t)dst_addr, (__ubuf__ T *)(uint64_t)src_addrs[i], index_addr, tiling.num_rows,
-                   tiling.num_dst_cols, tiling.num_srcs_cols[i]);
+      ScatterInput(dst_addr, src_addrs[i], index_addr, tiling.num_rows, tiling.num_dst_cols, tiling.num_srcs_cols[i]);
     }
     dst_col_offset += tiling.num_srcs_cols[i];
   }
 }
 
 template <typename T, size_t INPUT_NUM>
-__aicore__ inline void ConcatExtend(T *dst_addr, T *src_addrs[INPUT_NUM], LocalTensor<uint8_t> &tmp_buf,
-                                    const ConcatTilingPadded<INPUT_NUM> &tiling) {
+__aicore__ inline void ConcatExtend(__ubuf__ T *dst_addr, __ubuf__ T *src_addrs[INPUT_NUM],
+                                    LocalTensor<uint8_t> &tmp_buf, const ConcatTilingPadded<INPUT_NUM> &tiling) {
   using U = std::conditional_t<sizeof(T) == sizeof(uint32_t), uint32_t, uint16_t>;
   const uint32_t kScatterMaxLen = VECTOR_REG_WIDTH / sizeof(T) / 2;
   auto seq_tensor = tmp_buf[512].ReinterpretCast<U>();
@@ -372,23 +370,20 @@ __aicore__ inline void ConcatExtend(T *dst_addr, T *src_addrs[INPUT_NUM], LocalT
   for (size_t i = 0UL; i < INPUT_NUM; ++i) {
     if (tiling.num_srcs_cols[i] == tiling.src_row_strides[i]) {
       if (tiling.num_srcs_cols[i] > kScatterMaxLen) {
-        Copy((__ubuf__ T *)(uint64_t)dst_addr + dst_col_offset, (__ubuf__ T *)(uint64_t)src_addrs[i], tiling.num_rows,
-             tiling.num_srcs_cols[i], tiling.num_dst_cols);
+        Copy(dst_addr + dst_col_offset, src_addrs[i], tiling.num_rows, tiling.num_srcs_cols[i], tiling.num_dst_cols);
       } else {
         GenScatterIndex(tiling.num_srcs_cols[i], tiling.num_dst_cols, dst_col_offset, seq_addr, index_addr);
-        ScatterInput((__ubuf__ T *)(uint64_t)dst_addr, (__ubuf__ T *)(uint64_t)src_addrs[i], index_addr,
-                     tiling.num_rows, tiling.num_dst_cols, tiling.num_srcs_cols[i]);
+        ScatterInput(dst_addr, src_addrs[i], index_addr, tiling.num_rows, tiling.num_dst_cols, tiling.num_srcs_cols[i]);
       }
     } else {
       if (tiling.src_row_strides[i] > kScatterMaxLen) {
-        CopyPadded((__ubuf__ T *)(uint64_t)dst_addr + dst_col_offset, (__ubuf__ T *)(uint64_t)src_addrs[i],
-                   tiling.num_rows, tiling.src_row_strides[i], tiling.num_dst_cols,
-                   tiling.src_second_last_dim_strides[i], tiling.gather_mask_dim_sizes[i]);
+        CopyPadded(dst_addr + dst_col_offset, src_addrs[i], tiling.num_rows, tiling.src_row_strides[i],
+                   tiling.num_dst_cols, tiling.src_second_last_dim_strides[i], tiling.gather_mask_dim_sizes[i]);
       } else {
         GenScatterIndex(tiling.num_srcs_cols[i], tiling.num_dst_cols, dst_col_offset, seq_addr, index_addr);
-        ScatterInputPadded((__ubuf__ T *)(uint64_t)dst_addr, (__ubuf__ T *)(uint64_t)src_addrs[i], index_addr,
-                           tiling.num_rows, tiling.num_dst_cols, tiling.num_srcs_cols[i], tiling.src_row_strides[i],
-                           tiling.src_second_last_dim_strides[i], tiling.gather_mask_dim_sizes[i]);
+        ScatterInputPadded(dst_addr, src_addrs[i], index_addr, tiling.num_rows, tiling.num_dst_cols,
+                           tiling.num_srcs_cols[i], tiling.src_row_strides[i], tiling.src_second_last_dim_strides[i],
+                           tiling.gather_mask_dim_sizes[i]);
       }
     }
     dst_col_offset += tiling.num_srcs_cols[i];
@@ -501,8 +496,8 @@ __aicore__ inline void GatherInputsSplitCols(__ubuf__ T *dst_addr, __ubuf__ T *s
 }
 
 template <typename T, size_t INPUT_NUM, typename TilingType>
-__aicore__ inline void ConcatExtendByGather(T *dst_addr, T *src_addrs[INPUT_NUM], LocalTensor<uint8_t> &tmp_buf,
-                                            const TilingType &tiling) {
+__aicore__ inline void ConcatExtendByGather(__ubuf__ T *dst_addr, __ubuf__ T *src_addrs[INPUT_NUM],
+                                            LocalTensor<uint8_t> &tmp_buf, const TilingType &tiling) {
   using U = std::conditional_t<sizeof(T) == sizeof(uint32_t), uint32_t, uint16_t>;
   auto seq_tensor = tmp_buf[512].ReinterpretCast<U>();
   auto index_tensor = tmp_buf.ReinterpretCast<U>();
@@ -514,11 +509,10 @@ __aicore__ inline void ConcatExtendByGather(T *dst_addr, T *src_addrs[INPUT_NUM]
   const auto num_src_cols = NumSrcCols(tiling);
   GenGatherIndex(num_src_cols, tiling.num_dst_cols, stride, index_addr);
   if (tiling.num_dst_cols * sizeof(U) <= AscendC::VECTOR_REG_WIDTH) {
-    GatherInputs((__ubuf__ T *)(uint64_t)dst_addr, (__ubuf__ T *)(uint64_t)src_addrs[0], index_addr, tiling.num_rows,
-                 tiling.num_dst_cols, num_src_cols);
+    GatherInputs(dst_addr, src_addrs[0], index_addr, tiling.num_rows, tiling.num_dst_cols, num_src_cols);
   } else {
-    GatherInputsSplitCols((__ubuf__ T *)(uint64_t)dst_addr, (__ubuf__ T *)(uint64_t)src_addrs[0], index_addr,
-                          tiling.num_rows, tiling.num_dst_cols, num_src_cols, stride);
+    GatherInputsSplitCols(dst_addr, src_addrs[0], index_addr, tiling.num_rows, tiling.num_dst_cols, num_src_cols,
+                          stride);
   }
 }
 
@@ -540,8 +534,8 @@ __aicore__ inline bool CanUseGather(const ConcatTiling<INPUT_NUM> &tiling) {
 }
 
 template <typename T, size_t INPUT_NUM, bool CHECK_SHAPE = false>
-__aicore__ inline void ConcatExtendDyn(T *dst_addr, T *src_addrs[INPUT_NUM], AscendC::LocalTensor<uint8_t> &tmp_buf,
-                                       const ConcatTiling<INPUT_NUM> &tiling) {
+__aicore__ inline void ConcatExtendDyn(__ubuf__ T *dst_addr, __ubuf__ T *src_addrs[INPUT_NUM],
+                                       AscendC::LocalTensor<uint8_t> &tmp_buf, const ConcatTiling<INPUT_NUM> &tiling) {
   if (CanUseGather<T, INPUT_NUM, CHECK_SHAPE>(tiling)) {
     ConcatExtendByGather<T, INPUT_NUM>(dst_addr, src_addrs, tmp_buf, tiling);
   } else {
@@ -561,15 +555,13 @@ __aicore__ inline void CopyOneAxis(__ubuf__ T *dst_addr, __ubuf__ T *src_addr, u
 }
 
 template <typename T, size_t INPUT_NUM, size_t... Is>
-inline __aicore__ void ConcatOneAxisUnroll(T *dst_addr, T *src_addrs[INPUT_NUM],
+inline __aicore__ void ConcatOneAxisUnroll(__ubuf__ T *dst_addr, __ubuf__ T *src_addrs[INPUT_NUM],
                                            const ConcatTilingOneAxis<INPUT_NUM> &tiling, std::index_sequence<Is...>) {
-  ((CopyOneAxis((__ubuf__ T *)((uint64_t)dst_addr + tiling.dst_col_offsets[Is] * sizeof(T)),
-                (__ubuf__ T *)(uint64_t)src_addrs[Is], tiling.src_col_sizes[Is])),
-   ...);
+  ((CopyOneAxis(dst_addr + tiling.dst_col_offsets[Is], src_addrs[Is], tiling.src_col_sizes[Is])), ...);
 }
 
 template <typename T, size_t INPUT_NUM>
-inline __aicore__ void ConcatOneAxis(T *dst_addr, T *src_addrs[INPUT_NUM],
+inline __aicore__ void ConcatOneAxis(__ubuf__ T *dst_addr, __ubuf__ T *src_addrs[INPUT_NUM],
                                      const ConcatTilingOneAxis<INPUT_NUM> &tiling) {
   ConcatOneAxisUnroll(dst_addr, src_addrs, tiling, std::make_index_sequence<INPUT_NUM>{});
 }

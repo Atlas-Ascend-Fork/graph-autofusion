@@ -61,6 +61,11 @@ class IndirectLoadRegApiCall final : public ApiCall {
   Status ResolveSimtMetadata(const ascir::NodeView &node,
                              const ascgen_utils::indirect_load::SimtLoweringMetadata &metadata,
                              const SimtGraphNodeMap &node_map);
+  // [SIMT index 闭包预计算] 判定：链计划可行 + tmp scratch 已申请 + tile 整行对齐。
+  // 函数级 Index()/Context 与调用点 pre-pass 发射共用同一位点，避免形态漂移。
+  bool CanUseSimtIndexPrepass(const TPipe &tpipe, ascgen_utils::indirect_load::SimtIndexPrepassPlan &plan) const;
+  // 后置 Reduce 的 local target 分配（预计算开启时提升到 Context 初始化之前）。
+  Status GenerateSimtLocalTargetAlloc(const TPipe &tpipe, std::stringstream &ss) const;
   Status GenerateSk(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis,
                     const std::vector<std::reference_wrapper<const Tensor>> &inputs,
                     const std::vector<std::reference_wrapper<const Tensor>> &outputs, std::string &result) const;
@@ -68,6 +73,7 @@ class IndirectLoadRegApiCall final : public ApiCall {
                       const std::vector<std::reference_wrapper<const Tensor>> &inputs,
                       const std::vector<std::reference_wrapper<const Tensor>> &outputs, std::string &result) const;
   Status GenerateSimtInvocation(const TPipe &tpipe, const std::string &input_dtype, const std::string &outer_tb_var,
+                                const ascgen_utils::indirect_load::SimtIndexPrepassPlan *prepass_plan,
                                 std::stringstream &ss) const;
   Status GenerateSimt(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis, const Tensor &input,
                       std::string &result) const;

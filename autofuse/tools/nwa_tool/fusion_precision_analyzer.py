@@ -265,6 +265,10 @@ SUPPORTED_FORMAT_CONVERSIONS = {
 
 
 def compute_metrics(a, b):
+    if np.iscomplexobj(a) or np.iscomplexobj(b):
+        raise TypeError(
+            "Complex-valued NPY data is not supported by real-valued metrics"
+        )
     a_flat = a.flatten().astype(np.float64)
     b_flat = b.flatten().astype(np.float64)
     scale_a = float(np.max(np.abs(a_flat)))

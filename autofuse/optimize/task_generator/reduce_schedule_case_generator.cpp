@@ -39,6 +39,17 @@ std::string GetNewNodeName(const af::AscNodePtr &src_node, const af::AscNodePtr 
   return src_node->GetName() + "_to_" + dst_node->GetName() + "_" + type + "_" + to_string(idx);
 }
 
+// 打印 loop_start_end 的 [begin_idx, end_idx) 区段, tag 标识来源(FindNormLoops/AddNormLikeLoops)
+void LogNormLoops(const char *tag, const std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end,
+                  size_t begin_idx, size_t end_idx) {
+  GELOGI("%s got %zu loop(s):", tag, end_idx - begin_idx);
+  for (size_t i = begin_idx; i < end_idx; i++) {
+    GELOGI("  loop[%zu] start=%s(id=%lld) end=%s(id=%lld)", i, loop_start_end[i].first->GetName().c_str(),
+           loop_start_end[i].first->GetOpDescBarePtr()->GetId(), loop_start_end[i].second->GetName().c_str(),
+           loop_start_end[i].second->GetOpDescBarePtr()->GetId());
+  }
+}
+
 bool IsTailRepeatProductLargeEnough(const std::vector<ascir::SizeExpr> &repeats) {
   if (repeats.size() <= 1UL) {
     return false;
@@ -279,41 +290,6 @@ bool HasDataEdgeBetween(const af::AscNodePtr &src_node, const af::AscNodePtr &ds
   return false;
 }
 
-// 摘除冗余节点: 断开其全部边并从图中移除
-Status RemoveRedundantNode(ascir::ImplGraph &impl_graph, const af::NodePtr &node) {
-  af::NodeUtils::UnlinkAll(*node);
-  GE_CHECK_NOTNULL(af::AscGraphUtils::GetComputeGraph(impl_graph));
-  GE_ASSERT_GRAPH_SUCCESS(
-      af::GraphUtils::RemoveNodeWithoutRelink(af::AscGraphUtils::GetComputeGraph(impl_graph), node));
-  return af::SUCCESS;
-}
-
-// 获取从 start 出发沿数据边可达的全部 reduce 节点 id(升序), 作为副本链的下游归属签名:
-// 签名相同的链服务于同一批 reduce 相位, 可安全合并; 签名不同(数据流向不同 reduce)的链
-// 各自独立, 误并会把多个 reduce 区域连入同一连通组。遇 reduce 即停止向下展开(reduce 是
-// 相位边界)。
-std::vector<int64_t> GetReachableReduceIds(const af::AscNodePtr &start) {
-  std::set<int64_t> reduce_ids;
-  std::vector<af::AscNodePtr> pending{start};
-  std::set<af::Node *> visited{start.get()};
-  while (!pending.empty()) {
-    const af::AscNodePtr cur_node = pending.back();
-    pending.pop_back();
-    for (const auto &out_node : cur_node->GetOutDataNodes()) {
-      af::AscNodePtr asc_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
-      if (asc_node == nullptr || !visited.insert(asc_node.get()).second) {
-        continue;
-      }
-      if (ScheduleUtils::IsReduce(asc_node)) {
-        reduce_ids.insert(asc_node->GetOpDescBarePtr()->GetId());
-        continue;  // reduce 是相位边界, 不再向下展开
-      }
-      pending.push_back(asc_node);
-    }
-  }
-  return std::vector<int64_t>(reduce_ids.begin(), reduce_ids.end());
-}
-
 // 获取 post 侧 workspace(输出连向 load 的 workspace)所供给的 load, 按 workspace 名索引:
 // ws_pre 与 ws_post 同名标识同一 workspace 缓冲, store 链凭 ws_pre 的名字索引到 post 侧
 // 供给的 load, 对应的 ws_post 可由该 load 的输入生产者结构定位
@@ -336,152 +312,119 @@ std::map<std::string, af::AscNodePtr> GetPostWorkspaceLoadMap(const ascir::ImplG
   return post_ws_load_map;
 }
 
-// store->ws_pre ... ws_post->load 完整副本链
-struct WorkspaceChainInfo {
-  af::AscNodePtr store;
-  af::NodePtr ws_pre;
-  af::NodePtr ws_post;
-  af::AscNodePtr load;
-};
-
-// 获取切分建立的 workspace 链并按数据源(生产者节点, 输出锚点idx)分组。
-// 链判据: store 的输入来自某生产者的输出锚点、输出接 workspace(ws_pre), 且存在与 ws_pre
-// 同名、输出连向 load 的 workspace(ws_post, 由 load 的输入生产者定位); 不满足链形态的
-// store 防御性跳过。
-std::map<std::pair<af::Node *, int32_t>, std::vector<WorkspaceChainInfo>> GetWorkspaceChainsByDataSource(
-    const ascir::ImplGraph &impl_graph, const std::map<std::string, af::AscNodePtr> &post_ws_load_map) {
-  std::map<std::pair<af::Node *, int32_t>, std::vector<WorkspaceChainInfo>> chains_by_source;
-  for (const auto &node : impl_graph.GetAllNodes()) {
-    if (!af::ops::IsOps<af::ascir_op::Store>(node)) {
-      continue;
-    }
-    af::InDataAnchorPtr store_in = node->GetInDataAnchor(0);
-    af::OutDataAnchorPtr store_out = node->GetOutDataAnchor(0);
-    if (store_in == nullptr || store_in->GetPeerOutAnchor() == nullptr || store_out == nullptr ||
-        store_out->GetPeerInDataAnchors().empty()) {
-      continue;
-    }
-    af::NodePtr ws_pre = store_out->GetPeerInDataAnchors().at(0UL)->GetOwnerNode();
-    if (ws_pre == nullptr || !af::ops::IsOps<af::ascir_op::Workspace>(ws_pre)) {
-      continue;
-    }
-    if (post_ws_load_map.count(ws_pre->GetName()) == 0UL) {
-      continue;  // 缺少同名 post 侧, 防御性跳过
-    }
-    af::AscNodePtr load_after_ws = post_ws_load_map.at(ws_pre->GetName());
-    af::NodePtr ws_post = nullptr;
-    af::InDataAnchorPtr load_in = load_after_ws->GetInDataAnchor(0);
-    if (load_in != nullptr && load_in->GetPeerOutAnchor() != nullptr) {
-      ws_post = load_in->GetPeerOutAnchor()->GetOwnerNode();
-    }
-    if (ws_post == nullptr) {
-      continue;  // load 缺少输入侧 workspace, 防御性跳过
-    }
-    // 数据源 = store 输入边的生产者及其输出锚点
-    const std::pair<af::Node *, int32_t> source_key =
-        std::make_pair(store_in->GetPeerOutAnchor()->GetOwnerNode().get(), store_in->GetPeerOutAnchor()->GetIdx());
-    chains_by_source[source_key].push_back({node, ws_pre, ws_post, load_after_ws});
+// 连通判断: 从 from 出发沿数据边双向(输入/输出方向)搜索 target; 遇到 pre_workspace(输入侧
+// workspace)时视作与其同名 post_workspace 连通, 即允许越过切分从 pre 侧继续到 post 侧
+// (由同名 workspace 供给的 load 承接); 反向不成立——到达 post_workspace 后不再跳回 pre 侧,
+// 视作到头。excluded 非空时该节点不可经过(用于排除多输入节点自身, 避免绕经它使另一侧输入
+// 也被误判为连通)
+bool IsConnectedThroughWorkspace(const af::NodePtr &from, const af::NodePtr &target,
+                                 const std::map<std::string, af::AscNodePtr> &post_ws_load_map,
+                                 const af::NodePtr &excluded) {
+  if (from == nullptr || target == nullptr) {
+    return false;
   }
-  return chains_by_source;
+  std::set<const af::Node *> visited;
+  std::vector<af::NodePtr> pending;
+  visited.insert(from.get());
+  pending.emplace_back(from);
+  while (!pending.empty()) {
+    const af::NodePtr current = pending.back();
+    pending.pop_back();
+    if (current == target) {
+      return true;
+    }
+    auto push_node = [&pending, &visited, &excluded](const af::NodePtr &node) {
+      if (node == nullptr || node == excluded || !visited.insert(node.get()).second) {
+        return;
+      }
+      pending.emplace_back(node);
+    };
+    for (const auto &in_node : current->GetInDataNodes()) {
+      push_node(in_node);
+    }
+    for (const auto &out_node : current->GetOutDataNodes()) {
+      push_node(out_node);
+    }
+    if (af::ops::IsOps<af::ascir_op::Workspace>(current)) {
+      const auto load_iter = post_ws_load_map.find(current->GetName());
+      if (load_iter != post_ws_load_map.cend()) {
+        push_node(load_iter->second);
+      }
+    }
+  }
+  return false;
 }
 
-// 判断节点是否仍有数据消费者
-bool HasDataConsumer(const af::AscNodePtr &node) {
-  af::OutDataAnchorPtr out_anchor = node->GetOutDataAnchor(0);
-  return (out_anchor != nullptr) && (!out_anchor->GetPeerInDataAnchors().empty());
+// 固有汇点: 本来就不应该有输出的节点——图输出 Output 与 workspace 写侧(store->ws_pre,
+// 有数据输入边); 其余节点没有数据输出了即可视作悬空节点摘除
+bool IsInherentSink(const af::AscNodePtr &node) {
+  if (af::ops::IsOps<af::ascir_op::Output>(node)) {
+    return true;
+  }
+  return af::ops::IsOps<af::ascir_op::Workspace>(node) && node->GetInDataNodesSize() != 0UL;
 }
 
-// 摘除 store 副本链中 load 之外的配套节点(ws_post/ws_pre/store);
-// load 的摘除因消费者处理方式不同(死链直接移除/冗余链需先改接)由调用方先行处理
-Status RemoveWorkspaceChainNodesExceptLoad(ascir::ImplGraph &impl_graph, const WorkspaceChainInfo &chain) {
-  GE_CHK_STATUS_RET(RemoveRedundantNode(impl_graph, chain.ws_post));
-  GE_CHK_STATUS_RET(RemoveRedundantNode(impl_graph, chain.ws_pre));
-  GE_CHK_STATUS_RET(RemoveRedundantNode(impl_graph, chain.store));
-  return af::SUCCESS;
-}
-
-// 合并同一数据源组内的 store 副本链:
-// 1) 死链摘除: load 无数据消费者(多输出源未命中切分端点的锚点链)为纯冗余, 直接摘除;
-// 2) reduce 签名分桶: 按下游可达 reduce 集合分桶——同桶链流向同一相位可安全合并, 不同签名
-//    的链流向不同 reduce 相位, 保持独立(误并会把多个 reduce 区域连入同一连通组);
-// 3) 同桶合并: 保留节点 id 最小者为基准, 其余链 load 的消费者统一改接到基准 load 后整链摘除。
-// 链按 store 节点 id 升序排列, 基准选择与处理顺序确定。
-Status MergeDuplicatedWorkspaceChainsInSourceGroup(ascir::ImplGraph &impl_graph,
-                                                   std::vector<WorkspaceChainInfo> &chains) {
-  std::sort(chains.begin(), chains.end(), [](const WorkspaceChainInfo &lhs, const WorkspaceChainInfo &rhs) {
-    return lhs.store->GetOpDescBarePtr()->GetId() < rhs.store->GetOpDescBarePtr()->GetId();
-  });
-  for (size_t i = 0UL; i < chains.size();) {
-    if (HasDataConsumer(chains[i].load)) {
-      i++;
-      continue;
+// 判断节点在图内是否仍有数据消费者: 只认还在图中的消费者, 排除已摘除但锚点引用仍残留的
+// 幽灵消费者(GetOutDataNodesSize 会把幽灵消费者也统计进去)
+bool HasConsumerInGraph(const af::AscNodePtr &node, const std::set<const af::Node *> &nodes_in_graph) {
+  for (const auto &out_node : node->GetOutDataNodes()) {
+    if (nodes_in_graph.count(out_node.get()) != 0U) {
+      return true;
     }
-    GE_CHK_STATUS_RET(RemoveRedundantNode(impl_graph, chains[i].load));
-    GE_CHK_STATUS_RET(RemoveWorkspaceChainNodesExceptLoad(impl_graph, chains[i]));
-    chains.erase(chains.begin() + static_cast<int64_t>(i));
   }
-  if (chains.size() <= 1UL) {
-    return af::SUCCESS;
-  }
-  std::map<std::vector<int64_t>, size_t> canonical_by_signature;
-  for (size_t i = 0UL; i < chains.size(); i++) {
-    const std::vector<int64_t> signature = GetReachableReduceIds(chains[i].load);
-    if (canonical_by_signature.count(signature) == 0UL) {
-      canonical_by_signature.emplace(signature, i);  // 该签名的首条链为基准
-      continue;
-    }
-    const WorkspaceChainInfo &canonical = chains[canonical_by_signature.at(signature)];
-    GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(impl_graph, chains[i].load, canonical.load->GetOutDataAnchor(0UL)));
-    GE_CHK_STATUS_RET(RemoveWorkspaceChainNodesExceptLoad(impl_graph, chains[i]));
-  }
-  return af::SUCCESS;
+  return false;
 }
 
-// 获取切分建立的 copy_from_* 副本节点(PartitionLoadNode/PartitionScalarNode 的 Load/Scalar
-// 副本, 按原名命名)并按名分组; 同名即重复切分的产物
-std::map<std::string, std::vector<af::AscNodePtr>> GetCopyFromCopiesByName(const ascir::ImplGraph &impl_graph) {
-  std::map<std::string, std::vector<af::AscNodePtr>> copies_by_name;
-  for (const auto &node : impl_graph.GetAllNodes()) {
+// 手工注释：合并子图内同名的比如copy_from_scalar节点，避免codegen阶段检测失败
+// 合并同一子图内的同名 copy_from_* 副本(在 PartitionByConnectivity 划分子图之后逐子图执行):
+// 同一子图即同一连通分量/同一 kernel, 同名同类型副本必然同源, 保留 id 最小者为基准, 其余
+// 副本的消费者改接到基准后摘除整节点; 副本摘除后其输入副本(Data/Workspace)可能失去唯一
+// 消费者, 循环摘除直至无死副本。子图划分已定型, 该合并不影响连通性。
+Status MergeDuplicatedCopyNodesInSubGraph(ascir::ImplGraph &sub_graph) {
+  std::map<std::pair<std::string, std::string>, std::vector<af::AscNodePtr>> copies_by_key;
+  for (const auto &node : sub_graph.GetAllNodes()) {
     if (node->GetName().rfind("copy_from_", 0U) != 0U) {
       continue;
     }
-    if (ScheduleUtils::IsLoad(node) || ScheduleUtils::IsScalarLikeNode(node)) {
-      copies_by_name[node->GetName()].push_back(node);
-    }
+    copies_by_key[std::make_pair(node->GetName(), node->GetType())].push_back(node);
   }
-  return copies_by_name;
-}
-
-// 合并同名 copy_from_* 副本: 按下游 reduce 签名分桶(同桶流向同一相位, 安全可并; 不同签名
-// 保持独立), 桶内保留节点 id 最小者为基准, 冗余副本的消费者统一改接到基准后, 连同其输入侧
-// 副本节点(copy load 的 Data/Workspace 输入)一并摘除
-Status MergeDuplicatedCopyFromCopiesInNameGroup(ascir::ImplGraph &impl_graph, std::vector<af::AscNodePtr> &copies) {
-  std::sort(copies.begin(), copies.end(), [](const af::AscNodePtr &lhs, const af::AscNodePtr &rhs) {
-    return lhs->GetOpDescBarePtr()->GetId() < rhs->GetOpDescBarePtr()->GetId();
-  });
-  std::map<std::vector<int64_t>, size_t> canonical_by_signature;
-  for (size_t i = 0UL; i < copies.size(); i++) {
-    // copy load 的输入侧副本节点(Data/Workspace)在摘除前先结构定位
-    af::NodePtr copy_input = nullptr;
-    if (ScheduleUtils::IsLoad(copies[i])) {
-      af::InDataAnchorPtr dup_in = copies[i]->GetInDataAnchor(0);
-      if (dup_in != nullptr && dup_in->GetPeerOutAnchor() != nullptr) {
-        copy_input = dup_in->GetPeerOutAnchor()->GetOwnerNode();
-      }
-    }
-    const std::vector<int64_t> signature = GetReachableReduceIds(copies[i]);
-    if (canonical_by_signature.count(signature) == 0UL) {
-      canonical_by_signature.emplace(signature, i);  // 该签名的首个副本为基准
+  for (auto &item : copies_by_key) {
+    std::vector<af::AscNodePtr> &copies = item.second;
+    if (copies.size() <= 1UL) {
       continue;
     }
-    af::AscNodePtr canonical_copy = copies[canonical_by_signature.at(signature)];
-    GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(impl_graph, copies[i], canonical_copy->GetOutDataAnchor(0UL)));
-    if (copy_input != nullptr) {
-      GE_CHK_STATUS_RET(RemoveRedundantNode(impl_graph, copy_input));
+    std::sort(copies.begin(), copies.end(), [](const af::AscNodePtr &lhs, const af::AscNodePtr &rhs) {
+      return lhs->GetOpDescBarePtr()->GetId() < rhs->GetOpDescBarePtr()->GetId();
+    });
+    const af::AscNodePtr &canonical = copies.front();
+    for (size_t i = 1UL; i < copies.size(); ++i) {
+      GELOGI("Merge duplicated copy node [%s](id=%lld) into [%s](id=%lld), sub graph [%s].", copies[i]->GetNamePtr(),
+             copies[i]->GetOpDescBarePtr()->GetId(), canonical->GetNamePtr(), canonical->GetOpDescBarePtr()->GetId(),
+             sub_graph.GetName().c_str());
+      GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(sub_graph, copies[i], canonical->GetOutDataAnchor(0UL)),
+                        "Merge duplicated copy node [%s] failed.", copies[i]->GetName().c_str());
     }
   }
+  bool has_removed = false;
+  do {
+    has_removed = false;
+    std::vector<af::AscNodePtr> dead_copies;
+    for (const auto &node : sub_graph.GetAllNodes()) {
+      if (node->GetName().rfind("copy_from_", 0U) == 0U && node->GetOutDataNodes().empty()) {
+        dead_copies.push_back(node);
+      }
+    }
+    for (const auto &node : dead_copies) {
+      GELOGD("Remove dead copy node [%s](id=%lld), sub graph [%s].", node->GetNamePtr(),
+             node->GetOpDescBarePtr()->GetId(), sub_graph.GetName().c_str());
+      GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(sub_graph, node, node->GetOutDataAnchor(0UL)),
+                        "Remove dead copy node [%s] failed.", node->GetName().c_str());
+      has_removed = true;
+    }
+  } while (has_removed);
   return af::SUCCESS;
 }
+
 }  // namespace
 
 Status ReducePartitionCaseGenerator::GeneratorGeneralTask(ascir::HintGraph &optimize_graph,
@@ -498,6 +441,10 @@ Status ReducePartitionCaseGenerator::GeneratorGeneralTask(ascir::HintGraph &opti
     if (task.grouped_graphs.empty()) {
       GELOGW("Graph[%s] has no subgraphs after partition, skip task", graph.GetName().c_str());
       continue;
+    }
+    // 子图划分完成后, 在各自子图内合并重复的 copy_from_* 副本(子图已定型, 不影响连通性)
+    for (auto &grouped_graph : task.grouped_graphs) {
+      GE_CHK_STATUS_RET(MergeDuplicatedCopyNodesInSubGraph(grouped_graph), "Failed to merge duplicated copy nodes");
     }
     tasks.emplace_back(std::move(task));
   }
@@ -643,12 +590,7 @@ Status ReducePartitionCaseGenerator::GenerateGeneralCase(ascir::HintGraph &graph
         return lhs.second->GetOpDescBarePtr()->GetId() < rhs.second->GetOpDescBarePtr()->GetId();
       });
 
-  GELOGI("FindNormLoops got %zu loop(s):", loop_start_end.size());
-  for (size_t i = 0UL; i < loop_start_end.size(); i++) {
-    GELOGI("  loop[%zu] start=%s(id=%lld) end=%s(id=%lld)", i, loop_start_end[i].first->GetName().c_str(),
-           loop_start_end[i].first->GetOpDescBarePtr()->GetId(), loop_start_end[i].second->GetName().c_str(),
-           loop_start_end[i].second->GetOpDescBarePtr()->GetId());
-  }
+  LogNormLoops("FindNormLoops", loop_start_end, 0UL, loop_start_end.size());
 
   // reduce 后融合切分
   GE_CHK_STATUS_RET(ReducePartitionPostFusion(optimize_graph));
@@ -662,10 +604,21 @@ Status ReducePartitionCaseGenerator::GenerateGeneralCase(ascir::HintGraph &graph
   GE_CHK_STATUS_RET(ReducePartitionMultipleCitations(optimize_graph));
   ascir::utils::DumpGraph(optimize_graph, "after_multiple_citations");
 
-  // 公共动作: 三个切分步骤(PostFusion/PartitionNorm/多引用切分)可能对同一份数据重复建链,
-  // 统一合并冗余副本链
-  GE_CHK_STATUS_RET(MergeDuplicatedWorkspaceChainsAndCopyFromData(optimize_graph));
-  ascir::utils::DumpGraph(optimize_graph, "after_merge_duplicate_chains");
+  // 补充类 Norm 结构 loops: 上述切分动作建立 workspace 边界后才能探测到被边界绕过的类 Norm
+  // 结构, 对新增 loops 再执行一次 norm 切分
+  const size_t norm_loop_count = loop_start_end.size();
+  GE_CHK_STATUS_RET(AddNormLikeLoops(optimize_graph, loop_start_end));
+  LogNormLoops("AddNormLikeLoops", loop_start_end, norm_loop_count, loop_start_end.size());
+  if (loop_start_end.size() > norm_loop_count) {
+    std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> norm_like_loops(
+        loop_start_end.begin() + static_cast<int64_t>(norm_loop_count), loop_start_end.end());
+    GE_CHK_STATUS_RET(PartitionNorm(optimize_graph, norm_like_loops));
+    ascir::utils::DumpGraph(optimize_graph, "after_partition_norm_like");
+  }
+
+  // 公共动作: 摘除三个切分步骤(PostFusion/PartitionNorm/多引用切分)产生的悬空节点
+  GE_CHK_STATUS_RET(RemoveDanglingNodes(optimize_graph));
+  ascir::utils::DumpGraph(optimize_graph, "after_remove_dangling_nodes");
 
   if (partition_) {
     std::sort(node_order_.begin(), node_order_.end(), [](const af::AscNodePtr &lhs, af::AscNodePtr &rhs) {
@@ -736,32 +689,45 @@ Status ReducePartitionCaseGenerator::ReducePartitionMultipleCitations(ascir::Imp
   return PartitionCitationGroups(impl_graph, citation_groups, parent, group_anchors);
 }
 
-// 统一合并切分动作产生的重复 workspace 链与 copy_from_* 数据副本(公共动作, 在
-// ReducePartitionPostFusion / PartitionNorm / ReducePartitionMultipleCitations 三个切分
-// 步骤之后执行):
-// 三个切分步骤均通过 PartitionByNode / PartitionReduceNode 建立数据副本, 同一份
-// (生产者, 输出锚点) 的数据可能被重复建链——多环路端点各自切分、跨 reduce 的多引用各自
-// 切分等, 造成重复的 store->workspace->load 搬运、workspace 内存与 copy_from 副本开销。
-// 按副本形态分两类处理:
-// 1. workspace 链(store->ws_pre ... ws_post->load): GetWorkspaceChainsByDataSource 按数据源
-//    分组后, 逐组调 MergeDuplicatedWorkspaceChainsInSourceGroup 合并(死链摘除 + reduce 签名分桶 + 同桶改接摘除);
-// 2. copy_from_* 数据副本(PartitionLoadNode/PartitionScalarNode 建立的 Load/Scalar 副本,
-//    同名即重复切分产物): GetCopyFromCopiesByName 按名分组后, 逐组调 MergeDuplicatedCopyFromCopiesInNameGroup
-//    合并(reduce 签名分桶 + 同桶改接摘除)。
-Status ReducePartitionCaseGenerator::MergeDuplicatedWorkspaceChainsAndCopyFromData(ascir::ImplGraph &impl_graph) {
-  // 1. store->ws->load 链: 按数据源分组后逐组合并
-  const std::map<std::string, af::AscNodePtr> post_ws_load_map = GetPostWorkspaceLoadMap(impl_graph);
-  std::map<std::pair<af::Node *, int32_t>, std::vector<WorkspaceChainInfo>> chains_by_source =
-      GetWorkspaceChainsByDataSource(impl_graph, post_ws_load_map);
-  for (auto &item : chains_by_source) {
-    GE_CHK_STATUS_RET(MergeDuplicatedWorkspaceChainsInSourceGroup(impl_graph, item.second));
-  }
-
-  // 2. copy_from_* 副本(Load/Scalar): 同名分组后逐组合并
-  std::map<std::string, std::vector<af::AscNodePtr>> copies_by_name = GetCopyFromCopiesByName(impl_graph);
-  for (auto &item : copies_by_name) {
-    GE_CHK_STATUS_RET(MergeDuplicatedCopyFromCopiesInNameGroup(impl_graph, item.second));
-  }
+// 手工注释：解决有时会产生后续子图内只有一个节点的情况
+// 公共动作(在 ReducePartitionPostFusion / PartitionNorm / ReducePartitionMultipleCitations
+// 三个切分步骤之后、子图划分之前执行): 反复摘除"没有数据输出且非固有汇点"的节点, 直到没有
+// 新节点被摘除——末端节点摘除后上游可能失去最后一个消费者, 因此需要重复处理。控制边不计入
+// "有输出"(它只是保活/签名用途, 随节点摘除一并清理, RemoveNode 会处理 out/in 控制边)。
+// 固有汇点为本来就不应该有输出的节点: 图输出 Output 与 workspace 写侧(store->ws_pre)。
+// 重复切分残留的悬空副本(含同名副本, 不限类型)、失去消费者的源节点、死分支均在摘除范围内;
+// 存活的链与副本各自保留。
+Status ReducePartitionCaseGenerator::RemoveDanglingNodes(ascir::ImplGraph &impl_graph) {
+  auto compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
+  GE_CHECK_NOTNULL(compute_graph);
+  std::set<const af::Node *> nodes_in_graph;
+  bool has_removed = false;
+  do {
+    has_removed = false;
+    std::vector<af::NodePtr> nodes_to_remove;
+    nodes_in_graph.clear();
+    for (const auto &node : impl_graph.GetAllNodes()) {
+      nodes_in_graph.insert(node.get());
+    }
+    // 先收集再删除, 避免遍历过程中修改图节点容器
+    for (const auto &node : impl_graph.GetAllNodes()) {
+      if (IsInherentSink(node) || HasConsumerInGraph(node, nodes_in_graph)) {
+        continue;
+      }
+      nodes_to_remove.push_back(node);
+    }
+    for (const auto &node : nodes_to_remove) {
+      GELOGD("Remove dangling node [%s], type [%s], graph [%s].", node->GetNamePtr(), node->GetTypePtr(),
+             impl_graph.GetName().c_str());
+      GE_ASSERT_GRAPH_SUCCESS(compute_graph->RemoveNode(node));
+      has_removed = true;
+    }
+  } while (has_removed);
+  // 被摘除的节点若残留在切分根序列中, PartitionByConnectivity 会按根重建出孤立子图
+  node_order_.erase(
+      std::remove_if(node_order_.begin(), node_order_.end(),
+                     [&nodes_in_graph](const af::AscNodePtr &node) { return nodes_in_graph.count(node.get()) == 0U; }),
+      node_order_.end());
   return af::GRAPH_SUCCESS;
 }
 
@@ -850,8 +816,8 @@ Status ReducePartitionCaseGenerator::PartitionCitationGroups(ascir::ImplGraph &i
   // 若只切分第一条会残留 source->C2 直连边, source 无法与该 reduce 子图解耦(连通性分组时
   // 整体仍归并为一个组, 切分失效)。因此按 (source, citation, reduce) 逐条检测切分: 消费者与
   // source 间数据边仍存在才切分, 边已消失(重复收集的引用或消费者多次消费 source 时首次切分
-  // 已改接全部边)即跳过。逐条独立切分产生的重复副本链, 由公共动作 MergeDuplicatedWorkspaceChainsAndCopyFromData
-  // 在 PostFusion/PartitionNorm/多引用切分三个步骤完成后统一合并。
+  // 已改接全部边)即跳过。逐条独立切分产生的副本链各自保留, 不做合并, 避免误并已切分的
+  // workspace 边界。
   for (size_t i = 0UL; i < citation_groups.size(); ++i) {
     const size_t root = find_root(i);
     const af::AscNodePtr &anchor = group_anchors.at(root);
@@ -1101,29 +1067,81 @@ bool ReducePartitionCaseGenerator::IsInputNodePartitioned(const std::shared_ptr<
 std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> ReducePartitionCaseGenerator::FindNormLoops(
     ascir::ImplGraph &graph) {
   std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> loop_start_end;
-  for (auto node : graph.GetAllNodes()) {
-    if (node->GetOutDataNodes().empty()) {
-      node_order_.emplace_back(node);
+  for (auto start_node : graph.GetAllNodes()) {
+    if (start_node->GetOutDataNodes().empty()) {
+      node_order_.emplace_back(start_node);
     }
-    if (node->GetOutNodes().size() <= 1UL) {
+    if (start_node->GetOutNodes().size() <= 1UL) {
       continue;
     }
     std::vector<af::AscNodePtr> loop_ends;
-    FindNormLoop(node, loop_ends);
-    for (const auto &end : loop_ends) {
-      loop_start_end.emplace_back(node, end);
+    FindNormLoop(start_node, loop_ends);
+    for (const auto &end_node : loop_ends) {
+      loop_start_end.emplace_back(start_node, end_node);
     }
   }
   return loop_start_end;
+}
+
+// 手工注释：该场景由交叉norm结构触发，即并不是直连的norm结构，而是间接连接形成的norm连通结构。（如A->B则AB连通，不看输入输出关系）
+// 补充类 Norm 结构 loops: FindNormLoops 只沿输出方向从多输出节点展开, 这里在其结果基础上
+// 补充非单输出方向的类 Norm 结构, 追加到 loop_start_end
+Status ReducePartitionCaseGenerator::AddNormLikeLoops(
+    ascir::ImplGraph &graph, std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end) {
+  const std::map<std::string, af::AscNodePtr> post_ws_load_map = GetPostWorkspaceLoadMap(graph);
+  if (post_ws_load_map.empty()) {
+    return ge::GRAPH_SUCCESS;
+  }
+  for (const auto &node : graph.GetAllNodes()) {
+    if (!af::ops::IsOps<af::ascir_op::Workspace>(node) || node->GetInDataNodes().empty()) {
+      continue;
+    }
+    const auto load_iter = post_ws_load_map.find(node->GetName());
+    if (load_iter == post_ws_load_map.cend()) {
+      continue;
+    }
+    // 被 workspace 切分的节点对: {pre_workspace 的输入, post_workspace 的输出}
+    const af::AscNodePtr node_before_workspace = std::dynamic_pointer_cast<af::AscNode>(node->GetInDataNodes().at(0UL));
+    const af::AscNodePtr node_after_workspace = load_iter->second;
+    GE_ASSERT_NOTNULL(node_before_workspace);
+    GE_ASSERT_NOTNULL(node_after_workspace);
+    // 从 node_after_workspace 出发沿输出方向找多输入节点
+    std::set<af::Node *> visited{node_after_workspace.get()};
+    std::vector<af::AscNodePtr> pending{node_after_workspace};
+    while (!pending.empty()) {
+      const af::AscNodePtr current = pending.back();
+      pending.pop_back();
+      for (const auto &out_node : current->GetOutDataNodes()) {
+        const af::AscNodePtr out_asc_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
+        GE_ASSERT_NOTNULL(out_asc_node);
+        if (!visited.insert(out_asc_node.get()).second) {
+          continue;
+        }
+        pending.emplace_back(out_asc_node);
+        if (out_asc_node->GetInDataNodesSize() <= 1UL) {
+          continue;
+        }
+        // 多输入节点与 node_before_workspace 连通的输入节点, 与该多输入节点组成类 Norm 环路
+        for (const auto &in_node : out_asc_node->GetInDataNodes()) {
+          const af::AscNodePtr connected_input = std::dynamic_pointer_cast<af::AscNode>(in_node);
+          GE_ASSERT_NOTNULL(connected_input);
+          if (IsConnectedThroughWorkspace(connected_input, node_before_workspace, post_ws_load_map, out_asc_node)) {
+            loop_start_end.emplace_back(connected_input, out_asc_node);
+          }
+        }
+      }
+    }
+  }
+  return ge::GRAPH_SUCCESS;
 }
 
 Status ReducePartitionCaseGenerator::FindNormLoop(const af::AscNodePtr &start, std::vector<af::AscNodePtr> &ends) {
   std::set<af::NodePtr> visited{start};
   std::list<af::NodePtr> next_nodes{start};
   while (!next_nodes.empty()) {
-    const auto node = next_nodes.front();
+    const auto cur_node = next_nodes.front();
     next_nodes.pop_front();
-    for (auto &out_node : node->GetOutDataNodes()) {
+    for (auto &out_node : cur_node->GetOutDataNodes()) {
       if (visited.find(out_node) == visited.cend()) {
         next_nodes.emplace_back(out_node);
         visited.emplace(out_node);

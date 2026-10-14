@@ -18,6 +18,8 @@
 
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
+#include "ascendc_ir/ascendc_ir_core/ascendc_ir_def.h"
+#include "common_utils.h"
 #include "graph/symbolizer/symbolic_utils.h"
 #include "schedule_result.h"
 #include "utils/extern_math_util.h"
@@ -1397,6 +1399,12 @@ af::Status FinalizeLoweringMetadata(const af::AscNodePtr &node, bool &is_support
     }
     GE_ASSERT_SUCCESS(BuildSimtLoweringMetadata(node, metadata));
     GE_ASSERT_SUCCESS(ValidateSimtOutputPlan(metadata.simt));
+    // [SIMT index 闭包预计算] 调度期判定并 stash scratch 需求：CalcTmpBufSize（impl
+    // 注册库）只读 ext attr，不跨库回调本库符号；codegen 期用同一 builder 再判一次
+    // 决定是否发射（两处图副本结构漂移时以 tmp 缺失/白分配为安全方向）。
+    SimtIndexPrepassPlan prepass_plan;
+    GE_ASSERT_SUCCESS(BuildSimtIndexPrepassPlan(*node, prepass_plan));
+    GE_ASSERT_SUCCESS(SetSimtIndexPrepassTmpDemand(node, prepass_plan));
   }
   GE_ASSERT_SUCCESS(SetIndirectLoadAccessInfo(node, metadata.access_info));
   GE_ASSERT_SUCCESS(SetLoweringMetadata(node, metadata));
@@ -1581,6 +1589,682 @@ bool GetPrebuiltYTilingCase(const af::AscGraph &graph, af::AxisId &tile_id,
     tiling.second = all_axes[static_cast<size_t>(axes.tile_inner_axis)];
   }
   return true;
+}
+
+// ===== [SIMT index 闭包预计算] =====
+// 预计算可行性判定与发射计划构建。判定为纯图结构推导，调度期（tmp 尺寸规划，
+// IndirectLoadAscIrCodegenImplV2::CalcTmpBufSize）与 codegen 期（pre-pass 发射）共
+// 用同一位点，避免两处判定位漂移导致 scratch 缺口或白分配。
+namespace {
+// 值域区间：双精度端点 + 未知标记。无穷端点仅可能来自 Ln(0) 类退化输入（引用
+// int64 语义在该路径同样产生整型极值哨兵，最终由 Select 语义丢弃——与逐元素
+// 路径同一契约），有限端点必须落入 int32 才能写入索引表。
+struct PrepassRange {
+  double lo = 0.0;
+  double hi = 0.0;
+  bool unknown = false;
+  bool has_inf = false;
+};
+
+PrepassRange MakeScalarRange(double value) {
+  return {value, value, false, false};
+}
+
+// int32 索引表值域的校验端点（double 承载，按 fp32 槽重放约束取值）：下界 -2^31
+// （INT32_MIN，fp32 可精确表示）；上界 2^31-128 是不超过 INT32_MAX 的最大可表示
+// fp32——fp32 在 [2^30, 2^31) 的尾数粒度为 128，更大的值会舍入到 2^31 后溢出。
+constexpr double kPrepassInt32DomainLo = -2147483648.0;
+constexpr double kPrepassInt32DomainHi = 2147483520.0;
+// fp32 逐位精确整数界限：|v| ≤ 2^24 时整数在 24 位尾数（含隐含位）下精确。
+constexpr double kPrepassFp32ExactIntLimit = 16777216.0;
+
+// 标量字面量解析为 double：要求整串消费（与 att 侧 stod 判定同模式）；不可解析
+// 或超出 double 表示域时按数值不可用处理，由调用方按各自口径回退。
+bool ParsePrepassScalarDouble(const std::string &text, double &value) {
+  try {
+    size_t parsed = 0UL;
+    value = std::stod(text, &parsed);
+    return parsed == text.size();
+  } catch (...) {
+    return false;
+  }
+}
+
+bool RangeFitsInt32(const PrepassRange &range) {
+  return !range.unknown && range.lo >= kPrepassInt32DomainLo && range.hi <= kPrepassInt32DomainHi;
+}
+
+// int 值物化为 fp32 的精确性检查点：int64 算术在 fp32 槽内重放必须逐位可表示。
+bool RangeIsExactFp32(const PrepassRange &range) {
+  return !range.unknown && !range.has_inf && range.lo >= -kPrepassFp32ExactIntLimit &&
+         range.hi <= kPrepassFp32ExactIntLimit;
+}
+
+PrepassRange RangeBinary(const PrepassRange &lhs, const PrepassRange &rhs, bool is_mul) {
+  if (lhs.unknown || rhs.unknown) {
+    return {0.0, 0.0, true, false};
+  }
+  if (is_mul) {
+    const double products[4] = {lhs.lo * rhs.lo, lhs.lo * rhs.hi, lhs.hi * rhs.lo, lhs.hi * rhs.hi};
+    return {*std::min_element(products, products + 4), *std::max_element(products, products + 4), false,
+            lhs.has_inf || rhs.has_inf};
+  }
+  return {lhs.lo + rhs.lo, lhs.hi + rhs.hi, false, lhs.has_inf || rhs.has_inf};
+}
+
+bool IsPrepassFloatDtype(af::DataType dtype) {
+  return dtype == af::DT_FLOAT;
+}
+
+bool IsPrepassIntDtype(af::DataType dtype) {
+  return dtype == af::DT_BOOL || dtype == af::DT_INT8 || dtype == af::DT_INT16 || dtype == af::DT_INT32 ||
+         dtype == af::DT_INT64 || dtype == af::DT_UINT8 || dtype == af::DT_UINT16 || dtype == af::DT_UINT32 ||
+         dtype == af::DT_UINT64;
+}
+
+// 预计算 scratch 槽位需求上限：4B 槽（fp32 值、int32 ramp、截断往返、Where 标量
+// 分支物化均计入峰值）与 uint8 比较 mask 槽。超限形态回退逐元素路径。
+constexpr size_t kPrepassMaxFourByteSlots = 6UL;
+constexpr size_t kPrepassMaxMaskSlots = 2UL;
+constexpr size_t kPrepassInvalidSlot = static_cast<size_t>(-1);
+
+// 沿透传/同域 Cast 回溯 Where 掩码的比较来源；非比较来源不可作掩码。
+size_t ResolvePrepassMaskOrigin(const std::vector<SimtIndexPrepassNodePlan> &nodes, size_t node_index) {
+  size_t cursor = node_index;
+  for (size_t hop = 0UL; hop < nodes.size() && cursor < nodes.size(); ++hop) {
+    const auto &node = nodes[cursor];
+    if (node.kind == SimtIndexPrepassNodeKind::kOpCompare) {
+      return cursor;
+    }
+    if ((node.kind == SimtIndexPrepassNodeKind::kPassthrough || node.kind == SimtIndexPrepassNodeKind::kCastNoop) &&
+        !node.operands.empty() && node.operands.front().is_node) {
+      cursor = node.operands.front().node_index;
+      continue;
+    }
+    break;
+  }
+  return nodes.size();
+}
+
+bool PrepassNodeOwnsFourByteSlot(SimtIndexPrepassNodeKind kind) {
+  return kind == SimtIndexPrepassNodeKind::kLeafArangeInnerRamp ||
+         kind == SimtIndexPrepassNodeKind::kLeafArangeRowConstant || kind == SimtIndexPrepassNodeKind::kOpBinary ||
+         kind == SimtIndexPrepassNodeKind::kOpUnary || kind == SimtIndexPrepassNodeKind::kOpWhere ||
+         kind == SimtIndexPrepassNodeKind::kCastTruncToInt;
+}
+}  // namespace
+
+af::Status BuildSimtIndexPrepassPlan(const af::AscNode &indirect_load, SimtIndexPrepassPlan &plan) {
+  plan = SimtIndexPrepassPlan{};
+  // 按节点引用归位 owner 图内的 AscNodePtr（锚点遍历与闭包收集基于指针接口）。
+  const auto owner_graph = indirect_load.GetOwnerComputeGraph();
+  GE_ASSERT_NOTNULL(owner_graph, "IndirectLoad node[%s] has no owner graph.", indirect_load.GetNamePtr());
+  af::AscNodePtr indirect_load_ptr;
+  for (const auto &candidate : owner_graph->GetAllNodes()) {
+    const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(candidate);
+    if (asc_node != nullptr && asc_node.get() == std::addressof(indirect_load)) {
+      indirect_load_ptr = asc_node;
+      break;
+    }
+  }
+  GE_ASSERT_NOTNULL(indirect_load_ptr, "IndirectLoad node[%s] is absent from its owner graph.",
+                    indirect_load.GetNamePtr());
+  if (!af::ops::IsOps<af::ascir_op::IndirectLoad>(indirect_load_ptr)) {
+    return af::SUCCESS;
+  }
+  const auto il_inputs = indirect_load_ptr->inputs();
+  if (il_inputs.size() != 2UL || il_inputs[kInputTensorIndex] == nullptr) {
+    return af::SUCCESS;
+  }
+  // 索引表复用 value tensor 存储（int32 视图）：值 dtype 小于 4B 时表宽超出存储。
+  if (af::GetSizeByDataType(il_inputs[kInputTensorIndex]->attr.dtype) < 4) {
+    return af::SUCCESS;
+  }
+  TemplateLogicalView view;
+  GE_ASSERT_SUCCESS(GetTemplateLogicalView(indirect_load_ptr, view));
+  if (view.output.sizes.empty() || view.output.strides.empty() || view.output.axis_ids.empty() ||
+      view.output.sizes.size() != view.output.strides.size() ||
+      view.output.sizes.size() != view.output.axis_ids.size()) {
+    return af::SUCCESS;
+  }
+  // 尾轴尺寸需编译期可知（Arange 值域与行常量坐标推导依赖常量边界）。
+  int64_t inner_const = 0L;
+  if (!view.output.sizes.back().GetConstValue(inner_const) || inner_const <= 0L) {
+    return af::SUCCESS;
+  }
+  const af::AscNodePtr index_root = GetInputProducer(indirect_load_ptr, kIndexTensorIndex);
+  if (index_root == nullptr) {
+    return af::SUCCESS;
+  }
+  NodeSet index_set;
+  GE_ASSERT_SUCCESS(CollectSimtLoweringBackwardNodes(index_root, indirect_load_ptr, index_set));
+  NodePath graph_nodes;
+  GE_ASSERT_SUCCESS(GetStableGraphNodes(indirect_load_ptr, graph_nodes));
+  std::vector<af::AscNodePtr> chain;
+  for (const af::AscNodePtr &node : graph_nodes) {
+    if (node != nullptr && index_set.count(node.get()) != 0UL) {
+      chain.emplace_back(node);
+    }
+  }
+  if (chain.empty()) {
+    return af::SUCCESS;
+  }
+
+  auto reject = [&plan](const char *reason, const af::AscNodePtr &node) {
+    GELOGI("[IndirectLoad] SIMT index prepass is ineligible (%s), node[%s, %s].", reason,
+           node == nullptr ? "<null>" : node->GetTypePtr(), node == nullptr ? "<null>" : node->GetNamePtr());
+    plan = SimtIndexPrepassPlan{};
+    return af::SUCCESS;
+  };
+
+  plan.nodes.resize(chain.size());
+  std::vector<PrepassRange> ranges(chain.size());
+  // 死亡期下界为自身：值至少存活到自身节点完成；被消费时用 max 抬升。若初始化为
+  // chain.size()，max 更新永远无法下调，所有槽将被视为活到链尾（峰值虚高）。
+  std::vector<size_t> last_consumer(chain.size());
+  for (size_t i = 0UL; i < chain.size(); ++i) {
+    last_consumer[i] = i;
+  }
+  // 操作数解析按生产者节点指针而非 tensor_id：调度期图的 tensor_id 尚未赋值（全部
+  // 解析会命中同一默认值），而 SIMT 元数据收集同样基于节点可达性，指针语义与其
+  // 一致；链外单输入视图节点（折叠 broadcast 中继）沿输入上溯到链内等价值。
+  std::map<const af::AscNode *, size_t> producer_index;
+  for (size_t i = 0UL; i < chain.size(); ++i) {
+    producer_index.emplace(chain[i].get(), i);
+  }
+  auto is_view_relay = [](const af::AscNodePtr &n) {
+    return n != nullptr && n->inputs.Size() == 1UL &&
+           (af::ops::IsOps<af::ascir_op::Store>(n) || af::ops::IsOps<af::ascir_op::Transpose>(n) ||
+            af::ops::IsOps<af::ascir_op::Broadcast>(n));
+  };
+  // 解析 node 的第 input_pos 个输入：返回 0=链内节点 / 1=链外常量标量 / -1=不可解。
+  auto resolve_input = [&producer_index, &is_view_relay](const af::AscNodePtr &node, size_t input_pos,
+                                                         SimtIndexPrepassOperand &operand) -> int {
+    af::AscNodePtr cur = GetInputProducer(node, input_pos);
+    for (size_t hops = 0UL; cur != nullptr && hops < 8UL; ++hops) {
+      const auto found = producer_index.find(cur.get());
+      if (found != producer_index.end()) {
+        operand = SimtIndexPrepassOperand{true, found->second, ""};
+        return 0;
+      }
+      if (af::ops::IsOps<af::ascir_op::Scalar>(cur)) {
+        std::string value;
+        std::string dtype_name;
+        if (cur->attr.ir_attr == nullptr || cur->outputs().empty() ||
+            cur->attr.ir_attr->GetAttrValue("value", value) != ge::GRAPH_SUCCESS ||
+            ascgen_utils::DtypeName(cur->outputs()[0]->attr.dtype, dtype_name) != af::SUCCESS) {
+          return -1;
+        }
+        std::string processed;
+        if (ascgen_utils::ScalarValuePreProcess(value, dtype_name, processed) != af::SUCCESS) {
+          return -1;
+        }
+        operand = SimtIndexPrepassOperand{false, 0UL, processed};
+        return 1;
+      }
+      if (!is_view_relay(cur)) {
+        return -1;
+      }
+      cur = GetInputProducer(cur, 0UL);
+    }
+    return -1;
+  };
+  for (size_t i = 0UL; i < chain.size(); ++i) {
+    const af::AscNodePtr node = chain[i];
+    auto &node_plan = plan.nodes[i];
+    if (af::ops::IsOps<af::ascir_op::Store>(node) || af::ops::IsOps<af::ascir_op::Transpose>(node) ||
+        af::ops::IsOps<af::ascir_op::Broadcast>(node)) {
+      // Broadcast 为纯视图复制（零步长轴扩展），逐元素值与输入一致：SIMT 标量发射
+      // 同样直接透传输入表达式，此处按透传处理保持两路径一致。
+      if (node->inputs.Size() != 1UL || node->inputs().empty()) {
+        return reject("passthrough arity", node);
+      }
+      SimtIndexPrepassOperand relay;
+      if (resolve_input(node, 0UL, relay) != 0) {
+        return reject("passthrough input is external", node);
+      }
+      node_plan.kind = SimtIndexPrepassNodeKind::kPassthrough;
+      node_plan.operands.emplace_back(relay);
+      node_plan.slot = plan.nodes[relay.node_index].slot;
+      ranges[i] = ranges[relay.node_index];
+      continue;
+    }
+    if (af::ops::IsOps<af::ascir_op::Scalar>(node)) {
+      std::string value;
+      if (node->attr.ir_attr == nullptr || node->outputs().empty() ||
+          node->attr.ir_attr->GetAttrValue("value", value) != ge::GRAPH_SUCCESS) {
+        return reject("scalar value attr", node);
+      }
+      std::string dtype_name;
+      GE_ASSERT_SUCCESS(ascgen_utils::DtypeName(node->outputs()[0]->attr.dtype, dtype_name));
+      std::string processed;
+      GE_ASSERT_SUCCESS(ascgen_utils::ScalarValuePreProcess(value, dtype_name, processed));
+      double numeric = 0.0;
+      if (!ParsePrepassScalarDouble(processed, numeric)) {
+        return reject("scalar value is not numeric", node);
+      }
+      if (!IsPrepassIntDtype(node->outputs()[0]->attr.dtype) && !IsPrepassFloatDtype(node->outputs()[0]->attr.dtype)) {
+        return reject("scalar dtype is not prepass-representable", node);
+      }
+      node_plan.kind = SimtIndexPrepassNodeKind::kLeafScalar;
+      node_plan.operands.emplace_back(SimtIndexPrepassOperand{false, 0UL, processed});
+      ranges[i] = MakeScalarRange(numeric);
+      continue;
+    }
+    if (af::ops::IsOps<af::ascir_op::ScalarData>(node) || IsSimtDirectGmBoundary(node)) {
+      // 运行期标量与 GM 装载：index 闭包不再是输出坐标的纯函数。
+      return reject("index chain is data dependent", node);
+    }
+    if (af::ops::IsOps<af::ascir_op::Arange>(node)) {
+      const auto &out_attr = node->outputs()[0]->attr;
+      if (out_attr.axis.size() != out_attr.strides.size() || out_attr.strides.empty()) {
+        return reject("arange view metadata", node);
+      }
+      size_t varying_pos = out_attr.strides.size();
+      for (size_t pos = 0UL; pos < out_attr.strides.size(); ++pos) {
+        if (af::SymbolicUtils::StaticCheckNe(out_attr.strides[pos], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+          varying_pos = pos;
+          break;
+        }
+      }
+      if (varying_pos == out_attr.strides.size()) {
+        return reject("arange has no varying axis", node);
+      }
+      const auto axis_iter =
+          std::find(view.output.axis_ids.begin(), view.output.axis_ids.end(), out_attr.axis[varying_pos]);
+      if (axis_iter == view.output.axis_ids.end()) {
+        return reject("arange varying axis is absent from output view", node);
+      }
+      const size_t logical_pos = static_cast<size_t>(std::distance(view.output.axis_ids.begin(), axis_iter));
+      af::Expression base = af::ops::Zero;
+      af::Expression step = af::ops::One;
+      int64_t base_const = 0L;
+      int64_t step_const = 1L;
+      int64_t size_const = 0L;
+      if (node->attr.ir_attr == nullptr || node->attr.ir_attr->GetAttrValue("base", base) != ge::GRAPH_SUCCESS ||
+          node->attr.ir_attr->GetAttrValue("step", step) != ge::GRAPH_SUCCESS || !base.GetConstValue(base_const) ||
+          !step.GetConstValue(step_const) || !view.output.sizes[logical_pos].GetConstValue(size_const) ||
+          size_const <= 0L) {
+        return reject("arange base/step/size is not compile-time", node);
+      }
+      node_plan.arange.view_stride = view.output.strides[logical_pos];
+      node_plan.arange.view_size = view.output.sizes[logical_pos];
+      node_plan.arange.base = base;
+      node_plan.arange.step = step;
+      const bool unit_stride =
+          af::SymbolicUtils::StaticCheckEq(view.output.strides[logical_pos], af::sym::kSymbolOne) == af::TriBool::kTrue;
+      if (unit_stride && size_const == inner_const) {
+        // 尾轴 ramp：tile 基址按整行对齐，坐标退化为列号 ramp [0, inner)。
+        node_plan.kind = SimtIndexPrepassNodeKind::kLeafArangeInnerRamp;
+      } else {
+        // 行常量：stride 整除 inner（行对齐边界）时行内坐标恒定。
+        int64_t stride_const = 0L;
+        const bool stride_divides =
+            view.output.strides[logical_pos].GetConstValue(stride_const) && stride_const % inner_const == 0L;
+        const bool stride_equals_inner =
+            af::SymbolicUtils::StaticCheckEq(view.output.strides[logical_pos], view.output.sizes.back()) ==
+            af::TriBool::kTrue;
+        if (!stride_divides && !stride_equals_inner) {
+          return reject("arange leaf shape is neither inner ramp nor row constant", node);
+        }
+        node_plan.kind = SimtIndexPrepassNodeKind::kLeafArangeRowConstant;
+      }
+      const double lo = static_cast<double>(base_const);
+      const double hi = static_cast<double>(base_const) + static_cast<double>(size_const - 1L) * step_const;
+      ranges[i] = {std::min(lo, hi), std::max(lo, hi), false, false};
+    } else {
+      // 通用算子：解析操作数（链内节点、链内/链外常量标量）。
+      std::vector<SimtIndexPrepassOperand> operands;
+      bool operand_ok = true;
+      for (size_t input_pos = 0UL; input_pos < node->inputs.Size(); ++input_pos) {
+        SimtIndexPrepassOperand operand;
+        const int resolved = resolve_input(node, input_pos, operand);
+        if (resolved < 0) {
+          const auto producer = GetInputProducer(node, input_pos);
+          if (producer != nullptr &&
+              (af::ops::IsOps<af::ascir_op::ScalarData>(producer) || IsSimtDirectGmBoundary(producer))) {
+            // 运行期标量与 GM 装载：index 闭包不再是输出坐标的纯函数。
+            return reject("index chain is data dependent", node);
+          }
+          operand_ok = false;
+          break;
+        }
+        operands.emplace_back(operand);
+      }
+      if (!operand_ok) {
+        return reject("operand is not chain value or constant", node);
+      }
+      // Where/Select 掩码语义定位：输入端口序不保证 cond 在首位，按“唯一来源为
+      // 比较节点的输入”识别掩码并换至 operands[0]（其余两支保持相对顺序，与
+      // [cond, 真值, 假值] 规范序一致）。
+      const std::string type = node->GetType();
+      if (type == "Where" || type == "Select") {
+        size_t mask_pos = operands.size();
+        for (size_t pos = 0UL; pos < operands.size(); ++pos) {
+          if (operands[pos].is_node &&
+              ResolvePrepassMaskOrigin(plan.nodes, operands[pos].node_index) < plan.nodes.size()) {
+            if (mask_pos != operands.size()) {
+              return reject("where has multiple compare inputs", node);
+            }
+            mask_pos = pos;
+          }
+        }
+        if (mask_pos == operands.size()) {
+          return reject("where mask does not originate from a compare", node);
+        }
+        std::swap(operands[0UL], operands[mask_pos]);
+      }
+      node_plan.operands = operands;
+      const af::DataType out_dtype = node->outputs().empty() ? af::DT_UNDEFINED : node->outputs()[0]->attr.dtype;
+      auto operand_range = [&ranges](const SimtIndexPrepassOperand &operand) -> PrepassRange {
+        if (operand.is_node) {
+          return ranges[operand.node_index];
+        }
+        double numeric = 0.0;
+        if (!ParsePrepassScalarDouble(operand.scalar_value, numeric)) {
+          return {0.0, 0.0, true, false};
+        }
+        return MakeScalarRange(numeric);
+      };
+      if (af::ops::IsOps<af::ascir_op::Cast>(node)) {
+        if (node->inputs.Size() != 1UL || node->inputs().empty() || node->outputs().empty() ||
+            !operands.front().is_node) {
+          return reject("cast arity", node);
+        }
+        const af::DataType in_dtype = node->inputs()[0]->attr.dtype;
+        const bool in_float = IsPrepassFloatDtype(in_dtype);
+        const bool out_float = IsPrepassFloatDtype(out_dtype);
+        if ((!in_float && !IsPrepassIntDtype(in_dtype)) || (!out_float && !IsPrepassIntDtype(out_dtype))) {
+          return reject("cast dtype is not prepass-representable", node);
+        }
+        if (in_float && !out_float) {
+          // float→int 截断（CAST_ZERO）：经 int32 槽往返两段 Cast 还原截断语义。
+          node_plan.kind = SimtIndexPrepassNodeKind::kCastTruncToInt;
+          ranges[i] = ranges[operands.front().node_index];
+        } else {
+          if (!in_float && out_float && !RangeIsExactFp32(ranges[operands.front().node_index])) {
+            // int 值物化 fp32 必须逐位精确，否则预计算改变取值。
+            return reject("integer value range is not fp32 exact", node);
+          }
+          node_plan.kind = SimtIndexPrepassNodeKind::kCastNoop;
+          ranges[i] = ranges[operands.front().node_index];
+          node_plan.slot = plan.nodes[operands.front().node_index].slot;
+        }
+        continue;
+      }
+      if (!IsPrepassIntDtype(out_dtype) && !IsPrepassFloatDtype(out_dtype)) {
+        return reject("node dtype is not prepass representable", node);
+      }
+      if (af::ops::IsOps<af::ascir_op::Abs>(node) || af::ops::IsOps<af::ascir_op::Ln>(node)) {
+        if (operands.size() != 1UL || !operands.front().is_node) {
+          return reject("unary arity", node);
+        }
+        node_plan.kind = SimtIndexPrepassNodeKind::kOpUnary;
+        node_plan.op_code = af::ops::IsOps<af::ascir_op::Abs>(node) ? 0UL : 1UL;
+        const PrepassRange input = ranges[operands.front().node_index];
+        if (node_plan.op_code == 0UL) {
+          ranges[i] = {0.0, std::max(std::fabs(input.lo), std::fabs(input.hi)), input.unknown, input.has_inf};
+        } else {
+          if (input.unknown || input.lo < 0.0) {
+            return reject("ln input range includes negatives", node);
+          }
+          PrepassRange result{0.0, 0.0, false, false};
+          result.lo = input.lo <= 0.0 ? -std::numeric_limits<double>::infinity() : std::log(input.lo);
+          result.hi = input.hi <= 0.0 ? -std::numeric_limits<double>::infinity() : std::log(input.hi);
+          result.has_inf = input.lo <= 0.0 || input.has_inf;
+          ranges[i] = result;
+        }
+      } else if (type == "Add" || type == "Sub" || type == "Mul" || type == "Minimum" || type == "Maximum" ||
+                 type == "Max") {
+        if (operands.size() != 2UL) {
+          return reject("binary arity", node);
+        }
+        node_plan.kind = SimtIndexPrepassNodeKind::kOpBinary;
+        node_plan.op_code = type == "Add"       ? 0UL
+                            : type == "Sub"     ? 1UL
+                            : type == "Mul"     ? 2UL
+                            : type == "Minimum" ? 3UL
+                                                : 4UL;
+        if (node_plan.op_code == 1UL && !operands[0].is_node && operands[1].is_node) {
+          // Sub 的被减数为标量：*s 变体无法表达（tensor − scalar），标量物化又引入
+          // 额外临时槽，保守回退逐元素路径。
+          return reject("sub scalar minuend is not supported", node);
+        }
+        const PrepassRange lhs = operand_range(operands[0]);
+        const PrepassRange rhs = operand_range(operands[1]);
+        if (node_plan.op_code == 2UL) {
+          ranges[i] = RangeBinary(lhs, rhs, true);
+        } else if (node_plan.op_code == 1UL) {
+          if (lhs.unknown || rhs.unknown) {
+            ranges[i] = {0.0, 0.0, true, false};
+          } else {
+            ranges[i] = {lhs.lo - rhs.hi, lhs.hi - rhs.lo, false, lhs.has_inf || rhs.has_inf};
+          }
+        } else if (node_plan.op_code == 0UL) {
+          ranges[i] = RangeBinary(lhs, rhs, false);
+        } else {
+          ranges[i] = lhs;
+          if (node_plan.op_code == 3UL) {
+            ranges[i].hi = std::min(lhs.hi, rhs.hi);
+          } else {
+            ranges[i].lo = std::max(lhs.lo, rhs.lo);
+          }
+          ranges[i].unknown = lhs.unknown || rhs.unknown;
+        }
+      } else if (type == "Gt" || type == "Ge" || type == "Lt" || type == "Le" || type == "Eq" || type == "Ne") {
+        if (operands.size() != 2UL) {
+          return reject("compare arity", node);
+        }
+        node_plan.kind = SimtIndexPrepassNodeKind::kOpCompare;
+        node_plan.op_code = type == "Gt"   ? 0UL
+                            : type == "Ge" ? 1UL
+                            : type == "Lt" ? 2UL
+                            : type == "Le" ? 3UL
+                            : type == "Eq" ? 4UL
+                                           : 5UL;
+        ranges[i] = {0.0, 1.0, false, false};
+      } else if (type == "Where" || type == "Select") {
+        if (operands.size() != 3UL || !operands[0].is_node) {
+          return reject("where arity", node);
+        }
+        node_plan.kind = SimtIndexPrepassNodeKind::kOpWhere;
+        const PrepassRange branch0 = operand_range(operands[1]);
+        const PrepassRange branch1 = operand_range(operands[2]);
+        ranges[i] = {std::min(branch0.lo, branch1.lo), std::max(branch0.hi, branch1.hi),
+                     branch0.unknown || branch1.unknown, branch0.has_inf || branch1.has_inf};
+      } else {
+        return reject("node type is not prepass supported", node);
+      }
+    }
+  }
+
+  // ===== 阶段 B：透传归并与死亡期推导 =====
+  // 透传/同域 Cast 值穿透：槽位持有者沿链归并（effective_owner），操作数死亡期按
+  // 持有者统计（消费透传输出即消费底层持有者的值）。
+  std::vector<size_t> effective_owner(chain.size(), 0UL);
+  for (size_t i = 0UL; i < chain.size(); ++i) {
+    const auto &current = plan.nodes[i];
+    if ((current.kind == SimtIndexPrepassNodeKind::kPassthrough ||
+         current.kind == SimtIndexPrepassNodeKind::kCastNoop) &&
+        !current.operands.empty() && current.operands.front().is_node) {
+      effective_owner[i] = effective_owner[current.operands.front().node_index];
+    } else {
+      effective_owner[i] = i;
+    }
+  }
+  for (size_t i = 0UL; i < chain.size(); ++i) {
+    for (const auto &operand : plan.nodes[i].operands) {
+      if (!operand.is_node) {
+        continue;
+      }
+      const size_t owner = effective_owner[operand.node_index];
+      last_consumer[owner] = std::max(last_consumer[owner], i);
+    }
+  }
+  // 操作数预解析（发射语义）：沿 effective_owner 归并到值持有者——持有者是标量叶
+  // 则直接内联字面量（透传 broadcast 包裹的常量在此摊平），否则改指槽持有者节
+  // 点。发射端从此只见到“有效槽读取”或“字面量”两种操作数，无需再理解透传。
+  for (size_t i = 0UL; i < chain.size(); ++i) {
+    for (auto &operand : plan.nodes[i].operands) {
+      if (!operand.is_node) {
+        continue;
+      }
+      const size_t owner = effective_owner[operand.node_index];
+      if (plan.nodes[owner].kind == SimtIndexPrepassNodeKind::kLeafScalar) {
+        operand.is_node = false;
+        operand.node_index = 0UL;
+        operand.scalar_value = plan.nodes[owner].operands.front().scalar_value;
+      } else {
+        operand.node_index = owner;
+      }
+    }
+  }
+
+  // ===== 阶段 C：槽位分配（拓扑序单遍） =====
+  // 死亡槽（持有者 last_consumer < 当前节点）先释放；节点内临时槽（int32 ramp /
+  // 截断往返 / Where 标量分支物化）获取即释放（记录保留供发射期复用）；输出槽优
+  // 先原地复用死亡操作数槽。峰值 = 任意时刻占用槽数的最大值。
+  std::vector<size_t> free_slots;
+  for (size_t slot = kPrepassMaxFourByteSlots; slot > 0UL; --slot) {
+    free_slots.push_back(slot - 1UL);
+  }
+  std::vector<size_t> free_mask_slots;
+  for (size_t slot = kPrepassMaxMaskSlots; slot > 0UL; --slot) {
+    free_mask_slots.push_back(slot - 1UL);
+  }
+  size_t peak_slots = 0UL;
+  size_t peak_masks = 0UL;
+  // slot_holder[s] = 当前占用槽 s 的链节点：原地复用只转移持有关系，不回写旧持有
+  // 者的 slot 字段（发射端仍按旧持有者的 slot 读取操作数值，复用节点在同槽先读后
+  // 写）；释放仅当“当前持有者”死亡，避免重复释放。
+  std::vector<size_t> slot_holder(kPrepassMaxFourByteSlots, chain.size());
+  std::vector<bool> mask_owned(kPrepassMaxMaskSlots, false);
+  for (size_t i = 0UL; i < chain.size(); ++i) {
+    auto &node_plan = plan.nodes[i];
+    for (size_t owner = 0UL; owner < i; ++owner) {
+      if (effective_owner[owner] != owner || last_consumer[owner] >= i) {
+        continue;
+      }
+      const auto &owner_plan = plan.nodes[owner];
+      if (PrepassNodeOwnsFourByteSlot(owner_plan.kind) && owner_plan.slot != kPrepassInvalidSlot &&
+          slot_holder[owner_plan.slot] == owner) {
+        slot_holder[owner_plan.slot] = chain.size();
+        free_slots.push_back(owner_plan.slot);
+      } else if (owner_plan.kind == SimtIndexPrepassNodeKind::kOpCompare && owner_plan.slot != kPrepassInvalidSlot &&
+                 mask_owned[owner_plan.slot]) {
+        mask_owned[owner_plan.slot] = false;
+        free_mask_slots.push_back(owner_plan.slot);
+      }
+    }
+    size_t temp_count = 0UL;
+    if (node_plan.kind == SimtIndexPrepassNodeKind::kLeafArangeInnerRamp ||
+        node_plan.kind == SimtIndexPrepassNodeKind::kCastTruncToInt) {
+      temp_count = 1UL;
+    } else if (node_plan.kind == SimtIndexPrepassNodeKind::kOpWhere) {
+      for (size_t branch_pos = 1UL; branch_pos < node_plan.operands.size(); ++branch_pos) {
+        if (!node_plan.operands[branch_pos].is_node) {
+          ++temp_count;
+        }
+      }
+    }
+    for (size_t temp = 0UL; temp < temp_count; ++temp) {
+      if (free_slots.empty()) {
+        return reject("four byte slot demand exceeds limit", chain[i]);
+      }
+      node_plan.temp_slots.push_back(free_slots.back());
+      free_slots.pop_back();
+      peak_slots = std::max(peak_slots, kPrepassMaxFourByteSlots - free_slots.size());
+    }
+    if (node_plan.kind == SimtIndexPrepassNodeKind::kOpCompare) {
+      if (free_mask_slots.empty()) {
+        return reject("mask slot demand exceeds limit", chain[i]);
+      }
+      node_plan.slot = free_mask_slots.back();
+      free_mask_slots.pop_back();
+      mask_owned[node_plan.slot] = true;
+      peak_masks = std::max(peak_masks, kPrepassMaxMaskSlots - free_mask_slots.size());
+    } else if (PrepassNodeOwnsFourByteSlot(node_plan.kind)) {
+      size_t dying_input_slot = kPrepassInvalidSlot;
+      for (const auto &operand : node_plan.operands) {
+        if (!operand.is_node) {
+          continue;
+        }
+        const size_t owner = effective_owner[operand.node_index];
+        if (last_consumer[owner] == i && PrepassNodeOwnsFourByteSlot(plan.nodes[owner].kind) &&
+            plan.nodes[owner].slot != kPrepassInvalidSlot) {
+          dying_input_slot = plan.nodes[owner].slot;
+          break;
+        }
+      }
+      if (dying_input_slot != kPrepassInvalidSlot) {
+        // 原地复用：持有关系转移给本节点；旧持有者的 slot 字段保留（发射端读取操
+        // 作数仍指向该槽，本节点发射在同槽先读后写）。
+        node_plan.slot = dying_input_slot;
+        slot_holder[dying_input_slot] = i;
+      } else {
+        if (free_slots.empty()) {
+          return reject("four byte slot demand exceeds limit", chain[i]);
+        }
+        node_plan.slot = free_slots.back();
+        free_slots.pop_back();
+        slot_holder[node_plan.slot] = i;
+        peak_slots = std::max(peak_slots, kPrepassMaxFourByteSlots - free_slots.size());
+      }
+    }
+    for (size_t temp : node_plan.temp_slots) {
+      free_slots.push_back(temp);  // 临时槽归还（temp_slots 记录保留供发射期使用）。
+    }
+  }
+
+  // 比较结果只允许作为 Where/Select 掩码消费（掩码是 uint8，不能进入算术域）。
+  // 掩码经语义定位后位于 operands[0]，此处按操作数而非输入端口判断。
+  for (size_t i = 0UL; i < chain.size(); ++i) {
+    const auto &node_plan = plan.nodes[i];
+    for (size_t pos = 0UL; pos < node_plan.operands.size(); ++pos) {
+      if (!node_plan.operands[pos].is_node) {
+        continue;
+      }
+      if (pos == 0UL && node_plan.kind == SimtIndexPrepassNodeKind::kOpWhere) {
+        continue;
+      }
+      if (ResolvePrepassMaskOrigin(plan.nodes, node_plan.operands[pos].node_index) < plan.nodes.size()) {
+        return reject("compare result is consumed outside a where mask", chain[i]);
+      }
+    }
+  }
+  // ===== 阶段 E：结果解析与终局校验 =====
+  // 结果节点（index 输入的透传归并终点）的区间必须落入 int32 索引表。
+  SimtIndexPrepassOperand index_operand;
+  if (resolve_input(indirect_load_ptr, kIndexTensorIndex, index_operand) != 0) {
+    return reject("index result is not produced inside the chain", indirect_load_ptr);
+  }
+  const size_t result_index = effective_owner[index_operand.node_index];
+  if (!PrepassNodeOwnsFourByteSlot(plan.nodes[result_index].kind) ||
+      plan.nodes[result_index].slot == kPrepassInvalidSlot) {
+    return reject("index result has no prepass slot", chain[result_index]);
+  }
+  // Ln(0) 等哨兵 lane 会把区间端点推到 ±inf：这些 lane 的取值在参考路径同样铸成
+  // 未定义 int64 索引（图契约默认不出现，或被 Where 掩码丢弃），按“无效应 lane”
+  // 剪除无穷端点后仅校验有限区间。
+  PrepassRange finite_range = ranges[result_index];
+  if (std::isinf(finite_range.lo) && finite_range.lo < 0.0) {
+    finite_range.lo = kPrepassInt32DomainLo;
+  }
+  if (std::isinf(finite_range.hi) && finite_range.hi > 0.0) {
+    finite_range.hi = kPrepassInt32DomainHi;
+  }
+  finite_range.has_inf = false;
+  if (!RangeFitsInt32(finite_range)) {
+    return reject("index result range does not fit int32", chain[result_index]);
+  }
+  plan.result_slot = plan.nodes[result_index].slot;
+  plan.four_byte_slot_count = peak_slots;
+  plan.mask_slot_count = peak_masks;
+  plan.inner_size = view.output.sizes.back();
+  plan.eligible = true;
+  GELOGI("[IndirectLoad] SIMT index prepass is eligible for node[%s]: chain[%zu], fp32 slots[%zu], masks[%zu].",
+         indirect_load_ptr->GetNamePtr(), chain.size(), plan.four_byte_slot_count, plan.mask_slot_count);
+  return af::SUCCESS;
 }
 
 }  // namespace ascgen_utils::indirect_load

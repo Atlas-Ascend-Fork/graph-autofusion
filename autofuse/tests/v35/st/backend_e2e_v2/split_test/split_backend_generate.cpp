@@ -194,7 +194,7 @@ TEST_F(TestBackendSplitE2e, SplitNotAllAligned_B64) {
 
     std::string expected = "const split::SplitTiling<2> split_tiling {\n";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
-    expected = "split::SplitExtend<uint32_t, 2>((uint32_t *)";
+    expected = "split::SplitExtend<uint32_t, 2>((__ubuf__ uint32_t *)";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
   } catch (...) {
     gen_success = false;
@@ -224,7 +224,7 @@ TEST_F(TestBackendSplitE2e, SplitNotAllAligned_B8) {
     const auto &kernel = RemoveSubDirInclude(result.kernel);
     std::string expected = "const split::SplitTiling<2> split_tiling {\n";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
-    expected = "split::SplitExtend<int8_t, 2>((int8_t *)";
+    expected = "split::SplitExtend<int8_t, 2>((__ubuf__ int8_t *)";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
   } catch (...) {
     gen_success = false;
@@ -260,7 +260,7 @@ TEST_F(TestBackendSplitE2e, SplitNotAllAligned_B8ToB16) {
         "  .num_dsts_cols = {7, 7, }\n"
         "};\n";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
-    expected = "split::SplitExtend<uint16_t, 2>((uint16_t *)";
+    expected = "split::SplitExtend<uint16_t, 2>((__ubuf__ uint16_t *)";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
   } catch (...) {
     gen_success = false;

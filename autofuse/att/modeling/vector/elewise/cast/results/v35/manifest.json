@@ -1,0 +1,12 @@
+{
+  "environment": {
+    "platform": "3510"
+  },
+  "version": {
+    "repo": "graph-autofusion",
+    "branch": "develop",
+    "commit": "48f946b7",
+    "perf_impl": "autofuse/v35/att/api_perf_register/ascendc_regbase_perf.cpp CastPerf",
+    "api_source": "autofuse/v35/ascendc/api_regbase/cast.h"
+  }
+}

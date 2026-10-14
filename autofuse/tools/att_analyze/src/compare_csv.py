@@ -10,6 +10,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 import csv
+from contextlib import redirect_stdout
 import os
 import argparse
 import sys
@@ -211,7 +212,7 @@ class CSVComparator:
                 if value1 is not None and value2 is not None and value1 != value2:
                     absolute_diff = value2 - value1
                     percentage_diff = (
-                        (absolute_diff / value1) * 100 if value1 != 0 else 0.0
+                        (absolute_diff / value1) * 100 if value1 != 0 else float("inf")
                     )
                     improvement = absolute_diff < 0
 
@@ -409,14 +410,8 @@ class ComparisonReporter:
 
     def save_text_report(self, output_file: str):
         with open(output_file, "w", encoding="utf-8") as f:
-            import sys
-
-            original_stdout = sys.stdout
-            sys.stdout = f
-
-            self.print_console_report()
-
-            sys.stdout = original_stdout
+            with redirect_stdout(f):
+                self.print_console_report()
 
         print(f"对比报告已保存到: {output_file}")
 

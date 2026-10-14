@@ -2391,9 +2391,10 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SoftmaxDedicatedCandidateSolvesTileS
 
   ascgen_utils::indirect_load::TemplateAxes axes;
   ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(simt_indirect_load, axes), af::SUCCESS);
-  // [方案A] tile 回退主线固定形态：固定 tile 轴恢复注解（逐行发射）。
-  EXPECT_NE(axes.tile_outer_axis, af::kIdNone);
-  EXPECT_NE(axes.tile_inner_axis, af::kIdNone);
+  // Softmax 专用节点与 AR 后置 Reduce 一致：tile 轴不再预建固定 1 行，
+  // tile 行数交由调度期按 UB 容量求解（SoftmaxAR 的 A=tile 行数）。
+  EXPECT_EQ(axes.tile_outer_axis, af::kIdNone);
+  EXPECT_EQ(axes.tile_inner_axis, af::kIdNone);
   // outer=[y0,y1]（保留轴），inner=[y2]（Softmax 的 R 轴），向量化只沿尾轴。
   ExpectAxisNames(simt_graph, {axes.inner_axis}, {"y2"});
   EXPECT_EQ(axes.vectorized_axes, std::vector<af::AxisId>{tail_axis});

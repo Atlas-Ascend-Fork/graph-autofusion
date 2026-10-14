@@ -38,6 +38,7 @@ class CasePerfInfo:
     case_id: int
     nodes: List[NodePerfInfo] = field(default_factory=list)
     bottleneck_pipe: str = ""
+    graph_id: int = 0
 
 
 # 匹配 [PERF] 行，可选四维坐标标签
@@ -78,6 +79,7 @@ def parse_perf_lines(
     result_id: int = 0,
     group_id: int = 0,
     case_id: int = 0,
+    graph_id: int = 0,
 ) -> List[CasePerfInfo]:
     """
     解析 [PERF] 行，返回 CasePerfInfo 列表。
@@ -95,6 +97,7 @@ def parse_perf_lines(
         if not m:
             continue
 
+        gr_id = int(m.group(1)) if m.group(1) else graph_id
         r_id = int(m.group(2)) if m.group(2) else result_id
         grp_id = int(m.group(3)) if m.group(3) else group_id
         raw_case = m.group(4)
@@ -114,9 +117,11 @@ def parse_perf_lines(
             total=total,
         )
 
-        key = (r_id, grp_id, c_id)
+        key = (gr_id, r_id, grp_id, c_id)
         if key not in cases:
-            cases[key] = CasePerfInfo(result_id=r_id, group_id=grp_id, case_id=c_id)
+            cases[key] = CasePerfInfo(
+                result_id=r_id, group_id=grp_id, case_id=c_id, graph_id=gr_id
+            )
         cases[key].nodes.append(node)
 
     # 计算瓶颈管道

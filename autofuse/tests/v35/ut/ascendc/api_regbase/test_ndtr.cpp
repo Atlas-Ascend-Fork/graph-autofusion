@@ -82,34 +82,32 @@ class TestApiNdtr : public testing::Test {
 
     T inf_val = std::numeric_limits<T>::infinity();
     constexpr T inv_sqrt2 = 0.7071067811865475f;
-    constexpr T large_threshold = 3.92f;  // NDTR_LARGE_THRESHOLD
 
-    // Test cases for large inputs (beyond Pade approximation reliable range)
-    // |x| >= 3.92 should be handled as boundary cases to avoid precision issues
+    // Use erfc to preserve finite negative-tail reference values.
 
-    // Case 0: x = 4.0 (just above threshold)
+    // Case 0: x = 4.0
     param.src[0] = 4.0f;
-    param.exp[0] = 1.0f;  // Boundary value
+    param.exp[0] = static_cast<T>(0.5 * std::erfc(-4.0 * inv_sqrt2));
 
-    // Case 1: x = -4.0 (just below threshold)
+    // Case 1: x = -4.0
     param.src[1] = -4.0f;
-    param.exp[1] = 0.0f;  // Boundary value
+    param.exp[1] = static_cast<T>(0.5 * std::erfc(4.0 * inv_sqrt2));
 
-    // Case 2: x = 4.5 (above threshold)
+    // Case 2: x = 4.5
     param.src[2] = 4.5f;
-    param.exp[2] = 1.0f;
+    param.exp[2] = static_cast<T>(0.5 * std::erfc(-4.5 * inv_sqrt2));
 
-    // Case 3: x = -4.5 (above threshold)
+    // Case 3: x = -4.5
     param.src[3] = -4.5f;
-    param.exp[3] = 0.0f;
+    param.exp[3] = static_cast<T>(0.5 * std::erfc(4.5 * inv_sqrt2));
 
     // Case 4: x = 6.0 (large positive)
     param.src[4] = 6.0f;
-    param.exp[4] = 1.0f;
+    param.exp[4] = static_cast<T>(0.5 * std::erfc(-6.0 * inv_sqrt2));
 
     // Case 5: x = -6.0 (large negative)
     param.src[5] = -6.0f;
-    param.exp[5] = 0.0f;
+    param.exp[5] = static_cast<T>(0.5 * std::erfc(6.0 * inv_sqrt2));
 
     // Case 6: x = +inf
     param.src[6] = inf_val;
@@ -119,13 +117,13 @@ class TestApiNdtr : public testing::Test {
     param.src[7] = -inf_val;
     param.exp[7] = 0.0f;
 
-    // Case 8: x = 3.93 (just above threshold)
+    // Case 8: x = 3.93
     param.src[8] = 3.93f;
-    param.exp[8] = 1.0f;
+    param.exp[8] = static_cast<T>(0.5 * std::erfc(-3.93 * inv_sqrt2));
 
-    // Case 9: x = -3.93 (just above threshold)
+    // Case 9: x = -3.93
     param.src[9] = -3.93f;
-    param.exp[9] = 0.0f;
+    param.exp[9] = static_cast<T>(0.5 * std::erfc(3.93 * inv_sqrt2));
   }
 
   template <typename T>
@@ -179,13 +177,13 @@ class TestApiNdtr : public testing::Test {
     param.src[9] = -3.5f;
     param.exp[9] = static_cast<T>(0.5 * (1.0 + std::erf(-3.5 * inv_sqrt2)));
 
-    // Test case 10: x = 4.0, beyond threshold (|x| >= 3.92)
+    // Test case 10: x = 4.0
     param.src[10] = 4.0f;
-    param.exp[10] = 1.0f;  // Use boundary value
+    param.exp[10] = static_cast<T>(0.5 * std::erfc(-4.0 * inv_sqrt2));
 
-    // Test case 11: x = -4.0, beyond threshold (|x| >= 3.92)
+    // Test case 11: x = -4.0
     param.src[11] = -4.0f;
-    param.exp[11] = 0.0f;  // Use boundary value
+    param.exp[11] = static_cast<T>(0.5 * std::erfc(4.0 * inv_sqrt2));
   }
 
   template <typename T>

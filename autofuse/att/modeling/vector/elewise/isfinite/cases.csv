@@ -1,0 +1,6 @@
+input_dtype,outer_loop,cal_count
+float32,100,64
+float32,100,128
+float32,100,256
+float32,100,512
+float32,100,1024

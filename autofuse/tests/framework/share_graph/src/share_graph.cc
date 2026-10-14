@@ -7934,6 +7934,430 @@ af::ComputeGraphPtr ShareGraph::BrcReduceFusedGraph(size_t dims_size) {
   return compute_graph;
 }
 
+/**
+ *          output0        output1        output2        output3
+ *             |              |              |              |
+ *          store0         store1         store2         store3
+ *             |              |              |              |
+ *          e1(Add)        r1(Sum)        e2(Add)        r2(Sum)
+ *          /     \           |          /     \           |
+ *      c1(Relu) c2(Tanh)  c1(Relu)  c2(Tanh) c1(Relu)  c2(Tanh)
+ *          \      |          |        /       /          /
+ *           \     |          |       /       /          /
+ *            s = Add(load0, load1) <--------+----------+
+ *               /        \
+ *            load0      load1
+ *              |          |
+ *            data0      data1
+ *
+ * 交叉 norm-like 场景: 多引用切分源 s 的两条引用(c1/c2)各自下游的 e1/e2 互为对方的多输入
+ * 节点, 无论并查集锚点 reduce 的节点 id 顺序如何, 被切分的那条引用的下游多输入节点总有一
+ * 路输入来自另一条未被切断的引用分支, 可反向连通到切分前的节点(store), 从而稳定触发
+ * AddNormLikeLoops 中 IsConnectedThroughWorkspace 的连通判定与其后的 norm-like 切分。
+ */
+static void CreateReduceNormLikeAscGraph(af::AscGraph &graph, size_t dims_size) {
+  (void)dims_size;
+  const Expression s0 = graph.CreateSizeVar(2);
+  const Expression s1 = graph.CreateSizeVar(8);
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data d0("data0", graph);
+  d0.ir_attr.SetIndex(0);
+  af::ascir_op::Data d1("data1", graph);
+  d1.ir_attr.SetIndex(1);
+
+  af::ascir_op::Load load0("load0");
+  load0.x = d0.y;
+  load0.attr.api.compute_type = ComputeType::kComputeLoad;
+  load0.attr.api.type = af::ApiType::kAPITypeCompute;
+  load0.attr.sched.axis = {z0.id, z1.id};
+  *load0.y.axis = {z0.id, z1.id};
+  *load0.y.repeats = {s0, s1};
+  *load0.y.strides = {s1, One};
+  load0.y.dtype = af::DataType::DT_FLOAT;
+  load0.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Load load1("load1");
+  load1.x = d1.y;
+  load1.attr.api.compute_type = ComputeType::kComputeLoad;
+  load1.attr.api.type = af::ApiType::kAPITypeCompute;
+  load1.attr.sched.axis = {z0.id, z1.id};
+  *load1.y.axis = {z0.id, z1.id};
+  *load1.y.repeats = {s0, s1};
+  *load1.y.strides = {s1, One};
+  load1.y.dtype = af::DataType::DT_FLOAT;
+  load1.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Add s("s");
+  s.x1 = load0.y;
+  s.x2 = load1.y;
+  s.attr.api.compute_type = ComputeType::kComputeElewise;
+  s.attr.api.type = af::ApiType::kAPITypeCompute;
+  s.attr.sched.axis = {z0.id, z1.id};
+  *s.y.axis = {z0.id, z1.id};
+  *s.y.repeats = {s0, s1};
+  *s.y.strides = {s1, One};
+  s.y.dtype = af::DataType::DT_FLOAT;
+  s.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Relu c1("c1");
+  c1.x = s.y;
+  c1.attr.api.compute_type = ComputeType::kComputeElewise;
+  c1.attr.api.type = af::ApiType::kAPITypeCompute;
+  c1.attr.sched.axis = {z0.id, z1.id};
+  *c1.y.axis = {z0.id, z1.id};
+  *c1.y.repeats = {s0, s1};
+  *c1.y.strides = {s1, One};
+  c1.y.dtype = af::DataType::DT_FLOAT;
+  c1.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Tanh c2("c2");
+  c2.x = s.y;
+  c2.attr.api.compute_type = ComputeType::kComputeElewise;
+  c2.attr.api.type = af::ApiType::kAPITypeCompute;
+  c2.attr.sched.axis = {z0.id, z1.id};
+  *c2.y.axis = {z0.id, z1.id};
+  *c2.y.repeats = {s0, s1};
+  *c2.y.strides = {s1, One};
+  c2.y.dtype = af::DataType::DT_FLOAT;
+  c2.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Add e1("e1");
+  e1.x1 = c1.y;
+  e1.x2 = c2.y;
+  e1.attr.api.compute_type = ComputeType::kComputeElewise;
+  e1.attr.api.type = af::ApiType::kAPITypeCompute;
+  e1.attr.sched.axis = {z0.id, z1.id};
+  *e1.y.axis = {z0.id, z1.id};
+  *e1.y.repeats = {s0, s1};
+  *e1.y.strides = {s1, One};
+  e1.y.dtype = af::DataType::DT_FLOAT;
+  e1.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Sum r1("r1");
+  r1.x = c1.y;
+  r1.attr.api.compute_type = ComputeType::kComputeReduce;
+  r1.attr.api.type = af::ApiType::kAPITypeCompute;
+  r1.attr.sched.axis = {z0.id, z1.id};
+  *r1.y.axis = {z0.id, z1.id};
+  *r1.y.repeats = {One, One};
+  *r1.y.strides = {Zero, Zero};
+  r1.y.dtype = af::DataType::DT_FLOAT;
+  r1.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Add e2("e2");
+  e2.x1 = c2.y;
+  e2.x2 = c1.y;
+  e2.attr.api.compute_type = ComputeType::kComputeElewise;
+  e2.attr.api.type = af::ApiType::kAPITypeCompute;
+  e2.attr.sched.axis = {z0.id, z1.id};
+  *e2.y.axis = {z0.id, z1.id};
+  *e2.y.repeats = {s0, s1};
+  *e2.y.strides = {s1, One};
+  e2.y.dtype = af::DataType::DT_FLOAT;
+  e2.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Sum r2("r2");
+  r2.x = c2.y;
+  r2.attr.api.compute_type = ComputeType::kComputeReduce;
+  r2.attr.api.type = af::ApiType::kAPITypeCompute;
+  r2.attr.sched.axis = {z0.id, z1.id};
+  *r2.y.axis = {z0.id, z1.id};
+  *r2.y.repeats = {One, One};
+  *r2.y.strides = {Zero, Zero};
+  r2.y.dtype = af::DataType::DT_FLOAT;
+  r2.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Store store0("store0");
+  store0.x = e1.y;
+  store0.attr.api.compute_type = ComputeType::kComputeStore;
+  store0.attr.api.type = af::ApiType::kAPITypeCompute;
+  store0.attr.sched.axis = {z0.id, z1.id};
+  *store0.y.axis = {z0.id, z1.id};
+  *store0.y.repeats = {s0, s1};
+  *store0.y.strides = {s1, One};
+  store0.y.dtype = af::DataType::DT_FLOAT;
+  store0.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Store store1("store1");
+  store1.x = r1.y;
+  store1.attr.api.compute_type = ComputeType::kComputeStore;
+  store1.attr.api.type = af::ApiType::kAPITypeCompute;
+  store1.attr.sched.axis = {z0.id, z1.id};
+  *store1.y.axis = {z0.id, z1.id};
+  *store1.y.repeats = {One, One};
+  *store1.y.strides = {Zero, Zero};
+  store1.y.dtype = af::DataType::DT_FLOAT;
+  store1.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Store store2("store2");
+  store2.x = e2.y;
+  store2.attr.api.compute_type = ComputeType::kComputeStore;
+  store2.attr.api.type = af::ApiType::kAPITypeCompute;
+  store2.attr.sched.axis = {z0.id, z1.id};
+  *store2.y.axis = {z0.id, z1.id};
+  *store2.y.repeats = {s0, s1};
+  *store2.y.strides = {s1, One};
+  store2.y.dtype = af::DataType::DT_FLOAT;
+  store2.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Store store3("store3");
+  store3.x = r2.y;
+  store3.attr.api.compute_type = ComputeType::kComputeStore;
+  store3.attr.api.type = af::ApiType::kAPITypeCompute;
+  store3.attr.sched.axis = {z0.id, z1.id};
+  *store3.y.axis = {z0.id, z1.id};
+  *store3.y.repeats = {One, One};
+  *store3.y.strides = {Zero, Zero};
+  store3.y.dtype = af::DataType::DT_FLOAT;
+  store3.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Output out0("output0");
+  out0.x = store0.y;
+  out0.attr.api.compute_type = ComputeType::kComputeInvalid;
+  out0.attr.api.type = af::ApiType::kAPITypeBuffer;
+  out0.y.dtype = af::DataType::DT_FLOAT;
+  out0.ir_attr.SetIndex(0);
+
+  af::ascir_op::Output out1("output1");
+  out1.x = store1.y;
+  out1.attr.api.compute_type = ComputeType::kComputeInvalid;
+  out1.attr.api.type = af::ApiType::kAPITypeBuffer;
+  out1.y.dtype = af::DataType::DT_FLOAT;
+  out1.ir_attr.SetIndex(1);
+
+  af::ascir_op::Output out2("output2");
+  out2.x = store2.y;
+  out2.attr.api.compute_type = ComputeType::kComputeInvalid;
+  out2.attr.api.type = af::ApiType::kAPITypeBuffer;
+  out2.y.dtype = af::DataType::DT_FLOAT;
+  out2.ir_attr.SetIndex(2);
+
+  af::ascir_op::Output out3("output3");
+  out3.x = store3.y;
+  out3.attr.api.compute_type = ComputeType::kComputeInvalid;
+  out3.attr.api.type = af::ApiType::kAPITypeBuffer;
+  out3.y.dtype = af::DataType::DT_FLOAT;
+  out3.ir_attr.SetIndex(3);
+}
+
+/**
+ *      NetOutput
+ *         |
+ *       AscBc
+ *      /     \
+ *   data0  data1
+ */
+af::ComputeGraphPtr ShareGraph::ReduceNormLikeFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("reduce_norm_like_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+  auto data1 = builder.AddNode("data1", "Data", 0, 1);
+  af::AttrUtils::SetInt(data1->GetOpDescBarePtr(), "_parent_node_index", 1);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 2, 4);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 4, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(data1, 0, ascbc, 1);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  builder.AddDataEdge(ascbc, 1, netoutput, 1);
+  builder.AddDataEdge(ascbc, 2, netoutput, 2);
+  builder.AddDataEdge(ascbc, 3, netoutput, 3);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("reduce_norm_like");
+  CreateReduceNormLikeAscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
+ *        output0          output2
+ *           |                |
+ *        store0           store2
+ *           |                |
+ *         sum0(Sum)       sum2(Sum)
+ *           |                |
+ *         c0(Relu)        join(Add)
+ *              \           /      \
+ *               \      c1(Relu)  c2(Tanh)
+ *                \      /          /
+ *                 load0  <-------┘
+ *                   |
+ *                 data0
+ *
+ * 多引用同 reduce 场景: 源 load0 的非锚点引用 c1/c2 各被切分为一份同名副本, 两份副本
+ * 都落在 sum2 所在子图内, 用于覆盖子图内重复副本合并(保留基准副本并清理失活输入副本)路径。
+ */
+static void CreateMultiCitationReduceAscGraph(af::AscGraph &graph, size_t dims_size) {
+  (void)dims_size;
+  const Expression s0 = graph.CreateSizeVar(2);
+  const Expression s1 = graph.CreateSizeVar(8);
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data d0("data0", graph);
+  d0.ir_attr.SetIndex(0);
+
+  af::ascir_op::Load load0("load0");
+  load0.x = d0.y;
+  load0.attr.api.compute_type = ComputeType::kComputeLoad;
+  load0.attr.api.type = af::ApiType::kAPITypeCompute;
+  load0.attr.sched.axis = {z0.id, z1.id};
+  *load0.y.axis = {z0.id, z1.id};
+  *load0.y.repeats = {s0, s1};
+  *load0.y.strides = {s1, One};
+  load0.y.dtype = af::DataType::DT_FLOAT;
+  load0.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Relu c0("c0");
+  c0.x = load0.y;
+  c0.attr.api.compute_type = ComputeType::kComputeElewise;
+  c0.attr.api.type = af::ApiType::kAPITypeCompute;
+  c0.attr.sched.axis = {z0.id, z1.id};
+  *c0.y.axis = {z0.id, z1.id};
+  *c0.y.repeats = {s0, s1};
+  *c0.y.strides = {s1, One};
+  c0.y.dtype = af::DataType::DT_FLOAT;
+  c0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Sum sum0("sum0");
+  sum0.x = c0.y;
+  sum0.attr.api.compute_type = ComputeType::kComputeReduce;
+  sum0.attr.api.type = af::ApiType::kAPITypeCompute;
+  sum0.attr.sched.axis = {z0.id, z1.id};
+  *sum0.y.axis = {z0.id, z1.id};
+  *sum0.y.repeats = {One, One};
+  *sum0.y.strides = {Zero, Zero};
+  sum0.y.dtype = af::DataType::DT_FLOAT;
+  sum0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Relu c1("c1");
+  c1.x = load0.y;
+  c1.attr.api.compute_type = ComputeType::kComputeElewise;
+  c1.attr.api.type = af::ApiType::kAPITypeCompute;
+  c1.attr.sched.axis = {z0.id, z1.id};
+  *c1.y.axis = {z0.id, z1.id};
+  *c1.y.repeats = {s0, s1};
+  *c1.y.strides = {s1, One};
+  c1.y.dtype = af::DataType::DT_FLOAT;
+  c1.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Tanh c2("c2");
+  c2.x = load0.y;
+  c2.attr.api.compute_type = ComputeType::kComputeElewise;
+  c2.attr.api.type = af::ApiType::kAPITypeCompute;
+  c2.attr.sched.axis = {z0.id, z1.id};
+  *c2.y.axis = {z0.id, z1.id};
+  *c2.y.repeats = {s0, s1};
+  *c2.y.strides = {s1, One};
+  c2.y.dtype = af::DataType::DT_FLOAT;
+  c2.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Add join("join");
+  join.x1 = c1.y;
+  join.x2 = c2.y;
+  join.attr.api.compute_type = ComputeType::kComputeElewise;
+  join.attr.api.type = af::ApiType::kAPITypeCompute;
+  join.attr.sched.axis = {z0.id, z1.id};
+  *join.y.axis = {z0.id, z1.id};
+  *join.y.repeats = {s0, s1};
+  *join.y.strides = {s1, One};
+  join.y.dtype = af::DataType::DT_FLOAT;
+  join.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Sum sum2("sum2");
+  sum2.x = join.y;
+  sum2.attr.api.compute_type = ComputeType::kComputeReduce;
+  sum2.attr.api.type = af::ApiType::kAPITypeCompute;
+  sum2.attr.sched.axis = {z0.id, z1.id};
+  *sum2.y.axis = {z0.id, z1.id};
+  *sum2.y.repeats = {One, One};
+  *sum2.y.strides = {Zero, Zero};
+  sum2.y.dtype = af::DataType::DT_FLOAT;
+  sum2.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Store store0("store0");
+  store0.x = sum0.y;
+  store0.attr.api.compute_type = ComputeType::kComputeStore;
+  store0.attr.api.type = af::ApiType::kAPITypeCompute;
+  store0.attr.sched.axis = {z0.id, z1.id};
+  *store0.y.axis = {z0.id, z1.id};
+  *store0.y.repeats = {One, One};
+  *store0.y.strides = {Zero, Zero};
+  store0.y.dtype = af::DataType::DT_FLOAT;
+  store0.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Store store2("store2");
+  store2.x = sum2.y;
+  store2.attr.api.compute_type = ComputeType::kComputeStore;
+  store2.attr.api.type = af::ApiType::kAPITypeCompute;
+  store2.attr.sched.axis = {z0.id, z1.id};
+  *store2.y.axis = {z0.id, z1.id};
+  *store2.y.repeats = {One, One};
+  *store2.y.strides = {Zero, Zero};
+  store2.y.dtype = af::DataType::DT_FLOAT;
+  store2.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Output out0("output0");
+  out0.x = store0.y;
+  out0.attr.api.compute_type = ComputeType::kComputeInvalid;
+  out0.attr.api.type = af::ApiType::kAPITypeBuffer;
+  out0.y.dtype = af::DataType::DT_FLOAT;
+  out0.ir_attr.SetIndex(0);
+
+  af::ascir_op::Output out2("output2");
+  out2.x = store2.y;
+  out2.attr.api.compute_type = ComputeType::kComputeInvalid;
+  out2.attr.api.type = af::ApiType::kAPITypeBuffer;
+  out2.y.dtype = af::DataType::DT_FLOAT;
+  out2.ir_attr.SetIndex(1);
+}
+
+/**
+ *      NetOutput
+ *         |
+ *       AscBc
+ *         |
+ *      data0
+ */
+af::ComputeGraphPtr ShareGraph::MultiCitationReduceFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("multi_citation_reduce_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 2);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 2, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  builder.AddDataEdge(ascbc, 1, netoutput, 1);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("multi_citation_reduce");
+  CreateMultiCitationReduceAscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
 static void CreateTailBrcTailReduceAscGraph(af::AscGraph &graph, size_t dims_size) {
   const Expression s0 = graph.CreateSizeVar(4);
   const Expression s1 = graph.CreateSizeVar(8);

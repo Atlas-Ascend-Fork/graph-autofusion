@@ -81,6 +81,25 @@ bool HasReduceTemplateType(const std::vector<ScheduleTask> &tasks, ReduceTemplat
   return false;
 }
 
+// 统计公共任务(kCommon)各子图内指定名字的节点个数: 子图划分与子图内合并动作都作用在
+// 公共任务上, RCore/AllLoad 任务由其派生, 不计入避免重复统计
+size_t CountCommonTaskNodesByName(const std::vector<ScheduleTask> &tasks, const std::string &node_name) {
+  size_t count = 0UL;
+  for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
+    for (const auto &grouped_graph : task.grouped_graphs) {
+      for (const auto &node : grouped_graph.GetAllNodes()) {
+        if (node->GetName() == node_name) {
+          ++count;
+        }
+      }
+    }
+  }
+  return count;
+}
+
 void ConstructFourAxisReduce(af::AscGraph &graph, bool tail_reduce) {
   auto s0 = graph.CreateSizeVar(128);
   auto s1 = graph.CreateSizeVar(64);
@@ -770,5 +789,113 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_ScalarData_Input) {
       }
     }
   }
+}
+
+TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_MergeCopiesInSubGraph) {
+  // 同一 source(load) 的两条非锚点引用(c1/c2) 经 join 汇聚到同一个 reduce(sum2), 两次切分
+  // 产生的同名 copy_from_load/copy_from_data 副本落在同一子图, 应合并为一份
+  auto graph = AscGraphBuilder("reduce_multi_citation_merge_copies")
+                   .Loops({Sym(128), Sym(64)})
+                   .Data("data", 0)
+                   .Load("load", "data")
+                   .Abs("c0", "load")
+                   .Sum("sum0", "c0", {0, 1})
+                   .Relu("c1", "load")
+                   .Op<af::ascir_op::Tanh>("c2", {"load"})
+                   .Add("join", "c1", "c2")
+                   .Sum("sum2", "join", {0, 1})
+                   .Store("store0", "sum0")
+                   .Output("output0", "store0", 0)
+                   .Store("store2", "sum2")
+                   .Output("output2", "store2", 1)
+                   .Build();
+  std::vector<ScheduleTask> tasks;
+  ReducePartitionCaseGenerator generator;
+  OptimizerOptions options;
+  EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
+  EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kCommon));
+
+  // 合并后公共任务内同名副本各只剩一份
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "copy_from_load"), 1UL);
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "copy_from_data"), 1UL);
+
+  // 保留下来的副本同时服务 c1 与 c2
+  bool feeds_both = false;
+  for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
+    for (const auto &grouped_graph : task.grouped_graphs) {
+      auto copy_node = grouped_graph.FindNode("copy_from_load");
+      if (copy_node == nullptr) {
+        continue;
+      }
+      bool has_c1 = false;
+      bool has_c2 = false;
+      for (const auto &out_node : copy_node->GetOutDataNodes()) {
+        has_c1 = has_c1 || (out_node->GetName() == "c1");
+        has_c2 = has_c2 || (out_node->GetName() == "c2");
+      }
+      feeds_both = feeds_both || (has_c1 && has_c2);
+    }
+  }
+  EXPECT_TRUE(feeds_both);
+}
+
+TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_RemoveOrphanSourceKeepCrossSubGraphCopies) {
+  // src0 的两条引用 c1/c2 都是非锚点(并查集合并后锚点取自 src1 的 sum_small), 两条边都被切走后
+  // src0 失去全部消费者: 整图清扫应摘除 src0 及其失去消费者的输入 d0, 并剔除切分根序列中的
+  // src0(否则会被重建成孤立子图); src0 的两份副本分属不同子图, 不做合并
+  auto graph = AscGraphBuilder("reduce_multi_citation_orphan_source")
+                   .Loops({Sym(128), Sym(64)})
+                   .Data("d0", 0)
+                   .Load("src0", "d0")
+                   .Data("d1", 1)
+                   .Load("src1", "d1")
+                   .Relu("c1", "src0")
+                   .Op<af::ascir_op::Tanh>("c2", {"src0"})
+                   .Relu("t1", "src1")
+                   .Op<af::ascir_op::Tanh>("t2", {"src1"})
+                   .Sum("sum_small", "t1", {0, 1})
+                   .Add("shared_in", "c1", "t2")
+                   .Sum("sum_shared", "shared_in", {0, 1})
+                   .Sum("sum_other", "c2", {0, 1})
+                   .Store("store0", "sum_small")
+                   .Output("output0", "store0", 0)
+                   .Store("store1", "sum_shared")
+                   .Output("output1", "store1", 1)
+                   .Store("store2", "sum_other")
+                   .Output("output2", "store2", 2)
+                   .Build();
+  std::vector<ScheduleTask> tasks;
+  ReducePartitionCaseGenerator generator;
+  OptimizerOptions options;
+  EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
+  EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kCommon));
+
+  // 悬空源节点及其已失去消费者的输入被摘除, 且不残留在切分根序列中(否则会重建出孤立子图)
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "src0"), 0UL);
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "d0"), 0UL);
+
+  // src1 保留锚点引用(t1->sum_small), 原节点与副本正常保留
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "src1"), 1UL);
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "copy_from_src1"), 1UL);
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "copy_from_d1"), 1UL);
+
+  // src0 的两份副本分属不同子图, 各自保留(不做跨子图合并)
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "copy_from_src0"), 2UL);
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "copy_from_d0"), 2UL);
+  size_t subgraphs_with_src0_copy = 0UL;
+  for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
+    for (const auto &grouped_graph : task.grouped_graphs) {
+      if (grouped_graph.FindNode("copy_from_src0") != nullptr) {
+        ++subgraphs_with_src0_copy;
+      }
+    }
+  }
+  EXPECT_EQ(subgraphs_with_src0_copy, 2UL);
 }
 }  // namespace schedule

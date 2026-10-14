@@ -8,17 +8,21 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-"""Pure Python MiniDAG models for multistream planning.
+"""Pure Python multistream planning package (MiniDAG model).
 
-The models need no third-party Python package or CANN Runtime library.
+The package needs no third-party Python package and ships no extension of
+its own.  Calling :func:`plan` does need the host's CANN Runtime shared
+library, which is loaded lazily when planning queries the hardware
+core counts.
 """
 
+from .algorithm.planning import plan
 from .minidag.graph import DAGGraph
 from .minidag.node import DAGNode
 from .minidag.plan import StreamPlan
 
 # Constants are intentionally exported as attributes but excluded from
-# ``__all__``; the public API list contains the six model and type symbols.
+# ``__all__``; the public API list contains the seven documented symbols.
 from .minidag.types import (  # noqa: F401
     INVALID_STREAM_ID,
     MAX_STREAM_NUM,
@@ -34,4 +38,5 @@ __all__ = [
     "CoreType",
     "StreamPlan",
     "MergeStrategy",
+    "plan",
 ]

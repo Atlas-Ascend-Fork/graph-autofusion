@@ -3846,6 +3846,21 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     const auto template_id = ::ascir::GetTemplateIdOrDefault(node);
+    if (template_id == ::ascir::TemplateId::kIndirectLoadSimt) {
+      // [SIMT index 闭包预计算] index 链可向量化时申请 fp32/int32 槽与 uint8 mask 槽
+      // scratch（槽宽 = Align(inner*4, 32B)，mask 槽按 4B 槽宽对齐覆盖）。表本体驻留
+      // value tensor 存储，不走 tmp。需求由调度期（FinalizeLoweringMetadata）经 ext
+      // attr 传递——本注册库不依赖 codegen 库符号；链不可行时无 attr，SIMT 保持 GM
+      // 直读形态。
+      const auto demand = ::ascgen_utils::indirect_load::GetSimtIndexPrepassTmpDemand(node);
+      if (!demand.eligible) {
+        return {};
+      }
+      TmpBufDesc desc = {demand.tmp_bytes, -1};
+      std::vector<std::unique_ptr<TmpBufDesc>> tmp_buf_descs;
+      tmp_buf_descs.emplace_back(std::make_unique<TmpBufDesc>(desc));
+      return tmp_buf_descs;
+    }
     if (template_id != ::ascir::TemplateId::kIndirectLoadSimd && template_id != ::ascir::TemplateId::kIndirectLoadSK) {
       // SIMD uses an offsets buffer, SK uses an input cache and offsets buffer, while SIMT accesses GM directly.
       return {};
@@ -3878,8 +3893,8 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return false;
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
-    return {"datacopy_reg_base.h", "indirect_load_simd_policy_reg_base.h", "indirect_load_simd_reg_base.h",
-            "indirect_load_sk_reg_base.h", "indirect_load_simt_reg_base.h"};
+    return {"datacopy_reg_base.h",         "indirect_load_simd_policy_reg_base.h", "indirect_load_simd_reg_base.h",
+            "indirect_load_sk_reg_base.h", "indirect_load_simt_reg_base.h",        "transpose_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {"basic_api/kernel_operator_vec_gather_intf.h", "basic_api/reg_compute/kernel_reg_compute_intf.h",
