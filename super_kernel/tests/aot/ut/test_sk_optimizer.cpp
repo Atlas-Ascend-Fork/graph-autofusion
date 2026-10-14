@@ -211,8 +211,8 @@ TEST_F(SkOptimizerTaskReorderTest, SynthesizedEventDependencies_ConnectOnlyLastK
   auto *stream0LastKernel = CreateKernelNode(3, 0);
   auto *trailingWait = CreateWaitNode(4, 1);
   auto *firstEvent = CreateNotifyNode(100, 0);
-  std::vector<SuperKernelBaseNode *> reorderedTaskNodes = {
-      stream0FirstKernel, stream1LastKernel, stream0LastKernel, trailingWait};
+  std::vector<SuperKernelBaseNode *> reorderedTaskNodes = {stream0FirstKernel, stream1LastKernel, stream0LastKernel,
+                                                           trailingWait};
 
   optimizer->ConnectLastKernelsToFirstEvent(reorderedTaskNodes, firstEvent);
 

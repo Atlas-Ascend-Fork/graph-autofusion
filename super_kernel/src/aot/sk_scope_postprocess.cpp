@@ -228,8 +228,8 @@ bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
 }
 
 bool ProcessBackBlockForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
-                               const std::vector<ScopeStreamInfo> &scopeStreamInfos,
-                               std::vector<StreamPostPlan> &plans, uint32_t curStreamIdx, uint64_t lastNodeId) {
+                               const std::vector<ScopeStreamInfo> &scopeStreamInfos, std::vector<StreamPostPlan> &plans,
+                               uint32_t curStreamIdx, uint64_t lastNodeId) {
   auto &scopeStreamInfo = scopeStreamInfos[curStreamIdx];
   SK_LOGI("back-block process begin: streamId=%u", scopeStreamInfo.streamIdx);
 

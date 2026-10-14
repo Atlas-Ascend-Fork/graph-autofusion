@@ -545,8 +545,7 @@ TEST_F(SkTaskBuilderTest, PrecomputeSyncRelationsByMixGroups_AddsBoundarySyncAnd
 }
 
 TEST_F(SkTaskBuilderTest, PrecomputeUnifiedEventDependency_UsesMixBoundaryAndFinalGroupDirectSync) {
-  auto *eventQueueAnchor =
-      CreateKernelNodeEx(91100, 2, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIV_ONLY);
+  auto *eventQueueAnchor = CreateKernelNodeEx(91100, 2, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIV_ONLY);
   auto *mix = CreateKernelNodeEx(91101, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::MIX_AIC_1_1);
   auto *lastAic = CreateKernelNodeEx(91102, 1, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
   auto *firstEvent = CreateNotifyNodeEx(91103, 2, eventQueueAnchor->GetNodeId(), INVALID_TASK_ID, 301);
@@ -560,8 +559,7 @@ TEST_F(SkTaskBuilderTest, PrecomputeUnifiedEventDependency_UsesMixBoundaryAndFin
   ASSERT_EQ(builder->taskSyncInfos_.size(), tasks.size());
 
   ASSERT_EQ(builder->taskSyncInfos_[0].crossSyncInfo.count(static_cast<size_t>(SkQueueType::AIC)), 1U);
-  EXPECT_EQ(builder->taskSyncInfos_[0].crossSyncInfo[static_cast<size_t>(SkQueueType::AIC)],
-            SyncDirection::ALL_SYNC);
+  EXPECT_EQ(builder->taskSyncInfos_[0].crossSyncInfo[static_cast<size_t>(SkQueueType::AIC)], SyncDirection::ALL_SYNC);
   ASSERT_EQ(builder->taskSyncInfos_[1].cubSendInfo.count(2), 1U);
   EXPECT_EQ(builder->taskSyncInfos_[1].cubSendInfo[2], SyncDirection::CUB_TO_VEC);
   ASSERT_EQ(builder->taskSyncInfos_[2].vecRecvInfo.count(1), 1U);

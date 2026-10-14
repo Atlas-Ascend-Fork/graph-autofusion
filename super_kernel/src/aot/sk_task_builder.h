@@ -134,8 +134,8 @@ class SkTaskBuilder {
  public:
   SkTaskBuilder(SuperKernelOptionsManager &opts, const SuperKernelGraph &graph) : opts(opts), graph_(graph) {}
 
-  SkBuildResult Build(std::string skFuncName, const std::vector<SuperKernelBaseNode *> &tasks,
-                      uint16_t scopeId, const ScopeCoreInfo &scopeCoreInfo);
+  SkBuildResult Build(std::string skFuncName, const std::vector<SuperKernelBaseNode *> &tasks, uint16_t scopeId,
+                      const ScopeCoreInfo &scopeCoreInfo);
 
  private:
   SuperKernelOptionsManager &opts;
