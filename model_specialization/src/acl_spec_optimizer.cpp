@@ -123,6 +123,11 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
     SK_DLOGE("aclmdlRISpecOptimize streams unavailable: model=%p count=%u ret=%d", model, streamCount, result);
     return result;
   }
+  if (streamCount > streams.size()) {
+    SK_DLOGE("aclmdlRISpecOptimize invalid stream count: model=%p count=%u capacity=%zu", model, streamCount,
+             streams.size());
+    return ACL_ERROR_FAILURE;
+  }
   std::vector<std::unique_ptr<KernelSpecRequest>> collected;
   for (uint32_t streamIndex = 0; streamIndex < streamCount; ++streamIndex) {
     if (streams[streamIndex] == nullptr) {
@@ -144,6 +149,11 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
       SK_DLOGE("aclmdlRISpecOptimize tasks unavailable: model=%p stream=%u count=%u ret=%d", model, streamIndex,
                taskCount, result);
       return result;
+    }
+    if (taskCount > tasks.size()) {
+      SK_DLOGE("aclmdlRISpecOptimize invalid task count: model=%p stream=%u count=%u capacity=%zu", model, streamIndex,
+               taskCount, tasks.size());
+      return ACL_ERROR_FAILURE;
     }
     for (uint32_t taskIndex = 0; taskIndex < taskCount; ++taskIndex) {
       aclmdlRITaskType type = ACL_MODEL_RI_TASK_DEFAULT;

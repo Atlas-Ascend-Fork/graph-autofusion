@@ -494,7 +494,6 @@ size_t streamQueries = 0;
 size_t taskQueries = 0;
 size_t failStreamQuery = 0;
 size_t failTaskQuery = 0;
-size_t reportedExtraStreams = 0;
 size_t parameterQueries = 0;
 size_t lastParameterIndex = 0;
 std::vector<aclError> specializationResults;
@@ -542,7 +541,7 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
     MOCKER(rtGetBinBuffer).stubs().will(invoke(GetBinaryBuffer));
     MOCKER(aclrtBinaryGetFunction).stubs().will(invoke(GetBinaryFunction));
     MOCKER(KernelSpecRequest::UnloadBinary).stubs().will(invoke(UnloadBinary));
-    streamQueries = taskQueries = failStreamQuery = failTaskQuery = reportedExtraStreams = parameterQueries = 0;
+    streamQueries = taskQueries = failStreamQuery = failTaskQuery = parameterQueries = 0;
     lastParameterIndex = 0;
     specializationResults.clear();
     specializationPaths.clear();
@@ -620,10 +619,16 @@ aclError GetStreams(aclmdlRI model, aclrtStream *streams, uint32_t *count) {
     return ACL_ERROR_FAILURE;
   }
   const auto &values = static_cast<ModelState *>(model)->streams;
-  if (streams != nullptr) {
-    std::copy_n(values.begin(), std::min<size_t>(*count, values.size()), streams);
+  if (streams == nullptr) {
+    *count = values.size();
+    return ACL_SUCCESS;
   }
-  *count = values.size() + (streams != nullptr ? reportedExtraStreams : 0);
+  const size_t copied = std::min<size_t>(*count, values.size());
+  *count = copied;
+  if (copied < values.size()) {
+    return ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
+  }
+  std::copy_n(values.begin(), copied, streams);
   return ACL_SUCCESS;
 }
 
@@ -633,11 +638,32 @@ aclError GetTasks(aclrtStream stream, aclmdlRITask *tasks, uint32_t *count) {
     return ACL_ERROR_FAILURE;
   }
   const auto &values = static_cast<StreamState *>(stream)->tasks;
-  if (tasks != nullptr) {
-    std::copy_n(values.begin(), std::min<size_t>(*count, values.size()), tasks);
+  if (tasks == nullptr) {
+    *count = values.size();
+    return ACL_SUCCESS;
   }
-  *count = values.size();
-  return ACL_SUCCESS;
+  const size_t copied = std::min<size_t>(*count, values.size());
+  std::copy_n(values.begin(), copied, tasks);
+  std::fill(tasks + copied, tasks + *count, nullptr);
+  *count = copied;
+  return copied < values.size() ? ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY : ACL_SUCCESS;
+}
+
+// Deliberately violate the Runtime contract only in the defensive enumeration tests.
+aclError GetStreamsWithInvalidCount(aclmdlRI model, aclrtStream *streams, uint32_t *count) {
+  const auto result = GetStreams(model, streams, count);
+  if (result == ACL_SUCCESS && streams != nullptr) {
+    ++*count;
+  }
+  return result;
+}
+
+aclError GetTasksWithInvalidCount(aclrtStream stream, aclmdlRITask *tasks, uint32_t *count) {
+  const auto result = GetTasks(stream, tasks, count);
+  if (result == ACL_SUCCESS && tasks != nullptr) {
+    ++*count;
+  }
+  return result;
 }
 
 aclError GetFunctionName(aclrtFuncHandle function, uint32_t capacity, char *name) {
@@ -936,10 +962,50 @@ TEST_F(AclSpecOptimizerCollectionTest, EmptyModelDoesNotRepeatCountQueryWithNull
   EXPECT_EQ(taskQueries, 0U);
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, InconsistentEnumerationCountIsRejected) {
-  reportedExtraStreams = 1;
+TEST_F(AclSpecOptimizerCollectionTest, RejectsStreamCountExceedingAllocatedCapacity) {
+  GlobalMockObject::reset(reinterpret_cast<const void *>(aclmdlRIGetStreams));
+  MOCKER(aclmdlRIGetStreams).stubs().will(invoke(GetStreamsWithInvalidCount));
   EXPECT_EQ(Collect(), ACL_ERROR_FAILURE);
   EXPECT_TRUE(requests.empty());
+  EXPECT_EQ(taskQueries, 0U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, RejectsTaskCountExceedingAllocatedCapacity) {
+  GlobalMockObject::reset(reinterpret_cast<const void *>(aclmdlRIGetTasksByStream));
+  MOCKER(aclmdlRIGetTasksByStream).stubs().will(invoke(GetTasksWithInvalidCount));
+  EXPECT_EQ(Collect(), ACL_ERROR_FAILURE);
+  EXPECT_TRUE(requests.empty());
+  EXPECT_EQ(parameterQueries, 0U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, StreamEnumerationStubRespectsArrayCapacity) {
+  StreamState second;
+  model.streams.push_back(&second);
+  std::array<aclrtStream, 3> streams{&model, &model, &model};
+  uint32_t count = 1;
+  EXPECT_EQ(aclmdlRIGetStreams(&model, streams.data(), &count), ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY);
+  EXPECT_EQ(count, 1U);
+  EXPECT_EQ(streams, (std::array<aclrtStream, 3>{&model, &model, &model}));
+
+  count = streams.size();
+  EXPECT_EQ(aclmdlRIGetStreams(&model, streams.data(), &count), ACL_SUCCESS);
+  EXPECT_EQ(count, 2U);
+  EXPECT_EQ(streams, (std::array<aclrtStream, 3>{&stream, &second, &model}));
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, TaskEnumerationStubRespectsArrayCapacity) {
+  CollectorTask second = task;
+  stream.tasks.push_back(&second);
+  std::array<aclmdlRITask, 3> tasks{&model, &model, &model};
+  uint32_t count = 1;
+  EXPECT_EQ(aclmdlRIGetTasksByStream(&stream, tasks.data(), &count), ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY);
+  EXPECT_EQ(count, 1U);
+  EXPECT_EQ(tasks, (std::array<aclmdlRITask, 3>{&task, &model, &model}));
+
+  count = tasks.size();
+  EXPECT_EQ(aclmdlRIGetTasksByStream(&stream, tasks.data(), &count), ACL_SUCCESS);
+  EXPECT_EQ(count, 2U);
+  EXPECT_EQ(tasks, (std::array<aclmdlRITask, 3>{&task, &second, nullptr}));
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, RejectsInvalidInputsWithoutQueryingRuntime) {
