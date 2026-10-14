@@ -470,6 +470,26 @@ af::Status NddmaTemplate::ProcessTransposeNodes(af::AscGraph &new_case, bool &is
   return af::SUCCESS;
 }
 
+af::Status NddmaTemplate::ProcessSliceNodes(af::AscGraph &new_case, bool &is_nddma_generated) {
+  bool any_generated = false;
+  for (const auto &node : new_case.GetAllNodes()) {
+    GE_CHECK_NOTNULL(node);
+    if ((!af::ops::IsOps<af::ascir_op::Load>(node)) ||
+        ascgen_utils::indirect_load::GetTemplateBehavior(node).uses_direct_gm_pipeline) {
+      continue;
+    }
+    bool generated = false;
+    GE_ASSERT_SUCCESS(ProcessSliceToNddma(node, generated, new_case));
+    any_generated = (any_generated || generated);
+  }
+  if (any_generated) {
+    GELOGI("Nddma generated from Slice, realign vectorized strides");
+    GE_ASSERT_SUCCESS(autoschedule::AlignmentHandler::AlignVectorizedStrides(new_case));
+  }
+  is_nddma_generated = (is_nddma_generated || any_generated);
+  return af::SUCCESS;
+}
+
 af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_graph,
                                    [[maybe_unused]] const af::AscGraph &based_case, af::AscGraph &new_case) {
   const auto indirect_load = ascgen_utils::indirect_load::FindIndirectLoadNode(new_case);
@@ -483,6 +503,7 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
   bool is_nddma_generated = false;
   GE_ASSERT_SUCCESS(ProcessTransposeNodes(new_case, is_nddma_generated));
   bool is_transpose_nddma_generated = is_nddma_generated;
+  GE_ASSERT_SUCCESS(ProcessSliceNodes(new_case, is_nddma_generated));
   for (const auto &node : new_case.GetAllNodes()) {
     GE_CHECK_NOTNULL(node);
     if ((!af::ops::IsOps<af::ascir_op::Load>(node) && !af::ops::IsOps<af::ascir_op::Nddma>(node)) ||
@@ -511,15 +532,15 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
         SwapCastBrcAndGenNddma(std::dynamic_pointer_cast<af::AscNode>(out_node), node, new_case) == af::SUCCESS) {
       is_nddma_generated_cur = true;
     }
-    GE_ASSERT_SUCCESS(ProcessSliceToNddma(node, is_nddma_generated_cur, new_case));
-    is_nddma_generated = is_nddma_generated || is_nddma_generated_cur;
     ascgen_utils::DiscontinuityInfo info;
     GE_ASSERT_SUCCESS(ascgen_utils::TensorLayoutUtils::AnalyzeLoadDiscontinuity(node->outputs[0].attr, info),
                       "Failed to analyze discontinuity info for node:[%s].", node->GetNamePtr());
     bool need_align_at_repeat1 = info.has_multiple_discontinuities && info.is_tail_axis_discontinuous;
     if (!is_nddma_generated_cur && (IsLoadNeedAlign(node) || need_align_at_repeat1)) {
       GE_ASSERT_SUCCESS(GenLoadToGenNddmaNode(node));
+      is_nddma_generated_cur = true;
     }
+    is_nddma_generated = is_nddma_generated || is_nddma_generated_cur;
   }
   if (!is_nddma_generated) {
     GELOGD("No nddma template generated.");
