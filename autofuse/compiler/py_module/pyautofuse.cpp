@@ -19,6 +19,7 @@
 #include "ascgen_log.h"
 #include "ascir/meta/asc_graph_dumper_context.h"
 #include "common_utils.h"
+#include "gen_model_info/api_perf_register/soc_perf_config.h"
 
 namespace pyascir {
 namespace {
@@ -258,6 +259,9 @@ PyObject *Autofuser::AutofuseBackend(PyObject *self, PyObject *args, PyObject *k
   if (PyArg_ParseTuple(args, "O", &graph_obj) == kPythonFail) {
     return PyErr_Format(PyExc_ValueError, "autofuse input args error");
   }
+  if (att::ValidateSocPerfEntry() != af::SUCCESS) {
+    return PyErr_Format(PyExc_RuntimeError, "Invalid SoC performance target");
+  }
 
   ascir::FusedScheduledResult fused_schedule_result;
 
@@ -284,11 +288,13 @@ PyObject *Autofuser::AutofuseBackend(PyObject *self, PyObject *args, PyObject *k
 
   codegen::CodegenResult result;
   try {
-    if (self_->codegen->GenerateForInductor(fused_schedule_result, result) != af::SUCCESS) {
-      GELOGE(af::FAILED, "Codegen generate kernel failed");
+    const auto ret = self_->codegen->GenerateForInductor(fused_schedule_result, result);
+    if (ret != af::SUCCESS) {
+      return PyErr_Format(PyExc_RuntimeError, "Codegen generate kernel failed");
     }
   } catch (const std::runtime_error &e) {
     GELOGE(af::FAILED, "Caught a runtime_error: %s", e.what());
+    return PyErr_Format(PyExc_RuntimeError, "Codegen generate kernel failed: %s", e.what());
   }
 
   return Py_BuildValue("sss", result.tiling_data.c_str(), result.tiling.c_str(), result.kernel.c_str());

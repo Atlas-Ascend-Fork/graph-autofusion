@@ -64,8 +64,7 @@ class TestBackendShiftedChebyshevPolynomialUStoreE2e : public testing::Test {
   void SetUp() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
     ge::PlatformContext::GetInstance().Reset();
-    auto stub_v2 = std::make_shared<af::RuntimeStubV2>();
-    ge::RuntimeStub::SetInstance(stub_v2);
+    af::InstallV35SocPerfRuntimeStub();
   }
   void TearDown() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);

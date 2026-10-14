@@ -287,6 +287,9 @@ file(GLOB SOURCES
     )
 
 
+list(REMOVE_ITEM SOURCES ${ATT_DIR}/gen_model_info/api_perf_register/soc_perf_config_data.cpp)
+list(APPEND SOURCES ${CODE_ROOT_DIR}/tests/common/att/soc_perf_test_config.cpp)
+
 add_library(att SHARED
     ${SOURCES}
 )
@@ -499,6 +502,9 @@ else ()
             graph_base_af
             unified_dlog
     )
+endif ()
+if (TARGET pyautofuse_runtime_error_tiling)
+    add_dependencies(pyautofuse pyautofuse_runtime_error_tiling)
 endif ()
 if (ENABLE_OPEN_SRC)
     target_compile_options(att PRIVATE -g --coverage -fprofile-arcs -ftest-coverage)

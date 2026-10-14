@@ -17,6 +17,7 @@
 #include "common/ge_common/debug/log.h"
 #include "attribute_group/attr_group_shape_env.h"
 #include "common/platform_context.h"
+#include "gen_model_info/api_perf_register/soc_perf_config.h"
 
 #include "pyascir_types.h"
 #include "ascgen_log.h"
@@ -202,7 +203,8 @@ PyObject *UtilsSetPlatform(const PyObject *self_pyobject, PyObject *args, const 
   const char *platform = nullptr;
   long long vector_core_num = 0;
   long long ub_size = 0;
-  if (PyArg_ParseTuple(args, "sLL", &platform, &vector_core_num, &ub_size) == kPythonFail) {
+  const char *soc_version = nullptr;
+  if (PyArg_ParseTuple(args, "sLL|s", &platform, &vector_core_num, &ub_size, &soc_version) == kPythonFail) {
     return PyErr_Format(PyExc_TypeError, "UtilsSetPlatform param parse failed, expected string, long, long");
   }
   PY_ASSERT_NOTNULL(platform);
@@ -210,7 +212,28 @@ PyObject *UtilsSetPlatform(const PyObject *self_pyobject, PyObject *args, const 
   platform_info.soc_ver = std::string(platform);
   platform_info.aiv_num = static_cast<int64_t>(vector_core_num);
   platform_info.ub_size = static_cast<int64_t>(ub_size);
-  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  const std::string full_soc_version = (soc_version == nullptr) ? std::string() : std::string(soc_version);
+  if (ge::PlatformContext::GetInstance().SetPlatformTarget(platform_info, full_soc_version) != af::SUCCESS) {
+    return PyErr_Format(PyExc_RuntimeError, "UtilsSetPlatform failed: npu arch and soc version are inconsistent");
+  }
   Py_RETURN_NONE;
+}
+
+PyObject *UtilsRequiresFullSocVersion(const PyObject *self_pyobject, PyObject *args, const PyObject *kwds) {
+  (void)self_pyobject;
+  (void)kwds;
+  const char *npu_arch = nullptr;
+  if (PyArg_ParseTuple(args, "s", &npu_arch) == kPythonFail) {
+    return PyErr_Format(PyExc_TypeError, "UtilsRequiresFullSocVersion param parse failed, expected string");
+  }
+
+  bool required = false;
+  if (att::RequiresFullSocVersion(std::string(npu_arch), required) != af::SUCCESS) {
+    return PyErr_Format(PyExc_RuntimeError, "invalid npu arch: %s", npu_arch);
+  }
+  if (required) {
+    Py_RETURN_TRUE;
+  }
+  Py_RETURN_FALSE;
 }
 }  // namespace pyascir

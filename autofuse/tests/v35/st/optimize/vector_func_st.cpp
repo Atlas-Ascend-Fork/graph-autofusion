@@ -33,8 +33,7 @@ class VectorFuncSt : public ::testing::Test {
   void SetUp() override {
     setenv("DUMP_GE_GRAPH", "2", 1);
     ge::PlatformContext::GetInstance().Reset();
-    auto stub_v2 = std::make_shared<af::RuntimeStubV2>();
-    RuntimeStub::SetInstance(stub_v2);
+    af::InstallV35SocPerfRuntimeStub();
   }
   void TearDown() override {
     setenv("DUMP_GE_GRAPH", "0", 1);

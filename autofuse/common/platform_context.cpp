@@ -20,6 +20,7 @@ const char *kAICoreSpec = "AICoreSpec";
 const char *kVectorCoreCnt = "vector_core_cnt";
 const char *kUbSize = "ub_size";
 const char *kL2Size = "l2_size";
+std::string g_full_soc_version;
 
 bool ParseInt64(const char *value, const char *key_name, int64_t &result) {
   try {
@@ -41,6 +42,7 @@ std::mutex PlatformContext::mutex_;
 
 void PlatformContext::SetPlatform(const std::string &platform_name) {
   std::lock_guard<std::mutex> lg(mutex_);
+  g_full_soc_version.clear();
   if (!platform_name.empty()) {
     platform_info_.soc_ver = platform_name;
     initialized_ = true;
@@ -50,6 +52,7 @@ void PlatformContext::SetPlatform(const std::string &platform_name) {
 
 void PlatformContext::SetPlatformInfo(const PlatformInfo &platform_info) {
   std::lock_guard<std::mutex> lg(mutex_);
+  g_full_soc_version.clear();
   if (platform_info.ub_size > 0) {
     ub_size_override_ = platform_info.ub_size;
     has_ub_size_override_ = true;
@@ -60,6 +63,50 @@ void PlatformContext::SetPlatformInfo(const PlatformInfo &platform_info) {
     GELOGI("Set platform info: soc_ver=%s, aiv_num=%lld, ub_size=%lld, l2_size=%lld", platform_info_.soc_ver.c_str(),
            platform_info_.aiv_num, platform_info_.ub_size, platform_info_.l2_size);
   }
+}
+
+af::Status PlatformContext::SetPlatformTarget(const PlatformInfo &platform_info, const std::string &soc_version) {
+  if (platform_info.soc_ver.empty() && !soc_version.empty()) {
+    return af::FAILED;
+  }
+
+  std::lock_guard<std::mutex> lg(mutex_);
+  g_full_soc_version.clear();
+  if (platform_info.ub_size > 0) {
+    ub_size_override_ = platform_info.ub_size;
+    has_ub_size_override_ = true;
+  }
+  if (!platform_info.soc_ver.empty()) {
+    platform_info_ = platform_info;
+    g_full_soc_version = soc_version;
+    initialized_ = true;
+    return af::SUCCESS;
+  }
+
+  initialized_ = false;
+  return af::SUCCESS;
+}
+
+af::Status PlatformContext::GetPlatformTarget(std::string &npu_arch, std::string &soc_version) {
+  npu_arch.clear();
+  soc_version.clear();
+  if (!initialized_) {
+    g_full_soc_version.clear();
+    GE_ASSERT_SUCCESS(Initialize(), "Failed to init platform info.");
+  }
+  std::lock_guard<std::mutex> lg(mutex_);
+  npu_arch = platform_info_.soc_ver;
+  soc_version = g_full_soc_version;
+  return af::SUCCESS;
+}
+
+void PlatformContext::Reset() {
+  std::lock_guard<std::mutex> lg(mutex_);
+  initialized_ = false;
+  platform_info_ = PlatformInfo{};
+  g_full_soc_version.clear();
+  ub_size_override_ = 0;
+  has_ub_size_override_ = false;
 }
 
 void PlatformContext::SetUbSizeOverride(int64_t ub_size) {
@@ -83,6 +130,7 @@ af::Status PlatformContext::Initialize() {
   if (initialized_) {
     return af::SUCCESS;
   }
+  g_full_soc_version.clear();
   char soc_version[kSocStrMaxLen] = {};
   auto res = rtGetSocSpec("version", "NpuArch", soc_version, kSocStrMaxLen);
   GE_ASSERT_TRUE(res == RT_ERROR_NONE, "Failed to get npu arch str.");

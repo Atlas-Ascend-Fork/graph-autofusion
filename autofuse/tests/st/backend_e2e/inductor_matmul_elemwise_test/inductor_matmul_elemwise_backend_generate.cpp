@@ -20,6 +20,7 @@
 #include "codegen.h"
 #include "common_utils.h"
 #include "common/platform_context.h"
+#include "../../../common/att/soc_perf_test_config.h"
 #include "optimize.h"
 #include "runtime_stub.h"
 #include "share_graph.h"
@@ -36,6 +37,9 @@ class TestBackendInductorMatmulElemwiseE2e : public testing::Test {
     ge::PlatformContext::GetInstance().Reset();
     auto stub_v2 = std::make_shared<ge::RuntimeStubV2Common>();
     ge::RuntimeStub::SetInstance(stub_v2);
+    ASSERT_EQ(
+        att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35AltNpuArch, att::soc_perf_test::kSocEmpty),
+        af::SUCCESS);
   }
 
   void TearDown() override {

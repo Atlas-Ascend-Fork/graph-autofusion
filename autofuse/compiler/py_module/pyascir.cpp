@@ -1566,6 +1566,8 @@ PyMethodDef UtilsMethods[] = {
      "report durations"},
     {"set_platform", reinterpret_cast<PyCFunction>(pyascir::UtilsSetPlatform), METH_VARARGS,
      "set platform for platform context"},
+    {"requires_full_soc_version", reinterpret_cast<PyCFunction>(pyascir::UtilsRequiresFullSocVersion), METH_VARARGS,
+     "check whether npu arch requires full soc version"},
     {NULL}};
 
 PyMethodDef AscirMethods[] = {{"Max", SizeExprMax, METH_VARARGS, "Return the maximum of two SizeExpr values"},

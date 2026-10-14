@@ -64,6 +64,7 @@ target_link_directories(att_ut PRIVATE ${ASCEND_INSTALL_LIB_PATH})
 target_include_directories(att_ut PRIVATE
         ${TOP_DIR}/tests/ut/att/testcase
         ${TOP_DIR}/tests/ut/att/utils
+        ${TOP_DIR}/tests/common/att
         ${TOP_DIR}/tests/common/stub
         ${TOP_DIR}/tests/ut/att/testcase/gen_model_info
         ${TOP_DIR}/tests/ut/att/testcase/gen_model_info/core

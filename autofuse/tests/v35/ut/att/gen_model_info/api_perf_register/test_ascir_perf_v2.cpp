@@ -28,6 +28,7 @@
 #include "tests/ut/common/ascir_reduce_test_helpers.h"
 #include "tests/depends/slog/src/slog_stub.h"
 #include "../../../../att/gen_model_info/api_perf_register/nddma_test_utils.h"
+#include "soc_perf_test_config.h"
 
 using namespace att;
 using namespace af::sym;
@@ -54,6 +55,7 @@ class UTestAscirPerfV2 : public ::testing::Test {
   void SetUp() override {
     setenv("ASCEND_GLOBAL_LOG_LEVEL", "0", 1);
     setenv("ASCEND_SLOG_PRINT_TO_STDOUT", "1", 1);
+    ASSERT_EQ(soc_perf_test::SetSocPerfTestPlatform(soc_perf_test::kV35NpuArch, soc_perf_test::kSocEmpty), af::SUCCESS);
   }
   void TearDown() override {}
 };

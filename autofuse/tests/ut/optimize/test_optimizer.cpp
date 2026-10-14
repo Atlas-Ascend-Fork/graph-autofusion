@@ -46,6 +46,7 @@
 #include "optimize/graph_pass/pass_utils.h"
 #include "common/autofuse_backend_spec_api.h"
 #include "autoschedule/alignment_handler.h"
+#include "../../common/att/soc_perf_test_config.h"
 #include "../../v35/ut/optimize/runtime_stub.h"
 
 using namespace af;
@@ -501,7 +502,9 @@ TEST_F(TestOptimizer, V2ArangeStoreOptimizeProducesSingletonVectorFunc) {
 
 TEST_F(TestOptimizer, V2HighRankArangeOptimizeAndCodegenOuterFor) {
   SetUpV2RuntimeStub();
-  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  ASSERT_EQ(
+      att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35AltNpuArch, att::soc_perf_test::kSocEmpty),
+      af::SUCCESS);
   af::AscGraph graph("high_rank_arange_pipeline");
   std::vector<af::Expression> sizes;
   std::vector<af::AxisId> axes;
@@ -729,7 +732,9 @@ class Int64ArangeConsumerCodegenTest : public TestOptimizer,
 
 TEST_P(Int64ArangeConsumerCodegenTest, GeneratesInt64ConsumerWithoutNarrowing) {
   SetUpV2RuntimeStub();
-  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  ASSERT_EQ(
+      att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35AltNpuArch, att::soc_perf_test::kSocEmpty),
+      af::SUCCESS);
   const auto &test_case = GetParam();
   auto graph = CreateArangeConsumerGraph("int64_consumer", test_case.consumer, af::ops::One, af::DT_INT64);
   ::ascir::FusedScheduledResult scheduled;
@@ -778,7 +783,9 @@ INSTANTIATE_TEST_SUITE_P(
 
 TEST_F(TestOptimizer, V2ScalarVectorFuncPreservesRootScalarThroughCodegen) {
   SetUpV2RuntimeStub();
-  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  ASSERT_EQ(
+      att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35AltNpuArch, att::soc_perf_test::kSocEmpty),
+      af::SUCCESS);
   af::AscGraph graph("scalar_vf_regression");
   const auto size = graph.CreateSizeVar("size");
   const auto axis = graph.CreateAxis("axis", size);

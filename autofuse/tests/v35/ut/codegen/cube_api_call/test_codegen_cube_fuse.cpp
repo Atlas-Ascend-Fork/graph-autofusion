@@ -17,6 +17,7 @@
 #include "common_utils.h"
 #include "utils/api_call_factory.h"
 #include "../common.h"
+#include "../../../../common/att/soc_perf_test_config.h"
 #include "codegen.h"
 #include "optimize.h"
 
@@ -423,6 +424,9 @@ class CubeFuseTest : public ::testing::Test {
   void SetUp() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
     ge::PlatformContext::GetInstance().Reset();
+    ASSERT_EQ(
+        att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+        af::SUCCESS);
     auto stub_v2 = std::make_shared<ge::RuntimeStubV2>();
     ge::RuntimeStub::SetInstance(stub_v2);
   }
