@@ -20,6 +20,7 @@
 #include "e2e_common.h"
 #include "platform_context.h"
 #include "autofuse_config/auto_fuse_config.h"
+#include "../../common/att/soc_perf_test_config.h"
 #include "../../common/att/common_gen_utils.h"
 
 using namespace ascir;
@@ -35,6 +36,9 @@ class E2E_LoadAbsStore : public ::testing::Test {
 
   void SetUp() override {
     ge::PlatformContext::GetInstance().Reset();
+    ASSERT_EQ(
+        att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+        af::SUCCESS);
   }
 };
 

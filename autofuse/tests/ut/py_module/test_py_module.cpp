@@ -10,6 +10,8 @@
 
 #include "gtest/gtest.h"
 
+#include <string>
+
 #include "ascendc_ir.h"
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
 #include "ascir_ops.h"
@@ -17,19 +19,126 @@
 #include "pyascir.h"
 #include "pyascir_types.h"
 #include "pyascir_common_utils.h"
+#include "common/platform_context.h"
 
 class TestPyModule : public testing::Test {
  protected:
-  virtual void SetUp() {
+  static PyObject *pyautofuse_module_;
+
+  static void SetUpTestSuite() {
     Py_Initialize();
-    PyInit_pyautofuse();
-    PyInit_ascir();
+    pyautofuse_module_ = PyInit_pyautofuse();
   }
 
-  virtual void TearDown() {
+  static void TearDownTestSuite() {
+    Py_XDECREF(pyautofuse_module_);
+    pyautofuse_module_ = nullptr;
     Py_Finalize();
   }
 };
+
+PyObject *TestPyModule::pyautofuse_module_ = nullptr;
+
+TEST_F(TestPyModule, UtilsSetPlatformKeepsLegacyThreeArguments) {
+  PyObject *args = Py_BuildValue("(sLL)", "5102", 48, 245760);
+  ASSERT_NE(args, nullptr);
+
+  PyObject *result = pyascir::UtilsSetPlatform(nullptr, args, nullptr);
+  EXPECT_NE(result, nullptr);
+  Py_DECREF(result);
+  Py_DECREF(args);
+
+  std::string npu_arch;
+  std::string soc_version;
+  EXPECT_EQ(ge::PlatformContext::GetInstance().GetPlatformTarget(npu_arch, soc_version), af::SUCCESS);
+  EXPECT_EQ(npu_arch, "5102");
+  EXPECT_EQ(soc_version, "");
+  ge::PlatformContext::GetInstance().Reset();
+}
+
+TEST_F(TestPyModule, UtilsSetPlatformAcceptsFullSocVersion) {
+  PyObject *args = Py_BuildValue("(sLLs)", "5102", 48, 245760, "MC62CM12AA");
+  ASSERT_NE(args, nullptr);
+
+  PyObject *result = pyascir::UtilsSetPlatform(nullptr, args, nullptr);
+  EXPECT_NE(result, nullptr);
+  Py_DECREF(result);
+  Py_DECREF(args);
+
+  std::string npu_arch;
+  std::string soc_version;
+  EXPECT_EQ(ge::PlatformContext::GetInstance().GetPlatformTarget(npu_arch, soc_version), af::SUCCESS);
+  EXPECT_EQ(npu_arch, "5102");
+  EXPECT_EQ(soc_version, "MC62CM12AA");
+  ge::PlatformContext::GetInstance().Reset();
+}
+
+TEST_F(TestPyModule, UtilsSetPlatformRejectsFullSocVersionWithoutNpuArch) {
+  PyObject *valid_args = Py_BuildValue("(sLLs)", "5102", 48, 245760, "MC62CM12AA");
+  ASSERT_NE(valid_args, nullptr);
+  PyObject *result = pyascir::UtilsSetPlatform(nullptr, valid_args, nullptr);
+  EXPECT_NE(result, nullptr);
+  Py_DECREF(result);
+  Py_DECREF(valid_args);
+
+  PyObject *invalid_args = Py_BuildValue("(sLLs)", "", 48, 245760, "MC62CM12AA");
+  ASSERT_NE(invalid_args, nullptr);
+  result = pyascir::UtilsSetPlatform(nullptr, invalid_args, nullptr);
+  EXPECT_EQ(result, nullptr);
+  PyErr_Clear();
+  Py_DECREF(invalid_args);
+
+  std::string npu_arch;
+  std::string soc_version;
+  EXPECT_EQ(ge::PlatformContext::GetInstance().GetPlatformTarget(npu_arch, soc_version), af::SUCCESS);
+  EXPECT_EQ(npu_arch, "5102");
+  EXPECT_EQ(soc_version, "MC62CM12AA");
+  ge::PlatformContext::GetInstance().Reset();
+}
+
+TEST_F(TestPyModule, AutofuseBackendRejectsUnknownArchBeforeGraphValidation) {
+  ge::PlatformContext::GetInstance().SetPlatform("UnknownArch");
+  ASSERT_NE(pyautofuse_module_, nullptr);
+  PyObject *options_type = PyObject_GetAttrString(pyautofuse_module_, "AutofuserOptions");
+  ASSERT_NE(options_type, nullptr);
+  PyObject *options = PyObject_CallObject(options_type, nullptr);
+  ASSERT_NE(options, nullptr);
+  PyObject *autofuser_type = PyObject_GetAttrString(pyautofuse_module_, "Autofuser");
+  ASSERT_NE(autofuser_type, nullptr);
+  PyObject *autofuser = PyObject_CallFunctionObjArgs(autofuser_type, options, NULL);
+  ASSERT_NE(autofuser, nullptr);
+  PyObject *method = PyObject_GetAttrString(autofuser, "autofuse_backend");
+  ASSERT_NE(method, nullptr);
+  PyObject *args = Py_BuildValue("(O)", Py_None);
+  ASSERT_NE(args, nullptr);
+
+  PyObject *result = PyObject_CallObject(method, args);
+  EXPECT_EQ(result, nullptr);
+  ASSERT_TRUE(PyErr_Occurred());
+
+  PyObject *exc_type = nullptr;
+  PyObject *exc_value = nullptr;
+  PyObject *exc_traceback = nullptr;
+  PyErr_Fetch(&exc_type, &exc_value, &exc_traceback);
+  ASSERT_NE(exc_value, nullptr);
+  PyObject *message_obj = PyObject_Str(exc_value);
+  ASSERT_NE(message_obj, nullptr);
+  const std::string message = PyUnicode_AsUTF8(message_obj);
+  EXPECT_NE(message.find("Invalid SoC performance target"), std::string::npos) << message;
+
+  Py_XDECREF(message_obj);
+  Py_XDECREF(exc_traceback);
+  Py_XDECREF(exc_value);
+  Py_XDECREF(exc_type);
+  Py_XDECREF(result);
+  Py_XDECREF(args);
+  Py_XDECREF(method);
+  Py_XDECREF(autofuser);
+  Py_XDECREF(autofuser_type);
+  Py_XDECREF(options);
+  Py_XDECREF(options_type);
+  ge::PlatformContext::GetInstance().Reset();
+}
 
 TEST_F(TestPyModule, DISABLED_UtilsDeserialize_symbol_source_info) {
   PyObject *args = PyTuple_New(2);

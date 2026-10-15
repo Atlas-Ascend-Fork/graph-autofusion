@@ -22,6 +22,7 @@
 #include "schedule_result.h"
 #include "runtime_stub.h"
 #include "platform_context.h"
+#include "../../common/att/soc_perf_test_config.h"
 #include "ascgraph_info_complete.h"
 #if defined(FALSE)
 #pragma push_macro("FALSE")
@@ -162,6 +163,43 @@ uint64_t StableSourceHash(const std::string &source) {
 }
 
 using autofuse::tests::ScopedAutofusePgoFlag;
+
+bool g_soc_codegen_func_called = false;
+
+bool SuccessSocCodegenFunc(const std::string &op_name, const ascir::FusedScheduledResult &fused_schedule_result,
+                           std::map<std::string, std::string> &options,
+                           std::map<std::string, std::string> &tiling_file_name_to_content, bool is_inductor_scene) {
+  (void)op_name;
+  (void)fused_schedule_result;
+  (void)options;
+  (void)tiling_file_name_to_content;
+  (void)is_inductor_scene;
+  g_soc_codegen_func_called = true;
+  return true;
+}
+
+class ScopedSocPlatformState {
+ public:
+  ScopedSocPlatformState() {
+    has_state_ = ge::PlatformContext::GetInstance().GetPlatformInfo(saved_info_) == af::SUCCESS;
+    std::string npu_arch;
+    has_state_ =
+        has_state_ && ge::PlatformContext::GetInstance().GetPlatformTarget(npu_arch, saved_soc_) == af::SUCCESS;
+  }
+
+  ~ScopedSocPlatformState() {
+    if (has_state_) {
+      (void)ge::PlatformContext::GetInstance().SetPlatformTarget(saved_info_, saved_soc_);
+      return;
+    }
+    ge::PlatformContext::GetInstance().Reset();
+  }
+
+ private:
+  bool has_state_{false};
+  ge::PlatformInfo saved_info_{};
+  std::string saved_soc_;
+};
 }  // namespace
 
 namespace {
@@ -1161,6 +1199,9 @@ class TestCodegenTiling : public testing::Test, public codegen::TilingLib {
   void SetUp() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_DEBUG, 0);
     ge::PlatformContext::GetInstance().Reset();
+    ASSERT_EQ(
+        att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+        af::SUCCESS);
     ge::RuntimeStub::SetInstance(std::make_shared<ge::RuntimeStubV2Common>());
   }
   void TearDown() override {
@@ -1327,6 +1368,51 @@ TEST_F(TestCodegenTiling, DynamicShapeCacheKeyGuardsCapacityAndPreservesSymbolOr
   EXPECT_LT(capacity_guard, first_symbol);
   EXPECT_LT(first_symbol, second_symbol);
   EXPECT_LT(second_symbol, set_size);
+}
+
+TEST_F(TestCodegenTiling, GenerateForInductorValidatesSocTargetBeforeTilingCodegen) {
+  const ScopedSocPlatformState platform_state_guard;
+  ge::PlatformContext::GetInstance().SetPlatform("UnknownArch");
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen.tiling_lib_.codegen_func_ = SuccessSocCodegenFunc;
+  const auto fused_schedule_result = this->GenBasicFusedScheduleResult({}, af::Symbol(64));
+
+  codegen::CodegenResult result;
+  g_soc_codegen_func_called = false;
+  EXPECT_NE(codegen.GenerateForInductor(fused_schedule_result, result), af::SUCCESS);
+  EXPECT_FALSE(g_soc_codegen_func_called);
+  EXPECT_TRUE(result.tiling_data.empty());
+  EXPECT_TRUE(result.tiling.empty());
+  EXPECT_TRUE(result.kernel.empty());
+
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "5102";
+  platform_info.aiv_num = 1;
+  platform_info.ub_size = 262144;
+  ASSERT_EQ(ge::PlatformContext::GetInstance().SetPlatformTarget(platform_info, "SOC_EMPTY"), af::SUCCESS);
+  result = codegen::CodegenResult{};
+  g_soc_codegen_func_called = false;
+  EXPECT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), af::SUCCESS);
+  EXPECT_TRUE(g_soc_codegen_func_called);
+}
+
+TEST_F(TestCodegenTiling, GenerateTilingAcceptsV2ArchitecturesUnknownSocAndLegacyTarget) {
+  const ScopedSocPlatformState platform_state_guard;
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen.tiling_lib_.codegen_func_ = SuccessSocCodegenFunc;
+  const auto schedule_result = this->GenBasicFusedScheduleResult({}, af::Symbol(64));
+  for (const std::string &npu_arch : {"3510", "5102", "9201", "9202"}) {
+    for (const std::string &soc : {std::string("SOC_UNREGISTERED"), std::string()}) {
+      ASSERT_EQ(att::soc_perf_test::SetSocPerfTestPlatform(npu_arch, soc), af::SUCCESS);
+      if (soc.empty()) {
+        ge::PlatformContext::GetInstance().SetPlatform(npu_arch);
+      }
+      std::map<std::string, std::string> tiling_files;
+      g_soc_codegen_func_called = false;
+      EXPECT_EQ(codegen.GenerateTiling(schedule_result, {}, "", "0", tiling_files), af::SUCCESS);
+      EXPECT_TRUE(g_soc_codegen_func_called);
+    }
+  }
 }
 
 class RuntimeStubWithFullSocName : public ge::RuntimeStubV2Common {

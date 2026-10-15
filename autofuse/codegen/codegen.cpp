@@ -22,6 +22,7 @@
 #include "common/ge_common/debug/log.h"
 #include "codegen_infershape.h"
 #include "common/platform_context.h"
+#include "gen_model_info/api_perf_register/soc_perf_config.h"
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
 
 using namespace codegen;
@@ -390,6 +391,7 @@ Status Codegen::Generate(const ascir::FusedScheduledResult &fused_schedule_resul
 // inductor路径仍返回单个host_tiling字符串，通过注释marker保留拆分边界
 Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
                                     CodegenResult &result) const {
+  GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
   if (tiling_lib_.ShouldFallbackPgo(fused_schedule_result)) {
     GELOGW("Tiling key count exceeds 10000, fallback to non-PGO Inductor codegen");
     Codegen fallback(*this);
@@ -428,6 +430,7 @@ Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_sch
 
 Status Codegen::Generate(const std::map<std::string, std::string> &shape_info,
                          const ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result) const {
+  GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
   GE_CHK_STATUS_RET(GenerateKernel(fused_schedule_result, result.kernel, false), "Codegen generate kernel failed");
   result.tiling_data = GenerateTilingData(fused_schedule_result, false);
   std::map<std::string, std::string> tiling_file_name_to_content;
@@ -446,6 +449,7 @@ std::string Codegen::GenerateTilingData(const ascir::FusedScheduledResult &fused
 
 Status Codegen::GenerateTilingForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
                                           std::map<std::string, std::string> &tiling_file_name_to_content) const {
+  GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
   tiling_file_name_to_content = this->tiling_lib_.GenerateForInductor(fused_schedule_result);
   for (const auto &pair : tiling_file_name_to_content) {
     GE_CHK_BOOL_RET_STATUS(pair.second != ascgen_utils::INVALID_TILING, af::FAILED, "tilings(%s) is invalid",
@@ -465,6 +469,7 @@ Status Codegen::GenerateTiling(const ascir::FusedScheduledResult &fused_schedule
                                const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
                                const std::string &core_num,
                                std::map<std::string, std::string> &tiling_file_name_to_content) const {
+  GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
   tiling_file_name_to_content = this->tiling_lib_.Generate(fused_schedule_result, shape_info, pgo_dir, core_num);
   for (const auto &pair : tiling_file_name_to_content) {
     GE_CHK_BOOL_RET_STATUS(pair.second != ascgen_utils::INVALID_TILING, af::FAILED, "tilings(%s) is invalid",

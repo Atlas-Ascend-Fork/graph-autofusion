@@ -27,6 +27,7 @@
 #include "test_common_utils.h"
 #include "runtime_stub.h"
 #include "common/platform_context.h"
+#include "../../../../common/att/soc_perf_test_config.h"
 using namespace af::ascir_op;
 namespace ascir {
 using namespace ge;
@@ -176,6 +177,9 @@ class STestGenConcatV2 : public ::testing::Test {
     AutoFuseConfig::MutableAttStrategyConfig().force_template_op_name = "";
     AutoFuseConfig::MutableAttStrategyConfig().force_tiling_case = "";
     AutoFuseConfig::MutableAttStrategyConfig().force_schedule_result = -1L;
+    ASSERT_EQ(
+        att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+        af::SUCCESS);
   }
 
   void TearDown() override {

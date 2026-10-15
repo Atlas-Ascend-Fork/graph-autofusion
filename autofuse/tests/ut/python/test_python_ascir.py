@@ -16,6 +16,7 @@ import time
 import os
 import shutil
 import sys
+from pathlib import Path
 from autofuse.pyautofuse import ascir, Autofuser, AutofuserOptions, Schedule, CodeGen
 
 try:
@@ -25,6 +26,13 @@ except ImportError:
 from ascir import Max, Min, Mod
 
 PYF_PATH = os.path.dirname(os.path.realpath(__file__))
+RUNTIME_ERROR_TILING_LIB = (
+    Path(__file__).resolve().parents[4]
+    / "build"
+    / "autofuse"
+    / "tests"
+    / "libpyautofuse_runtime_error_tiling.so"
+)
 
 ascir.utils.set_platform("2201", 1, 245760)
 
@@ -175,7 +183,7 @@ class TestAscir:
 
     @staticmethod
     def test_index_expr_and_arange_api():
-        ascir.utils.set_platform("3510", 1, 245760)
+        ascir.utils.set_platform("3510", 1, 245760, "SOC_EMPTY")
         try:
             graph = ascir.HintGraph("index_expr_arange_api")
             size = graph.create_size("size")
@@ -691,6 +699,23 @@ class TestAutofuseLoadAbsStore:
 
         hint_graph = self.construct_graph()
         tiling_def, host_tiling, op_kernel = fuser.autofuse_backend(hint_graph)
+
+    def test_autofuse_backend_runtime_error_does_not_return_partial_result(self):
+        assert RUNTIME_ERROR_TILING_LIB.is_file(), (
+            f"missing runtime error tiling library: {RUNTIME_ERROR_TILING_LIB}"
+        )
+        options = AutofuserOptions(
+            tiling_lib_path=str(RUNTIME_ERROR_TILING_LIB),
+            tiling_lib_codegen_symbol="CodegenTiling",
+        )
+        fuser = Autofuser(options)
+
+        hint_graph = self.construct_graph()
+        with pytest.raises(
+            RuntimeError,
+            match=r"^Codegen generate kernel failed: pyautofuse runtime error test$",
+        ):
+            fuser.autofuse_backend(hint_graph)
 
 
 class TestAutofuseLoadMatMulStore:

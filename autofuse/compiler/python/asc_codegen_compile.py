@@ -572,6 +572,26 @@ def get_codegen_compile_context():
     )
 
 
+def _set_platform_from_compile_target(codegen_context):
+    npu_arch = get_soc_spec("NpuArch")
+    if not npu_arch:
+        raise RuntimeError("NpuArch is empty in compile target")
+
+    requires_full_soc_version = ascir.utils.requires_full_soc_version(npu_arch)
+    soc_version = ""
+    if requires_full_soc_version:
+        soc_version = get_soc_spec("SOC_VERSION") or ""
+
+    ub_size = int(get_soc_spec("ub_size"))
+    ascir.utils.set_platform(
+        npu_arch,
+        codegen_context.static_compile_vector_core_num,
+        ub_size,
+        soc_version,
+    )
+    return npu_arch
+
+
 def log_core_limit_info(codegen_context):
     CommonUtility.print_compile_log(
         "",
@@ -2858,18 +2878,12 @@ def asc_codegen_compile(*args, **kwargs):
         log_core_limit_info(codegen_context)
 
         # 设置 platform 到 context
-        npu_arch = get_soc_spec("NpuArch")
-        if npu_arch:
-            ascir.utils.set_platform(
-                npu_arch,
-                codegen_context.static_compile_vector_core_num,
-                int(get_soc_spec("ub_size")),
-            )
-            CommonUtility.print_compile_log(
-                "",
-                f"Set platform from get_soc_spec: {npu_arch}",
-                AscendCLogLevel.LOG_DEBUG,
-            )
+        npu_arch = _set_platform_from_compile_target(codegen_context)
+        CommonUtility.print_compile_log(
+            "",
+            f"Set platform from get_soc_spec: {npu_arch}",
+            AscendCLogLevel.LOG_DEBUG,
+        )
 
         CommonUtility.print_compile_log(
             "",

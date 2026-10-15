@@ -665,7 +665,7 @@ class TestStaticShapeCompileHasattrCheck:
             asc_codegen_compile_module,
             "get_soc_spec",
             lambda key: {
-                "NpuArch": "Ascend910",
+                "NpuArch": "2201",
                 "vector_core_cnt": 8,
                 "ub_size": 1024,
             }.get(key),
@@ -676,7 +676,8 @@ class TestStaticShapeCompileHasattrCheck:
             lambda unused, message, level: log_messages.append((message, level)),
         )
         asc_codegen_compile_module.ascir.utils = SimpleNamespace(
-            set_platform=lambda *args: set_platform_calls.append(args)
+            set_platform=lambda *args, **kwargs: set_platform_calls.append(args),
+            requires_full_soc_version=lambda npu_arch: False,
         )
         monkeypatch.setattr(
             asc_codegen_compile_module,
@@ -686,7 +687,7 @@ class TestStaticShapeCompileHasattrCheck:
 
         asc_codegen_compile_module.asc_codegen_compile("kernel")
 
-        assert ("Ascend910", 4, 1024) in set_platform_calls
+        assert ("2201", 4, 1024, "") in set_platform_calls
         assert compile_calls[0]["vector_core_num"] == "4"
         assert any(
             "vector_core_num=4, vector_core_num_limited=4" in message

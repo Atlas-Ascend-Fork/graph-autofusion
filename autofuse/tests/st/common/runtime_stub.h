@@ -12,6 +12,8 @@
 #define AUTOFUSE_RUNTIME_STUB_H
 #include <cstring>
 #include_next <runtime_stub.h>
+#include "../../common/att/soc_perf_test_config.h"
+
 namespace af {
 using ge::RuntimeStub;
 class RuntimeStubV2 : public ge::RuntimeStub {
@@ -25,6 +27,14 @@ class RuntimeStubV2 : public ge::RuntimeStub {
     return ge::CopyRuntimeSocSpecValue(label, key, val, maxLen, ge::RuntimeSocSpecDefaults{"3510", "0"});
   }
 };
+
+inline void InstallV35SocPerfRuntimeStub() {
+  ge::RuntimeStub::SetInstance(std::make_shared<RuntimeStubV2>());
+  if (att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35AltNpuArch, att::soc_perf_test::kSocEmpty) !=
+      af::SUCCESS) {
+    ge::RuntimeStub::Reset();
+  }
+}
 }  // namespace af
 
 #endif  // AUTOFUSE_RUNTIME_STUB_H

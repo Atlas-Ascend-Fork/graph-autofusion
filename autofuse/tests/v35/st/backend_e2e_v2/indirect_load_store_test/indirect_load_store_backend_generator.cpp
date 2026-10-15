@@ -415,7 +415,7 @@ inline void WriteGeneratedFiles(const codegen::CodegenResult &result) {
 inline void SetUpBackendRuntime() {
   dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
   ge::PlatformContext::GetInstance().Reset();
-  ge::RuntimeStub::SetInstance(std::make_shared<af::RuntimeStubV2>());
+  af::InstallV35SocPerfRuntimeStub();
 }
 
 inline void TearDownBackendRuntime() {
@@ -1589,7 +1589,7 @@ class TestBackendIndirectLoadStoreE2e : public testing::Test {
   void SetUp() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
     ge::PlatformContext::GetInstance().Reset();
-    ge::RuntimeStub::SetInstance(std::make_shared<af::RuntimeStubV2>());
+    af::InstallV35SocPerfRuntimeStub();
   }
 
   void TearDown() override {

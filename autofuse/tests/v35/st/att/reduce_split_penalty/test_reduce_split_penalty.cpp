@@ -9,6 +9,7 @@
  */
 
 #include "common/platform_context.h"
+#include "../../../../common/att/soc_perf_test_config.h"
 #include "runtime_stub.h"
 #include "common/test_common_headers.h"
 #include "common/st_scenario_utils.h"
@@ -22,6 +23,9 @@ class STestReduceSplitPenaltyV2 : public ::testing::Test {
     AutoFuseConfig::MutableAttStrategyConfig().Reset();
     ge::RuntimeStub::Install(&stub_v_2);
     ge::PlatformContext::GetInstance().Reset();
+    ASSERT_EQ(
+        att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+        af::SUCCESS);
     // V2形态：通过TilingScheduleConfigTableV2自动返回true，无需手动设置
   }
   void TearDown() override {

@@ -22,6 +22,7 @@
 #include "nlohmann/json.hpp"
 #include "util/base_types_printer.h"
 #include "util/duration.h"
+#include "api_perf_register/soc_perf_config.h"
 #include "api_tiling_gen/gen_api_tiling.h"
 #include "base/att_const_values.h"
 #include "util/thread_local_context.h"
@@ -187,6 +188,7 @@ af::Status RefreshCommonUbExprContext(const af::AscGraph &graph, ModelInfo &mode
 static af::Status GenerateSingleModelInfoWithContext(const af::AscGraph &graph, ModelInfo &model_info,
                                                      TuningSpacePtr &tuning_space, const uint32_t tiling_case_id,
                                                      bool is_cv_ub_fusion) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   GELOGI("[DFX]Begin to generate model info for graph %s of tiling case id %u", graph.GetName().c_str(),
          tiling_case_id);
   DURATION_GUARD(DurationType::DURATION_GEN_MODEL_INFO);
@@ -223,6 +225,7 @@ af::Status CheckKeyValid(const std::vector<af::AscGraph> &graph_list) {
 }
 
 af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::vector<ModelInfo> &model_info_list) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   GE_ASSERT_SUCCESS(CheckKeyValid(graph_list));
   uint32_t tiling_key = 0U;
   for (auto &graph : graph_list) {
@@ -421,12 +424,14 @@ static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &
 
 af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::vector<ModelInfo> &model_info_list,
                              const std::map<std::string, std::string> &options, bool enable_group_parallel) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   return GenerateModelInfo(graph_list, model_info_list, options, enable_group_parallel, false);
 }
 
 af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::vector<ModelInfo> &model_info_list,
                              const std::map<std::string, std::string> &options, bool enable_group_parallel,
                              bool enable_gather_reduce_penalty) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   return GenerateModelInfoWithContext(graph_list, model_info_list, options, enable_group_parallel,
                                       {enable_gather_reduce_penalty, false});
 }
@@ -576,6 +581,7 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
 af::Status GetModelInfoMap(const ascir::FusedScheduledResult &schedule_results,
                            const std::map<std::string, std::string> &options,
                            FusedParsedScheduleResult &out_all_model_infos) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   std::vector<std::vector<std::vector<std::vector<af::AscGraph>>>> all_graphs_lists;
   std::map<std::string, std::string> all_graph_score_funcs;
   GE_ASSERT_SUCCESS(GetAllSubImplGraphs(schedule_results, all_graphs_lists, all_graph_score_funcs));

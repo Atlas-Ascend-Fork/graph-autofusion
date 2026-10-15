@@ -14,6 +14,7 @@
 #include "api_perf_register/perf_param.h"
 #include "api_perf_register/api_perf_factory.h"
 #include "api_perf_register/ascendc_api_perf.h"
+#include "api_perf_register/soc_perf_config.h"
 #include "utils/node_expr_id.h"
 
 namespace att {
@@ -383,6 +384,25 @@ const PerfParamTable *GetParamPerfTable() {
   return api_perf->GetPerfParam();
 }
 
+static af::Status IsSocPerfTarget(const SocPerfTarget &target, bool &is_soc_perf_target) {
+  is_soc_perf_target = false;
+  return RequiresFullSocVersion(target.npu_arch, is_soc_perf_target);
+}
+
+static af::Status GetTargetApiParams(const SocPerfTarget &target, std::shared_ptr<const Json> &params) {
+  const auto asc_ir_att_impl = af::ascir::AscirRegistry::GetInstance().GetIrAttImpl(target.npu_arch, kDefaultApi);
+  GE_ASSERT_NOTNULL(asc_ir_att_impl);
+  const auto api_perf_name = ge::PtrToPtr<void, ge::char_t>(asc_ir_att_impl->GetApiPerf());
+  GE_ASSERT_NOTNULL(api_perf_name);
+  auto api_perf = ApiPerfFactory::Instance().Create(api_perf_name);
+  GE_ASSERT_NOTNULL(api_perf);
+  const auto param_table = api_perf->GetPerfParam();
+  GE_ASSERT_NOTNULL(param_table);
+  const auto ascend_api_perf_table = param_table->GetAscendCApiPerfTable();
+  GE_ASSERT_NOTNULL(ascend_api_perf_table);
+  return GetSocApiParams(target, *ascend_api_perf_table, params);
+}
+
 void UpdateContinuousIdx(size_t idx, const std::vector<Expr> &strides, const std::vector<Expr> &repeats,
                          std::vector<bool> &is_continuous) {
   size_t cur = idx - 1UL;
@@ -560,8 +580,39 @@ af::Status GetOpHeadCost(Expr &head_cost) {
   return af::SUCCESS;
 }
 
+static std::unique_ptr<ApiPerf> CreateSocApiPerf(const SocPerfTarget &target, const std::string &node_type) {
+  const auto asc_ir_att_impl = af::ascir::AscirRegistry::GetInstance().GetIrAttImpl(target.npu_arch, node_type);
+  if (asc_ir_att_impl == nullptr) {
+    return nullptr;
+  }
+  const auto api_perf_name = ge::PtrToPtr<void, ge::char_t>(asc_ir_att_impl->GetApiPerf());
+  auto api_perf = api_perf_name == nullptr ? ApiPerfFactory::Instance().Create(node_type)
+                                           : ApiPerfFactory::Instance().Create(api_perf_name);
+  if (api_perf == nullptr) {
+    return nullptr;
+  }
+
+  Perf selected_func = nullptr;
+  if (ResolveSocAscIrPerf(target, api_perf->GetApiName(), api_perf->GetPerfFunc(), selected_func) != af::SUCCESS) {
+    return nullptr;
+  }
+  return std::make_unique<ApiPerf>(api_perf->GetApiName(), selected_func, api_perf->GetMicroPerfFunc(),
+                                   api_perf->GetPerfParam(), api_perf->GetTilingScheduleConfigTable());
+}
+
 std::unique_ptr<ApiPerf> GetApiPerf(const std::string &node_type) {
   GELOGD("Begin to get api name for node[%s]", node_type.c_str());
+  SocPerfTarget target;
+  if (ReadSocPerfTarget(target) == af::SUCCESS) {
+    bool is_soc_perf_target = false;
+    if (IsSocPerfTarget(target, is_soc_perf_target) != af::SUCCESS) {
+      return nullptr;
+    }
+    if (is_soc_perf_target) {
+      return CreateSocApiPerf(target, node_type);
+    }
+  }
+
   const auto asc_ir_att_impl = ascgen_utils::GetAscIrAttImpl(node_type);
   GE_ASSERT_NOTNULL(asc_ir_att_impl, "Get ascir att impl failed, node_type[%s]", node_type.c_str());
   const auto api_perf_name = ge::PtrToPtr<void, ge::char_t>(asc_ir_att_impl->GetApiPerf());
@@ -572,18 +623,10 @@ std::unique_ptr<ApiPerf> GetApiPerf(const std::string &node_type) {
   return ApiPerfFactory::Instance().Create(node_type);
 }
 
-af::Status GetPerf(const NodePerfInfo &node_perf_info, Expr &res) {
-  std::string optype = node_perf_info.optype;
-  std::string input_dtype = node_perf_info.input_dtype;
-  std::string output_dtype = node_perf_info.output_dtype;
-  GELOGD("GetPerf: optype=[%s], input_dtype=[%s], output_dtype=[%s], block_count_idx=%d", optype.c_str(),
-         input_dtype.c_str(), output_dtype.c_str(), node_perf_info.block_count_idx);
-  const auto perf_table = GetParamPerfTable();
-  GE_ASSERT_NOTNULL(perf_table);
-  const auto ascend_api_perf_table = perf_table->GetAscendCApiPerfTable();
-  GE_ASSERT_NOTNULL(ascend_api_perf_table);
-  Json params_data;
-  GE_ASSERT_SUCCESS(StringToJson(*ascend_api_perf_table, params_data));
+static af::Status CalculatePerfFromParams(const NodePerfInfo &node_perf_info, const Json &params_data, Expr &res) {
+  const std::string optype = node_perf_info.optype;
+  const std::string input_dtype = node_perf_info.input_dtype;
+  const std::string output_dtype = node_perf_info.output_dtype;
   const auto &opt_type_param = params_data.find(optype);
   GE_ASSERT_TRUE(opt_type_param != params_data.end(), "Optype[%s] not found! json: %s", optype.c_str(),
                  params_data.dump().c_str());
@@ -614,6 +657,30 @@ af::Status GetPerf(const NodePerfInfo &node_perf_info, Expr &res) {
   GE_ASSERT_SUCCESS(perf_func->second(param_map, node_perf_info.dims, node_perf_info.gm_stride, res),
                     "Get Perf Func failed! json: %s", params_data.dump().c_str());
   return af::SUCCESS;
+}
+
+af::Status GetPerf(const NodePerfInfo &node_perf_info, Expr &res) {
+  GELOGD("GetPerf: optype=[%s], input_dtype=[%s], output_dtype=[%s], block_count_idx=%d", node_perf_info.optype.c_str(),
+         node_perf_info.input_dtype.c_str(), node_perf_info.output_dtype.c_str(), node_perf_info.block_count_idx);
+
+  SocPerfTarget target;
+  std::shared_ptr<const Json> soc_params;
+  if (ReadSocPerfTarget(target) == af::SUCCESS) {
+    bool is_soc_perf_target = false;
+    GE_ASSERT_SUCCESS(IsSocPerfTarget(target, is_soc_perf_target));
+    if (is_soc_perf_target) {
+      GE_ASSERT_SUCCESS(GetTargetApiParams(target, soc_params));
+      return CalculatePerfFromParams(node_perf_info, *soc_params, res);
+    }
+  }
+
+  const auto perf_table = GetParamPerfTable();
+  GE_ASSERT_NOTNULL(perf_table);
+  const auto ascend_api_perf_table = perf_table->GetAscendCApiPerfTable();
+  GE_ASSERT_NOTNULL(ascend_api_perf_table);
+  Json params_data;
+  GE_ASSERT_SUCCESS(StringToJson(*ascend_api_perf_table, params_data));
+  return CalculatePerfFromParams(node_perf_info, params_data, res);
 }
 
 inline void FilterStridesAndRepeats(const std::vector<Expr> &strides, const std::vector<Expr> &repeats,

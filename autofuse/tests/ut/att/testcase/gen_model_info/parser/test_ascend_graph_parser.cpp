@@ -14,6 +14,7 @@
 #include "test_fa_ascir_graph.h"
 #include "base/att_const_values.h"
 #include "common/platform_context.h"
+#include "soc_perf_test_config.h"
 #define private public
 #include "expr_gen/generate_tiling_expr.h"
 #include "parser/ascend_graph_parser.h"
@@ -146,7 +147,7 @@ ascir::FusedScheduledResult BuildGatherReduceScheduleResult(const af::AscGraph &
 
 af::Status GenerateGatherReduceModelInfos(const bool enable_group_parallel, const bool gather_as_load,
                                           FusedParsedScheduleResult &model_infos) {
-  ge::PlatformContext::GetInstance().SetPlatform("5102");
+  GE_ASSERT_SUCCESS(soc_perf_test::SetSocPerfTestPlatform(soc_perf_test::kV35NpuArch, soc_perf_test::kSocEmpty));
   af::AscGraph gather_graph("gather_graph");
   af::AscGraph reduce_graph("reduce_graph");
   if (af::ascir::cg::BuildGatherAscendGraphND(gather_graph) != af::SUCCESS ||
@@ -166,7 +167,7 @@ af::Status GenerateGatherReduceModelInfos(const bool enable_group_parallel, cons
 }
 
 af::Status GenerateReduceOnlyModelInfos(const size_t group_count, FusedParsedScheduleResult &model_infos) {
-  ge::PlatformContext::GetInstance().SetPlatform("5102");
+  GE_ASSERT_SUCCESS(soc_perf_test::SetSocPerfTestPlatform(soc_perf_test::kV35NpuArch, soc_perf_test::kSocEmpty));
   af::AscGraph reduce_graph("reduce_graph");
   if (GraphConstructUtils::BuildConcatGroupAscendGraphS0S1ReduceMultiTiling(reduce_graph) != af::SUCCESS) {
     return af::FAILED;
