@@ -51,3 +51,13 @@ super_kernel/tests/aot/third_party/mockcpp_src/
 
 # AOT reports
 oat_reports/
+
+/super_kernel/examples/aot/**/aclnn_static_shape_kernel_outputs/
+/super_kernel/examples/aot/**/kernel_meta/
+/super_kernel/examples/aot/**/log/
+/super_kernel/examples/aot/**/profiling/
+/super_kernel/examples/aot/**/sk_meta/
+/super_kernel/examples/aot/**/static_kernel_compile_outputs/
+/super_kernel/examples/aot/**/static_kernel_install/
+/super_kernel/examples/aot/**/tmp/
+/super_kernel/examples/aot/**/.static_kernel_records.json

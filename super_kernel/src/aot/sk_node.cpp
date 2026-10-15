@@ -116,10 +116,6 @@ KernelCapBits ParseKernelCapBits(uint64_t cap) {
   return bits;
 }
 
-bool ShouldDisableScheMode(const KernelCapBits &capBits) {
-  return capBits.disableScheMode || capBits.blockDimScaleUp;
-}
-
 // Implementation of FusionFailReasonInfo methods (requires complete ScopeProcessStatus/DeadlockFailReason definition)
 FusionFailReasonInfo::FusionFailReasonInfo()
     : scopeProcessStatus(ScopeProcessStatus::INIT),
@@ -313,7 +309,7 @@ SkBindMap InitSuperKernelBindMap(aclrtBinHandle binHdl) {
 
   if (int ret =
           rtBinaryGetMetaInfo(binHdl, RT_BINARY_TYPE_SK_INFO, metaNum, metaDataList.data(), infoSize.data()) != 0) {
-    SK_LOGI("rtBinaryGetMetaInfo failed, ret=%d", ret);
+    SK_LOGW("Failed to get SuperKernel metadata from binary, ret=%d; fusion will be skipped", ret);
     return SkBindMap();
   }
 
@@ -488,7 +484,6 @@ bool InitSingleSplitFunc(ResolvedFunctionInfo &info, size_t splitIdx, const SkBi
     res |= InitSingleCoreFunc<SkNodeCoreType::AIV>(aivCtx, binHdl, binDevAddr, validFuncNum);
   }
   if (!res) {
-    SK_LOGI("Failed to initialize kernel function in sk Node split[%zu]", splitIdx);
     return false;
   }
   if (validFuncNum > 0) {
@@ -577,7 +572,7 @@ bool InitKernelResolvedFuncs(KernelInfos &kernelInfos) {
       "earlyStartSetFlag=%d, disableDcci=%d, disableScheMode=%d, blockDimScaleUp=%d",
       bindMap.size(), aicItor != bindMap.end(), aivItor != bindMap.end(), capBits.earlyStartWaitFlag,
       capBits.earlyStartSetFlag, capBits.disableDcci, capBits.disableScheMode, capBits.blockDimScaleUp);
-  if (ShouldDisableScheMode(capBits)) {
+  if (capBits.disableScheMode) {
     const bool originScheModeOn = kernelInfos.isScheModeOn;
     kernelInfos.isScheModeOn = false;
     SK_LOGI(
@@ -591,7 +586,7 @@ bool InitKernelResolvedFuncs(KernelInfos &kernelInfos) {
     BindmapFailReason failReason = BindmapFailReason::NONE;
     if (!InitSingleSplitFunc(info, i, bindMap, aicItor, aivItor, binHdl, binDevAddr, kernelInfos.resolvedNum,
                              failReason)) {
-      SK_LOGI("Failed to initialize kernel function in sk Node split[%zu]", i);
+      SK_LOGW("Failed to initialize kernel function for SK node split[%zu]; fusion will be skipped", i);
       kernelInfos.bindmapFailReason = failReason;
       return false;
     }
@@ -685,6 +680,7 @@ Json KernelInfosToJson(const KernelInfos &kernelInfos) {
   kernelJson["kernelTypeInt"] = kernelInfos.kernelTypeInt;
   kernelJson["kernelType"] = to_string(kernelInfos.kernelType);
   kernelJson["needMixKernelSplit"] = kernelInfos.needMixKernelSplit;
+  kernelJson["isScheModeOn"] = kernelInfos.isScheModeOn;
   kernelJson["isSimtOp"] = kernelInfos.isSimtOp;
   kernelJson["taskRatio"] = Json::array({kernelInfos.taskRatio[0], kernelInfos.taskRatio[1]});
   kernelJson["opInfoPtr"] = PtrToHexString(kernelInfos.opInfoPtr);
@@ -882,7 +878,7 @@ struct JudgeTaskKernelInfo {
 };
 
 bool GetScopeKernelInfo(aclmdlRIKernelTaskParams params, JudgeTaskKernelInfo *info) {
-  char kernelName[MAX_SCOPE_NAME_LEN] = {0};
+  char kernelName[MAX_FUNC_NAME_LEN] = {0};
   int32_t ret = aclrtGetFunctionName(params.funcHandle, sizeof(kernelName), kernelName);
   if (ret != ACL_SUCCESS) {
     SK_LOGE("Failed to get kernel name for funcHandle, ret: %d", ret);
@@ -1005,7 +1001,7 @@ bool SuperKernelKernelNode::InitNode(const SuperKernelOptionsManager *opts) {
     nodeInfos.kernelInfos.vecNum = numBlocks << 1;
   }
 
-  char tmpFuncName[256] = {0};
+  char tmpFuncName[MAX_FUNC_NAME_LEN] = {0};
   aclRet = aclrtGetFunctionName(kernelParams.funcHandle, sizeof(tmpFuncName), tmpFuncName);
   if (aclRet != ACL_SUCCESS) {
     SK_LOGE("Failed to get function name for node %s, ret=%d", Format().c_str(), aclRet);
@@ -1114,35 +1110,41 @@ void SuperKernelKernelNode::IdentifyAndHandleSimtKernel(const SuperKernelOptions
   return;
 }
 
-bool SuperKernelKernelNode::SetupLaunchKernelCfg(aclrtFuncHandle funcHandle, size_t skMaxDcacheSize,
-                                                 std::vector<aclrtLaunchKernelAttr> &launchKernelAttrs,
-                                                 aclrtLaunchKernelCfg &launchKernelCfg) const {
-  launchKernelAttrs.clear();
-  launchKernelAttrs.reserve(1);
+bool SuperKernelKernelNode::SetupLaunchKernelCfg(const SkLaunchInfo &launchInfo) {
+  launchKernelAttrs_.clear();
+  size_t skEntryDynUbufSize = 0;
 
-  aclrtLaunchKernelAttr dynUbufAttr{};
-  dynUbufAttr.id = ACL_RT_LAUNCH_KERNEL_ATTR_DYN_UBUF_SIZE;
-  size_t skAllocUbufSize = 0;
-  if (!GetFunctionAllocUbufSize(funcHandle, skAllocUbufSize, Format())) {
-    return false;
+  if (launchInfo.isScheModeOn) {
+    aclrtLaunchKernelAttr schemAttr{};
+    schemAttr.id = ACL_RT_LAUNCH_KERNEL_ATTR_SCHEM_MODE;
+    schemAttr.value.schemMode = 1;
+    launchKernelAttrs_.push_back(schemAttr);
   }
-  if (skMaxDcacheSize > SK_TOTAL_UB_SIZE || skAllocUbufSize > SK_TOTAL_UB_SIZE - skMaxDcacheSize) {
-    SK_LOGE(
-        "invalid dyn ubuf calculation for %s, totalUbSize=%zu, skMaxDcacheSize=%zu, "
-        "skAllocUbufSize=%zu",
-        Format().c_str(), SK_TOTAL_UB_SIZE, skMaxDcacheSize, skAllocUbufSize);
-    return false;
-  }
-  size_t skEntryDynUbufSize = SK_TOTAL_UB_SIZE - skMaxDcacheSize - skAllocUbufSize;
-  dynUbufAttr.value.dynUBufSize = static_cast<uint32_t>(skEntryDynUbufSize);
-  launchKernelAttrs.push_back(dynUbufAttr);
 
-  launchKernelCfg.attrs = launchKernelAttrs.data();
-  launchKernelCfg.numAttrs = launchKernelAttrs.size();
-  SK_LOGI(
-      "Set dyn ubuf launch cfg for %s, skMaxDcacheSize=%zu, skAllocUbufSize=%zu, "
-      "skEntryDynUbufSize=%zu, attrCount=%zu",
-      Format().c_str(), skMaxDcacheSize, skAllocUbufSize, skEntryDynUbufSize, launchKernelCfg.numAttrs);
+  if (launchInfo.useSimtEntry) {
+    aclrtLaunchKernelAttr dynUbufAttr{};
+    dynUbufAttr.id = ACL_RT_LAUNCH_KERNEL_ATTR_DYN_UBUF_SIZE;
+    const size_t skMaxDcacheSize = launchInfo.skMaxDcacheSize;
+    size_t skAllocUbufSize = 0;
+    if (!GetFunctionAllocUbufSize(launchInfo.entryInfo.skEntryFunc, skAllocUbufSize, Format())) {
+      return false;
+    }
+    if (skMaxDcacheSize > SK_TOTAL_UB_SIZE || skAllocUbufSize > SK_TOTAL_UB_SIZE - skMaxDcacheSize) {
+      SK_LOGE(
+          "invalid dyn ubuf calculation for %s, totalUbSize=%zu, skMaxDcacheSize=%zu, "
+          "skAllocUbufSize=%zu",
+          Format().c_str(), SK_TOTAL_UB_SIZE, skMaxDcacheSize, skAllocUbufSize);
+      return false;
+    }
+    skEntryDynUbufSize = SK_TOTAL_UB_SIZE - skMaxDcacheSize - skAllocUbufSize;
+    dynUbufAttr.value.dynUBufSize = static_cast<uint32_t>(skEntryDynUbufSize);
+    launchKernelAttrs_.push_back(dynUbufAttr);
+  }
+
+  launchKernelCfg_.attrs = launchKernelAttrs_.data();
+  launchKernelCfg_.numAttrs = launchKernelAttrs_.size();
+  SK_LOGI("Set SK launch cfg: nodeId=%lu, isScheModeOn=%d, useSimtEntry=%d, skEntryDynUbufSize=%zu, attrCount=%zu",
+          nodeId, launchInfo.isScheModeOn, launchInfo.useSimtEntry, skEntryDynUbufSize, launchKernelCfg_.numAttrs);
   return true;
 }
 
@@ -1224,14 +1226,11 @@ bool SuperKernelKernelNode::Update(const UpdateContext &ctx) {
     updateParams.kernelTaskParams.isHostArgs = true;
     updateParams.kernelTaskParams.funcHandle = ctx.launchInfo->entryInfo.skEntryFunc;
     updateParams.kernelTaskParams.numBlocks = ctx.launchInfo->entryInfo.numBlocks;
-    if (ctx.launchInfo->useSimtEntry) {
-      if (!SetupLaunchKernelCfg(updateParams.kernelTaskParams.funcHandle, ctx.launchInfo->skMaxDcacheSize,
-                                launchKernelAttrs_, launchKernelCfg_)) {
-        SK_LOGE("Failed to setup dyn ubuf launch cfg for kernel node %s", Format().c_str());
-        return false;
-      }
-      updateParams.kernelTaskParams.cfg = &launchKernelCfg_;
+    if (!SetupLaunchKernelCfg(*ctx.launchInfo)) {
+      SK_LOGE("Failed to setup SK launch cfg for kernel node %s", Format().c_str());
+      return false;
     }
+    updateParams.kernelTaskParams.cfg = launchKernelCfg_.numAttrs == 0 ? nullptr : &launchKernelCfg_;
 
     aclError aclRet = aclmdlRITaskSetParams(*originTask, &updateParams);
 

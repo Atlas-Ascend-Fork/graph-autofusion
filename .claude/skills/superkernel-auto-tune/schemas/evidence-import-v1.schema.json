@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SuperKernel Auto Tune Evidence Import v1",
+  "type": "object",
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object",
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "authorization",
+    "parent",
+    "base_handoff",
+    "artifacts",
+    "identity"
+  ],
+  "properties": {
+    "schema_version": {"const": "superkernel-auto-tune-evidence-import-v1"},
+    "authorization": {
+      "type": "object",
+      "required": ["approved", "source", "approved_at"],
+      "properties": {
+        "approved": {"const": true},
+        "source": {"const": "explicit-user-request"},
+        "approved_at": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "parent": {
+      "type": "object",
+      "required": ["session_id", "artifact_root", "session_path", "session_sha256", "session_fingerprint"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "artifact_root": {"type": "string", "minLength": 1},
+        "session_path": {"type": "string", "minLength": 1},
+        "session_sha256": {"$ref": "#/$defs/sha256"},
+        "session_fingerprint": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "base_handoff": {
+      "type": "object",
+      "required": ["step_id", "result_path", "result_sha256", "file_sha256", "outcome_status"],
+      "properties": {
+        "step_id": {"type": "string", "minLength": 1},
+        "result_path": {"type": "string", "minLength": 1},
+        "result_sha256": {"$ref": "#/$defs/sha256"},
+        "file_sha256": {"$ref": "#/$defs/sha256"},
+        "outcome_status": {"enum": ["succeeded", "no_gain"]}
+      },
+      "additionalProperties": false
+    },
+    "artifacts": {
+      "type": "object",
+      "required": ["profiling_analysis", "ledger"],
+      "properties": {
+        "profiling_analysis": {"$ref": "#/$defs/artifact"},
+        "ledger": {"$ref": "#/$defs/artifact"},
+        "source_scope_map": {"$ref": "#/$defs/artifact"}
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "required": ["experiment_id", "round_id", "candidate_name", "source_revision"],
+      "properties": {
+        "experiment_id": {"type": "string", "minLength": 1},
+        "round_id": {"type": "string", "minLength": 1},
+        "candidate_name": {"type": "string", "minLength": 1},
+        "source_revision": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

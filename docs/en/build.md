@@ -306,6 +306,8 @@ If you want to uninstall the installed package, execute the following command:
 
 After installation, you can perform developer testing. Ensure you have completed [Environment Preparation](./quick_install.md#1-environment-preparation) and installed the compiled `.run` package before executing operations in this section.
 
+The `.run` package provides the shared libraries required by the tests. SuperKernel Python UT/ST loads `superkernel` directly from the current source tree and does not replace or uninstall the wheel installed in the CANN path by `--pylocal`.
+
 - UT Verification
 
    ```bash

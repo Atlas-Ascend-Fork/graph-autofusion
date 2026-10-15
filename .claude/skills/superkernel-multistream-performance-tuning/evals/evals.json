@@ -1,0 +1,87 @@
+{
+  "skill_name": "superkernel-multistream-performance-tuning",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "S3-BASE 的 clean 端到端结果有收益，fresh profiling 证明某个 SK 融合前存在 C/V overlap、融合后内部串行。请设计独立多流调优分支；没有真实执行环境，不要声称已经运行。",
+      "expected_output": "中文方案保持 S3-BASE 为 immutable incumbent，把 beneficial 与 parallelism degraded 分开记录；只在独立 worktree/config/artifact/cache 根中规划单变量 trial，局部 overlap 恢复不能替代 clean 端到端增量门禁。分支未 accepted 时精确回退 S3-BASE，不阻塞上层 whole-scope 或普通 P。",
+      "files": [],
+      "expectations": [
+        "不得因为并行变串行就把仍有净收益的 SK 自动改成 prune。",
+        "必须说明 accepted 之外的 no_gain、blocked、failed 都保持 incumbent_unchanged。",
+        "不得把没有 artifact 的方案写成已执行结果。"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "多流请求没有 source_scope_map，但环境报告接受 auto_op_parallel=1，同时计划自动做 scope split。请说明哪些动作可执行、哪些必须阻塞。",
+      "expected_output": "option-only trial 可以在性能 occurrence 映射可靠、accepted value 和隔离执行门禁满足时运行；scope split 和 range exclusion 必须因缺少 source_scope_map_v2 + exact + proven offsets 而阻塞。阻塞源码动作后保持原 incumbent，不能按算子名、raw ID 或局部窗口猜测源码位置。",
+      "files": [],
+      "expectations": [
+        "明确 source_scope_map 是源码动作的条件门禁，不是所有多流分析的统一必填项。",
+        "全局 option 必须重分析全部可靠 SK 和 spillover，不能称为 range-local change。",
+        "源码动作 blocked 不得导致原 Sbest-BASE 失败。"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Stage O 已经以相同 config 测试 auto_op_parallel=1，目标 SK overlap 改善但 clean 端到端没有增量收益。Stage B 多流分支是否应重复该实验并接受？",
+      "expected_output": "不得重复完全相同的全局 option/value，也不得因局部 overlap 改善而接受。保留 Stage O 的机制诊断证据，回退稳定 incumbent；后续只考虑有 source exact 的单边界 dependency-aligned split、exact range exclusion 或其他直接证据驱动且未结算的单变量实验。",
+      "files": [],
+      "expectations": [
+        "把 Stage O option history 作为去重输入。",
+        "端到端增量 clean 性能是 accepted 主门禁。",
+        "不能把 auto_op_parallel 描述成多流问题的必然解。"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "隔离多流 trial 在局部 SK interval、C/V overlap 和 clean 端到端均改善，并补足五次稳定样本。请说明上层如何消费 accepted 结果，不能直接修改旧 optimizer ledger。",
+      "expected_output": "先用 request/result contract 复核 request fingerprint、incumbent identity、correctness、fresh profile、五次稳定 clean、mean/median/P90/stddev 和唯一变化。验证通过后，以返回 source/config 创建新的派生实验 family，并用标准 fresh *-BASE 重新建立 schema 2 证据；不得把多流 trial 直接伪装成旧 family 的 P/FINAL。若 result stale 或复核失败，仍回退当前 incumbent。",
+      "files": [],
+      "expectations": [
+        "accepted 结果仍需上层复核，不能直接覆盖 incumbent。",
+        "source 修改使旧 source revision/source map 失效，option 修改使旧 config/profile binding 失效。",
+        "新的派生 family 必须从 fresh BASE 进入普通生命周期。"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "隔离多流 trial M2 的 correctness 已通过，但 profile phase timeout，runner 杀掉了进程组并准备回退 incumbent；随后计划用唯一变量修正后的 M3 重试。请说明报告和 artifact 如何处理，并区分 trial 创建前 CANN 环境未加载的情况。",
+      "expected_output": "M2 必须在回退和 M3 前封存 timeout attempt 的 phase manifest、argv、stdout/stderr/plog、已有 metadata/profile、PID/进程组、exit/signal/timeout、fingerprint 和 gate progress，并在 MULTISTREAM_TUNING.md 写独立 failure scene。M3 是新 attempt，只能追加且写明唯一变化；不得覆盖 M2。父报告只链接。若 trial 创建前 CANN 环境未加载，只写 environment evidence/blocker，不创建 M2 failed 现场。",
+      "files": [],
+      "expectations": [
+        "明确先封存 M2 现场，再回退、清理或启动 M3。",
+        "MULTISTREAM_TUNING.md 包含 M2 的完整 per-attempt 现场，父 REPORT 不能代替。",
+        "已有 correctness 与失败 profile gate、后续 not_run gate 均被记录，缺失 artifact 写 missing 和原因。",
+        "M3 不复用 M2 可变产物，且成功也不删除 M2 失败历史。",
+        "实验启动前环境失败与已启动 trial timeout 被严格区分。"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "某个多流 SK 在 SK-off 时子算子存在稳定跨流并行，SK-on 后内部变串行；但融合减少了 launch 和 child work，所以父 SK 仍比 SK-off interval 快 8%。请判断是否还要进入多流机会筛查。",
+      "expected_output": "必须记录 net_effect=beneficial 与 parallelism_effect=degraded 两个独立事实，把它作为 latent opportunity 而不是 neutral/regressed。保留当前 beneficial incumbent，同时继续判断丢失 overlap 是否为纯 Cube/Vector、是否位于关键路径以及预测 E2E 上界；Mix/同资源损失只能 degraded+blocked。完整筛查必须证明所有 performance-exact beneficial 多流 SK 均被双侧 trace 覆盖。",
+      "files": [],
+      "expectations": [
+        "不得因 SK 有净收益而跳过内部并行保持分析。",
+        "不得因 parallelism degraded 自动 prune 仍有净收益的 incumbent。",
+        "必须区分观察到的并行损失与纯 Cube/Vector 可动作性。",
+        "不得把 lost overlap 直接等同于可回收端到端收益。"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "fresh trace 证明 QBMM 是 MIX_1_1，AIC 可与 Combine 的 AIV 互补，但 QBMM 的 AIV 也可能与 Combine 竞争；QBMM 位于 shared expert 函数内部，Combine 位于外层 MoE 函数。如何合法发起跨函数顺序实验？",
+      "expected_output": "普通 dependency_safe_operator_reorder 必须继续拒绝 whole-MIX，不能伪造 core family。先以至少三个完整 occurrence 收集全部 QBMM AIC/AIV 与 Combine AIV component，并量化互补 overlap 与同引擎 contention；建立绑定 source revision、文件 SHA256、operator/sync/join/transform-region 的多 source span exact AST map 和完整 dependency DAG。adapter capability preflight 必须声明 component_overlap_reorder 及 component capture、multi-span mapper、reviewed multi-hunk materializer、post-component dispatch 输出。只能在隔离 worktree 由该 materializer 生成 action-manifest-v2；correctness 后验证所有 target 的 child/component/stream 与预期 dispatch，再做四 profile、clean3/clean5。只有 clean 端到端正收益才采纳。",
+      "files": [],
+      "expectations": [
+        "普通 whole-MIX 路径仍然 blocked，不得把 MIX 标成 Cube。",
+        "必须同时检查 MIX AIC 互补收益和 MIX AIV 同引擎竞争。",
+        "跨函数修改要求多个 exact AST span 和受审 multi-hunk materializer，不能手工 patch。",
+        "profile 前必须有所有受影响 target 的 post-component dispatch evidence。",
+        "局部 overlap 恢复不能代替 clean 端到端接受门禁。"
+      ]
+    }
+  ]
+}

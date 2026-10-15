@@ -1,0 +1,3 @@
+interface:
+  display_name: "SuperKernel Option 调优"
+  short_description: "Sweep frozen winner options before profiling"

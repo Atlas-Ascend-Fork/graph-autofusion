@@ -1,0 +1,138 @@
+{
+  "adapter_fingerprint": "sha256:7a0f2d0bf9e14ed865641eeff31d515e39662a64ec19d28fc57a48cc37050f62",
+  "adapter_id": "distributed-large-model-capabilities-v1",
+  "artifacts": [
+    {
+      "file_fingerprint": "sha256:d89013490f8b0fc58aef297a984f147b5b4922c496272a369efc65a65ac88d2d",
+      "kind": "cleanup_evaluation",
+      "path": "superkernel-multistream-performance-tuning/evals/cleanup-evaluation/real-npu-trial-receipt.json",
+      "schema_version": "superkernel-multistream-cleanup-evaluation-v1"
+    },
+    {
+      "file_fingerprint": "sha256:bff9524a69544edc35ea2d1805e1efa11529312231dfc3860ec0590a3dbdcfa9",
+      "kind": "network_conformance_report",
+      "path": "superkernel-multistream-performance-tuning/evals/network-conformance/report.json",
+      "schema_version": "superkernel-multistream-network-conformance-report-v1"
+    },
+    {
+      "file_fingerprint": "sha256:387cbe752838ef917a1447026ebf2cb827b2d71d13f51f2f53910fd5fcb317fc",
+      "kind": "resource_screening_receipt",
+      "path": "superkernel-multistream-performance-tuning/evals/network-conformance/evidence/deepseek-v4-screening-receipt.json",
+      "schema_version": "superkernel-multistream-resource-screening-receipt-v1"
+    },
+    {
+      "file_fingerprint": "sha256:91f4d86c821c0cb5abfa323e89a9501967afcb362964acdec18f0b00cd1f74f0",
+      "kind": "shared_npu_lease_inventory",
+      "path": "superkernel-auto-tune/evals/shared-npu-lease-20260829/inventory.json",
+      "schema_version": "superkernel-shared-npu-lease-inventory-v1"
+    }
+  ],
+  "capabilities": [
+    {
+      "blocker": {
+        "code": "MISSING_CLEAN_ADAPTER",
+        "detail": "no sealed network clean validator is registered"
+      },
+      "evidence_artifacts": [],
+      "name": "clean_performance_validation",
+      "status": "unsupported"
+    },
+    {
+      "blocker": null,
+      "evidence_artifacts": [
+        "resource_screening_receipt"
+      ],
+      "name": "core_family_classification",
+      "status": "supported"
+    },
+    {
+      "blocker": {
+        "code": "MISSING_DEPENDENCY_PROVIDER",
+        "detail": "no complete audited dependency provider receipt is registered"
+      },
+      "evidence_artifacts": [],
+      "name": "dependency_evidence",
+      "status": "unsupported"
+    },
+    {
+      "blocker": {
+        "code": "MISSING_FOUR_PROFILE_ADAPTER",
+        "detail": "no sealed four-profile command adapter is registered"
+      },
+      "evidence_artifacts": [],
+      "name": "four_profile_orchestration",
+      "status": "unsupported"
+    },
+    {
+      "blocker": {
+        "code": "MISSING_IDENTITY_REGISTRY",
+        "detail": "resource screening is not a complete bidirectional identity registry"
+      },
+      "evidence_artifacts": [],
+      "name": "identity_binding",
+      "status": "unsupported"
+    },
+    {
+      "blocker": null,
+      "evidence_artifacts": [
+        "cleanup_evaluation"
+      ],
+      "name": "isolated_cleanup",
+      "status": "supported"
+    },
+    {
+      "blocker": {
+        "code": "MISSING_EXECUTION_ADAPTER",
+        "detail": "no frozen model execution adapter is registered in this support declaration"
+      },
+      "evidence_artifacts": [],
+      "name": "model_execution",
+      "status": "unsupported"
+    },
+    {
+      "blocker": {
+        "code": "MISSING_REORDER_SOURCE_ADAPTER",
+        "detail": "no statement-span source reorder adapter is registered"
+      },
+      "evidence_artifacts": [],
+      "name": "operator_reorder_materialization",
+      "status": "unsupported"
+    },
+    {
+      "blocker": null,
+      "evidence_artifacts": [
+        "resource_screening_receipt"
+      ],
+      "name": "raw_capture_ingestion",
+      "status": "supported"
+    },
+    {
+      "blocker": null,
+      "evidence_artifacts": [
+        "shared_npu_lease_inventory"
+      ],
+      "name": "shared_npu_lease",
+      "status": "supported"
+    },
+    {
+      "blocker": {
+        "code": "MISSING_SOURCE_EXACT_MAP",
+        "detail": "no exact source byte-range mapping artifact is registered"
+      },
+      "evidence_artifacts": [],
+      "name": "source_exact_mapping",
+      "status": "unsupported"
+    },
+    {
+      "blocker": {
+        "code": "MISSING_SCOPE_SOURCE_ADAPTER",
+        "detail": "no scope API source materializer is registered"
+      },
+      "evidence_artifacts": [],
+      "name": "scope_api_materialization",
+      "status": "unsupported"
+    }
+  ],
+  "network_class": "distributed_large_model",
+  "schema_version": "superkernel-multistream-adapter-capability-v1"
+}

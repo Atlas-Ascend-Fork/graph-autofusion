@@ -1,0 +1,23 @@
+{
+  "skill_name": "superkernel-sk-failure-isolation",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "A named Ascend SuperKernel scope fails on rank 3. The fresh plog prints fault kernel_name=sk_entry_aiv, Exception is from superkernel function, a PrintDfxInfo PC, opId=42, scopeId=7, and the matching sk_task_queue.json and sk_fused_nodes.log are available. Analyze the evidence and return the exact child operator to exclude from the next scope, preserving stream and dependency ordering.",
+      "expected_output": "A structured failure-isolation record that cites fresh log fields, correlates PC/opId/scopeId with the child metadata, assigns confidence, proposes an exact exclusion, and lists revalidation gates without claiming success from attribution alone.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "A scoped SK run times out and the only useful log line is Exception is from superkernel function with a generated SK name. There is no child execution trace, no unique PC-to-symbol match, and no task queue artifact. Decide what the next action should be.",
+      "expected_output": "The diagnosis reports low confidence and an evidence gap, refuses to exclude an arbitrary child, and requests an accepted diagnostic execution trace or a narrower scope.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "The plog and metadata identify a failing child inside a fused range, but the child is between a required event record/wait edge and a cross-stream cache mutation. Propose the next scope change and explain whether the child can be excluded independently.",
+      "expected_output": "The proposal preserves event, barrier, cache, and stream ordering; it splits at a safe dependency boundary or blocks the candidate instead of bypassing synchronization for more fusion.",
+      "files": []
+    }
+  ]
+}

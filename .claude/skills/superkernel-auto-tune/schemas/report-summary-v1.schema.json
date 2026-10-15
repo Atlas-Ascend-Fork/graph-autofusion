@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SuperKernel Report Summary v1",
+  "description": "Optional schema 2 ledger.report_summary or render-final-report --summary input. Final clean metrics remain authoritative in final_e2e.",
+  "type": "object",
+  "required": ["schema_version", "baseline", "stages"],
+  "properties": {
+    "schema_version": {"const": "superkernel-report-summary-v1"},
+    "baseline": {"$ref": "#/$defs/baseline"},
+    "stages": {"type": "array", "items": {"$ref": "#/$defs/stage"}},
+    "final_gates_zh": {"type": "string", "minLength": 1},
+    "display_note_zh": {"type": "string", "minLength": 1},
+    "winner": {"$ref": "#/$defs/winner"},
+    "fallback": {"$ref": "#/$defs/config"}
+  },
+  "$defs": {
+    "optionalMs": {"type": ["number", "null"], "exclusiveMinimum": 0},
+    "optionalCount": {"type": ["integer", "null"], "minimum": 1},
+    "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "baseline": {
+      "type": "object",
+      "required": ["metric", "reason_zh"],
+      "properties": {
+        "metric": {"type": "string", "minLength": 1},
+        "value_ms": {"$ref": "#/$defs/optionalMs"},
+        "run_count": {"$ref": "#/$defs/optionalCount"},
+        "reason_zh": {"type": "string", "minLength": 1},
+        "evidence_artifacts": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "stage": {
+      "type": "object",
+      "required": ["stage", "kind", "candidate_id", "metric", "status", "eligible", "reason_zh", "gates_zh"],
+      "properties": {
+        "stage": {"enum": ["stage_a", "stage_o", "base_profile_source_mapping", "optional_multistream", "optional_source_range", "optional_experiments"]},
+        "kind": {"enum": ["screening", "option", "profiling", "optional_clean"]},
+        "candidate_id": {"type": "string", "minLength": 1},
+        "metric": {"type": "string", "minLength": 1},
+        "baseline_ms": {"$ref": "#/$defs/optionalMs"},
+        "candidate_ms": {"$ref": "#/$defs/optionalMs"},
+        "run_count": {"$ref": "#/$defs/optionalCount"},
+        "selector_rank": {"$ref": "#/$defs/optionalCount"},
+        "improvement_pct": {"type": "number"},
+        "status": {"enum": ["succeeded", "accepted", "no_gain", "blocked", "failed", "invalid", "not_requested", "not_run"]},
+        "eligible": {"type": "boolean"},
+        "reason_zh": {"type": "string", "minLength": 1},
+        "gates_zh": {"type": "string", "minLength": 1},
+        "evidence_artifacts": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["candidate_id", "scope_strategy", "reason_zh", "evidence_artifacts"],
+      "properties": {
+        "candidate_id": {"type": "string", "minLength": 1},
+        "scope_strategy": {"type": "string", "minLength": 1},
+        "promotion_path": {"enum": ["whole-scope", "FINAL"]},
+        "option_config": {"type": "object"},
+        "debug_option_config": {"type": "object"},
+        "config_path": {"type": "string", "minLength": 1},
+        "config_fingerprint": {"type": "string", "minLength": 1},
+        "reason_zh": {"type": "string", "minLength": 1},
+        "evidence_artifacts": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "winner": {
+      "allOf": [
+        {"$ref": "#/$defs/config"},
+        {"required": ["promotion_path", "option_config"]}
+      ]
+    }
+  }
+}

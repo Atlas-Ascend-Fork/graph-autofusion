@@ -188,6 +188,16 @@ Json SkTaskToJson(const SkTask &task) {
       taskInfo["args"] = hexStream.str();
       taskInfo["debugOptions"] = singleTaskInfo.debugOptions;
 
+      const bool isEventTask = singleTaskInfo.type == SkTaskType::TYPE_EVENT_NOTIFY ||
+                               singleTaskInfo.type == SkTaskType::TYPE_EVENT_WAIT ||
+                               singleTaskInfo.type == SkTaskType::TYPE_EVENT_RESET;
+      if (isEventTask) {
+        taskInfo["eventValue"] = UintToHexString(GetEventTaskValue(singleTaskInfo));
+      }
+      if (singleTaskInfo.type == SkTaskType::TYPE_EVENT_WAIT) {
+        taskInfo["waitFlag"] = GetEventTaskFlag(singleTaskInfo);
+      }
+
       Json entries = Json::array();
       for (uint32_t j = 0; j < singleTaskInfo.entryCnt && j < 4; ++j) {
         std::stringstream hexStream;
@@ -208,7 +218,7 @@ Json SkTaskToJson(const SkTask &task) {
  * @brief Add basic kernel parameters to JSON
  */
 static void AddBasicKernelParams(Json &kernelParamsJson, const aclmdlRIKernelTaskParams &kernelParams) {
-  char funcName[256] = {0};
+  char funcName[MAX_FUNC_NAME_LEN] = {0};
   if (aclrtGetFunctionName(kernelParams.funcHandle, sizeof(funcName), funcName) == ACL_SUCCESS) {
     kernelParamsJson["funcName"] = std::string(funcName);
   }
@@ -626,12 +636,6 @@ bool DumpGraphJsonToFile(Json graphJson, const SuperKernelOptionsManager &opts, 
 
 void PrintFusedScopes(const SuperKernelGraph &graph, const std::vector<SuperKernelScopeInfo> &processedScopeInfos,
                       bool debugPerOpMaxCoreEnabled) {
-  // Build scopeId -> scope index map for root tracing
-  std::unordered_map<uint16_t, size_t> scopeIdToIdx;
-  for (size_t i = 0; i < processedScopeInfos.size(); ++i) {
-    scopeIdToIdx[processedScopeInfos[i].GetScopeId()] = i;
-  }
-
   // Build original scope kernel node sets
   const auto &originalScopes = graph.GetOriginalScopeInfos();
   auto originalKernelSets = BuildOriginalKernelSets(graph, originalScopes);
@@ -651,7 +655,7 @@ void PrintFusedScopes(const SuperKernelGraph &graph, const std::vector<SuperKern
       continue;
     }
 
-    ScopeBreakInfo rootScopeBreakInfo = FindRootBreakInfo(scopeInfo, scopeIdToIdx, processedScopeInfos);
+    const auto &breakInfo = scopeInfo.GetBreakInfo();
     std::string scopeNames = ScopeSplitPass::GetScopeNamesFromBitFlags(scopeInfo.GetScopeBitFlags(), graph);
 
     // Line 0: scopeId and scopeBitFlag
@@ -670,10 +674,10 @@ void PrintFusedScopes(const SuperKernelGraph &graph, const std::vector<SuperKern
     }
 
     // Line 3: breakReason (if kernel set differs from original scope)
-    if (!debugPerOpMaxCoreEnabled && rootScopeBreakInfo.GetReason() != ScopeBreakReason::NONE &&
+    if (!debugPerOpMaxCoreEnabled && breakInfo.GetReason() != ScopeBreakReason::NONE &&
         !IsKernelSetMatch(scopeInfo, originalKernelSets, graph)) {
-      SK_LOGI("    breakReason=[%s], breakReasonDetail=%s, scopeName=[%s]", rootScopeBreakInfo.Format().c_str(),
-              ScopeBreakReasonDetail(rootScopeBreakInfo.GetReason()), scopeNames.c_str());
+      SK_LOGI("    breakReason=[%s], breakReasonDetail=%s, scopeName=[%s]", breakInfo.Format().c_str(),
+              ScopeBreakReasonDetail(breakInfo.GetReason()), scopeNames.c_str());
     }
   }
 }

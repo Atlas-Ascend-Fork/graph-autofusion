@@ -1,0 +1,3 @@
+interface:
+  display_name: "SuperKernel 环境确认与实验准备"
+  short_description: "Freeze a valid SK tuning session before S0"

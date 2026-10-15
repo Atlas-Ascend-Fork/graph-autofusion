@@ -15,4 +15,4 @@
 
 from .validators import validate_codegen_output, validate_compile_options, compare_files
 
-__all__ = ["validate_codegen_output", "validate_compile_options"]
+__all__ = ["validate_codegen_output", "validate_compile_options", "compare_files"]

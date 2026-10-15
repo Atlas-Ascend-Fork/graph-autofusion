@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SuperKernel Final Clean E2E v1",
+  "type": "object",
+  "required": [
+    "classification",
+    "candidate_id",
+    "scope_strategy",
+    "option_config",
+    "evidence_artifacts",
+    "reason_zh"
+  ],
+  "properties": {
+    "classification": {
+      "enum": ["beneficial", "no_gain", "not_run", "failed", "blocked"]
+    },
+    "candidate_id": {"type": "string", "minLength": 1},
+    "scope_strategy": {"type": "string", "minLength": 1},
+    "option_config": {"type": "object"},
+    "evidence_artifacts": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "reason_zh": {"type": "string", "minLength": 1},
+    "baseline": {"$ref": "#/$defs/metrics"},
+    "candidate": {"$ref": "#/$defs/metrics"},
+    "improvement_pct": {"type": "number"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"classification": {"enum": ["beneficial", "no_gain"]}}},
+      "then": {"required": ["baseline", "candidate", "improvement_pct"]}
+    }
+  ],
+  "$defs": {
+    "metrics": {
+      "type": "object",
+      "required": ["median_ms"],
+      "properties": {
+        "median_ms": {"type": "number", "exclusiveMinimum": 0},
+        "p90_ms": {"type": "number", "exclusiveMinimum": 0},
+        "stddev_ms": {"type": "number", "minimum": 0},
+        "sample_count": {"type": "integer", "minimum": 1},
+        "run_count": {"type": "integer", "minimum": 1, "description": "Independent clean processes, not decode samples."}
+      }
+    }
+  },
+  "additionalProperties": true
+}

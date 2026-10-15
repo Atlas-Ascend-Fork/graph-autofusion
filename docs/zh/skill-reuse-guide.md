@@ -4,7 +4,7 @@
 
 本文档面向**没有 cannbot** 的外部开发者，说明如何复用 graph-autofusion 工程内置的 Skills：既可接入其他 AI 工具（Claude Code / Cursor / GitHub Copilot 等）自动加载，也可作为人工开发指南阅读。
 
-工程内置 Skills 共 17 个，分为三类：6 个通用开发 Skill、7 个 SuperKernel 算子流水线 Skill、4 个远程 GitCode 协作 Skill。
+工程内置 30 个本地 Skill：9 个通用开发 Skill、7 个 SuperKernel 算子流水线 Skill、14 个 SuperKernel 自动调优与分析 Skill；另有 4 个需单独安装的远程 GitCode 协作 Skill。
 
 ### 与其他文档的关系
 
@@ -15,7 +15,7 @@
 
 ## Skill 总览
 
-### 通用开发 Skill（6 个，git 跟踪）
+### 通用开发 Skill（9 个，git 跟踪）
 
 | Skill | 定位 | 脚本依赖 | SKILL.md |
 |-------|------|----------|----------|
@@ -25,20 +25,42 @@
 | `af-reg-ascir` | ASCIR 注册辅助（新增/修改算子、dtype、tmp buffer、UT/ST 生成） | 无 | [链接](../../.claude/skills/af-reg-ascir/SKILL.md) |
 | `cann-toolkit-installer` | CANN Toolkit 自动下载安装（参数解析、校验、静默安装） | 内嵌 bash 逻辑 | [链接](../../.claude/skills/cann-toolkit-installer/SKILL.md) |
 | `default-skills` | 默认远程 Skill 安装入口 | `scripts/install-default-skills.sh` | [链接](../../.claude/skills/default-skills/SKILL.md) |
+| `af-inductor-cv-validator` | Inductor CV 模型验证矩阵 | `scripts/run_inductor_cv_matrix.py` | [链接](../../.claude/skills/af-inductor-cv-validator/SKILL.md) |
+| `af-perf-modeler` | ATT 性能公式与 codegen 参数建模 | 无 | [链接](../../.claude/skills/af-perf-modeler/SKILL.md) |
+| `af-prune-graph-metadef` | Graph/MetaDef 裁剪与黑名单校验 | `scripts/check-blacklist.sh` | [链接](../../.claude/skills/af-prune-graph-metadef/SKILL.md) |
 
-### SuperKernel 算子流水线 Skill（7 个，master 分支可用）
-
-> 这 7 个 Skill 目前仅在 `master` 分支可用，`develop` 分支暂未合入。下表 `SKILL.md` 列不提供链接，请切换到 `master` 分支或通过 GitCode 网页查看。
+### SuperKernel 算子流水线 Skill（7 个，git 跟踪）
 
 | Skill | 定位 | 脚本依赖 | SKILL.md |
 |-------|------|----------|----------|
-| `sk-operator-pipeline` | SK 算子交付流水线总入口（路由、索引） | `scripts/` | master 分支 |
-| `sk-operator-asset-adapter` | 算子资产适配（用户目录 → JSON contract） | `scripts/*.py` | master 分支 |
-| `sk-operator-validate` | 适配产物规范校验（contract、源码、兼容性） | `scripts/` | master 分支 |
-| `sk-operator-codegen` | SK binding 代码生成（Args struct + `__sk__` + SK_BIND） | `scripts/` | master 分支 |
-| `sk-operator-sample-gen` | 样例生成与验证 contract（输入、oracle、runner） | `scripts/` | master 分支 |
-| `sk-operator-build-package` | SK/ACLGraph 编译打包（bisheng 编译 → wheel） | `scripts/*.py` | master 分支 |
-| `sk-model-analysis` | 整网诊断（hang/coredump 定位、性能分析、可视化） | `scripts/*.py` | master 分支 |
+| `sk-operator-pipeline` | SK 算子交付流水线总入口（路由、索引） | `scripts/` | [链接](../../.claude/skills/sk-operator-pipeline/SKILL.md) |
+| `sk-operator-asset-adapter` | 算子资产适配（用户目录 → JSON contract） | `scripts/*.py` | [链接](../../.claude/skills/sk-operator-asset-adapter/SKILL.md) |
+| `sk-operator-validate` | 适配产物规范校验（contract、源码、兼容性） | `scripts/` | [链接](../../.claude/skills/sk-operator-validate/SKILL.md) |
+| `sk-operator-codegen` | SK binding 代码生成（Args struct + `__sk__` + SK_BIND） | `scripts/` | [链接](../../.claude/skills/sk-operator-codegen/SKILL.md) |
+| `sk-operator-sample-gen` | 样例生成与验证 contract（输入、oracle、runner） | `scripts/` | [链接](../../.claude/skills/sk-operator-sample-gen/SKILL.md) |
+| `sk-operator-build-package` | SK/ACLGraph 编译打包（bisheng 编译 → wheel） | `scripts/*.py` | [链接](../../.claude/skills/sk-operator-build-package/SKILL.md) |
+| `sk-model-analysis` | 整网诊断（hang/coredump 定位、性能分析、可视化） | `scripts/*.py` | [链接](../../.claude/skills/sk-model-analysis/SKILL.md) |
+
+### SuperKernel 自动调优与分析 Skill（14 个，git 跟踪）
+
+这些 Skill 从 `superkernel-skill` 迁入 `.claude/skills/`，与算子交付流水线分开，面向模型级融合调优和 profiling 分析。
+
+| Skill | 定位 | SKILL.md |
+|-------|------|----------|
+| `superkernel-auto-tune` | 全生命周期调优总入口与阶段调度 | [链接](../../.claude/skills/superkernel-auto-tune/SKILL.md) |
+| `superkernel-intake-preparation` | 冻结运行环境、工作负载、控制项与可选实验意图 | [链接](../../.claude/skills/superkernel-intake-preparation/SKILL.md) |
+| `superkernel-s0-baseline` | 建立五个独立进程的 SK-off clean 性能基线 | [链接](../../.claude/skills/superkernel-s0-baseline/SKILL.md) |
+| `superkernel-stage-a-scope-selection` | 筛选完整 scope 策略矩阵并选择候选 | [链接](../../.claude/skills/superkernel-stage-a-scope-selection/SKILL.md) |
+| `superkernel-stage-o-option-tuning` | 针对冻结的 Stage A 胜者增量调优 wrapper 选项 | [链接](../../.claude/skills/superkernel-stage-o-option-tuning/SKILL.md) |
+| `superkernel-base-profile-source-mapping` | 采集 BASE profiling、逐 SK 分析并确认精确源码映射 | [链接](../../.claude/skills/superkernel-base-profile-source-mapping/SKILL.md) |
+| `superkernel-optional-experiments` | 执行用户授权的多流及 P/FINAL 源码范围实验 | [链接](../../.claude/skills/superkernel-optional-experiments/SKILL.md) |
+| `superkernel-final-e2e-report` | 最终 clean E2E 验证与中文调优报告 | [链接](../../.claude/skills/superkernel-final-e2e-report/SKILL.md) |
+| `superkernel-source-range-from-smap` | 从已完成会话的已验证 BASE/SMAP 派生独立 P/FINAL 实验 | [链接](../../.claude/skills/superkernel-source-range-from-smap/SKILL.md) |
+| `superkernel-fusion-performance-analysis` | SK-off/SK-on 性能对比、回退归因与源码映射分析 | [链接](../../.claude/skills/superkernel-fusion-performance-analysis/SKILL.md) |
+| `superkernel-multistream-performance-tuning` | 基于新鲜 profiling 调优融合后的多流重叠与调度 | [链接](../../.claude/skills/superkernel-multistream-performance-tuning/SKILL.md) |
+| `superkernel-sk-failure-isolation` | 根据 plog/sk_meta 隔离执行、精度、超时或 hang 故障 | [链接](../../.claude/skills/superkernel-sk-failure-isolation/SKILL.md) |
+| `superkernel-sk-prof-timeline` | 将逐核 sk_prof trace 折叠为 Cube/Vector 时间线 | [链接](../../.claude/skills/superkernel-sk-prof-timeline/SKILL.md) |
+| `superkernel-runtime-common` | 内部共享运行时：分析、设备租约、生命周期、台账与报告 | [链接](../../.claude/skills/superkernel-runtime-common/SKILL.md) |
 
 ### 远程 GitCode 协作 Skill（4 个，自动安装）
 
@@ -134,7 +156,7 @@ applyTo: "build.sh,CMakeLists.txt,cmake/**"
 1. 按当前任务定位相关 Skill（参考"Skill 总览"清单）。
 2. 读取对应 `.claude/skills/<name>/SKILL.md` 全文。
 3. 在 AI 工具的系统提示词或对话开头粘贴："请按以下指令辅助我完成 graph-autofusion 开发：\n\n{SKILL.md 正文}"。
-4. 按需选用，避免一次性粘贴全部 17 个 Skill（超出上下文窗口）。
+4. 按需选用，避免一次性粘贴全部 Skill（超出上下文窗口）。
 
 ## 复用方式二：作为人工开发指南阅读
 
@@ -166,7 +188,18 @@ SK 算子交付流水线按以下阶段顺序执行，每阶段对应一个 Skil
 | 5. 编译打包 | `sk-operator-build-package` | 调用 bisheng 编译 SK/ACLGraph 扩展，打包为 wheel |
 | 诊断 | `sk-model-analysis` | 整网诊断：hang/coredump 定位、性能分析、scope/task 可视化 |
 
-人工阅读时，建议从 `sk-operator-pipeline` 的 SKILL.md（master 分支）入口了解整体流程。
+人工阅读时，建议从 `sk-operator-pipeline` 的 SKILL.md入口了解整体流程。
+
+### SuperKernel 自动调优流程速查
+
+从 [superkernel-auto-tune](../../.claude/skills/superkernel-auto-tune/SKILL.md) 开始：
+
+```text
+Intake -> S0 -> Stage A -> Stage O -> BASE profiling / analysis / SMAP
+       -> [multistream and/or P/FINAL] -> final clean E2E / report
+```
+
+Intake 冻结可选模式 `none`、`multistream`、`source-range` 或 `both`；可选实验仅在用户授权后执行，无收益或失败时保留原胜者。最终结论以 clean E2E 时延为准。已有已完成且验证通过的父会话时，可通过 `superkernel-source-range-from-smap` 派生独立 P/FINAL 实验。`superkernel-runtime-common` 是共享依赖，不作为用户入口。
 
 ### 远程 Skill 触发场景速查
 
@@ -186,6 +219,13 @@ SK 算子交付流水线按以下阶段顺序执行，每阶段对应一个 Skil
 - **`default-skills`** 的 `scripts/install-default-skills.sh` 用于安装远程 Skill，需网络可访问 gitcode.com。
 
 人工阅读场景下，脚本仅作参考，不强制执行。
+
+### SuperKernel 调优技能的完整复用
+
+- 跨工程复用时，将全部 14 个 `.claude/skills/superkernel-*` 目录放在同一个 skills 根目录下；保留 `scripts/`、`references/`、`schemas/`、`phase.json`、`agents/` 等现有资源。阶段脚本通过同级相对路径加载控制器和共享运行时，不能只复制 `SKILL.md`。
+- 在其他工具中转换指令格式时，也必须保留这些资源，并将脚本路径定位到对应技能目录。`agents/openai.yaml` 仅为可选 UI 元数据，不注册自定义阶段 Agent。
+- 完整调优需要宿主提供原生通用子 Agent 或命令适配器，并显式加载阶段 Skill；仅粘贴提示词可用于阅读分析，不能替代执行环境。
+- 执行需要 Python 3；NPU 阶段还需要适配工作负载的 Ascend/CANN、模型依赖及 profiling 工具。具体依赖以各 Skill 和环境预检结果为准。阅读文档无需 NPU。
 
 ### 远程 Skill 安装
 
@@ -228,7 +268,7 @@ rm -rf /tmp/cann-skills
 *
 !af-build-runner/
 !af-build-runner/**
-...（12 个本地 Skill 白名单条目）
+...（其余本地 Skill 白名单条目）
 !.gitignore
 ```
 
@@ -265,7 +305,7 @@ A：不需要。人工阅读场景下，脚本仅作参考，理解 SKILL.md 描
 
 **Q：远程 Skill 和本地 Skill 有什么区别？**
 
-A：本地 Skill（12 个）在 git 中跟踪，`git clone` 即得；远程 Skill（4 个）不在 git 中，需通过 `default-skills` 或手动克隆安装到 `.claude/skills/_remote/`。详见 [opencode-skill-management.md](./opencode-skill-management.md)。
+A：本地 Skill（30 个）在 git 中跟踪，`git clone` 即得；远程 Skill（4 个）不在 git 中，需通过 `default-skills` 或手动克隆安装到 `.claude/skills/_remote/`。详见 [opencode-skill-management.md](./opencode-skill-management.md)。
 
 **Q：如何贡献新 Skill？**
 

@@ -1,0 +1,31 @@
+{
+  "adapter_count": 2,
+  "adapters": [
+    {
+      "adapter_fingerprint": "sha256:3d7abc672a0bb4df38a2cba26eef28d81a7c986f1e21cf4c01498f37e1429baa",
+      "adapter_id": "reference-real-npu-v1",
+      "capabilities": [
+        "real_npu_closure"
+      ],
+      "decision": "no_gain",
+      "network_class": "minimal_reference"
+    },
+    {
+      "adapter_fingerprint": "sha256:1de94f7ca955a9edbcf28808a40f6028d8f2d5c3ee7fe5035e2d09994a25cd2f",
+      "adapter_id": "deepseek-v4-resource-screening-v1",
+      "capabilities": [
+        "resource_screening"
+      ],
+      "decision": "no_reorder_candidate",
+      "network_class": "distributed_large_model"
+    }
+  ],
+  "core_adapter_identity_leaks": [],
+  "decision": "pass",
+  "generic_core_fingerprint": "sha256:a0563716ed1e4f09955c31cbb3e4fc46f17fcecde707e2cc56c37526488d0840",
+  "network_class_count": 2,
+  "plan_fingerprint": "sha256:8306f9e98433972c229700f3f9ac4697d17561a2220c507a348468c2aa20268c",
+  "report_fingerprint": "sha256:16233dd0e981181bb4cf3ddce285adb98570936315207b966dc2ccb9052d9521",
+  "schema_version": "superkernel-multistream-network-conformance-report-v1",
+  "suite_id": "reference-and-large-model-20260829"
+}

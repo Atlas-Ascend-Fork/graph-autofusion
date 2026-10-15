@@ -11,42 +11,37 @@
 set +e
 echo $(grep -E "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
 
-select_compilers() {
-    local selected_cc="${CC:-}"
-    local selected_cxx="${CXX:-}"
-    local gcc_version="${GCC_VERSION:-}"
+if sudo update-alternatives --set gcc /usr/bin/gcc-16 2>/dev/null; then
+    echo "Switched to gcc-16"
+elif sudo update-alternatives --set gcc /usr/bin/gcc-15 2>/dev/null; then
+    echo "Switched to gcc-15"
+elif sudo update-alternatives --set gcc /usr/bin/gcc-14 2>/dev/null; then
+    echo "gcc-16/15 not available, fell back to gcc-14"
+fi
 
-    if [[ -n "${selected_cc}" && -z "${selected_cxx}" ]]; then
-        if [[ "${selected_cc}" =~ ^gcc-([0-9]+)$ ]]; then
-            selected_cxx="g++-${BASH_REMATCH[1]}"
-        fi
+if gcc --version | head -n1 | grep -q "15\."; then
+    rm -rf /home/jenkins/opensource/lib_cache
+    if [ -d /home/jenkins/opensource/gcc15 ]; then
+        rm -rf /home/jenkins/opensource/gcc15/lib_cache/abseil-cpp
+        rm -rf /home/jenkins/opensource/gcc15/lib_cache/device/abseil-cpp
+        ln -s /home/jenkins/opensource/gcc15/lib_cache/ /home/jenkins/opensource/lib_cache
+    elif [ -d /home/jenkins/opensource/gcc15x86 ]; then
+        rm -rf /home/jenkins/opensource/gcc15x86/lib_cache/abseil-cpp
+        rm -rf /home/jenkins/opensource/gcc15x86/lib_cache/device/abseil-cpp
+        ln -s /home/jenkins/opensource/gcc15x86/lib_cache/ /home/jenkins/opensource/lib_cache
     fi
-
-    if [[ -n "${selected_cxx}" && -z "${selected_cc}" ]]; then
-        if [[ "${selected_cxx}" =~ ^g\+\+-([0-9]+)$ ]]; then
-            selected_cc="gcc-${BASH_REMATCH[1]}"
-        fi
-    fi
-
-    if [[ -z "${selected_cc}" || -z "${selected_cxx}" ]]; then
-        if [[ -n "${gcc_version}" ]]; then
-            selected_cc="${selected_cc:-gcc-${gcc_version}}"
-            selected_cxx="${selected_cxx:-g++-${gcc_version}}"
-        else
-            selected_cc="${selected_cc:-gcc-14}"
-            selected_cxx="${selected_cxx:-g++-14}"
-        fi
-    fi
-
-    export CC="${selected_cc}"
-    export CXX="${selected_cxx}"
-    echo "Using CC=${CC}"
-    echo "Using CXX=${CXX}"
-}
-
-select_compilers
-"${CC}" --version
-"${CXX}" --version
+elif gcc --version | head -n1 | grep -q "14\."; then
+    gcc --version
+else
+    gcc --version
+    rm -rf /home/jenkins/opensource/lib_cache
+    ln -s /home/jenkins/opensource/ubuntu20/lib_cache /home/jenkins/opensource/lib_cache
+fi
+if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; then
+	sudo update-alternatives --set lcov /opt/lcov-2.3.2/bin/lcov
+	lcov --version
+fi
+gcc --version
 source /home/jenkins/Ascend/cann/bin/setenv.bash
 pip3 install -r super_kernel/requirements-dev.txt
 
@@ -58,7 +53,7 @@ if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; th
 			bash build.sh -u -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource" -j20 -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
 			;;
-		UT_Test_superkernel)
+		UT_Test_Cpp_superkernel)
 			bash build.sh -u -c --impl=cpp --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
 			;;
@@ -71,23 +66,27 @@ if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; th
 			ret=$?
 			;;
 		ST_Test_Python_superkernel)
-			bash build.sh -u -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
+			bash build.sh -s -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
+			ret=$?
+			;;
+		ST_Test_Cpp_superkernel)
+			bash build.sh -s -c --impl=cpp --module=superkernel --no-autofuse --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
 			;;
 		ST_Test_autofuse_framework)
 			bash build.sh -s -c --module=autofuse_framework --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
-			coverage_save="false"
+			coverage_save="true"
 			;;
 		ST_Test_autofuse_ascendc_api)
-			bash build.sh -s -c --module=autofuse_ascendc_api --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt -j20 | tee test_ascendc_api.log
+			bash build.sh -s -c --module=autofuse_ascendc_api --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt -j20
 			ret=$?
-			coverage_save="false"
+			coverage_save="true"
 			;;
 		ST_Test_autofuse_e2e)
 			bash build.sh -s -c  --module=autofuse_e2e --cann_3rd_lib_path="/home/jenkins/opensource" -j20 -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
-			coverage_save="false"
+			coverage_save="true"
 			;;
         *)
             echo "Skip UT test execution for ${ut_type} on non-master branch"
@@ -100,7 +99,7 @@ else
 			bash build.sh -u -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource"
 			ret=$?
 			;;
-		UT_Test_superkernel)
+		UT_Test_Cpp_superkernel)
 			bash build.sh -u -c --impl=cpp --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource"
 			ret=$?
 			;;
@@ -113,7 +112,11 @@ else
 			ret=$?
 			;;
 		ST_Test_Python_superkernel)
-			bash build.sh -u -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource"
+			bash build.sh -s -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource"
+			ret=$?
+			;;
+		ST_Test_Cpp_superkernel)
+			bash build.sh -s -c --impl=cpp --module=superkernel --no-autofuse --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
 			;;
 		ST_Test_autofuse_framework)
@@ -138,7 +141,7 @@ else
 	esac
 fi
 
-
+/usr/local/ccache/bin/ccache -s
 if [ $ret -ne 200 ] && [ $ret -ne 0 ]; then
     echo "run ut fail"
     exit 1

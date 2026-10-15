@@ -400,8 +400,8 @@ bool GetMainAndSubStreamOrder(SuperKernelGraph &graph, std::vector<StreamPostPla
   uint32_t entrySubStreamIdx = INVALID_STREAM_ID;
   if (!SelectMainAndEntryStream(plans, candidates, streamCount, mainStreamIdx, entrySubStreamIdx,
                                 extInfo.skMainNodeId)) {
-    SK_LOGI("unable to find main SK node in scope, skip update");
-    extInfo.processStatus = ScopeProcessStatus::NO_TARGET_NODE;
+    SK_LOGI("unable to select main and entry streams due to insufficient stream task slots, skip update");
+    extInfo.processStatus = ScopeProcessStatus::RESOURCE_INSUFFICIENT;
     return false;
   }
   SK_LOGI("main stream and entry sub stream selected: mainStreamIdx=%u, entrySubStreamIdx=%u", mainStreamIdx,

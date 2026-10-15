@@ -1,0 +1,10 @@
+{
+  "schema_version": "superkernel-phase-manifest-v1",
+  "phase": "final_e2e_report",
+  "agent_id": "sk-final-e2e-report",
+  "skill": "superkernel-final-e2e-report",
+  "runtime_tools": [
+    "analyze_performance.py",
+    "experiment_ledger.py"
+  ]
+}

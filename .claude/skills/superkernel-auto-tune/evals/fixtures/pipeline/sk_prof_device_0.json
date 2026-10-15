@@ -1,0 +1,20 @@
+{
+  "traceEvents": [
+    {
+      "name": "static_kernel_GroupedMatmul_hash",
+      "ph": "X",
+      "ts": 0,
+      "dur": 6,
+      "tid": 1,
+      "args": {"kernelType": "AIC_ONLY", "nodeId": 10}
+    },
+    {
+      "name": "static_kernel_VectorPost_hash",
+      "ph": "X",
+      "ts": 6,
+      "dur": 6,
+      "tid": 2,
+      "args": {"kernelType": "AIV_ONLY", "nodeId": 11}
+    }
+  ]
+}

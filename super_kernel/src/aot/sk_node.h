@@ -236,7 +236,6 @@ struct KernelCapBits {
 };
 
 KernelCapBits ParseKernelCapBits(uint64_t cap);
-bool ShouldDisableScheMode(const KernelCapBits &capBits);
 
 struct KernelInfos {
   SkKernelType kernelType = SkKernelType::DEFAULT;
@@ -382,6 +381,9 @@ class SuperKernelBaseNode {
   virtual bool IsScheModeOn() const {
     return false;
   }
+  bool RequiresExactCoreMatch() const {
+    return IsScheModeOn() && !GetNodeInfos().kernelInfos.capBits.blockDimScaleUp;
+  }
   virtual bool GetScheMode() const {
     return false;
   }
@@ -460,6 +462,16 @@ class SuperKernelBaseNode {
   }
   void ClearScopeBitFlags() {
     scopeBitFlags.reset();
+  }
+
+  uint16_t GetScopeId() const {
+    return scopeId;
+  }
+  void SetScopeId(uint16_t inputScopeId) {
+    scopeId = inputScopeId;
+  }
+  void ClearScopeId() {
+    scopeId = INVALID_SCOPE_ID;
   }
   void MarkEventNodeToScope(SuperKernelBaseNode *node);
 
@@ -556,6 +568,7 @@ class SuperKernelBaseNode {
   bool isInvalidated = false;
   std::unordered_set<uint32_t> scopeStreamIds;
   std::bitset<MAX_SCOPE_NUM> scopeBitFlags;
+  uint16_t scopeId = INVALID_SCOPE_ID;
 };
 
 // Derived Node Classes
@@ -600,9 +613,7 @@ class SuperKernelKernelNode : public SuperKernelBaseNode {
 
  private:
   void IdentifyAndHandleSimtKernel(const SuperKernelOptionsManager *opts);
-  bool SetupLaunchKernelCfg(aclrtFuncHandle funcHandle, size_t skMaxDcacheSize,
-                            std::vector<aclrtLaunchKernelAttr> &launchKernelAttrs,
-                            aclrtLaunchKernelCfg &launchKernelCfg) const;
+  bool SetupLaunchKernelCfg(const SkLaunchInfo &launchInfo);
 
   bool isScopeBegin = false;
   bool isScopeEnd = false;

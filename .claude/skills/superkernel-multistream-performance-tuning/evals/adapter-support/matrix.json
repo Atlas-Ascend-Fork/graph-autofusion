@@ -1,0 +1,520 @@
+{
+  "action_requirements_fingerprint": "sha256:1347919396312844c621cb36c5c998435ffb6d95beeb7174857b3476c1a795b6",
+  "adapters": [
+    {
+      "actions": [
+        {
+          "action": "option",
+          "blockers": [],
+          "required_artifacts": [
+            "network_conformance_report",
+            "shared_npu_lease_inventory"
+          ],
+          "required_capabilities": [
+            "clean_performance_validation",
+            "isolated_cleanup",
+            "model_execution",
+            "shared_npu_lease"
+          ],
+          "status": "available"
+        },
+        {
+          "action": "scope_split",
+          "blockers": [
+            {
+              "code": "MISSING_SCOPE_ACTION_CLOSURE",
+              "detail": "the sealed real NPU closure exercised operator reorder, not a scope API source action",
+              "name": "scope_api_materialization",
+              "type": "capability"
+            }
+          ],
+          "required_artifacts": [
+            "network_conformance_report",
+            "shared_npu_lease_inventory"
+          ],
+          "required_capabilities": [
+            "clean_performance_validation",
+            "identity_binding",
+            "isolated_cleanup",
+            "model_execution",
+            "raw_capture_ingestion",
+            "scope_api_materialization",
+            "shared_npu_lease",
+            "source_exact_mapping"
+          ],
+          "status": "blocked"
+        },
+        {
+          "action": "range_exclusion",
+          "blockers": [
+            {
+              "code": "MISSING_SCOPE_ACTION_CLOSURE",
+              "detail": "the sealed real NPU closure exercised operator reorder, not a scope API source action",
+              "name": "scope_api_materialization",
+              "type": "capability"
+            }
+          ],
+          "required_artifacts": [
+            "network_conformance_report",
+            "shared_npu_lease_inventory"
+          ],
+          "required_capabilities": [
+            "clean_performance_validation",
+            "identity_binding",
+            "isolated_cleanup",
+            "model_execution",
+            "raw_capture_ingestion",
+            "scope_api_materialization",
+            "shared_npu_lease",
+            "source_exact_mapping"
+          ],
+          "status": "blocked"
+        },
+        {
+          "action": "dependency_safe_operator_reorder",
+          "blockers": [],
+          "required_artifacts": [
+            "network_conformance_report",
+            "shared_npu_lease_inventory"
+          ],
+          "required_capabilities": [
+            "clean_performance_validation",
+            "core_family_classification",
+            "dependency_evidence",
+            "four_profile_orchestration",
+            "identity_binding",
+            "isolated_cleanup",
+            "model_execution",
+            "operator_reorder_materialization",
+            "raw_capture_ingestion",
+            "shared_npu_lease",
+            "source_exact_mapping"
+          ],
+          "status": "available"
+        }
+      ],
+      "adapter_fingerprint": "sha256:0327c33ecb623567a5c36a180d669c5acd5c7dca757e585e859c88d0b5bed582",
+      "adapter_id": "reference-real-npu-capabilities-v1",
+      "capabilities": [
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "clean_performance_validation",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "core_family_classification",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "dependency_evidence",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "four_profile_orchestration",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "identity_binding",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "cleanup_evaluation"
+          ],
+          "name": "isolated_cleanup",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "model_execution",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "operator_reorder_materialization",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "raw_capture_ingestion",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "shared_npu_lease_inventory"
+          ],
+          "name": "shared_npu_lease",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "real_npu_closure_receipt"
+          ],
+          "name": "source_exact_mapping",
+          "status": "supported"
+        },
+        {
+          "blocker": {
+            "code": "MISSING_SCOPE_ACTION_CLOSURE",
+            "detail": "the sealed real NPU closure exercised operator reorder, not a scope API source action"
+          },
+          "evidence_artifacts": [],
+          "name": "scope_api_materialization",
+          "status": "unsupported"
+        }
+      ],
+      "file_fingerprint": "sha256:125a343d3fd122ad81c135d7832f56e059f8694a8baab8be8d91f43b55e4de03",
+      "network_class": "minimal_reference",
+      "path": "superkernel-multistream-performance-tuning/evals/adapter-support/adapters/reference.json"
+    },
+    {
+      "actions": [
+        {
+          "action": "option",
+          "blockers": [
+            {
+              "code": "MISSING_CLEAN_ADAPTER",
+              "detail": "no sealed network clean validator is registered",
+              "name": "clean_performance_validation",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_EXECUTION_ADAPTER",
+              "detail": "no frozen model execution adapter is registered in this support declaration",
+              "name": "model_execution",
+              "type": "capability"
+            }
+          ],
+          "required_artifacts": [
+            "network_conformance_report",
+            "shared_npu_lease_inventory"
+          ],
+          "required_capabilities": [
+            "clean_performance_validation",
+            "isolated_cleanup",
+            "model_execution",
+            "shared_npu_lease"
+          ],
+          "status": "blocked"
+        },
+        {
+          "action": "scope_split",
+          "blockers": [
+            {
+              "code": "MISSING_CLEAN_ADAPTER",
+              "detail": "no sealed network clean validator is registered",
+              "name": "clean_performance_validation",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_IDENTITY_REGISTRY",
+              "detail": "resource screening is not a complete bidirectional identity registry",
+              "name": "identity_binding",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_EXECUTION_ADAPTER",
+              "detail": "no frozen model execution adapter is registered in this support declaration",
+              "name": "model_execution",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_SCOPE_SOURCE_ADAPTER",
+              "detail": "no scope API source materializer is registered",
+              "name": "scope_api_materialization",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_SOURCE_EXACT_MAP",
+              "detail": "no exact source byte-range mapping artifact is registered",
+              "name": "source_exact_mapping",
+              "type": "capability"
+            }
+          ],
+          "required_artifacts": [
+            "network_conformance_report",
+            "shared_npu_lease_inventory"
+          ],
+          "required_capabilities": [
+            "clean_performance_validation",
+            "identity_binding",
+            "isolated_cleanup",
+            "model_execution",
+            "raw_capture_ingestion",
+            "scope_api_materialization",
+            "shared_npu_lease",
+            "source_exact_mapping"
+          ],
+          "status": "blocked"
+        },
+        {
+          "action": "range_exclusion",
+          "blockers": [
+            {
+              "code": "MISSING_CLEAN_ADAPTER",
+              "detail": "no sealed network clean validator is registered",
+              "name": "clean_performance_validation",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_IDENTITY_REGISTRY",
+              "detail": "resource screening is not a complete bidirectional identity registry",
+              "name": "identity_binding",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_EXECUTION_ADAPTER",
+              "detail": "no frozen model execution adapter is registered in this support declaration",
+              "name": "model_execution",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_SCOPE_SOURCE_ADAPTER",
+              "detail": "no scope API source materializer is registered",
+              "name": "scope_api_materialization",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_SOURCE_EXACT_MAP",
+              "detail": "no exact source byte-range mapping artifact is registered",
+              "name": "source_exact_mapping",
+              "type": "capability"
+            }
+          ],
+          "required_artifacts": [
+            "network_conformance_report",
+            "shared_npu_lease_inventory"
+          ],
+          "required_capabilities": [
+            "clean_performance_validation",
+            "identity_binding",
+            "isolated_cleanup",
+            "model_execution",
+            "raw_capture_ingestion",
+            "scope_api_materialization",
+            "shared_npu_lease",
+            "source_exact_mapping"
+          ],
+          "status": "blocked"
+        },
+        {
+          "action": "dependency_safe_operator_reorder",
+          "blockers": [
+            {
+              "code": "MISSING_CLEAN_ADAPTER",
+              "detail": "no sealed network clean validator is registered",
+              "name": "clean_performance_validation",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_DEPENDENCY_PROVIDER",
+              "detail": "no complete audited dependency provider receipt is registered",
+              "name": "dependency_evidence",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_FOUR_PROFILE_ADAPTER",
+              "detail": "no sealed four-profile command adapter is registered",
+              "name": "four_profile_orchestration",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_IDENTITY_REGISTRY",
+              "detail": "resource screening is not a complete bidirectional identity registry",
+              "name": "identity_binding",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_EXECUTION_ADAPTER",
+              "detail": "no frozen model execution adapter is registered in this support declaration",
+              "name": "model_execution",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_REORDER_SOURCE_ADAPTER",
+              "detail": "no statement-span source reorder adapter is registered",
+              "name": "operator_reorder_materialization",
+              "type": "capability"
+            },
+            {
+              "code": "MISSING_SOURCE_EXACT_MAP",
+              "detail": "no exact source byte-range mapping artifact is registered",
+              "name": "source_exact_mapping",
+              "type": "capability"
+            },
+            {
+              "code": "NO_STABLE_SAME_PARENT_PAIR",
+              "detail": "resource screening proves zero stable same-parent Cube/Vector matches",
+              "name": "stable_same_parent_pair",
+              "type": "current_evidence"
+            }
+          ],
+          "required_artifacts": [
+            "network_conformance_report",
+            "shared_npu_lease_inventory"
+          ],
+          "required_capabilities": [
+            "clean_performance_validation",
+            "core_family_classification",
+            "dependency_evidence",
+            "four_profile_orchestration",
+            "identity_binding",
+            "isolated_cleanup",
+            "model_execution",
+            "operator_reorder_materialization",
+            "raw_capture_ingestion",
+            "shared_npu_lease",
+            "source_exact_mapping"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "adapter_fingerprint": "sha256:7a0f2d0bf9e14ed865641eeff31d515e39662a64ec19d28fc57a48cc37050f62",
+      "adapter_id": "distributed-large-model-capabilities-v1",
+      "capabilities": [
+        {
+          "blocker": {
+            "code": "MISSING_CLEAN_ADAPTER",
+            "detail": "no sealed network clean validator is registered"
+          },
+          "evidence_artifacts": [],
+          "name": "clean_performance_validation",
+          "status": "unsupported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "resource_screening_receipt"
+          ],
+          "name": "core_family_classification",
+          "status": "supported"
+        },
+        {
+          "blocker": {
+            "code": "MISSING_DEPENDENCY_PROVIDER",
+            "detail": "no complete audited dependency provider receipt is registered"
+          },
+          "evidence_artifacts": [],
+          "name": "dependency_evidence",
+          "status": "unsupported"
+        },
+        {
+          "blocker": {
+            "code": "MISSING_FOUR_PROFILE_ADAPTER",
+            "detail": "no sealed four-profile command adapter is registered"
+          },
+          "evidence_artifacts": [],
+          "name": "four_profile_orchestration",
+          "status": "unsupported"
+        },
+        {
+          "blocker": {
+            "code": "MISSING_IDENTITY_REGISTRY",
+            "detail": "resource screening is not a complete bidirectional identity registry"
+          },
+          "evidence_artifacts": [],
+          "name": "identity_binding",
+          "status": "unsupported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "cleanup_evaluation"
+          ],
+          "name": "isolated_cleanup",
+          "status": "supported"
+        },
+        {
+          "blocker": {
+            "code": "MISSING_EXECUTION_ADAPTER",
+            "detail": "no frozen model execution adapter is registered in this support declaration"
+          },
+          "evidence_artifacts": [],
+          "name": "model_execution",
+          "status": "unsupported"
+        },
+        {
+          "blocker": {
+            "code": "MISSING_REORDER_SOURCE_ADAPTER",
+            "detail": "no statement-span source reorder adapter is registered"
+          },
+          "evidence_artifacts": [],
+          "name": "operator_reorder_materialization",
+          "status": "unsupported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "resource_screening_receipt"
+          ],
+          "name": "raw_capture_ingestion",
+          "status": "supported"
+        },
+        {
+          "blocker": null,
+          "evidence_artifacts": [
+            "shared_npu_lease_inventory"
+          ],
+          "name": "shared_npu_lease",
+          "status": "supported"
+        },
+        {
+          "blocker": {
+            "code": "MISSING_SOURCE_EXACT_MAP",
+            "detail": "no exact source byte-range mapping artifact is registered"
+          },
+          "evidence_artifacts": [],
+          "name": "source_exact_mapping",
+          "status": "unsupported"
+        },
+        {
+          "blocker": {
+            "code": "MISSING_SCOPE_SOURCE_ADAPTER",
+            "detail": "no scope API source materializer is registered"
+          },
+          "evidence_artifacts": [],
+          "name": "scope_api_materialization",
+          "status": "unsupported"
+        }
+      ],
+      "file_fingerprint": "sha256:823192e96c4e5af2a058c8df7cc43bc8c6636f104eec9d6d64c56e3e469e08db",
+      "network_class": "distributed_large_model",
+      "path": "superkernel-multistream-performance-tuning/evals/adapter-support/adapters/distributed-large-model.json"
+    }
+  ],
+  "availability_scope": "adapter_capability_not_candidate_recommendation",
+  "matrix_fingerprint": "sha256:53b25ec821d79446277299bcaf4f8afc903a7daaadb5a372bc13d67438ea8e69",
+  "matrix_id": "generic-network-support-20260829",
+  "schema_version": "superkernel-multistream-adapter-support-matrix-v1"
+}

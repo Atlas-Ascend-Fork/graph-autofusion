@@ -1,0 +1,3 @@
+interface:
+  display_name: "SuperKernel 性能分析与源码映射"
+  short_description: "Profile the winner, analyze per SK, and settle source maps"

@@ -451,7 +451,7 @@ void *SkEventRecorder::DumpThreadFunc(void *arg) {
   if (sig != 0) {
     recorder->CopyOutputToProfPath(ctx);
     g_profSignal.store(0, std::memory_order_relaxed);
-    SK_LOGI("[sk time profiling] The end singal of profiling missing, re-copying\n");
+    SK_LOGI("[sk time profiling] The end signal of profiling missing, re-copying\n");
   }
 
   // 如果profiling路径下的json文件为空, 复制完整版json到profiling路径

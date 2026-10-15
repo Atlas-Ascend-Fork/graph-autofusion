@@ -66,6 +66,27 @@ TEST_F(ScopeIdGeneratorTest, NextId_ConcurrentCallsReturnUniqueIds) {
 
 class SuperKernelScopeInfoIdTest : public testing::Test {};
 
+TEST_F(SuperKernelScopeInfoIdTest, AddNode_BindsNodeToScope) {
+  SuperKernelKernelNode node(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, 0, INVALID_STREAM_ID, INVALID_TASK_ID);
+  SuperKernelScopeInfo scope;
+
+  scope.AddNode(&node);
+
+  EXPECT_EQ(node.GetScopeId(), scope.GetScopeId());
+}
+
+TEST_F(SuperKernelScopeInfoIdTest, SetNodes_UpdatesNodeScopeMembership) {
+  SuperKernelKernelNode oldNode(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, 0, INVALID_STREAM_ID, INVALID_TASK_ID);
+  SuperKernelKernelNode newNode(nullptr, ACL_MODEL_RI_TASK_KERNEL, 1, 0, INVALID_STREAM_ID, INVALID_TASK_ID);
+  SuperKernelScopeInfo scope;
+  scope.AddNode(&oldNode);
+
+  scope.SetNodes({&newNode});
+
+  EXPECT_EQ(oldNode.GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_EQ(newNode.GetScopeId(), scope.GetScopeId());
+}
+
 TEST_F(SuperKernelScopeInfoIdTest, ScopeId_AssignedAtCreation) {
   uint16_t prevId = ScopeIdGenerator::Instance().NextId();
   SuperKernelScopeInfo scope1;
@@ -112,6 +133,22 @@ TEST_F(SuperKernelScopeInfoIdTest, ScopeId_AssignmentMoveKeepsId) {
   scope2 = std::move(scope1);
   EXPECT_EQ(scope2.GetScopeId(), originalId1);
   EXPECT_NE(scope2.GetScopeId(), originalId2);
+}
+
+TEST_F(SuperKernelScopeInfoIdTest, ScopeId_AssignmentMoveClearsReplacedNodeMembership) {
+  SuperKernelKernelNode sourceNode(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, 0, INVALID_STREAM_ID, INVALID_TASK_ID);
+  SuperKernelKernelNode replacedNode(nullptr, ACL_MODEL_RI_TASK_KERNEL, 1, 0, INVALID_STREAM_ID, INVALID_TASK_ID);
+  SuperKernelScopeInfo sourceScope;
+  SuperKernelScopeInfo targetScope;
+  sourceScope.AddNode(&sourceNode);
+  targetScope.AddNode(&replacedNode);
+  const uint16_t sourceScopeId = sourceScope.GetScopeId();
+
+  targetScope = std::move(sourceScope);
+
+  EXPECT_EQ(replacedNode.GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_EQ(sourceNode.GetScopeId(), sourceScopeId);
+  EXPECT_EQ(targetScope.GetScopeId(), sourceScopeId);
 }
 
 TEST_F(SuperKernelScopeInfoIdTest, ScopeId_PersistAcrossSessions) {

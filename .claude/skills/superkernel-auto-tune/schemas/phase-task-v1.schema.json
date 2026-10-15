@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SuperKernel Auto Tune Phase Task v1",
+  "type": "object",
+  "required": ["schema_version", "session_id", "session_path", "artifact_root", "session_fingerprint", "step", "consumed_handoffs", "handoff"],
+  "properties": {
+    "schema_version": {"const": "superkernel-auto-tune-phase-task-v1"},
+    "session_id": {"type": "string", "minLength": 1},
+    "session_path": {"type": "string", "minLength": 1},
+    "artifact_root": {"type": "string", "minLength": 1},
+    "session_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "step": {
+      "type": "object",
+      "required": ["step_id", "phase", "agent_id", "skill", "state"],
+      "properties": {
+        "agent_id": {"type": "string", "description": "Stable logical phase worker and audit ID; the controller displays it as the native generic subagent task name."}
+      }
+    },
+    "consumed_handoffs": {"type": "array"},
+    "evidence_import": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "handoff": {"type": "object", "required": ["result_schema", "seal_command"]}
+  },
+  "additionalProperties": false
+}

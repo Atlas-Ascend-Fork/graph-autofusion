@@ -1,0 +1,3 @@
+SK Function: sk_1_decoder.layer.0.mlp_start_static_kernel_GroupedMatmul_hash_end_static_kernel_VectorPost_hash, scope id: 1, Node Count: 2
+[nodeId:10, streamId:1] - KernelInfos{funcName:static_kernel_GroupedMatmul_hash, kernelType:AIC_ONLY, taskRatio:[1,0], numBlocks:1, cubeNum:1, vecNum:0, isScheModeOn:0, needMixKernelSplit:0, resolvedNum:1}
+[nodeId:11, streamId:2] - KernelInfos{funcName:static_kernel_VectorPost_hash, kernelType:AIV_ONLY, taskRatio:[0,1], numBlocks:1, cubeNum:0, vecNum:1, isScheModeOn:0, needMixKernelSplit:0, resolvedNum:1}

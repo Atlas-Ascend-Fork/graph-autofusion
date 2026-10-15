@@ -4,7 +4,7 @@
 
 This document is for **external developers without cannbot**, explaining how to reuse the Skills built into the graph-autofusion project: either integrate them into other AI tools (Claude Code / Cursor / GitHub Copilot, etc.) for automatic loading, or read them as a manual development guide.
 
-The project ships 17 built-in Skills in three categories: 6 general development Skills, 7 SuperKernel operator pipeline Skills, and 4 remote GitCode collaboration Skills.
+The project ships 30 local Skills: 9 general development Skills, 7 SuperKernel operator pipeline Skills, and 14 SuperKernel auto-tuning and analysis Skills. Another 4 remote GitCode collaboration Skills require separate installation.
 
 ### Relationship with Other Documents
 
@@ -15,7 +15,7 @@ The project ships 17 built-in Skills in three categories: 6 general development 
 
 ## Skill Overview
 
-### General Development Skills (6, git-tracked)
+### General Development Skills (9, git-tracked)
 
 | Skill | Purpose | Script Dependency | SKILL.md |
 |-------|---------|-------------------|----------|
@@ -25,20 +25,42 @@ The project ships 17 built-in Skills in three categories: 6 general development 
 | `af-reg-ascir` | ASCIR registration assistant (add/modify ops, dtype, tmp buffer, UT/ST gen) | None | [Link](../../.claude/skills/af-reg-ascir/SKILL.md) |
 | `cann-toolkit-installer` | Auto-download and install CANN Toolkit (parsing, verify, silent install) | Embedded bash logic | [Link](../../.claude/skills/cann-toolkit-installer/SKILL.md) |
 | `default-skills` | Default remote Skill installation entry | `scripts/install-default-skills.sh` | [Link](../../.claude/skills/default-skills/SKILL.md) |
+| `af-inductor-cv-validator` | Inductor CV model validation matrix | `scripts/run_inductor_cv_matrix.py` | [Link](../../.claude/skills/af-inductor-cv-validator/SKILL.md) |
+| `af-perf-modeler` | ATT performance formulas and codegen parameter modeling | None | [Link](../../.claude/skills/af-perf-modeler/SKILL.md) |
+| `af-prune-graph-metadef` | Graph/MetaDef pruning and blacklist checks | `scripts/check-blacklist.sh` | [Link](../../.claude/skills/af-prune-graph-metadef/SKILL.md) |
 
-### SuperKernel Operator Pipeline Skills (7, master branch only)
-
-> These 7 Skills are currently available only on the `master` branch; the `develop` branch does not include them yet. The `SKILL.md` column below has no link; switch to the `master` branch or view via the GitCode web interface.
+### SuperKernel Operator Pipeline Skills (7, git-tracked)
 
 | Skill | Purpose | Script Dependency | SKILL.md |
 |-------|---------|-------------------|----------|
-| `sk-operator-pipeline` | SK operator delivery pipeline entry (routing, index) | `scripts/` | master branch |
-| `sk-operator-asset-adapter` | Operator asset adaptation (user dir → JSON contract) | `scripts/*.py` | master branch |
-| `sk-operator-validate` | Asset contract validation (contract, source, compatibility) | `scripts/` | master branch |
-| `sk-operator-codegen` | SK binding code generation (Args struct + `__sk__` + SK_BIND) | `scripts/` | master branch |
-| `sk-operator-sample-gen` | Sample generation and validation contract (input, oracle, runner) | `scripts/` | master branch |
-| `sk-operator-build-package` | SK/ACLGraph build and package (bisheng compile → wheel) | `scripts/*.py` | master branch |
-| `sk-model-analysis` | Full-network diagnosis (hang/coredump, perf analysis, visualization) | `scripts/*.py` | master branch |
+| `sk-operator-pipeline` | SK operator delivery pipeline entry (routing, index) | `scripts/` | [Link](../../.claude/skills/sk-operator-pipeline/SKILL.md) |
+| `sk-operator-asset-adapter` | Operator asset adaptation (user dir → JSON contract) | `scripts/*.py` | [Link](../../.claude/skills/sk-operator-asset-adapter/SKILL.md) |
+| `sk-operator-validate` | Asset contract validation (contract, source, compatibility) | `scripts/` | [Link](../../.claude/skills/sk-operator-validate/SKILL.md) |
+| `sk-operator-codegen` | SK binding code generation (Args struct + `__sk__` + SK_BIND) | `scripts/` | [Link](../../.claude/skills/sk-operator-codegen/SKILL.md) |
+| `sk-operator-sample-gen` | Sample generation and validation contract (input, oracle, runner) | `scripts/` | [Link](../../.claude/skills/sk-operator-sample-gen/SKILL.md) |
+| `sk-operator-build-package` | SK/ACLGraph build and package (bisheng compile → wheel) | `scripts/*.py` | [Link](../../.claude/skills/sk-operator-build-package/SKILL.md) |
+| `sk-model-analysis` | Full-network diagnosis (hang/coredump, perf analysis, visualization) | `scripts/*.py` | [Link](../../.claude/skills/sk-model-analysis/SKILL.md) |
+
+### SuperKernel Auto-Tuning and Analysis Skills (14, git-tracked)
+
+These Skills were moved from `superkernel-skill` into `.claude/skills/`. They cover model-level fusion tuning and profiling analysis, separately from the operator delivery pipeline.
+
+| Skill | Purpose | SKILL.md |
+|-------|---------|----------|
+| `superkernel-auto-tune` | Full-lifecycle tuning controller and phase dispatch | [Link](../../.claude/skills/superkernel-auto-tune/SKILL.md) |
+| `superkernel-intake-preparation` | Freeze runtime, workload, controls, and optional experiment intent | [Link](../../.claude/skills/superkernel-intake-preparation/SKILL.md) |
+| `superkernel-s0-baseline` | Establish the five-process SK-off clean performance baseline | [Link](../../.claude/skills/superkernel-s0-baseline/SKILL.md) |
+| `superkernel-stage-a-scope-selection` | Screen the full scope-strategy matrix and select a candidate | [Link](../../.claude/skills/superkernel-stage-a-scope-selection/SKILL.md) |
+| `superkernel-stage-o-option-tuning` | Incrementally tune wrapper options for the frozen Stage A winner | [Link](../../.claude/skills/superkernel-stage-o-option-tuning/SKILL.md) |
+| `superkernel-base-profile-source-mapping` | Collect BASE profiles, analyze each SK, and verify exact source mapping | [Link](../../.claude/skills/superkernel-base-profile-source-mapping/SKILL.md) |
+| `superkernel-optional-experiments` | Run user-authorized multistream and P/FINAL source-range experiments | [Link](../../.claude/skills/superkernel-optional-experiments/SKILL.md) |
+| `superkernel-final-e2e-report` | Final clean E2E validation and Chinese tuning report | [Link](../../.claude/skills/superkernel-final-e2e-report/SKILL.md) |
+| `superkernel-source-range-from-smap` | Derive independent P/FINAL experiments from a completed session with verified BASE/SMAP | [Link](../../.claude/skills/superkernel-source-range-from-smap/SKILL.md) |
+| `superkernel-fusion-performance-analysis` | Compare SK-off/SK-on performance, attribute regressions, and analyze source mapping | [Link](../../.claude/skills/superkernel-fusion-performance-analysis/SKILL.md) |
+| `superkernel-multistream-performance-tuning` | Tune fused multistream overlap and scheduling using fresh profiles | [Link](../../.claude/skills/superkernel-multistream-performance-tuning/SKILL.md) |
+| `superkernel-sk-failure-isolation` | Isolate execution, correctness, timeout, or hang failures using plog/sk_meta | [Link](../../.claude/skills/superkernel-sk-failure-isolation/SKILL.md) |
+| `superkernel-sk-prof-timeline` | Compact per-core sk_prof traces into Cube/Vector timelines | [Link](../../.claude/skills/superkernel-sk-prof-timeline/SKILL.md) |
+| `superkernel-runtime-common` | Internal shared runtime for analysis, device leases, lifecycle, ledger, and reporting | [Link](../../.claude/skills/superkernel-runtime-common/SKILL.md) |
 
 ### Remote GitCode Collaboration Skills (4, auto-installed)
 
@@ -134,7 +156,7 @@ For AI tools that do not support instruction file loading (e.g., web-based ChatG
 1. Identify the relevant Skill for your current task (see "Skill Overview").
 2. Read the full `.claude/skills/<name>/SKILL.md`.
 3. Paste at the start of your AI tool's system prompt or conversation: "Please assist me with graph-autofusion development per the following instructions:\n\n{SKILL.md body}".
-4. Select on demand; avoid pasting all 17 Skills at once (may exceed context window).
+4. Select on demand; avoid pasting all Skills at once (may exceed context window).
 
 ## Reuse Method 2: Read as a Manual Development Guide
 
@@ -166,7 +188,18 @@ The SK operator delivery pipeline executes in the following stage order; each st
 | 5. Build and package | `sk-operator-build-package` | Invoke bisheng to compile SK/ACLGraph extension, package as wheel |
 | Diagnosis | `sk-model-analysis` | Full-network diagnosis: hang/coredump location, perf analysis, scope/task visualization |
 
-When reading manually, start from `sk-operator-pipeline`'s SKILL.md (master branch) for the overall flow.
+When reading manually, start from `sk-operator-pipeline`'s SKILL.md for the overall flow.
+
+### SuperKernel Auto-Tuning Workflow Quick Reference
+
+Start with [superkernel-auto-tune](../../.claude/skills/superkernel-auto-tune/SKILL.md):
+
+```text
+Intake -> S0 -> Stage A -> Stage O -> BASE profiling / analysis / SMAP
+       -> [multistream and/or P/FINAL] -> final clean E2E / report
+```
+
+Intake freezes the optional mode as `none`, `multistream`, `source-range`, or `both`. Optional experiments require user authorization; failed or non-improving branches preserve the incumbent. Final decisions use clean E2E latency. For a completed and verified parent session, `superkernel-source-range-from-smap` derives an independent P/FINAL experiment. `superkernel-runtime-common` is a shared dependency, not a user entry point.
 
 ### Remote Skill Trigger Scenario Quick Reference
 
@@ -186,6 +219,13 @@ When reading manually, start from `sk-operator-pipeline`'s SKILL.md (master bran
 - **`default-skills`**'s `scripts/install-default-skills.sh` installs remote Skills; requires network access to gitcode.com.
 
 In manual reading scenarios, scripts are for reference only and are not required to run.
+
+### Reusing the Complete SuperKernel Tuning Bundle
+
+- When reusing across projects, keep all 14 `.claude/skills/superkernel-*` directories under one skills root, including their existing `scripts/`, `references/`, `schemas/`, `phase.json`, and `agents/` resources. Phase scripts load the controller and shared runtime through sibling-relative paths; copying only `SKILL.md` is insufficient.
+- When converting instructions for another tool, retain these resources and resolve script paths against each Skill directory. `agents/openai.yaml` is optional UI metadata; it does not register custom phase Agents.
+- Full tuning requires host-native generic subagents or a command adapter that explicitly loads each phase Skill. Pasted prompts support reading and analysis but do not replace the execution environment.
+- Execution requires Python 3. NPU stages also require Ascend/CANN, model dependencies, and profiling tools appropriate to the workload. Follow each Skill and its environment preflight for exact dependencies. Reading the documentation does not require an NPU.
 
 ### Remote Skill Installation
 
@@ -228,7 +268,7 @@ After installation, 4 symlinks appear in `.claude/skills/` top level, discoverab
 *
 !af-build-runner/
 !af-build-runner/**
-... (12 local Skill whitelist entries)
+... (remaining local Skill whitelist entries)
 !.gitignore
 ```
 
@@ -265,7 +305,7 @@ A: No. In manual reading scenarios, scripts are for reference only; understandin
 
 **Q: What's the difference between remote and local Skills?**
 
-A: Local Skills (12) are git-tracked; `git clone` gets them. Remote Skills (4) are not in git; install via `default-skills` or manual clone to `.claude/skills/_remote/`. See [opencode-skill-management.md](../zh/opencode-skill-management.md).
+A: Local Skills (30) are git-tracked; `git clone` gets them. Remote Skills (4) are not in git; install via `default-skills` or manual clone to `.claude/skills/_remote/`. See [opencode-skill-management.md](../zh/opencode-skill-management.md).
 
 **Q: How do I contribute a new Skill?**
 

@@ -176,6 +176,8 @@ inline std::string CreateSkMetaDirectory(const std::string &modelId) {
 namespace sk {
 namespace logger {
 
+class FileLogSuppressGuard;
+
 // ==================== Log Level Enumeration ====================
 enum class LogLevel : uint8_t {
   TRACE = 0,
@@ -374,7 +376,8 @@ class FileLogger {
   template <typename... Args>
   void WriteLogIfEnabled(LogLevel level, const char *funcName, const char *fileName, int lineNum, const char *format,
                          Args &&...args) {
-    if (enabled_.load(std::memory_order_relaxed) && level >= minLevel_.load(std::memory_order_relaxed)) {
+    if (!suppressFileLog_ && enabled_.load(std::memory_order_relaxed) &&
+        level >= minLevel_.load(std::memory_order_relaxed)) {
       // SK_LOG* has already emitted its passthrough log. Skip the file sink when re-entered by its manager.
       if (FileHandleManager::Instance().IsLockedByCurrentThread()) {
         return;
@@ -429,6 +432,8 @@ class FileLogger {
   LoggerConfig GetConfigSnapshot() const;
 
  private:
+  friend class FileLogSuppressGuard;
+
   LoggerConfig config_;
   std::atomic<bool> enabled_{false};
   std::atomic<LogLevel> minLevel_{LogLevel::INFO};
@@ -440,6 +445,20 @@ class FileLogger {
 
   // Thread-local model ID, used to isolate concurrent aclskOptimize calls.
   static thread_local std::string currentModelId_;
+  // Thread-local file log suppression, used by APIs that must keep dlog/plog but never write sk_meta files.
+  static thread_local bool suppressFileLog_;
+};
+
+class FileLogSuppressGuard {
+ public:
+  FileLogSuppressGuard();
+  ~FileLogSuppressGuard();
+
+  FileLogSuppressGuard(const FileLogSuppressGuard &) = delete;
+  FileLogSuppressGuard &operator=(const FileLogSuppressGuard &) = delete;
+
+ private:
+  bool previousSuppressFileLog_ = false;
 };
 
 }  // namespace logger

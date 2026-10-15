@@ -1,0 +1,4 @@
+interface:
+  display_name: "SuperKernel P/FINAL 独立入口"
+  short_description: "Derive verified P/FINAL sessions from accepted BASE and SMAP"
+  default_prompt: "Use $superkernel-source-range-from-smap to validate approved evidence from a completed SuperKernel parent session, derive an immutable source-range child session, dispatch P/FINAL through a fresh generic subagent, and finish with the unified Chinese E2E report."

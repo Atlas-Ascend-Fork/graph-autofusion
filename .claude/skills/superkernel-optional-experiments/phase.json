@@ -1,0 +1,10 @@
+{
+  "schema_version": "superkernel-phase-manifest-v1",
+  "phase": "optional_experiments",
+  "agent_id": "sk-optional-experiments",
+  "skill": "superkernel-optional-experiments",
+  "runtime_tools": [
+    "derived_family_lifecycle.py",
+    "experiment_ledger.py"
+  ]
+}

@@ -4,7 +4,7 @@
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
@@ -18,9 +18,10 @@
  * Architecture:
  * The scope splitting is implemented as a multi-pass pipeline, similar to compiler passes:
  * - Pass 0: Initial scope splitting based on fusibility and scopeBitFlags
- * - Pass 1: Deadlock detection and scope refinement
- * - Pass 2: ScheMode kernel core trend based split refinement
+ * - Pass 1: ScheMode core compatibility refinement
+ * - Pass 2: Progressive deadlock detection
  * - Pass 3: Remove event-only streams from scopes
+ * - Finalization: Calculate final SK core info after scope boundaries are stable
  *
  * Key Concepts:
  * - Scope: A collection of nodes from potentially multiple streams that can be fused together
@@ -43,6 +44,7 @@
 #include "sk_lock_detector.h"
 #include "sk_options_manager.h"
 #include "sk_scope_info.h"
+#include "sk_scope_split_result_reporter.h"
 
 /*!
  * \struct StreamState
@@ -89,6 +91,38 @@ struct StreamState {
 // Forward declaration
 class SuperKernelScopeSplitter;
 
+class ScopeCoreInfoCalculator {
+ public:
+  ScopeCoreInfoCalculator(int64_t maxDeviceCubeNum, int64_t maxDeviceVectorNum)
+      : maxDeviceCubeNum_(maxDeviceCubeNum), maxDeviceVectorNum_(maxDeviceVectorNum) {}
+
+  // Use this overload when only scope validity is needed.
+  bool GetValidScopeCoreInfo(const std::vector<SuperKernelBaseNode *> &nodes) const;
+
+  // On failure, scopeCoreInfo contains the preferred attempted shape for mismatch diagnostics.
+  bool GetValidScopeCoreInfo(const std::vector<SuperKernelBaseNode *> &nodes, ScopeCoreInfo &scopeCoreInfo) const;
+
+  // On failure, scopeCoreInfo contains the attempted shape and the accumulated constraints remain unchanged.
+  bool UpdateScopeCoreInfo(const SuperKernelBaseNode &node, ScopeCoreInfo &scopeCoreInfo);
+  void Reset();
+
+ private:
+  struct ScopeCoreConstraints {
+    uint32_t minCubeNum = 0;
+    uint32_t minVectorNum = 0;
+    std::optional<uint32_t> exactCubeNum;
+    std::optional<uint32_t> exactVectorNum;
+    bool requireMix12 = false;
+  };
+
+  static bool UpdateScopeCoreConstraints(const SuperKernelBaseNode &node, ScopeCoreConstraints &constraints);
+  bool GetScopeCoreCandidate(const ScopeCoreConstraints &constraints, ScopeCoreInfo &scopeCoreInfo) const;
+
+  int64_t maxDeviceCubeNum_ = 0;
+  int64_t maxDeviceVectorNum_ = 0;
+  ScopeCoreConstraints constraints_;
+};
+
 // ============ Pass Base Class ============
 
 /*!
@@ -97,7 +131,8 @@ class SuperKernelScopeSplitter;
  */
 class ScopeSplitPass {
  public:
-  explicit ScopeSplitPass(SuperKernelGraph &inputGraph) : graph_(inputGraph), splitter_(nullptr) {}
+  explicit ScopeSplitPass(SuperKernelGraph &inputGraph)
+      : graph_(inputGraph), splitter_(nullptr), scopeSplitResultReporter_(nullptr) {}
   virtual ~ScopeSplitPass() = default;
 
   /*!
@@ -115,6 +150,10 @@ class ScopeSplitPass {
    */
   void SetSplitter(SuperKernelScopeSplitter *splitter) {
     splitter_ = splitter;
+  }
+
+  void SetScopeSplitResultReporter(ScopeSplitResultReporter *scopeSplitResultReporter) {
+    scopeSplitResultReporter_ = scopeSplitResultReporter;
   }
 
   /*!
@@ -169,14 +208,6 @@ class ScopeSplitPass {
    */
   static std::vector<uint64_t> GetKernelNodeIds(const SuperKernelScopeInfo &scope);
 
-  /*!
-   * \brief Check if two scopes have the same kernel nodes
-   * \param originScope First scope
-   * \param currentScope Second scope
-   * \return true if kernel node sets are identical
-   */
-  static bool HasSameKernelNodes(const SuperKernelScopeInfo &originScope, const SuperKernelScopeInfo &currentScope);
-
  private:
   /*!
    * \brief Print detailed scope information to current log context
@@ -189,9 +220,10 @@ class ScopeSplitPass {
  protected:
   SuperKernelGraph &graph_;
   SuperKernelScopeSplitter *splitter_;  ///< Reference to splitter for re-split requests
+  ScopeSplitResultReporter *scopeSplitResultReporter_;
 };
 
-// ============ Pass 3: Event-Only Stream Remove (after ScheModeKernelSplit) ============
+// ============ Pass 3: Event-Only Stream Remove (after SK core calculation) ============
 
 /*!
  * \class EventOnlyStreamRemovePass
@@ -268,11 +300,11 @@ class PerOpMaxCoreSplitPass : public ScopeSplitPass {
   }
 };
 
-// ============ Pass 1: Initial Scope Split ============
+// ============ Pass 0: Initial Scope Split ============
 
 /*!
  * \class InitialScopeSplitPass
- * \brief Pass 1: Split graph into initial scopes based on fusibility and scopeBitFlags
+ * \brief Pass 0: Split graph into initial scopes based on fusibility and scopeBitFlags
  *
  * This pass performs coarse-grained scope splitting:
  * - Groups nodes by scopeBitFlags
@@ -336,9 +368,9 @@ class InitialScopeSplitPass : public ScopeSplitPass {
  * \brief Result of processing a single scope for deadlock detection
  */
 enum class ScopeProcessResult {
-  NO_DEADLOCK,         ///< No deadlock found, scope is safe and added to outputScopes
-  DEADLOCK_RESOLVED,   ///< Deadlock found and successfully split, remaining part returned via pendingScope
-  DEADLOCK_UNRESOLVED  ///< Deadlock found but cannot split (no Wait node), caller should treat as fatal and abort
+  NO_DEADLOCK,          ///< No deadlock found, scope is safe and added to outputScopes
+  DEADLOCK_RESOLVED,    ///< Deadlock found and successfully split, remaining part returned via pendingScope
+  DEADLOCK_UNRESOLVED,  ///< Deadlock found but cannot split (no Wait node)
 };
 
 /*!
@@ -348,7 +380,7 @@ enum class ScopeProcessResult {
  * This pass performs fine-grained scope refinement:
  * - Detects deadlocks within each scope
  * - Splits scopes at Wait nodes that would cause deadlocks
- * - The Wait node that triggers deadlock is NOT included in either split scope
+ * - The Wait split point is NOT included in either split scope
  */
 class DeadlockRefinePass : public ScopeSplitPass {
  public:
@@ -360,16 +392,23 @@ class DeadlockRefinePass : public ScopeSplitPass {
     return "DeadlockRefinePass";
   }
 
+ protected:
+  virtual void RecordDeadlockSplitResult(SuperKernelBaseNode *deadlockNode, SuperKernelBaseNode *deadlockWaitNode) {
+    (void)deadlockNode;
+    (void)deadlockWaitNode;
+  }
+
  private:
   /*!
    * \brief Find deadlock point in a scope
    * \param scope Scope to check
    * \param deadlockNode Output: node that causes deadlock (nullptr if no deadlock)
-   * \param deadlockWaitNode Output: first Wait node before deadlock (nullptr if no deadlock)
-   * \return true if deadlock found
+   * \param deadlockWaitNode Output: nearest Wait node before deadlock (nullptr if no deadlock)
+   * \param checkedScopeCoreInfo Output: core info used by deadlock detection for the checked scope prefix
+   * \return true if a deadlock is found
    */
   bool FindDeadlockInScope(const SuperKernelScopeInfo &scope, SuperKernelBaseNode **deadlockNode,
-                           SuperKernelBaseNode **deadlockWaitNode);
+                           SuperKernelBaseNode **deadlockWaitNode, ScopeCoreInfo *checkedScopeCoreInfo);
 
   /*!
    * \brief Split a scope at a Wait node
@@ -389,13 +428,12 @@ class DeadlockRefinePass : public ScopeSplitPass {
    * - Detects a deadlock and splits at the nearest preceding Wait node, moving
    *   the front part into outputScopes and returning the remaining part via
    *   pendingScope; or
-   * - Detects an unresolvable deadlock (no suitable Wait node), in which case
-   *   the caller should treat this as a fatal error and abort refinement.
+   * - Detects an unresolvable deadlock (no suitable Wait node).
    *
    * \param scopeToProcess The scope to process (moved)
    * \param outputScopes Vector to store deadlock-free scopes produced from the front part
    * \param pendingScope Optional: remaining part of the scope that still needs processing
-   * \return Result of the processing (NO_DEADLOCK, DEADLOCK_RESOLVED, or DEADLOCK_UNRESOLVED)
+   * \return Result of the processing
    */
   ScopeProcessResult ProcessSingleScope(SuperKernelScopeInfo &&scopeToProcess,
                                         std::vector<SuperKernelScopeInfo> &outputScopes,
@@ -406,18 +444,22 @@ class DeadlockRefinePass : public ScopeSplitPass {
    * @param workingScope scope to split
    * @param deadlockNode node that caused deadlock
    * @param deadlockWaitNode wait node to split at
+   * @param scopeBeforeCoreInfo core info used to model the scope before the wait node during deadlock detection
    * @param outputScopes output scopes
    * @param pendingScope pending scope for next iteration
    * @return split result
    */
   ScopeProcessResult HandleDeadlockSplit(SuperKernelScopeInfo &workingScope, SuperKernelBaseNode *deadlockNode,
                                          SuperKernelBaseNode *deadlockWaitNode,
+                                         const ScopeCoreInfo &scopeBeforeCoreInfo,
                                          std::vector<SuperKernelScopeInfo> &outputScopes,
                                          std::optional<SuperKernelScopeInfo> &pendingScope);
   LockDetector lockDetector_;
+  int64_t maxCubeNum_ = 0;
+  int64_t maxVectorNum_ = 0;
 };
 
-// ============ Pass 3: ScheMode Kernel Core Split Refinement ============
+// ============ Pass 1: ScheMode Kernel Core Split Refinement ============
 
 /*!
  * \enum ScheModeScopeProcessResult
@@ -430,14 +472,13 @@ enum class ScheModeScopeProcessResult {
 
 /*!
  * \class ScheModeKernelSplitPass
- * \brief Pass 3: Refine scopes based on ScheMode kernel core trend
+ * \brief Explore SK type/core candidates and refine incompatible scopes
  *
  * Rules:
- * - Traverse nodes in a scope and merge kernel core requirement using max(cube), max(vec)
- * - When a kernel node with IsScheModeOn()==true is encountered:
- *   - If its core requirement is greater than merged previous requirement, keep merging
- *   - If its core requirement is smaller than merged previous requirement, split at this node
- * - Split point kernel is included in the "after" scope
+ * - Explore legal AIC/AIV/MIX1:1/MIX1:2 core results after each kernel is appended
+ * - Non-ScheMode tasks require no more C/V cores than the candidate SK core result
+ * - ScheMode vector-only tasks require an exact V match; other ScheMode tasks require an exact C match
+ * - Split before the first kernel that makes all launch-shape candidates invalid
  */
 class ScheModeKernelSplitPass : public ScopeSplitPass {
  public:
@@ -447,6 +488,11 @@ class ScheModeKernelSplitPass : public ScopeSplitPass {
   bool Run(std::vector<SuperKernelScopeInfo> &scopes) override;
   std::string GetName() const override {
     return "ScheModeKernelSplitPass";
+  }
+
+ protected:
+  virtual void RecordScheModeSplitResult(SuperKernelBaseNode *splitNode) {
+    (void)splitNode;
   }
 
  private:
@@ -470,6 +516,14 @@ class ScheModeKernelSplitPass : public ScopeSplitPass {
    */
   void SplitScopeAtNode(const SuperKernelScopeInfo &scope, SuperKernelBaseNode *splitNode,
                         SuperKernelScopeInfo &scopeBefore, SuperKernelScopeInfo &scopeAfter);
+
+  std::string BuildScheModeCoreMismatchDetail(const ScopeCoreInfo &scopeBeforeCoreInfo,
+                                              const ScopeCoreInfo &candidateScopeCoreInfo,
+                                              const SuperKernelScopeInfo &scopeBefore,
+                                              const SuperKernelBaseNode &triggerNode) const;
+
+  int64_t maxCubeNum_ = 0;
+  int64_t maxVectorNum_ = 0;
 };
 
 // ============ Default Node Process Pass ============
@@ -582,9 +636,11 @@ class SuperKernelScopeSplitter {
   SuperKernelGraph &graph_;
   std::vector<SuperKernelScopeInfo> scopeInfos_;
   std::vector<std::unique_ptr<ScopeSplitPass>> passes_;
+  ScopeSplitResultReporter splitResultReporter_;
   bool needResplit_ = false;
 
  private:
+  bool FinalizeScopeCoreInfo();
   void InitDefaultNodeFusibility();
   SuperKernelOptionsManager *opts_ = nullptr;
   bool enableTaskBreakerBypass_ = false;

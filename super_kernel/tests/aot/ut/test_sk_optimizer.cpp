@@ -233,6 +233,11 @@ TEST_F(SkOptimizerTaskReorderTest, ThreeStreamParallel_OnlyOp4ToOp9Fusible) {
   op7->SetIsFusible(true);
   op8->SetIsFusible(true);
   op9->SetIsFusible(true);
+  for (auto *node : {op4, op5, op6, op7, op8, op9}) {
+    node->nodeInfos.kernelInfos.kernelType = SkKernelType::AIV_ONLY;
+    node->nodeInfos.kernelInfos.numBlocks = 1;
+    node->nodeInfos.kernelInfos.vecNum = 1;
+  }
 
   // Setup stream connections
   graph->streams.clear();

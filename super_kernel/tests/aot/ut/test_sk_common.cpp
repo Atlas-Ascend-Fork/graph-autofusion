@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -18,7 +19,7 @@
 #include "mockcpp/mockcpp.hpp"
 #include "acl/acl.h"
 #include "sk_common.h"
-#include "stub/ut_common_stubs.h"
+#include "ut_common_stubs.h"
 
 #define private public
 #define protected public
@@ -267,6 +268,59 @@ TEST_F(SkCommonTest, GetFuncSymbolInfo_ShstrtabExceedsBinSize_ReturnsFalse) {
   EXPECT_FALSE(ret);
 }
 
+TEST_F(SkCommonTest, GetFuncSymbolInfo_SectionRangeOverflow_ReturnsFalse) {
+  constexpr size_t bufferSize = 512;
+  constexpr size_t shstrtabOffset = 320;
+  constexpr size_t symtabOffset = 384;
+  constexpr uint64_t strtabOffset = 500;
+  std::vector<uint8_t> buffer(bufferSize, 0);
+
+  Elf64_Ehdr *ehdr = reinterpret_cast<Elf64_Ehdr *>(buffer.data());
+  ehdr->e_ident[EI_MAG0] = ELFMAG0;
+  ehdr->e_ident[EI_MAG1] = ELFMAG1;
+  ehdr->e_ident[EI_MAG2] = ELFMAG2;
+  ehdr->e_ident[EI_MAG3] = ELFMAG3;
+  ehdr->e_ident[EI_CLASS] = ELFCLASS64;
+  ehdr->e_shoff = sizeof(Elf64_Ehdr);
+  ehdr->e_shnum = 4;
+  ehdr->e_shstrndx = 3;
+
+  Elf64_Shdr *shdr = reinterpret_cast<Elf64_Shdr *>(buffer.data() + ehdr->e_shoff);
+  shdr[0].sh_type = SHT_NULL;
+  shdr[1].sh_name = 1;
+  shdr[1].sh_type = SHT_SYMTAB;
+  shdr[1].sh_offset = symtabOffset;
+  shdr[1].sh_size = sizeof(Elf64_Sym);
+  shdr[2].sh_name = 9;
+  shdr[2].sh_type = SHT_STRTAB;
+  shdr[2].sh_offset = strtabOffset;
+  shdr[2].sh_size = std::numeric_limits<uint64_t>::max() - strtabOffset + 1;
+  shdr[3].sh_name = 17;
+  shdr[3].sh_type = SHT_STRTAB;
+  shdr[3].sh_offset = shstrtabOffset;
+  shdr[3].sh_size = 27;
+
+  char *shstrtab = reinterpret_cast<char *>(buffer.data() + shstrtabOffset);
+  std::memcpy(shstrtab + 1, ".symtab", sizeof(".symtab"));
+  std::memcpy(shstrtab + 9, ".strtab", sizeof(".strtab"));
+  std::memcpy(shstrtab + 17, ".shstrtab", sizeof(".shstrtab"));
+
+  Elf64_Sym *symtab = reinterpret_cast<Elf64_Sym *>(buffer.data() + symtabOffset);
+  symtab[0].st_name = 0;
+  symtab[0].st_value = 0x10;
+  symtab[0].st_size = 8;
+  symtab[0].st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC);
+  std::memcpy(buffer.data() + strtabOffset, "func", sizeof("func"));
+
+  std::string symbolName;
+  uint64_t funcSize = 0;
+  std::string symbolBind;
+  bool ret = GetFuncSymbolInfo(reinterpret_cast<aclrtBinHandle>(0x3001), reinterpret_cast<char *>(buffer.data()),
+                               buffer.size(), 0x10, symbolName, funcSize, symbolBind);
+
+  EXPECT_FALSE(ret);
+}
+
 TEST_F(SkCommonTest, GetFuncSymbolInfo_MissingSymtabAndStrtab_ReturnsFalse) {
   size_t bufferSize = sizeof(Elf64_Ehdr) + sizeof(Elf64_Shdr) * 3 + 50;
   std::vector<uint8_t> buffer(bufferSize, 0);
@@ -383,28 +437,39 @@ TEST_F(SkCommonTest, GetFuncSymbolInfo_ConcurrentCacheAccessReturnsConsistentRes
   EXPECT_TRUE(resultsConsistent.load(std::memory_order_relaxed));
 }
 
-TEST_F(SkCommonTest, GetDeviceCubeCoreNum_GetDeviceFails_Returns0) {
+TEST_F(SkCommonTest, GetDeviceCoreNums_NoDevices_ReturnsInvalidParam) {
   SkUtSetAclrtGetDeviceRet(ACL_ERROR_INVALID_PARAM);
-  int64_t result = GetDeviceCubeCoreNum();
-  EXPECT_EQ(result, 0);
+  int64_t cubeNum = -1, vecNum = -1;
+  EXPECT_EQ(GetDeviceCoreNums(cubeNum, vecNum), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(cubeNum, 0);
+  EXPECT_EQ(vecNum, -1);
 }
 
-TEST_F(SkCommonTest, GetDeviceVecCoreNum_GetDeviceFails_Returns0) {
+TEST_F(SkCommonTest, GetDeviceCoreNums_GetDeviceFails_FallsBackToDeviceZero) {
   SkUtSetAclrtGetDeviceRet(ACL_ERROR_INVALID_PARAM);
-  int64_t result = GetDeviceVecCoreNum();
-  EXPECT_EQ(result, 0);
+  SkUtSetDeviceCount(1);
+  int64_t cubeNum = 0, vecNum = 0;
+  EXPECT_EQ(GetDeviceCoreNums(cubeNum, vecNum), ACL_SUCCESS);
+  EXPECT_EQ(cubeNum, 32);
+  EXPECT_EQ(vecNum, 32);
 }
 
-TEST_F(SkCommonTest, GetDeviceCubeCoreNum_GetDeviceInfoFails_Returns0) {
-  SkUtSetAclrtGetDeviceInfoRet(ACL_ERROR_INVALID_PARAM);
-  int64_t result = GetDeviceCubeCoreNum();
-  EXPECT_EQ(result, 0);
+TEST_F(SkCommonTest, GetDeviceCoreNums_GetDeviceCountFails_ReturnsInvalidParam) {
+  SkUtSetAclrtGetDeviceRet(ACL_ERROR_INVALID_PARAM);
+  SkUtSetDeviceCount(1);
+  SkUtSetAclrtGetDeviceCountRet(ACL_ERROR_FAILURE);
+  int64_t cubeNum = -1, vecNum = -1;
+  EXPECT_EQ(GetDeviceCoreNums(cubeNum, vecNum), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(cubeNum, 0);
+  EXPECT_EQ(vecNum, -1);
 }
 
-TEST_F(SkCommonTest, GetDeviceVecCoreNum_GetDeviceInfoFails_Returns0) {
+TEST_F(SkCommonTest, GetDeviceCoreNums_GetDeviceInfoFails_ReturnsInvalidParam) {
   SkUtSetAclrtGetDeviceInfoRet(ACL_ERROR_INVALID_PARAM);
-  int64_t result = GetDeviceVecCoreNum();
-  EXPECT_EQ(result, 0);
+  int64_t cubeNum = -1, vecNum = -1;
+  EXPECT_EQ(GetDeviceCoreNums(cubeNum, vecNum), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(cubeNum, 0);
+  EXPECT_EQ(vecNum, -1);
 }
 
 TEST_F(SkCommonTest, GetDeviceCoreNums_Success_ReturnsValidValues) {

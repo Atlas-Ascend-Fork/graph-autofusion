@@ -1,0 +1,52 @@
+{
+  "schema_version": "superkernel-multistream-real-npu-receipt-v1",
+  "executed_at": "2026-08-29",
+  "closure": {
+    "closure_fingerprint": "sha256:80115b981d49f7c37555b86e2bfebde79e860afda5526a330b0f83709dde819e",
+    "closure_id": "reference-ascend910-real-npu-no-gain-v1",
+    "request_fingerprint": "sha256:ff01fda424cf807e2d021691927cce49ed73962018fe63be870c0fc939d4f75b",
+    "trial_id": "MS-R1"
+  },
+  "runtime": {
+    "backend": "npugraph_ex",
+    "device_count": 16,
+    "device_name": "Ascend910_9392",
+    "static_kernel_compile": true,
+    "stream_count": 2,
+    "super_kernel_scope": true
+  },
+  "mechanism": {
+    "candidate_dispatch_order": ["vector_branch", "cube_branch"],
+    "child_set_preserved": true,
+    "incumbent_dispatch_order": ["cube_branch", "vector_branch"],
+    "resource_pair": {
+      "cube": {"accelerator_core": "AI_CORE", "block_num": 8, "mix_block_num": 0},
+      "vector": {"accelerator_core": "AI_VECTOR_CORE", "block_num": 4, "mix_block_num": 0}
+    },
+    "four_profile_summary_fingerprint": "sha256:0a8093383b7c300489b2c920ad5197c36d4461681e130ad05989cac687483c7f"
+  },
+  "clean3": {
+    "baseline_stable": true,
+    "candidate_mean_ms": 0.29367133333333334,
+    "decision": "reject",
+    "improvement_pct": -1.7679738618715288,
+    "incumbent_mean_ms": 0.2885695,
+    "minimum_improvement_pct": 2.0,
+    "run_pairs": 3
+  },
+  "outcome": {
+    "incumbent_unchanged": true,
+    "result_status": "no_gain",
+    "trial_decision": "rejected"
+  },
+  "sealed_artifacts": {
+    "action_manifest": "sha256:3015e304201372d0ad77ca65852cef214f22c9503c8121731801455a37c95a7f",
+    "clean_evidence": "sha256:e48ca6453b5f6f30d13f4776787876a758f6b2c296e104b5ae86e6366f41ef3c",
+    "dispatch_order_evidence": "sha256:bdb718cac85fe75498391e1d87ec76cdbb2d4237ff2182ada03d4b3bad3ebec4",
+    "four_profile_plan": "sha256:dbe76703a5e2d89b941122777a0902b469d4edc884315575292582e68c44d705",
+    "four_profile_summary": "sha256:75f14376f29d92b89a6040867ac2e1460670b8c4f84a35d5bdded72fa78a2c81",
+    "operator_order_capture": "sha256:7194e901de40bd83a359894347a9f23a66749512af3652c3ccc5de5b276f7d4f",
+    "request": "sha256:f696df2d18c984ba8944a4aad929521f25e0d7a87dfbcced6803c622ba662830",
+    "result": "sha256:5853844d1cba3953f80a921c8b47601195a07b04e7c9e867f34902e7ac3e47c3"
+  }
+}

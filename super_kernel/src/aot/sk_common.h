@@ -405,8 +405,6 @@ enum class ScheModeState : uint8_t {
 
 // ==================== Device Core Number Utilities ====================
 
-int64_t GetDeviceCubeCoreNum();
-int64_t GetDeviceVecCoreNum();
 aclError GetDeviceCoreNums(int64_t &cubeNum, int64_t &vecNum);
 
 #endif

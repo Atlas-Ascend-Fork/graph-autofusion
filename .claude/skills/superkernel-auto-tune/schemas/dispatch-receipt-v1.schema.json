@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SuperKernel Agent Host Dispatch Receipt v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "session_id",
+    "step_id",
+    "phase",
+    "agent_id",
+    "skill",
+    "attempt",
+    "started_at",
+    "finished_at",
+    "task_path",
+    "task_sha256",
+    "result_path",
+    "stdout_path",
+    "stderr_path",
+    "runner_argv_sha256",
+    "runner_status"
+  ],
+  "properties": {
+    "schema_version": {"const": "superkernel-auto-tune-dispatch-receipt-v1"},
+    "runner_status": {"enum": ["passed", "failed", "timed_out"]},
+    "attempt": {"type": "integer", "minimum": 1}
+  },
+  "additionalProperties": true
+}

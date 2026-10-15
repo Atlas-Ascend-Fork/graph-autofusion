@@ -1,0 +1,15 @@
+{
+  "schema_version": "superkernel-multistream-resource-screening-receipt-v1",
+  "adapter_source_schema": "deepseek-v4-resource-compatible-multistream-inventory-v2",
+  "authorization": "diagnostic_only",
+  "cross_stream_cube_vector_overlap_count": 640,
+  "decision": "no_reorder_candidate",
+  "resource_classification_policy": "accelerator_core_block_num_mix_block_num_v1",
+  "sealed_inputs": {
+    "sk_off_kernel_details": "sha256:fe8419b6ac74ec27bbc0f5fed86e3f8be2d70db66c00439488ddfb943d991495",
+    "sk_on_fused_nodes": "sha256:e39e8ccafc3f8fe5c9481fa1cd6890169faadd5579bb9440038b9dff45540488"
+  },
+  "source_inventory_fingerprint": "sha256:faafe0ce8682dee4d605ed55526ebd457593ab5f82a66085224f62343ab7063f",
+  "stable_pair_family_count": 11,
+  "stable_parent_match_count": 0
+}

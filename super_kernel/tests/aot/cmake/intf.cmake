@@ -7,38 +7,30 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
-add_library(intf_llt_pub INTERFACE)
+add_library(intf_llt_options INTERFACE)
 
-target_include_directories(intf_llt_pub INTERFACE
-)
-
-target_compile_definitions(intf_llt_pub INTERFACE
-    CFG_BUILD_DEBUG
+target_compile_definitions(intf_llt_options INTERFACE
     _GLIBCXX_USE_CXX11_ABI=0
 )
 
-target_compile_options(intf_llt_pub INTERFACE
-    -g
-    -w
+target_compile_options(intf_llt_options INTERFACE
     $<$<BOOL:${ENABLE_GCOV}>:-fprofile-arcs -ftest-coverage -fprofile-update=atomic>
     $<$<BOOL:${ENABLE_ASAN}>:-fsanitize=address -fno-omit-frame-pointer -static-libasan -fsanitize=undefined -static-libubsan -fsanitize=leak -static-libtsan>
-    -fPIC
-    -pipe
-    -Werror
-    -Wno-error=deprecated-declarations
 )
 
-target_link_options(intf_llt_pub INTERFACE
+target_link_options(intf_llt_options INTERFACE
     $<$<BOOL:${ENABLE_GCOV}>:-fprofile-arcs -ftest-coverage>
     $<$<BOOL:${ENABLE_ASAN}>:-fsanitize=address -static-libasan -fsanitize=undefined  -static-libubsan -fsanitize=leak -static-libtsan>
 )
 
-target_link_directories(intf_llt_pub INTERFACE
-)
-
-target_link_libraries(intf_llt_pub INTERFACE
-    GTest::gtest
-    mockcpp
+target_link_libraries(intf_llt_options INTERFACE
     -lpthread
     $<$<BOOL:${ENABLE_GCOV}>:-lgcov>
 )
+
+if(ENABLE_CPP_UTEST)
+    add_library(intf_llt_ut INTERFACE)
+    target_compile_definitions(intf_llt_ut INTERFACE CFG_BUILD_DEBUG)
+    target_compile_options(intf_llt_ut INTERFACE -g -w -fPIC -pipe -Werror -Wno-error=deprecated-declarations)
+    target_link_libraries(intf_llt_ut INTERFACE intf_llt_options GTest::gtest mockcpp)
+endif()

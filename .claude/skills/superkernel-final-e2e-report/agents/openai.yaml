@@ -1,0 +1,3 @@
+interface:
+  display_name: "SuperKernel 最终 E2E 确认与报告"
+  short_description: "Validate final clean E2E and report every outcome"

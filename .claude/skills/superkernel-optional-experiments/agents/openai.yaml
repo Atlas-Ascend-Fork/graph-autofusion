@@ -1,0 +1,3 @@
+interface:
+  display_name: "SuperKernel 双流与源码范围实验"
+  short_description: "Run explicitly requested isolated optional experiments"

@@ -33,7 +33,7 @@ declare -A MODULE_ACTION_HANDLERS=(
   ["superkernel:py_ut"]="superkernel_py_ut"
   ["superkernel:cpp_ut"]="superkernel_cpp_ut"
   ["superkernel:py_st"]="superkernel_py_st"
-  ["superkernel:py_run_example"]="superkernel_py_run_example"
+  ["superkernel:cpp_st"]="superkernel_cpp_st"
   ["autofuse_framework:all_ut"]="autofuse_module_test_suite"
   ["autofuse_framework:all_st"]="autofuse_module_test_suite"
   ["autofuse_ascendc_api:all_ut"]="autofuse_module_test_suite"
@@ -71,7 +71,6 @@ usage() {
   echo "                          Without explicit test selection, run supported tests for the selected module"
   echo "    --output_path=<PATH>"
   echo "                          Set output path, where the run package will be generated, default ./build_out"
-  echo "    --run_example         Run examples for the selected module"
   echo "    --cann_3rd_lib_path=<PATH>"
   echo "                          Set third_party package install path, default ./output/third_party"
   echo "                          (Third_party package will cost a little time during the first compilation,"
@@ -312,7 +311,6 @@ checkopts() {
   ENABLE_UT="off"
   ENABLE_ST="off"
   ENABLE_COVERAGE="off"
-  ENABLE_RUN_EXAMPLE="off"
   TEST_IMPL_MODE="all"
   TARGET_MODULE="all"
   CANN_3RD_LIB_PATH="$BASEPATH/output/third_party"
@@ -320,7 +318,7 @@ checkopts() {
   CHANGED_FILES=""
   PACKAGE_TYPE="run"
 
-  parsed_args=$(getopt -a -o j:huscf: -l help,pkg,autofuse,no-autofuse,impl:,module:,test_case:,run_example,ut,st,coverage,output_path:,cann_3rd_lib_path:,build-type:,pkg-type: -- "$@") || {
+  parsed_args=$(getopt -a -o j:huscf: -l help,pkg,autofuse,no-autofuse,impl:,module:,test_case:,ut,st,coverage,output_path:,cann_3rd_lib_path:,build-type:,pkg-type: -- "$@") || {
     usage
     exit 1
   }
@@ -388,10 +386,6 @@ checkopts() {
         CPP_UTEST_FILTER="$2"
         shift 2
         ;;
-      --run_example)
-        ENABLE_RUN_EXAMPLE="on"
-        shift
-        ;;
       --output_path)
         OUTPUT_PATH="$(realpath $2)"
         shift 2
@@ -442,26 +436,9 @@ checkopts() {
 
   normalize_test_selection
 
-  if [[ "${ENABLE_RUN_EXAMPLE}" == "on" ]]; then
-    local selected_modules=()
-    if [[ "${TARGET_MODULE}" == "all" ]]; then
-      selected_modules=("${SUPPORTED_MODULES[@]}")
-    else
-      selected_modules=("${TARGET_MODULE}")
-    fi
-
-    local module
-    for module in "${selected_modules[@]}"; do
-      if [[ -z "${MODULE_ACTION_HANDLERS["${module}:py_run_example"]}" ]]; then
-        continue
-      fi
-      EXEC_ACTIONS+=("${module}:py_run_example")
-    done
-  fi
-
   if [ "X$ENABLE_BUILD_PACKAGE" != "Xon" ] && [ ${#EXEC_ACTIONS[@]} -eq 0 ]; then
     echo "ERROR: No supported actions for the requested selection."
-    echo "       module=${TARGET_MODULE}, impl=${TEST_IMPL_MODE}, ut=${ENABLE_UT}, st=${ENABLE_ST}, coverage=${ENABLE_COVERAGE}, run_example=${ENABLE_RUN_EXAMPLE}"
+    echo "       module=${TARGET_MODULE}, impl=${TEST_IMPL_MODE}, ut=${ENABLE_UT}, st=${ENABLE_ST}, coverage=${ENABLE_COVERAGE}"
     exit 1
   fi
 }
@@ -470,6 +447,7 @@ function cmake_config()
 {
   local extra_option="$1"
   local cmake_option="${CUSTOM_OPTION} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DCANN_3RD_LIB_PATH=${CANN_3RD_LIB_PATH} -DPACKAGE_TYPE=${PACKAGE_TYPE}"
+  cmake_option="${cmake_option} -DENABLE_CPP_UTEST=OFF -DENABLE_CPP_STEST=OFF"
   if [ "X$ENABLE_AUTOFUSE" == "Xon" ]; then
     extra_option="${extra_option} -DBUILD_AUTOFUSE=ON"
   fi
@@ -512,7 +490,7 @@ clean_coverage_artifacts() {
 
   if [ "X$has_cpp_tests" == "Xon" ]; then
     echo "---------------- Clean AOT C++ Coverage Artifacts ----------------"
-    rm -rf ${BASEPATH}/super_kernel/coverage/cpp_ut
+    rm -rf ${BASEPATH}/super_kernel/coverage/cpp_ut ${BASEPATH}/super_kernel/coverage/cpp_st
     find ${BUILD_PATH} -name "*.gcda" -delete 2>/dev/null || true
   fi
 }
@@ -538,28 +516,22 @@ build_package() {
   echo "package: ${output_run_path}"
 }
 
-superkernel_py_run_example() {
-  echo "---------------- Start running examples ----------------"
-  ${PYTHON_CMD} ${BASEPATH}/super_kernel/examples/super_kernel_base/superkernel_scope.py &&
-  ${PYTHON_CMD} ${BASEPATH}/super_kernel/examples/super_kernel_profiling/superkernel_compare.py &&
-  ${PYTHON_CMD} ${BASEPATH}/super_kernel/examples/super_kernel_runtime_ascendc_only/superkernel_runtime_ascendc_basic.py &&
-  echo "Run all examples success"
-}
-
 superkernel_py_ut() {
   echo "---------------- Start UT ----------------"
   cd ${BASEPATH}/super_kernel &&
   ${PYTHON_CMD} -m pip install --upgrade pip -q &&
-  ${PYTHON_CMD} -m pip install -e .[dev] --force-reinstall -q &&
+  ${PYTHON_CMD} -m pip install -r requirements-dev.txt -q &&
   if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
-    ${PYTHON_CMD} -m pytest tests/ut -m ut -n auto \
+    PYTHONPATH="${BASEPATH}/super_kernel/src/jit${PYTHONPATH:+:${PYTHONPATH}}" \
+      ${PYTHON_CMD} -m pytest tests/ut -m ut -n auto \
                                      --cov-config=scripts/sk_ut_cfg.toml \
                                      --cov=superkernel \
                                      --cov-report=term-missing \
                                      --cov-report=html \
                                      --cov-report=xml
   else
-    ${PYTHON_CMD} -m pytest tests/ut -m ut -n auto
+    PYTHONPATH="${BASEPATH}/super_kernel/src/jit${PYTHONPATH:+:${PYTHONPATH}}" \
+      ${PYTHON_CMD} -m pytest tests/ut -m ut -n auto
   fi
 }
 
@@ -567,44 +539,63 @@ superkernel_py_st() {
   echo "---------------- Start ST ----------------"
   cd ${BASEPATH}/super_kernel &&
   ${PYTHON_CMD} -m pip install --upgrade pip -q &&
-  ${PYTHON_CMD} -m pip install -e .[dev] --force-reinstall -q &&
+  ${PYTHON_CMD} -m pip install -r requirements-dev.txt -q &&
   if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
-    ${PYTHON_CMD} -m pytest tests/st -m st -n auto --cov-config=scripts/sk_st_cfg.toml \
+    PYTHONPATH="${BASEPATH}/super_kernel/src/jit${PYTHONPATH:+:${PYTHONPATH}}" \
+      ${PYTHON_CMD} -m pytest tests/st -m st -n auto --cov-config=scripts/sk_st_cfg.toml \
                                      --cov=superkernel \
                                      --cov-report=term-missing \
                                      --cov-report=html \
                                      --cov-report=xml
   else
-    ${PYTHON_CMD} -m pytest tests/st -m st -n auto
+    PYTHONPATH="${BASEPATH}/super_kernel/src/jit${PYTHONPATH:+:${PYTHONPATH}}" \
+      ${PYTHON_CMD} -m pytest tests/st -m st -n auto
   fi
 }
 
 function superkernel_cpp_ut() {
-  echo "---------------- Start run cpp utest ----------------"
+  superkernel_cpp_test ut
+}
 
-  CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CPP_UTEST=ON"
+function superkernel_cpp_st() {
+  superkernel_cpp_test st
+}
+
+function superkernel_cpp_test() {
+  local suite="$1"
+  local test_options="-DENABLE_CPP_UTEST=OFF -DENABLE_CPP_STEST=OFF -DENABLE_GCOV=OFF"
+  local coverage_target="collect_coverage_data"
+  echo "---------------- Start run cpp ${suite}est ----------------"
+
+  if [ "${suite}" == "ut" ]; then
+    test_options="${test_options} -DENABLE_CPP_UTEST=ON"
+  else
+    test_options="${test_options} -DENABLE_CPP_STEST=ON"
+    coverage_target="collect_coverage_data_cpp_st"
+  fi
 
   if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_GCOV=ON"
+    test_options="${test_options} -DENABLE_GCOV=ON"
   fi
 
   # Pass gtest filter to cmake if specified
   if [ -n "${CPP_UTEST_FILTER}" ]; then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DGTEST_FILTER=--gtest_filter=${CPP_UTEST_FILTER}"
+    test_options="${test_options} -DGTEST_FILTER=--gtest_filter=${CPP_UTEST_FILTER}"
   else
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DGTEST_FILTER="
+    test_options="${test_options} -DGTEST_FILTER="
   fi
 
   mkdir -pv ${BUILD_PATH} &&
   cd ${BUILD_PATH} &&
-  cmake_config &&
+  cmake_config "${test_options}" &&
   if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
     build clean &&
-    build collect_coverage_data
+    build "${coverage_target}"
   else
-    build run_super_kernel_aot_utest
+    build "run_super_kernel_aot_${suite}est" &&
+    build "run_model_specialization_${suite}est"
   fi &&
-  echo "Build run cpp utest success!"
+  echo "Build run cpp ${suite}est success!"
 }
 
 autofuse_module_test_suite() {

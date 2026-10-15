@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SuperKernel Phase Manifest v1",
+  "type": "object",
+  "required": ["schema_version", "phase", "agent_id", "skill", "runtime_tools"],
+  "properties": {
+    "schema_version": {"const": "superkernel-phase-manifest-v1"},
+    "phase": {"type": "string", "minLength": 1},
+    "agent_id": {"type": "string", "minLength": 1, "description": "Stable logical phase worker and audit ID; it does not require a registered host Agent profile."},
+    "skill": {"type": "string", "minLength": 1},
+    "runtime_tools": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_]+\\.py$"}
+    }
+  },
+  "additionalProperties": false
+}

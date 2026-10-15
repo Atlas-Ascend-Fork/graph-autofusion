@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://superkernel.local/schemas/collection-manifest-1.0.json",
+  "title": "SuperKernel structural association collection manifest",
+  "description": "Collection-side filesystem freshness and protocol evidence. This manifest does not claim that hashes cryptographically prove process provenance, and native runtime IDs are not cross-process identity.",
+  "x-collection-marker": {
+    "path": ".collection-session.json",
+    "role_artifact": false,
+    "description": "After the outside session record is published with no replacement, this marker is atomically published with identical canonical JSON. An exact valid outside record can recover an interrupted marker publication idempotently; existing marker or session paths are never overwritten or rolled back."
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capture_role",
+    "capture_root",
+    "capture",
+    "source_revision",
+    "config",
+    "config_fingerprint",
+    "control",
+    "control_fingerprint",
+    "producer",
+    "workload",
+    "workload_fingerprint",
+    "files",
+    "manifest_fingerprint"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "capture_role": {
+      "enum": [
+        "baseline_profile",
+        "candidate_compat",
+        "candidate_verify",
+        "candidate_profile"
+      ]
+    },
+    "capture_root": {
+      "const": ".",
+      "description": "Artifact paths are resolved relative to the directory containing this manifest."
+    },
+    "capture": {
+      "$ref": "#/$defs/capture"
+    },
+    "source_revision": {
+      "$ref": "#/$defs/trimmedString"
+    },
+    "config": {
+      "description": "Canonical detached structural-association config shared by all four collection roles. It contains only graph targets and collection invariants, is distinct from baseline/candidate execution configs, and is used to independently recompute config_fingerprint."
+    },
+    "config_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "control": {
+      "description": "Canonical detached structural-association control shared by all four collection roles. It contains collection/runtime invariants, is distinct from control derived from baseline/candidate execution configs, and is used to independently recompute control_fingerprint."
+    },
+    "control_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "producer": {
+      "$ref": "#/$defs/producer"
+    },
+    "workload": {
+      "$ref": "#/$defs/workload"
+    },
+    "workload_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "files": {
+      "$ref": "#/$defs/files"
+    },
+    "manifest_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "capture_role": {
+            "const": "baseline_profile"
+          }
+        },
+        "required": ["capture_role"]
+      },
+      "then": {
+        "properties": {
+          "files": {
+            "required": ["kernel_details", "task_time", "trace_view"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capture_role": {
+            "enum": ["candidate_compat", "candidate_verify"]
+          }
+        },
+        "required": ["capture_role"]
+      },
+      "then": {
+        "properties": {
+          "files": {
+            "required": [
+              "sk_graph_origin",
+              "sk_graph_updated",
+              "sk_fused_nodes",
+              "sk_scope_split",
+              "super_kernel"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capture_role": {
+            "const": "candidate_profile"
+          }
+        },
+        "required": ["capture_role"]
+      },
+      "then": {
+        "properties": {
+          "files": {
+            "required": [
+              "kernel_details",
+              "task_time",
+              "trace_view",
+              "sk_graph_origin",
+              "sk_graph_updated",
+              "sk_fused_nodes",
+              "sk_scope_split",
+              "super_kernel"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "trimmedString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonnegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_fingerprint",
+        "started_ns",
+        "finalized_ns",
+        "root_was_empty"
+      ],
+      "properties": {
+        "session_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "started_ns": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "finalized_ns": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "root_was_empty": {
+          "const": true
+        }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "native_pid",
+        "started_ns",
+        "ended_ns",
+        "command_fingerprint"
+      ],
+      "properties": {
+        "native_pid": {
+          "$ref": "#/$defs/positiveInteger",
+          "description": "Freshness/protocol metadata local to this capture, not cross-process identity."
+        },
+        "started_ns": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "ended_ns": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "command_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "input",
+        "batch",
+        "rank",
+        "mode",
+        "warmup",
+        "iterations",
+        "runtime"
+      ],
+      "properties": {
+        "model": true,
+        "input": true,
+        "batch": true,
+        "rank": true,
+        "mode": true,
+        "warmup": true,
+        "iterations": true,
+        "runtime": true
+      }
+    },
+    "fileRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size", "ctime_ns", "mtime_ns"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?! )(?!.* $)(?!\\.collection-session\\.json$)(?!\\.{1,2}(?:/|$))(?!.*//)(?!.*/\\.{1,2}(?:/|$))(?!.*/$)[\\x20-\\x5B\\x5D-\\x7E]+$",
+          "description": "Portable printable-ASCII POSIX role-artifact path with no backslash, leading or trailing space, reserved collection marker, absolute prefix, empty segment, dot segment, traversal segment, or trailing slash. Descriptor-based validation rejects symlinks and path changes while reading beneath capture_root."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "ctime_ns": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "mtime_ns": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "fileRecords": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/fileRecord"
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kernel_details": {
+          "$ref": "#/$defs/fileRecords"
+        },
+        "task_time": {
+          "$ref": "#/$defs/fileRecords"
+        },
+        "trace_view": {
+          "$ref": "#/$defs/fileRecords"
+        },
+        "sk_prof": {
+          "$ref": "#/$defs/fileRecords"
+        },
+        "sk_graph_origin": {
+          "$ref": "#/$defs/fileRecords"
+        },
+        "sk_graph_updated": {
+          "$ref": "#/$defs/fileRecords"
+        },
+        "sk_fused_nodes": {
+          "$ref": "#/$defs/fileRecords"
+        },
+        "sk_scope_split": {
+          "$ref": "#/$defs/fileRecords"
+        },
+        "super_kernel": {
+          "$ref": "#/$defs/fileRecords"
+        }
+      }
+    }
+  },
+  "x-role-files": {
+    "baseline_profile": ["kernel_details", "task_time", "trace_view"],
+    "candidate_compat": [
+      "sk_graph_origin",
+      "sk_graph_updated",
+      "sk_fused_nodes",
+      "sk_scope_split",
+      "super_kernel"
+    ],
+    "candidate_verify": [
+      "sk_graph_origin",
+      "sk_graph_updated",
+      "sk_fused_nodes",
+      "sk_scope_split",
+      "super_kernel"
+    ],
+    "candidate_profile": [
+      "kernel_details",
+      "task_time",
+      "trace_view",
+      "sk_graph_origin",
+      "sk_graph_updated",
+      "sk_fused_nodes",
+      "sk_scope_split",
+      "super_kernel"
+    ]
+  }
+}

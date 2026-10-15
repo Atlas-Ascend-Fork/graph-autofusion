@@ -1,0 +1,127 @@
+{
+  "blockers": [],
+  "entrypoints": [
+    {
+      "entrypoint": "parent_device_lease_runner",
+      "function": "run_command",
+      "lease_policy": "acquire_or_inherit_then_inject_child_markers",
+      "npu_capable": true,
+      "path": "superkernel-runtime-common/scripts/device_lease_runner.py",
+      "source_fingerprint": "sha256:b6935ce4d2062a4e072e945c2ddc926cf5579e2196012dcd47e92fa4cd5a1efe",
+      "status": "covered"
+    },
+    {
+      "entrypoint": "multistream_execution_runner",
+      "function": "_run_phase",
+      "lease_policy": "device_phase_acquire_or_inherit",
+      "npu_capable": true,
+      "path": "superkernel-multistream-performance-tuning/scripts/multistream_runner.py",
+      "source_fingerprint": "sha256:7ccefdc94c25147a9e1e9b47a3c958265d5367ca11fe23862ae2b620e82fd599",
+      "status": "covered"
+    },
+    {
+      "entrypoint": "four_profile_orchestrator",
+      "function": "run_plan",
+      "lease_policy": "matching_parent_marker_required",
+      "npu_capable": true,
+      "path": "superkernel-multistream-performance-tuning/scripts/multistream_four_profile.py",
+      "source_fingerprint": "sha256:d89f3cea074f9c76d8c0a3a141a568de8a760d7a5c98be808f54f1916f15de68",
+      "status": "covered"
+    },
+    {
+      "entrypoint": "derived_family_fresh_base",
+      "function": "run_fresh_base",
+      "lease_policy": "delegate_to_parent_device_lease_runner",
+      "npu_capable": true,
+      "path": "superkernel-runtime-common/scripts/derived_family_lifecycle.py",
+      "source_fingerprint": "sha256:3ff4c264f51b6de967975b86a5ae82ee34c191a7e4008340d4c0aca9916daf8d",
+      "status": "covered"
+    }
+  ],
+  "inventory_fingerprint": "sha256:68c522897f52d8ffe5e8ab8dd226607c508358c54160c45b33cea1e85577a1ae",
+  "process_launches": [
+    {
+      "call": "device_lease_runner.run_command",
+      "classification": "delegated_parent_wrapper",
+      "function": "run_fresh_base",
+      "line": 291,
+      "npu_capable": true,
+      "path": "superkernel-runtime-common/scripts/derived_family_lifecycle.py"
+    },
+    {
+      "call": "multistream_runner._run_argv",
+      "classification": "shared_device_leases+lease_environment",
+      "function": "run_command",
+      "line": 98,
+      "npu_capable": true,
+      "path": "superkernel-runtime-common/scripts/device_lease_runner.py"
+    },
+    {
+      "call": "subprocess.run",
+      "classification": "offline_read_only_analysis",
+      "function": "_run_read_only_reanalysis",
+      "line": 1608,
+      "npu_capable": false,
+      "path": "superkernel-runtime-common/scripts/recommend_sk_strategy.py"
+    },
+    {
+      "call": "subprocess.run",
+      "classification": "agent_host_dispatch",
+      "function": "run_agent_step",
+      "line": 704,
+      "npu_capable": false,
+      "path": "superkernel-auto-tune/scripts/auto_tune_session.py"
+    },
+    {
+      "call": "device_lease_runner.run_command",
+      "classification": "delegated_parent_wrapper",
+      "function": "run",
+      "line": 78,
+      "npu_capable": true,
+      "path": "superkernel-auto-tune/scripts/phase_entrypoint.py"
+    },
+    {
+      "call": "multistream_runner._run_argv",
+      "classification": "required_parent_marker",
+      "function": "_run_profile",
+      "line": 276,
+      "npu_capable": true,
+      "path": "superkernel-multistream-performance-tuning/scripts/multistream_four_profile.py"
+    },
+    {
+      "call": "multistream_runner._run_argv",
+      "classification": "required_parent_marker",
+      "function": "_run_profile",
+      "line": 289,
+      "npu_capable": true,
+      "path": "superkernel-multistream-performance-tuning/scripts/multistream_four_profile.py"
+    },
+    {
+      "call": "subprocess.Popen",
+      "classification": "lease_primitive",
+      "function": "_run_argv",
+      "line": 432,
+      "npu_capable": false,
+      "path": "superkernel-multistream-performance-tuning/scripts/multistream_runner.py"
+    },
+    {
+      "call": "_run_argv",
+      "classification": "shared_device_leases",
+      "function": "_run_phase",
+      "line": 594,
+      "npu_capable": true,
+      "path": "superkernel-multistream-performance-tuning/scripts/multistream_runner.py"
+    },
+    {
+      "call": "_run_argv",
+      "classification": "shared_device_leases",
+      "function": "_run_phase",
+      "line": 603,
+      "npu_capable": true,
+      "path": "superkernel-multistream-performance-tuning/scripts/multistream_runner.py"
+    }
+  ],
+  "repository_root": "/data/lxh/module/superkernel-skill",
+  "schema_version": "superkernel-shared-npu-lease-inventory-v1",
+  "status": "passed"
+}

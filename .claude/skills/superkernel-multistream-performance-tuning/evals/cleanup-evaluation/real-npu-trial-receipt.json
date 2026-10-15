@@ -1,0 +1,31 @@
+{
+  "acceptance": {
+    "failure_injection_recovery": "passed",
+    "idempotent_replay": "passed",
+    "incumbent_unchanged": "passed",
+    "terminal_state_coverage": [
+      "accepted",
+      "blocked",
+      "failed",
+      "rejected"
+    ]
+  },
+  "cleanup_policy": {
+    "audit_artifacts": "preserved",
+    "mutable_trial_state": "atomic_quarantine",
+    "quarantine_deletion": "manual_only",
+    "reverse_patch": false
+  },
+  "real_npu_source": {
+    "candidate_source_fingerprint": "sha256:c19da2b999eca08c0bb05bde04ec41df7cf0c0add5df4db14510408cae91edd9",
+    "closure_file_fingerprint": "sha256:c01b6cd2b84122db8752c22b88e381e7090084d0122cf787b9f755bf1cf5b23f",
+    "closure_fingerprint": "sha256:80115b981d49f7c37555b86e2bfebde79e860afda5526a330b0f83709dde819e",
+    "incumbent_source_fingerprint": "sha256:280166ff19b3e4f8adad9a3c1855afee1ede3138074a17e03f9eebc8359ecea6",
+    "outcome": "no_gain",
+    "result_file_fingerprint": "sha256:5853844d1cba3953f80a921c8b47601195a07b04e7c9e867f34902e7ac3e47c3",
+    "runtime": "Ascend910_9392 npugraph_ex static-kernel SuperKernel",
+    "trial_id": "MS-R1"
+  },
+  "schema_version": "superkernel-multistream-cleanup-evaluation-v1",
+  "terminal_cleanup_state": "rejected"
+}

@@ -19,10 +19,6 @@ on:
       image_version:
         required: true
         type: string
-      gcc_version:
-        required: false
-        type: string
-        default: ''
 
 jobs:
   JOB_ut:
@@ -36,7 +32,7 @@ jobs:
         uses: checkout
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
-          token: ${{secrets.GIT_TOKEN}}
+          allow-unsafe-pr-checkout: true
       -
         name: download
         uses: obs-download
@@ -60,7 +56,6 @@ jobs:
           export WORKSPACE=${{ steps.process_checkout.outputs.path }}
           cd ${{ steps.process_checkout.outputs.path }}
           export ut_type=${{ inputs.ut_type }}
-          export GCC_VERSION=${{ inputs.gcc_version }}
           export PATH=/opt/buildtools/python-3.10.2/bin:$PATH
           export target_branch=${{ env.TARGET_BRANCH }}
           bash ut.sh ${ut_type}

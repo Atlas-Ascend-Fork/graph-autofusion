@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include <gtest/gtest.h>
-#include "stub/dlog_pub.h"
+#include "dlog_pub.h"
 
 // 转发监听器基类
 class ForwardingListener : public testing::TestEventListener {

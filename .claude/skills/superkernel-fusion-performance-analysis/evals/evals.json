@@ -1,0 +1,153 @@
+{
+  "skill_name": "superkernel-fusion-performance-analysis",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "一个 child_count=1 的 SK 有 5 个 occurrence。融合前 interval P50=8us、MAD=0.2us，融合后 SK P50=6us、MAD=0.2us。默认阈值为 3% 和 1us。请给出分类和 scope action，不要因为只有一个子算子而排除。",
+      "expected_output": "按题设统计且所有原始证据门禁通过时，该 SK 条件分类为 beneficial：improvement_us=8-6=2us，improvement_pct=2/8=25%，动态噪声阈值 max(3%, 2*0.2/8*100%, 2*0.2/6*100%) 约为 6.67%，并建议 keep；但 files 为空，不能声称实际 artifact 已核验，实际状态必须为 insufficient_evidence，不能自动 keep。child_count 仅作描述。",
+      "files": [],
+      "expectations": [
+        "必须明确计算 improvement_us=2us、improvement_pct=25%、dynamic threshold 约 6.67%，并说明 2us 同时超过 1us 绝对阈值。",
+        "自动 keep 前必须核验可靠 mapping、baseline 与 candidate 各至少 3 个对齐 occurrence、profile/config/workload fingerprint 和 declared-change；本题 files 为空时不得声称这些 artifact 已通过。",
+        "不得使用 child_count 作为 keep 或 prune 的门禁，也不得在缺证时把条件 beneficial 写成实际已 keep。"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "融合前两个跨 stream 子算子 duration sum P50=18us，但考虑重叠后的 interval P50=10us；融合后 SK P50=12us。请以正确口径分类并解释原因。",
+      "expected_output": "若完整可信证据通过门禁且补采 MAD 得到的动态噪声阈值不超过 20%，则应按 baseline interval 10us 与 fused SK 12us 条件判定 regressed（improvement_us=-2us、improvement_pct=-20%）；18us duration sum 只能辅助诊断跨 stream 重叠，Cube/Vector 串行化只能列为待验证假设。由于 files 为空且题设未给 occurrence、MAD、mapping、fingerprint 和 declared-change 证据，实际分类必须为 insufficient_evidence，不能自动 prune。",
+      "files": [],
+      "expectations": [
+        "必须给出 interval 口径的 -2us 和 -20%，不得用 18us duration sum 推导 +6us 或 33.33% 的虚假收益。",
+        "自动 prune 前必须核验可靠 mapping、baseline 与 candidate 各至少 3 个对齐 occurrence、MAD 动态阈值、profile/config/workload fingerprint 和 declared-change；本题缺证时实际为 insufficient_evidence。",
+        "保留跨 stream 重叠语义；没有 child trace 或 stream 证据时，不得宣称 Cube/Vector 已被串行化。"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "一个 SK 明确劣化，config manifest 证明 DCCI enabled，scalar ratio=0.35，环境探测只接受窄 before/after regex。请给出后续实验。",
+      "expected_output": "题设劣化成立时只能形成 DCCI 条件原因假设；只有直接 config manifest 明确 enabled 且环境探测对精确 before/after regex 给出 accepted evidence 后，才可提出独立窄范围、一个 range 加一个 option 的 A/B。files 为空时这些直接 artifact 未实际核验，必须标为 insufficient_evidence，不能自动生成可运行 P 轮，也不能宣称 DCCI 是根因。",
+      "files": [],
+      "expectations": [
+        "必须区分题设假设与直接证据：DCCI state 需要 explicit config source，选项值需要 active wrapper/probe 的精确 accepted source，不得推测、改写或扩展 regex。",
+        "任何 P 轮之前还必须通过可靠 mapping、双方至少 3 个对齐 occurrence、fingerprint 和 declared-change 门禁；files 为空时不得声称门禁已通过。"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "一个映射可靠且有 10 个 occurrence 的 SK 变化落在动态噪声带内。请说明主 scope 和后续 P/FINAL 策略。",
+      "expected_output": "若动态噪声带、可靠 mapping、样本和 artifact 均已核验，则条件分类为 neutral/无明确性能收益，建议在 P 轮裁剪该 exact range；但 files 为空，实际状态必须为 insufficient_evidence，不能自动 prune 或创建可运行 P 轮。",
+      "files": [],
+      "expectations": [
+        "只有通过可靠 mapping、baseline 与 candidate 各至少 3 个对齐 occurrence、MAD 动态阈值、fingerprint 和 declared-change 门禁后，主 scope 才可仅保留 beneficial 并裁剪 neutral。",
+        "父流程明确请求 P/FINAL 时，P 只裁剪已证明的 exact range，FINAL 只组合保留的 beneficial range；继承 Sbest-BASE option maps，并记录 declared_option_changes=[]。",
+        "不得因为题设给出 10 个 occurrence 就虚构 baseline/candidate 对齐、fingerprint 或 declared-change 已通过；缺少 files 时不得自动 prune 或生成实验计划。"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "两个 range 单独实验均 beneficial，但合并后的 Sx-FINAL profiling 出现共享资源竞争并整体 regressed。请给出结论。",
+      "expected_output": "若两个局部结果与 Sx-FINAL 的完整可信 profiling、mapping、fingerprint 和 declared-change 均已核验，则条件结论是 FINAL 组合 regressed，应否决当前组合晋级并保留局部收益证据；共享资源竞争只作为待验证假设。files 为空时实际状态必须为 insufficient_evidence，不能声称 FINAL artifact 已通过或自动作出 clean promotion/prune 决策。",
+      "files": [],
+      "expectations": [
+        "条件门禁通过时，不得用两个局部 beneficial 结果覆盖 FINAL 的组合回归；必须核验 FINAL 与对照双方各至少 3 个对齐 occurrence。",
+        "保留每个 range 的局部收益证据，同时记录共享资源竞争为待验证假设；没有 stream/resource 直接证据时不得宣称根因。",
+        "自动否决、keep 或 prune 前必须核验可靠 mapping、profile/config/workload fingerprint 和 declared-change；本题 files 为空时不得宣称实际 artifact 已通过。"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "SK metadata child node 到 baseline Task ID 存在一对多歧义，只有一次候选 occurrence，SK 名称看起来与某个 scope 相似。请给出分类和动作。",
+      "expected_output": "实际分类为 insufficient_evidence：一对多 mapping 和仅一次 candidate occurrence 已直接违反证据门禁；files 为空也无法核验 fingerprint 与 declared-change。禁止按名称猜测、自动 keep/prune、创建实验或修改 scope，只能输出映射修复与补采 blocker。",
+      "files": [],
+      "expectations": [
+        "必须明确可靠一对一 mapping 失败，且 baseline 与 candidate 各至少 3 个对齐 occurrence 的要求未满足。",
+        "还必须补齐并核验 profile/config/workload fingerprint 和 declared-change，不能把 SK 名称相似当作证据。",
+        "在全部门禁通过前只允许补采或修复映射，不得自动 keep、prune、生成实验或修改 scope。"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "profile-process sk_graph_origin 有 3060 个节点，其中 1910 个 kernel 和 1150 个 control/event；SK-off baseline 的每个 Step Id 都有 1910 条有效 kernel row，完整流内 kernel 序列可以形成唯一 injective stream-role assignment。应如何映射 fused child？",
+      "expected_output": "使用 kernel_projection_trace_v2：先删除 topology-only control/event 节点，再对每个完整 Step Id 的流内 kernel 序列求唯一 stream-role 注入，并用 fused metadata 的 origin nodeId 转换为 stream role + kernel ordinal，落到 baseline row。只有至少三个 step 全量一致、第二解数量为 0、每个 child 唯一落点时才是 kernel_projection_structural + exact_projected_trace；不得因 3060 与 1910 不相等直接判无映射。",
+      "files": [],
+      "expectations": [
+        "必须把 3060 节点静态图投影为 1910 个 profiler 可观测 kernel，不能继续要求 control 全图同构。",
+        "必须使用完整 step 序列、injective stream-role assignment 和显式第二解搜索，不能靠局部 op 窗口或 raw stream ID 提升 exact。",
+        "必须用 origin nodeId 只在同一 graph 内解析 kernel ordinal，并区分 graph occurrence 与源码区间。"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "kernel_details 使用 host epoch 时间，sk_prof 使用 device counter；同一 SK 的绝对 clock offset 无法在三个 Step Id 间求得，但 candidate kernel row、profile-process fused metadata 和每个 step 的 baseline kernel projection 均完整且唯一。能否恢复融合前子算子？",
+      "expected_output": "可以。baseline fragment 映射不应依赖 kernel_details/sk_prof 的绝对 clock offset；按 device_id + model_id + sk_id + Step Id 绑定父 occurrence，并使用 kernel_projection_trace_v2 恢复 baseline child rows。sk_prof 只用于映射后的融合内 child 调度、Cube/Vector 或 DCCI 归因；其跨时钟域 offset 失败不能抹掉已证明的 projected mapping。",
+      "files": [],
+      "expectations": [
+        "必须识别 host 与 device 为不同时间域，不得要求共同绝对 offset。",
+        "必须使用显式 Step Id occurrence domain 和完整 kernel projection 映射 baseline fragment。",
+        "必须限制 sk_prof 的用途：它可阻塞内部调度归因，但不能单独阻塞 exact_projected_trace。"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "candidate compat/verify/profile 配置相同，但 compat/verify replay 中有 330 个重复 signature 无法唯一配对。candidate profile 自有 metadata 与 SK-off baseline 的 kernel_projection_trace_v2 映射唯一，双方各有 5 个 occurrence，fingerprint 和 declared-change 全部通过。应如何分类？",
+      "expected_output": "性能分析只消费 candidate profile 与 SK-off baseline。重复 signature 不属于性能 mapping error，不能生成 fusion_replay_identity_unmatched/ambiguous，也不能把 exact_projected_trace 降级；应按 measured interval、SK duration 和 MAD 阈值正常分类。compat/verify replay 只作为独立复现审计。",
+      "files": [],
+      "expectations": [
+        "明确性能 analyzer 只使用 baseline_profile 和 candidate_profile 两份 manifest。",
+        "明确拒绝把 compat/verify/replay identity 放入 mapping_errors 或 classification gate。",
+        "保留 exact_projected_trace 并按 interval P50、SK P50、MAD 与至少三个 occurrence 分类。",
+        "将 330 个重复 signature 单列为可复现性审计问题，而不是 330 个性能映射失败。"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "一个非 Python 网络由 adapter 产出 semantic unit manifest。original 与 calibration 业务图的 op/core 数量相同，但两个相同 label 节点在保留 DATA、BUSINESS_CONTROL、STREAM_ORDER 后仍可交换，存在第二个 node correspondence。旧 task_ranges 恰好能找到唯一局部 op window。能否生成 source_scope_map + exact？",
+      "expected_output": "不能。source_calibration_projection_v2 必须显式搜索第二解；存在可交换 correspondence 或非平凡自同构时只能 diagnostic_only。旧 task_ranges、局部 op window、raw ordinal、层号和名称都禁止作为 fallback，不能生成源码 prune。源码语言不影响该门禁。",
+      "files": [],
+      "expectations": [
+        "必须区分性能 kernel_projection_trace_v2 与源码 calibration projection 两条证据链。",
+        "必须因第二个 correspondence 将源码映射降为 diagnostic_only，不得人工选择 ordinal。",
+        "必须拒绝 task_ranges、layer、名称或局部 window 产生 source exact。",
+        "必须说明核心协议模型和源码语言无关，adapter 只产出标准 manifest/assignment。"
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "一个没有重复层的网络完成一次分段标定：唯一业务图投影通过，三个 measured step 的 unit assignment 完整，C_sk 与一个 unit 的全部 occurrence 集合相等；stable-marker source snapshot、byte span、marker operation span、collection manifest 和 DAG 均验证通过。是否必须凑够三个重复 block 才能源码 exact？",
+      "expected_output": "不需要。该实例可标为 source_unit_exact 并经 source_scope_map_v2 成为 source_scope_map + exact；三个重复 block 只用于升级 source_unit_template_exact，不是单实例 exact 的前置条件。仍需 fresh stable-marker correctness/profile，calibration timing 不可继承。",
+      "files": [],
+      "expectations": [
+        "明确单实例三个 step 的直接标定可以得到 source_unit_exact。",
+        "明确至少三个不同 block 且无反例只用于 template consensus。",
+        "要求 C_sk == C_unit 的集合相等、stable revision、source snapshot 与 provenance 校验。",
+        "不得继承 calibration timing，必须 fresh stable-marker profile。"
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "Stage O 的 dcci_disable_on_kernel=[\".*\"] clean 相比无 DCCI O0 明确劣化。两侧已有 fresh kernel_details.csv、同进程完整 SK metadata 和无 buffer-full 的 sk_prof_device_0.json。请说明分析与下一轮设置，不运行实验。",
+      "expected_output": "按 DCCI Stage O 专用模式先结构唯一匹配并报告全部 SK，以 P50/P90/MAD 找出所有显著劣化 SK，再对每个劣化 SK 的全部 ordered child 比较 wall span、max-lane、P90/MAD，duration sum 只作辅助。取所有显著劣化 child canonical op 的稳定去重并集，生成能匹配完整 metadata symbol 且通过 exact probe 的 regex list，同时用于 dcci_before_kernel_start 和 dcci_after_kernel_end，并保留 disable-all。只建议这一轮联合修复，不生成独立 before/after 或逐 child trial；执行 owner 必须直接与五轮无 DCCI O0 做 clean A/B，有收益才采纳，否则报告并拒绝 DCCI family。",
+      "files": [],
+      "expectations": [
+        "要求全量逐 SK 比较，不能只分析最慢一个 SK；跨进程不能用 raw SK/task/stream/node ID 或生成 hash 直接连接。",
+        "要求每个显著劣化 SK 的完整 child 归因，wall/execution 为主，duration sum 不得单独把 child 加入修复集合。",
+        "before 与 after 使用完全相同的全部劣化 child regex 并保留 dcci_disable_on_kernel=[\".*\"]；不得分别试验。",
+        "联合修复只相对 disable-all 恢复不够，必须直接优于无 DCCI O0；分析本身不得运行推理、改 option 或声明采纳。",
+        "files 为空时只能给条件流程，不得声称实际 SK、child、regex 或门禁已经核验。"
+      ]
+    },
+    {
+      "id": 13,
+      "prompt": "同一 model/device 的 43 层 decode profile 已完成 exact_projected_trace。8-child MoE 融合在每层的 child op 顺序、stream-role 与 core-family 均一致，但 layer0 为 -12% 且 regressed，40 个层为 3%-9% beneficial，另两个层为 positive 但 neutral。另一个 12-child attention family 在 21 个偶数层均为 25%-31% beneficial。请给出跨层分析报告应如何分组、重点关注项和动作边界。",
+      "expected_output": "应按 model、完整 ordered child op sequence、ordered source-stream-role/core-family 与可用 shape/dtype/port 签名构造 family，不能用 raw SK ID、layer 或 kernel ordinal。MoE family 必须写 family_classification_split，逐层列出 interval/S3 P50/P90/MAD/收益与 child topology，并将 layer0 的实际 regressed 优先审阅；不能因其余层 beneficial 而平均掉。对正但 neutral 的实例，及 child 较多且低于 family 稳健收益下界或 owner 声明期望的实例，写 weak_relative_benefit review；12-child attention 的稳定收益也应保留为对照。family 诊断不能修改既有 per-SK classification/action，不能批量 prune/reorder，具体 source action 仍需每个实例的 source_scope_map + exact 与后续单变量验证。",
+      "files": [],
+      "expectations": [
+        "必须把 family identity 限定为完整 child 拓扑，并明确排除 raw SK ID、layer、task ID、绝对 ordinal 和局部名称窗口；结构或 shape/dtype/port 不同必须拆 family。",
+        "必须报告 family 覆盖层、逐层 S0 interval/S3 duration/收益、P50/P90/MAD、分类分布和奇偶层差异；交替模板不能误报为同一 SK 波动。",
+        "必须把 beneficial 与 regressed 共存标为 family_classification_split，并优先保留实际 regressed；不得以 family 平均收益覆盖它。",
+        "child 数量和小正收益只能形成 weak_relative_benefit 审阅优先级，不能改变 classification/action 或自动产生 scope/source/option 修改；无 owner 期望时不得自造固定收益门槛。"
+      ]
+    }
+  ]
+}

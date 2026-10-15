@@ -1,0 +1,7 @@
+{
+  "schema_version": "superkernel-phase-manifest-v1",
+  "phase": "s0_baseline",
+  "agent_id": "sk-s0-baseline",
+  "skill": "superkernel-s0-baseline",
+  "runtime_tools": ["analyze_performance.py"]
+}

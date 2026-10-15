@@ -1,0 +1,2 @@
+Step Id,Device_id,Model ID,Task ID,Stream ID,Name,Type,OP State,Accelerator Core,Start Time(us),Duration(us),Wait Time(us),Block Num,Mix Block Num,aic_scalar_time(us),aic_scalar_ratio,aiv_scalar_time(us),aiv_scalar_ratio
+1,0,48,99,1,sk_1_decoder.layer.0.mlp_start_static_kernel_GroupedMatmul_hash_end_static_kernel_VectorPost_hash,SuperKernel,static,MIX_AIC,0,14,0,1,1,0,0,0,0

@@ -110,13 +110,9 @@ bool SuperKernelExceptionHandler::CopySkDeviceEntryArgsToHost(
     return false;
   }
 
-  logContext = std::make_unique<sk::logger::LogContextGuard>(UNKNOWN_MODEL_ID);
   uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
   std::string modelId = SkEventRecorder::Instance().GetModelIdByIndex(modelIdIdx);
-  if (!modelId.empty()) {
-    logContext.reset();
-    logContext = std::make_unique<sk::logger::LogContextGuard>(modelId);
-  }
+  logContext = std::make_unique<sk::logger::LogContextGuard>(modelId.empty() ? UNKNOWN_MODEL_ID : modelId);
 
   // Step 2: Now that we know totalSize, copy all SkDeviceEntryArgs data to host at once
   SK_LOGI("---Total SkDeviceEntryArgs size: %lu bytes", skHeaderInfoHost->totalSize);
@@ -368,7 +364,7 @@ void SuperKernelExceptionHandler::PrintDfxInfo() const {
           dfxInfo[i].cubeNum, dfxInfo[i].vecNum);
       if (funcNodeIndices_.count(i) > 0) {
         aclrtFuncHandle funcHdl = reinterpret_cast<aclrtFuncHandle>(dfxInfo[i].funcHdlOri);
-        char funcName[256] = {0};
+        char funcName[MAX_FUNC_NAME_LEN] = {0};
         aclError ret = aclrtGetFunctionName(funcHdl, sizeof(funcName), funcName);
         if (ret == ACL_SUCCESS) {
           SK_LOGE("    Origin function name: %s", funcName);
@@ -528,7 +524,7 @@ KernelFuncName SuperKernelExceptionHandler::GetOrLoadKernelSymbols(uint32_t opId
   aclrtFuncHandle funcHdl = reinterpret_cast<aclrtFuncHandle>(dfxInfo[opId].funcHdlOri);
   SK_LOGI("Loading function name for opId=%u, funcHdl=%p", opId, funcHdl);
 
-  char funcName[256] = {0};
+  char funcName[MAX_FUNC_NAME_LEN] = {0};
   constexpr uint32_t maxLen = sizeof(funcName);
   aclError ret = aclrtGetFunctionName(funcHdl, maxLen, funcName);
   if (ret != ACL_SUCCESS) {
@@ -576,7 +572,7 @@ void SuperKernelExceptionHandler::PrintFuncSymbolInfo(uint32_t coreId, rtCoreTyp
 
   // Print origin function name from funcHdlOri
   aclrtFuncHandle funcHdl = reinterpret_cast<aclrtFuncHandle>(dfxNode.funcHdlOri);
-  char funcName[256] = {0};
+  char funcName[MAX_FUNC_NAME_LEN] = {0};
   aclError ret = aclrtGetFunctionName(funcHdl, sizeof(funcName), funcName);
   if (ret == ACL_SUCCESS) {
     SK_LOGE("[Core %u] Origin function name: %s", coreId, funcName);
@@ -861,7 +857,6 @@ aclError SuperKernelExceptionHandler::CheckError(aclError ret, const char *error
 }
 
 bool SuperKernelExceptionHandler::IsSuperKernelException(aclrtExceptionInfo *exceptionInfo) {
-  constexpr uint32_t MAX_FUNC_NAME_LEN = 256;
   char funcName[MAX_FUNC_NAME_LEN] = {0};
 
   // Get exception function handle
@@ -933,7 +928,7 @@ aclError SuperKernelExceptionHandler::PrepareExceptionDump(aclrtExceptionInfo *e
  */
 aclError SuperKernelExceptionHandler::PopulateSkEntryFields(Adx::ExceptionDumpInfo &dumpInfo,
                                                             aclrtExceptionInfo *exceptionInfo) {
-  char skFuncName[Adx::MAX_KERNELNAME_LEN] = {0};
+  char skFuncName[MAX_FUNC_NAME_LEN] = {0};
   aclrtFuncHandle funcHandle = nullptr;
 
   aclError ret = aclrtGetFuncHandleFromExceptionInfo(exceptionInfo, &funcHandle);
@@ -942,7 +937,7 @@ aclError SuperKernelExceptionHandler::PopulateSkEntryFields(Adx::ExceptionDumpIn
     return ACL_ERROR_FAILURE;
   }
 
-  ret = aclrtGetFunctionName(funcHandle, Adx::MAX_KERNELNAME_LEN, skFuncName);
+  ret = aclrtGetFunctionName(funcHandle, MAX_FUNC_NAME_LEN, skFuncName);
   if (ret != ACL_SUCCESS) {
     SK_LOGE("Failed to get function name, ret=%d", ret);
     return ACL_ERROR_FAILURE;
@@ -999,7 +994,6 @@ bool SuperKernelExceptionHandler::PopulateSubKernelFields(Adx::ExceptionDumpInfo
                                                           aclrtExceptionInfo *exceptionInfo) {
   if (errorNodeIdx < 0 || static_cast<uint32_t>(errorNodeIdx) >= skHeaderInfoHost->nodeCnt) {
     SK_LOGI("No sub kernel matched, fill with SK entry fields");
-    constexpr uint32_t MAX_FUNC_NAME_LEN = 256;
     char funcName[MAX_FUNC_NAME_LEN] = {0};
 
     // Get SK entry func handle from exception info
@@ -1020,7 +1014,7 @@ bool SuperKernelExceptionHandler::PopulateSubKernelFields(Adx::ExceptionDumpInfo
       SK_LOGI("Successfully got function name: %s", funcName);
       snprintf_s(dumpInfo.kernelName, Adx::MAX_KERNELNAME_LEN, Adx::MAX_KERNELNAME_LEN - 1, "%s", funcName);
     } else {
-      SK_LOGI("Failed to get function name, ret=%d", ret);
+      SK_LOGW("Failed to get SK entry function name, ret=%d; continuing without function name", ret);
       memset_s(dumpInfo.kernelName, sizeof(dumpInfo.kernelName), 0, sizeof(dumpInfo.kernelName));
     }
 
@@ -1034,7 +1028,7 @@ bool SuperKernelExceptionHandler::PopulateSubKernelFields(Adx::ExceptionDumpInfo
     // Exception occurred within Superkernel (not in sub-kernel), no sub-kernel args available
     dumpInfo.argAddr = nullptr;
     dumpInfo.argSize = 0;
-    SK_LOGI("Not match sub Kernel, exception occurred within Superkernel");
+    SK_LOGI("Does not match sub kernel, exception occurred within Superkernel");
     return true;
   }
 
@@ -1075,7 +1069,7 @@ aclError SuperKernelExceptionHandler::PopulateDumpInfoFields(Adx::ExceptionDumpI
 
   aclError ret = PopulateSkEntryFields(dumpInfo, exceptionInfo);
   if (ret != ACL_SUCCESS) {
-    SK_LOGI("PopulateSkEntryFields failed, ret=%d", ret);
+    SK_LOGE("Failed to populate SK entry fields, ret=%d", ret);
     return ret;
   }
 

@@ -1,39 +1,54 @@
-# super_kernel Sample Usage Guide
+# SuperKernel Sample Guide
 
-## Function Description
+## Overview
 
-Use super_kernel to complete operator fusion.
+This directory contains two groups of SuperKernel Python samples. See the `README_en.md` in each sample directory for its supported products and execution instructions.
+
+- `jit/`: builds and runs fused kernels through the SuperKernel JIT interface.
+- `aot/`: enables SuperKernel optimization during TorchAir `npugraph_ex` static compilation.
 
 ## Directory Structure
+
 ```text
 examples/
-├── super_kernel_base							# basic functionality sample
-│   └── superkernel_scope.py					# complete operator fusion through super_kernel
-├── super_kernel_profiling						# profiling demonstration sample
-│   └── superkernel_compare.py					# compare data using super_kernel vs not using super_kernel
-└── super_kernel_runtime_ascendc_only			# minimal super_kernel sample
-    └── superkernel_runtime_ascendc_basic.py	# compile super_kernel through ascendc for operator fusion, execute using runtime environment
+├── run_example.sh                                   # Engineering test batch script
+├── jit/
+│   ├── example01_super_kernel_base/                 # Basic SuperKernel usage
+│   ├── example02_super_kernel_profiling/            # Profiling comparison
+│   └── example03_super_kernel_runtime_ascendc_only/ # Minimal AscendC and Runtime sample
+└── aot/
+    ├── scripts/                                     # Shared Bash functions for AOT samples
+    ├── example01_dual_stream/                       # Two streams with NPU events
+    ├── example02_sk_options/                        # SuperKernel options
+    └── example03_kernel_pybind/                     # Pybind custom operator fusion
 ```
 
 ## Prerequisites
 
-Please refer to "[Source Build Guide](../../docs/en/build.md)" to complete prerequisite environment preparation.
+The samples support the following product models:
 
-## Dependency Installation
+- Ascend 950PR/Ascend 950DT
+- Atlas A3 training series products/Atlas A3 inference series products
+- Atlas A2 training series products/Atlas A2 inference series products
 
-Python dependencies required for sample execution are written in [requirements.txt](requirements.txt), can install through:
-```shell
-pip3 install -r requirements.txt
+Follow the [source build guide](../../docs/en/build.md) and install the officially released matching
+PyTorch and TorchNPU versions. See the
+[Ascend Extension for PyTorch user guide](https://www.hiascend.com/document/redirect/pytorchuserguide).
+Finally, install the Python dependencies of these samples:
+
+```bash
+pip install -r super_kernel/examples/requirements.txt
 ```
 
-## Use Case Demonstrations
+## Sample Summary
 
-[Use Case 1](super_kernel_base/README_en.md)
+Use the table below to route quickly to a sample. Refer to the README in each sample directory for supported products and execution instructions.
 
-[Use Case 2](super_kernel_profiling/README_en.md)
-
-[Use Case 3](super_kernel_runtime_ascendc_only/README_en.md)
-
-## Reference
-
-Please refer to relevant content in "[Ascend Extension for PyTorch](https://www.hiascend.com/document/redirect/pytorchuserguide)" under "Suite and Third-party Libraries > PyTorch Graph Mode Usage (TorchAir) > API Reference > torchair.scope > super_kernel".
+| Type | Sample | Documentation and instructions |
+| --- | --- | --- |
+| JIT | [example01_super_kernel_base](./jit/example01_super_kernel_base/README_en.md) | [README.md](./jit/example01_super_kernel_base/README.md) / [README_en.md](./jit/example01_super_kernel_base/README_en.md) |
+| JIT | [example02_super_kernel_profiling](./jit/example02_super_kernel_profiling/README_en.md) | [README.md](./jit/example02_super_kernel_profiling/README.md) / [README_en.md](./jit/example02_super_kernel_profiling/README_en.md) |
+| JIT | [example03_super_kernel_runtime_ascendc_only](./jit/example03_super_kernel_runtime_ascendc_only/README_en.md) | [README.md](./jit/example03_super_kernel_runtime_ascendc_only/README.md) / [README_en.md](./jit/example03_super_kernel_runtime_ascendc_only/README_en.md) |
+| AOT | [example01_dual_stream](./aot/example01_dual_stream/README_en.md) | [README.md](./aot/example01_dual_stream/README.md) / [README_en.md](./aot/example01_dual_stream/README_en.md) |
+| AOT | [example02_sk_options](./aot/example02_sk_options/README_en.md) | [README.md](./aot/example02_sk_options/README.md) / [README_en.md](./aot/example02_sk_options/README_en.md) |
+| AOT | [example03_kernel_pybind](./aot/example03_kernel_pybind/README_en.md) | [README.md](./aot/example03_kernel_pybind/README.md) / [README_en.md](./aot/example03_kernel_pybind/README_en.md) |

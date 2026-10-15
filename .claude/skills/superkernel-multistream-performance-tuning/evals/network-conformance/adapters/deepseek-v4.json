@@ -1,0 +1,18 @@
+{
+  "adapter_fingerprint": "sha256:1de94f7ca955a9edbcf28808a40f6028d8f2d5c3ee7fe5035e2d09994a25cd2f",
+  "adapter_id": "deepseek-v4-resource-screening-v1",
+  "capabilities": [
+    "resource_screening"
+  ],
+  "evidence": [
+    {
+      "file_fingerprint": "sha256:387cbe752838ef917a1447026ebf2cb827b2d71d13f51f2f53910fd5fcb317fc",
+      "kind": "resource_screening",
+      "path": "network-conformance/evidence/deepseek-v4-screening-receipt.json",
+      "schema_version": "superkernel-multistream-resource-screening-receipt-v1"
+    }
+  ],
+  "expected_decision": "no_reorder_candidate",
+  "network_class": "distributed_large_model",
+  "schema_version": "superkernel-multistream-conformance-adapter-v1"
+}

@@ -13,10 +13,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(LOCAL_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(super_kernel_aot_utest
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_model_fixture.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_pattern_common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_options_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_super_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_graph.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_scope_verify.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_node.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_scope_split.cpp
@@ -38,14 +41,15 @@ add_executable(super_kernel_aot_utest
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_dump_json.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_log_context.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_common.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/stub/aclrt_stubs.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/stub/ut_common_stubs.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/stub/rt_stub.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_common.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_options_manager.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_graph.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_scope_launch.cpp
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_scope_verify.cpp
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_verify_graph.cpp
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_verify_scope_split.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_scope_split.cpp
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_scope_split_result_reporter.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_lock_detector.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_node.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_optimizer.cpp
@@ -57,21 +61,14 @@ add_executable(super_kernel_aot_utest
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_resource_manager.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_scope_postprocess.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_event_recorder.cpp
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/common/pattern_common.cpp
 )
 
 target_include_directories(super_kernel_aot_utest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/stub
-    ${CMAKE_CURRENT_SOURCE_DIR}/stub/dump
-    ${CMAKE_CURRENT_SOURCE_DIR}/stub/runtime
-    ${CMAKE_CURRENT_SOURCE_DIR}/stub/acl
-    ${CMAKE_CURRENT_SOURCE_DIR}/stub/base
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/common/
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/include/super_kernel/
-)
-
-target_compile_definitions(super_kernel_aot_utest PRIVATE
-    UT_TEST
 )
 
 target_compile_options(super_kernel_aot_utest PRIVATE
@@ -82,8 +79,9 @@ target_compile_options(super_kernel_aot_utest PRIVATE
 )
 
 target_link_libraries(super_kernel_aot_utest PRIVATE
-    $<BUILD_INTERFACE:intf_llt_pub>
+    $<BUILD_INTERFACE:intf_llt_ut>
     json
+    super_kernel_aot_stub
 )
 
 run_llt_test(

@@ -1,0 +1,25 @@
+{
+  "schema_version": "superkernel-multistream-adapter-capability-v1",
+  "adapter_id": "reference-real-npu-capabilities-v1",
+  "network_class": "minimal_reference",
+  "artifacts": [
+    {"kind": "cleanup_evaluation", "path": "superkernel-multistream-performance-tuning/evals/cleanup-evaluation/real-npu-trial-receipt.json"},
+    {"kind": "network_conformance_report", "path": "superkernel-multistream-performance-tuning/evals/network-conformance/report.json"},
+    {"kind": "real_npu_closure_receipt", "path": "superkernel-multistream-performance-tuning/evals/real-npu-reference/receipt.json"},
+    {"kind": "shared_npu_lease_inventory", "path": "superkernel-auto-tune/evals/shared-npu-lease-20260829/inventory.json"}
+  ],
+  "capabilities": [
+    {"name": "clean_performance_validation", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "core_family_classification", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "dependency_evidence", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "four_profile_orchestration", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "identity_binding", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "isolated_cleanup", "status": "supported", "evidence_artifacts": ["cleanup_evaluation"], "blocker": null},
+    {"name": "model_execution", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "operator_reorder_materialization", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "raw_capture_ingestion", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "shared_npu_lease", "status": "supported", "evidence_artifacts": ["shared_npu_lease_inventory"], "blocker": null},
+    {"name": "source_exact_mapping", "status": "supported", "evidence_artifacts": ["real_npu_closure_receipt"], "blocker": null},
+    {"name": "scope_api_materialization", "status": "unsupported", "evidence_artifacts": [], "blocker": {"code": "MISSING_SCOPE_ACTION_CLOSURE", "detail": "the sealed real NPU closure exercised operator reorder, not a scope API source action"}}
+  ]
+}

@@ -17,10 +17,6 @@ on:
         required: false
         type: string
         default: ''
-      gcc_version:
-        required: false
-        type: string
-        default: ''
     outputs:
       arm_run_url:
         value: ${{jobs.JOB_compile.outputs.primary-url}}
@@ -37,6 +33,7 @@ jobs:
         uses: checkout
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+          allow-unsafe-pr-checkout: true
           token: ${{secrets.GIT_TOKEN}}
       -
         name: download
@@ -61,7 +58,6 @@ jobs:
             export WORKSPACE=${{ steps.process_checkout.outputs.path }}
             cd ${{ steps.process_checkout.outputs.path }}
             export task_name=${{ inputs.task_name }}
-            export GCC_VERSION=${{ inputs.gcc_version }}
             export target_branch=${{ env.TARGET_BRANCH }}
             BuildAccelerate bash compile.sh
           AC_SERVER_IP: ${{ vars.AC_SERVER_IP }}

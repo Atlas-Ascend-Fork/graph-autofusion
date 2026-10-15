@@ -160,6 +160,17 @@ thread_local std::string FileHandleManager::currentHandle_ = "default";
 // Thread-local current model ID
 thread_local std::string FileLogger::currentModelId_;
 
+// Thread-local file log suppression
+thread_local bool FileLogger::suppressFileLog_ = false;
+
+FileLogSuppressGuard::FileLogSuppressGuard() : previousSuppressFileLog_(FileLogger::suppressFileLog_) {
+  FileLogger::suppressFileLog_ = true;
+}
+
+FileLogSuppressGuard::~FileLogSuppressGuard() {
+  FileLogger::suppressFileLog_ = previousSuppressFileLog_;
+}
+
 FileHandleManager::FileHandleManager() {}
 
 FileHandleManager::~FileHandleManager() {
@@ -371,7 +382,7 @@ void FileLogger::SwitchToDefault() {
 }
 
 std::unique_ptr<LogContextGuard> FileLogger::CreateContext(const std::string &fileName, const std::string &modelId) {
-  if (!initialized_.load() || !enabled_.load(std::memory_order_relaxed)) {
+  if (suppressFileLog_ || !initialized_.load() || !enabled_.load(std::memory_order_relaxed)) {
     return nullptr;
   }
 

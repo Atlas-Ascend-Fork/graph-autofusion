@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SuperKernel Auto Tune Session v1",
+  "type": "object",
+  "required": ["schema_version", "session_id", "artifact_root", "optional_mode", "status", "steps"],
+  "properties": {
+    "schema_version": {"const": "superkernel-auto-tune-session-v1"},
+    "session_id": {"type": "string", "minLength": 1},
+    "artifact_root": {"type": "string", "minLength": 1},
+    "optional_mode": {"enum": ["none", "multistream", "source-range", "both"]},
+    "entrypoint": {"enum": ["full", "optional-from-base", "source-range-from-smap"]},
+    "evidence_import": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "status": {"enum": ["active", "completed"]},
+    "steps": {"type": "array", "minItems": 1}
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["entrypoint"],
+        "properties": {
+          "entrypoint": {"enum": ["optional-from-base", "source-range-from-smap"]}
+        }
+      },
+      "then": {"required": ["evidence_import"]}
+    }
+  ],
+  "additionalProperties": true
+}

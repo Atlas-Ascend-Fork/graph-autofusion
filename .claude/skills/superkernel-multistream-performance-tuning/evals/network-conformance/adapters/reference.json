@@ -1,0 +1,18 @@
+{
+  "adapter_fingerprint": "sha256:3d7abc672a0bb4df38a2cba26eef28d81a7c986f1e21cf4c01498f37e1429baa",
+  "adapter_id": "reference-real-npu-v1",
+  "capabilities": [
+    "real_npu_closure"
+  ],
+  "evidence": [
+    {
+      "file_fingerprint": "sha256:7f9d0dff2db11c396a9af4bb1016fdc2883eb55904585d23a784d12e56406dba",
+      "kind": "real_npu_closure",
+      "path": "real-npu-reference/receipt.json",
+      "schema_version": "superkernel-multistream-real-npu-receipt-v1"
+    }
+  ],
+  "expected_decision": "no_gain",
+  "network_class": "minimal_reference",
+  "schema_version": "superkernel-multistream-conformance-adapter-v1"
+}

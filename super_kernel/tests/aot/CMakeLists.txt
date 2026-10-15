@@ -17,7 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 
 
-if(ENABLE_CPP_UTEST)
+if(ENABLE_CPP_UTEST OR ENABLE_CPP_STEST)
     set(GRAPH_AUTOFUSION_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../)
     set(CMAKE_MODULE_PATH
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/module
@@ -26,6 +26,12 @@ if(ENABLE_CPP_UTEST)
 
     include(cmake/config.cmake)
     include(cmake/intf.cmake)
-    include(cmake/func.cmake)    
-    add_subdirectory(ut)
+    include(cmake/func.cmake)
+    add_subdirectory(depends)
+    if(ENABLE_CPP_UTEST)
+        add_subdirectory(ut)
+    endif()
+    if(ENABLE_CPP_STEST)
+        add_subdirectory(st)
+    endif()
 endif()

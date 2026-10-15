@@ -1,0 +1,41 @@
+{
+  "adapters": [
+    {
+      "file_fingerprint": "sha256:9e4b9b79611f129d46fbb9bceb07fcd0139babd81c13625565a51f8bf02c768d",
+      "path": "network-conformance/adapters/reference.json"
+    },
+    {
+      "file_fingerprint": "sha256:637ac6fc5282a9292de8a7ea82ca1150a9a96471780f1321f3ac54c3464b9f5c",
+      "path": "network-conformance/adapters/deepseek-v4.json"
+    }
+  ],
+  "core_files": [
+    {
+      "file_fingerprint": "sha256:2349132a6b6cd508d8f4349bcacfb0e73d43161fd3ae7dd5b488bc3cde451d85",
+      "path": "scripts/multistream_capture_producer.py"
+    },
+    {
+      "file_fingerprint": "sha256:a46f107b9e044f344e004b251767b79c342d02114385e0c0285df482b843b850",
+      "path": "scripts/multistream_core_family.py"
+    },
+    {
+      "file_fingerprint": "sha256:3db4c3b695b5b04d9158ea70163326d1e16c0f440472b51c60181759c10dfcdf",
+      "path": "scripts/multistream_dependency_evidence.py"
+    },
+    {
+      "file_fingerprint": "sha256:4ac57b968c7af3d6a80a56f2b570b4442617e78187ca8fb1ce9401020f55ee5b",
+      "path": "scripts/multistream_identity_binding.py"
+    },
+    {
+      "file_fingerprint": "sha256:8093ce7d68f58c40ddc96a85efc52237b33bb858d493df7c6d6d125c31d36498",
+      "path": "scripts/multistream_npu_closure.py"
+    },
+    {
+      "file_fingerprint": "sha256:2ebd9a216abec6c5c4feacb5a4222c80d10af058ed950998b526e2ba586b4af8",
+      "path": "scripts/multistream_operator_order.py"
+    }
+  ],
+  "plan_fingerprint": "sha256:8306f9e98433972c229700f3f9ac4697d17561a2220c507a348468c2aa20268c",
+  "schema_version": "superkernel-multistream-network-conformance-plan-v1",
+  "suite_id": "reference-and-large-model-20260829"
+}

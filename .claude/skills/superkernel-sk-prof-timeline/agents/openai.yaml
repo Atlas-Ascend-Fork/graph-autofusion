@@ -1,0 +1,4 @@
+interface:
+  display_name: "SK Prof Timeline"
+  short_description: "Collapse sk_prof AIC/AIV cores into two Chrome Trace lanes"
+  default_prompt: "Compact an Ascend sk_prof JSON into Cube and Vector Chrome Trace lanes, then summarize the output."

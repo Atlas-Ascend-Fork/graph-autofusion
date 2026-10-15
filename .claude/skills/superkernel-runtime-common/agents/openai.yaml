@@ -1,0 +1,4 @@
+interface:
+  display_name: "SuperKernel Shared Runtime"
+  short_description: "Internal runtime for SuperKernel tuning phases"
+  default_prompt: "Use the named SuperKernel phase skill; this package only supplies shared deterministic runtime tools."

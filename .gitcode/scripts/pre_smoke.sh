@@ -13,6 +13,7 @@ set -euo pipefail
 
 echo "start run test case, please wait ..."
 cd ${WORKSPACE}
+: "${NPU_ARCH:?NPU_ARCH is required}"
 
 export ASCEND_GLOBAL_LOG_LEVEL=2
 export ASCEND_SLOG_PRINT_TO_STDOUT=0
@@ -41,10 +42,11 @@ wget -nv ${arm_run_url} && chmod 777 ${arm_package}
 /opt/conda/envs/python39/bin/python3 -m pip install 'setuptools>=68,<80'
 chmod +x ${arm_package}
 echo 'y' | bash ${arm_package} --full --quiet --pylocal
-echo "bash ${arm_package} bash build.sh --run_example --no-autofuse"
+echo "bash super_kernel/examples/run_example.sh --npu-arch=${NPU_ARCH}"
 source /opt/conda/bin/activate python39
 pip3 install build
-source /usr/local/Ascend/cann/set_env.sh && bash build.sh --run_example --no-autofuse 2>&1 | tee -a ./run_test.log
+source /usr/local/Ascend/cann/set_env.sh && \
+  bash super_kernel/examples/run_example.sh --npu-arch="${NPU_ARCH}" 2>&1 | tee -a ./run_test.log
 source /opt/conda/bin/deactivate
 
 # ==============================

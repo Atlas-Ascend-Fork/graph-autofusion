@@ -1,0 +1,4 @@
+interface:
+  display_name: "SuperKernel 自动调优总控"
+  short_description: "Dispatch generic subagents for evidence-gated SK tuning"
+  default_prompt: "Use $superkernel-auto-tune to run the complete Ascend SuperKernel lifecycle or derive an approved optional-experiment session from verified BASE evidence. Dispatch a fresh host-native generic subagent for each phase, preserve every evidence gate and failure scene, and always generate the final Chinese E2E report."

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SuperKernel Auto Tune Phase Result v1",
+  "type": "object",
+  "required": ["schema_version", "session_id", "step_id", "phase", "agent_id", "status", "summary_zh", "input_fingerprints", "consumed_artifacts", "produced_artifacts", "decisions", "blockers", "next_step_guidance_zh", "details_zh"],
+  "properties": {
+    "schema_version": {"const": "superkernel-auto-tune-phase-result-v1"},
+    "session_id": {"type": "string", "minLength": 1},
+    "step_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "phase": {"type": "string"},
+    "agent_id": {"type": "string", "description": "Stable logical phase worker and audit ID; it does not require a registered host Agent profile."},
+    "status": {"enum": ["succeeded", "accepted", "no_gain", "blocked", "failed", "invalid", "not_requested", "not_run"]},
+    "summary_zh": {"type": "string", "minLength": 1},
+    "input_fingerprints": {"type": "object"},
+    "consumed_artifacts": {"type": "array", "items": {"type": "string"}},
+    "produced_artifacts": {"type": "array", "items": {"type": "string"}},
+    "decisions": {"type": "array"},
+    "blockers": {"type": "array"},
+    "next_step_guidance_zh": {"type": "string", "minLength": 1},
+    "details_zh": {"type": "object"}
+  },
+  "additionalProperties": true
+}

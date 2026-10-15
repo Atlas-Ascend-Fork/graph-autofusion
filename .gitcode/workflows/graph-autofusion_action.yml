@@ -26,7 +26,6 @@ env:
   obs_path: "${{ env.org_name }}/${{ env.repo_name }}/ci/package/${{ env.MERGE_ID }}"
   obs_smoke_path: "${{ env.obs_path }}/presmoke/2"
   online: ${{ vars.APPLY_LABEL }}
-  GCC_VERSION: ${{ vars.GCC_VERSION }}
 
 stages:
   stage1:
@@ -55,9 +54,9 @@ stages:
   stage2:
     name: Compile
     jobs:
-      JOB_codecheck_action:
+      JOB_codecheck:
         name: CodeCheck
-        uses: .gitcode/workflows/codecheck_action.yml
+        uses: cann/.gitcode/.gitcode/workflows/codecheck_action.yml@master
         with:
           precommit_image_version: ${{ jobs.JOB_image.outputs.precommit }}
           codecheck_image_version: ${{ jobs.JOB_image.outputs.codecheck }}
@@ -69,7 +68,6 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
           arch: 'x64'
           package_name: 'cann-graph-autofusion_linux-x86_64.run'
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_x86_compile_ubuntu24:
         name: Compile_Ascend_X86_ubuntu24
         uses: .gitcode/workflows/compile_action.yml
@@ -78,7 +76,6 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_X86_ubuntu24 }}
           arch: 'x64'
           package_name: 'cann-graph-autofusion_linux-x86_64_ubuntu24.run'
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_arm_compile:
         name: Compile_Ascend_ARM
         uses: .gitcode/workflows/compile_action.yml
@@ -87,7 +84,6 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_ARM }}
           arch: 'arm64'
           package_name: 'cann-graph-autofusion_linux-aarch64.run'
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_arm_compile_ubuntu24:
         name: Compile_Ascend_ARM_ubuntu24
         uses: .gitcode/workflows/compile_action.yml
@@ -96,7 +92,6 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_ARM_ubuntu24 }}
           arch: 'arm64'
           package_name: 'cann-graph-autofusion_linux-aarch64_ubuntu24.run'
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_staticcheck_md_check:
         name: CodeCheck_staticcheck_md_check
         uses: .gitcode/workflows/staticcheck_action.yml
@@ -145,7 +140,7 @@ stages:
             uses: checkout
             with:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
-              token: ${{secrets.GIT_TOKEN}}
+              allow-unsafe-pr-checkout: true
           -
             name: api_check
             identifier: api_check
@@ -171,7 +166,6 @@ stages:
           ut_type: 'UT_Test_Python_superkernel'
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.UT_Test_Python_superkernel }}
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_ST_TEST_Python_superkernel:
         name: ST_Test_Python_superkernel
         select: selected_by_default
@@ -181,17 +175,26 @@ stages:
           ut_type: 'ST_Test_Python_superkernel'
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_Python_superkernel }}
-          gcc_version: ${{ env.GCC_VERSION }}
-      JOB_UT_TEST_superkernel:
-        name: UT_Test_superkernel
+      JOB_UT_Test_Cpp_superkernel:
+        name: UT_Test_Cpp_superkernel
+        if: ${{ env.TARGET_BRANCH == 'master' }}
         select: selected_by_default
         needs: []
         uses: .gitcode/workflows/ut_action.yml
         with:
-          ut_type: 'UT_Test_superkernel'
+          ut_type: 'UT_Test_Cpp_superkernel'
           ut_package: 'coverage_*.info'
-          image_version: ${{ jobs.JOB_image.outputs.UT_Test_superkernel }}
-          gcc_version: ${{ env.GCC_VERSION }}
+          image_version: ${{ jobs.JOB_image.outputs.UT_Test_Cpp_superkernel }}
+      JOB_ST_Test_Cpp_superkernel:
+        name: ST_Test_Cpp_superkernel
+        if: ${{ env.TARGET_BRANCH == 'master' }}
+        select: selected_by_default
+        needs: []
+        uses: .gitcode/workflows/ut_action.yml
+        with:
+          ut_type: 'ST_Test_Cpp_superkernel'
+          ut_package: 'coverage_*.info'
+          image_version: ${{ jobs.JOB_image.outputs.ST_Test_Cpp_superkernel }}
       JOB_UT_TEST_autofuse_framework:
         name: UT_Test_autofuse_framework
         select: selected_by_default
@@ -202,7 +205,6 @@ stages:
           ut_package: 'coverage_*.info'
           spec_size: '2xlarge'
           image_version: ${{ jobs.JOB_image.outputs.UT_Test_autofuse_framework }}
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_ST_TEST_autofuse_framework:
         name: ST_Test_autofuse_framework
         select: selected_by_default
@@ -212,7 +214,6 @@ stages:
           ut_type: 'ST_Test_autofuse_framework'
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_framework }}
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_UT_TEST_autofuse_ascendc_api:
         name: UT_Test_autofuse_ascendc_api
         select: selected_by_default
@@ -222,7 +223,6 @@ stages:
           ut_type: 'UT_Test_autofuse_ascendc_api'
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.UT_Test_autofuse_ascendc_api }}
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_ST_TEST_autofuse_ascendc_api:
         name: ST_Test_autofuse_ascendc_api
         select: selected_by_default
@@ -232,7 +232,6 @@ stages:
           ut_type: 'ST_Test_autofuse_ascendc_api'
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_ascendc_api }}
-          gcc_version: ${{ env.GCC_VERSION }}
       JOB_ST_TEST_autofuse_e2e:
         name: ST_Test_autofuse_e2e
         select: selected_by_default
@@ -242,7 +241,6 @@ stages:
           ut_type: 'ST_Test_autofuse_e2e'
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
-          gcc_version: ${{ env.GCC_VERSION }}
     pre:
     - type: auto
     fail-fast: false
@@ -258,7 +256,7 @@ stages:
             uses: checkout
             with:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
-              token: ${{ secrets.GIT_TOKEN }}
+              allow-unsafe-pr-checkout: true
           -
             name: download
             uses: obs-download
@@ -277,7 +275,7 @@ stages:
               workspace: ${{ steps.process_checkout.outputs.path }}
               cov_mode: "report"
               ut_field: "superkernel"
-              modules: "UT_Test_superkernel"
+              modules: "UT_Test_superkernel UT_Test_autofuse_framework UT_Test_autofuse_ascendc_api"
               source_branch: ${{ env.SOURCE_BRANCH }}
               target_branch: ${{ env.TARGET_BRANCH }}
               obs_path: ${{ env.obs_path }}
@@ -293,7 +291,7 @@ stages:
               artifact-path: |
                 ${{ steps.process_checkout.outputs.path }}/ut_cov_*.tar.gz
               object-prefix: ${{ env.obs_path }}/
-        if: env.TARGET_BRANCH == 'master'
+        if: env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop'
         runs-on: ['self-hosted', 'arch=x64', 'spec=large']
         container:
           image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.UT_Test_report }}
@@ -306,7 +304,7 @@ stages:
             uses: checkout
             with:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
-              token: ${{ secrets.GIT_TOKEN }}
+              allow-unsafe-pr-checkout: true
           -
             name: download
             uses: obs-download
@@ -325,7 +323,7 @@ stages:
               workspace: ${{ steps.process_checkout.outputs.path }}
               cov_mode: "report"
               ut_field: "superkernel"
-              modules: "ST_Test_Python_superkernel"
+              modules: "ST_Test_Python_superkernel ST_Test_autofuse_ascendc_api ST_Test_autofuse_e2e"
               source_branch: ${{ env.SOURCE_BRANCH }}
               target_branch: ${{ env.TARGET_BRANCH }}
               obs_path: ${{ env.obs_path }}
@@ -341,7 +339,7 @@ stages:
               artifact-path: |
                 ${{ steps.process_checkout.outputs.path }}/ut_cov_*.tar.gz
               object-prefix: ${{ env.obs_path }}/
-        if: env.TARGET_BRANCH == 'master'
+        if: env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop'
         runs-on: ['self-hosted', 'arch=x64', 'spec=large']
         container:
           image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.ST_Test_report }}
@@ -360,8 +358,8 @@ stages:
             identifier: process_checkout
             uses: checkout
             with:
-              token: ${{secrets.GIT_TOKEN}}
-              path: "./runner"
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+              allow-unsafe-pr-checkout: true
           -
             name: download
             uses: obs-download
@@ -387,6 +385,7 @@ stages:
               export AK=${{secrets.AK}}
               export SK=${{secrets.SK}}
               export WORKSPACE=${{ steps.process_checkout.outputs.path }}
+              export NPU_ARCH=dav-2201
               bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh
           - name: upload
             uses: obs-upload

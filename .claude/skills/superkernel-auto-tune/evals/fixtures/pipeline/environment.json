@@ -1,0 +1,32 @@
+{
+  "ready": true,
+  "options": {
+    "optimize_options": {
+      "auto_op_parallel": {
+        "accepted": true,
+        "accepted_values": [0, 1],
+        "rejected_values": []
+      },
+      "dcci_before_kernel_start": {
+        "accepted": true,
+        "accepted_values": [[".*GroupedMatmul.*"]],
+        "rejected_values": []
+      },
+      "dcci_after_kernel_end": {
+        "accepted": true,
+        "accepted_values": [[".*GroupedMatmul.*"]],
+        "rejected_values": []
+      },
+      "dcci_disable_on_kernel": {
+        "accepted": true,
+        "accepted_values": [[".*GroupedMatmul.*"]],
+        "rejected_values": []
+      },
+      "aggressive_opt_strategies": {
+        "accepted": false,
+        "accepted_values": [],
+        "rejected_values": []
+      }
+    }
+  }
+}

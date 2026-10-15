@@ -1,0 +1,4 @@
+interface:
+  display_name: "SuperKernel Multistream Performance Tuning"
+  short_description: "Isolated multistream SK tuning with incumbent fallback"
+  default_prompt: "Use $superkernel-multistream-performance-tuning to run an isolated winner-only multistream tuning branch and preserve the incumbent unless a validated clean end-to-end gain is accepted."

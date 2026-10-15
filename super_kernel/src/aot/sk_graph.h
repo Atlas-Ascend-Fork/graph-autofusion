@@ -33,6 +33,7 @@
 #include "acl/acl.h"
 
 class SuperKernelOptionsManager;
+class ScopeVerifyGraphBuilder;
 
 using Json = nlohmann::ordered_json;
 
@@ -184,6 +185,7 @@ class SuperKernelGraph {
   aclmdlRI modelRI;
   std::string modelId;
   friend class SuperKernelOptimizer;
+  friend class ScopeVerifyGraphBuilder;
   std::unordered_map<std::string, uint32_t> scopeNameToIdx;  ///< scopeName -> scopeIdx
   std::unordered_map<uint32_t, std::string> scopeIdxToName;  ///< scopeIdx -> scopeName (reverse mapping)
   std::vector<OriginalScopeInfo> originalScopeInfos_;        ///< Original scopes before any splitting

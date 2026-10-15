@@ -113,7 +113,7 @@ struct ElfSymbolTables {
 };
 
 static bool ValidateElfSectionRange(size_t binSize, uint64_t offset, uint64_t size) {
-  return offset <= binSize && offset + size <= binSize;
+  return offset <= binSize && size <= binSize - offset;
 }
 
 static bool FindElfSymbolTables(const char *binAddr, size_t binSize, ElfSymbolTables &tables) {
@@ -272,47 +272,40 @@ std::string GetSocName() {
 
 // ==================== Device Core Number Utilities ====================
 
-int64_t GetDeviceCubeCoreNum() {
+aclError GetDeviceCoreNums(int64_t &cubeNum, int64_t &vecNum) {
+  cubeNum = 0;
   int32_t deviceId = 0;
   aclError ret = aclrtGetDevice(&deviceId);
   if (ret != ACL_SUCCESS) {
-    SK_LOGE("[DeviceCores] Failed to get deviceId, ret=%d", ret);
-    return 0;
+    uint32_t deviceCount = 0;
+    ret = aclrtGetDeviceCount(&deviceCount);
+    if (ret != ACL_SUCCESS) {
+      SK_LOGE("[DeviceCores] Failed to get device count, ret=%d", ret);
+      return ACL_ERROR_INVALID_PARAM;
+    }
+    if (deviceCount == 0) {
+      SK_LOGE("[DeviceCores] No available devices");
+      return ACL_ERROR_INVALID_PARAM;
+    }
+    deviceId = 0;
   }
-  int64_t cubeNum = 0;
   ret = aclrtGetDeviceInfo(deviceId, ACL_DEV_ATTR_CUBE_CORE_NUM, &cubeNum);
   if (ret != ACL_SUCCESS) {
     SK_LOGE("[DeviceCores] Failed to get cube core num, ret=%d", ret);
-    return 0;
+    return ACL_ERROR_INVALID_PARAM;
   }
-  return cubeNum;
-}
-
-int64_t GetDeviceVecCoreNum() {
-  int32_t deviceId = 0;
-  aclError ret = aclrtGetDevice(&deviceId);
-  if (ret != ACL_SUCCESS) {
-    SK_LOGE("[DeviceCores] Failed to get deviceId, ret=%d", ret);
-    return 0;
+  if (cubeNum <= 0) {
+    SK_LOGE("[DeviceCores] Invalid cube core num: %ld", cubeNum);
+    return ACL_ERROR_INVALID_PARAM;
   }
-  int64_t vecNum = 0;
+  vecNum = 0;
   ret = aclrtGetDeviceInfo(deviceId, ACL_DEV_ATTR_VECTOR_CORE_NUM, &vecNum);
   if (ret != ACL_SUCCESS) {
     SK_LOGE("[DeviceCores] Failed to get vec core num, ret=%d", ret);
-    return 0;
-  }
-  return vecNum;
-}
-
-aclError GetDeviceCoreNums(int64_t &cubeNum, int64_t &vecNum) {
-  cubeNum = GetDeviceCubeCoreNum();
-  if (cubeNum <= 0) {
-    SK_LOGE("[DeviceCores] GetDeviceCubeCoreNum returned invalid value: %ld", cubeNum);
     return ACL_ERROR_INVALID_PARAM;
   }
-  vecNum = GetDeviceVecCoreNum();
   if (vecNum <= 0) {
-    SK_LOGE("[DeviceCores] GetDeviceVecCoreNum returned invalid value: %ld", vecNum);
+    SK_LOGE("[DeviceCores] Invalid vec core num: %ld", vecNum);
     return ACL_ERROR_INVALID_PARAM;
   }
   SK_LOGI("[DeviceCores] Get core nums: cube=%ld, vec=%ld", cubeNum, vecNum);

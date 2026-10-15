@@ -1,0 +1,11 @@
+{
+  "schema_version": "superkernel-phase-manifest-v1",
+  "phase": "stage_o_option_tuning",
+  "agent_id": "sk-stage-o-option-tuning",
+  "skill": "superkernel-stage-o-option-tuning",
+  "runtime_tools": [
+    "analyze_performance.py",
+    "experiment_ledger.py",
+    "render_round_report.py"
+  ]
+}

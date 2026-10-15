@@ -91,6 +91,10 @@ generate_coverage() {
   local _source_dir="$1"
   local _coverage_file="$2"
   local _cann_pkg_path="$3"
+  local _source_filter_opts=()
+  if [[ -n "${_source_filter}" ]]; then
+    _source_filter_opts=(--include "${_source_filter}/*")
+  fi
 
   if [[ -z "${_source_dir}" ]]; then
     logging "directory required to find the .da files"
@@ -118,8 +122,11 @@ generate_coverage() {
   if [[ ! -d "${_path_to_gen}" ]]; then
     mk_dir "${_path_to_gen}"
   fi
-  lcov -c -d "${_source_dir}" "${LCOV_CAPTURE_OPTS[@]}" -o "${_coverage_file}"
+  lcov -c -d "${_source_dir}" "${LCOV_CAPTURE_OPTS[@]}" "${_source_filter_opts[@]}" -o "${_coverage_file}"
   lcov -r "${_coverage_file}" "${_cann_pkg_path}/*" "/home/jenkins/opensource/*" "${_src}/build/*" "${_src}/build_out/*" "${_src}/output/*" "${_src}/super_kernel/tests/*" "${LCOV_FILTER_OPTS[@]}" -o "${_coverage_file}"
+  if [[ -n "${_source_filter}" ]]; then
+    lcov --extract "${_coverage_file}" "${_source_filter}/*" "${LCOV_FILTER_OPTS[@]}" -o "${_coverage_file}"
+  fi
   logging "generated coverage file ${_coverage_file} ${_src}"
 }
 
@@ -212,8 +219,8 @@ print_low_coverage_files() {
 }
 
 
-if [[ $# -ne 4 ]]; then
-  logging "Usage: $0 DIR COV_FILE OUT_PATH CANN_PATH"
+if [[ $# -lt 4 || $# -gt 6 ]]; then
+  logging "Usage: $0 DIR COV_FILE OUT_PATH CANN_PATH [CAPTURE_DIR [SOURCE_FILTER]]"
   exit 0
 fi
 
@@ -221,9 +228,11 @@ _src="$1"
 _cov_file="$2"
 _out="$3"
 _cann_path="$4"
+_capture_dir="${5:-${_src}}"
+_source_filter="${6:-}"
 
 progress 1 4 "Capturing AOT C++ coverage data"
-generate_coverage "${_src}" "${_cov_file}" "${_cann_path}"
+generate_coverage "${_capture_dir}" "${_cov_file}" "${_cann_path}"
 progress 2 4 "Filtering AOT C++ coverage data"
 filter_coverage   "${_cov_file}" "${_cov_file}_filtered"
 progress 3 4 "Generating AOT C++ coverage html report"

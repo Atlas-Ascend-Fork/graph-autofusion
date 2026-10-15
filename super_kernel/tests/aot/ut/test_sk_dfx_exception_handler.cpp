@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 #include "mockcpp/mockcpp.hpp"
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -26,9 +27,10 @@
 #include "sk_common.h"
 #include "sk_event_recorder.h"
 #include "sk_log.h"
+#include "sk_types.h"
 #include "runtime/kernel.h"
-#include "stub/ut_common_stubs.h"
-#include "stub/dlog_pub.h"
+#include "ut_common_stubs.h"
+#include "dlog_pub.h"
 
 class SkDfxExceptionHandlerTest : public testing::Test {
  protected:
@@ -172,6 +174,24 @@ aclError Fake_aclrtGetFunctionName_other(void *funcHandle, uint32_t maxLen, char
   return ACL_SUCCESS;
 }
 
+static const std::string &MaxLengthSkEntryName() {
+  static const std::string name = [] {
+    const std::string prefix = "sk_entry_";
+    return prefix + std::string(MAX_FUNC_NAME_LEN - 1U - prefix.size(), 'x');
+  }();
+  return name;
+}
+
+aclError Fake_aclrtGetFunctionName_MaxLengthSkEntry(void *funcHandle, uint32_t maxLen, char *name) {
+  (void)funcHandle;
+  const std::string &functionName = MaxLengthSkEntryName();
+  if (name == nullptr || maxLen <= functionName.size()) {
+    return ACL_ERROR_INVALID_PARAM;
+  }
+  errno_t ret = memcpy_s(name, maxLen, functionName.c_str(), functionName.size() + 1U);
+  return ret == EOK ? ACL_SUCCESS : ACL_ERROR_FAILURE;
+}
+
 // Global buffer for aclrtMemcpy mock in FillExceptionDumpInfo tests
 static uint8_t *g_mockDeviceBuffer = nullptr;
 static size_t g_mockDeviceBufferSize = 0;
@@ -268,6 +288,16 @@ TEST_F(SkDfxExceptionHandlerTest, IsSuperKernelException_Success) {
 
   bool result = handler->IsSuperKernelException(exceptionInfo);
   EXPECT_TRUE(result);
+}
+
+TEST_F(SkDfxExceptionHandlerTest, IsSuperKernelException_AcceptsMaximumFunctionName) {
+  aclrtExceptionInfo *exceptionInfo = reinterpret_cast<aclrtExceptionInfo *>(0x500);
+
+  ASSERT_EQ(MaxLengthSkEntryName().size(), MAX_FUNC_NAME_LEN - 1U);
+  MOCKER(aclrtGetFuncHandleFromExceptionInfo).stubs().will(invoke(Fake_aclrtGetFuncHandleFromExceptionInfo_Success));
+  MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionName_MaxLengthSkEntry));
+
+  EXPECT_TRUE(handler->IsSuperKernelException(exceptionInfo));
 }
 
 TEST_F(SkDfxExceptionHandlerTest, IsSuperKernelException_NotSkEntry) {
@@ -2312,6 +2342,37 @@ TEST_F(SkDfxExceptionHandlerTest, PopulateDumpInfoFields_FillsKernelNameField) {
   EXPECT_STREQ(dumpInfo.kernelName, "sk_entry");
 }
 
+TEST_F(SkDfxExceptionHandlerTest, PopulateSkEntryFields_AcceptsMaximumFunctionNameAndTruncatesDisplayName) {
+  SkHeaderInfo headerInfo = {};
+  headerInfo.modelIdIndexAndSkScopeId = static_cast<uint64_t>(UINT16_MAX) << 32;
+  handler->skHeaderInfoHost = &headerInfo;
+
+  aclrtExceptionInfo *exceptionInfo = reinterpret_cast<aclrtExceptionInfo *>(0x500);
+  MOCKER(aclrtGetFuncHandleFromExceptionInfo).stubs().will(invoke(Fake_aclrtGetFuncHandleFromExceptionInfo_Success));
+  MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionName_MaxLengthSkEntry));
+
+  Adx::ExceptionDumpInfo dumpInfo = {};
+  ASSERT_EQ(handler->PopulateSkEntryFields(dumpInfo, exceptionInfo), ACL_SUCCESS);
+
+  const std::string expected = MaxLengthSkEntryName() + "_scope0";
+  EXPECT_EQ(std::string(dumpInfo.kernelDisplayName), expected.substr(0, Adx::MAX_KERNELNAME_LEN - 1U));
+}
+
+TEST_F(SkDfxExceptionHandlerTest, PopulateSubKernelFields_AcceptsMaximumFunctionNameAndTruncatesKernelName) {
+  SkHeaderInfo headerInfo = {};
+  headerInfo.nodeCnt = 0;
+  handler->skHeaderInfoHost = &headerInfo;
+
+  aclrtExceptionInfo *exceptionInfo = reinterpret_cast<aclrtExceptionInfo *>(0x500);
+  MOCKER(aclrtGetFuncHandleFromExceptionInfo).stubs().will(invoke(Fake_aclrtGetFuncHandleFromExceptionInfo_Success));
+  MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionName_MaxLengthSkEntry));
+
+  Adx::ExceptionDumpInfo dumpInfo = {};
+  ASSERT_TRUE(handler->PopulateSubKernelFields(dumpInfo, -1, exceptionInfo));
+
+  EXPECT_EQ(std::string(dumpInfo.kernelName), MaxLengthSkEntryName().substr(0, Adx::MAX_KERNELNAME_LEN - 1U));
+}
+
 // ==================== FillExceptionDumpInfo Tests (Line 758) ====================
 
 TEST_F(SkDfxExceptionHandlerTest, FillExceptionDumpInfo_NullExceptionInfo_ReturnsInvalidParam) {
@@ -3002,6 +3063,8 @@ TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_RoutesToHeaderModelAndGuard
   ASSERT_TRUE(sk::logger::FileLogger::Instance().Initialize(config));
   sk::logger::FileLogger::SetCurrentModelId(previousModelId);
   sk::logger::FileHandleManager::Instance().SwitchToDefault();
+  const std::string unknownModelPath = GetSkMetaPath(UNKNOWN_MODEL_ID);
+  std::filesystem::remove_all(unknownModelPath);
 
   std::unique_ptr<sk::logger::LogContextGuard> logContext;
   aclrtExceptionInfo *exceptionInfo = reinterpret_cast<aclrtExceptionInfo *>(0x500);
@@ -3009,6 +3072,7 @@ TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_RoutesToHeaderModelAndGuard
   ASSERT_NE(logContext, nullptr);
   EXPECT_EQ(sk::logger::FileLogger::GetCurrentModelId(), modelId);
   EXPECT_EQ(sk::logger::FileHandleManager::Instance().GetCurrentHandle(), "default");
+  EXPECT_FALSE(std::filesystem::exists(unknownModelPath));
 
   handler->FreeResources();
   logContext.reset();

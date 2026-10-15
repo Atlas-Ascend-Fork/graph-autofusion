@@ -8,7 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 function(run_llt_test)
-    cmake_parse_arguments(LLT "" "TARGET;TASK_NUM;ENV_FILE" "" ${ARGN})
+    cmake_parse_arguments(LLT "" "TARGET;TASK_NUM;ENV_FILE;COVERAGE_SUITE" "" ${ARGN})
 
     set(_llt_run_target run_${LLT_TARGET})
 
@@ -50,15 +50,27 @@ function(run_llt_test)
 
     if(ENABLE_GCOV)
         set(_collect_coverage_data_target collect_coverage_data)
+        if(NOT LLT_COVERAGE_SUITE)
+            set(LLT_COVERAGE_SUITE cpp_ut)
+        else()
+            set(_collect_coverage_data_target collect_coverage_data_${LLT_COVERAGE_SUITE})
+        endif()
 
         get_filename_component(_ops_builtin_bin_path ${CMAKE_BINARY_DIR} DIRECTORY)
-        set(_cov_report ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/coverage/cpp_ut)
+        set(_cov_capture_dir ${_ops_builtin_bin_path})
+        set(_cov_source_filter)
+        if(LLT_COVERAGE_SUITE STREQUAL "cpp_st")
+            set(_cov_capture_dir ${CMAKE_CURRENT_BINARY_DIR})
+            set(_cov_source_filter ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot)
+            get_filename_component(_cov_source_filter "${_cov_source_filter}" ABSOLUTE)
+        endif()
+        set(_cov_report ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/coverage/${LLT_COVERAGE_SUITE})
         set(_cov_html ${_cov_report}/html)
         set(_cov_data ${_cov_report}/coverage.info)
 
         if (NOT TARGET ${_collect_coverage_data_target})
             add_custom_target(${_collect_coverage_data_target}
-                    COMMAND bash ${GENERATE_CPP_COV} ${_ops_builtin_bin_path} ${_cov_data} ${_cov_html} $ENV{ASCEND_HOME_PATH}
+                    COMMAND bash ${GENERATE_CPP_COV} ${_ops_builtin_bin_path} ${_cov_data} ${_cov_html} $ENV{ASCEND_HOME_PATH} ${_cov_capture_dir} ${_cov_source_filter}
                     COMMENT "Run collect coverage data"
             )
         endif()

@@ -306,6 +306,8 @@ bash build.sh --pkg
 
 安装完成后，用户可以进行开发者测试，在执行本章节操作之前，确保已完成[环境准备](./quick_install.md#1-环境准备)并已安装编译生成的 `.run` 包。
 
+其中，`.run` 包用于提供测试依赖的动态库。SuperKernel Python UT/ST 直接从当前源码目录加载 `superkernel`，不会替换或卸载通过 `--pylocal` 安装到 CANN 路径下的 wheel 包。
+
 - UT 验证
 
    ```bash

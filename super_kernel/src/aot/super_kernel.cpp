@@ -23,6 +23,7 @@
 #include "sk_common.h"
 #include "sk_resource_manager.h"
 #include "sk_scope_launch.h"
+#include "sk_scope_verify.h"
 #include "sk_event_recorder.h"
 
 namespace {
@@ -105,9 +106,9 @@ aclError aclskOptimize(aclmdlRI model, aclskOptions *options) {
   if (ret != ACL_SUCCESS) {
     return ret;
   }
-  ret = aclrtSetExceptionInfoCallback(SuperKernelExceptionCallBackFunc);
+  ret = aclrtExceptionInfoCallbackRegister(SuperKernelExceptionCallBackFunc);
   if (ret != ACL_SUCCESS) {
-    SK_LOGE("Failed to set exception callback.");
+    SK_LOGE("Failed to register exception callback.");
     return ACL_ERROR_FAILURE;
   }
   if (Adx::AdumpRegExceptionDumpCallback) {
@@ -209,13 +210,10 @@ aclError aclskScopeEnd(const char *scopeName, aclrtStream stream) {
 
 aclError aclskScopeVerify(const aclskScopeVerifyGraphInfo *verifyGraph, size_t maxSplitResultCount,
                           aclskScopeVerifySplitResult *splitResults, size_t *realSplitResultCount) {
-  (void)verifyGraph;
-  (void)maxSplitResultCount;
-  (void)splitResults;
-  if (realSplitResultCount != nullptr) {
-    *realSplitResultCount = 0;
-  }
-  return ACL_SUCCESS;
+  SK_DLOGI("aclskScopeVerify start");
+  sk::logger::FileLogSuppressGuard fileLogSuppressGuard;
+  LogScopeVerifyInput(verifyGraph, maxSplitResultCount);
+  return RunScopeVerify(verifyGraph, maxSplitResultCount, splitResults, realSplitResultCount);
 }
 
 #ifdef __cplusplus

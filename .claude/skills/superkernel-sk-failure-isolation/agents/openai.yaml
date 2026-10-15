@@ -1,0 +1,4 @@
+interface:
+  display_name: "SuperKernel SK Failure Isolation"
+  short_description: "Trace failed SK children from plog and propose safe exclusions"
+  default_prompt: "Use $superkernel-sk-failure-isolation after a scoped SuperKernel execution or correctness failure to attribute the child operator from fresh plog/sk_meta evidence and return a dependency-safe next-scope exclusion record."

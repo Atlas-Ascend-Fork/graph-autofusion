@@ -12,14 +12,14 @@ SuperKernel is a scheduling optimization technology for network graph models. Th
 
 ***
 
-The original design intent of SuperKernel is to fuse multiple sub-operators into one SuperKernel, saving N-1 operator scheduling overhead. However, to maintain execution order between sub-operators, full-core synchronization operations are typically inserted, which to some extent weakens the benefits of scheduling optimization. Thanks to obtaining all prior information of sub-operators during the compilation phase, SuperKernel can implement more deep optimizations on this basis.
+The original design intent of SuperKernel is to fuse multiple sub-operators into one SuperKernel, saving N-1 operator scheduling overhead. However, to maintain execution order between sub-operators, full-core synchronization operations are typically inserted, which to some extent weakens the benefits of scheduling optimization. Thanks to obtaining all prior information of sub-operators during the compilation phase, SuperKernel can implement deeper optimizations on this basis.
 
 1. **ICache Preload Optimization**
 
    After SuperKernel fuses all operators, its binary size is large. When the system loads the operator, it typically only prefetches entry instructions, causing a large number of instructions inside SuperKernel not to be preloaded into the instruction cache (ICache), resulting in high ICache Miss. Therefore, we introduce the ICache Preload mechanism: preload the code segments of subsequent sub-operators before the current sub-operator starts execution, effectively reducing ICache Miss when subsequent operators execute.
 
    <div align="center">
-      <img src="../docs/en/super_kernel/figures/ICachePreload_ optimization.svg" alt="Editor" width="600">
+      <img src="../docs/en/super_kernel/figures/ICachePreload_optimization.svg" alt="Editor" width="600">
    </div>
 
 2. **Early-Start Optimization**

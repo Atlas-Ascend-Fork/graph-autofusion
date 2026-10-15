@@ -699,7 +699,7 @@ class SuperOperatorInfos:
                     CommonUtility().ascendc_raise_python_err(
                         ERR_CODE,
                         (
-                            f"ERROR: super kernel do not support self send/receive pair within 1 real stream: oplist: {self.op_list} "
+                            f"ERROR: super kernel does not support self send/receive pair within 1 real stream: oplist: {self.op_list} "
                         ),
                     )
                 elif connect_set:
@@ -723,7 +723,7 @@ class SuperOperatorInfos:
                     CommonUtility().ascendc_raise_python_err(
                         ERR_CODE,
                         (
-                            f"ERROR: super kernel do not support self send/receive pair within 1 real stream: oplist: {self.op_list} "
+                            f"ERROR: super kernel does not support self send/receive pair within 1 real stream: oplist: {self.op_list} "
                         ),
                     )
                 elif former_op.stream_index != op.stream_index and not connect_set:
@@ -742,7 +742,7 @@ class SuperOperatorInfos:
                         CommonUtility().ascendc_raise_python_err(
                             ERR_CODE,
                             (
-                                f"ERROR: super kernel do not support more than 2 real stream, use "
+                                f"ERROR: super kernel does not support more than 2 real stream, use "
                                 f"'options=\"stream-fusion=1\"' to enable operators fusion on multi-stream, "
                                 f"oplist: {self.op_list} "
                             ),

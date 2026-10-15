@@ -23,6 +23,7 @@
 
 #include "sk_options_manager.h"
 #include "sk_common.h"
+#include "common/pattern_common.h"
 #include "sk_log.h"
 #include <nlohmann/json.hpp>
 
@@ -157,18 +158,6 @@ uint32_t GetValidatedUintValue(const std::string &optionName, uint32_t value, ui
   return value;
 }
 
-std::string TrimString(const std::string &input) {
-  size_t start = 0;
-  while (start < input.size() && std::isspace(static_cast<unsigned char>(input[start])) != 0) {
-    ++start;
-  }
-  size_t end = input.size();
-  while (end > start && std::isspace(static_cast<unsigned char>(input[end - 1])) != 0) {
-    --end;
-  }
-  return input.substr(start, end - start);
-}
-
 std::vector<std::string> SplitString(const std::string &input, char delimiter) {
   std::vector<std::string> tokens;
   size_t start = 0;
@@ -214,7 +203,7 @@ bool ParseAndValidateExtendOptionValue(const char *rawValue, const std::string &
     return false;
   }
 
-  const std::string trimmedInput = TrimString(input);
+  const std::string trimmedInput = sk::TrimString(input);
   if (trimmedInput.empty()) {
     SK_LOGW("OptionName:%s, raw extend value is empty after trim", optionName.c_str());
     return false;
@@ -223,7 +212,7 @@ bool ParseAndValidateExtendOptionValue(const char *rawValue, const std::string &
   std::unordered_map<std::string, std::vector<std::string>> tmpResult;
   const std::vector<std::string> pairs = SplitString(trimmedInput, ':');
   for (const std::string &rawPair : pairs) {
-    const std::string pair = TrimString(rawPair);
+    const std::string pair = sk::TrimString(rawPair);
     if (pair.empty()) {
       SK_LOGW("OptionName:%s, extend pair is empty", optionName.c_str());
       return false;
@@ -236,7 +225,7 @@ bool ParseAndValidateExtendOptionValue(const char *rawValue, const std::string &
       return false;
     }
 
-    const std::string key = TrimString(pair.substr(0, eqPos));
+    const std::string key = sk::TrimString(pair.substr(0, eqPos));
     if (!IsValidExtendOptionToken(key, false)) {
       SK_LOGW("OptionName:%s, extend key is invalid: %s", optionName.c_str(), key.c_str());
       return false;
@@ -250,7 +239,7 @@ bool ParseAndValidateExtendOptionValue(const char *rawValue, const std::string &
     std::vector<std::string> valueList;
     valueList.reserve(rawValues.size());
     for (const std::string &rawSubValue : rawValues) {
-      const std::string value = TrimString(rawSubValue);
+      const std::string value = sk::TrimString(rawSubValue);
       if (!IsValidExtendOptionToken(value, true)) {
         SK_LOGW("OptionName:%s, extend value is invalid: %s", optionName.c_str(), value.c_str());
         return false;
@@ -386,68 +375,8 @@ bool SuperKernelOptionsManager::JudgeUbufLockIgnoreKernel(const std::vector<std:
   return false;
 }
 
-static bool IsValidRegexPattern(const std::string &pattern) {
-  if (pattern.empty()) {
-    return false;
-  }
-  for (char ch : pattern) {
-    const unsigned char uchar = static_cast<unsigned char>(ch);
-    if (std::isalnum(uchar) != 0 || ch == '_' || ch == '-' || ch == '.' || ch == '*') {
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-
 bool SuperKernelOptionsManager::MatchRegex(const std::string &pattern, const std::string &opName) {
-  const std::string trimmedPattern = TrimString(pattern);
-  if (trimmedPattern.empty()) {
-    SK_LOGE("pattern is empty after trim");
-    return false;
-  }
-  if (!IsValidRegexPattern(trimmedPattern)) {
-    SK_LOGE("pattern contains invalid characters, only alphanumeric, '_', '-', '.', '*' are allowed: %s",
-            trimmedPattern.c_str());
-    return false;
-  }
-  if (trimmedPattern[0] == '*') {
-    SK_LOGE("invalid pattern starts with '*': %s", trimmedPattern.c_str());
-    return false;
-  }
-
-  size_t m = opName.size();
-  size_t n = trimmedPattern.size();
-
-  auto matches = [&](size_t i, size_t j) {
-    if (i == 0 || j == 0) {
-      return false;
-    }
-    if (trimmedPattern[j - 1] == '.') {
-      return true;
-    }
-    return opName[i - 1] == trimmedPattern[j - 1];
-  };
-
-  std::vector<std::vector<size_t>> matchFlag(m + 1, std::vector<size_t>(n + 1));
-  matchFlag[0][0] = true;
-  for (size_t i = 0; i <= m; ++i) {
-    for (size_t j = 1; j <= n; ++j) {
-      if (trimmedPattern[j - 1] == '*') {
-        if (j >= 2) {
-          matchFlag[i][j] |= matchFlag[i][j - 2];
-          if (matches(i, j - 1)) {
-            matchFlag[i][j] |= matchFlag[i - 1][j];
-          }
-        }
-      } else {
-        if (matches(i, j)) {
-          matchFlag[i][j] |= matchFlag[i - 1][j - 1];
-        }
-      }
-    }
-  }
-  return matchFlag[m][n];
+  return sk::MatchKernelNamePattern(pattern, opName);
 }
 
 bool SuperKernelOptionsManager::EnableDebug() const {

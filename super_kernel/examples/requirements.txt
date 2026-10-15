@@ -1,4 +1,7 @@
+# SuperKernel 样例 Python 依赖；torch 与 torch_npu 按官方配套版本安装，见 README
 protobuf>=3.13,<4
-torch>=2.6.0
-torch_npu>=2.6.0.post5
+numpy>=1.21.6
 PyYAML>=5.1
+packaging>=20.0
+tqdm>=4.0.0
+wheel>=0.30.0

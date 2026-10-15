@@ -101,6 +101,22 @@ class LockDetector {
    */
   void Reset();
 
+  void SetScopeCoreInfo(const ScopeCoreInfo &scopeCoreInfo) {
+    const uint32_t cubeNum = scopeCoreInfo.GetCubeNum();
+    const uint32_t vectorNum = scopeCoreInfo.GetVectorNum();
+    scopeCoreInfoChanged_ = cubeNum != superKernelCubeNum || vectorNum != superKernelVecNum;
+    superKernelCubeNum = cubeNum;
+    superKernelVecNum = vectorNum;
+  }
+
+  void SetCurrentScopeId(uint16_t scopeId) {
+    currentScopeId_ = scopeId;
+  }
+
+  void SetScopeInfos(const std::vector<SuperKernelScopeInfo> &scopes);
+  void UpdateScopeInfo(const SuperKernelScopeInfo &scope);
+  void RemoveScopeInfo(uint16_t scopeId);
+
   /**
    * @brief 获取最近一次检测到的死锁原因
    */
@@ -118,11 +134,11 @@ class LockDetector {
   /**
    * @brief 设置scope中Notify节点的expand number
    * @param scope Scope信息
+   * @param scopeCoreInfo 当前scope用于死锁检测的核信息
    *
-   * 该函数遍历scope中的所有节点，找出最大的vec/cube num，
-   * 并将其设置到所有Notify节点上。
+   * 该函数使用死锁检测过程中的ScopeCoreInfo，将vec/cube num设置到所有Notify节点上。
    */
-  void SetNotifyNodesExpandNumForScope(SuperKernelScopeInfo &scope);
+  void SetNotifyNodesExpandNumForScope(SuperKernelScopeInfo &scope, const ScopeCoreInfo &scopeCoreInfo);
 
   /**
    * @brief 重置scope中Notify节点的expand number为0
@@ -134,6 +150,18 @@ class LockDetector {
   void ResetNotifyExpandNumForScope(SuperKernelScopeInfo &scope);
 
  private:
+  struct ScopeRuntimeInfo {
+    ScopeCoreInfo coreInfo;
+    std::unordered_set<uint32_t> streamIds;
+    std::unordered_map<uint32_t, uint64_t> headNodeIds;
+    std::unordered_map<uint32_t, uint64_t> tailNodeIds;
+  };
+
+  struct FusedNotifyWaitInfo {
+    uint64_t waitId;
+    std::unordered_set<uint32_t> predecessorStreamIds;
+  };
+
   void Init(SuperKernelGraph &graph);
 
   std::pair<uint64_t, uint64_t> GetAvailableCores(bool isSuperKernel) const;
@@ -143,12 +171,15 @@ class LockDetector {
   void UpdateNodeInfo(const SuperKernelBaseNode &node);
 
   void UpdateSKRangeInStream(const SuperKernelBaseNode &curNode);
+  void UpdateSKRangeInStream(uint32_t streamId, const SuperKernelBaseNode &headNode,
+                             const SuperKernelBaseNode &tailNode);
 
   bool IsBeforeSKRange(const SuperKernelBaseNode &curNode);
 
   bool IsAfterSKRange(const SuperKernelBaseNode &curNode);
 
-  bool HasIntersection(const std::unordered_set<uint32_t> &lhsStreams, const std::unordered_set<uint32_t> &rhsStreams);
+  bool HasIntersection(const std::unordered_set<uint32_t> &lhsStreams,
+                       const std::unordered_set<uint32_t> &rhsStreams) const;
 
   bool HasDeadlock(SuperKernelBaseNode *curNode);
 
@@ -166,21 +197,36 @@ class LockDetector {
   bool ShouldBypassValueWaitDeadlock(const SuperKernelBaseNode &curNode) const;
 
   bool HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSuperKernel);
-
+  bool HasEnoughDeviceCores(uint64_t skCubeNum, uint64_t skVecNum, uint64_t depCubeNum, uint64_t depVecNum) const;
+  bool CheckNotifyWaitScopeCombinations(const SuperKernelBaseNode &waitNode, const SuperKernelBaseNode &notifyNode,
+                                        uint32_t skCubeNum, uint32_t skVecNum, uint32_t depCubeNum, uint32_t depVecNum,
+                                        const std::unordered_set<uint32_t> &predecessorStreamIds);
+  bool CheckFusedWaitNotifies(uint32_t skCubeNum, uint32_t skVecNum, uint32_t depCubeNum, uint32_t depVecNum);
+  bool IsSerializedWithCandidateScope(const SuperKernelBaseNode &waitNode, uint64_t candidateWaitNodeId,
+                                      const ScopeRuntimeInfo &candidateScope) const;
+  bool IsNodeBeforeCandidateScope(const SuperKernelBaseNode &node, const ScopeRuntimeInfo &candidateScope) const;
+  bool IsNodeAfterCandidateScope(const SuperKernelBaseNode &node, const ScopeRuntimeInfo &candidateScope) const;
+  void MergeCandidateScopeRange(const ScopeRuntimeInfo &candidateScope);
   void RollbackVisitedState(std::vector<uint64_t> &visitedNodes);
 
   std::vector<uint64_t> nodes;             // visited nodes
   std::vector<uint64_t> tempVisitedNodes;  // temporary visited nodes for HasDeadlock
   uint32_t depOpCubeNum;                   // visited op cube num outside superkernel
   uint32_t depOpVecNum;                    // visited op vec num outside superkernel
-  uint32_t superKernelCubeNum;             // fused op cube num in superkernel
-  uint32_t superKernelVecNum;              // fused op vec num in superkernel
+  uint32_t superKernelCubeNum;
+  uint32_t superKernelVecNum;
+  uint16_t currentScopeId_ = INVALID_SCOPE_ID;
+  std::unordered_map<uint16_t, ScopeRuntimeInfo> scopeInfos_;
+  std::unordered_map<uint64_t, FusedNotifyWaitInfo> fusedNotifyWaitInfos_;
+  bool scopeCoreInfoChanged_ = false;  // Whether the current candidate changed physical core requirements
   static int64_t deviceRealCubeNum;
   static int64_t deviceRealVecNum;
   std::unordered_set<uint32_t> skStreamIds;
   uint32_t nodeNum;
   uint32_t kernelNodeNum;
   std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> skRangeInStream;
+  std::unordered_map<uint32_t, uint64_t> parallelScopeHeadNodeIds_;
+  std::unordered_map<uint32_t, uint64_t> parallelScopeTailNodeIds_;
   SuperKernelGraph *graph_;  // 存储graph指针，用于析构时调用Reset
   const SuperKernelOptionsManager *opts_ = nullptr;
   DeadlockFailReason deadlockReason_ = DeadlockFailReason::NOT_FIND_DEADLOCK;  // 当前检测到的死锁原因

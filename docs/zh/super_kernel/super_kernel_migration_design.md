@@ -65,7 +65,7 @@
 | NonEmptyParser | 同上 |super_kernel_options.py |
 | setup_super_kernel_option_parsers | 同上 |super_kernel_options.py |
 
-如下函数为 SuperKernel 与常规算子共用，或者紧耦合，依赖(可能)不稳定，先行拆解，暂不迁移，考虑后续阶段在特性解耦中分析（不再使用、API标准化、或其他措施）
+如下函数为 SuperKernel 与常规算子共用，或者紧耦合，依赖（可能）不稳定，先行拆解，暂不迁移，考虑后续阶段在特性解耦中分析（不再使用、API标准化、或其他措施）
 
 | 函数名 | 功能 | 新文件 |
 | ----- | --- | --- |

@@ -1,0 +1,12 @@
+{
+  "schema_version": "superkernel-phase-manifest-v1",
+  "phase": "base_profile_source_mapping",
+  "agent_id": "sk-base-profile-source-mapping",
+  "skill": "superkernel-base-profile-source-mapping",
+  "runtime_tools": [
+    "analyze_profiler.py",
+    "analyze_sk_meta.py",
+    "bootstrap_derived_family.py",
+    "derived_family_lifecycle.py"
+  ]
+}

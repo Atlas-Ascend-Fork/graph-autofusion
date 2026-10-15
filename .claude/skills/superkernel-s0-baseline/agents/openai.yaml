@@ -1,0 +1,3 @@
+interface:
+  display_name: "SuperKernel S0 基线性能测量"
+  short_description: "Collect the stable five-process SK-off baseline"

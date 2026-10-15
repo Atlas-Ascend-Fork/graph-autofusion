@@ -65,7 +65,7 @@ The following functions are SuperKernel-specific, regular operator compilation f
 | NonEmptyParser | Same as above |super_kernel_options.py |
 | setup_super_kernel_option_parsers | Same as above |super_kernel_options.py |
 
-The following functions are shared by SuperKernel and regular operators, or tightly coupled, dependencies (possibly) unstable, first extracted, temporarily not migrated, consider analyzing in subsequent phase feature decoupling (no longer used, API standardization, or other measures)
+The following functions are shared by SuperKernel and regular operators, or tightly coupled. Their dependencies (possibly) are unstable, first extracted, temporarily not migrated, consider analyzing in subsequent phase feature decoupling (no longer used, API standardization, or other measures)
 
 | Function Name | Function | New File |
 | ----- | --- | --- |

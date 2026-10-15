@@ -1,0 +1,11 @@
+{
+  "schema_version": "superkernel-phase-manifest-v1",
+  "phase": "intake_preparation",
+  "agent_id": "sk-intake-preparation",
+  "skill": "superkernel-intake-preparation",
+  "runtime_tools": [
+    "check_environment.py",
+    "shared_npu_lease_inventory.py",
+    "device_lease_runner.py"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": "superkernel-phase-manifest-v1",
+  "phase": "stage_a_scope_selection",
+  "agent_id": "sk-stage-a-scope-selection",
+  "skill": "superkernel-stage-a-scope-selection",
+  "runtime_tools": [
+    "validate_stage_a_options.py",
+    "recommend_sk_strategy.py",
+    "analyze_performance.py"
+  ]
+}

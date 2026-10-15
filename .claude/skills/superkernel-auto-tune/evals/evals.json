@@ -1,0 +1,285 @@
+{
+  "skill_name": "superkernel-auto-tune",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Analyze the existing Pangu-7B S4 SuperKernel diagnostic artifacts under /data/lxh/module/cann-recipes-infer/models/pangu_7b/experiments/superkernel/20260803. Do not launch inference or edit the model. Reconstruct the layer topology from the S4 decode profiler, inventory every layer's SK count and children from S4 metadata, quantify fragmentation, classify break causes, identify control-core evidence, and produce REPORT.md plus machine-readable analysis/strategy files. State exactly which profiling, DCCI, multi-stream, option, correctness, and clean-performance conclusions remain unproven. Save outputs in the requested output directory.",
+      "expected_output": "输出有证据支撑的诊断报告：识别 34 层、每层两个单 child SK、严重碎片化、主要资源或不支持断点及混合调度模式证据；不得虚构缺失的基线、child trace、环境、正确性或 clean performance 结论。",
+      "files": [
+        "/data/lxh/module/cann-recipes-infer/models/pangu_7b/experiments/superkernel/20260803/profiler/S4/prof/decode/liteserver-dae7-smoke-2_710139_20260803140854905_ascend_pt/ASCEND_PROFILER_OUTPUT/kernel_details.csv",
+        "/data/lxh/module/cann-recipes-infer/models/pangu_7b/experiments/superkernel/20260803/S4/compat-1/sk_meta"
+      ],
+      "expectations": [
+        "报告 34 个已 profiling 或命名的层，并明确给出层覆盖证据。",
+        "报告每层两个 SK、每个 SK 一个 child 以及严重碎片化，而不是只给聚合均值。",
+        "将 scope 或资源修复与暂缓的 OP_UNSUPPORT、运行时或静态 kernel 工作分开。",
+        "将 isScheModeOn 报告为混合证据，或以等价方式区分融合与未融合证据。",
+        "输入缺失时不得宣称 DCCI、Cube/Vector 保持、正确性或 clean performance 结论。",
+        "使用随 skill 提供的 analyzer 和 strategy 产物形成逐层决策与后续动作，不编写任务专用推导脚本。"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Use the supplied synthetic S0/S4 profiler, S4 sk_meta, SK child trace, layer map, and environment probe to analyze one transformer layer. Prove whether baseline Cube/Vector work became serialized inside SK, compare fused duration with the original interval, inventory the SK children and control-core state, then generate an evidence-gated next-candidate matrix. Include only exact wrapper-accepted values. For Stage O DCCI, use disable-all first and never create standalone before/after trials; a combined repair is conditional on a measured disable-all regression and complete all-SK/child attribution. Try automatic scheduling before manual source reordering, and write REPORT.md plus JSON outputs in the requested output directory.",
+      "expected_output": "输出单层报告，证明 Cube/Vector 串行化和 SK interval 回归；包含精确 accepted 的 auto_op_parallel。DCCI Stage O 只把 dcci_disable_on_kernel=[\".*\"] 作为首轮，不能从单层现有诊断直接生成独立 before/after trial；只有 disable-all clean 劣化并补齐 no-option/disable-all 全量 SK 与 child 证据后，才可生成一次相同 regex list 的 before+after 联合修复。保留人工调度作为后备，诊断证据不得直接用于晋级。",
+      "files": [
+        "evals/fixtures/pipeline/baseline.csv",
+        "evals/fixtures/pipeline/candidate.csv",
+        "evals/fixtures/pipeline/layer-map.json",
+        "evals/fixtures/pipeline/sk_meta",
+        "evals/fixtures/pipeline/sk_prof_device_0.json",
+        "evals/fixtures/pipeline/environment.json"
+      ],
+      "expectations": [
+        "报告一层、一个恰含两个 child operator 的 SK，以及控制核 disabled 证据。",
+        "证明基线 Cube/Vector 重叠在 SK child trace 中变为串行。",
+        "用原始 elapsed interval 对比并报告融合后的 interval 回归。",
+        "包含精确 accepted 的 auto_op_parallel=1；DCCI 首轮只生成 dcci_disable_on_kernel=[\".*\"]，不能用窄 GroupedMatmul regex 替代。",
+        "不得分别生成 GroupedMatmul dcci_before_kernel_start 与 dcci_after_kernel_end 实验；仅在 disable-all 劣化且全量 SK/child 归因完备时生成一次 before+after 相同列表的联合修复。",
+        "每个后续候选同时给出可读测试点、唯一改动说明和稳定 experiment ID。",
+        "自动选项之后才保留人工调度后备，不得根据诊断计时直接宣称晋级。",
+        "使用随 skill 提供的脚本生成标准 strategy 与定向选项探测产物，不手工拼装决策矩阵。"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "S0 五次稳定基线已经通过，但本题没有提供可执行工程或 profiling artifact。请只设计并说明 S3-BASE SuperKernel 主实验应如何执行：为这个 SK-enabled round 启动一个新的只读 profiling 分析 Agent，metadata 可能包含 child_count=1、2、4、6 的 SK，并说明性能分类、scope 动作和向父 Agent 的中文交接。不要声称已经执行实验。",
+      "expected_output": "只输出 S3-BASE 的执行与交接设计，不声称已运行；计划使用新的只读 profiling 分析 Agent，证据完整后按 beneficial、neutral、regressed、insufficient_evidence 决定动作，child_count 仅作描述，不决定 keep/prune。",
+      "files": [],
+      "expectations": [
+        "本条只对应 S3-BASE，不得混入 S3-P1 或 S3-FINAL 的已执行结论。",
+        "设计以融合前 interval 和融合后 SK duration 的 profiling 证据作主判据，duration sum 只作辅助诊断，并要求 mapping、双方至少 3 个 occurrence、fingerprint 与 declared-change 门禁。",
+        "设计中的交接记录全新 profiling 分析 Agent ID、相对产物路径、fingerprint、性能分类与中文 next_agent_guidance；不得虚构实际 ID、路径或分类。BASE 后默认走 whole_scope_clean_validation，未获用户或冻结实验计划明确请求时不得创建 P/FINAL。"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "用户或冻结实验计划已经明确请求可选 P/FINAL 源码范围分支。假设 S3-BASE 的可信只读 profiling 报告将部分 range 分类为 beneficial、neutral 和 regressed，但本题没有提供报告或可执行工程。请只设计并说明 S3-P1 performance prune 轮应如何从 BASE 派生、如何启动一个新的只读 profiling 分析 Agent，以及如何更新账本。不要声称已经执行 P 轮。",
+      "expected_output": "只输出 S3-P1 的派生、执行与交接设计，不声称已运行；证据门禁通过后仅保留 beneficial 范围，neutral 与 regressed 范围进入 P 轮裁剪，insufficient_evidence 形成 blocker；规划使用新的只读 profiling 分析 Agent。",
+      "files": [],
+      "expectations": [
+        "本条只对应 S3-P1，不得混入 S3-BASE 或 S3-FINAL 的已执行结论；P1 的 scope_actions 必须可追溯到 S3-BASE 分析结果。",
+        "设计要求 mapping、双方至少 3 个 occurrence、fingerprint 与 declared-change 门禁通过后才裁剪，且不得根据 child_count 改写 keep/prune。",
+        "账本设计记录全新 profiling 分析 Agent ID、候选 profile fingerprint、相对分析产物和 comparison_to=S3-BASE；不得虚构实际记录。"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "用户或冻结实验计划已经明确请求可选 P/FINAL 源码范围分支。假设 S3 中两个 range 的可信独立 profiling 均为 beneficial，组合后的 S3-FINAL 可信 profiling 整体 regressed，但本题没有提供报告或可执行工程。请只设计并说明 FINAL 如何启动一个新的只读 profiling 分析 Agent、如何验证共享资源竞争假设，以及父 Agent 如何形成中文晋级结论。不要声称已经执行 FINAL。",
+      "expected_output": "只输出 S3-FINAL 的执行、验证与交接设计，不声称已运行；若完整证据确认组合 regressed，则否决晋级，保留两个 range 的局部证据并将共享资源竞争记录为待验证假设；规划使用新的只读 profiling 分析 Agent。",
+      "files": [],
+      "expectations": [
+        "本条只对应 S3-FINAL，不得混入 S3-BASE 或 S3-P1 的已执行结论；不得用局部 beneficial 证据覆盖可信 FINAL 组合回归。",
+        "设计要求 mapping、双方至少 3 个 occurrence、fingerprint 与 declared-change 门禁通过后才能否决或晋级；child_count 不决定 keep/prune 或晋级。",
+        "父 Agent 设计保留全新 Agent ID、局部证据、组合 blocker、相对产物路径和后续拆分验证建议；缺少实际 artifact 时不得宣称 clean promotion 结论。"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "给定同一 workload 的 SK-off baseline 与 S1-AUTO artifacts：candidate 的全部 Task ID、model ID、stream ID 和 node ID 都已重编号，但每个完整 Step Id 的可观测 kernel 序列保持一致。请设计 adaptation Agent 的采集、analyzer 调用与结果消费流程，不运行模型，并说明能否依靠原始 ID 建立 exact 映射。",
+      "expected_output": "中文方案要求 fresh manifest 和 profile-process 自有 graph/fused metadata，保留原 analyzer 参数；原始 ID 只作同 artifact 解析或诊断证据，不能作为跨进程 exact fallback；只有完整 step kernel projection、唯一 injective stream-role assignment、显式第二解为零且至少三个 step 一致时才可得到 exact_projected_trace 性能 occurrence。",
+      "files": [],
+      "expectations": [
+        "明确在 profiling run 前 begin、归档后 finalize，并对 baseline_profile 与 candidate_profile 两份 manifest validate-set。",
+        "candidate_profile 明确归档该 profiling 进程自己的 profiler 三件套和完整 SK metadata；sk_prof 仅为可选调度诊断。",
+        "不得按 same Task/model/stream/node ID 或名称恢复 exact；ID 全量重编号本身不应破坏结构关联。",
+        "session fingerprint、PID、times、revision、command fingerprint 只进入采集协议，不注入模型、图或编译流程。"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "给定包含多层重复 decoder block 的采集结果。局部 operator 窗口重复，但每个完整 Step Id 的流内 kernel 序列可形成唯一 stream-role 注入。请说明 adaptation Agent 如何请求分析、记录 proof，并消费该映射。不要发明源码位置。",
+      "expected_output": "中文方案使用 kernel_projection_trace_v2，记录完整 step、每步唯一 stream-role assignment、alternative_solution_count=0、graph_occurrence_fingerprint、coverage 和 blocker counts；exact_projected_trace 只支持该 occurrence 的性能分类，不自动转成源码范围。",
+      "files": [],
+      "expectations": [
+        "要求两份 profile manifest 和 candidate_profile 自有 metadata，不用 compat metadata 替代。",
+        "要求 analyzer 只接收 baseline/candidate profile、profile-owned metadata、config/workload/change-set 与两份 profile manifest，不传 replay/compat/verify 参数。",
+        "局部同名窗口和生成名称不能作为 exact fallback。",
+        "即使结构 occurrence 唯一，也不得生成 source_file/start_offset/end_offset。"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "给定 profiling artifacts，其中两个 baseline stream 对完整 kernel projection 都能形成有效的 injective stream-role assignment，第二解搜索返回一个替代解。请说明 adaptation Agent 应如何报告和决定下一步，不运行额外模型。",
+      "expected_output": "中文结论将映射标记为 ambiguous/insufficient_evidence，报告 alternative solution、mapping coverage 和 blocker count；不得借助 raw ID、SK 名称、局部窗口或人工挑选把它提升为 exact，也不得修改 scope。",
+      "files": [],
+      "expectations": [
+        "保留两个候选解及 named blocker，不猜测 graph occurrence。",
+        "ambiguous 不得产生 beneficial/neutral/regressed 的可消费精确分类或源码动作。",
+        "不得用 Task ID、node ID、名称或 layer ordinal 作为 exact fallback。",
+        "下一步只能补充可区分的采集证据或 block，不能伪造 source map。"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "candidate_compat 与 candidate_verify 都有完整 SK metadata，candidate_profile 只有 kernel_details、task_time、trace_view 和一份可选 profiler/sk_prof_device_0.json，没有该 profiling 进程自己的 origin/updated graph、fused/scope/super-kernel metadata。请说明 adaptation Agent 如何处理；不得从 compat 复制文件。",
+      "expected_output": "中文结论指出 candidate_profile 缺少 profile-process 自有 kernel projection 元数据，阻塞 exact_projected_trace，并要求重新采集 fresh profile process。compat/verify metadata 和可选 sk_prof 诊断 trace均不得替代 profile-process 的 origin graph 与 fused metadata。",
+      "files": [],
+      "expectations": [
+        "列出 candidate_profile 必需的 profiler 三件套和五类 SK metadata，并说明 sk_prof 可选。",
+        "不得通过复制 compat metadata、复用 session/root/producer identity 或修改 manifest 绕过。",
+        "必须使用 profile-process 自有 origin graph 与 fused metadata 建立 kernel ordinal。",
+        "可选 --sk-prof 诊断 trace不能替代 kernel projection 输入。",
+        "本轮只能 insufficient_evidence/reprofile|block，不得给 source prune。",
+        "说明 begin/finalize 信息仅在 collection protocol，不需要修改模型命令。"
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "给定一个 S3-BASE profile，其中可靠 SK 的 child_count 分别为 1、2、3、4，并且每类都有至少三个 occurrence。请设计分析 request、分类和最终中文表格，验证 adaptation Agent 不会过滤浅融合。不要假设浅融合必然有益或有害。",
+      "expected_output": "中文方案让 child_count 1 到 4 全部进入 inventory、kernel projection 和 measured interval 分类，报告 child-count distribution 与 filtered_by_child_count=0；child_count 只作描述，不覆盖性能证据。",
+      "files": [],
+      "expectations": [
+        "不得设置 minimum child count 5 或以 shallow/single-child 标签排除。",
+        "每个 SK 都按 interval P50 对 SK P50、MAD threshold 和 occurrence gate 分类。",
+        "报告 mapping method/confidence、graph occurrence、coverage 和 blocker。",
+        "只有 source_scope_map + exact + proven offsets 的 manual range 才能进入源码 P 动作。"
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "用户或冻结实验计划已明确请求可选 P/FINAL 源码范围分支。给定 S1-AUTO schema 1.2 报告：某 SK 为 kernel_projection_structural + exact_projected_trace，graph_occurrence_fingerprint 唯一且 measured interval 明确 regressed，但报告没有 source scope、source file 或 offsets。请说明 strategy 和父 Agent 下一步应输出什么，不得修改源码。",
+      "expected_output": "中文结论保留该回归为 proposed 性能证据，并为 automatic winner 创建由目标 graph_occurrence_fingerprint 集合标识的 Sbest-SMAP；冻结无 marker 的 stable_source，在独立 worktree 只增加临时语义 marker，以 marker_only_calibration 证明删除插入区间后逐字节还原原 AUTO 源码，再做唯一图投影、三步 assignment 和 C_sk==C_unit。SMAP 前不执行 prune；analyzer 得到 source_scope_map + exact 后才允许已明确请求的 AUTO-P/FINAL。若完整 inventory 无 blocker/insufficient，同时保留 unchanged whole_scope clean validation。",
+      "files": [],
+      "expectations": [
+        "automatic AOT 结构证据只证明性能 occurrence，不等价于源码区间。",
+        "建议 winner 只运行一次批量 SMAP，不把 AUTO 重建成 manual named-scope family。",
+        "stable_source + marker-only calibration 必须独立取得 source_scope_map + exact + proven offsets 才能执行源码动作。",
+        "不得使用 raw ID、名称或局部窗口为 automatic occurrence 补造源码定位。",
+        "源码动作门禁不得误用为 whole-scope 特性禁用门禁；满足全量精确映射时允许 clean 端到端验证。",
+        "SMAP 后 partial/skipped/insufficient 的 SK 单独跳过，不能阻塞 independently exact 范围。"
+      ]
+    },
+    {
+      "id": 13,
+      "prompt": "candidate_compat、candidate_verify 与 candidate_profile 使用相同配置，但 compat/verify 中有 330 个重复 op signature，旧 replay 无法唯一配对；candidate_profile 与 SK-off baseline 的完整 step kernel projection 唯一且双方各有至少三个 occurrence。请说明性能 analyzer 与父 Agent 如何处理。",
+      "expected_output": "中文结论只用 candidate_profile 与 SK-off baseline 做性能映射和分类；330 个重复 signature 仅影响独立复现审计，不产生 mapping error，不把 exact_projected_trace 降级，也不阻塞已满足门禁的 measured classification。",
+      "files": [],
+      "expectations": [
+        "性能 request 只包含 baseline_profile、candidate_profile、profile-owned metadata 与两份 profile manifest。",
+        "不得传入 replay_evidence、candidate_compat 或 candidate_verify 作为 analyzer 映射输入。",
+        "不得产生 fusion_replay_identity_unmatched/ambiguous，也不得因 330 个重复 signature 返回 insufficient_evidence。",
+        "compat/verify/replay 结果只能在独立 candidate reproducibility audit 中报告。"
+      ]
+    },
+    {
+      "id": 14,
+      "prompt": "给定 S2-BASE 的完整 profile：331 个 SK 全部为 performance-exact，201 beneficial、118 neutral、12 regressed，insufficient_evidence=0，correctness 已通过；但所有 neutral/regressed 都没有可机器证明的源码半开区间。请生成下一步策略并说明是否应禁用 SK。",
+      "expected_output": "不得因缺少源码 offsets 而禁用整个 SK 候选。策略生成不改源码的 whole_scope_clean_validation，以至少三个独立 clean 候选进程对比冻结五次 S0；均值达到阈值且 P90/标准差不劣化时可使能。130 个局部 neutral/regressed 保留为诊断与后续可选优化，源码 offsets 只阻塞 prune/diagnostic。",
+      "files": [],
+      "expectations": [
+        "明确区分 whole-scope 特性晋级和 source-range 细粒度优化。",
+        "whole-scope 路径要求完整 inventory、performance-exact、无 analyzer blocker、insufficient_evidence=0 和 candidate identity 不变。",
+        "不得生成无 offsets 的源码裁剪，也不得把缺少 offsets 写成整个候选的 FINAL blocker。",
+        "clean 门禁至少三个独立 candidate process，并同时检查 mean threshold、P90 和 standard deviation。"
+      ]
+    },
+    {
+      "id": 15,
+      "prompt": "当前网络不是 DeepSeek，也没有 layer 整数编号；adapter 能识别 opaque block instance 和三个 semantic unit。请设计一次通用 SK-to-source 标定流程，并说明 marker 最终如何处理。",
+      "expected_output": "使用 model/language adapter 只产出标准 template、opaque block_instance_id、unit byte span、marker operation 和 runtime binding；临时 calibration worktree 只增加平衡叶子 marker，采集至少三步并做 original/calibration 唯一标号业务图投影，再以 C_sk == C_unit 生成 instance exact。命名 scope 路径把采用的 marker 固化到 stable-marker revision；automatic 路径删除全部标定 marker，并以 stable_source + marker_only_calibration 证明回投原始源码。两者都需 source_scope_map_v2 和 fresh correctness/profile。不得使用模型名、层号或固定重复规则。",
+      "files": [],
+      "expectations": [
+        "核心 identity 不得包含 DeepSeek、模型类名、固定层数、奇偶层或全局 ordinal。",
+        "adapter 与通用 analyzer 边界清晰，analyzer 不 import 模型 adapter。",
+        "标定只建立身份；命名路径保留 marker 必须形成 stable revision，AUTO 路径不保留 marker 并证明 marker-only 可逆。",
+        "执行源码动作前必须比较当前 --source-root 与 archived actionable source snapshot 的逐文件字节 SHA；仅 revision 名称一致不够。",
+        "不存在重复 block 仍允许三步直接标定的 source_unit_exact。"
+      ]
+    },
+    {
+      "id": 16,
+      "prompt": "用户或冻结实验计划已明确请求可选 P 源码范围分支。S3 profile 的 kernel_projection_trace_v2 已对某 SK 得到 exact_projected_trace 和唯一 graph_occurrence_fingerprint。另有一个旧 task_ranges 文件能从重复 op signature 找到源码区间，但没有 source snapshot、calibration projection、unit assignment 或 provenance DAG。父 Agent 是否可据此进入 P 轮？",
+      "expected_output": "不可进入源码 P。结构投影只证明 SK-on 到 SK-off 的性能 occurrence；旧 task_ranges 永远 diagnostic_only。应保留性能分类，并另建通用标定 worktree，补 semantic manifest、唯一 original/calibration 图投影、至少三步 assignment、C_sk==C_unit、可动作 source snapshot 和 DAG；AUTO 使用 stable_source + marker_only_calibration，命名 scope 使用 stable_marker。待 analyzer 验证 source_scope_map_v2 后再动作。whole-scope clean validation 不因缺 offsets 自动被阻塞。",
+      "files": [],
+      "expectations": [
+        "不得把 graph occurrence、重复 signature 或 task range 转换为源码 exact。",
+        "必须列出 source_scope_map_v2 的关键证据链和对应 source role 的 fresh profile。",
+        "缺源码 mapping 只阻塞 P 源码动作，不自动禁用整个 SK 候选。",
+        "不得恢复旧局部 op window fallback。"
+      ]
+    },
+    {
+      "id": 17,
+      "expected_output": "中文方案分为三个阶段：先冻结覆盖 S1/S2/S3/S4 的 superkernel-screening-matrix-v2；阶段 A 对四者分别做完整执行、正确性和至少三个独立 clean process，矩阵全部结算后以 --screening-matrix + --selection-only 对冻结五次 S0 统一排名，输出唯一 selected_for_deep_analysis 并冻结为 Sbest-SEED，但不写成 promotion；阶段 O 对普通 option 逐项 clean，对 DCCI 只先试 disable-all。有收益直接采纳，neutral/no-gain 拒绝；劣化才采集 no-option/disable-all paired profiler、SK meta、sk_prof，全量定位劣化 SK/child 并运行一次 before+after 相同列表的联合修复，且必须直接优于 O0。最终冻结 Sbest-BASE；阶段 B 只对该 BASE 采集 fresh profile 并映射全部可靠 SK，缺 source exact 时只补一次 Sbest-SMAP，之后默认进入 unchanged whole_scope_clean_validation。仅当默认 winner 门禁失败时才按固化排名回退；可选 P 分支失败只恢复 BASE incumbent。",
+      "files": [],
+      "expectations": [
+        "阶段 A 明确关闭 profiler、metadata、sk_prof、trace、debug sync 和 calibration。",
+        "clean 筛选同时检查正确性、至少三次候选进程、mean threshold、P90 和 standard deviation。",
+        "selection 前矩阵必须覆盖 automatic/broad/per-block/semantic-segment，executed IDs 与 --candidate 完全一致；不得因已有 eligible 而跳过后续候选。",
+        "只有 winner 先进入无 profiling 的 O 选项探索，再进入 fresh read-only profiling analysis 和 BASE/可选 SMAP/默认 whole_scope_clean_validation；P/FINAL 需要用户或冻结实验计划明确请求，非 winner 不补 profile。",
+        "普通 O 项不得因缺少 profiling 直接证据跳过；DCCI 首轮固定 disable-all，只有其实测劣化才允许 paired diagnostic profiling 与一个 two-pointer 联合修复例外。",
+        "筛选样本与 O 样本只用于选择和选项保留，不复用为深度分析后的最终 promotion 证据。",
+        "仅当 BASE profiling/analysis、required SMAP settlement 或 whole_scope correctness/promotion 等默认 winner 门禁失败时，才按预先固化的 eligible 排名逐个回退；absent/no_gain/blocked/failed/invalid 可选 P 恢复已保留的 BASE incumbent 并继续 whole_scope（whole-scope），不得触发 next eligible 候选回退。"
+      ]
+    },
+    {
+      "id": 18,
+      "prompt": "Stage A 原计划包含 S1 automatic、S2 broad decode、S3 per-block、S4 semantic segment。S1-S3 已各完成三次 clean timing 且均 eligible；候选矩阵把 S4 写成 deferred，理由是已有 eligible candidate，因此调用 --selection-only 时只传 S1-S3。请说明校验门禁应如何处理，以及合法矩阵和命令需要满足什么条件。",
+      "expected_output": "必须在读取 timing 和产生 winner 前拒绝 selection：冻结的 superkernel-screening-matrix-v2 至少覆盖 automatic_aot、broad_decode、per_block、semantic_segment，所有条目结算为 executed/blocked/skipped；blocked/skipped 需 named blocker、中文原因和 evidence，已有 eligible/winner 不是合法原因；矩阵 executed IDs 必须与 --candidate IDs 完全一致。应执行 S4，或以源码/权限/环境/获批预算的直接证据明确 blocked/skipped，再统一选择并在结果中绑定矩阵 SHA256。",
+      "files": [],
+      "expectations": [
+        "不得把 S1 是 S1-S3 winner 写成 S1-S4 的完整 winner。",
+        "明确 --selection-only 必须接收 screening matrix，并在性能日志读取前 fail closed。",
+        "缺失 semantic_segment、pending/deferred 状态、executed 集合不一致均拒绝 selection。",
+        "允许真实 blocker，但必须包含 code、中文 reason_zh 和 evidence；已有 eligible/winner 或提前停止不是 blocker。",
+        "筛选输出绑定矩阵 schema、内容 fingerprint、planned/executed IDs 和未执行候选证据。"
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "S1/S2/S3/S4 clean 粗选已经选出 S1-AUTO，但还没有采集 winner profiling。active 推理环境的 ready probe 接受多个 DCCI regex、auto_op_parallel=1、若干 aggressive_opt_strategies；当前没有 scalar/cache、Cube/Vector 或 breaker 的明显 profiling 证据。请给出 profiling 前的后续调优顺序，只设计并说明，不要声称已经执行。",
+      "expected_output": "先冻结 S1-AUTO 为 Sbest-SEED 和 superkernel-winner-option-matrix-v1，并采集五次稳定 incumbent O0。普通 auto_op_parallel/aggressive O 轮仍每轮一个 accepted option/value，使用 --option-trial 做 clean 增量判断，失败/无收益立即回退 incumbent；缺少 profiling 直接证据不需要跳过普通 O 轮。DCCI 不逐 regex 扫描：只先运行 dcci_disable_on_kernel=[\".*\"]。有收益直接采纳并补足五轮；neutral/no-gain 拒绝。若劣化，采集 fresh O0/disable-all kernel_details、同进程 SK meta 与完整 sk_prof，全量对比每个 SK，并对所有劣化 SK 做 child 归因；把全部显著劣化 child regex 稳定去重后同时写入 before/after，保留 disable-all，只运行一次联合修复。联合修复必须直接优于 O0 才采纳。全部 option 结算后才冻结 Sbest-BASE 并进入普通 winner profile；P/FINAL 不再调优 option，必须继承 Sbest-BASE 的 optimize/debug option maps，并设 declared_option_changes=[]。默认进入 whole_scope_clean_validation；只有用户或冻结实验计划明确请求时才进入 P/FINAL，可选分支 absent/invalid/no_gain/blocked/failed 均保留 BASE incumbent 并继续 whole-scope。",
+      "files": [],
+      "expectations": [
+        "明确 O 轮不需要 per-SK profiling hypothesis，但仍要求同推理环境 ready probe 的 exact accepted value、完整 correctness 和 clean 增量收益。",
+        "auto_op_parallel、aggressive 逐 option/value 拆轮；DCCI 是唯一例外，禁止独立 before/after，只允许 disable-all 劣化后一个 evidence-derived two-pointer 联合修复。",
+        "冒险值使用独立进程与 timeout，crash/hang/correctness failure 留证并回退 incumbent；debug option 不计入 clean 样本。",
+        "不得硬编码 DeepSeek、层数或网络独有算子；联合修复 DCCI 正则只来自所有显著劣化 child 的 fresh symbol evidence 和 exact probe。",
+        "普通 O clean 阶段关闭 profiler、metadata、sk_prof、trace、debug sync 和 calibration；只有 disable-all 实测劣化后允许 paired diagnostic collection，且不计 clean 样本、不做源码动作。",
+        "筛选和 O timing 均不得复用为最终 promotion timing。"
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "Sbest-BASE 已有 fresh schema 1.2 profiling analysis，其中一个 fused SK 是 beneficial + parallelism degraded。请设计可选多流调优的派发、失败回退和成功接回方式；分别说明 option-only 与 scope split 的源码映射条件。只设计，不声称已执行。",
+      "expected_output": "父 Agent 通过独立 superkernel-multistream-request-v1 派发 superkernel-multistream-performance-tuning，并冻结五次稳定 incumbent、命令、预算及专用 worktree/config/artifact/cache。beneficial + degraded 保持 keep，只是可选 opportunity。option-only 不要求 source_scope_map；scope split/range exclusion 必须有 analyzer-validated source_scope_map_v2 + exact。局部 C/V overlap 改善不能替代五次 clean 增量端到端门禁。无效/no_gain/blocked/failed 结果精确保留 incumbent 且不阻塞默认 whole_scope_clean_validation 或另行明确请求的 P；accepted 结果验证后建立新 derived family，从 fresh 普通 BASE 重跑，不向旧 schema 2 ledger 插入 M 轮。",
+      "files": [],
+      "expectations": [
+        "明确仅在 winner 的 Sbest-BASE fresh analysis 后可选触发，不回到 Stage A 或重复 Stage O 的同 option/value。",
+        "独立 child 不修改 incumbent 和父 ledger，并使用专用 source/config/artifact/cache 根及设备串行约束。",
+        "三轴分类独立；beneficial + degraded 不得转成 prune 或负收益结论。",
+        "option-only 可缺 source map；任何源码 scope split/range exclusion 都 fail closed 要求 source_scope_map_v2 + exact offsets。",
+        "任何非 accepted 或 contract 无效结果都返回完全相同 incumbent，旁路失败不阻塞原主流程。",
+        "accepted 必须由 correctness、fresh profile、全 SK spillover 检查和 exactly five clean incremental runs 支撑，随后只作为新 derived family 的输入并重做 fresh BASE。"
+      ]
+    },
+    {
+      "id": 21,
+      "prompt": "Sbest 的 O3 option trial 已经启动并完成编译，但 correctness validator 返回非零，stderr 和 fresh plog 已生成。随后 O4 仍可使用回退后的 incumbent 独立执行。请说明 O3、O4 和最终 REPORT 应怎样记录；另说明如果 CANN 环境在 O3 创建前就未加载，应如何处理。不要声称已重新执行。",
+      "expected_output": "O3 是非环境类已启动实验失败：先停止后续门禁，封存该 attempt 的 stdout/stderr/plog、命令、配置、fingerprint、exit code、最后通过与失败 gate、初步判断和回退，再写入 winner EXPERIMENT_REPORT.md 的 O3 failure scene；O4 可以从 immutable incumbent 继续，但不能覆盖 O3。父 REPORT 只索引本地现场。若 CANN 在 O3 identity/命令创建前未加载，则只记录 environment probe/intake blocker，不伪造 O3 failed attempt。",
+      "files": [],
+      "expectations": [
+        "明确父 REPORT 的摘要不能替代 O3 自己的 EXPERIMENT_REPORT.md 失败小节。",
+        "现场包含 attempt identity、phase/gate、exact argv、exit status、相对 artifact+SHA256、fingerprints、gate progress、初步假设/备选解释和 fallback。",
+        "先封存现场再回退或继续 O4，O4 必须从未修改的 incumbent 派生。",
+        "成功重试或后续 O4 不得删除、覆盖或用新产物补写 O3 现场。",
+        "实验启动前 CANN/runtime/device/option-probe 环境失败只进入 environment evidence，不误标为 experiment failed。"
+      ]
+    },
+    {
+      "id": 22,
+      "prompt": "一个 clean SuperKernel option trial 正在执行静态编译。目录中已出现 300 多个 *_compile_error.log，部分 opc 进程已运行超过 60 秒，但推理父进程、rank 和对应 opc 仍存活，顶层 runner 尚未达到冻结的 timeout，也没有最终 [summary]。父 Agent 是否应按 error.log 或进程时长杀死这些进程？请给出状态判定、允许的终止条件和报告方式。",
+      "expected_output": "不得杀死。某些 CANN 编译流程会在启动 opc 前创建 *_compile_error.log，并在成功后改写或重命名；活跃进程、error 文件数量和进程时长只说明 in_progress/unknown，不是最终失败或 hang 证据。父 Agent、诊断脚本和清理脚本不得据此 kill/pkill opc、op_compiler、rank、推理父进程或进程组。应等待自然返回并结合最终汇总与 exit status 判断；只有冻结 runner 的顶层 timeout 可以终止其精确拥有的进程组。若超时或外部终止，现场记为 timed_out/interrupted，已有 error.log 证据无效，封存后 clean retry；还应冻结并记录显式有界的 NPU_STATIC_KERNEL_COMPILE_JOBS。",
+      "files": [],
+      "expectations": [
+        "明确拒绝仅因 *_compile_error.log 存在、数量多或进程超过时长阈值而杀进程。",
+        "说明 error-named 文件在编译进程自然结束前可能是 provisional artifact。",
+        "最终编译失败必须来自自然返回后的非零 exit status 或最终 aggregate summary，而不是文件名。",
+        "只有冻结的顶层 runner timeout 可终止其精确拥有的进程组；不得杀 unowned/pre-existing 进程。",
+        "被 timeout 或外部信号终止的 attempt 标记为 interrupted/invalid evidence，封存现场后 clean retry。",
+        "建议显式冻结有界 NPU_STATIC_KERNEL_COMPILE_JOBS，并在所有可比运行中保持一致。"
+      ]
+    }
+  ]
+}

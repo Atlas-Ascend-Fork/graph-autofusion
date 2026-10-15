@@ -22,7 +22,7 @@
 #define private public
 #include "sk_resource_manager.h"
 #undef private
-#include "stub/ut_common_stubs.h"
+#include "ut_common_stubs.h"
 
 class SkResourceManagerTest : public testing::Test {
  protected:

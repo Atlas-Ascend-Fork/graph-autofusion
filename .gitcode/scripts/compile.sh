@@ -11,6 +11,13 @@
 
 echo $(grep -E "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
 if [[ "${task_name}" == *ubuntu24* ]]; then
+    if sudo update-alternatives --set gcc /usr/bin/gcc-16 2>/dev/null; then
+        echo "Switched to gcc-16"
+    elif sudo update-alternatives --set gcc /usr/bin/gcc-15 2>/dev/null; then
+        echo "Switched to gcc-15"
+    elif sudo update-alternatives --set gcc /usr/bin/gcc-14 2>/dev/null; then
+        echo "gcc-16/15 not available, fell back to gcc-14"
+    fi
     export PATH=/opt/buildtools/python-3.10.2/bin:$PATH
 else
     if [[ -f "/opt/rh/devtoolset-7/enable" ]]; then
@@ -21,45 +28,26 @@ else
     ln -s /home/jenkins/opensource/ubuntu20/lib_cache /home/jenkins/opensource/lib_cache
 fi
 
-select_compilers() {
-    local selected_cc="${CC:-}"
-    local selected_cxx="${CXX:-}"
-    local gcc_version="${GCC_VERSION:-}"
-
-    if [[ -n "${selected_cc}" && -z "${selected_cxx}" ]]; then
-        if [[ "${selected_cc}" =~ ^gcc-([0-9]+)$ ]]; then
-            selected_cxx="g++-${BASH_REMATCH[1]}"
-        fi
+if gcc --version | head -n1 | grep -q "15\."; then
+    rm -rf /home/jenkins/opensource/lib_cache
+    if [ -d /home/jenkins/opensource/gcc15 ]; then
+        rm -rf /home/jenkins/opensource/gcc15/lib_cache/abseil-cpp
+        rm -rf /home/jenkins/opensource/gcc15/lib_cache/device/abseil-cpp
+        ln -s /home/jenkins/opensource/gcc15/lib_cache/ /home/jenkins/opensource/lib_cache
+    elif [ -d /home/jenkins/opensource/gcc15x86 ]; then
+        rm -rf /home/jenkins/opensource/gcc15x86/lib_cache/abseil-cpp
+        rm -rf /home/jenkins/opensource/gcc15x86/lib_cache/device/abseil-cpp
+        ln -s /home/jenkins/opensource/gcc15x86/lib_cache/ /home/jenkins/opensource/lib_cache
     fi
+elif gcc --version | head -n1 | grep -q "14\."; then
+    gcc --version
+else
+    gcc --version
+    rm -rf /home/jenkins/opensource/lib_cache
+    ln -s /home/jenkins/opensource/ubuntu20/lib_cache /home/jenkins/opensource/lib_cache
+fi
 
-    if [[ -n "${selected_cxx}" && -z "${selected_cc}" ]]; then
-        if [[ "${selected_cxx}" =~ ^g\+\+-([0-9]+)$ ]]; then
-            selected_cc="gcc-${BASH_REMATCH[1]}"
-        fi
-    fi
-
-    if [[ -z "${selected_cc}" || -z "${selected_cxx}" ]]; then
-        if [[ -n "${gcc_version}" ]]; then
-            selected_cc="${selected_cc:-gcc-${gcc_version}}"
-            selected_cxx="${selected_cxx:-g++-${gcc_version}}"
-        elif [[ "${task_name}" == *ubuntu24* ]]; then
-            selected_cc="${selected_cc:-gcc-14}"
-            selected_cxx="${selected_cxx:-g++-14}"
-        else
-            selected_cc="${selected_cc:-gcc}"
-            selected_cxx="${selected_cxx:-g++}"
-        fi
-    fi
-
-    export CC="${selected_cc}"
-    export CXX="${selected_cxx}"
-    echo "Using CC=${CC}"
-    echo "Using CXX=${CXX}"
-}
-
-select_compilers
-
-if [[ "${task_name}" =~ Compile_Ascend_X86_ubuntu24 ]]; then
+if [[ "${task_name}" =~ Compile_Ascend_X86_ubuntu24 ]] && [ "${target_branch}" == master ]; then
     sed -i "1i set(CMAKE_EXPORT_COMPILE_COMMANDS ON)" "CMakeLists.txt"
     echo "api-check=compile" >> "${ATOMGIT_OUTPUT}"
 else
@@ -71,14 +59,13 @@ if [[ "${target_branch}" == "master" ]] || [[ "${target_branch}" == "develop" ]]
     lcov --version
 fi
 
-"${CC}" --version
-"${CXX}" --version
+gcc --version
 source /home/jenkins/Ascend/cann/bin/setenv.bash
 set +e
 
 pip3 install -r super_kernel/requirements-dev.txt
 
-echo "exec cmd: [bash build.sh --pkg --cann_3rd_lib_path="/home/jenkins/opensource"]"
-bash build.sh --pkg --cann_3rd_lib_path="/home/jenkins/opensource"
+echo "exec cmd: [bash build.sh -j12 --pkg --cann_3rd_lib_path="/home/jenkins/opensource"]"
+bash build.sh -j12 --pkg --cann_3rd_lib_path="/home/jenkins/opensource"
 ret=$?
 exit $ret

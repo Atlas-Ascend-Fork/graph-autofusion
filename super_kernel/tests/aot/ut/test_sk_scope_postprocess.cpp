@@ -21,7 +21,7 @@
 #include "sk_scope_postprocess.h"
 #include "sk_node.h"
 #include "sk_resource_manager.h"
-#include "stub/ut_common_stubs.h"
+#include "ut_common_stubs.h"
 
 namespace {
 class ScopedModelContext {
@@ -1192,5 +1192,44 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_UnableToFindMainEntryCombina
   EXPECT_FALSE(result);
   EXPECT_TRUE(scopeInfo.extInfo_.filteredNodes.empty());
   EXPECT_EQ(scopeInfo.extInfo_.skMainNodeId, INVALID_TASK_ID);
-  EXPECT_EQ(scopeInfo.extInfo_.processStatus, ScopeProcessStatus::NO_TARGET_NODE);
+  EXPECT_EQ(scopeInfo.extInfo_.processStatus, ScopeProcessStatus::RESOURCE_INSUFFICIENT);
+}
+
+TEST_F(SuperKernelScopePostprocessTest, PostProcess_ThreeStreamsWithThreeNodesEach_ResourceInsufficient) {
+  ScopedModelContext modelCtx(reinterpret_cast<aclmdlRI>(0x1));
+
+  constexpr uint32_t streamCount = 3;
+  constexpr uint32_t nodesPerStream = 3;
+  SuperKernelScopeInfo scopeInfo;
+  for (uint32_t streamIdx = 0; streamIdx < streamCount; ++streamIdx) {
+    const uint64_t headNodeId = static_cast<uint64_t>(streamIdx + 1U) * 100U;
+    for (uint32_t nodeIdx = 0; nodeIdx < nodesPerStream; ++nodeIdx) {
+      const uint64_t nodeId = headNodeId + nodeIdx;
+      auto kernelNode = std::make_unique<SuperKernelKernelNode>(nullptr, ACL_MODEL_RI_TASK_KERNEL, nodeIdx, streamIdx,
+                                                                INVALID_STREAM_ID, INVALID_TASK_ID);
+      kernelNode->SetNodeType(SkNodeType::NODE_KERNEL);
+      kernelNode->nodeInfos.kernelInfos.kernelType = SkKernelType::AIC_ONLY;
+      kernelNode->SetNodeId(nodeId);
+      kernelNode->SetPreNodeId(nodeIdx == 0 ? headNodeId - 1U : nodeId - 1U);
+      kernelNode->SetNextNodeId(nodeId + 1U);
+      kernelNode->SetIsFusible(true);
+      scopeInfo.nodes_.push_back(kernelNode.get());
+      graph->graphMap[nodeId] = std::move(kernelNode);
+    }
+
+    ScopeStreamInfo streamInfo;
+    streamInfo.streamIdx = streamIdx;
+    streamInfo.headNodeIdx = headNodeId;
+    streamInfo.tailNodeIdx = headNodeId + nodesPerStream - 1U;
+    streamInfo.nodeSize = nodesPerStream;
+    scopeInfo.scopeStreamInfos_.push_back(streamInfo);
+  }
+
+  SuperKernelScopePostProcessor postProcessor(*graph);
+  const bool result = postProcessor.PostProcess(scopeInfo);
+
+  EXPECT_FALSE(result);
+  EXPECT_TRUE(scopeInfo.extInfo_.filteredNodes.empty());
+  EXPECT_EQ(scopeInfo.extInfo_.skMainNodeId, INVALID_TASK_ID);
+  EXPECT_EQ(scopeInfo.extInfo_.processStatus, ScopeProcessStatus::RESOURCE_INSUFFICIENT);
 }

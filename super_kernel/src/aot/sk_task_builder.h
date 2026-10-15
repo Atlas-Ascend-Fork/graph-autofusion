@@ -12,8 +12,9 @@
 #define __SK_TASK_BUILDER_H__
 
 #include "sk_node.h"
-#include "sk_types.h"
 #include "sk_options_manager.h"
+#include "sk_scope_info.h"
+#include "sk_types.h"
 
 #include <vector>
 #include <map>
@@ -134,7 +135,8 @@ class SkTaskBuilder {
   SkTaskBuilder(SuperKernelOptionsManager &opts, const SuperKernelGraph &graph) : opts(opts), graph_(graph) {}
 
   SkBuildResult Build(std::string skFuncName, const std::vector<SuperKernelBaseNode *> &tasks,
-                      const std::vector<SuperKernelBaseNode *> &customTasks, uint16_t scopeId);
+                      const std::vector<SuperKernelBaseNode *> &customTasks, uint16_t scopeId,
+                      const ScopeCoreInfo &scopeCoreInfo);
 
  private:
   SuperKernelOptionsManager &opts;
@@ -156,14 +158,15 @@ class SkTaskBuilder {
                    int binCount, SkTaskType taskType, uint32_t numBlocks);
 
   bool DispatchFuncTask(SkTask &skTaskCube, SkTask &skTaskVec, SuperKernelBaseNode *node, SkDfxInfo *dfxInfo,
-                        size_t nodeIndex, int binCount, SkTaskType taskType, SkQueueType queueType);
+                        size_t nodeIndex, int binCount, SkTaskType taskType, SkQueueType queueType,
+                        const ScopeCoreInfo &scopeCoreInfo);
   bool DispatchEventTask(SkTask &skTaskCube, SkTask &skTaskVec, SuperKernelBaseNode *node, size_t nodeIndex,
                          SkTaskType taskType, SkQueueType queueType);
 
   bool DispatchSyncTasks(SkTask &skTaskCube, SkTask &skTaskVec, size_t nodeIndex,
                          const std::map<size_t, SyncDirection> &syncInfo, bool isSend, SkQueueType queueType);
   bool DispatchSyncTasks(SkTask &skTaskCube, SkTask &skTaskVec, size_t nodeIndex, const EarlyStartInfo &earlyStartInfo,
-                         bool isSend, SkQueueType queueType);
+                         bool isSend, SkQueueType queueType, const ScopeCoreInfo &scopeCoreInfo);
 
   // ========== Graph-topology-based sync extraction ==========
 
@@ -208,11 +211,6 @@ class SkTaskBuilder {
   // ========== Early-start-specific sync methods ==========
   bool ApplyEarlyStartSyncPass(const std::vector<SuperKernelBaseNode *> &tasks);
 
-  // ========== DEBUG mode helpers ==========
-  bool ApplyPerOpMaxCoreNum(const std::vector<SuperKernelBaseNode *> &tasks, SkTask &aicTask, SkTask &aivTask);
-
-  void ApplyBlockDimScaleUp(SkTask &skTaskCube, SkTask &skTaskVec, const std::vector<SuperKernelBaseNode *> &tasks);
-
   // Helper: determine whether crossed sync can be removed
   bool JudgeRemoveCrossSync(size_t sendIdx, size_t recvIdx, bool isCubToVec);
 
@@ -222,8 +220,10 @@ class SkTaskBuilder {
   // Print sync metadata (debug only)
   void PrintSyncInfo(const char *stage) const;
 
-  SkHostEntryInfo GenEntryInfo(SkTask &skTaskCube, SkTask &skTaskVec, bool useSimtEntry = false,
-                               const std::vector<SuperKernelBaseNode *> &tasks = {});
+  SkHostEntryInfo GenEntryInfo(SkTask &skTaskCube, SkTask &skTaskVec, const ScopeCoreInfo &scopeCoreInfo,
+                               bool useSimtEntry = false);
+  bool CalculateSkScheMode(const std::vector<SuperKernelBaseNode *> &tasks, const SkTask &aicTask,
+                           const SkTask &aivTask) const;
   DeviceArgsPtr GenEntryArgs(const SkTask &skTaskCube, const SkTask &skTaskVec, const SkDfxInfo *dfxInfos,
                              uint32_t dfxCount, const SkEventConfig *eventConfig = nullptr);
 

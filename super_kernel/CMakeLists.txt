@@ -34,46 +34,21 @@ if (NOT TARGET sk_kernel)
     add_subdirectory(kernel)
 endif()
 
-aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/src/aot SRC_FILES)
+include(cmake/aot_host.cmake)
 
 add_library(ascendsk SHARED
-    ${SRC_FILES}
+    ${ASCENDSK_HOST_SOURCES}
     ${GENERATED_SK_ENTRY_STUB_CPP}
 )
 add_dependencies(ascendsk generate_entry_stub)
-target_compile_options(ascendsk PRIVATE
-    -std=c++17
-    -fPIC
-    -fvisibility=hidden
-    -Werror
-    -Wno-error=deprecated-declarations
-    -fno-common
-    -ftrapv
-    $<IF:$<VERSION_GREATER:${CMAKE_C_COMPILER_VERSION},4.8.5>,-fstack-protector-strong,-fstack-protector-all>
-    $<$<CONFIG:Release>:-O2>
-    $<$<CONFIG:Debug>:-g -O0>
-)
-
-target_compile_definitions(ascendsk PRIVATE
-    FUNC_VISIBILITY
-    _GLIBCXX_USE_CXX11_ABI=0
-    $<$<CONFIG:Release>:_FORTIFY_SOURCE=2>
-)
-
+configure_ascendsk_host(ascendsk)
 target_include_directories(ascendsk PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/super_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/src/aot
-    )
-target_link_options(ascendsk PRIVATE
-    -Wl,-z,relro
-    -Wl,-z,now
-    -Wl,-z,noexecstack
-    $<$<CONFIG:Release>:-s>
 )
 target_link_libraries(ascendsk PRIVATE c_sec_headers runtime_headers)
 target_link_libraries(ascendsk PUBLIC sk_scope_dav_2201 sk_scope_dav_3510 acl_rt acl_rtc ascend_dump runtime error_manager c_sec unified_dlog ascendc_runtime profapi profimpl msprofiler json)
 
-if(ENABLE_CPP_UTEST OR ENABLE_RDV_UTEST)
+if(ENABLE_CPP_UTEST OR ENABLE_CPP_STEST)
     add_subdirectory(tests/aot)
 endif()

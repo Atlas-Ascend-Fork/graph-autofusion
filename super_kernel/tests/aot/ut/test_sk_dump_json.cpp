@@ -31,6 +31,7 @@
 #include "sk_scope_info.h"
 #include "sk_log.h"
 #include "sk_options_manager.h"
+#include "sk_types.h"
 #include "ut_common_stubs.h"
 
 #include <nlohmann/json.hpp>
@@ -443,6 +444,24 @@ aclError FakeAclmdlRITaskGetParamsFailure(aclmdlRITask task, aclmdlRITaskParams 
   return ACL_ERROR_FAILURE;
 }
 
+static const std::string &MaxLengthDumpFunctionName() {
+  static const std::string name = [] {
+    const std::string prefix = "dump_kernel_";
+    return prefix + std::string(MAX_FUNC_NAME_LEN - 1U - prefix.size(), 'x');
+  }();
+  return name;
+}
+
+aclError FakeAclrtGetFunctionName_MaxLengthDump(aclrtFuncHandle funcHandle, uint32_t maxLen, char *name) {
+  (void)funcHandle;
+  const std::string &functionName = MaxLengthDumpFunctionName();
+  if (name == nullptr || maxLen <= functionName.size()) {
+    return ACL_ERROR_INVALID_PARAM;
+  }
+  errno_t ret = memcpy_s(name, maxLen, functionName.c_str(), functionName.size() + 1U);
+  return ret == EOK ? ACL_SUCCESS : ACL_ERROR_FAILURE;
+}
+
 }  // namespace
 
 TEST_F(SkDumpJsonDirectHelperTest, TaskAndKernelTypeStringHelpers) {
@@ -467,6 +486,19 @@ TEST_F(SkDumpJsonDirectHelperTest, TaskAndKernelTypeStringHelpers) {
 
   EXPECT_EQ(PtrToHexString(reinterpret_cast<void *>(0x1234)), "0x1234");
   EXPECT_EQ(UintToHexString(0xabcd), "0xabcd");
+}
+
+TEST_F(SkDumpJsonDirectHelperTest, BasicKernelParamsAcceptMaximumFunctionName) {
+  aclmdlRIKernelTaskParams params{};
+  params.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x300);
+
+  ASSERT_EQ(MaxLengthDumpFunctionName().size(), MAX_FUNC_NAME_LEN - 1U);
+  MOCKER(aclrtGetFunctionName).stubs().will(invoke(FakeAclrtGetFunctionName_MaxLengthDump));
+
+  Json kernelParamsJson;
+  AddBasicKernelParams(kernelParamsJson, params);
+
+  EXPECT_EQ(kernelParamsJson["funcName"].get<std::string>(), MaxLengthDumpFunctionName());
 }
 
 TEST_F(SkDumpJsonDirectHelperTest, BinaryBindMapAndResolvedFuncsCoverSuccessAndFailurePaths) {
@@ -619,12 +651,10 @@ TEST_F(SkDumpJsonDirectHelperTest, SkTaskQueueAndFileWritingHelpers) {
   queue->taskInfos[1].index = 11;
   queue->taskInfos[1].type = SkTaskType::TYPE_EVENT_WAIT;
   queue->taskInfos[1].numBlocks = 1;
-  queue->taskInfos[1].entryCnt = 5;
+  queue->taskInfos[1].entryCnt = 0;
   queue->taskInfos[1].args = 0x4000;
   queue->taskInfos[1].entry[0] = 0x5000;
-  queue->taskInfos[1].entry[1] = 0x6000;
-  queue->taskInfos[1].entry[2] = 0x7000;
-  queue->taskInfos[1].entry[3] = 0x8000;
+  queue->taskInfos[1].extraInfo = static_cast<uint64_t>(SkMemoryWaitFlag::AND);
   queue->taskInfos[1].debugOptions = 16;
 
   Json taskJson = SkTaskToJson(task);
@@ -632,7 +662,10 @@ TEST_F(SkDumpJsonDirectHelperTest, SkTaskQueueAndFileWritingHelpers) {
   EXPECT_FALSE(taskJson["taskQue"]["taskInfos"][0].contains("isSimtKernel"));
   EXPECT_FALSE(taskJson["taskQue"]["taskInfos"][1].contains("isSimtKernel"));
   EXPECT_EQ(taskJson["taskQue"]["taskInfos"][0]["entries"].size(), 2);
-  EXPECT_EQ(taskJson["taskQue"]["taskInfos"][1]["entries"].size(), 4);
+  EXPECT_EQ(taskJson["taskQue"]["taskInfos"][1]["entryCnt"], 0);
+  EXPECT_EQ(taskJson["taskQue"]["taskInfos"][1]["entries"].size(), 0);
+  EXPECT_EQ(taskJson["taskQue"]["taskInfos"][1]["eventValue"], "0x5000");
+  EXPECT_EQ(taskJson["taskQue"]["taskInfos"][1]["waitFlag"], static_cast<uint32_t>(SkMemoryWaitFlag::AND));
 
   Json noQueueJson = SkTaskToJson(SkTask());
   EXPECT_FALSE(noQueueJson.contains("taskQue"));
