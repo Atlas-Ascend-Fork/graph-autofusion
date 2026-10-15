@@ -1461,8 +1461,12 @@ Status IndirectLoadRegApiCall::ResolveSimtMetadata(const ascir::NodeView &node,
   const size_t local_target_count = static_cast<size_t>(std::count_if(
       output_chains_.begin(), output_chains_.end(), [](const SimtOutputChain &chain) { return chain.local_target; }));
   GE_ASSERT_TRUE(local_target_count <= 1UL, "IndirectLoad SIMT supports at most one local output target.");
-  GE_ASSERT_TRUE(has_post_reduce_ == (local_target_count == 1UL),
-                 "IndirectLoad SIMT post Reduce and local output target must appear together.");
+  // 与 schedule 侧 ValidateSimtOutputPlan 的放宽对齐：单 gather 的 post Reduce 与 local
+  // target 成对出现；多 gather 组员 value 直接写 UB 局部目标（归并/输出链为普通向量代码），
+  // 允许 local target 不伴随 post Reduce——双向等价断言会使组员（含 fused primary）在
+  // ParseAttr 阶段（ApiCall::Init 逐节点调用，先于 Generate 的成员跳过）断言失败。
+  GE_ASSERT_TRUE(!has_post_reduce_ || local_target_count == 1UL,
+                 "IndirectLoad SIMT post Reduce requires a local output target.");
   if (has_post_reduce_) {
     GE_ASSERT_TRUE(outputs.size() == kIndirectLoadOutputCount, "Invalid IndirectLoad SIMT output number:%zu.",
                    outputs.size());
@@ -1556,6 +1560,12 @@ Status IndirectLoadRegApiCall::Generate(const TPipe &tpipe, const std::vector<as
                                         std::string &result) const {
   if (template_id_ != ascir::TemplateId::kIndirectLoadSimt) {
     return ApiCall::Generate(tpipe, current_axis, result);
+  }
+  // seq-V1（L2/L3）：fused primary 统一发射全组，携带 fused 代发标记的非 primary 成员跳过；
+  // L4（V2 多 evaluator）无该标记——各成员走标准单 gather invocation。
+  if (node != nullptr && ascgen_utils::indirect_load::IsSimtFusedMemberEmitted(node)) {
+    result = "// IndirectLoad SIMT group member (emitted by fused primary)\n";
+    return af::SUCCESS;
   }
   GE_ASSERT_TRUE(inputs.size() == kIndirectLoadInputCount, "Invalid IndirectLoad SIMT input number:%zu.",
                  inputs.size());
@@ -1694,12 +1704,16 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
   const std::string body_name = kSimtBodyNamePrefix + ascgen_utils::GenValidName(node_name);
   std::string actual_size_expr;
   std::string output_offset_expr;
-  if (has_post_reduce_) {
-    const auto local_chain = std::find_if(output_chains_.begin(), output_chains_.end(),
-                                          [](const SimtOutputChain &chain) { return chain.local_target; });
-    GE_ASSERT_TRUE(local_chain != output_chains_.end(), "IndirectLoad SIMT post Reduce local output is missing.");
-    const Tensor *local_target = tpipe.GetTensor(local_chain->target_tensor_id);
-    GE_ASSERT_NOTNULL(local_target, "IndirectLoad SIMT post Reduce local target is missing.");
+  // 局部目标（UB）：post Reduce 合成链（单 gather）或多 gather 组员的 value 直写链——
+  // 两者均按 value tensor 元素计数与 tile 偏移寻址（组员 value 即 IL 输出，同构复用）。
+  const auto local_chain_iter = std::find_if(output_chains_.begin(), output_chains_.end(),
+                                             [](const SimtOutputChain &chain) { return chain.local_target; });
+  const bool has_local_target = local_chain_iter != output_chains_.end();
+  if (has_local_target) {
+    GE_ASSERT_TRUE(has_post_reduce_ || local_chain_iter->target_tensor_id == simt_value_tensor_id_,
+                   "IndirectLoad SIMT local output must be the post Reduce chain or the group member value tensor.");
+    const Tensor *local_target = tpipe.GetTensor(local_chain_iter->target_tensor_id);
+    GE_ASSERT_NOTNULL(local_target, "IndirectLoad SIMT local target is missing.");
     const Tensor *value_tensor = tpipe.GetTensor(simt_value_tensor_id_);
     GE_ASSERT_NOTNULL(value_tensor, "IndirectLoad SIMT value tensor is missing.");
     // 后置 Reduce 的目标是 IndirectLoad value tensor，而 API 调用的输出会重定向到最终
@@ -1738,8 +1752,8 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
     actual_size_expr = outer_tb_var + "_loop_size";
     output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
   }
-  if (!has_post_reduce_ && simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding &&
-      rank == 2UL && axis_ == 0L) {
+  if (!has_local_target && !has_post_reduce_ &&
+      simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding && rank == 2UL && axis_ == 0L) {
     const std::string row_count_expr = PromoteSizeExpr(tpipe.tiler.Size(logical_view_.output.sizes[0]), offset_type);
     const std::string inner_size_expr = PromoteSizeExpr(tpipe.tiler.Size(logical_view_.output.sizes[1]), offset_type);
     ss << "  const " << offset_type << " embedding_rows_per_block = (" << row_count_expr << " + static_cast<"
@@ -1853,6 +1867,416 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
   const bool use_prepass = CanUseSimtIndexPrepass(tpipe, prepass_plan);
   const std::string offset_type = GetSimtOffsetType(simt_policy_);
   std::stringstream ss;
+  // [seq-V1] fused primary（六级降级阶梯 L2/L3，见设计文档）：单 evaluator 统一发射全组——
+  // 一个 VF_CALL（IndirectLoadSimtFused）启动线程块，每线程逐路串行 index 链求值 →
+  // AddressPolicy 寻址 → load。L2（寄存器归并）：归并树在 FusedEval 内以 N 个 value 为种子
+  // 经 EmitSimtEvaluatorNodes 按拓扑序折叠为标量表达式（任意 element-wise 算子，不可交换
+  // 算子按操作数序），结果直写 GM 输出链；L3（UB 归并）：各路 value 写各自 UB 局部目标
+  // （行对齐寻址），归并链由向量代码执行。相比 V2（N 个 VF_CALL + N 个 PipeBarrier）→
+  // 1 个 VF_CALL + 1 个 PipeBarrier。L4（V2）不进入本分支（无 fused primary 标记）。
+  if (node != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(node)) {
+    const auto member_names = ascgen_utils::indirect_load::GetSimtFusedMemberNames(node);
+    GE_ASSERT_TRUE(!member_names.empty(), "IndirectLoad SIMT fused primary has no members.");
+    const auto owner_graph = node->GetOwnerComputeGraph();
+    GE_ASSERT_NOTNULL(owner_graph, "IndirectLoad SIMT fused primary has no owner graph.");
+    const auto merge_info = ascgen_utils::indirect_load::GetSimtFusedMergeInfo(node);
+    const size_t member_count = member_names.size();
+    ss << "// IndirectLoad SIMT Fused (seq-V1: single evaluator, serial loads, " << member_count << " paths, "
+       << (merge_info.register_merge ? "register merge" : "UB merge") << ")\n";
+    ss << "{\n";
+    // Phase 1：收集全部成员数据（input 指针、index 链节点与负载元数据、地址策略、UB 目标）。
+    SimtGraphNodeMap node_map;
+    GE_ASSERT_SUCCESS(BuildSimtGraphNodeMap(node, node_map));
+    struct FusedMemberData {
+      const Tensor *input_tensor;
+      const Tensor *ub_target;
+      ascir::TensorId value_tensor_id;
+      ascir::TensorId index_result_tensor_id;
+      std::string dtype_name;
+      std::vector<af::AscNodePtr> index_nodes;
+      std::vector<ascgen_utils::indirect_load::SimtLoadMetadata> index_loads;
+      std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> gm_tensors;
+      ascgen_utils::indirect_load::SimtPolicyMetadata policy;
+      ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+      size_t rank;
+      int64_t axis;
+    };
+    std::vector<FusedMemberData> members;
+    members.reserve(member_count);
+    for (const std::string &member_name : member_names) {
+      const af::AscNodePtr member_node =
+          std::dynamic_pointer_cast<af::AscNode>(owner_graph->FindNode(member_name.c_str()));
+      GE_ASSERT_NOTNULL(member_node, "Fused group member[%s] not found.", member_name.c_str());
+      const auto member_inputs = member_node->inputs();
+      GE_ASSERT_TRUE(member_inputs.size() >= kIndirectLoadInputCount, "Member[%s] invalid input count.",
+                     member_name.c_str());
+      ascgen_utils::indirect_load::IndirectLoadLoweringMetadata meta;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetLoweringMetadata(member_node, meta));
+      FusedMemberData md;
+      md.input_tensor =
+          tpipe.GetTensor(member_inputs[ascgen_utils::indirect_load::kInputTensorIndex]->attr.mem.tensor_id);
+      GE_ASSERT_NOTNULL(md.input_tensor, "Member[%s] input tensor missing.", member_name.c_str());
+      GE_ASSERT_TRUE(!meta.simt.output_chains.empty() && meta.simt.output_chains[0].local_target,
+                     "Member[%s] has no local_target output chain.", member_name.c_str());
+      md.ub_target = tpipe.GetTensor(meta.simt.output_chains[0].target_tensor_id);
+      GE_ASSERT_NOTNULL(md.ub_target, "Member[%s] UB target tensor missing.", member_name.c_str());
+      md.value_tensor_id = meta.simt.value_tensor_id;
+      md.index_result_tensor_id = meta.simt.index_result_tensor_id;
+      Tensor::DtypeName(meta.simt.output_dtype, md.dtype_name);
+      md.index_loads = meta.simt.index_loads;
+      md.gm_tensors = meta.simt.gm_tensors;
+      md.policy = meta.simt.policy;
+      md.logical_view = meta.logical_view;
+      md.rank = meta.logical_view.input.sizes.size();
+      md.axis = meta.axis;
+      GE_ASSERT_SUCCESS(ResolveSimtNodes(meta.simt.index_node_names, node_map, md.index_nodes));
+      members.emplace_back(std::move(md));
+    }
+    // 归并树节点解析（仅 L2）。输出链 tensor id 与 side load 寻址分类均在当前图上重建——
+    // 节点名跨图副本稳定（唯一可信引用），视图/张量 id 在调度期与 codegen 期两份图副本间
+    // 会漂移（见 utils「漂移防护」注释），调度期存下的 id 不可直接消费。
+    std::vector<af::AscNodePtr> merge_nodes;
+    std::vector<ascgen_utils::indirect_load::SimtOutputChainMetadata> merge_chains;
+    SimtLoadMetadataMap merge_load_map;
+    std::vector<af::AscNodePtr> merge_side_loads;
+    std::vector<af::AscNodePtr> emission_nodes;
+    if (merge_info.register_merge) {
+      GE_ASSERT_SUCCESS(ResolveSimtNodes(merge_info.merge_node_names, node_map, merge_nodes));
+      // 输出链：Store 终端按名重解析，result/target tensor id 取当前图。
+      for (const std::string &store_name : merge_info.merge_store_names) {
+        const auto store_iter = node_map.find(store_name);
+        GE_ASSERT_TRUE(store_iter != node_map.end(), "Fused merge store terminal[%s] is missing.", store_name.c_str());
+        const auto store_inputs = store_iter->second->inputs();
+        GE_ASSERT_TRUE(!store_inputs.empty() && !store_iter->second->outputs().empty() &&
+                           store_iter->second->outputs()[0] != nullptr,
+                       "Fused merge store terminal[%s] has invalid inputs/outputs.", store_name.c_str());
+        ascgen_utils::indirect_load::SimtOutputChainMetadata chain;
+        chain.result_tensor_id = store_inputs[0]->attr.mem.tensor_id;
+        chain.target_tensor_id = store_iter->second->outputs()[0]->attr.mem.tensor_id;
+        chain.dtype = store_inputs[0]->attr.dtype;
+        chain.local_target = false;
+        merge_chains.emplace_back(std::move(chain));
+      }
+      // side GM load 发现 + 寻址分类（当前图，与调度期门控同一分类函数——非 GM load 的
+      // side input 在此出现即为两份图副本间的结构漂移，显式断言暴露而非静默错算）。
+      // merge_nodes 含 ③ side 链节点（merge_node_names 含两者），链上 Load 由同一遍历发现。
+      const auto is_merge_node = [&merge_info](const std::string &name) {
+        return std::find(merge_info.merge_node_names.begin(), merge_info.merge_node_names.end(), name) !=
+               merge_info.merge_node_names.end();
+      };
+      const auto is_member_node = [&member_names](const std::string &name) {
+        return std::find(member_names.begin(), member_names.end(), name) != member_names.end();
+      };
+      for (const af::AscNodePtr &merge_node : merge_nodes) {
+        for (const auto &in_node : merge_node->GetInDataNodes()) {
+          const auto producer = std::dynamic_pointer_cast<af::AscNode>(in_node);
+          if (producer == nullptr || is_merge_node(producer->GetName()) || is_member_node(producer->GetName()) ||
+              af::ops::IsOps<af::ascir_op::Scalar>(producer) || af::ops::IsOps<af::ascir_op::ScalarData>(producer) ||
+              af::ops::IsOps<af::ascir_op::Arange>(producer)) {
+            continue;
+          }
+          GE_ASSERT_TRUE(ascgen_utils::indirect_load::IsSimtDirectGmLoadNode(producer),
+                         "Fused merge side input[%s] is not a direct GM load (schedule/codegen drift).",
+                         producer->GetNamePtr());
+          if (std::find(merge_side_loads.begin(), merge_side_loads.end(), producer) != merge_side_loads.end()) {
+            continue;
+          }
+          merge_side_loads.emplace_back(producer);
+        }
+      }
+      for (const af::AscNodePtr &side_load : merge_side_loads) {
+        ascgen_utils::indirect_load::SimtLoadMetadata side_meta;
+        GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::BuildSimtMergeSideLoadMetadata(side_load, side_meta));
+        merge_load_map.emplace(side_meta.node_name, std::move(side_meta));
+      }
+      // 发射节点列表 = 归并树 + ③ side 链节点 + side load（①②③），按图拓扑序（GetDirectNode）
+      // 排列——load/链节点先于消费者，EmitSimtEvaluatorNodes 的 values map 传播依赖此序
+      // （side load 不在闭包内，缺席会使归并节点输入无表达式）。
+      const auto is_side_load = [&merge_side_loads](const std::string &name) {
+        return std::find_if(merge_side_loads.begin(), merge_side_loads.end(), [&name](const af::AscNodePtr &side_load) {
+                 return side_load->GetName() == name;
+               }) != merge_side_loads.end();
+      };
+      for (const auto &graph_node : owner_graph->GetDirectNode()) {
+        const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(graph_node);
+        if (asc_node != nullptr && (is_merge_node(asc_node->GetName()) || is_side_load(asc_node->GetName()))) {
+          emission_nodes.emplace_back(asc_node);
+        }
+      }
+      GE_ASSERT_TRUE(!emission_nodes.empty(), "Fused merge emission node list is empty.");
+    }
+    // context 张量清单（成员序优先、归并树 side input 随后，去重）：index 链 GM load /
+    // ScalarData + 归并树 ScalarData side input。字段命名与单 gather Context 一致，
+    // EmitSimtEvaluatorNodes 的 context.gm_N / context.v_N 引用直接生效。
+    std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> context_tensors;
+    const auto seen_context_tensor = [&context_tensors](ascir::TensorId tensor_id) {
+      return std::find_if(context_tensors.begin(), context_tensors.end(),
+                          [tensor_id](const ascgen_utils::indirect_load::SimtGmTensorMetadata &tensor) {
+                            return tensor.value_tensor_id == tensor_id;
+                          }) != context_tensors.end();
+    };
+    for (const FusedMemberData &member : members) {
+      for (const auto &gm_tensor : member.gm_tensors) {
+        if (!seen_context_tensor(gm_tensor.value_tensor_id)) {
+          context_tensors.emplace_back(gm_tensor);
+        }
+      }
+    }
+    if (merge_info.register_merge) {
+      for (const af::AscNodePtr &merge_node : merge_nodes) {
+        for (const auto &in_node : merge_node->GetInDataNodes()) {
+          const auto producer = std::dynamic_pointer_cast<af::AscNode>(in_node);
+          if (producer == nullptr || !af::ops::IsOps<af::ascir_op::ScalarData>(producer) ||
+              producer->outputs().empty() || producer->outputs()[0] == nullptr ||
+              seen_context_tensor(producer->outputs()[0]->attr.mem.tensor_id)) {
+            continue;
+          }
+          ascgen_utils::indirect_load::SimtGmTensorMetadata tensor;
+          tensor.value_tensor_id = producer->outputs()[0]->attr.mem.tensor_id;
+          tensor.gm_tensor_id = producer->outputs()[0]->attr.mem.tensor_id;
+          tensor.dtype = producer->outputs()[0]->attr.dtype;
+          tensor.is_scalar = true;
+          context_tensors.emplace_back(std::move(tensor));
+        }
+      }
+      // side GM load 的 context 张量（镜像单 gather AppendSimtGmTensorMetadata：Load 的
+      // gm 字段名取其输入 GM 张量 id，与 evaluator 表达式引用的输出 id 同源——direct GM
+      // 边界两 tensor 同一）。
+      for (const af::AscNodePtr &side_load : merge_side_loads) {
+        const auto output = side_load->outputs()[0];
+        GE_ASSERT_TRUE(output != nullptr && !side_load->inputs().empty(),
+                       "Fused merge side load[%s] has invalid inputs/outputs.", side_load->GetNamePtr());
+        if (seen_context_tensor(output->attr.mem.tensor_id)) {
+          continue;
+        }
+        ascgen_utils::indirect_load::SimtGmTensorMetadata tensor;
+        tensor.value_tensor_id = output->attr.mem.tensor_id;
+        tensor.gm_tensor_id = side_load->inputs()[0]->attr.mem.tensor_id;
+        tensor.dtype = output->attr.dtype;
+        tensor.is_scalar = false;
+        context_tensors.emplace_back(std::move(tensor));
+      }
+    }
+    // Phase 2：FusedCtx——N 路 input 指针 + 逐成员策略参数（常量驻留）+ context 张量。
+    for (size_t k = 0; k < member_count; ++k) {
+      ss << "  using FusedCase" << k << " = " << GetSimtCaseTag(members[k].policy, members[k].rank, members[k].axis)
+         << ";\n";
+    }
+    ss << "  struct FusedCtx {\n";
+    for (size_t k = 0; k < member_count; ++k) {
+      ss << "    __gm__ " << members[k].dtype_name << " *in" << k << ";\n";
+      ss << "    AscendC::IndirectLoadSimtParams<FusedCase" << k << "> params" << k << ";\n";
+    }
+    for (const auto &gm_tensor : context_tensors) {
+      std::string dtype;
+      GE_ASSERT_SUCCESS(Tensor::DtypeName(gm_tensor.dtype, dtype));
+      if (gm_tensor.is_scalar) {
+        ss << "    " << dtype << " " << kSimtValueNamePrefix << gm_tensor.value_tensor_id << ";\n";
+      } else {
+        ss << "    __gm__ " << dtype << " *" << kSimtGmFieldNamePrefix << gm_tensor.gm_tensor_id << ";\n";
+      }
+    }
+    ss << "  };\n";
+    ss << "  FusedCtx fctx = {\n";
+    for (size_t k = 0; k < member_count; ++k) {
+      ss << "    (__gm__ " << members[k].dtype_name << " *)" << members[k].input_tensor->name << ".GetPhyAddr(),\n";
+      ss << "    {" << GetSimtPolicyParams(members[k].policy, tpipe) << "},\n";
+    }
+    for (const auto &gm_tensor : context_tensors) {
+      std::string dtype;
+      GE_ASSERT_SUCCESS(Tensor::DtypeName(gm_tensor.dtype, dtype));
+      if (gm_tensor.is_scalar) {
+        const Tensor *scalar = tpipe.GetTensor(gm_tensor.value_tensor_id);
+        GE_ASSERT_NOTNULL(scalar, "IndirectLoad SIMT fused ScalarData tensor is missing.");
+        ss << "    " << scalar->name << ",\n";
+      } else {
+        ss << "    (__gm__ " << dtype << " *)" << kGlobalTensorNamePrefix << gm_tensor.gm_tensor_id
+           << ".GetPhyAddr(),\n";
+      }
+    }
+    ss << "  };\n";
+    // Phase 3：FusedBody。OffsetType 按成员策略位宽选优（全 uint32 → 32 位偏移）；线程档
+    // 上限 = 资源压力模型档位（schedule 侧推得）与 offset 位宽门槛（64 位封顶 1024，对齐
+    // 单 gather IndirectLoadUse2048Threads）取小（模型规格见设计文档「寄存器压力模型」）。
+    bool all_offset_uint32 = true;
+    for (const FusedMemberData &member : members) {
+      if (member.policy.offset_width != ascgen_utils::indirect_load::SimtOffsetWidth::kUint32) {
+        all_offset_uint32 = false;
+        break;
+      }
+    }
+    const std::string fused_offset_type = all_offset_uint32 ? "uint32_t" : "uint64_t";
+    uint32_t max_thread_tier = merge_info.max_thread_tier;
+    if (!all_offset_uint32) {
+      max_thread_tier = std::min(max_thread_tier, 1024U);
+    }
+    ss << "  struct FusedBody {\n";
+    ss << "    using OffsetType = " << fused_offset_type << ";\n";
+    ss << "    static constexpr uint32_t kMaxThreadTier = " << max_thread_tier << "U;\n";
+    if (merge_info.register_merge) {
+      ss << "    struct OutputTargets {";
+      for (size_t i = 0; i < merge_chains.size(); ++i) {
+        std::string dtype;
+        GE_ASSERT_SUCCESS(Tensor::DtypeName(merge_chains[i].dtype, dtype));
+        ss << " __gm__ " << dtype << " *out" << i << ";";
+      }
+      ss << " };\n";
+      ss << "    struct OutputPack {";
+      for (size_t i = 0; i < merge_chains.size(); ++i) {
+        std::string dtype;
+        GE_ASSERT_SUCCESS(Tensor::DtypeName(merge_chains[i].dtype, dtype));
+        ss << " " << dtype << " out" << i << ";";
+      }
+      ss << " };\n";
+    } else {
+      ss << "    struct OutputTargets {";
+      for (size_t k = 0; k < member_count; ++k) {
+        ss << " __ubuf__ " << members[k].dtype_name << " *val" << k << ";";
+      }
+      ss << " };\n";
+      ss << "    struct OutputPack {";
+      for (size_t k = 0; k < member_count; ++k) {
+        ss << " " << members[k].dtype_name << " v" << k << ";";
+      }
+      ss << " };\n";
+    }
+    ss << "    static OutputPack FusedEval(OffsetType output_index, const FusedCtx& context) {\n";
+    ss << "      OutputPack out;\n";
+    for (size_t k = 0; k < member_count; ++k) {
+      ss << "      " << members[k].dtype_name << " value" << k << ";\n";
+      ss << "      {\n";
+      ss << "        using Policy" << k << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << k
+         << ">::Policy;\n";
+      ss << "        const Policy" << k << " policy" << k
+         << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << k << ">::MakePolicy(context.params" << k
+         << ");\n";
+      ss << "        const auto addr" << k << " = policy" << k << ".GetAddress(output_index);\n";
+      ss << "        const OffsetType index_offset = static_cast<OffsetType>(addr" << k << ".index_offset);\n";
+      SimtLoadMetadataMap load_map;
+      for (const auto &load : members[k].index_loads) {
+        load_map.emplace(load.node_name, load);
+      }
+      std::map<ascir::TensorId, std::string> index_values;
+      SimtLoadIndexOffsetExpressions index_offsets;
+      GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(
+          members[k].logical_view, members[k].index_nodes, load_map, tpipe, GetSimtOffsetType(members[k].policy),
+          "output_index", "index_offset", false, index_offsets, ss));
+      GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(members[k].index_nodes, load_map, &index_offsets,
+                                               members[k].logical_view, "index_offset", "output_index", index_values,
+                                               ss));
+      const auto index_result = index_values.find(members[k].index_result_tensor_id);
+      GE_ASSERT_TRUE(index_result != index_values.end(), "Fused member[%zu] index result tensor has no scalar value.",
+                     k);
+      ss << "        const OffsetType idx" << k << " = static_cast<OffsetType>(" << index_result->second << ");\n";
+      ss << "        OffsetType input_offset" << k << " = static_cast<OffsetType>(addr" << k << ".input_base);\n";
+      ss << "        if constexpr (Policy" << k << "::kUsesInputAxis) {\n";
+      ss << "          input_offset" << k << " += idx" << k << " * static_cast<OffsetType>(policy" << k
+         << ".input_axis_stride);\n";
+      ss << "        }\n";
+      ss << "        value" << k << " = context.in" << k << "[input_offset" << k << "];\n";
+      ss << "      }\n";
+    }
+    if (merge_info.register_merge) {
+      // L2：N 个 value 为种子，发射列表（归并树 + side 链 + side load，图拓扑序）按序折叠
+      // （EmitSimtEvaluatorNodes：任意 element-wise 算子经各自 V2 标量表达式发射，操作数按
+      // 输入序——不可交换算子语义正确）。side GM load 经 use_logical_offset 坐标折叠寻址
+      // （BuildSimtPerLoadIndexOffsetExpressions，与单 gather Outputs() 同构——strided/行广播/
+      // 视图匹配 index 的 ② 形态由物理 view 承载正确寻址）。
+      std::map<ascir::TensorId, std::string> merge_values;
+      for (size_t k = 0; k < member_count; ++k) {
+        merge_values[members[k].value_tensor_id] = "value" + std::to_string(k);
+      }
+      SimtLoadIndexOffsetExpressions merge_offsets;
+      GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(members.front().logical_view, emission_nodes,
+                                                               merge_load_map, tpipe, fused_offset_type, "output_index",
+                                                               "output_index", false, merge_offsets, ss));
+      GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(emission_nodes, merge_load_map, &merge_offsets,
+                                               members.front().logical_view, "output_index", "output_index",
+                                               merge_values, ss));
+      for (size_t i = 0; i < merge_chains.size(); ++i) {
+        const auto chain_result = merge_values.find(merge_chains[i].result_tensor_id);
+        GE_ASSERT_TRUE(chain_result != merge_values.end(), "Fused merge chain[%zu] result tensor has no scalar value.",
+                       i);
+        ss << "      out.out" << i << " = " << chain_result->second << ";\n";
+      }
+    } else {
+      for (size_t k = 0; k < member_count; ++k) {
+        ss << "      out.v" << k << " = value" << k << ";\n";
+      }
+    }
+    ss << "      return out;\n";
+    ss << "    }\n";
+    ss << "    static void Store(const OutputTargets& t, OffsetType output_index, OffsetType local_index, "
+          "const FusedCtx& context, const OutputPack& o) {\n";
+    if (merge_info.register_merge) {
+      for (size_t i = 0; i < merge_chains.size(); ++i) {
+        ss << "      t.out" << i << "[output_index] = o.out" << i << ";\n";
+      }
+    } else {
+      // L3：UB 局部目标行对齐寻址（与单 gather GenerateSimtOutputsEvaluator 的 local target
+      // Store 一致；组员无 post-Reduce ⇒ inner size 恒为编译期常量，直接内联）。
+      std::string inner_size_expr;
+      if (!members.front().logical_view.output.sizes.empty()) {
+        inner_size_expr = tpipe.tiler.Size(members.front().logical_view.output.sizes.back());
+      }
+      for (size_t k = 0; k < member_count; ++k) {
+        if (inner_size_expr.empty()) {
+          ss << "      t.val" << k << "[local_index] = o.v" << k << ";\n";
+        } else {
+          const std::string row_stride =
+              "KernelUtils::SizeAlign(" + inner_size_expr + ", 32/sizeof(" + members[k].dtype_name + "))";
+          ss << "      t.val" << k << "[(local_index / (" << inner_size_expr << ")) * (" << row_stride
+             << ") + local_index % (" << inner_size_expr << ")] = o.v" << k << ";\n";
+        }
+      }
+    }
+    ss << "    }\n";
+    ss << "  };\n";
+    // Phase 4：OutputTargets 初始化 + fused 调用。actual_size/output_offset 语义对齐单 gather：
+    // L2（GM 直出）= loop size 与 block 偏移；L3（UB 局部目标）= tile 元素计数与 tile 基址偏移
+    // （Store 仅用 local_index，基址供 index 链 GM load 寻址）。
+    ss << "  FusedBody::OutputTargets ftgt = {";
+    if (merge_info.register_merge) {
+      for (size_t i = 0; i < merge_chains.size(); ++i) {
+        std::string dtype;
+        GE_ASSERT_SUCCESS(Tensor::DtypeName(merge_chains[i].dtype, dtype));
+        if (i != 0) {
+          ss << ", ";
+        }
+        ss << "(__gm__ " << dtype << " *)" << kGlobalTensorNamePrefix << merge_chains[i].target_tensor_id
+           << ".GetPhyAddr()";
+      }
+    } else {
+      for (size_t k = 0; k < member_count; ++k) {
+        if (k != 0) {
+          ss << ", ";
+        }
+        ss << "(__ubuf__ " << members[k].dtype_name << " *)" << members[k].ub_target->name << ".GetPhyAddr()";
+      }
+    }
+    ss << "};\n";
+    std::string fused_actual_size_expr;
+    std::string fused_output_offset_expr;
+    if (merge_info.register_merge) {
+      fused_actual_size_expr = outer_tb_var + "_loop_size";
+      fused_output_offset_expr = "static_cast<" + fused_offset_type + ">(block_dim_offset)";
+    } else {
+      const Tensor *value_tensor = tpipe.GetTensor(members.front().value_tensor_id);
+      GE_ASSERT_NOTNULL(value_tensor, "IndirectLoad SIMT fused value tensor is missing.");
+      af::Expression local_element_count;
+      GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
+      const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
+      fused_actual_size_expr = tpipe.tiler.ActualSize(local_element_count);
+      fused_output_offset_expr = "(static_cast<" + fused_offset_type + ">(block_dim_offset) + static_cast<" +
+                                 fused_offset_type + ">(" + outer_tb_var + ")) * " +
+                                 PromoteSizeExpr(local_tile_size_expr, fused_offset_type);
+    }
+    ss << "  AscendC::IndirectLoadSimtFused<FusedBody>(ftgt, fctx, static_cast<uint32_t>(" << fused_actual_size_expr
+       << "), " << fused_output_offset_expr << ");\n";
+    ss << "}\n";
+    result = ss.str();
+    return af::SUCCESS;
+  }
   ss << "// IndirectLoad SIMT" << std::endl;
   ss << "{" << std::endl;
   ss << "  __gm__ " << input_dtype << " *input_ptr = (__gm__ " << input_dtype << " *)" << input << ".GetPhyAddr();"

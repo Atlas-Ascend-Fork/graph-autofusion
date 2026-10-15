@@ -682,7 +682,11 @@ Status Scheduler::ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &sk
   }
   const bool is_input_pre = ascgen_utils::indirect_load::ShouldApplyInputInnerVectorization(node);
   if (is_input_pre) {
-    GE_ASSERT_SUCCESS(ApplyInputInnerVectorizedAxis(graph_, node, indirect_load_info_.axes.input_inner_axis));
+    // 双 gather 水平融合：优先使用节点上的 per-IL 输入内轴提示（两路 input 的 dim 轴
+    // 尺寸可不同）；单 gather 场景无提示，回退全局模板轴，行为与原实现一致。
+    const auto hint_axis = ascgen_utils::indirect_load::GetSimdInputInnerAxis(node);
+    GE_ASSERT_SUCCESS(ApplyInputInnerVectorizedAxis(
+        graph_, node, hint_axis != af::kIdNone ? hint_axis : indirect_load_info_.axes.input_inner_axis));
   }
   const bool is_index_pre =
       ascgen_utils::indirect_load::GetTemplateRole(node) == ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre;

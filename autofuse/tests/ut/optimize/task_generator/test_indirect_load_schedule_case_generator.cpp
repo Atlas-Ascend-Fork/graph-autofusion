@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
@@ -2443,6 +2443,757 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimtRaPostReduceCandidateKeepsFixedT
   ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(simt_indirect_load, axes), af::SUCCESS);
   EXPECT_NE(axes.tile_outer_axis, af::kIdNone);
   EXPECT_NE(axes.tile_inner_axis, af::kIdNone);
+}
+
+// ==================== 双 gather 水平融合 ====================
+// rank2 图：input0(s0,s1)/input1(s0',s1')、index/out(s2,s3)、gather_dim=1；
+// 两路 IndirectLoad 输出经 Add 归并，可选后置 Sum（reduce_dim=1，满足 G>=R）。
+// 构图选项注释置于字段上方而非行尾：行尾注释对齐列随 clang-format 版本变化（v18 与 v19+
+// 列不同），上置写法使格式化结果与版本无关。
+struct DualGatherGraphOptions {
+  // true: 两路 input 共用轴；false: 第二路独立轴
+  bool same_input_axes = false;
+  // true: 第二路 index 使用不同尺寸符号（非法组配对）
+  bool index_shape_mismatch = false;
+  // true: 第二路 IL 的 gather 轴不同（非法组配对）
+  bool axis_mismatch = false;
+  // true: 两路各自 store，不归并（非法组配对）
+  bool independent_outputs = false;
+  // true: 两路 input 各挂一个前置 Abs（验证逐路改图）
+  bool with_input_pre = false;
+  // true: 归并后接 Sum
+  bool with_post_reduce = false;
+  // true: 额外第三个 IL 独立输出（成员输出链发散，非法组）
+  bool third_indirect_load = false;
+  // true: 额外第三个 IL 经归并树汇入共享输出链（三路融合）
+  bool third_indirect_load_merged = false;
+  // true: 两路 input 值 dtype 为 int8（1 字节）——SIMD 档被 dtype 门控拒绝，仅 SIMT 档
+  bool one_byte_value = false;
+  // true: 第一路 input 值 dtype 为 int8（成员级 1 字节，混模板场景）
+  bool first_value_one_byte = false;
+  // true: 第二路 input 值 dtype 为 int8（成员级 1 字节，混模板场景；与第一路 dtype 不同
+  // 时自动在第二路 IL 后插 Cast 对齐归并链 dtype）
+  bool second_value_one_byte = false;
+  // true: 第一路 index 链挂非法外部消费者（Abs→store，SIMT 候选否决、SIMD/SK 不受影响）
+  bool first_index_illegal_consumer = false;
+  // true: 第二路 index 链挂非法外部消费者（同上）
+  bool second_index_illegal_consumer = false;
+  // true: post Reduce 归约外轴（R>G 形态：SIMD/SIMT 不可行，SK 分段桥接承接）；仅与
+  // with_post_reduce 组合生效
+  bool reduce_outer = false;
+};
+
+af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = {}) {
+  af::AscGraph graph("indirect_load_dual_ut_graph");
+  // BuildPostReduceLayout 对 Reduce 输入/输出 stride 逐轴做 StaticCheckEq(stride, 0) 静态判定，
+  // 符号 stride 判定为 kUnknown 时布局直接非法；with_post_reduce 场景与单 gather 的
+  // BuildPostReduceGraph 约定一致改用具体尺寸，其余场景保持符号尺寸。
+  const af::DataType value0_dtype =
+      (options.one_byte_value || options.first_value_one_byte) ? af::DT_INT8 : af::DT_FLOAT16;
+  const af::DataType value1_dtype =
+      (options.one_byte_value || options.second_value_one_byte) ? af::DT_INT8 : af::DT_FLOAT16;
+  const bool mixed_value_dtype = value0_dtype != value1_dtype;
+  const auto make_size = [&graph, &options](const char *name, int64_t value) {
+    return options.with_post_reduce ? af::Expression(graph.CreateSizeVar(value)) : graph.CreateSizeVar(name);
+  };
+  const af::Expression s0 = make_size("s0", 32);
+  const af::Expression s1 = make_size("s1", 16);
+  const af::Expression s0b = make_size("s0b", 32);
+  const af::Expression s1b = make_size("s1b", 16);
+  const af::Expression s2 = make_size("s2", 8);
+  const af::Expression s3 = make_size("s3", 16);
+  const af::Expression s3b = make_size("s3b", 32);
+  const auto z0 = graph.CreateAxis("z0", s0);
+  const auto z1 = graph.CreateAxis("z1", s1);
+  const auto w0 = graph.CreateAxis("w0", s0b);
+  const auto w1 = graph.CreateAxis("w1", s1b);
+  const auto z2 = graph.CreateAxis("z2", s2);
+  const auto z3 = graph.CreateAxis("z3", s3);
+  const auto z3b = graph.CreateAxis("z3b", s3b);
+  const std::vector<af::AxisId> input0_axes = {z0.id, z1.id};
+  const std::vector<af::AxisId> input1_axes =
+      options.same_input_axes ? input0_axes : std::vector<af::AxisId>{w0.id, w1.id};
+  const std::vector<af::AxisId> output_axes = {z2.id, z3.id};
+  const std::vector<af::Expression> input0_repeats = {s0, s1};
+  const std::vector<af::Expression> input1_repeats =
+      options.same_input_axes ? input0_repeats : std::vector<af::Expression>{s0b, s1b};
+  const std::vector<af::Expression> output_repeats = {s2, s3};
+  const std::vector<af::Expression> input0_strides = {s1, af::sym::kSymbolOne};
+  const std::vector<af::Expression> input1_strides =
+      options.same_input_axes ? input0_strides : std::vector<af::Expression>{s1b, af::sym::kSymbolOne};
+  const std::vector<af::Expression> output_strides = {s3, af::sym::kSymbolOne};
+  const std::vector<af::Expression> index1_repeats =
+      options.index_shape_mismatch ? std::vector<af::Expression>{s2, s3b} : output_repeats;
+  const std::vector<af::Expression> index1_strides =
+      options.index_shape_mismatch ? std::vector<af::Expression>{s3b, af::sym::kSymbolOne} : output_strides;
+
+  af::ascir_op::Data x0("dual_x0", graph);
+  x0.ir_attr.SetIndex(0);
+  SetNodeView(x0, value0_dtype, input0_axes, input0_repeats, input0_strides);
+  af::ascir_op::Load input_load0("dual_input_load0");
+  input_load0.x = x0.y;
+  SetNodeView(input_load0, value0_dtype, input0_axes, input0_repeats, input0_strides);
+  af::ascir_op::Data index0("dual_index0", graph);
+  index0.ir_attr.SetIndex(1);
+  SetNodeView(index0, af::DT_INT32, output_axes, output_repeats, output_strides);
+  af::ascir_op::Load index_load0("dual_index_load0");
+  index_load0.x = index0.y;
+  SetNodeView(index_load0, af::DT_INT32, output_axes, output_repeats, output_strides);
+  if (options.first_index_illegal_consumer) {
+    // 与单 gather kIllegalConsumer 形态一致：index 链尾部喂给非 store 的外部消费者，
+    // SIMT 标量求值器无法供值（SIMT 候选否决）；SIMD/SK 按张量整体读 index，不受影响。
+    af::ascir_op::Abs index_abs0("dual_index_abs0");
+    index_abs0.x = index_load0.y;
+    SetNodeView(index_abs0, af::DT_INT32, output_axes, output_repeats, output_strides);
+    SetVectorApi(index_abs0);
+    af::ascir_op::Store index_store0("dual_index_store0");
+    index_store0.x = index_abs0.y;
+    SetNodeView(index_store0, af::DT_INT32, output_axes, output_repeats, output_strides);
+  }
+
+  af::ascir_op::Data x1("dual_x1", graph);
+  x1.ir_attr.SetIndex(2);
+  SetNodeView(x1, value1_dtype, input1_axes, input1_repeats, input1_strides);
+  af::ascir_op::Load input_load1("dual_input_load1");
+  input_load1.x = x1.y;
+  SetNodeView(input_load1, value1_dtype, input1_axes, input1_repeats, input1_strides);
+  af::ascir_op::Data index1("dual_index1", graph);
+  index1.ir_attr.SetIndex(3);
+  SetNodeView(index1, af::DT_INT32, output_axes, index1_repeats, index1_strides);
+  af::ascir_op::Load index_load1("dual_index_load1");
+  index_load1.x = index1.y;
+  SetNodeView(index_load1, af::DT_INT32, output_axes, index1_repeats, index1_strides);
+  if (options.second_index_illegal_consumer) {
+    af::ascir_op::Abs index_abs1("dual_index_abs1");
+    index_abs1.x = index_load1.y;
+    SetNodeView(index_abs1, af::DT_INT32, output_axes, index1_repeats, index1_strides);
+    SetVectorApi(index_abs1);
+    af::ascir_op::Store index_store1("dual_index_store1");
+    index_store1.x = index_abs1.y;
+    SetNodeView(index_store1, af::DT_INT32, output_axes, index1_repeats, index1_strides);
+  }
+
+  af::ascir_op::IndirectLoad indirect_load0("dual_indirect_load0");
+  if (options.with_input_pre) {
+    af::ascir_op::Abs pre_abs0("dual_pre_abs0");
+    pre_abs0.x = input_load0.y;
+    SetNodeView(pre_abs0, value0_dtype, input0_axes, input0_repeats, input0_strides);
+    SetVectorApi(pre_abs0);
+    indirect_load0.x1 = pre_abs0.y;
+  } else {
+    indirect_load0.x1 = input_load0.y;
+  }
+  indirect_load0.x2 = index_load0.y;
+  indirect_load0.ir_attr.SetAxis(1);
+  SetNodeView(indirect_load0, value0_dtype, output_axes, output_repeats, output_strides);
+
+  af::ascir_op::IndirectLoad indirect_load1("dual_indirect_load1");
+  if (options.with_input_pre) {
+    af::ascir_op::Abs pre_abs1("dual_pre_abs1");
+    pre_abs1.x = input_load1.y;
+    SetNodeView(pre_abs1, value1_dtype, input1_axes, input1_repeats, input1_strides);
+    SetVectorApi(pre_abs1);
+    indirect_load1.x1 = pre_abs1.y;
+  } else {
+    indirect_load1.x1 = input_load1.y;
+  }
+  indirect_load1.x2 = index_load1.y;
+  indirect_load1.ir_attr.SetAxis(options.axis_mismatch ? 0 : 1);
+  SetNodeView(indirect_load1, value1_dtype, output_axes, output_repeats, output_strides);
+
+  // 混模板场景（成员 dtype 不同）：第二路 IL 输出经 Cast 对齐归并链 dtype（模拟
+  // DtypeConsistency 在归并树前插的 cast；IL 自身 input/output 保持 1 字节 dtype，
+  // dtype 门控按 IL 输入判定）。
+  af::ascir_op::Cast value_cast1("dual_cast1");
+  if (mixed_value_dtype) {
+    value_cast1.x = indirect_load1.y;
+    SetNodeView(value_cast1, value0_dtype, output_axes, output_repeats, output_strides);
+  }
+
+  if (options.third_indirect_load) {
+    af::ascir_op::IndirectLoad indirect_load2("dual_indirect_load2");
+    indirect_load2.x1 = input_load0.y;
+    indirect_load2.x2 = index_load0.y;
+    indirect_load2.ir_attr.SetAxis(1);
+    SetNodeView(indirect_load2, value0_dtype, output_axes, output_repeats, output_strides);
+    af::ascir_op::Store store2("dual_store2");
+    store2.x = indirect_load2.y;
+    SetNodeView(store2, value0_dtype, output_axes, output_repeats, output_strides);
+    af::ascir_op::Output output2("dual_output2");
+    output2.x = store2.y;
+    output2.ir_attr.SetIndex(4);
+    SetNodeView(output2, value0_dtype, output_axes, output_repeats, output_strides);
+  }
+
+  if (options.independent_outputs) {
+    af::ascir_op::Store store0("dual_store0");
+    store0.x = indirect_load0.y;
+    SetNodeView(store0, value0_dtype, output_axes, output_repeats, output_strides);
+    af::ascir_op::Output output0("dual_output0");
+    output0.x = store0.y;
+    output0.ir_attr.SetIndex(0);
+    SetNodeView(output0, value0_dtype, output_axes, output_repeats, output_strides);
+    af::ascir_op::Store store1("dual_store1");
+    store1.x = indirect_load1.y;
+    SetNodeView(store1, value1_dtype, output_axes, output_repeats, output_strides);
+    af::ascir_op::Output output1("dual_output1");
+    output1.x = store1.y;
+    output1.ir_attr.SetIndex(1);
+    SetNodeView(output1, value1_dtype, output_axes, output_repeats, output_strides);
+    return graph;
+  }
+
+  af::ascir_op::Add merge_add("dual_merge_add");
+  merge_add.x1 = indirect_load0.y;
+  merge_add.x2 = mixed_value_dtype ? value_cast1.y : indirect_load1.y;
+  SetNodeView(merge_add, value0_dtype, output_axes, output_repeats, output_strides);
+  SetVectorApi(merge_add);
+  // reduce_outer：Sum 归约外轴（R>G，SIMD/SIMT 模板不可行）；默认归约内轴（G≥R）。
+  const std::vector<af::Expression> terminal_repeats =
+      options.with_post_reduce ? (options.reduce_outer ? std::vector<af::Expression>{af::sym::kSymbolOne, s3}
+                                                       : std::vector<af::Expression>{s2, af::sym::kSymbolOne})
+                               : output_repeats;
+  const std::vector<af::Expression> terminal_strides =
+      options.with_post_reduce
+          ? (options.reduce_outer ? std::vector<af::Expression>{af::sym::kSymbolZero, af::sym::kSymbolOne}
+                                  : std::vector<af::Expression>{af::sym::kSymbolOne, af::sym::kSymbolZero})
+          : output_strides;
+  af::ascir_op::Store store("dual_store");
+  const auto wire_terminal = [&options, &output_axes, &terminal_repeats, &terminal_strides, &store,
+                              &value0_dtype](const af::AscOpOutput &chain_head) {
+    if (options.with_post_reduce) {
+      af::ascir_op::Sum sum("dual_sum");
+      sum.x = chain_head;
+      sum.attr.api.compute_type = af::ComputeType::kComputeReduce;
+      sum.attr.sched.axis = output_axes;
+      SetNodeView(sum, value0_dtype, output_axes, terminal_repeats, terminal_strides);
+      store.x = sum.y;
+    } else {
+      store.x = chain_head;
+    }
+  };
+  if (options.third_indirect_load_merged) {
+    // 第三路 IL：独立 input/index（独立轴系），经第二个 Add 树形归并进共享输出链。
+    const af::Expression s0c = make_size("s0c", 32);
+    const af::Expression s1c = make_size("s1c", 16);
+    const auto u0 = graph.CreateAxis("u0", s0c);
+    const auto u1 = graph.CreateAxis("u1", s1c);
+    const std::vector<af::AxisId> input2_axes = {u0.id, u1.id};
+    const std::vector<af::Expression> input2_repeats = {s0c, s1c};
+    const std::vector<af::Expression> input2_strides = {s1c, af::sym::kSymbolOne};
+    af::ascir_op::Data x2("dual_x2", graph);
+    x2.ir_attr.SetIndex(4);
+    SetNodeView(x2, value0_dtype, input2_axes, input2_repeats, input2_strides);
+    af::ascir_op::Load input_load2("dual_input_load2");
+    input_load2.x = x2.y;
+    SetNodeView(input_load2, value0_dtype, input2_axes, input2_repeats, input2_strides);
+    af::ascir_op::Data index2("dual_index2", graph);
+    index2.ir_attr.SetIndex(5);
+    SetNodeView(index2, af::DT_INT32, output_axes, output_repeats, output_strides);
+    af::ascir_op::Load index_load2("dual_index_load2");
+    index_load2.x = index2.y;
+    SetNodeView(index_load2, af::DT_INT32, output_axes, output_repeats, output_strides);
+    af::ascir_op::IndirectLoad indirect_load2("dual_indirect_load2");
+    indirect_load2.x1 = input_load2.y;
+    indirect_load2.x2 = index_load2.y;
+    indirect_load2.ir_attr.SetAxis(1);
+    SetNodeView(indirect_load2, value0_dtype, output_axes, output_repeats, output_strides);
+    af::ascir_op::Add merge_add2("dual_merge_add2");
+    merge_add2.x1 = merge_add.y;
+    merge_add2.x2 = indirect_load2.y;
+    SetNodeView(merge_add2, value0_dtype, output_axes, output_repeats, output_strides);
+    SetVectorApi(merge_add2);
+    wire_terminal(merge_add2.y);
+  } else {
+    wire_terminal(merge_add.y);
+  }
+  SetNodeView(store, value0_dtype, output_axes, terminal_repeats, terminal_strides);
+  af::ascir_op::Output output("dual_output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  SetNodeView(output, value0_dtype, output_axes, terminal_repeats, terminal_strides);
+  return graph;
+}
+
+std::vector<af::AscGraph> GenerateDualGatherCases(const DualGatherGraphOptions &options = {}) {
+  auto graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  EXPECT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  return graphs;
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSimdCandidatesUseBothTiers) {
+  const auto graphs = GenerateDualGatherCases();
+  // 模板阶梯：双 gather 生成 SIMD 两档 + SIMT 一档共 3 个候选（SIMT 组员形态见
+  // MultiGatherGeneratesSimdAndSimtCandidates）；此处验证候选内两 IL 模板一致与两档
+  // SIMD 实现档位差异。
+  ASSERT_EQ(graphs.size(), 3UL);
+  for (const auto &candidate : graphs) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    const auto il1 = candidate.FindNode("dual_indirect_load1");
+    ASSERT_NE(il0, nullptr);
+    ASSERT_NE(il1, nullptr);
+    EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il0), ascir::GetTemplateIdOrDefault(*il1));
+  }
+  ascgen_utils::indirect_load::Implementation implementation0 = ascgen_utils::indirect_load::Implementation::kDefault;
+  ascgen_utils::indirect_load::Implementation implementation1 = ascgen_utils::indirect_load::Implementation::kDefault;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetImplementation(graphs[0].FindNode("dual_indirect_load0"), implementation0),
+            af::SUCCESS);
+  ASSERT_EQ(ascgen_utils::indirect_load::GetImplementation(graphs[1].FindNode("dual_indirect_load0"), implementation1),
+            af::SUCCESS);
+  EXPECT_NE(implementation0, implementation1);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSharesTemplateAxesAcrossPair) {
+  // ExpectAxisNames/ExpectFixedTileSplit 需要非 const 的 AscGraph 引用（与单 gather 用例一致）。
+  auto graphs = GenerateDualGatherCases();
+  ASSERT_EQ(graphs.size(), 3UL);
+  auto &simd_graph = graphs.front();
+  const auto il0 = simd_graph.FindNode("dual_indirect_load0");
+  const auto il1 = simd_graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  ascgen_utils::indirect_load::TemplateAxes axes0;
+  ascgen_utils::indirect_load::TemplateAxes axes1;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il0, axes0), af::SUCCESS);
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il1, axes1), af::SUCCESS);
+  // primary 的切分规则与循环组织（outer/inner/tile/vectorized）对 secondary 生效。
+  EXPECT_EQ(axes1.outer_axis, axes0.outer_axis);
+  EXPECT_EQ(axes1.inner_axis, axes0.inner_axis);
+  EXPECT_EQ(axes1.tile_outer_axis, axes0.tile_outer_axis);
+  EXPECT_EQ(axes1.tile_inner_axis, axes0.tile_inner_axis);
+  EXPECT_EQ(axes1.vectorized_axes, axes0.vectorized_axes);
+  // 两路 input 轴不同：input 内轴独立构建。
+  EXPECT_NE(axes1.input_inner_axis, axes0.input_inner_axis);
+  ExpectAxisNames(simd_graph, {axes0.outer_axis}, {"z2"});
+  ExpectAxisNames(simd_graph, {axes0.inner_axis}, {"z3"});
+  ExpectAxisNames(simd_graph, {axes0.input_inner_axis}, {"z1"});
+  ExpectAxisNames(simd_graph, {axes1.input_inner_axis}, {"w1"});
+  ExpectFixedTileSplit(simd_graph, axes0.outer_axis);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherReusesInputInnerAxisForSharedInputAxes) {
+  DualGatherGraphOptions options;
+  options.same_input_axes = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 3UL);
+  const auto &simd_graph = graphs.front();
+  const auto il0 = simd_graph.FindNode("dual_indirect_load0");
+  const auto il1 = simd_graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  ascgen_utils::indirect_load::TemplateAxes axes0;
+  ascgen_utils::indirect_load::TemplateAxes axes1;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il0, axes0), af::SUCCESS);
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il1, axes1), af::SUCCESS);
+  // 两路 input 轴后缀一致时复用同一 input 内轴，避免重复建轴。
+  EXPECT_EQ(axes1.input_inner_axis, axes0.input_inner_axis);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSetsPerIlInputInnerAxisHints) {
+  const auto graphs = GenerateDualGatherCases();
+  ASSERT_EQ(graphs.size(), 3UL);
+  const auto &simd_graph = graphs.front();
+  const auto input_load0 = simd_graph.FindNode("dual_input_load0");
+  const auto input_load1 = simd_graph.FindNode("dual_input_load1");
+  ASSERT_NE(input_load0, nullptr);
+  ASSERT_NE(input_load1, nullptr);
+  // 调度期按节点提示区分两路 input 边界的向量化内轴归属。
+  const auto hint0 = ascgen_utils::indirect_load::GetSimdInputInnerAxis(input_load0);
+  const auto hint1 = ascgen_utils::indirect_load::GetSimdInputInnerAxis(input_load1);
+  EXPECT_NE(hint0, af::kIdNone);
+  EXPECT_NE(hint1, af::kIdNone);
+  EXPECT_NE(hint0, hint1);
+  const auto il0 = simd_graph.FindNode("dual_indirect_load0");
+  const auto il1 = simd_graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  ascgen_utils::indirect_load::TemplateAxes axes0;
+  ascgen_utils::indirect_load::TemplateAxes axes1;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il0, axes0), af::SUCCESS);
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il1, axes1), af::SUCCESS);
+  EXPECT_EQ(hint0, axes0.input_inner_axis);
+  EXPECT_EQ(hint1, axes1.input_inner_axis);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherMovesInputPreNodesAfterEachIndirectLoad) {
+  DualGatherGraphOptions options;
+  options.with_input_pre = true;
+  auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 3UL);
+  auto &simd_graph = graphs.front();
+  const auto il0 = simd_graph.FindNode("dual_indirect_load0");
+  const auto il1 = simd_graph.FindNode("dual_indirect_load1");
+  const auto pre_abs0 = simd_graph.FindNode("dual_pre_abs0");
+  const auto pre_abs1 = simd_graph.FindNode("dual_pre_abs1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  ASSERT_NE(pre_abs0, nullptr);
+  ASSERT_NE(pre_abs1, nullptr);
+  // 改图逻辑逐 IL 独立执行：两路前置 Abs 均搬到各自 gather 之后。
+  EXPECT_EQ(ascgen_utils::indirect_load::GetInputProducer(il0, 0UL)->GetName(), "dual_input_load0");
+  EXPECT_EQ(ascgen_utils::indirect_load::GetInputProducer(il1, 0UL)->GetName(), "dual_input_load1");
+  EXPECT_EQ(ascgen_utils::indirect_load::GetInputProducer(pre_abs0, 0UL), il0);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetInputProducer(pre_abs1, 0UL), il1);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetOnlyOutputConsumer(il0), pre_abs0);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetOnlyOutputConsumer(il1), pre_abs1);
+  // 后移的前置 ele 与单 gather 语义一致：sched.axis 取各自 IL 输出轴空间（两路共享 z2/z3）。
+  // per-IL 输入内轴归属由 DualGatherSetsPerIlInputInnerAxisHints 验证。
+  ExpectAxisNames(simd_graph, pre_abs0->attr.sched.axis, {"z2", "z3"});
+  ExpectAxisNames(simd_graph, pre_abs1->attr.sched.axis, {"z2", "z3"});
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherFusesSharedPostReduce) {
+  DualGatherGraphOptions options;
+  options.with_post_reduce = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 3UL);
+  for (const auto &candidate : graphs) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    const auto il1 = candidate.FindNode("dual_indirect_load1");
+    const auto sum = candidate.FindNode("dual_sum");
+    const auto store = candidate.FindNode("dual_store");
+    ASSERT_NE(il0, nullptr);
+    ASSERT_NE(il1, nullptr);
+    ASSERT_NE(sum, nullptr);
+    ASSERT_NE(store, nullptr);
+    // 共享输出链：store 的生产者为 post Reduce，两路 lowering 元数据齐备。
+    EXPECT_EQ(ascgen_utils::indirect_load::GetInputProducer(store, 0UL), sum);
+    EXPECT_EQ(ascgen_utils::indirect_load::GetPostReduceConsumer(il0), sum);
+    EXPECT_EQ(ascgen_utils::indirect_load::GetPostReduceConsumer(il1), sum);
+    EXPECT_TRUE(ascgen_utils::indirect_load::HasLoweringMetadata(il0));
+    EXPECT_TRUE(ascgen_utils::indirect_load::HasLoweringMetadata(il1));
+    // L3（UB 归并，共享 Reduce 终端）：归并链为扇出分支、Reduce 后的 Store 由普通向量
+    // 发射读取——不做 L2 的 kSimtDirectGmBoundary 跳过标注（仅寄存器归并直写 GM）。
+    if (ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt) {
+      EXPECT_NE(ascgen_utils::indirect_load::GetTemplateRole(store),
+                ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary);
+    }
+  }
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, GeneratorTaskKeepsDualPairInSameGroupedGraph) {
+  auto graph = BuildDualIndirectLoadGraph();
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<optimize::ScheduleTask> tasks;
+  ASSERT_EQ(generator.GeneratorTask(graph, tasks, {}), af::SUCCESS);
+  ASSERT_EQ(tasks.size(), 3UL);
+  for (const auto &task : tasks) {
+    ASSERT_FALSE(task.score_func.empty());
+    ASSERT_FALSE(task.grouped_graphs.empty());
+    // 两路经归并节点连通，必须落在同一 grouped graph（单 kernel）。
+    const auto grouped_with_pair =
+        std::find_if(task.grouped_graphs.begin(), task.grouped_graphs.end(), [](const af::AscGraph &grouped) {
+          return grouped.FindNode("dual_indirect_load0") != nullptr &&
+                 grouped.FindNode("dual_indirect_load1") != nullptr;
+        });
+    ASSERT_NE(grouped_with_pair, task.grouped_graphs.end());
+  }
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherFailsWhenIndexShapeMismatch) {
+  DualGatherGraphOptions options;
+  options.index_shape_mismatch = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  // GE_ASSERT 失败返回自有错误码而非 af::FAILED，与既有负向用例一致以非 SUCCESS 判定。
+  EXPECT_NE(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_TRUE(graphs.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherFailsWhenAxisMismatch) {
+  DualGatherGraphOptions options;
+  options.axis_mismatch = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  EXPECT_NE(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_TRUE(graphs.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherFailsWhenOutputChainsDiverge) {
+  DualGatherGraphOptions options;
+  options.independent_outputs = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  EXPECT_NE(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_TRUE(graphs.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherFailsWhenMemberOutputDiverges) {
+  DualGatherGraphOptions options;
+  options.third_indirect_load = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  // 第三路 IL 独立输出，与 primary 的输出闭包无公共节点，组配对失败。
+  EXPECT_NE(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_TRUE(graphs.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherFusesThreeGathersThroughMergeTree) {
+  // 三路 gather 经归并树（add(add(g0,g1),g2)）汇入同一条输出链：数量不设上限，
+  // 全组共享 primary 的切分轴与循环组织，仅生成 SIMD 两档候选。
+  DualGatherGraphOptions options;
+  options.third_indirect_load_merged = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 3UL);
+  for (const auto &candidate : graphs) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    const auto il1 = candidate.FindNode("dual_indirect_load1");
+    const auto il2 = candidate.FindNode("dual_indirect_load2");
+    ASSERT_NE(il0, nullptr);
+    ASSERT_NE(il1, nullptr);
+    ASSERT_NE(il2, nullptr);
+    ASSERT_EQ(ascir::GetTemplateIdOrDefault(*il0), ascir::GetTemplateIdOrDefault(*il1));
+    ASSERT_EQ(ascir::GetTemplateIdOrDefault(*il0), ascir::GetTemplateIdOrDefault(*il2));
+    if (ascir::GetTemplateIdOrDefault(*il0) != ascir::TemplateId::kIndirectLoadSimd) {
+      // SIMT 组员候选：共享轴断言仅适用于 SIMD 候选（SIMT 组员形态见
+      // MultiGatherGeneratesSimdAndSimtCandidates）。
+      continue;
+    }
+    ascgen_utils::indirect_load::TemplateAxes axes0;
+    ascgen_utils::indirect_load::TemplateAxes axes1;
+    ascgen_utils::indirect_load::TemplateAxes axes2;
+    ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il0, axes0), af::SUCCESS);
+    ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il1, axes1), af::SUCCESS);
+    ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il2, axes2), af::SUCCESS);
+    // 全组共享 outer/inner/tile/vectorized；三路 input 轴系互不相同，各自独立构建 input 内轴。
+    EXPECT_EQ(axes1.outer_axis, axes0.outer_axis);
+    EXPECT_EQ(axes2.outer_axis, axes0.outer_axis);
+    EXPECT_EQ(axes1.inner_axis, axes0.inner_axis);
+    EXPECT_EQ(axes2.inner_axis, axes0.inner_axis);
+    EXPECT_EQ(axes1.tile_outer_axis, axes0.tile_outer_axis);
+    EXPECT_EQ(axes2.tile_outer_axis, axes0.tile_outer_axis);
+    EXPECT_EQ(axes1.tile_inner_axis, axes0.tile_inner_axis);
+    EXPECT_EQ(axes2.tile_inner_axis, axes0.tile_inner_axis);
+    EXPECT_EQ(axes1.vectorized_axes, axes0.vectorized_axes);
+    EXPECT_EQ(axes2.vectorized_axes, axes0.vectorized_axes);
+    EXPECT_NE(axes1.input_inner_axis, axes0.input_inner_axis);
+    EXPECT_NE(axes2.input_inner_axis, axes0.input_inner_axis);
+    EXPECT_NE(axes2.input_inner_axis, axes1.input_inner_axis);
+  }
+  ascgen_utils::indirect_load::Implementation implementation0 = ascgen_utils::indirect_load::Implementation::kDefault;
+  ascgen_utils::indirect_load::Implementation implementation1 = ascgen_utils::indirect_load::Implementation::kDefault;
+  ASSERT_NE(graphs[0].FindNode("dual_indirect_load0"), nullptr);
+  ASSERT_NE(graphs[1].FindNode("dual_indirect_load0"), nullptr);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetImplementation(graphs[0].FindNode("dual_indirect_load0"), implementation0),
+            af::SUCCESS);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetImplementation(graphs[1].FindNode("dual_indirect_load0"), implementation1),
+            af::SUCCESS);
+  EXPECT_NE(implementation0, implementation1);
+}
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherGeneratesSimdAndSimtCandidates) {
+  // 模板阶梯：双 gather 生成 SIMD 两档 + SIMT 一档共 3 个候选。SIMT 候选为组员形态——
+  // 各路计划仅含本路 index 链，value 写 UB 局部目标（空变换链），共享归并/输出链
+  // 不进入任何组员的 SIMT 计划。
+  // L2 判定（CanEmitSimtScalar 逐节点查 V2 标量注册表）依赖平台上下文——与既有平台
+  // 相关用例一致显式设置；未设置平台时 impl 解析失败会把 SIMT 候选整体降为 L3。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  const auto graphs = GenerateDualGatherCases();
+  ASSERT_EQ(graphs.size(), 3UL);
+  size_t simd_count = 0UL;
+  size_t simt_count = 0UL;
+  for (const auto &candidate : graphs) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    const auto il1 = candidate.FindNode("dual_indirect_load1");
+    ASSERT_NE(il0, nullptr);
+    ASSERT_NE(il1, nullptr);
+    const auto template0 = ascir::GetTemplateIdOrDefault(*il0);
+    ASSERT_EQ(template0, ascir::GetTemplateIdOrDefault(*il1));
+    if (template0 == ascir::TemplateId::kIndirectLoadSimd) {
+      ++simd_count;
+      continue;
+    }
+    ASSERT_EQ(template0, ascir::TemplateId::kIndirectLoadSimt);
+    ++simt_count;
+    EXPECT_TRUE(ascgen_utils::indirect_load::IsSimtGroupMember(il0));
+    EXPECT_TRUE(ascgen_utils::indirect_load::IsSimtGroupMember(il1));
+    // L2 寄存器归并：evaluator 归并结果直写 Store 的 GM 目标（OutputTargets），Store 必须
+    // 跳过独立发射（kSimtDirectGmBoundary，与单 gather output_store 语义一致——否则普通
+    // 发射与直写冲突：重复写/读未产出的张量）。
+    const auto fused_store = candidate.FindNode("dual_store");
+    ASSERT_NE(fused_store, nullptr);
+    EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(fused_store),
+              ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary);
+    // seq-V1：primary 携带融合发射标记与全组成员名；非 primary 无标记（codegen 跳过其发射）。
+    EXPECT_TRUE(ascgen_utils::indirect_load::IsSimtFusedPrimary(il0));
+    EXPECT_FALSE(ascgen_utils::indirect_load::IsSimtFusedPrimary(il1));
+    const auto fused_members = ascgen_utils::indirect_load::GetSimtFusedMemberNames(il0);
+    ASSERT_EQ(fused_members.size(), 2UL);
+    EXPECT_EQ(fused_members[0], "dual_indirect_load0");
+    EXPECT_EQ(fused_members[1], "dual_indirect_load1");
+    for (const af::AscNodePtr &member : {il0, il1}) {
+      ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+      ASSERT_EQ(ascgen_utils::indirect_load::GetLoweringMetadata(member, metadata), af::SUCCESS);
+      EXPECT_FALSE(metadata.simt.has_post_reduce);
+      ASSERT_EQ(metadata.simt.output_chains.size(), 1UL);
+      EXPECT_TRUE(metadata.simt.output_chains[0].local_target);
+      EXPECT_TRUE(metadata.simt.output_chains[0].node_names.empty());
+      EXPECT_EQ(metadata.simt.output_chains[0].result_tensor_id, metadata.simt.value_tensor_id);
+      EXPECT_EQ(metadata.simt.output_chains[0].target_tensor_id, metadata.simt.value_tensor_id);
+      EXPECT_EQ(metadata.simt.output_result_tensor_id, metadata.simt.value_tensor_id);
+    }
+  }
+  EXPECT_EQ(simd_count, 2UL);
+  EXPECT_EQ(simt_count, 1UL);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSimtLadderForOneByteValues) {
+  // 模板阶梯（dtype 维度）：1 字节值（int8）仅 SIMT 标量路径支持——SIMD 两档被 dtype
+  // 门控拒绝，仅生成 SIMT 一档候选。
+  DualGatherGraphOptions options;
+  options.one_byte_value = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 1UL);
+  const auto il0 = graphs[0].FindNode("dual_indirect_load0");
+  const auto il1 = graphs[0].FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il0), ascir::TemplateId::kIndirectLoadSimt);
+  EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il1), ascir::TemplateId::kIndirectLoadSimt);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherMixedTemplateFallbackForHeterogeneousMembers) {
+  // L5 混模板独立兜底：member0（fp16，index 链含非法外部消费者 → SIMT 不可行）与
+  // member1（int8 值 → SIMD 被 dtype 门控拒绝）输入侧可行性互补——共模板候选全灭后，
+  // 逐成员探测得到 {SIMD, SIMT} 异构选择，各成员以各自模板标注于同一 kernel。
+  DualGatherGraphOptions options;
+  options.first_index_illegal_consumer = true;
+  options.second_value_one_byte = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 1UL);
+  const auto il0 = graphs[0].FindNode("dual_indirect_load0");
+  const auto il1 = graphs[0].FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il0), ascir::TemplateId::kIndirectLoadSimd);
+  EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il1), ascir::TemplateId::kIndirectLoadSimt);
+  // SIMT 成员组员形态：标记组员但不设融合发射标记（与共模板 SIMT 候选不同，各成员走
+  // 标准单 gather invocation），value 写 UB 局部目标（空变换链）。
+  EXPECT_TRUE(ascgen_utils::indirect_load::IsSimtGroupMember(il1));
+  EXPECT_FALSE(ascgen_utils::indirect_load::IsSimtFusedPrimary(il1));
+  EXPECT_FALSE(ascgen_utils::indirect_load::IsSimtFusedMemberEmitted(il1));
+  ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetLoweringMetadata(il1, metadata), af::SUCCESS);
+  EXPECT_FALSE(metadata.simt.has_post_reduce);
+  ASSERT_EQ(metadata.simt.output_chains.size(), 1UL);
+  EXPECT_TRUE(metadata.simt.output_chains[0].local_target);
+  // M2 执行顺序（元数据级验证）：归并/输出链（含 int8→fp16 Cast）标为扇出分支，在全部
+  // 成员发射之后作为普通向量代码执行——SIMD 成员输出 UB 张量与 SIMT 成员 UB 局部目标
+  // 均由该段消费（执行顺序的端到端验证随 ST/E2E 补齐）。
+  const auto merge_add = graphs[0].FindNode("dual_merge_add");
+  const auto value_cast1 = graphs[0].FindNode("dual_cast1");
+  ASSERT_NE(merge_add, nullptr);
+  ASSERT_NE(value_cast1, nullptr);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(merge_add),
+            ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(value_cast1),
+            ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch);
+  // L5 混模板：SIMD 成员向量发射 + SIMT 成员标准单 gather invocation，归并链值由扇出
+  // 分支向量代码产出——Store 正常发射，不做 L2 的 kSimtDirectGmBoundary 跳过标注。
+  const auto mixed_store = graphs[0].FindNode("dual_store");
+  ASSERT_NE(mixed_store, nullptr);
+  EXPECT_NE(ascgen_utils::indirect_load::GetTemplateRole(mixed_store),
+            ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary);
+  // SIMD 子集建轴，SIMT 成员复用同一 TemplateAxes（outer/inner/tile/vectorized 一致；
+  // SIMT 仅消费 outer，含 SIMD 专用轴的整体拷贝见检视 M3）。
+  ascgen_utils::indirect_load::TemplateAxes axes0;
+  ascgen_utils::indirect_load::TemplateAxes axes1;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il0, axes0), af::SUCCESS);
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il1, axes1), af::SUCCESS);
+  EXPECT_EQ(axes1.outer_axis, axes0.outer_axis);
+  EXPECT_EQ(axes1.inner_axis, axes0.inner_axis);
+  EXPECT_EQ(axes1.tile_outer_axis, axes0.tile_outer_axis);
+  EXPECT_EQ(axes1.tile_inner_axis, axes0.tile_inner_axis);
+  EXPECT_EQ(axes1.vectorized_axes, axes0.vectorized_axes);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSkBridgeFallbackSegmentsMembers) {
+  // L6 SK 分段桥接（终态兜底）：双成员 index 链含非法外部消费者（SIMT 候选否决）且共享
+  // post Reduce 归约外轴（R>G，SIMD 候选否决）——前五级全灭，逐成员复用单 gather SK
+  // 流水：各成员独立 workspace 边界切断成员间及成员↔消费段连通性。
+  DualGatherGraphOptions options;
+  options.first_index_illegal_consumer = true;
+  options.second_index_illegal_consumer = true;
+  options.with_post_reduce = true;
+  options.reduce_outer = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 1UL);
+  const auto &sk_graph = graphs[0];
+  const auto il0 = sk_graph.FindNode("dual_indirect_load0");
+  const auto il1 = sk_graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il0), ascir::TemplateId::kIndirectLoadSK);
+  EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il1), ascir::TemplateId::kIndirectLoadSK);
+  // 各成员独立的 output workspace 边界（成员名前缀，连通性切分依据）。
+  EXPECT_NE(sk_graph.FindNode("dual_indirect_load0_sk_output_store"), nullptr);
+  EXPECT_NE(sk_graph.FindNode("dual_indirect_load1_sk_output_store"), nullptr);
+
+  // 分段语义：GeneratorTask 分区后各 IL 落入独立段（段内恒单 IL），归并/输出链作为
+  // 消费段独立调度（读各路 workspace）。
+  af::AscGraph graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<optimize::ScheduleTask> tasks;
+  ASSERT_EQ(generator.GeneratorTask(graph, tasks, {}), af::SUCCESS);
+  ASSERT_EQ(tasks.size(), 1UL);
+  const auto &grouped = tasks[0].grouped_graphs;
+  ASSERT_FALSE(grouped.empty());
+  const auto find_group = [&grouped](const char *name) {
+    for (size_t index = 0UL; index < grouped.size(); ++index) {
+      if (grouped[index].FindNode(name) != nullptr) {
+        return index;
+      }
+    }
+    return grouped.size();
+  };
+  const size_t group_il0 = find_group("dual_indirect_load0");
+  const size_t group_il1 = find_group("dual_indirect_load1");
+  const size_t group_merge = find_group("dual_merge_add");
+  ASSERT_LT(group_il0, grouped.size());
+  ASSERT_LT(group_il1, grouped.size());
+  ASSERT_LT(group_merge, grouped.size());
+  EXPECT_NE(group_il0, group_il1);
+  EXPECT_NE(group_il0, group_merge);
+  EXPECT_NE(group_il1, group_merge);
+  // 段内恒单 IL（H1 连通性分区正确性：段内单 IL 假设全部成立）。
+  for (const auto &segment : grouped) {
+    const bool has_il0 = segment.FindNode("dual_indirect_load0") != nullptr;
+    const bool has_il1 = segment.FindNode("dual_indirect_load1") != nullptr;
+    EXPECT_FALSE(has_il0 && has_il1);
+  }
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSkBridgeRejectsOneByteValueMembers) {
+  // L6 dtype 门控（与单 gather ApplyGraphPass 对齐）：SK 的 AscendC::Gather 不支持 1 字节
+  // 值。双成员 int8 + index 链非法外部消费者（SIMT 不可行）时六级阶梯全灭，不产生候选
+  // （由前端 BackendSpec 预防兜底承接），而非生成 codegen 不可支持的 SK 候选。
+  DualGatherGraphOptions options;
+  options.first_index_illegal_consumer = true;
+  options.second_index_illegal_consumer = true;
+  options.first_value_one_byte = true;
+  options.second_value_one_byte = true;
+  af::AscGraph graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  EXPECT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_TRUE(graphs.empty());
 }
 
 }  // namespace

@@ -1590,6 +1590,353 @@ TEST(IndirectLoadApiCallTest, InitSimtPostReduceSucceeds) {
   EXPECT_EQ(status, af::SUCCESS);
 }
 
+TEST(IndirectLoadApiCallTest, InitSimtGroupMemberLocalTargetWithoutPostReduceSucceeds) {
+  // 组员形态回归：无 post-Reduce + value 直写 UB 局部目标（local target 不伴随 post-Reduce）。
+  // ResolveSimtMetadata 的旧双向等价断言（has_post_reduce_ == (local_target_count == 1)）会使
+  // 组员（含 fused primary）在 ApiCall::Init 的 ParseAttr 阶段失败——Init 先于 Generate 的
+  // 成员跳过执行。断言已与 schedule 侧 ValidateSimtOutputPlan 对齐为单向蕴含。
+  ILTestGraph g("simt_group_member");
+  BuildSimtPostReduceGraph(g);
+  AnnotateSimtTemplate(g.graph);
+
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  ASSERT_EQ(SetSimtGroupMember(il_node), af::SUCCESS);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(GetLoweringMetadata(il_node, metadata), af::SUCCESS);
+  EXPECT_FALSE(metadata.simt.has_post_reduce);
+  ASSERT_EQ(metadata.simt.output_chains.size(), 1UL);
+  EXPECT_TRUE(metadata.simt.output_chains[0].local_target);
+
+  IndirectLoadRegApiCall call("IndirectLoadRegApiCall");
+  EXPECT_EQ(call.Init(il_node), af::SUCCESS);
+}
+
+// ======================== SIMT fused group graph（多 gather L2 寄存器归并）========================
+// 两路 IndirectLoad（组员形态：value 写 UB 局部目标）→ merge Add → Store → Output。
+// 镜像调度侧 PlanSimtFusedEmission 的 L2 标注产物：primary 携带 fused 标记与归并信息，
+// 归并树标 kSimtInlineTransform，Store 标 kSimtDirectGmBoundary（evaluator 归并结果经
+// OutputTargets 直写其 GM 目标，跳过独立发射）。
+
+void BuildSimtFusedGroupGraph(ILTestGraph &g) {
+  const af::Expression One = af::sym::kSymbolOne;
+
+  Data x0_data("x0", g.graph);
+  x0_data.ir_attr.SetIndex(0);
+  x0_data.y.dtype = ge::DT_FLOAT16;
+  x0_data.attr.sched.axis = {g.z0.id, g.z1.id};
+  *x0_data.y.axis = {g.z0.id, g.z1.id};
+  *x0_data.y.repeats = {g.s0, g.s1};
+  *x0_data.y.strides = {g.s1, One};
+
+  Data x1_data("x1", g.graph);
+  x1_data.ir_attr.SetIndex(1);
+  x1_data.y.dtype = ge::DT_FLOAT16;
+  x1_data.attr.sched.axis = {g.z0.id, g.z1.id};
+  *x1_data.y.axis = {g.z0.id, g.z1.id};
+  *x1_data.y.repeats = {g.s0, g.s1};
+  *x1_data.y.strides = {g.s1, One};
+
+  Data idx0_data("idx0", g.graph);
+  idx0_data.ir_attr.SetIndex(2);
+  idx0_data.y.dtype = ge::DT_INT32;
+  idx0_data.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx0_data.y.axis = {g.z2.id, g.z3.id};
+  *idx0_data.y.repeats = {g.s2, g.s3};
+  *idx0_data.y.strides = {g.s3, One};
+
+  Data idx1_data("idx1", g.graph);
+  idx1_data.ir_attr.SetIndex(3);
+  idx1_data.y.dtype = ge::DT_INT32;
+  idx1_data.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx1_data.y.axis = {g.z2.id, g.z3.id};
+  *idx1_data.y.repeats = {g.s2, g.s3};
+  *idx1_data.y.strides = {g.s3, One};
+
+  Load x_load0("x_load0");
+  g.graph.AddNode(x_load0);
+  x_load0.x = x0_data.y;
+  x_load0.y.dtype = ge::DT_FLOAT16;
+  x_load0.attr.sched.axis = {g.z0.id, g.z1.id};
+  *x_load0.y.axis = {g.z0.id, g.z1.id};
+  *x_load0.y.repeats = {g.s0, g.s1};
+  *x_load0.y.strides = {g.s1, One};
+
+  Load x_load1("x_load1");
+  g.graph.AddNode(x_load1);
+  x_load1.x = x1_data.y;
+  x_load1.y.dtype = ge::DT_FLOAT16;
+  x_load1.attr.sched.axis = {g.z0.id, g.z1.id};
+  *x_load1.y.axis = {g.z0.id, g.z1.id};
+  *x_load1.y.repeats = {g.s0, g.s1};
+  *x_load1.y.strides = {g.s1, One};
+
+  Load idx_load0("idx_load0");
+  g.graph.AddNode(idx_load0);
+  idx_load0.x = idx0_data.y;
+  idx_load0.y.dtype = ge::DT_INT32;
+  idx_load0.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx_load0.y.axis = {g.z2.id, g.z3.id};
+  *idx_load0.y.repeats = {g.s2, g.s3};
+  *idx_load0.y.strides = {g.s3, One};
+
+  Load idx_load1("idx_load1");
+  g.graph.AddNode(idx_load1);
+  idx_load1.x = idx1_data.y;
+  idx_load1.y.dtype = ge::DT_INT32;
+  idx_load1.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx_load1.y.axis = {g.z2.id, g.z3.id};
+  *idx_load1.y.repeats = {g.s2, g.s3};
+  *idx_load1.y.strides = {g.s3, One};
+
+  IndirectLoad il0("indirect_load0");
+  g.graph.AddNode(il0);
+  il0.x1 = x_load0.y;
+  il0.x2 = idx_load0.y;
+  il0.ir_attr.SetAxis(1);
+  il0.attr.sched.axis = {g.z2.id, g.z3.id};
+  *il0.y.axis = {g.z2.id, g.z3.id};
+  *il0.y.repeats = {g.s2, g.s3};
+  *il0.y.strides = {g.s3, One};
+
+  IndirectLoad il1("indirect_load1");
+  g.graph.AddNode(il1);
+  il1.x1 = x_load1.y;
+  il1.x2 = idx_load1.y;
+  il1.ir_attr.SetAxis(1);
+  il1.attr.sched.axis = {g.z2.id, g.z3.id};
+  *il1.y.axis = {g.z2.id, g.z3.id};
+  *il1.y.repeats = {g.s2, g.s3};
+  *il1.y.strides = {g.s3, One};
+
+  Add merge_add("merge_add");
+  g.graph.AddNode(merge_add);
+  merge_add.x1 = il0.y;
+  merge_add.x2 = il1.y;
+  merge_add.y.dtype = ge::DT_FLOAT16;
+  merge_add.attr.sched.axis = {g.z2.id, g.z3.id};
+  *merge_add.y.axis = {g.z2.id, g.z3.id};
+  *merge_add.y.repeats = {g.s2, g.s3};
+  *merge_add.y.strides = {g.s3, One};
+
+  Store store("store");
+  g.graph.AddNode(store);
+  store.x = merge_add.y;
+  store.y.dtype = ge::DT_FLOAT16;
+  store.attr.sched.axis = {g.z2.id, g.z3.id};
+  *store.y.axis = {g.z2.id, g.z3.id};
+  *store.y.repeats = {g.s2, g.s3};
+  *store.y.strides = {g.s3, One};
+
+  Output y_out("y");
+  g.graph.AddNode(y_out);
+  y_out.ir_attr.SetIndex(0);
+  y_out.x = store.y;
+  y_out.y.dtype = ge::DT_FLOAT16;
+
+  // ----- API attrs -----
+  for (const char *name : {"x0", "x1", "idx0", "idx1", "y"}) {
+    auto n = g.graph.FindNode(name);
+    n->attr.api.compute_type = af::ComputeType::kComputeInvalid;
+    n->attr.api.type = af::ApiType::kAPITypeBuffer;
+    n->attr.api.unit = af::ComputeUnit::kUnitNone;
+  }
+  for (const char *name : {"x_load0", "x_load1", "idx_load0", "idx_load1"}) {
+    auto n = g.graph.FindNode(name);
+    n->attr.api.compute_type = af::ComputeType::kComputeLoad;
+    n->attr.api.type = af::ApiType::kAPITypeCompute;
+    n->attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  }
+  for (const char *name : {"indirect_load0", "indirect_load1"}) {
+    auto n = g.graph.FindNode(name);
+    n->attr.api.compute_type = af::ComputeType::kComputeLoad;
+    n->attr.api.type = af::ApiType::kAPITypeCompute;
+    n->attr.api.unit = af::ComputeUnit::kUnitVector;
+  }
+  auto merge_add_node = g.graph.FindNode("merge_add");
+  merge_add_node->attr.api.compute_type = af::ComputeType::kComputeElewise;
+  merge_add_node->attr.api.type = af::ApiType::kAPITypeCompute;
+  merge_add_node->attr.api.unit = af::ComputeUnit::kUnitVector;
+
+  auto store_node = g.graph.FindNode("store");
+  store_node->attr.api.compute_type = af::ComputeType::kComputeStore;
+  store_node->attr.api.type = af::ApiType::kAPITypeCompute;
+  store_node->attr.api.unit = af::ComputeUnit::kUnitMTE2;
+
+  // ----- Axis splitting: merge output axes → z2z3 -----
+  auto axes = g.graph.GetAllAxis();
+  auto z2_id = axes[2]->id;
+  auto z3_id = axes[3]->id;
+
+  auto z2z3 = g.graph.MergeAxis({z2_id, z3_id});
+  auto [z2z3T, z2z3t] = g.graph.TileSplit(z2z3->id);
+  auto [z2z3TB, z2z3Tb] = g.graph.BlockSplit(z2z3T->id);
+
+  for (auto n : g.graph.GetAllNodes()) {
+    if (IsOps<Data>(n) || IsOps<Output>(n) || n->GetName() == "x_load0" || n->GetName() == "x_load1") continue;
+    g.graph.ApplyMerge(n, z2z3->id);
+    g.graph.ApplySplit(n, z2z3T->id, z2z3t->id);
+    g.graph.ApplySplit(n, z2z3TB->id, z2z3Tb->id);
+    g.graph.ApplyReorder(n, {z2z3TB->id, z2z3Tb->id, z2z3t->id});
+  }
+
+  for (const char *name : {"indirect_load0", "indirect_load1", "merge_add", "store"}) {
+    auto n = g.graph.FindNode(name);
+    n->attr.sched.loop_axis = z2z3Tb->id;
+    n->outputs[0].attr.vectorized_axis = {z2z3t->id};
+    n->outputs[0].attr.vectorized_strides = {One};
+  }
+
+  // ----- Memory allocation -----
+  auto set_gm = [](const af::AscNodePtr &node, ascir::TensorId tensor_id) {
+    node->outputs[0].attr.mem.tensor_id = tensor_id;
+    node->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+    node->outputs[0].attr.mem.hardware = af::MemHardware::kMemHardwareGM;
+    node->outputs[0].attr.mem.position = af::Position::kPositionGM;
+    node->outputs[0].attr.que.id = af::kIdNone;
+  };
+  auto set_ub_que = [](const af::AscNodePtr &node, ascir::TensorId tensor_id, ascir::TensorId reuse_id,
+                       af::Position position, int64_t que_id) {
+    node->outputs[0].attr.mem.tensor_id = tensor_id;
+    node->outputs[0].attr.mem.reuse_id = reuse_id;
+    node->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+    node->outputs[0].attr.mem.hardware = af::MemHardware::kMemHardwareUB;
+    node->outputs[0].attr.mem.position = position;
+    node->outputs[0].attr.que.id = que_id;
+    node->outputs[0].attr.que.depth = 2;
+    node->outputs[0].attr.que.buf_num = 2;
+  };
+  set_gm(g.graph.FindNode("x0"), 0);
+  set_gm(g.graph.FindNode("x1"), 6);
+  set_gm(g.graph.FindNode("idx0"), 3);
+  set_gm(g.graph.FindNode("idx1"), 7);
+  set_gm(g.graph.FindNode("store"), 2);
+  set_ub_que(g.graph.FindNode("x_load0"), 4, 4, af::Position::kPositionVecIn, 1);
+  set_ub_que(g.graph.FindNode("idx_load0"), 5, 5, af::Position::kPositionVecIn, 2);
+  set_ub_que(g.graph.FindNode("x_load1"), 9, 9, af::Position::kPositionVecIn, 4);
+  set_ub_que(g.graph.FindNode("idx_load1"), 10, 10, af::Position::kPositionVecIn, 5);
+  set_ub_que(g.graph.FindNode("indirect_load0"), 1, 1, af::Position::kPositionVecOut, 0);
+  set_ub_que(g.graph.FindNode("indirect_load1"), 8, 8, af::Position::kPositionVecOut, 3);
+  set_ub_que(g.graph.FindNode("merge_add"), 11, 11, af::Position::kPositionVecOut, 6);
+  g.graph.FindNode("indirect_load0")->outputs[0].attr.dtype = ge::DT_FLOAT16;
+  g.graph.FindNode("indirect_load1")->outputs[0].attr.dtype = ge::DT_FLOAT16;
+}
+
+void AnnotateSimtFusedGroupTemplate(ILTestGraph &g) {
+  af::AxisId outer_id = af::kIdNone;
+  for (const auto &axis : g.graph.GetAllAxis()) {
+    if (axis != nullptr && axis->name == "z2z3") outer_id = axis->id;
+  }
+  ASSERT_NE(outer_id, af::kIdNone);
+  const auto axes = g.graph.GetAllAxis();
+  const af::Expression One = af::sym::kSymbolOne;
+  TemplateLogicalView view;
+  view.input.axis_ids = {axes[0]->id, axes[1]->id};
+  view.input.sizes = {g.graph.FindAxis(axes[0]->id)->size, g.graph.FindAxis(axes[1]->id)->size};
+  view.input.strides = {g.graph.FindAxis(axes[1]->id)->size, One};
+  view.index.axis_ids = {axes[2]->id, axes[3]->id};
+  view.index.sizes = {g.graph.FindAxis(axes[2]->id)->size, g.graph.FindAxis(axes[3]->id)->size};
+  view.index.strides = {g.graph.FindAxis(axes[3]->id)->size, One};
+  view.output.axis_ids = {axes[2]->id, axes[3]->id};
+  view.output.sizes = {g.graph.FindAxis(axes[2]->id)->size, g.graph.FindAxis(axes[3]->id)->size};
+  view.output.strides = {g.graph.FindAxis(axes[3]->id)->size, One};
+
+  for (const char *name : {"indirect_load0", "indirect_load1"}) {
+    auto il = g.graph.FindNode(name);
+    ASSERT_NE(il, nullptr);
+    ASSERT_EQ(::ascir::SetTemplateId(il, ::ascir::TemplateId::kIndirectLoadSimt), af::SUCCESS);
+    ASSERT_EQ(SetImplementation(il, Implementation::kDefault), af::SUCCESS);
+    TemplateAxes t{outer_id, af::kIdNone, af::kIdNone};
+    ASSERT_EQ(SetTemplateAxes(il, t), af::SUCCESS);
+    ASSERT_EQ(ClassifyIndirectLoadLayout(view.input, view.input), af::SUCCESS);
+    ASSERT_EQ(ClassifyIndirectLoadLayout(view.index, view.index), af::SUCCESS);
+    ASSERT_EQ(SetTemplateLogicalView(il, view), af::SUCCESS);
+  }
+  // L2 角色标注（镜像调度侧 PlanSimtFusedEmission/ApplyGraphPassGroup 的产物）。
+  for (const char *name : {"x_load0", "x_load1"}) {
+    ASSERT_EQ(SetTemplateRole(g.graph.FindNode(name), TemplateRole::kSimtInputBoundary), af::SUCCESS);
+  }
+  for (const char *name : {"idx_load0", "idx_load1"}) {
+    ASSERT_EQ(SetTemplateRole(g.graph.FindNode(name), TemplateRole::kSimtDirectGmBoundary), af::SUCCESS);
+  }
+  ASSERT_EQ(SetTemplateRole(g.graph.FindNode("merge_add"), TemplateRole::kSimtInlineTransform), af::SUCCESS);
+  ASSERT_EQ(SetTemplateRole(g.graph.FindNode("store"), TemplateRole::kSimtDirectGmBoundary), af::SUCCESS);
+  // 组员标记 + 成员形态 lowering 元数据（value 写 UB 局部目标）。
+  for (const char *name : {"indirect_load0", "indirect_load1"}) {
+    auto il = g.graph.FindNode(name);
+    ASSERT_EQ(SetSimtGroupMember(il), af::SUCCESS);
+    bool metadata_supported = false;
+    ASSERT_EQ(FinalizeLoweringMetadata(il, metadata_supported), af::SUCCESS);
+    ASSERT_TRUE(metadata_supported);
+  }
+  // fused 发射标记 + L2 归并信息（primary 携带全组成员名、归并树与 Store 终端名）。
+  auto primary = g.graph.FindNode("indirect_load0");
+  ASSERT_EQ(SetSimtFusedPrimary(primary, {"indirect_load0", "indirect_load1"}), af::SUCCESS);
+  SimtFusedMergeInfo merge_info;
+  merge_info.register_merge = true;
+  merge_info.merge_node_names = {"merge_add"};
+  merge_info.merge_store_names = {"store"};
+  ASSERT_EQ(SetSimtFusedMergeInfo(primary, merge_info), af::SUCCESS);
+}
+
+TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimtFusedRegisterMergeWithDirectGmStore) {
+  ILTestGraph g("simt_fused_group");
+  BuildSimtFusedGroupGraph(g);
+  AnnotateSimtFusedGroupTemplate(g);
+
+  auto il0 = g.graph.FindNode("indirect_load0");
+  ASSERT_NE(il0, nullptr);
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  tpipe.CollectQues(g.graph);
+
+  IndirectLoadRegApiCall call("IndirectLoadRegApiCall");
+  ASSERT_EQ(call.Init(il0), af::SUCCESS);
+  ApiTensor x1, x2;
+  x1.id = il0->inputs[0].attr.mem.tensor_id;
+  x2.id = il0->inputs[1].attr.mem.tensor_id;
+  call.inputs.push_back(&x1);
+  call.inputs.push_back(&x2);
+  // fused 发射按 tensor id 取各成员 input 指针与 value/UB 目标，逐个注册。
+  for (const char *name : {"x_load0", "idx_load0", "x_load1", "idx_load1", "indirect_load0", "indirect_load1"}) {
+    const auto node = g.graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    tpipe.AddTensor(*node->outputs()[0]);
+  }
+
+  ascir::AxisId outer_tb = af::kIdNone;
+  for (const auto &axis : g.graph.GetAllAxis()) {
+    if (axis != nullptr && axis->name == "z2z3Tb") outer_tb = axis->id;
+  }
+  ASSERT_NE(outer_tb, af::kIdNone);
+  std::string generated;
+  ASSERT_EQ(call.Generate(tpipe, {outer_tb}, generated), af::SUCCESS);
+
+  // L2 融合发射头：单 evaluator（seq-V1）+ 寄存器归并。
+  EXPECT_NE(generated.find("// IndirectLoad SIMT Fused (seq-V1: single evaluator, serial loads, 2 paths, register "
+                           "merge)"),
+            std::string::npos);
+  // FusedCtx：N 路 input 指针（常量驻留参数）。
+  EXPECT_NE(generated.find("struct FusedCtx"), std::string::npos);
+  EXPECT_NE(generated.find("__gm__ half *in0;"), std::string::npos);
+  EXPECT_NE(generated.find("__gm__ half *in1;"), std::string::npos);
+  // Store 终端经 OutputTargets 直写 GM（merge_store_names → out0；Store 自身跳过独立发射）。
+  EXPECT_NE(generated.find("struct OutputTargets { __gm__ half *out0; };"), std::string::npos);
+  EXPECT_NE(generated.find("static OutputPack FusedEval(OffsetType output_index, const FusedCtx& context)"),
+            std::string::npos);
+  // 逐成员 index 链求值 + AddressPolicy 寻址 + GM load（关键寻址表达式）。
+  EXPECT_NE(generated.find("value0 = context.in0[input_offset0];"), std::string::npos);
+  EXPECT_NE(generated.find("value1 = context.in1[input_offset1];"), std::string::npos);
+  // L2 寄存器归并：merge_add 以 value0/value1 为种子折叠，结果写 OutputPack 并直写 GM。
+  EXPECT_NE(generated.find("out.out0 = "), std::string::npos);
+  EXPECT_NE(generated.find("t.out0[output_index] = o.out0;"), std::string::npos);
+  EXPECT_NE(generated.find("AscendC::IndirectLoadSimtFused<FusedBody>(ftgt, fctx"), std::string::npos);
+}
+
 TEST_F(IndirectLoadConstructFromNodesTest, ConnectsRedirectedSimtOutputToReduce) {
   ILTestGraph g("simt_post_construct");
   BuildSimtPostReduceGraph(g);
