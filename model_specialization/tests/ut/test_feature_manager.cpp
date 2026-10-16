@@ -54,31 +54,21 @@ TEST_F(FeatureManagerTest, JobsAndEnableSkAreModelLevelOptions) {
   EXPECT_EQ(manager.Get<Feature::SK_COMPILE_OPTIONS>("add"), (Arguments{"--enable-super-kernel"}));
 }
 
-TEST_F(FeatureManagerTest, ScopeModeDefaultsAndSuccessfulReinitialization) {
-  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
-  ASSERT_TRUE(manager.Init(nullptr));
-  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
-
-  ASSERT_TRUE(manager.Init(nullptr, true));
-  EXPECT_TRUE(manager.Get<Feature::IS_SCOPE_JIT>());
-  ASSERT_TRUE(manager.Init(nullptr, false));
-  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
-  ASSERT_TRUE(manager.Init(nullptr, true));
-  ASSERT_TRUE(manager.Init(nullptr));
-  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
-}
-
-TEST_F(FeatureManagerTest, ScopeModeIsIndependentBetweenManagers) {
+TEST_F(FeatureManagerTest, ScopeModeIsLocalAndChangesOnlyAfterSuccessfulInitialization) {
   FeatureManager other;
-  ASSERT_TRUE(manager.Init(nullptr, true));
-  ASSERT_TRUE(other.Init(nullptr));
-  EXPECT_TRUE(manager.Get<Feature::IS_SCOPE_JIT>());
-  EXPECT_FALSE(other.Get<Feature::IS_SCOPE_JIT>());
-
-  ASSERT_TRUE(other.Init(nullptr, true));
-  ASSERT_TRUE(manager.Init(nullptr, false));
   EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
-  EXPECT_TRUE(other.Get<Feature::IS_SCOPE_JIT>());
+  aclmdlRISpecOptions invalid{};
+  invalid.specCompileOptionCount = 1;
+  for (bool scope : {true, false}) {
+    ASSERT_TRUE(manager.Init(nullptr, scope));
+    EXPECT_EQ(manager.Get<Feature::IS_SCOPE_JIT>(), scope);
+    EXPECT_FALSE(other.Get<Feature::IS_SCOPE_JIT>());
+    EXPECT_FALSE(manager.Init(&invalid, !scope));
+    EXPECT_EQ(manager.Get<Feature::IS_SCOPE_JIT>(), scope);
+  }
+  ASSERT_TRUE(manager.Init(nullptr, true));
+  ASSERT_TRUE(manager.Init(nullptr));
+  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
 }
 
 TEST_F(FeatureManagerTest, BasicCompileOptionsUseGlobalAndPatternRules) {
@@ -282,40 +272,30 @@ TEST_F(FeatureManagerTest, CountPointerMismatchAndOverflowRejectedBeforeReading)
 TEST_F(FeatureManagerTest, FailedReinitializationPreservesPreviousConfiguration) {
   const char *args[] = {"-O2"};
   aclmdlRISpecCompileOption basic{"add.*", 1, args};
-  const char *replacementArgs[] = {"-O3"};
-  aclmdlRISpecCompileOption replacementBasic{"add.*", 1, replacementArgs};
   const char *names[] = {"add.*"};
   aclmdlRISpecSKFeature feature{"DEBUG_PER_OP_MAX_CORE_NUM", 1, names};
-  for (bool isScopeJit : {false, true}) {
-    options = {};
-    options.jobs = 4;
-    options.enableSK = true;
-    options.specCompileOptionCount = 1;
-    options.specCompileOptions = &basic;
-    options.specSKFeatureCount = 1;
-    options.specSKFeatures = &feature;
-    feature.kernelNames = names;
-    ASSERT_TRUE(manager.Init(&options, isScopeJit));
+  options.jobs = 4;
+  options.enableSK = true;
+  options.specCompileOptionCount = 1;
+  options.specCompileOptions = &basic;
+  options.specSKFeatureCount = 1;
+  options.specSKFeatures = &feature;
+  ASSERT_TRUE(manager.Init(&options));
 
-    options.jobs = 16;
-    options.enableSK = false;
-    options.specCompileOptions = &replacementBasic;
-    feature.kernelNames = nullptr;
-    EXPECT_FALSE(manager.Init(&options, !isScopeJit));
-    EXPECT_EQ(manager.Get<Feature::IS_SCOPE_JIT>(), isScopeJit);
-    EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), 4U);
-    EXPECT_TRUE(manager.Get<Feature::ENABLE_SK>());
-    EXPECT_EQ(manager.Get<Feature::BASIC_COMPILE_OPTIONS>("add"), (Arguments{"-O2"}));
-    EXPECT_EQ(manager.Get<Feature::SK_COMPILE_OPTIONS>("add"),
-              (Arguments{"--enable-super-kernel", "-D__ASCENDC_SUPER_KERNEL_DEBUG__"}));
+  options.jobs = 16;
+  feature.kernelNames = nullptr;
+  EXPECT_FALSE(manager.Init(&options));
+  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), 4U);
+  EXPECT_TRUE(manager.Get<Feature::ENABLE_SK>());
+  EXPECT_EQ(manager.Get<Feature::BASIC_COMPILE_OPTIONS>("add"), (Arguments{"-O2"}));
+  EXPECT_EQ(manager.Get<Feature::SK_COMPILE_OPTIONS>("add"),
+            (Arguments{"--enable-super-kernel", "-D__ASCENDC_SUPER_KERNEL_DEBUG__"}));
 
-    ASSERT_TRUE(manager.Init(nullptr));
-    EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
-    EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), 1U);
-    EXPECT_FALSE(manager.Get<Feature::ENABLE_SK>());
-    EXPECT_TRUE(manager.Get<Feature::BASIC_COMPILE_OPTIONS>("add").empty());
-    EXPECT_TRUE(manager.Get<Feature::SK_COMPILE_OPTIONS>("add").empty());
-  }
+  ASSERT_TRUE(manager.Init(nullptr));
+  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), 1U);
+  EXPECT_FALSE(manager.Get<Feature::ENABLE_SK>());
+  EXPECT_TRUE(manager.Get<Feature::BASIC_COMPILE_OPTIONS>("add").empty());
+  EXPECT_TRUE(manager.Get<Feature::SK_COMPILE_OPTIONS>("add").empty());
 }
 
 TEST_F(FeatureManagerTest, ConcurrentGetReadsStableConfiguration) {

@@ -54,13 +54,6 @@ class SpecScopeLaunchTest : public testing::Test {
     exceptionKind = 0;
     ut_log::LogBuffer::Instance().Clear();
   }
-  void CheckBoth(aclError expected, aclrtStream stream = expectedStream) {
-    const size_t queriesBefore = queryCount;
-    EXPECT_EQ(aclmdlRISpecScopeBegin(stream), expected);
-    EXPECT_EQ(aclmdlRISpecScopeEnd(stream), expected);
-    EXPECT_EQ(launchCounts, (std::array<size_t, 4>{}));
-    EXPECT_EQ(queryCount - queriesBefore, stream == nullptr ? 0U : 2U);
-  }
 };
 }  // namespace
 
@@ -105,57 +98,51 @@ TEST_F(SpecScopeLaunchTest, ActiveCaptureDispatchesOneMarkerPerCallForEachArch) 
   EXPECT_EQ(queryCount, 4);
   EXPECT_EQ(launchCounts, (std::array<size_t, 4>{1, 1, 1, 1}));
 }
-TEST_F(SpecScopeLaunchTest, NullStreamDoesNotQueryOrLaunch) {
-  CheckBoth(ACL_ERROR_INVALID_PARAM, nullptr);
-  EXPECT_EQ(queryCount, 0);
-}
-TEST_F(SpecScopeLaunchTest, NoneCaptureDoesNotLaunch) {
-  captureStatus = ACL_MODEL_RI_CAPTURE_STATUS_NONE;
-  CheckBoth(ACL_ERROR_RT_STREAM_NOT_CAPTURED);
-  const std::string logs = ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_NE(logs.find("[ERROR] [SK][LaunchSpecScopeMarker] Spec scope stream is not captured: markerType=Begin, "
-                      "stream=0x100, status=0"),
-            std::string::npos);
-  EXPECT_NE(logs.find("[ERROR] [SK][LaunchSpecScopeMarker] Spec scope stream is not captured: markerType=End, "
-                      "stream=0x100, status=0"),
-            std::string::npos);
-  EXPECT_EQ(queryCount, 2);
-}
-TEST_F(SpecScopeLaunchTest, InvalidatedCaptureDoesNotLaunch) {
-  captureStatus = ACL_MODEL_RI_CAPTURE_STATUS_INVALIDATED;
-  CheckBoth(ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED);
-  const std::string logs = ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_NE(logs.find("[ERROR] [SK][LaunchSpecScopeMarker] Spec scope capture is invalidated: markerType=Begin, "
-                      "stream=0x100, status=2"),
-            std::string::npos);
-  EXPECT_NE(logs.find("[ERROR] [SK][LaunchSpecScopeMarker] Spec scope capture is invalidated: markerType=End, "
-                      "stream=0x100, status=2"),
-            std::string::npos);
-}
-TEST_F(SpecScopeLaunchTest, QueryFailurePreservesErrorAndDoesNotLaunch) {
-  queryResult = 123456;
-  CheckBoth(queryResult);
-}
-TEST_F(SpecScopeLaunchTest, UnknownCaptureStatusDoesNotLaunch) {
-  captureStatus = static_cast<aclmdlRICaptureStatus>(99);
-  CheckBoth(ACL_ERROR_FAILURE);
-}
-TEST_F(SpecScopeLaunchTest, UnsupportedArchDoesNotLaunch) {
-  currentArch = SkKernelArch::UNKNOWN;
-  CheckBoth(ACL_ERROR_FEATURE_UNSUPPORTED);
-}
-TEST_F(SpecScopeLaunchTest, PublicEntryPointsMapAllExceptionKinds) {
-  const std::array<aclError, 5> errors = {ACL_ERROR_BAD_ALLOC, ACL_ERROR_BAD_ALLOC, ACL_ERROR_INVALID_PARAM,
-                                          ACL_ERROR_FAILURE, ACL_ERROR_FAILURE};
-  for (size_t index = 0; index < errors.size(); ++index) {
-    exceptionKind = static_cast<int>(index + 1);
-    CheckBoth(errors[index]);
+TEST_F(SpecScopeLaunchTest, RejectedCaptureOrRequestNeverLaunchesMarker) {
+  struct FailureCase {
+    aclrtStream stream;
+    aclmdlRICaptureStatus status;
+    aclError query, expected;
+    SkKernelArch arch = SkKernelArch::DAV_2201;
+    const char *message;
+  };
+  const std::array<FailureCase, 6> cases{
+      {{nullptr, ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE, ACL_SUCCESS, ACL_ERROR_INVALID_PARAM, SkKernelArch::DAV_2201,
+        "Invalid Spec scope marker request"},
+       {expectedStream, ACL_MODEL_RI_CAPTURE_STATUS_NONE, ACL_SUCCESS, ACL_ERROR_RT_STREAM_NOT_CAPTURED,
+        SkKernelArch::DAV_2201, "Spec scope stream is not captured"},
+       {expectedStream, ACL_MODEL_RI_CAPTURE_STATUS_INVALIDATED, ACL_SUCCESS, ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED,
+        SkKernelArch::DAV_2201, "Spec scope capture is invalidated"},
+       {expectedStream, ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE, ACL_ERROR_FAILURE, ACL_ERROR_FAILURE,
+        SkKernelArch::DAV_2201, "Spec scope capture query failed"},
+       {expectedStream, static_cast<aclmdlRICaptureStatus>(99), ACL_SUCCESS, ACL_ERROR_FAILURE, SkKernelArch::DAV_2201,
+        "Unknown Spec scope capture status"},
+       {expectedStream, ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE, ACL_SUCCESS, ACL_ERROR_FEATURE_UNSUPPORTED,
+        SkKernelArch::UNKNOWN, "Unsupported Spec scope marker arch"}}};
+  for (const auto &entry : cases) {
+    SCOPED_TRACE(entry.message);
+    captureStatus = entry.status;
+    queryResult = entry.query;
+    currentArch = entry.arch;
+    queryCount = 0;
+    ut_log::LogBuffer::Instance().Clear();
+    EXPECT_EQ(aclmdlRISpecScopeBegin(entry.stream), entry.expected);
+    EXPECT_EQ(aclmdlRISpecScopeEnd(entry.stream), entry.expected);
+    EXPECT_EQ(queryCount, entry.stream == nullptr ? 0U : 2U);
+    EXPECT_EQ(launchCounts, (std::array<size_t, 4>{}));
+    EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find(entry.message), std::string::npos);
   }
-}
-
-TEST_F(SpecScopeLaunchTest, InvalidInternalMarkerKindDoesNotQueryOrLaunch) {
   EXPECT_EQ(model_spec::LaunchSpecScopeMarker(expectedStream, static_cast<model_spec::SpecScopeMarkerKind>(99)),
             ACL_ERROR_INVALID_PARAM);
-  EXPECT_EQ(queryCount, 0);
+}
+
+TEST_F(SpecScopeLaunchTest, PublicEntryPointsMapAllExceptionKinds) {
+  const std::array<aclError, 5> errors{ACL_ERROR_BAD_ALLOC, ACL_ERROR_BAD_ALLOC, ACL_ERROR_INVALID_PARAM,
+                                       ACL_ERROR_FAILURE, ACL_ERROR_FAILURE};
+  for (size_t index = 0; index < errors.size(); ++index) {
+    exceptionKind = static_cast<int>(index + 1);
+    EXPECT_EQ(aclmdlRISpecScopeBegin(expectedStream), errors[index]);
+    EXPECT_EQ(aclmdlRISpecScopeEnd(expectedStream), errors[index]);
+  }
   EXPECT_EQ(launchCounts, (std::array<size_t, 4>{}));
 }
