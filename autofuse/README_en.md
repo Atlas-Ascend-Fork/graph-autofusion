@@ -66,6 +66,22 @@ Run the following command in the root directory of the Graph-AutoFusion reposito
 bash scripts/env_install/pytorch/setup_torch_npu_daily.sh
 ```
 
+#### Sample Runtime Dependencies
+
+When running the [PyTorch scenario examples](./examples/pytorch/README_en.md), the fused operator code generation phase invokes generated scripts such as `asc_tilling.py`. These scripts depend on Python packages such as `decorator`, `scipy`, and `attr` (`attrs`), which are not included in the `numpy`, `pyyaml`, and `setuptools` installation above.
+
+If the following error occurs:
+
+```text
+RuntimeError: Failed to build ascend kernel. trigger bug by following command: '.../asc_tilling.py'
+```
+
+This error wraps the real cause as a "trigger bug" command and does not directly reveal the missing dependency. In this case, manually run the `.py` file shown in the error (for example, `python3 .../asc_tilling.py`) to see the actual error (such as `ModuleNotFoundError: No module named 'decorator'`), and then install the missing package accordingly. Alternatively, you can install all dependencies at once from the repository root:
+
+```bash
+pip3 install -r super_kernel/requirements-dev.txt
+```
+
 #### Other Environment Dependencies
 
 ```bash
@@ -102,7 +118,7 @@ Before executing the use cases, set the following environment variables to confi
 
 ```bash
 # Installation path of your driver package
-source /usr/local/Ascend/driver/bin/setenv.sh
+source /usr/local/Ascend/driver/bin/setenv.bash
 # Installation path of your CANN package
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 # Assume that the script runs on device 0, consistent with the device configured in the script

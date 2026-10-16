@@ -156,7 +156,7 @@ PKG_DIR="/mnt/workspace/env/torch_npu_pkg"
 根据版本、日期和 Python 版本生成下载地址：
 
 ```bash
-URL="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v${TORCH_NPU_VERSION}/${DATE}.1/pytorch_v${TORCH_NPU_VERSION}_${PY_TAG}.tar.gz"
+URL="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v${TORCH_NPU_VERSION}/${DATE}.2/pytorch_v${TORCH_NPU_VERSION}_${PY_TAG}.tar.gz"
 ```
 
 检查当天 Daily 包是否存在：
@@ -203,6 +203,24 @@ python -m pip install --force-reinstall "$WHEEL"
 ```text
 /mnt/workspace/env/venv/torch210_daily/lib/python3.11/site-packages
 ```
+
+### 3. 安装样例运行依赖
+
+使用本环境运行 [Autofuse PyTorch 用例](../../../autofuse/examples/pytorch/README.md)时，融合算子代码生成阶段会调用 `asc_tilling.py` 等生成脚本，这些脚本依赖 `decorator`、`scipy`、`attr`（`attrs`）等 Python 包，未包含在上述 `NumPy`、`torch_npu` 安装范围内。
+
+若运行时出现如下报错：
+
+```text
+RuntimeError: Failed to build ascend kernel. trigger bug by following command: '.../asc_tilling.py'
+```
+
+该报错会把真实失败原因包装为“触发 bug 的命令”，并不直接暴露缺失的依赖。此时请手动执行报错中给出的 `.py` 文件（例如 `python3 .../asc_tilling.py`），即可看到真实的报错（如 `ModuleNotFoundError: No module named 'decorator'`），再按提示安装缺失的依赖包。也可以切换到仓库根目录，一次性安装全部依赖：
+
+```bash
+python -m pip install -r super_kernel/requirements-dev.txt
+```
+
+> **注意**：`requirements-dev.txt` 位于仓库根目录下的 `super_kernel/` 目录，请在仓库根目录执行上述命令，或将路径替换为绝对路径。
 
 ---
 

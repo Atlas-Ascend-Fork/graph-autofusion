@@ -58,7 +58,7 @@
 # cann包安装路径变量定义，值根据实际安装位置设置
 export CANN_INSTALL_PATH=/usr/local/Ascend
 # 激活cann包中驱动相关环境变量
-source $CANN_INSTALL_PATH/driver/bin/setenv.sh
+source $CANN_INSTALL_PATH/driver/bin/setenv.bash
 # 激活cann包中toolkit相关环境变量
 source $CANN_INSTALL_PATH/ascend-toolkit/set_env.sh
 
