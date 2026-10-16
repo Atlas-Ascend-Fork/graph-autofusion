@@ -35,6 +35,8 @@ constexpr char kTemplateTileInnerAxisAttr[] = "af.internal.indirect_load.tile_in
 constexpr char kTemplateVectorizedAxesAttr[] = "af.internal.indirect_load.vectorized_axes";
 constexpr char kTemplateSyntheticOuterAttr[] = "af.internal.indirect_load.synthetic_outer";
 constexpr char kImplementationAttr[] = "af.internal.indirect_load.implementation";
+constexpr char kSimdInputInnerAxisHintAttr[] = "af.internal.indirect_load.simd_input_inner_axis";
+constexpr char kSimtGroupMemberAttr[] = "af.internal.indirect_load.simt_group_member";
 bool IsValidLogicalTensorView(const LogicalTensorView &view) {
   return !view.axis_ids.empty() && view.axis_ids.size() == view.sizes.size() &&
          view.axis_ids.size() == view.strides.size();
@@ -1134,9 +1136,11 @@ af::Status ValidateSimtOutputPlan(const SimtLoweringMetadata &metadata) {
       static_cast<size_t>(std::count_if(metadata.output_chains.begin(), metadata.output_chains.end(),
                                         [](const SimtOutputChainMetadata &chain) { return chain.local_target; }));
   GE_ASSERT_TRUE(local_target_count <= 1UL, "IndirectLoad SIMT supports at most one local output target.");
-  GE_ASSERT_TRUE(metadata.has_post_reduce == (local_target_count == 1UL),
-                 "IndirectLoad SIMT post Reduce and local output target must appear together.");
-  if (local_target_count == 1UL) {
+  // 单 gather：post Reduce 与 local target 必须成对出现；多 gather 组员：value 直接写 UB 局部
+  // 目标（归并/输出链为普通向量代码），允许 local target 不伴随 post Reduce。
+  GE_ASSERT_TRUE(!metadata.has_post_reduce || local_target_count == 1UL,
+                 "IndirectLoad SIMT post Reduce requires a local output target.");
+  if (metadata.has_post_reduce) {
     const auto &local_chain = metadata.output_chains.back();
     GE_ASSERT_TRUE(local_chain.local_target && local_chain.result_tensor_id == metadata.output_result_tensor_id &&
                        local_chain.target_tensor_id == metadata.output_result_tensor_id &&
@@ -1150,7 +1154,10 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   NodePath graph_nodes;
   GE_ASSERT_SUCCESS(GetStableGraphNodes(indirect_load, graph_nodes));
   auto &simt = metadata.simt;
-  const af::AscNodePtr post_reduce = GetPostReduceConsumer(indirect_load);
+  // 多 gather 组员：SIMT 计划仅含本路 index 链与 input 读取；共享归并/输出链不进入计划
+  // （普通向量代码在全部组员 invocation 之后执行），value 直接写 UB 局部目标。
+  const bool is_group_member = IsSimtGroupMember(indirect_load);
+  const af::AscNodePtr post_reduce = is_group_member ? nullptr : GetPostReduceConsumer(indirect_load);
   simt.has_post_reduce = post_reduce != nullptr;
   const auto inputs = indirect_load->inputs();
   GE_ASSERT_TRUE(inputs.size() == 2UL, "Invalid IndirectLoad SIMT input number:%zu.", inputs.size());
@@ -1171,9 +1178,15 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   }
 
   std::vector<SimtOutputChainBuild> chain_builds;
-  GE_ASSERT_SUCCESS(CollectSimtOutputChainBuilds(graph_nodes, indirect_load, chain_builds));
-  GE_ASSERT_SUCCESS(
-      CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, chain_builds));
+  if (is_group_member) {
+    // 组员：仅收 index 生产链尾部的外部 store 链（per-IL，无共享）；不收集 IL 前向输出链。
+    GE_ASSERT_SUCCESS(
+        CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, chain_builds));
+  } else {
+    GE_ASSERT_SUCCESS(CollectSimtOutputChainBuilds(graph_nodes, indirect_load, chain_builds));
+    GE_ASSERT_SUCCESS(
+        CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, chain_builds));
+  }
   std::vector<bool> keep_chain(chain_builds.size(), true);
   for (size_t chain_index = 0UL; chain_index < chain_builds.size(); ++chain_index) {
     const bool contains_reduce =
@@ -1227,6 +1240,13 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
     simt.output_dtype = output_root->outputs()[0]->attr.dtype;
     simt.output_chains.push_back(
         {simt.output_node_names, simt.output_result_tensor_id, simt.output_result_tensor_id, simt.output_dtype, true});
+  } else if (is_group_member) {
+    // 组员输出 = value 直写 UB 局部目标：空变换链，evaluator 的 value 种子直接落 target
+    // （与 post Reduce 合成链同构，见 GenerateSimtOutputsEvaluator 的 values[value_tensor_id]）。
+    simt.output_result_tensor_id = simt.value_tensor_id;
+    simt.output_dtype = indirect_load->outputs()[0]->attr.dtype;
+    simt.output_chains.push_back(
+        {std::vector<std::string>{}, simt.value_tensor_id, simt.value_tensor_id, simt.output_dtype, true});
   } else {
     GE_ASSERT_TRUE(!simt.output_chains.empty(), "IndirectLoad SIMT output chains are empty.");
     if (simt.output_chains.size() == 1UL) {
@@ -1553,6 +1573,134 @@ std::vector<af::AscNodePtr> CollectIndirectLoadNodes(const af::AscGraph &graph) 
 af::AscNodePtr FindIndirectLoadNode(const af::AscGraph &graph) {
   const auto nodes = CollectIndirectLoadNodes(graph);
   return nodes.empty() ? nullptr : nodes.front();
+}
+
+std::vector<af::AscNodePtr> GetAllIndirectLoadNodes(const af::AscGraph &graph) {
+  return CollectIndirectLoadNodes(graph);
+}
+
+af::Status SetSimdInputInnerAxis(const af::AscNodePtr &node, af::AxisId axis) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimdInputInnerAxisHintAttr, static_cast<int64_t>(axis)),
+                 "Set IndirectLoad SIMD input inner axis hint failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+af::AxisId GetSimdInputInnerAxis(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return af::kIdNone;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimdInputInnerAxisHintAttr, static_cast<int64_t>(af::kIdNone));
+}
+
+af::Status SetSimtGroupMember(const af::AscNodePtr &node) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtGroupMemberAttr, true),
+                 "Set IndirectLoad SIMT group member flag failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+bool IsSimtGroupMember(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return false;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtGroupMemberAttr, false);
+}
+
+constexpr char kSimtFusedPrimaryAttr[] = "af.internal.indirect_load.simt_fused_primary";
+constexpr char kSimtFusedMembersAttr[] = "af.internal.indirect_load.simt_fused_members";
+
+af::Status SetSimtFusedPrimary(const af::AscNodePtr &node, const std::vector<std::string> &member_names) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtFusedPrimaryAttr, true),
+                 "Set IndirectLoad SIMT fused primary flag failed, node = %s", node->GetNamePtr());
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtFusedMembersAttr, member_names),
+                 "Set IndirectLoad SIMT fused member names failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+bool IsSimtFusedPrimary(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return false;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtFusedPrimaryAttr, false);
+}
+
+std::vector<std::string> GetSimtFusedMemberNames(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return {};
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtFusedMembersAttr, std::vector<std::string>{});
+}
+
+constexpr char kSimtFusedMergeInfoAttr[] = "af.internal.indirect_load.simt_fused_merge_info";
+
+af::Status SetSimtFusedMergeInfo(const af::AscNodePtr &node, const SimtFusedMergeInfo &info) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtFusedMergeInfoAttr, info),
+                 "Set IndirectLoad SIMT fused merge info failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+SimtFusedMergeInfo GetSimtFusedMergeInfo(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return {};
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtFusedMergeInfoAttr, SimtFusedMergeInfo{});
+}
+
+constexpr char kSimtFusedMemberEmittedAttr[] = "af.internal.indirect_load.simt_fused_member_emitted";
+
+af::Status SetSimtFusedMemberEmitted(const af::AscNodePtr &node) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtFusedMemberEmittedAttr, true),
+                 "Set IndirectLoad SIMT fused member emitted flag failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+bool IsSimtFusedMemberEmitted(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return false;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtFusedMemberEmittedAttr, false);
+}
+
+bool IsSimtDirectGmLoadNode(const af::AscNodePtr &node) {
+  return IsSimtDirectGmBoundary(node);
+}
+
+af::Status BuildSimtMergeSideLoadMetadata(const af::AscNodePtr &load, SimtLoadMetadata &metadata) {
+  metadata = SimtLoadMetadata{};
+  GE_ASSERT_NOTNULL(load);
+  GE_ASSERT_TRUE(!load->outputs().empty() && load->outputs()[0] != nullptr,
+                 "IndirectLoad SIMT merge side load[%s] has no output.", load->GetNamePtr());
+  // 与单 gather 输出侧 load 同构的分类（kZeroOffset / kOutputOffset）。视图匹配成员 index
+  // load 的 ② 形态无需特判：use_logical_offset 恒为 true，寻址按自身物理视图从 output_index
+  // 坐标折叠——分类值在折叠路径下不被消费（单 gather 输出侧 load 同此），不存在 N 路
+  // index_offset 歧义。
+  if (SimtLoadUsesZeroOffset(load)) {
+    metadata.address_source = SimtLoadAddressSource::kZeroOffset;
+  } else {
+    metadata.address_source = SimtLoadAddressSource::kOutputOffset;
+  }
+  metadata.node_name = load->GetName();
+  // 输出侧 load 恒走逻辑偏移坐标折叠（与单 gather 输出侧一致）：物理 view 承载 strided/
+  // 行广播/② 形态的正确寻址，行广播标记读改写前写入的节点 attr（跨漂移稳定）。
+  metadata.use_logical_offset = true;
+  metadata.physical_view = GetNodeOutputView(load);
+  metadata.original_view = metadata.physical_view;
+  metadata.is_row_broadcast = ascir::IsRowBroadcastLoad(*load);
+  return af::SUCCESS;
 }
 
 af::Status ValidateSingleIndirectLoadNode(const af::AscGraph &graph, af::AscNodePtr &node) {

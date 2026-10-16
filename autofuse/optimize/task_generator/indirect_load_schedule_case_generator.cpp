@@ -424,29 +424,6 @@ bool IsSupportedIndirectLoadTopologyNode(const af::AscNodePtr &node) {
          ScheduleUtils::IsBroadcast(node) || ScheduleUtils::IsReduce(node);
 }
 
-af::Status CollectAndValidateIndirectLoadNodes(const ascir::HintGraph &graph, af::AscNodePtr &indirect_load) {
-  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::ValidateSingleIndirectLoadNode(graph, indirect_load));
-  if (indirect_load == nullptr) {
-    return af::SUCCESS;
-  }
-  af::AscNodePtr unsupported_node;
-  for (const af::AscNodePtr &node : graph.GetAllNodes()) {
-    if (!IsSupportedIndirectLoadTopologyNode(node)) {
-      unsupported_node = node;
-      break;
-    }
-  }
-  if (unsupported_node != nullptr) {
-    GELOGE(af::FAILED,
-           "[IndirectLoad] Graph[%s] node[%s] contains unsupported topology operator[%s, compute_type=%u] "
-           "around IndirectLoad[%s].",
-           graph.GetName().c_str(), unsupported_node->GetNamePtr(), unsupported_node->GetTypePtr(),
-           static_cast<uint32_t>(unsupported_node->attr.api.compute_type), indirect_load->GetNamePtr());
-    return af::FAILED;
-  }
-  return af::SUCCESS;
-}
-
 void CollectInputRegionMembers(const af::AscNodePtr &indirect_load, size_t input_index, NodeSet &region) {
   const af::AscNodePtr root = ascgen_utils::indirect_load::GetInputProducer(indirect_load, input_index);
   if (root == nullptr) {
@@ -599,6 +576,131 @@ size_t GetIndirectLoadAxisIndex(const af::AscNodePtr &node) {
     return kIndirectLoadInvalidAxisIndex;
   }
   return static_cast<size_t>(axis < 0L ? axis + rank_value : axis);
+}
+
+// 多 gather 水平融合组配对（约束见《双gather水平融合设计文档》）：
+// 1) 组内各路 G 轴（负轴归一化后）与 primary 相等；
+// 2) 输出 tensor 轴空间一致（axis id 逐元素相等，归并 ele 的图合法性天然保证）；
+// 3) index 逻辑 shape 符号级完全相等（逐路与 primary 比较）；
+// 4) 组内各路输出的前向消费者闭包与 primary 存在公共节点（经 ele 归并树汇入同一条输出链）。
+// 数量不设上限（N >= 2 均进入组配对）。全部为符号级静态判定，判定不确定（kUnknown）一律视为不满足。
+struct IndirectLoadGroup {
+  af::AscNodePtr primary;              // GetAllNodes 顺序中的第一个 IndirectLoad
+  std::vector<af::AscNodePtr> others;  // 其余 IndirectLoad（GetAllNodes 顺序）
+};
+
+bool IsGroupMemberLegal(const af::AscNodePtr &primary, const af::AscNodePtr &member) {
+  const auto report_illegal = [&primary, &member](const char *const reason) {
+    GELOGE(af::FAILED, "[IndirectLoad] Gather group member[%s] with primary[%s] is illegal: %s.", member->GetNamePtr(),
+           primary->GetNamePtr(), reason);
+    return false;
+  };
+  const size_t primary_axis = GetIndirectLoadAxisIndex(primary);
+  const size_t member_axis = GetIndirectLoadAxisIndex(member);
+  if (primary_axis == kIndirectLoadInvalidAxisIndex || member_axis == kIndirectLoadInvalidAxisIndex ||
+      primary_axis != member_axis) {
+    return report_illegal("gather axis mismatch");
+  }
+  const auto primary_outputs = primary->outputs();
+  const auto member_outputs = member->outputs();
+  if (primary_outputs.size() != kIndirectLoadOutputCount || member_outputs.size() != kIndirectLoadOutputCount) {
+    return report_illegal("output count mismatch");
+  }
+  if (primary_outputs[0] == nullptr || member_outputs[0] == nullptr ||
+      primary_outputs[0]->attr.axis != member_outputs[0]->attr.axis) {
+    return report_illegal("output axis space mismatch");
+  }
+  const auto primary_inputs = primary->inputs();
+  const auto member_inputs = member->inputs();
+  if (primary_inputs.size() != kIndirectLoadInputCount || member_inputs.size() != kIndirectLoadInputCount ||
+      primary_inputs[ascgen_utils::indirect_load::kIndexTensorIndex] == nullptr ||
+      member_inputs[ascgen_utils::indirect_load::kIndexTensorIndex] == nullptr) {
+    return report_illegal("input count mismatch");
+  }
+  const auto &primary_index = primary_inputs[ascgen_utils::indirect_load::kIndexTensorIndex]->attr;
+  const auto &member_index = member_inputs[ascgen_utils::indirect_load::kIndexTensorIndex]->attr;
+  if (primary_index.repeats.size() != member_index.repeats.size()) {
+    return report_illegal("index rank mismatch");
+  }
+  for (size_t dim = 0UL; dim < primary_index.repeats.size(); ++dim) {
+    if (af::SymbolicUtils::StaticCheckEq(primary_index.repeats[dim], member_index.repeats[dim]) != af::TriBool::kTrue) {
+      return report_illegal("index shape mismatch");
+    }
+  }
+  // 输出链汇聚：成员输出与 primary 的前向消费者闭包存在公共节点（归并 ele / 归并树公共节点）。
+  const auto collect_closure = [](NodeSet &closure) {
+    return [&closure](const af::AscNodePtr &node, bool &stop) -> af::Status {
+      (void)stop;
+      closure.emplace(node.get());
+      return af::SUCCESS;
+    };
+  };
+  const auto collect_roots = [](const af::AscNodePtr &node, NodePath &roots) {
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer != nullptr) {
+        roots.emplace_back(consumer);
+      }
+    }
+  };
+  NodePath primary_roots;
+  collect_roots(primary, primary_roots);
+  NodeSet primary_closure;
+  NodeSet primary_visited{primary.get()};
+  GE_ASSERT_SUCCESS(TraverseOutputConsumers(primary_roots, primary_visited, collect_closure(primary_closure)));
+  NodePath member_roots;
+  collect_roots(member, member_roots);
+  NodeSet member_closure;
+  NodeSet member_visited{member.get()};
+  GE_ASSERT_SUCCESS(TraverseOutputConsumers(member_roots, member_visited, collect_closure(member_closure)));
+  const bool has_common_consumer =
+      std::any_of(member_closure.begin(), member_closure.end(),
+                  [&primary_closure](const af::AscNode *const node) { return primary_closure.count(node) != 0UL; });
+  if (!has_common_consumer) {
+    return report_illegal("output chains do not converge");
+  }
+  return true;
+}
+
+af::Status CollectIndirectLoadEntry(const ascir::HintGraph &graph, af::AscNodePtr &indirect_load,
+                                    IndirectLoadGroup &group, bool &is_group) {
+  is_group = false;
+  group = {};
+  indirect_load = nullptr;
+  const auto nodes = ascgen_utils::indirect_load::GetAllIndirectLoadNodes(graph);
+  if (nodes.empty()) {
+    return af::SUCCESS;
+  }
+  if (nodes.size() == 1UL) {
+    indirect_load = nodes.front();
+  } else {
+    // 数量不限制：N（>= 2）路全部进入组配对，逐路与 primary 判定。
+    group.primary = nodes.front();
+    group.others.assign(nodes.begin() + 1, nodes.end());
+    for (const af::AscNodePtr &member : group.others) {
+      if (!IsGroupMemberLegal(group.primary, member)) {
+        return af::FAILED;
+      }
+    }
+    is_group = true;
+  }
+  const af::AscNodePtr &anchor = is_group ? group.primary : indirect_load;
+  af::AscNodePtr unsupported_node;
+  for (const af::AscNodePtr &node : graph.GetAllNodes()) {
+    if (!IsSupportedIndirectLoadTopologyNode(node)) {
+      unsupported_node = node;
+      break;
+    }
+  }
+  if (unsupported_node != nullptr) {
+    GELOGE(af::FAILED,
+           "[IndirectLoad] Graph[%s] node[%s] contains unsupported topology operator[%s, compute_type=%u] "
+           "around IndirectLoad[%s].",
+           graph.GetName().c_str(), unsupported_node->GetNamePtr(), unsupported_node->GetTypePtr(),
+           static_cast<uint32_t>(unsupported_node->attr.api.compute_type), anchor->GetNamePtr());
+    return af::FAILED;
+  }
+  return af::SUCCESS;
 }
 
 af::Status BuildPostReduceLayout(const af::AscNodePtr &reduce, PostReduceLayout &layout, bool &is_legal) {
@@ -1539,6 +1641,13 @@ af::Status NormalizeSimdAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
   ascir::AxisId input_inner_axis = af::kIdNone;
   GE_ASSERT_NOTNULL(analysis.input_root, "IndirectLoad SIMD input producer is missing.");
   GE_ASSERT_SUCCESS(BuildSimdInnerAxis(graph, analysis.input_root, axis_index, kInputInnerAxisName, input_inner_axis));
+  // per-IL 输入内轴提示：调度期 ApplyIndirectLoadNodeAxes 优先读取节点提示值，使多 gather
+  // 组中各路 input 边界使用各自的输入内轴；单 gather 场景提示值与全局模板轴一致，行为不变。
+  for (const af::AscNodePtr &node : analysis.input_region) {
+    if (ascgen_utils::indirect_load::ShouldApplyInputInnerVectorization(node)) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimdInputInnerAxis(node, input_inner_axis));
+    }
+  }
   ascir::AxisId index_inner_axis = af::kIdNone;
   const auto index_root =
       ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kIndexTensorIndex);
@@ -1550,6 +1659,67 @@ af::Status NormalizeSimdAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
   GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(analysis.index_region, output_axes, axis_index, false));
   return NormalizeAxesForTemplate(graph, indirect_load, axis_index, input_inner_axis, index_inner_axis,
                                   analysis.simd_index_uses_output_inner_axis);
+}
+
+// 多 gather 共享轴归一化：primary 完整建轴（outer/inner/tile/vectorized 与单 gather 完全一致），
+// 其余各成员复用共享轴、仅按需构建自己的 input 内轴（各路 input 的 dim 轴尺寸可以不同）；
+// 各成员区域节点写入其 per-IL 内轴提示。组配对约束保证组内各路输出 axis id 完全一致，
+// 因此 primary 的切分规则与循环组织形式天然对其余各路生效。
+af::Status NormalizeSimdAxesForMember(af::AscGraph &graph, const af::AscNodePtr &primary,
+                                      const RewrittenGraphAnalysis &primary_analysis, const af::AscNodePtr &member,
+                                      const RewrittenGraphAnalysis &member_analysis) {
+  ascgen_utils::indirect_load::TemplateAxes shared_axes;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(primary, shared_axes));
+  const size_t axis_index = GetIndirectLoadAxisIndex(member);
+  GE_ASSERT_TRUE(axis_index != kIndirectLoadInvalidAxisIndex, "IndirectLoad axis index of node[%s] is invalid.",
+                 member->GetNamePtr());
+  const auto member_output_axes = member->outputs()[0]->attr.axis;
+  GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(member_analysis.input_region, member_output_axes, axis_index, true));
+  if (member_analysis.simd_index_uses_output_inner_axis) {
+    GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(member_analysis.index_region, member_output_axes, axis_index, false));
+  }
+  // 成员的 input 内轴：与 primary 输入轴后缀完全一致（如两路读同一输入）时复用，避免
+  // 对相同 from 轴重复 MergeAxis；否则按成员自己的 input 构建独立内轴。
+  GE_ASSERT_NOTNULL(member_analysis.input_root, "IndirectLoad SIMD input producer is missing.");
+  const auto primary_input_axes = primary_analysis.input_root->outputs()[0]->attr.axis;
+  const auto member_input_axes = member_analysis.input_root->outputs()[0]->attr.axis;
+  const bool same_input_suffix =
+      primary_input_axes.size() == member_input_axes.size() &&
+      std::equal(primary_input_axes.begin() + static_cast<int64_t>(axis_index), primary_input_axes.end(),
+                 member_input_axes.begin() + static_cast<int64_t>(axis_index));
+  ascir::AxisId member_input_inner = shared_axes.input_inner_axis;
+  if (!same_input_suffix) {
+    GE_ASSERT_SUCCESS(
+        BuildSimdInnerAxis(graph, member_analysis.input_root, axis_index, kInputInnerAxisName, member_input_inner));
+  }
+  ascgen_utils::indirect_load::TemplateAxes member_axes = shared_axes;
+  member_axes.input_inner_axis = member_input_inner;
+  // simd_index_uses_output_inner_axis 为 true 时，index 内轴即共享输出内轴（单 gather 流程中
+  // 该值同样由输出轴覆写而来）；为 false 时保持空，与单 gather 语义一致。
+  member_axes.index_inner_axis =
+      member_analysis.simd_index_uses_output_inner_axis ? shared_axes.inner_axis : af::kIdNone;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateAxes(member, member_axes));
+  for (const af::AscNodePtr &node : member_analysis.input_region) {
+    if (ascgen_utils::indirect_load::ShouldApplyInputInnerVectorization(node)) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimdInputInnerAxis(node, member_input_inner));
+    }
+  }
+  return af::SUCCESS;
+}
+
+// members 与 analyses 按序对齐：members[0] 为 primary（analyses[0] 对应），
+// 其余为组内成员。primary 完整建轴一次，各成员逐个复用共享轴。
+af::Status NormalizeSimdAxesForGroupTemplate(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                                             const std::vector<RewrittenGraphAnalysis> &analyses) {
+  GE_ASSERT_TRUE(members.size() == analyses.size() && !members.empty(),
+                 "IndirectLoad gather group members[%zu] and analyses[%zu] must be aligned and non-empty.",
+                 members.size(), analyses.size());
+  GE_ASSERT_SUCCESS(NormalizeSimdAxesForTemplate(graph, members.front(), analyses.front()));
+  for (size_t index = 1UL; index < members.size(); ++index) {
+    GE_ASSERT_SUCCESS(
+        NormalizeSimdAxesForMember(graph, members.front(), analyses.front(), members[index], analyses[index]));
+  }
+  return af::SUCCESS;
 }
 
 af::Status NormalizeSimtAxesForTemplate(af::AscGraph &graph, const af::AscNodePtr &indirect_load, size_t boundary,
@@ -1567,6 +1737,49 @@ af::Status NormalizeSimtAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
   // 因而 direct index 与 Cast/Add/Where 等复合 index 共用该路径。
   GE_ASSERT_SUCCESS(
       NormalizeAxesForTemplate(graph, indirect_load, boundary, af::kIdNone, af::kIdNone, false, solve_tile_size));
+  return af::SUCCESS;
+}
+
+// 多 gather 组员（SIMT）：仅收集本路 index 生产链 backward 区域（含 index 链外部 store 折叠）。
+// 共享归并/输出链不进入任何组员的 SIMT 区域——它们作为普通向量代码在全部组员 invocation
+// 之后执行，避免输出链角色冲突与 evaluator 跨依赖。
+bool CollectSimtGroupIndexRegion(const af::AscGraph &graph, const af::AscNodePtr &indirect_load,
+                                 NodePath &index_region) {
+  index_region.clear();
+  const af::AscNodePtr index_root =
+      ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kIndexTensorIndex);
+  if (index_root == nullptr) {
+    return false;
+  }
+  NodeSet region;
+  if (!CollectSimtBackwardRegion({index_root}, indirect_load, region)) {
+    return false;
+  }
+  if (!FoldSimtIndexChainExternalStores(indirect_load, index_root, region)) {
+    return false;
+  }
+  // 按 GetAllNodes 顺序重建（与 CollectRewrittenRegion 的确定性约定一致）。
+  for (const af::AscNodePtr &node : graph.GetAllNodes()) {
+    if (region.count(node.get()) != 0UL) {
+      index_region.emplace_back(node);
+    }
+  }
+  return !index_region.empty();
+}
+
+// 多 gather 组员（SIMT）共享轴归一化：primary 完整归一一次（boundary = 输出 rank，组内
+// 一致；无 post-Reduce 固定单行 tile 语义），其余成员复用 primary 的 TemplateAxes——
+// 输出轴空间与 boundary 全组相同，轴结构一致；SIMT 归一不触碰区域节点轴，拷贝语义等价，
+// 且避免 BuildAxisViewByBoundary/CreateFixedTileSplit 按成员重复建轴。
+af::Status NormalizeSimtAxesForGroupTemplate(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members) {
+  GE_ASSERT_TRUE(!members.empty(), "IndirectLoad gather group members must be non-empty.");
+  const size_t boundary = members.front()->outputs()[0]->attr.axis.size();
+  GE_ASSERT_SUCCESS(NormalizeSimtAxesForTemplate(graph, members.front(), boundary, /*solve_tile_size=*/false));
+  ascgen_utils::indirect_load::TemplateAxes shared_axes;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(members.front(), shared_axes));
+  for (size_t index = 1UL; index < members.size(); ++index) {
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateAxes(members[index], shared_axes));
+  }
   return af::SUCCESS;
 }
 
@@ -2986,6 +3199,613 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
   return af::SUCCESS;
 }
 
+// 多 gather 组员（SIMT）扇出标注：组员计划不含主输出链（selected 仅含全组 IL 节点作
+// 排除集），IL 输出的全部消费者（归并 ele/输出链）均为 normal schedule 扇出分支——
+// 标注 kSimtFanoutBranch 使调度侧按既有语义处理 SIMT 输出到普通向量代码的边界；
+// side input 闭包随分支标注，全组 IL 排除避免改写他组成员的 kSimtOp 角色。
+af::Status AnnotateSimtGroupFanoutBranches(const std::vector<af::AscNodePtr> &members) {
+  NodeSet member_set;
+  for (const af::AscNodePtr &member : members) {
+    member_set.emplace(member.get());
+  }
+  NodeSet normal_schedule_nodes;
+  NodeSet side_visited;
+  const auto visit = [&member_set, &normal_schedule_nodes, &side_visited](
+                         const af::AscNodePtr &member, const af::AscNodePtr &node, bool &stop) -> af::Status {
+    // store/reduce 为 normal schedule 终端，不标注扇出角色（单 gather 版本中它们位于
+    // selected 主输出链内、同样不标注；组员无主输出链，需显式排除）。
+    const bool is_fanout_branch = member_set.count(node.get()) == 0UL && !IsInputDataSource(node) &&
+                                  !ScheduleUtils::IsReduce(node) && !ScheduleUtils::IsStore(node);
+    if (is_fanout_branch) {
+      GELOGD("[IndirectLoad] SIMT group fanout branch node[%s] annotated.", node->GetNamePtr());
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
+          node, ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch));
+      GE_ASSERT_SUCCESS(AnnotateSimtSideInputClosure(node, member, member_set, normal_schedule_nodes, side_visited));
+    }
+    if (ScheduleUtils::IsStore(node) || ScheduleUtils::IsReduce(node)) {
+      stop = true;
+    }
+    return af::SUCCESS;
+  };
+  for (const af::AscNodePtr &member : members) {
+    NodeSet visited{member.get()};
+    NodePath roots;
+    for (const auto &out_node : member->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      GE_ASSERT_NOTNULL(consumer, "IndirectLoad output successor is invalid.");
+      roots.emplace_back(consumer);
+    }
+    for (size_t cursor = 0UL; cursor < roots.size(); ++cursor) {
+      const af::AscNodePtr node = roots[cursor];
+      if (node == nullptr || !visited.emplace(node.get()).second) {
+        continue;
+      }
+      bool stop = false;
+      GE_ASSERT_SUCCESS(visit(member, node, stop));
+      if (stop) {
+        continue;
+      }
+      for (const auto &out_node : node->GetOutDataNodes()) {
+        const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+        GE_ASSERT_NOTNULL(consumer, "IndirectLoad output successor is invalid.");
+        roots.emplace_back(consumer);
+      }
+    }
+  }
+  return af::SUCCESS;
+}
+
+// 六级降级阶梯 L2/L3/L4 判定（全部 schedule 侧编译期判定，算法与常量见设计文档
+// 「六级降级阶梯（六级终态设计）」章节）：
+// - L4（V2 多 evaluator）：资源压力模型超最低档配额（模型规格与常量依据见设计文档
+//   「寄存器压力模型」章节）。
+// - L2（寄存器归并）：归并树（成员输出前向闭包，成员为边界）全部节点可标量发射、无共享
+//   Reduce 终端、side input 可整体标量发射——Scalar/ScalarData/GM load 直接支持；③ 区域外
+//   elewise 链经后向闭包拉入发射（链上 Load 收为 side load）；② 视图匹配成员 index load 的
+//   GM load 无需特判（use_logical_offset 坐标折叠按自身物理视图寻址）。
+// - L3（UB 归并）：其余情形——各路 value 写 UB 局部目标，归并链向量代码执行。
+// 防漂移：此处仅做门控与角色标注；side load 寻址分类与输出链 tensor id 由 codegen 在
+// codegen 期图上用同一分类函数重建（节点名跨图副本稳定，视图/张量 id 会漂移）。
+af::Status PlanSimtFusedEmission(const af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                                 ascgen_utils::indirect_load::SimtFusedMergeInfo &merge_info,
+                                 bool &use_fused_emission) {
+  merge_info = ascgen_utils::indirect_load::SimtFusedMergeInfo{};
+  // 资源压力模型常数与最低档配额（取值依据与档位配额表见设计文档「寄存器压力模型」）。
+  constexpr uint64_t kRegisterBase = 24U;
+  constexpr uint64_t kRegisterPerMember = 18U;
+  constexpr uint64_t kRegisterPerSideLoad = 5U;
+  constexpr uint64_t kRegisterPerChainNode = 3U;
+  constexpr uint64_t kMinTierQuota = 127U;
+  // 归并树收集：全部成员输出 Consumer 的前向闭包（成员为边界；Store/Reduce 为终端）。
+  NodeSet member_set;
+  for (const af::AscNodePtr &member : members) {
+    member_set.emplace(member.get());
+  }
+  NodeSet forward;
+  std::vector<af::AscNodePtr> pending;
+  for (const af::AscNodePtr &member : members) {
+    for (const auto &out_node : member->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      GE_ASSERT_NOTNULL(consumer, "IndirectLoad output successor is invalid.");
+      pending.emplace_back(consumer);
+    }
+  }
+  bool has_reduce_terminal = false;
+  std::vector<af::AscNodePtr> store_terminals;
+  std::vector<af::AscNodePtr> forward_nodes;
+  for (size_t cursor = 0UL; cursor < pending.size(); ++cursor) {
+    const af::AscNodePtr node = pending[cursor];
+    if (node == nullptr || member_set.count(node.get()) != 0UL) {
+      continue;
+    }
+    if (ScheduleUtils::IsStore(node)) {
+      store_terminals.emplace_back(node);
+      continue;
+    }
+    if (ScheduleUtils::IsReduce(node)) {
+      // 共享 post-Reduce 终端：merge 结果需 UB 局部目标 + 向量 Reduce 消费（v1 边界，降 L3）。
+      has_reduce_terminal = true;
+      continue;
+    }
+    if (!forward.emplace(node.get()).second) {
+      continue;
+    }
+    forward_nodes.emplace_back(node);
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      GE_ASSERT_NOTNULL(consumer, "IndirectLoad output successor is invalid.");
+      pending.emplace_back(consumer);
+    }
+  }
+  // side input 发现与分类（②③）：
+  // - Scalar/ScalarData：直接放行（context 常量/值字段）
+  // - GM load（Load/direct-gm Nddma）：side load，BuildSimtMergeSideLoadMetadata 分类
+  //   （kZeroOffset/kOutputOffset + use_logical_offset 坐标折叠；视图匹配成员 index load 的
+  //   ② 形态由折叠按自身物理视图从 output_index 正确寻址，无需特判）
+  // - 其余（③ 区域外 elewise 链）：后向闭包收集链节点（逐节点可发射性校验），链上 Load
+  //   收为 side load，Scalar/ScalarData/Arange 为终端放行；不可发射节点 → L3。
+  bool has_unsupported_side_input = false;
+  std::vector<af::AscNodePtr> side_loads;
+  std::vector<af::AscNodePtr> side_chain_nodes;
+  NodeSet side_chain_set;
+  std::vector<af::AscNodePtr> backward_pending;
+  for (const af::AscNodePtr &node : forward_nodes) {
+    for (const auto &in_node : node->GetInDataNodes()) {
+      const auto producer = std::dynamic_pointer_cast<af::AscNode>(in_node);
+      if (producer == nullptr || member_set.count(producer.get()) != 0UL || forward.count(producer.get()) != 0UL ||
+          side_chain_set.count(producer.get()) != 0UL) {
+        continue;
+      }
+      if (af::ops::IsOps<af::ascir_op::Scalar>(producer) || af::ops::IsOps<af::ascir_op::ScalarData>(producer)) {
+        continue;
+      }
+      if (ascgen_utils::indirect_load::IsSimtDirectGmLoadNode(producer)) {
+        if (std::find(side_loads.begin(), side_loads.end(), producer) == side_loads.end()) {
+          ascgen_utils::indirect_load::SimtLoadMetadata side_meta;
+          GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::BuildSimtMergeSideLoadMetadata(producer, side_meta));
+          side_loads.emplace_back(producer);
+        }
+        continue;
+      }
+      backward_pending.emplace_back(producer);
+    }
+  }
+  for (size_t cursor = 0UL; cursor < backward_pending.size(); ++cursor) {
+    const af::AscNodePtr node = backward_pending[cursor];
+    if (node == nullptr || member_set.count(node.get()) != 0UL || forward.count(node.get()) != 0UL ||
+        side_chain_set.count(node.get()) != 0UL) {
+      continue;
+    }
+    if (ascgen_utils::indirect_load::IsSimtDirectGmLoadNode(node)) {
+      if (std::find(side_loads.begin(), side_loads.end(), node) == side_loads.end()) {
+        ascgen_utils::indirect_load::SimtLoadMetadata side_meta;
+        GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::BuildSimtMergeSideLoadMetadata(node, side_meta));
+        side_loads.emplace_back(node);
+      }
+      continue;
+    }
+    if (af::ops::IsOps<af::ascir_op::Scalar>(node) || af::ops::IsOps<af::ascir_op::ScalarData>(node) ||
+        af::ops::IsOps<af::ascir_op::Arange>(node)) {
+      continue;
+    }
+    if (!af::ops::IsOps<af::ascir_op::Transpose>(node) && !CanEmitSimtScalar(node)) {
+      has_unsupported_side_input = true;
+      break;
+    }
+    side_chain_set.emplace(node.get());
+    side_chain_nodes.emplace_back(node);
+    for (const auto &in_node : node->GetInDataNodes()) {
+      const auto producer = std::dynamic_pointer_cast<af::AscNode>(in_node);
+      if (producer != nullptr) {
+        backward_pending.emplace_back(producer);
+      }
+    }
+  }
+  // 可发射性：闭包消费节点逐个查 V2 标量注册表（Transpose 为表达式直通节点，豁免）。
+  bool all_emittable = true;
+  for (const af::AscNodePtr &node : forward_nodes) {
+    if (af::ops::IsOps<af::ascir_op::Transpose>(node) || CanEmitSimtScalar(node)) {
+      continue;
+    }
+    all_emittable = false;
+    break;
+  }
+  // 资源压力模型：按成员数、side load 数与 side 链节点数线性估算（见设计文档）。
+  const uint64_t register_demand = kRegisterBase + kRegisterPerMember * static_cast<uint64_t>(members.size()) +
+                                   kRegisterPerSideLoad * static_cast<uint64_t>(side_loads.size()) +
+                                   kRegisterPerChainNode * static_cast<uint64_t>(side_chain_nodes.size());
+  use_fused_emission = register_demand <= kMinTierQuota;
+  if (!use_fused_emission) {
+    GELOGI(
+        "[IndirectLoad] Fused register demand[%llu] exceeds min tier quota[%llu], fall back to V2 (N=%zu, S=%zu, "
+        "E=%zu).",
+        static_cast<unsigned long long>(register_demand), static_cast<unsigned long long>(kMinTierQuota),
+        members.size(), side_loads.size(), side_chain_nodes.size());
+    return af::SUCCESS;
+  }
+  if (register_demand <= 16U) {
+    merge_info.max_thread_tier = 2048U;
+  } else if (register_demand <= 32U) {
+    merge_info.max_thread_tier = 1024U;
+  } else if (register_demand <= 64U) {
+    merge_info.max_thread_tier = 512U;
+  } else {
+    merge_info.max_thread_tier = 256U;
+  }
+  merge_info.register_merge = all_emittable && !has_reduce_terminal && !has_unsupported_side_input &&
+                              !store_terminals.empty() && !forward_nodes.empty();
+  if (!merge_info.register_merge) {
+    GELOGI(
+        "[IndirectLoad] Fused merge falls back to UB merge (reduce_terminal[%d], unsupported_side_input[%d], "
+        "all_emittable[%d], stores[%zu], side_loads[%zu]).",
+        has_reduce_terminal ? 1 : 0, has_unsupported_side_input ? 1 : 0, all_emittable ? 1 : 0, store_terminals.size(),
+        side_loads.size());
+    return af::SUCCESS;
+  }
+  // side load 角色标注：kSimtDirectGmBoundary——evaluator 直读 GM，向量 codegen 跳过其
+  // 独立发射（与单 gather index 区域 load 的角色语义一致；其向量化视图由
+  // CompletePreservedVectorizedViews 的全图遍历统一播种，行广播标记同理）。
+  for (const af::AscNodePtr &side_load : side_loads) {
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
+        side_load, ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary));
+  }
+  // Store 终端角色标注 + 终端名：evaluator 的归并结果经 OutputTargets 直写 Store 的 GM
+  // 目标（codegen 按 merge_store_names 在当前图重解析输出链 tensor id——跨图副本防漂移），
+  // Store 自身必须跳过独立发射，否则普通发射会与直写冲突（重复写/读未产出的张量）——
+  // 与单 gather output_store 的 kSimtDirectGmBoundary 语义一致（skips_api_emit；skipped
+  // Store 的 GM 输出 tensor 由 codegen 的 tpipe 收集兜底注册，供下游 Output 绑定）。
+  // 仅 L2（寄存器归并）进入本分支；L3/L4（UB 归并/V2）归并链为扇出分支、值由 VF 子图
+  // 产出后 Store 正常发射读取，不做此标注。
+  for (const af::AscNodePtr &store : store_terminals) {
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
+        store, ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary));
+    merge_info.merge_store_names.emplace_back(store->GetName());
+  }
+  // 按 GetAllNodes 顺序重建归并树节点名（含 ③ side 链节点——同标 kSimtInlineTransform，
+  // 由 evaluator 发射；确定性 + 拓扑序，与 CollectSimtGroupIndexRegion 约定一致）。
+  for (const af::AscNodePtr &graph_node : graph.GetAllNodes()) {
+    if (graph_node != nullptr &&
+        (forward.count(graph_node.get()) != 0UL || side_chain_set.count(graph_node.get()) != 0UL)) {
+      merge_info.merge_node_names.emplace_back(graph_node->GetName());
+    }
+  }
+  GELOGI(
+      "[IndirectLoad] Fused register merge: %zu merge nodes, %zu output chains, %zu side loads, %zu side chain "
+      "nodes (N=%zu).",
+      merge_info.merge_node_names.size(), merge_info.merge_store_names.size(), side_loads.size(),
+      side_chain_nodes.size(), members.size());
+  return af::SUCCESS;
+}
+
+// 多 gather 水平融合候选流水：逐 IL 复用单 gather 的分析/校验/标注/元数据机制，仅轴归一化
+// 改为共享模板轴（NormalizeSimdAxesForGroupTemplate / NormalizeSimtAxesForGroupTemplate）。
+// G≥R、复合 Norm 等输出侧校验对组内各路判定必然一致（axis 相同、输出边界相同），逐 IL 执行
+// 以完整复用既有校验实现。SIMT 档位采用组员形态：各路 evaluator 仅含本路 index 链与 input
+// 读取，value 写 UB 局部目标；共享归并/输出链作为普通向量代码在全部 invocation 之后执行。
+af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &group, ascir::TemplateId template_id,
+                               bool &is_candidate_legal) {
+  is_candidate_legal = true;
+  std::vector<af::AscNodePtr> members{group.primary};
+  members.insert(members.end(), group.others.begin(), group.others.end());
+  GELOGD("[IndirectLoad] Apply gather group graph pass for primary[%s] with %zu members, template_id[%d].",
+         group.primary->GetNamePtr(), members.size(), static_cast<int32_t>(template_id));
+  const bool is_simt = template_id == ascir::TemplateId::kIndirectLoadSimt;
+  // L6 SK 分段桥接：逐成员复用单 gather SK 流水（ApplySkGraphPass 自包含——仅触碰本路的
+  // 边/区域/角色，无全局清理，顺序调用天然可组合）。workspace 边界把各路 IL 隔入独立段
+  // （段内恒单 IL，下游 RestoreSkTemplateAxes 等单 IL 假设在段内成立），归并/输出链作为
+  // 消费段独立调度（读各路 workspace）。
+  if (template_id == ascir::TemplateId::kIndirectLoadSK) {
+    // 与单 gather 路径的 dtype 门控（见 ApplyGraphPass）保持一致：SK 的 AscendC::Gather
+    // 不支持 8 字节与 1 字节值，任一成员命中即整组 SK 候选拒绝（该图对本生成器不可融合，
+    // 由前端 BackendSpec 预防兜底承接）。
+    for (const af::AscNodePtr &member : members) {
+      const auto value_dtype = member->inputs()[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype;
+      const bool is_64bit_value = value_dtype == af::DT_INT64 || value_dtype == af::DT_UINT64;
+      const bool is_1byte_value =
+          value_dtype == af::DT_INT8 || value_dtype == af::DT_UINT8 || value_dtype == af::DT_BOOL;
+      if (is_64bit_value || is_1byte_value) {
+        is_candidate_legal = false;
+        GELOGI("[IndirectLoad] value dtype[%d] is unsupported by SK, skip gather group SK candidate for node[%s].",
+               static_cast<int32_t>(value_dtype), member->GetNamePtr());
+        return af::SUCCESS;
+      }
+    }
+    for (const af::AscNodePtr &member : members) {
+      bool softmax_normalized = false;
+      GE_ASSERT_SUCCESS(softmax_pattern::NormalizeDirectPostSoftmax(graph, member, softmax_normalized));
+      bool member_legal = false;
+      GE_ASSERT_SUCCESS(ApplySkGraphPass(graph, member, member_legal));
+      if (!member_legal) {
+        is_candidate_legal = false;
+        GELOGE(af::FAILED, "[IndirectLoad] Reject gather group SK candidate: member[%s] is SK-illegal.",
+               member->GetNamePtr());
+        return af::SUCCESS;
+      }
+    }
+    return af::SUCCESS;
+  }
+  if (template_id != ascir::TemplateId::kIndirectLoadSimd && !is_simt) {
+    is_candidate_legal = false;
+    // 组候选拒绝原因需在默认日志级别可观测，与成员非法判定（report_illegal）的 GELOGE 约定一致。
+    GELOGE(af::FAILED, "[IndirectLoad] Reject gather group template[%d]: only SIMD/SIMT/SK are supported.",
+           static_cast<int32_t>(template_id));
+    return af::SUCCESS;
+  }
+  // 与单 gather 路径的 dtype 门控（见 ApplyGraphPass）保持一致：1 字节值（int8/uint8/bool）
+  // 仅 SIMT 标量路径支持——SIMD 候选直接拒绝（SIMT 候选继续，即模板阶梯的 1 字节档）；
+  // 64 位值由 SIMD 8 字节 ValuePolicy（RegTraitNumTwo）与 SIMT 共同支持。
+  if (!is_simt) {
+    for (const af::AscNodePtr &member : members) {
+      const auto value_dtype = member->inputs()[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype;
+      const bool is_1byte_value =
+          value_dtype == af::DT_INT8 || value_dtype == af::DT_UINT8 || value_dtype == af::DT_BOOL;
+      if (is_1byte_value) {
+        is_candidate_legal = false;
+        GELOGI("[IndirectLoad] 1-byte value dtype[%d] only supports SIMT, skip gather group template[%d] for node[%s].",
+               static_cast<int32_t>(value_dtype), static_cast<int32_t>(template_id), member->GetNamePtr());
+        return af::SUCCESS;
+      }
+    }
+  }
+  // 与单 gather SIMT 入口一致：先清理整图残留的 SIMT 角色（组员输出链保持无 SIMT 计划角色，
+  // 由组员扇出标注统一标为 normal schedule 扇出分支）。
+  if (is_simt) {
+    GE_ASSERT_SUCCESS(ClearSimtTemplateRoles(graph));
+  }
+  std::vector<RewrittenGraphAnalysis> analyses(members.size());
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    GE_ASSERT_SUCCESS(AnalyzeRewrittenGraph(graph, members[index], template_id, is_candidate_legal, analyses[index]));
+    if (!is_candidate_legal) {
+      return af::SUCCESS;
+    }
+  }
+  // 组配对约束已保证各路输出前向闭包与 primary 存在公共节点；此处进一步要求输出边界（store
+  // 与首个 post Reduce）全部与 primary 为同一节点，即全组归并到同一条输出链，避免边界分析
+  // 各自收敛到不同链路。
+  for (size_t index = 1UL; index < members.size(); ++index) {
+    if (analyses.front().output_store != analyses[index].output_store ||
+        analyses.front().post_reduce != analyses[index].post_reduce) {
+      is_candidate_legal = false;
+      GELOGE(af::FAILED,
+             "[IndirectLoad] Reject gather group candidate: output chains of node[%s] and node[%s] diverge.",
+             members.front()->GetNamePtr(), members[index]->GetNamePtr());
+      return af::SUCCESS;
+    }
+  }
+  if (is_simt) {
+    // 组员 SIMT 计划收窄：SIMT 区域重收集为仅本路 index 链；共享归并/post-Reduce 链不进入
+    // 任何组员的 SIMT 计划（普通向量代码），post_reduce 置空使 ValidateTemplate 的 boundary
+    // 保持输出 rank（固定单行 tile 语义，与单 gather 无 post-Reduce SIMT 一致）。
+    for (size_t index = 0UL; index < members.size(); ++index) {
+      if (!CollectSimtGroupIndexRegion(graph, members[index], analyses[index].index_region)) {
+        is_candidate_legal = false;
+        GELOGE(af::FAILED,
+               "[IndirectLoad] Reject gather group SIMT candidate: index region of node[%s] is empty or unsupported.",
+               members[index]->GetNamePtr());
+        return af::SUCCESS;
+      }
+      analyses[index].post_reduce = nullptr;
+    }
+  }
+  for (const RewrittenGraphAnalysis &analysis : analyses) {
+    GE_ASSERT_SUCCESS(CompleteInputDataTensorAttrs(analysis));
+  }
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    // 与单 gather 路径一致：ValidateTemplate 的 boundary 为出/入参（SIMT 模板会改写），
+    // 组 SIMT 的 post_reduce 已置空，boundary 保持输出 rank。
+    size_t boundary = members[index]->outputs()[0]->attr.axis.size();
+    GE_ASSERT_SUCCESS(ValidateTemplate(members[index], template_id, analyses[index], boundary, is_candidate_legal));
+    if (!is_candidate_legal) {
+      GELOGE(af::FAILED,
+             "[IndirectLoad] Reject gather group template[%d] for node[%s]: post-reduce or region validation failed.",
+             static_cast<int32_t>(template_id), members[index]->GetNamePtr());
+      return af::SUCCESS;
+    }
+  }
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    GE_ASSERT_SUCCESS(AnnotateTemplate(members[index], template_id, analyses[index]));
+  }
+  // 六级降级阶梯的 L2/L3/L4 判定结果（L4=V2 时不设融合发射标记，成员各自走标准单 gather
+  // invocation——codegen 的成员发射路径完整复用单 gather 机制）。
+  ascgen_utils::indirect_load::SimtFusedMergeInfo merge_info;
+  bool use_fused_emission = false;
+  if (is_simt) {
+    // 组员标记先于全部角色标注写入（顺序修复）：扇出标注的排除集与 BuildSimtLoweringMetadata
+    // 的组员分支均依赖该标记。
+    for (const af::AscNodePtr &member : members) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtGroupMember(member));
+    }
+    GE_ASSERT_SUCCESS(PlanSimtFusedEmission(graph, members, merge_info, use_fused_emission));
+    if (merge_info.register_merge) {
+      // L2 寄存器归并：归并树整链标 kSimtInlineTransform——在 fused evaluator 的 FusedEval
+      // 内按拓扑序发射（N 种子 + 表达式折叠），向量 codegen 跳过其发射。
+      for (const std::string &merge_node_name : merge_info.merge_node_names) {
+        const af::AscNodePtr merge_node = graph.FindNode(merge_node_name.c_str());
+        GE_ASSERT_NOTNULL(merge_node, "Fused merge node[%s] is missing.", merge_node_name.c_str());
+        GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
+            merge_node, ascgen_utils::indirect_load::TemplateRole::kSimtInlineTransform));
+        GELOGD("[IndirectLoad] Register merge: node[%s] marked kSimtInlineTransform (in-evaluator merge).",
+               merge_node->GetNamePtr());
+      }
+    } else {
+      // L3 UB 归并 / L4 V2 多 evaluator：归并/输出链标为 normal schedule 扇出分支（复用单
+      // gather 的 kSimtFanoutBranch 语义），全组 IL 作为排除集避免改写他组成员角色。
+      GE_ASSERT_SUCCESS(AnnotateSimtGroupFanoutBranches(members));
+    }
+    GE_ASSERT_SUCCESS(NormalizeSimtAxesForGroupTemplate(graph, members));
+  } else {
+    GE_ASSERT_SUCCESS(NormalizeSimdAxesForGroupTemplate(graph, members, analyses));
+    // 与单 gather NormalizeTemplateAxes 的 SIMD 分支保持一致：post Reduce（含复合区域）输入
+    // 的向量化视图按模板轴播种；组内 vectorized_axes 相同，以 primary 播种一次即对全组生效。
+    const bool is_softmax_post =
+        analyses.front().post_reduce != nullptr && af::ops::IsOps<af::ascir_op::Softmax>(analyses.front().post_reduce);
+    if (!is_softmax_post) {
+      if (!analyses.front().composite_reduces.empty()) {
+        GE_ASSERT_SUCCESS(SeedCompositeReduceInputViews(members.front(), analyses.front().composite_reduces));
+      } else {
+        GE_ASSERT_SUCCESS(SeedPostReduceInputVectorizedView(members.front(), analyses.front().post_reduce));
+      }
+    }
+  }
+  for (const af::AscNodePtr &member : members) {
+    GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph, member));
+    GE_ASSERT_SUCCESS(FinalizeTemplate(member, template_id));
+  }
+  if (is_simt && use_fused_emission) {
+    // seq-V1 融合发射标记（L2/L3）：primary 携带全组成员名与归并信息，codegen 生成单个
+    // fused invocation（IndirectLoadSimtFused，寄存器归并或 UB 归并）；非 primary 成员跳过
+    // 发射（primary 统一处理）。L4（V2）不设该标记——各成员走标准单 gather invocation。
+    std::vector<std::string> member_names;
+    member_names.reserve(members.size());
+    for (const af::AscNodePtr &member : members) {
+      member_names.emplace_back(member->GetName());
+    }
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtFusedPrimary(members.front(), member_names));
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtFusedMergeInfo(members.front(), merge_info));
+    for (size_t index = 1UL; index < members.size(); ++index) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtFusedMemberEmitted(members[index]));
+    }
+  }
+  for (const af::AscNodePtr &indirect_load : members) {
+    bool metadata_supported = false;
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
+    if (!metadata_supported) {
+      is_candidate_legal = false;
+      GELOGW("[IndirectLoad] Reject gather group candidate: lowering metadata of node[%s] is unsupported.",
+             indirect_load->GetNamePtr());
+      return af::SUCCESS;
+    }
+  }
+  return af::SUCCESS;
+}
+
+// L5 混模板独立兜底（六级降级阶梯第 5 级）：全部共模板候选（SIMD×2 + SIMT）被否决时的
+// 混模板死区承接——逐成员探测可行模板（SIMD 优先含 1 字节 dtype 门控，SIMT 兜底），
+// 异构选择时各成员以各自模板标注于同一 kernel：SIMD 成员子集共享 SIMD 模板轴（组机制，
+// per-IL input 内轴提示），SIMT 成员走组员形态（组员标记 + value 写 UB 局部目标）并复用
+// SIMD 子集的 TemplateAxes（SIMD 轴含 outer/inner/tile/vectorized 全集，SIMT 仅消费 outer）；
+// 全组 post_reduce 置空——归并/输出链（含 Reduce）统一作为 normal schedule 扇出分支的
+// 向量代码执行（混模板下归并链不做 SIMD 的 G≥R 融合，保证语义一致）。发射形态：SIMD 成员
+// 正常向量发射，SIMT 成员各走标准单 gather invocation（不设融合发射标记）。同构选择
+// （全 SIMD 或全 SIMT）时跳过（与共模板候选重复）。primary_selection 返回 primary 的选择
+// （供 score function 使用）。
+af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                               ascir::TemplateId &primary_selection, bool &is_candidate_legal) {
+  is_candidate_legal = false;
+  primary_selection = ascir::TemplateId::kIndirectLoadSimt;
+  std::vector<RewrittenGraphAnalysis> analyses(members.size());
+  std::vector<ascir::TemplateId> selection(members.size(), ascir::TemplateId::kIndirectLoadSimt);
+  // 逐成员探测：SIMD 优先（dtype 门控 + 区域校验），SIMT 兜底（index 链重收集 + 校验）。
+  // 探测在混模板候选自身的图副本上执行，AnalyzeRewrittenGraph 的改图（前置 ele 后移）与
+  // 共模板路径一致，两模板探测间的重复调用幂等（改写模式不匹配即无操作）。
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    const af::AscNodePtr &member = members[index];
+    const auto value_dtype = member->inputs()[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype;
+    const bool is_1byte_value = value_dtype == af::DT_INT8 || value_dtype == af::DT_UINT8 || value_dtype == af::DT_BOOL;
+    bool simd_legal = false;
+    if (!is_1byte_value) {
+      GE_ASSERT_SUCCESS(
+          AnalyzeRewrittenGraph(graph, member, ascir::TemplateId::kIndirectLoadSimd, simd_legal, analyses[index]));
+      if (simd_legal) {
+        // 与单 gather canonical 顺序一致（Analyze → CompleteInputDataTensorAttrs → Validate）：
+        // Data 节点轴属性补齐先于校验，保证选档结论与正式校验同输入状态。
+        GE_ASSERT_SUCCESS(CompleteInputDataTensorAttrs(analyses[index]));
+        size_t boundary = member->outputs()[0]->attr.axis.size();
+        GE_ASSERT_SUCCESS(
+            ValidateTemplate(member, ascir::TemplateId::kIndirectLoadSimd, analyses[index], boundary, simd_legal));
+      }
+    }
+    if (simd_legal) {
+      selection[index] = ascir::TemplateId::kIndirectLoadSimd;
+      continue;
+    }
+    bool simt_legal = false;
+    GE_ASSERT_SUCCESS(
+        AnalyzeRewrittenGraph(graph, member, ascir::TemplateId::kIndirectLoadSimt, simt_legal, analyses[index]));
+    if (!simt_legal) {
+      GELOGW("[IndirectLoad] Mixed mode: node[%s] is illegal on both templates.", member->GetNamePtr());
+      return af::SUCCESS;
+    }
+    if (!CollectSimtGroupIndexRegion(graph, member, analyses[index].index_region)) {
+      GELOGW("[IndirectLoad] Mixed mode: index region of node[%s] is empty or unsupported.", member->GetNamePtr());
+      return af::SUCCESS;
+    }
+    analyses[index].post_reduce = nullptr;
+    GE_ASSERT_SUCCESS(CompleteInputDataTensorAttrs(analyses[index]));
+    size_t boundary = member->outputs()[0]->attr.axis.size();
+    GE_ASSERT_SUCCESS(
+        ValidateTemplate(member, ascir::TemplateId::kIndirectLoadSimt, analyses[index], boundary, simt_legal));
+    if (!simt_legal) {
+      GELOGW("[IndirectLoad] Mixed mode: node[%s] is illegal on both templates.", member->GetNamePtr());
+      return af::SUCCESS;
+    }
+    selection[index] = ascir::TemplateId::kIndirectLoadSimt;
+  }
+  // 成员分类（探测完成后）：异构性判定 + 后续子集处理。
+  std::vector<af::AscNodePtr> simd_members;
+  std::vector<af::AscNodePtr> simt_members;
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    if (selection[index] == ascir::TemplateId::kIndirectLoadSimd) {
+      simd_members.emplace_back(members[index]);
+    } else {
+      simt_members.emplace_back(members[index]);
+    }
+  }
+  if (simd_members.empty() || simt_members.empty()) {
+    GELOGI("[IndirectLoad] Mixed mode skipped: selection is homogeneous (simd=%zu, simt=%zu).", simd_members.size(),
+           simt_members.size());
+    return af::SUCCESS;
+  }
+  primary_selection = selection.front();
+  // 输出链一致性（与共模板组一致）：全组输出边界为同一节点。
+  for (size_t index = 1UL; index < members.size(); ++index) {
+    if (analyses.front().output_store != analyses[index].output_store) {
+      GELOGE(af::FAILED, "[IndirectLoad] Reject mixed mode candidate: output chains of node[%s] and node[%s] diverge.",
+             members.front()->GetNamePtr(), members[index]->GetNamePtr());
+      return af::SUCCESS;
+    }
+  }
+  // 全组 post_reduce 置空：归并链（含 Reduce）统一作为扇出向量代码（混模板下不做 SIMD 的
+  // G≥R 融合，避免同一 Reduce 同时处于 SIMD 融合与 SIMT 扇出两种语义）。
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    analyses[index].post_reduce = nullptr;
+  }
+  // SIMD 子集分析在 post_reduce 置空后构建，与 ValidateTemplate/AnnotateTemplate/
+  // NormalizeSimdAxesForGroupTemplate 消费的分析保持一致。
+  std::vector<RewrittenGraphAnalysis> simd_analyses;
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    if (selection[index] == ascir::TemplateId::kIndirectLoadSimd) {
+      simd_analyses.emplace_back(analyses[index]);
+    }
+  }
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    size_t boundary = members[index]->outputs()[0]->attr.axis.size();
+    bool member_legal = false;
+    GE_ASSERT_SUCCESS(ValidateTemplate(members[index], selection[index], analyses[index], boundary, member_legal));
+    if (!member_legal) {
+      GELOGW("[IndirectLoad] Mixed mode: post-probe validation of node[%s] failed.", members[index]->GetNamePtr());
+      return af::SUCCESS;
+    }
+  }
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    GE_ASSERT_SUCCESS(AnnotateTemplate(members[index], selection[index], analyses[index]));
+  }
+  // 归并/输出链 = normal schedule 扇出分支（SIMT 成员 invocation 之后执行；SIMD 成员输出
+  // 为 UB 张量，向量归并直接消费）。
+  GE_ASSERT_SUCCESS(AnnotateSimtGroupFanoutBranches(members));
+  // 轴：SIMD 子集共享轴归一化（首个 SIMD 成员建轴 + per-IL input 内轴提示），SIMT 成员
+  // 复用同一 TemplateAxes。
+  GE_ASSERT_SUCCESS(NormalizeSimdAxesForGroupTemplate(graph, simd_members, simd_analyses));
+  ascgen_utils::indirect_load::TemplateAxes shared_axes;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(simd_members.front(), shared_axes));
+  for (const af::AscNodePtr &simt_member : simt_members) {
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateAxes(simt_member, shared_axes));
+  }
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph, members[index]));
+    GE_ASSERT_SUCCESS(FinalizeTemplate(members[index], selection[index]));
+  }
+  // SIMT 成员组员标记（member-form 元数据：index 链 + value 写 UB 局部目标）；不设融合
+  // 发射标记（各成员走标准单 gather invocation）。
+  for (const af::AscNodePtr &simt_member : simt_members) {
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtGroupMember(simt_member));
+  }
+  for (const af::AscNodePtr &indirect_load : members) {
+    bool metadata_supported = false;
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
+    if (!metadata_supported) {
+      is_candidate_legal = false;
+      GELOGW("[IndirectLoad] Reject mixed mode candidate: lowering metadata of node[%s] is unsupported.",
+             indirect_load->GetNamePtr());
+      return af::SUCCESS;
+    }
+  }
+  is_candidate_legal = true;
+  GELOGI("[IndirectLoad] Add mixed template candidate: %zu SIMD + %zu SIMT members (N=%zu).", simd_members.size(),
+         simt_members.size(), members.size());
+  return af::SUCCESS;
+}
+
 bool IsEmbeddingFastPathCapable(const TemplateCase &template_case,
                                 const ascgen_utils::indirect_load::IndirectLoadAccessInfo &access_info) {
   if (template_case.implementation != ascgen_utils::indirect_load::Implementation::kDefault) {
@@ -3084,38 +3904,179 @@ af::Status ReduceTaskGraphCount(std::vector<ascir::ImplGraph> &grouped_graphs, c
 
 af::Status FinalizeGroupedGraphLoweringMetadata(std::vector<ascir::ImplGraph> &grouped_graphs) {
   for (auto &graph : grouped_graphs) {
-    af::AscNodePtr indirect_load;
-    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::ValidateSingleIndirectLoadNode(graph, indirect_load));
-    if (indirect_load == nullptr) {
-      continue;
-    }
-    const auto template_id = ascir::GetTemplateIdOrDefault(*indirect_load);
-    // FinalizeLoweringMetadata 仅支持 SIMD/SIMT：SK 的分区图不含该 lowering
-    // 元数据，不进入本循环的元数据检查。
-    if (template_id != ascir::TemplateId::kIndirectLoadSimd && template_id != ascir::TemplateId::kIndirectLoadSimt) {
-      continue;
-    }
-    // Norm 区域完整性：区域节点必须与 IndirectLoad 同组，否则统计分支与
-    // 原始输入回流被拆到不同 Kernel。SK 除外：SK 的 workspace 分区本身就是
-    // 把 Gather 与后续计算合法拆到不同 grouped graph，区域节点位于其他分区
-    // 属预期形态，仅记录日志不阻断。
-    ascgen_utils::norm::NormInfo norm_info;
-    GE_ASSERT_SUCCESS(ascgen_utils::norm::TryGetNormInfo(indirect_load, norm_info));
-    if (norm_info.kind != ascgen_utils::norm::NormInfo::Kind::kNone && !norm_info.region_node_names.empty()) {
-      const bool is_sk_split = template_id == ascir::TemplateId::kIndirectLoadSK;
-      for (const auto &node_name : norm_info.region_node_names) {
-        if (graph.FindNode(node_name.c_str()) == nullptr) {
-          GE_ASSERT_TRUE(!is_sk_split, "Norm region node[%s] is split out of grouped graph[%s], IndirectLoad[%s].",
-                         node_name.c_str(), graph.GetName().c_str(), indirect_load->GetNamePtr());
-          GELOGI("[IndirectLoad] Norm region node[%s] resides in another SK workspace partition of graph[%s].",
-                 node_name.c_str(), graph.GetName().c_str());
+    // 多 gather 水平融合：同一 grouped graph 可包含组内全部 IndirectLoad，逐个校验。
+    for (const af::AscNodePtr &indirect_load : ascgen_utils::indirect_load::GetAllIndirectLoadNodes(graph)) {
+      const auto template_id = ascir::GetTemplateIdOrDefault(*indirect_load);
+      // FinalizeLoweringMetadata 仅支持 SIMD/SIMT：SK 的分区图不含该 lowering
+      // 元数据，不进入本循环的元数据检查。
+      if (template_id != ascir::TemplateId::kIndirectLoadSimd && template_id != ascir::TemplateId::kIndirectLoadSimt) {
+        continue;
+      }
+      // Norm 区域完整性：区域节点必须与 IndirectLoad 同组，否则统计分支与
+      // 原始输入回流被拆到不同 Kernel。SK 除外：SK 的 workspace 分区本身就是
+      // 把 Gather 与后续计算合法拆到不同 grouped graph，区域节点位于其他分区
+      // 属预期形态，仅记录日志不阻断。
+      ascgen_utils::norm::NormInfo norm_info;
+      GE_ASSERT_SUCCESS(ascgen_utils::norm::TryGetNormInfo(indirect_load, norm_info));
+      if (norm_info.kind != ascgen_utils::norm::NormInfo::Kind::kNone && !norm_info.region_node_names.empty()) {
+        const bool is_sk_split = template_id == ascir::TemplateId::kIndirectLoadSK;
+        for (const auto &node_name : norm_info.region_node_names) {
+          if (graph.FindNode(node_name.c_str()) == nullptr) {
+            GE_ASSERT_TRUE(!is_sk_split, "Norm region node[%s] is split out of grouped graph[%s], IndirectLoad[%s].",
+                           node_name.c_str(), graph.GetName().c_str(), indirect_load->GetNamePtr());
+            GELOGI("[IndirectLoad] Norm region node[%s] resides in another SK workspace partition of graph[%s].",
+                   node_name.c_str(), graph.GetName().c_str());
+          }
         }
       }
+      bool metadata_supported = false;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
+      GE_ASSERT_TRUE(metadata_supported,
+                     "IndirectLoad lowering metadata is unsupported in grouped graph[%s], node[%s].",
+                     graph.GetName().c_str(), indirect_load->GetNamePtr());
     }
-    bool metadata_supported = false;
-    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
-    GE_ASSERT_TRUE(metadata_supported, "IndirectLoad lowering metadata is unsupported in grouped graph[%s], node[%s].",
-                   graph.GetName().c_str(), indirect_load->GetNamePtr());
+  }
+  return af::SUCCESS;
+}
+
+// 多 gather 水平融合候选生成（六级降级阶梯）：共模板候选 SIMD×2 + SIMT×1（SIMD 优先
+// 竞标，SIMT 承载 1 字节值等 SIMD 不可行档位），全部否决时逐级 L5 混模板独立兜底与
+// L6 SK 分段桥接（逐成员复用单 gather SK 流水，workspace 边界分段，见设计文档「六级
+// 降级阶梯」章节）。
+af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGroup &group,
+                                   std::vector<ascir::ImplGraph> &graphs, std::vector<std::string> &score_functions) {
+  std::vector<af::AscNodePtr> members{group.primary};
+  members.insert(members.end(), group.others.begin(), group.others.end());
+  for (const af::AscNodePtr &member : members) {
+    GE_ASSERT_SUCCESS(ValidateIndirectLoadNode(member));
+  }
+  GELOGI("[IndirectLoad] Generate gather group schedule candidates for graph[%s], primary[%s] with %zu members.",
+         graph.GetName().c_str(), group.primary->GetNamePtr(), members.size());
+  const TemplateCase cases[] = {
+      {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kDefault},
+      {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kGatherApi},
+      {ascir::TemplateId::kIndirectLoadSimt, ascgen_utils::indirect_load::Implementation::kDefault}};
+  for (const TemplateCase &template_case : cases) {
+    const ascir::TemplateId template_id = template_case.template_id;
+    ascir::ImplGraph candidate_graph(graph.GetName().c_str());
+    GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
+    IndirectLoadGroup candidate_group;
+    candidate_group.primary = candidate_graph.FindNode(group.primary->GetName().c_str());
+    GE_ASSERT_NOTNULL(candidate_group.primary, "Failed to find copied IndirectLoad node[%s].",
+                      group.primary->GetName().c_str());
+    for (const af::AscNodePtr &member : group.others) {
+      const af::AscNodePtr candidate_member = candidate_graph.FindNode(member->GetName().c_str());
+      GE_ASSERT_NOTNULL(candidate_member, "Failed to find copied IndirectLoad node[%s].", member->GetName().c_str());
+      candidate_group.others.emplace_back(candidate_member);
+    }
+    for (const af::AscNodePtr &member : candidate_group.others) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetImplementation(member, template_case.implementation));
+    }
+    GE_ASSERT_SUCCESS(
+        ascgen_utils::indirect_load::SetImplementation(candidate_group.primary, template_case.implementation));
+    // 组内经 ele 归并后 Softmax Pattern 的原始输入不直接来自任一 IndirectLoad 输出，
+    // 规范化必然不命中；保持与单 gather 一致的调用形态以覆盖归并节点即 Pattern 头的形态。
+    bool softmax_normalized = false;
+    GE_ASSERT_SUCCESS(
+        softmax_pattern::NormalizeDirectPostSoftmax(candidate_graph, candidate_group.primary, softmax_normalized));
+    if (softmax_normalized) {
+      GELOGI("[IndirectLoad] Gather group candidate[%d] normalized direct post Softmax for node[%s].",
+             static_cast<int32_t>(template_id), candidate_group.primary->GetNamePtr());
+    }
+    bool is_candidate_legal = false;
+    GE_ASSERT_SUCCESS(ApplyGraphPassGroup(candidate_graph, candidate_group, template_id, is_candidate_legal));
+    if (!is_candidate_legal) {
+      GELOGW("[IndirectLoad] Skip illegal gather group template candidate[%d] for primary[%s] with %zu members.",
+             static_cast<int32_t>(template_id), candidate_group.primary->GetNamePtr(), members.size());
+      continue;
+    }
+    // 组内 index.shape 相同，模板档位判决以 primary 的访问信息为准。
+    ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_group.primary, access_info));
+    graphs.emplace_back(std::move(candidate_graph));
+    score_functions.emplace_back(GenerateScoreFunc(template_case, access_info, candidate_group.primary));
+    GELOGI("[IndirectLoad] Add gather group schedule candidate[%d, %d] for primary[%s] with %zu members.",
+           static_cast<int32_t>(template_id), static_cast<int32_t>(template_case.implementation),
+           candidate_group.primary->GetNamePtr(), members.size());
+  }
+  // [L5 混模板独立兜底] 全部共模板候选（SIMD×2 + SIMT）被否决时的死区承接：逐成员探测
+  // （SIMD 优先 / SIMT 兜底），异构选择时各成员以各自模板标注于同一 kernel，归并/输出链
+  // （含 Reduce）统一作为扇出分支向量代码。同构选择跳过（与共模板候选重复）。
+  if (graphs.empty()) {
+    ascir::ImplGraph candidate_graph(graph.GetName().c_str());
+    GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
+    IndirectLoadGroup candidate_group;
+    candidate_group.primary = candidate_graph.FindNode(group.primary->GetName().c_str());
+    GE_ASSERT_NOTNULL(candidate_group.primary, "Failed to find copied IndirectLoad node[%s].",
+                      group.primary->GetName().c_str());
+    for (const af::AscNodePtr &member : group.others) {
+      const af::AscNodePtr candidate_member = candidate_graph.FindNode(member->GetName().c_str());
+      GE_ASSERT_NOTNULL(candidate_member, "Failed to find copied IndirectLoad node[%s].", member->GetName().c_str());
+      candidate_group.others.emplace_back(candidate_member);
+    }
+    std::vector<af::AscNodePtr> candidate_members{candidate_group.primary};
+    candidate_members.insert(candidate_members.end(), candidate_group.others.begin(), candidate_group.others.end());
+    for (const af::AscNodePtr &member : candidate_members) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetImplementation(
+          member, ascgen_utils::indirect_load::Implementation::kDefault));
+    }
+    bool softmax_normalized = false;
+    GE_ASSERT_SUCCESS(
+        softmax_pattern::NormalizeDirectPostSoftmax(candidate_graph, candidate_group.primary, softmax_normalized));
+    ascir::TemplateId primary_selection = ascir::TemplateId::kIndirectLoadSimt;
+    bool is_candidate_legal = false;
+    GE_ASSERT_SUCCESS(ApplyGraphPassMixed(candidate_graph, candidate_members, primary_selection, is_candidate_legal));
+    if (is_candidate_legal) {
+      ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_group.primary, access_info));
+      graphs.emplace_back(std::move(candidate_graph));
+      score_functions.emplace_back(
+          GenerateScoreFunc(TemplateCase{primary_selection, ascgen_utils::indirect_load::Implementation::kDefault},
+                            access_info, candidate_group.primary));
+      GELOGI("[IndirectLoad] Add mixed template candidate for graph[%s] (mixed dead-zone fallback).",
+             graph.GetName().c_str());
+    }
+  }
+  // [L6 SK 分段桥接] 终态兜底：逐成员复用单 gather SK 流水（workspace 边界把各路 IL 隔入
+  // 独立段、归并/输出链作为消费段独立调度——各段保留各自调度，承接共同调度不可行场景）。
+  // SK 自身不可行（Transpose / 复合 Norm / SK 校验否决）时返回无候选——该图对本生成器
+  // 不可融合，由前端 BackendSpec 预防兜底。
+  if (graphs.empty()) {
+    ascir::ImplGraph candidate_graph(graph.GetName().c_str());
+    GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
+    IndirectLoadGroup candidate_group;
+    candidate_group.primary = candidate_graph.FindNode(group.primary->GetName().c_str());
+    GE_ASSERT_NOTNULL(candidate_group.primary, "Failed to find copied IndirectLoad node[%s].",
+                      group.primary->GetName().c_str());
+    for (const af::AscNodePtr &member : group.others) {
+      const af::AscNodePtr candidate_member = candidate_graph.FindNode(member->GetName().c_str());
+      GE_ASSERT_NOTNULL(candidate_member, "Failed to find copied IndirectLoad node[%s].", member->GetName().c_str());
+      candidate_group.others.emplace_back(candidate_member);
+    }
+    for (const af::AscNodePtr &member : candidate_group.others) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetImplementation(
+          member, ascgen_utils::indirect_load::Implementation::kDefault));
+    }
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetImplementation(
+        candidate_group.primary, ascgen_utils::indirect_load::Implementation::kDefault));
+    bool is_candidate_legal = false;
+    GE_ASSERT_SUCCESS(
+        ApplyGraphPassGroup(candidate_graph, candidate_group, ascir::TemplateId::kIndirectLoadSK, is_candidate_legal));
+    if (is_candidate_legal) {
+      ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_group.primary, access_info));
+      graphs.emplace_back(std::move(candidate_graph));
+      score_functions.emplace_back(GenerateScoreFunc(
+          TemplateCase{ascir::TemplateId::kIndirectLoadSK, ascgen_utils::indirect_load::Implementation::kDefault},
+          access_info, candidate_group.primary));
+      GELOGI("[IndirectLoad] Add gather group SK bridge candidate for graph[%s] (terminal fallback).",
+             graph.GetName().c_str());
+    } else {
+      GELOGW(
+          "[IndirectLoad] All gather group candidates including SK bridge rejected for graph[%s] with %zu "
+          "members; no candidates emitted (frontend BackendSpec prevention applies).",
+          graph.GetName().c_str(), members.size());
+    }
   }
   return af::SUCCESS;
 }
@@ -3124,9 +4085,14 @@ af::Status FinalizeGroupedGraphLoweringMetadata(std::vector<ascir::ImplGraph> &g
 Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std::vector<ascir::ImplGraph> &graphs,
                                                    std::vector<std::string> &score_functions) {
   af::AscNodePtr indirect_load;
-  GE_ASSERT_SUCCESS(CollectAndValidateIndirectLoadNodes(graph, indirect_load));
-  if (indirect_load == nullptr) {
+  IndirectLoadGroup group;
+  bool is_group = false;
+  GE_ASSERT_SUCCESS(CollectIndirectLoadEntry(graph, indirect_load, group, is_group));
+  if (indirect_load == nullptr && !is_group) {
     return af::SUCCESS;
+  }
+  if (is_group) {
+    return GenerateGroupCandidates(graph, group, graphs, score_functions);
   }
   GE_ASSERT_SUCCESS(ValidateIndirectLoadNode(indirect_load));
   GELOGI("[IndirectLoad] Generate schedule candidates for graph[%s], node[%s].", graph.GetName().c_str(),
@@ -3195,8 +4161,11 @@ Status IndirectLoadScheduleCaseGenerator::GeneratorTask(ascir::HintGraph &optimi
     const auto &graph = optimize_graphs[i];
     ScheduleTask task{graph, {}, score_funcs[i]};
     task.has_load_store_conversion = HasLoadStoreConversion();
-    af::AscNodePtr indirect_load;
-    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::ValidateSingleIndirectLoadNode(graph, indirect_load));
+    // 多 gather 候选图包含组内全部 IndirectLoad（组 SIMD/SIMT 与混模板候选经归并树连通
+    // 落在同一 grouped graph；SK 桥接候选经 workspace 边界分段、各段恒单 IL）；取首个
+    // 节点判定模板类型即可。
+    const auto indirect_loads = ascgen_utils::indirect_load::GetAllIndirectLoadNodes(graph);
+    const af::AscNodePtr indirect_load = indirect_loads.empty() ? nullptr : indirect_loads.front();
     // [SK分段SIMT] 重定向形态（template 已是 SIMT 但图含 output workspace 边界）与
     // SK 走同一分区/恢复路径（分区后子图需重新执行模板归一）。
     const bool is_sk_template =

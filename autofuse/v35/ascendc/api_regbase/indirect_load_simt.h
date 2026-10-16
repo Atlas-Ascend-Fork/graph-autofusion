@@ -807,6 +807,56 @@ __aicore__ inline void IndirectLoadSimtMulti(
   IndirectLoadSimt<X, FusedBody, CaseTag>(x, targets, context, actual_size, output_offset, params);
 }
 
+// [seq-V1] 多 gather 水平融合 fused kernel：单 evaluator、逐路 load + 寄存器归并。
+// FusedBody 由 codegen 生成，Context 包含 N 路 input 指针、N 路 index 链 GM 张量、N 路 AddressPolicy。
+template <uint32_t ThreadNum, typename FusedBody, typename Context>
+__simt_vf__ __aicore__ LAUNCH_BOUND(ThreadNum) inline void IndirectLoadSimtFusedKernel(
+    typename FusedBody::OutputTargets targets, Context context, uint32_t actual_size,
+    typename FusedBody::OffsetType output_offset) {
+  using OffsetT = typename FusedBody::OffsetType;
+  for (uint32_t i = threadIdx.x; i < actual_size; i += blockDim.x) {
+    const OffsetT output_index = output_offset + static_cast<OffsetT>(i);
+    const typename FusedBody::OutputPack outputs = FusedBody::FusedEval(output_index, context);
+    FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), context, outputs);
+  }
+}
+
+template <typename FusedBody, typename Context>
+__aicore__ inline void IndirectLoadSimtFused(typename FusedBody::OutputTargets targets, Context context,
+                                             uint32_t actual_size, typename FusedBody::OffsetType output_offset) {
+  if (actual_size != 0U) {
+    // 六级降级阶梯的线程档封顶（模型规格见双 gather 设计文档「寄存器压力模型」）：
+    // kMaxThreadTier 由 codegen 按资源压力模型与 offset 位宽门槛推得。封顶档吞吐不变：
+    // 预算受限下时间 ∝ 总 load 数，线程 ≥128 即打满 outstanding；线程以 blockDim.x 步进
+    // 循环覆盖 actual_size。
+    constexpr uint32_t kTierCap = FusedBody::kMaxThreadTier;
+    const uint32_t tier = actual_size <= 128U || kTierCap < 256U
+                              ? 128U
+                              : (actual_size <= 256U || kTierCap < 512U
+                                     ? 256U
+                                     : (actual_size <= 512U || kTierCap < 1024U
+                                            ? 512U
+                                            : (actual_size <= 1024U || kTierCap < 2048U ? 1024U : 2048U)));
+    if (tier == 2048U) {
+      Simt::VF_CALL<IndirectLoadSimtFusedKernel<2048U, FusedBody, Context>>(Simt::Dim3(2048U), targets, context,
+                                                                            actual_size, output_offset);
+    } else if (tier == 1024U) {
+      Simt::VF_CALL<IndirectLoadSimtFusedKernel<1024U, FusedBody, Context>>(Simt::Dim3(1024U), targets, context,
+                                                                            actual_size, output_offset);
+    } else if (tier == 512U) {
+      Simt::VF_CALL<IndirectLoadSimtFusedKernel<512U, FusedBody, Context>>(Simt::Dim3(512U), targets, context,
+                                                                           actual_size, output_offset);
+    } else if (tier == 256U) {
+      Simt::VF_CALL<IndirectLoadSimtFusedKernel<256U, FusedBody, Context>>(Simt::Dim3(256U), targets, context,
+                                                                           actual_size, output_offset);
+    } else {
+      Simt::VF_CALL<IndirectLoadSimtFusedKernel<128U, FusedBody, Context>>(Simt::Dim3(128U), targets, context,
+                                                                           actual_size, output_offset);
+    }
+  }
+  PipeBarrier<PIPE_V>();
+}
+
 }  // namespace AscendC
 
 #endif  // AUTOFUSE_V35_ASCENDC_API_REGBASE_INDIRECT_LOAD_SIMT_H_

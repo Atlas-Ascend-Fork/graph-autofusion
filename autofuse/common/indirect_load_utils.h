@@ -353,6 +353,49 @@ af::Status ValidateIndirectLoadOutputLayout(const LogicalTensorView &output);
 // [s3*s4*s5/Tb, Tb]），符号级全等比较会漏判这类等价视图。
 bool IsDenseEquivalentView(const LogicalTensorView &load_view, const LogicalTensorView &output_view);
 bool ShouldApplyInputInnerVectorization(const af::AscNodePtr &node);
+// 双 gather 水平融合：按 GetAllNodes 顺序收集图中全部 IndirectLoad 节点（确定性顺序）。
+std::vector<af::AscNodePtr> GetAllIndirectLoadNodes(const af::AscGraph &graph);
+// 多 gather 水平融合（SIMT）：组成员标记。携带该标记的 IL 走组员版 SIMT lowering 计划——
+// 计划仅含本路 index 链与 input 读取，输出为写 UB 局部目标（value tensor），共享归并/输出
+// 链不进入 SIMT 计划（作为普通向量代码在全部 SIMT invocation 之后执行）。
+af::Status SetSimtGroupMember(const af::AscNodePtr &node);
+bool IsSimtGroupMember(const af::AscNodePtr &node);
+// seq-V1 融合发射标记：组的 primary IL 携带该标记时，codegen 生成单个 fused invocation
+// （IndirectLoadSimtFused，逐路串行 load + 寄存器归并）；非 primary 成员跳过发射。
+af::Status SetSimtFusedPrimary(const af::AscNodePtr &node, const std::vector<std::string> &member_names);
+bool IsSimtFusedPrimary(const af::AscNodePtr &node);
+std::vector<std::string> GetSimtFusedMemberNames(const af::AscNodePtr &node);
+// 六级降级阶梯（L2/L3）：fused primary 携带的归并信息。register_merge=true 时归并树在
+// FusedEval 内按拓扑序折叠为标量表达式（寄存器归并，L2）；false 时各路 value 写各自 UB
+// 局部目标、归并链由向量代码执行（UB 归并，L3），merge 字段不消费。max_thread_tier 为
+// 资源压力模型推得的线程档上限（模型规格见设计文档「寄存器压力模型」）。
+// 防漂移约定：节点名跨图副本稳定（唯一存储介质）；视图/分类/输出链 tensor id 由 codegen
+// 在当前图上重建（见 BuildSimtMergeSideLoadMetadata 与「漂移防护」注释）。
+struct SimtFusedMergeInfo {
+  bool register_merge = false;
+  uint32_t max_thread_tier = 2048U;
+  std::vector<std::string> merge_node_names;   // 归并树闭包节点名（拓扑序，不含成员 IL 与 Store）
+  std::vector<std::string> merge_store_names;  // Store 终端节点名（codegen 按名重解析输出链 tensor id）
+};
+af::Status SetSimtFusedMergeInfo(const af::AscNodePtr &node, const SimtFusedMergeInfo &info);
+SimtFusedMergeInfo GetSimtFusedMergeInfo(const af::AscNodePtr &node);
+// 归并树 side GM load 的判定与寻址元数据构建（调用方在各自当前图上执行——调度期门控与
+// codegen 期重建各调一次，分类/视图取自当前节点，防两份图副本间的视图漂移）。
+// IsSimtDirectGmLoadNode：Load 或 direct-gm Nddma（evaluator 可直读的 GM 边界节点）。
+// BuildSimtMergeSideLoadMetadata：与单 gather 输出侧 load 同构——kZeroOffset/kOutputOffset
+// 分类 + use_logical_offset 坐标折叠（物理 view 承载 strided/行广播/视图匹配成员 index
+// load 的 ② 形态寻址——按自身物理视图从 output_index 分解，与单 gather 输出侧 load 行为
+// 一致，无 N 路 index_offset 歧义）+ 行广播标记（改写前写入的节点 attr，跨漂移稳定）。
+bool IsSimtDirectGmLoadNode(const af::AscNodePtr &node);
+af::Status BuildSimtMergeSideLoadMetadata(const af::AscNodePtr &load, SimtLoadMetadata &metadata);
+// seq-V1 融合发射模式下非 primary 成员携带该标记（发射由 fused primary 统一处理，自身跳过）；
+// L4（V2 多 evaluator）不设该标记——各成员走标准单 gather invocation。
+af::Status SetSimtFusedMemberEmitted(const af::AscNodePtr &node);
+bool IsSimtFusedMemberEmitted(const af::AscNodePtr &node);
+// SIMD input 区域节点携带的 per-IndirectLoad 输入内轴提示：调度期优先于全局 primary 模板轴，
+// 用于区分双 gather 中各路 input 边界的向量化内轴归属；单 gather 场景提示值与全局值一致。
+af::Status SetSimdInputInnerAxis(const af::AscNodePtr &node, af::AxisId axis);
+af::AxisId GetSimdInputInnerAxis(const af::AscNodePtr &node);
 af::AscNodePtr GetInputProducer(const af::AscNodePtr &node, size_t input_index);
 af::AscNodePtr GetOnlyOutputConsumer(const af::AscNodePtr &node);
 af::AscNodePtr FindIndirectLoadNode(const af::AscGraph &graph);

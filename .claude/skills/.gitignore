@@ -5,6 +5,8 @@
 !cann-toolkit-installer/**
 !default-skills/
 !default-skills/**
+!af-api-modeling/
+!af-api-modeling/**
 !af-build-runner/
 !af-build-runner/**
 !af-test-developer/
