@@ -67,6 +67,8 @@ target_include_directories(model_specialization
 target_link_libraries(model_specialization
     PRIVATE
         ${SPEC_SCOPE_TARGETS}
+        ascendc_runtime
+        profapi
         Boost::filesystem
         c_sec_headers
         runtime_headers
