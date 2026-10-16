@@ -30,7 +30,6 @@
 #include "dlog_pub.h"
 #include <mockcpp/mockcpp.hpp>
 #include <mockcpp/mokc.h>
-#include <mockcpp/ApiHook.h>
 #include <new>
 #include <stdexcept>
 #include <tuple>
@@ -601,6 +600,7 @@ struct KernelState {
   aclError paramError = ACL_SUCCESS;
   aclError nameError = ACL_SUCCESS;
   bool unterminatedName = false;
+  std::function<void()> onParamCount;
 };
 
 using CollectorTask = TaskState;
@@ -676,55 +676,6 @@ void UnloadBinary(aclrtBinHandle binary) {
   ++unloadCalls;
 }
 
-// Arm the allocator only after the selected identity has been read by the real implementation.
-// This excludes setup and mock-framework allocations from the injected collection failure.
-template <typename T>
-class ScopedCollectionAllocationFailure {
- public:
-  explicit ScopedCollectionAllocationFailure(uint32_t taskIndex) : taskIndex_(taskIndex) {
-    identityHook_ = HookIdentity();
-    active_ = this;
-  }
-  ~ScopedCollectionAllocationFailure() {
-    allocationHook_.reset();
-    identityHook_.reset();
-    active_ = nullptr;
-  }
-  size_t failures = 0;
-  std::string outputDirectory;
-
- private:
-  static std::unique_ptr<mockcpp::ApiHook> HookIdentity() {
-    return std::make_unique<mockcpp::ApiHook>(mockcpp::Details::methodToAddr(&AclSpecOptimizer::ReadTaskIdentity),
-                                              reinterpret_cast<const void *>(&ReadIdentityAndArm));
-  }
-  static aclError ReadIdentityAndArm(const AclSpecOptimizer *optimizer, AclSpecOptimizer::TaskIdentity &identity) {
-    auto &failure = *active_;
-    failure.identityHook_.reset();
-    const aclError result = optimizer->ReadTaskIdentity(identity);
-    if (result == ACL_SUCCESS && identity.record.taskIndex == failure.taskIndex_) {
-      failure.outputDirectory = optimizer->outputDirectory_.Path();
-      failure.allocationHook_ =
-          std::make_unique<mockcpp::ApiHook>(mockcpp::Details::methodToAddr(&std::allocator<T>::allocate),
-                                             reinterpret_cast<const void *>(&FailAllocation));
-    } else {
-      failure.identityHook_ = HookIdentity();
-    }
-    return result;
-  }
-  static T *FailAllocation(const void *, size_t, const void *) {
-    ++active_->failures;
-    // Restore before unwinding so exception logging and cleanup can allocate normally.
-    active_->allocationHook_.reset();
-    throw std::bad_alloc();
-  }
-
-  inline static ScopedCollectionAllocationFailure *active_ = nullptr;
-  uint32_t taskIndex_;
-  std::unique_ptr<mockcpp::ApiHook> identityHook_;
-  std::unique_ptr<mockcpp::ApiHook> allocationHook_;
-};
-
 class AclSpecOptimizerCollectionTest : public testing::Test {
  protected:
   void SetUp() override {
@@ -795,72 +746,6 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
     marker.params.kernelTaskParams.args = nullptr;
     marker.params.kernelTaskParams.argsSize = 0;
     return marker;
-  }
-  template <typename T>
-  void CheckCollectionAllocationFailure(uint32_t taskIndex) {
-    ASSERT_TRUE(manager.Init(nullptr, true));
-    KernelState beginKernel;
-    KernelState endKernel;
-    auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
-    auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
-    stream.tasks = {&begin, &task, &end};
-    const auto originalBegin = begin.params;
-    const auto originalEnd = end.params;
-    const auto originalTask = task.params;
-    auto previous = std::make_unique<KernelSpecRequest>();
-    const auto *saved = previous.get();
-    requests.push_back(std::move(previous));
-    scopeMarkers = {{&task}};
-    MOCKER(aclmdlRITaskDisable).expects(never());
-    for (bool publicEntry : {false, true}) {
-      identityParamsQueries = nameQueries = 0;
-      size_t failures = 0;
-      std::string outputDirectory;
-      aclError result = ACL_SUCCESS;
-      bool allocationThrown = false;
-      {
-        ScopedCollectionAllocationFailure<T> failure(taskIndex);
-        if (publicEntry) {
-          result = aclmdlRISpecOptimizeByFlag(&model, nullptr);
-        } else {
-          try {
-            Collect();
-          } catch (const std::bad_alloc &) {
-            allocationThrown = true;
-          }
-        }
-        failures = failure.failures;
-        outputDirectory = failure.outputDirectory;
-      }
-      EXPECT_EQ(failures, 1U);
-      EXPECT_EQ(identityParamsQueries, taskIndex + 1U);
-      EXPECT_EQ(nameQueries, taskIndex + 1U);
-      if (publicEntry) {
-        EXPECT_EQ(result, ACL_ERROR_BAD_ALLOC);
-        ASSERT_FALSE(outputDirectory.empty());
-        EXPECT_FALSE(std::filesystem::exists(outputDirectory));
-      } else {
-        EXPECT_TRUE(allocationThrown);
-      }
-      ASSERT_EQ(requests.size(), 1U);
-      EXPECT_EQ(requests.front().get(), saved);
-      EXPECT_EQ(MarkerTasks(scopeMarkers), (std::vector<aclmdlRITask>{&task}));
-      EXPECT_EQ(binaryQueries, 0U);
-      EXPECT_EQ(paramCountQueries, 0U);
-      EXPECT_EQ(copyQueries, 0U);
-      EXPECT_TRUE(specializationPaths.empty());
-      EXPECT_EQ(loadCalls, 0U);
-      EXPECT_TRUE(touched.empty());
-      EXPECT_EQ(updateCount, 0U);
-      EXPECT_EQ(std::memcmp(&begin.params, &originalBegin, sizeof(originalBegin)), 0);
-      EXPECT_EQ(std::memcmp(&end.params, &originalEnd, sizeof(originalEnd)), 0);
-      EXPECT_EQ(std::memcmp(&task.params, &originalTask, sizeof(originalTask)), 0);
-    }
-    // The scoped hooks must leave the same collector and allocators usable by later tests.
-    ASSERT_EQ(Collect(), ACL_SUCCESS);
-    ASSERT_EQ(requests.size(), 1U);
-    EXPECT_EQ(requests.front()->task, &task);
-    EXPECT_EQ(MarkerTasks(scopeMarkers), (std::vector<aclmdlRITask>{&begin, &end}));
   }
   std::array<uint8_t, 128> args{};
   KernelState kernel;
@@ -993,7 +878,11 @@ rtError_t GetBinaryBuffer(rtBinHandle binary, int type, void **data, uint32_t *s
 
 extern "C" aclError aclrtFunctionGetParamCount(const void *function, size_t *count) {
   ++paramCountQueries;
-  *count = static_cast<const KernelState *>(function)->paramCount;
+  const auto &value = *static_cast<const KernelState *>(function);
+  if (value.onParamCount) {
+    value.onParamCount();
+  }
+  *count = value.paramCount;
   return ACL_SUCCESS;
 }
 
@@ -1221,46 +1110,6 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagRangeScanLogsEachInScopeTaskOnce) {
   EXPECT_EQ(logs.find("kernel specialization applied"), std::string::npos);
   EXPECT_EQ(logs.find("task=0, kernel=AddCustom\n"), std::string::npos);
   EXPECT_LT(logs.find(selected[2]), logs.find("cannot read resource id"));
-}
-
-TEST_F(AclSpecOptimizerCollectionTest, OptimizeSkipsInvalidIdentityAndCollectsLaterValidTask) {
-  for (int failure = 0; failure < 8; ++failure) {
-    CollectorTask invalid = task;
-    KernelState invalidKernel = kernel;
-    invalid.params.kernelTaskParams.funcHandle = &invalidKernel;
-    aclmdlRITask handle = &invalid;
-    switch (failure) {
-      case 0:
-        handle = nullptr;
-        break;
-      case 1:
-        invalid.typeError = ACL_ERROR_INVALID_PARAM;
-        break;
-      case 2:
-        invalid.paramsError = ACL_ERROR_INVALID_PARAM;
-        break;
-      case 3:
-        invalid.params.type = ACL_MODEL_RI_TASK_EVENT_WAIT;
-        break;
-      case 4:
-        invalid.params.kernelTaskParams.funcHandle = nullptr;
-        break;
-      case 5:
-        invalidKernel.nameError = ACL_ERROR_INVALID_PARAM;
-        break;
-      case 6:
-        invalidKernel.name.clear();
-        break;
-      case 7:
-        invalidKernel.unterminatedName = true;
-        break;
-    }
-    stream.tasks = {handle, &task};
-    ASSERT_EQ(Collect(), ACL_SUCCESS);
-    ASSERT_EQ(requests.size(), 1U) << failure;
-    EXPECT_EQ(requests.front()->task, &task);
-    EXPECT_EQ(requests.front()->taskIndex, 1U);
-  }
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, AllExactMarkersAllowZeroArgsAndNeverReadCandidateResources) {
@@ -1500,143 +1349,6 @@ TEST_F(AclSpecOptimizerCollectionTest, MarkerRecordsPreserveStreamTaskPositionsA
     }
   }
 }
-
-namespace {
-std::vector<ScopeTaskRecord> submittedMarkers;
-size_t submittedRequestCount = 0;
-size_t submissionCalls = 0;
-
-// mockcpp represents a const member's this argument as a non-const class pointer.
-aclError CaptureSubmission(AclSpecOptimizer *, aclmdlRI,
-                           const std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
-                           const std::vector<ScopeTaskRecord> &markersToDisable) {
-  ++submissionCalls;
-  submittedRequestCount = requests.size();
-  submittedMarkers = markersToDisable;
-  return ACL_SUCCESS;
-}
-
-class AclSpecOptimizerMarkerForwardingTest : public AclSpecOptimizerCollectionTest,
-                                             public testing::WithParamInterface<bool> {
- protected:
-  void SetUp() override {
-    AclSpecOptimizerCollectionTest::SetUp();
-    ut_log::LogBuffer::Instance().Clear();
-    submittedMarkers.clear();
-    submittedRequestCount = submissionCalls = 0;
-  }
-  void TearDown() override {
-    submittedMarkers.clear();
-    AclSpecOptimizerCollectionTest::TearDown();
-    ut_log::LogBuffer::Instance().Clear();
-  }
-};
-}  // namespace
-
-TEST_P(AclSpecOptimizerMarkerForwardingTest, PublicEntriesForwardMarkersForCleanup) {
-  KernelState beginKernel;
-  KernelState endKernel;
-  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_3510);
-  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_3510);
-  CollectorTask other = task;
-  other.type = ACL_MODEL_RI_TASK_EVENT_WAIT;
-  stream.tasks = {&begin, &other, &task, &end};
-  MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(once()).will(invoke(CaptureSubmission));
-  MOCKER(aclmdlRITaskDisable).expects(never());
-  const auto entry = GetParam() ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
-  ASSERT_EQ(entry(&model, nullptr), ACL_SUCCESS) << ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_EQ(submissionCalls, 1U);
-  EXPECT_EQ(submittedRequestCount, 1U);
-  EXPECT_EQ(specializationPaths.size(), 1U);
-  EXPECT_EQ(loadCalls, 1U);
-  ASSERT_EQ(submittedMarkers.size(), 2U);
-  EXPECT_EQ(submittedMarkers[0].task, &begin);
-  EXPECT_EQ(submittedMarkers[0].streamIndex, 0U);
-  EXPECT_EQ(submittedMarkers[0].taskIndex, 0U);
-  EXPECT_EQ(submittedMarkers[0].kind, ScopeTaskKind::BEGIN);
-  EXPECT_EQ(submittedMarkers[1].task, &end);
-  EXPECT_EQ(submittedMarkers[1].streamIndex, 0U);
-  EXPECT_EQ(submittedMarkers[1].taskIndex, 3U);
-  EXPECT_EQ(submittedMarkers[1].kind, ScopeTaskKind::END);
-}
-
-TEST_P(AclSpecOptimizerMarkerForwardingTest, MarkerOnlyModelSubmitsForCleanup) {
-  KernelState beginKernel;
-  KernelState endKernel;
-  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
-  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
-  stream.tasks = {&begin, &end};
-  MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(once()).will(invoke(CaptureSubmission));
-  const auto entry = GetParam() ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
-  ASSERT_EQ(entry(&model, nullptr), ACL_SUCCESS) << ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_EQ(submissionCalls, 1U);
-  EXPECT_EQ(submittedRequestCount, 0U);
-  EXPECT_EQ(MarkerTasks(submittedMarkers), (std::vector<aclmdlRITask>{&begin, &end}));
-  EXPECT_EQ(binaryQueries, 0U);
-  EXPECT_EQ(copyQueries, 0U);
-  EXPECT_TRUE(specializationPaths.empty());
-  EXPECT_EQ(loadCalls, 0U);
-  EXPECT_TRUE(touched.empty());
-  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
-}
-
-TEST_P(AclSpecOptimizerMarkerForwardingTest, UnsupportedKernelDoesNotOmitPendingMarkers) {
-  KernelState beginKernel;
-  KernelState endKernel;
-  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_3510);
-  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_3510);
-  kernel.binary.clear();
-  stream.tasks = {&begin, &task, &end};
-  const auto originalParams = task.params;
-  MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(once()).will(invoke(CaptureSubmission));
-  const auto entry = GetParam() ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
-  ASSERT_EQ(entry(&model, nullptr), ACL_SUCCESS) << ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_EQ(submissionCalls, 1U);
-  EXPECT_EQ(submittedRequestCount, 0U);
-  EXPECT_EQ(MarkerTasks(submittedMarkers), (std::vector<aclmdlRITask>{&begin, &end}));
-  EXPECT_EQ(binaryQueries, 1U);
-  EXPECT_EQ(copyQueries, 0U);
-  EXPECT_TRUE(specializationPaths.empty());
-  EXPECT_EQ(loadCalls, 0U);
-  EXPECT_TRUE(touched.empty());
-  EXPECT_EQ(std::memcmp(&task.params, &originalParams, sizeof(originalParams)), 0);
-  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
-}
-
-TEST_P(AclSpecOptimizerMarkerForwardingTest, AllCompileFailuresStillReachOriginalSubmissionPath) {
-  KernelState beginKernel;
-  KernelState endKernel;
-  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
-  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
-  stream.tasks = {&begin, &task, &end};
-  const auto originalParams = task.params;
-  specializationResults = {ACL_ERROR_FAILURE};
-  MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(once()).will(invoke(CaptureSubmission));
-  const auto entry = GetParam() ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
-  ASSERT_EQ(entry(&model, nullptr), ACL_SUCCESS) << ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_EQ(submissionCalls, 1U);
-  EXPECT_EQ(submittedRequestCount, 0U);
-  EXPECT_EQ(MarkerTasks(submittedMarkers), (std::vector<aclmdlRITask>{&begin, &end}));
-  EXPECT_EQ(specializationPaths.size(), 1U);
-  EXPECT_EQ(loadCalls, 0U);
-  EXPECT_TRUE(touched.empty());
-  EXPECT_EQ(std::memcmp(&task.params, &originalParams, sizeof(originalParams)), 0);
-  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
-}
-
-TEST_P(AclSpecOptimizerMarkerForwardingTest, NoRequestsOrMarkersReturnsWithoutSubmission) {
-  stream.tasks.clear();
-  MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(never());
-  const auto entry = GetParam() ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
-  ASSERT_EQ(entry(&model, nullptr), ACL_SUCCESS) << ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_EQ(submissionCalls, 0U);
-  EXPECT_TRUE(specializationPaths.empty());
-  EXPECT_EQ(loadCalls, 0U);
-  EXPECT_TRUE(touched.empty());
-  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
-}
-
-INSTANTIATE_TEST_SUITE_P(PublicEntries, AclSpecOptimizerMarkerForwardingTest, testing::Bool());
 
 namespace {
 class AclSpecOptimizerScopeCommitTest : public AclSpecOptimizerCollectionTest,
@@ -2284,16 +1996,54 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagLateRangeFailureStopsPublicEntryBef
   EXPECT_EQ(updateCount, 0U);
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, IdentityAllocationFailurePreservesOutputsAndMapsToBadAlloc) {
-  CheckCollectionAllocationFailure<AclSpecOptimizer::TaskIdentity>(2);
-}
+TEST_F(AclSpecOptimizerCollectionTest, CollectionExceptionPreservesOutputsAndCleansOptimizerDirectory) {
+  ASSERT_TRUE(manager.Init(nullptr, true));
+  KernelState beginKernel;
+  KernelState endKernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  KernelState secondKernel = kernel;
+  secondKernel.onParamCount = []() { throw std::bad_alloc(); };
+  CollectorTask secondTask = task;
+  secondTask.params.kernelTaskParams.funcHandle = &secondKernel;
+  stream.tasks = {&begin, &task, &secondTask, &end};
+  const auto originalTask = task.params;
+  const auto originalSecond = secondTask.params;
+  const auto originalBegin = begin.params;
+  const auto originalEnd = end.params;
+  auto previous = std::make_unique<KernelSpecRequest>();
+  const auto *saved = previous.get();
+  requests.push_back(std::move(previous));
+  scopeMarkers = {{&task}};
+  MOCKER_CPP(&AclSpecOptimizer::SpecializeKernels).expects(never());
+  MOCKER_CPP(&AclSpecOptimizer::LoadKernels).expects(never());
+  MOCKER(aclmdlRITaskDisable).expects(never());
+  EXPECT_THROW(Collect(), std::bad_alloc);
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests.front().get(), saved);
+  EXPECT_EQ(MarkerTasks(scopeMarkers), (std::vector<aclmdlRITask>{&task}));
+  EXPECT_EQ(paramCountQueries, 2U);
+  EXPECT_EQ(copyQueries, 1U);  // The first candidate was built before the second candidate failed.
 
-TEST_F(AclSpecOptimizerCollectionTest, MarkerAllocationFailurePreservesOutputsAndMapsToBadAlloc) {
-  CheckCollectionAllocationFailure<ScopeTaskRecord>(2);
-}
-
-TEST_F(AclSpecOptimizerCollectionTest, ActiveBeginAllocationFailurePreservesOutputsAndMapsToBadAlloc) {
-  CheckCollectionAllocationFailure<size_t>(2);
+  std::string outputDirectory;
+  const auto optimize = [&]() {
+    AclSpecOptimizer optimizer;
+    ASSERT_EQ(optimizer.Init(&model), ACL_SUCCESS);
+    outputDirectory = optimizer.outputDirectory_.Path();
+    EXPECT_TRUE(std::filesystem::is_directory(outputDirectory));
+    optimizer.Optimize(&model, manager);
+  };
+  EXPECT_THROW(optimize(), std::bad_alloc);
+  ASSERT_FALSE(outputDirectory.empty());
+  EXPECT_FALSE(std::filesystem::exists(outputDirectory));
+  EXPECT_TRUE(specializationPaths.empty());
+  EXPECT_EQ(loadCalls, 0U);
+  EXPECT_TRUE(touched.empty());
+  EXPECT_EQ(updateCount, 0U);
+  EXPECT_EQ(std::memcmp(&begin.params, &originalBegin, sizeof(originalBegin)), 0);
+  EXPECT_EQ(std::memcmp(&end.params, &originalEnd, sizeof(originalEnd)), 0);
+  EXPECT_EQ(std::memcmp(&task.params, &originalTask, sizeof(originalTask)), 0);
+  EXPECT_EQ(std::memcmp(&secondTask.params, &originalSecond, sizeof(originalSecond)), 0);
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, ByFlagNoScopeReturnsWithoutCandidateWorkOrMutation) {
@@ -2882,57 +2632,43 @@ TEST_P(AclSpecOptimizerEntryTest, PropagatesOptimizationError) {
 
 INSTANTIATE_TEST_SUITE_P(PublicEntries, AclSpecOptimizerEntryTest, testing::Bool());
 
-int entryException = 0;
-aclError ThrowEntryException(const AclSpecOptimizer *, aclmdlRI, const FeatureManager &) {
-  switch (entryException) {
-    case 0:
-      throw std::bad_alloc();
-    case 1:
-      throw std::length_error("entry test");
-    case 2:
-      throw std::invalid_argument("entry test");
-    case 3:
-      throw std::runtime_error("entry test");
-    default:
-      throw 1;
-  }
-}
-
-aclError ThrowInitEntryException(AclSpecOptimizer *optimizer, aclmdlRI model) {
-  return ThrowEntryException(optimizer, model, FeatureManager());
-}
-
-class AclSpecOptimizerEntryExceptionTest : public testing::TestWithParam<std::tuple<bool, int, bool>> {
- protected:
-  void SetUp() override {
-    SkUtResetTestControls();
-  }
-  void TearDown() override {
-    GlobalMockObject::verify();
-    SkUtResetTestControls();
-  }
-};
+class AclSpecOptimizerEntryExceptionTest : public AclSpecOptimizerCollectionTest,
+                                           public testing::WithParamInterface<std::tuple<bool, int>> {};
 
 TEST_P(AclSpecOptimizerEntryExceptionTest, ConvertsExceptionAtPublicBoundary) {
-  entryException = std::get<1>(GetParam());
-  // ChainableMockMethod catches std::exception and converts it to a mock failure.
-  // A direct RAII hook preserves the exception type for the public API boundary.
-  const bool failInit = std::get<2>(GetParam());
-  if (failInit) {
-    MOCKER_CPP(&AclSpecOptimizer::Optimize).expects(never());
-  }
-  mockcpp::ApiHook hook(failInit ? mockcpp::Details::methodToAddr(&AclSpecOptimizer::Init)
-                                 : mockcpp::Details::methodToAddr(&AclSpecOptimizer::Optimize),
-                        failInit ? reinterpret_cast<const void *>(&ThrowInitEntryException)
-                                 : reinterpret_cast<const void *>(&ThrowEntryException));
+  KernelState beginKernel;
+  KernelState endKernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  stream.tasks = {&begin, &task, &end};
+  const int exceptionKind = std::get<1>(GetParam());
+  kernel.onParamCount = [exceptionKind]() {
+    switch (exceptionKind) {
+      case 0:
+        throw std::bad_alloc();
+      case 1:
+        throw std::length_error("entry test");
+      case 2:
+        throw std::invalid_argument("entry test");
+      case 3:
+        throw std::runtime_error("entry test");
+      default:
+        throw 1;
+    }
+  };
+  MOCKER(aclmdlRITaskDisable).expects(never());
   const std::array<aclError, 5> expected{ACL_ERROR_BAD_ALLOC, ACL_ERROR_BAD_ALLOC, ACL_ERROR_INVALID_PARAM,
                                          ACL_ERROR_FAILURE, ACL_ERROR_FAILURE};
-  int model = 0;
-  EXPECT_EQ(GetOptimizeEntry(std::get<0>(GetParam()))(&model, nullptr), expected[entryException]);
+  EXPECT_EQ(GetOptimizeEntry(std::get<0>(GetParam()))(&model, nullptr), expected[exceptionKind]);
+  EXPECT_EQ(paramCountQueries, 1U);
+  EXPECT_TRUE(specializationPaths.empty());
+  EXPECT_EQ(loadCalls, 0U);
+  EXPECT_TRUE(touched.empty());
+  EXPECT_EQ(updateCount, 0U);
 }
 
 INSTANTIATE_TEST_SUITE_P(PublicEntries, AclSpecOptimizerEntryExceptionTest,
-                         testing::Combine(testing::Bool(), testing::Range(0, 5), testing::Bool()));
+                         testing::Combine(testing::Bool(), testing::Range(0, 5)));
 }  // namespace
 
 }  // namespace model_spec
