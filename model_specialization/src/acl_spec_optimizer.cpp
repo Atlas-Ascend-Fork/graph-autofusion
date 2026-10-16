@@ -85,9 +85,6 @@ aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featur
     SK_DLOGE("aclmdlRISpecOptimize collection failed: model=%p ret=%d", model, result);
     return result;
   }
-  if (featureManager.Get<Feature::IS_SCOPE_JIT>()) {
-    scopeMarkers.clear();
-  }
   if (requests.empty() && scopeMarkers.empty()) {
     SK_DLOGW("aclmdlRISpecOptimize finished with nothing to specialize: model=%p", model);
     return ACL_SUCCESS;
@@ -107,13 +104,14 @@ aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featur
 aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
   const auto &record = identity.record;
   if (record.task == nullptr) {
-    SK_DLOGI("Task identity unavailable: stream=%u task=%u reason=null task", record.streamIndex, record.taskIndex);
+    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=null task ret=%d", record.streamIndex,
+             record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   aclmdlRITaskType type = ACL_MODEL_RI_TASK_DEFAULT;
   aclError result = aclmdlRITaskGetType(record.task, &type);
   if (result != ACL_SUCCESS) {
-    SK_DLOGI("Task identity unavailable: stream=%u task=%u reason=task type query failed ret=%d", record.streamIndex,
+    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=task type query failed ret=%d", record.streamIndex,
              record.taskIndex, result);
     return result;
   }
@@ -124,36 +122,36 @@ aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
 
   result = aclmdlRITaskGetParams(record.task, &identity.params);
   if (result != ACL_SUCCESS) {
-    SK_DLOGI("Task identity unavailable: stream=%u task=%u reason=task parameters query failed ret=%d",
+    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=task parameters query failed ret=%d",
              record.streamIndex, record.taskIndex, result);
     return result;
   }
   if (identity.params.type != ACL_MODEL_RI_TASK_KERNEL) {
-    SK_DLOGI("Task identity unavailable: stream=%u task=%u reason=parameter type mismatch type=%d", record.streamIndex,
-             record.taskIndex, static_cast<int>(identity.params.type));
+    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=parameter type mismatch ret=%d", record.streamIndex,
+             record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   const auto function = identity.params.kernelTaskParams.funcHandle;
   if (function == nullptr) {
-    SK_DLOGI("Task identity unavailable: stream=%u task=%u reason=null function handle", record.streamIndex,
-             record.taskIndex);
+    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=null function handle ret=%d", record.streamIndex,
+             record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   std::array<char, MAX_KERNEL_ENTRY_LEN> name{};
   result = aclrtGetFunctionName(function, name.size(), name.data());
   if (result != ACL_SUCCESS) {
-    SK_DLOGI("Task identity unavailable: stream=%u task=%u reason=function name query failed ret=%d",
+    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=function name query failed ret=%d",
              record.streamIndex, record.taskIndex, result);
     return result;
   }
   if (name[0] == '\0') {
-    SK_DLOGI("Task identity unavailable: stream=%u task=%u reason=empty function name", record.streamIndex,
-             record.taskIndex);
+    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=empty function name ret=%d", record.streamIndex,
+             record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   if (std::memchr(name.data(), '\0', name.size()) == nullptr) {
-    SK_DLOGI("Task identity unavailable: stream=%u task=%u reason=unterminated function name", record.streamIndex,
-             record.taskIndex);
+    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=unterminated function name ret=%d",
+             record.streamIndex, record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
 
@@ -198,6 +196,10 @@ aclError AclSpecOptimizer::SetTaskAdmission(std::vector<TaskIdentity> &identitie
           break;
         case ScopeTaskKind::KERNEL:
           record.allowSpecialization = !activeBegins.empty();
+          if (record.allowSpecialization) {
+            SK_DLOGI("JIT Scope: kernel in scope, stream=%u, task=%u, kernel=%s", streamIndex, record.taskIndex,
+                     identities[index].kernelEntry.c_str());
+          }
           break;
         case ScopeTaskKind::OTHER:
           break;
@@ -281,13 +283,7 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
       identity.record.taskIndex = taskIndex;
       result = ReadTaskIdentity(identity);
       if (result != ACL_SUCCESS) {
-        if (isScopeJit) {
-          SK_DLOGE("aclmdlRISpecOptimizeByFlag task identity unavailable: stream=%u task=%u ret=%d", streamIndex,
-                   taskIndex, result);
-          return result;
-        }
-        SK_DLOGI("aclmdlRISpecOptimize task identity unavailable: stream=%u task=%u ret=%d", streamIndex, taskIndex,
-                 result);
+        SK_DLOGW("ReadTaskIdentity failed; skipping task: stream=%u task=%u ret=%d", streamIndex, taskIndex, result);
         continue;
       }
       if (identity.record.kind == ScopeTaskKind::BEGIN || identity.record.kind == ScopeTaskKind::END) {

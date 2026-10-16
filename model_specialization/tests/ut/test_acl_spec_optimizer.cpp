@@ -1006,78 +1006,221 @@ extern "C" aclError aclrtFunctionGetParamInfo(const void *function, size_t index
   return value.paramError;
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, ByFlagLateIdentityFailuresPreserveOutputsWithoutCandidateWork) {
-  ASSERT_TRUE(manager.Init(nullptr, true));
-  for (bool secondStream : {false, true}) {
-    for (int failure = 0; failure < 8; ++failure) {
-      CollectorTask invalid = task;
-      KernelState invalidKernel = kernel;
-      invalid.params.kernelTaskParams.funcHandle = &invalidKernel;
-      aclmdlRITask invalidHandle = &invalid;
-      aclError expected = ACL_ERROR_FAILURE;
-      switch (failure) {
-        case 0:
-          invalidHandle = nullptr;
-          break;
-        case 1:
-          invalid.typeError = expected = ACL_ERROR_INVALID_PARAM;
-          break;
-        case 2:
-          invalid.paramsError = expected = ACL_ERROR_INVALID_PARAM;
-          break;
-        case 3:
-          invalid.params.type = ACL_MODEL_RI_TASK_EVENT_WAIT;
-          break;
-        case 4:
-          invalid.params.kernelTaskParams.funcHandle = nullptr;
-          break;
-        case 5:
-          invalidKernel.nameError = expected = ACL_ERROR_INVALID_PARAM;
-          break;
-        case 6:
-          invalidKernel.name.clear();
-          break;
-        case 7:
-          invalidKernel.unterminatedName = true;
-          break;
+TEST_F(AclSpecOptimizerCollectionTest, BothModesWarnAndSkipInvalidIdentityWhileCollectingLaterTasks) {
+  const std::array<const char *, 8> reasons{"null task",
+                                            "task type query failed",
+                                            "task parameters query failed",
+                                            "parameter type mismatch",
+                                            "null function handle",
+                                            "function name query failed",
+                                            "empty function name",
+                                            "unterminated function name"};
+  KernelState beginKernel;
+  KernelState endKernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  auto secondBegin = begin;
+  auto secondEnd = end;
+  CollectorTask later = task;
+  for (bool byFlag : {false, true}) {
+    ASSERT_TRUE(manager.Init(nullptr, byFlag));
+    for (bool secondStream : {false, true}) {
+      for (size_t failure = 0; failure < reasons.size(); ++failure) {
+        SCOPED_TRACE(std::to_string(failure) + " byFlag=" + std::to_string(byFlag) +
+                     " secondStream=" + std::to_string(secondStream));
+        CollectorTask invalid = task;
+        KernelState invalidKernel = kernel;
+        invalid.params.kernelTaskParams.funcHandle = &invalidKernel;
+        aclmdlRITask invalidHandle = &invalid;
+        aclError error = ACL_ERROR_FAILURE;
+        switch (failure) {
+          case 0:
+            invalidHandle = nullptr;
+            break;
+          case 1:
+            invalid.typeError = error = ACL_ERROR_INVALID_PARAM;
+            break;
+          case 2:
+            invalid.paramsError = error = ACL_ERROR_INVALID_PARAM;
+            break;
+          case 3:
+            invalid.params.type = ACL_MODEL_RI_TASK_EVENT_WAIT;
+            break;
+          case 4:
+            invalid.params.kernelTaskParams.funcHandle = nullptr;
+            break;
+          case 5:
+            invalidKernel.nameError = error = ACL_ERROR_INVALID_PARAM;
+            break;
+          case 6:
+            invalidKernel.name.clear();
+            break;
+          case 7:
+            invalidKernel.unterminatedName = true;
+            break;
+        }
+        stream.tasks = secondStream ? std::vector<aclmdlRITask>{&begin, &task, &end}
+                                    : std::vector<aclmdlRITask>{&begin, &task, invalidHandle, &later, &end};
+        StreamState second{{&secondBegin, invalidHandle, &later, &secondEnd}};
+        model.streams = secondStream ? std::vector<aclrtStream>{&stream, &second} : std::vector<aclrtStream>{&stream};
+        requests.clear();
+        requests.push_back(std::make_unique<KernelSpecRequest>());
+        scopeMarkers = {{&task}};
+        binaryQueries = paramCountQueries = copyQueries = 0;
+        ut_log::LogBuffer::Instance().Clear();
+        ASSERT_EQ(Collect(), ACL_SUCCESS);
+        ASSERT_EQ(requests.size(), 2U);
+        EXPECT_EQ(requests[0]->task, &task);
+        EXPECT_EQ(requests[1]->task, &later);
+        EXPECT_EQ(requests[1]->streamIndex, secondStream ? 1U : 0U);
+        EXPECT_EQ(requests[1]->taskIndex, secondStream ? 2U : 3U);
+        EXPECT_EQ(MarkerTasks(scopeMarkers), secondStream
+                                                 ? std::vector<aclmdlRITask>({&begin, &end, &secondBegin, &secondEnd})
+                                                 : std::vector<aclmdlRITask>({&begin, &end}));
+        EXPECT_EQ(binaryQueries, 2U);
+        EXPECT_EQ(paramCountQueries, 2U);
+        EXPECT_EQ(copyQueries, 2U);
+        EXPECT_TRUE(specializationPaths.empty());
+        EXPECT_TRUE(touched.empty());
+        EXPECT_EQ(updateCount, 0U);
+        const auto logs = ut_log::LogBuffer::Instance().GetContent();
+        const std::string location =
+            "stream=" + std::to_string(secondStream ? 1 : 0) + " task=" + std::to_string(secondStream ? 1 : 2);
+        const std::string warning = "[WARN] [SK][ReadTaskIdentity] Task identity unavailable: " + location +
+                                    " reason=" + reasons[failure] + " ret=" + std::to_string(error);
+        const std::string skipped = "[WARN] [SK][Collect] ReadTaskIdentity failed; skipping task: " + location +
+                                    " ret=" + std::to_string(error);
+        const size_t position = logs.find(warning);
+        ASSERT_NE(position, std::string::npos) << logs;
+        EXPECT_EQ(logs.find(warning, position + warning.size()), std::string::npos);
+        const size_t skippedPosition = logs.find(skipped);
+        ASSERT_NE(skippedPosition, std::string::npos) << logs;
+        EXPECT_LT(position, skippedPosition);
+        EXPECT_EQ(logs.find(skipped, skippedPosition + skipped.size()), std::string::npos);
+        EXPECT_EQ(logs.find("scope range information may be incomplete"), std::string::npos);
+        EXPECT_EQ(logs.find("[ERROR]"), std::string::npos) << logs;
       }
-      StreamState second{{invalidHandle}};
-      stream.tasks = secondStream ? std::vector<aclmdlRITask>{&task} : std::vector<aclmdlRITask>{&task, invalidHandle};
-      model.streams = secondStream ? std::vector<aclrtStream>{&stream, &second} : std::vector<aclrtStream>{&stream};
-      requests.clear();
-      auto previous = std::make_unique<KernelSpecRequest>();
-      const auto *saved = previous.get();
-      requests.push_back(std::move(previous));
-      scopeMarkers = {{&task}};
-      binaryQueries = paramCountQueries = copyQueries = 0;
-      EXPECT_EQ(Collect(), expected) << failure << " secondStream=" << secondStream;
-      ASSERT_EQ(requests.size(), 1U);
-      EXPECT_EQ(requests.front().get(), saved);
-      EXPECT_EQ(MarkerTasks(scopeMarkers), (std::vector<aclmdlRITask>{&task}));
-      EXPECT_EQ(binaryQueries, 0U);
-      EXPECT_EQ(paramCountQueries, 0U);
-      EXPECT_EQ(copyQueries, 0U);
-      EXPECT_TRUE(specializationPaths.empty());
-      EXPECT_TRUE(touched.empty());
-      EXPECT_EQ(updateCount, 0U);
     }
   }
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, ByFlagLateIdentityFailureStopsOptimizationBeforeAnyRuntimeMutation) {
+TEST_F(AclSpecOptimizerCollectionTest, ByFlagSkippedKernelDoesNotPreventLaterSpecializationAndMarkerCleanup) {
+  KernelState beginKernel;
+  KernelState endKernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
   CollectorTask invalid = task;
   invalid.paramsError = ACL_ERROR_INVALID_PARAM;
-  StreamState second{{&invalid}};
-  model.streams.push_back(&second);
+  CollectorTask later = task;
+  stream.tasks = {&begin, &task, &invalid, &later, &end};
+  MOCKER(aclmdlRITaskDisable).stubs().will(invoke(DisableTask));
+  EXPECT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), ACL_SUCCESS);
+  EXPECT_EQ(binaryQueries, 2U);
+  EXPECT_EQ(paramCountQueries, 2U);
+  EXPECT_EQ(copyQueries, 2U);
+  EXPECT_EQ(specializationPaths.size(), 2U);
+  EXPECT_EQ(loadCalls, 2U);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task, &later}));
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(updateCount, 1U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, ByFlagSkippedMarkersValidateOnlyRemainingPairsBeforeCandidateWork) {
+  ASSERT_TRUE(manager.Init(nullptr, true));
+  MOCKER_CPP(&AclSpecOptimizer::TryBuildRequest).expects(never());
   MOCKER(aclmdlRITaskDisable).expects(never());
-  EXPECT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), ACL_ERROR_INVALID_PARAM);
-  EXPECT_EQ(binaryQueries, 0U);
-  EXPECT_EQ(paramCountQueries, 0U);
-  EXPECT_EQ(copyQueries, 0U);
-  EXPECT_TRUE(specializationPaths.empty());
-  EXPECT_EQ(loadCalls, 0U);
-  EXPECT_TRUE(touched.empty());
-  EXPECT_EQ(updateCount, 0U);
+  for (const auto &failures : {std::pair{true, false}, std::pair{false, true}, std::pair{true, true}}) {
+    KernelState beginKernel;
+    KernelState endKernel;
+    auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+    auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+    if (failures.first) {
+      beginKernel.nameError = ACL_ERROR_FAILURE;
+    }
+    if (failures.second) {
+      end.paramsError = ACL_ERROR_FAILURE;
+    }
+    stream.tasks = {&begin, &task, &end};
+    requests.clear();
+    auto previous = std::make_unique<KernelSpecRequest>();
+    const auto *saved = previous.get();
+    requests.push_back(std::move(previous));
+    scopeMarkers = {{&task}};
+    ut_log::LogBuffer::Instance().Clear();
+    const aclError expected = failures.first && failures.second ? ACL_SUCCESS : ACL_ERROR_INVALID_PARAM;
+    EXPECT_EQ(Collect(), expected);
+    if (expected != ACL_SUCCESS) {
+      ASSERT_EQ(requests.size(), 1U);
+      EXPECT_EQ(requests.front().get(), saved);
+      EXPECT_EQ(MarkerTasks(scopeMarkers), (std::vector<aclmdlRITask>{&task}));
+      const auto logs = ut_log::LogBuffer::Instance().GetContent();
+      EXPECT_NE(logs.find("[ERROR] [SK][SetTaskAdmission]"), std::string::npos);
+      EXPECT_NE(logs.find(failures.first ? "End without Begin" : "Begin without End"), std::string::npos);
+      EXPECT_EQ(logs.find("JIT Scope: kernel in scope") != std::string::npos, !failures.first);
+    } else {
+      EXPECT_TRUE(requests.empty());
+      EXPECT_TRUE(scopeMarkers.empty());
+    }
+    EXPECT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), expected);
+    EXPECT_EQ(binaryQueries, 0U);
+    EXPECT_EQ(paramCountQueries, 0U);
+    EXPECT_EQ(copyQueries, 0U);
+    EXPECT_TRUE(specializationPaths.empty());
+    EXPECT_EQ(loadCalls, 0U);
+    EXPECT_TRUE(touched.empty());
+    EXPECT_EQ(updateCount, 0U);
+  }
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, ByFlagRangeScanLogsEachInScopeTaskOnce) {
+  ASSERT_TRUE(manager.Init(nullptr, true));
+  KernelState beginKernel;
+  KernelState endKernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  auto nestedBegin = begin;
+  auto nestedEnd = end;
+  auto secondBegin = begin;
+  auto secondEnd = end;
+  KernelState firstKernel = kernel;
+  firstKernel.name = "AddCustom_float32_full_entry";
+  firstKernel.binary.clear();  // Scope selection must be logged even if the later resource check rejects it.
+  KernelState secondKernel = kernel;
+  secondKernel.name = "MultiplyCustom_float32_full_entry";
+  KernelState thirdKernel = kernel;
+  thirdKernel.name = firstKernel.name;  // The same name on another stream is a distinct selected task.
+  CollectorTask first = task;
+  CollectorTask second = task;
+  CollectorTask third = task;
+  first.params.kernelTaskParams.funcHandle = &firstKernel;
+  second.params.kernelTaskParams.funcHandle = &secondKernel;
+  third.params.kernelTaskParams.funcHandle = &thirdKernel;
+  stream.tasks = {&task, &begin, &first, &nestedBegin, &second, &nestedEnd, &end, &task};
+  StreamState other{{&secondBegin, &third, &secondEnd}};
+  StreamState noScope{{&task}};
+  StreamState empty;
+  CollectorTask invalid = task;
+  invalid.typeError = ACL_ERROR_INVALID_PARAM;
+  StreamState unreadable{{&invalid}};
+  model.streams = {&stream, &other, &noScope, &empty, &unreadable};
+  ut_log::LogBuffer::Instance().Clear();
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  ASSERT_EQ(requests.size(), 2U);
+  const auto logs = ut_log::LogBuffer::Instance().GetContent();
+  const std::array<std::string, 3> selected{"JIT Scope: kernel in scope, stream=0, task=2, kernel=" + firstKernel.name,
+                                            "JIT Scope: kernel in scope, stream=0, task=4, kernel=" + secondKernel.name,
+                                            "JIT Scope: kernel in scope, stream=1, task=1, kernel=" + thirdKernel.name};
+  for (const auto &message : selected) {
+    const std::string info = "[INFO] [SK][SetTaskAdmission] " + message;
+    const size_t position = logs.find(info);
+    ASSERT_NE(position, std::string::npos) << logs;
+    EXPECT_EQ(logs.find(info, position + info.size()), std::string::npos);
+  }
+  EXPECT_EQ(logs.find("JIT Scope:", logs.find(selected[2]) + selected[2].size()), std::string::npos);
+  EXPECT_EQ(logs.find("selection completed"), std::string::npos);
+  EXPECT_EQ(logs.find("kernel specialization applied"), std::string::npos);
+  EXPECT_EQ(logs.find("task=0, kernel=AddCustom\n"), std::string::npos);
+  EXPECT_LT(logs.find(selected[2]), logs.find("cannot read resource id"));
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, OptimizeSkipsInvalidIdentityAndCollectsLaterValidTask) {
@@ -1146,7 +1289,7 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagSelectsRangeUnionAndSameNameTaskIns
   const std::vector<std::pair<std::string, std::vector<uint32_t>>> cases{
       {"KK", {}},           {"BE", {}},         {"BEBE", {}},        {"KBKEK", {2}},
       {"BKKKE", {1, 2, 3}}, {"BKEBKE", {1, 4}}, {"BKEKBKE", {1, 5}}, {"BBBKEKEKE", {3, 5, 7}},
-      {"BOKOE", {2}},       {"BOE", {}},
+      {"BOKOE", {2}},       {"BOE", {}},        {"BEBKEBE", {3}},    {"BBKEKE", {2, 4}},
   };
   for (const auto &entry : cases) {
     const auto &layout = entry.first;
@@ -1245,6 +1388,7 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagKeepsStreamRangesIndependentOfEnume
 
 TEST_F(AclSpecOptimizerCollectionTest, ByFlagMalformedRangesPreserveOutputsBeforeAnyCandidateWork) {
   ASSERT_TRUE(manager.Init(nullptr, true));
+  MOCKER_CPP(&AclSpecOptimizer::TryBuildRequest).expects(never());
   const std::vector<std::pair<std::string, std::string>> cases{
       {"E", ""}, {"BK", ""}, {"BBKE", ""}, {"BKEE", ""}, {"BKEBK", ""}, {"BKE", "E"}, {"BKE", "BK"}, {"BK", "E"},
   };
@@ -1275,7 +1419,15 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagMalformedRangesPreserveOutputsBefor
     requests.push_back(std::move(previous));
     scopeMarkers = {{&task}};
     binaryQueries = paramCountQueries = copyQueries = 0;
+    ut_log::LogBuffer::Instance().Clear();
     EXPECT_EQ(Collect(), ACL_ERROR_INVALID_PARAM);
+    const auto logs = ut_log::LogBuffer::Instance().GetContent();
+    const size_t scanned = logs.find("JIT Scope: kernel in scope");
+    const bool scannedKernel = entry.first.find("BK") != std::string::npos;
+    EXPECT_EQ(scanned != std::string::npos, scannedKernel);
+    if (scannedKernel) {
+      EXPECT_LT(scanned, logs.find("[ERROR] [SK][SetTaskAdmission]"));
+    }
     ASSERT_EQ(requests.size(), 1U);
     EXPECT_EQ(requests.front().get(), saved);
     EXPECT_EQ(MarkerTasks(scopeMarkers), (std::vector<aclmdlRITask>{&task}));
@@ -1288,15 +1440,34 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagMalformedRangesPreserveOutputsBefor
 TEST_F(AclSpecOptimizerCollectionTest, OptimizeAdmitsAllOrdinaryKernelsWithoutPairValidation) {
   KernelState beginKernel;
   KernelState endKernel;
-  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
-  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
-  CollectorTask secondTask = task;
-  stream.tasks = {&end, &task, &begin, &secondTask};
-  ASSERT_EQ(Collect(), ACL_SUCCESS);
-  ASSERT_EQ(requests.size(), 2U);
-  EXPECT_EQ(requests[0]->task, &task);
-  EXPECT_EQ(requests[1]->task, &secondTask);
-  EXPECT_EQ(MarkerTasks(scopeMarkers), (std::vector<aclmdlRITask>{&end, &begin}));
+  const auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  const auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  for (const std::string layout : {"KK", "KBKEK", "KBEEK", "BBKEKE", "EK", "BK", "EKBK"}) {
+    SCOPED_TRACE(layout);
+    std::vector<CollectorTask> states(layout.size(), task);
+    std::vector<aclmdlRITask> expectedTasks;
+    std::vector<aclmdlRITask> expectedMarkers;
+    stream.tasks.clear();
+    for (size_t index = 0; index < layout.size(); ++index) {
+      if (layout[index] == 'K') {
+        expectedTasks.push_back(&states[index]);
+      } else {
+        states[index] = layout[index] == 'B' ? begin : end;
+        expectedMarkers.push_back(&states[index]);
+      }
+      stream.tasks.push_back(&states[index]);
+    }
+    binaryQueries = paramCountQueries = copyQueries = 0;
+    ASSERT_EQ(Collect(), ACL_SUCCESS);
+    ASSERT_EQ(requests.size(), expectedTasks.size());
+    for (size_t index = 0; index < requests.size(); ++index) {
+      EXPECT_EQ(requests[index]->task, expectedTasks[index]);
+    }
+    EXPECT_EQ(MarkerTasks(scopeMarkers), expectedMarkers);
+    EXPECT_EQ(binaryQueries, expectedTasks.size());
+    EXPECT_EQ(paramCountQueries, expectedTasks.size());
+    EXPECT_EQ(copyQueries, expectedTasks.size());
+  }
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, MarkerRecordsPreserveStreamTaskPositionsAndKinds) {
@@ -1362,7 +1533,7 @@ class AclSpecOptimizerMarkerForwardingTest : public AclSpecOptimizerCollectionTe
 };
 }  // namespace
 
-TEST_P(AclSpecOptimizerMarkerForwardingTest, PublicEntryForwardsMarkersOnlyForOptimize) {
+TEST_P(AclSpecOptimizerMarkerForwardingTest, PublicEntriesForwardMarkersForCleanup) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_3510);
@@ -1378,38 +1549,29 @@ TEST_P(AclSpecOptimizerMarkerForwardingTest, PublicEntryForwardsMarkersOnlyForOp
   EXPECT_EQ(submittedRequestCount, 1U);
   EXPECT_EQ(specializationPaths.size(), 1U);
   EXPECT_EQ(loadCalls, 1U);
-  if (GetParam()) {
-    EXPECT_TRUE(submittedMarkers.empty());
-  } else {
-    ASSERT_EQ(submittedMarkers.size(), 2U);
-    EXPECT_EQ(submittedMarkers[0].task, &begin);
-    EXPECT_EQ(submittedMarkers[0].streamIndex, 0U);
-    EXPECT_EQ(submittedMarkers[0].taskIndex, 0U);
-    EXPECT_EQ(submittedMarkers[0].kind, ScopeTaskKind::BEGIN);
-    EXPECT_EQ(submittedMarkers[1].task, &end);
-    EXPECT_EQ(submittedMarkers[1].streamIndex, 0U);
-    EXPECT_EQ(submittedMarkers[1].taskIndex, 3U);
-    EXPECT_EQ(submittedMarkers[1].kind, ScopeTaskKind::END);
-  }
+  ASSERT_EQ(submittedMarkers.size(), 2U);
+  EXPECT_EQ(submittedMarkers[0].task, &begin);
+  EXPECT_EQ(submittedMarkers[0].streamIndex, 0U);
+  EXPECT_EQ(submittedMarkers[0].taskIndex, 0U);
+  EXPECT_EQ(submittedMarkers[0].kind, ScopeTaskKind::BEGIN);
+  EXPECT_EQ(submittedMarkers[1].task, &end);
+  EXPECT_EQ(submittedMarkers[1].streamIndex, 0U);
+  EXPECT_EQ(submittedMarkers[1].taskIndex, 3U);
+  EXPECT_EQ(submittedMarkers[1].kind, ScopeTaskKind::END);
 }
 
-TEST_P(AclSpecOptimizerMarkerForwardingTest, MarkerOnlyModelSubmitsOnlyForOptimize) {
+TEST_P(AclSpecOptimizerMarkerForwardingTest, MarkerOnlyModelSubmitsForCleanup) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
   auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
   stream.tasks = {&begin, &end};
-  if (GetParam()) {
-    MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(never());
-  } else {
-    MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(once()).will(invoke(CaptureSubmission));
-  }
+  MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(once()).will(invoke(CaptureSubmission));
   const auto entry = GetParam() ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
   ASSERT_EQ(entry(&model, nullptr), ACL_SUCCESS) << ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_EQ(submissionCalls, GetParam() ? 0U : 1U);
+  EXPECT_EQ(submissionCalls, 1U);
   EXPECT_EQ(submittedRequestCount, 0U);
-  EXPECT_EQ(MarkerTasks(submittedMarkers),
-            GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(MarkerTasks(submittedMarkers), (std::vector<aclmdlRITask>{&begin, &end}));
   EXPECT_EQ(binaryQueries, 0U);
   EXPECT_EQ(copyQueries, 0U);
   EXPECT_TRUE(specializationPaths.empty());
@@ -1426,17 +1588,12 @@ TEST_P(AclSpecOptimizerMarkerForwardingTest, UnsupportedKernelDoesNotOmitPending
   kernel.binary.clear();
   stream.tasks = {&begin, &task, &end};
   const auto originalParams = task.params;
-  if (GetParam()) {
-    MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(never());
-  } else {
-    MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(once()).will(invoke(CaptureSubmission));
-  }
+  MOCKER_CPP(&AclSpecOptimizer::UpdateTasks).expects(once()).will(invoke(CaptureSubmission));
   const auto entry = GetParam() ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
   ASSERT_EQ(entry(&model, nullptr), ACL_SUCCESS) << ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_EQ(submissionCalls, GetParam() ? 0U : 1U);
+  EXPECT_EQ(submissionCalls, 1U);
   EXPECT_EQ(submittedRequestCount, 0U);
-  EXPECT_EQ(MarkerTasks(submittedMarkers),
-            GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(MarkerTasks(submittedMarkers), (std::vector<aclmdlRITask>{&begin, &end}));
   EXPECT_EQ(binaryQueries, 1U);
   EXPECT_EQ(copyQueries, 0U);
   EXPECT_TRUE(specializationPaths.empty());
@@ -1459,8 +1616,7 @@ TEST_P(AclSpecOptimizerMarkerForwardingTest, AllCompileFailuresStillReachOrigina
   ASSERT_EQ(entry(&model, nullptr), ACL_SUCCESS) << ut_log::LogBuffer::Instance().GetContent();
   EXPECT_EQ(submissionCalls, 1U);
   EXPECT_EQ(submittedRequestCount, 0U);
-  EXPECT_EQ(MarkerTasks(submittedMarkers),
-            GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(MarkerTasks(submittedMarkers), (std::vector<aclmdlRITask>{&begin, &end}));
   EXPECT_EQ(specializationPaths.size(), 1U);
   EXPECT_EQ(loadCalls, 0U);
   EXPECT_TRUE(touched.empty());
@@ -1487,11 +1643,7 @@ class AclSpecOptimizerScopeCommitTest : public AclSpecOptimizerCollectionTest,
                                         public testing::WithParamInterface<bool> {
  protected:
   void ExpectMarkerDisables(size_t count) {
-    if (GetParam()) {
-      MOCKER(aclmdlRITaskDisable).expects(never());
-    } else {
-      MOCKER(aclmdlRITaskDisable).expects(exactly(count)).will(invoke(DisableTask));
-    }
+    MOCKER(aclmdlRITaskDisable).expects(exactly(count)).will(invoke(DisableTask));
   }
 
   aclError RunPublicEntry() {
@@ -1500,7 +1652,7 @@ class AclSpecOptimizerScopeCommitTest : public AclSpecOptimizerCollectionTest,
 };
 }  // namespace
 
-TEST_P(AclSpecOptimizerScopeCommitTest, MarkerOnlyModelDisablesAndUpdatesOnlyForOptimize) {
+TEST_P(AclSpecOptimizerScopeCommitTest, MarkerOnlyModelDisablesAndUpdates) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
@@ -1510,10 +1662,9 @@ TEST_P(AclSpecOptimizerScopeCommitTest, MarkerOnlyModelDisablesAndUpdatesOnlyFor
   const auto originalEnd = end.params;
   ExpectMarkerDisables(2);
   ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
-  EXPECT_EQ(disabled, GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
-  EXPECT_EQ(commitOperations,
-            GetParam() ? std::vector<std::string>{} : (std::vector<std::string>{"Disable", "Disable", "Update"}));
-  EXPECT_EQ(updateCount, GetParam() ? 0U : 1U);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(commitOperations, (std::vector<std::string>{"Disable", "Disable", "Update"}));
+  EXPECT_EQ(updateCount, 1U);
   EXPECT_TRUE(touched.empty());
   EXPECT_EQ(binaryQueries, 0U);
   EXPECT_EQ(copyQueries, 0U);
@@ -1524,7 +1675,139 @@ TEST_P(AclSpecOptimizerScopeCommitTest, MarkerOnlyModelDisablesAndUpdatesOnlyFor
   EXPECT_EQ(std::memcmp(&end.params, &originalEnd, sizeof(originalEnd)), 0);
 }
 
-TEST_P(AclSpecOptimizerScopeCommitTest, UnsupportedKernelStillDisablesMarkersOnlyForOptimize) {
+TEST_P(AclSpecOptimizerScopeCommitTest, NestedEmptyScopesDisableEveryMarkerWithoutCandidateWork) {
+  MOCKER_CPP(&AclSpecOptimizer::TryBuildRequest).expects(never());
+  KernelState beginKernel0;
+  KernelState beginKernel1;
+  KernelState endKernel0;
+  KernelState endKernel1;
+  auto begin0 = MakeMarker(beginKernel0, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto begin1 = MakeMarker(beginKernel1, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end1 = MakeMarker(endKernel1, SPEC_SCOPE_END_DAV_2201);
+  auto end0 = MakeMarker(endKernel0, SPEC_SCOPE_END_DAV_2201);
+  stream.tasks = {&begin0, &begin1, &end1, &end0};
+  ExpectMarkerDisables(4);
+  ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin0, &begin1, &end1, &end0}));
+  EXPECT_EQ(commitOperations, (std::vector<std::string>{"Disable", "Disable", "Disable", "Disable", "Update"}));
+  EXPECT_EQ(updateCount, 1U);
+  EXPECT_TRUE(touched.empty());
+  EXPECT_EQ(binaryQueries, 0U);
+  EXPECT_EQ(paramCountQueries, 0U);
+  EXPECT_EQ(copyQueries, 0U);
+  EXPECT_TRUE(specializationPaths.empty());
+  EXPECT_EQ(loadCalls, 0U);
+  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
+}
+
+TEST_P(AclSpecOptimizerScopeCommitTest, EmptyModelDoesNotReadCandidatesOrSubmit) {
+  model.streams.clear();
+  MOCKER_CPP(&AclSpecOptimizer::TryBuildRequest).expects(never());
+  MOCKER(aclmdlRITaskDisable).expects(never());
+  ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
+  EXPECT_EQ(streamQueries, 1U);
+  EXPECT_EQ(taskQueries, 0U);
+  EXPECT_EQ(identityTypeQueries, 0U);
+  EXPECT_EQ(binaryQueries, 0U);
+  EXPECT_EQ(paramCountQueries, 0U);
+  EXPECT_EQ(copyQueries, 0U);
+  EXPECT_TRUE(specializationPaths.empty());
+  EXPECT_EQ(loadCalls, 0U);
+  EXPECT_TRUE(touched.empty());
+  EXPECT_TRUE(commitOperations.empty());
+  EXPECT_EQ(updateCount, 0U);
+  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
+}
+
+TEST_P(AclSpecOptimizerScopeCommitTest, EmptyStreamDoesNotReadCandidatesOrSubmit) {
+  stream.tasks.clear();
+  MOCKER_CPP(&AclSpecOptimizer::TryBuildRequest).expects(never());
+  MOCKER(aclmdlRITaskDisable).expects(never());
+  ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
+  EXPECT_EQ(streamQueries, 2U);
+  EXPECT_EQ(taskQueries, 1U);
+  EXPECT_EQ(identityTypeQueries, 0U);
+  EXPECT_EQ(binaryQueries, 0U);
+  EXPECT_EQ(paramCountQueries, 0U);
+  EXPECT_EQ(copyQueries, 0U);
+  EXPECT_TRUE(specializationPaths.empty());
+  EXPECT_EQ(loadCalls, 0U);
+  EXPECT_TRUE(touched.empty());
+  EXPECT_TRUE(commitOperations.empty());
+  EXPECT_EQ(updateCount, 0U);
+  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
+}
+
+TEST_P(AclSpecOptimizerScopeCommitTest, PartialCompileFailurePreservesFailedTaskAndCommitsSuccessfulTask) {
+  KernelState beginKernel;
+  KernelState endKernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  CollectorTask failed = task;
+  stream.tasks = {&begin, &task, &failed, &end};
+  const auto originalFailed = failed.params;
+  specializationResults = {ACL_SUCCESS, ACL_ERROR_INVALID_PARAM};
+  ExpectMarkerDisables(2);
+  ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
+  EXPECT_EQ(binaryQueries, 2U);
+  EXPECT_EQ(copyQueries, 2U);
+  EXPECT_EQ(specializationPaths.size(), 2U);
+  EXPECT_EQ(loadCalls, 1U);
+  EXPECT_EQ(functionCalls, 1U);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
+  EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &staticFunctionToken);
+  EXPECT_EQ(std::memcmp(&failed.params, &originalFailed, sizeof(originalFailed)), 0);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(updateCount, 1U);
+  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 1U);
+  EXPECT_EQ(unloadCalls, 0U);
+  ASSERT_EQ(SkUtInvokeModelDestroyCallback(&model), ACL_SUCCESS);
+  EXPECT_EQ(unloadedBinaries, (std::vector<aclrtBinHandle>{&staticBinaryToken}));
+}
+
+TEST_P(AclSpecOptimizerScopeCommitTest, UnsupportedTaskPreservesParametersWhileSupportedTaskCommits) {
+  KernelState beginKernel;
+  KernelState endKernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_3510);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_3510);
+  KernelState unsupportedKernel = kernel;
+  unsupportedKernel.binary.clear();
+  CollectorTask unsupported = task;
+  unsupported.params.kernelTaskParams.funcHandle = &unsupportedKernel;
+  stream.tasks = {&begin, &unsupported, &task, &end};
+  const auto originalUnsupported = unsupported.params;
+  ExpectMarkerDisables(2);
+  ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
+  EXPECT_EQ(binaryQueries, 2U);
+  EXPECT_EQ(paramCountQueries, 1U);
+  EXPECT_EQ(copyQueries, 1U);
+  EXPECT_EQ(specializationPaths.size(), 1U);
+  EXPECT_EQ(loadCalls, 1U);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
+  EXPECT_EQ(std::memcmp(&unsupported.params, &originalUnsupported, sizeof(originalUnsupported)), 0);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(updateCount, 1U);
+}
+
+TEST_P(AclSpecOptimizerScopeCommitTest, BinaryRegistrationFailureReturnsErrorWithoutUnloadingReferencedBinary) {
+  KernelState beginKernel;
+  KernelState endKernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  stream.tasks = {&begin, &task, &end};
+  SkUtSetAclmdlRIDestroyRegisterCallbackRet(ACL_ERROR_INVALID_PARAM);
+  ExpectMarkerDisables(2);
+  EXPECT_EQ(RunPublicEntry(), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
+  EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &staticFunctionToken);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(updateCount, 1U);
+  EXPECT_EQ(loadCalls, 1U);
+  EXPECT_TRUE(unloadedBinaries.empty());
+  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
+}
+
+TEST_P(AclSpecOptimizerScopeCommitTest, UnsupportedKernelStillDisablesMarkers) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_3510);
@@ -1534,10 +1817,9 @@ TEST_P(AclSpecOptimizerScopeCommitTest, UnsupportedKernelStillDisablesMarkersOnl
   const auto originalParams = task.params;
   ExpectMarkerDisables(2);
   ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
-  EXPECT_EQ(disabled, GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
-  EXPECT_EQ(commitOperations,
-            GetParam() ? std::vector<std::string>{} : (std::vector<std::string>{"Disable", "Disable", "Update"}));
-  EXPECT_EQ(updateCount, GetParam() ? 0U : 1U);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(commitOperations, (std::vector<std::string>{"Disable", "Disable", "Update"}));
+  EXPECT_EQ(updateCount, 1U);
   EXPECT_TRUE(touched.empty());
   EXPECT_EQ(binaryQueries, 1U);
   EXPECT_EQ(copyQueries, 0U);
@@ -1547,7 +1829,7 @@ TEST_P(AclSpecOptimizerScopeCommitTest, UnsupportedKernelStillDisablesMarkersOnl
   EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
 }
 
-TEST_P(AclSpecOptimizerScopeCommitTest, AllCompileFailuresCommitMarkersOnlyForOptimize) {
+TEST_P(AclSpecOptimizerScopeCommitTest, AllCompileFailuresCommitMarkers) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
@@ -1557,9 +1839,8 @@ TEST_P(AclSpecOptimizerScopeCommitTest, AllCompileFailuresCommitMarkersOnlyForOp
   specializationResults = {ACL_ERROR_FAILURE};
   ExpectMarkerDisables(2);
   ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
-  EXPECT_EQ(disabled, GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
-  EXPECT_EQ(commitOperations, GetParam() ? std::vector<std::string>{"Update"}
-                                         : (std::vector<std::string>{"Disable", "Disable", "Update"}));
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(commitOperations, (std::vector<std::string>{"Disable", "Disable", "Update"}));
   EXPECT_EQ(updateCount, 1U);
   EXPECT_TRUE(touched.empty());
   EXPECT_EQ(specializationPaths.size(), 1U);
@@ -1578,9 +1859,8 @@ TEST_P(AclSpecOptimizerScopeCommitTest, SuccessfulKernelRewriteAndMarkerHandling
   const auto originalEnd = end.params;
   ExpectMarkerDisables(2);
   ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
-  EXPECT_EQ(disabled, GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
-  EXPECT_EQ(commitOperations, GetParam() ? (std::vector<std::string>{"SetParams", "Update"})
-                                         : (std::vector<std::string>{"SetParams", "Disable", "Disable", "Update"}));
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(commitOperations, (std::vector<std::string>{"SetParams", "Disable", "Disable", "Update"}));
   EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
   EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &staticFunctionToken);
   EXPECT_EQ(specializationPaths.size(), 1U);
@@ -1606,11 +1886,9 @@ TEST_P(AclSpecOptimizerScopeCommitTest, MultiStreamMarkerHandlingSharesOneModelU
   model.streams.push_back(&secondStream);
   ExpectMarkerDisables(4);
   ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
-  EXPECT_EQ(disabled,
-            GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin0, &end0, &begin1, &end1}));
-  EXPECT_EQ(commitOperations, GetParam() ? (std::vector<std::string>{"SetParams", "SetParams", "Update"})
-                                         : (std::vector<std::string>{"SetParams", "SetParams", "Disable", "Disable",
-                                                                     "Disable", "Disable", "Update"}));
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin0, &end0, &begin1, &end1}));
+  EXPECT_EQ(commitOperations,
+            (std::vector<std::string>{"SetParams", "SetParams", "Disable", "Disable", "Disable", "Disable", "Update"}));
   EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task, &secondTask}));
   EXPECT_EQ(specializationPaths.size(), 2U);
   EXPECT_EQ(loadCalls, 2U);
@@ -1629,9 +1907,9 @@ TEST_P(AclSpecOptimizerScopeCommitTest, OnlyExactScopeMarkersAreDisabledInMixedT
                                                    ACL_MODEL_RI_TASK_EVENT_WAIT,  ACL_MODEL_RI_TASK_EVENT_RESET,
                                                    ACL_MODEL_RI_TASK_VALUE_WRITE, ACL_MODEL_RI_TASK_VALUE_WAIT};
   std::array<CollectorTask, otherTypes.size()> others{};
-  const std::array<const char *, 4> similarNames{"spec_scope_kernel_begin", "spec_scope_kernel_begin_dav_2201_extra",
+  const std::array<const char *, 5> similarNames{"spec_scope_kernel_begin", "spec_scope_kernel_begin_dav_2201_extra",
                                                  "spec_scope_kernel_end_dav_3510_extra",
-                                                 "sk_scope_kernel_begin_dav_2201"};
+                                                 "sk_scope_kernel_begin_dav_2201", "sk_scope_kernel_end_dav_2201"};
   std::array<KernelState, similarNames.size()> similarKernels{};
   std::array<CollectorTask, similarNames.size()> similarTasks{};
   stream.tasks = {&before, &begin};
@@ -1657,23 +1935,23 @@ TEST_P(AclSpecOptimizerScopeCommitTest, OnlyExactScopeMarkersAreDisabledInMixedT
   for (const auto handle : stream.tasks) {
     originals.push_back(static_cast<CollectorTask *>(handle)->params);
   }
-  std::vector<aclmdlRITask> expectedRewrites{&task, &similarTasks[0], &similarTasks[1], &similarTasks[2],
-                                             &similarTasks[3]};
+  std::vector<aclmdlRITask> expectedRewrites{
+      &task, &similarTasks[0], &similarTasks[1], &similarTasks[2], &similarTasks[3], &similarTasks[4]};
   if (!GetParam()) {
     expectedRewrites.insert(expectedRewrites.begin(), &before);
     expectedRewrites.push_back(&after);
   }
   ExpectMarkerDisables(2);
   ASSERT_EQ(RunPublicEntry(), ACL_SUCCESS);
-  EXPECT_EQ(disabled, GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
   EXPECT_EQ(touched, expectedRewrites);
   EXPECT_EQ(binaryQueries, expectedRewrites.size());
   EXPECT_EQ(copyQueries, expectedRewrites.size());
   EXPECT_EQ(specializationPaths.size(), expectedRewrites.size());
   EXPECT_EQ(loadCalls, expectedRewrites.size());
   EXPECT_EQ(identityTypeQueries, stream.tasks.size());
-  EXPECT_EQ(identityParamsQueries, 9U);
-  EXPECT_EQ(nameQueries, 9U);
+  EXPECT_EQ(identityParamsQueries, 10U);
+  EXPECT_EQ(nameQueries, 10U);
   EXPECT_EQ(updateCount, 1U);
   for (size_t index = 0; index < stream.tasks.size(); ++index) {
     const auto handle = stream.tasks[index];
@@ -1782,6 +2060,42 @@ class AclSpecOptimizerScopeFailureTest : public AclSpecOptimizerScopeCommitTest 
 };
 }  // namespace
 
+TEST_P(AclSpecOptimizerScopeFailureTest, FirstSetFailureRetainsLoadedBinariesBeforeAnyMarkerDisable) {
+  setResults = {ACL_ERROR_INVALID_PARAM};
+  MOCKER(aclmdlRITaskDisable).expects(never());
+  EXPECT_EQ(RunPublicEntry(), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(commitOperations, (std::vector<std::string>{"SetParams"}));
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
+  EXPECT_EQ(secondTask.params.kernelTaskParams.funcHandle, &kernel);
+  EXPECT_EQ(begin.params.kernelTaskParams.funcHandle, &beginKernel);
+  EXPECT_EQ(end.params.kernelTaskParams.funcHandle, &endKernel);
+  EXPECT_EQ(loadCalls, 2U);
+  EXPECT_EQ(updateCount, 0U);
+  EXPECT_TRUE(disabled.empty());
+  EXPECT_TRUE(unloadedBinaries.empty());
+  ASSERT_EQ(SkUtGetModelDestroyCallbackCount(), 1U);
+  ASSERT_EQ(SkUtInvokeModelDestroyCallback(&model), ACL_SUCCESS);
+  EXPECT_EQ(unloadedBinaries, (std::vector<aclrtBinHandle>{&binaryTokens[0], &binaryTokens[1]}));
+}
+
+TEST_P(AclSpecOptimizerScopeFailureTest, LaterSetFailureRetainsLoadedBinariesAndStopsBeforeMarkerDisable) {
+  setResults = {ACL_SUCCESS, ACL_ERROR_INVALID_PARAM};
+  MOCKER(aclmdlRITaskDisable).expects(never());
+  EXPECT_EQ(RunPublicEntry(), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(commitOperations, (std::vector<std::string>{"SetParams", "SetParams"}));
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task, &secondTask}));
+  EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &staticFunctionToken);
+  EXPECT_EQ(begin.params.kernelTaskParams.funcHandle, &beginKernel);
+  EXPECT_EQ(end.params.kernelTaskParams.funcHandle, &endKernel);
+  EXPECT_EQ(loadCalls, 2U);
+  EXPECT_EQ(updateCount, 0U);
+  EXPECT_TRUE(disabled.empty());
+  EXPECT_TRUE(unloadedBinaries.empty());
+  ASSERT_EQ(SkUtGetModelDestroyCallbackCount(), 1U);
+  ASSERT_EQ(SkUtInvokeModelDestroyCallback(&model), ACL_SUCCESS);
+  EXPECT_EQ(unloadedBinaries, (std::vector<aclrtBinHandle>{&binaryTokens[0], &binaryTokens[1]}));
+}
+
 TEST_P(AclSpecOptimizerScopeFailureTest, FirstLoadFailureLeavesTasksAndMarkersUntouched) {
   loadResult = ACL_ERROR_INVALID_PARAM;
   MOCKER(aclmdlRITaskDisable).expects(never());
@@ -1831,11 +2145,9 @@ TEST_P(AclSpecOptimizerScopeFailureTest, UpdateFailureRetainsBothBinariesUntilMo
   updateResults = {ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED};
   ExpectMarkerDisables(2);
   EXPECT_EQ(RunPublicEntry(), ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED);
-  EXPECT_EQ(commitOperations,
-            GetParam() ? (std::vector<std::string>{"SetParams", "SetParams", "Update"})
-                       : (std::vector<std::string>{"SetParams", "SetParams", "Disable", "Disable", "Update"}));
+  EXPECT_EQ(commitOperations, (std::vector<std::string>{"SetParams", "SetParams", "Disable", "Disable", "Update"}));
   EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task, &secondTask}));
-  EXPECT_EQ(disabled, GetParam() ? std::vector<aclmdlRITask>{} : (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
   EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &staticFunctionToken);
   EXPECT_EQ(secondTask.params.kernelTaskParams.funcHandle, &staticFunctionToken);
   EXPECT_EQ(updateCount, 1U);
@@ -1848,7 +2160,7 @@ TEST_P(AclSpecOptimizerScopeFailureTest, UpdateFailureRetainsBothBinariesUntilMo
 
 INSTANTIATE_TEST_SUITE_P(PublicEntries, AclSpecOptimizerScopeFailureTest, testing::Bool());
 
-TEST_F(AclSpecOptimizerCollectionTest, FirstDisableFailureRetainsRewrittenKernelUntilModelDestruction) {
+TEST_P(AclSpecOptimizerScopeCommitTest, FirstDisableFailureRetainsRewrittenKernelUntilModelDestruction) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
@@ -1856,7 +2168,7 @@ TEST_F(AclSpecOptimizerCollectionTest, FirstDisableFailureRetainsRewrittenKernel
   stream.tasks = {&begin, &task, &end};
   disableResults = {ACL_ERROR_INVALID_PARAM};
   MOCKER(aclmdlRITaskDisable).expects(once()).will(invoke(DisableTask));
-  EXPECT_EQ(aclmdlRISpecOptimize(&model, nullptr), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(RunPublicEntry(), ACL_ERROR_INVALID_PARAM);
   EXPECT_EQ(commitOperations, (std::vector<std::string>{"SetParams", "Disable"}));
   EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin}));
   EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &staticFunctionToken);
@@ -1867,7 +2179,7 @@ TEST_F(AclSpecOptimizerCollectionTest, FirstDisableFailureRetainsRewrittenKernel
   EXPECT_EQ(unloadedBinaries, (std::vector<aclrtBinHandle>{&staticBinaryToken}));
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, LaterStreamDisableFailureRetainsBothBinariesAndStopsBeforeUpdate) {
+TEST_P(AclSpecOptimizerScopeCommitTest, LaterStreamDisableFailureRetainsBothBinariesAndStopsBeforeUpdate) {
   KernelState beginKernel0;
   KernelState endKernel0;
   KernelState beginKernel1;
@@ -1885,7 +2197,7 @@ TEST_F(AclSpecOptimizerCollectionTest, LaterStreamDisableFailureRetainsBothBinar
   disableResults = {ACL_SUCCESS, ACL_SUCCESS, ACL_SUCCESS, ACL_ERROR_INVALID_PARAM};
   MOCKER(aclmdlRITaskDisable).expects(exactly(4)).will(invoke(DisableTask));
   ut_log::LogBuffer::Instance().Clear();
-  EXPECT_EQ(aclmdlRISpecOptimize(&model, nullptr), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(RunPublicEntry(), ACL_ERROR_INVALID_PARAM);
   EXPECT_EQ(commitOperations,
             (std::vector<std::string>{"SetParams", "SetParams", "Disable", "Disable", "Disable", "Disable"}));
   EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin0, &end0, &begin1, &end1}));
@@ -1900,7 +2212,7 @@ TEST_F(AclSpecOptimizerCollectionTest, LaterStreamDisableFailureRetainsBothBinar
   ut_log::LogBuffer::Instance().Clear();
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, MarkerOnlyDisableFailureReturnsErrorWithoutBinaryCallback) {
+TEST_P(AclSpecOptimizerScopeCommitTest, MarkerOnlyDisableFailureReturnsErrorWithoutBinaryCallback) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_3510);
@@ -1908,7 +2220,7 @@ TEST_F(AclSpecOptimizerCollectionTest, MarkerOnlyDisableFailureReturnsErrorWitho
   stream.tasks = {&begin, &end};
   disableResults = {ACL_ERROR_INVALID_PARAM};
   MOCKER(aclmdlRITaskDisable).expects(once()).will(invoke(DisableTask));
-  EXPECT_EQ(aclmdlRISpecOptimize(&model, nullptr), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(RunPublicEntry(), ACL_ERROR_INVALID_PARAM);
   EXPECT_EQ(commitOperations, (std::vector<std::string>{"Disable"}));
   EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin}));
   EXPECT_TRUE(touched.empty());
@@ -1918,7 +2230,7 @@ TEST_F(AclSpecOptimizerCollectionTest, MarkerOnlyDisableFailureReturnsErrorWitho
   EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, CallbackRegistrationFailureDoesNotReplaceDisableErrorOrUnloadBinary) {
+TEST_P(AclSpecOptimizerScopeCommitTest, CallbackRegistrationFailureDoesNotReplaceDisableErrorOrUnloadBinary) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
@@ -1927,7 +2239,7 @@ TEST_F(AclSpecOptimizerCollectionTest, CallbackRegistrationFailureDoesNotReplace
   disableResults = {ACL_ERROR_INVALID_PARAM};
   SkUtSetAclmdlRIDestroyRegisterCallbackRet(ACL_ERROR_FAILURE);
   MOCKER(aclmdlRITaskDisable).expects(once()).will(invoke(DisableTask));
-  EXPECT_EQ(aclmdlRISpecOptimize(&model, nullptr), ACL_ERROR_INVALID_PARAM);
+  EXPECT_EQ(RunPublicEntry(), ACL_ERROR_INVALID_PARAM);
   EXPECT_EQ(commitOperations, (std::vector<std::string>{"SetParams", "Disable"}));
   EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &staticFunctionToken);
   EXPECT_EQ(loadCalls, 1U);
@@ -1935,7 +2247,7 @@ TEST_F(AclSpecOptimizerCollectionTest, CallbackRegistrationFailureDoesNotReplace
   EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, CallbackRegistrationFailureDoesNotReplaceUpdateErrorOrUnloadBinary) {
+TEST_P(AclSpecOptimizerScopeCommitTest, CallbackRegistrationFailureDoesNotReplaceUpdateErrorOrUnloadBinary) {
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_3510);
@@ -1944,7 +2256,7 @@ TEST_F(AclSpecOptimizerCollectionTest, CallbackRegistrationFailureDoesNotReplace
   updateResults = {ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED};
   SkUtSetAclmdlRIDestroyRegisterCallbackRet(ACL_ERROR_FAILURE);
   MOCKER(aclmdlRITaskDisable).expects(exactly(2)).will(invoke(DisableTask));
-  EXPECT_EQ(aclmdlRISpecOptimize(&model, nullptr), ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED);
+  EXPECT_EQ(RunPublicEntry(), ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED);
   EXPECT_EQ(commitOperations, (std::vector<std::string>{"SetParams", "Disable", "Disable", "Update"}));
   EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &staticFunctionToken);
   EXPECT_EQ(loadCalls, 1U);
@@ -1953,6 +2265,7 @@ TEST_F(AclSpecOptimizerCollectionTest, CallbackRegistrationFailureDoesNotReplace
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, ByFlagLateRangeFailureStopsPublicEntryBeforeAnyRuntimeMutation) {
+  MOCKER_CPP(&AclSpecOptimizer::TryBuildRequest).expects(never());
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
@@ -1984,6 +2297,7 @@ TEST_F(AclSpecOptimizerCollectionTest, ActiveBeginAllocationFailurePreservesOutp
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, ByFlagNoScopeReturnsWithoutCandidateWorkOrMutation) {
+  MOCKER_CPP(&AclSpecOptimizer::TryBuildRequest).expects(never());
   MOCKER(aclmdlRITaskDisable).expects(never());
   EXPECT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), ACL_SUCCESS);
   EXPECT_EQ(binaryQueries, 0U);
@@ -1995,7 +2309,8 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagNoScopeReturnsWithoutCandidateWorkO
   EXPECT_EQ(updateCount, 0U);
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, ByFlagOnlyNonKernelInScopeReturnsWithoutCandidateWorkOrMutation) {
+TEST_F(AclSpecOptimizerCollectionTest, ByFlagOnlyNonKernelInScopeCleansMarkersWithoutCandidateWork) {
+  MOCKER_CPP(&AclSpecOptimizer::TryBuildRequest).expects(never());
   KernelState beginKernel;
   KernelState endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_3510);
@@ -2003,7 +2318,7 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagOnlyNonKernelInScopeReturnsWithoutC
   task.type = ACL_MODEL_RI_TASK_EVENT_RECORD;
   task.paramsError = ACL_ERROR_INVALID_PARAM;
   stream.tasks = {&begin, &task, &end};
-  MOCKER(aclmdlRITaskDisable).expects(never());
+  MOCKER(aclmdlRITaskDisable).expects(exactly(2)).will(invoke(DisableTask));
   EXPECT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), ACL_SUCCESS);
   EXPECT_EQ(binaryQueries, 0U);
   EXPECT_EQ(paramCountQueries, 0U);
@@ -2011,7 +2326,8 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagOnlyNonKernelInScopeReturnsWithoutC
   EXPECT_TRUE(specializationPaths.empty());
   EXPECT_EQ(loadCalls, 0U);
   EXPECT_TRUE(touched.empty());
-  EXPECT_EQ(updateCount, 0U);
+  EXPECT_EQ(updateCount, 1U);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, ByFlagOnlySelectedTaskReadsResourcesCompilesAndRewrites) {
@@ -2023,7 +2339,7 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagOnlySelectedTaskReadsResourcesCompi
   CollectorTask after = task;
   stream.tasks = {&before, &begin, &task, &end, &after};
   const auto originalParams = task.params;
-  MOCKER(aclmdlRITaskDisable).expects(never());
+  MOCKER(aclmdlRITaskDisable).expects(exactly(2)).will(invoke(DisableTask));
   ASSERT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), ACL_SUCCESS);
   EXPECT_EQ(binaryQueries, 1U);
   EXPECT_EQ(paramCountQueries, 1U);
@@ -2033,6 +2349,7 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagOnlySelectedTaskReadsResourcesCompi
   EXPECT_EQ(loadCalls, 1U);
   EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
   EXPECT_EQ(updateCount, 1U);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
   EXPECT_EQ(std::memcmp(&before.params, &originalParams, sizeof(originalParams)), 0);
   EXPECT_EQ(std::memcmp(&after.params, &originalParams, sizeof(originalParams)), 0);
   EXPECT_EQ(begin.params.kernelTaskParams.funcHandle, &beginKernel);

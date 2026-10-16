@@ -61,6 +61,8 @@ struct aclmdlRISpecOptions {
  * The caller must exclude concurrent execution, modification and destruction, and keep the
  * specialized values invariant. options may be null for defaults; its referenced data must remain
  * valid and unchanged during this call. Unsupported kernels retain their original functions.
+ * Recognized Spec Scope Begin/End tasks are disabled during submission, including when no kernel
+ * can be specialized. Markers belonging to SuperKernel are not included in this cleanup.
  *
  * @retval ACL_SUCCESS Optimization completed, including when every kernel was skipped because it
  * could not be specialized.
@@ -86,6 +88,13 @@ ACL_FUNC_VISIBILITY aclError aclmdlRISpecOptimize(aclmdlRI modelRI, aclmdlRISpec
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeBegin(aclrtStream stream);
 /** @brief Dispatch an End marker with the same capture and error contract as ScopeBegin. */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeEnd(aclrtStream stream);
+/**
+ * @brief Specialize eligible kernels within valid Spec Scope ranges.
+ * Submission disables all recognized Spec Scope Begin/End tasks, as Optimize does.
+ * Tasks whose identities cannot be read are logged as warnings and skipped. Ranges are validated
+ * using the remaining recognized markers; invalid pairing returns before compilation or task modification.
+ * Skipped markers can leave scope information incomplete even if the remaining pairing is valid.
+ */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecOptimizeByFlag(aclmdlRI modelRI, aclmdlRISpecOptions *options);
 
 #ifdef __cplusplus
