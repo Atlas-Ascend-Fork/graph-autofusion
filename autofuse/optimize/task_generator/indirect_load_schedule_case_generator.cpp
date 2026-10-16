@@ -67,6 +67,10 @@ struct RewrittenGraphAnalysis {
   std::vector<af::AscNodePtr> composite_reduces;
   bool align_input_path = false;
   bool align_index_path = false;
+  // 输入/索引路径含 Load 后接 Transpose：staging 经逐行 TransposeExtend，无法批量化
+  // 为多行窗口（且其布局被强制标记 kStrided 以表达合法置换视图，绕过单调性分类）。
+  bool input_load_transposed = false;
+  bool index_load_transposed = false;
   bool simd_index_uses_output_inner_axis = false;
 };
 
@@ -316,6 +320,23 @@ bool NeedsAlignedUbWindow(const ascgen_utils::indirect_load::IndirectLoadTensorL
       return true;
     }
     physical_span = physical_span + (layout.sizes[dim] - af::sym::kSymbolOne) * layout.strides[dim];
+  }
+  return false;
+}
+
+// gather 轴内侧（含轴维）存在尺寸大于 1 的零步长维：该维为视图内广播（如 gather 轴
+// 广播源），staging 需逐行展开广播而非批量 DMA 块，多行窗口无法批量搬运；行维
+// （axis_index 之前）的零步长不受限——staging 单份、模板按零步长重读（如
+// row-invariant 索引 {0,1}）。
+bool HasBroadcastInsideWindow(const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout, size_t axis_index) {
+  for (size_t dim = axis_index; dim < layout.strides.size(); ++dim) {
+    const bool zero_stride =
+        af::SymbolicUtils::StaticCheckEq(layout.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue;
+    const bool degenerate =
+        af::SymbolicUtils::StaticCheckEq(layout.sizes[dim], af::sym::kSymbolOne) == af::TriBool::kTrue;
+    if (zero_stride && !degenerate) {
+      return true;
+    }
   }
   return false;
 }
@@ -1632,7 +1653,7 @@ af::Status ReplaceRegionAxisPrefix(const NodePath &region, const std::vector<af:
 }
 
 af::Status NormalizeSimdAxesForTemplate(af::AscGraph &graph, const af::AscNodePtr &indirect_load,
-                                        const RewrittenGraphAnalysis &analysis) {
+                                        const RewrittenGraphAnalysis &analysis, bool solve_tile_size) {
   const auto output_axes = indirect_load->outputs()[0]->attr.axis;
   GE_ASSERT_TRUE(!output_axes.empty(), "IndirectLoad SIMD output axis is empty.");
   const size_t axis_index = GetIndirectLoadAxisIndex(indirect_load);
@@ -1658,7 +1679,7 @@ af::Status NormalizeSimdAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
   GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(analysis.input_region, output_axes, axis_index, true));
   GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(analysis.index_region, output_axes, axis_index, false));
   return NormalizeAxesForTemplate(graph, indirect_load, axis_index, input_inner_axis, index_inner_axis,
-                                  analysis.simd_index_uses_output_inner_axis);
+                                  analysis.simd_index_uses_output_inner_axis, solve_tile_size);
 }
 
 // 多 gather 共享轴归一化：primary 完整建轴（outer/inner/tile/vectorized 与单 gather 完全一致），
@@ -1714,7 +1735,9 @@ af::Status NormalizeSimdAxesForGroupTemplate(af::AscGraph &graph, const std::vec
   GE_ASSERT_TRUE(members.size() == analyses.size() && !members.empty(),
                  "IndirectLoad gather group members[%zu] and analyses[%zu] must be aligned and non-empty.",
                  members.size(), analyses.size());
-  GE_ASSERT_SUCCESS(NormalizeSimdAxesForTemplate(graph, members.front(), analyses.front()));
+  // 组模板（多 gather 水平融合）保持固定单行 tile：可求解多行 tile 的门控按单
+  // gather 候选判定，组内成员共享 primary 的模板轴结构，行数求解语义未定义。
+  GE_ASSERT_SUCCESS(NormalizeSimdAxesForTemplate(graph, members.front(), analyses.front(), false));
   for (size_t index = 1UL; index < members.size(); ++index) {
     GE_ASSERT_SUCCESS(
         NormalizeSimdAxesForMember(graph, members.front(), analyses.front(), members[index], analyses[index]));
@@ -2424,6 +2447,8 @@ af::Status AnalyzeRewrittenGraph(af::AscGraph &graph, const af::AscNodePtr &indi
                               NeedsAlignedUbWindow(preparation.logical_view.index, axis_index);
   analysis.align_input_path = template_id != ascir::TemplateId::kIndirectLoadSimt &&
                               NeedsAlignedUbWindow(preparation.logical_view.input, axis_index);
+  analysis.input_load_transposed = preparation.input.load_transpose != nullptr;
+  analysis.index_load_transposed = preparation.index.load_transpose != nullptr;
   analysis.simd_index_uses_output_inner_axis = preparation.index.simd_index_uses_output_inner_axis;
 
   // SK 跳过 input-pre 搬移；SIMD/SIMT 将 input-pre 单目元素链搬到 IndirectLoad 之后。
@@ -2784,7 +2809,46 @@ af::Status NormalizeTemplateAxes(af::AscGraph &graph, const af::AscNodePtr &indi
   const bool is_softmax_post =
       analysis.post_reduce != nullptr && af::ops::IsOps<af::ascir_op::Softmax>(analysis.post_reduce);
   if (template_id == ascir::TemplateId::kIndirectLoadSimd) {
-    GE_ASSERT_SUCCESS(NormalizeSimdAxesForTemplate(graph, indirect_load, analysis));
+    // 无后置 Reduce 的裸 gather：tile 行数交由调度期 TileTiling 按 UB 容量求解（多行 tile），
+    // 消除逐行 staging/队列周期；带后置 Reduce 的 SIMD 保持固定单行 tile 语义（其区域
+    // 视图种子依赖单行 tile 结构）。以下形态同样保持固定单行 tile（多行调用要求 staging
+    // 批量产出 R×inner，而下列形态的 staging 只能逐行或单份产出，模板会读取仅含单行
+    // 的缓冲导致越界/错行）：
+    // 1) gather 轴不在第 1 维（axis_index != 1）：批量 DMA 要求 tile 行映射为 gather
+    //    切片正上方的单一行维；行维跨越多个维度（如 rank4/axis2，行维由 merged outer
+    //    承载）时 Load 视图保留分离行维，staging 按行循环、目的偏移固定（如
+    //    index_binary_same_view 用例），多行调用读取单行缓冲；
+    // 2) 对齐（padding）视图：staging 按紧凑布局剥离行间 padding，模板按逻辑步长寻址；
+    // 3) Load 后接 Transpose 的路径：staging 经逐行 TransposeExtend，无法批量化
+    //    （其布局被强制标记 kStrided 表达合法置换，NeedsAlignedUbWindow 仅检查
+    //    gather 轴内侧维度拦不住行维置换，如 both_transpose 用例）；
+    // 4) gather 轴内侧零步长（视图内广播，如 gather 轴广播源）：staging 需逐行展开
+    //    广播而非批量 DMA 块（如 broadcast_axis 用例）；
+    // 5) 重叠/非法视图（kind==kUnsupported）：非单调布局，不可批量 staging；
+    // 6) 输入与索引均为 kDense 的稠密视图：lowering 选 kRegisterGather/kGatherApi
+    //    稠密 facade（indirect_load_utils.cpp：input/index 任一非 kDense 才选
+    //    kStrided），稠密 dispatch 不含行基址项（行由外层 tile 循环承载），多行调用
+    //    全部行读 staged 窗口首行（如 rank2_axis1_simd 用例；rank3_axis1_int64_gather
+    //    仅因运行期 R=1 偶然通过），必须保持固定单行 tile。kStrided facade 经
+    //    input_outer_offset 正确叠加行基址，多行安全。
+    // kZeroStrideCompact 及无对齐窗口的 kStrided 均为行主序单调布局，axis_index==1
+    // 时可安全批量 staging；行维零步长（如 row-invariant 索引 {0,1}，索引路径含
+    // Broadcast 节点但行维零步长）staging 单份、模板按零步长重读，同样安全。
+    ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateLogicalView(indirect_load, logical_view));
+    const size_t axis_index = GetIndirectLoadAxisIndex(indirect_load);
+    GE_ASSERT_TRUE(axis_index != kIndirectLoadInvalidAxisIndex, "IndirectLoad axis index of node[%s] is invalid.",
+                   indirect_load->GetNamePtr());
+    const auto layout_kind = ascgen_utils::indirect_load::IndirectLoadLayoutKind::kUnsupported;
+    const auto dense_kind = ascgen_utils::indirect_load::IndirectLoadLayoutKind::kDense;
+    const bool solve_simd_tile = analysis.post_reduce == nullptr && axis_index == 1UL && !analysis.align_input_path &&
+                                 !analysis.align_index_path && !analysis.input_load_transposed &&
+                                 !analysis.index_load_transposed && logical_view.input.kind != layout_kind &&
+                                 logical_view.index.kind != layout_kind &&
+                                 (logical_view.input.kind != dense_kind || logical_view.index.kind != dense_kind) &&
+                                 !HasBroadcastInsideWindow(logical_view.input, axis_index) &&
+                                 !HasBroadcastInsideWindow(logical_view.index, axis_index);
+    GE_ASSERT_SUCCESS(NormalizeSimdAxesForTemplate(graph, indirect_load, analysis, solve_simd_tile));
     if (is_softmax_post) return af::SUCCESS;
     // 多阶段：全部 Reduce 各自种向量化视图；单 Reduce/无 Reduce 保持原行为。
     if (!analysis.composite_reduces.empty()) {

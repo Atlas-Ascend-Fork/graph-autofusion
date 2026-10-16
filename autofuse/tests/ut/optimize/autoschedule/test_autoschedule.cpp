@@ -2134,6 +2134,29 @@ static bool SetStridedInputPrePath(af::AscGraph &graph) {
   return true;
 }
 
+// 索引视图外层带 padding（GM 行步长为紧凑跨度的 2 倍）：索引为 kStrided 布局，可求解
+// 多行 tile。输入与索引均为 kDense 时 lowering 选稠密 facade（无行基址项），保持固定
+// 单行 tile，故求解类用例需索引侧带 padding 触发 kStrided 路径。
+static bool SetPaddedIndexOuterStride(af::AscGraph &graph) {
+  const std::vector<af::AscNodePtr> index_path = {graph.FindNode("index"), graph.FindNode("index_load")};
+  if (std::any_of(index_path.begin(), index_path.end(),
+                  [](const af::AscNodePtr &node) { return node == nullptr || node->outputs().empty(); })) {
+    return false;
+  }
+  const auto &attr = index_path.front()->outputs()[0]->attr;
+  if (attr.repeats.size() != 4UL) {
+    return false;
+  }
+  const auto &repeats = attr.repeats;
+  const auto gap = One + One;
+  const std::vector<af::Expression> strides = {repeats[1] * repeats[2] * repeats[3] * gap, repeats[2] * repeats[3],
+                                               repeats[3], One};
+  for (const af::AscNodePtr &node : index_path) {
+    node->outputs()[0]->attr.strides = strides;
+  }
+  return true;
+}
+
 static std::vector<af::AscGraph>::iterator FindIndirectLoadCandidate(std::vector<af::AscGraph> &candidates,
                                                                      ascir::TemplateId template_id) {
   return std::find_if(candidates.begin(), candidates.end(), [template_id](const af::AscGraph &candidate) {
@@ -2210,8 +2233,9 @@ TEST_F(AutoSchedulerUT, IndirectLoadStridedIndexPathIsAlignedDuringSchedule) {
   EXPECT_FALSE(scheduled_index_abs->outputs()[0]->attr.vectorized_strides.empty());
 }
 
-TEST_F(AutoSchedulerUT, IndirectLoadPrebuiltFixedYTilingGeneratesOnlyTemplateOuterCase) {
+TEST_F(AutoSchedulerUT, IndirectLoadSolvedTileTilingGeneratesOnlyTemplateOuterCase) {
   auto graph = BuildIndirectLoadAutoScheduleGraph(1L, false, false);
+  ASSERT_TRUE(SetPaddedIndexOuterStride(graph));
   IndirectLoadScheduleCaseGenerator generator;
   std::vector<af::AscGraph> candidates;
   std::vector<std::string> score_functions;
@@ -2242,15 +2266,19 @@ TEST_F(AutoSchedulerUT, IndirectLoadPrebuiltFixedYTilingGeneratesOnlyTemplateOut
   ASSERT_NE(outer, nullptr);
   ASSERT_NE(tile_outer, nullptr);
   ASSERT_NE(tile_inner, nullptr);
-  EXPECT_EQ(tile_outer->size, outer->size);
-  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(tile_inner->size, One), af::TriBool::kTrue);
+  // 无后置 Reduce 的裸 gather：TileInner 行数为调度期按 UB 容量求解的变量（非固定 1），
+  // 多行 tile 使 staging/模板调用按 tile 批量执行。
+  EXPECT_NE(af::SymbolicUtils::StaticCheckEq(tile_inner->size, One), af::TriBool::kTrue);
   EXPECT_EQ(tile_outer->split_pair_other_id, tile_inner->id);
   EXPECT_EQ(tile_inner->split_pair_other_id, tile_outer->id);
   ASSERT_EQ(scheduled_indirect_load->outputs().size(), 1UL);
   const auto *inner = scheduled_graph.FindAxis(scheduled_axes.inner_axis);
   ASSERT_NE(inner, nullptr);
-  EXPECT_EQ(scheduled_indirect_load->outputs()[0]->attr.vectorized_axis, inner->from);
-  for (af::AxisId axis : inner->from) {
+  // TileInner 前插进向量化视图，成为模板一次处理的窗口行维度。
+  std::vector<af::AxisId> expected_vectorized{tile_inner->id};
+  expected_vectorized.insert(expected_vectorized.end(), inner->from.begin(), inner->from.end());
+  EXPECT_EQ(scheduled_indirect_load->outputs()[0]->attr.vectorized_axis, expected_vectorized);
+  for (af::AxisId axis : expected_vectorized) {
     EXPECT_NE(std::find(scheduled_indirect_load->outputs()[0]->attr.axis.begin(),
                         scheduled_indirect_load->outputs()[0]->attr.axis.end(), axis),
               scheduled_indirect_load->outputs()[0]->attr.axis.end());
@@ -2416,6 +2444,7 @@ TEST_F(AutoSchedulerUT, IndirectLoadAxisZeroSyntheticOuterParticipatesWithConsis
 
 TEST_F(AutoSchedulerUT, IndirectLoadSimdInputPreUsesMergedInputInnerInFinalTensorView) {
   auto graph = BuildIndirectLoadAutoScheduleGraph(1L, true, false);
+  ASSERT_TRUE(SetPaddedIndexOuterStride(graph));
   IndirectLoadScheduleCaseGenerator generator;
   std::vector<af::AscGraph> candidates;
   std::vector<std::string> score_functions;
@@ -2447,9 +2476,14 @@ TEST_F(AutoSchedulerUT, IndirectLoadSimdInputPreUsesMergedInputInnerInFinalTenso
   EXPECT_NE(std::find(output.axis.begin(), output.axis.end(), template_axes.input_inner_axis), output.axis.end());
   EXPECT_EQ(output.axis.size(), output.repeats.size());
   EXPECT_EQ(output.axis.size(), output.strides.size());
-  EXPECT_EQ(output.vectorized_axis, std::vector<af::AxisId>{template_axes.input_inner_axis});
-  ASSERT_EQ(output.vectorized_strides.size(), 1UL);
-  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(output.vectorized_strides[0], One), af::TriBool::kTrue);
+  // 可求解多行 tile：TileInner 前插进输入 pre 节点的向量化窗口（多行 staging），内层
+  // 步长仍为 1；TileInner 步长为输入行步长。
+  const auto *solved_tile_inner =
+      FindDerivedAxis(results[0].scheduled_graph, af::Axis::Type::kAxisTypeTileInner, template_axes.outer_axis);
+  ASSERT_NE(solved_tile_inner, nullptr);
+  EXPECT_EQ(output.vectorized_axis, (std::vector<af::AxisId>{solved_tile_inner->id, template_axes.input_inner_axis}));
+  ASSERT_EQ(output.vectorized_strides.size(), 2UL);
+  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(output.vectorized_strides[1], One), af::TriBool::kTrue);
 }
 
 TEST_F(AutoSchedulerUT, IndirectLoadSimdInputPreKeepsOriginalVectorizedAxesWhenTensorMergeIsSkipped) {
@@ -2488,6 +2522,12 @@ TEST_F(AutoSchedulerUT, IndirectLoadSimdInputPreKeepsOriginalVectorizedAxesWhenT
   EXPECT_EQ(output.vectorized_axis, input_inner_from);
   EXPECT_EQ(output.vectorized_strides,
             (std::vector<af::Expression>{af::Symbol(64), af::Symbol(16), af::sym::kSymbolOne}));
+  // 对齐（padding）输入视图不走可求解多行 tile：staging 剥离 padding 与模板按逻辑步长
+  // 寻址在多行窗口下不一致，保持固定单行 tile。
+  const auto *strided_tile_inner =
+      FindDerivedAxis(results[0].scheduled_graph, af::Axis::Type::kAxisTypeTileInner, template_axes.outer_axis);
+  ASSERT_NE(strided_tile_inner, nullptr);
+  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(strided_tile_inner->size, One), af::TriBool::kTrue);
   for (const af::AxisId vectorized_axis : output.vectorized_axis) {
     EXPECT_NE(std::find(output.axis.begin(), output.axis.end(), vectorized_axis), output.axis.end());
   }

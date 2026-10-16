@@ -600,6 +600,51 @@ template <typename X, typename Index, int32_t Rank, int32_t Axis>
 __aicore__ inline void BuildIndirectLoadSimdStridedOffsets(const LocalTensor<Index> &index,
                                                            const LocalTensor<uint32_t> &offsets,
                                                            const IndirectLoadSimdStridedContext<Rank, Axis> &ctx) {
+  // 仿射快路径：inner 域塌缩、tile 为整行对齐窗口（单行即 rows=1 特例）、index 在 tile
+  // 内连续时，逐元素坐标折叠退化为常量三元组，offsets 满足线性模型，可按行用向量仿射构建：
+  //   offsets[seg * slice + j] = (input_base(seg) + idx[index_base(seg) + j] * gather_stride) * sizeof(X)
+  // 行数 R 次 Cast/Muls/Adds 替代 R*slice 次标量折叠；未整行对齐/跨步 index 形态走通用路径。
+  if (ctx.index_inner == 1) {
+    const int64_t slice_count = ctx.output_slice_count;
+    const int64_t logical = static_cast<int64_t>(ctx.logical_size);
+    const int64_t rows =
+        (ctx.output_offset % slice_count == 0 && logical % slice_count == 0) ? logical / slice_count : 0;
+    if (rows > 0 && ctx.shape[2 * Rank + Axis] == 1 && ctx.shape[2 * Rank + Rank - 1] == 1) {
+      const int64_t outer_base = ctx.output_offset / slice_count;
+      // offsets 为字节偏移（与通用路径 source_offset × sizeof(X) 一致）。
+      const int64_t stride_bytes = ctx.shape[Rank + Axis] * static_cast<int64_t>(sizeof(X));
+      // 一次 Cast + 一次 Muls + 一次 Adds 批量构建：offsets 与 int32 视图同址，Gather 按
+      // uint32 读；Index 为 32 位时无需窄化 Cast，直接按 int32 视图仿射。
+      auto offsets32 = offsets.template ReinterpretCast<int32_t>();
+      const int64_t seg_count = rows;
+      const int64_t seg_len = slice_count;
+      for (int64_t seg = 0; seg < seg_count; ++seg) {
+        const int64_t outer_global = outer_base + seg;
+        int64_t index_base = 0;
+        int64_t input_base = 0;
+        if constexpr (Axis > 0) {
+          index_base += Internal::IndirectLoadSimdOuterOffset<Axis - 1, 2 * Rank>::Call(outer_global, ctx.shape) -
+                        ctx.index_window_base;
+          input_base = Internal::IndirectLoadSimdOuterOffset<Axis - 1, Rank>::Call(outer_global, ctx.shape) -
+                       ctx.input_window_base;
+        }
+        const int64_t base_bytes = input_base * static_cast<int64_t>(sizeof(X));
+        const auto index_view = index[index_base];
+        const auto seg_view = offsets32[seg * seg_len];
+        if constexpr (sizeof(Index) == sizeof(int64_t)) {
+          Cast(seg_view, index_view, AscendC::RoundMode::CAST_NONE, seg_len);
+          Muls(seg_view, seg_view, static_cast<int32_t>(stride_bytes), seg_len);
+          Adds(seg_view, seg_view, static_cast<int32_t>(base_bytes), seg_len);
+        } else {
+          Muls(seg_view, index_view.template ReinterpretCast<int32_t>(), static_cast<int32_t>(stride_bytes), seg_len);
+          Adds(seg_view, seg_view, static_cast<int32_t>(base_bytes), seg_len);
+        }
+      }
+      return;
+    }
+  }
+  // —— 通用路径：逐元素坐标折叠（非尾轴 gather 含 inner 残留 / 跨 slice / index
+  // 跨步等形态，无法塌缩为常量仿射基址）。
   for (uint32_t i = 0; i < ctx.logical_size; ++i) {
     const int64_t global_idx = ctx.output_offset + static_cast<int64_t>(i);
     const int64_t index_offset = GetIndirectLoadSimdStridedIndexOffset<Rank, Axis>(global_idx, ctx);
@@ -628,6 +673,16 @@ __aicore__ inline int64_t GetIndirectLoadSimdStridedOutputOffset(
 template <typename X, int32_t Rank, int32_t Axis>
 __aicore__ inline void ScatterIndirectLoadSimdStridedOutput(const LocalTensor<X> &y,
                                                             const IndirectLoadSimdStridedContext<Rank, Axis> &ctx) {
+  // 整行对齐窗口（Rank=2 尾轴 gather，单行即 logical==slice_count 特例）且
+  // output_strides == {slice_count, 1} 时，行内与行间均线性连续，逐元素输出偏移恒等
+  // 于 i，Gather 写入的紧凑结果已在最终位置，无需重排；其余形态逐元素重排。
+  if constexpr (Rank == 2 && Axis == 1) {
+    if (ctx.index_inner == 1 && ctx.output_strides[0] == ctx.output_slice_count && ctx.output_strides[1] == 1 &&
+        ctx.output_offset % ctx.output_slice_count == 0 &&
+        static_cast<int64_t>(ctx.logical_size) % ctx.output_slice_count == 0) {
+      return;
+    }
+  }
   // Gather writes packed logical values first. Repack from the end so padding lanes do not
   // overwrite a source value that is still needed by the supported compact output layouts.
   for (int64_t i = static_cast<int64_t>(ctx.logical_size) - 1; i >= 0; --i) {

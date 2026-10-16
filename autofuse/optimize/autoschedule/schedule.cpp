@@ -659,6 +659,68 @@ Status ApplyInputInnerVectorizedAxis(ascir::ImplGraph &graph, const af::AscNodeP
 
 }  // namespace
 
+ascir::AxisId Scheduler::GetSolvedTileInnerAxis() const {
+  // 固定 tile（预建 pair）保持既有单行窗口语义；可求解 tile 返回通用 TileSplit 产物
+  // TileInner 轴 id（与 TileSplit 中向量化视图前插的判定条件一致）。
+  if (indirect_load_info_.axes.tile_inner_axis != af::kIdNone) {
+    return af::kIdNone;
+  }
+  return tiling_case_.ub_tiling_y.second == nullptr ? af::kIdNone : tiling_case_.ub_tiling_y.second->id;
+}
+
+Status Scheduler::FoldSolvedTileInnerIntoPreWindow(const af::AscNodePtr &node) const {
+  // 可求解多行 tile：TileInner（tile 内行数）并入输入侧 pre 节点的向量化窗口，使输入
+  // staging 覆盖 tile 内多行（R×inner 批量搬运）而非按行循环。须在 ApplyTiling 之后
+  // 调用（节点视图完成 a0 -> a0T/a0t 分裂后才能看到 TileInner 轴）。
+  const ascir::AxisId tile_inner_axis_id = GetSolvedTileInnerAxis();
+  if (tile_inner_axis_id == af::kIdNone) {
+    return af::SUCCESS;
+  }
+  const auto role = ascgen_utils::indirect_load::GetTemplateRole(node);
+  // StridedUbPath（带行间 padding 的对齐路径）保持既有单行窗口语义：其紧凑写回与
+  // 视图标注机制假定逐行 staging 结构，多行窗口不在本变更范围内。
+  if (role == ascgen_utils::indirect_load::TemplateRole::kSimdInputPreStridedUbPath) {
+    return af::SUCCESS;
+  }
+  const bool is_pre_node = ascgen_utils::indirect_load::ShouldApplyInputInnerVectorization(node) ||
+                           role == ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre;
+  if (!is_pre_node) {
+    return af::SUCCESS;
+  }
+  for (const auto &output : node->outputs()) {
+    auto &attr = output->attr;
+    const auto tile_iter = std::find(attr.axis.begin(), attr.axis.end(), tile_inner_axis_id);
+    if (tile_iter == attr.axis.end() || std::find(attr.vectorized_axis.begin(), attr.vectorized_axis.end(),
+                                                  tile_inner_axis_id) != attr.vectorized_axis.end()) {
+      continue;
+    }
+    const auto tile_index = static_cast<size_t>(std::distance(attr.axis.begin(), tile_iter));
+    const bool zero_stride =
+        af::SymbolicUtils::StaticCheckEq(attr.strides[tile_index], af::sym::kSymbolZero) == af::TriBool::kTrue;
+    const bool multi_repeat =
+        af::SymbolicUtils::StaticCheckEq(attr.repeats[tile_index], af::sym::kSymbolOne) != af::TriBool::kTrue;
+    // 零步长且窗口展开（广播流）不并入：并入会使 staging 重复搬运 R 份相同数据；
+    // 其余情形并入——多行窗口批量化，或退化轴（repeat==1）仅上移循环层级。
+    if (zero_stride && multi_repeat) {
+      continue;
+    }
+    // 插入位置须保持 vectorized_axis 为 attr.axis 的子序列：转置视图下行维度不一定
+    // 位于内层轴之前（如 origin [1,5,9,13] 中内层轴 1 先于行轴 9），盲目前插会破坏
+    // 视图轴序一致性（CheckContinuous）。按 tile 轴在 attr.axis 中的位置确定插入点。
+    size_t insert_pos = 0UL;
+    for (size_t axis_pos = 0UL; axis_pos < tile_index; ++axis_pos) {
+      if (std::find(attr.vectorized_axis.begin(), attr.vectorized_axis.end(), attr.axis[axis_pos]) !=
+          attr.vectorized_axis.end()) {
+        ++insert_pos;
+      }
+    }
+    attr.vectorized_axis.insert(attr.vectorized_axis.begin() + static_cast<int64_t>(insert_pos), tile_inner_axis_id);
+    attr.vectorized_strides.insert(attr.vectorized_strides.begin() + static_cast<int64_t>(insert_pos),
+                                   attr.strides[tile_index]);
+  }
+  return af::SUCCESS;
+}
+
 Status Scheduler::InitIndirectLoadScheduleCase() {
   indirect_load_info_ = {};
   const af::AscNodePtr indirect_load = ascgen_utils::indirect_load::FindIndirectLoadNode(graph_);
@@ -811,6 +873,10 @@ Status Scheduler::TileSplit() {
     ApplyTiling(node, tiling_case_.ub_tiling_id_x, tiling_case_.ub_tiling_x);
     ApplyTiling(node, tiling_case_.ub_tiling_id_y, tiling_case_.ub_tiling_y);
     ApplyTiling(node, tiling_case_.ub_tiling_id_r, tiling_case_.ub_tiling_r);
+    if (indirect_load_info_.active) {
+      GE_CHK_STATUS_RET(FoldSolvedTileInnerIntoPreWindow(node), "Failed to fold solved tile inner window for node[%s].",
+                        node->GetNamePtr());
+    }
 
     auto axes = node->attr.sched.axis;
     const auto &n_group = this->axes_group_.n_group;
