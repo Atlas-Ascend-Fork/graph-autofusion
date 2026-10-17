@@ -49,6 +49,10 @@ touch test1.log
 coverage_save="true"
 if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; then
 	case "${ut_type}" in
+		UT_Test_Python_multistream)
+			bash build.sh -u -c --module=multistream --no-autofuse -f ${WORKSPACE}/pr_filelist.txt
+			ret=$?
+			;;
 		UT_Test_Python_superkernel)
 			bash build.sh -u -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource" -j20 -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
@@ -95,6 +99,10 @@ if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; th
 	esac
 else
 	case "${ut_type}" in
+		UT_Test_Python_multistream)
+			bash build.sh -u -c --module=multistream --no-autofuse
+			ret=$?
+			;;
 		UT_Test_Python_superkernel)
 			bash build.sh -u -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource"
 			ret=$?

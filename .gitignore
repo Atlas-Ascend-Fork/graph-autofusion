@@ -21,6 +21,7 @@ super_kernel/tests/generated/
 
 # Coverage reports
 super_kernel/coverage/
+multistream/coverage/
 
 # UT temporary files
 super_kernel/kernel_meta

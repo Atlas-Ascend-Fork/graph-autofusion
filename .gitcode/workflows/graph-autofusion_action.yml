@@ -129,6 +129,15 @@ stages:
     name: UT
     select: selected_by_default
     jobs:
+      JOB_UT_TEST_Python_multistream:
+        name: UT_Test_Python_multistream
+        select: selected_by_default
+        needs: []
+        uses: .gitcode/workflows/ut_action.yml
+        with:
+          ut_type: 'UT_Test_Python_multistream'
+          ut_package: 'coverage_*.info'
+          image_version: ${{ jobs.JOB_image.outputs.UT_Test_Python_superkernel }}
       JOB_api_check:
         name: API_Check
         select: selected_by_default

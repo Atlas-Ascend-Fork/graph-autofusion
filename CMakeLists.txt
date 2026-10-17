@@ -51,6 +51,7 @@ endif()
 
 set(INSTALL_LIBRARY_DIR graph_autofusion/lib)
 
+add_subdirectory(multistream)
 add_subdirectory(super_kernel)
 add_subdirectory(model_specialization)
 
