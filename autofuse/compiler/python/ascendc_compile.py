@@ -1216,16 +1216,9 @@ def init_torch_npu_for_const_tiling():
     torch.npu.synchronize()
 
 
-@inductor_compile_duration("PrepareStaticShapeRecompile")
-def try_static_shape_compile(args: argparse.Namespace, temp_dir, so_path):
-    if args.force_unknown:
-        return False
-    lib = ctypes.CDLL(so_path)
-    lib.AutofuseIsStaticShape.argtypes = []
-    lib.AutofuseIsStaticShape.restype = ctypes.c_bool
-    if not bool(lib.AutofuseIsStaticShape()):
-        return False
-    logger.info("static shape detected, recompile kernel with const tiling data")
+def rewrite_device_kernel_with_const_tiling(args: argparse.Namespace, temp_dir, lib):
+    """改写 device 源为 const 分支，生成并写入 const tiling 头文件。"""
+    logger.info("static shape detected, compile kernel with const tiling data")
     static_shape_kernel_proc(args, temp_dir)
     with InductorCompileDuration(args, "InitTorchNpu"):
         init_torch_npu_for_const_tiling()
@@ -1243,9 +1236,55 @@ def try_static_shape_compile(args: argparse.Namespace, temp_dir, so_path):
     const_tiling_data = result.decode("utf-8")
     tiling_data = os.path.join(temp_dir, "device", "autofuse_tiling_data.h")
     tiling_data_bak = os.path.join(temp_dir, "device", "autofuse_tiling_data_bak.h")
+    # 备份改写前的（动态）tiling 头，便于定位/恢复；按次覆盖，避免复用 temp_dir 时残留上一张图内容。
     shutil.copy(tiling_data, tiling_data_bak)
     with open(tiling_data, "w") as file:
         file.write(const_tiling_data)
+
+
+@inductor_compile_duration("PrepareStaticShapeRecompile")
+def try_static_shape_compile(args: argparse.Namespace, temp_dir, so_path):
+    if args.force_unknown:
+        return False
+    lib = ctypes.CDLL(so_path)
+    lib.AutofuseIsStaticShape.argtypes = []
+    lib.AutofuseIsStaticShape.restype = ctypes.c_bool
+    if not bool(lib.AutofuseIsStaticShape()):
+        return False
+    rewrite_device_kernel_with_const_tiling(args, temp_dir, lib)
+    return True
+
+
+@inductor_compile_duration("PrepareStaticShapeRecompile")
+def bake_const_tiling_before_device_compile(
+    args: argparse.Namespace, tiling_obj_paths, temp_dir
+):
+    """单遍静态编译：静态 shape 的 CV 融合在首次 device 编译前烧录 const tiling。
+
+    AutofuseIsStaticShape/GenConstTilingData 由 tiling 源生成，将 tiling 目标
+    文件链接为 host 库后即可调用，无需先完成动态分支的 device 编译。命中时
+    device 只按 const 分支编译一次，跳过链接后的动态→静态二次编译。
+    """
+    if getattr(args, "stage", None) not in ("all", "device_obj") or getattr(
+        args, "force_unknown", False
+    ):
+        return False
+    if not tiling_obj_paths or not is_cv_fusion_compile(args):
+        logger.info(
+            "[bake] skip: n_tiling_objs=%s is_cv=%s",
+            len(tiling_obj_paths or []),
+            is_cv_fusion_compile(args),
+        )
+        return False
+    tiling_so_file = link_tiling_so(args, tiling_obj_paths, temp_dir)
+    lib = ctypes.CDLL(tiling_so_file)
+    lib.AutofuseIsStaticShape.argtypes = []
+    lib.AutofuseIsStaticShape.restype = ctypes.c_bool
+    if not bool(lib.AutofuseIsStaticShape()):
+        logger.info("[bake] AutofuseIsStaticShape=false, keep dynamic device compile")
+        return False
+    rewrite_device_kernel_with_const_tiling(args, temp_dir, lib)
+    logger.info("[bake] single-pass static bake done")
     return True
 
 
@@ -1282,14 +1321,34 @@ def build_kernel_target(args, tiling_obj_paths, temp_dir):
             logger.info("process static shape kernel with tiling_repr")
         static_shape_kernel_proc(args, temp_dir, args.tiling_repr)
 
+    const_tiling_baked = bake_const_tiling_before_device_compile(
+        args, tiling_obj_paths, temp_dir
+    )
     kernel_obj_path = compile_device_obj(args, temp_dir)
     so_file = link_kernel_so(args, tiling_obj_paths, temp_dir, kernel_obj_path)
-    if args.stage == "device" or not try_static_shape_compile(args, temp_dir, so_file):
+    if (
+        const_tiling_baked
+        or args.stage == "device"
+        or not try_static_shape_compile(args, temp_dir, so_file)
+    ):
         return so_file
 
     # 静态 shape 重编译后，重新生成 device.o 并链接最终产物。
     kernel_obj_path = compile_device_obj(args, temp_dir)
     return link_kernel_so(args, tiling_obj_paths, temp_dir, kernel_obj_path)
+
+
+def is_device_const_tiling_baked(temp_dir):
+    """device tiling 头是否已被烧成 const（含 INDUCTOR_CONST_TILING_DATA 定义）。
+
+    动态头不会定义该宏，只有 bake 覆写后的 const 头才会 —— 用它作为"已单遍编译"
+    的自判据，避免 link 阶段强依赖上层透传 --const_tiling_baked。
+    """
+    tiling_data = os.path.join(temp_dir, "device", "autofuse_tiling_data.h")
+    if not os.path.exists(tiling_data):
+        return False
+    with open(tiling_data, "r") as file:
+        return "#define INDUCTOR_CONST_TILING_DATA" in file.read()
 
 
 @inductor_compile_duration("BuildKernelTargetFromObjects")
@@ -1301,6 +1360,18 @@ def build_kernel_target_from_objects(args, tiling_obj_paths, kernel_obj_path, te
         raise ValueError("device object path is required")
 
     so_file = link_kernel_so(args, tiling_obj_paths, temp_dir, kernel_obj_path)
+    const_tiling_baked = getattr(args, "const_tiling_baked", False)
+    if not const_tiling_baked and is_device_const_tiling_baked(temp_dir):
+        # 上层未透传 --const_tiling_baked，但 device tiling 头已是 const：
+        # 说明 device 已按 const 分支编过，跳过一次冗余重编，避免静默性能回退。
+        _log_warning(
+            "[bake] const_tiling_baked not passed but device tiling header is already "
+            "const; skip static recompile to avoid a redundant device compile"
+        )
+        const_tiling_baked = True
+    if const_tiling_baked:
+        # device 已在 device_obj 阶段按 const 分支编译，链接阶段无需二次编译。
+        return so_file
     if not try_static_shape_compile(args, temp_dir, so_file):
         return so_file
 
@@ -1423,12 +1494,19 @@ def main(args):
                 "shared_cv_wrapper_so": getattr(args, "shared_cv_wrapper_so", None),
             }
         elif args.stage == "device_obj":
+            tiling_obj_paths = parse_object_paths(
+                getattr(args, "tiling_obj_paths", "") or ""
+            )
+            baked = bake_const_tiling_before_device_compile(
+                args, tiling_obj_paths, args.temp_dir
+            )
             kernel_obj_path = compile_device_obj(args, args.temp_dir)
             return {
                 "version": 1,
                 "stage": "device_obj",
                 "kernel_obj_path": kernel_obj_path,
                 "kernel_source_path": args.device_files,
+                "baked": baked,
             }
         elif args.stage == "link":
             tiling_obj_paths = parse_object_paths(args.tiling_obj_paths)
