@@ -554,7 +554,7 @@ auto_gen_{super_operator.kernel_name}_kernel_{arch}(void) {{\n"
         [None] + sub_ops[:-1], sub_ops, sub_ops[1:] + [None]
     ):
         super_kernel_file += indent_code_func(
-            f"//begin func call of sub operator {sub_operator.kernel_name}\n"
+            f"//begin func call of sub operator{(' ' + sub_operator.kernel_name) if sub_operator.kernel_name else ''}\n"
         )
 
         # generate switch case func of dynamic
@@ -1240,7 +1240,7 @@ auto_gen_{super_operator.kernel_name}_kernel(void) {{\n'
         [None] + sub_ops[:-1], sub_ops, sub_ops[1:] + [None]
     ):
         super_kernel_file += indent_code_func(
-            f"//begin func call of sub operator {sub_operator.kernel_name}\n"
+            f"//begin func call of sub operator{(' ' + sub_operator.kernel_name) if sub_operator.kernel_name else ''}\n"
         )
 
         # generatre switch case func of dynamic
