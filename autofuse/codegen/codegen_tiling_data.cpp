@@ -317,7 +317,7 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
          << "#define GET_TILING_DATA_WITH_STRUCT_PTR(tiling_struct, tiling_data, tiling_arg) \\\n"
          << "const tiling_struct tiling_data = convert_from_bytes<tiling_struct>(kConstMatmulTilingBytes); \n";
       ss << "#define INDUCTOR_CONST_TILING_DATA\n";
-      ss << "const CVAutofuseTilingData kConstTilingData = {};\n";
+      ss << "constexpr CVAutofuseTilingData kConstTilingData = {};\n";
     } else {
       ss << "#define GET_TILING_DATA_WITH_STRUCT(tiling_struct, tiling_data, tiling_arg) \\\n"
          << "const tiling_struct &tiling_data = *reinterpret_cast<const tiling_struct "
@@ -691,7 +691,7 @@ std::string codegen::TilingData::GenCVConstReplace(const std::string &tiling_dat
         "std::to_string(g_matmul_tiling_bytes.size()) + \"] = {\" + matmul_bytes + \"};\\n\";"
      << std::endl;
   ss << "  std::stringstream k_const_tiling_data_ss;" << std::endl;
-  ss << "  k_const_tiling_data_ss << \"const CVAutofuseTilingData kConstTilingData = "
+  ss << "  k_const_tiling_data_ss << \"constexpr CVAutofuseTilingData kConstTilingData = "
         "{{CVAutofuseExternTilingData{{}, \";"
      << std::endl;
   ss << "  k_const_tiling_data_ss << std::to_string((uint64_t)" << tiling_data_struct_name
@@ -716,7 +716,7 @@ std::string codegen::TilingData::GenCVConstReplace(const std::string &tiling_dat
      << ".cube_m_stage_size) << \", {\";" << std::endl;
   ss << "  k_const_tiling_data_ss << matmul_bytes << \"}};\";" << std::endl;
   ss << "  replaceSubstring(tiling_data_const_gen_result, " << std::endl;
-  ss << "    \"const CVAutofuseTilingData kConstTilingData = {};\", " << std::endl;
+  ss << "    \"constexpr CVAutofuseTilingData kConstTilingData = {};\", " << std::endl;
   ss << "    k_const_tiling_data_ss.str());" << std::endl;
   ss << "  replaceSubstring(tiling_data_const_gen_result, " << std::endl;
   ss << "    \"#define GET_TILING_DATA_WITH_STRUCT(tiling_struct, tiling_data, tiling_arg)\", " << std::endl;

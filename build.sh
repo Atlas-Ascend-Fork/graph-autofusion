@@ -28,8 +28,10 @@ else
   PYTHON_CMD="python3"
 fi
 
-SUPPORTED_MODULES=("superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e")
+SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e")
 declare -A MODULE_ACTION_HANDLERS=(
+  ["multistream:py_ut"]="multistream_py_ut"
+  ["multistream:py_st"]="multistream_py_st"
   ["superkernel:py_ut"]="superkernel_py_ut"
   ["superkernel:cpp_ut"]="superkernel_cpp_ut"
   ["superkernel:py_st"]="superkernel_py_st"
@@ -636,6 +638,41 @@ autofuse_module_test_suite() {
   fi
 
   bash "${BASEPATH}/scripts/test/run_autofuse_test.sh" "${test_args[@]}"
+}
+
+multistream_py_ut() {
+  echo "---------------- Start multistream UT ----------------"
+  cd "${BASEPATH}/multistream" &&
+  "${PYTHON_CMD}" -m pip install --upgrade pip -q &&
+  "${PYTHON_CMD}" -m pip install -e ".[dev]" --force-reinstall -q &&
+  if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
+    "${PYTHON_CMD}" -m pytest tests/ut -m ut -n auto \
+                                     --cov-config=scripts/ms_ut_cfg.toml \
+                                     --cov=. \
+                                     --cov-report=term-missing \
+                                     --cov-report=html \
+                                     --cov-report=xml \
+                                     --cov-report=lcov:"${BASEPATH}/coverage_multistream.info"
+  else
+    "${PYTHON_CMD}" -m pytest tests/ut -m ut -n auto
+  fi
+}
+
+multistream_py_st() {
+  echo "---------------- Start multistream ST ----------------"
+  cd "${BASEPATH}/multistream" &&
+  "${PYTHON_CMD}" -m pip install --upgrade pip -q &&
+  "${PYTHON_CMD}" -m pip install -e ".[dev]" --force-reinstall -q &&
+  if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
+    "${PYTHON_CMD}" -m pytest tests/st -m st --junitxml="${BASEPATH}/build_out/multistream_st/junit.xml" \
+                                     --cov-config=scripts/ms_st_cfg.toml \
+                                     --cov=. \
+                                     --cov-report=term-missing \
+                                     --cov-report=html \
+                                     --cov-report=xml
+  else
+    "${PYTHON_CMD}" -m pytest tests/st -m st --junitxml="${BASEPATH}/build_out/multistream_st/junit.xml"
+  fi
 }
 
 main() {

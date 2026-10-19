@@ -4621,6 +4621,20 @@ std::string Kernel::GenKernelFuncCallForInductor(const ascir::FusedScheduledResu
                       "Failed to get cube info from FusedScheduledResult");
     if (is_batch) {
       cube_template_args = R"(
+#ifdef INDUCTOR_CONST_TILING_DATA
+  constexpr int64_t tiling_key = kConstTilingData.extern_tiling_data.cube_tiling_key;
+  constexpr int8_t BATCH_API_LEVEL = static_cast<int8_t>((tiling_key >> 0) & 0xF);
+  constexpr int8_t BATCH_A_TRANS = static_cast<int8_t>((tiling_key >> 4) & 0x3);
+  constexpr int8_t BATCH_B_TRANS = static_cast<int8_t>((tiling_key >> 6) & 0x3);
+  constexpr int8_t BATCH_ITER_MODEL = static_cast<int8_t>((tiling_key >> 8) & 0xF);
+  constexpr int8_t BMODEL = static_cast<int8_t>((tiling_key >> 12) & 0xF);
+  constexpr int8_t BATCH_FULL_LOAD = static_cast<int8_t>((tiling_key >> 16) & 0xF);
+  constexpr int8_t BATCH_L0C2OUT_MODEL = static_cast<int8_t>((tiling_key >> 20) & 0xF);
+  constexpr int8_t FUSION_MODE = static_cast<int8_t>(kConstTilingData.extern_tiling_data.cv_tiling_data.fusion_mode);
+  constexpr int8_t UB_MODE = static_cast<int8_t>(kConstTilingData.extern_tiling_data.cv_tiling_data.ub_mode);
+  constexpr int8_t MIX_MODE = static_cast<int8_t>(kConstTilingData.extern_tiling_data.cv_tiling_data.mix_mode);
+  (void)tiling_data;
+#else
   int64_t tiling_key = tiling_data->cube_tiling_key;
   int8_t BATCH_API_LEVEL = (tiling_key >> 0) & 0xF;
   int8_t BATCH_A_TRANS = (tiling_key >> 4) & 0x3;
@@ -4632,9 +4646,24 @@ std::string Kernel::GenKernelFuncCallForInductor(const ascir::FusedScheduledResu
   int8_t FUSION_MODE = tiling_data->cv_tiling_data.fusion_mode;
   int8_t UB_MODE = tiling_data->cv_tiling_data.ub_mode;
   int8_t MIX_MODE = tiling_data->cv_tiling_data.mix_mode;
+#endif
 )";
     } else {
       cube_template_args = R"(
+#ifdef INDUCTOR_CONST_TILING_DATA
+  constexpr int64_t tiling_key = kConstTilingData.extern_tiling_data.cube_tiling_key;
+  constexpr int8_t API_LEVEL = static_cast<int8_t>((tiling_key >> 0) & 0xF);
+  constexpr int8_t A_TRANS = static_cast<int8_t>((tiling_key >> 4) & 0x3);
+  constexpr int8_t B_TRANS = static_cast<int8_t>((tiling_key >> 6) & 0x3);
+  constexpr int8_t BATCH_MODEL = static_cast<int8_t>((tiling_key >> 8) & 0xF);
+  constexpr int8_t MODEL = static_cast<int8_t>((tiling_key >> 12) & 0xF);
+  constexpr int8_t FULL_LOAD = static_cast<int8_t>((tiling_key >> 16) & 0xF);
+  constexpr int8_t L0C2OUT_MODEL = static_cast<int8_t>((tiling_key >> 20) & 0xF);
+  constexpr int8_t FUSION_MODE = static_cast<int8_t>(kConstTilingData.extern_tiling_data.cv_tiling_data.fusion_mode);
+  constexpr int8_t UB_MODE = static_cast<int8_t>(kConstTilingData.extern_tiling_data.cv_tiling_data.ub_mode);
+  constexpr int8_t MIX_MODE = static_cast<int8_t>(kConstTilingData.extern_tiling_data.cv_tiling_data.mix_mode);
+  (void)tiling_data;
+#else
   int64_t tiling_key = tiling_data->cube_tiling_key;
   int8_t API_LEVEL = (tiling_key >> 0) & 0xF;
   int8_t A_TRANS = (tiling_key >> 4) & 0x3;
@@ -4646,6 +4675,7 @@ std::string Kernel::GenKernelFuncCallForInductor(const ascir::FusedScheduledResu
   int8_t FUSION_MODE = tiling_data->cv_tiling_data.fusion_mode;
   int8_t UB_MODE = tiling_data->cv_tiling_data.ub_mode;
   int8_t MIX_MODE = tiling_data->cv_tiling_data.mix_mode;
+#endif
 )";
     }
   }

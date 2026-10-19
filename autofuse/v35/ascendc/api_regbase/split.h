@@ -55,7 +55,8 @@ __aicore__ inline void DataCopyGatherVf(__ubuf__ T *dst_addr, __ubuf__ T *src_ad
                                         uint32_t dst_cols, uint32_t src_col_offset,
                                         AscendC::LocalTensor<uint8_t> &tmp_buf) {
   {
-    constexpr uint32_t vflen = AscendC::VECTOR_REG_WIDTH / sizeof(T);
+    // 索引/gather/mask 均以工作类型 U 计算 lane 数，b8 场景下 U 为 b16。
+    constexpr uint32_t vflen = AscendC::VECTOR_REG_WIDTH / sizeof(U);
     uint32_t size0 = vflen / dst_cols;
     if (size0 > rows) {
       size0 = rows;
@@ -129,7 +130,7 @@ __aicore__ inline void DataCopyGatherVf(__ubuf__ T *dst_addr, __ubuf__ T *src_ad
 template <typename T, typename U, typename Y, size_t OUTPUT_NUM>
 __aicore__ inline void SplitExtendInner(__ubuf__ T *src_addr, __ubuf__ T *dst_addrs[OUTPUT_NUM],
                                         AscendC::LocalTensor<uint8_t> &tmp_buf, const SplitTiling<OUTPUT_NUM> &tiling) {
-  const uint32_t kGatherMaxLen = AscendC::VECTOR_REG_WIDTH / sizeof(T);
+  const uint32_t kGatherMaxLen = AscendC::VECTOR_REG_WIDTH / sizeof(U);
 
   uint32_t src_col_offset = 0;
   for (size_t i = 0UL; i < OUTPUT_NUM; ++i) {
@@ -151,6 +152,13 @@ __aicore__ inline void SplitExtend(__ubuf__ T *src_addr, __ubuf__ T *out_addrs[O
     SplitExtendInner<uint32_t, uint32_t, int32_t, OUTPUT_NUM>(reinterpret_cast<__ubuf__ uint32_t *>(src_addr),
                                                               reinterpret_cast<__ubuf__ uint32_t **>(out_addrs),
                                                               tmp_buf, tiling);
+  } else if constexpr (sizeof(T) == sizeof(uint8_t)) {
+    // b8 无法整体按 b16 处理时（存在奇数输出列），统一按无符号字节(uint8_t)处理，
+    // 索引/gather 的工作类型提升为 b16(U)。SDK 的 Pack(vpack) 目标寄存器要求 b8 为
+    // unsigned char，不能用 int8_t，故此处显式以 uint8_t 实例化（纯字节搬移，符号无关）。
+    SplitExtendInner<uint8_t, uint16_t, int16_t, OUTPUT_NUM>(reinterpret_cast<__ubuf__ uint8_t *>(src_addr),
+                                                             reinterpret_cast<__ubuf__ uint8_t **>(out_addrs), tmp_buf,
+                                                             tiling);
   } else {
     SplitExtendInner<uint16_t, uint16_t, int16_t, OUTPUT_NUM>(reinterpret_cast<__ubuf__ uint16_t *>(src_addr),
                                                               reinterpret_cast<__ubuf__ uint16_t **>(out_addrs),

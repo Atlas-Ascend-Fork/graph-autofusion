@@ -24,41 +24,36 @@ TEST_P(E2E_BackendSplit_Code, CalculateCorrect) {
 
   uint64_t block_dim = 48;
 
-  int input_size = test_shape[0] * test_shape[1];
-  int output_size = input_size / 2;
+  // 图输入为 u8[s0, 2*s1]，沿最后一维 split 成两个 u8[s0, s1] 输出。
+  int rows = test_shape[0];
+  int cols = test_shape[1];
+  int input_size = rows * cols * 2;
+  int output_size = rows * cols;
 
   AutofuseTilingData tiling_data;
-  int32_t *input = (int32_t *)AscendC::GmAlloc(input_size * sizeof(int32_t) + 32);
-  int32_t *y1 = (int32_t *)AscendC::GmAlloc(output_size * sizeof(int32_t) + 32);
-  int32_t *y2 = (int32_t *)AscendC::GmAlloc(output_size * sizeof(int32_t) + 32);
-  int32_t *expect1 = (int32_t *)AscendC::GmAlloc(output_size * sizeof(int32_t) + 32);
-  int32_t *expect2 = (int32_t *)AscendC::GmAlloc(output_size * sizeof(int32_t) + 32);
+  uint8_t *input = (uint8_t *)AscendC::GmAlloc(input_size * sizeof(uint8_t) + 32);
+  uint8_t *y1 = (uint8_t *)AscendC::GmAlloc(output_size * sizeof(uint8_t) + 32);
+  uint8_t *y2 = (uint8_t *)AscendC::GmAlloc(output_size * sizeof(uint8_t) + 32);
+  uint8_t *expect1 = (uint8_t *)AscendC::GmAlloc(output_size * sizeof(uint8_t) + 32);
+  uint8_t *expect2 = (uint8_t *)AscendC::GmAlloc(output_size * sizeof(uint8_t) + 32);
 
   // Prepare test and expect data
-  int32_t value = 0;
-  int32_t half_size = test_shape[1] / 2;
-  for (int i = 0; i < test_shape[0]; ++i) {
-    for (int j = 0; j < (test_shape[1]); ++j) {
-      input[i * test_shape[1] + j] = j + i * test_shape[1];
-      // input[i * test_shape[1] + test_shape[1] + j] = -1 * input2[i * test_shape[1] + j];
-      // input1[i * test_shape[1] + j] = value;
-      // input2[i * test_shape[1] + j] = 100000 + value;
-      // expect[i * 2 * test_shape[1] + j] = -1 * input1[i * test_shape[1] + j];
-      // expect[i * 2 * test_shape[1] + test_shape[1] + j] = -1 * input2[i * test_shape[1] + j];
+  for (int i = 0; i < rows; ++i) {
+    for (int j = 0; j < cols * 2; ++j) {
+      input[i * cols * 2 + j] = static_cast<uint8_t>(i * cols * 2 + j);
     }
   }
 
-  for (int i = 0; i < test_shape[0]; ++i) {
-    for (int j = 0; j < half_size; ++j) {
-      expect1[i * half_size + j] = input[i * test_shape[1] + j];
-      expect2[i * half_size + j] = input[i * test_shape[1] + j + half_size];
-      value++;
+  for (int i = 0; i < rows; ++i) {
+    for (int j = 0; j < cols; ++j) {
+      expect1[i * cols + j] = input[i * cols * 2 + j];
+      expect2[i * cols + j] = input[i * cols * 2 + cols + j];
     }
   }
 
   // Launch
   uint32_t ws_size = 0;
-  AutofuseTiling(test_shape[0], test_shape[1], &tiling_data, &ws_size, &block_dim, 1, 192 * 1024);
+  AutofuseTiling(rows, cols, &tiling_data, &ws_size, &block_dim, 1, 192 * 1024);
 
   AscendC::SetKernelMode(KernelMode::AIV_MODE);
   ICPU_RUN_KF(split_v2_test, tiling_data.block_dim, (uint8_t *)input, (uint8_t *)y1, (uint8_t *)y2, nullptr,
@@ -76,7 +71,7 @@ TEST_P(E2E_BackendSplit_Code, CalculateCorrect) {
     }
   }
 
-  // EXPECT_EQ(diff_count, 0) << " of " << output_size;
+  EXPECT_EQ(diff_count, 0) << " of " << output_size * 2;
 
   AscendC::GmFree(input);
   AscendC::GmFree(y1);

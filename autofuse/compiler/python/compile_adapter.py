@@ -139,6 +139,7 @@ def parse_compile_args(argv):
     parser.add_argument("--kernel_obj_path", default="", type=str)
     parser.add_argument("--kernel_source_path", default="", type=str)
     parser.add_argument("--shared_cv_wrapper_so", default="", type=str)
+    parser.add_argument("--const_tiling_baked", default=False, type=str2bool)
     # 使用 parse_known_args 容忍上层透传的未声明参数，避免触发 SystemExit 终止编译。
     args, unknown = parser.parse_known_args(argv)
     if unknown:
@@ -555,6 +556,7 @@ def _compile_result(args, result):
             "stage": args.stage,
             "kernel_obj_path": result["kernel_obj_path"],
             "kernel_source_path": result["kernel_source_path"],
+            "baked": result.get("baked", False),
         }
     return result
 

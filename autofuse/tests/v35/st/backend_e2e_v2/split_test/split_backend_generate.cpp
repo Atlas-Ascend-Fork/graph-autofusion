@@ -276,7 +276,7 @@ TEST_F(TestBackendSplitE2e, SplitNotAllAligned) {
  )";
 
   af::AscGraph graph("split_v2_test");
-  CreateSplitAscGraph(graph, {"s0", "s1"});
+  CreateSplitAscGraph(graph, {"s0", "s1"}, af::DT_UINT8);
   std::map<std::string, std::string> shape_info({{"s0", "stub_s0"}, {"s1", "stub_s1"}});
   std::cout << "KERNEL_SRC_LIST=" << KERNEL_SRC_LIST << std::endl;
   std::vector<std::string> parts = splitString(KERNEL_SRC_LIST, ':');

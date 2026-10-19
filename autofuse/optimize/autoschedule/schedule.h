@@ -83,6 +83,10 @@ class Scheduler {
   void RemoveDuplicatedAxisFromGroup();
   Status InitIndirectLoadScheduleCase();
   Status ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &skip_main_tiling) const;
+  // 可求解 tile（通用 TileSplit 产物）返回 TileInner 轴 id；固定 tile 返回 kIdNone。
+  ascir::AxisId GetSolvedTileInnerAxis() const;
+  // ApplyTiling 后将可求解 TileInner 并入输入侧 pre 节点的向量化窗口（多行 staging）。
+  Status FoldSolvedTileInnerIntoPreWindow(const af::AscNodePtr &node) const;
   Status SynchronizeTransposeInputSchedAxis();
   Status ModifyStoreAfterReduce(ascir::NodeView &node, ascir::AxisId reduce_block_id);
   Status ApplyBlockSplitToNode(ascir::NodeView &node, bool is_store_after_reduce);

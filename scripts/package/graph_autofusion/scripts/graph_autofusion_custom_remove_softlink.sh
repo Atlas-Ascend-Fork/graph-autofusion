@@ -93,6 +93,8 @@ python_dir_chmod_set "$WHL_SOFTLINK_INSTALL_DIR_PATH"
 
 remove_softlink "superkernel"
 remove_softlink "superkernel-*.dist-info"
+remove_softlink "multistream"
+remove_softlink "multistream-*.dist-info"
 
 remove_empty_dir "$WHL_SOFTLINK_INSTALL_DIR_PATH"
 remove_empty_dir "$install_path/$latest_dir/python"

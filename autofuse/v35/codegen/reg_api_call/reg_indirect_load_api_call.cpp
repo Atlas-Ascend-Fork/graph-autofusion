@@ -93,7 +93,27 @@ bool IsAxisDerivedFrom(const TPipe &tpipe, ascir::AxisId axis_id, ascir::AxisId 
   return false;
 }
 
-af::Status BuildTensorWindowInfo(const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout,
+// 判断张量向量化视图是否越出 gather 窗口：存在未被窗口维（布局轴 [axis_pos, rank)）
+// 派生覆盖的轴（如窗口跨行时由模板 outer 轴派生的 tile 轴出现在视图首部）。
+bool TensorViewSpansRows(const TPipe &tpipe, const Tensor &tensor,
+                         const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout, size_t axis_pos) {
+  for (ascir::AxisId vec_axis : tensor.vectorized_axis) {
+    bool inside_window = false;
+    for (size_t dim = axis_pos; dim < layout.axis_ids.size(); ++dim) {
+      if (IsAxisDerivedFrom(tpipe, vec_axis, layout.axis_ids[dim])) {
+        inside_window = true;
+        break;
+      }
+    }
+    if (!inside_window) {
+      return true;
+    }
+  }
+  return false;
+}
+
+af::Status BuildTensorWindowInfo(const TPipe &tpipe,
+                                 const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout,
                                  const Tensor &tensor, size_t axis_pos, LogicalTensorInfo &info) {
   GE_ASSERT_TRUE(layout.axis_ids.size() == layout.sizes.size() && layout.sizes.size() == layout.strides.size(),
                  "IndirectLoad tensor window layout rank mismatch.");
@@ -109,7 +129,7 @@ af::Status BuildTensorWindowInfo(const ascgen_utils::indirect_load::IndirectLoad
     return af::SUCCESS;
   }
   af::Expression compact_stride = af::sym::kSymbolOne;
-  for (size_t index = info.sizes.size(); index > axis_pos; --index) {
+  for (size_t index = info.sizes.size(); index > 0UL; --index) {
     const size_t dim = index - 1UL;
     if (af::SymbolicUtils::StaticCheckEq(layout.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue) {
       info.strides[dim] = af::sym::kSymbolZero;
@@ -122,7 +142,41 @@ af::Status BuildTensorWindowInfo(const ascgen_utils::indirect_load::IndirectLoad
           tensor
               .vectorized_strides[static_cast<size_t>(std::distance(tensor.vectorized_axis.begin(), vectorized_axis))];
     } else {
-      info.strides[dim] = compact_stride;
+      // 可求解多行 tile：逻辑视图轴在张量中被分裂为 TileInner 后代轴（如 a0 -> a0t），
+      // 取后代轴的向量化步长（staging 视图步长）。行维（dim < axis_pos）的 staging 按
+      // 紧凑布局写入（DMA 剥离行间 padding），行步长必须取 staging 视图步长而非逻辑
+      // （GM）步长，否则多行窗口按 padding 步长寻址紧凑缓冲会读错行。gather 轴
+      // （dim == axis_pos）步长描述 staged 源区内被 gather 行的寻址几何：staging 按
+      // GM 布局整块拷贝源区（含行间 gap，如 rank3_axis1_input_index_gap 用例的
+      // 16x8 源区仅内层 5 有效），必须保留逻辑步长，不得取输出侧 tile 后代（如 a2t）
+      // 的步长 1（mixed_rank4_axis2 用例回归：行 gather 退化为滑动窗口 gather）；
+      // 轴内维度（dim > axis_pos）无后代时沿用 compact_stride（紧凑写回语义）。
+      // 固定单行 tile 无向量化后代，保留逻辑步长：单行窗口下行步长不参与寻址（由
+      // 窗口基址吸收），维持既有产物不变。
+      bool derived = false;
+      if (dim < axis_pos) {
+        for (size_t vec_pos = 0UL; vec_pos < tensor.vectorized_axis.size(); ++vec_pos) {
+          if (IsAxisDerivedFrom(tpipe, tensor.vectorized_axis[vec_pos], layout.axis_ids[dim])) {
+            info.strides[dim] = tensor.vectorized_strides[vec_pos];
+            derived = true;
+            break;
+          }
+        }
+        if (!derived && TensorViewSpansRows(tpipe, tensor, layout, axis_pos)) {
+          // 窗口跨行但行维后代轴不可达（tile 轴派生自模板 outer 轴——其谱系根为新建的
+          // 模板轴而非本维布局轴，派生查找失败）：staging 将各行按窗口跨度紧凑写入
+          // （多块 DMA，dstStride=0），行步长取紧凑累积步长。模板 OuterOffset 按
+          // strides 逐维分解 merged outer 行号，紧凑布局下各 row 维步长恰为
+          // compact_stride 的逐级累积（最内 row 维为窗口跨度，更外层逐级乘以内层
+          // 尺寸），与 staging 逐块紧凑写入的布局一致（如 torch_gather_frontend
+          // 用例：GM 64-stride 行 staged 为 32 紧凑块，行步长须 32 而非 64）。
+          info.strides[dim] = compact_stride;
+          derived = true;
+        }
+      }
+      if (!derived && dim > axis_pos) {
+        info.strides[dim] = compact_stride;
+      }
     }
     if (af::SymbolicUtils::StaticCheckEq(info.strides[dim], af::sym::kSymbolZero) != af::TriBool::kTrue) {
       compact_stride = af::sym::Mul(info.strides[dim], info.sizes[dim]);
@@ -1150,7 +1204,7 @@ af::Status EmitSimtIndexPrepass(const ascgen_utils::indirect_load::SimtIndexPrep
   return af::SUCCESS;
 }
 
-std::vector<ascir::SizeExpr> GetSimdOutputStrides(const Tensor &tensor,
+std::vector<ascir::SizeExpr> GetSimdOutputStrides(const TPipe &tpipe, const Tensor &tensor,
                                                   const ascgen_utils::indirect_load::LogicalTensorView &layout) {
   std::vector<ascir::SizeExpr> strides(layout.axis_ids.size(), af::sym::kSymbolOne);
   for (size_t dim = 0; dim < layout.axis_ids.size(); ++dim) {
@@ -1162,6 +1216,15 @@ std::vector<ascir::SizeExpr> GetSimdOutputStrides(const Tensor &tensor,
     const auto axis_it = std::find(tensor.axis.begin(), tensor.axis.end(), layout.axis_ids[dim]);
     if (axis_it != tensor.axis.end()) {
       strides[dim] = tensor.axis_strides[static_cast<size_t>(std::distance(tensor.axis.begin(), axis_it))];
+      continue;
+    }
+    // 可求解多行 tile：逻辑视图轴在张量中被分裂为 TileInner 后代轴（如 a0 -> a0t），
+    // 该维输出步长取后代轴在紧凑 tile 视图中的向量化步长（多行窗口的行步长）。
+    for (size_t vec_pos = 0UL; vec_pos < tensor.vectorized_axis.size(); ++vec_pos) {
+      if (IsAxisDerivedFrom(tpipe, tensor.vectorized_axis[vec_pos], layout.axis_ids[dim])) {
+        strides[dim] = tensor.vectorized_strides[vec_pos];
+        break;
+      }
     }
   }
   return strides;
@@ -1192,7 +1255,7 @@ void EmitSimdParams(const TPipe &tpipe, const std::vector<ascir::AxisId> &curren
   const std::string output_offset = tpipe.tiler.Offset(current_axis, output.axis, output.axis_strides);
   if (metadata.try_embedding) {
     const std::string logical_output_size = GetSimdLogicalOutputSize(tpipe, output);
-    const auto output_strides = GetSimdOutputStrides(output, output_layout);
+    const auto output_strides = GetSimdOutputStrides(tpipe, output, output_layout);
     ss << "static_cast<uint32_t>(" << logical_output_size << "), static_cast<uint32_t>(" << output.actual_size
        << "), static_cast<uint32_t>(" << input.actual_size << "), " << output_offset << ", "
        << tpipe.tiler.Size(input_info.sizes[axis_pos]) << ", {" << JoinSizeExprs(index_info.sizes, tpipe) << "}, {"
@@ -1200,7 +1263,7 @@ void EmitSimdParams(const TPipe &tpipe, const std::vector<ascir::AxisId> &curren
        << JoinSizeExprs(output_strides, tpipe) << "}";
   } else if (metadata.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided) {
     const std::string logical_output_size = GetSimdLogicalOutputSize(tpipe, output);
-    const auto output_strides = GetSimdOutputStrides(output, output_layout);
+    const auto output_strides = GetSimdOutputStrides(tpipe, output, output_layout);
     ss << "static_cast<uint32_t>(" << logical_output_size << "), static_cast<uint32_t>(" << output.actual_size << "), "
        << output_offset << ", {" << JoinSizeExprs(index_info.sizes, tpipe) << "}, {"
        << JoinSizeExprs(input_info.strides, tpipe) << "}, {" << JoinSizeExprs(index_info.strides, tpipe) << "}, {"
@@ -1587,7 +1650,7 @@ Status IndirectLoadRegApiCall::GenerateSk(const TPipe &tpipe, const std::vector<
   const size_t axis_pos = static_cast<size_t>(axis_);
   const LogicalTensorInfo x_info(logical_view_.input);
   LogicalTensorInfo index_info;
-  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(logical_view_.index, index, axis_pos, index_info));
+  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(tpipe, logical_view_.index, index, axis_pos, index_info));
   std::string x_dtype_name;
   std::string index_dtype_name;
   GE_ASSERT_SUCCESS(Tensor::DtypeName(x.dtype, x_dtype_name));
@@ -1620,8 +1683,8 @@ Status IndirectLoadRegApiCall::GenerateSimd(const TPipe &tpipe, const std::vecto
   const size_t axis_pos = static_cast<size_t>(axis_);
   LogicalTensorInfo input_info;
   LogicalTensorInfo index_info;
-  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(logical_view_.input, input, axis_pos, input_info));
-  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(logical_view_.index, index, axis_pos, index_info));
+  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(tpipe, logical_view_.input, input, axis_pos, input_info));
+  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(tpipe, logical_view_.index, index, axis_pos, index_info));
   const auto tmp_iter = tmp_buf_id.find(-1L);
   if (simd_metadata_.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided) {
     GE_ASSERT_TRUE(tmp_iter != tmp_buf_id.end(), "IndirectLoad SIMD requires an API-level tmp buffer.");

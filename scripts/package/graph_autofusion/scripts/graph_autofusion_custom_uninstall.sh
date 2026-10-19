@@ -109,31 +109,28 @@ recreate_common_stub_softlink() {
 whl_uninstall_package() {
     local _module="$1"
     local _module_apth="$2"
-    if [ ! -d "${WHL_INSTALL_DIR_PATH}/${_module}" ]; then
-        pip3 show "${_module}" > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
-            log "WARNING" "${_module} is not exist."
-        else
-            pip3 uninstall -y "${_module}" 1> /dev/null
-            local ret=$?
-            if [ $ret -ne 0 ]; then
-                log "WARNING" "uninstall ${_module} failed, error code: $ret."
-                exit 1
-            else
-                log "INFO" "${_module} uninstalled successfully!"
-            fi
-        fi
+    local _module_dist_name="${_module//-/_}"
+    # Keep each package lookup independent when local and default installs coexist.
+    local PYTHONPATH=""
+    local PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-}"
+    export PYTHONPATH PIP_BREAK_SYSTEM_PACKAGES
+    if [ -d "${WHL_INSTALL_DIR_PATH}/${_module}" ] ||
+        ls "${WHL_INSTALL_DIR_PATH}/${_module_dist_name}-"*.dist-info >/dev/null 2>&1; then
+        PYTHONPATH="${_module_apth}"
+        PIP_BREAK_SYSTEM_PACKAGES=1
+    elif ! pip3 show "${_module}" >/dev/null 2>&1; then
+        # --pylocal is optional: retain the historical default-environment lookup.
+        log "WARNING" "${_module} is not exist."
+        return 0
+    fi
+
+    pip3 uninstall -y "${_module}" > /dev/null 2>&1
+    local ret=$?
+    if [ $ret -ne 0 ]; then
+        log "WARNING" "uninstall ${_module} failed, error code: $ret."
+        exit 1
     else
-        export PYTHONPATH="${_module_apth}"
-        export PIP_BREAK_SYSTEM_PACKAGES=1  # 强制卸载系统包
-        pip3 uninstall -y "${_module}" > /dev/null 2>&1
-        local ret=$?
-        if [ $ret -ne 0 ]; then
-            log "WARNING" "uninstall ${_module} failed, error code: $ret."
-            exit 1
-        else
-            log "INFO" "${_module} uninstalled successfully!"
-        fi
+        log "INFO" "${_module} uninstalled successfully!"
     fi
 }
 
@@ -197,10 +194,13 @@ custom_uninstall() {
         chmod +w -R "$curpath" 2> /dev/null
         chmod +w -R "${WHL_INSTALL_DIR_PATH}/superkernel" 2> /dev/null
         chmod +w -R "${WHL_INSTALL_DIR_PATH}/superkernel-0.1.0.dist-info" 2> /dev/null
+        chmod +w -R "${WHL_INSTALL_DIR_PATH}/multistream" 2> /dev/null
+        chmod +w -R "${WHL_INSTALL_DIR_PATH}"/multistream-*.dist-info 2> /dev/null
 
-        log "INFO" "uninstall superkernel python package begin..."
+        log "INFO" "uninstall graph_autofusion python packages begin..."
         whl_uninstall_package "superkernel" "${WHL_INSTALL_DIR_PATH}"
-        log "INFO" "superkernel python package uninstalled successfully!"
+        whl_uninstall_package "multistream" "${WHL_INSTALL_DIR_PATH}"
+        log "INFO" "graph_autofusion python packages uninstalled successfully!"
     fi
 
     remove_empty_dir "${common_parse_dir}/share/info/graph_autofusion/python"

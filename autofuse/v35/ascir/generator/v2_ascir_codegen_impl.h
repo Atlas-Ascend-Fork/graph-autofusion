@@ -3897,8 +3897,9 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
             "indirect_load_sk_reg_base.h", "indirect_load_simt_reg_base.h",        "transpose_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
-    return {"basic_api/kernel_operator_vec_gather_intf.h", "basic_api/reg_compute/kernel_reg_compute_intf.h",
-            "simt_api/cpp/kernel_simt_intf.h"};
+    // SIMD offsets fast path uses vector Cast, provided only by vconv.
+    return {"basic_api/kernel_operator_vec_gather_intf.h", "basic_api/kernel_operator_vec_vconv_intf.h",
+            "basic_api/reg_compute/kernel_reg_compute_intf.h", "simt_api/cpp/kernel_simt_intf.h"};
   }
   [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
     GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),

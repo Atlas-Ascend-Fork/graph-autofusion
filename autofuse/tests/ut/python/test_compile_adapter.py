@@ -834,3 +834,38 @@ def test_host_compile_and_jit_compile_signatures_keep_stable(compile_adapter_mod
         "tiling_impl_code",
         "argv",
     ]
+
+
+def test_parse_compile_args_reads_const_tiling_baked(compile_adapter_module):
+    args, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so", "--const_tiling_baked=True"], "link", None
+    )
+    assert args.const_tiling_baked is True
+
+    args, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so", "--const_tiling_baked=False"], "link", None
+    )
+    assert args.const_tiling_baked is False
+
+    args, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so"], "link", None
+    )
+    assert args.const_tiling_baked is False
+
+
+def test_compile_result_carries_baked_for_device_obj(compile_adapter_module):
+    result = {
+        "kernel_obj_path": "/tmp/k.o",
+        "kernel_source_path": "/tmp/k.cpp",
+        "baked": True,
+    }
+    out = compile_adapter_module._compile_result(
+        types.SimpleNamespace(stage="device_obj"), result
+    )
+    assert out["baked"] is True
+
+    out = compile_adapter_module._compile_result(
+        types.SimpleNamespace(stage="device_obj"),
+        {"kernel_obj_path": "/tmp/k.o", "kernel_source_path": "/tmp/k.cpp"},
+    )
+    assert out["baked"] is False

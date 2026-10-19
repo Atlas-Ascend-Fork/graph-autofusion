@@ -1365,6 +1365,8 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimdDirectBroadcastUsesUnserializedT
   ASSERT_NE(indirect_load, nullptr);
   ascgen_utils::indirect_load::TemplateAxes axes;
   ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(indirect_load, axes), af::SUCCESS);
+  // 该图 index 视图带行间 padding（步长为稠密的 2 倍）：多行 staging 会剥离 padding 而
+  // 模板按逻辑步长寻址，两者不一致，保持固定单行 tile。
   ExpectFixedTileSplit(*simd, axes.outer_axis);
 }
 
@@ -1468,6 +1470,8 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, StoresTemplateAxesWithoutOverwriting
   ExpectAxisNames(simd_graph, indirect_load->attr.sched.axis, {"z4", "z5", "z6", "z7"});
   ExpectAxisNames(simd_graph, {axes.outer_axis}, {"indirect_load_outer"});
   ExpectAxisNames(simd_graph, {axes.inner_axis}, {"indirect_load_inner"});
+  // rank4/axis2（行维跨 z0/z1 两维，由 merged outer 承载）：多行 staging 无法映射为
+  // 单一批量 DMA，保持生成器期固定 tile pair（可求解 tile 仅限 axis_index==1 形态）。
   ExpectFixedTileSplit(simd_graph, axes.outer_axis);
 
   ascgen_utils::indirect_load::TemplateLogicalView logical_view;
@@ -1661,6 +1665,7 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimdNormalizesNonExpandedGraph) {
   ExpectAxisNames(simd_graph, {axes.inner_axis}, {"indirect_load_inner"});
   ExpectAxisNames(simd_graph, {axes.input_inner_axis}, {"indirect_load_input_inner"});
   ExpectMergedFrom(simd_graph, "indirect_load_input_inner", {"z2", "z3"});
+  // 同 StoresTemplateAxesWithoutOverwritingSchedAxis：rank4/axis2 保持固定 tile pair。
   ExpectFixedTileSplit(simd_graph, axes.outer_axis);
 
   ascgen_utils::indirect_load::TemplateLogicalView logical_view;

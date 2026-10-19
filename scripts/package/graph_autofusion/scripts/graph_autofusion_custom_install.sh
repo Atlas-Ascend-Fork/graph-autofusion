@@ -324,6 +324,7 @@ clear_kernel_cache_dir() {
 
 WHL_INSTALL_DIR_PATH="${common_parse_dir}/python/site-packages"
 PYTHON_GRAPH_AUTOFUSION_WHL="${sourcedir}/lib/superkernel-0.1.0-py3-none-any.whl"
+PYTHON_MULTISTREAM_WHL="$(find "${sourcedir}/lib" -maxdepth 1 -type f -name 'multistream-*.whl' -print -quit 2>/dev/null)"
 
 custom_install() {
     if [ -z "$common_parse_dir/share/info/graph_autofusion" ]; then
@@ -342,6 +343,7 @@ custom_install() {
     if [ "$hetero_arch" != "y" ]; then
         log "INFO" "install graph_autofusion extension module begin..."
         graph_autofusion_install_package "${PYTHON_GRAPH_AUTOFUSION_WHL}" "${WHL_INSTALL_DIR_PATH}"
+        graph_autofusion_install_package "${PYTHON_MULTISTREAM_WHL}" "${WHL_INSTALL_DIR_PATH}"
         log "INFO" "the graph_autofusion extension module installed successfully!"
 
         if [ "${pylocal}" = "y" ]; then
