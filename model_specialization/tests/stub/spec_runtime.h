@@ -39,7 +39,6 @@ typedef enum aclmdlRICaptureStatus {
 } aclmdlRICaptureStatus;
 aclError aclmdlRICaptureGetInfo(aclrtStream stream, aclmdlRICaptureStatus *status, aclmdlRI *modelRI);
 
-
 typedef struct aclrtcKernelSpecRequest {
   const char *resourceId;
   const char *kernelEntry;
