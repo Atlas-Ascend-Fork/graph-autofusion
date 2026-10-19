@@ -694,7 +694,10 @@ void ExpectSimdFramework(const std::string &kernel) {
 
 void ExpectPostReduceSimtFramework(const std::string &kernel) {
   const std::string simt_kernel = GetFunctionContaining(kernel, "inline void IndirectLoadSimtKernel(");
-  EXPECT_NE(simt_kernel.find("FusedBody::Outputs(value, output_index, address.index_offset, context)"),
+  // [SIMT 分解共享] Outputs 签名为标量透传（bisheng -x asc 限制 __simt_callee__
+  // 签名引用 Internal 类模板，地址字段逐个展开传递）。
+  EXPECT_NE(simt_kernel.find("FusedBody::Outputs(value, output_index, address.index_offset, address.coord_axis, "
+                             "address.axis_prefix, context)"),
             std::string::npos);
   EXPECT_NE(simt_kernel.find("FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), context, outputs)"),
             std::string::npos);
@@ -742,7 +745,10 @@ void ExpectSimtKernelStructure(const std::string &kernel) {
   const std::string simt_kernel = GetFunctionContaining(kernel, "inline void IndirectLoadSimtKernel(");
   EXPECT_EQ(simt_kernel.find("indirect_index < 0"), std::string::npos);
   EXPECT_EQ(simt_kernel.find("indirect_index >="), std::string::npos);
-  EXPECT_NE(simt_kernel.find("FusedBody::Outputs(value, output_index, address.index_offset, context)"),
+  // [SIMT 分解共享] Outputs 签名为标量透传（bisheng -x asc 限制 __simt_callee__
+  // 签名引用 Internal 类模板，地址字段逐个展开传递）。
+  EXPECT_NE(simt_kernel.find("FusedBody::Outputs(value, output_index, address.index_offset, address.coord_axis, "
+                             "address.axis_prefix, context)"),
             std::string::npos);
   EXPECT_NE(simt_kernel.find("FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), context, outputs)"),
             std::string::npos);
@@ -4893,6 +4899,63 @@ std::shared_ptr<af::AscGraph> CreateUserAbsEmbeddingSumSubGraph() {
                   af::DT_FLOAT);
   return graph;
 }
+#elif defined(IL_USER_EMBEDDING_MUL)
+// Exact reproduction of the user-provided GraphHint
+// autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa (aten.embedding + aten.mul):
+//   data i64 [ks0, ks1, 1] (index 0), data1 f32 [1, ks3, ks2] (index 1), data2 f32 [1, ks1, ks2] (index 2),
+//   IndirectLoad(axis=1, max=ks3) -> Mul(broadcast2) -> Store/Output.  全符号尺寸（动态
+//   shape）：SIMT 静态方法体内的 strided side-load 坐标分解依赖运行期符号尺寸。
+constexpr int64_t kUserEmbMulKs0 = 400;
+constexpr int64_t kUserEmbMulKs1 = 230;
+constexpr int64_t kUserEmbMulKs2 = 160;
+constexpr int64_t kUserEmbMulKs3 = 500;
+constexpr char kUserEmbMulGraphName[] = "autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa";
+
+std::shared_ptr<af::AscGraph> CreateUserEmbeddingMulSubGraph() {
+  auto graph = std::make_shared<af::AscGraph>(kUserEmbMulGraphName);
+  // Symbolic size vars: the backend E2E sets the concrete values in the runtime tiling data,
+  // so this graph exercises the dynamic-shape tiling path.
+  const auto ks0 = graph->CreateSizeVar("ks0");
+  const auto ks1 = graph->CreateSizeVar("ks1");
+  const auto ks2 = graph->CreateSizeVar("ks2");
+  const auto ks3 = graph->CreateSizeVar("ks3");
+  const auto a0 = graph->CreateAxis("a0", ks0).id;
+  const auto a1 = graph->CreateAxis("a1", ks1).id;
+  const auto a2 = graph->CreateAxis("a2", ks2).id;
+  const std::vector<af::AxisId> axes = {a0, a1, a2};
+  af::AscGraphUtils::GetComputeGraph(*graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis = axes;
+
+  // idx：i64 [ks0, ks1, 1]/{ks1, 1, 0} -> Broadcast [ks0, ks1, ks2]/{ks1*ks2, ks2, 1}
+  af::ascir_op::Load load("graph_hint/load");
+  af::ascir_op::Broadcast broadcast("graph_hint/broadcast");
+  InitDataLoadBroadcast("graph_hint/data", 0, load, broadcast, *graph, axes, {ks0, ks1, af::ops::One},
+                        {ks1, af::ops::One, af::ops::Zero}, {ks0, ks1, ks2}, {ks1 * ks2, ks2, af::ops::One},
+                        af::DT_INT64);
+  // 表：f32 [1, ks3, ks2]/{0, ks2, 1} -> Broadcast [ks0, ks3, ks2]/{ks2*ks3, ks2, 1}
+  af::ascir_op::Load load1("graph_hint/load1");
+  af::ascir_op::Broadcast broadcast1("graph_hint/broadcast1");
+  InitDataLoadBroadcast("graph_hint/data1", 1, load1, broadcast1, *graph, axes, {af::ops::One, ks3, ks2},
+                        {af::ops::Zero, ks2, af::ops::One}, {ks0, ks3, ks2}, {ks2 * ks3, ks2, af::ops::One},
+                        af::DT_FLOAT);
+  af::ascir_op::IndirectLoad indirectload("graph_hint/indirectload");
+  InitIndirectLoad(broadcast1.y, broadcast.y, 1, ks3, indirectload, *graph, axes, {ks0, ks1, ks2},
+                   {ks1 * ks2, ks2, af::ops::One}, af::DT_FLOAT);
+  // mul 操作数：f32 [1, ks1, ks2]/{0, ks2, 1} -> Broadcast [ks0, ks1, ks2]/{ks1*ks2, ks2, 1}
+  af::ascir_op::Load load2("graph_hint/load2");
+  af::ascir_op::Broadcast broadcast2("graph_hint/broadcast2");
+  InitDataLoadBroadcast("graph_hint/data2", 2, load2, broadcast2, *graph, axes, {af::ops::One, ks1, ks2},
+                        {af::ops::Zero, ks2, af::ops::One}, {ks0, ks1, ks2}, {ks1 * ks2, ks2, af::ops::One},
+                        af::DT_FLOAT);
+  af::ascir_op::Mul mul("graph_hint/mul");
+  graph->AddNode(mul);
+  mul.x1 = indirectload.y;
+  mul.x2 = broadcast2.y;
+  SetView(mul, axes, {ks0, ks1, ks2}, {ks1 * ks2, ks2, af::ops::One}, af::DT_FLOAT);
+  af::ascir_op::Store store("graph_hint/store");
+  af::ascir_op::Output output("graph_hint/output");
+  InitStoreOutput(mul.y, store, output, *graph, axes, {ks0, ks1, ks2}, {ks1 * ks2, ks2, af::ops::One}, af::DT_FLOAT);
+  return graph;
+}
 #elif defined(IL_USER_DTYPE_INT64) || defined(IL_USER_DTYPE_UINT64) || defined(IL_USER_DTYPE_INT8) || \
     defined(IL_USER_DTYPE_UINT8) || defined(IL_USER_DTYPE_BOOL)
 // 值 dtype embedding（int64/uint64/int8/uint8/bool）：形状一致，仅值 dtype 不同；
@@ -5908,6 +5971,31 @@ TEST_F(TestBackendUserInt64GatherDenseE2e, GeneratesUserInt64GatherDenseKernel) 
   EXPECT_NE(result.kernel.find("IndirectLoadSimdGatherApi<int64_t"), std::string::npos);
   EXPECT_NE(result.kernel.find("// IndirectLoad SIMT"), std::string::npos);
 #endif
+  indirect_load_test::WriteGeneratedFiles(result);
+}
+#elif defined(IL_USER_EMBEDDING_MUL)
+using TestBackendUserEmbeddingMulE2e = indirect_load_test::PrecisionBackendE2e;
+
+TEST_F(TestBackendUserEmbeddingMulE2e, GeneratesUserEmbeddingMulKernel) {
+  ThreeInputBackendGraph backend(kUserEmbMulGraphName, af::DT_INT64, af::DT_FLOAT, af::DT_FLOAT, af::DT_FLOAT);
+  const auto graph = backend.Finalize(CreateUserEmbeddingMulSubGraph());
+  ASSERT_NE(graph, nullptr);
+  ascir::FusedScheduledResult scheduled_result;
+  OptimizeForBackend(graph, scheduled_result);
+  ASSERT_TRUE(indirect_load_test::HasTemplate(scheduled_result, ascir::TemplateId::kIndirectLoadSimt));
+  codegen::CodegenResult result;
+  GenerateForBackend(scheduled_result, result);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SIMT"), std::string::npos);
+  // 动态 shape：SIMT 静态方法体（struct IndirectLoadSimtBody_*）作用域内没有 tiling 数据
+  // 指针 t，side-load 坐标分解的运行期符号尺寸（t->ksN）必须经 Context 字段传入，不得在
+  // 静态方法体内引用 t->（否则设备侧编译报 use of undeclared identifier 't'）。body 以
+  // 后随的 #include 守卫（#endif）为界，覆盖全部静态方法。
+  const auto body_begin = result.kernel.find("struct IndirectLoadSimtBody_");
+  ASSERT_NE(body_begin, std::string::npos);
+  const auto body_end = result.kernel.find("#endif", body_begin);
+  ASSERT_NE(body_end, std::string::npos);
+  const std::string simt_body = result.kernel.substr(body_begin, body_end - body_begin);
+  EXPECT_EQ(simt_body.find("t->"), std::string::npos);
   indirect_load_test::WriteGeneratedFiles(result);
 }
 #elif defined(IL_USER_ABS_EMBEDDING_SUM)

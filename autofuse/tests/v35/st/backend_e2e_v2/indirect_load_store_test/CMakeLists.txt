@@ -464,13 +464,16 @@ add_indirect_load_sweep_variant(indirect_load_user_int64_dense_sweep indirect_lo
     IL_CASE_BROADCAST_WHERE IL_USER_INT64_GATHER_DENSE IL_USER_INT64_GATHER_DENSE_SIMT)
 finalize_indirect_load_sweep(indirect_load_user_int64_dense_sweep)
 
-# 动态 shape 轴：两个用户 GraphHint（gather_sum_transpose / abs_embedding_sum）。
+# 动态 shape 轴：三个用户 GraphHint（gather_sum_transpose / abs_embedding_sum / embedding_mul）。
 add_indirect_load_sweep_variant(indirect_load_user_dynamic_shape_sweep
     indirect_load_user_dynamic_shape_sweep_gather_sum_transpose 0
     IL_CASE_BROADCAST_WHERE IL_USER_GATHER_SUM_TRANSPOSE)
 add_indirect_load_sweep_variant(indirect_load_user_dynamic_shape_sweep
     indirect_load_user_dynamic_shape_sweep_abs_embedding_sum 0
     IL_CASE_BROADCAST_WHERE IL_USER_ABS_EMBEDDING_SUM)
+add_indirect_load_sweep_variant(indirect_load_user_dynamic_shape_sweep
+    indirect_load_user_dynamic_shape_sweep_embedding_mul 0
+    IL_USER_EMBEDDING_MUL)
 finalize_indirect_load_sweep(indirect_load_user_dynamic_shape_sweep)
 
 # Rank-2 embedding view followed by Reduce on the payload dimension.  Keep the

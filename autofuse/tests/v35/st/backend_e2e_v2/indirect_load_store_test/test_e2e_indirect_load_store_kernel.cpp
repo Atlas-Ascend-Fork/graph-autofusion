@@ -1108,6 +1108,181 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   AscendC::GmFree(output);
 }
 
+#elif defined(IL_USER_EMBEDDING_MUL)
+namespace {
+void FillEmbeddingMulTiling(AutofuseTilingData &tiling_data, uint32_t ks0, uint32_t ks1, uint32_t ks2, uint32_t ks3) {
+  tiling_data.set_block_dim(indirect_load_test::kUserAivNum);
+  tiling_data.set_ub_size(indirect_load_test::kUserUbSize);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks0(ks0);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks1(ks1);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks2(ks2);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks3(ks3);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks0(ks0);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks1(ks1);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks2(ks2);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks3(ks3);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks0(ks0);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks1(ks1);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks2(ks2);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks3(ks3);
+}
+}  // namespace
+
+// 用户场景（inductor embedding*mul，动态 shape）：output[i0,i1,i2] =
+// table[idx[i0,i1], i2] * other[i1, i2]。idx 形状 [ks0,ks1,1]（gather 轴 a1），
+// table 形状 [1,ks3,ks2]，other 形状 [1,ks1,ks2]，均经 Broadcast 视图对齐输出。
+TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
+  constexpr int32_t kKs0 = 2;
+  constexpr int32_t kKs1 = 3;
+  constexpr int32_t kKs2 = 5;
+  constexpr int32_t kKs3 = 7;
+  constexpr int64_t kTableCount = static_cast<int64_t>(kKs3) * kKs2;
+  constexpr int64_t kIndexCount = static_cast<int64_t>(kKs0) * kKs1;
+  constexpr int64_t kOtherCount = static_cast<int64_t>(kKs1) * kKs2;
+  constexpr int64_t kOutputCount = static_cast<int64_t>(kKs0) * kKs1 * kKs2;
+
+  auto index = indirect_load_test::AllocGmBuffer<int64_t>(kIndexCount);
+  auto table = indirect_load_test::AllocGmBuffer<float>(kTableCount);
+  auto other = indirect_load_test::AllocGmBuffer<float>(kOtherCount);
+  auto output = indirect_load_test::AllocGmBuffer<float>(kOutputCount);
+  ASSERT_TRUE(index && table && other && output);
+
+  for (int64_t i = 0; i < kIndexCount; ++i) {
+    index.get()[i] = static_cast<int64_t>(i % kKs3);
+  }
+  for (int64_t i = 0; i < kTableCount; ++i) {
+    table.get()[i] = static_cast<float>(i) * 0.01F + 1.0F;
+  }
+  for (int64_t i = 0; i < kOtherCount; ++i) {
+    other.get()[i] = static_cast<float>(i) * 0.02F - 0.5F;
+  }
+  std::fill_n(output.get(), kOutputCount, 0.0F);
+
+  indirect_load_test::UserGraphTiling tiling;
+  tiling.Tile(FillEmbeddingMulTiling, kKs0, kKs1, kKs2, kKs3);
+  indirect_load_test::RunKernel(autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa, tiling.block_dim,
+                                tiling.workspace.get(), reinterpret_cast<uint8_t *>(&tiling.data), index.get(),
+                                table.get(), other.get(), output.get());
+
+  for (int32_t i0 = 0; i0 < kKs0; ++i0) {
+    for (int32_t i1 = 0; i1 < kKs1; ++i1) {
+      for (int32_t i2 = 0; i2 < kKs2; ++i2) {
+        const int64_t selected = index.get()[static_cast<int64_t>(i0) * kKs1 + i1];
+        const float expected = table.get()[selected * kKs2 + i2] * other.get()[static_cast<int64_t>(i1) * kKs2 + i2];
+        const int64_t offset = (static_cast<int64_t>(i0) * kKs1 + i1) * kKs2 + i2;
+        EXPECT_NEAR(output.get()[offset], expected, 1.0e-4F) << "i0=" << i0 << ", i1=" << i1 << ", i2=" << i2;
+      }
+    }
+  }
+}
+
+// [SIMT 动态 shape 用户场景] 用户原生 shape（ks0=400/ks1=230/ks2=160/ks3=500）：
+// 表 320KB 超单核 192KB UB，SIMD strided 窗口驻留无解，求解必退选 SIMT result2
+// （真机主路径）——动态 shape 下其 fused consumer 坐标分解走预计算 magic 的
+// UintDiv 乘移序列，须断言选中并验证数值。
+TEST(UserGraphConstruction, GeneratedKernelMatchesReferenceOversizedTable) {
+  constexpr int32_t kKs0 = 400;
+  constexpr int32_t kKs1 = 230;
+  constexpr int32_t kKs2 = 160;
+  constexpr int32_t kKs3 = 500;
+  constexpr int64_t kIndexCount = static_cast<int64_t>(kKs0) * kKs1;
+  constexpr int64_t kOtherCount = static_cast<int64_t>(kKs1) * kKs2;
+  constexpr int64_t kOutputCount = static_cast<int64_t>(kKs0) * kKs1 * kKs2;
+  constexpr int64_t kTableCount = static_cast<int64_t>(kKs3) * kKs2;
+
+  auto index = indirect_load_test::AllocGmBuffer<int64_t>(kIndexCount);
+  auto table = indirect_load_test::AllocGmBuffer<float>(kTableCount);
+  auto other = indirect_load_test::AllocGmBuffer<float>(kOtherCount);
+  auto output = indirect_load_test::AllocGmBuffer<float>(kOutputCount);
+  ASSERT_TRUE(index && table && other && output);
+
+  for (int64_t i = 0; i < kIndexCount; ++i) {
+    index.get()[i] = static_cast<int64_t>(i % kKs3);
+  }
+  for (int64_t i = 0; i < kTableCount; ++i) {
+    table.get()[i] = static_cast<float>(i) * 0.01F + 1.0F;
+  }
+  for (int64_t i = 0; i < kOtherCount; ++i) {
+    other.get()[i] = static_cast<float>(i) * 0.02F - 0.5F;
+  }
+  std::fill_n(output.get(), kOutputCount, 0.0F);
+
+  indirect_load_test::UserGraphTiling tiling;
+  tiling.Tile(FillEmbeddingMulTiling, kKs0, kKs1, kKs2, kKs3);
+  ASSERT_EQ(tiling.data.get_graph0_tiling_key(), 2U) << "oversized table must select the SIMT result";
+  indirect_load_test::RunKernel(autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa, tiling.block_dim,
+                                tiling.workspace.get(), reinterpret_cast<uint8_t *>(&tiling.data), index.get(),
+                                table.get(), other.get(), output.get());
+
+  for (int32_t i0 = 0; i0 < kKs0; ++i0) {
+    for (int32_t i1 = 0; i1 < kKs1; ++i1) {
+      for (int32_t i2 = 0; i2 < kKs2; ++i2) {
+        const int64_t selected = index.get()[static_cast<int64_t>(i0) * kKs1 + i1];
+        const float expected = table.get()[selected * kKs2 + i2] * other.get()[static_cast<int64_t>(i1) * kKs2 + i2];
+        const int64_t offset = (static_cast<int64_t>(i0) * kKs1 + i1) * kKs2 + i2;
+        EXPECT_NEAR(output.get()[offset], expected, 1.0e-4F) << "i0=" << i0 << ", i1=" << i1 << ", i2=" << i2;
+      }
+    }
+  }
+}
+
+// [SIMT 动态 shape 数值回归] 小 shape 下 host 求解常选 SIMD result，SIMT result2
+// （超大表等 SIMD 无解场景的真机主路径）不被执行。该分支 fused consumer 的坐标
+// 分解在动态 shape 下使用预计算 magic 的 UintDiv（区别于静态字面量除模的编译期
+// 折叠路径），须强制派发验证数值。
+TEST(UserGraphConstruction, GeneratedKernelMatchesReferenceSimtForced) {
+  constexpr int32_t kKs0 = 2;
+  constexpr int32_t kKs1 = 3;
+  constexpr int32_t kKs2 = 5;
+  constexpr int32_t kKs3 = 7;
+  constexpr int64_t kTableCount = static_cast<int64_t>(kKs3) * kKs2;
+  constexpr int64_t kIndexCount = static_cast<int64_t>(kKs0) * kKs1;
+  constexpr int64_t kOtherCount = static_cast<int64_t>(kKs1) * kKs2;
+  constexpr int64_t kOutputCount = static_cast<int64_t>(kKs0) * kKs1 * kKs2;
+
+  auto index = indirect_load_test::AllocGmBuffer<int64_t>(kIndexCount);
+  auto table = indirect_load_test::AllocGmBuffer<float>(kTableCount);
+  auto other = indirect_load_test::AllocGmBuffer<float>(kOtherCount);
+  auto output = indirect_load_test::AllocGmBuffer<float>(kOutputCount);
+  ASSERT_TRUE(index && table && other && output);
+
+  for (int64_t i = 0; i < kIndexCount; ++i) {
+    index.get()[i] = static_cast<int64_t>(i % kKs3);
+  }
+  for (int64_t i = 0; i < kTableCount; ++i) {
+    table.get()[i] = static_cast<float>(i) * 0.01F + 1.0F;
+  }
+  for (int64_t i = 0; i < kOtherCount; ++i) {
+    other.get()[i] = static_cast<float>(i) * 0.03F - 0.25F;
+  }
+  std::fill_n(output.get(), kOutputCount, 0.0F);
+
+  indirect_load_test::UserGraphTiling tiling;
+  tiling.Tile(FillEmbeddingMulTiling, kKs0, kKs1, kKs2, kKs3);
+  // 强制派发 SIMT result2：host 求解只填当选 result 的字段，此处改顶层 key 并
+  // 补齐 result2 的分派字段（block 分派与批切分）。
+  tiling.data.set_graph0_tiling_key(2U);
+  auto &simt_tiling = tiling.data.graph0_result2_g0_tiling_data;
+  simt_tiling.set_block_dim(indirect_load_test::kUserAivNum);
+  simt_tiling.set_ub_size(indirect_load_test::kUserUbSize);
+  simt_tiling.set_indirect_load_outerTb_size(1U);
+  simt_tiling.set_tiling_key(0U);
+  indirect_load_test::RunKernel(
+      autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa, indirect_load_test::kUserAivNum, tiling.workspace.get(),
+      reinterpret_cast<uint8_t *>(&tiling.data), index.get(), table.get(), other.get(), output.get());
+
+  for (int32_t i0 = 0; i0 < kKs0; ++i0) {
+    for (int32_t i1 = 0; i1 < kKs1; ++i1) {
+      for (int32_t i2 = 0; i2 < kKs2; ++i2) {
+        const int64_t selected = index.get()[static_cast<int64_t>(i0) * kKs1 + i1];
+        const float expected = table.get()[selected * kKs2 + i2] * other.get()[static_cast<int64_t>(i1) * kKs2 + i2];
+        const int64_t offset = (static_cast<int64_t>(i0) * kKs1 + i1) * kKs2 + i2;
+        EXPECT_NEAR(output.get()[offset], expected, 1.0e-4F) << "i0=" << i0 << ", i1=" << i1 << ", i2=" << i2;
+      }
+    }
+  }
+}
+
 #elif defined(IL_USER_GATHER_SUM_TRANSPOSE)
 namespace {
 void FillGatherSumTiling(AutofuseTilingData &tiling_data, uint32_t ks0, uint32_t ks1, uint32_t ks2, uint32_t ks3) {

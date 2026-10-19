@@ -66,6 +66,18 @@ class IndirectLoadRegApiCall final : public ApiCall {
   bool CanUseSimtIndexPrepass(const TPipe &tpipe, ascgen_utils::indirect_load::SimtIndexPrepassPlan &plan) const;
   // 后置 Reduce 的 local target 分配（预计算开启时提升到 Context 初始化之前）。
   Status GenerateSimtLocalTargetAlloc(const TPipe &tpipe, std::stringstream &ss) const;
+  // [SIMT 动态 shape 坐标分解] 空跑三个求值器收集静态方法体引用的运行期符号尺寸
+  // （t->ksN 不能内联进静态方法，须走 Context）。返回按序去重的 tiler 表达式列表
+  // （Context 字段 rt_size_N 的初始化表达式）；prepass 行宽表达式经 idx_inner_expr
+  // 带出（首注册项）。Context 字段声明（GenerateFuncDefinition）与初始化
+  // （GenerateSimt）两处按同参调用，保证字段序一致。
+  // [SIMT 32 位双实例] 偏移域运行时判定可 32 位的形态才双发 body：kStrided
+  // Rank3/Axis1（gather 轴内单维、共享坐标差分路径、无 post Reduce/prepass）。
+  bool SimtSupportsDualOffsetBody() const;
+  std::vector<std::string> CollectSimtRuntimeSizeExprs(
+      const std::string &input_dtype, const std::string &index_dtype, const std::string &offset_type,
+      const TPipe &tpipe, bool use_prepass, const ascgen_utils::indirect_load::SimtIndexPrepassPlan &prepass_plan,
+      std::string &idx_inner_expr) const;
   Status GenerateSk(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis,
                     const std::vector<std::reference_wrapper<const Tensor>> &inputs,
                     const std::vector<std::reference_wrapper<const Tensor>> &outputs, std::string &result) const;

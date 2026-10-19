@@ -1363,7 +1363,10 @@ TEST(IndirectLoadApiCallTest, GenerateSimtOutputMapsBroadcastLoadToColumn) {
   std::string definition;
   GenerateSimtPostReduceFuncDefinitionFromGraph(g, definition);
   EXPECT_NE(definition.find("context.gm_9[index_coord_0]"), std::string::npos);
-  EXPECT_NE(definition.find("index_coord_0 = static_cast<uint32_t>(output_index % 8);"), std::string::npos);
+  // [SIMT 分解共享] 广播侧载维与 gather 轴尺寸对齐时复用 Address 已算的轴坐标
+  // （coord_axis == output_index % 8，数值等价），消除独立 magic mod。
+  EXPECT_NE(definition.find("index_coord_0 = coord_axis;"), std::string::npos);
+  EXPECT_EQ(definition.find("output_index % 8"), std::string::npos);
   EXPECT_EQ(definition.find("context.gm_9[output_index]"), std::string::npos);
   EXPECT_EQ(definition.find("context.gm_9[index_offset]"), std::string::npos);
 }
@@ -1381,7 +1384,10 @@ TEST(IndirectLoadApiCallTest, GenerateSimtPostReduceMapsBroadcastLoadToColumn) {
   std::string definition;
   GenerateSimtPostReduceFuncDefinitionFromGraph(g, definition);
   EXPECT_NE(definition.find("context.gm_9[index_coord_0]"), std::string::npos);
-  EXPECT_NE(definition.find("index_coord_0 = static_cast<uint32_t>(output_index % 8);"), std::string::npos);
+  // [SIMT 分解共享] 广播侧载维与 gather 轴尺寸对齐时复用 Address 已算的轴坐标
+  // （coord_axis == output_index % 8，数值等价），消除独立 magic mod。
+  EXPECT_NE(definition.find("index_coord_0 = coord_axis;"), std::string::npos);
+  EXPECT_EQ(definition.find("output_index % 8"), std::string::npos);
   EXPECT_EQ(definition.find("context.gm_9[output_index]"), std::string::npos);
   EXPECT_EQ(definition.find("context.gm_9[index_offset]"), std::string::npos);
 }
@@ -1445,17 +1451,21 @@ TEST(IndirectLoadApiCallTest, ReusesBroadcastCoordinatesAcrossLoads) {
   GenerateSimtBroadcastPairDefinition(8, definition);
   EXPECT_NE(definition.find("context.gm_9[index_coord_0]"), std::string::npos);
   EXPECT_NE(definition.find("context.gm_51[index_coord_0]"), std::string::npos);
-  const auto coordinate = definition.find("output_index % 8");
-  ASSERT_NE(coordinate, std::string::npos);
-  EXPECT_EQ(definition.find("output_index % 8", coordinate + 1), std::string::npos);
+  // [SIMT 分解共享] 尺寸对齐的两个广播侧载复用同一 coord_axis 坐标变量，
+  // 逐元素 magic mod 站点数为零（旧版为一次共享 mod）。
+  EXPECT_NE(definition.find("index_coord_0 = coord_axis;"), std::string::npos);
+  EXPECT_EQ(definition.find("output_index % 8"), std::string::npos);
   EXPECT_EQ(definition.find("index_coord_1"), std::string::npos);
 }
 
 TEST(IndirectLoadApiCallTest, KeepsDistinctPhysicalExtentsInBroadcastCoordinates) {
   std::string definition;
   GenerateSimtBroadcastPairDefinition(4, definition);
-  EXPECT_NE(definition.find("output_index % 8"), std::string::npos);
-  EXPECT_NE(definition.find("output_index % 4"), std::string::npos);
+  // [SIMT 分解共享] 与 gather 轴对齐（extent 8）的侧载走 coord_axis；物理 extent
+  // 不同（4）的侧载保留独立 mod 站点，两者不得混用坐标。
+  EXPECT_NE(definition.find("index_coord_0 = coord_axis;"), std::string::npos);
+  EXPECT_NE(definition.find("% static_cast<uint64_t>(4)"), std::string::npos);
+  EXPECT_EQ(definition.find("output_index % 8"), std::string::npos);
   EXPECT_NE(definition.find("context.gm_9[index_coord_0]"), std::string::npos);
   EXPECT_NE(definition.find("context.gm_51[index_coord_1]"), std::string::npos);
 }

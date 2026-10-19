@@ -110,6 +110,21 @@ __aicore__ inline void IndirectLoadGetUintDivMagicAndShift(T &magic, T &shift, T
   }
 }
 
+// [SIMT 32 位快速除法] AIV 上 32 位乘移序列显著短于 64 位；动态 64 位偏移域的
+// 热点除法在「值 < 2^32 且 32 位 magic 套有效（除数 < 2^32，哨兵 0）」时走
+// 32 位 UintDiv（同除数按 32 位公式独立预算的 magic/shift 对），否则回退
+// 64 位 UintDiv。
+template <typename T>
+__simt_callee__ __aicore__ inline T IndirectLoadSimtFastDiv(T value, T magic32, T shift32, T magic, T shift) {
+  if constexpr (sizeof(T) == 8U) {
+    if (value < (static_cast<T>(1U) << 32U) && magic32 != 0U) {
+      return static_cast<T>(
+          Simt::UintDiv(static_cast<uint32_t>(value), static_cast<uint32_t>(magic32), static_cast<uint32_t>(shift32)));
+    }
+  }
+  return Simt::UintDiv(value, magic, shift);
+}
+
 template <uint64_t Value>
 inline __aicore__ constexpr uint32_t IndirectLoadLog2() {
   static_assert(Value > 0U && (Value & (Value - 1U)) == 0U, "IndirectLoad SIMT span must be a power of two.");
@@ -126,6 +141,13 @@ template <typename OffsetT>
 struct IndirectLoadSimtAddress {
   OffsetT index_offset;
   OffsetT input_base;
+  // [SIMT 分解共享] gather 轴坐标与「轴前压平商」（output_index / inner_size），
+  // 供 fused consumer 的坐标分解复用：broadcast 对齐视图的地址可差分表示
+  // （inner 维 = output_index - axis_prefix * inner_size；axis 维直接取坐标），
+  // 免去逐元素除法。axis 维与自身重合时（Axis == Rank - 1）axis_prefix 退化为
+  // output_index 本身。
+  OffsetT coord_axis;
+  OffsetT axis_prefix;
 };
 
 template <typename OffsetT, uint64_t InnerSpan, uint64_t InputAxisSpan>
@@ -142,6 +164,12 @@ struct IndirectLoadSimtAddressDecoder {
     const OffsetT quotient = Simt::UintDiv(linear_index, policy.magic[Dim], policy.shift[Dim]);
     const OffsetT coordinate = linear_index - quotient * policy.shape[Dim];
     policy.template AddCoordinate<Dim>(coordinate, address);
+    if constexpr (Dim == AddressPolicy::kAxis) {
+      // [SIMT 分解共享] Axis 层：linear_index 即轴前压平商（i / inner_size），
+      // coordinate 即 gather 轴坐标。
+      address.coord_axis = coordinate;
+      address.axis_prefix = linear_index;
+    }
     if constexpr (Dim > 0) {
       IndirectLoadSimtAddressDecoder<Dim - 1, OffsetT, AddressPolicy>::Call(quotient, policy, address);
     }
@@ -153,6 +181,7 @@ template <typename OffsetT, uint64_t InnerSpan, uint64_t OutputAxisSpan, uint64_
           uint64_t InputAxisSpan>
 struct IndirectLoadSimtStaticPowerOfTwoPolicy {
   using OffsetType = OffsetT;
+  static constexpr int32_t kAxis = 0;
   static constexpr bool kStructured = true;
   static constexpr bool kUsesInputAxis = true;
   static constexpr bool kEmbedding = false;
@@ -169,6 +198,7 @@ struct IndirectLoadSimtStaticPowerOfTwoPolicy {
 template <typename OffsetT, uint64_t InnerSpan, uint64_t InputAxisStride, uint64_t InputAxisSpan>
 struct IndirectLoadSimtStaticInnerPolicy {
   using OffsetType = OffsetT;
+  static constexpr int32_t kAxis = 0;
   static constexpr bool kStructured = true;
   static constexpr bool kUsesInputAxis = true;
   static constexpr bool kEmbedding = false;
@@ -190,6 +220,7 @@ struct IndirectLoadSimtStaticInnerPolicy {
 template <typename OffsetT>
 struct IndirectLoadSimtStructuredMagicPolicy {
   using OffsetType = OffsetT;
+  static constexpr int32_t kAxis = 0;
   static constexpr bool kStructured = true;
   static constexpr bool kUsesInputAxis = true;
   static constexpr bool kEmbedding = false;
@@ -224,6 +255,7 @@ template <typename OffsetT, int32_t Rank = 2, int32_t Axis = 0, uint64_t InputSt
 struct IndirectLoadSimtEmbeddingPolicy {
   using OffsetType = OffsetT;
   using ShapeLayout = IndirectLoadSimtShapeLayout<Rank>;
+  static constexpr int32_t kAxis = Axis;
   static constexpr bool kStructured = true;
   static constexpr bool kUsesInputAxis = true;
   static constexpr bool kEmbedding = Rank == 2 && Axis == 0 && InputStrideMask == 0U && IndexStrideMask == 0U;
@@ -263,9 +295,11 @@ struct IndirectLoadSimtEmbeddingPolicy {
     if constexpr (Rank == 2 && Axis == 0 && InputStrideMask == 0U && IndexStrideMask == 0U) {
       const OffsetT row = Simt::UintDiv(output_index, magic[1], shift[1]);
       const OffsetT inner = output_index - row * shape[1];
-      return {row * shape[ShapeLayout::kIndexStrideBase], inner * shape[ShapeLayout::kInputStrideBase + 1]};
+      const Internal::IndirectLoadSimtAddress<OffsetT> address{
+          row * shape[ShapeLayout::kIndexStrideBase], inner * shape[ShapeLayout::kInputStrideBase + 1], row, row};
+      return address;
     } else {
-      Internal::IndirectLoadSimtAddress<OffsetT> address{0U, 0U};
+      Internal::IndirectLoadSimtAddress<OffsetT> address{0U, 0U, 0U, 0U};
       Internal::IndirectLoadSimtAddressDecoder<Rank - 1, OffsetT, IndirectLoadSimtEmbeddingPolicy>::Call(
           output_index, *this, address);
       return address;
@@ -292,6 +326,7 @@ struct IndirectLoadSimtEmbeddingPolicy {
 template <typename OffsetT, int32_t Rank, int32_t Axis>
 struct IndirectLoadSimtRecursivePolicy {
   using OffsetType = OffsetT;
+  static constexpr int32_t kAxis = Axis;
   using ShapeLayout = IndirectLoadSimtShapeLayout<Rank>;
   static constexpr bool kStructured = false;
   static constexpr bool kUsesInputAxis = true;
@@ -345,6 +380,7 @@ template <typename OffsetT, int32_t Rank, int32_t Axis, uint64_t InputStrideMask
 struct IndirectLoadSimtStridedPolicy {
   using OffsetType = OffsetT;
   using ShapeLayout = IndirectLoadSimtShapeLayout<Rank>;
+  static constexpr int32_t kAxis = Axis;
   static constexpr bool kStructured = false;
   static constexpr bool kUsesInputAxis = (InputStrideMask & (1ULL << Axis)) != 0U;
   static constexpr bool kEmbedding = false;
@@ -357,6 +393,22 @@ struct IndirectLoadSimtStridedPolicy {
                   "IndirectLoad SIMT shape is invalid.");
     for (int32_t dim = 0; dim < Rank; ++dim) {
       Internal::IndirectLoadGetUintDivMagicAndShift(magic[dim], shift[dim], shape[dim]);
+      if constexpr (sizeof(OffsetT) == 8U) {
+        if (shape[dim] < (static_cast<OffsetT>(1U) << 32U)) {
+          uint32_t m32 = 0U;
+          uint32_t s32 = 0U;
+          Internal::IndirectLoadGetUintDivMagicAndShift(m32, s32, static_cast<uint32_t>(shape[dim]));
+          magic32[dim] = m32;
+          shift32[dim] = s32;
+        } else {
+          magic32[dim] = 0U;
+          shift32[dim] = 0U;
+        }
+      } else {
+        // 32 位实例化时 FastDiv 直接走本套 magic，32 位副套无需（避免移位 UB）。
+        magic32[dim] = magic[dim];
+        shift32[dim] = shift[dim];
+      }
     }
     input_axis_stride = shape[ShapeLayout::kInputStrideBase + Axis];
   }
@@ -368,16 +420,37 @@ struct IndirectLoadSimtStridedPolicy {
     }
     for (int32_t dim = 0; dim < Rank; ++dim) {
       Internal::IndirectLoadGetUintDivMagicAndShift(magic[dim], shift[dim], shape[dim]);
+      if constexpr (sizeof(OffsetT) == 8U) {
+        if (shape[dim] < (static_cast<OffsetT>(1U) << 32U)) {
+          uint32_t m32 = 0U;
+          uint32_t s32 = 0U;
+          Internal::IndirectLoadGetUintDivMagicAndShift(m32, s32, static_cast<uint32_t>(shape[dim]));
+          magic32[dim] = m32;
+          shift32[dim] = s32;
+        } else {
+          magic32[dim] = 0U;
+          shift32[dim] = 0U;
+        }
+      } else {
+        // 32 位实例化时 FastDiv 直接走本套 magic，32 位副套无需（避免移位 UB）。
+        magic32[dim] = magic[dim];
+        shift32[dim] = shift[dim];
+      }
     }
     input_axis_stride = shape[ShapeLayout::kInputStrideBase + Axis];
   }
 
   __simt_callee__ __aicore__ inline Internal::IndirectLoadSimtAddress<OffsetT> GetAddress(OffsetT output_index) const {
-    Internal::IndirectLoadSimtAddress<OffsetT> address{0U, 0U};
-    if constexpr (Rank == 3 && Axis == 1 && IndexStrideMask == 2U) {
-      const OffsetT axis_and_inner = Simt::UintDiv(output_index, magic[2], shift[2]);
+    Internal::IndirectLoadSimtAddress<OffsetT> address{0U, 0U, 0U, 0U};
+    // [SIMT 分解共享] Rank3/Axis1 特化放宽 IndexStrideMask 限制：dim0 位的
+    // index stride 贡献按位补全，分解结构不变；填充共享坐标（gather 轴坐标与
+    // 轴前压平商）供 fused consumer 免除逐元素除法。
+    if constexpr (Rank == 3 && Axis == 1) {
+      const OffsetT axis_and_inner =
+          Internal::IndirectLoadSimtFastDiv(output_index, magic32[2], shift32[2], magic[2], shift[2]);
       const OffsetT inner = output_index - axis_and_inner * shape[2];
-      const OffsetT outer = Simt::UintDiv(axis_and_inner, magic[1], shift[1]);
+      const OffsetT outer =
+          Internal::IndirectLoadSimtFastDiv(axis_and_inner, magic32[1], shift32[1], magic[1], shift[1]);
       const OffsetT axis = axis_and_inner - outer * shape[1];
       if constexpr ((InputStrideMask & 1U) != 0U) {
         address.input_base += outer * shape[ShapeLayout::kInputStrideBase];
@@ -385,16 +458,33 @@ struct IndirectLoadSimtStridedPolicy {
       if constexpr ((InputStrideMask & 4U) != 0U) {
         address.input_base += inner * shape[ShapeLayout::kInputStrideBase + 2];
       }
-      address.index_offset = axis * shape[ShapeLayout::kIndexStrideBase + 1];
+      if constexpr ((IndexStrideMask & 1U) != 0U) {
+        address.index_offset += outer * shape[ShapeLayout::kIndexStrideBase];
+      }
+      if constexpr ((IndexStrideMask & 2U) != 0U) {
+        address.index_offset += axis * shape[ShapeLayout::kIndexStrideBase + 1];
+      }
+      if constexpr ((IndexStrideMask & 4U) != 0U) {
+        address.index_offset += inner * shape[ShapeLayout::kIndexStrideBase + 2];
+      }
+      address.coord_axis = axis;
+      address.axis_prefix = axis_and_inner;
       return address;
     }
-    if constexpr (Rank == 2 && Axis == 0 && IndexStrideMask == 1U) {
-      const OffsetT row = Simt::UintDiv(output_index, magic[1], shift[1]);
+    if constexpr (Rank == 2 && Axis == 0) {
+      const OffsetT row = Internal::IndirectLoadSimtFastDiv(output_index, magic32[1], shift32[1], magic[1], shift[1]);
       const OffsetT column = output_index - row * shape[1];
-      address.index_offset = row * shape[ShapeLayout::kIndexStrideBase];
+      if constexpr ((IndexStrideMask & 1U) != 0U) {
+        address.index_offset += row * shape[ShapeLayout::kIndexStrideBase];
+      }
+      if constexpr ((IndexStrideMask & 2U) != 0U) {
+        address.index_offset += column * shape[ShapeLayout::kIndexStrideBase + 1];
+      }
       if constexpr ((InputStrideMask & 2U) != 0U) {
         address.input_base += column * shape[ShapeLayout::kInputStrideBase + 1];
       }
+      address.coord_axis = row;
+      address.axis_prefix = row;
       return address;
     }
     Internal::IndirectLoadSimtAddressDecoder<Rank - 1, OffsetT, IndirectLoadSimtStridedPolicy>::Call(output_index,
@@ -416,6 +506,10 @@ struct IndirectLoadSimtStridedPolicy {
   OffsetT shape[ShapeLayout::kStridedShapeSize];
   OffsetT magic[Rank];
   OffsetT shift[Rank];
+  // [SIMT 32 位快速除法] 与 magic/shift 同除数的 32 位套（除数 < 2^32 时有效，
+  // 否则置 0 哨兵回退 64 位）。
+  OffsetT magic32[Rank];
+  OffsetT shift32[Rank];
   OffsetT input_axis_stride{0U};
 };
 
@@ -545,8 +639,12 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(ThreadNum) inline void IndirectLoadSimtKerne
       input_offset += indirect_index * address_policy.input_axis_stride;
     }
     const X value = x[input_offset];
+    // [SIMT 分解共享] bisheng -x asc 的 SIMT 通道限制 __simt_callee__ 签名不能
+    // 引用 Internal 命名空间的类模板，Policy 分解结果（gather 轴坐标与轴前压
+    // 平商）以标量透传，fused consumer 的坐标分解免逐元素除法（不可差分的维
+    // 仍回退除法）。
     const typename FusedBody::OutputPack outputs =
-        FusedBody::Outputs(value, output_index, address.index_offset, context);
+        FusedBody::Outputs(value, output_index, address.index_offset, address.coord_axis, address.axis_prefix, context);
     FusedBody::Store(targets, output_index, static_cast<OffsetT>(i), context, outputs);
   }
 }
@@ -596,7 +694,10 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(ThreadNum) inline void IndirectLoadSimtEmbed
     for (; output_index < end; output_index += static_cast<OffsetT>(warpSize),
                                input_offset += static_cast<OffsetT>(warpSize) * payload_stride) {
       const X value = x[input_offset];
-      const typename FusedBody::OutputPack outputs = FusedBody::Outputs(value, output_index, index_offset, context);
+      // [SIMT 分解共享] 标量透传与 Rank2/Axis0 特化同语义：coord_axis = row，
+      // axis_prefix = row * inner_size（行首压平前缀）。
+      const typename FusedBody::OutputPack outputs =
+          FusedBody::Outputs(value, output_index, index_offset, row, row_begin, context);
       FusedBody::Store(targets, output_index, output_index - output_offset, context, outputs);
     }
   }
