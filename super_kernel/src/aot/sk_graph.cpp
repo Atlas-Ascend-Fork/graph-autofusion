@@ -160,6 +160,14 @@ SuperKernelBaseNode *SuperKernelGraph::GetNodeById(uint64_t nodeId) const {
   return nullptr;
 }
 
+uint64_t SuperKernelGraph::AllocateSyntheticNodeId() {
+  if (maxNodeId_ >= INVALID_TASK_ID - 1U) {
+    SK_LOGE("Failed to allocate synthetic node ID: node ID space exhausted, maxNodeId=%lu", maxNodeId_);
+    return INVALID_TASK_ID;
+  }
+  return ++maxNodeId_;
+}
+
 bool SuperKernelGraph::AddNode(std::unique_ptr<SuperKernelBaseNode> node) {
   uint64_t nodeId = node->GetNodeId();
   uint64_t eventId = node->GetEventId();
@@ -208,6 +216,7 @@ bool SuperKernelGraph::AddNode(std::unique_ptr<SuperKernelBaseNode> node) {
     return false;
   }
   graphMap[nodeId] = std::move(node);
+  maxNodeId_ = std::max(maxNodeId_, nodeId);
   return true;
 }
 

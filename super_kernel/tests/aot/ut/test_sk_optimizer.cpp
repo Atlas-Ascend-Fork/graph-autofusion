@@ -55,6 +55,18 @@ class SkOptimizerTaskReorderTest : public testing::Test {
     return ptr;
   }
 
+  SuperKernelBaseNode *CreateNotifyNode(uint64_t nodeId, uint32_t streamIdx) {
+    auto node = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_EVENT_RECORD, 0, streamIdx,
+                                                        INVALID_STREAM_ID, INVALID_TASK_ID);
+    node->SetNodeType(SkNodeType::NODE_NOTIFY);
+    node->SetNodeId(nodeId);
+    node->SetPreNodeId(INVALID_TASK_ID);
+    node->SetNextNodeId(INVALID_TASK_ID);
+    auto *ptr = node.get();
+    graph->graphMap[nodeId] = std::move(node);
+    return ptr;
+  }
+
   std::vector<uint64_t> ToNodeIds(const std::vector<SuperKernelBaseNode *> &nodes) {
     std::vector<uint64_t> nodeIds;
     nodeIds.reserve(nodes.size());
@@ -191,6 +203,25 @@ TEST_F(SkOptimizerTaskReorderTest, ReorderWaitNodesForTaskBuild_CustomizeQueue_N
   std::vector<SuperKernelBaseNode *> reorderedTaskNodes = optimizer->ReorderWaitNodesForTaskBuild(taskNodes);
 
   EXPECT_EQ(ToNodeIds(reorderedTaskNodes), (std::vector<uint64_t>{1, 3, 2, 4, 5}));
+}
+
+TEST_F(SkOptimizerTaskReorderTest, SynthesizedEventDependencies_ConnectOnlyLastKernelOfEachStream) {
+  auto *stream0FirstKernel = CreateKernelNode(1, 0);
+  auto *stream1LastKernel = CreateKernelNode(2, 1);
+  auto *stream0LastKernel = CreateKernelNode(3, 0);
+  auto *trailingWait = CreateWaitNode(4, 1);
+  auto *firstEvent = CreateNotifyNode(100, 0);
+  std::vector<SuperKernelBaseNode *> reorderedTaskNodes = {stream0FirstKernel, stream1LastKernel, stream0LastKernel,
+                                                           trailingWait};
+
+  optimizer->ConnectLastKernelsToFirstEvent(reorderedTaskNodes, firstEvent);
+
+  EXPECT_EQ(stream0FirstKernel->sendToNodeId.count(100), 0);
+  EXPECT_EQ(stream0LastKernel->sendToNodeId.count(100), 1);
+  EXPECT_EQ(stream1LastKernel->sendToNodeId.count(100), 1);
+  EXPECT_EQ(firstEvent->receiveNodeId.count(3), 1);
+  EXPECT_EQ(firstEvent->receiveNodeId.count(2), 1);
+  EXPECT_EQ(firstEvent->receiveNodeId.size(), 2);
 }
 
 /**
