@@ -375,8 +375,9 @@ Status VFLoop::Generate(const TPipe &tpipe, const TensorManager &tensor_mgr, int
   std::vector<ascir::AxisId> current_axis;
   std::stringstream ss;
   std::stringstream loop_size_ss;
+  std::set<std::string> emitted_declarations;
   GE_CHK_STATUS_RET(this->GenerateLoop(tpipe, tensor_mgr, depth, current_axis, ss, loop_size_ss, only_loop_max_depth,
-                                       loop_size_vec, arange_offsets),
+                                       loop_size_vec, emitted_declarations, arange_offsets),
                     "Generate loop failed");
   result = ss.str();
   loop_size_result = loop_size_ss.str();
@@ -408,35 +409,43 @@ Status VFLoop::GenerateCvUbFuse(const TPipe &tpipe, const TensorManager &tensor_
 Status VFLoop::GenerateLoop(const TPipe &tpipe, const TensorManager &tensor_mgr, int32_t depth,
                             std::vector<ascir::AxisId> &current_axis, std::stringstream &ss,
                             std::stringstream &loop_size_ss, int32_t &only_loop_max_depth,
-                            std::vector<std::string> &loop_size_vec, const ArangeOffsetMap &arange_offsets) const {
+                            std::vector<std::string> &loop_size_vec, std::set<std::string> &emitted_declarations,
+                            const ArangeOffsetMap &arange_offsets) const {
   if (this->axis_id_ == af::kIdNone) {
     GE_CHK_STATUS_RET(this->GenerateBody(tpipe, tensor_mgr, depth, current_axis, ss, loop_size_ss, only_loop_max_depth,
-                                         loop_size_vec, arange_offsets),
+                                         loop_size_vec, emitted_declarations, arange_offsets),
                       "Codegen generate body failed when axis id is none");
     return af::SUCCESS;
   }
 
   const auto &axis = tpipe.tiler.GetAxis(this->axis_id_);
   int32_t current_depth = static_cast<int32_t>(current_axis.size());
-  if (current_depth == depth) {
-    loop_size_ss << "  uint16_t " << axis.loop_size.Str() << " = " << "loop_times;\n";
+  const bool is_innermost_loop = current_depth == depth;
+  const bool emit_loop_size = emitted_declarations.insert(axis.loop_size.Str()).second;
+  bool emit_depth_declarations = false;
+  if (is_innermost_loop) {
+    emit_depth_declarations = emitted_declarations.insert("depth_" + std::to_string(current_depth)).second;
+  }
+  if (emit_loop_size) {
+    const std::string loop_size_value =
+        is_innermost_loop ? "loop_times" : "static_cast<uint16_t>(output_dims_" + std::to_string(current_depth) + ")";
+    loop_size_ss << "  uint16_t " << axis.loop_size.Str() << " = " << loop_size_value << ";\n";
+  }
+  if (is_innermost_loop && emit_depth_declarations) {
     ss << "  uint32_t sreg_" << current_depth << " = element_count;\n";
     ss << "  AscendC::MicroAPI::MaskReg preg_" << current_depth << ";\n";
-  } else {
-    loop_size_ss << "  uint16_t " << axis.loop_size.Str() << " = " << "static_cast<uint16_t>(output_dims_"
-                 << current_depth << ");\n";
   }
   loop_size_vec.push_back(axis.loop_size.Str());
   current_axis.push_back(this->axis_id_);
   ss << "for (" << "uint16_t " << axis.Variable::name << " = 0; " << axis << " < " << axis.loop_size.Str() << "; "
      << axis << "++) "
      << "{" << std::endl;
-  if (current_depth == depth) {
+  if (is_innermost_loop) {
     ss << "    preg_" << current_depth << " = " << "AscendC::MicroAPI::UpdateMask<" << this->loop_dtype_ << ">("
        << "sreg_" << current_depth << ");\n";
   }
   GE_CHK_STATUS_RET(this->GenerateBody(tpipe, tensor_mgr, depth, current_axis, ss, loop_size_ss, only_loop_max_depth,
-                                       loop_size_vec, arange_offsets),
+                                       loop_size_vec, emitted_declarations, arange_offsets),
                     "Codegen generate body failed for normal loop");
   ss << "}" << std::endl;
 
@@ -447,14 +456,16 @@ Status VFLoop::GenerateLoop(const TPipe &tpipe, const TensorManager &tensor_mgr,
 Status VFLoop::GenerateBody(const TPipe &tpipe, const TensorManager &tensor_mgr, int32_t depth,
                             std::vector<ascir::AxisId> &current_axis, std::stringstream &ss,
                             std::stringstream &loop_size_ss, int32_t &only_loop_max_depth,
-                            std::vector<std::string> &loop_size_vec, const ArangeOffsetMap &arange_offsets) const {
+                            std::vector<std::string> &loop_size_vec, std::set<std::string> &emitted_declarations,
+                            const ArangeOffsetMap &arange_offsets) const {
   bool has_loop = false;
   bool has_call = false;
   for (const auto &body : this->bodys_) {
     if (body.type_ == LoopType::LOOP) {
-      GE_CHK_STATUS_RET(body.loop_->GenerateLoop(tpipe, tensor_mgr, depth, current_axis, ss, loop_size_ss,
-                                                 only_loop_max_depth, loop_size_vec, arange_offsets),
-                        "Generate loop for body failed");
+      GE_CHK_STATUS_RET(
+          body.loop_->GenerateLoop(tpipe, tensor_mgr, depth, current_axis, ss, loop_size_ss, only_loop_max_depth,
+                                   loop_size_vec, emitted_declarations, arange_offsets),
+          "Generate loop for body failed");
       has_loop = true;
     } else if (body.type_ == LoopType::CALL) {
       if (body.call_->unit == ge::ComputeUnit::kUnitNone) {

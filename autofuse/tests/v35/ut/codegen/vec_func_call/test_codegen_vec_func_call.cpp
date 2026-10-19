@@ -43,6 +43,16 @@ std::string GetLineContaining(const std::string &text, const std::string &needle
                      line_end == std::string::npos ? std::string::npos : line_end - line_begin - 1UL);
 }
 
+size_t CountOccurrences(const std::string &text, const std::string &needle) {
+  size_t count = 0;
+  size_t offset = 0;
+  while ((offset = text.find(needle, offset)) != std::string::npos) {
+    ++count;
+    offset += needle.size();
+  }
+  return count;
+}
+
 class FailingMicroApiCall final : public MicroApiCall {
  public:
   FailingMicroApiCall() : MicroApiCall("FailingMicroApiCall") {}
@@ -347,6 +357,33 @@ TEST(VFLoopTest, PropagatesFailureWhenMicroApiCallFails) {
   EXPECT_NE(loop.Generate(tpipe, tensor_manager, 0, result, loop_size, max_depth, loop_sizes), af::SUCCESS);
   EXPECT_NE(loop.GenerateCvUbFuse(tpipe, tensor_manager, result, loop_size), af::SUCCESS);
   loop.Destruct();
+}
+
+TEST(VFLoopTest, DeduplicatesSiblingLoopDeclarations) {
+  ge::SetupRuntimeStub();
+  af::AscGraph graph("sibling_vf_loops");
+  const auto size = graph.CreateSizeVar("size");
+  const auto axis = graph.CreateAxis("axis", size);
+
+  Tiler tiler;
+  tiler.AddAxis(axis);
+  TPipe tpipe("tpipe", tiler);
+  TensorManager tensor_manager;
+
+  VFLoop root(af::kIdNone);
+  root.SetMaxDtypeSize("float");
+  root.AddLoop(new VFLoop(axis.id));
+  root.AddLoop(new VFLoop(axis.id));
+
+  std::string result;
+  std::string loop_size;
+  int32_t max_depth = -1;
+  std::vector<std::string> loop_sizes;
+  ASSERT_EQ(root.Generate(tpipe, tensor_manager, 0, result, loop_size, max_depth, loop_sizes), af::SUCCESS);
+  EXPECT_EQ(CountOccurrences(loop_size, "uint16_t axis_loop_size = loop_times;"), 1U) << loop_size;
+  EXPECT_EQ(CountOccurrences(result, "uint32_t sreg_0 = element_count;"), 1U) << result;
+  EXPECT_EQ(CountOccurrences(result, "AscendC::MicroAPI::MaskReg preg_0;"), 1U) << result;
+  root.Destruct();
 }
 
 TEST(VFLoopTest, GeneratesInt64ArangeAcrossVectorBlocks) {
