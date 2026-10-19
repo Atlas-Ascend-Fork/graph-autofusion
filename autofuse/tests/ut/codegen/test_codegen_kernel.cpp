@@ -2257,6 +2257,38 @@ TEST_F(CodegenKernel_CallSync, LoadEnq_DeqVec1_Vec23_PipeVec4ReuseLoad) {
                                     "\n"});
 }
 
+// load 的输出被 store(MTE3) 读取，同时被 vec 原地复用(覆盖写)，
+// vec 写之前必须等 store 读完，即插入 MTE3->V 同步。
+TEST_F(CodegenKernel_CallSync, Load_StoreReader_And_VecReuseLoad_ShouldSyncMte3ToVec) {
+  auto load = Load("Load", x);
+  load->attr.api.compute_type = af::ComputeType::kComputeLoad;
+  auto store = Store("Store", load);
+  auto vec4 = Vec("vec4", true, load);
+
+  auto res = Generate();
+  const auto sync = res.find("TQueSync<PIPE_MTE3, PIPE_V>");
+  ASSERT_NE(sync, std::string::npos) << res;
+  const auto store_pos = res.find("Store();");
+  const auto reuse_pos = res.find("uint32_t q1_reuse2_offset");
+  ASSERT_NE(store_pos, std::string::npos) << res;
+  ASSERT_NE(reuse_pos, std::string::npos) << res;
+  EXPECT_LT(store_pos, sync);
+  EXPECT_LT(sync, reuse_pos);
+}
+
+// vec 输出被 Store 读取并 FreeTensor 后，下一个 vec 经 AllocTensor 复用该 que buffer，
+// que 的 free 事件已保证 MTE3 读者完成，不应重复插入 MTE3->V 同步。
+TEST_F(CodegenKernel_CallSync, VecOut_StoreRead_Free_AllocVecReuse_ShouldNotSyncMte3ToVec) {
+  auto vec1 = VecOut("vec1");
+  auto store = Store("Store", vec1);
+  auto vec2 = Vec("vec2", true, vec1);
+
+  auto res = Generate();
+  const auto reuse_pos = res.find("q1_reuse2_offset");
+  ASSERT_NE(reuse_pos, std::string::npos) << res;
+  EXPECT_EQ(res.find("MTE3_V"), std::string::npos) << res;
+}
+
 TEST_F(CodegenKernel_CallSync, AllocVec1Enq_DeqStore1_Stroe23Free_Vec2ReuseVec1) {
   auto vec1 = VecOut("vec1");
   auto store1 = Store("store1", vec1);

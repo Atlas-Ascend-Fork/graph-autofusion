@@ -12922,6 +12922,47 @@ af::ComputeGraphPtr ShareGraph::ReciprocalBf16FusedGraph(size_t dims_size) {
 }
 
 /**
+ *         data0
+ *           |
+ *         load0
+ *         |    \
+ *       store2  round
+ *         |     |
+ *        ouput0 output1
+ */
+static void CreateLoadToStoreAndRoundAscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data x("data", graph);
+  x.y.dtype = af::DataType::DT_BF16;
+  x.ir_attr.SetIndex(0);
+
+  af::ascir_op::Load xLocal("load");
+  xLocal.x = x.y;
+  xLocal.y.dtype = af::DataType::DT_BF16;
+
+  af::ascir_op::Store load_2_store("store2");
+  load_2_store.x = xLocal.y;
+  load_2_store.y.dtype = af::DataType::DT_BF16;
+
+  af::ascir_op::Round round("round");
+  round.x = xLocal.y;
+  round.y.dtype = af::DataType::DT_BF16;
+
+  af::ascir_op::Store round_store("store");
+  round_store.x = round.y;
+  round_store.y.dtype = af::DataType::DT_BF16;
+
+  af::ascir_op::Output y1("output");
+  y1.x = load_2_store.y;
+  y1.ir_attr.SetIndex(0);
+
+  af::ascir_op::Output y2("output2");
+  y2.x = round_store.y;
+  y2.ir_attr.SetIndex(1);
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+}
+
+/**
  *      NetOutput
  *         |
  *       AscBc
@@ -12945,6 +12986,44 @@ af::ComputeGraphPtr ShareGraph::RoundBf16FusedGraph(size_t dims_size) {
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("round_bf16_test");
   CreateRoundBf16AscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
+ *      NetOutput
+ *      /      \
+ *   output0  output1
+ *     |         |
+ *  store2     store
+ *     |         |
+ *     |       round
+ *      \       /
+ *        load0
+ *          |
+ *        data0
+ */
+af::ComputeGraphPtr ShareGraph::LoadToStoreAndRoundFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("load_to_store_and_round_test");
+  auto data = builder.AddNode("data", "Data", 0, 1);
+  af::AttrUtils::SetInt(data->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 2);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 2, 0);
+
+  builder.AddDataEdge(data, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  builder.AddDataEdge(ascbc, 1, netoutput, 1);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_to_store_and_round_test");
+  CreateLoadToStoreAndRoundAscGraph(sub_graph, dims_size);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);

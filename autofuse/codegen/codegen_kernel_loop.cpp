@@ -1532,6 +1532,22 @@ static bool IsInplaceOutput(const ApiCall &call, const ApiTensor &tensor) {
   return false;
 }
 
+// 被复用的 buffer 是否还有 Store(MTE3) 读者。向量算子覆盖写该 buffer 前需等待其读完。
+static bool HasMte3StoreReader(const ApiTensor &reuse_from) {
+  return std::any_of(reuse_from.reads.begin(), reuse_from.reads.end(),
+                     [](const ApiCall *read) { return read != nullptr && read->type == Store::Type; });
+}
+
+// 复用若通过 FreeTensor->AllocTensor 的 que 途径完成（复用来源为 VecOut），que 的 free 事件
+// 已保证 MTE3 读者完成；仅原地覆盖（TBuf 复用、复用来源非 VecOut 的 que 复用）需要显式同步。
+static bool IsQueProtectedReuse(const TPipe &tpipe, const ApiTensor &out, const Tensor &t) {
+  if (t.alloc_type != af::AllocType::kAllocTypeQueue || out.reuse_from == nullptr) {
+    return false;
+  }
+  auto reused = tpipe.GetTensor(out.reuse_from->id);
+  return reused != nullptr && reused->position == af::Position::kPositionVecOut;
+}
+
 Status ApiCall::HandleVecOutAlloc(const TPipe &tpipe, const ApiTensor &out, const Tensor &t, std::stringstream &ss,
                                   bool with_define) const {
   if (IsInplaceOutput(*this, out)) {
@@ -1568,6 +1584,13 @@ Status ApiCall::AllocOutputs(const TPipe &tpipe, std::stringstream &ss) const {
     auto tensor_ptr = tpipe.GetTensor(out.id);
     GE_CHK_BOOL_RET_STATUS(tensor_ptr != nullptr, af::FAILED, "Check[Param] tensor_ptr is nullptr");
     auto t = *tensor_ptr;
+
+    // 向量算子以原地覆盖方式复用某 buffer 时，若该 buffer 仍有 Store(MTE3) 读者未完成，
+    // 覆盖写之前需要插入 MTE3->V 同步，避免 Store 读取到被改写的 buffer。
+    if (this->unit == af::ComputeUnit::kUnitVector && out.reuse_from != nullptr &&
+        HasMte3StoreReader(*out.reuse_from) && !IsQueProtectedReuse(tpipe, out, t)) {
+      ss << tpipe.SyncMte3ToVec(t) << std::endl;
+    }
 
     if (t.alloc_type == af::AllocType::kAllocTypeBuffer) {
       if (out.reuse_from != nullptr) {
