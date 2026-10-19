@@ -2524,6 +2524,28 @@ TEST_F(SkTaskBuilderTest, DispatchSyncTasks_EarlyStartMasksEnqueueTasks) {
       builder->DispatchSyncTasks(defaultAic, defaultAiv, 1, defaultInfo, false, SkQueueType::AIC, scopeCoreInfo));
 }
 
+TEST_F(SkTaskBuilderTest, DispatchSyncTasks_NullRelatedNodeEnqueuesDefaultSyncTask) {
+  EarlyStartInfo info;
+  info.ApplySyncMask(SkEarlyStartMask::AIC_TO_AIC_SET);
+  auto scopeCoreInfo = BuildCoreInfo(SkKernelType::AIC_ONLY, 4);
+
+  SkTask aic;
+  SkTask aiv;
+  ASSERT_TRUE(aic.taskQue.Init(2));
+  ASSERT_TRUE(aiv.taskQue.Init(2));
+
+  ASSERT_TRUE(builder->DispatchSyncTasks(aic, aiv, 0, info, true, SkQueueType::AIC, scopeCoreInfo));
+  ASSERT_EQ(aic.taskQue.get()->taskCnt, 1U);
+  EXPECT_EQ(aiv.taskQue.get()->taskCnt, 0U);
+
+  const TaskInfo &syncTask = aic.taskQue.get()->taskInfos[0];
+  EXPECT_EQ(syncTask.type, SkTaskType::TYPE_SYNC);
+  EXPECT_EQ(syncTask.args, static_cast<uint32_t>(SkCoreSyncType::CROSS_SYNC_AIC_TO_AIC));
+  EXPECT_EQ(syncTask.extraInfo, static_cast<uint64_t>(SkEarlyStartMask::AIC_TO_AIC_SET));
+  EXPECT_EQ(syncTask.numBlocks, 0U);
+  EXPECT_EQ(syncTask.relatedType, SkKernelType::DEFAULT);
+}
+
 TEST_F(SkTaskBuilderTest, GenEntryInfo_BlockDimScaleUpUpdatesRelatedEarlyStartSyncTask) {
   auto *scaled = CreateKernelNodeEx(43405, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
   auto *aicDriver = CreateKernelNodeEx(43406, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
