@@ -1110,161 +1110,182 @@ TEST_P(AclSpecOptimizerScopeTest, ConvertsExceptionsWithoutCompilingOrMutatingMo
 INSTANTIATE_TEST_SUITE_P(PublicEntries, AclSpecOptimizerScopeTest, testing::Bool());
 
 namespace {
-enum class SubmissionCase {
-  SUCCESS,
-  MARKERS_ONLY,
-  EMPTY,
-  UNSUPPORTED,
-  PARTIAL_COMPILE,
-  ALL_COMPILE_FAILED,
-  FIRST_LOAD,
-  LATER_LOAD,
-  LOOKUP,
-  LOAD_WITH_HANDLE,
-  FIRST_SET,
-  LATER_SET,
-  FIRST_DISABLE,
-  LATER_DISABLE,
-  UPDATE,
-  CALLBACK,
-  DISABLE_AND_CALLBACK,
-  UPDATE_AND_CALLBACK
+class AclSpecOptimizerSubmissionTest : public AclSpecOptimizerCollectionTest {
+ protected:
+  void SetUp() override {
+    AclSpecOptimizerCollectionTest::SetUp();
+    begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+    end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+    secondKernel = kernel;
+    second = task;
+    second.params.kernelTaskParams.funcHandle = &secondKernel;
+    stream.tasks = {&begin, &task, &second, &end};
+    binaryLoadHandles = {&tokens[0], &tokens[1]};
+    MOCKER(aclmdlRITaskDisable).stubs().will(invoke(DisableTask));
+  }
+
+  aclError RunEntry(bool byFlag) {
+    return byFlag ? aclmdlRISpecOptimizeByFlag(&model, nullptr) : aclmdlRISpecOptimize(&model, nullptr);
+  }
+
+  void ExpectSubmission(size_t rewrites, size_t disables, size_t updates, size_t released,
+                        bool callbackFailed = false) {
+    std::vector<std::string> operations(rewrites, "SetParams");
+    operations.insert(operations.end(), disables, "Disable");
+    operations.insert(operations.end(), updates, "Update");
+    EXPECT_EQ(commitOperations, operations);
+    EXPECT_EQ(unloadedBinaries.size(), released);
+    const bool referenced = rewrites != 0;
+    EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), referenced && !callbackFailed ? 1U : 0U);
+    if (referenced && !callbackFailed) {
+      ASSERT_EQ(SkUtInvokeModelDestroyCallback(&model), ACL_SUCCESS);
+      EXPECT_EQ(unloadedBinaries.size(), loadCalls);
+    }
+    if (!referenced) {
+      EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &kernel);
+      EXPECT_EQ(second.params.kernelTaskParams.funcHandle, &secondKernel);
+    }
+    EXPECT_EQ(begin.params.kernelTaskParams.funcHandle, &beginKernel);
+    EXPECT_EQ(end.params.kernelTaskParams.funcHandle, &endKernel);
+    for (const auto &path : specializationPaths) {
+      EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(path).parent_path()));
+    }
+  }
+
+  KernelState beginKernel, endKernel, secondKernel;
+  CollectorTask begin{}, end{}, second{};
+  std::array<int, 2> tokens{};
 };
-struct SubmissionExpectation {
-  SubmissionCase scenario;
-  size_t rewrites, disables, updates, released;
+
+struct CandidateCase {
+  const char *name;
+  size_t taskCount, unsupportedCount;
+  std::vector<aclError> compileResults;
+  size_t rewrites;
+  bool hasMarkers = true;
 };
-class AclSpecOptimizerScopeSubmissionTest
-    : public AclSpecOptimizerCollectionTest,
-      public testing::WithParamInterface<std::tuple<bool, SubmissionExpectation>> {};
+class AclSpecOptimizerCandidateTest : public AclSpecOptimizerSubmissionTest,
+                                      public testing::WithParamInterface<std::tuple<bool, CandidateCase>> {};
+
+struct LoadFailureCase {
+  const char *name;
+  std::vector<aclError> loadResults, lookupResults;
+  bool errorHasHandle;
+  size_t released;
+};
+class AclSpecOptimizerLoadFailureTest : public AclSpecOptimizerSubmissionTest,
+                                        public testing::WithParamInterface<std::tuple<bool, LoadFailureCase>> {};
+
+struct CommitFailureCase {
+  const char *name;
+  std::vector<aclError> setResults, disableResults, updateResults;
+  aclError callbackResult;
+  size_t rewrites, disables, updates;
+};
+class AclSpecOptimizerCommitFailureTest : public AclSpecOptimizerSubmissionTest,
+                                          public testing::WithParamInterface<std::tuple<bool, CommitFailureCase>> {};
 }  // namespace
 
-TEST_P(AclSpecOptimizerScopeSubmissionTest, SubmitsInOrderAndKeepsOrReleasesBinariesAtFailureBoundary) {
-  const auto expected = std::get<1>(GetParam());
-  const auto scenario = expected.scenario;
-  KernelState beginKernel, endKernel, secondKernel = kernel;
-  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
-  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
-  CollectorTask second = task;
-  second.params.kernelTaskParams.funcHandle = &secondKernel;
-  stream.tasks = {&begin, &task, &second, &end};
-  std::array<int, 2> tokens{};
-  binaryLoadHandles = {&tokens[0], &tokens[1]};
-  MOCKER(aclmdlRITaskDisable).stubs().will(invoke(DisableTask));
-  aclError result = ACL_ERROR_INVALID_PARAM;
-  switch (scenario) {
-    case SubmissionCase::SUCCESS:
-      result = ACL_SUCCESS;
-      break;
-    case SubmissionCase::MARKERS_ONLY:
-      stream.tasks = {&begin, &end};
-      result = ACL_SUCCESS;
-      break;
-    case SubmissionCase::EMPTY:
-      stream.tasks.clear();
-      result = ACL_SUCCESS;
-      break;
-    case SubmissionCase::UNSUPPORTED:
-      kernel.binary.clear();
-      result = ACL_SUCCESS;
-      break;
-    case SubmissionCase::PARTIAL_COMPILE:
-      specializationResults = {ACL_SUCCESS, ACL_ERROR_FAILURE};
-      result = ACL_SUCCESS;
-      break;
-    case SubmissionCase::ALL_COMPILE_FAILED:
-      specializationResults = {ACL_ERROR_FAILURE, ACL_ERROR_FAILURE};
-      result = ACL_SUCCESS;
-      break;
-    case SubmissionCase::FIRST_LOAD:
-      loadResult = result;
-      break;
-    case SubmissionCase::LATER_LOAD:
-      binaryLoadResults = {ACL_SUCCESS, result};
-      break;
-    case SubmissionCase::LOOKUP:
-      functionLookupResults = {ACL_SUCCESS, result};
-      break;
-    case SubmissionCase::LOAD_WITH_HANDLE:
-      loadResult = result;
-      loadErrorHasHandle = true;
-      break;
-    case SubmissionCase::FIRST_SET:
-      setResults = {result};
-      break;
-    case SubmissionCase::LATER_SET:
-      setResults = {ACL_SUCCESS, result};
-      break;
-    case SubmissionCase::FIRST_DISABLE:
-      disableResults = {result};
-      break;
-    case SubmissionCase::LATER_DISABLE:
-      disableResults = {ACL_SUCCESS, result};
-      break;
-    case SubmissionCase::UPDATE:
-      updateResults = {result};
-      break;
-    case SubmissionCase::CALLBACK:
-      SkUtSetAclmdlRIDestroyRegisterCallbackRet(result);
-      break;
-    case SubmissionCase::DISABLE_AND_CALLBACK:
-      disableResults = {result};
-      SkUtSetAclmdlRIDestroyRegisterCallbackRet(ACL_ERROR_FAILURE);
-      break;
-    case SubmissionCase::UPDATE_AND_CALLBACK:
-      updateResults = {result};
-      SkUtSetAclmdlRIDestroyRegisterCallbackRet(ACL_ERROR_FAILURE);
-      break;
+TEST_P(AclSpecOptimizerCandidateTest, KeepsSkippedTasksAndCleansMarkersAfterCompilation) {
+  const auto &expected = std::get<1>(GetParam());
+  stream.tasks.clear();
+  if (expected.hasMarkers) {
+    stream.tasks.push_back(&begin);
   }
-  const auto entry = std::get<0>(GetParam()) ? aclmdlRISpecOptimizeByFlag : aclmdlRISpecOptimize;
-  EXPECT_EQ(entry(&model, nullptr), result);
-  std::vector<std::string> operations(expected.rewrites, "SetParams");
-  operations.insert(operations.end(), expected.disables, "Disable");
-  operations.insert(operations.end(), expected.updates, "Update");
-  EXPECT_EQ(commitOperations, operations);
-  EXPECT_EQ(unloadedBinaries.size(), expected.released);
-  const bool referenced = expected.rewrites != 0;
-  const bool callbackFailed = scenario == SubmissionCase::CALLBACK ||
-                              scenario == SubmissionCase::DISABLE_AND_CALLBACK ||
-                              scenario == SubmissionCase::UPDATE_AND_CALLBACK;
-  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), referenced && !callbackFailed ? 1U : 0U);
-  if (referenced && !callbackFailed) {
-    ASSERT_EQ(SkUtInvokeModelDestroyCallback(&model), ACL_SUCCESS);
-    EXPECT_EQ(unloadedBinaries.size(), loadCalls);
+  const std::array<aclmdlRITask, 2> tasks{&task, &second};
+  ASSERT_LE(expected.taskCount, tasks.size());
+  ASSERT_LE(expected.unsupportedCount, expected.taskCount);
+  stream.tasks.insert(stream.tasks.end(), tasks.begin(), tasks.begin() + expected.taskCount);
+  if (expected.hasMarkers) {
+    stream.tasks.push_back(&end);
   }
-  if (!referenced) {
+  if (expected.unsupportedCount > 0) {
+    kernel.binary.clear();
+  }
+  if (expected.unsupportedCount > 1) {
+    secondKernel.binary.clear();
+  }
+  specializationResults = expected.compileResults;
+
+  EXPECT_EQ(RunEntry(std::get<0>(GetParam())), ACL_SUCCESS);
+  const size_t markerCount = expected.hasMarkers ? 2U : 0U;
+  ExpectSubmission(expected.rewrites, markerCount, expected.hasMarkers ? 1U : 0U, 0);
+  EXPECT_EQ(specializationPaths.size(), expected.taskCount - expected.unsupportedCount);
+  EXPECT_EQ(loadCalls, expected.rewrites);
+  EXPECT_EQ(functionCalls, expected.rewrites);
+  const std::vector<aclmdlRITask> expectedMarkers =
+      expected.hasMarkers ? std::vector<aclmdlRITask>{&begin, &end} : std::vector<aclmdlRITask>{};
+  EXPECT_EQ(disabled, expectedMarkers);
+  if (expected.unsupportedCount > 0) {
     EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &kernel);
-  }
-  EXPECT_EQ(begin.params.kernelTaskParams.funcHandle, &beginKernel);
-  EXPECT_EQ(end.params.kernelTaskParams.funcHandle, &endKernel);
-  for (const auto &path : specializationPaths) {
-    EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(path).parent_path()));
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(PublicEntries, AclSpecOptimizerScopeSubmissionTest,
-                         testing::Combine(testing::Bool(),
-                                          testing::Values(
-                                              // scenario, SetParams calls, Disable calls, Update calls, binaries
-                                              // released before model destruction
-                                              SubmissionExpectation{SubmissionCase::SUCCESS, 2, 2, 1, 0},
-                                              SubmissionExpectation{SubmissionCase::MARKERS_ONLY, 0, 2, 1, 0},
-                                              SubmissionExpectation{SubmissionCase::EMPTY, 0, 0, 0, 0},
-                                              SubmissionExpectation{SubmissionCase::UNSUPPORTED, 1, 2, 1, 0},
-                                              SubmissionExpectation{SubmissionCase::PARTIAL_COMPILE, 1, 2, 1, 0},
-                                              SubmissionExpectation{SubmissionCase::ALL_COMPILE_FAILED, 0, 2, 1, 0},
-                                              SubmissionExpectation{SubmissionCase::FIRST_LOAD, 0, 0, 0, 0},
-                                              SubmissionExpectation{SubmissionCase::LATER_LOAD, 0, 0, 0, 1},
-                                              SubmissionExpectation{SubmissionCase::LOOKUP, 0, 0, 0, 2},
-                                              SubmissionExpectation{SubmissionCase::LOAD_WITH_HANDLE, 0, 0, 0, 1},
-                                              SubmissionExpectation{SubmissionCase::FIRST_SET, 1, 0, 0, 0},
-                                              SubmissionExpectation{SubmissionCase::LATER_SET, 2, 0, 0, 0},
-                                              SubmissionExpectation{SubmissionCase::FIRST_DISABLE, 2, 1, 0, 0},
-                                              SubmissionExpectation{SubmissionCase::LATER_DISABLE, 2, 2, 0, 0},
-                                              SubmissionExpectation{SubmissionCase::UPDATE, 2, 2, 1, 0},
-                                              SubmissionExpectation{SubmissionCase::CALLBACK, 2, 2, 1, 0},
-                                              SubmissionExpectation{SubmissionCase::DISABLE_AND_CALLBACK, 2, 1, 0, 0},
-                                              SubmissionExpectation{SubmissionCase::UPDATE_AND_CALLBACK, 2, 2, 1, 0})));
+INSTANTIATE_TEST_SUITE_P(
+    PublicEntries, AclSpecOptimizerCandidateTest,
+    testing::Combine(testing::Bool(),
+                     testing::Values(
+                         // name, task count, unsupported count, compile results, rewrites, has markers
+                         CandidateCase{"Success", 2, 0, {}, 2}, CandidateCase{"MarkersOnly", 0, 0, {}, 0},
+                         CandidateCase{"Empty", 0, 0, {}, 0, false}, CandidateCase{"MixedSupport", 2, 1, {}, 1},
+                         CandidateCase{"AllUnsupported", 2, 2, {}, 0},
+                         CandidateCase{"PartialCompileFailure", 2, 0, {ACL_SUCCESS, ACL_ERROR_FAILURE}, 1},
+                         CandidateCase{"AllCompileFailure", 2, 0, {ACL_ERROR_FAILURE, ACL_ERROR_FAILURE}, 0})),
+    [](const testing::TestParamInfo<AclSpecOptimizerCandidateTest::ParamType> &info) {
+      return std::string(std::get<0>(info.param) ? "ByFlag" : "Optimize") + std::get<1>(info.param).name;
+    });
+
+TEST_P(AclSpecOptimizerLoadFailureTest, DoesNotMutateTasksAndReleasesLoadedBinaries) {
+  const auto &expected = std::get<1>(GetParam());
+  binaryLoadResults = expected.loadResults;
+  functionLookupResults = expected.lookupResults;
+  loadErrorHasHandle = expected.errorHasHandle;
+
+  EXPECT_EQ(RunEntry(std::get<0>(GetParam())), ACL_ERROR_INVALID_PARAM);
+  ExpectSubmission(0, 0, 0, expected.released);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    PublicEntries, AclSpecOptimizerLoadFailureTest,
+    testing::Combine(testing::Bool(),
+                     testing::Values(
+                         // name, load results, lookup results, error has handle, released binaries
+                         LoadFailureCase{"FirstLoad", {ACL_ERROR_INVALID_PARAM}, {}, false, 0},
+                         LoadFailureCase{"LaterLoad", {ACL_SUCCESS, ACL_ERROR_INVALID_PARAM}, {}, false, 1},
+                         LoadFailureCase{"FunctionLookup", {}, {ACL_SUCCESS, ACL_ERROR_INVALID_PARAM}, false, 2},
+                         LoadFailureCase{"LoadErrorWithHandle", {ACL_ERROR_INVALID_PARAM}, {}, true, 1})),
+    [](const testing::TestParamInfo<AclSpecOptimizerLoadFailureTest::ParamType> &info) {
+      return std::string(std::get<0>(info.param) ? "ByFlag" : "Optimize") + std::get<1>(info.param).name;
+    });
+
+TEST_P(AclSpecOptimizerCommitFailureTest, StopsAtFailureAndRetainsReferencedBinaries) {
+  const auto &expected = std::get<1>(GetParam());
+  setResults = expected.setResults;
+  disableResults = expected.disableResults;
+  updateResults = expected.updateResults;
+  SkUtSetAclmdlRIDestroyRegisterCallbackRet(expected.callbackResult);
+
+  EXPECT_EQ(RunEntry(std::get<0>(GetParam())), ACL_ERROR_INVALID_PARAM);
+  ExpectSubmission(expected.rewrites, expected.disables, expected.updates, 0, expected.callbackResult != ACL_SUCCESS);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    PublicEntries, AclSpecOptimizerCommitFailureTest,
+    testing::Combine(
+        testing::Bool(),
+        testing::Values(
+            // name, SetParams/Disable/Update results, callback result, attempted rewrites/disables/updates
+            CommitFailureCase{"FirstSet", {ACL_ERROR_INVALID_PARAM}, {}, {}, ACL_SUCCESS, 1, 0, 0},
+            CommitFailureCase{"LaterSet", {ACL_SUCCESS, ACL_ERROR_INVALID_PARAM}, {}, {}, ACL_SUCCESS, 2, 0, 0},
+            CommitFailureCase{"FirstDisable", {}, {ACL_ERROR_INVALID_PARAM}, {}, ACL_SUCCESS, 2, 1, 0},
+            CommitFailureCase{"LaterDisable", {}, {ACL_SUCCESS, ACL_ERROR_INVALID_PARAM}, {}, ACL_SUCCESS, 2, 2, 0},
+            CommitFailureCase{"Update", {}, {}, {ACL_ERROR_INVALID_PARAM}, ACL_SUCCESS, 2, 2, 1},
+            CommitFailureCase{"Callback", {}, {}, {}, ACL_ERROR_INVALID_PARAM, 2, 2, 1},
+            CommitFailureCase{"DisableAndCallback", {}, {ACL_ERROR_INVALID_PARAM}, {}, ACL_ERROR_FAILURE, 2, 1, 0},
+            CommitFailureCase{"UpdateAndCallback", {}, {}, {ACL_ERROR_INVALID_PARAM}, ACL_ERROR_FAILURE, 2, 2, 1})),
+    [](const testing::TestParamInfo<AclSpecOptimizerCommitFailureTest::ParamType> &info) {
+      return std::string(std::get<0>(info.param) ? "ByFlag" : "Optimize") + std::get<1>(info.param).name;
+    });
 
 TEST_F(AclSpecOptimizerCollectionTest, UsesFeatureQueriesAndPassesRuntimeSizeWithoutDereferencing) {
   kernel.size = 24;
