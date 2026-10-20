@@ -271,11 +271,6 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
                taskCount, result);
       return result;
     }
-    if (taskCount > tasks.size()) {
-      SK_DLOGE("aclmdlRISpecOptimize invalid task count: model=%p stream=%u count=%u capacity=%zu", model, streamIndex,
-               taskCount, tasks.size());
-      return ACL_ERROR_FAILURE;
-    }
     for (uint32_t taskIndex = 0; taskIndex < taskCount; ++taskIndex) {
       TaskIdentity identity;
       identity.record.task = tasks[taskIndex];

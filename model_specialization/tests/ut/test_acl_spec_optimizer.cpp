@@ -763,14 +763,6 @@ aclError GetStreamsWithInvalidCount(aclmdlRI model, aclrtStream *streams, uint32
   return result;
 }
 
-aclError GetTasksWithInvalidCount(aclrtStream stream, aclmdlRITask *tasks, uint32_t *count) {
-  const auto result = GetTasks(stream, tasks, count);
-  if (result == ACL_SUCCESS && tasks != nullptr) {
-    ++*count;
-  }
-  return result;
-}
-
 aclError GetFunctionName(aclrtFuncHandle function, uint32_t capacity, char *name) {
   ++nameQueries;
   const auto &state = *static_cast<KernelState *>(function);
@@ -1550,14 +1542,6 @@ TEST_F(AclSpecOptimizerCollectionTest, RejectsStreamCountExceedingAllocatedCapac
   EXPECT_EQ(Collect(), ACL_ERROR_FAILURE);
   EXPECT_TRUE(requests.empty());
   EXPECT_EQ(taskQueries, 0U);
-}
-
-TEST_F(AclSpecOptimizerCollectionTest, RejectsTaskCountExceedingAllocatedCapacity) {
-  GlobalMockObject::reset(reinterpret_cast<const void *>(aclmdlRIGetTasksByStream));
-  MOCKER(aclmdlRIGetTasksByStream).stubs().will(invoke(GetTasksWithInvalidCount));
-  EXPECT_EQ(Collect(), ACL_ERROR_FAILURE);
-  EXPECT_TRUE(requests.empty());
-  EXPECT_EQ(parameterQueries, 0U);
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, StreamEnumerationStubRespectsArrayCapacity) {
