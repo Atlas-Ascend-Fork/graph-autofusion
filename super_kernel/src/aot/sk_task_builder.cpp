@@ -464,8 +464,7 @@ bool SkTaskBuilder::PrecomputeSyncRelationsFromGraph(const std::vector<SuperKern
     return false;
   }
 
-  if (!BuildTaskIndex(tasks) || !ValidateGraphRelations(tasks, true) ||
-      !ExtractSyncRelationsFromGraph(tasks, true)) {
+  if (!BuildTaskIndex(tasks) || !ValidateGraphRelations(tasks, true) || !ExtractSyncRelationsFromGraph(tasks, true)) {
     SK_LOGE("PrecomputeSyncRelationsFromGraph failed: invalid graph task relations");
     return false;
   }
@@ -539,8 +538,7 @@ bool SkTaskBuilder::ValidateGraphRelations(const std::vector<SuperKernelBaseNode
       }
       const auto *target = tasks[targetIndex];
       if (target->receiveNodeId.count(source->GetNodeId()) == 0) {
-        SK_LOGW("ValidateGraphRelations: reverse relation missing for edge %lu -> %lu", source->GetNodeId(),
-                targetId);
+        SK_LOGW("ValidateGraphRelations: reverse relation missing for edge %lu -> %lu", source->GetNodeId(), targetId);
       }
     }
   }

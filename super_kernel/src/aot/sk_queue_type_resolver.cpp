@@ -162,15 +162,14 @@ bool SkQueueTypeResolver::Resolve(const std::vector<SuperKernelBaseNode *> &task
       return false;
     }
     const bool previous = type != SkNodeType::NODE_WAIT;
-    const auto *kernel = FindKernel(graph_, previous ? node->GetPreNodeId() : node->GetNextNodeId(), previous,
-                                    kernelNodeCache);
+    const auto *kernel =
+        FindKernel(graph_, previous ? node->GetPreNodeId() : node->GetNextNodeId(), previous, kernelNodeCache);
     SkQueueType resolved = fallback;
     if (kernel != nullptr) {
       kernelNodeCache[node->GetNodeId()] = kernel;
       resolved = EventQueueType(QueueTypeFromKernel(kernel->GetKernelType()), aicAvailable, aivAvailable);
-      if (type == SkNodeType::NODE_WAIT &&
-          (QueueTypeFromKernel(kernel->GetKernelType()) == SkQueueType::MIX_1_1 ||
-           QueueTypeFromKernel(kernel->GetKernelType()) == SkQueueType::MIX_1_2)) {
+      if (type == SkNodeType::NODE_WAIT && (QueueTypeFromKernel(kernel->GetKernelType()) == SkQueueType::MIX_1_1 ||
+                                            QueueTypeFromKernel(kernel->GetKernelType()) == SkQueueType::MIX_1_2)) {
         resolved = EventQueueType(ResolveMixWaitEventQueueType(previousKernel, kernel), aicAvailable, aivAvailable);
       }
     }

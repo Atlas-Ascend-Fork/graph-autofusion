@@ -151,8 +151,7 @@ class SkTaskBuilder {
   // Validate graph edges against the current task order.  MIX sub-groups may
   // contain edges whose endpoints belong to another sub-group; those edges
   // are handled by the group boundary synchronization.
-  bool ValidateGraphRelations(const std::vector<SuperKernelBaseNode *> &tasks,
-                              bool allowExternalDependencies = false);
+  bool ValidateGraphRelations(const std::vector<SuperKernelBaseNode *> &tasks, bool allowExternalDependencies = false);
 
   // Extract synchronization from graph edges for every node type, not only
   // kernel nodes.  The optional external-dependency mode is used while

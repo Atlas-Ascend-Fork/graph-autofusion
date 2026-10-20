@@ -56,12 +56,18 @@ enum class SkQueueType : uint8_t {
 
 inline const char *to_string(SkQueueType type) {
   switch (type) {
-    case SkQueueType::AIC: return "AIC";
-    case SkQueueType::AIV: return "AIV";
-    case SkQueueType::MIX_1_1: return "MIX_1_1";
-    case SkQueueType::MIX_1_2: return "MIX_1_2";
-    case SkQueueType::UNKNOWN: return "UNKNOWN";
-    default: return "UNKNOWN";
+    case SkQueueType::AIC:
+      return "AIC";
+    case SkQueueType::AIV:
+      return "AIV";
+    case SkQueueType::MIX_1_1:
+      return "MIX_1_1";
+    case SkQueueType::MIX_1_2:
+      return "MIX_1_2";
+    case SkQueueType::UNKNOWN:
+      return "UNKNOWN";
+    default:
+      return "UNKNOWN";
   }
 }
 

@@ -245,8 +245,7 @@ TEST_F(SkOptimizerTaskReorderTest, ExtractIntraStreamDependencies_ConnectsAdjace
   auto *stream0Second = CreateWaitNode(203, 0);
   auto *stream1Second = CreateKernelNode(204, 1);
 
-  ASSERT_TRUE(optimizer->ExtractIntraStreamDependencies(
-      {stream0First, stream1First, stream0Second, stream1Second}));
+  ASSERT_TRUE(optimizer->ExtractIntraStreamDependencies({stream0First, stream1First, stream0Second, stream1Second}));
 
   EXPECT_EQ(stream0First->sendToNodeId.count(203), 1);
   EXPECT_EQ(stream0Second->receiveNodeId.count(201), 1);

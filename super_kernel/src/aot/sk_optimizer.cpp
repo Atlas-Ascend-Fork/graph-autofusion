@@ -70,8 +70,7 @@ void PrintTaskNodesDetail(const std::vector<SuperKernelBaseNode *> &nodes, const
 }
 }  // namespace
 
-bool SuperKernelOptimizer::ExtractIntraStreamDependencies(
-    const std::vector<SuperKernelBaseNode *> &taskNodes) const {
+bool SuperKernelOptimizer::ExtractIntraStreamDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes) const {
   std::unordered_map<uint32_t, SuperKernelBaseNode *> lastNodeByStream;
   for (auto *node : taskNodes) {
     if (node == nullptr) {
