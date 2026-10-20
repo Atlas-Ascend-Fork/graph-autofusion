@@ -24,7 +24,7 @@ rtExceptionErrRegInfo_t Core(uint32_t id, rtCoreType_t type, uint64_t pc = 0, ui
   result.currentPC = pc;
   // Runtime register transport slots documented by the exception decoder:
   // DAV_2201 uses 20/21; DAV_3510 uses 32/33. COND is emitted by set_cond
-  // as scope bits | (task index << 8) | state (0..4). No SK memory is decoded.
+  // with state in bits [7:0]. WAIT states identify a per-core queue slot.
   for (size_t slot : {20U, 32U}) {
     result.errReg[slot] = static_cast<uint32_t>(cond);
     result.errReg[slot + 1] = static_cast<uint32_t>(cond >> 32);
@@ -89,10 +89,11 @@ TEST_F(AotSystemTest, ExceptionCallbackDecodesCondStatesFromExternalRegisters) {
   sk::test::Exception exception(task);
   const char *messages[] = {"No SK entry executed yet",     "SK entry launched, no sub-kernel executed yet",
                             "Currently running sub-kernel", "finished, about to run next",
-                            "SK entry execution completed", "Unknown opState=5"};
-  for (uint32_t state = 0; state < 6; ++state) {
+                            "SK entry execution completed", "Currently executing waitfunc",
+                            "Last completed waitfunc",      "Unknown opState=7"};
+  for (uint32_t state = 0; state < 8; ++state) {
     SCOPED_TRACE(state);
-    exception.registers = {Core(0, RT_CORE_TYPE_AIV, 0, (1ULL << 16) | state)};
+    exception.registers = {Core(0, RT_CORE_TYPE_AIV, 0, (1ULL << 24) | state)};
     ut_log::LogBuffer::Instance().Clear();
     exception.Raise();
     ExpectExceptionLog(messages[state]);
