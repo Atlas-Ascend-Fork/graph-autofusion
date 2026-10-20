@@ -980,6 +980,7 @@ build_backend() {
                       reciprocal_bf16_test_e2e_v2 \
                       relu_uint8_test_e2e_v2 \
                       round_bf16_test_e2e_v2 \
+                      load_to_store_and_round_test_e2e_v2 \
                       rshift_uint8_test_e2e_v2 \
                       sign_uint8_test_e2e_v2 \
                       sign_bf16_test_e2e_v2 \

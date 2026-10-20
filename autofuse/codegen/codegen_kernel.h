@@ -338,6 +338,7 @@ class TPipe : public Variable {
   Status LocalTensorQueBufAlloc(std::string &result) const;
   std::string SyncMte3ToMte2(const Tensor in_tensor) const;
   std::string SyncMte2ToMte3(const Tensor in_tensor) const;
+  std::string SyncMte3ToVec(const Tensor in_tensor) const;
   Status CollectQues(const ascir::ImplGraph &graph);
   void AddBlkTensor(const ascir::TensorId &tensorid) {
     need_gen_blk_tensors.emplace_back(tensorid);

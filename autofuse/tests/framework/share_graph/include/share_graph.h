@@ -224,6 +224,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr PowBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ReciprocalBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RoundBf16FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr LoadToStoreAndRoundFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ReluUint8FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RshiftUint8FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr SignUint8FusedGraph(size_t dims_size);

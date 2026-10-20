@@ -1868,6 +1868,19 @@ std::string TPipe::SyncMte2ToMte3(const Tensor in_tensor) const {
   return ss.str();
 }
 
+std::string TPipe::SyncMte3ToVec(const Tensor in_tensor) const {
+  stringstream ss;
+  std::string event_name = in_tensor.Str() + "_e_mte3_2_v";
+  std::string sync_name = in_tensor.Str() + "_s_mte3_2_v";
+
+  ss << "auto " << event_name << " = tpipe.AllocEventID<HardEvent::MTE3_V>();" << std::endl
+     << "TQueSync<PIPE_MTE3, PIPE_V> " << sync_name << ";" << std::endl
+     << sync_name << ".SetFlag(" << event_name << ");" << std::endl
+     << sync_name << ".WaitFlag(" << event_name << ");" << std::endl
+     << "tpipe.ReleaseEventID<HardEvent::MTE3_V>(" << event_name << ");" << std::endl;
+  return ss.str();
+}
+
 Status TPipe::CollectQues(const ascir::ImplGraph &graph) {
   QueCollection collection;
   for (auto node : graph.GetAllNodes()) {
