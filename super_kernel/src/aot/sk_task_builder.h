@@ -24,33 +24,6 @@
 // Forward declaration
 class SuperKernelGraph;
 
-// ========== Queue type enum (indicates which queue executes the task) ==========
-
-enum class SkQueueType : uint8_t {
-  AIC,      // AIC queue only
-  AIV,      // AIV queue only
-  MIX_1_1,  // Execute on both queues (MIX_AIC_1_1)
-  MIX_1_2,  // Execute on both queues (MIX_AIC_1_2)
-  UNKNOWN,  // Unknown/invalid type (used for debug or fallback paths)
-};
-
-inline const char *to_string(SkQueueType type) {
-  switch (type) {
-    case SkQueueType::AIC:
-      return "AIC";
-    case SkQueueType::AIV:
-      return "AIV";
-    case SkQueueType::MIX_1_1:
-      return "MIX_1_1";
-    case SkQueueType::MIX_1_2:
-      return "MIX_1_2";
-    case SkQueueType::UNKNOWN:
-      return "UNKNOWN";
-    default:
-      return "UNKNOWN";
-  }
-}
-
 // ========== Node-oriented sync metadata (aligned with Python behavior) ==========
 
 // Sync direction type (corresponds to Python labels such as "cub:vec", "vec:cub")
@@ -172,6 +145,21 @@ class SkTaskBuilder {
   // Initialize taskSyncInfos_
   bool InitTaskSyncInfos(const std::vector<SuperKernelBaseNode *> &tasks);
 
+  // Build a stable node-id/index mapping for the current task order.
+  bool BuildTaskIndex(const std::vector<SuperKernelBaseNode *> &tasks);
+
+  // Validate graph edges against the current task order.  MIX sub-groups may
+  // contain edges whose endpoints belong to another sub-group; those edges
+  // are handled by the group boundary synchronization.
+  bool ValidateGraphRelations(const std::vector<SuperKernelBaseNode *> &tasks,
+                              bool allowExternalDependencies = false);
+
+  // Extract synchronization from graph edges for every node type, not only
+  // kernel nodes.  The optional external-dependency mode is used while
+  // processing an individual MIX sub-group.
+  bool ExtractSyncRelationsFromGraph(const std::vector<SuperKernelBaseNode *> &tasks,
+                                     bool allowExternalDependencies = false);
+
   // Precompute sync relations (based on graph topology)
   bool PrecomputeSyncRelationsFromGraph(const std::vector<SuperKernelBaseNode *> &tasks);
 
@@ -189,12 +177,6 @@ class SkTaskBuilder {
   void AddBoundaryAllSync(const std::vector<SuperKernelBaseNode *> &curSplitTasks, size_t groupIndex,
                           size_t groupOffset);
   bool IsMixKernelTask(const SuperKernelBaseNode *task) const;
-
-  // Extract intra-stream sync relations (based on GetNextNodeId)
-  void ExtractIntraStreamSync(const std::vector<SuperKernelBaseNode *> &tasks);
-
-  // Extract inter-stream sync relations (event-based)
-  bool ExtractInterStreamSync(const std::vector<SuperKernelBaseNode *> &tasks);
 
   // ========== Core sync insertion (aligned with Python insert_sync_event) ==========
 

@@ -18,6 +18,7 @@
 #define protected public
 #include "sk_graph.h"
 #include "sk_optimizer.h"
+#include "sk_queue_type_resolver.h"
 #include "sk_options_manager.h"
 #include "sk_node.h"
 #include "sk_candidate_heap.h"
@@ -30,7 +31,8 @@ class SkOptimizerTaskReorderTest : public testing::Test {
     optimizer = std::make_unique<SuperKernelOptimizer>(*opts);
   }
 
-  SuperKernelBaseNode *CreateKernelNode(uint64_t nodeId, uint32_t streamIdx) {
+  SuperKernelBaseNode *CreateKernelNode(uint64_t nodeId, uint32_t streamIdx,
+                                        SkKernelType kernelType = SkKernelType::AIC_ONLY) {
     auto node = std::make_unique<SuperKernelKernelNode>(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, streamIdx,
                                                         INVALID_STREAM_ID, INVALID_TASK_ID);
     node->SetNodeType(SkNodeType::NODE_KERNEL);
@@ -38,6 +40,7 @@ class SkOptimizerTaskReorderTest : public testing::Test {
     node->SetPreNodeId(INVALID_TASK_ID);
     node->SetNextNodeId(INVALID_TASK_ID);
     node->nodeInfos.kernelInfos.funcName = "k";
+    node->nodeInfos.kernelInfos.kernelType = kernelType;
     auto *ptr = node.get();
     graph->graphMap[nodeId] = std::move(node);
     return ptr;
@@ -59,6 +62,18 @@ class SkOptimizerTaskReorderTest : public testing::Test {
     auto node = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_EVENT_RECORD, 0, streamIdx,
                                                         INVALID_STREAM_ID, INVALID_TASK_ID);
     node->SetNodeType(SkNodeType::NODE_NOTIFY);
+    node->SetNodeId(nodeId);
+    node->SetPreNodeId(INVALID_TASK_ID);
+    node->SetNextNodeId(INVALID_TASK_ID);
+    auto *ptr = node.get();
+    graph->graphMap[nodeId] = std::move(node);
+    return ptr;
+  }
+
+  SuperKernelBaseNode *CreateResetNode(uint64_t nodeId, uint32_t streamIdx) {
+    auto node = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_EVENT_RESET, 0, streamIdx,
+                                                        INVALID_STREAM_ID, INVALID_TASK_ID);
+    node->SetNodeType(SkNodeType::NODE_RESET);
     node->SetNodeId(nodeId);
     node->SetPreNodeId(INVALID_TASK_ID);
     node->SetNextNodeId(INVALID_TASK_ID);
@@ -222,6 +237,111 @@ TEST_F(SkOptimizerTaskReorderTest, SynthesizedEventDependencies_ConnectOnlyLastK
   EXPECT_EQ(firstEvent->receiveNodeId.count(3), 1);
   EXPECT_EQ(firstEvent->receiveNodeId.count(2), 1);
   EXPECT_EQ(firstEvent->receiveNodeId.size(), 2);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, ExtractIntraStreamDependencies_ConnectsAdjacentNodesPerStream) {
+  auto *stream0First = CreateKernelNode(201, 0);
+  auto *stream1First = CreateKernelNode(202, 1);
+  auto *stream0Second = CreateWaitNode(203, 0);
+  auto *stream1Second = CreateKernelNode(204, 1);
+
+  ASSERT_TRUE(optimizer->ExtractIntraStreamDependencies(
+      {stream0First, stream1First, stream0Second, stream1Second}));
+
+  EXPECT_EQ(stream0First->sendToNodeId.count(203), 1);
+  EXPECT_EQ(stream0Second->receiveNodeId.count(201), 1);
+  EXPECT_EQ(stream1First->sendToNodeId.count(204), 1);
+  EXPECT_EQ(stream1Second->receiveNodeId.count(202), 1);
+  EXPECT_EQ(stream0First->sendToNodeId.count(202), 0);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_AssignsKernelAndEventQueues) {
+  auto *kernel = CreateKernelNode(211, 0);
+  auto *notify = CreateNotifyNode(212, 0);
+  kernel->SetNextNodeId(212);
+  notify->SetPreNodeId(211);
+
+  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({kernel, notify}));
+  EXPECT_EQ(kernel->GetExecutionQueueType(), SkQueueType::AIC);
+  EXPECT_EQ(notify->GetExecutionQueueType(), SkQueueType::AIC);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_PreservesMixWaitDependencyBehavior) {
+  auto *previous = CreateKernelNode(221, 0, SkKernelType::AIC_ONLY);
+  auto *wait = CreateWaitNode(222, 1);
+  auto *mix = CreateKernelNode(223, 1, SkKernelType::MIX_AIC_1_1);
+  wait->SetNextNodeId(223);
+  previous->sendToNodeId.insert(223);
+  mix->receiveNodeId.insert(221);
+
+  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({previous, wait, mix}));
+  EXPECT_EQ(previous->GetExecutionQueueType(), SkQueueType::AIC);
+  EXPECT_EQ(wait->GetExecutionQueueType(), SkQueueType::AIC);
+  EXPECT_EQ(mix->GetExecutionQueueType(), SkQueueType::MIX_1_1);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_SameStreamMixWaitUsesPreviousQueue) {
+  auto *previous = CreateKernelNode(231, 0, SkKernelType::AIC_ONLY);
+  auto *wait = CreateWaitNode(232, 0);
+  auto *mix = CreateKernelNode(233, 0, SkKernelType::MIX_AIC_1_1);
+  wait->SetNextNodeId(233);
+
+  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({previous, wait, mix}));
+  EXPECT_EQ(wait->GetExecutionQueueType(), SkQueueType::AIC);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_SearchBeyond100HopsUsesFallback) {
+  auto *fallbackKernel = CreateKernelNode(300, 0, SkKernelType::AIC_ONLY);
+  auto *distantKernel = CreateKernelNode(301, 1, SkKernelType::AIV_ONLY);
+  uint64_t predecessor = distantKernel->GetNodeId();
+  for (uint64_t id = 400; id < 501; ++id) {
+    auto *reset = CreateResetNode(id, 1);
+    reset->SetPreNodeId(predecessor);
+    predecessor = id;
+  }
+  auto *notify = CreateNotifyNode(600, 1);
+  notify->SetPreNodeId(predecessor);
+
+  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({fallbackKernel, notify, distantKernel}));
+  EXPECT_EQ(notify->GetExecutionQueueType(), SkQueueType::AIC);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_ReusesKernelSearchCacheWithin100Hops) {
+  auto *fallbackKernel = CreateKernelNode(700, 0, SkKernelType::AIC_ONLY);
+  auto *distantKernel = CreateKernelNode(701, 1, SkKernelType::AIV_ONLY);
+  uint64_t predecessor = distantKernel->GetNodeId();
+  std::vector<SuperKernelBaseNode *> chain;
+  for (uint64_t id = 1000; id < 1180; ++id) {
+    auto *reset = CreateResetNode(id, 1);
+    reset->SetPreNodeId(predecessor);
+    predecessor = id;
+    chain.push_back(reset);
+  }
+  auto *nearNotify = CreateNotifyNode(800, 1);
+  nearNotify->SetPreNodeId(1079);
+  auto *farNotify = CreateNotifyNode(801, 1);
+  farNotify->SetPreNodeId(1178);
+
+  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({fallbackKernel, nearNotify, farNotify, distantKernel}));
+  EXPECT_EQ(nearNotify->GetExecutionQueueType(), SkQueueType::AIV);
+  EXPECT_EQ(farNotify->GetExecutionQueueType(), SkQueueType::AIV);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_RejectsNullTask) {
+  EXPECT_FALSE(SkQueueTypeResolver(*graph).Resolve({nullptr}));
+}
+
+TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_RejectsEventWithoutKernelFallback) {
+  auto *notify = CreateNotifyNode(1201, 0);
+  EXPECT_FALSE(SkQueueTypeResolver(*graph).Resolve({notify}));
+}
+
+TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_RejectsUnsupportedNodeType) {
+  auto *kernel = CreateKernelNode(1202, 0);
+  auto *defaultNode = CreateKernelNode(1203, 0);
+  defaultNode->SetNodeType(SkNodeType::NODE_DEFAULT);
+
+  EXPECT_FALSE(SkQueueTypeResolver(*graph).Resolve({kernel, defaultNode}));
 }
 
 /**
