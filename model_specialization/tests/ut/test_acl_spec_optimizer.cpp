@@ -763,6 +763,14 @@ aclError GetStreamsWithInvalidCount(aclmdlRI model, aclrtStream *streams, uint32
   return result;
 }
 
+aclError GetTasksWithInvalidCount(aclrtStream stream, aclmdlRITask *tasks, uint32_t *count) {
+  const auto result = GetTasks(stream, tasks, count);
+  if (result == ACL_SUCCESS && tasks != nullptr) {
+    ++*count;
+  }
+  return result;
+}
+
 aclError GetFunctionName(aclrtFuncHandle function, uint32_t capacity, char *name) {
   ++nameQueries;
   const auto &state = *static_cast<KernelState *>(function);
@@ -869,12 +877,21 @@ TEST_F(AclSpecOptimizerCollectionTest, BothModesWarnAndSkipUnreadableTasks) {
       ASSERT_EQ(requests.size(), 1U);
       EXPECT_EQ(requests.front()->task, &task);
       const auto logs = ut_log::LogBuffer::Instance().GetContent();
-      EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: stream=0 task=1 reason=" +
+      EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: streamIndex=0 task=1 reason=" +
                           std::string(reasons[failure]) + " ret=" + std::to_string(ACL_ERROR_FAILURE)),
                 std::string::npos);
-      EXPECT_NE(logs.find("[WARN] [SK][Collect] ReadTaskIdentity failed; skipping task: stream=0 task=1 ret=" +
+      EXPECT_NE(logs.find("[WARN] [SK][Collect] ReadTaskIdentity failed; skipping task: streamIndex=0 task=1 ret=" +
                           std::to_string(ACL_ERROR_FAILURE)),
                 std::string::npos);
+      if (byFlag) {
+        const size_t skipped = logs.find("Kernel Specialization: streamIndex=0, task=1, type=UNKNOWN, status=SKIPPED");
+        const size_t following = logs.find("streamIndex=0, task=2, type=KERNEL");
+        ASSERT_NE(skipped, std::string::npos);
+        ASSERT_NE(following, std::string::npos);
+        EXPECT_LT(skipped, following);
+      } else {
+        EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
+      }
     }
   }
 }
@@ -929,6 +946,7 @@ TEST_F(AclSpecOptimizerCollectionTest, SelectsRangeUnionAndValidatesPairsOnlyFor
       auto *previous = requests.front().get();
       scopeMarkers = {{&task}};
       binaryQueries = copyQueries = 0;
+      ut_log::LogBuffer::Instance().Clear();
       const aclError result = Collect();
       if (byFlag && !entry.valid) {
         EXPECT_EQ(result, ACL_ERROR_INVALID_PARAM);
@@ -936,6 +954,8 @@ TEST_F(AclSpecOptimizerCollectionTest, SelectsRangeUnionAndValidatesPairsOnlyFor
         EXPECT_EQ(requests.front().get(), previous);
         EXPECT_EQ(MarkerTasks(scopeMarkers), (std::vector<aclmdlRITask>{&task}));
         EXPECT_EQ(binaryQueries, 0U);
+        EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find("aclmdlRISpecOptimizeByFlag invalid scope:"),
+                  std::string::npos);
       } else {
         ASSERT_EQ(result, ACL_SUCCESS);
         ASSERT_EQ(requests.size(), expected.size());
@@ -945,6 +965,13 @@ TEST_F(AclSpecOptimizerCollectionTest, SelectsRangeUnionAndValidatesPairsOnlyFor
         EXPECT_EQ(MarkerTasks(scopeMarkers), markers);
         EXPECT_EQ(binaryQueries, expected.size());
         EXPECT_EQ(copyQueries, expected.size());
+        const auto logs = ut_log::LogBuffer::Instance().GetContent();
+        size_t selectedLogs = 0;
+        for (size_t pos = logs.find("Kernel Specialization: [IN_SCOPE]"); pos != std::string::npos;
+             pos = logs.find("Kernel Specialization: [IN_SCOPE]", pos + 1)) {
+          ++selectedLogs;
+        }
+        EXPECT_EQ(selectedLogs, byFlag ? expected.size() : 0U);
       }
     }
   }
@@ -1002,16 +1029,36 @@ TEST_P(AclSpecOptimizerScopeTest, MultiStreamSelectionPreservesOtherTasksAndComm
   if (GetParam()) {
     EXPECT_EQ(std::memcmp(&before.params, &original, sizeof(original)), 0);
     EXPECT_EQ(std::memcmp(&after.params, &original, sizeof(original)), 0);
-    const auto logs = ut_log::LogBuffer::Instance().GetContent();
-    for (const auto &message :
-         {"stream=0, task=2, kernel=AddCustom", "stream=0, task=3, kernel=sk_scope_kernel_begin_dav_2201",
-          "stream=2, task=1, kernel=AddCustom"}) {
-      const std::string line = "JIT Scope: kernel in scope, " + std::string(message);
-      const size_t position = logs.find(line);
-      ASSERT_NE(position, std::string::npos);
-      EXPECT_EQ(logs.find(line, position + line.size()), std::string::npos);
-    }
   }
+  const auto logs = ut_log::LogBuffer::Instance().GetContent();
+  if (GetParam()) {
+    const std::array<const char *, 11> rows{"streamIndex=0, task=0, type=KERNEL, kernel=AddCustom",
+                                            "streamIndex=0, task=1, type=MARKER",
+                                            "streamIndex=0, task=2, type=KERNEL, kernel=AddCustom",
+                                            "streamIndex=0, task=3, type=KERNEL, kernel=sk_scope_kernel_begin_dav_2201",
+                                            "streamIndex=0, task=4, type=EVENT_RECORD",
+                                            "streamIndex=0, task=5, type=MARKER",
+                                            "streamIndex=0, task=6, type=KERNEL, kernel=AddCustom",
+                                            "streamIndex=1, task=0, type=KERNEL, kernel=AddCustom",
+                                            "streamIndex=2, task=0, type=MARKER",
+                                            "streamIndex=2, task=1, type=KERNEL, kernel=AddCustom",
+                                            "streamIndex=2, task=2, type=MARKER"};
+    size_t next = 0;
+    for (size_t index = 0; index < rows.size(); ++index) {
+      const bool inScope = GetParam() && (index == 2 || index == 3 || index == 9);
+      const std::string line = std::string("Kernel Specialization: ") + (inScope ? "[IN_SCOPE] " : "") + rows[index];
+      const size_t position = logs.find(line, next);
+      ASSERT_NE(position, std::string::npos) << line;
+      next = position + line.size();
+      EXPECT_EQ(logs.find(line, next), std::string::npos);
+    }
+  } else {
+    EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
+  }
+  EXPECT_EQ(logs.find("JIT Scope:"), std::string::npos);
+  const char *apiName = GetParam() ? "aclmdlRISpecOptimizeByFlag" : "aclmdlRISpecOptimize";
+  EXPECT_NE(logs.find(std::string(apiName) + " started:"), std::string::npos);
+  EXPECT_NE(logs.find(std::string(apiName) + " finished:"), std::string::npos);
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, ByFlagWithoutScopeLeavesOrdinaryTasksUntouched) {
@@ -1198,6 +1245,7 @@ TEST_P(AclSpecOptimizerCandidateTest, KeepsSkippedTasksAndCleansMarkersAfterComp
     secondKernel.binary.clear();
   }
   specializationResults = expected.compileResults;
+  ut_log::LogBuffer::Instance().Clear();
 
   EXPECT_EQ(RunEntry(std::get<0>(GetParam())), ACL_SUCCESS);
   const size_t markerCount = expected.hasMarkers ? 2U : 0U;
@@ -1210,6 +1258,20 @@ TEST_P(AclSpecOptimizerCandidateTest, KeepsSkippedTasksAndCleansMarkersAfterComp
   EXPECT_EQ(disabled, expectedMarkers);
   if (expected.unsupportedCount > 0) {
     EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &kernel);
+  }
+  const auto logs = ut_log::LogBuffer::Instance().GetContent();
+  const char *apiName = std::get<0>(GetParam()) ? "aclmdlRISpecOptimizeByFlag" : "aclmdlRISpecOptimize";
+  const std::string warning = "[WARN] [SK][SpecializeKernels] aclmdlRISpecOptimize specialized none";
+  EXPECT_NE(logs.find(std::string(apiName) + " started:"), std::string::npos);
+  if (expected.taskCount == expected.unsupportedCount) {
+    EXPECT_NE(logs.find(std::string(apiName) + " has no candidate kernels"), std::string::npos);
+    EXPECT_EQ(logs.find(warning), std::string::npos);
+    EXPECT_EQ(logs.find("finished with nothing to specialize"), std::string::npos);
+    if (expected.taskCount == 0) {
+      EXPECT_EQ(logs.find("[WARN]"), std::string::npos);
+    }
+  } else if (expected.rewrites == 0) {
+    EXPECT_NE(logs.find(warning), std::string::npos);
   }
 }
 
@@ -1542,6 +1604,14 @@ TEST_F(AclSpecOptimizerCollectionTest, RejectsStreamCountExceedingAllocatedCapac
   EXPECT_EQ(Collect(), ACL_ERROR_FAILURE);
   EXPECT_TRUE(requests.empty());
   EXPECT_EQ(taskQueries, 0U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, RejectsTaskCountExceedingAllocatedCapacity) {
+  GlobalMockObject::reset(reinterpret_cast<const void *>(aclmdlRIGetTasksByStream));
+  MOCKER(aclmdlRIGetTasksByStream).stubs().will(invoke(GetTasksWithInvalidCount));
+  EXPECT_EQ(Collect(), ACL_ERROR_FAILURE);
+  EXPECT_TRUE(requests.empty());
+  EXPECT_EQ(parameterQueries, 0U);
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, StreamEnumerationStubRespectsArrayCapacity) {

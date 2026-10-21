@@ -45,6 +45,27 @@ namespace fs = boost::filesystem;
 
 constexpr size_t MAX_KERNEL_ENTRY_LEN = 256;
 
+const char *TaskTypeName(aclmdlRITaskType type) {
+  switch (type) {
+    case ACL_MODEL_RI_TASK_DEFAULT:
+      return "DEFAULT";
+    case ACL_MODEL_RI_TASK_KERNEL:
+      return "KERNEL";
+    case ACL_MODEL_RI_TASK_EVENT_RECORD:
+      return "EVENT_RECORD";
+    case ACL_MODEL_RI_TASK_EVENT_WAIT:
+      return "EVENT_WAIT";
+    case ACL_MODEL_RI_TASK_EVENT_RESET:
+      return "EVENT_RESET";
+    case ACL_MODEL_RI_TASK_VALUE_WRITE:
+      return "VALUE_WRITE";
+    case ACL_MODEL_RI_TASK_VALUE_WAIT:
+      return "VALUE_WAIT";
+    default:
+      return "UNKNOWN";
+  }
+}
+
 void BindOptionPointers(const std::vector<std::string> &storage, std::vector<const char *> &pointers) {
   pointers.clear();
   pointers.reserve(storage.size());
@@ -78,43 +99,49 @@ aclError AclSpecOptimizer::Init(aclmdlRI model) {
 }
 
 aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featureManager) const {
+  const char *apiName =
+      featureManager.Get<Feature::IS_SCOPE_JIT>() ? "aclmdlRISpecOptimizeByFlag" : "aclmdlRISpecOptimize";
+  SK_DLOGI("%s started: model=%p", apiName, model);
   std::vector<std::unique_ptr<KernelSpecRequest>> requests;
   std::vector<ScopeTaskRecord> scopeMarkers;
   aclError result = Collect(model, featureManager, outputDirectory_.Path(), requests, scopeMarkers);
   if (result != ACL_SUCCESS) {
-    SK_DLOGE("aclmdlRISpecOptimize collection failed: model=%p ret=%d", model, result);
+    SK_DLOGE("%s collection failed: model=%p ret=%d", apiName, model, result);
     return result;
   }
-  if (requests.empty() && scopeMarkers.empty()) {
-    SK_DLOGW("aclmdlRISpecOptimize finished with nothing to specialize: model=%p", model);
-    return ACL_SUCCESS;
+  if (requests.empty()) {
+    SK_DLOGI("%s has no candidate kernels: model=%p markers=%zu", apiName, model, scopeMarkers.size());
+    if (scopeMarkers.empty()) {
+      return ACL_SUCCESS;
+    }
   }
   SpecializeKernels(requests);
   result = LoadKernels(requests);
   if (result != ACL_SUCCESS) {
-    SK_DLOGE("aclmdlRISpecOptimize load failed: model=%p ret=%d", model, result);
+    SK_DLOGE("%s load failed: model=%p ret=%d", apiName, model, result);
     return result;
   }
   result = UpdateTasks(model, requests, scopeMarkers);
   const aclError retained = RetainBinaries(model, requests);
-  SK_DLOGI("aclmdlRISpecOptimize finished: model=%p commit=%d retain=%d", model, result, retained);
+  SK_DLOGI("%s finished: model=%p commit=%d retain=%d", apiName, model, result, retained);
   return result != ACL_SUCCESS ? result : retained;
 }
 
 aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
   const auto &record = identity.record;
   if (record.task == nullptr) {
-    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=null task ret=%d", record.streamIndex,
+    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=null task ret=%d", record.streamIndex,
              record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   aclmdlRITaskType type = ACL_MODEL_RI_TASK_DEFAULT;
   aclError result = aclmdlRITaskGetType(record.task, &type);
   if (result != ACL_SUCCESS) {
-    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=task type query failed ret=%d", record.streamIndex,
-             record.taskIndex, result);
+    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=task type query failed ret=%d",
+             record.streamIndex, record.taskIndex, result);
     return result;
   }
+  identity.params.type = type;
   if (type != ACL_MODEL_RI_TASK_KERNEL) {
     identity.record.kind = ScopeTaskKind::OTHER;
     return ACL_SUCCESS;
@@ -122,35 +149,35 @@ aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
 
   result = aclmdlRITaskGetParams(record.task, &identity.params);
   if (result != ACL_SUCCESS) {
-    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=task parameters query failed ret=%d",
+    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=task parameters query failed ret=%d",
              record.streamIndex, record.taskIndex, result);
     return result;
   }
   if (identity.params.type != ACL_MODEL_RI_TASK_KERNEL) {
-    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=parameter type mismatch ret=%d", record.streamIndex,
-             record.taskIndex, ACL_ERROR_FAILURE);
+    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=parameter type mismatch ret=%d",
+             record.streamIndex, record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   const auto function = identity.params.kernelTaskParams.funcHandle;
   if (function == nullptr) {
-    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=null function handle ret=%d", record.streamIndex,
+    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=null function handle ret=%d", record.streamIndex,
              record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   std::array<char, MAX_KERNEL_ENTRY_LEN> name{};
   result = aclrtGetFunctionName(function, name.size(), name.data());
   if (result != ACL_SUCCESS) {
-    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=function name query failed ret=%d",
+    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=function name query failed ret=%d",
              record.streamIndex, record.taskIndex, result);
     return result;
   }
   if (name[0] == '\0') {
-    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=empty function name ret=%d", record.streamIndex,
+    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=empty function name ret=%d", record.streamIndex,
              record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   if (std::memchr(name.data(), '\0', name.size()) == nullptr) {
-    SK_DLOGW("Task identity unavailable: stream=%u task=%u reason=unterminated function name ret=%d",
+    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=unterminated function name ret=%d",
              record.streamIndex, record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
@@ -164,6 +191,21 @@ aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
     identity.record.kind = ScopeTaskKind::KERNEL;
   }
   return ACL_SUCCESS;
+}
+
+void AclSpecOptimizer::LogTaskAdmission(const TaskIdentity &identity) const {
+  const auto &record = identity.record;
+  if (identity.readResult != ACL_SUCCESS) {
+    SK_DLOGI("Kernel Specialization: streamIndex=%u, task=%u, type=UNKNOWN, status=SKIPPED, ret=%d", record.streamIndex,
+             record.taskIndex, identity.readResult);
+  } else if (record.kind == ScopeTaskKind::KERNEL) {
+    SK_DLOGI("Kernel Specialization: %sstreamIndex=%u, task=%u, type=KERNEL, kernel=%s",
+             record.allowSpecialization ? "[IN_SCOPE] " : "", record.streamIndex, record.taskIndex,
+             identity.kernelEntry.c_str());
+  } else {
+    const char *type = record.kind == ScopeTaskKind::OTHER ? TaskTypeName(identity.params.type) : "MARKER";
+    SK_DLOGI("Kernel Specialization: streamIndex=%u, task=%u, type=%s", record.streamIndex, record.taskIndex, type);
+  }
 }
 
 aclError AclSpecOptimizer::SetTaskAdmission(std::vector<TaskIdentity> &identities, bool isScopeJit) const {
@@ -188,7 +230,7 @@ aclError AclSpecOptimizer::SetTaskAdmission(std::vector<TaskIdentity> &identitie
           break;
         case ScopeTaskKind::END:
           if (activeBegins.empty()) {
-            SK_DLOGE("aclmdlRISpecOptimizeByFlag invalid scope: stream=%u task=%u reason=End without Begin",
+            SK_DLOGE("aclmdlRISpecOptimizeByFlag invalid scope: streamIndex=%u task=%u reason=End without Begin",
                      streamIndex, record.taskIndex);
             return ACL_ERROR_INVALID_PARAM;
           }
@@ -196,18 +238,15 @@ aclError AclSpecOptimizer::SetTaskAdmission(std::vector<TaskIdentity> &identitie
           break;
         case ScopeTaskKind::KERNEL:
           record.allowSpecialization = !activeBegins.empty();
-          if (record.allowSpecialization) {
-            SK_DLOGI("JIT Scope: kernel in scope, stream=%u, task=%u, kernel=%s", streamIndex, record.taskIndex,
-                     identities[index].kernelEntry.c_str());
-          }
           break;
         case ScopeTaskKind::OTHER:
           break;
       }
+      LogTaskAdmission(identities[index]);
     }
     if (!activeBegins.empty()) {
       const auto &begin = identities[activeBegins.back()].record;
-      SK_DLOGE("aclmdlRISpecOptimizeByFlag invalid scope: stream=%u task=%u reason=Begin without End depth=%zu",
+      SK_DLOGE("aclmdlRISpecOptimizeByFlag invalid scope: streamIndex=%u task=%u reason=Begin without End depth=%zu",
                streamIndex, begin.taskIndex, activeBegins.size());
       return ACL_ERROR_INVALID_PARAM;
     }
@@ -271,14 +310,21 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
                taskCount, result);
       return result;
     }
+    if (taskCount > tasks.size()) {
+      SK_DLOGE("aclmdlRISpecOptimize invalid task count: model=%p stream=%u count=%u capacity=%zu", model, streamIndex,
+               taskCount, tasks.size());
+      return ACL_ERROR_FAILURE;
+    }
     for (uint32_t taskIndex = 0; taskIndex < taskCount; ++taskIndex) {
       TaskIdentity identity;
       identity.record.task = tasks[taskIndex];
       identity.record.streamIndex = streamIndex;
       identity.record.taskIndex = taskIndex;
-      result = ReadTaskIdentity(identity);
-      if (result != ACL_SUCCESS) {
-        SK_DLOGW("ReadTaskIdentity failed; skipping task: stream=%u task=%u ret=%d", streamIndex, taskIndex, result);
+      identity.readResult = ReadTaskIdentity(identity);
+      if (identity.readResult != ACL_SUCCESS) {
+        SK_DLOGW("ReadTaskIdentity failed; skipping task: streamIndex=%u task=%u ret=%d", streamIndex, taskIndex,
+                 identity.readResult);
+        identities.push_back(std::move(identity));
         continue;
       }
       if (identity.record.kind == ScopeTaskKind::BEGIN || identity.record.kind == ScopeTaskKind::END) {
@@ -385,7 +431,7 @@ void AclSpecOptimizer::SpecializeKernels(std::vector<std::unique_ptr<KernelSpecR
     }
     specialized.push_back(std::move(request));
   }
-  if (specialized.empty()) {
+  if (!requests.empty() && specialized.empty()) {
     SK_DLOGW("aclmdlRISpecOptimize specialized none of its %zu candidate kernels", requests.size());
   }
   requests.swap(specialized);
