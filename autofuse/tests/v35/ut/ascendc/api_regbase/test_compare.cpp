@@ -73,13 +73,15 @@ class TestApiCompareUT : public testing::Test {
     for (int i = 0; i < param.size; i++) {
       auto input = distr(eng);  // Use the secure random number generator
       param.src0[i] = input;
+      // 期望值必须基于截断后实际存储的 src0[i] 计算（如 bool 会把 [0,10] 截断为 0/1），
+      // 与内核读取到的数据保持一致
       switch (param.cmpmode) {
         case CMPMODE::EQ:
           if (input > 5 || i == param.size - 1) {
             param.src0[i] = param.src1;
             param.exp[i] = true;
           } else {
-            param.exp[i] = DefaultCompare(input, param.src1);
+            param.exp[i] = DefaultCompare(param.src0[i], param.src1);
           }
           break;
         case CMPMODE::NE:
@@ -94,28 +96,28 @@ class TestApiCompareUT : public testing::Test {
           if constexpr (std::is_same_v<I, half>) {
             param.exp[i] = static_cast<half>(input) >= param.src1;
           } else {
-            param.exp[i] = input >= param.src1;
+            param.exp[i] = param.src0[i] >= param.src1;
           }
           break;
         case CMPMODE::LE:
           if constexpr (std::is_same_v<I, half>) {
             param.exp[i] = static_cast<half>(input) <= param.src1;
           } else {
-            param.exp[i] = input <= param.src1;
+            param.exp[i] = param.src0[i] <= param.src1;
           }
           break;
         case CMPMODE::GT:
           if constexpr (std::is_same_v<I, half>) {
             param.exp[i] = static_cast<half>(input) > param.src1;
           } else {
-            param.exp[i] = input > param.src1;
+            param.exp[i] = param.src0[i] > param.src1;
           }
           break;
         case CMPMODE::LT:
           if constexpr (std::is_same_v<I, half>) {
             param.exp[i] = static_cast<half>(input) < param.src1;
           } else {
-            param.exp[i] = input < param.src1;
+            param.exp[i] = param.src0[i] < param.src1;
           }
           break;
         default:
@@ -136,6 +138,33 @@ class TestApiCompareUT : public testing::Test {
     return diff_count;
   }
 
+  // bool 与 uint8 位模式一致：输入数据经 uint8 tensor 装载后以 bool 视图传入被测 API，
+  // 规避部分模拟器对 LocalTensor<bool> 装载路径的差异；API 仍按 bool 实例化
+  template <typename I>
+  static void LoadUbTensor(LocalTensor<I> &local, TBuf<TPosition::VECCALC> &buf, I *gm, int size) {
+    if constexpr (std::is_same_v<I, bool>) {
+      auto tensorU8 = buf.Get<uint8_t>();
+      GmToUb(tensorU8, reinterpret_cast<uint8_t *>(gm), size);
+      local = reinterpret_cast<const LocalTensor<I> &>(tensorU8);
+    } else {
+      local = buf.Get<I>();
+      GmToUb(local, gm, size);
+    }
+  }
+
+  template <typename I>
+  static void LoadUbTensorNormal(LocalTensor<I> &local, TBuf<TPosition::VECCALC> &buf, I *gm, uint32_t first_axis,
+                                 uint32_t last_axis, uint32_t input_stride) {
+    if constexpr (std::is_same_v<I, bool>) {
+      auto tensorU8 = buf.Get<uint8_t>();
+      GmToUbNormal(tensorU8, reinterpret_cast<uint8_t *>(gm), first_axis, last_axis, input_stride);
+      local = reinterpret_cast<const LocalTensor<I> &>(tensorU8);
+    } else {
+      local = buf.Get<I>();
+      GmToUbNormal(local, gm, first_axis, last_axis, input_stride);
+    }
+  }
+
   template <typename O, typename I, uint8_t dim, CMPMODE mode>
   static void InvokeKernel(CompareInputParam<O, I, dim, mode> &param) {
     TPipe tpipe;
@@ -143,10 +172,10 @@ class TestApiCompareUT : public testing::Test {
     tpipe.InitBuffer(x1buf, sizeof(I) * param.size);
     tpipe.InitBuffer(ybuf, sizeof(O) * AlignUp(param.size, ONE_BLK_SIZE / sizeof(O)));
 
-    LocalTensor<I> l_x1 = x1buf.Get<I>();
+    LocalTensor<I> l_x1;
     LocalTensor<O> l_y = ybuf.Get<O>();
+    LoadUbTensor(l_x1, x1buf, param.src0, param.size);
 
-    GmToUb(l_x1, param.src0, param.size);
     const uint16_t output_dims[1] = {param.size};
     const uint16_t output_stride[1] = {1};
     const uint16_t input_stride[1] = {1};
@@ -185,13 +214,12 @@ class TestApiCompareUT : public testing::Test {
       tpipe.InitBuffer(x2buf, sizeof(I) * param.size);
       tpipe.InitBuffer(ybuf, sizeof(O) * AlignUp(param.size, ONE_BLK_SIZE / sizeof(O)));
 
-      LocalTensor<I> l_x1 = x1buf.Get<I>();
-      LocalTensor<I> l_x2 = x2buf.Get<I>();
-
+      LocalTensor<I> l_x1;
+      LocalTensor<I> l_x2;
       LocalTensor<O> l_y = ybuf.Get<O>();
 
-      GmToUb(l_x1, param.src0, param.size);
-      GmToUb(l_x2, param.src1, param.size);
+      LoadUbTensor(l_x1, x1buf, param.src0, param.size);
+      LoadUbTensor(l_x2, x2buf, param.src1, param.size);
       const uint16_t output_dims[dim] = {param.size};
       const uint16_t output_stride[dim] = {1};
       const uint16_t input_stride[dim] = {1};
@@ -210,12 +238,12 @@ class TestApiCompareUT : public testing::Test {
       tpipe.InitBuffer(x2buf, sizeof(I) * inputSize);
       tpipe.InitBuffer(ybuf, sizeof(O) * AlignUp(outputSize, ONE_BLK_SIZE / sizeof(O)));
 
-      LocalTensor<I> l_x1 = x1buf.Get<I>();
-      LocalTensor<I> l_x2 = x2buf.Get<I>();
+      LocalTensor<I> l_x1;
+      LocalTensor<I> l_x2;
       LocalTensor<O> l_y = ybuf.Get<O>();
 
-      GmToUbNormal(l_x1, param.src0, param.first_axis, param.last_axis, inputStride);
-      GmToUbNormal(l_x2, param.src1, param.first_axis, param.last_axis, inputStride);
+      LoadUbTensorNormal(l_x1, x1buf, param.src0, param.first_axis, param.last_axis, inputStride);
+      LoadUbTensorNormal(l_x2, x2buf, param.src1, param.first_axis, param.last_axis, inputStride);
       const uint16_t output_dims[dim] = {param.first_axis, param.last_axis};
       const uint16_t output_stride[dim] = {outputStride, 1};
       const uint16_t input_stride[dim] = {inputStride, 1};
@@ -262,7 +290,12 @@ class TestApiCompareUT : public testing::Test {
           param.src1[i] = input1;
         }
       } else {
-        param.src1[i] = input1;
+        if constexpr (std::is_same_v<I, bool>) {
+          // bool 用例 src1[0] 取 def_src1：blk tensor 广播后 oracle 可控（避免随机值导致期望恒 true）
+          param.src1[i] = src1_val;
+        } else {
+          param.src1[i] = input1;
+        }
       }
 
       switch (param.cmpmode) {
@@ -1117,5 +1150,22 @@ TEST_F(TestApiCompareUT, CompareNormal_Eq_int16_uint8) {
       7, ((MAX_REPEAT_NUM - 1) * ONE_REPEAT_BYTE_SIZE + (ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) +
           (ONE_BLK_SIZE - sizeof(int16_t))) /
              sizeof(int16_t) / 8);
+}
+
+// bool 输入（底层按 uint8 执行），输出 uint8（比较结果 0/1，位模式一致）。
+// BOOL 与 uint8 共享全部内部路径，shape 边界由 uint8 用例覆盖，此处每种模式仅取 1 组最小 shape
+TEST_F(TestApiCompareUT, CompareCount_Le_bool_bool) {
+  TensorCompareTest<uint8_t, bool, 1, CMPMODE::LE>(ONE_BLK_SIZE / sizeof(bool));
+}
+
+TEST_F(TestApiCompareUT, CompareScalar_Le_bool_bool) {
+  // src1 取 0：期望 = (src0 截断值 <= 0)，src0=0 时 true、src0=1 时 false，两种输出均有覆盖
+  CompareTest<uint8_t, bool, 1, CMPMODE::LE>(ONE_BLK_SIZE / sizeof(bool), 0);
+}
+
+TEST_F(TestApiCompareUT, CompareNormal_Le_bool_bool) {
+  // def_src1 取 0：dim=2 且 size 为一个 block 时 src1 会被广播为 blk tensor，
+  // 若 src1[0]=1 则期望恒 true，取 0 保证期望有 true/false 区分度
+  TensorCompareTestNormal<uint8_t, bool, 2, CMPMODE::LE>(2, ONE_BLK_SIZE / sizeof(bool), 0);
 }
 }  // namespace af

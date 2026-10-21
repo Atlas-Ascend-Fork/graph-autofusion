@@ -20,6 +20,7 @@
 #include "gtest/gtest.h"
 #include "tikicpulib.h"
 #include "test_api_utils.h"
+#include "api_regbase/bitwise_or.h"
 
 using namespace AscendC;
 
@@ -101,6 +102,53 @@ class TestRegbaseApiBitwiseOrUT : public testing::Test {
     EXPECT_EQ(diff_count, 0);
     FreeTensorInput(param);
   }
+
+  // bool 与 uint8 位模式一致：数据经 uint8 tensor 装载后以 bool 视图传入 BitwiseOrExtend，
+  // 规避部分模拟器对 LocalTensor<bool> 装载路径的差异；API 仍按 bool 实例化
+  static void InvokeBoolTensorTensorKernel(BinaryInputParam<uint8_t> &param) {
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> x1buf, x2buf, ybuf;
+    tpipe.InitBuffer(x1buf, sizeof(uint8_t) * param.size);
+    tpipe.InitBuffer(x2buf, sizeof(uint8_t) * param.size);
+    tpipe.InitBuffer(ybuf, sizeof(uint8_t) * AlignUp(param.size, ONE_BLK_SIZE / sizeof(uint8_t)));
+
+    auto x1U8 = x1buf.Get<uint8_t>();
+    auto x2U8 = x2buf.Get<uint8_t>();
+    auto yU8 = ybuf.Get<uint8_t>();
+    LocalTensor<bool> l_y = reinterpret_cast<const LocalTensor<bool> &>(yU8);
+    LocalTensor<bool> l_x1 = reinterpret_cast<const LocalTensor<bool> &>(x1U8);
+    LocalTensor<bool> l_x2 = reinterpret_cast<const LocalTensor<bool> &>(x2U8);
+
+    GmToUb(x1U8, param.x1, param.size);
+    GmToUb(x2U8, param.x2, param.size);
+    BitwiseOrExtend(l_y, l_x1, l_x2, param.size);
+    UbToGm(param.y, yU8, param.size);
+  }
+
+  // bool 输入：BitwiseOrExtend 内部转 uint8 视图调用 BitwiseOr，0/1 域按位或等价逐元素或
+  static void BitwiseOrBoolTest(uint32_t size) {
+    BinaryInputParam<uint8_t> param{};
+    param.size = size;
+    param.y = static_cast<uint8_t *>(AscendC::GmAlloc(sizeof(uint8_t) * param.size));
+    param.exp = static_cast<uint8_t *>(AscendC::GmAlloc(sizeof(uint8_t) * param.size));
+    param.x1 = static_cast<uint8_t *>(AscendC::GmAlloc(sizeof(uint8_t) * param.size));
+    param.x2 = static_cast<uint8_t *>(AscendC::GmAlloc(sizeof(uint8_t) * param.size));
+
+    srand(1);
+    for (uint32_t i = 0; i < param.size; i++) {
+      param.x1[i] = static_cast<uint8_t>(rand() % 2);
+      param.x2[i] = static_cast<uint8_t>(rand() % 2);
+      param.exp[i] = param.x1[i] | param.x2[i];
+    }
+
+    auto kernel = [&param] { InvokeBoolTensorTensorKernel(param); };
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+    ICPU_RUN_KF(kernel, 1);
+
+    uint32_t diff_count = Valid(param.y, param.exp, param.size);
+    EXPECT_EQ(diff_count, 0);
+    FreeTensorInput(param);
+  }
 };
 
 // ============ Tensor - Tensor 测试 (新增数据类型: DT_INT8, DT_INT64, DT_BF16) ============
@@ -136,6 +184,11 @@ TEST_F(TestRegbaseApiBitwiseOrUT, BitwiseOr_TensorTensor_Test) {
   BitwiseOrTensorTensorTest<uint64_t>((ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) / sizeof(uint64_t));
   BitwiseOrTensorTensorTest<uint64_t>(MAX_REPEAT_NUM * ONE_REPEAT_BYTE_SIZE / 2 / sizeof(uint64_t));
   BitwiseOrTensorTensorTest<uint64_t>((MAX_REPEAT_NUM - 1) * ONE_REPEAT_BYTE_SIZE / 2 / sizeof(uint64_t));
+}
+
+// bool 输入：regbase BitwiseOrExtend 按 uint8 视图执行（多 repeat 等场景由既有 uint8 用例覆盖）
+TEST_F(TestRegbaseApiBitwiseOrUT, BitwiseOr_Bool_Test) {
+  BitwiseOrBoolTest(ONE_BLK_SIZE / sizeof(uint8_t));
 }
 
 }  // namespace af

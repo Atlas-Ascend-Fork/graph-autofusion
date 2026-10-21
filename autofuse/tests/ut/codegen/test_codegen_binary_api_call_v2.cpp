@@ -91,7 +91,7 @@ TEST(CodegenKernel, BitwiseAndTest) {
   x2.id = load->outputs[0].attr.mem.tensor_id;
   x1.id = load->outputs[0].attr.mem.tensor_id;
 
-  codegen::BinaryApiCallV2 call("AscendC::BitwiseAnd");
+  codegen::BinaryApiCallV2 call("BitwiseAndExtend");
   ;
   EXPECT_EQ(call.Init(min), 0);
   call.inputs.push_back(&x1);
@@ -99,5 +99,5 @@ TEST(CodegenKernel, BitwiseAndTest) {
 
   std::string result;
   call.Generate(tpipe, vector<af::AxisId>{}, result);
-  EXPECT_EQ(result, std::string{"AscendC::BitwiseAnd(local_2[0], local_0[0], local_0[0], local_0_actual_size);\n"});
+  EXPECT_EQ(result, std::string{"BitwiseAndExtend(local_2[0], local_0[0], local_0[0], local_0_actual_size);\n"});
 }

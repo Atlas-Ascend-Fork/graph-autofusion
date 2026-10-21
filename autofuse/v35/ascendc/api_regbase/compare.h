@@ -75,26 +75,39 @@ __aicore__ inline LocalTensor<uint8_t> GetCompareUint8Output(const LocalTensor<O
   }
 }
 
+// bool 与 uint8 同为 1 字节、位模式一致（0/1），底层 MicroAPI 不支持 bool，
+// 向量计算统一按 uint8 执行
+template <typename InT>
+struct CompareEffInType {
+  using type = InT;
+};
+
+template <>
+struct CompareEffInType<bool> {
+  using type = uint8_t;
+};
+
 template <typename InT, uint8_t dim, CMPMODE mode, typename OutT>
 __aicore__ inline void CompareExtend(const LocalTensor<OutT> &dst, const LocalTensor<InT> &src0,
                                      const LocalTensor<InT> &src1, const uint16_t (&output_dims)[dim],
                                      const uint16_t (&output_stride)[dim], const uint16_t (&input_stride)[dim]) {
   static_assert((dim == 1) || (dim == 2), "CompareExtend only support dim=1 or dim=2");
+  using EffT = typename CompareEffInType<InT>::type;
   auto dstUint8 = GetCompareUint8Output(dst);
   bool src1IsScalar = false;
-  InT scalar = 0;
+  EffT scalar = 0;
 
-  uint16_t vlSize = static_cast<uint32_t>(GetVecLen() / sizeof(InT));
-  if constexpr (sizeof(InT) == 8) {
-    vlSize = static_cast<uint32_t>(2 * GetVecLen() / sizeof(InT));
+  uint16_t vlSize = static_cast<uint32_t>(GetVecLen() / sizeof(EffT));
+  if constexpr (sizeof(EffT) == 8) {
+    vlSize = static_cast<uint32_t>(2 * GetVecLen() / sizeof(EffT));
   }
-  if ((dim == 2) && (src1.GetSize() * sizeof(InT) == 32)) {
+  if ((dim == 2) && (src1.GetSize() * sizeof(EffT) == 32)) {
     src1IsScalar = true;
-    scalar = src1.GetValue(0);
+    scalar = static_cast<EffT>(src1.GetValue(0));
   }
   __ubuf__ uint8_t *dstLocal = (__ubuf__ uint8_t *)dstUint8.GetPhyAddr();
-  __ubuf__ InT *src0Local = (__ubuf__ InT *)src0.GetPhyAddr();
-  __ubuf__ InT *src1Local = (__ubuf__ InT *)src1.GetPhyAddr();
+  __ubuf__ EffT *src0Local = (__ubuf__ EffT *)src0.GetPhyAddr();
+  __ubuf__ EffT *src1Local = (__ubuf__ EffT *)src1.GetPhyAddr();
   const uint16_t dstStride = output_stride[0];
   const uint16_t srcStride = input_stride[0];
   uint16_t counterFirst = dim == 1 ? 1 : output_dims[0];
@@ -105,20 +118,20 @@ __aicore__ inline void CompareExtend(const LocalTensor<OutT> &dst, const LocalTe
     counterTail += vlSize;
   }
   if (src1IsScalar) {
-    if constexpr (sizeof(InT) == 8) {
-      CompareNormal2DVecImpl<InT, mode, true, MicroAPI::RegTraitNumTwo>(
+    if constexpr (sizeof(EffT) == 8) {
+      CompareNormal2DVecImpl<EffT, mode, true, MicroAPI::RegTraitNumTwo>(
           dstLocal, src0Local, src1Local, dstStride, srcStride, repeat, counterFirst, counterTail, scalar, vlSize);
     } else {
-      CompareNormal2DVecImpl<InT, mode, true>(dstLocal, src0Local, src1Local, dstStride, srcStride, repeat,
-                                              counterFirst, counterTail, scalar, vlSize);
+      CompareNormal2DVecImpl<EffT, mode, true>(dstLocal, src0Local, src1Local, dstStride, srcStride, repeat,
+                                               counterFirst, counterTail, scalar, vlSize);
     }
   } else {
-    if constexpr (sizeof(InT) == 8) {
-      CompareNormal2DVecImpl<InT, mode, false, MicroAPI::RegTraitNumTwo>(
+    if constexpr (sizeof(EffT) == 8) {
+      CompareNormal2DVecImpl<EffT, mode, false, MicroAPI::RegTraitNumTwo>(
           dstLocal, src0Local, src1Local, dstStride, srcStride, repeat, counterFirst, counterTail, scalar, vlSize);
     } else {
-      CompareNormal2DVecImpl<InT, mode, false>(dstLocal, src0Local, src1Local, dstStride, srcStride, repeat,
-                                               counterFirst, counterTail, scalar, vlSize);
+      CompareNormal2DVecImpl<EffT, mode, false>(dstLocal, src0Local, src1Local, dstStride, srcStride, repeat,
+                                                counterFirst, counterTail, scalar, vlSize);
     }
   }
 }
@@ -128,14 +141,16 @@ __aicore__ inline void CompareScalarExtend(const LocalTensor<OutT> &dst, const L
                                            const InT srcScalar, const uint16_t (&output_dims)[dim],
                                            const uint16_t (&output_stride)[dim], const uint16_t (&input_stride)[dim]) {
   static_assert((dim == 1) || (dim == 2), "CompareExtend only support dim=1 or dim=2");
+  using EffT = typename CompareEffInType<InT>::type;
+  const EffT effScalar = static_cast<EffT>(srcScalar);
   auto dstUint8 = GetCompareUint8Output(dst);
-  uint16_t vlSize = static_cast<uint32_t>(GetVecLen() / sizeof(InT));
-  if constexpr (sizeof(InT) == 8) {
-    vlSize = static_cast<uint32_t>(2 * GetVecLen() / sizeof(InT));
+  uint16_t vlSize = static_cast<uint32_t>(GetVecLen() / sizeof(EffT));
+  if constexpr (sizeof(EffT) == 8) {
+    vlSize = static_cast<uint32_t>(2 * GetVecLen() / sizeof(EffT));
   }
   __ubuf__ uint8_t *dstLocal = (__ubuf__ uint8_t *)dstUint8.GetPhyAddr();
-  __ubuf__ InT *src0Local = (__ubuf__ InT *)src0.GetPhyAddr();
-  __ubuf__ InT *src1Local = (__ubuf__ InT *)src0.GetPhyAddr();
+  __ubuf__ EffT *src0Local = (__ubuf__ EffT *)src0.GetPhyAddr();
+  __ubuf__ EffT *src1Local = (__ubuf__ EffT *)src0.GetPhyAddr();
   const uint16_t dstStride = output_stride[0];
   const uint16_t srcStride = input_stride[0];
   uint16_t counterFirst = dim == 1 ? 1 : output_dims[0];
@@ -145,12 +160,12 @@ __aicore__ inline void CompareScalarExtend(const LocalTensor<OutT> &dst, const L
     repeat--;
     counterTail += vlSize;
   }
-  if constexpr (sizeof(InT) == 8) {
-    CompareNormal2DVecImpl<InT, mode, true, MicroAPI::RegTraitNumTwo>(
-        dstLocal, src0Local, src1Local, dstStride, srcStride, repeat, counterFirst, counterTail, srcScalar, vlSize);
+  if constexpr (sizeof(EffT) == 8) {
+    CompareNormal2DVecImpl<EffT, mode, true, MicroAPI::RegTraitNumTwo>(
+        dstLocal, src0Local, src1Local, dstStride, srcStride, repeat, counterFirst, counterTail, effScalar, vlSize);
   } else {
-    CompareNormal2DVecImpl<InT, mode, true>(dstLocal, src0Local, src1Local, dstStride, srcStride, repeat, counterFirst,
-                                            counterTail, srcScalar, vlSize);
+    CompareNormal2DVecImpl<EffT, mode, true>(dstLocal, src0Local, src1Local, dstStride, srcStride, repeat, counterFirst,
+                                             counterTail, effScalar, vlSize);
   }
 }
 #endif  //__ASCENDC_API_REGBASE__COMPARE_H__

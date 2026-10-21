@@ -54,6 +54,18 @@ Register::Register() {
   const std::string kAscendcCompareRegStr = {
 #include "compare_reg_base.h"
   };
+  const std::string kAscendcBitwiseAndRegStr = {
+#include "bitwise_and_reg_base.h"
+  };
+  const std::string kAscendcBitwiseOrRegStr = {
+#include "bitwise_or_reg_base.h"
+  };
+  const std::string kAscendcBitwiseXorRegStr = {
+#include "bitwise_xor_reg_base.h"
+  };
+  const std::string kAscendcBitwiseNotRegStr = {
+#include "bitwise_not_reg_base.h"
+  };
   const std::string kAscendcConcatRegBaseStr = {
 #include "concat_reg_base.h"
   };
@@ -408,6 +420,10 @@ Register::Register() {
   std::unordered_map<std::string, std::string> api_to_file{
       {"cast_reg_base.h", kAscendcCastRegStr},
       {"compare_reg_base.h", kAscendcCompareRegStr},
+      {"bitwise_and_reg_base.h", kAscendcBitwiseAndRegStr},
+      {"bitwise_or_reg_base.h", kAscendcBitwiseOrRegStr},
+      {"bitwise_xor_reg_base.h", kAscendcBitwiseXorRegStr},
+      {"bitwise_not_reg_base.h", kAscendcBitwiseNotRegStr},
       {"concat_reg_base.h", kAscendcConcatRegBaseStr},
       {"datacopy_reg_base.h", kAscendcDatacopyRegBaseStr},
       {"datacopy_nddma_reg_base.h", kAscendcDatacopyNddmaRegBaseStr},

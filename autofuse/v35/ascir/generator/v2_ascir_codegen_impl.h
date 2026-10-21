@@ -2847,6 +2847,13 @@ class CompareAscIrCodegenImplV2 : public AscIrCodegenV2 {
     if (first_input_type == "Scalar" || first_input_type == "IndexExpr") {
       return false;
     }
+    // MicroAPI::Compare 不支持 bool，BOOL 输入不走 VF，回落到 CompareV2ApiCall（regbase 内部按 uint8 执行）
+    AscNodeInputs node_inputs = node.inputs;
+    for (size_t i = 0; i < node_inputs().size(); i++) {
+      if (node_inputs[i].attr.dtype == ge::DT_BOOL) {
+        return false;
+      }
+    }
     return true;
   }
   [[nodiscard]] bool IsSimtScalarSupported(const AscNode &node) const override {
@@ -4643,7 +4650,10 @@ class BitwiseAndAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "BitwiseAnd";
+    return "BitwiseAndExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"bitwise_and_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -4666,7 +4676,7 @@ class BitwiseNotAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "UnaryApiCall";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "BitwiseNot";
+    return "BitwiseNotExtend";
   }
 
   [[nodiscard]] std::string GetMicroApiCallName() const override {
@@ -4678,12 +4688,23 @@ class BitwiseNotAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
 
   [[nodiscard]] bool IsVectorFunctionSupported(const AscNode &node) const override {
-    (void)node;
+    // VF 融合路径走 MicroAPI::Not 的按位非指令，bool 输入时语义错误（~1 = 0xFE 非 0/1 值），禁止融合，
+    // 回落到 UnaryApiCall（regbase BitwiseNotExtend 内部按 LogicalNot 执行）
+    AscNodeInputs node_inputs = node.inputs;
+    for (size_t i = 0; i < node_inputs().size(); i++) {
+      if (node_inputs[i].attr.dtype == ge::DT_BOOL) {
+        return false;
+      }
+    }
     return true;
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"bitwise_not_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "adv_api/math/bitwise_not.h",
+        "adv_api/math/logical_not.h",
         "basic_api/reg_compute/kernel_reg_compute_intf.h",
     };
   }
@@ -4718,7 +4739,10 @@ class BitwiseOrAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "BitwiseOr";
+    return "BitwiseOrExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"bitwise_or_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -4740,7 +4764,10 @@ class BitwiseXorAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "BitwiseXor";
+    return "BitwiseXorExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"bitwise_xor_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {

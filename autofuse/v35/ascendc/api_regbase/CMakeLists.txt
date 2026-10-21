@@ -22,6 +22,10 @@ set(ascendc_api_regbase_extend_src
         cast.h
         logical.h
         compare.h
+        bitwise_and.h
+        bitwise_or.h
+        bitwise_xor.h
+        bitwise_not.h
         floor_div.h
         pow.h
         polygamma.h

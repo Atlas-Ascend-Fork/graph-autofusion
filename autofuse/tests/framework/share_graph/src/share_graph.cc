@@ -6151,6 +6151,211 @@ af::ComputeGraphPtr ShareGraph::LoadCompareStoreFusedGraph(size_t dims_size) {
   return compute_graph;
 }
 
+static void CreateLoadLeBoolStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data x1("data0", graph);
+  x1.ir_attr.SetIndex(0);
+  af::ascir_op::Data x2("data1", graph);
+  x2.ir_attr.SetIndex(1);
+  af::ascir_op::Data x3("data2", graph);
+  x3.ir_attr.SetIndex(2);
+  x1.y.dtype = af::DT_BOOL;
+  x2.y.dtype = af::DT_BOOL;
+  x3.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Load x1Local("load0");
+  x1Local.x = x1.y;
+  x1Local.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Load x2Local("load1");
+  x2Local.x = x2.y;
+  x2Local.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Load x3Local("load2");
+  x3Local.x = x3.y;
+  x3Local.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Scalar scalar0("scalar0", graph);
+  scalar0.ir_attr.SetValue("0");
+  scalar0.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Le le0("le0");
+  le0.x1 = x1Local.y;
+  le0.x2 = x2Local.y;
+  le0.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Le le1("le1");
+  le1.x1 = x3Local.y;
+  le1.x2 = scalar0.y;
+  le1.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Store store0("store0");
+  store0.x = le0.y;
+  store0.y.dtype = af::DT_BOOL;
+  af::ascir_op::Store store1("store1");
+  store1.x = le1.y;
+  store1.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Output y0("output0");
+  y0.x = store0.y;
+  y0.y.dtype = af::DT_BOOL;
+  y0.ir_attr.SetIndex(0);
+  af::ascir_op::Output y1("output1");
+  y1.x = store1.y;
+  y1.y.dtype = af::DT_BOOL;
+  y1.ir_attr.SetIndex(1);
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+}
+
+/**
+ *      NetOutput(2)
+ *         |    |
+ *       AscBc(3in, 2out)
+ *      /  |    |
+ *  data0 data1 data2
+ */
+af::ComputeGraphPtr ShareGraph::LoadLeBoolStoreFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("le_bool_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+  auto data1 = builder.AddNode("data1", "Data", 0, 1);
+  af::AttrUtils::SetInt(data1->GetOpDescBarePtr(), "_parent_node_index", 1);
+  auto data2 = builder.AddNode("data2", "Data", 0, 1);
+  af::AttrUtils::SetInt(data2->GetOpDescBarePtr(), "_parent_node_index", 2);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 3, 2);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 2, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(data1, 0, ascbc, 1);
+  builder.AddDataEdge(data2, 0, ascbc, 2);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  builder.AddDataEdge(ascbc, 1, netoutput, 1);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("le_bool_store");
+  CreateLoadLeBoolStoreAscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
+ *         data0  data1
+ *            \    /
+ *          load0 load1
+ *          /  \   /  \
+ *        and  or  xor (load0,load1)
+ *          |    |   |
+ *        not0(load0)
+ *          |    |   |
+ *       store0-3
+ *          |    |   |
+ *      output0 output1..3
+ */
+static void CreateLoadBitwiseBoolStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data x1("data0", graph);
+  x1.ir_attr.SetIndex(0);
+  x1.y.dtype = af::DT_BOOL;
+  af::ascir_op::Data x2("data1", graph);
+  x2.ir_attr.SetIndex(1);
+  x2.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Load x1Local("load0");
+  x1Local.x = x1.y;
+  x1Local.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Load x2Local("load1");
+  x2Local.x = x2.y;
+  x2Local.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::BitwiseAnd and0("and0");
+  and0.x1 = x1Local.y;
+  and0.x2 = x2Local.y;
+  and0.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::BitwiseOr or0("or0");
+  or0.x1 = x1Local.y;
+  or0.x2 = x2Local.y;
+  or0.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::BitwiseXor xor0("xor0");
+  xor0.x1 = x1Local.y;
+  xor0.x2 = x2Local.y;
+  xor0.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::BitwiseNot not0("not0");
+  not0.x = x1Local.y;
+  not0.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Store store0("store0");
+  store0.x = and0.y;
+  store0.y.dtype = af::DT_BOOL;
+  af::ascir_op::Store store1("store1");
+  store1.x = or0.y;
+  store1.y.dtype = af::DT_BOOL;
+  af::ascir_op::Store store2("store2");
+  store2.x = xor0.y;
+  store2.y.dtype = af::DT_BOOL;
+  af::ascir_op::Store store3("store3");
+  store3.x = not0.y;
+  store3.y.dtype = af::DT_BOOL;
+
+  af::ascir_op::Output y0("output0");
+  y0.x = store0.y;
+  y0.y.dtype = af::DT_BOOL;
+  y0.ir_attr.SetIndex(0);
+  af::ascir_op::Output y1("output1");
+  y1.x = store1.y;
+  y1.y.dtype = af::DT_BOOL;
+  y1.ir_attr.SetIndex(1);
+  af::ascir_op::Output y2("output2");
+  y2.x = store2.y;
+  y2.y.dtype = af::DT_BOOL;
+  y2.ir_attr.SetIndex(2);
+  af::ascir_op::Output y3("output3");
+  y3.x = store3.y;
+  y3.y.dtype = af::DT_BOOL;
+  y3.ir_attr.SetIndex(3);
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+}
+
+af::ComputeGraphPtr ShareGraph::LoadBitwiseBoolStoreFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("bitwise_bool_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+  auto data1 = builder.AddNode("data1", "Data", 0, 1);
+  af::AttrUtils::SetInt(data1->GetOpDescBarePtr(), "_parent_node_index", 1);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 2, 4);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 4, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(data1, 0, ascbc, 1);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  builder.AddDataEdge(ascbc, 1, netoutput, 1);
+  builder.AddDataEdge(ascbc, 2, netoutput, 2);
+  builder.AddDataEdge(ascbc, 3, netoutput, 3);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("bitwise_bool_store");
+  CreateLoadBitwiseBoolStoreAscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
 /**
  *         data0
  *           |

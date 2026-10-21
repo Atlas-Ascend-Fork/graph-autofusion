@@ -893,6 +893,8 @@ build_backend() {
                       remainder_int32_store_test_e2e_v2 \
                       floor_div_int32_store_test_e2e_v2 \
                       load_compare_store_test_e2e_v2 \
+                      le_bool_store_test_e2e_v2 \
+                      bitwise_bool_store_test_e2e_v2 \
                       load_compare_cast_sum_store_test_e2e_v2 \
                       scalar_div_inf_test_e2e_v2 \
                       matmul_elemwise_brc_test_e2e_v2 \
