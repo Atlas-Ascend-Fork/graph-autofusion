@@ -978,6 +978,13 @@ af::AscGraph BuildShapeEnlargingInputPreGraph() {
   return graph;
 }
 
+int32_t ParseScore(const std::string &score_function) {
+  const std::string key = "return ";
+  const size_t pos = score_function.find(key);
+  EXPECT_NE(pos, std::string::npos);
+  return pos == std::string::npos ? -1 : std::stoi(score_function.substr(pos + key.size()));
+}
+
 std::vector<af::AscGraph> GenerateIndirectLoadCases(int64_t axis) {
   auto graph = BuildIndirectLoadGraph(axis);
   optimize::IndirectLoadScheduleCaseGenerator generator;
@@ -986,9 +993,11 @@ std::vector<af::AscGraph> GenerateIndirectLoadCases(int64_t axis) {
   EXPECT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
   EXPECT_EQ(graphs.size(), 4UL);
   EXPECT_EQ(score_functions.size(), 4UL);
+  // 动态 shape 下 SIMD 候选只能退化到逐元素 strided facade，SIMT 候选得分严格更高；
+  // 两个 SIMD 候选与 SK 候选维持同分。
   EXPECT_EQ(score_functions[0], score_functions[1]);
-  EXPECT_EQ(score_functions[1], score_functions[2]);
-  EXPECT_EQ(score_functions[2], score_functions[3]);
+  EXPECT_EQ(score_functions[0], score_functions[3]);
+  EXPECT_GT(ParseScore(score_functions[2]), ParseScore(score_functions[0]));
   return graphs;
 }
 
@@ -2013,6 +2022,11 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, ShapeEnlargingIndirectLoadStopsSimdI
   ge::PlatformContext::GetInstance().Reset();
   ASSERT_EQ(status, af::SUCCESS);
   ASSERT_EQ(graphs.size(), 4UL);
+  ASSERT_EQ(score_functions.size(), graphs.size());
+  // 静态稠密视图下 SIMD 候选走 dense facade，不需要让位给 SIMT，四个候选同分。
+  for (const auto &score_function : score_functions) {
+    EXPECT_EQ(ParseScore(score_function), ParseScore(score_functions[0]));
+  }
 
   const auto simd_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd);
   ASSERT_NE(simd_iter, graphs.end());
