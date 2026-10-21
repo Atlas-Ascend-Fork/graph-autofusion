@@ -138,7 +138,7 @@ TEST_F(AotSystemTest, OptionsNumericBoundariesAndDuplicateFirstValuePersist) {
     SCOPED_TRACE(split);
     aclskOption values[5]{};
     values[0].optionType = aclskOptionType::PRELOAD_CODE;
-    values[0].preload.preloadMode = split % 2 == 0 ? 2 : 0;
+    values[0].preload.preloadMode = split;
     values[1].optionType = aclskOptionType::SPLIT_MODE;
     values[1].splitMode.splitCnt = split;
     values[2].optionType = aclskOptionType::AUTO_OP_PARALLEL;
@@ -162,7 +162,7 @@ TEST_F(AotSystemTest, OptionsInvalidNumbersFallBackToDocumentedDefaults) {
   OptionsDumpDirectory directory;
   aclskOption values[5]{};
   values[0].optionType = aclskOptionType::PRELOAD_CODE;
-  values[0].preload.preloadMode = 3;
+  values[0].preload.preloadMode = ACLSK_PRELOAD_PER_FUNC_HALF_AIV + 1U;
   values[1].optionType = aclskOptionType::SPLIT_MODE;
   values[1].splitMode.splitCnt = 0;
   values[2].optionType = aclskOptionType::AUTO_OP_PARALLEL;

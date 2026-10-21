@@ -1100,24 +1100,52 @@ TEST_F(SkTaskBuilderTest, Build_Mix11ScheModeAdaptsVectorQueueToMix12Result) {
 }
 
 TEST_F(SkTaskBuilderTest, GetPreFetchCnt_OptionBranches) {
-  opts->AddOption(std::make_unique<NumberOptOption>("preload", aclskOptionType::PRELOAD_CODE, 1, 0, 2));
+  opts->AddOption(std::make_unique<NumberOptOption>("preload", aclskOptionType::PRELOAD_CODE, ACLSK_PRELOAD_PER_FUNC,
+                                                    ACLSK_PRELOAD_MAX, ACLSK_PRELOAD_PER_FUNC_HALF_AIV));
   ResolvedFunctionInfo resolved{};
   resolved.prefetchCnt[0] = 3;
-  resolved.prefetchCnt[1] = 4;
+  resolved.prefetchCnt[1] = 5;
 
-  auto p1 = builder->GetPreFetchCnt(resolved);
-  EXPECT_EQ(p1.first, 3);
-  EXPECT_EQ(p1.second, 4);
+  auto perFunc = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(perFunc.first, 3);
+  EXPECT_EQ(perFunc.second, 5);
 
-  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(0);
-  auto p2 = builder->GetPreFetchCnt(resolved);
-  EXPECT_EQ(p2.first, 16);
-  EXPECT_EQ(p2.second, 8);
+  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(ACLSK_PRELOAD_MAX);
+  auto maximum = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(maximum.first, 16);
+  EXPECT_EQ(maximum.second, 8);
 
-  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(2);
-  auto p3 = builder->GetPreFetchCnt(resolved);
-  EXPECT_EQ(p3.first, 0);
-  EXPECT_EQ(p3.second, 0);
+  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(ACLSK_PRELOAD_DISABLED);
+  auto disabled = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(disabled.first, 0);
+  EXPECT_EQ(disabled.second, 0);
+
+  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(ACLSK_PRELOAD_MIN);
+  auto minimum = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(minimum.first, 1);
+  EXPECT_EQ(minimum.second, 1);
+
+  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(ACLSK_PRELOAD_PER_FUNC_HALF_AIV);
+  auto halfAiv = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(halfAiv.first, 3);
+  EXPECT_EQ(halfAiv.second, 3);
+}
+
+TEST_F(SkTaskBuilderTest, GetPreFetchCnt_FunctionSizedModesRespectHardwareLimits) {
+  opts->AddOption(std::make_unique<NumberOptOption>("preload", aclskOptionType::PRELOAD_CODE, ACLSK_PRELOAD_PER_FUNC,
+                                                    ACLSK_PRELOAD_MAX, ACLSK_PRELOAD_PER_FUNC_HALF_AIV));
+  ResolvedFunctionInfo resolved{};
+  resolved.prefetchCnt[0] = 20;
+  resolved.prefetchCnt[1] = 18;
+
+  auto perFunc = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(perFunc.first, 16);
+  EXPECT_EQ(perFunc.second, 8);
+
+  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(ACLSK_PRELOAD_PER_FUNC_HALF_AIV);
+  auto halfAiv = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(halfAiv.first, 16);
+  EXPECT_EQ(halfAiv.second, 4);
 }
 
 TEST_F(SkTaskBuilderTest, Build_DebugMode_TriggerDumpHelpers) {
