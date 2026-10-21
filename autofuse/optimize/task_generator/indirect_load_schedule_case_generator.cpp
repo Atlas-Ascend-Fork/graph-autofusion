@@ -1941,6 +1941,109 @@ af::Status ValidateReduceOutputCandidate(const af::AscNodePtr &reduce, bool &is_
   return af::SUCCESS;
 }
 
+af::AscNodePtr GetReduceTerminalStore(const af::AscNodePtr &reduce) {
+  auto outputs = reduce->GetOutDataNodes();
+  if (outputs.size() != 1UL) {
+    return nullptr;
+  }
+  auto successor = std::dynamic_pointer_cast<af::AscNode>(*outputs.begin());
+  if (successor != nullptr && ScheduleUtils::IsStore(successor)) {
+    return successor;
+  }
+  if (successor == nullptr || !af::ops::IsOps<af::ascir_op::Cast>(successor)) {
+    return nullptr;
+  }
+  outputs = successor->GetOutDataNodes();
+  if (outputs.size() != 1UL) {
+    return nullptr;
+  }
+  auto store = std::dynamic_pointer_cast<af::AscNode>(*outputs.begin());
+  return store != nullptr && ScheduleUtils::IsStore(store) ? store : nullptr;
+}
+
+// kUnsupported 同时覆盖动态符号视图与 Reduce/Broadcast 输出的零 stride 约定，二者均为
+// 既有合法路径；仅当视图可静态判定且不含零 stride 时才视为异常视图并保守拒绝。
+bool IsStaticallyIrregularStoreTarget(const std::vector<af::Expression> &strides, const af::Expression &offset) {
+  if (!offset.IsConstExpr()) {
+    return false;
+  }
+  for (const af::Expression &stride : strides) {
+    if (!stride.IsConstExpr() || af::SymbolicUtils::StaticCheckEq(stride, af::ops::Zero) == af::TriBool::kTrue) {
+      return false;
+    }
+  }
+  return true;
+}
+
+af::Status ClassifyStoreTargetAndGate(const af::AscNodePtr &store, ascir::TemplateId template_id,
+                                      bool &is_candidate_legal) {
+  const auto &target = store->outputs()[0]->attr;
+  GE_ASSERT_TRUE(target.repeats.size() == target.strides.size() && !target.repeats.empty(),
+                 "IndirectLoad Store[%s] target view is invalid.", store->GetNamePtr());
+  af::Expression offset = af::ops::Zero;
+  if (store->attr.ir_attr != nullptr) {
+    (void)store->attr.ir_attr->GetAttrValue("offset", offset);
+  }
+  ascgen_utils::indirect_load::IndirectLoadStoreKind kind =
+      ascgen_utils::indirect_load::IndirectLoadStoreKind::kUnsupported;
+  GE_ASSERT_SUCCESS(
+      ascgen_utils::indirect_load::ClassifyIndirectLoadStoreTarget(target.repeats, target.strides, offset, kind));
+  bool accepted = false;
+  if (kind == ascgen_utils::indirect_load::IndirectLoadStoreKind::kDense) {
+    // SIMD/SK 尾部 Store 走通用 Store 路径；SIMT Store 体做 offset/stride 映射。
+    accepted = true;
+  } else if (kind == ascgen_utils::indirect_load::IndirectLoadStoreKind::kSliceStrided) {
+    // SIMD 尾部 Store 走通用 strided MTE3 路径；SIMT Store 体做坐标×stride+offset 映射；SK 恒拒绝。
+    accepted = template_id != ascir::TemplateId::kIndirectLoadSK;
+  } else if (!IsStaticallyIrregularStoreTarget(target.strides, offset)) {
+    accepted = true;
+  }
+  if (!accepted) {
+    is_candidate_legal = false;
+    GELOGI("[IndirectLoad] Reject candidate[%d]: Store[%s] target kind[%d] is not supported.",
+           static_cast<int32_t>(template_id), store->GetNamePtr(), static_cast<int32_t>(kind));
+  }
+  return af::SUCCESS;
+}
+
+af::Status ValidateOutputStoreTargets(const af::AscNodePtr &indirect_load, ascir::TemplateId template_id,
+                                      bool &is_candidate_legal) {
+  std::vector<af::AscNodePtr> stores;
+  NodeSet visited{indirect_load.get()};
+  NodePath roots;
+  for (const auto &out_node : indirect_load->GetOutDataNodes()) {
+    const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+    GE_ASSERT_NOTNULL(consumer, "IndirectLoad output successor is invalid.");
+    roots.emplace_back(consumer);
+  }
+  const auto visit = [&stores](const af::AscNodePtr &current, bool &stop) -> af::Status {
+    if (ScheduleUtils::IsStore(current)) {
+      stores.emplace_back(current);
+      stop = true;
+      return af::SUCCESS;
+    }
+    if (ScheduleUtils::IsReduce(current)) {
+      // 非法 Reduce 后继交由既有 ValidateReduceOutput 报错，此处不重复门控。
+      // SK 例外：SK 候选跳过 CollectRewrittenBoundaries，ValidateReduceOutput 不会执行，
+      // 非法后继时 SK 由其他路径处理/失败，与门控引入前行为一致。
+      const auto store = GetReduceTerminalStore(current);
+      if (store != nullptr) {
+        stores.emplace_back(store);
+      }
+      stop = true;
+    }
+    return af::SUCCESS;
+  };
+  GE_ASSERT_SUCCESS(TraverseOutputConsumers(roots, visited, visit));
+  for (const af::AscNodePtr &store : stores) {
+    GE_ASSERT_SUCCESS(ClassifyStoreTargetAndGate(store, template_id, is_candidate_legal));
+    if (!is_candidate_legal) {
+      return af::SUCCESS;
+    }
+  }
+  return af::SUCCESS;
+}
+
 // Traverse all output branches once, collecting Store/Reduce boundaries and validating each Reduce successor.
 af::Status CollectOutputBoundaries(const af::AscNodePtr &indirect_load, RewrittenGraphAnalysis &analysis,
                                    bool &is_candidate_legal) {
@@ -2443,6 +2546,10 @@ af::Status AnalyzeRewrittenGraph(af::AscGraph &graph, const af::AscNodePtr &indi
   // 分析阶段：路径、布局分类、对齐标志（只读）
   PhysicalViewPreparation preparation;
   GE_ASSERT_SUCCESS(PreparePhysicalViews(indirect_load, template_id, preparation, is_candidate_legal));
+  if (!is_candidate_legal) {
+    return af::SUCCESS;
+  }
+  GE_ASSERT_SUCCESS(ValidateOutputStoreTargets(indirect_load, template_id, is_candidate_legal));
   if (!is_candidate_legal) {
     return af::SUCCESS;
   }

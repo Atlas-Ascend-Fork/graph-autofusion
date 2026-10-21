@@ -169,6 +169,13 @@ if (ENABLE_OPEN_SRC)
     endif()
 endif()
 
+# Community CANN packages (e.g. 9.3.0) no longer ship libintf_llt_pub; fall back to an
+# interface stub whenever no real target exists so test stubs keep linking.
+if (NOT TARGET intf_llt_pub)
+    add_library(intf_llt_pub INTERFACE)
+    target_compile_options(intf_llt_pub INTERFACE -g -fPIC -w)
+endif()
+
 file(GLOB_RECURSE ASCIR_META_TEST_SRC CONFIGURE_DEPENDS "${CODE_ROOT_DIR}/ascir/meta/*.cpp")
 file(GLOB_RECURSE ASCIR_BUILTIN_OPS_TEST_SRC CONFIGURE_DEPENDS
         "${CODE_ROOT_DIR}/ascir/generator/*.cpp"

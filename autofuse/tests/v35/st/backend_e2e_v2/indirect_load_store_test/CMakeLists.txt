@@ -476,6 +476,24 @@ add_indirect_load_sweep_variant(indirect_load_user_dynamic_shape_sweep
     IL_USER_EMBEDDING_MUL)
 finalize_indirect_load_sweep(indirect_load_user_dynamic_shape_sweep)
 
+# Minimal red cases for the SIMT non-owning Store view: same embedding + slice topology
+# shrunk to [2, 4, 8] over one [2, 8] index tensor, table [3, 8], and a Store row stride
+# of 64 against the logical 32 (gap equal to one logical row).
+add_indirect_load_graph_case(indirect_load_user_embedding_slice_minimal_front
+    indirect_load_user_embedding_slice_minimal_front 1
+    IL_CASE_BROADCAST_WHERE IL_USER_EMBEDDING_SLICE IL_USER_EMBEDDING_SLICE_OFFSET=0
+    IL_USER_EMBEDDING_SLICE_ROWS=2 IL_USER_EMBEDDING_SLICE_COLUMNS=4 IL_USER_EMBEDDING_SLICE_INNER=8
+    IL_USER_EMBEDDING_SLICE_TABLE_ROWS=3 IL_USER_EMBEDDING_SLICE_INDEX_COLUMNS=8
+    IL_USER_EMBEDDING_SLICE_FUSED_NAME=\"autofused_embedding_slice_minimal_front\"
+    IL_USER_EMBEDDING_SLICE_KERNEL_NAME=autofused_embedding_slice_minimal_front)
+add_indirect_load_graph_case(indirect_load_user_embedding_slice_minimal_back
+    indirect_load_user_embedding_slice_minimal_back 1
+    IL_CASE_BROADCAST_WHERE IL_USER_EMBEDDING_SLICE IL_USER_EMBEDDING_SLICE_OFFSET=4
+    IL_USER_EMBEDDING_SLICE_ROWS=2 IL_USER_EMBEDDING_SLICE_COLUMNS=4 IL_USER_EMBEDDING_SLICE_INNER=8
+    IL_USER_EMBEDDING_SLICE_TABLE_ROWS=3 IL_USER_EMBEDDING_SLICE_INDEX_COLUMNS=8
+    IL_USER_EMBEDDING_SLICE_FUSED_NAME=\"autofused_embedding_slice_minimal_back\"
+    IL_USER_EMBEDDING_SLICE_KERNEL_NAME=autofused_embedding_slice_minimal_back)
+
 # Rank-2 embedding view followed by Reduce on the payload dimension.  Keep the
 # original rank-3 lookup-reduction case above unchanged as a regression guard.
 add_indirect_load_graph_case(indirect_load_user_embedding_sum_rank2
@@ -675,6 +693,37 @@ add_indirect_load_torch_gather_strided_test(indirect_load_rank3_axis1_input_inde
 set(indirect_load_index_select_defs IL_INDEX_SELECT_CASE=1)
 mark_indirect_load_codegen_and_e2e(indirect_load_rank3_axis1_input_index_gap_simt_test
                                    ${indirect_load_index_select_defs})
+
+function(add_indirect_load_strided_store_test test_name tiling_key expect_simt input_s0 input_s1 out_s0 out_s1
+         out_stride0 out_offset)
+    set(case_workdir ${CMAKE_CURRENT_BINARY_DIR}/${test_name})
+    file(MAKE_DIRECTORY ${case_workdir})
+    do_backend_e2e_st_test(${test_name}
+        WORKDIR ${case_workdir}
+        CODEGEN indirect_load_store_backend_generator.cpp
+        TILING_KEY ${tiling_key}
+        KERNEL_SRC
+            indirect_load_strided_store_test_kernel.cpp
+            indirect_load_strided_store_test_tiling.cpp
+            autofuse_tiling_data.h
+        TEST_SRC test_e2e_indirect_load_store_kernel.cpp)
+    set(case_definitions
+        IL_CASE_STRIDED_STORE
+        IL_STATIC_SHAPE
+        IL_EXPECT_TILING_KEY=${tiling_key}
+        IL_EXPECT_SIMT=${expect_simt}
+        IL_INPUT_S0=${input_s0}
+        IL_INPUT_S1=${input_s1}
+        IL_STRIDED_OUT_S0=${out_s0}
+        IL_STRIDED_OUT_S1=${out_s1}
+        IL_STRIDED_OUT_STRIDE0=${out_stride0}
+        IL_STRIDED_OUT_OFFSET=${out_offset})
+    mark_indirect_load_codegen_and_e2e(${test_name} ${case_definitions})
+endfunction()
+
+# cat([u(4,6), IL(4,8)], dim=1) → out(4,14)：IL 路切片 store，size=(4,8)、stride=(14,1)、offset=6
+add_indirect_load_strided_store_test(indirect_load_strided_store_rank2_axis1_simd_test 0 0 4 10 4 8 14 6)
+add_indirect_load_strided_store_test(indirect_load_strided_store_rank2_axis1_simt_test 1 1 4 10 4 8 14 6)
 
 
 set(indirect_load_embedding_test_workdir ${CMAKE_CURRENT_BINARY_DIR}/indirect_load_embedding_test)

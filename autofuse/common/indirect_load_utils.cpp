@@ -799,6 +799,14 @@ af::Status CollectSimtOutputChainBuilds(const NodePath &graph_nodes, const af::A
     chain.metadata.result_tensor_id = producer->outputs()[producer_output_index]->attr.mem.tensor_id;
     chain.metadata.target_tensor_id = node->outputs()[0]->attr.mem.tensor_id;
     chain.metadata.dtype = producer->outputs()[producer_output_index]->attr.dtype;
+    const auto &target_attr = node->outputs()[0]->attr;
+    chain.metadata.target_sizes = target_attr.repeats;
+    chain.metadata.target_strides = target_attr.strides;
+    af::Expression store_offset = af::ops::Zero;
+    if (node->attr.ir_attr != nullptr) {
+      (void)node->attr.ir_attr->GetAttrValue("offset", store_offset);
+    }
+    chain.metadata.target_offset = store_offset;
     chains.emplace_back(std::move(chain));
   }
   return af::SUCCESS;
@@ -948,6 +956,45 @@ bool CanUseUint32Offsets(const LogicalTensorView &input, const LogicalTensorView
          index_max <= limit && TryGetMaxElementOffset(output, output_max) && output_max <= limit;
 }
 
+// Decomposed store addressing only engages when the target view mirrors the logical output view
+// (rank and sizes equal); every other target view keeps legacy linear addressing (offset +
+// output_index), whose extent the dense logical output view already bounds. Merged (ApplyMerge)
+// or split store views therefore only need the static offset check, while mirroring views must
+// prove their full static span fits the offset width.
+bool StoreTargetsFitUint32(const std::vector<SimtOutputChainMetadata> &chains, const LogicalTensorView &output) {
+  const uint64_t limit = std::numeric_limits<uint32_t>::max();
+  uint64_t output_max = 0U;
+  if (!TryGetMaxElementOffset(output, output_max)) {
+    return false;
+  }
+  for (const SimtOutputChainMetadata &chain : chains) {
+    if (chain.local_target) {
+      continue;
+    }
+    int64_t offset = 0L;
+    if (!chain.target_offset.GetConstValue(offset) || offset < 0L) {
+      return false;
+    }
+    uint64_t span = static_cast<uint64_t>(offset);
+    if (span > limit) {
+      return false;
+    }
+    if (chain.target_sizes.size() != output.sizes.size() || chain.target_strides.size() != output.sizes.size() ||
+        chain.target_sizes != output.sizes) {
+      if (output_max + span > limit) {
+        return false;
+      }
+      continue;
+    }
+    for (size_t dim = 0UL; dim < chain.target_sizes.size(); ++dim) {
+      if (!TryAccumulateStaticOffset(chain.target_sizes[dim], chain.target_strides[dim], span) || span > limit) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 bool CanUseUint32Divisors(const LogicalTensorView &index) {
   for (const af::Expression &size_expr : index.sizes) {
     int64_t size = 0L;
@@ -1027,8 +1074,8 @@ void AppendRuntimeParams(std::vector<af::Expression> &target, const std::vector<
 }
 
 af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, const NodePath &index_nodes, size_t axis,
-                                   bool embedding_structured, bool &mixed_index_views, SimtPolicyMetadata &metadata,
-                                   LogicalTensorView &policy_index_view) {
+                                   bool embedding_structured, bool &mixed_index_views, bool store_targets_fit_uint32,
+                                   SimtPolicyMetadata &metadata, LogicalTensorView &policy_index_view) {
   const size_t rank = logical_view.input.sizes.size();
   GE_ASSERT_TRUE(rank < 64UL, "IndirectLoad SIMT rank must be smaller than 64.");
   LogicalTensorView input = logical_view.input;
@@ -1080,8 +1127,8 @@ af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, cons
       (metadata.policy != SimtAddressPolicy::kRecursive && metadata.policy != SimtAddressPolicy::kStrided &&
        metadata.policy != SimtAddressPolicy::kEmbedding) ||
       CanUseUint32Divisors(index);
-  if (CanUseUint32Offsets(input, index, output) && structured_magic_supported && static_inner_magic_supported &&
-      general_magic_supported) {
+  if (CanUseUint32Offsets(input, index, output) && store_targets_fit_uint32 && structured_magic_supported &&
+      static_inner_magic_supported && general_magic_supported) {
     metadata.offset_width = SimtOffsetWidth::kUint32;
   }
   switch (metadata.policy) {
@@ -1238,15 +1285,27 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
     GE_ASSERT_TRUE(!output_root->outputs().empty(), "IndirectLoad post Reduce input producer has no output.");
     simt.output_result_tensor_id = output_root->outputs()[0]->attr.mem.tensor_id;
     simt.output_dtype = output_root->outputs()[0]->attr.dtype;
-    simt.output_chains.push_back(
-        {simt.output_node_names, simt.output_result_tensor_id, simt.output_result_tensor_id, simt.output_dtype, true});
+    simt.output_chains.push_back({simt.output_node_names,
+                                  simt.output_result_tensor_id,
+                                  simt.output_result_tensor_id,
+                                  simt.output_dtype,
+                                  true,
+                                  {},
+                                  {},
+                                  af::ops::Zero});
   } else if (is_group_member) {
     // 组员输出 = value 直写 UB 局部目标：空变换链，evaluator 的 value 种子直接落 target
     // （与 post Reduce 合成链同构，见 GenerateSimtOutputsEvaluator 的 values[value_tensor_id]）。
     simt.output_result_tensor_id = simt.value_tensor_id;
     simt.output_dtype = indirect_load->outputs()[0]->attr.dtype;
-    simt.output_chains.push_back(
-        {std::vector<std::string>{}, simt.value_tensor_id, simt.value_tensor_id, simt.output_dtype, true});
+    simt.output_chains.push_back({std::vector<std::string>{},
+                                  simt.value_tensor_id,
+                                  simt.value_tensor_id,
+                                  simt.output_dtype,
+                                  true,
+                                  {},
+                                  {},
+                                  af::ops::Zero});
   } else {
     GE_ASSERT_TRUE(!simt.output_chains.empty(), "IndirectLoad SIMT output chains are empty.");
     if (simt.output_chains.size() == 1UL) {
@@ -1276,10 +1335,11 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   }
 
   bool mixed_index_views = false;
+  const bool store_targets_fit_uint32 = StoreTargetsFitUint32(simt.output_chains, metadata.logical_view.output);
   LogicalTensorView policy_index_view;
   GE_ASSERT_SUCCESS(BuildSimtPolicyMetadata(metadata.logical_view, index_nodes, static_cast<size_t>(metadata.axis),
                                             metadata.access_info.can_use_simt_structured, mixed_index_views,
-                                            simt.policy, policy_index_view));
+                                            store_targets_fit_uint32, simt.policy, policy_index_view));
   for (const auto &node : index_load_nodes) {
     const LogicalTensorView current_view = GetNodeOutputView(node);
     SimtLoadMetadata load_meta;
@@ -1522,6 +1582,51 @@ af::Status ValidateIndirectLoadOutputLayout(const LogicalTensorView &output) {
                    "IndirectLoad output must use a dense contiguous layout.");
     expected_stride = af::sym::Mul(expected_stride, output.sizes[dim]);
   }
+  return af::SUCCESS;
+}
+
+// Classifies the layout of an IndirectLoad output Store target.  The supported
+// non-dense form mirrors a ConcatKernel slice view: a contiguous suffix starting
+// at the innermost dim, arbitrary positive static strides on the prefix dims, and
+// a provably non-negative static offset.
+// Every stride (including dims skipped below) must be provably positive.
+af::Status ClassifyIndirectLoadStoreTarget(const std::vector<af::Expression> &sizes,
+                                           const std::vector<af::Expression> &strides, const af::Expression &offset,
+                                           IndirectLoadStoreKind &kind) {
+  GE_ASSERT_TRUE(!sizes.empty() && sizes.size() == strides.size(),
+                 "IndirectLoad store target rank is invalid, sizes:%zu, strides:%zu.", sizes.size(), strides.size());
+  kind = IndirectLoadStoreKind::kUnsupported;
+  if (af::SymbolicUtils::StaticCheckGe(offset, af::sym::kSymbolZero) != af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  for (const af::Expression &stride : strides) {
+    if (af::SymbolicUtils::StaticCheckGt(stride, af::sym::kSymbolZero) != af::TriBool::kTrue) {
+      return af::SUCCESS;
+    }
+  }
+  af::Expression expected_stride = af::sym::kSymbolOne;
+  bool has_contiguous_suffix = false;
+  for (size_t index = sizes.size(); index > 0UL; --index) {
+    const size_t dim = index - 1UL;
+    if (af::SymbolicUtils::StaticCheckEq(sizes[dim], af::sym::kSymbolOne) == af::TriBool::kTrue) {
+      continue;
+    }
+    if (!has_contiguous_suffix) {
+      if (af::SymbolicUtils::StaticCheckEq(strides[dim], expected_stride) != af::TriBool::kTrue) {
+        return af::SUCCESS;
+      }
+      has_contiguous_suffix = true;
+      expected_stride = af::sym::Mul(expected_stride, sizes[dim]);
+      continue;
+    }
+    if (af::SymbolicUtils::StaticCheckEq(strides[dim], expected_stride) == af::TriBool::kTrue) {
+      expected_stride = af::sym::Mul(expected_stride, sizes[dim]);
+      continue;
+    }
+    kind = IndirectLoadStoreKind::kSliceStrided;
+    return af::SUCCESS;
+  }
+  kind = IndirectLoadStoreKind::kDense;
   return af::SUCCESS;
 }
 

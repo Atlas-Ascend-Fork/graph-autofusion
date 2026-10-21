@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 #include "ascir.h"
+#include "ascir_ops_utils.h"
 #include "graph/ascendc_ir/ascendc_ir_core/ascendc_ir.h"
 #include "graph/symbolizer/symbolic_utils.h"
 
@@ -79,6 +80,12 @@ enum class IndirectLoadLayoutKind : int64_t {
   kZeroStrideCompact = 1,
   kStrided = 2,
   kUnsupported = 3,
+};
+
+enum class IndirectLoadStoreKind : int64_t {
+  kDense = 0,
+  kSliceStrided = 1,
+  kUnsupported = 2,
 };
 
 struct IndirectLoadTensorLayout : LogicalTensorView {
@@ -182,6 +189,9 @@ struct SimtOutputChainMetadata {
   ascir::TensorId target_tensor_id = af::kIdNone;
   af::DataType dtype = af::DT_UNDEFINED;
   bool local_target = false;
+  std::vector<af::Expression> target_sizes;
+  std::vector<af::Expression> target_strides;
+  af::Expression target_offset{af::ops::Zero};
 };
 
 struct SimtLoweringMetadata {
@@ -352,6 +362,9 @@ af::Status ValidateIndirectLoadOutputLayout(const LogicalTensorView &output);
 // 调度会把普通节点视图 merge/split 到模板轴空间（如 outer 被拆为
 // [s3*s4*s5/Tb, Tb]），符号级全等比较会漏判这类等价视图。
 bool IsDenseEquivalentView(const LogicalTensorView &load_view, const LogicalTensorView &output_view);
+af::Status ClassifyIndirectLoadStoreTarget(const std::vector<af::Expression> &sizes,
+                                           const std::vector<af::Expression> &strides, const af::Expression &offset,
+                                           IndirectLoadStoreKind &kind);
 bool ShouldApplyInputInnerVectorization(const af::AscNodePtr &node);
 // 双 gather 水平融合：按 GetAllNodes 顺序收集图中全部 IndirectLoad 节点（确定性顺序）。
 std::vector<af::AscNodePtr> GetAllIndirectLoadNodes(const af::AscGraph &graph);
