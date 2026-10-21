@@ -132,21 +132,25 @@ ExpressionImplPtr ExprParser::ParserMulDivide() {
 ExpressionImplPtr ExprParser::ParserMaxFunction() {
   GE_ASSERT_SUCCESS(Eat(TokenType::kMax));
   GE_ASSERT_SUCCESS(Eat(TokenType::kLparen));
-  auto arg1 = ParserExpression();
-  GE_ASSERT_SUCCESS(Eat(TokenType::kComma));
-  auto arg2 = ParserExpression();
+  auto node = ParserExpression();
+  while (currentToken_.type == TokenType::kComma) {
+    GE_ASSERT_SUCCESS(Eat(TokenType::kComma));
+    node = Max(node, ParserExpression());
+  }
   GE_ASSERT_SUCCESS(Eat(TokenType::kRparen));
-  return Max(arg1, arg2);
+  return node;
 }
 
 ExpressionImplPtr ExprParser::ParserMinFunction() {
   GE_ASSERT_SUCCESS(Eat(TokenType::kMin));
   GE_ASSERT_SUCCESS(Eat(TokenType::kLparen));
-  auto arg1 = ParserExpression();
-  GE_ASSERT_SUCCESS(Eat(TokenType::kComma));
-  auto arg2 = ParserExpression();
+  auto node = ParserExpression();
+  while (currentToken_.type == TokenType::kComma) {
+    GE_ASSERT_SUCCESS(Eat(TokenType::kComma));
+    node = Min(node, ParserExpression());
+  }
   GE_ASSERT_SUCCESS(Eat(TokenType::kRparen));
-  return Min(arg1, arg2);
+  return node;
 }
 
 ExpressionImplPtr ExprParser::ParserEqual() {
@@ -192,26 +196,26 @@ ExpressionImplPtr ExprParser::ParserLessThan() {
 ExpressionImplPtr ExprParser::ParserLogicalAnd() {
   GE_ASSERT_SUCCESS(Eat(TokenType::kLogicalAnd));
   GE_ASSERT_SUCCESS(Eat(TokenType::kLparen));
-  auto arg1 = ParserExpression();
-  GE_ASSERT_SUCCESS(Eat(TokenType::kComma));
-  auto arg2 = ParserExpression();
-  GE_ASSERT_SUCCESS(Eat(TokenType::kRparen));
   std::vector<ExpressionImplPtr> args;
-  args.push_back(std::move(arg1));
-  args.push_back(std::move(arg2));
+  args.push_back(ParserExpression());
+  while (currentToken_.type == TokenType::kComma) {
+    GE_ASSERT_SUCCESS(Eat(TokenType::kComma));
+    args.push_back(ParserExpression());
+  }
+  GE_ASSERT_SUCCESS(Eat(TokenType::kRparen));
   return LogicalAnd(args);
 }
 
 ExpressionImplPtr ExprParser::ParserLogicalOr() {
   GE_ASSERT_SUCCESS(Eat(TokenType::kLogicalOr));
   GE_ASSERT_SUCCESS(Eat(TokenType::kLparen));
-  auto arg1 = ParserExpression();
-  GE_ASSERT_SUCCESS(Eat(TokenType::kComma));
-  auto arg2 = ParserExpression();
-  GE_ASSERT_SUCCESS(Eat(TokenType::kRparen));
   std::vector<ExpressionImplPtr> args;
-  args.push_back(std::move(arg1));
-  args.push_back(std::move(arg2));
+  args.push_back(ParserExpression());
+  while (currentToken_.type == TokenType::kComma) {
+    GE_ASSERT_SUCCESS(Eat(TokenType::kComma));
+    args.push_back(ParserExpression());
+  }
+  GE_ASSERT_SUCCESS(Eat(TokenType::kRparen));
   return LogicalOr(args);
 }
 
