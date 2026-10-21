@@ -47,7 +47,12 @@ bool AxesReorderSolver::BinarySearchWithAlignment(TilingVariable **vars, uint32_
       right = mid - align;
     }
   }
-  return (result != -1);
+  if (result != -1) {
+    for (uint32_t i = 0; i < var_num; ++i) {
+      vars[i]->SetValue(result);
+    }
+  }
+  return result != -1;
 }
 )";
 }
@@ -283,6 +288,8 @@ std::string GenBinarySearchDualThresholdLoop() {
   if (result == -1) {
     return false;
   }
+  vars[0]->SetValue(result);
+  vars[1]->SetValue(result);
   upper_ub_a = result;
   upper_ub_b = result;
 )";

@@ -19,7 +19,7 @@ file(GLOB SOURCES
         ${TC_DIR}/ffn/*.cpp
         ${TC_DIR}/att_st_test/att_test.cpp
         ${TC_DIR}/test_expr/*.cpp
-        ${TC_DIR}/solver_pass_gen/axes_reorder_solver_gen/*.cpp
+        ${TC_DIR}/source_mirror/generator/solver_pass_gen/axes_reorder_solver_gen/*.cpp
         ${TC_DIR}/solver_pass_gen/general_solver_gen/*.cpp
         ${TC_DIR}/solver_pass/general_solver/*.cpp
         ${TC_DIR}/solver_pass_manager/*.cpp

@@ -410,6 +410,52 @@ TEST_F(TestAxesReorderSolverGen, GenEqualOrderAndAxisOrderRemainCanonical) {
   EXPECT_NE(init_code.find("axis1.order = 3UL"), std::string::npos);
 }
 
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbBinarySearchCommitsResultBeforeReturn) {
+  const std::string code = GenBinarySearchWithAlignment();
+  const size_t commit_pos = code.find("vars[i]->SetValue(result);");
+  const size_t return_pos = code.find("return result != -1;");
+  ASSERT_NE(commit_pos, std::string::npos) << code;
+  ASSERT_NE(return_pos, std::string::npos) << code;
+  EXPECT_LT(commit_pos, return_pos);
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbMainSearchRestoresBothAxesBeforeBSearch) {
+  const std::string code = GenBinarySearchEqualPriorityAxesWithDualThreshold();
+  const size_t failed_pos = code.find("if (result == -1) {");
+  const size_t restore_a_pos = code.find("vars[0]->SetValue(result);");
+  const size_t restore_b_pos = code.find("vars[1]->SetValue(result);");
+  const size_t b_search_pos = code.find("\"B axis search\"");
+  ASSERT_NE(failed_pos, std::string::npos) << code;
+  ASSERT_NE(restore_a_pos, std::string::npos) << code;
+  ASSERT_NE(restore_b_pos, std::string::npos) << code;
+  ASSERT_NE(b_search_pos, std::string::npos) << code;
+  EXPECT_LT(failed_pos, restore_a_pos);
+  EXPECT_LT(restore_a_pos, restore_b_pos);
+  EXPECT_LT(restore_b_pos, b_search_pos);
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbLocalBufTilingGeneratesFinalChecks) {
+  const std::string naive_equal_code = GenNaiveLocalBufTiling(true);
+  EXPECT_NE(naive_equal_code.find("if (!SatisfyCons(ConstraintType::LOCAL_BUFFER)) {\n"
+                                  "    return enable_equal_order && NaiveLocalBufTiling(false);"),
+            std::string::npos);
+
+  const std::string naive_normal_code = GenNaiveLocalBufTiling(false);
+  EXPECT_NE(naive_normal_code.find("return SatisfyCons(ConstraintType::LOCAL_BUFFER) && "
+                                   "SatisfyCons(ConstraintType::LB_MIXED);"),
+            std::string::npos);
+
+  const std::string binary_equal_code = GenBinaryLocalBufTiling(true);
+  EXPECT_NE(binary_equal_code.find("return enable_equal_order && BinaryLocalBufTiling(false);"), std::string::npos);
+
+  const std::string binary_normal_code = GenBinaryLocalBufTiling(false);
+  EXPECT_NE(binary_normal_code.find("if (!SatisfyCons(ConstraintType::LOCAL_BUFFER)) {\n"
+                                    "    return false;\n"
+                                    "  }"),
+            std::string::npos);
+  EXPECT_EQ(binary_normal_code.find("enable_equal_order"), std::string::npos);
+}
+
 TEST_F(TestAxesReorderSolverGen, GenTransposeEqualOrderDoesNotGenerateReduceTailBalance) {
   const std::string solver_head = GetAxesSolverSolverHead(true);
   const std::string solver_func = GetAxesSolverSolverFunc(true);
