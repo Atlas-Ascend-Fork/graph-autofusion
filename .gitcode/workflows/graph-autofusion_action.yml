@@ -131,6 +131,7 @@ stages:
     jobs:
       JOB_UT_TEST_Python_multistream:
         name: UT_Test_Python_multistream
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
         select: selected_by_default
         needs: []
         uses: .gitcode/workflows/ut_action.yml
