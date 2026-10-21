@@ -493,8 +493,6 @@ __simd_vf__ inline void ReduceRAConcatVFImpl(__ubuf__ T *dstAddr, __ubuf__ T *sr
   uint16_t loopDataNum = mainR * dimA;
 
   __ubuf__ T *addr;
-  Reg::MaskReg fullMask;
-  fullMask = Reg::CreateMask<T, Reg::MaskPattern::ALL, Trait>();
   Reg::MaskReg counterMask;
 
   if constexpr (!isReuseSource) {
@@ -530,11 +528,13 @@ __simd_vf__ inline void ReduceRAConcatVFImpl(__ubuf__ T *dstAddr, __ubuf__ T *sr
     mainR = mainR >> 1;
     uint32_t foldDataNum = mainR * dimA;
     uint16_t foldRepeat = CeilDivision(foldDataNum, vlSize);
+    uint32_t maskScalar = foldDataNum;
     for (uint16_t i = 0; i < foldRepeat; i++) {
+      counterMask = Reg::UpdateMask<T, Trait>(maskScalar);
       Reg::LoadAlign(vregMain, addr + i * vlSize);
       Reg::LoadAlign(vregTail, addr + foldDataNum + i * vlSize);
-      Binaryfunc(vregMain, vregMain, vregTail, fullMask);
-      Reg::StoreAlign(addr + i * vlSize, vregMain, fullMask);
+      Binaryfunc(vregMain, vregMain, vregTail, counterMask);
+      Reg::StoreAlign(addr + i * vlSize, vregMain, counterMask);
     }
     Reg::LocalMemBar<Reg::MemType::VEC_STORE, Reg::MemType::VEC_LOAD>();
   }
