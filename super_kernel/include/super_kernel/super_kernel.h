@@ -67,6 +67,7 @@ enum aclskPreloadMode : uint32_t {
   ACLSK_PRELOAD_DISABLED = 2U,           // disable instruction-cache preload
   ACLSK_PRELOAD_MIN = 3U,                // AIC/AIV preload one 2-KB block
   ACLSK_PRELOAD_PER_FUNC_HALF_AIV = 4U,  // AIC uses function size; AIV uses half, rounded up
+  ACLSK_PRELOAD_PER_FUNC_MIN_AIV = 5U,   // AIC uses function size; AIV uses at most one block
 };
 
 typedef struct aclskPreloadOption {

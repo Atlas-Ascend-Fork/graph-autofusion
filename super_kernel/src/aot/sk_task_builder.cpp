@@ -1365,6 +1365,9 @@ std::pair<int, int> SkTaskBuilder::GetPreFetchCnt(const ResolvedFunctionInfo &re
       preFetchCntValue.second = preFetchCntValue.second / 2 + preFetchCntValue.second % 2;
       break;
     }
+    case ACLSK_PRELOAD_PER_FUNC_MIN_AIV:
+      preFetchCntValue.second = std::min(preFetchCntValue.second, 1);
+      break;
     case ACLSK_PRELOAD_PER_FUNC:
     default:
       break;

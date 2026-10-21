@@ -1101,7 +1101,7 @@ TEST_F(SkTaskBuilderTest, Build_Mix11ScheModeAdaptsVectorQueueToMix12Result) {
 
 TEST_F(SkTaskBuilderTest, GetPreFetchCnt_OptionBranches) {
   opts->AddOption(std::make_unique<NumberOptOption>("preload", aclskOptionType::PRELOAD_CODE, ACLSK_PRELOAD_PER_FUNC,
-                                                    ACLSK_PRELOAD_MAX, ACLSK_PRELOAD_PER_FUNC_HALF_AIV));
+                                                    ACLSK_PRELOAD_MAX, ACLSK_PRELOAD_PER_FUNC_MIN_AIV));
   ResolvedFunctionInfo resolved{};
   resolved.prefetchCnt[0] = 3;
   resolved.prefetchCnt[1] = 5;
@@ -1129,11 +1129,23 @@ TEST_F(SkTaskBuilderTest, GetPreFetchCnt_OptionBranches) {
   auto halfAiv = builder->GetPreFetchCnt(resolved);
   EXPECT_EQ(halfAiv.first, 3);
   EXPECT_EQ(halfAiv.second, 3);
+
+  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(ACLSK_PRELOAD_PER_FUNC_MIN_AIV);
+  auto minAiv = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(minAiv.first, 3);
+  EXPECT_EQ(minAiv.second, 1);
+
+  resolved.prefetchCnt[1] = 0;
+  minAiv = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(minAiv.second, 0);
+  resolved.prefetchCnt[1] = 1;
+  minAiv = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(minAiv.second, 1);
 }
 
 TEST_F(SkTaskBuilderTest, GetPreFetchCnt_FunctionSizedModesRespectHardwareLimits) {
   opts->AddOption(std::make_unique<NumberOptOption>("preload", aclskOptionType::PRELOAD_CODE, ACLSK_PRELOAD_PER_FUNC,
-                                                    ACLSK_PRELOAD_MAX, ACLSK_PRELOAD_PER_FUNC_HALF_AIV));
+                                                    ACLSK_PRELOAD_MAX, ACLSK_PRELOAD_PER_FUNC_MIN_AIV));
   ResolvedFunctionInfo resolved{};
   resolved.prefetchCnt[0] = 20;
   resolved.prefetchCnt[1] = 18;
@@ -1146,6 +1158,11 @@ TEST_F(SkTaskBuilderTest, GetPreFetchCnt_FunctionSizedModesRespectHardwareLimits
   auto halfAiv = builder->GetPreFetchCnt(resolved);
   EXPECT_EQ(halfAiv.first, 16);
   EXPECT_EQ(halfAiv.second, 4);
+
+  opts->GetOption(aclskOptionType::PRELOAD_CODE)->SetValue(ACLSK_PRELOAD_PER_FUNC_MIN_AIV);
+  auto minAiv = builder->GetPreFetchCnt(resolved);
+  EXPECT_EQ(minAiv.first, 16);
+  EXPECT_EQ(minAiv.second, 1);
 }
 
 TEST_F(SkTaskBuilderTest, Build_DebugMode_TriggerDumpHelpers) {

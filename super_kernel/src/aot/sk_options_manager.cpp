@@ -43,7 +43,7 @@ const std::array<DefaultOptionFactoryEntry, static_cast<size_t>(aclskOptionType:
          []() -> std::unique_ptr<OptOptionBase> {
            return std::make_unique<NumberOptOption>("preload_code", aclskOptionType::PRELOAD_CODE,
                                                     ACLSK_PRELOAD_PER_FUNC, ACLSK_PRELOAD_MAX,
-                                                    ACLSK_PRELOAD_PER_FUNC_HALF_AIV);
+                                                    ACLSK_PRELOAD_PER_FUNC_MIN_AIV);
          }},
         {aclskOptionType::SPLIT_MODE,
          []() -> std::unique_ptr<OptOptionBase> {
