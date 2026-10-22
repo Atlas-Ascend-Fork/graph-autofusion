@@ -196,12 +196,13 @@ aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
 void AclSpecOptimizer::LogTaskAdmission(const TaskIdentity &identity) const {
   const auto &record = identity.record;
   if (record.kind == ScopeTaskKind::KERNEL) {
-    SK_DLOGI("Kernel Specialization: %sstreamIndex=%u, task=%u, type=KERNEL, kernel=%s",
+    SK_DLOGI("Kernel Specialization: %sstreamIndex=%u, task=%u, type=KERNEL, kernel=%s, sequenceId=%u",
              record.allowSpecialization ? "[IN_SCOPE] " : "", record.streamIndex, record.taskIndex,
-             identity.kernelEntry.c_str());
+             identity.kernelEntry.c_str(), identity.sequenceId);
   } else {
     const char *type = record.kind == ScopeTaskKind::OTHER ? TaskTypeName(identity.params.type) : "MARKER";
-    SK_DLOGI("Kernel Specialization: streamIndex=%u, task=%u, type=%s", record.streamIndex, record.taskIndex, type);
+    SK_DLOGI("Kernel Specialization: streamIndex=%u, task=%u, type=%s, sequenceId=%u", record.streamIndex,
+             record.taskIndex, type, identity.sequenceId);
   }
 }
 
@@ -213,41 +214,50 @@ aclError AclSpecOptimizer::SetTaskAdmission(std::vector<TaskIdentity> &identitie
     return ACL_SUCCESS;
   }
 
-  // Identities are appended in stream/task order. Each contiguous stream group has its own stack.
-  size_t streamFirst = 0;
-  while (streamFirst < identities.size()) {
-    const uint32_t streamIndex = identities[streamFirst].record.streamIndex;
-    std::vector<size_t> activeBegins;
-    size_t index = streamFirst;
-    for (; index < identities.size() && identities[index].record.streamIndex == streamIndex; ++index) {
-      auto &record = identities[index].record;
-      switch (record.kind) {
-        case ScopeTaskKind::BEGIN:
-          activeBegins.push_back(index);
-          break;
-        case ScopeTaskKind::END:
-          if (activeBegins.empty()) {
-            SK_DLOGE("aclmdlRISpecOptimizeByFlag invalid scope: streamIndex=%u task=%u reason=End without Begin",
-                     streamIndex, record.taskIndex);
-            return ACL_ERROR_INVALID_PARAM;
-          }
-          activeBegins.pop_back();
-          break;
-        case ScopeTaskKind::KERNEL:
-          record.allowSpecialization = !activeBegins.empty();
-          break;
-        case ScopeTaskKind::OTHER:
-          break;
-      }
-      LogTaskAdmission(identities[index]);
-    }
-    if (!activeBegins.empty()) {
-      const auto &begin = identities[activeBegins.back()].record;
-      SK_DLOGE("aclmdlRISpecOptimizeByFlag invalid scope: streamIndex=%u task=%u reason=Begin without End depth=%zu",
-               streamIndex, begin.taskIndex, activeBegins.size());
+  std::sort(identities.begin(), identities.end(),
+            [](const TaskIdentity &left, const TaskIdentity &right) { return left.sequenceId < right.sequenceId; });
+  for (size_t index = 1; index < identities.size(); ++index) {
+    if (identities[index - 1].sequenceId == identities[index].sequenceId) {
+      const auto &identity = identities[index];
+      SK_DLOGE(
+          "aclmdlRISpecOptimizeByFlag invalid task sequence: streamIndex=%u task=%u sequenceId=%u reason=duplicate",
+          identity.record.streamIndex, identity.record.taskIndex, identity.sequenceId);
       return ACL_ERROR_INVALID_PARAM;
     }
-    streamFirst = index;
+  }
+
+  std::vector<size_t> activeBegins;
+  for (size_t index = 0; index < identities.size(); ++index) {
+    auto &identity = identities[index];
+    auto &record = identity.record;
+    switch (record.kind) {
+      case ScopeTaskKind::BEGIN:
+        activeBegins.push_back(index);
+        break;
+      case ScopeTaskKind::END:
+        if (activeBegins.empty()) {
+          SK_DLOGE(
+              "aclmdlRISpecOptimizeByFlag invalid scope: streamIndex=%u task=%u sequenceId=%u "
+              "reason=End without Begin",
+              record.streamIndex, record.taskIndex, identity.sequenceId);
+          return ACL_ERROR_INVALID_PARAM;
+        }
+        activeBegins.pop_back();
+        break;
+      case ScopeTaskKind::KERNEL:
+      case ScopeTaskKind::OTHER:
+        break;
+    }
+    record.allowSpecialization = record.kind == ScopeTaskKind::KERNEL && !activeBegins.empty();
+    LogTaskAdmission(identity);
+  }
+  if (!activeBegins.empty()) {
+    const auto &begin = identities[activeBegins.back()];
+    SK_DLOGE(
+        "aclmdlRISpecOptimizeByFlag invalid scope: streamIndex=%u task=%u sequenceId=%u "
+        "reason=Begin without End depth=%zu",
+        begin.record.streamIndex, begin.record.taskIndex, begin.sequenceId, activeBegins.size());
+    return ACL_ERROR_INVALID_PARAM;
   }
   return ACL_SUCCESS;
 }
@@ -322,13 +332,21 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
         SK_DLOGE("ReadTaskIdentity failed: streamIndex=%u task=%u ret=%d", streamIndex, taskIndex, result);
         return result;
       }
+      if (isScopeJit) {
+        result = aclmdlRITaskGetSeqId(identity.record.task, &identity.sequenceId);
+        if (result != ACL_SUCCESS) {
+          SK_DLOGE("aclmdlRISpecOptimizeByFlag task sequence unavailable: streamIndex=%u task=%u ret=%d", streamIndex,
+                   taskIndex, result);
+          return result;
+        }
+      }
       if (identity.record.kind == ScopeTaskKind::BEGIN || identity.record.kind == ScopeTaskKind::END) {
         collectedMarkers.push_back(identity.record);
       }
       identities.push_back(std::move(identity));
     }
   }
-  // Validate every stream's range before reading resources or copying any candidate's arguments.
+  // Validate model-wide scopes before reading resources or copying any candidate's arguments.
   result = SetTaskAdmission(identities, isScopeJit);
   if (result != ACL_SUCCESS) {
     return result;

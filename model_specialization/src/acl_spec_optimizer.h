@@ -96,6 +96,7 @@ class AclSpecOptimizer final {
     ScopeTaskRecord record;
     aclmdlRITaskParams params{};
     std::string kernelEntry;
+    uint32_t sequenceId = 0;
   };
 
   aclError ReadTaskIdentity(TaskIdentity &identity) const;
