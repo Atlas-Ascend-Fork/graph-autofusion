@@ -15,7 +15,7 @@ BASEPATH=$(cd "$(dirname $0)"; pwd)
 BUILD_PATH="${BASEPATH}/build"
 OUTPUT_PATH="${BASEPATH}/build_out"
 CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)))
-THREAD_NUM=${CPU_NUM}
+THREAD_NUM=$((CPU_NUM < 14 ? CPU_NUM : 14))
 ASCEND_INSTALL_PATH="${ASCEND_HOME_PATH}"
 BUILD_TYPE="Release"
 CUSTOM_OPTION="-DCMAKE_INSTALL_PREFIX=${BUILD_PATH} -DASCEND_INSTALL_PATH=${ASCEND_INSTALL_PATH}"
@@ -64,7 +64,7 @@ usage() {
   echo "    -h, --help            Print usage"
   echo "    --pkg                 Build package"
   echo "    --no-autofuse         Skip autofuse backend build/package artifacts"
-  echo "    -j                    Compile thread nums, default is 16, eg: -j 8"
+  echo "    -j                    Compile thread nums, default is min(CPU count, 14), eg: -j 8"
   echo "    -u, --ut              Run unit tests for supported implementations"
   echo "    -s, --st              Run system tests for supported implementations"
   echo "    --impl=<py|cpp|all>   Select implementation under -u/-s (default: all supported)"

@@ -116,7 +116,7 @@ std::string GenNaiveLocalBufTilingImpl() {
     }
     ApplyPromptAlign(var);
   }
-  return SatisfyCons(ConstraintType::LB_MIXED);
+  return SatisfyCons(ConstraintType::LOCAL_BUFFER) && SatisfyCons(ConstraintType::LB_MIXED);
 }
 )";
   return kNaiveLocalBufTilingImpl + GenMcRelatedNaiveTiling() + kNaiveLocalBufTilingImplPostProcess;
@@ -165,6 +165,9 @@ std::string GenNaiveLocalBufTilingWithEqualOrderImpl() {
     if (!ProcessSingleAxisNaive(var, canonical_idx, max_core_num)) {
       return false;
     }
+  }
+  if (!SatisfyCons(ConstraintType::LOCAL_BUFFER)) {
+    return enable_equal_order && NaiveLocalBufTiling(false);
   }
   return SatisfyCons(ConstraintType::LB_MIXED);
 }
@@ -223,18 +226,34 @@ bool AxesReorderSolver::BinaryLocalBufTilingCore(const std::vector<bool> &solved
 )";
 }
 
-static std::string GenBinaryLocalBufTilingFinalCheck() {
-  return R"(
+static std::string GenBinaryLocalBufTilingFinalCheck(bool enable_equal_order_tiling) {
+  std::string codes = R"(
   if (!BinaryLocalBufTilingCore(solved_axes)) {
     OP_LOGW(OP_NAME, "Binary local Tiling Calculation failed in final check.");
     return false;
   }
+)";
+  if (enable_equal_order_tiling) {
+    codes += R"(
+  if (!SatisfyCons(ConstraintType::LOCAL_BUFFER)) {
+    return enable_equal_order && BinaryLocalBufTiling(false);
+  }
+)";
+  } else {
+    codes += R"(
+  if (!SatisfyCons(ConstraintType::LOCAL_BUFFER)) {
+    return false;
+  }
+)";
+  }
+  codes += R"(
   if (!SatisfyCons(ConstraintType::LB_MIXED)) {
     OP_LOGW(OP_NAME, "Binary local Tiling Calculation failed in final check.");
     return false;
   }
   return true;
 )";
+  return codes;
 }
 
 namespace {
@@ -286,7 +305,7 @@ std::string GenBinaryLoadBufTilingEqualOrder() {
   int64_t max_aligned = 1L;
   bool equal_axes_tiling_success = false;)";
   codes.append(GenEqualPriorityAxesTiling());
-  codes.append(GenBinaryLocalBufTilingFinalCheck());
+  codes.append(GenBinaryLocalBufTilingFinalCheck(true));
   return codes;
 }
 
@@ -302,7 +321,7 @@ std::string GenBinaryLocalBufTiling(bool enable_equal_order_tiling) {
     codes += "bool AxesReorderSolver::BinaryLocalBufTiling() {\n";
     codes += GenInitLocalMCVars();
     codes += "\n  std::vector<bool> solved_axes(input_.local_buffer_vars_size, false);\n";
-    codes += GenBinaryLocalBufTilingFinalCheck();
+    codes += GenBinaryLocalBufTilingFinalCheck(false);
   }
   return codes.append("}\n");
 }

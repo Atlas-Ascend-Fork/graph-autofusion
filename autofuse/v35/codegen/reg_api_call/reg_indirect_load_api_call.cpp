@@ -1020,6 +1020,78 @@ bool UseRuntimeOutputInnerSize(bool has_post_reduce,
 }
 }  // namespace
 
+// [非连续 Store 目标寻址] 尾部 Store 目标视图与逻辑输出视图同 rank 同 sizes 且 strides 不同
+// （NonOwningLayout 切片 / cat 输出切片，行 stride 大于逻辑行宽）时，逻辑线性 output_index 不再
+// 等于物理元素偏移：按输出轴逐维折叠坐标（offset + Σ coord×stride）。坐标按逻辑 stride 取商、
+// 按目标维宽取模，商/模与 Load 侧同法（静态除数编译期折叠，运行期除数走 magic 乘移，符号尺寸
+// 经 Context 传入，见 SimtRuntimeSizeRegistry）。目标视图与逻辑视图不一致（ApplyMerge 合并视图、
+// post Reduce 并行写回）时保持既有线性寻址，其稠密序不变性由调度门控保证。
+std::string BuildSimtStoreTargetOffsetExpr(const SimtOutputChain &chain,
+                                           const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
+                                           const TPipe &tpipe, const std::string &offset_type,
+                                           SimtRuntimeSizeRegistry &runtime_sizes,
+                                           std::map<std::pair<size_t, std::string>, std::string> &coordinates,
+                                           std::stringstream &ss) {
+  const size_t rank = logical_view.output.sizes.size();
+  std::string offset;
+  if (af::SymbolicUtils::StaticCheckEq(chain.target_offset, af::ops::Zero) != af::TriBool::kTrue) {
+    offset = runtime_sizes.InlineOrContext(chain.target_offset, tpipe, offset_type);
+  }
+  const std::string linear = offset.empty() ? "output_index" : offset + " + output_index";
+  const bool view_matches_logical = chain.target_sizes.size() == rank && chain.target_strides.size() == rank &&
+                                    chain.target_sizes == logical_view.output.sizes;
+  if (!view_matches_logical) {
+    return linear;
+  }
+  if (chain.target_strides == logical_view.output.strides) {
+    return linear;
+  }
+  std::string expression;
+  for (size_t dim = 0UL; dim < rank; ++dim) {
+    if (af::SymbolicUtils::StaticCheckEq(chain.target_strides[dim], af::ops::Zero) == af::TriBool::kTrue ||
+        af::SymbolicUtils::StaticCheckEq(chain.target_sizes[dim], af::ops::One) == af::TriBool::kTrue) {
+      continue;
+    }
+    const std::string target_size = runtime_sizes.InlineOrContext(chain.target_sizes[dim], tpipe, offset_type);
+    // Different target extents on the same axis must not share a modulo expression.
+    const auto key = std::make_pair(dim, target_size);
+    auto found = coordinates.find(key);
+    if (found == coordinates.end()) {
+      const std::string name = "store_coord_" + std::to_string(coordinates.size());
+      // [SIMT 32 位双实例] 与 Load 侧同法：div/mod 在宽类型上求值后截断回 offset_type。
+      const std::string wide_type = (offset_type == "uint32_t") ? "uint64_t" : offset_type;
+      const bool unit_logical_stride =
+          af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[dim], af::ops::One) == af::TriBool::kTrue;
+      std::string quotient_var;
+      const std::string dividend = unit_logical_stride
+                                       ? "static_cast<" + wide_type + ">(output_index)"
+                                       : runtime_sizes.MakeRuntimeDiv("output_index", logical_view.output.strides[dim],
+                                                                      tpipe, wide_type, &quotient_var);
+      const std::string mod_expr = runtime_sizes.MakeRuntimeMod(dividend, chain.target_sizes[dim], tpipe, wide_type);
+      std::vector<std::string> quotient_stmts;
+      runtime_sizes.TakeQuotientStmts(quotient_stmts);
+      for (const std::string &stmt : quotient_stmts) {
+        ss << stmt << std::endl;
+      }
+      ss << "    const " << offset_type << " " << name << " = static_cast<" << offset_type << ">(" << mod_expr << ");"
+         << std::endl;
+      found = coordinates.emplace(key, name).first;
+    }
+    const bool unit_target_stride =
+        af::SymbolicUtils::StaticCheckEq(chain.target_strides[dim], af::ops::One) == af::TriBool::kTrue;
+    std::string target_stride;
+    if (!unit_target_stride) {
+      target_stride = runtime_sizes.InlineOrContext(chain.target_strides[dim], tpipe, offset_type);
+    }
+    const std::string term = unit_target_stride ? found->second : found->second + " * " + target_stride;
+    expression += (expression.empty() ? "" : " + ") + term;
+  }
+  if (!offset.empty()) {
+    expression = expression.empty() ? offset : offset + " + " + expression;
+  }
+  return expression.empty() ? "0" : expression;
+}
+
 af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const std::string &offset_type,
                                         int64_t gather_axis, ascir::TensorId value_tensor_id,
                                         const std::vector<SimtOutputChain> &chains,
@@ -1032,9 +1104,11 @@ af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const st
   std::string primary_output_dtype;
   GE_ASSERT_SUCCESS(Tensor::DtypeName(chains[0].dtype, primary_output_dtype));
   ss << "  using PrimaryOutputType = " << primary_output_dtype << ";" << std::endl;
-  // 只有输出为gm，纯搬运操作，无element算子操作，才走mte快速搬运路径
-  if (chains.size() == 1UL && !chains[0].local_target &&
-      IsLosslessSimtCastChain(nodes, value_tensor_id, chains[0].result_tensor_id)) {
+  // 只有输出为gm，纯搬运操作，无element算子操作，且目标为 dense 零偏移布局，才走mte快速搬运路径
+  const bool identity_target_dense =
+      chains.size() == 1UL && !chains[0].local_target && chains[0].target_strides == logical_view.output.strides &&
+      af::SymbolicUtils::StaticCheckEq(chains[0].target_offset, af::ops::Zero) == af::TriBool::kTrue;
+  if (identity_target_dense && IsLosslessSimtCastChain(nodes, value_tensor_id, chains[0].result_tensor_id)) {
     ss << "  static constexpr bool kSimtOutputIdentity = true;" << std::endl;
   }
   ss << "  struct OutputPack {" << std::endl;
@@ -1093,22 +1167,29 @@ af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const st
   ss << "  __simt_callee__ __aicore__ inline static void Store(const OutputTargets &targets, " << offset_type
      << " output_index, " << offset_type << " local_index, const Context &context, const OutputPack &outputs) {"
      << std::endl;
+  std::map<std::pair<size_t, std::string>, std::string> coordinates;
+  std::vector<std::string> store_exprs(chains.size());
   for (size_t i = 0UL; i < chains.size(); ++i) {
-    std::string output_offset = "output_index";
     if (chains[i].local_target) {
-      if (!logical_view.output.sizes.empty()) {
-        // 编译期常量直接内联；仅运行期符号（如 t->ksN）经 Context 传入，避免在静态 Store 中引用 t->。
-        const std::string inner_size = UseRuntimeOutputInnerSize(has_post_reduce, logical_view)
-                                           ? "static_cast<" + offset_type + ">(context.output_inner_size)"
-                                           : tpipe.tiler.Size(logical_view.output.sizes.back());
-        std::string dtype;
-        GE_ASSERT_SUCCESS(Tensor::DtypeName(chains[i].dtype, dtype));
-        const auto row_stride = "KernelUtils::SizeAlign(" + inner_size + ", 32/sizeof(" + dtype + "))";
-        output_offset =
-            "(local_index / (" + inner_size + ")) * (" + row_stride + ") + local_index % (" + inner_size + ")";
-      } else {
-        output_offset = "local_index";
-      }
+      continue;
+    }
+    store_exprs[i] =
+        BuildSimtStoreTargetOffsetExpr(chains[i], logical_view, tpipe, offset_type, runtime_sizes, coordinates, ss);
+  }
+  for (size_t i = 0UL; i < chains.size(); ++i) {
+    std::string output_offset = "local_index";
+    if (!chains[i].local_target) {
+      output_offset = store_exprs[i];
+    } else if (!logical_view.output.sizes.empty()) {
+      // 编译期常量直接内联；仅运行期符号（如 t->ksN）经 Context 传入，避免在静态 Store 中引用 t->。
+      const std::string inner_size = UseRuntimeOutputInnerSize(has_post_reduce, logical_view)
+                                         ? "static_cast<" + offset_type + ">(context.output_inner_size)"
+                                         : tpipe.tiler.Size(logical_view.output.sizes.back());
+      std::string dtype;
+      GE_ASSERT_SUCCESS(Tensor::DtypeName(chains[i].dtype, dtype));
+      const auto row_stride = "KernelUtils::SizeAlign(" + inner_size + ", 32/sizeof(" + dtype + "))";
+      output_offset =
+          "(local_index / (" + inner_size + ")) * (" + row_stride + ") + local_index % (" + inner_size + ")";
     }
     ss << "    targets.output" << i << "[" << output_offset << "] = outputs.output" << i << ";" << std::endl;
   }
@@ -1716,6 +1797,9 @@ Status IndirectLoadRegApiCall::ResolveSimtMetadata(const ascir::NodeView &node,
     chain.target_tensor_id = chain_metadata.target_tensor_id;
     chain.dtype = chain_metadata.dtype;
     chain.local_target = chain_metadata.local_target;
+    chain.target_sizes = chain_metadata.target_sizes;
+    chain.target_strides = chain_metadata.target_strides;
+    chain.target_offset = chain_metadata.target_offset;
     output_chains_.emplace_back(std::move(chain));
   }
   GE_ASSERT_TRUE(!output_chains_.empty(), "IndirectLoad SIMT output chains are empty.");

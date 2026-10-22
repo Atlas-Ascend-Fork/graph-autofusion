@@ -36,6 +36,9 @@ constexpr int64_t kEmbeddingSimdPayloadBytesThreshold = 2048;
 constexpr int64_t kEmbeddingSimdLookupCountThreshold = 32;
 constexpr int32_t kEmbeddingFastPathScore = 2;
 constexpr int32_t kEmbeddingAlternateFastPathScore = 1;
+// SIMD 候选退化到 strided facade（逐元素标量组装 offsets 并逐元素重排）时，SIMT 把同样的
+// 逐元素地址计算分摊到 lane 上，评分上偏好 SIMT。
+constexpr int32_t kSimtStridedFallbackScore = 1;
 constexpr size_t kIndirectLoadInputCount = 2UL;
 constexpr size_t kIndirectLoadOutputCount = 1UL;
 constexpr size_t kIndirectLoadInvalidAxisIndex = std::numeric_limits<size_t>::max();
@@ -1938,6 +1941,109 @@ af::Status ValidateReduceOutputCandidate(const af::AscNodePtr &reduce, bool &is_
   return af::SUCCESS;
 }
 
+af::AscNodePtr GetReduceTerminalStore(const af::AscNodePtr &reduce) {
+  auto outputs = reduce->GetOutDataNodes();
+  if (outputs.size() != 1UL) {
+    return nullptr;
+  }
+  auto successor = std::dynamic_pointer_cast<af::AscNode>(*outputs.begin());
+  if (successor != nullptr && ScheduleUtils::IsStore(successor)) {
+    return successor;
+  }
+  if (successor == nullptr || !af::ops::IsOps<af::ascir_op::Cast>(successor)) {
+    return nullptr;
+  }
+  outputs = successor->GetOutDataNodes();
+  if (outputs.size() != 1UL) {
+    return nullptr;
+  }
+  auto store = std::dynamic_pointer_cast<af::AscNode>(*outputs.begin());
+  return store != nullptr && ScheduleUtils::IsStore(store) ? store : nullptr;
+}
+
+// kUnsupported 同时覆盖动态符号视图与 Reduce/Broadcast 输出的零 stride 约定，二者均为
+// 既有合法路径；仅当视图可静态判定且不含零 stride 时才视为异常视图并保守拒绝。
+bool IsStaticallyIrregularStoreTarget(const std::vector<af::Expression> &strides, const af::Expression &offset) {
+  if (!offset.IsConstExpr()) {
+    return false;
+  }
+  for (const af::Expression &stride : strides) {
+    if (!stride.IsConstExpr() || af::SymbolicUtils::StaticCheckEq(stride, af::ops::Zero) == af::TriBool::kTrue) {
+      return false;
+    }
+  }
+  return true;
+}
+
+af::Status ClassifyStoreTargetAndGate(const af::AscNodePtr &store, ascir::TemplateId template_id,
+                                      bool &is_candidate_legal) {
+  const auto &target = store->outputs()[0]->attr;
+  GE_ASSERT_TRUE(target.repeats.size() == target.strides.size() && !target.repeats.empty(),
+                 "IndirectLoad Store[%s] target view is invalid.", store->GetNamePtr());
+  af::Expression offset = af::ops::Zero;
+  if (store->attr.ir_attr != nullptr) {
+    (void)store->attr.ir_attr->GetAttrValue("offset", offset);
+  }
+  ascgen_utils::indirect_load::IndirectLoadStoreKind kind =
+      ascgen_utils::indirect_load::IndirectLoadStoreKind::kUnsupported;
+  GE_ASSERT_SUCCESS(
+      ascgen_utils::indirect_load::ClassifyIndirectLoadStoreTarget(target.repeats, target.strides, offset, kind));
+  bool accepted = false;
+  if (kind == ascgen_utils::indirect_load::IndirectLoadStoreKind::kDense) {
+    // SIMD/SK 尾部 Store 走通用 Store 路径；SIMT Store 体做 offset/stride 映射。
+    accepted = true;
+  } else if (kind == ascgen_utils::indirect_load::IndirectLoadStoreKind::kSliceStrided) {
+    // SIMD 尾部 Store 走通用 strided MTE3 路径；SIMT Store 体做坐标×stride+offset 映射；SK 恒拒绝。
+    accepted = template_id != ascir::TemplateId::kIndirectLoadSK;
+  } else if (!IsStaticallyIrregularStoreTarget(target.strides, offset)) {
+    accepted = true;
+  }
+  if (!accepted) {
+    is_candidate_legal = false;
+    GELOGI("[IndirectLoad] Reject candidate[%d]: Store[%s] target kind[%d] is not supported.",
+           static_cast<int32_t>(template_id), store->GetNamePtr(), static_cast<int32_t>(kind));
+  }
+  return af::SUCCESS;
+}
+
+af::Status ValidateOutputStoreTargets(const af::AscNodePtr &indirect_load, ascir::TemplateId template_id,
+                                      bool &is_candidate_legal) {
+  std::vector<af::AscNodePtr> stores;
+  NodeSet visited{indirect_load.get()};
+  NodePath roots;
+  for (const auto &out_node : indirect_load->GetOutDataNodes()) {
+    const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+    GE_ASSERT_NOTNULL(consumer, "IndirectLoad output successor is invalid.");
+    roots.emplace_back(consumer);
+  }
+  const auto visit = [&stores](const af::AscNodePtr &current, bool &stop) -> af::Status {
+    if (ScheduleUtils::IsStore(current)) {
+      stores.emplace_back(current);
+      stop = true;
+      return af::SUCCESS;
+    }
+    if (ScheduleUtils::IsReduce(current)) {
+      // 非法 Reduce 后继交由既有 ValidateReduceOutput 报错，此处不重复门控。
+      // SK 例外：SK 候选跳过 CollectRewrittenBoundaries，ValidateReduceOutput 不会执行，
+      // 非法后继时 SK 由其他路径处理/失败，与门控引入前行为一致。
+      const auto store = GetReduceTerminalStore(current);
+      if (store != nullptr) {
+        stores.emplace_back(store);
+      }
+      stop = true;
+    }
+    return af::SUCCESS;
+  };
+  GE_ASSERT_SUCCESS(TraverseOutputConsumers(roots, visited, visit));
+  for (const af::AscNodePtr &store : stores) {
+    GE_ASSERT_SUCCESS(ClassifyStoreTargetAndGate(store, template_id, is_candidate_legal));
+    if (!is_candidate_legal) {
+      return af::SUCCESS;
+    }
+  }
+  return af::SUCCESS;
+}
+
 // Traverse all output branches once, collecting Store/Reduce boundaries and validating each Reduce successor.
 af::Status CollectOutputBoundaries(const af::AscNodePtr &indirect_load, RewrittenGraphAnalysis &analysis,
                                    bool &is_candidate_legal) {
@@ -2440,6 +2546,10 @@ af::Status AnalyzeRewrittenGraph(af::AscGraph &graph, const af::AscNodePtr &indi
   // 分析阶段：路径、布局分类、对齐标志（只读）
   PhysicalViewPreparation preparation;
   GE_ASSERT_SUCCESS(PreparePhysicalViews(indirect_load, template_id, preparation, is_candidate_legal));
+  if (!is_candidate_legal) {
+    return af::SUCCESS;
+  }
+  GE_ASSERT_SUCCESS(ValidateOutputStoreTargets(indirect_load, template_id, is_candidate_legal));
   if (!is_candidate_legal) {
     return af::SUCCESS;
   }
@@ -3884,9 +3994,24 @@ bool IsEmbeddingFastPathCapable(const TemplateCase &template_case,
   return false;
 }
 
+// SIMD 候选是否退化到 strided facade：索引/输入布局非 dense 或输出存在物理 padding 时，
+// SIMD 只能逐元素标量组装 offsets 并逐元素重排（与最终 lowering 的 facade 判定同源）。
+bool LowersToStridedSimdFacade(const af::AscNodePtr &candidate_node) {
+  bool is_supported = false;
+  if (ascgen_utils::indirect_load::FinalizeLoweringMetadata(candidate_node, is_supported) != af::SUCCESS ||
+      !is_supported) {
+    return false;
+  }
+  ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+  if (ascgen_utils::indirect_load::GetLoweringMetadata(candidate_node, metadata) != af::SUCCESS) {
+    return false;
+  }
+  return metadata.simd.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided;
+}
+
 std::string GenerateScoreFunc(const TemplateCase &template_case,
                               const ascgen_utils::indirect_load::IndirectLoadAccessInfo &access_info,
-                              const af::AscNodePtr &candidate_node) {
+                              const af::AscNodePtr &candidate_node, bool simd_lowers_to_strided) {
   int32_t score = 0;
   if (IsEmbeddingFastPathCapable(template_case, access_info)) {
     int64_t input_slice_bytes = 0L;
@@ -3907,6 +4032,10 @@ std::string GenerateScoreFunc(const TemplateCase &template_case,
         score = simd_preferred ? kEmbeddingAlternateFastPathScore : kEmbeddingFastPathScore;
       }
     }
+  } else if (simd_lowers_to_strided && template_case.template_id == ascir::TemplateId::kIndirectLoadSimt) {
+    // 非 embedding 形态（SIMT 不满足 structured 布局条件）且 SIMD 候选退化到逐元素
+    // strided facade 时偏好 SIMT。
+    score = kSimtStridedFallbackScore;
   }
   // Norm 区域候选：Softmax 专用路径复用既有专用 API 与 tmp，给予小幅偏好，
   // 使同分场景下优先选择可直接融合的形态；通用复合区域不加分，
@@ -4020,6 +4149,9 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
       {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kDefault},
       {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kGatherApi},
       {ascir::TemplateId::kIndirectLoadSimt, ascgen_utils::indirect_load::Implementation::kDefault}};
+  // 首个 SIMD 候选（kDefault）的 lowering facade 判定：退化到 strided 时给组内 SIMT 候选
+  // 加分（与单 gather 的 Generate 同源同判，组内以 primary 的布局为准）。
+  bool simd_lowers_to_strided = false;
   for (const TemplateCase &template_case : cases) {
     const ascir::TemplateId template_id = template_case.template_id;
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
@@ -4057,8 +4189,13 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
     // 组内 index.shape 相同，模板档位判决以 primary 的访问信息为准。
     ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_group.primary, access_info));
+    if (template_id == ascir::TemplateId::kIndirectLoadSimd &&
+        template_case.implementation == ascgen_utils::indirect_load::Implementation::kDefault) {
+      simd_lowers_to_strided = LowersToStridedSimdFacade(candidate_group.primary);
+    }
     graphs.emplace_back(std::move(candidate_graph));
-    score_functions.emplace_back(GenerateScoreFunc(template_case, access_info, candidate_group.primary));
+    score_functions.emplace_back(
+        GenerateScoreFunc(template_case, access_info, candidate_group.primary, simd_lowers_to_strided));
     GELOGI("[IndirectLoad] Add gather group schedule candidate[%d, %d] for primary[%s] with %zu members.",
            static_cast<int32_t>(template_id), static_cast<int32_t>(template_case.implementation),
            candidate_group.primary->GetNamePtr(), members.size());
@@ -4094,9 +4231,11 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
       ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
       GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_group.primary, access_info));
       graphs.emplace_back(std::move(candidate_graph));
+      // 混模板死区承接为该组唯一候选（共模板候选全被否决后的兜底），不参与 SIMD/SIMT
+      // 共模板排序，不施加 strided 偏好。
       score_functions.emplace_back(
           GenerateScoreFunc(TemplateCase{primary_selection, ascgen_utils::indirect_load::Implementation::kDefault},
-                            access_info, candidate_group.primary));
+                            access_info, candidate_group.primary, false));
       GELOGI("[IndirectLoad] Add mixed template candidate for graph[%s] (mixed dead-zone fallback).",
              graph.GetName().c_str());
     }
@@ -4132,7 +4271,7 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
       graphs.emplace_back(std::move(candidate_graph));
       score_functions.emplace_back(GenerateScoreFunc(
           TemplateCase{ascir::TemplateId::kIndirectLoadSK, ascgen_utils::indirect_load::Implementation::kDefault},
-          access_info, candidate_group.primary));
+          access_info, candidate_group.primary, false));
       GELOGI("[IndirectLoad] Add gather group SK bridge candidate for graph[%s] (terminal fallback).",
              graph.GetName().c_str());
     } else {
@@ -4167,6 +4306,9 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
       {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kGatherApi},
       {ascir::TemplateId::kIndirectLoadSimt, ascgen_utils::indirect_load::Implementation::kDefault},
       {ascir::TemplateId::kIndirectLoadSK, ascgen_utils::indirect_load::Implementation::kDefault}};
+  // 首个 SIMD 候选（kDefault）的 lowering facade 判定结果：退化到 strided 时给后续 SIMT
+  // 候选加分。facade 判定与实现无关（kGatherApi 同样先受 strided 判定约束），故取首个 SIMD 候选。
+  bool simd_lowers_to_strided = false;
   for (const TemplateCase &template_case : cases) {
     const ascir::TemplateId template_id = template_case.template_id;
     if (HasReduceBeforeGatherAxis(indirect_load) && template_id != ascir::TemplateId::kIndirectLoadSK) {
@@ -4205,8 +4347,13 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     }
     ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_indirect_load, access_info));
+    if (template_id == ascir::TemplateId::kIndirectLoadSimd &&
+        template_case.implementation == ascgen_utils::indirect_load::Implementation::kDefault) {
+      simd_lowers_to_strided = LowersToStridedSimdFacade(candidate_indirect_load);
+    }
     graphs.emplace_back(std::move(candidate_graph));
-    score_functions.emplace_back(GenerateScoreFunc(template_case, access_info, candidate_indirect_load));
+    score_functions.emplace_back(
+        GenerateScoreFunc(template_case, access_info, candidate_indirect_load, simd_lowers_to_strided));
     GELOGI("[IndirectLoad] Add schedule candidate[%d, %d] for node[%s].", static_cast<int32_t>(template_id),
            static_cast<int32_t>(template_case.implementation), candidate_indirect_load->GetNamePtr());
   }

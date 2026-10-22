@@ -937,6 +937,10 @@ build_backend() {
                       indirect_load_user_int64_dense_sweep_e2e_v2 \
                       indirect_load_user_dynamic_shape_sweep_e2e_v2 \
                       indirect_load_user_embedding_sum_simd_e2e_v2 \
+                      indirect_load_user_embedding_slice_minimal_front_e2e_v2 \
+                      indirect_load_user_embedding_slice_minimal_back_e2e_v2 \
+                      indirect_load_strided_store_rank2_axis1_simd_test_e2e_v2 \
+                      indirect_load_strided_store_rank2_axis1_simt_test_e2e_v2 \
                       indirect_load_user_layernorm_e2e_v2 \
                       indirect_load_user_embedding_exp_abs_add_simt_e2e_v2 \
                       indirect_load_user_fanout_direct_reduce_simt_e2e_v2 \

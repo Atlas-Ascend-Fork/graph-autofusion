@@ -21,6 +21,9 @@
 
 namespace {
 constexpr uint32_t kTmpBufferSize = 32 * 1024;
+constexpr uint32_t kReduceMinRaInputCount = 32;
+constexpr uint32_t kReduceMinRaOutputCount = 8;
+constexpr uint32_t kReduceMinRaStorageCount = 80;
 
 template <typename T, typename Pattern, typename ReduceFunc>
 void RunReduceKernel(T *input, T *output, uint32_t inputCount, uint32_t outputCount, uint32_t dim0, uint32_t dim1,
@@ -64,6 +67,23 @@ std::vector<T> RunReduce(const std::vector<T> &input, uint32_t outputCount, uint
   AscendC::GmFree(inputGm);
   AscendC::GmFree(outputGm);
   return output;
+}
+
+void RunReduceMinRaReuseSourceKernel(float *input, float *output, float *sourceAfter) {
+  TPipe pipe;
+  TBuf<TPosition::VECCALC> srcBuffer;
+  TBuf<TPosition::VECCALC> dstBuffer;
+  pipe.InitBuffer(srcBuffer, kReduceMinRaStorageCount * sizeof(float));
+  pipe.InitBuffer(dstBuffer, kReduceMinRaOutputCount * sizeof(float));
+
+  LocalTensor<float> src = srcBuffer.Get<float>();
+  LocalTensor<float> dst = dstBuffer.Get<float>();
+  GmToUb(src, input, kReduceMinRaStorageCount);
+
+  const uint32_t shape[] = {4, 8};
+  AscendC::ReduceMinExtend<float, AscendC::Pattern::Reduce::RA, true>(dst, src, shape, true);
+  UbToGm(output, dst, kReduceMinRaOutputCount);
+  UbToGm(sourceAfter, src, kReduceMinRaStorageCount);
 }
 }  // namespace
 
@@ -145,4 +165,35 @@ TEST(TestApiReduceExtend, ArithmeticAndLogicalReduceEntries) {
         AscendC::ReduceAllExtend<uint8_t, AscendC::Pattern::Reduce::AR>(dst, src, tmp, shape, true);
       });
   EXPECT_EQ(allOutput, (std::vector<uint8_t>{0, 0}));
+}
+
+TEST(TestApiReduceExtend, ReduceMinRaReuseSourceDoesNotWriteBeyondInput) {
+  std::vector<float> input(kReduceMinRaStorageCount);
+  std::iota(input.begin(), input.begin() + kReduceMinRaInputCount, 1.0F);
+  for (uint32_t i = kReduceMinRaInputCount; i < kReduceMinRaStorageCount; ++i) {
+    input[i] = -static_cast<float>(i);
+  }
+
+  const uint32_t inputBytes = input.size() * sizeof(float);
+  const uint32_t outputBytes = kReduceMinRaOutputCount * sizeof(float);
+  auto *inputGm = static_cast<float *>(AscendC::GmAlloc(inputBytes));
+  auto *outputGm = static_cast<float *>(AscendC::GmAlloc(outputBytes));
+  auto *sourceAfterGm = static_cast<float *>(AscendC::GmAlloc(inputBytes));
+  std::copy(input.begin(), input.end(), inputGm);
+  std::fill_n(outputGm, kReduceMinRaOutputCount, 0.0F);
+  std::fill_n(sourceAfterGm, kReduceMinRaStorageCount, 0.0F);
+
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(RunReduceMinRaReuseSourceKernel, 1, inputGm, outputGm, sourceAfterGm);
+
+  for (uint32_t i = 0; i < kReduceMinRaOutputCount; ++i) {
+    EXPECT_FLOAT_EQ(outputGm[i], static_cast<float>(i + 1));
+  }
+  for (uint32_t i = kReduceMinRaInputCount; i < kReduceMinRaStorageCount; ++i) {
+    EXPECT_FLOAT_EQ(sourceAfterGm[i], input[i]) << "source guard changed at index " << i;
+  }
+
+  AscendC::GmFree(inputGm);
+  AscendC::GmFree(outputGm);
+  AscendC::GmFree(sourceAfterGm);
 }

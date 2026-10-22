@@ -8,8 +8,22 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <signal.h>
+#include <map>
+#include <sstream>
+#include <string>
+#include <sys/wait.h>
+#include <thread>
+#include <unistd.h>
+#include <vector>
+
 #include "gtest/gtest.h"
 #include "base/base_types.h"
+#include "generator/solver_pass/axes_reorder_solver_code.h"
 #define private public
 #include "generator/solver_pass_gen/axes_reorder_solver/axes_reorder_solver_gen.h"
 #include "test_common_utils.h"
@@ -17,11 +31,419 @@ using namespace att;
 
 class TestAxesReorderSolverGen : public ::testing::Test {
  public:
+  static std::filesystem::path original_work_dir_;
+  static std::filesystem::path test_work_dir_;
+
+  static void SetUpTestCase() {
+    original_work_dir_ = std::filesystem::current_path();
+    const auto run_root = std::filesystem::path(TOP_DIR) / "build" / "test_runs";
+    std::filesystem::create_directories(run_root);
+    std::string template_path = (run_root / "equal_priority_ub_XXXXXX").string();
+    if (mkdtemp(template_path.data()) == nullptr) {
+      FAIL() << "Failed to create test run directory";
+    }
+    test_work_dir_ = std::filesystem::path(template_path) / "run" / "att";
+    std::filesystem::create_directories(test_work_dir_);
+    std::filesystem::current_path(test_work_dir_);
+  }
+
+  static void TearDownTestCase() {
+    std::filesystem::current_path(original_work_dir_);
+  }
+
   void TearDown() override {
     // 清理测试生成的临时文件
     autofuse::test::CleanupTestArtifacts();
   }
 };
+
+std::filesystem::path TestAxesReorderSolverGen::original_work_dir_;
+std::filesystem::path TestAxesReorderSolverGen::test_work_dir_;
+
+namespace {
+bool RunCommand(const std::vector<std::string> &args, uint32_t timeout_seconds) {
+  std::vector<char *> exec_args;
+  exec_args.reserve(args.size() + 1U);
+  for (const auto &arg : args) {
+    exec_args.push_back(const_cast<char *>(arg.c_str()));
+  }
+  exec_args.push_back(nullptr);
+
+  const pid_t pid = fork();
+  if (pid < 0) {
+    return false;
+  }
+  if (pid == 0) {
+    execvp(exec_args[0], exec_args.data());
+    _exit(127);
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
+  int status = 0;
+  while (true) {
+    const pid_t result = waitpid(pid, &status, WNOHANG);
+    if (result == pid) {
+      return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    if (result < 0) {
+      return false;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      kill(pid, SIGKILL);
+      waitpid(pid, &status, 0);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
+std::string MakeGeneratedSolverSource(bool enable_equal_order) {
+  std::ostringstream source;
+  source << R"cpp(#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <sstream>
+#include <vector>
+
+#include "op_log.h"
+
+                  struct Variable;
+                  struct TilingVariable;
+
+                  namespace {
+                  constexpr char OP_NAME[] = "EqualPriorityUb";
+                  struct TestState {
+                    const char *scenario = "search-pr";
+                    int local_calls = 0;
+                    int fail_local_on_call = 0;
+                    int fail_local_from_call = 0;
+                  };
+                  TestState g_state;
+                  TilingVariable *g_var_a = nullptr;
+                  TilingVariable *g_var_b = nullptr;
+
+                  inline int64_t CeilDiv(int64_t value, int64_t align) {
+                    return (value + align - 1) / align;
+                  }
+                  inline int64_t Ceiling(double value) {
+                    return static_cast<int64_t>(value) + (value > static_cast<int64_t>(value));
+                  }
+                  inline int64_t Mod(int64_t value, int64_t align) {
+                    return value % align;
+                  }
+
+                  inline int64_t Pr1807Ub();
+                  inline bool LocalSatisfied();
+                  inline int64_t LocalEval(TilingVariable **, Variable **, int64_t);
+                  inline int64_t MixedEval(TilingVariable **, Variable **, int64_t);
+                  inline int64_t UpperBound17(Variable **);
+                  }  // namespace
+
+#define private public
+  )cpp";
+  source << GetAxesSolverSolverHead(enable_equal_order);
+  source << R"cpp(#undef private
+
+                  namespace {
+                  inline int64_t Pr1807Ub() {
+                    const int64_t a = g_var_a->value;
+                    const int64_t b = g_var_b->value;
+                    const int64_t c = CeilDiv(b, 8);
+                    const int64_t q0 = 1088 * c;
+                    const int64_t q1 = q0 * a;
+                    const int64_t q2 = 32 * c;
+                    return 4 * q1 + 2 * q2 + std::max<int64_t>(8192, q2) + std::max<int64_t>(8192, std::max<int64_t>(q0, q1)) + q0;
+                  }
+
+                  inline bool LocalSatisfied() {
+                    ++g_state.local_calls;
+                    if (g_state.local_calls == g_state.fail_local_on_call ||
+                        (g_state.fail_local_from_call > 0 && g_state.local_calls >= g_state.fail_local_from_call)) {
+                      return false;
+                    }
+                    if (std::string(g_state.scenario) == "search-no-solution") {
+                      return false;
+                    }
+                    if (std::string(g_state.scenario) == "search-sum") {
+                      return g_var_a->value + g_var_b->value <= 32;
+                    }
+                    return Pr1807Ub() <= 253696;
+                  }
+
+                  inline int64_t LocalEval(TilingVariable **, Variable **, int64_t) {
+                    return LocalSatisfied() ? 0 : 1;
+                  }
+                  inline int64_t MixedEval(TilingVariable **, Variable **, int64_t) {
+                    return (g_var_a->value <= 42 && g_var_b->value <= 17) ? 0 : 1;
+                  }
+                  inline int64_t UpperBound17(Variable **) {
+                    return 17;
+                  }
+                  }  // namespace
+
+                  class TestSolver : public AxesReorderSolver {
+                   public:
+                    explicit TestSolver(const AxesReorderSolverInput &input) : AxesReorderSolver(input) {}
+                    bool CalUsedCoreNum(double &) override {
+                      return true;
+                    }
+                    bool CalRealUsedCoreNum(int64_t &used_core_num) override {
+                      used_core_num = 1;
+                      return true;
+                    }
+                    bool SatisfyThresholdUBSize() override {
+                      return true;
+                    }
+                    double GetPerf() override {
+                      return 0.0;
+                    }
+                    bool SatisfyUBSizeCacheLine(uint32_t) override {
+                      return true;
+                    }
+                  };
+  )cpp";
+  source << GetAxesSolverSolverFunc(enable_equal_order);
+  source << R"cpp(
+    int main(int argc, char **argv) {
+      if (argc != 2) {
+        return 2;
+      }
+      g_state.scenario = argv[1];
+
+      TilingVariable var_a;
+      TilingVariable var_b;
+      var_a.align = 1;
+      var_b.align = 1;
+      var_a.order = 10;
+      var_b.order = 10;
+      var_a.upper_bound = UpperBound17;
+      var_b.upper_bound = UpperBound17;
+      g_var_a = &var_a;
+      g_var_b = &var_b;
+
+      Constraint local_constraint;
+      Constraint mixed_constraint;
+      local_constraint.type = ConstraintType::LOCAL_BUFFER;
+      mixed_constraint.type = ConstraintType::LB_MIXED;
+      local_constraint.eval = LocalEval;
+      mixed_constraint.eval = MixedEval;
+      TilingVariable *tiling_vars[] = {&var_a, &var_b};
+      local_constraint.rel_tiling_vars = tiling_vars;
+      mixed_constraint.rel_tiling_vars = tiling_vars;
+      Constraint *var_constraints[] = {&local_constraint, &mixed_constraint};
+      var_a.rel_cons = var_constraints;
+      var_b.rel_cons = var_constraints;
+      var_a.rel_cons_size = 2;
+      var_b.rel_cons_size = 2;
+      Constraint *all_constraints[] = {&local_constraint, &mixed_constraint};
+
+      AxesReorderSolverInput input;
+      input.core_num = 1;
+      input.ub_size = 253696;
+      input.corenum_threshold = 0.0;
+      input.local_buffer_vars = tiling_vars;
+      input.local_buffer_vars_size = 2;
+      input.ordered_local_buffer_vars = tiling_vars;
+      input.ordered_to_canonical = new uint32_t[2]{0, 1};
+      input.all_cons = all_constraints;
+      input.all_cons_size = 2;
+      TestSolver solver(input);
+
+      const std::string scenario(g_state.scenario);
+#ifdef ENABLE_EQUAL_ORDER
+      if (scenario == "search-fixed") {
+        var_a.SetValue(17);
+        var_b.SetValue(16);
+        TilingVariable *search_vars[] = {&var_b};
+        return solver.BinarySearchWithAlignment(search_vars, 1, 16, 17, 1, "B search") && var_a.value == 17 &&
+                       var_b.value == 16
+                   ? 0
+                   : 1;
+      }
+      if (scenario == "search-sum") {
+        int64_t upper_a = -1;
+        int64_t upper_b = -1;
+        return solver.BinarySearchEqualPriorityAxesWithDualThreshold(tiling_vars, 1, 17, upper_a, upper_b) &&
+                       var_a.value == 16 && var_b.value == 16 && upper_a == 16 && upper_b == 16
+                   ? 0
+                   : 1;
+      }
+      if (scenario == "search-pr") {
+        int64_t upper_a = -1;
+        int64_t upper_b = -1;
+        return solver.BinarySearchEqualPriorityAxesWithDualThreshold(tiling_vars, 1, 17, upper_a, upper_b) &&
+                       var_a.value == 16 && var_b.value == 16 && Pr1807Ub() == 184576
+                   ? 0
+                   : 1;
+      }
+      if (scenario == "search-iterative") {
+        uint32_t axis_idx[] = {0, 1};
+        return solver.IterativeSolveEqualPriorityAxes(2, axis_idx, 1, 17) && var_a.value > 0 && var_b.value > 0 &&
+                       Pr1807Ub() <= 253696
+                   ? 0
+                   : 1;
+      }
+      if (scenario == "search-single") {
+        var_a.SetValue(16);
+        var_b.SetValue(16);
+        TilingVariable *search_vars[] = {&var_b};
+        return solver.BinarySearchWithAlignment(search_vars, 1, 16, 16, 1, "single search") && var_b.value == 16 ? 0 : 1;
+      }
+      if (scenario == "search-align8") {
+        var_a.SetValue(16);
+        var_b.SetValue(8);
+        TilingVariable *search_vars[] = {&var_b};
+        return solver.BinarySearchWithAlignment(search_vars, 1, 8, 17, 8, "align8 search") && var_b.value == 16 ? 0 : 1;
+      }
+      if (scenario == "search-no-solution") {
+        var_a.SetValue(17);
+        var_b.SetValue(1);
+        TilingVariable *search_vars[] = {&var_b};
+        return !solver.BinarySearchWithAlignment(search_vars, 1, 1, 17, 1, "no solution search") ? 0 : 1;
+      }
+      if (scenario == "search-reverse") {
+        var_a.SetValue(17);
+        var_b.SetValue(16);
+        TilingVariable *search_vars[] = {&var_b};
+        return !solver.BinarySearchWithAlignment(search_vars, 1, 17, 16, 1, "reverse search") ? 0 : 1;
+      }
+      if (scenario == "full-naive") {
+        return solver.NaiveLocalBufTiling(true) && var_a.value <= 42 && var_b.value <= 17 && Pr1807Ub() <= 253696 ? 0 : 1;
+      }
+      if (scenario == "full-binary") {
+        return solver.BinaryLocalBufTiling(true) && var_a.value <= 42 && var_b.value <= 17 && Pr1807Ub() <= 253696 ? 0 : 1;
+      }
+      if (scenario == "fallback-naive") {
+        g_state.fail_local_on_call = 9;
+        const bool success = solver.NaiveLocalBufTiling(true);
+        std::cout << "local_calls=" << g_state.local_calls << std::endl;
+        return success && g_state.local_calls > g_state.fail_local_on_call && Pr1807Ub() <= 253696 ? 0 : 1;
+      }
+      if (scenario == "fallback-binary") {
+        g_state.fail_local_on_call = 11;
+        const bool success = solver.BinaryLocalBufTiling(true);
+        std::cout << "local_calls=" << g_state.local_calls << std::endl;
+        return success && g_state.local_calls > g_state.fail_local_on_call && Pr1807Ub() <= 253696 ? 0 : 1;
+      }
+      if (scenario == "fallback-failure-naive") {
+        g_state.fail_local_on_call = 9;
+        g_state.fail_local_from_call = 12;
+        const bool success = solver.NaiveLocalBufTiling(true);
+        return !success && g_state.local_calls > g_state.fail_local_on_call ? 0 : 1;
+      }
+      if (scenario == "fallback-failure-binary") {
+        g_state.fail_local_on_call = 11;
+        g_state.fail_local_from_call = 20;
+        const bool success = solver.BinaryLocalBufTiling(true);
+        return !success && g_state.local_calls > g_state.fail_local_on_call ? 0 : 1;
+      }
+#endif
+#ifdef ENABLE_NORMAL_MODE
+      if (scenario == "normal-naive") {
+        return solver.NaiveLocalBufTiling() && var_a.value <= 42 && var_b.value <= 17 && Pr1807Ub() <= 253696 ? 0 : 1;
+      }
+      if (scenario == "normal-binary") {
+        return solver.BinaryLocalBufTiling() && var_a.value <= 42 && var_b.value <= 17 && Pr1807Ub() <= 253696 ? 0 : 1;
+      }
+#endif
+      return 3;
+    }
+  )cpp";
+  return source.str();
+}
+
+std::filesystem::path CompileGeneratedSolver(bool enable_equal_order) {
+  static std::map<bool, std::filesystem::path> binaries;
+  const auto iter = binaries.find(enable_equal_order);
+  if (iter != binaries.end()) {
+    return iter->second;
+  }
+
+  const auto source_path = TestAxesReorderSolverGen::test_work_dir_ /
+                           ("tiling_func_main_equal_priority_ub_" + std::to_string(enable_equal_order) + ".cpp");
+  const auto binary_path = TestAxesReorderSolverGen::test_work_dir_ /
+                           ("tiling_func_main_equal_priority_ub_" + std::to_string(enable_equal_order));
+  std::ofstream source_file(source_path);
+  source_file << MakeGeneratedSolverSource(enable_equal_order);
+  source_file.close();
+  if (!source_file.good()) {
+    ADD_FAILURE() << "Failed to write generated solver source";
+    return {};
+  }
+
+  const char *cxx = std::getenv("CXX");
+  const std::string mode_define = enable_equal_order ? "-DENABLE_EQUAL_ORDER" : "-DENABLE_NORMAL_MODE";
+  const std::vector<std::string> compile_args = {cxx == nullptr ? "g++" : cxx,
+                                                 "-std=c++17",
+                                                 "-DSTUB_LOG",
+                                                 mode_define,
+                                                 "-I" + std::string(ST_DIR) + "/testcase",
+                                                 source_path.filename().string(),
+                                                 "-o",
+                                                 binary_path.filename().string()};
+  if (!RunCommand(compile_args, 60)) {
+    ADD_FAILURE() << "Generated solver compilation failed";
+    return {};
+  }
+  return binaries.emplace(enable_equal_order, binary_path).first->second;
+}
+
+void RunGeneratedSolver(bool enable_equal_order, const std::string &scenario) {
+  const auto &binary = CompileGeneratedSolver(enable_equal_order);
+  ASSERT_FALSE(binary.empty());
+  ASSERT_TRUE(RunCommand({binary.string(), scenario}, 30)) << "Generated solver scenario " << scenario;
+}
+}  // namespace
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbBSearchCommitsFeasibleValue) {
+  RunGeneratedSolver(true, "search-fixed");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbMainSearchRestoresBothAxes) {
+  RunGeneratedSolver(true, "search-sum");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbPr1807Search) {
+  RunGeneratedSolver(true, "search-pr");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbSearchBoundaries) {
+  RunGeneratedSolver(true, "search-iterative");
+  RunGeneratedSolver(true, "search-single");
+  RunGeneratedSolver(true, "search-align8");
+  RunGeneratedSolver(true, "search-no-solution");
+  RunGeneratedSolver(true, "search-reverse");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbNaiveFinalCheck) {
+  RunGeneratedSolver(true, "full-naive");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbBinaryFinalCheck) {
+  RunGeneratedSolver(true, "full-binary");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbNaiveFallbackOnce) {
+  RunGeneratedSolver(true, "fallback-naive");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbBinaryFallbackOnce) {
+  RunGeneratedSolver(true, "fallback-binary");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbFallbackFailure) {
+  RunGeneratedSolver(true, "fallback-failure-naive");
+  RunGeneratedSolver(true, "fallback-failure-binary");
+}
+
+TEST_F(TestAxesReorderSolverGen, EqualPriorityUbNormalModeCompilesAndRuns) {
+  RunGeneratedSolver(false, "normal-naive");
+  RunGeneratedSolver(false, "normal-binary");
+}
 
 TEST_F(TestAxesReorderSolverGen, TEST_ARRANGE) {
   Expr x0 = CreateExpr("x0");

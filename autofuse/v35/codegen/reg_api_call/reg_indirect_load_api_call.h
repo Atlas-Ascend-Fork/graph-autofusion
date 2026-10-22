@@ -26,6 +26,9 @@ struct SimtOutputChain {
   ascir::TensorId target_tensor_id{af::kIdNone};
   af::DataType dtype{af::DT_UNDEFINED};
   bool local_target{false};
+  std::vector<af::Expression> target_sizes;
+  std::vector<af::Expression> target_strides;
+  af::Expression target_offset{af::ops::Zero};
 };
 
 struct LogicalTensorInfo {

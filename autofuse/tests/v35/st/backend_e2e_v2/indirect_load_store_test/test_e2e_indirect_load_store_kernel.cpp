@@ -1703,6 +1703,17 @@ extern "C" __global__ __aicore__ void user_position_bias_exp_sum(GM_ADDR input0,
 #elif defined(IL_USER_MASKED_EMBEDDING_MINIMAL) || defined(IL_USER_MASKED_EMBEDDING_SUM_FULL)
 extern "C" __global__ __aicore__ void user_masked_embedding_sum(GM_ADDR input0, GM_ADDR input1, GM_ADDR input2,
                                                                 GM_ADDR output, GM_ADDR workspace, GM_ADDR tiling);
+#elif defined(IL_USER_EMBEDDING_SLICE)
+#ifndef IL_USER_EMBEDDING_SLICE_KERNEL_NAME
+#if IL_USER_EMBEDDING_SLICE_OFFSET == 0
+#define IL_USER_EMBEDDING_SLICE_KERNEL_NAME autofused_embedding_slice_minimal_front
+#else
+#define IL_USER_EMBEDDING_SLICE_KERNEL_NAME autofused_embedding_slice_minimal_back
+#endif
+#endif
+extern "C" __global__ __aicore__ void IL_USER_EMBEDDING_SLICE_KERNEL_NAME(GM_ADDR input0, GM_ADDR input1,
+                                                                          GM_ADDR output, GM_ADDR workspace,
+                                                                          GM_ADDR tiling);
 #elif defined(IL_GRAPH_HINT_EMBEDDING_SLICE)
 extern "C" __global__ __aicore__ void autofused_to_copy_embedding_slice_161da55df6362966862381c5d053b7e7(
     GM_ADDR input0, GM_ADDR input1, GM_ADDR output, GM_ADDR workspace, GM_ADDR tiling);
@@ -1937,6 +1948,82 @@ TEST(E2EUserMaskedEmbeddingSum, GeneratedKernelMatchesReference) {
     }
   }
 #endif
+}
+#elif defined(IL_USER_EMBEDDING_SLICE)
+#ifndef IL_USER_EMBEDDING_SLICE_ROWS
+#define IL_USER_EMBEDDING_SLICE_ROWS 2
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_COLUMNS
+#define IL_USER_EMBEDDING_SLICE_COLUMNS 4
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_INNER
+#define IL_USER_EMBEDDING_SLICE_INNER 8
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_TABLE_ROWS
+#define IL_USER_EMBEDDING_SLICE_TABLE_ROWS 3
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_INDEX_COLUMNS
+#define IL_USER_EMBEDDING_SLICE_INDEX_COLUMNS 8
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_OFFSET
+#define IL_USER_EMBEDDING_SLICE_OFFSET 0
+#endif
+constexpr int32_t kUserEmbeddingSliceRows = IL_USER_EMBEDDING_SLICE_ROWS;
+constexpr int32_t kUserEmbeddingSliceColumns = IL_USER_EMBEDDING_SLICE_COLUMNS;
+constexpr int32_t kUserEmbeddingSliceInner = IL_USER_EMBEDDING_SLICE_INNER;
+constexpr int32_t kUserEmbeddingSliceTableRows = IL_USER_EMBEDDING_SLICE_TABLE_ROWS;
+constexpr int32_t kUserEmbeddingSliceIndexColumns = IL_USER_EMBEDDING_SLICE_INDEX_COLUMNS;
+constexpr int32_t kUserEmbeddingSliceIndexOffset = IL_USER_EMBEDDING_SLICE_OFFSET;
+#define USER_EMBEDDING_SLICE_KERNEL IL_USER_EMBEDDING_SLICE_KERNEL_NAME
+
+TEST(E2EUserEmbeddingSlice, GeneratedKernelMatchesReference) {
+  // The index tensor keeps its full physical [rows, index_columns] span and the output keeps
+  // the non-owning [rows, index_columns, inner] backing span, matching the original slice views.
+  constexpr int64_t index_count = static_cast<int64_t>(kUserEmbeddingSliceRows) * kUserEmbeddingSliceIndexColumns;
+  constexpr int64_t table_count = static_cast<int64_t>(kUserEmbeddingSliceTableRows) * kUserEmbeddingSliceInner;
+  constexpr int64_t output_span =
+      static_cast<int64_t>(kUserEmbeddingSliceRows) * kUserEmbeddingSliceIndexColumns * kUserEmbeddingSliceInner;
+  auto indices = indirect_load_test::AllocGmBuffer<int64_t>(index_count);
+  auto table = indirect_load_test::AllocGmBuffer<float>(table_count);
+  auto output = indirect_load_test::AllocGmBuffer<float>(output_span);
+  ASSERT_TRUE(indices && table && output);
+
+  for (int32_t row = 0; row < kUserEmbeddingSliceTableRows; ++row) {
+    for (int32_t column = 0; column < kUserEmbeddingSliceInner; ++column) {
+      table.get()[static_cast<int64_t>(row) * kUserEmbeddingSliceInner + column] =
+          static_cast<float>((row % 97) * 0.25F + (column % 31) * 0.001F);
+    }
+  }
+  for (int32_t row = 0; row < kUserEmbeddingSliceRows; ++row) {
+    for (int32_t column = 0; column < kUserEmbeddingSliceIndexColumns; ++column) {
+      indices.get()[static_cast<int64_t>(row) * kUserEmbeddingSliceIndexColumns + column] =
+          (static_cast<int64_t>(row) * 911 + column * 37) % kUserEmbeddingSliceTableRows;
+    }
+  }
+  std::fill_n(output.get(), output_span, 0.0F);
+
+  indirect_load_test::KernelTiling tiling;
+  ASSERT_TRUE(tiling.IsValid());
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(USER_EMBEDDING_SLICE_KERNEL, tiling.block_dim, reinterpret_cast<uint8_t *>(indices.get()),
+              reinterpret_cast<uint8_t *>(table.get()), reinterpret_cast<uint8_t *>(output.get()),
+              reinterpret_cast<uint8_t *>(tiling.workspace.get()), reinterpret_cast<uint8_t *>(&tiling.data));
+
+  for (int32_t p0 = 0; p0 < kUserEmbeddingSliceRows; ++p0) {
+    for (int32_t p1 = 0; p1 < kUserEmbeddingSliceColumns; ++p1) {
+      const int64_t raw =
+          indices
+              .get()[static_cast<int64_t>(p0) * kUserEmbeddingSliceIndexColumns + p1 + kUserEmbeddingSliceIndexOffset];
+      const int64_t selected = raw;
+      for (int32_t p2 = 0; p2 < kUserEmbeddingSliceInner; ++p2) {
+        const int64_t offset = static_cast<int64_t>(p0) * kUserEmbeddingSliceIndexColumns * kUserEmbeddingSliceInner +
+                               static_cast<int64_t>(p1) * kUserEmbeddingSliceInner + p2;
+        const int64_t table_offset = selected * kUserEmbeddingSliceInner + p2;
+        EXPECT_FLOAT_EQ(output.get()[offset], table.get()[table_offset])
+            << "p0=" << p0 << ", p1=" << p1 << ", p2=" << p2;
+      }
+    }
+  }
 }
 #elif defined(IL_GRAPH_HINT_EMBEDDING_SLICE)
 constexpr int32_t kGraphHintEmbeddingSliceRows = 128;
@@ -2516,6 +2603,75 @@ TEST(E2EIndirectLoadTorchGatherStrided, GeneratedKernelMatchesReference) {
   }
 }
 
+#endif
+
+#if defined(IL_CASE_STRIDED_STORE)
+extern "C" __global__ __aicore__ void indirect_load_strided_store_test(GM_ADDR x, GM_ADDR index, GM_ADDR y,
+                                                                       GM_ADDR workspace, GM_ADDR tiling);
+
+namespace {
+constexpr int32_t kSsInputS0 = IL_INPUT_S0;
+constexpr int32_t kSsInputS1 = IL_INPUT_S1;
+constexpr int32_t kSsOutS0 = IL_STRIDED_OUT_S0;
+constexpr int32_t kSsOutS1 = IL_STRIDED_OUT_S1;
+constexpr int32_t kSsOutStride0 = IL_STRIDED_OUT_STRIDE0;
+constexpr int32_t kSsOutOffset = IL_STRIDED_OUT_OFFSET;
+constexpr int32_t kSsStoreCount = kSsOutS0 * kSsOutS1;
+constexpr int32_t kSsOutputSpan = kSsOutOffset + (kSsOutS0 - 1) * kSsOutStride0 + kSsOutS1;
+}  // namespace
+
+TEST(E2EIndirectLoadStridedStore, StridedStoreMatchesReference) {
+  const int32_t input_count = kSsInputS0 * kSsInputS1;
+  const auto gm_free = [](void *ptr) { AscendC::GmFree(ptr); };
+  std::unique_ptr<half, decltype(gm_free)> x(reinterpret_cast<half *>(AscendC::GmAlloc(input_count * sizeof(half))),
+                                             gm_free);
+  std::unique_ptr<int32_t, decltype(gm_free)> index(
+      reinterpret_cast<int32_t *>(AscendC::GmAlloc(kSsStoreCount * sizeof(int32_t))), gm_free);
+  std::unique_ptr<half, decltype(gm_free)> output(
+      reinterpret_cast<half *>(AscendC::GmAlloc(kSsOutputSpan * sizeof(half))), gm_free);
+  ASSERT_NE(x, nullptr);
+  ASSERT_NE(index, nullptr);
+  ASSERT_NE(output, nullptr);
+  for (int32_t i = 0; i < input_count; ++i) {
+    x.get()[i] = static_cast<half>(static_cast<float>((i % 29) - 14) * 0.25F);
+  }
+  for (int32_t i = 0; i < kSsStoreCount; ++i) {
+    index.get()[i] = (i * 3 + 1) % kSsInputS1;
+  }
+  std::fill_n(output.get(), kSsOutputSpan, static_cast<half>(0.0F));
+  std::vector<half> expected(static_cast<size_t>(kSsOutputSpan), static_cast<half>(0.0F));
+  std::vector<bool> written(static_cast<size_t>(kSsOutputSpan), false);
+
+  indirect_load_test::KernelTiling tiling;
+  ASSERT_TRUE(tiling.IsValid());
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(indirect_load_strided_store_test, tiling.block_dim, reinterpret_cast<uint8_t *>(x.get()),
+              reinterpret_cast<uint8_t *>(index.get()), reinterpret_cast<uint8_t *>(output.get()),
+              reinterpret_cast<uint8_t *>(tiling.workspace.get()), reinterpret_cast<uint8_t *>(&tiling.data));
+
+  for (int32_t r = 0; r < kSsOutS0; ++r) {
+    for (int32_t c = 0; c < kSsOutS1; ++c) {
+      const int32_t linear = r * kSsOutS1 + c;
+      const int32_t input_offset = r * kSsInputS1 + index.get()[linear];
+      const size_t position = static_cast<size_t>(kSsOutOffset + r * kSsOutStride0 + c);
+      expected[position] = x.get()[input_offset];
+      written[position] = true;
+    }
+  }
+  for (int32_t r = 0; r < kSsOutS0; ++r) {
+    for (int32_t c = 0; c < kSsOutS1; ++c) {
+      const size_t position = static_cast<size_t>(kSsOutOffset + r * kSsOutStride0 + c);
+      EXPECT_NEAR(static_cast<float>(output.get()[position]), static_cast<float>(expected[position]), 0.0625F)
+          << "r=" << r << " c=" << c;
+    }
+  }
+  for (int32_t i = 0; i < kSsOutputSpan; ++i) {
+    if (!written[static_cast<size_t>(i)]) {
+      EXPECT_EQ(static_cast<float>(output.get()[static_cast<size_t>(i)]), 0.0F)
+          << "gap position " << i << " was written";
+    }
+  }
+}
 #endif
 
 #if defined(IL_CASE_EMBEDDING)
