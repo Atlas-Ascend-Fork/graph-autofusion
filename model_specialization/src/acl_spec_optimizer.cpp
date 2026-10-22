@@ -130,14 +130,14 @@ aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featur
 aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
   const auto &record = identity.record;
   if (record.task == nullptr) {
-    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=null task ret=%d", record.streamIndex,
+    SK_DLOGE("Task identity unavailable: streamIndex=%u task=%u reason=null task ret=%d", record.streamIndex,
              record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   aclmdlRITaskType type = ACL_MODEL_RI_TASK_DEFAULT;
   aclError result = aclmdlRITaskGetType(record.task, &type);
   if (result != ACL_SUCCESS) {
-    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=task type query failed ret=%d",
+    SK_DLOGE("Task identity unavailable: streamIndex=%u task=%u reason=task type query failed ret=%d",
              record.streamIndex, record.taskIndex, result);
     return result;
   }
@@ -149,35 +149,35 @@ aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
 
   result = aclmdlRITaskGetParams(record.task, &identity.params);
   if (result != ACL_SUCCESS) {
-    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=task parameters query failed ret=%d",
+    SK_DLOGE("Task identity unavailable: streamIndex=%u task=%u reason=task parameters query failed ret=%d",
              record.streamIndex, record.taskIndex, result);
     return result;
   }
   if (identity.params.type != ACL_MODEL_RI_TASK_KERNEL) {
-    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=parameter type mismatch ret=%d",
+    SK_DLOGE("Task identity unavailable: streamIndex=%u task=%u reason=parameter type mismatch ret=%d",
              record.streamIndex, record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   const auto function = identity.params.kernelTaskParams.funcHandle;
   if (function == nullptr) {
-    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=null function handle ret=%d", record.streamIndex,
+    SK_DLOGE("Task identity unavailable: streamIndex=%u task=%u reason=null function handle ret=%d", record.streamIndex,
              record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   std::array<char, MAX_KERNEL_ENTRY_LEN> name{};
   result = aclrtGetFunctionName(function, name.size(), name.data());
   if (result != ACL_SUCCESS) {
-    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=function name query failed ret=%d",
+    SK_DLOGE("Task identity unavailable: streamIndex=%u task=%u reason=function name query failed ret=%d",
              record.streamIndex, record.taskIndex, result);
     return result;
   }
   if (name[0] == '\0') {
-    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=empty function name ret=%d", record.streamIndex,
+    SK_DLOGE("Task identity unavailable: streamIndex=%u task=%u reason=empty function name ret=%d", record.streamIndex,
              record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
   if (std::memchr(name.data(), '\0', name.size()) == nullptr) {
-    SK_DLOGW("Task identity unavailable: streamIndex=%u task=%u reason=unterminated function name ret=%d",
+    SK_DLOGE("Task identity unavailable: streamIndex=%u task=%u reason=unterminated function name ret=%d",
              record.streamIndex, record.taskIndex, ACL_ERROR_FAILURE);
     return ACL_ERROR_FAILURE;
   }
@@ -195,10 +195,7 @@ aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
 
 void AclSpecOptimizer::LogTaskAdmission(const TaskIdentity &identity) const {
   const auto &record = identity.record;
-  if (identity.readResult != ACL_SUCCESS) {
-    SK_DLOGI("Kernel Specialization: streamIndex=%u, task=%u, type=UNKNOWN, status=SKIPPED, ret=%d", record.streamIndex,
-             record.taskIndex, identity.readResult);
-  } else if (record.kind == ScopeTaskKind::KERNEL) {
+  if (record.kind == ScopeTaskKind::KERNEL) {
     SK_DLOGI("Kernel Specialization: %sstreamIndex=%u, task=%u, type=KERNEL, kernel=%s",
              record.allowSpecialization ? "[IN_SCOPE] " : "", record.streamIndex, record.taskIndex,
              identity.kernelEntry.c_str());
@@ -320,12 +317,10 @@ aclError AclSpecOptimizer::Collect(aclmdlRI model, const FeatureManager &feature
       identity.record.task = tasks[taskIndex];
       identity.record.streamIndex = streamIndex;
       identity.record.taskIndex = taskIndex;
-      identity.readResult = ReadTaskIdentity(identity);
-      if (identity.readResult != ACL_SUCCESS) {
-        SK_DLOGW("ReadTaskIdentity failed; skipping task: streamIndex=%u task=%u ret=%d", streamIndex, taskIndex,
-                 identity.readResult);
-        identities.push_back(std::move(identity));
-        continue;
+      result = ReadTaskIdentity(identity);
+      if (result != ACL_SUCCESS) {
+        SK_DLOGE("ReadTaskIdentity failed: streamIndex=%u task=%u ret=%d", streamIndex, taskIndex, result);
+        return result;
       }
       if (identity.record.kind == ScopeTaskKind::BEGIN || identity.record.kind == ScopeTaskKind::END) {
         collectedMarkers.push_back(identity.record);

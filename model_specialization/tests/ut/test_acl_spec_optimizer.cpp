@@ -825,7 +825,7 @@ extern "C" aclError aclrtFunctionGetParamInfo(const void *function, size_t index
   return value.paramError;
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, BothModesWarnAndSkipUnreadableTasks) {
+TEST_F(AclSpecOptimizerCollectionTest, BothEntriesRejectUnreadableTasksBeforeCompilationOrMutation) {
   const std::array<const char *, 8> reasons{"null task",
                                             "task type query failed",
                                             "task parameters query failed",
@@ -837,9 +837,10 @@ TEST_F(AclSpecOptimizerCollectionTest, BothModesWarnAndSkipUnreadableTasks) {
   KernelState beginKernel, endKernel;
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
   auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  MOCKER(aclmdlRITaskDisable).stubs().will(invoke(DisableTask));
   for (bool byFlag : {false, true}) {
-    ASSERT_TRUE(manager.Init(nullptr, byFlag));
     for (size_t failure = 0; failure < reasons.size(); ++failure) {
+      SCOPED_TRACE(byFlag ? "OptimizeByFlag" : "Optimize");
       SCOPED_TRACE(reasons[failure]);
       KernelState invalidKernel = kernel;
       CollectorTask invalid = task;
@@ -850,10 +851,10 @@ TEST_F(AclSpecOptimizerCollectionTest, BothModesWarnAndSkipUnreadableTasks) {
           handle = nullptr;
           break;
         case 1:
-          invalid.typeError = ACL_ERROR_FAILURE;
+          invalid.typeError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
           break;
         case 2:
-          invalid.paramsError = ACL_ERROR_FAILURE;
+          invalid.paramsError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
           break;
         case 3:
           invalid.params.type = ACL_MODEL_RI_TASK_DEFAULT;
@@ -862,7 +863,7 @@ TEST_F(AclSpecOptimizerCollectionTest, BothModesWarnAndSkipUnreadableTasks) {
           invalid.params.kernelTaskParams.funcHandle = nullptr;
           break;
         case 5:
-          invalidKernel.nameError = ACL_ERROR_FAILURE;
+          invalidKernel.nameError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
           break;
         case 6:
           invalidKernel.name.clear();
@@ -871,27 +872,28 @@ TEST_F(AclSpecOptimizerCollectionTest, BothModesWarnAndSkipUnreadableTasks) {
           invalidKernel.unterminatedName = true;
           break;
       }
-      stream.tasks = {&begin, handle, &task, &end};
+      stream.tasks = {&begin, &task, handle, &end};
+      identityTypeQueries = 0;
       ut_log::LogBuffer::Instance().Clear();
-      ASSERT_EQ(Collect(), ACL_SUCCESS);
-      ASSERT_EQ(requests.size(), 1U);
-      EXPECT_EQ(requests.front()->task, &task);
+      const aclError expected =
+          failure == 1 || failure == 2 || failure == 5 ? ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY : ACL_ERROR_FAILURE;
+      EXPECT_EQ(byFlag ? aclmdlRISpecOptimizeByFlag(&model, nullptr) : aclmdlRISpecOptimize(&model, nullptr), expected);
+      EXPECT_EQ(identityTypeQueries, failure == 0 ? 2U : 3U);
+      EXPECT_EQ(binaryQueries, 0U);
+      EXPECT_EQ(paramCountQueries, 0U);
+      EXPECT_TRUE(specializationPaths.empty());
+      EXPECT_EQ(loadCalls, 0U);
+      EXPECT_TRUE(touched.empty());
+      EXPECT_TRUE(disabled.empty());
+      EXPECT_EQ(updateCount, 0U);
       const auto logs = ut_log::LogBuffer::Instance().GetContent();
-      EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: streamIndex=0 task=1 reason=" +
-                          std::string(reasons[failure]) + " ret=" + std::to_string(ACL_ERROR_FAILURE)),
+      EXPECT_NE(logs.find("[ERROR] [SK][ReadTaskIdentity] Task identity unavailable: streamIndex=0 task=2 reason=" +
+                          std::string(reasons[failure]) + " ret=" + std::to_string(expected)),
                 std::string::npos);
-      EXPECT_NE(logs.find("[WARN] [SK][Collect] ReadTaskIdentity failed; skipping task: streamIndex=0 task=1 ret=" +
-                          std::to_string(ACL_ERROR_FAILURE)),
+      EXPECT_NE(logs.find("[ERROR] [SK][Collect] ReadTaskIdentity failed: streamIndex=0 task=2 ret=" +
+                          std::to_string(expected)),
                 std::string::npos);
-      if (byFlag) {
-        const size_t skipped = logs.find("Kernel Specialization: streamIndex=0, task=1, type=UNKNOWN, status=SKIPPED");
-        const size_t following = logs.find("streamIndex=0, task=2, type=KERNEL");
-        ASSERT_NE(skipped, std::string::npos);
-        ASSERT_NE(following, std::string::npos);
-        EXPECT_LT(skipped, following);
-      } else {
-        EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
-      }
+      EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
     }
   }
 }
@@ -1517,29 +1519,7 @@ TEST_F(AclSpecOptimizerCollectionTest, NonKernelTaskIsSkipped) {
   EXPECT_TRUE(requests.empty());
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, NullTaskDoesNotPreventCollectingLaterKernel) {
-  stream.tasks = {nullptr, &task};
-  ASSERT_EQ(Collect(), ACL_SUCCESS);
-  ASSERT_EQ(requests.size(), 1U);
-  EXPECT_EQ(requests[0]->task, &task);
-  EXPECT_EQ(requests[0]->taskIndex, 1U);
-}
-
-TEST_F(AclSpecOptimizerCollectionTest, TypeQueryFailureDoesNotPreventCollectingLaterKernel) {
-  CollectorTask failedTask{};
-  failedTask.typeError = ACL_ERROR_FAILURE;
-  stream.tasks = {&failedTask, &task};
-  ASSERT_EQ(Collect(), ACL_SUCCESS);
-  ASSERT_EQ(requests.size(), 1U);
-  EXPECT_EQ(requests[0]->task, &task);
-  EXPECT_EQ(requests[0]->taskIndex, 1U);
-}
-
-TEST_F(AclSpecOptimizerCollectionTest, InvalidIdentityIsTaskLocal) {
-  kernel.name.clear();
-  ASSERT_EQ(Collect(), ACL_SUCCESS);
-  EXPECT_TRUE(requests.empty());
-  kernel.name = "AddCustom";
+TEST_F(AclSpecOptimizerCollectionTest, MissingKernelBinaryKeepsTaskDynamic) {
   kernel.binary.clear();
   ASSERT_EQ(Collect(), ACL_SUCCESS);
   EXPECT_TRUE(requests.empty());
