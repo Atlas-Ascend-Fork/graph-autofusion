@@ -1016,20 +1016,48 @@ bool HasSameLogicalAxisView(const af::AscTensorAttr &lhs, const af::AscTensorAtt
   return lhs.axis == rhs.axis && PassUtils::IsExprVectorEqual(lhs.repeats, rhs.repeats);
 }
 
+// 复合区域视图折叠校验：从入口视图出发沿归约阶段折叠——配对 Broadcast 直接
+// 取其输出视图（还原或放大均合法，放大允许超过入口宽度），尾部无配对 Broadcast
+// 的 Reduce 将归约轴 repeat 折为 1，Elementwise/Cast 不改变视图。折叠终态须与
+// Store 输入视图完全一致。相比逐对视图相等，该口径统一覆盖三类自洽形态：
+// 入口==出口（R→B 配对抵消）、入口>出口（尾部归约收缩）、入口<出口（广播放大），
+// 仍拒绝区域链路与出口视图对不上的候选。
 bool ValidateCompositeRegionOutputView(const af::AscNodePtr &indirect_load, const RewrittenGraphAnalysis &analysis) {
   const auto input_outputs = indirect_load->outputs();
   if (input_outputs.empty() || input_outputs[0] == nullptr) {
     return false;
   }
-  const auto &entry_attr = input_outputs[0]->attr;
   const af::AscNodePtr exit_node = analysis.output_store == nullptr ? nullptr : analysis.output_store;
   if (exit_node == nullptr || exit_node->inputs.Size() == 0UL) {
     return false;
   }
+  const auto &entry_attr = input_outputs[0]->attr;
   if (analysis.composite_reduces.empty()) {
     return HasSameLogicalAxisView(entry_attr, exit_node->inputs[0].attr);
   }
-  return HasSameLogicalAxisView(entry_attr, exit_node->inputs[0].attr);
+  std::vector<af::AxisId> folded_axes = entry_attr.axis;
+  std::vector<af::Expression> folded_repeats = entry_attr.repeats;
+  for (const auto &reduce : analysis.composite_reduces) {
+    const auto broadcast = FindPairedBroadcast(reduce);
+    if (broadcast != nullptr) {
+      const auto broadcast_outputs = broadcast->outputs();
+      if (broadcast_outputs.empty() || broadcast_outputs[0] == nullptr) {
+        return false;
+      }
+      folded_axes = broadcast_outputs[0]->attr.axis;
+      folded_repeats = broadcast_outputs[0]->attr.repeats;
+      continue;
+    }
+    for (const auto &axis : CalcReduceAxesFromNode(reduce)) {
+      const auto it = std::find(folded_axes.begin(), folded_axes.end(), axis);
+      if (it == folded_axes.end()) {
+        return false;
+      }
+      folded_repeats[static_cast<size_t>(std::distance(folded_axes.begin(), it))] = af::sym::kSymbolOne;
+    }
+  }
+  return folded_axes == exit_node->inputs[0].attr.axis &&
+         PassUtils::IsExprVectorEqual(folded_repeats, exit_node->inputs[0].attr.repeats);
 }
 
 // Softmax 专用路径的 IO 形态校验：单输入单输出且输入输出 View 与
@@ -1099,8 +1127,12 @@ af::Status SaveSoftmaxDedicatedNormInfo(const af::AscNodePtr &indirect_load, con
 af::Status SaveCompositeNormInfo(const af::AscNodePtr &indirect_load, const RewrittenGraphAnalysis &analysis,
                                  bool &is_candidate_legal) {
   is_candidate_legal = false;
-  if (analysis.output_store == nullptr || !ValidateCompositeRegionOutputView(indirect_load, analysis)) {
-    GELOGI("[IndirectLoad] Composite Norm rejected: entry and final output views differ, node[%s].",
+  if (analysis.output_store == nullptr) {
+    GELOGI("[IndirectLoad] Composite Norm rejected: no output store, node[%s].", indirect_load->GetNamePtr());
+    return af::SUCCESS;
+  }
+  if (!ValidateCompositeRegionOutputView(indirect_load, analysis)) {
+    GELOGI("[IndirectLoad] Composite Norm rejected: region view folding mismatches the final output view, node[%s].",
            indirect_load->GetNamePtr());
     return af::SUCCESS;
   }
@@ -4368,6 +4400,16 @@ Status IndirectLoadScheduleCaseGenerator::GeneratorTask(ascir::HintGraph &optimi
   std::vector<ascir::ImplGraph> optimize_graphs;
   std::vector<std::string> score_funcs;
   GE_CHK_STATUS_RET(Generate(optimize_graph, optimize_graphs, score_funcs), "GenerateScheduleCases failed");
+  if (optimize_graphs.empty() && !ascgen_utils::indirect_load::GetAllIndirectLoadNodes(optimize_graph).empty()) {
+    // 本生成器独占含 IndirectLoad 的图（其余生成器按约定跳过）。模板候选全部被拒时
+    // 不存在通用调度兜底——未标注模板的 IndirectLoad 没有通用调度与发射路径，落入
+    // Recomputation 兜底会在调度期触发内部断言。此处显式失败，让上层按不支持处理。
+    GELOGE(af::FAILED,
+           "[IndirectLoad] Graph[%s] contains IndirectLoad but no template candidate was generated; the graph is "
+           "not supported by autofuse.",
+           optimize_graph.GetName().c_str());
+    return af::FAILED;
+  }
   for (size_t i = 0UL; i < optimize_graphs.size(); ++i) {
     const auto &graph = optimize_graphs[i];
     ScheduleTask task{graph, {}, score_funcs[i]};
