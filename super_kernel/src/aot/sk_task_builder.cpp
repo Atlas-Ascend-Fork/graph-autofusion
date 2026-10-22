@@ -1338,11 +1338,9 @@ DeviceArgsPtr SkTaskBuilder::GenEntryArgs(const SkTask &skTaskCube, const SkTask
 }
 
 std::pair<int, int> SkTaskBuilder::GetPreFetchCnt(const ResolvedFunctionInfo &resolved) const {
-  constexpr uint64_t aicMaxPreloadCount = 16U;
-  constexpr uint64_t aivMaxPreloadCount = 8U;
   std::pair<int, int> preFetchCntValue =
-      std::make_pair(static_cast<int>(std::min(resolved.prefetchCnt[0], aicMaxPreloadCount)),
-                     static_cast<int>(std::min(resolved.prefetchCnt[1], aivMaxPreloadCount)));
+      std::make_pair(static_cast<int>(std::min(resolved.prefetchCnt[0], SK_AIC_MAX_PRELOAD_COUNT)),
+                     static_cast<int>(std::min(resolved.prefetchCnt[1], SK_AIV_MAX_PRELOAD_COUNT)));
   auto preLoadOptions = opts.GetOption(aclskOptionType::PRELOAD_CODE);
 
   uint32_t preLoadValue = ACLSK_PRELOAD_PER_FUNC;
@@ -1353,7 +1351,8 @@ std::pair<int, int> SkTaskBuilder::GetPreFetchCnt(const ResolvedFunctionInfo &re
 
   switch (preLoadValue) {
     case ACLSK_PRELOAD_MAX:
-      preFetchCntValue = std::make_pair(static_cast<int>(aicMaxPreloadCount), static_cast<int>(aivMaxPreloadCount));
+      preFetchCntValue =
+          std::make_pair(static_cast<int>(SK_AIC_MAX_PRELOAD_COUNT), static_cast<int>(SK_AIV_MAX_PRELOAD_COUNT));
       break;
     case ACLSK_PRELOAD_DISABLED:
       preFetchCntValue = std::make_pair(0, 0);
