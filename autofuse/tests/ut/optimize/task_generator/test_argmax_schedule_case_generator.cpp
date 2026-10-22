@@ -248,8 +248,9 @@ TEST_F(ArgMaxScheduleCaseGeneratorTest, TestArgMax_Three_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
-  ASSERT_EQ(tasks.size(), 1UL);
+  ASSERT_EQ(tasks.size(), 2UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
+  ASSERT_EQ(tasks[1].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ArgMaxScheduleCaseGeneratorTest, TestArgMax_One_Elewise_Store) {
@@ -259,8 +260,9 @@ TEST_F(ArgMaxScheduleCaseGeneratorTest, TestArgMax_One_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
-  ASSERT_EQ(tasks.size(), 1UL);
+  ASSERT_EQ(tasks.size(), 2UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
+  ASSERT_EQ(tasks[1].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ArgMaxScheduleCaseGeneratorTest, TestArgMax_Four_Elewise_Store) {
@@ -270,8 +272,9 @@ TEST_F(ArgMaxScheduleCaseGeneratorTest, TestArgMax_Four_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
-  ASSERT_EQ(tasks.size(), 1UL);
+  ASSERT_EQ(tasks.size(), 2UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
+  ASSERT_EQ(tasks[1].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ArgMaxScheduleCaseGeneratorTest, TestArgMax_Multi_Cita_Store) {
