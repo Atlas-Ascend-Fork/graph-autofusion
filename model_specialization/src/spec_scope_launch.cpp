@@ -43,32 +43,8 @@ aclError LaunchSpecScopeMarker(aclrtStream stream, SpecScopeMarkerKind kind) {
     return ACL_ERROR_INVALID_PARAM;
   }
   const char *markerType = kind == SpecScopeMarkerKind::Begin ? "Begin" : "End";
-  aclmdlRICaptureStatus status = ACL_MODEL_RI_CAPTURE_STATUS_NONE;
-  aclmdlRI model = nullptr;
-  aclError result = aclmdlRICaptureGetInfo(stream, &status, &model);
-  if (result != ACL_SUCCESS) {
-    SK_DLOGE("Spec scope capture query failed: markerType=%s, stream=%p, ret=%d", markerType, stream, result);
-    return result;
-  }
-  switch (status) {
-    case ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE:
-      break;
-    case ACL_MODEL_RI_CAPTURE_STATUS_NONE:
-      SK_DLOGE("Spec scope stream is not captured: markerType=%s, stream=%p, status=%d", markerType, stream,
-               static_cast<int>(status));
-      return ACL_ERROR_RT_STREAM_NOT_CAPTURED;
-    case ACL_MODEL_RI_CAPTURE_STATUS_INVALIDATED:
-      SK_DLOGE("Spec scope capture is invalidated: markerType=%s, stream=%p, status=%d", markerType, stream,
-               static_cast<int>(status));
-      return ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED;
-    default:
-      // Unknown Runtime output is a contract failure, not a non-captured stream.
-      SK_DLOGE("Unknown Spec scope capture status: markerType=%s, stream=%p, status=%d", markerType, stream,
-               static_cast<int>(status));
-      return ACL_ERROR_FAILURE;
-  }
   int32_t deviceId = 0;
-  result = aclrtGetDevice(&deviceId);
+  aclError result = aclrtGetDevice(&deviceId);
   if (result != ACL_SUCCESS) {
     SK_DLOGE("Spec scope current device query failed: markerType=%s, stream=%p, ret=%d", markerType, stream, result);
     return result;

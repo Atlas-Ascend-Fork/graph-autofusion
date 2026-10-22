@@ -77,13 +77,12 @@ struct aclmdlRISpecOptions {
  */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecOptimize(aclmdlRI modelRI, aclmdlRISpecOptions *options);
 /**
- * @brief Dispatch a Begin marker into an actively captured non-null stream.
- * One standalone marker is dispatched per call. The caller owns capture and Scope pairing.
- * @retval ACL_ERROR_RT_STREAM_NOT_CAPTURED The stream is not captured.
- * @retval ACL_ERROR_RT_STREAM_CAPTURE_INVALIDATED Capture has been invalidated.
- * Capture query errors are returned unchanged. ACL_SUCCESS after the generated void launcher
- * indicates dispatch was attempted; synchronous launch errors are printed by ASC generated code,
- * and it does not confirm device execution. No thread LastError state is read or cleared.
+ * @brief Dispatch a Begin marker into a non-null stream.
+ * One standalone marker is dispatched per call. The caller owns capture and Scope pairing;
+ * this interface does not query or validate the stream's capture status.
+ * Device and architecture query errors are returned unchanged. ACL_SUCCESS after the generated
+ * void launcher indicates dispatch was attempted; synchronous launch errors are printed by ASC
+ * generated code, and it does not confirm device execution. No thread LastError state is read or cleared.
  */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeBegin(aclrtStream stream);
 /** @brief Dispatch an End marker with the same capture and error contract as ScopeBegin. */
@@ -91,9 +90,10 @@ ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeEnd(aclrtStream stream);
 /**
  * @brief Specialize eligible kernels within valid Spec Scope ranges.
  * Submission disables all recognized Spec Scope Begin/End tasks, as Optimize does.
- * Tasks whose identities cannot be read are logged as warnings and skipped. Ranges are validated
- * using the remaining recognized markers; invalid pairing returns before compilation or task modification.
- * Skipped markers can leave scope information incomplete even if the remaining pairing is valid.
+ * Both entry points return on task identity errors before compilation or task modification.
+ * ByFlag sorts all tasks by sequence ID and pairs anonymous Begin/End markers across streams.
+ * Invalid sequence queries, duplicate IDs, or marker pairing return before compilation.
+ * Optimize does not perform sequence sorting or marker pairing validation.
  */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecOptimizeByFlag(aclmdlRI modelRI, aclmdlRISpecOptions *options);
 
