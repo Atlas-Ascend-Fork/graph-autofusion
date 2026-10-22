@@ -29,7 +29,6 @@ add_library(model_specialization SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/acl_spec_optimizer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/aclmodel_specialization.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/spec_scope_launch.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../super_kernel/src/aot/sk_common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../super_kernel/src/aot/common/pattern_common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../super_kernel/src/aot/sk_log.cpp
 )
