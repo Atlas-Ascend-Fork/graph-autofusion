@@ -554,6 +554,8 @@ using CollectorTask = TaskState;
 
 struct StreamState {
   std::vector<aclmdlRITask> tasks;
+  int32_t id = 37;
+  aclError idError = ACL_SUCCESS;
 };
 
 struct ModelState {
@@ -562,6 +564,7 @@ struct ModelState {
 
 size_t streamQueries = 0;
 size_t taskQueries = 0;
+size_t streamIdQueries = 0;
 size_t failStreamQuery = 0;
 size_t failTaskQuery = 0;
 size_t binaryQueries = 0;
@@ -595,6 +598,15 @@ std::vector<uint8_t> MakeKernelBinary() {
 }
 
 aclError GetStreams(aclmdlRI model, aclrtStream *streams, uint32_t *count);
+aclError GetStreamId(aclrtStream stream, int32_t *id) {
+  ++streamIdQueries;
+  const auto &state = *static_cast<StreamState *>(stream);
+  if (state.idError != ACL_SUCCESS) {
+    return state.idError;
+  }
+  *id = state.id;
+  return ACL_SUCCESS;
+}
 aclError GetTasks(aclrtStream stream, aclmdlRITask *tasks, uint32_t *count);
 aclError GetFunctionName(aclrtFuncHandle function, uint32_t capacity, char *name);
 aclError GetFunctionBinary(aclrtFuncHandle function, aclrtBinHandle *binary);
@@ -628,6 +640,7 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
     MOCKER(aclmdlRITaskSetParams).stubs().will(invoke(RecordSetTaskParams));
     MOCKER(aclmdlRIUpdate).stubs().will(invoke(RecordUpdateModel));
     MOCKER(aclmdlRIGetStreams).stubs().will(invoke(GetStreams));
+    MOCKER(aclrtStreamGetId).stubs().will(invoke(GetStreamId));
     MOCKER(aclmdlRIGetTasksByStream).stubs().will(invoke(GetTasks));
     MOCKER(aclmdlRITaskGetParams).stubs().will(invoke(GetTaskParams));
     MOCKER(aclmdlRITaskGetType).stubs().will(invoke(GetTaskType));
@@ -642,6 +655,7 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
     binaryQueries = paramCountQueries = nameQueries = copyQueries = 0;
     identityParamsQueries = identityTypeQueries = 0;
     sequenceQueries = 0;
+    streamIdQueries = 0;
     taskSequenceIds.clear();
     lastParameterIndex = 0;
     specializationResults.clear();
@@ -870,6 +884,7 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagRejectsUnreadableTasksBeforeCompila
     SCOPED_TRACE(reasons[failure]);
     KernelState invalidKernel = kernel;
     CollectorTask invalid = task;
+    invalid.sequenceId = std::numeric_limits<uint32_t>::max();
     invalid.params.kernelTaskParams.funcHandle = &invalidKernel;
     aclmdlRITask handle = &invalid;
     switch (failure) {
@@ -913,12 +928,14 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagRejectsUnreadableTasksBeforeCompila
     EXPECT_TRUE(disabled.empty());
     EXPECT_EQ(updateCount, 0U);
     const auto logs = ut_log::LogBuffer::Instance().GetContent();
-    EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: streamIndex=0 task=2 reason=" +
-                        std::string(reasons[failure]) + " ret=" + std::to_string(expected)),
+    const std::string location =
+        "streamId=37 taskId=" + (failure == 0 ? std::string("-1") : std::to_string(*invalid.sequenceId));
+    EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: " + location +
+                        " reason=" + std::string(reasons[failure]) + " ret=" + std::to_string(expected)),
               std::string::npos);
-    EXPECT_NE(logs.find("[ERROR] [SK][Collect] ReadTaskIdentity failed: streamIndex=0 task=2 ret=" +
-                        std::to_string(expected)),
-              std::string::npos);
+    EXPECT_NE(
+        logs.find("[ERROR] [SK][Collect] ReadTaskIdentity failed: " + location + " ret=" + std::to_string(expected)),
+        std::string::npos);
     EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
   }
 }
@@ -941,14 +958,13 @@ TEST_F(AclSpecOptimizerCollectionTest, OptimizeSkipsUnreadableTasksAndSpecialize
   EXPECT_EQ(specializationPaths.size(), 2U);
   EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
   EXPECT_EQ(updateCount, 1U);
-  EXPECT_EQ(sequenceQueries, 0U);
+  EXPECT_EQ(sequenceQueries, 7U);
   const auto logs = ut_log::LogBuffer::Instance().GetContent();
   for (uint32_t index = 2; index <= 5; ++index) {
-    EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: streamIndex=0 task=" +
-                        std::to_string(index) + " reason="),
+    const std::string location = "streamId=37 taskId=" + (index == 2 ? std::string("-1") : std::to_string(index));
+    EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: " + location + " reason="),
               std::string::npos);
-    EXPECT_NE(logs.find("[WARN] [SK][Collect] ReadTaskIdentity failed, skipping task: streamIndex=0 task=" +
-                        std::to_string(index) + " ret="),
+    EXPECT_NE(logs.find("[WARN] [SK][Collect] ReadTaskIdentity failed, skipping task: " + location + " ret="),
               std::string::npos);
   }
   EXPECT_EQ(logs.find("[ERROR]"), std::string::npos);
@@ -1063,6 +1079,8 @@ TEST_P(AclSpecOptimizerScopeTest, MultiStreamSelectionPreservesOtherTasksAndComm
   auto secondBegin = begin, secondEnd = end;
   stream.tasks = {&before, &begin, &task, &similar, &other, &end, &after};
   StreamState second{{&secondBegin, &secondTask, &secondEnd}}, empty{{&unmarkedTask}};
+  second.id = 95;
+  empty.id = 81;
   model.streams = {&stream, &empty, &second};
   const auto original = task.params;
   const auto originalArgs = args;
@@ -1079,7 +1097,8 @@ TEST_P(AclSpecOptimizerScopeTest, MultiStreamSelectionPreservesOtherTasksAndComm
   EXPECT_EQ(binaryQueries, expected.size());
   EXPECT_EQ(copyQueries, expected.size());
   EXPECT_EQ(updateCount, 1U);
-  EXPECT_EQ(sequenceQueries, GetParam() ? 11U : 0U);
+  EXPECT_EQ(sequenceQueries, 11U);
+  EXPECT_EQ(streamIdQueries, 3U);
   auto restored = task.params;
   EXPECT_EQ(restored.kernelTaskParams.funcHandle, &staticFunctionToken);
   restored.kernelTaskParams.funcHandle = original.kernelTaskParams.funcHandle;
@@ -1090,18 +1109,20 @@ TEST_P(AclSpecOptimizerScopeTest, MultiStreamSelectionPreservesOtherTasksAndComm
     EXPECT_EQ(std::memcmp(&after.params, &original, sizeof(original)), 0);
   }
   const auto logs = ut_log::LogBuffer::Instance().GetContent();
+  EXPECT_EQ(logs.find("streamIndex="), std::string::npos);
+  EXPECT_EQ(logs.find("taskIndex="), std::string::npos);
   if (GetParam()) {
-    const std::array<const char *, 11> rows{"streamIndex=0, task=0, type=KERNEL, kernel=AddCustom",
-                                            "streamIndex=0, task=1, type=MARKER",
-                                            "streamIndex=0, task=2, type=KERNEL, kernel=AddCustom",
-                                            "streamIndex=0, task=3, type=KERNEL, kernel=sk_scope_kernel_begin_dav_2201",
-                                            "streamIndex=0, task=4, type=EVENT_RECORD",
-                                            "streamIndex=0, task=5, type=MARKER",
-                                            "streamIndex=0, task=6, type=KERNEL, kernel=AddCustom",
-                                            "streamIndex=1, task=0, type=KERNEL, kernel=AddCustom",
-                                            "streamIndex=2, task=0, type=MARKER",
-                                            "streamIndex=2, task=1, type=KERNEL, kernel=AddCustom",
-                                            "streamIndex=2, task=2, type=MARKER"};
+    const std::array<const char *, 11> rows{"streamId=37, taskId=0, type=KERNEL, kernel=AddCustom",
+                                            "streamId=37, taskId=1, type=MARKER",
+                                            "streamId=37, taskId=2, type=KERNEL, kernel=AddCustom",
+                                            "streamId=37, taskId=3, type=KERNEL, kernel=sk_scope_kernel_begin_dav_2201",
+                                            "streamId=37, taskId=4, type=EVENT_RECORD",
+                                            "streamId=37, taskId=5, type=MARKER",
+                                            "streamId=37, taskId=6, type=KERNEL, kernel=AddCustom",
+                                            "streamId=81, taskId=7, type=KERNEL, kernel=AddCustom",
+                                            "streamId=95, taskId=8, type=MARKER",
+                                            "streamId=95, taskId=9, type=KERNEL, kernel=AddCustom",
+                                            "streamId=95, taskId=10, type=MARKER"};
     size_t next = 0;
     for (size_t index = 0; index < rows.size(); ++index) {
       const bool inScope = GetParam() && (index == 2 || index == 3 || index == 9);
@@ -1118,6 +1139,31 @@ TEST_P(AclSpecOptimizerScopeTest, MultiStreamSelectionPreservesOtherTasksAndComm
   const char *apiName = GetParam() ? "aclmdlRISpecOptimizeByFlag" : "aclmdlRISpecOptimize";
   EXPECT_NE(logs.find(std::string(apiName) + " started:"), std::string::npos);
   EXPECT_NE(logs.find(std::string(apiName) + " finished:"), std::string::npos);
+}
+
+TEST_P(AclSpecOptimizerScopeTest, MissingStreamIdDoesNotChangeOptimizationBehavior) {
+  stream.tasks = {&begin, &task, &end};
+  stream.idError = ACL_ERROR_FAILURE;
+  ASSERT_EQ(RunEntry(), ACL_SUCCESS);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(streamIdQueries, 1U);
+  const auto logs = ut_log::LogBuffer::Instance().GetContent();
+  EXPECT_NE(logs.find("stream ID unavailable: streamId=-1"), std::string::npos);
+  if (GetParam()) {
+    EXPECT_NE(logs.find("[IN_SCOPE] streamId=-1, taskId=1, type=KERNEL"), std::string::npos);
+  }
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, OptimizeKeepsKernelWhenTaskIdIsUnavailableForLogging) {
+  task.sequenceError = ACL_ERROR_FAILURE;
+  ut_log::LogBuffer::Instance().Clear();
+  ASSERT_EQ(aclmdlRISpecOptimize(&model, nullptr), ACL_SUCCESS);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
+  EXPECT_EQ(sequenceQueries, 1U);
+  const auto logs = ut_log::LogBuffer::Instance().GetContent();
+  EXPECT_NE(logs.find("task ID unavailable: streamId=37 taskId=-1"), std::string::npos);
+  EXPECT_EQ(logs.find("[ERROR]"), std::string::npos);
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, ByFlagWithoutScopeLeavesOrdinaryTasksUntouched) {
@@ -1164,7 +1210,7 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagUsesGlobalSequenceAcrossStreamsAndE
     const auto logs = ut_log::LogBuffer::Instance().GetContent();
     size_t next = 0;
     for (size_t index = 0; index < states.size(); ++index) {
-      const std::string key = "sequenceId=" + std::to_string(index * 3) + "\n";
+      const std::string key = "taskId=" + std::to_string(index * 3) + ", type=";
       const size_t position = logs.find(key, next);
       ASSERT_NE(position, std::string::npos) << key;
       next = position + key.size();

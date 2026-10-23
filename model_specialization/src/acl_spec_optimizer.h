@@ -39,6 +39,9 @@ struct ScopeTaskRecord {
   aclmdlRITask task = nullptr;
   uint32_t streamIndex = 0;
   uint32_t taskIndex = 0;
+  int32_t streamId = -1;
+  // The model sequence ID used by SK as nodeId/taskId; -1 means unavailable.
+  int64_t taskId = -1;
   ScopeTaskKind kind = ScopeTaskKind::OTHER;
   bool allowSpecialization = false;
 };
@@ -52,6 +55,8 @@ class KernelSpecRequest {
   aclmdlRITask task = nullptr;
   uint32_t streamIndex = 0;
   uint32_t taskIndex = 0;
+  int32_t streamId = -1;
+  int64_t taskId = -1;
   aclmdlRITaskParams originalParams{};
   std::string resourceId;
   std::string kernelEntry;
@@ -96,7 +101,6 @@ class AclSpecOptimizer final {
     ScopeTaskRecord record;
     aclmdlRITaskParams params{};
     std::string kernelEntry;
-    uint32_t sequenceId = 0;
   };
 
   aclError ReadTaskIdentity(TaskIdentity &identity) const;
