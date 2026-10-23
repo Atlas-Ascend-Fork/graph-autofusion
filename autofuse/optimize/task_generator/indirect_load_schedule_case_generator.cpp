@@ -3472,16 +3472,19 @@ af::Status AnnotateSimtGroupFanoutBranches(const std::vector<af::AscNodePtr> &me
 // - L3（UB 归并）：其余情形——各路 value 写 UB 局部目标，归并链向量代码执行。
 // 防漂移：此处仅做门控与角色标注；side load 寻址分类与输出链 tensor id 由 codegen 在
 // codegen 期图上用同一分类函数重建（节点名跨图副本稳定，视图/张量 id 会漂移）。
+// 寄存器压力模型共用常数（取值依据与档位配额表见设计文档「寄存器压力模型」）。
+// IsGroupSimtL4UbDoomed 仅取基线 + 每成员项（不含 side load/链节点，方向安全——
+// 基线判定已超配额时 side load/链节点只会更高，不会漏判）。
+constexpr uint64_t kRegisterBase = 24U;
+constexpr uint64_t kRegisterPerMember = 18U;
+constexpr uint64_t kRegisterPerSideLoad = 5U;
+constexpr uint64_t kRegisterPerChainNode = 3U;
+constexpr uint64_t kMinTierQuota = 127U;
+
 af::Status PlanSimtFusedEmission(const af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
                                  ascgen_utils::indirect_load::SimtFusedMergeInfo &merge_info,
                                  bool &use_fused_emission) {
   merge_info = ascgen_utils::indirect_load::SimtFusedMergeInfo{};
-  // 资源压力模型常数与最低档配额（取值依据与档位配额表见设计文档「寄存器压力模型」）。
-  constexpr uint64_t kRegisterBase = 24U;
-  constexpr uint64_t kRegisterPerMember = 18U;
-  constexpr uint64_t kRegisterPerSideLoad = 5U;
-  constexpr uint64_t kRegisterPerChainNode = 3U;
-  constexpr uint64_t kMinTierQuota = 127U;
   // 归并树收集：全部成员输出 Consumer 的前向闭包（成员为边界；Store/Reduce 为终端）。
   NodeSet member_set;
   for (const af::AscNodePtr &member : members) {
@@ -3873,15 +3876,16 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
 // 全组 post_reduce 置空——归并/输出链（含 Reduce）统一作为 normal schedule 扇出分支的
 // 向量代码执行（混模板下归并链不做 SIMD 的 G≥R 融合，保证语义一致）。发射形态：SIMD 成员
 // 正常向量发射，SIMT 成员各走标准单 gather invocation（不设融合发射标记）。同构选择
-// （全 SIMD 或全 SIMT）时跳过（与共模板候选重复）。primary_selection 返回 primary 的选择
-// （供 score function 使用）。
+// （全 SIMD 或全 SIMT）时跳过（与共模板候选重复）。
 af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
-                               ascir::TemplateId &primary_selection, bool &is_candidate_legal) {
+                               bool &is_candidate_legal, size_t &simd_selected_count) {
   is_candidate_legal = false;
-  primary_selection = ascir::TemplateId::kIndirectLoadSimt;
+  simd_selected_count = 0UL;
   std::vector<RewrittenGraphAnalysis> analyses(members.size());
   std::vector<ascir::TemplateId> selection(members.size(), ascir::TemplateId::kIndirectLoadSimt);
-  // 逐成员探测：SIMD 优先（dtype 门控 + 区域校验），SIMT 兜底（index 链重收集 + 校验）。
+  // 逐成员探测：性能序择优（两模板均合法时按单 gather 同款判据 + 同款能力门控选更优
+  // 的模板——embedding 形态且切片 ≥ 2KB、查表 ≥ 32 次选 SIMD，否则选 SIMT）；单模板
+  // 合法时结构强制；dense（无 embedding 能力）无偏好依据，默认选 SIMT（择优处注释）。
   // 探测在混模板候选自身的图副本上执行，AnalyzeRewrittenGraph 的改图（前置 ele 后移）与
   // 共模板路径一致，两模板探测间的重复调用幂等（改写模式不匹配即无操作）。
   for (size_t index = 0UL; index < members.size(); ++index) {
@@ -3901,11 +3905,57 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
             ValidateTemplate(member, ascir::TemplateId::kIndirectLoadSimd, analyses[index], boundary, simd_legal));
       }
     }
+    bool simt_legal = false;
     if (simd_legal) {
+      // SIMD 合法时仍需探测 SIMT：两模板均合法时按性能择优（大表路选 SIMD、小表路选
+      // SIMT → 异构 → MIXED 产出与共模板候选同场竞标——消除"两路都合法时 MIXED
+      // 必跳过、性能分裂无入口"的缺口）。SIMT 探测使用独立分析（不覆盖 SIMD 分析，
+      // 后续按 selection 取对应的 analyses）。
+      RewrittenGraphAnalysis simt_analysis;
+      GE_ASSERT_SUCCESS(
+          AnalyzeRewrittenGraph(graph, member, ascir::TemplateId::kIndirectLoadSimt, simt_legal, simt_analysis));
+      if (simt_legal) {
+        if (!CollectSimtGroupIndexRegion(graph, member, simt_analysis.index_region)) {
+          simt_legal = false;  // SIMT 结构不可行，退回 SIMD（结构强制）
+        } else {
+          simt_analysis.post_reduce = nullptr;
+          GE_ASSERT_SUCCESS(CompleteInputDataTensorAttrs(simt_analysis));
+          size_t boundary = member->outputs()[0]->attr.axis.size();
+          GE_ASSERT_SUCCESS(
+              ValidateTemplate(member, ascir::TemplateId::kIndirectLoadSimt, simt_analysis, boundary, simt_legal));
+        }
+      }
+      if (simd_legal && simt_legal) {
+        // 性能择优（仅 embedding 形态，与单 gather 的 IsEmbeddingFastPathCapable 同款
+        // 能力门控）：切片 ≥ 2KB 且查表 ≥ 32 → SIMD，动态 shape 保留候选序默认（SIMD
+        // 先）。dense / SIMD fast-path 视图不具备的成员无偏好依据（判据来自 embedding
+        // 行拷贝模型，对 dense"SIMD 窗口 = 整表驻留 UB"的语义不成立），默认选 SIMT——
+        // MIXED 构建的生存导向（无 UB 窗口约束一侧），使 dense 组仅经结构强制产出
+        // MIXED；共模板路径的平局语义不受影响（bid 层候选序仍 SIMD 先，与单 gather
+        // "无偏好 → 平局按候选序"一致）。
+        ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
+        GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(member, access_info));
+        int64_t slice_bytes = 0L;
+        int64_t lookup_count = 0L;
+        const bool static_cost = access_info.input_slice_bytes.GetConstValue(slice_bytes) &&
+                                 access_info.index_varying_extent.GetConstValue(lookup_count);
+        const bool prefers_simd = access_info.can_use_simd_embedding &&
+                                  (!static_cost || (slice_bytes >= kEmbeddingSimdPayloadBytesThreshold &&
+                                                    lookup_count >= kEmbeddingSimdLookupCountThreshold));
+        if (prefers_simd) {
+          selection[index] = ascir::TemplateId::kIndirectLoadSimd;
+          continue;  // 保留 SIMD 分析（analyses[index] 不变）
+        }
+        // 选 SIMT：用 SIMT 分析替换（后续 ValidateTemplate/AnnotateTemplate 消费）。
+        analyses[index] = simt_analysis;
+        selection[index] = ascir::TemplateId::kIndirectLoadSimt;
+        continue;
+      }
+      // 仅 SIMD 合法（SIMT 探测失败或校验不通过）：结构强制选 SIMD。
       selection[index] = ascir::TemplateId::kIndirectLoadSimd;
       continue;
     }
-    bool simt_legal = false;
+    // SIMD 不合法（int8 / 布局 / G≥R）：SIMT 兜底。
     GE_ASSERT_SUCCESS(
         AnalyzeRewrittenGraph(graph, member, ascir::TemplateId::kIndirectLoadSimt, simt_legal, analyses[index]));
     if (!simt_legal) {
@@ -3937,12 +3987,12 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
       simt_members.emplace_back(members[index]);
     }
   }
+  simd_selected_count = simd_members.size();
   if (simd_members.empty() || simt_members.empty()) {
     GELOGI("[IndirectLoad] Mixed mode skipped: selection is homogeneous (simd=%zu, simt=%zu).", simd_members.size(),
            simt_members.size());
     return af::SUCCESS;
   }
-  primary_selection = selection.front();
   // 输出链一致性（与共模板组一致）：全组输出边界为同一节点。
   for (size_t index = 1UL; index < members.size(); ++index) {
     if (analyses.front().output_store != analyses[index].output_store) {
@@ -4087,6 +4137,226 @@ std::string GenerateScoreFunc(const TemplateCase &template_case,
          "}\n";
 }
 
+// ==================== 多 gather 组聚合统计与统一打分（成员偏好满足模型） ====================
+// 组候选（SIMD/SIMT/混模板/SK）共用同一套聚合输入与同一个评分函数；分数语义为
+// "该形态下运行在各自偏好模板上的成员占比"（三档映射到 0..2，与单 gather 启发式
+// 同量级，跨生成器竞标不失真）。偏好判据与单 gather 完全同款（slice ≥ payload 阈值
+// && lookup ≥ 次数阈值）逐成员判定后计数；lookup 由配对约束保证全组一致。
+
+enum class GroupCandidateForm {
+  kSimd,   // 组 SIMD 共模板候选（L1）
+  kSimt,   // 组 SIMT 共模板候选（内部形态 L2/L3/L4 由压力模型定型）
+  kMixed,  // L5 混模板候选（异构选择，各成员以各自模板标注于同一 kernel）
+  kSk      // L6 SK 分段桥接候选（终态兜底，打分恒 0）
+};
+
+struct GroupAccessStats {
+  bool all_static = false;               // 全成员 slice/lookup 静态可得（任一动态即 false）
+  size_t member_count = 0UL;             // 成员总数 N
+  size_t simd_preferring_count = 0UL;    // 偏好 SIMD 的成员数（单 gather 同款判据逐成员）
+  int64_t slice_bytes_sum = 0L;          // Σ 成员切片字节（SIMD UB 压力代理）
+  int64_t ub_size = 0L;                  // 平台 UB 容量（0 = 未知，不施加 UB 代价项）
+  bool simd_embedding_capable = false;   // AND(can_use_simd_embedding)
+  bool simt_structured_capable = false;  // AND(can_use_simt_structured)
+};
+
+// 在候选图副本上收集（access_info ext attr 由成员各自的分析流水写入，与既有
+// primary 单点读取同一时机）；任一成员动态 shape 即整体退化为 alternate 平分。
+GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &members) {
+  GroupAccessStats stats;
+  stats.member_count = members.size();
+  stats.all_static = true;
+  stats.simd_embedding_capable = true;
+  stats.simt_structured_capable = true;
+  (void)TryGetIndirectLoadPlatformUbSize(stats.ub_size);
+  bool lookup_static = true;
+  bool lookup_gate_passed = true;
+  int64_t lookup_count = 0L;
+  for (const af::AscNodePtr &member : members) {
+    ascgen_utils::indirect_load::IndirectLoadAccessInfo info;
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(member, info));
+    stats.simd_embedding_capable = stats.simd_embedding_capable && info.can_use_simd_embedding;
+    stats.simt_structured_capable = stats.simt_structured_capable && info.can_use_simt_structured;
+    int64_t slice_bytes = 0L;
+    if (!info.input_slice_bytes.GetConstValue(slice_bytes)) {
+      stats.all_static = false;
+      continue;
+    }
+    stats.slice_bytes_sum += slice_bytes;
+    int64_t member_lookup = 0L;
+    if (!info.index_varying_extent.GetConstValue(member_lookup)) {
+      lookup_static = false;
+      continue;
+    }
+    lookup_count = member_lookup;  // 配对约束保证全组一致
+    if (slice_bytes >= kEmbeddingSimdPayloadBytesThreshold && member_lookup >= kEmbeddingSimdLookupCountThreshold) {
+      ++stats.simd_preferring_count;
+    }
+  }
+  // lookup 阈值门控全组统一（配对约束保证 index.shape 全等）：门控不过即全组不偏好 SIMD。
+  lookup_gate_passed = lookup_static && lookup_count >= kEmbeddingSimdLookupCountThreshold;
+  stats.all_static = stats.all_static && lookup_static;
+  if (!stats.all_static || !lookup_gate_passed) {
+    // 动态 shape / lookup 门控不过：偏好计数不可信，统一走 alternate 平分（候选序破平局）。
+    stats.simd_preferring_count = 0UL;
+    stats.slice_bytes_sum = 0L;
+  }
+  return stats;
+}
+
+// 统一打分：满足率三档映射 {≥2/3 → 2, ≥1/3 → 1, else 0} 减形态代价项，限定 [0,2]。
+// 满足率：SIMD → n_simd_pref/n；SIMT → 1−n_simd_pref/n；MIXED → 1（异构各得其所）；
+// SK → 0（纯兜底）。代价项（幅度 ≤1）：SIMD 且组切片总量过半 UB（tile 缩水风险）；
+// SIMT 且 L4 形态且 N>2（相位 N+1/barrier ×N）；MIXED 且少数派占比 < 1/3（分裂
+// 不均衡时整合开销不划算）。动态 shape / 能力门控不满足时统一 0 或 1（平局按
+// 候选序，与单 gather 行为一致）；Softmax 专用 Norm 加分与单 gather 一致。
+// MIXED 的能力门控（访问形态维度，非结构合法性）：门控取 simt_structured_capable
+// （= AND(embedding_like)）。can_use_simd_embedding ⟹ embedding_like，探测又保证
+// SIMD 侧的偏好选择仅发生于 can_use_simd_embedding 成员，故该门控等价于"每个成员
+// 的被选模板都有偏好依据"——满足率 N/N 的 2 分仅授予 embedding 性能分裂；dense 组
+// （含结构强制异构）无偏好依据，0 分按候选序兜底（共模板之后、SK 之前）。结构
+// 合法性由探测逐成员校验，此处不二次门控：embedding_like 度量访问形态（embedding
+// /dense），与"成员可跑哪块模板"（结构维度，探测已覆盖）正交，全组 AND 不与结构
+// 异构的存在前提冲突。
+std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const TemplateCase &template_case,
+                                   const GroupAccessStats &stats, const af::AscNodePtr &candidate_node,
+                                   const bool simt_unfused, const size_t mixed_simd_count,
+                                   const bool simd_lowers_to_strided) {
+  int32_t score = 0;
+  const bool fast_path_eligible = template_case.implementation == ascgen_utils::indirect_load::Implementation::kDefault;
+  const bool capable = fast_path_eligible && (form == GroupCandidateForm::kSimd    ? stats.simd_embedding_capable
+                                              : form == GroupCandidateForm::kSimt  ? stats.simt_structured_capable
+                                              : form == GroupCandidateForm::kMixed ? stats.simt_structured_capable
+                                                                                   : false);
+  if (capable) {
+    if (!stats.all_static) {
+      score = kEmbeddingAlternateFastPathScore;
+    } else {
+      size_t satisfied = 0UL;
+      if (form == GroupCandidateForm::kSimd) {
+        satisfied = stats.simd_preferring_count;
+      } else if (form == GroupCandidateForm::kSimt) {
+        satisfied = stats.member_count - stats.simd_preferring_count;
+      } else if (form == GroupCandidateForm::kMixed) {
+        satisfied = stats.member_count;  // 异构选择：每成员各得其所
+      }
+      const int64_t ratio_x3 = stats.member_count == 0UL
+                                   ? 0L
+                                   : static_cast<int64_t>(satisfied * 3UL) / static_cast<int64_t>(stats.member_count);
+      score = ratio_x3 >= 2L ? kEmbeddingFastPathScore : (ratio_x3 >= 1L ? kEmbeddingAlternateFastPathScore : 0);
+      if (form == GroupCandidateForm::kSimd && stats.member_count > 1UL && stats.ub_size > 0L &&
+          stats.slice_bytes_sum * 2L > stats.ub_size) {
+        --score;  // 组切片总量过半 UB：tile 缩水风险进分数
+      }
+      if (form == GroupCandidateForm::kSimt && simt_unfused && stats.member_count > 2UL) {
+        --score;  // L4 形态（非融合发射）：相位 N+1、barrier ×N
+      }
+      if (form == GroupCandidateForm::kMixed && stats.member_count > 0UL) {
+        const size_t mixed_simt_count = stats.member_count - mixed_simd_count;
+        const size_t minority = std::min(mixed_simd_count, mixed_simt_count);
+        if (minority * 3UL < stats.member_count) {
+          --score;  // 少数派 < 1/3：混搭整合开销不划算
+        }
+      }
+      if (score < 0) {
+        score = 0;
+      }
+    }
+  } else if (simd_lowers_to_strided && form == GroupCandidateForm::kSimt) {
+    // 非 embedding 形态（能力门控不满足）且组 SIMD 候选退化到逐元素 strided facade
+    // 时偏好 SIMT（单 gather 的 kSimtStridedFallbackScore 同源语义：strided 的逐元素
+    // 标量组装 offsets + 逐元素重排劣于 SIMT 标量直读）。
+    score = kSimtStridedFallbackScore;
+  }
+  if (candidate_node != nullptr) {
+    ascgen_utils::norm::NormInfo norm_info;
+    GE_ASSERT_SUCCESS(ascgen_utils::norm::TryGetNormInfo(candidate_node, norm_info));
+    if (norm_info.kind == ascgen_utils::norm::NormInfo::Kind::kSoftmaxDedicated) {
+      score += 1;
+    }
+  }
+  return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
+         "  (void)tiling_data;\n"
+         "  return " +
+         std::to_string(score) +
+         ";\n"
+         "}\n";
+}
+
+// ==================== 调度期组候选 UB 可行性预估（硬下界，保守放行） ====================
+// 与单 gather 的 IsSkWindowUbInfeasible/IsSimtUbInfeasible 同源思路：只估"再怎么缩
+// tile 也省不掉的硬下界"；平台信息不可得或任一成员 shape 动态时保守放行（宁漏判
+// 不误杀——并存竞标下漏判的后果是 tiling 期资源否决后由 SK 兜底候选接管，误杀的
+// 后果是白白损失融合机会）。定位为编译期优化（跳过必死候选的生成与求解），非
+// 正确性必需。
+
+// 组 SIMD 硬下界：共循环流水要求全部成员的 input 切片同时驻留 UB，最小 tile
+// （gather 轴 1 行）时的下界 = Σ 成员切片字节 + 预留。基于原始图成员的 tensor
+// 属性计算（gather 轴后缀 repeats × dtype），不依赖候选图的改写后视图。
+bool IsGroupSimdUbDoomed(const std::vector<af::AscNodePtr> &members) {
+  int64_t ub_size = 0L;
+  if (!TryGetIndirectLoadPlatformUbSize(ub_size)) {
+    return false;
+  }
+  int64_t slice_floor_sum = 0L;
+  for (const af::AscNodePtr &member : members) {
+    const size_t axis_index = GetIndirectLoadAxisIndex(member);
+    if (axis_index == kIndirectLoadInvalidAxisIndex) {
+      return false;
+    }
+    const auto inputs = member->inputs();
+    if (inputs.size() <= ascgen_utils::indirect_load::kInputTensorIndex) {
+      return false;
+    }
+    const auto &input_attr = inputs[ascgen_utils::indirect_load::kInputTensorIndex]->attr;
+    int64_t slice_bytes = static_cast<int64_t>(af::GetSizeByDataType(input_attr.dtype));
+    for (size_t dim = axis_index + 1UL; dim < input_attr.repeats.size(); ++dim) {
+      int64_t dim_size = 0L;
+      if (!input_attr.repeats[dim].GetConstValue(dim_size) || dim_size <= 0L) {
+        return false;  // 动态 shape 保守放行
+      }
+      slice_bytes *= dim_size;
+    }
+    slice_floor_sum += slice_bytes;
+  }
+  return slice_floor_sum + kIndirectLoadUbReservedBytes > ub_size;
+}
+
+// 组 SIMT·L4 硬下界：寄存器压力模型基线（24+18×N，side load/链节点只会更高）超
+// 最低档配额（127）时形态定为 L4（N ≥ 6），N 份 value tile 驻留 UB 的下界 =
+// N×R + 预留。L2（寄存器归并）UB≈0、L3 虽有 N 份 tile 但 N≤5 时通常可容纳——
+// 保守起见仅对 L4 判定（漏判 = tiling 期竞标淘汰，无误杀）。
+bool IsGroupSimtL4UbDoomed(const std::vector<af::AscNodePtr> &members) {
+  if (kRegisterBase + kRegisterPerMember * static_cast<uint64_t>(members.size()) <= kMinTierQuota) {
+    return false;
+  }
+  int64_t ub_size = 0L;
+  if (!TryGetIndirectLoadPlatformUbSize(ub_size)) {
+    return false;
+  }
+  const auto outputs = members.front()->outputs();
+  if (outputs.empty() || outputs[0] == nullptr || outputs[0]->attr.repeats.empty()) {
+    return false;
+  }
+  int64_t tail = 0L;
+  if (!outputs[0]->attr.repeats.back().GetConstValue(tail) || tail <= 0L) {
+    return false;  // 动态 shape 保守放行
+  }
+  const int64_t r_bytes = tail * static_cast<int64_t>(af::GetSizeByDataType(outputs[0]->attr.dtype));
+  return static_cast<int64_t>(members.size()) * r_bytes + kIndirectLoadUbReservedBytes > ub_size;
+}
+
+// SK 前置检查：图含 Transpose 时 SK 必非法（ApplySkGraphPass 的逐成员全图扫描结论
+// 提前到组级一次），同时避免逐成员重复扫描的冗余。
+bool HasTransposeNode(const ascir::HintGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (af::ops::IsOps<af::ascir_op::Transpose>(node)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 af::Status PartitionTaskGraph(const ascir::ImplGraph &graph, const af::AscNodePtr &indirect_load, bool is_sk_template,
                               std::vector<ascir::ImplGraph> &grouped_graphs) {
   if (!is_sk_template) {
@@ -4164,10 +4434,12 @@ af::Status FinalizeGroupedGraphLoweringMetadata(std::vector<ascir::ImplGraph> &g
   return af::SUCCESS;
 }
 
-// 多 gather 水平融合候选生成（六级降级阶梯）：共模板候选 SIMD×2 + SIMT×1（SIMD 优先
-// 竞标，SIMT 承载 1 字节值等 SIMD 不可行档位），全部否决时逐级 L5 混模板独立兜底与
-// L6 SK 分段桥接（逐成员复用单 gather SK 流水，workspace 边界分段，见设计文档「六级
-// 降级阶梯」章节）。
+// 多 gather 水平融合候选生成（并存竞标制）：全部形态在调度期并存生成、进同一竞争
+// 池交 CalcScore 竞标——L1/L4 共模板候选（SIMD×2 + SIMT×1，SIMT 内部按寄存器压力
+// 模型定型 L2/L3/L4）+ L5 混模板候选（异构选择时产出，同构跳过）+ L6 SK 分段桥接
+// 候选（打分恒 0 的终态兜底，仅当其余候选全灭/垫底时胜出）。统一打分为成员偏好
+// 满足模型（GenerateGroupScoreFunc），同一套组聚合输入对全部形态可比；tiling 期
+// 资源死亡的兜底由 SK 在场结构性成立（单 gather 四候选并存机制的组路径推广）。
 af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGroup &group,
                                    std::vector<ascir::ImplGraph> &graphs, std::vector<std::string> &score_functions) {
   std::vector<af::AscNodePtr> members{group.primary};
@@ -4177,6 +4449,10 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
   }
   GELOGI("[IndirectLoad] Generate gather group schedule candidates for graph[%s], primary[%s] with %zu members.",
          graph.GetName().c_str(), group.primary->GetNamePtr(), members.size());
+  const bool simd_ub_doomed = IsGroupSimdUbDoomed(members);
+  const bool simt_ub_doomed = IsGroupSimtL4UbDoomed(members);
+  // [SK 前置检查] 图含 Transpose 时 SK 必非法，组级一次判定（消除逐成员重复扫描）。
+  const bool sk_blocked = HasTransposeNode(graph);
   const TemplateCase cases[] = {
       {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kDefault},
       {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kGatherApi},
@@ -4186,6 +4462,20 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
   bool simd_lowers_to_strided = false;
   for (const TemplateCase &template_case : cases) {
     const ascir::TemplateId template_id = template_case.template_id;
+    if (template_id == ascir::TemplateId::kIndirectLoadSimd && simd_ub_doomed) {
+      GELOGI(
+          "[IndirectLoad] Skip gather group SIMD candidate for primary[%s]: UB hard lower bound exceeds platform "
+          "capacity (schedule-time estimation).",
+          group.primary->GetNamePtr());
+      continue;
+    }
+    if (template_id == ascir::TemplateId::kIndirectLoadSimt && simt_ub_doomed) {
+      GELOGI(
+          "[IndirectLoad] Skip gather group SIMT candidate for primary[%s]: L4 value tiles exceed platform UB "
+          "(schedule-time estimation).",
+          group.primary->GetNamePtr());
+      continue;
+    }
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
     GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
     IndirectLoadGroup candidate_group;
@@ -4218,30 +4508,47 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
              static_cast<int32_t>(template_id), candidate_group.primary->GetNamePtr(), members.size());
       continue;
     }
-    // 组内 index.shape 相同，模板档位判决以 primary 的访问信息为准。
-    ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
-    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_group.primary, access_info));
+    // 组聚合统计 + 统一打分（成员偏好满足模型，同一套输入对全部形态可比）。
+    std::vector<af::AscNodePtr> candidate_members{candidate_group.primary};
+    candidate_members.insert(candidate_members.end(), candidate_group.others.begin(), candidate_group.others.end());
+    const GroupAccessStats stats = CollectGroupAccessStats(candidate_members);
+    const bool simt_unfused = template_id == ascir::TemplateId::kIndirectLoadSimt &&
+                              !ascgen_utils::indirect_load::IsSimtFusedPrimary(candidate_group.primary);
     if (template_id == ascir::TemplateId::kIndirectLoadSimd &&
         template_case.implementation == ascgen_utils::indirect_load::Implementation::kDefault) {
-      simd_lowers_to_strided = LowersToStridedSimdFacade(candidate_group.primary);
+      // 任一成员退化到逐元素 strided facade 即视为该组 SIMD 候选退化，供后续 SIMT
+      // 候选打分施加让位偏好（单 gather 的 LowersToStridedSimdFacade 同源语义，
+      // 组版为全成员 ANY 判定）。
+      for (const af::AscNodePtr &member : candidate_members) {
+        if (LowersToStridedSimdFacade(member)) {
+          simd_lowers_to_strided = true;
+          break;
+        }
+      }
     }
+    const GroupCandidateForm form =
+        template_id == ascir::TemplateId::kIndirectLoadSimd ? GroupCandidateForm::kSimd : GroupCandidateForm::kSimt;
     graphs.emplace_back(std::move(candidate_graph));
-    score_functions.emplace_back(
-        GenerateScoreFunc(template_case, access_info, candidate_group.primary, simd_lowers_to_strided));
+    score_functions.emplace_back(GenerateGroupScoreFunc(form, template_case, stats, candidate_group.primary,
+                                                        simt_unfused, 0UL, simd_lowers_to_strided));
     GELOGI("[IndirectLoad] Add gather group schedule candidate[%d, %d] for primary[%s] with %zu members.",
            static_cast<int32_t>(template_id), static_cast<int32_t>(template_case.implementation),
            candidate_group.primary->GetNamePtr(), members.size());
   }
-  // [L5 混模板独立兜底] 全部共模板候选（SIMD×2 + SIMT）被否决时的死区承接：逐成员探测
-  // （SIMD 优先 / SIMT 兜底），异构选择时各成员以各自模板标注于同一 kernel，归并/输出链
-  // （含 Reduce）统一作为扇出分支向量代码。同构选择跳过（与共模板候选重复）。
-  if (graphs.empty()) {
+  // [L5 混模板候选]（并存，不再以共模板全灭为门槛）：逐成员探测（SIMD 优先 / SIMT
+  // 兜底；dense 双合法默认 SIMT——生存导向，见探测处注释），异构选择时各成员以各自
+  // 模板标注于同一 kernel，归并/输出链（含 Reduce）统一作为扇出分支向量代码；同构
+  // 选择跳过（与共模板候选重复）。统一打分按成员偏好满足模型：满足率恒为 1（各得其
+  // 所）——仅 embedding 形态（偏好有据，2 分与共模板同场竞标）；dense 组（含结构强制
+  // 异构）无偏好依据 0 分，按候选序兜底（共模板之后、SK 之前）。少数派占比 < 1/3 时
+  // 扣分（整合开销不划算）。
+  {
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
     GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
     IndirectLoadGroup candidate_group;
     candidate_group.primary = candidate_graph.FindNode(group.primary->GetName().c_str());
     GE_ASSERT_NOTNULL(candidate_group.primary, "Failed to find copied IndirectLoad node[%s].",
-                      group.primary->GetName().c_str());
+                      group.primary->GetNamePtr());
     for (const af::AscNodePtr &member : group.others) {
       const af::AscNodePtr candidate_member = candidate_graph.FindNode(member->GetName().c_str());
       GE_ASSERT_NOTNULL(candidate_member, "Failed to find copied IndirectLoad node[%s].", member->GetName().c_str());
@@ -4256,33 +4563,31 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
     bool softmax_normalized = false;
     GE_ASSERT_SUCCESS(
         softmax_pattern::NormalizeDirectPostSoftmax(candidate_graph, candidate_group.primary, softmax_normalized));
-    ascir::TemplateId primary_selection = ascir::TemplateId::kIndirectLoadSimt;
     bool is_candidate_legal = false;
-    GE_ASSERT_SUCCESS(ApplyGraphPassMixed(candidate_graph, candidate_members, primary_selection, is_candidate_legal));
+    size_t simd_selected_count = 0UL;
+    GE_ASSERT_SUCCESS(ApplyGraphPassMixed(candidate_graph, candidate_members, is_candidate_legal, simd_selected_count));
     if (is_candidate_legal) {
-      ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
-      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_group.primary, access_info));
+      const GroupAccessStats stats = CollectGroupAccessStats(candidate_members);
       graphs.emplace_back(std::move(candidate_graph));
-      // 混模板死区承接为该组唯一候选（共模板候选全被否决后的兜底），不参与 SIMD/SIMT
-      // 共模板排序，不施加 strided 偏好。
-      score_functions.emplace_back(
-          GenerateScoreFunc(TemplateCase{primary_selection, ascgen_utils::indirect_load::Implementation::kDefault},
-                            access_info, candidate_group.primary, false));
-      GELOGI("[IndirectLoad] Add mixed template candidate for graph[%s] (mixed dead-zone fallback).",
-             graph.GetName().c_str());
+      score_functions.emplace_back(GenerateGroupScoreFunc(
+          GroupCandidateForm::kMixed,
+          TemplateCase{ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kDefault},
+          stats, candidate_group.primary, false, simd_selected_count, false));
+      GELOGI("[IndirectLoad] Add mixed template candidate for graph[%s] (simd=%zu, simt=%zu).", graph.GetName().c_str(),
+             simd_selected_count, candidate_members.size() - simd_selected_count);
     }
   }
-  // [L6 SK 分段桥接] 终态兜底：逐成员复用单 gather SK 流水（workspace 边界把各路 IL 隔入
-  // 独立段、归并/输出链作为消费段独立调度——各段保留各自调度，承接共同调度不可行场景）。
-  // SK 自身不可行（Transpose / 复合 Norm / SK 校验否决）时返回无候选——该图对本生成器
-  // 不可融合，由前端 BackendSpec 预防兜底。
-  if (graphs.empty()) {
+  // [L6 SK 分段桥接候选]（并存兜底，打分恒 0）：逐成员复用单 gather SK 流水（workspace
+  // 边界把各路 IL 隔入独立段、归并/输出链作为消费段独立调度——各段保留各自调度）。
+  // 仅当其余候选全灭/垫底时胜出——tiling 期资源死亡的兜底由此结构性成立；SK 自身
+  // 不可行（Transpose / 复合 Norm / SK 校验否决 / dtype 门控）时无此候选。
+  if (!sk_blocked) {
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
     GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
     IndirectLoadGroup candidate_group;
     candidate_group.primary = candidate_graph.FindNode(group.primary->GetName().c_str());
     GE_ASSERT_NOTNULL(candidate_group.primary, "Failed to find copied IndirectLoad node[%s].",
-                      group.primary->GetName().c_str());
+                      group.primary->GetNamePtr());
     for (const af::AscNodePtr &member : group.others) {
       const af::AscNodePtr candidate_member = candidate_graph.FindNode(member->GetName().c_str());
       GE_ASSERT_NOTNULL(candidate_member, "Failed to find copied IndirectLoad node[%s].", member->GetName().c_str());
@@ -4298,20 +4603,20 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
     GE_ASSERT_SUCCESS(
         ApplyGraphPassGroup(candidate_graph, candidate_group, ascir::TemplateId::kIndirectLoadSK, is_candidate_legal));
     if (is_candidate_legal) {
-      ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
-      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(candidate_group.primary, access_info));
       graphs.emplace_back(std::move(candidate_graph));
-      score_functions.emplace_back(GenerateScoreFunc(
+      score_functions.emplace_back(GenerateGroupScoreFunc(
+          GroupCandidateForm::kSk,
           TemplateCase{ascir::TemplateId::kIndirectLoadSK, ascgen_utils::indirect_load::Implementation::kDefault},
-          access_info, candidate_group.primary, false));
-      GELOGI("[IndirectLoad] Add gather group SK bridge candidate for graph[%s] (terminal fallback).",
+          GroupAccessStats{}, candidate_group.primary, false, 0UL, false));
+      GELOGI("[IndirectLoad] Add gather group SK bridge candidate for graph[%s] (coexisting fallback).",
              graph.GetName().c_str());
-    } else {
-      GELOGW(
-          "[IndirectLoad] All gather group candidates including SK bridge rejected for graph[%s] with %zu "
-          "members; no candidates emitted (frontend BackendSpec prevention applies).",
-          graph.GetName().c_str(), members.size());
     }
+  }
+  if (graphs.empty()) {
+    GELOGW(
+        "[IndirectLoad] All gather group candidates (common/mixed/SK bridge) rejected for graph[%s] with %zu "
+        "members; no candidates emitted (frontend BackendSpec prevention applies).",
+        graph.GetName().c_str(), members.size());
   }
   return af::SUCCESS;
 }
