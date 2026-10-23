@@ -148,7 +148,7 @@ ReduceTailSubAxes MakeReduceTailSubAxes(const Expr &reduce_size, const Expr &tai
   sub_axes.origin_reduce->data_type_size = kAxisDataTypeSize;
   sub_axes.reduce->data_type_size = kAxisDataTypeSize;
   sub_axes.tail->data_type_size = kAxisDataTypeSize;
-  sub_axes.reduce->is_bind_multi_core = bind_multicore;
+  sub_axes.origin_reduce->is_bind_multi_core = bind_multicore;
   sub_axes.reduce->orig_axis_name = {sub_axes.origin_reduce->name};
   sub_axes.reduce->orig_axis.emplace_back(sub_axes.origin_reduce.get());
   sub_axes.tail->is_node_innerest_dim = true;
@@ -189,7 +189,7 @@ ReduceTailSortCase BuildReduceTailSortCase(const Expr &reduce_size, const Expr &
   test_case.tuning_space->sub_axes.emplace_back(std::move(sub_axes.tail));
   auto reduce_axis = MakeAttAxis("reduce");
   auto tail_axis = MakeAttAxis("tail");
-  InitAttAxis(reduce_axis, "reduce", reduce_size, bind_multicore);
+  InitAttAxis(reduce_axis, "reduce", reduce_size);
   InitAttAxis(tail_axis, "tail", tail_size);
   test_case.model_info.arg_list = {reduce_axis, tail_axis};
   return test_case;
@@ -208,6 +208,13 @@ ReduceTailSortCase BuildReduceTailSortCaseWithOriginalAxes(const Expr &reduce_si
   tail->orig_axis_name = {origin_tail->name};
   tail->orig_axis.emplace_back(origin_tail.get());
   test_case.tuning_space->sub_axes.emplace_back(std::move(origin_tail));
+  return test_case;
+}
+
+ReduceTailSortCase BuildReduceInnermostSortCase() {
+  auto test_case = BuildReduceTailSortCase(af::Symbol(129800), af::Symbol(84));
+  test_case.tuning_space->sub_axes[1]->is_node_innerest_dim = true;
+  test_case.tuning_space->sub_axes[2]->is_node_innerest_dim = false;
   return test_case;
 }
 }  // namespace
@@ -501,6 +508,71 @@ TEST_F(TestArgListReorder, case2) {
     arg_id_map[arg->name] = i;
   }
   EXPECT_EQ(arg_id_map["z0z1t"] < arg_id_map["z2t"], true);
+}
+
+TEST_F(TestArgListReorder, reorder_duplicate_tiling_r_with_non_reduce_first) {
+  auto test_case = BuildReduceInnermostSortCase();
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  ASSERT_EQ(tiling_R_arg_list.size(), test_case.model_info.arg_list.size());
+  EXPECT_LT(GetArgIndex(test_case.model_info.arg_list, "reduce"), GetArgIndex(test_case.model_info.arg_list, "tail"));
+  EXPECT_LT(GetArgIndex(tiling_R_arg_list, "tail"), GetArgIndex(tiling_R_arg_list, "reduce"));
+}
+
+TEST_F(TestArgListReorder, skip_duplicate_tiling_r_when_dependencies_prevent_reorder) {
+  auto test_case = BuildReduceInnermostSortCase();
+  test_case.model_info.arg_list[1]->from_axis.emplace_back(test_case.model_info.arg_list[0].get());
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  EXPECT_TRUE(tiling_R_arg_list.empty());
+  EXPECT_LT(GetArgIndex(test_case.model_info.arg_list, "reduce"), GetArgIndex(test_case.model_info.arg_list, "tail"));
+}
+
+TEST_F(TestArgListReorder, reorder_duplicate_tiling_r_when_only_origin_order_differs) {
+  auto test_case = BuildReduceInnermostSortCase();
+  test_case.tuning_space->sub_axes[1]->is_node_innerest_dim = false;
+  auto origin_axis = MakeAttAxis("origin");
+  InitAttAxis(origin_axis, "origin", CreateExpr("origin_size"));
+  origin_axis->axis_pos = AxisPosition::ORIGIN;
+  test_case.model_info.arg_list.insert(test_case.model_info.arg_list.begin(), origin_axis);
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  arg_list_reorder.innermost_dim_map_["origin"] = true;
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  ASSERT_EQ(tiling_R_arg_list.size(), test_case.model_info.arg_list.size());
+  EXPECT_LT(GetArgIndex(tiling_R_arg_list, "tail"), GetArgIndex(tiling_R_arg_list, "reduce"));
+}
+
+TEST_F(TestArgListReorder, duplicate_tiling_r_preserves_parent_order) {
+  auto test_case = BuildReduceInnermostSortCase();
+  test_case.model_info.arg_list[1]->from_axis.emplace_back(test_case.model_info.arg_list[0].get());
+  auto outer_axis = MakeAttAxis("outer");
+  InitAttAxis(outer_axis, "outer", CreateExpr("outer_size"));
+  test_case.model_info.arg_list.emplace_back(outer_axis);
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  ASSERT_EQ(tiling_R_arg_list.size(), 3U);
+  EXPECT_LT(GetArgIndex(tiling_R_arg_list, "outer"), GetArgIndex(tiling_R_arg_list, "reduce"));
+  EXPECT_LT(GetArgIndex(tiling_R_arg_list, "reduce"), GetArgIndex(tiling_R_arg_list, "tail"));
+}
+
+TEST_F(TestArgListReorder, duplicate_tiling_r_reorders_multiple_non_reduce_axes) {
+  auto test_case = BuildReduceInnermostSortCase();
+  constexpr size_t kAxisCount = 32U;
+  for (size_t i = 0U; i < kAxisCount; ++i) {
+    const auto name = "outer" + std::to_string(i);
+    auto axis = MakeAttAxis(name);
+    InitAttAxis(axis, name, CreateExpr((name + "_size").c_str()));
+    test_case.model_info.arg_list.emplace_back(axis);
+  }
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  ASSERT_EQ(tiling_R_arg_list.size(), kAxisCount + 2U);
+  EXPECT_EQ(GetArgIndex(tiling_R_arg_list, "reduce"), tiling_R_arg_list.size() - 1U);
 }
 
 TEST_F(TestArgListReorder, keep_tiling_r_arg_list_when_reduce_block_split) {
