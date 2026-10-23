@@ -1050,9 +1050,11 @@ TEST(IndirectLoadApiCallTest, GenerateSimdProducesIndirectLoadSimdCall) {
   std::string result;
   GenerateSimdCall(ge::DT_FLOAT16, result);
   EXPECT_NE(result.find("// IndirectLoad SIMD"), std::string::npos);
-  EXPECT_NE(result.find("IndirectLoadSimdStrided<half, int32_t, 2, 1>"), std::string::npos);
-  // Symbolic sizes are dynamic shapes, which use the strided path and require a temporary UB buffer.
-  EXPECT_NE(result.find("tmp_buf_0"), std::string::npos);
+  // 符号 strides 可证连续的动态 shape 视图判 dense，走向量化 RegisterGather
+  // facade（此前动态 shape 一律保守判 strided，需要临时 UB 缓冲逐元素组装）。
+  EXPECT_NE(result.find("IndirectLoadSimd<half, int32_t, 2, 1>"), std::string::npos);
+  EXPECT_EQ(result.find("IndirectLoadSimdStrided"), std::string::npos);
+  EXPECT_EQ(result.find("tmp_buf_0"), std::string::npos);
   EXPECT_NE(result.find("indirect_load_simd_params{static_cast<uint32_t>("), std::string::npos);
   EXPECT_NE(result.find("), static_cast<uint32_t>("), std::string::npos);
 }
@@ -1060,7 +1062,7 @@ TEST(IndirectLoadApiCallTest, GenerateSimdProducesIndirectLoadSimdCall) {
 TEST(IndirectLoadApiCallTest, GenerateSimdUint32InputProducesTypedCall) {
   std::string result;
   GenerateSimdCall(ge::DT_UINT32, result);
-  EXPECT_NE(result.find("IndirectLoadSimdStrided<uint32_t, int32_t, 2, 1>"), std::string::npos);
+  EXPECT_NE(result.find("IndirectLoadSimd<uint32_t, int32_t, 2, 1>"), std::string::npos);
 }
 
 TEST(IndirectLoadApiCallTest, GenerateSimdDenseSelectsDenseApi) {

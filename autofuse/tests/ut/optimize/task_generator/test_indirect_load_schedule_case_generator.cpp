@@ -195,7 +195,8 @@ void BuildIndexPreChain(const af::AscOpOutput &index_load_output, const std::vec
 enum class IndexChainExtraConsumer { kNone, kExternalStore, kIllegalConsumer };
 
 af::AscGraph BuildIndirectLoadGraph(int64_t axis, bool has_input_pre_node = false, bool full_prefix = false,
-                                    IndexChainExtraConsumer index_extra = IndexChainExtraConsumer::kNone) {
+                                    IndexChainExtraConsumer index_extra = IndexChainExtraConsumer::kNone,
+                                    bool gapped_input_strides = false) {
   af::AscGraph graph("indirect_load_ut_graph");
   const af::Expression s0 = graph.CreateSizeVar("s0");
   const af::Expression s1 = graph.CreateSizeVar("s1");
@@ -217,7 +218,12 @@ af::AscGraph BuildIndirectLoadGraph(int64_t axis, bool has_input_pre_node = fals
   const std::vector<af::AxisId> output_axes = {z4.id, z5.id, z6.id, z7.id};
   const std::vector<af::Expression> input_repeats = {s0, s1, s2, s3};
   const std::vector<af::Expression> output_repeats = {s4, s5, s6, s7};
-  const std::vector<af::Expression> input_strides = {s1 * s2 * s3, s2 * s3, s3, af::sym::kSymbolOne};
+  std::vector<af::Expression> input_strides = {s1 * s2 * s3, s2 * s3, s3, af::sym::kSymbolOne};
+  if (gapped_input_strides) {
+    // 输入最外维行间留恒定物理间隙：动态 strided 形态，SIMD 候选 lowering 退化到
+    // 逐元素 strided facade（PR 2486 的 SIMT 让位场景）。
+    input_strides[0] = input_strides[0] + af::Symbol(1);
+  }
   const std::vector<af::Expression> output_strides = {s5 * s6 * s7, s6 * s7, s7, af::sym::kSymbolOne};
 
   af::ascir_op::Data x("x", graph);
@@ -993,11 +999,11 @@ std::vector<af::AscGraph> GenerateIndirectLoadCases(int64_t axis) {
   EXPECT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
   EXPECT_EQ(graphs.size(), 4UL);
   EXPECT_EQ(score_functions.size(), 4UL);
-  // 动态 shape 下 SIMD 候选只能退化到逐元素 strided facade，SIMT 候选得分严格更高；
-  // 两个 SIMD 候选与 SK 候选维持同分。
+  // 动态 shape 的稠密视图（input/index strides 符号可证连续）判 dense，SIMD 候选
+  // 不再退化到 strided facade，四个候选同分，由候选顺序优先选中 SIMD。
   EXPECT_EQ(score_functions[0], score_functions[1]);
+  EXPECT_EQ(score_functions[0], score_functions[2]);
   EXPECT_EQ(score_functions[0], score_functions[3]);
-  EXPECT_GT(ParseScore(score_functions[2]), ParseScore(score_functions[0]));
   return graphs;
 }
 
@@ -1109,10 +1115,47 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesNonOverlappingStridedLayou
   EXPECT_EQ(layout.physical_repeats, view.sizes);
 }
 
-TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesDynamicShapeAsStridedLayout) {
+TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesDynamicDenseShapeAsDenseLayout) {
   const af::Expression s0 = af::Symbol("s0");
   const af::Expression s1 = af::Symbol("s1");
   const ascgen_utils::indirect_load::LogicalTensorView view = {{0, 1}, {s0, s1}, {s1, af::Symbol(1)}};
+  ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(view, layout), af::SUCCESS);
+  // 符号可证连续的动态视图判 dense：dense facade 的 kernel 参数为运行时表达式，
+  // 可安全使用向量化 Gather（此前动态 shape 一律保守判 strided）。
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kDense);
+  EXPECT_EQ(layout.physical_repeats, view.sizes);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesDynamicDenseShape3DAsDenseLayout) {
+  const af::Expression s0 = af::Symbol("s0");
+  const af::Expression s1 = af::Symbol("s1");
+  const af::Expression s2 = af::Symbol("s2");
+  const ascgen_utils::indirect_load::LogicalTensorView view = {{0, 1, 2}, {s0, s1, s2}, {s1 * s2, s2, af::Symbol(1)}};
+  ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(view, layout), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kDense);
+  EXPECT_EQ(layout.physical_repeats, view.sizes);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesDynamicGappedShapeAsStridedLayout) {
+  const af::Expression s0 = af::Symbol("s0");
+  const af::Expression s1 = af::Symbol("s1");
+  const af::Expression s2 = af::Symbol("s2");
+  // 行间存在恒定物理间隙（首维 stride 比 s1*s2 多 1），不可证明连续。
+  const ascgen_utils::indirect_load::LogicalTensorView view = {
+      {0, 1, 2}, {s0, s1, s2}, {s1 * s2 + af::Symbol(1), s2, af::Symbol(1)}};
+  ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(view, layout), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kStrided);
+  EXPECT_EQ(layout.physical_repeats, view.sizes);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesDynamicStridedShapeAsStridedLayout) {
+  const af::Expression s0 = af::Symbol("s0");
+  const af::Expression s1 = af::Symbol("s1");
+  // 元素跨步 2（stride 为跨步 span 的 2 倍），逻辑视图存在物理间隙。
+  const ascgen_utils::indirect_load::LogicalTensorView view = {{0, 1}, {s0, s1}, {s1 * af::Symbol(2), af::Symbol(2)}};
   ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
   ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(view, layout), af::SUCCESS);
   EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kStrided);
@@ -3656,4 +3699,19 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkRedirectsCompositeNormChain) {
   }
   // mean(1) + diff(2消费者) + var(1) = 4 个边界 workspace 节点（pre 形态）。
   EXPECT_GE(norm_boundaries, 3);
+}
+
+// 真 strided 动态形态（输入行间物理间隙，符号不可证连续）：SIMD(kDefault) 候选
+// lowering 退化到逐元素 strided facade，PR 2486 的 SIMT 让位加分继续生效——SIMT
+// 候选得分严格高于 SIMD。与 GenerateIndirectLoadCases 的稠密动态图（SIMD 不退化、
+// 四候选同分）互补，覆盖动态 shape 判定放开后的两条路径。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SimtScoresAboveSimdWhenDynamicInputGapped) {
+  auto graph = BuildIndirectLoadGraph(2, false, false, IndexChainExtraConsumer::kNone, true);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_FALSE(graphs.empty());
+  ASSERT_EQ(score_functions.size(), graphs.size());
+  EXPECT_GT(ParseScore(score_functions[2]), ParseScore(score_functions[0]));
 }

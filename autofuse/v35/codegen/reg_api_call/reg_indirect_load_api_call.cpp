@@ -724,7 +724,9 @@ af::Status EmitSimtTransform(const af::AscNodePtr &node, std::map<ascir::TensorI
 
 af::Status EmitSimtArangeExpr(const af::AscNodePtr &node,
                               const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
-                              const std::string &offset_expr, std::map<ascir::TensorId, std::string> &values) {
+                              const std::string &offset_expr, const TPipe &tpipe,
+                              SimtRuntimeSizeRegistry &runtime_sizes, const std::string &offset_type,
+                              std::map<ascir::TensorId, std::string> &values) {
   const auto impl = ascgen_utils::GetAscIrCodegenImpl(node->GetType());
   GE_ASSERT_NOTNULL(impl, "SIMT zero-input codegen is not registered for node %s[%s].", node->GetTypePtr(),
                     node->GetNamePtr());
@@ -744,12 +746,17 @@ af::Status EmitSimtArangeExpr(const af::AscNodePtr &node,
   const size_t logical_pos = static_cast<size_t>(std::distance(logical_view.output.axis_ids.begin(), logical_axis));
   GE_ASSERT_TRUE(logical_pos < logical_view.output.sizes.size() && logical_pos < logical_view.output.strides.size(),
                  "Arange output view metadata is incomplete.");
+  // [SIMT 动态 shape 节点链] Arange 坐标的视图步长/尺寸与坐标分解同源：动态 shape 下
+  // 是运行期符号（ksN），静态方法体内既无 tiling 指针 t 也不能裸渲染符号名，须与坐标
+  // 分解同法经 Context（rt_size_N）传入；静态 shape 保持常量内联（uint32 产物不变）。
   std::string coordinate = std::string("(") + offset_expr;
   if (af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[logical_pos], af::sym::kSymbolOne) !=
       af::TriBool::kTrue) {
-    coordinate += std::string(" / ") + logical_view.output.strides[logical_pos].Str().get();
+    coordinate += std::string(" / ") +
+                  runtime_sizes.InlineOrContext(logical_view.output.strides[logical_pos], tpipe, offset_type);
   }
-  coordinate += std::string(") % (") + logical_view.output.sizes[logical_pos].Str().get() + ")";
+  coordinate += std::string(") % (") +
+                runtime_sizes.InlineOrContext(logical_view.output.sizes[logical_pos], tpipe, offset_type) + ")";
   std::string expr;
   GE_ASSERT_GRAPH_SUCCESS(v2_impl->GenerateSimtScalarExpr(*node, {coordinate}, expr));
   values[node->outputs()[0]->attr.mem.tensor_id] = expr;
@@ -760,7 +767,9 @@ af::Status EmitSimtEvaluatorNodes(const std::vector<af::AscNodePtr> &nodes, cons
                                   const SimtLoadIndexOffsetExpressions *index_offset_expressions,
                                   const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
                                   const std::string &output_offset_expr, const std::string &arange_offset_expr,
-                                  std::map<ascir::TensorId, std::string> &values, std::stringstream &ss) {
+                                  const TPipe &tpipe, SimtRuntimeSizeRegistry &runtime_sizes,
+                                  const std::string &offset_type, std::map<ascir::TensorId, std::string> &values,
+                                  std::stringstream &ss) {
   for (const af::AscNodePtr &node : nodes) {
     const auto load = load_metadata.find(node->GetName());
     if (load != load_metadata.end()) {
@@ -806,7 +815,8 @@ af::Status EmitSimtEvaluatorNodes(const std::vector<af::AscNodePtr> &nodes, cons
       continue;
     }
     if (af::ops::IsOps<af::ascir_op::Arange>(node)) {
-      GE_ASSERT_SUCCESS(EmitSimtArangeExpr(node, logical_view, arange_offset_expr, values));
+      GE_ASSERT_SUCCESS(
+          EmitSimtArangeExpr(node, logical_view, arange_offset_expr, tpipe, runtime_sizes, offset_type, values));
       continue;
     }
     if (af::ops::IsOps<af::ascir_op::Store>(node)) {
@@ -835,9 +845,12 @@ af::Status GenerateSimtEvaluatorBody(const std::vector<af::AscNodePtr> &nodes,
                                      const SimtLoadMetadataMap &load_metadata, std::stringstream &ss,
                                      const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
                                      const std::string &output_offset_expr, const std::string &arange_offset_expr,
+                                     const TPipe &tpipe, SimtRuntimeSizeRegistry &runtime_sizes,
+                                     const std::string &offset_type,
                                      const SimtLoadIndexOffsetExpressions *index_offset_expressions = nullptr) {
   GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(nodes, load_metadata, index_offset_expressions, logical_view,
-                                           output_offset_expr, arange_offset_expr, values, ss));
+                                           output_offset_expr, arange_offset_expr, tpipe, runtime_sizes, offset_type,
+                                           values, ss));
   const auto result = values.find(result_tensor_id);
   GE_ASSERT_TRUE(result != values.end(), "SIMT evaluator result tensor[%ld] has no scalar value.", result_tensor_id);
   ss << "    return " << result->second << ";" << std::endl;
@@ -1136,8 +1149,8 @@ af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const st
   GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(logical_view, nodes, load_metadata, tpipe, offset_type,
                                                            "output_index", "output_index", has_post_reduce, gather_axis,
                                                            runtime_sizes, offsets, ss));
-  GE_ASSERT_SUCCESS(
-      EmitSimtEvaluatorNodes(nodes, load_metadata, &offsets, logical_view, "output_index", "output_index", values, ss));
+  GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(nodes, load_metadata, &offsets, logical_view, "output_index", "output_index",
+                                           tpipe, runtime_sizes, offset_type, values, ss));
   // index 生产链尾部的外部 store 收为空节点输出链：链值由 Index() 求值器结果注入
   // （与 gather 值的 "value" 种子同构）。已由值侧求值产出（含输出侧 GM load 产出）
   // 的张量不注入，避免合流链双写。
@@ -1240,7 +1253,7 @@ af::Status GenSimtIndexEvaluator(const std::string &index_dtype, const std::stri
                                                            "output_index", "index_offset", has_post_reduce, -1L,
                                                            runtime_sizes, offsets, ss));
   return GenerateSimtEvaluatorBody(nodes, values, result_tensor_id, load_metadata, ss, logical_view, "index_offset",
-                                   "output_index", &offsets);
+                                   "output_index", tpipe, runtime_sizes, offset_type, &offsets);
 }
 
 af::Status GenAicoreIndexEvaluator(const std::string &index_dtype, const std::string &offset_type,
@@ -2544,11 +2557,22 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
         GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(
             members[k].logical_view, members[k].index_nodes, load_map, tpipe, GetSimtOffsetType(members[k].policy),
             "output_index", "index_offset", false, -1L, fused_runtime_sizes, scratch_offsets, scratch));
+        std::map<ascir::TensorId, std::string> scratch_values;
+        GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(
+            members[k].index_nodes, load_map, &scratch_offsets, members[k].logical_view, "index_offset", "output_index",
+            tpipe, fused_runtime_sizes, GetSimtOffsetType(members[k].policy), scratch_values, scratch));
       }
       if (merge_info.register_merge) {
         GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(
             members.front().logical_view, emission_nodes, merge_load_map, tpipe, collect_offset_type, "output_index",
             "output_index", false, -1L, fused_runtime_sizes, scratch_offsets, scratch));
+        std::map<ascir::TensorId, std::string> scratch_values;
+        for (size_t k = 0; k < member_count; ++k) {
+          scratch_values[members[k].value_tensor_id] = "value" + std::to_string(k);
+        }
+        GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(emission_nodes, merge_load_map, &scratch_offsets,
+                                                 members.front().logical_view, "output_index", "output_index", tpipe,
+                                                 fused_runtime_sizes, collect_offset_type, scratch_values, scratch));
       }
     }
     // Phase 2：FusedCtx——N 路 input 指针 + 逐成员策略参数（常量驻留）+ context 张量。
@@ -2664,9 +2688,9 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
       GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(
           members[k].logical_view, members[k].index_nodes, load_map, tpipe, GetSimtOffsetType(members[k].policy),
           "output_index", "index_offset", false, -1L, fused_runtime_sizes, index_offsets, ss));
-      GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(members[k].index_nodes, load_map, &index_offsets,
-                                               members[k].logical_view, "index_offset", "output_index", index_values,
-                                               ss));
+      GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(
+          members[k].index_nodes, load_map, &index_offsets, members[k].logical_view, "index_offset", "output_index",
+          tpipe, fused_runtime_sizes, GetSimtOffsetType(members[k].policy), index_values, ss));
       const auto index_result = index_values.find(members[k].index_result_tensor_id);
       GE_ASSERT_TRUE(index_result != index_values.end(), "Fused member[%zu] index result tensor has no scalar value.",
                      k);
@@ -2694,8 +2718,8 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
           members.front().logical_view, emission_nodes, merge_load_map, tpipe, fused_offset_type, "output_index",
           "output_index", false, -1L, fused_runtime_sizes, merge_offsets, ss));
       GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(emission_nodes, merge_load_map, &merge_offsets,
-                                               members.front().logical_view, "output_index", "output_index",
-                                               merge_values, ss));
+                                               members.front().logical_view, "output_index", "output_index", tpipe,
+                                               fused_runtime_sizes, fused_offset_type, merge_values, ss));
       for (size_t i = 0; i < merge_chains.size(); ++i) {
         const auto chain_result = merge_values.find(merge_chains[i].result_tensor_id);
         GE_ASSERT_TRUE(chain_result != merge_values.end(), "Fused merge chain[%zu] result tensor has no scalar value.",

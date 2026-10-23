@@ -1693,7 +1693,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
 extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint32_t);
 
 #ifndef IL_ADD_IL_REDUCE
-#if defined(IL_USER_POSITION_BIAS)
+#if defined(IL_USER_POSITION_BIAS) || defined(IL_USER_POSITION_BIAS_DYNAMIC)
 extern "C" __global__ __aicore__ void user_position_bias(GM_ADDR input0, GM_ADDR input1, GM_ADDR input2, GM_ADDR output,
                                                          GM_ADDR workspace, GM_ADDR tiling);
 #elif defined(IL_USER_POSITION_BIAS_EXP_SUM)
@@ -1742,7 +1742,7 @@ extern "C" __global__ __aicore__ void indirect_load_add_il_reduce_test(GM_ADDR i
 
 namespace {
 #ifndef IL_ADD_IL_REDUCE
-#if defined(IL_USER_POSITION_BIAS)
+#if defined(IL_USER_POSITION_BIAS) || defined(IL_USER_POSITION_BIAS_DYNAMIC)
 constexpr int32_t kUserPositionBiasRows = 8;
 constexpr int32_t kUserPositionBiasDim = 256;
 constexpr int32_t kUserPositionBiasLookups = 256;
@@ -1765,6 +1765,24 @@ TEST(E2EUserPositionBias, GeneratedKernelMatchesReference) {
   for (int64_t i = 0; i < output_count; ++i) input.get()[i] = static_cast<float>(i % 97) * 0.01F;
   std::fill_n(output.get(), output_count, 0.0F);
   AutofuseTilingData tiling_data{};
+#if defined(IL_USER_POSITION_BIAS_DYNAMIC)
+  // 动态 shape：运行期 tiling data 设符号尺寸具体值（与 inductor 动态场景的 tiling 传参一致）。
+  // 本用例的 tiling data 中符号尺寸 ksN 位于按 tiling_key 分发的 schedule result 子结构，
+  // AutofuseTiling 按 perf 在三个 result 间决策，故各 result 子结构均需填符号值（kernel
+  // 入口按 graph0_tiling_key 取对应子结构）。
+  tiling_data.graph0_result0_g0_tiling_data.set_ks0(kUserPositionBiasRows);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks1(kUserPositionBiasDim);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks2(kUserPositionBiasLookups);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks3(kUserPositionBiasTableRows);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks0(kUserPositionBiasRows);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks1(kUserPositionBiasDim);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks2(kUserPositionBiasLookups);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks3(kUserPositionBiasTableRows);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks0(kUserPositionBiasRows);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks1(kUserPositionBiasDim);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks2(kUserPositionBiasLookups);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks3(kUserPositionBiasTableRows);
+#endif
   uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);

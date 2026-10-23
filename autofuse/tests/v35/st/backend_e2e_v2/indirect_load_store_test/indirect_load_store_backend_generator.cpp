@@ -2780,13 +2780,14 @@ TEST_F(TestBackendIndirectLoadBroadcastE2e, IndirectLoadBroadcastCodegen) {
 
 #if defined(IL_USER_FANOUT) || defined(IL_USER_FANOUT_SIDE_INPUT) || defined(IL_USER_SIDE_INPUT_FANOUT) ||            \
     defined(IL_CASE_BROADCAST_WHERE) || defined(IL_GRAPH_HINT_REDUCE) || defined(IL_USER_MASKED_EMBEDDING_MINIMAL) || \
-    defined(IL_USER_MASKED_EMBEDDING_SUM_FULL) || defined(IL_USER_POSITION_BIAS) || defined(IL_USER_EMBEDDING_SUM) || \
-    defined(IL_USER_EMBEDDING_MUL) || defined(IL_USER_LAYERNORM) || defined(IL_USER_LAYERNORM_SIMD) ||                \
-    defined(IL_USER_EMBEDDING_EXP_ABS_ADD) || defined(IL_USER_SOFTMAX) || defined(IL_DUAL_IL_GATHER) ||               \
-    defined(IL_GRAPH_HINT_EMBEDDING_SLICE) || defined(IL_USER_POSITION_BIAS_EXP_SUM) ||                               \
-    defined(IL_USER_GATHER_SUM_TRANSPOSE) || defined(IL_USER_ABS_EMBEDDING_SUM) || defined(IL_USER_DTYPE_INT64) ||    \
-    defined(IL_USER_INT64_GATHER_DENSE) || defined(IL_USER_DTYPE_INT8) || defined(IL_USER_DTYPE_UINT8) ||             \
-    defined(IL_USER_DTYPE_BOOL) || defined(IL_USER_DTYPE_UINT64) || defined(IL_USER_EMBEDDING_SLICE)
+    defined(IL_USER_MASKED_EMBEDDING_SUM_FULL) || defined(IL_USER_POSITION_BIAS) ||                                   \
+    defined(IL_USER_POSITION_BIAS_DYNAMIC) || defined(IL_USER_EMBEDDING_SUM) || defined(IL_USER_EMBEDDING_MUL) ||     \
+    defined(IL_USER_LAYERNORM) || defined(IL_USER_LAYERNORM_SIMD) || defined(IL_USER_EMBEDDING_EXP_ABS_ADD) ||        \
+    defined(IL_USER_SOFTMAX) || defined(IL_DUAL_IL_GATHER) || defined(IL_GRAPH_HINT_EMBEDDING_SLICE) ||               \
+    defined(IL_USER_POSITION_BIAS_EXP_SUM) || defined(IL_USER_GATHER_SUM_TRANSPOSE) ||                                \
+    defined(IL_USER_ABS_EMBEDDING_SUM) || defined(IL_USER_DTYPE_INT64) || defined(IL_USER_INT64_GATHER_DENSE) ||      \
+    defined(IL_USER_DTYPE_INT8) || defined(IL_USER_DTYPE_UINT8) || defined(IL_USER_DTYPE_BOOL) ||                     \
+    defined(IL_USER_DTYPE_UINT64) || defined(IL_USER_EMBEDDING_SLICE)
 /**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -4089,7 +4090,7 @@ std::shared_ptr<af::AscGraph> CreateGraphHintSimdReproSubGraph() {
   output.y.dtype = af::DT_FLOAT;
   return graph;
 }
-#elif defined(IL_USER_POSITION_BIAS)
+#elif defined(IL_USER_POSITION_BIAS) || defined(IL_USER_POSITION_BIAS_DYNAMIC)
 constexpr int64_t kUserPositionBiasRows = 8;
 constexpr int64_t kUserPositionBiasDim = 256;
 constexpr int64_t kUserPositionBiasLookups = 256;
@@ -4098,10 +4099,20 @@ constexpr char kUserPositionBiasGraphName[] = "user_position_bias";
 
 std::shared_ptr<af::AscGraph> CreateUserPositionBiasSubGraph() {
   auto graph = std::make_shared<af::AscGraph>(kUserPositionBiasGraphName);
+#if defined(IL_USER_POSITION_BIAS_DYNAMIC)
+  // 动态 shape：字符串命名的自由符号（ksN），E2E 在运行期 tiling data 设具体值，
+  // 复刻 inductor dynamic=True 下 tiling 无法静态化的 embedding+permute 场景
+  // （相对位置 bucket 算术链含 Arange 坐标，动态时坐标取模引用符号尺寸）。
+  const auto rows = graph->CreateSizeVar("ks0");
+  const auto dim = graph->CreateSizeVar("ks1");
+  const auto lookups = graph->CreateSizeVar("ks2");
+  const auto table_rows = graph->CreateSizeVar("ks3");
+#else
   const auto rows = graph->CreateSizeVar(kUserPositionBiasRows);
   const auto dim = graph->CreateSizeVar(kUserPositionBiasDim);
   const auto lookups = graph->CreateSizeVar(kUserPositionBiasLookups);
   const auto table_rows = graph->CreateSizeVar(kUserPositionBiasTableRows);
+#endif
   const auto a0 = graph->CreateAxis("a0", rows).id;
   const auto a1 = graph->CreateAxis("a1", dim).id;
   const auto a2 = graph->CreateAxis("a2", lookups).id;
@@ -5929,6 +5940,37 @@ TEST_F(TestBackendUserPositionBiasE2e, GeneratesUserPositionBiasKernel) {
   codegen::CodegenResult result;
   codegen::Codegen codegen(codegen::CodegenOptions{});
   ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
+  indirect_load_test::WriteGeneratedFiles(result);
+}
+#elif defined(IL_USER_POSITION_BIAS_DYNAMIC)
+using TestBackendUserPositionBiasDynamicE2e = indirect_load_test::PrecisionBackendE2e;
+
+TEST_F(TestBackendUserPositionBiasDynamicE2e, GeneratesUserPositionBiasDynamicKernel) {
+  ThreeInputBackendGraph backend(kUserPositionBiasGraphName, af::DT_FLOAT, af::DT_FLOAT, af::DT_FLOAT, af::DT_FLOAT);
+  const auto sub_graph = CreateUserPositionBiasSubGraph();
+  const auto graph = backend.Finalize(sub_graph);
+  ASSERT_NE(graph, nullptr);
+  ascir::FusedScheduledResult scheduled_result;
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);
+  codegen::CodegenResult result;
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
+  // 动态 shape：SIMT 静态方法体（struct IndirectLoadSimtBody_*）作用域内没有 tiling 数据
+  // 指针 t，index 生产链（Arange 坐标取模）与坐标分解引用的运行期符号尺寸（ksN）必须经
+  // Context 字段传入，不得在静态方法体内渲染裸符号 ksN 或 t->ksN（否则设备侧编译报
+  // use of undeclared identifier）。body 以后随的 #include 守卫（#endif）为界，覆盖全部
+  // 静态方法。
+  const auto body_begin = result.kernel.find("struct IndirectLoadSimtBody_");
+  ASSERT_NE(body_begin, std::string::npos);
+  const auto body_end = result.kernel.find("#endif", body_begin);
+  ASSERT_NE(body_end, std::string::npos);
+  const std::string simt_body = result.kernel.substr(body_begin, body_end - body_begin);
+  EXPECT_EQ(simt_body.find("t->"), std::string::npos);
+  EXPECT_EQ(simt_body.find("ks0"), std::string::npos);
+  EXPECT_EQ(simt_body.find("ks1"), std::string::npos);
+  EXPECT_EQ(simt_body.find("ks2"), std::string::npos);
+  EXPECT_EQ(simt_body.find("ks3"), std::string::npos);
   indirect_load_test::WriteGeneratedFiles(result);
 }
 #elif defined(IL_USER_POSITION_BIAS_EXP_SUM)
