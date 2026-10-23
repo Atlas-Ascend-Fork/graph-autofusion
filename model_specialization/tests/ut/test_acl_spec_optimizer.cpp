@@ -1113,8 +1113,8 @@ TEST_P(AclSpecOptimizerScopeTest, MultiStreamSelectionPreservesOtherTasksAndComm
   EXPECT_EQ(logs.find("taskIndex="), std::string::npos);
   if (GetParam()) {
     const std::array<const char *, 3> rows{"streamId=37, taskId=2, type=KERNEL, kernel=AddCustom",
-                                         "streamId=37, taskId=3, type=KERNEL, kernel=sk_scope_kernel_begin_dav_2201",
-                                         "streamId=95, taskId=9, type=KERNEL, kernel=AddCustom"};
+                                           "streamId=37, taskId=3, type=KERNEL, kernel=sk_scope_kernel_begin_dav_2201",
+                                           "streamId=95, taskId=9, type=KERNEL, kernel=AddCustom"};
     size_t next = 0;
     for (const char *row : rows) {
       const std::string line = std::string("Kernel Specialization: [IN_SCOPE] ") + row;
