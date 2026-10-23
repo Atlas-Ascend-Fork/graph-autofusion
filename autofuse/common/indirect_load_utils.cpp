@@ -1833,6 +1833,12 @@ bool GetPrebuiltYTilingCase(const af::AscGraph &graph, af::AxisId &tile_id,
   }
 
   const TemplateAxes axes = ReadTemplateAxes(indirect_load);
+  if (axes.outer_axis == af::kIdNone) {
+    // 模板候选全部被拒时节点无模板标注：节点存在不等于模板接管，此时不存在可预建
+    // 的 tile 轴。返回 false 让调用方走通用 tiling case 生成，避免 kIdNone 毒化
+    // PruneTilingCase 的轴查找（axis_id:-1 断言）。
+    return false;
+  }
   tile_id = axes.outer_axis;
   const auto all_axes = graph.GetAllAxis();
   if (axes.tile_outer_axis >= 0L && static_cast<size_t>(axes.tile_outer_axis) < all_axes.size()) {

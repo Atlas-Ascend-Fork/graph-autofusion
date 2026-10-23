@@ -7412,7 +7412,7 @@ TEST_F(TestOptimizer, ReducePartition) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
 }
 
 TEST_F(TestOptimizer, ReducePartitionLoad) {
@@ -7596,9 +7596,11 @@ TEST_F(TestOptimizer, ReducePartition3) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 2);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][3].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7694,9 +7696,11 @@ TEST_F(TestOptimizer, ReducePartition4) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 2);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 3);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 3);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][3].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7780,9 +7784,11 @@ TEST_F(TestOptimizer, ReduceRMulticore) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 2);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][3].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7875,7 +7881,7 @@ TEST_F(TestOptimizer, ReducePartitionScalar) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
 }
 
 TEST_F(TestOptimizer, ReduceAllLoad) {

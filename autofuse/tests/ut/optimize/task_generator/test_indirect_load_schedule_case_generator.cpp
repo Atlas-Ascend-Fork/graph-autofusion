@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
@@ -2420,6 +2420,197 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SoftmaxDedicatedCandidateSolvesTileS
   const auto output_axes = simt_indirect_load->outputs()[0]->attr.axis;
   const std::vector<af::AxisId> expected_outer(output_axes.begin(), output_axes.begin() + 2);
   ExpectAxisOrigins(simt_graph, axes.outer_axis, expected_outer);
+}
+
+// 复合 Norm 区域（多 Reduce 阶段）测试图：gather 入口 → R(a1) → B(a1) → E → R(a1) → store。
+// 通过入口/广播/出口宽度组合表达三类视图关系与一个不自洽的反例。
+enum class CompositeNormShape {
+  kEquality,     // R→B → E → R→B → E → store：入口==出口（既有支持形态，回归保护）
+  kTailShrink,   // R→B → E → R → store：尾部归约收缩，入口>出口
+  kAmplified,    // 入口宽 8，B 放大到 32 后尾部归约收缩：入口<出口（广播放大）
+  kFoldMismatch  // 尾部归约 stride 已折叠但视图声明未收缩：折叠终态与出口视图不一致
+};
+
+af::AscGraph BuildCompositeNormGraph(CompositeNormShape shape) {
+  af::AscGraph graph("indirect_load_composite_norm_ut_graph");
+  const af::Expression rows = graph.CreateSizeVar(2);
+  const af::Expression table_w = graph.CreateSizeVar(64);
+  const af::Expression entry_w = graph.CreateSizeVar(shape == CompositeNormShape::kAmplified ? 8 : 32);
+  const af::Expression brc_w = graph.CreateSizeVar(32);
+  const auto x0 = graph.CreateAxis("x0", rows);
+  const auto x1 = graph.CreateAxis("x1", table_w);
+  const auto y0 = graph.CreateAxis("y0", rows);
+  const auto y1 = graph.CreateAxis("y1", brc_w);
+  const std::vector<af::AxisId> input_axes = {x0.id, x1.id};
+  const std::vector<af::AxisId> output_axes = {y0.id, y1.id};
+  const std::vector<af::Expression> input_repeats = {rows, table_w};
+  const std::vector<af::Expression> input_strides = {table_w, af::sym::kSymbolOne};
+  const std::vector<af::Expression> entry_repeats = {rows, entry_w};
+  const std::vector<af::Expression> entry_strides = {entry_w, af::sym::kSymbolOne};
+  const std::vector<af::Expression> reduced_repeats = {rows, af::sym::kSymbolOne};
+  const std::vector<af::Expression> reduced_strides = {af::sym::kSymbolOne, af::sym::kSymbolZero};
+  const std::vector<af::Expression> brc_repeats = {rows, brc_w};
+  const std::vector<af::Expression> brc_strides = {brc_w, af::sym::kSymbolOne};
+
+  af::ascir_op::Data x("x", graph);
+  x.ir_attr.SetIndex(0);
+  SetNodeView(x, af::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  af::ascir_op::Load input_load("input_load");
+  input_load.x = x.y;
+  SetNodeView(input_load, af::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  af::ascir_op::Data index("index", graph);
+  index.ir_attr.SetIndex(1);
+  SetNodeView(index, af::DT_INT32, output_axes, entry_repeats, entry_strides);
+  af::ascir_op::Load index_load("index_load");
+  index_load.x = index.y;
+  SetNodeView(index_load, af::DT_INT32, output_axes, entry_repeats, entry_strides);
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = input_load.y;
+  indirect_load.x2 = index_load.y;
+  indirect_load.ir_attr.SetAxis(1);
+  SetNodeView(indirect_load, af::DT_FLOAT16, output_axes, entry_repeats, entry_strides);
+
+  af::ascir_op::Sum sum1("sum1");
+  sum1.x = indirect_load.y;
+  sum1.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  sum1.attr.sched.axis = output_axes;
+  SetNodeView(sum1, af::DT_FLOAT16, output_axes, reduced_repeats, reduced_strides);
+  af::ascir_op::Broadcast broadcast("broadcast");
+  broadcast.x = sum1.y;
+  SetNodeView(broadcast, af::DT_FLOAT16, output_axes, brc_repeats, brc_strides);
+  af::ascir_op::Abs abs_op("abs_op");
+  abs_op.x = broadcast.y;
+  SetVectorApi(abs_op);
+  SetNodeView(abs_op, af::DT_FLOAT16, output_axes, brc_repeats, brc_strides);
+  af::ascir_op::Sum sum2("sum2");
+  sum2.x = abs_op.y;
+  sum2.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  sum2.attr.sched.axis = output_axes;
+  af::ascir_op::Broadcast tail_broadcast("tail_broadcast");
+  af::ascir_op::Abs tail_abs("tail_abs");
+  af::ascir_op::Store store("store");
+  if (shape == CompositeNormShape::kEquality) {
+    // 第二阶段同样 R→B 配对，Elementwise 后满宽落盘：入口==出口。
+    SetNodeView(sum2, af::DT_FLOAT16, output_axes, reduced_repeats, reduced_strides);
+    tail_broadcast.x = sum2.y;
+    SetNodeView(tail_broadcast, af::DT_FLOAT16, output_axes, brc_repeats, brc_strides);
+    tail_abs.x = tail_broadcast.y;
+    SetVectorApi(tail_abs);
+    SetNodeView(tail_abs, af::DT_FLOAT16, output_axes, brc_repeats, brc_strides);
+    store.x = tail_abs.y;
+    SetNodeView(store, af::DT_FLOAT16, output_axes, brc_repeats, brc_strides);
+  } else {
+    // 尾部归约直连 Store。kFoldMismatch：stride 已折叠（a1 stride 为 0）但视图
+    // 声明保持满宽，与折叠终态矛盾，候选必须被拒。
+    const bool mismatch = shape == CompositeNormShape::kFoldMismatch;
+    const std::vector<af::Expression> tail_repeats = mismatch ? brc_repeats : reduced_repeats;
+    SetNodeView(sum2, af::DT_FLOAT16, output_axes, tail_repeats, reduced_strides);
+    store.x = sum2.y;
+    SetNodeView(store, af::DT_FLOAT16, output_axes, tail_repeats, reduced_strides);
+  }
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  SetNodeView(output, af::DT_FLOAT16, output_axes, *store.y.repeats, *store.y.strides);
+  return graph;
+}
+
+void ExpectCompositeNormStages(af::AscGraph &graph, size_t expected_stages) {
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_FALSE(graphs.empty());
+  size_t composite_cnt = 0UL;
+  for (auto &candidate : graphs) {
+    const auto node = candidate.FindNode("indirect_load");
+    ASSERT_NE(node, nullptr);
+    ascgen_utils::norm::NormInfo norm_info;
+    if (ascgen_utils::norm::TryGetNormInfo(node, norm_info) != af::SUCCESS) {
+      continue;
+    }
+    if (norm_info.kind != ascgen_utils::norm::NormInfo::Kind::kGenericComposite) {
+      continue;
+    }
+    ++composite_cnt;
+    EXPECT_EQ(norm_info.stages.size(), expected_stages);
+    EXPECT_EQ(norm_info.stages[0UL].reduce_node_name, "sum1");
+    EXPECT_EQ(norm_info.stages[1UL].reduce_node_name, "sum2");
+  }
+  EXPECT_GE(composite_cnt, 1UL);
+}
+
+// 复合 Norm 区域视图折叠：R→B 全配对抵消，入口==出口必须保持既有支持。
+TEST(IndirectLoadScheduleCaseGeneratorTest, CompositeNormRegionFoldsPairedStagesToEqualView) {
+  auto graph = BuildCompositeNormGraph(CompositeNormShape::kEquality);
+  ExpectCompositeNormStages(graph, 2UL);
+}
+
+// 复合 Norm 区域视图折叠：尾部归约无配对广播时按归约轴收缩，入口>出口（如
+// gather→sum→broadcast→mul→sum→store 两段归约形态）必须放行。
+TEST(IndirectLoadScheduleCaseGeneratorTest, CompositeNormRegionFoldsTailReduceShrinkView) {
+  auto graph = BuildCompositeNormGraph(CompositeNormShape::kTailShrink);
+  ExpectCompositeNormStages(graph, 2UL);
+}
+
+// 复合 Norm 区域视图折叠：配对广播放大超过入口宽度（入口<出口）同样自洽，
+// 折叠取广播输出视图，不假设还原入口宽度。
+TEST(IndirectLoadScheduleCaseGeneratorTest, CompositeNormRegionFoldsAmplifiedBroadcastView) {
+  auto graph = BuildCompositeNormGraph(CompositeNormShape::kAmplified);
+  ExpectCompositeNormStages(graph, 2UL);
+}
+
+// 复合 Norm 区域视图折叠：区域链路折叠终态与出口视图不一致时必须拒绝。
+TEST(IndirectLoadScheduleCaseGeneratorTest, CompositeNormRegionRejectsFoldMismatchView) {
+  auto graph = BuildCompositeNormGraph(CompositeNormShape::kFoldMismatch);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  for (auto &candidate : graphs) {
+    const auto node = candidate.FindNode("indirect_load");
+    ASSERT_NE(node, nullptr);
+    ascgen_utils::norm::NormInfo norm_info;
+    if (ascgen_utils::norm::TryGetNormInfo(node, norm_info) == af::SUCCESS) {
+      EXPECT_NE(norm_info.kind, ascgen_utils::norm::NormInfo::Kind::kGenericComposite);
+    }
+  }
+}
+
+// 模板候选全部被拒（节点未标注模板）时，节点存在不等于模板接管：
+// GetPrebuiltYTilingCase 必须返回 false，而不是产出 axis_id=-1 的毒化 case。
+TEST(IndirectLoadScheduleCaseGeneratorTest, PrebuiltYTilingCaseRequiresTemplateAnnotation) {
+  auto graph = BuildIndirectLoadGraph(1);
+  af::AxisId tile_id = af::kIdNone;
+  std::pair<af::AxisPtr, af::AxisPtr> tiling;
+  EXPECT_FALSE(ascgen_utils::indirect_load::GetPrebuiltYTilingCase(graph, tile_id, tiling));
+  EXPECT_EQ(tile_id, af::kIdNone);
+
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_FALSE(graphs.empty());
+  const auto simd_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd);
+  ASSERT_NE(simd_iter, graphs.end());
+  const auto node = simd_iter->FindNode("indirect_load");
+  ASSERT_NE(node, nullptr);
+  ascgen_utils::indirect_load::TemplateAxes axes;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(node, axes), af::SUCCESS);
+  EXPECT_NE(axes.outer_axis, af::kIdNone);
+  EXPECT_TRUE(ascgen_utils::indirect_load::GetPrebuiltYTilingCase(*simd_iter, tile_id, tiling));
+  EXPECT_EQ(tile_id, axes.outer_axis);
+}
+
+// 任务层契约：本生成器独占含 IndirectLoad 的图，模板候选全部被拒时必须显式失败，
+// 不得以空任务落入通用兜底（未标注模板的 IndirectLoad 无通用调度与发射路径）。
+TEST(IndirectLoadScheduleCaseGeneratorTest, GeneratorTaskFailsWhenAllCandidatesRejected) {
+  auto graph = BuildCompositeNormGraph(CompositeNormShape::kFoldMismatch);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<optimize::ScheduleTask> tasks;
+  optimize::OptimizerOptions options;
+  EXPECT_NE(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
+  EXPECT_TRUE(tasks.empty());
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, SimtArPostReduceCandidateUsesSolvableTile) {

@@ -81,6 +81,8 @@ class ReducePartitionCaseGenerator : public FusionCaseGenerator {
                                  const std::map<size_t, af::AscNodePtr> &group_anchors);
   bool FindOutputReduce(const af::AscNodePtr &node, af::AscNodePtr &reduce_node);
   Status PartitionReduceNode(af::AscNodePtr &src_node, ascir::ImplGraph &impl_graph);
+  static Status ExpandDimsForRA(ascir::ImplGraph &impl_graph);
+  static bool IsRAStructure(const ascir::ImplGraph &impl_graph);
 
   bool partition_{false};
   std::vector<af::AscNodePtr> node_order_{};

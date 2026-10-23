@@ -30,7 +30,6 @@
 namespace optimize {
 namespace {
 size_t TWO = 2;
-size_t kMaxFullLoadAxisSize = 3UL;
 size_t NODE_COUNT_AFTER_REDUCE = 4UL;
 constexpr int64_t kBroadcastTailRepeatWorkspaceThreshold = 22500L;
 constexpr int64_t kBroadcastFirstAxisWorkspaceThreshold = 128L;
@@ -113,35 +112,6 @@ bool NeedWorkspaceBeforeBroadcast(const af::AscNodePtr &broadcast_node) {
     return false;
   }
   return IsTailRepeatProductLargeEnough(broadcast_node->outputs[0].attr.repeats);
-}
-
-bool IsLegacyFullLoadReduce(const std::vector<ascir::SizeExpr> &input_repeats,
-                            const std::vector<ascir::SizeExpr> &output_repeats) {
-  if (output_repeats.size() > kMaxFullLoadAxisSize) {
-    return false;
-  }
-  return af::SymbolicUtils::StaticCheckEq(input_repeats[0], output_repeats[0]) == af::TriBool::kTrue;
-}
-
-bool IsTailReduceFullLoad(const af::AscNodePtr &node, const std::vector<ascir::SizeExpr> &input_repeats,
-                          const std::vector<ascir::SizeExpr> &output_repeats) {
-  if (input_repeats.size() < kMaxFullLoadAxisSize) {
-    return false;
-  }
-  const auto tail_index = input_repeats.size() - 1U;
-  for (size_t i = 0U; i < tail_index; ++i) {
-    if (af::SymbolicUtils::StaticCheckEq(input_repeats[i], output_repeats[i]) != af::TriBool::kTrue) {
-      return false;
-    }
-  }
-  if (node != nullptr && node->GetType() == "Softmax") {
-    GELOGD("IsTailReduceFullLoad node=%s is Softmax, return true.", node->GetName().c_str());
-    return true;
-  }
-  if (!ScheduleUtils::IsReduceOnTailAxis(node)) {
-    return false;
-  }
-  return true;
 }
 
 Status DoCopyAscNodeTensorAttr(const af::AscNodePtr &src_node, af::AscNodePtr &dst_node) {
@@ -463,6 +433,9 @@ Status ReducePartitionCaseGenerator::GeneratorAllLoadTask(ascir::HintGraph &opti
            optimize_graph.GetName().c_str());
     return ge::GRAPH_SUCCESS;
   }
+  // ForceAllLoad 场景下，尝试将 R... 结构补轴为 AR...，以满足全载模板条件
+  GE_CHK_STATUS_RET(ExpandDimsForRA(optimize_graph), "ExpandDimsForRA failed");
+
   std::vector<ascir::ImplGraph> optimize_graphs;
   std::vector<std::string> score_funcs;
   GE_CHK_STATUS_RET(GenerateAllLoadCase(optimize_graph, optimize_graphs, score_funcs), "GenerateScheduleCases failed");
@@ -550,6 +523,79 @@ Status ReducePartitionCaseGenerator::GeneratorTask(ascir::HintGraph &optimize_gr
   GE_CHK_STATUS_RET(GeneratorAllLoadTask(optimize_graph, tasks));
   GELOGI("After AllLoadTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
   return ge::GRAPH_SUCCESS;
+}
+
+// 判断是否为 R/RA 结构：首轴为 reduce 轴
+bool ReducePartitionCaseGenerator::IsRAStructure(const ascir::ImplGraph &impl_graph) {
+  bool has_reduce = false;
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (!ScheduleUtils::IsReduce(node)) {
+      continue;
+    }
+    has_reduce = true;
+    std::vector<ascir::SizeExpr> input_repeats = node->inputs[0].attr.repeats;
+    std::vector<ascir::SizeExpr> output_repeats = node->outputs[0].attr.repeats;
+    if (input_repeats.size() != output_repeats.size() || input_repeats.empty()) {
+      return false;
+    }
+    if (af::SymbolicUtils::StaticCheckEq(input_repeats[0], output_repeats[0]) == af::TriBool::kTrue) {
+      return false;
+    }
+  }
+  return has_reduce;
+}
+
+// 对 R/RA 结构在最前面补一根大小为 1 的轴，使其变为 ARA，满足全载模板条件
+Status ReducePartitionCaseGenerator::ExpandDimsForRA(ascir::ImplGraph &impl_graph) {
+  if (!IsRAStructure(impl_graph)) {
+    return ge::SUCCESS;
+  }
+
+  auto compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
+  GE_CHECK_NOTNULL(compute_graph);
+  auto graph_attr = compute_graph->GetOrCreateAttrsGroup<af::AscGraphAttr>();
+  GE_CHECK_NOTNULL(graph_attr);
+
+  const auto src_axes = graph_attr->axis;
+  std::shared_ptr<af::Axis> const_axis = std::make_shared<af::Axis>();
+  GE_CHECK_NOTNULL(const_axis);
+  const_axis->id = 0;
+  const_axis->name = "axis_ra_expand";
+  const_axis->type = af::Axis::kAxisTypeOriginal;
+  const_axis->size = af::ops::One;
+
+  std::vector<af::AxisPtr> new_axes;
+  new_axes.push_back(std::move(const_axis));
+  for (const auto &src_axis : src_axes) {
+    auto new_axis = std::make_shared<af::Axis>();
+    GE_CHECK_NOTNULL(new_axis);
+    new_axis->id = src_axis->id + 1;
+    new_axis->name = src_axis->name;
+    new_axis->type = src_axis->type;
+    new_axis->size = src_axis->size;
+    new_axes.push_back(std::move(new_axis));
+  }
+  graph_attr->axis = std::move(new_axes);
+
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (ScheduleUtils::IsIOBuffer(node)) {
+      continue;
+    }
+    auto cur_axis_ids = node->attr.sched.axis;
+    std::vector<ascir::AxisId> new_axis_ids;
+    new_axis_ids.push_back(0);
+    for (auto id : cur_axis_ids) {
+      new_axis_ids.push_back(id + 1);
+    }
+    node->attr.sched.axis = new_axis_ids;
+
+    for (const auto &output_attr : node->outputs()) {
+      output_attr->attr.axis = new_axis_ids;
+      output_attr->attr.strides.insert(output_attr->attr.strides.begin(), af::ops::Zero);
+      output_attr->attr.repeats.insert(output_attr->attr.repeats.begin(), af::ops::One);
+    }
+  }
+  return ge::SUCCESS;
 }
 
 Status ReducePartitionCaseGenerator::Generate([[maybe_unused]] ascir::HintGraph &graph,
@@ -1230,7 +1276,6 @@ bool ReducePartitionCaseGenerator::HasArgMaxReduce(const ScheduleTask &task) {
   return false;
 }
 
-// 全载模板支持历史 AR/ARA 类短轴场景，并额外支持 AA...AR 尾轴 reduce 场景。
 bool ReducePartitionCaseGenerator::CanFullLoadReduceFuse(const ascir::ImplGraph &impl_graph) {
   for (const auto &node : impl_graph.GetAllNodes()) {
     if (!ScheduleUtils::IsReduce(node)) {
@@ -1242,13 +1287,7 @@ bool ReducePartitionCaseGenerator::CanFullLoadReduceFuse(const ascir::ImplGraph 
     if (output_repeats.empty()) {
       return false;
     }
-
-    if (!IsLegacyFullLoadReduce(input_repeats, output_repeats) &&
-        !IsTailReduceFullLoad(node, input_repeats, output_repeats)) {
-      return false;
-    }
   }
-
   return true;
 }
 

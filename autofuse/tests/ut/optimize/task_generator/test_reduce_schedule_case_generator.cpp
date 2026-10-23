@@ -493,9 +493,10 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Three_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
-  ASSERT_EQ(tasks.size(), 2UL);
+  ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 2UL);
+  ASSERT_EQ(tasks[2].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_One_Elewise_Store) {
@@ -505,9 +506,10 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_One_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
-  ASSERT_EQ(tasks.size(), 2UL);
+  ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 2UL);
+  ASSERT_EQ(tasks[2].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Four_Elewise_Store) {
@@ -517,9 +519,10 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Four_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
-  ASSERT_EQ(tasks.size(), 2UL);
+  ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 2UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 3UL);
+  ASSERT_EQ(tasks[2].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_AllLoadTailReduceFourAxis) {
@@ -532,14 +535,14 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_AllLoadTailReduceFourAxis) {
   EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
 }
 
-TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_NoAllLoadForFourAxisNonTailReduce) {
+TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_AllLoadForFourAxisNonTailReduce) {
   af::AscGraph graph("reduce_no_all_load_for_four_axis_non_tail_reduce");
   ConstructFourAxisReduce(graph, false);
   std::vector<ScheduleTask> tasks;
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
-  EXPECT_FALSE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
+  EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_NoAllLoadForEmptyRepeats) {
@@ -570,7 +573,7 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Store) {
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
   EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kCommon));
-  EXPECT_FALSE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
+  EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Multi_Out_NoDependencyCycle) {
@@ -779,7 +782,7 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_ScalarData_Input) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
-  ASSERT_EQ(tasks.size(), 2UL);
+  ASSERT_EQ(tasks.size(), 3UL);
   // ScalarData直连算子，reduce拆分时ScalarData走PartitionScalar分支，保持ScalarData类型
   for (const auto &task : tasks) {
     for (const auto &grouped_graph : task.grouped_graphs) {

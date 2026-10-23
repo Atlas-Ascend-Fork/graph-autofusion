@@ -336,6 +336,9 @@ size_t CountIndependentReduceGraphAxesWithSize(const ascir::FusedScheduledResult
       if (!scheduled_result.var_relations.empty()) {
         continue;
       }
+      if (scheduled_result.is_reduce_mem_reuse) {
+        continue;  // 新增：跳过 kAllLoad 全载模板 result，统计口径限定在 kCommon
+      }
       for (const auto &schedule_group : scheduled_result.schedule_groups) {
         for (const auto &impl_graph : schedule_group.impl_graphs) {
           count += CountReduceGraphAxesWithSize(impl_graph, expected_size);
