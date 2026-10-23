@@ -44,6 +44,7 @@ if __name__ == '__main__':
         sub_kernels = compile_subkernel(ctx)
         # 2.1 Set the input/output memory reuse relation
         assert_true(len(sub_kernels) == 2, "sub_kernels should contain 2 subkernels")
+        # sub_kernels=[pows_op, is_inf_op]
         sub_kernels[0].set_input(["arg_in1", "arg_in2"])
         sub_kernels[0].set_output(["out1"])
         sub_kernels[1].set_input(["out1"])
@@ -71,6 +72,8 @@ if __name__ == '__main__':
             sub_kernel.output_addr.append(addr)
 
         for ws_size in sub_kernel.workspaces_size():
+            if ws_size == 0:
+                continue
             dev_ptr = ctypes.c_void_p()
             acl.aclrt_malloc_align32(ctypes.byref(dev_ptr), ws_size,
                                      acl.aclrt_mem_malloc_policy.ACL_MEM_MALLOC_HUGE_FIRST)
