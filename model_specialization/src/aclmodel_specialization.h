@@ -64,10 +64,11 @@ struct aclmdlRISpecOptions {
  * Recognized Spec Scope Begin/End tasks are disabled during submission, including when no kernel
  * can be specialized. Markers belonging to SuperKernel are not included in this cleanup.
  *
- * @retval ACL_SUCCESS Optimization completed, including when every kernel was skipped because it
- * could not be specialized.
+ * @retval ACL_SUCCESS Optimization completed, including when every recognizable candidate kernel
+ * was skipped because its resource, argument metadata, or specialization compilation was unavailable.
  * @retval ACL_ERROR_INVALID_PARAM Invalid model or configuration.
  * @retval ACL_ERROR_BAD_ALLOC Insufficient resources before the model was modified.
+ * Task identity query failures are logged as warnings, and the affected tasks are skipped.
  * A specialized binary that cannot be loaded, or that lacks its kernel entry, is reported rather
  * than skipped: it indicates a broken artifact or an exhausted resource, and the model is left
  * untouched because loading precedes any modification.
@@ -90,7 +91,8 @@ ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeEnd(aclrtStream stream);
 /**
  * @brief Specialize eligible kernels within valid Spec Scope ranges.
  * Submission disables all recognized Spec Scope Begin/End tasks, as Optimize does.
- * Both entry points return on task identity errors before compilation or task modification.
+ * Task identity query failures return an error before compilation or task modification;
+ * Optimize instead logs a warning and skips the affected task.
  * ByFlag sorts all tasks by sequence ID and pairs anonymous Begin/End markers across streams.
  * Invalid sequence queries, duplicate IDs, or marker pairing return before compilation.
  * Optimize does not perform sequence sorting or marker pairing validation.

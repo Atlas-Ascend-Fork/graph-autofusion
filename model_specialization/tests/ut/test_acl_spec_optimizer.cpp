@@ -853,7 +853,7 @@ extern "C" aclError aclrtFunctionGetParamInfo(const void *function, size_t index
   return value.paramError;
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, BothEntriesRejectUnreadableTasksBeforeCompilationOrMutation) {
+TEST_F(AclSpecOptimizerCollectionTest, ByFlagRejectsUnreadableTasksBeforeCompilationOrMutation) {
   const std::array<const char *, 8> reasons{"null task",
                                             "task type query failed",
                                             "task parameters query failed",
@@ -866,64 +866,92 @@ TEST_F(AclSpecOptimizerCollectionTest, BothEntriesRejectUnreadableTasksBeforeCom
   auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
   auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
   MOCKER(aclmdlRITaskDisable).stubs().will(invoke(DisableTask));
-  for (bool byFlag : {false, true}) {
-    for (size_t failure = 0; failure < reasons.size(); ++failure) {
-      SCOPED_TRACE(byFlag ? "OptimizeByFlag" : "Optimize");
-      SCOPED_TRACE(reasons[failure]);
-      KernelState invalidKernel = kernel;
-      CollectorTask invalid = task;
-      invalid.params.kernelTaskParams.funcHandle = &invalidKernel;
-      aclmdlRITask handle = &invalid;
-      switch (failure) {
-        case 0:
-          handle = nullptr;
-          break;
-        case 1:
-          invalid.typeError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
-          break;
-        case 2:
-          invalid.paramsError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
-          break;
-        case 3:
-          invalid.params.type = ACL_MODEL_RI_TASK_DEFAULT;
-          break;
-        case 4:
-          invalid.params.kernelTaskParams.funcHandle = nullptr;
-          break;
-        case 5:
-          invalidKernel.nameError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
-          break;
-        case 6:
-          invalidKernel.name.clear();
-          break;
-        case 7:
-          invalidKernel.unterminatedName = true;
-          break;
-      }
-      stream.tasks = {&begin, &task, handle, &end};
-      identityTypeQueries = 0;
-      ut_log::LogBuffer::Instance().Clear();
-      const aclError expected =
-          failure == 1 || failure == 2 || failure == 5 ? ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY : ACL_ERROR_FAILURE;
-      EXPECT_EQ(byFlag ? aclmdlRISpecOptimizeByFlag(&model, nullptr) : aclmdlRISpecOptimize(&model, nullptr), expected);
-      EXPECT_EQ(identityTypeQueries, failure == 0 ? 2U : 3U);
-      EXPECT_EQ(binaryQueries, 0U);
-      EXPECT_EQ(paramCountQueries, 0U);
-      EXPECT_TRUE(specializationPaths.empty());
-      EXPECT_EQ(loadCalls, 0U);
-      EXPECT_TRUE(touched.empty());
-      EXPECT_TRUE(disabled.empty());
-      EXPECT_EQ(updateCount, 0U);
-      const auto logs = ut_log::LogBuffer::Instance().GetContent();
-      EXPECT_NE(logs.find("[ERROR] [SK][ReadTaskIdentity] Task identity unavailable: streamIndex=0 task=2 reason=" +
-                          std::string(reasons[failure]) + " ret=" + std::to_string(expected)),
-                std::string::npos);
-      EXPECT_NE(logs.find("[ERROR] [SK][Collect] ReadTaskIdentity failed: streamIndex=0 task=2 ret=" +
-                          std::to_string(expected)),
-                std::string::npos);
-      EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
+  for (size_t failure = 0; failure < reasons.size(); ++failure) {
+    SCOPED_TRACE(reasons[failure]);
+    KernelState invalidKernel = kernel;
+    CollectorTask invalid = task;
+    invalid.params.kernelTaskParams.funcHandle = &invalidKernel;
+    aclmdlRITask handle = &invalid;
+    switch (failure) {
+      case 0:
+        handle = nullptr;
+        break;
+      case 1:
+        invalid.typeError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
+        break;
+      case 2:
+        invalid.paramsError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
+        break;
+      case 3:
+        invalid.params.type = ACL_MODEL_RI_TASK_DEFAULT;
+        break;
+      case 4:
+        invalid.params.kernelTaskParams.funcHandle = nullptr;
+        break;
+      case 5:
+        invalidKernel.nameError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
+        break;
+      case 6:
+        invalidKernel.name.clear();
+        break;
+      case 7:
+        invalidKernel.unterminatedName = true;
+        break;
     }
+    stream.tasks = {&begin, &task, handle, &end};
+    identityTypeQueries = 0;
+    ut_log::LogBuffer::Instance().Clear();
+    const aclError expected =
+        failure == 1 || failure == 2 || failure == 5 ? ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY : ACL_ERROR_FAILURE;
+    EXPECT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), expected);
+    EXPECT_EQ(identityTypeQueries, failure == 0 ? 2U : 3U);
+    EXPECT_EQ(binaryQueries, 0U);
+    EXPECT_EQ(paramCountQueries, 0U);
+    EXPECT_TRUE(specializationPaths.empty());
+    EXPECT_EQ(loadCalls, 0U);
+    EXPECT_TRUE(touched.empty());
+    EXPECT_TRUE(disabled.empty());
+    EXPECT_EQ(updateCount, 0U);
+    const auto logs = ut_log::LogBuffer::Instance().GetContent();
+    EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: streamIndex=0 task=2 reason=" +
+                        std::string(reasons[failure]) + " ret=" + std::to_string(expected)),
+              std::string::npos);
+    EXPECT_NE(logs.find("[ERROR] [SK][Collect] ReadTaskIdentity failed: streamIndex=0 task=2 ret=" +
+                        std::to_string(expected)),
+              std::string::npos);
+    EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
   }
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, OptimizeSkipsUnreadableTasksAndSpecializesRemainingKernels) {
+  KernelState beginKernel, endKernel, unreadableKernel = kernel;
+  auto begin = MakeMarker(beginKernel, SPEC_SCOPE_BEGIN_DAV_2201);
+  auto end = MakeMarker(endKernel, SPEC_SCOPE_END_DAV_2201);
+  CollectorTask badType = task, badParams = task, badName = task, following = task;
+  badType.typeError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
+  badParams.paramsError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
+  unreadableKernel.nameError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
+  badName.params.kernelTaskParams.funcHandle = &unreadableKernel;
+  stream.tasks = {&begin, &task, nullptr, &badType, &badParams, &badName, &following, &end};
+  MOCKER(aclmdlRITaskDisable).stubs().will(invoke(DisableTask));
+  ut_log::LogBuffer::Instance().Clear();
+
+  ASSERT_EQ(aclmdlRISpecOptimize(&model, nullptr), ACL_SUCCESS);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task, &following}));
+  EXPECT_EQ(specializationPaths.size(), 2U);
+  EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
+  EXPECT_EQ(updateCount, 1U);
+  EXPECT_EQ(sequenceQueries, 0U);
+  const auto logs = ut_log::LogBuffer::Instance().GetContent();
+  for (uint32_t index = 2; index <= 5; ++index) {
+    EXPECT_NE(logs.find("[WARN] [SK][ReadTaskIdentity] Task identity unavailable: streamIndex=0 task=" +
+                        std::to_string(index) + " reason="),
+              std::string::npos);
+    EXPECT_NE(logs.find("[WARN] [SK][Collect] ReadTaskIdentity failed, skipping task: streamIndex=0 task=" +
+                        std::to_string(index) + " ret="),
+              std::string::npos);
+  }
+  EXPECT_EQ(logs.find("[ERROR]"), std::string::npos);
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, SelectsRangeUnionAndValidatesPairsOnlyForByFlag) {
