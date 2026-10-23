@@ -46,27 +46,6 @@ namespace fs = boost::filesystem;
 
 constexpr size_t MAX_KERNEL_ENTRY_LEN = 256;
 
-const char *TaskTypeName(aclmdlRITaskType type) {
-  switch (type) {
-    case ACL_MODEL_RI_TASK_DEFAULT:
-      return "DEFAULT";
-    case ACL_MODEL_RI_TASK_KERNEL:
-      return "KERNEL";
-    case ACL_MODEL_RI_TASK_EVENT_RECORD:
-      return "EVENT_RECORD";
-    case ACL_MODEL_RI_TASK_EVENT_WAIT:
-      return "EVENT_WAIT";
-    case ACL_MODEL_RI_TASK_EVENT_RESET:
-      return "EVENT_RESET";
-    case ACL_MODEL_RI_TASK_VALUE_WRITE:
-      return "VALUE_WRITE";
-    case ACL_MODEL_RI_TASK_VALUE_WAIT:
-      return "VALUE_WAIT";
-    default:
-      return "UNKNOWN";
-  }
-}
-
 void BindOptionPointers(const std::vector<std::string> &storage, std::vector<const char *> &pointers) {
   pointers.clear();
   pointers.reserve(storage.size());
@@ -194,18 +173,6 @@ aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
   return ACL_SUCCESS;
 }
 
-void AclSpecOptimizer::LogTaskAdmission(const TaskIdentity &identity) const {
-  const auto &record = identity.record;
-  if (record.kind == ScopeTaskKind::KERNEL) {
-    SK_DLOGI("Kernel Specialization: %sstreamId=%d, taskId=%" PRId64 ", type=KERNEL, kernel=%s",
-             record.allowSpecialization ? "[IN_SCOPE] " : "", record.streamId, record.taskId,
-             identity.kernelEntry.c_str());
-  } else {
-    const char *type = record.kind == ScopeTaskKind::OTHER ? TaskTypeName(identity.params.type) : "MARKER";
-    SK_DLOGI("Kernel Specialization: streamId=%d, taskId=%" PRId64 ", type=%s", record.streamId, record.taskId, type);
-  }
-}
-
 aclError AclSpecOptimizer::SetTaskAdmission(std::vector<TaskIdentity> &identities, bool isScopeJit) const {
   if (!isScopeJit) {
     for (auto &identity : identities) {
@@ -247,7 +214,10 @@ aclError AclSpecOptimizer::SetTaskAdmission(std::vector<TaskIdentity> &identitie
         break;
     }
     record.allowSpecialization = record.kind == ScopeTaskKind::KERNEL && !activeBegins.empty();
-    LogTaskAdmission(identity);
+    if (record.allowSpecialization) {
+      SK_DLOGI("Kernel Specialization: [IN_SCOPE] streamId=%d, taskId=%" PRId64 ", type=KERNEL, kernel=%s",
+               record.streamId, record.taskId, identity.kernelEntry.c_str());
+    }
   }
   if (!activeBegins.empty()) {
     const auto &begin = identities[activeBegins.back()];

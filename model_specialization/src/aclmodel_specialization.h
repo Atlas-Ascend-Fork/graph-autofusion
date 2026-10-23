@@ -68,7 +68,9 @@ struct aclmdlRISpecOptions {
  * was skipped because its resource, argument metadata, or specialization compilation was unavailable.
  * @retval ACL_ERROR_INVALID_PARAM Invalid model or configuration.
  * @retval ACL_ERROR_BAD_ALLOC Insufficient resources before the model was modified.
- * Task identity query failures are logged as warnings, and the affected tasks are skipped.
+ * Failures to read a task's type, parameters, or kernel function name are logged as warnings, and
+ * the affected tasks are skipped. Failure to read the task sequence ID only removes its diagnostic
+ * ID and does not affect ordinary kernel specialization.
  * A specialized binary that cannot be loaded, or that lacks its kernel entry, is reported rather
  * than skipped: it indicates a broken artifact or an exhausted resource, and the model is left
  * untouched because loading precedes any modification.

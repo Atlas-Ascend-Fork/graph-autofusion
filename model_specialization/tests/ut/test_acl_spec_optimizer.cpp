@@ -1112,26 +1112,23 @@ TEST_P(AclSpecOptimizerScopeTest, MultiStreamSelectionPreservesOtherTasksAndComm
   EXPECT_EQ(logs.find("streamIndex="), std::string::npos);
   EXPECT_EQ(logs.find("taskIndex="), std::string::npos);
   if (GetParam()) {
-    const std::array<const char *, 11> rows{"streamId=37, taskId=0, type=KERNEL, kernel=AddCustom",
-                                            "streamId=37, taskId=1, type=MARKER",
-                                            "streamId=37, taskId=2, type=KERNEL, kernel=AddCustom",
-                                            "streamId=37, taskId=3, type=KERNEL, kernel=sk_scope_kernel_begin_dav_2201",
-                                            "streamId=37, taskId=4, type=EVENT_RECORD",
-                                            "streamId=37, taskId=5, type=MARKER",
-                                            "streamId=37, taskId=6, type=KERNEL, kernel=AddCustom",
-                                            "streamId=81, taskId=7, type=KERNEL, kernel=AddCustom",
-                                            "streamId=95, taskId=8, type=MARKER",
-                                            "streamId=95, taskId=9, type=KERNEL, kernel=AddCustom",
-                                            "streamId=95, taskId=10, type=MARKER"};
+    const std::array<const char *, 3> rows{"streamId=37, taskId=2, type=KERNEL, kernel=AddCustom",
+                                         "streamId=37, taskId=3, type=KERNEL, kernel=sk_scope_kernel_begin_dav_2201",
+                                         "streamId=95, taskId=9, type=KERNEL, kernel=AddCustom"};
     size_t next = 0;
-    for (size_t index = 0; index < rows.size(); ++index) {
-      const bool inScope = GetParam() && (index == 2 || index == 3 || index == 9);
-      const std::string line = std::string("Kernel Specialization: ") + (inScope ? "[IN_SCOPE] " : "") + rows[index];
+    for (const char *row : rows) {
+      const std::string line = std::string("Kernel Specialization: [IN_SCOPE] ") + row;
       const size_t position = logs.find(line, next);
       ASSERT_NE(position, std::string::npos) << line;
       next = position + line.size();
       EXPECT_EQ(logs.find(line, next), std::string::npos);
     }
+    size_t logCount = 0;
+    for (size_t pos = logs.find("Kernel Specialization:"); pos != std::string::npos;
+         pos = logs.find("Kernel Specialization:", pos + 1)) {
+      ++logCount;
+    }
+    EXPECT_EQ(logCount, rows.size());
   } else {
     EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
   }
@@ -1209,12 +1206,18 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagUsesGlobalSequenceAcrossStreamsAndE
     }
     const auto logs = ut_log::LogBuffer::Instance().GetContent();
     size_t next = 0;
-    for (size_t index = 0; index < states.size(); ++index) {
-      const std::string key = "taskId=" + std::to_string(index * 3) + ", type=";
+    for (const size_t index : std::array<size_t, 4>{1, 4, 6, 10}) {
+      const std::string key = "taskId=" + std::to_string(index * 3) + ", type=KERNEL, kernel=AddCustom";
       const size_t position = logs.find(key, next);
       ASSERT_NE(position, std::string::npos) << key;
       next = position + key.size();
     }
+    size_t logCount = 0;
+    for (size_t pos = logs.find("Kernel Specialization:"); pos != std::string::npos;
+         pos = logs.find("Kernel Specialization:", pos + 1)) {
+      ++logCount;
+    }
+    EXPECT_EQ(logCount, 4U);
   } while (std::next_permutation(order.begin(), order.end()));
   EXPECT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), ACL_SUCCESS);
   EXPECT_EQ(touched, expected);
