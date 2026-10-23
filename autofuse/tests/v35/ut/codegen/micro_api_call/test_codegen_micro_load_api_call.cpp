@@ -405,6 +405,100 @@ TEST(CodegenKernel, LoadMicroApiCall_Load_Cast_in8_out32) {
                                 "AscendC::MicroAPI::LoadDist::DIST_UNPACK4_B8>(vreg_0, local_0 + offset);\n"});
 }
 
+TEST(CodegenKernel, LoadMicroApiCall_Load_Cast_bool_max_bool) {
+  af::AscGraph graph("test_graph");
+
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  Data x_op("x", graph);
+  Load load_op("load");
+  af::ascir_op::Cast cast_op("cast");
+  graph.AddNode(load_op);
+  graph.AddNode(cast_op);
+
+  load_op.x = x_op.y;
+  load_op.attr.sched.axis = {z0.id, z1.id};
+  *load_op.y.axis = {z0.id, z1.id};
+  *load_op.y.repeats = {s0, s1};
+  *load_op.y.strides = {s1, One};
+  cast_op.x = load_op.y;
+  *cast_op.y.axis = {z0.id, z1.id};
+  *cast_op.y.repeats = {s0, s1};
+  *cast_op.y.strides = {s1, One};
+
+  auto x = graph.FindNode("x");
+  x->outputs[0].attr.dtype = af::DT_BOOL;
+  x->outputs[0].attr.mem.tensor_id = 0;
+  x->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+
+  auto load = graph.FindNode("load");
+  load->attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load->attr.api.type = af::ApiType::kAPITypeCompute;
+  load->attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load->attr.sched.loop_axis = z0.id;
+  load->outputs[0].attr.vectorized_axis = {z1.id};
+  load->outputs[0].attr.vectorized_strides = {One};
+  load->outputs[0].attr.dtype = af::DT_BOOL;
+  load->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+  load->outputs[0].attr.mem.tensor_id = 0;
+  load->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+  load->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  load->outputs[0].attr.que.id = 1;
+  load->outputs[0].attr.opt.merge_scope = af::kIdNone;
+
+  auto cast = graph.FindNode("cast");
+  cast->attr.api.compute_type = af::ComputeType::kComputeElewise;
+  cast->attr.api.type = af::ApiType::kAPITypeCompute;
+  cast->attr.api.unit = af::ComputeUnit::kUnitVector;
+  cast->attr.sched.loop_axis = z0.id;
+  cast->outputs[0].attr.vectorized_axis = {z1.id};
+  cast->outputs[0].attr.vectorized_strides = {One};
+  cast->outputs[0].attr.dtype = af::DT_INT8;
+  cast->outputs[0].attr.mem.position = af::Position::kPositionVecOut;
+  cast->outputs[0].attr.mem.tensor_id = 1;
+  cast->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  cast->outputs[0].attr.que.id = 2;
+  cast->outputs[0].attr.opt.merge_scope = af::kIdNone;
+
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  tpipe.AddTensor(load->outputs[0]);
+
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  std::vector<af::AxisId> current_axis;
+  current_axis.push_back(z0.id);
+
+  codegen::ApiTensor x1;
+  x1.id = load->inputs[0].attr.mem.tensor_id;
+  codegen::ApiTensor y1;
+  y1.id = load->outputs[0].attr.mem.tensor_id;
+
+  codegen::CallParam cp = {"p_reg", "offset"};
+  auto tensor_load = load->GetName() + "_" + load->GetOpDesc()->GetOutputNameByIndex(0);
+  MicroApiTensor tensor(load->outputs[0], tensor_load);
+  auto tensor_cast = cast->GetName() + "_" + cast->GetOpDesc()->GetOutputNameByIndex(0);
+  MicroApiTensor tensor1(cast->outputs[0], tensor_cast);
+
+  TensorManager tensor_mng;
+  tensor_mng.AddTensor(tensor);
+  tensor_mng.AddTensor(tensor1);
+  codegen::MicroLoadApiCall call_0("Load");
+  EXPECT_EQ(call_0.Init(load), 0);
+  call_0.AddInput(x1.id);
+  call_0.AddOutput(y1.id);
+
+  std::string result;
+  cp.max_dtype_size = "bool";
+  call_0.Generate(tensor_mng, tpipe, cp, result);
+  EXPECT_EQ(result, std::string{"AscendC::MicroAPI::LoadAlign(vreg_0, local_0 + offset);\n"});
+}
+
 TEST(CodegenKernel, LoadMicroApiCall_Load_Cast_in32_out64) {
   af::AscGraph graph("test_graph");
 
