@@ -32,6 +32,7 @@
 #include "ascgraph_info_complete.h"
 #include "ascir_ops.h"
 #include "ascir/meta/ascir_ops_utils.h"
+#include "common_utils.h"
 
 namespace att {
 namespace {
@@ -420,7 +421,8 @@ struct ModelGenerationContext {
 static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &graph_list,
                                                std::vector<ModelInfo> &model_info_list,
                                                const std::map<std::string, std::string> &options,
-                                               bool enable_group_parallel, const ModelGenerationContext &context);
+                                               bool enable_group_parallel, const ModelGenerationContext &context,
+                                               const std::string &base_semantic_name);
 
 af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::vector<ModelInfo> &model_info_list,
                              const std::map<std::string, std::string> &options, bool enable_group_parallel) {
@@ -433,19 +435,22 @@ af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::v
                              bool enable_gather_reduce_penalty) {
   GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   return GenerateModelInfoWithContext(graph_list, model_info_list, options, enable_group_parallel,
-                                      {enable_gather_reduce_penalty, false});
+                                      {enable_gather_reduce_penalty, false}, "");
 }
 
 static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &graph_list,
                                                std::vector<ModelInfo> &model_info_list,
                                                const std::map<std::string, std::string> &options,
-                                               bool enable_group_parallel, const ModelGenerationContext &context) {
+                                               bool enable_group_parallel, const ModelGenerationContext &context,
+                                               const std::string &base_semantic_name) {
   GE_ASSERT_SUCCESS(CheckKeyValid(graph_list));
   uint32_t tiling_key = 0U;
   for (auto &graph : graph_list) {
     tiling_key = graph.GetTilingKey() >= 0 ? graph.GetTilingKey() : tiling_key;
     ModelInfo model_info;
     model_info.graph_name = graph.GetName();
+    model_info.semantic_name =
+        ascgen_utils::NormalizeTemplateSemanticName(ascgen_utils::GetTemplateSemanticName(graph, base_semantic_name));
     model_info.tiling_case_id = tiling_key;
     model_info.enable_group_parallel = enable_group_parallel;
     std::vector<AttAxisPtr> tiling_R_arg_list;
@@ -550,9 +555,10 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
     // 但 Codegen 最终生成 kUBFuse 固定 2D 描述。
     const bool is_cv_ub_fusion = schedule_result.cube_type == ascir::CubeTemplateType::kUBFuse;
     const ModelGenerationContext context{enable_gather_reduce_penalty, is_cv_ub_fusion};
-    GE_ASSERT_SUCCESS(GenerateModelInfoWithContext(schedule_groups[schedule_group_id], model_info_list, options,
-                                                   out_schedule_groups.enable_group_parallel, context),
-                      "Get model info failed, impl graph id = %ld, group id = %ld.", impl_graph_id, schedule_group_id);
+    GE_ASSERT_SUCCESS(
+        GenerateModelInfoWithContext(schedule_groups[schedule_group_id], model_info_list, options,
+                                     out_schedule_groups.enable_group_parallel, context, schedule_result.semantic_name),
+        "Get model info failed, impl graph id = %ld, group id = %ld.", impl_graph_id, schedule_group_id);
     for (auto &model_info : model_info_list) {
       model_info.schedule_group_ident.asc_graph_id = asc_graph_id;
       model_info.schedule_group_ident.impl_graph_id = impl_graph_id;

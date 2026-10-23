@@ -95,6 +95,15 @@ GitCode PR、Issue、流水线相关操作使用项目默认 skills：
 - `.clang-format`
 - `.pre-commit-config.yaml`
 
+### Autofuse 模板语义命名
+
+新增模板、实现策略、API 分支或回退，以及影响名称的分组、图改写和 reuse 映射变更前，必须读取并遵循：
+
+- [Codegen 语义命名规范](docs/zh/autofuse/design/features/codegen.md#template-semantic-naming)：统一词表、最终 API 采集、完整身份、不确定状态、测试及性能要求。
+- [Schedule 语义信息传递](docs/zh/autofuse/design/features/schedule.md#template-semantic-propagation)：策略、组级角色、成功转换及复制/回退规则。
+
+名称适配必须随模板交付；仅数值参数变化时说明沿用既有分类的依据。PR 中列明采集点、身份/reuse 处理及行为测试证据；不得以默认父名或 `Adaptive` 掩盖遗漏。复用公共 helper 和现有测试，不另建命名词表、模板清单或选择算法。自动接入 CI 检查仍待实施，开发者和 reviewer 必须按上述规范检查。
+
 ### 代码风格
 
 - 遵循 Google 开源代码规范和项目 `.clang-format`。

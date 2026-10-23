@@ -9,11 +9,13 @@
  */
 
 #include "brc_inline_template.h"
+#include "common_utils.h"
 #include <sstream>
 #include <string>
 #include <queue>
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 
 std::string BrcInlineTemplate::GenName(const std::string &general_case_name) {
   return general_case_name + "_inline";
@@ -66,6 +68,12 @@ af::Status BrcInlineTemplate::Generate(const af::AscGraph &origin_graph, const a
     GE_ASSERT_TRUE(node->GetOutDataNodesSize() > 0U);
     if (IsNodeSupportBrcInline(node)) {
       GELOGD("Graph[%s] find brc inline node: %s", new_case.GetName().c_str(), node->GetNamePtr());
+      for (const auto &out_node : node->GetOutDataNodes()) {
+        const auto consumer_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
+        if (consumer_node != nullptr) {
+          GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticRole(consumer_node, semantic::kInline));
+        }
+      }
       brc_inlined_count++;
       const auto in_data_anchor = node->GetInDataAnchor(0);
       GE_CHECK_NOTNULL(in_data_anchor);

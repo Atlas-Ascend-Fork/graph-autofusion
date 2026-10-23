@@ -6,7 +6,7 @@
 python3 autofuse/tools/att_analyze/src/att.py --help
 ```
 
-支持 `summary`、`compare`、`split-slog`、`perf-formula`、`verify-tiling` 和 `evidence` 六个命令。`summary` 默认只读解析日志；`verify-tiling` 会编译并执行代码，使用前请确认输入目录和授权。
+支持 `summary`、`compare`、`split-slog`、`perf-formula`、`verify-tiling`、`evidence` 和 `topn-templates` 七个命令。`summary` 默认只读解析日志；`verify-tiling` 会编译并执行代码，使用前请确认输入目录和授权。
 
 `LogParser` 的 `OperatorSummary.parse_status` 用于标明证据是否完整：`ok` 表示日志包含完整选择信息，`inferred_graph_result` 表示仅从模板行推断 graph/result，`missing_group_case`、`missing_result_performance` 和 `missing_graph_result` 表示相应日志缺失。CSV 列保持历史含义不变。
 
@@ -15,9 +15,35 @@ python3 autofuse/tools/att_analyze/src/att.py summary path/to/att.log -f csv -o 
 python3 autofuse/tools/att_analyze/src/att.py compare baseline.csv candidate.csv
 python3 autofuse/tools/att_analyze/src/att.py evidence path/to/att.log -o /tmp/evidence
 python3 autofuse/tools/att_analyze/src/att.py verify-tiling generated/ --scene tf --preset B --aiv-num 56
+python3 autofuse/tools/att_analyze/src/att.py topn-templates path/to/worker_round_1_af.log -o /tmp/topn-templates
 ```
 
 工具不会把缺失值当作有效的 0；请在后续分析中根据 `parse_status` 决定是否需要补充日志。
+
+`topn-templates` 只读取 Autofuse worker 日志，输出静态 Top1/TopN 模板 CSV 与 Markdown。
+Top1 取 `topn_output output_index=0` 下所有 group。若日志包含 `output[i]: perf=`，脚本记录
+TopN 的 modeled perf；日志中没有该行时留空。脚本不从日志推断实测 Task Duration，也不读取
+外部测试框架生成的 analysis CSV。
+
+## TEMPLATE 日志契约
+
+词表与规范化规则集中在 `autofuse/common/common_utils.*`。生产端在生成 ModelInfo 时保存规范化的
+`semantic_name`；日志和离线工具直接消费名称，不各自维护 role 词表或重新分类。
+
+`[ATT][TEMPLATE]` 的核心行使用字段 `semantic_name`，格式为
+`<family>/<strategy>[@<role>][#<api-feature>|...][+<transform>...]`。字段和定位信息分成独立行输出：
+
+```text
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 semantic_name="Pointwise/Common"
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 fields semantic_schema=1 family="Pointwise" strategy="Common" role="" api_features="" transforms=""
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 detail graph=0 result=0 tiling_key=0 template="graph0_result0_g0_0"
+```
+
+`name_status` 仅在无法确认或匹配不唯一时输出 `unavailable` 或 `ambiguous`；默认唯一匹配不输出该字段。
+单字段或整行超过 700 字节时，输出 `<field>_hash`、`<field>_len` 或 `line_hash`、`line_len` 摘要，不截断字符串。
+TopN 分析按 case/visit/shape、`GenerateTopnSolutions enter` 中的 operator 以及同名 operator 的调用序号隔离；
+同一 visit 内多个 kernel 或多次调用不会合并。日志缺少 operator 关联时，CSV 的 `association_status` 输出
+`unconfirmed`，不当作已确认调用边界。
 
 ## FINAL_TILING 日志契约
 

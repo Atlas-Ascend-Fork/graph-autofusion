@@ -139,8 +139,13 @@ TEST_F(RegReduceApicallTest, RegReduceApi_Test_001) {
   Status status = call.Generate(tpipe, current_axis, result);
   // Check the result
   EXPECT_EQ(status, af::SUCCESS);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(reduce_node);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "AR/NoReuseSrc/MultiRound");
   EXPECT_NE(result.find("first_actual"), std::string::npos);
   EXPECT_NE(result.find("tmp_reduce_shape"), std::string::npos);
+  EXPECT_NE(result.find("ReduceInit<"), std::string::npos) << result;
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_V>()"), std::string::npos) << result;
   EXPECT_NE(result.find("ReduceMaxExtend<"), std::string::npos) << result;
   EXPECT_NE(result.find("AscendC::Pattern::Reduce::AR"), std::string::npos);
   EXPECT_EQ(result.find("AscirNodeParams"), std::string::npos);

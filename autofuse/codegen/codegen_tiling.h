@@ -219,20 +219,27 @@ class TilingLib {
                                                  const std::string &entry_declaration = "") const;
   std::string GenModeledFallbackTopnForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                                 const std::string &tiling) const;
+  bool UseAttCodegen(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   void GenTopnInitSearchTiling(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result,
                                const std::string &tiling, int symbol_value_count, bool use_measured_perf) const;
   void GenTopnGetTilingFunc(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result,
                             const std::string &tiling, int symbol_value_count, bool use_measured_perf) const;
   void GenTopnSearchTilingSetup(std::stringstream &ss, const std::string &tiling,
                                 const ::ascir::FusedScheduledResult &fused_schedule_result) const;
-  void GenTopnCollectCandidates(std::stringstream &ss, const std::string &tiling) const;
+  void GenTopnCollectCandidates(std::stringstream &ss, const std::string &tiling, bool use_att_codegen) const;
+  void GenAppendTemplateSemanticInfos(std::stringstream &ss, const std::string &indent, bool use_att_codegen,
+                                      const std::string &selection_snapshots = "{}") const;
+  std::string GenTemplateSemanticInfosForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  void GenGroupTemplateSemanticInfo(std::stringstream &ss, const std::string &group_prefix,
+                                    const std::string &tiling_data, size_t slot) const;
+  void GenTopnTemplateSemanticLogs(std::stringstream &ss, bool use_att_codegen) const;
   void GenTopnMeasuredCoreSearch(std::stringstream &ss, const std::string &tiling) const;
-  void GenTopnMeasuredBatchProfiling(std::stringstream &ss) const;
-  void GenTopnAppendMeasuredDefault(std::stringstream &ss) const;
+  void GenTopnMeasuredBatchProfiling(std::stringstream &ss, bool use_att_codegen) const;
+  void GenTopnAppendMeasuredDefault(std::stringstream &ss, bool use_att_codegen) const;
   void GenTopnSearchTilingKeyCall(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result,
                                   const std::string &search_cfg) const;
   void GenTopnSetFailureMessage(std::stringstream &ss, const std::string &indent, const std::string &reason) const;
-  void GenTopnDefaultTiling(std::stringstream &ss, const std::string &tiling) const;
+  void GenTopnDefaultTiling(std::stringstream &ss, const std::string &tiling, bool use_att_codegen) const;
   void GenTopnSearchAndFinalChecks(std::stringstream &ss, const std::string &tiling,
                                    const ::ascir::FusedScheduledResult &fused_schedule_result,
                                    bool use_measured_perf) const;
@@ -240,7 +247,7 @@ class TilingLib {
                                      const std::string &tiling, const codegen::PgoShapeStringStream &pgo_shape_dim,
                                      const std::string &entry_declaration) const;
   void GenInductorPgoProxyEntry(std::stringstream &ss, const std::string &tiling) const;
-  std::string GenCandidateSolutionProtocolForInductor(const std::string &tiling) const;
+  std::string GenCandidateSolutionProtocolForInductor(const std::string &tiling, bool emit_semantic_infos) const;
   void GenDeduplicateCandidateSolutionsPrefix(std::stringstream &ss) const;
   void GenDeduplicateCandidateSolutions(std::stringstream &ss) const;
   void GenDeduplicateMeasuredCandidateSolutions(std::stringstream &ss) const;

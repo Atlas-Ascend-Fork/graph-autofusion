@@ -33,7 +33,14 @@ def test_help_lists_all_commands():
     assert result.returncode == 0
     assert all(
         x in result.stdout
-        for x in ("summary", "compare", "verify-tiling", "split-slog", "perf-formula")
+        for x in (
+            "summary",
+            "compare",
+            "verify-tiling",
+            "split-slog",
+            "perf-formula",
+            "topn-templates",
+        )
     )
 
 

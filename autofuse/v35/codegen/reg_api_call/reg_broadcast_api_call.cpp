@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "reg_broadcast_api_call.h"
+#include "common_utils.h"
 #include <limits>
 #include <sstream>
 #include "ascir_ops.h"
@@ -20,12 +21,38 @@
 #include "reg_api_call_utils.h"
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 using namespace std;
 using namespace ascgen_utils;
 
 namespace {
 constexpr const char *kAscirNodeParams = "AscirNodeParams";
 constexpr const char *kCompactPddingMode = "AscendC::PaddingMode::Compact";
+
+std::string GetBroadcastSemanticFeature(const Tensor &input, const Tensor &output) {
+  if (IsBroadcastConstantTensor(input)) {
+    return semantic::kBroadcastScalar;
+  }
+  const size_t axis_count = std::min(input.vectorized_axis.size(), output.vectorized_axis.size());
+  bool has_non_tail_broadcast = false;
+  bool has_tail_broadcast = false;
+  for (size_t pos = 0UL; pos < axis_count; ++pos) {
+    const auto input_size = input.axis_size[input.vectorized_axis_pos[pos]];
+    const auto output_size = output.axis_size[output.vectorized_axis_pos[pos]];
+    if (af::SymbolicUtils::StaticCheckEq(input_size, output_size) == af::TriBool::kTrue) {
+      continue;
+    }
+    if (pos + 1UL == axis_count) {
+      has_tail_broadcast = true;
+    } else {
+      has_non_tail_broadcast = true;
+    }
+  }
+  if (has_non_tail_broadcast) {
+    return semantic::kBroadcastNonTail;
+  }
+  return has_tail_broadcast ? semantic::kBroadcastTail : semantic::kBroadcast;
+}
 
 af::Status ResetBroadcastNodeParams(const af::AscNodePtr &node, ascir_param::BroadcastNodeParams *&broadcast_params) {
   GE_ASSERT_NOTNULL(node);
@@ -185,6 +212,7 @@ Status BroadcastRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir
   const auto &x = inputs[0].get();
   const auto &y = outputs[0].get();
   (void)RegisterBasicDumpParam(this->api_name_, inputs, outputs);
+  GE_ASSERT_SUCCESS(SetSemanticFeature(GetBroadcastSemanticFeature(x, y)));
   if (IsBroadcastConstantTensor(x)) {
     int64_t id = -1;
     BroadcastScalar(tpipe, current_axis, x, y, id, result, false);

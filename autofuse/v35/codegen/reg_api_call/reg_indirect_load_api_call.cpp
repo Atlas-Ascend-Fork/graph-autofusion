@@ -24,6 +24,7 @@
 #include "v35/ascir/ascir_codegen_v2.h"
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 constexpr size_t kIndirectLoadInputCount = 2UL;
 constexpr size_t kIndirectLoadOutputCount = 1UL;
@@ -2018,6 +2019,7 @@ Status IndirectLoadRegApiCall::GenerateSk(const TPipe &tpipe, const std::vector<
 
   std::stringstream ss;
   ss << "// IndirectLoad SK" << std::endl;
+  GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kSk));
   ss << "{" << std::endl;
   ss << "  AscendC::IndirectLoadSk<" << x_dtype_name << ", " << index_dtype_name << ", " << x_info.sizes.size() << ", "
      << axis_ << ">(" << std::endl;
@@ -2103,6 +2105,20 @@ Status IndirectLoadRegApiCall::GenerateSimd(const TPipe &tpipe, const std::vecto
 
   std::stringstream ss;
   ss << "// IndirectLoad SIMD" << std::endl;
+  std::string simd_feature = semantic::kSimdPrefix;
+  switch (simd_metadata_.fallback) {
+    case ascgen_utils::indirect_load::SimdFallback::kGatherApi:
+      simd_feature += semantic::kGatherApi;
+      break;
+    case ascgen_utils::indirect_load::SimdFallback::kStrided:
+      simd_feature += semantic::kStrided;
+      break;
+    case ascgen_utils::indirect_load::SimdFallback::kRegisterGather:
+    default:
+      simd_feature += simd_metadata_.try_embedding ? semantic::kAdaptive : semantic::kRegisterGather;
+      break;
+  }
+  GE_ASSERT_SUCCESS(SetSemanticFeature(simd_feature));
   ss << "{" << std::endl;
   EmitSimdParams(tpipe, current_axis, input, output, input_info, index_info, logical_view_.output, simd_metadata_,
                  axis_pos, ss);
@@ -2349,6 +2365,10 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
   const bool use_prepass = CanUseSimtIndexPrepass(tpipe, prepass_plan);
   const std::string offset_type = GetSimtOffsetType(simt_policy_);
   std::stringstream ss;
+  const std::string simt_feature = std::string(semantic::kSimtPrefix) +
+                                   ascgen_utils::GetSimtSemanticRole(simt_policy_.policy) + semantic::kOffsetPrefix +
+                                   (offset_type == "uint32_t" ? "32" : "64");
+  GE_ASSERT_SUCCESS(SetSemanticFeature(simt_feature));
   // [seq-V1] fused primary（六级降级阶梯 L2/L3，见设计文档）：单 evaluator 统一发射全组——
   // 一个 VF_CALL（IndirectLoadSimtFused）启动线程块，每线程逐路串行 index 链求值 →
   // AddressPolicy 寻址 → load。L2（寄存器归并）：归并树在 FusedEval 内以 N 个 value 为种子

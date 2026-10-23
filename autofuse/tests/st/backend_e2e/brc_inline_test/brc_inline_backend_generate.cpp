@@ -55,6 +55,7 @@ TEST_F(TestBackendAddAbsE2e, BrcInlineE2eCodegen) {
     EXPECT_EQ(optimizer.Optimize(graph, fused_schedule_result), 0);
     codegen::CodegenResult result;
     EXPECT_EQ(codegen.Generate(shape_info, fused_schedule_result, result), 0);
+    EXPECT_NE(result.tiling.find("Broadcast/Inline"), std::string::npos);
     kernel_file << tilig_stub << RemoveSubDirInclude(result.kernel);
     tiling_file << result.tiling;
     tiling_data_file << result.tiling_data;

@@ -16,6 +16,30 @@
 #include "codegen_tiling_data.h"
 #include "tests/common/codegen_workspace_test_utils.h"
 
+namespace {
+std::string WithoutFinalTilingMetadata(std::string value) {
+  const size_t begin = value.find("#ifndef AUTOFUSE_FINAL_TILING_SELECTION_SNAPSHOT_DEFINED");
+  if (begin != std::string::npos) {
+    const size_t end = value.find("#endif", begin);
+    const size_t end_size = end == std::string::npos ? 0U : strlen("#endif") + 1U;
+    if (end != std::string::npos) {
+      value.erase(begin, end + end_size - begin);
+    }
+  }
+  const std::string vector_include = "#include <vector>\n";
+  const size_t include_pos = value.find(vector_include);
+  if (include_pos != std::string::npos) {
+    value.erase(include_pos, vector_include.size());
+  }
+  const std::string selections = "  std::vector<FinalTilingSelectionSnapshot> final_tiling_selections;\n";
+  const size_t selections_pos = value.find(selections);
+  if (selections_pos != std::string::npos) {
+    value.erase(selections_pos, selections.size());
+  }
+  return value;
+}
+}  // namespace
+
 class TestCodegenTilingData : public testing::Test, public codegen::TilingData {
  protected:
   TestCodegenTilingData() : codegen::TilingData("TestKernel", "TilingData") {}
@@ -92,7 +116,7 @@ struct AutofuseTilingDataPerf {
 };
 #endif
 )rawliteral";
-  EXPECT_EQ(this->Generate(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->Generate(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, GenerateWorkspaceFieldsShouldUseUint64) {
@@ -169,7 +193,7 @@ struct AutofuseTilingDataPerf {
 };
 #endif
 )rawliteral";
-  EXPECT_EQ(this->Generate(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->Generate(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, SingleGroupGenerateConstTilingDataWithTranspose) {
@@ -329,7 +353,7 @@ struct AutofuseTilingDataPerf {
 }
 
 )rawliteral";
-  EXPECT_EQ(this->GenerateConst(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->GenerateConst(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, multiGroupGenerateConstTilingDataWithTranspose) {
@@ -577,7 +601,7 @@ struct AutofuseTilingDataPerf {
 }
 
 )rawliteral";
-  EXPECT_EQ(this->GenerateConst(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->GenerateConst(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, MultiGroupGenerateTilingData) {
@@ -703,7 +727,7 @@ struct AutofuseTilingDataPerf {
 };
 #endif
 )rawliteral";
-  EXPECT_EQ(this->Generate(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->Generate(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, AddApiTilingData) {

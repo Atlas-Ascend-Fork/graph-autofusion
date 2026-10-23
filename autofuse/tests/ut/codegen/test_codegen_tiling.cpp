@@ -17,6 +17,10 @@
 #include "codegen_tiling.h"
 #include "codegen_tiling_cube_wrapper.h"
 #include "common_utils.h"
+#include "../../att/generator/final_tiling_log_gen.h"
+#define protected public
+#include "../../att/generator/high_perf_tiling_code_gen_impl.h"
+#undef protected
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
 #include "schedule_result.h"
@@ -2020,6 +2024,12 @@ TEST_F(TestCodegenTiling, EmptyTensorInductorModeledPerfShouldNotReferenceAttTil
   EXPECT_NE(perf_func.find("return DBL_MAX;"), std::string::npos);
   EXPECT_EQ(perf_func.find("optiling::GetPerf"), std::string::npos);
   EXPECT_EQ(perf_func.find("AscGraph"), std::string::npos);
+
+  EXPECT_EQ(tiling_impl.find("TemplateSemanticInfo"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("GetTemplateSemanticInfos"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("GetTilingCore(default_tiling, -1)"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("EmitFinalTilingByCase"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("ShouldEmitFinalTiling()"), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, TestGenDfxInputSymbolInfo) {
@@ -3560,7 +3570,9 @@ TEST_F(TestCodegenTiling, FinalTilingUsesSharedLogHeaderAndSelectionProducer) {
   bool has_summary_producer = false;
   for (const auto &[name, source] : tensorflow_files) {
     (void)name;
-    has_pipe_estimate = has_pipe_estimate || source.find("final_pipe_estimates") != std::string::npos;
+    has_pipe_estimate =
+        has_pipe_estimate ||
+        source.find("CollectPipeEstimates(tiling_data, final_context.pipe_estimates)") != std::string::npos;
     has_summary_producer =
         has_summary_producer || source.find("EmitFinalTilingSummary(final_summary)") != std::string::npos;
   }
@@ -3568,7 +3580,7 @@ TEST_F(TestCodegenTiling, FinalTilingUsesSharedLogHeaderAndSelectionProducer) {
   bool has_score = false;
   for (const auto &[name, source] : tensorflow_files) {
     (void)name;
-    has_score = has_score || source.find("final_score = final_case_impl->CalcScore") != std::string::npos;
+    has_score = has_score || source.find("final_context.score = final_case_impl->CalcScore") != std::string::npos;
   }
   EXPECT_TRUE(has_score);
   EXPECT_TRUE(has_summary_producer);
@@ -3582,6 +3594,86 @@ TEST_F(TestCodegenTiling, FinalTilingUsesSharedLogHeaderAndSelectionProducer) {
     has_inductor_repr_call = has_inductor_repr_call || source.find("GetTilingDataRepr") != std::string::npos;
   }
   EXPECT_TRUE(has_inductor_repr_call);
+}
+
+TEST_F(TestCodegenTiling, FinalTilingContextInitializerKeepsSemanticNameOrder) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::Symbol(1));
+  codegen_func_ = att::GenTilingImplAutoFuseV3;
+  const auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+  std::string all_tiling_code;
+  for (const auto &tiling_file : tiling_files) {
+    all_tiling_code += tiling_file.second;
+  }
+  EXPECT_NE(all_tiling_code.find("final_context.template_name = final_case_impl->GetTemplateName();"),
+            std::string::npos);
+  EXPECT_NE(all_tiling_code.find("final_context.semantic_name = final_case_impl->GetSemanticName();"),
+            std::string::npos);
+  EXPECT_NE(all_tiling_code.find("final_context.semantic_names = {final_context.semantic_name};"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("EmitTemplateSemanticRecord(final_context, ambiguous_sub_case);"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, FinalTilingObservationContextIsolatesSlotsAndReentry) {
+  const std::string source = R"(
+#include <string>
+#include <vector>
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                             R"(
+int main() {
+  FinalTilingObservationContext outer_context;
+  FinalTilingObservationCallGuard outer_guard(outer_context, true, 2U);
+  {
+    FinalTilingObservationSlotGuard slot_guard(0U);
+    CommitCurrentFinalTilingSelection({true, 2U, 3U, 0U, 11U, 11, 1});
+  }
+  {
+    FinalTilingObservationSlotGuard slot_guard(1U);
+    CommitCurrentFinalTilingSelection({true, 2U, 3U, 1U, 12U, 12, 2});
+  }
+  FinalTilingSelectionSnapshot first{};
+  FinalTilingSelectionSnapshot second{};
+  if (!GetFinalTilingSelectionSnapshot(0U, first) || !GetFinalTilingSelectionSnapshot(1U, second)) { return 1; }
+  if (!first.valid || first.sub_case_id != 1 || first.tiling_key != 11U) { return 2; }
+  if (!second.valid || second.sub_case_id != 2 || second.tiling_key != 12U) { return 3; }
+
+  {
+    FinalTilingObservationContext inner_context;
+    FinalTilingObservationCallGuard inner_guard(inner_context, true, 1U);
+    FinalTilingObservationSlotGuard slot_guard(0U);
+    CommitCurrentFinalTilingSelection({true, 9U, 9U, 9U, 99U, 99, 9});
+    FinalTilingSelectionSnapshot inner{};
+    if (!GetFinalTilingSelectionSnapshot(0U, inner) || inner.tiling_key != 99U) { return 4; }
+  }
+  if (!GetFinalTilingSelectionSnapshot(0U, first) || first.tiling_key != 11U) { return 5; }
+
+  FinalTilingObservationContext disabled_context;
+  FinalTilingObservationCallGuard disabled_guard(disabled_context, false, 1U);
+  FinalTilingObservationSlotGuard slot_guard(0U);
+  CommitCurrentFinalTilingSelection({true, 1U, 1U, 1U, 1U, 1, 1});
+  FinalTilingSelectionSnapshot disabled{};
+  if (GetFinalTilingSelectionSnapshot(0U, disabled) && disabled.valid) { return 6; }
+  if (!disabled_context.selections.empty()) { return 7; }
+  return 0;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, FinalTilingSelectionUsesCallPrivateSlotSnapshots) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::Symbol(1));
+  codegen_func_ = att::GenTilingImplAutoFuseV3;
+  const auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+  std::string all_tiling_code;
+  for (const auto &tiling_file : tiling_files) {
+    all_tiling_code += tiling_file.second;
+  }
+  EXPECT_EQ(all_tiling_code.find("g_final_selected_sub_case_tag"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("FinalTilingObservationCallGuard"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("FinalTilingObservationSlotGuard"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("CommitCurrentFinalTilingSelection"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("GetFinalTilingSubCaseId"), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, InductorMultiGroupFinalTilingUsesFullRepresentation) {
@@ -3628,7 +3720,12 @@ TEST_F(TestCodegenTiling, FinalTilingKeepsCoreSelectionFreeOfObservabilityWork) 
   const std::string &wrapper_source = wrapper_file->second;
   EXPECT_NE(wrapper_source.find("ShouldEmitFinalTiling"), std::string::npos);
   EXPECT_NE(wrapper_source.find("EmitFinalTilingSummary"), std::string::npos);
-  EXPECT_NE(wrapper_source.find("g_final_tiling_observe_enabled"), std::string::npos);
+  EXPECT_NE(wrapper_source.find("FinalTilingObservationCallGuard"), std::string::npos);
+  const size_t reset_pos = wrapper_source.find("FinalTilingObservationCallGuard final_tiling_observation_guard");
+  const size_t core_call_pos = wrapper_source.find("const bool ret = GetTilingCore(");
+  ASSERT_NE(reset_pos, std::string::npos);
+  ASSERT_NE(core_call_pos, std::string::npos);
+  EXPECT_LT(reset_pos, core_call_pos);
   EXPECT_NE(core_file->second.find("bool GetTilingCore("), std::string::npos);
   EXPECT_NE(wrapper_source.find("if (!final_summary.groups.empty())"), std::string::npos);
   EXPECT_NE(core_file->second.find("void EmitFinalTilingByCase("), std::string::npos);
@@ -3648,7 +3745,8 @@ TEST_F(TestCodegenTiling, SingleGroupFinalTilingEmitsRuntimeObservation) {
     has_observe_begin = has_observe_begin ||
                         source.find("const bool emit_final_tiling = ShouldEmitFinalTiling();") != std::string::npos;
     has_observe_reset =
-        has_observe_reset || source.find("::g_final_tiling_observe_enabled = false;") != std::string::npos;
+        has_observe_reset ||
+        source.find("FinalTilingObservationCallGuard final_tiling_observation_guard") != std::string::npos;
     has_runtime_emitter_call =
         has_runtime_emitter_call ||
         source.find("EmitFinalTilingByCase(tiling_data, tiling_data.get_block_dim(), \"runtime\"") != std::string::npos;
@@ -3677,13 +3775,12 @@ TEST_F(TestCodegenTiling, FinalTilingUsesSelectedCaseAndStructuredPipeInterface)
         source.find("GetSelectedTilingImplPtr(static_cast<uint32_t>(final_case_id), corenum") != std::string::npos;
     has_selection_case_factory =
         has_selection_case_factory ||
-        source.find("GetSelectedTilingImplPtr(static_cast<uint32_t>(case_id), tiling_data.get_block_dim()") !=
+        source.find("GetSelectedTilingImplPtr(static_cast<uint32_t>(snapshot.case_id), tiling_data.get_block_dim()") !=
             std::string::npos;
     has_selected_sub_case_state =
-        has_selected_sub_case_state ||
-        source.find("g_final_selected_sub_case_tag = selected_sub_case_tag") != std::string::npos;
+        has_selected_sub_case_state || source.find("CommitCurrentFinalTilingSelection(") != std::string::npos;
     has_selected_sub_case_reset =
-        has_selected_sub_case_reset || source.find("g_final_selected_sub_case_tag_valid = false") != std::string::npos;
+        has_selected_sub_case_reset || source.find("ResetCurrentFinalTilingSelection()") != std::string::npos;
     has_structured_pipe_interface =
         has_structured_pipe_interface || source.find("CollectPipeEstimates(tiling_data") != std::string::npos;
     has_axes_pipe_estimate =
@@ -3797,7 +3894,7 @@ TEST_F(TestCodegenTiling, SplitHeaderGenerateForTfShouldGuardRuntimeHeadersForCc
 TEST_F(TestCodegenTiling, SplitHeaderGenerateForPgoShouldIncludeDirectEntryDependencies) {
   enable_autofuse_pgo_ = true;
   codegen_func_ = att::GenTilingImplAutoFuseV3;
-  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")});
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::Symbol(1));
   const std::map<std::string, std::string> shape_info;
   auto tiling_files = this->Generate(fused_schedule_result, shape_info, ".", "10");
 
@@ -4900,9 +4997,638 @@ TEST_F(TestCodegenTiling, TopnWrapperPrintsCompleteFinalTilingDataInChunks) {
   ASSERT_TRUE(tiling_files.find(codegen::kTilingDefAndConstIdentify) != tiling_files.end());
   const auto &tiling_impl = tiling_files.at(codegen::kTilingDefAndConstIdentify);
 
+  EXPECT_NE(tiling_impl.find("GenerateTopnSolutions enter: topn=%ld, input_configs.size=%zu operator=%s"),
+            std::string::npos);
   EXPECT_NE(tiling_impl.find("output[%zu]: perf=%.6f is_default=%d block_dim=%ld"), std::string::npos);
   EXPECT_NE(tiling_impl.find("output[%zu] repr[%zu..%zu]: %.*s"), std::string::npos);
   EXPECT_EQ(tiling_impl.find("block_dim=%ld repr=%s"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticTopnCapturesCandidateIdentity) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::ops::One);
+  fused_schedule_result.node_idx_to_scheduled_results[0][0].semantic_name = "Pointwise/Test";
+  this->codegen_func_ = att::GenTilingImplAutoFuseV3;
+  auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+  ASSERT_TRUE(tiling_files.find(codegen::kTilingDefAndConstIdentify) != tiling_files.end());
+  ASSERT_TRUE(tiling_files.find(codegen::kTilingApiHeaderIdentify) != tiling_files.end());
+  const auto &tiling_impl = tiling_files.at(codegen::kTilingDefAndConstIdentify);
+  const auto &api_header = tiling_files.at(codegen::kTilingApiHeaderIdentify);
+
+  EXPECT_NE(tiling_impl.find("std::vector<TemplateSemanticInfo> semantic_infos{};"), std::string::npos);
+  EXPECT_NE(api_header.find("struct TemplateSemanticInfo;"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("optiling::GetTemplateSemanticInfos(response.candidate_solutions.back().tiling_data)"),
+            std::string::npos);
+  std::string all_tiling_code;
+  for (const auto &tiling_file : tiling_files) {
+    all_tiling_code += tiling_file.second;
+  }
+  EXPECT_NE(all_tiling_code.find("const char *GetSemanticName() const override { return \"Pointwise/Test\"; }"),
+            std::string::npos);
+  EXPECT_NE(tiling_impl.find("record.tiling_key = info.tiling_key;"), std::string::npos);
+  EXPECT_NE(tiling_impl.find("if (ShouldEmitFinalTiling()) {"), std::string::npos);
+  EXPECT_NE(tiling_impl.find("EmitTemplateSemanticRecord(record);"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticInductorSingleGroupEmitsAttReturn) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::Symbol(1));
+  fused_schedule_result.node_idx_to_scheduled_results[0].resize(1);
+  this->codegen_func_ = att::GenTilingImplAutoFuseV3;
+  auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+  ASSERT_TRUE(tiling_files.find(codegen::kTilingDefAndConstIdentify) != tiling_files.end());
+  const auto &tiling_impl = tiling_files.at(codegen::kTilingDefAndConstIdentify);
+  std::string all_tiling_code;
+  for (const auto &tiling_file : tiling_files) {
+    all_tiling_code += tiling_file.second;
+  }
+
+  EXPECT_NE(tiling_impl.find("optiling::EmitFinalTilingByCase(*tiling, tiling->get_block_dim(), "
+                             "\"runtime\", \"default\", 0U, -1);"),
+            std::string::npos);
+  EXPECT_NE(all_tiling_code.find("record.tiling_key = context.tiling_key;"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("HasAmbiguousFinalTilingCase(final_tiling_key, nullptr)"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("set_semantic_fallback();"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticTopnAggregatesMultiGroupInfos) {
+  auto fused_schedule_result = this->GenTilingKeyCountResult({{1, 1}}, af::Symbol(1));
+  this->codegen_func_ = att::GenTilingImplAutoFuseV3;
+  auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+  ASSERT_TRUE(tiling_files.find(codegen::kTilingDefAndConstIdentify) != tiling_files.end());
+  const auto &tiling_impl = tiling_files.at(codegen::kTilingDefAndConstIdentify);
+
+  EXPECT_NE(tiling_impl.find("std::vector<TemplateSemanticInfo> "
+                             "GetTemplateSemanticInfos(AutofuseTilingData &tiling_data)"),
+            std::string::npos);
+  EXPECT_NE(tiling_impl.find("if (tiling_data.get_graph0_tiling_key() == 0U) {"), std::string::npos);
+  EXPECT_NE(tiling_impl.find("optiling::AscGraph0ScheduleResult0G0::GetTemplateSemanticInfos("
+                             "tiling_data.graph0_result0_g0_tiling_data)"),
+            std::string::npos);
+  EXPECT_NE(tiling_impl.find("optiling::AscGraph0ScheduleResult0G1::GetTemplateSemanticInfos("
+                             "tiling_data.graph0_result0_g1_tiling_data)"),
+            std::string::npos);
+  std::string all_tiling_code;
+  for (const auto &tiling_file : tiling_files) {
+    all_tiling_code += tiling_file.second;
+  }
+  EXPECT_EQ(all_tiling_code.find("tiling_data.graph0_result0_g0_tiling_data.get_tiling_key()"), std::string::npos);
+  EXPECT_EQ(all_tiling_code.find("tiling_data.graph0_result0_g1_tiling_data.get_tiling_key()"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticTopnLogsOnlyAfterSuccessfulSwap) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::ops::One);
+  this->codegen_func_ = att::GenTilingImplAutoFuseV3;
+  auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+  ASSERT_TRUE(tiling_files.find(codegen::kTilingDefAndConstIdentify) != tiling_files.end());
+  const auto &tiling_impl = tiling_files.at(codegen::kTilingDefAndConstIdentify);
+
+  const auto tiling_swap_pos = tiling_impl.find("tiling_datas.swap(export_tilings);");
+  const auto workspace_swap_pos = tiling_impl.find("workspaces.swap(export_workspaces);");
+  const auto block_dim_swap_pos = tiling_impl.find("block_dims.swap(export_block_dims);");
+  const auto semantic_log_pos = tiling_impl.find("EmitTemplateSemanticRecord(record);");
+  ASSERT_NE(tiling_swap_pos, std::string::npos);
+  ASSERT_NE(workspace_swap_pos, std::string::npos);
+  ASSERT_NE(block_dim_swap_pos, std::string::npos);
+  ASSERT_NE(semantic_log_pos, std::string::npos);
+  const auto topn_entry_pos = tiling_impl.find("extern \"C\" int64_t GenerateTopnSolutions");
+  ASSERT_NE(topn_entry_pos, std::string::npos);
+  const auto topn_success_return_pos = tiling_impl.find("return 0;", topn_entry_pos);
+  ASSERT_NE(topn_success_return_pos, std::string::npos);
+  const auto topn_entry_body = tiling_impl.substr(topn_entry_pos, topn_success_return_pos - topn_entry_pos);
+  EXPECT_EQ(topn_entry_body.find("return;"), std::string::npos);
+  EXPECT_NE(topn_entry_body.find("if (ShouldEmitFinalTiling()) {"), std::string::npos);
+  EXPECT_LT(tiling_swap_pos, semantic_log_pos);
+  EXPECT_LT(workspace_swap_pos, semantic_log_pos);
+  EXPECT_LT(block_dim_swap_pos, semantic_log_pos);
+  std::string all_tiling_code;
+  for (const auto &tiling_file : tiling_files) {
+    all_tiling_code += tiling_file.second;
+  }
+  EXPECT_NE(all_tiling_code.find("record.stage = \"topn_output\";"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("unavailable_record.name_status = \"unavailable\";"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("std::vector<std::string> semantic_names = info.semantic_names;"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("semantic_names.size() > 1U ? \"ambiguous\""), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticLogUsesBoundedFormatterAndEscapeHelper) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::ops::One);
+  this->codegen_func_ = att::GenTilingImplAutoFuseV3;
+  auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+  ASSERT_TRUE(tiling_files.find(codegen::kTilingDefAndConstIdentify) != tiling_files.end());
+  const auto &tiling_impl = tiling_files.at(codegen::kTilingDefAndConstIdentify);
+  std::string all_tiling_code;
+  for (const auto &tiling_file : tiling_files) {
+    all_tiling_code += tiling_file.second;
+  }
+
+  EXPECT_NE(all_tiling_code.find("FormatTemplateSemanticRecord"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("kTemplateSemanticLineBudget = 700U"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("FinalTilingShellQuote(semantic_name)"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("ParseTemplateSemanticName"), std::string::npos);
+  EXPECT_EQ(all_tiling_code.find("IsTemplateSemanticRole"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("FinalTilingJsonQuote(group.semantic_name)"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("semantic_name\\\":\""), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("semantic_name="), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("semantic_schema=1"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("family="), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("strategy="), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("role="), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("api_features="), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("transforms="), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("semantic_index="), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("semantic_name_count="), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("TemplateSemanticDetailLines"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("TemplateSemanticFieldSummary"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("TemplateSemanticLineSummary"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("line.size() > kTemplateSemanticLineBudget"), std::string::npos);
+  EXPECT_EQ(all_tiling_code.find("TemplateSemanticShellQuote"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticFormatterBoundsEveryGeneratedLine) {
+  const std::string helpers = att::final_tiling::GenFinalTilingLogHelpers(false);
+  std::string source = R"(
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, ...) (void)0
+#define OP_NAME "test"
+)";
+  source += helpers;
+  source += R"(
+int main() {
+  const auto bounded = [](const std::vector<std::string> &lines) {
+    for (const auto &line : lines) {
+      if (line.size() > 700U) { return false; }
+    }
+    return true;
+  };
+  TemplateSemanticRecord core;
+  core.stage = "topn_output";
+  core.has_output = true;
+  core.has_group = true;
+  core.semantic_name.assign(800U, 'x');
+  if (!bounded(FormatTemplateSemanticRecord(core))) { return 1; }
+
+  TemplateSemanticRecord detail = core;
+  detail.semantic_name = "Pointwise/Test";
+  detail.has_identity = true;
+  detail.template_name.assign(800U, 'x');
+  const auto lines = FormatTemplateSemanticRecord(detail);
+  bool has_template_summary = false;
+  for (const auto &line : lines) {
+    if (line.find("template_hash=") != std::string::npos) { has_template_summary = true; }
+  }
+  return bounded(lines) && has_template_summary ? 0 : 1;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticFormatterReadsCanonicalFields) {
+  std::string source = R"(
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, ...) (void)0
+#define OP_NAME "test"
+)";
+  source += att::final_tiling::GenFinalTilingLogHelpers(false);
+  source += R"(
+int main() {
+  const std::string name = "Reduce/Common@Norm#AR|NoReuseSrc+NDDMA.Cast";
+  const auto fields = ParseTemplateSemanticName(name);
+  if (fields.family != "Reduce" || fields.strategy != "Common" || fields.role != "Norm" ||
+      fields.api_features != std::vector<std::string>{"AR", "NoReuseSrc"} ||
+      fields.transforms != std::vector<std::string>{"NDDMA.Cast"}) { return 1; }
+  const auto parent = ParseTemplateSemanticName("Reduce/Common@Norm");
+  if (parent.strategy != "Common" || parent.role != "Norm" || !parent.api_features.empty()) { return 3; }
+  const auto api_only = ParseTemplateSemanticName("Reduce/Common#AR|ReuseSrc");
+  if (api_only.strategy != "Common" || !api_only.role.empty() || api_only.api_features.size() != 2U) { return 4; }
+  const auto family = ParseTemplateSemanticName("Reduce");
+  if (family.family != "Reduce" || !family.strategy.empty()) { return 5; }
+  FinalTilingGroupSelection group{};
+  group.semantic_name = name;
+  const std::string summary = FinalTilingGroupsJson({group});
+  return summary.find("\"semantic_name\":\"" + name + "\"") != std::string::npos ? 0 : 6;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, CachedTemplateSemanticFallbackExecutesKeyMapping) {
+  att::TilingModelInfo models(3);
+  for (size_t index = 0; index < models.size(); ++index) {
+    models[index].tiling_case_id = index == 0 ? 0U : 1U;
+    models[index].sub_case_tag = std::to_string(index);
+    models[index].semantic_name =
+        index == 0 ? "Pointwise/Common" : (index == 1 ? "Reduce/Common@Norm#AR" : "Reduce/Common@Norm#RA");
+  }
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "TestTilingData";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  ASSERT_EQ(generator.GenTemplateSemanticInfos(), af::SUCCESS);
+  const std::string mapping = generator.tiling_func_.GetOutputStr();
+  generator.GenFinalTilingSemanticFallback();
+  std::string source = R"(
+#include <string>
+#include <vector>
+std::vector<std::string> emitted_lines;
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) emitted_lines.emplace_back(value)
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct TestTilingData { uint32_t key; uint32_t get_tiling_key() { return key; } };
+int32_t GetFinalTilingCaseId(uint32_t key) { return key < 2U ? key : -1; }
+)" + mapping + R"(
+int main() {
+  const char *source = "runtime", *selection_mode = "default";
+  const uint32_t group_id = 0U;
+  const bool ambiguous_sub_case = false;
+  for (uint32_t key : {0U, 1U, 99U}) {
+    TestTilingData tiling_data{key};
+    FinalTilingContext final_context{};
+    final_context.tiling_key = key;
+)" + generator.tiling_func_.GetOutputStr().substr(mapping.size()) +
+                       R"(
+    emitted_lines.clear();
+    set_semantic_fallback();
+    EmitTemplateSemanticRecord(final_context, key == 1U);
+    if (emitted_lines.empty()) { return 1; }
+    const std::string &line = emitted_lines.front();
+    const std::string name = key == 0U ? "Pointwise/Common" : (key == 1U ? "Reduce/Common@Norm" : "Unknown");
+    const std::string status = key == 0U ? "" : (key == 1U ? "ambiguous" : "unavailable");
+    if (line.find("semantic_name=\"" + name + "\"") == std::string::npos ||
+        (!status.empty() && line.find("name_status=" + status) == std::string::npos)) { return 2; }
+  }
+  return 0;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, ReuseFinalTilingLogsCurrentIdentityForSelectedAndCachedCases) {
+  att::TilingModelInfo models(3);
+  att::ReuseScheduleGroupInfo primary, current;
+  primary.tiling_keys = {0U, 1U, 1U};
+  current.tiling_keys = {7U, 8U, 8U};
+  for (size_t index = 0UL; index < models.size(); ++index) {
+    models[index].schedule_group_ident = {2UL, 3UL, 4UL};
+    models[index].reuse_schedule_group = std::make_shared<att::ReuseScheduleGroup>();
+    models[index].tiling_case_id = current.tiling_keys[index];
+    models[index].sub_case_tag = std::to_string(index);
+    models[index].semantic_name =
+        index == 0UL ? "Pointwise/Common" : (index == 1UL ? "Reduce/Common@Norm#AR" : "Reduce/Common@Norm#RA");
+  }
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  std::map<att::ScheduleGroupIdent, att::ReuseScheduleGroupInfo> infos{{{2UL, 3UL, 4UL}, current}};
+  ASSERT_EQ(generator.GenTemplateSemanticInfos(), af::SUCCESS);
+  ASSERT_EQ(generator.GenReuseGroupTilingWrapperFinalEmitter("Cur", "Primary", primary, infos.cbegin()), af::SUCCESS);
+  std::string source = R"(
+#include <string>
+#include <vector>
+std::vector<std::string> emitted_lines;
+bool log_enabled = true;
+#define CheckCachedLogLevel(level) log_enabled
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) emitted_lines.emplace_back(value)
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct Data { uint32_t key; uint32_t get_tiling_key() const { return key; } void set_tiling_key(uint32_t v) { key = v; } };
+using CurTilingData = Data;
+using PrimaryTilingData = Data;
+template<class TI, class TO> TO &RefToRef(TI &v) { return reinterpret_cast<TO &>(v); }
+namespace Primary {
+bool exact = true; bool fail_context = false;
+int calls = 0;
+void FillContext(Data &data, int32_t id, FinalTilingContext &context) {
+  ++calls; if (fail_context) { throw std::bad_alloc(); }
+  if (id >= 0 && id != static_cast<int32_t>(data.key)) { std::abort(); }
+  context.case_id = id; context.tiling_key = data.key; context.score = 17;
+  context.sub_case_tag = data.key == 0U ? "primary_tag" : "1";
+  context.template_name = "graph0_result0_g0_0";
+  context.semantic_name = data.key == 0U ? "Pointwise/Common" : "Reduce/Common@Norm#AR";
+  context.semantic_names = {context.semantic_name};
+}
+bool GetFinalTilingContextFromSnapshot(Data &data, uint32_t, int32_t id,
+                                       const FinalTilingSelectionSnapshot &snapshot, FinalTilingContext &context) {
+  if (!snapshot.valid || snapshot.graph != 0U || snapshot.result != 0U || snapshot.group != 0U ||
+      snapshot.tiling_key != data.key) { return false; }
+  FillContext(data, id, context);
+  return exact;
+}
+bool GetFinalTilingSelectionFromSnapshot(Data &data, const FinalTilingSelectionSnapshot &snapshot,
+                                         FinalTilingGroupSelection &selection) {
+  selection.case_id = snapshot.case_id;
+  selection.tiling_key = data.key;
+  selection.score = 17;
+  selection.sub_case_tag = data.key == 0U ? "primary_tag" : "1";
+  selection.template_name = "graph0_result0_g0_0";
+  selection.semantic_name = data.key == 0U ? "Pointwise/Common" : "Reduce/Common@Norm#AR";
+  return exact;
+}
+}
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+int main() {
+  log_enabled = false;
+  Data disabled{7U};
+  EmitFinalTilingByCase(disabled, 32U, "runtime", "default", 4U, 7);
+  if (Primary::calls != 0 || !emitted_lines.empty()) { return 3; }
+  log_enabled = true;
+  FinalTilingObservationContext observation;
+  FinalTilingObservationCallGuard observation_guard(observation, true, 1U);
+  FinalTilingObservationSlotGuard observation_slot_guard(0U);
+  for (bool exact : {true, false}) {
+    Primary::exact = exact;
+    for (uint32_t key : {7U, 8U}) {
+      Data data{key}; emitted_lines.clear();
+      CommitCurrentFinalTilingSelection(
+          {true, 2U, 3U, 4U, key, static_cast<int32_t>(key), key == 7U ? 0 : 1});
+      EmitFinalTilingByCase(data, 32U, "runtime", "default", 4U, static_cast<int32_t>(key));
+      const std::string name = key == 7U ? "Pointwise/Common" :
+          (exact ? "Reduce/Common@Norm#AR" : "Reduce/Common@Norm");
+      const std::string templ = key == 7U ? "graph2_result3_g4_07" :
+          (exact ? "graph2_result3_g4_18" : "");
+      std::string logs;
+      for (const auto &line : emitted_lines) { logs += line + "\n"; }
+      if (data.key != key || logs.find("semantic_name=\"" + name + "\"") == std::string::npos ||
+          logs.find("detail graph=2 result=3 tiling_key=" + std::to_string(key) + " template=\"" + templ + "\"") ==
+              std::string::npos) { return 1; }
+      if (exact && logs.find("score=17") == std::string::npos) { return 4; }
+      if (!exact && key == 8U && logs.find("name_status=ambiguous") == std::string::npos) { return 2; }
+    }
+  }
+  Primary::fail_context = true;
+  CommitCurrentFinalTilingSelection({true, 2U, 3U, 4U, 7U, 7, 0});
+  Data unchanged{7U};
+  try { EmitFinalTilingByCase(unchanged, 32U, "runtime", "default", 4U, 7); } catch (...) { return 5; }
+  return unchanged.key == 7U && !observation.enabled ? 0 : 6;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticMetadataIsCanonicalBeforeLogging) {
+  att::TilingModelInfo models(3);
+  const std::vector<std::string> names = {"Reduce/Common/Norm/AR/NoReuseSrc+NDDMA.Cast", "Concat/UB/Extend/Copy",
+                                          "Reduce/Common@Norm#RA"};
+  for (size_t index = 0UL; index < models.size(); ++index) {
+    models[index].tiling_case_id = index;
+    models[index].semantic_name = ascgen_utils::NormalizeTemplateSemanticName(names[index]);
+  }
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, true);
+  ASSERT_EQ(generator.GenTemplateSemanticInfos(), af::SUCCESS);
+  std::string source = R"(
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct Data { uint32_t key; uint32_t get_tiling_key() const { return key; } };
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+int main() {
+  const std::vector<std::string> expected = {"Reduce/Common@Norm#AR|NoReuseSrc+NDDMA.Cast",
+                                           "Concat/UB#Extend|Copy", "Reduce/Common@Norm#RA"};
+  for (uint32_t key = 0U; key < expected.size(); ++key) {
+    Data data{key}; const auto infos = GetTemplateSemanticInfos(data);
+    if (infos.size() != 1U || infos[0].semantic_name != expected[key]) { return 1; }
+  }
+  return 0;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, ReuseObservationStoresLogicalGroupIdentity) {
+  att::TilingModelInfo models(1);
+  models[0].schedule_group_ident = {2UL, 3UL, 4UL};
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  generator.SetFinalTilingObservationMetadata(1UL, 2UL, {{"", 0}});
+  att::ReuseScheduleGroupInfo primary;
+  primary.tiling_keys = {0U};
+  std::map<att::ScheduleGroupIdent, att::ReuseScheduleGroupInfo> infos{{{2UL, 3UL, 4UL}, primary}};
+  ASSERT_EQ(generator.GenReuseGroupTilingWrapperGetTiling("Cur", "Primary", primary, infos.cbegin()), af::SUCCESS);
+  std::string source = R"(
+#include <unordered_map>
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct Data { uint32_t key{0}; uint32_t get_tiling_key() const { return key; }
+  void set_tiling_key(uint32_t value) { key = value; } };
+using CurTilingData = Data;
+using PrimaryTilingData = Data;
+template<class TI, class TO> TO &RefToRef(TI &value) { return value; }
+namespace Primary {
+bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t) {
+  FinalTilingObservationSlotGuard guard(0U);
+  CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 0U, 0, 1}); return true;
+}
+}
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+int main() {
+  FinalTilingObservationContext context;
+  FinalTilingObservationCallGuard guard(context, true, 2U);
+  Data data; std::unordered_map<int64_t, uint64_t> workspace;
+  if (!GetTiling(data, workspace, -1)) { return 1; }
+  const auto &snapshot = context.selections[1];
+  return snapshot.valid && snapshot.graph == 2U && snapshot.result == 3U && snapshot.group == 4U ? 0 : 2;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, PgoObservationCapturesCurrentCaseInsteadOfDefault) {
+  att::TilingModelInfo models(1);
+  models[0].tiling_case_id = 7U;
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, true);
+  generator.GenInductorExecutePGOSolver(models[0]);
+  std::string source = R"(
+#include <unordered_map>
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct Data { uint32_t key{0}; uint32_t get_tiling_key() const { return key; } };
+using AutofuseTilingData = Data;
+struct AutofuseTilingDataPerf { Data tiling_data; double best_perf;
+  std::vector<FinalTilingSelectionSnapshot> final_tiling_selections; };
+struct SearchConfig {};
+struct Base { virtual bool ExecutePGOSolver(Data &, std::vector<AutofuseTilingDataPerf> &, Data *, void *,
+  std::unordered_map<int64_t, uint64_t> &, std::vector<uint32_t *>, const SearchConfig *) = 0; };
+struct Case : Base {
+  const SearchConfig *pending_search_cfg_{nullptr};
+  bool GetTiling(Data &data, double &) { data.key = 7U; return true; }
+  double GetPerf(Data &) { return 1.0; }
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+};
+int main() {
+  FinalTilingObservationContext context;
+  FinalTilingObservationCallGuard guard(context, true, 2U);
+  { FinalTilingObservationSlotGuard slot(0U);
+    CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 14U, 14, 0}); }
+  Data data; std::vector<AutofuseTilingDataPerf> candidates;
+  std::unordered_map<int64_t, uint64_t> workspace;
+  Case impl;
+  if (!impl.ExecutePGOSolver(data, candidates, nullptr, nullptr, workspace)) { return 1; }
+  const auto &snapshots = candidates[0].final_tiling_selections;
+  if (snapshots[0].tiling_key != 7U || snapshots[1].valid || context.selections[0].tiling_key != 14U) { return 2; }
+  RestoreFinalTilingSelectionSnapshots(snapshots);
+  return context.selections[0].tiling_key == 7U && !context.selections[1].valid ? 0 : 3;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticTopnDedupKeepsWinningObservationWithoutCopy) {
+  for (bool measured : {false, true}) {
+    std::stringstream helpers;
+    if (measured) {
+      GenDeduplicateMeasuredCandidateSolutions(helpers);
+    } else {
+      GenDeduplicateCandidateSolutions(helpers);
+    }
+    std::string source = R"(
+#include <cmath>
+#include <map>
+#include <unordered_map>
+#define OP_LOGI(...) (void)0
+#define OP_LOGW(...) (void)0
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                         R"(
+struct Data {}; struct ResLimit {};
+)" + GenCandidateSolutionProtocolForInductor("Data", true) +
+                         helpers.str() + "constexpr bool kMeasured = " + (measured ? "true;" : "false;") + R"(
+int main() {
+  std::vector<CandidateSolution> solutions(3U);
+  for (size_t index = 0UL; index < solutions.size(); ++index) {
+    auto &solution = solutions[index];
+    solution.canonical_repr = index < 2UL ? "same" : "other";
+    solution.modeled_perf = kMeasured ? 3.0 - index : 3.0;
+    solution.is_default = !kMeasured && index == 1UL;
+    solution.semantic_infos.resize(1U);
+    solution.semantic_infos[0].semantic_name.assign(128U, static_cast<char>('A' + index));
+  }
+  const char *kept_name = solutions[1].semantic_infos[0].semantic_name.data();
+  DeduplicateCandidateSolutions(solutions);
+  return solutions.size() == 2U && solutions[0].semantic_infos[0].semantic_name.data() == kept_name &&
+      solutions[0].semantic_infos[0].semantic_name == std::string(128U, 'B') ? 0 : 1;
+}
+)";
+    ASSERT_TRUE(CompileAndRunCode(source));
+  }
+}
+
+TEST_F(TestCodegenTiling, FinalTilingObservationAllocationFailuresPreserveSolverAndReentry) {
+  std::string source = R"(
+#include <cstdlib>
+#include <new>
+bool fail_allocation = false;
+void *operator new(std::size_t size) {
+  if (fail_allocation) { fail_allocation = false; throw std::bad_alloc(); }
+  if (auto *value = std::malloc(size)) { return value; }
+  throw std::bad_alloc();
+}
+void operator delete(void *value) noexcept { std::free(value); }
+void operator delete(void *value, std::size_t) noexcept { std::free(value); }
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+int main() {
+  FinalTilingObservationContext outer;
+  FinalTilingObservationCallGuard outer_guard(outer, true, 1U);
+  FinalTilingObservationSlotGuard outer_slot(0U);
+  CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 7U, 7, 0});
+  for (size_t count : {1UL, 64UL, 4096UL}) {
+    FinalTilingObservationContext inner;
+    fail_allocation = true;
+    try {
+      FinalTilingObservationCallGuard inner_guard(inner, true, count);
+      if (inner.enabled || IsFinalTilingObservationEnabled()) { return 1; }
+    } catch (...) { return 2; }
+    if (!IsFinalTilingObservationEnabled() || outer.selections[0].tiling_key != 7U) { return 3; }
+    for (bool capture : {false, true}) {
+      FinalTilingObservationContext trial;
+      FinalTilingObservationCallGuard trial_guard(trial, true, count);
+      fail_allocation = true;
+      const auto snapshots = capture ? CaptureFinalTilingSelectionSnapshot(0U, {}) : GetFinalTilingSelectionSnapshots();
+      if (!snapshots.empty() || trial.enabled) { return 4; }
+    }
+  }
+  return outer.selections[0].tiling_key == 7U ? 0 : 5;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, TopnObservationVisitsOnlySelectedResultWithPerGroupFallback) {
+  auto fused = GenBasicFusedScheduleResult({}, af::ops::One);
+  const auto result = fused.node_idx_to_scheduled_results[0][0];
+  fused.node_idx_to_scheduled_results[0].assign(2U, result);
+  codegen_func_ = att::GenTilingImplAutoFuseV3;
+  std::string source = R"(
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+int fallback_calls = 0; bool fail_names = false;
+struct Data { uint32_t get_tiling_key() const { return 0U; } };
+struct AutofuseTilingData { Data graph0_result0_g0_tiling_data, graph0_result1_g0_tiling_data;
+  uint32_t get_graph0_tiling_key() const { return 1U; } };
+template<uint32_t Result> std::vector<TemplateSemanticInfo> Fallback(Data &) {
+  ++fallback_calls; if (fail_names) { throw std::bad_alloc(); }
+  TemplateSemanticInfo info; info.result = Result; info.semantic_name = "fallback"; return {info}; }
+bool Selected(Data &, const FinalTilingSelectionSnapshot &snapshot, FinalTilingGroupSelection &selection) {
+  selection.semantic_name = "selected"; return snapshot.valid; }
+namespace optiling {
+namespace AscGraph0ScheduleResult0G0 { auto GetTemplateSemanticInfos(Data &data) { return Fallback<0>(data); }
+  auto GetFinalTilingSelectionFromSnapshot(Data &d, const FinalTilingSelectionSnapshot &s,
+    FinalTilingGroupSelection &v) { return Selected(d, s, v); } }
+namespace AscGraph0ScheduleResult1G0 { auto GetTemplateSemanticInfos(Data &data) { return Fallback<1>(data); }
+  auto GetFinalTilingSelectionFromSnapshot(Data &d, const FinalTilingSelectionSnapshot &s,
+    FinalTilingGroupSelection &v) { return Selected(d, s, v); } }
+}
+)" + GenTemplateSemanticInfosForInductor(fused) +
+                       R"(
+int main() {
+  AutofuseTilingData data;
+  std::vector<FinalTilingSelectionSnapshot> snapshots(2U);
+  snapshots[1] = {true, 0U, 1U, 0U, 0U, 0, 0};
+  FinalTilingObservationContext context;
+  {
+    FinalTilingObservationCallGuard disabled(context, false, 2U);
+    for (size_t count = 0UL; count < 4096UL; ++count) {
+      if (!optiling::GetTemplateSemanticInfos(data, snapshots).empty() || fallback_calls != 0) { return 3; }
+    }
+  }
+  FinalTilingObservationCallGuard enabled(context, true, 2U);
+  auto infos = optiling::GetTemplateSemanticInfos(data, snapshots);
+  if (infos.size() != 1U || infos[0].result != 1U || infos[0].semantic_name != "selected") { return 1; }
+  snapshots[1].valid = false;
+  infos = optiling::GetTemplateSemanticInfos(data, snapshots);
+  if (infos.size() != 1U || infos[0].result != 1U || infos[0].semantic_name != "fallback") { return 2; }
+  fail_names = true;
+  if (!optiling::GetTemplateSemanticInfos(data, snapshots).empty() || context.enabled) { return 4; }
+  const auto calls = fallback_calls;
+  return optiling::GetTemplateSemanticInfos(data, snapshots).empty() && fallback_calls == calls ? 0 : 5;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
 }
 
 // Task 2: Config truth table — request construction & config semantics

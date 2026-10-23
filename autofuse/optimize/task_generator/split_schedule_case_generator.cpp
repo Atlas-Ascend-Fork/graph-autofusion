@@ -21,8 +21,10 @@
 #include "optimize/schedule_utils.h"
 #include "optimize/task_generator/split_group_partitioner.h"
 #include "platform/platform_factory.h"
+#include "common_utils.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 constexpr uint32_t kMaxOutputNum = 48U;
 constexpr int32_t kAlignment = 32;
@@ -124,6 +126,7 @@ Status SplitFusionCaseGenerator::ConvertSplitToLoads(ascir::HintGraph &owner_gra
   }
   GE_CHK_STATUS_RET(RemoveUnusedNodes(split_node), "RemoveUnusedNodes failed");
   GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(owner_graph));
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(owner_graph, semantic::kSplitOffsetLoad));
   ascir::utils::DumpGraph(owner_graph, "AfterConvertSplitToLoad");
   return af::SUCCESS;
 }

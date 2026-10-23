@@ -104,7 +104,7 @@ std::string TilingLib::GenPgoAutofuseTiling(const ascir::FusedScheduledResult &f
       ss << "  }" << std::endl;
       ss << "  if (use_pgo_tiling) {" << std::endl;
       ss << "    *tiling = pgo_tiling;" << std::endl;
-      if (codegen_func_ != nullptr) {
+      if (UseAttCodegen(fused_schedule_result)) {
         if (ascgen_utils::IsSingleGroup(fused_schedule_result)) {
           ss << "    optiling::EmitFinalTilingByCase(*tiling, tiling->get_block_dim(), \"pgo\", \"pgo\", 0U, -1);"
              << std::endl;

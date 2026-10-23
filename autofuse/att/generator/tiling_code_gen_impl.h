@@ -14,6 +14,8 @@
 #include <string>
 #include <set>
 #include <memory>
+#include <map>
+#include <tuple>
 #include <utility>
 #include "code_printer.h"
 #include "common/tiling_source_dependencies.h"
@@ -49,6 +51,8 @@ class TilingCodeGenImpl {
   using FusedGraphNamespaceMap = std::map<size_t, AscGraphNamepspaceMap>;
 
  public:
+  void SetFinalTilingObservationMetadata(const size_t slot, const size_t slot_count,
+                                         const std::map<std::string, int32_t> &sub_case_ids);
   TilingCodeGenImpl(const std::string &op_name, const TilingCodeGenConfig &config,
                     const TilingModelInfo &tiling_model_info, const ScoreFuncs &score_funcs, const bool is_uniq_group);
   virtual ~TilingCodeGenImpl() = default;
@@ -253,6 +257,8 @@ class TilingCodeGenImpl {
   // 多模板情况下算法的模板选择逻辑
   virtual af::Status GenGetTilingKey();
   af::Status GenFinalTilingEmitter();
+  void GenFinalTilingSemanticFallback();
+  af::Status GenFinalTilingContextQuery();
   af::Status GenFinalTilingByCaseEmitter();
   af::Status CollectFinalTilingReprFields(std::set<std::string> &fields);
   af::Status GenFinalTilingReprFunction();
@@ -390,6 +396,9 @@ class TilingCodeGenImpl {
   uint32_t cache_capacity_{0};
   bool with_reuse_info_{false};
   std::string arrange_code_;
+  size_t final_tiling_observation_slot_{0UL};
+  size_t final_tiling_observation_slot_count_{1UL};
+  std::map<std::string, int32_t> final_tiling_sub_case_ids_{};
   // 存储每个ScheduleResult的Group个数：(asc_graph_id, impl_graph_id) -> group_num
   std::map<std::pair<size_t, size_t>, size_t> schedule_result_group_nums_;
 
@@ -449,6 +458,7 @@ class TilingCodeGenImpl {
 
   // 由tilingkey获取对应的tilingimpl的指针
   af::Status GenImplPtr();
+  af::Status GenTemplateSemanticInfos();
   // 由tilingkey获取对应的性能公式
   af::Status GenGetPerf();
   // 由tilingkey获取对应的日志信息
@@ -459,9 +469,20 @@ class TilingCodeGenImpl {
   af::Status GenReuseGroupTilingWrapperGetPerf(
       const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
       std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
+  void GenReuseGroupTilingWrapperFinalObservation(const std::string &reuse_prefix);
+  void GenReuseGroupSnapshotMapping();
+  af::Status GenReuseGroupTilingWrapperFinalEmitter(
+      const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
+      std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
   af::Status GenReuseGroupTilingWrapperGetSummary(
       const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
       std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
+  af::Status GenReuseGroupTilingWrapperGetTemplateSemanticInfos(
+      const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
+      std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
+  af::Status GenReuseGroupTilingWrapperTemplateIdentity(const std::string &object_name, bool emit_status);
+  void GenReuseGroupSelectedTemplateIdentity(const std::string &object_name);
+  af::Status GenReuseGroupTilingWrapperSelectionIdentity();
   af::Status GenReuseGroupTilingWrapper(std::map<std::string, std::string> &tiling_res);
   af::Status GenPGOReuseGroupTilingWrapper();
   af::Status GenTilingKeyFunc();

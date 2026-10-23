@@ -280,6 +280,7 @@ struct ModelInfo {
   uint32_t tiling_case_id;
   std::string graph_name;
   std::string score_func;
+  std::string semantic_name;
   std::string sub_case_tag;                    // Reduce切R，优先切R轴的模板
   std::map<int64_t, Expr> workspace_size_map;  // 用于描述每个tensor_id的workspace大小
   std::map<HardwareDef, Expr> hardware_cons;   // 用于描述硬件约束

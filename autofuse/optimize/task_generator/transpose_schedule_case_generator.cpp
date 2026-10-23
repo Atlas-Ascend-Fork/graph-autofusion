@@ -20,8 +20,10 @@
 #include "indirect_load_utils.h"
 #include "schedule_utils.h"
 #include "graph_properties_cache.h"
+#include "common_utils.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 constexpr int32_t kTransposeNoNeedUBConvertSize = 512;  // 以512Byte作为是否需要消除Transpose的阈值
 constexpr char kTransposePrefix[] = "transpose_";
@@ -92,6 +94,7 @@ Status TransposeFusionCaseGenerator::TransposeConvertProcess(ascir::HintGraph &g
                     transpose_node->GetNamePtr());
 
   GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(graph));
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(graph, semantic::kTransposeFold));
   ascir::utils::DumpGraph(graph, "AfterConvertTranspose");
   return af::SUCCESS;
 }

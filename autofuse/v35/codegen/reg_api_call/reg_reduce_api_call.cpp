@@ -24,6 +24,7 @@
 #include "ascir/reg_func/reduce_reuse_utils.h"
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 using namespace af::ops;
 using namespace af::ascir_op;
 using namespace ascgen_utils;
@@ -133,6 +134,15 @@ Status RegReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<asc
                                              y.Str() + "[0], temp_size);\n");
     api_param->api_post_process.emplace_back("}\n");
   }
+
+  std::string semantic_feature = x.isAr ? semantic::kAr : semantic::kRa;
+  semantic_feature +=
+      is_reuse_source_ == "true" ? "/" + std::string(semantic::kReuseSrc) : "/" + std::string(semantic::kNoReuseSrc);
+  if (need_multi_reduce) {
+    semantic_feature += "/" + std::string(semantic::kMultiRound);
+  }
+  api_param->semantic_feature = semantic_feature;
+
   // 结束代码块（与ReduceMergedSizeCodeGen生成的 { 对应）
   api_param->api_post_process.emplace_back("}\n");
 

@@ -28,6 +28,7 @@
 #include "indirect_load_utils.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 size_t TWO = 2;
 size_t NODE_COUNT_AFTER_REDUCE = 4UL;
@@ -406,6 +407,7 @@ Status ReducePartitionCaseGenerator::GeneratorGeneralTask(ascir::HintGraph &opti
   for (size_t i = 0U; i < optimize_graphs.size(); ++i) {
     const auto &graph = optimize_graphs[i];
     ScheduleTask task{graph, {}, score_funcs[i], {}, ReduceTemplateType::kCommon};
+    task.semantic_name = semantic::kReduceCommon;
     GE_CHK_STATUS_RET(ScheduleGroupGraphPartitioner::PartitionByConnectivity(graph, task.grouped_graphs, node_order_),
                       "Failed to partition graph");
     if (task.grouped_graphs.empty()) {
@@ -443,6 +445,7 @@ Status ReducePartitionCaseGenerator::GeneratorAllLoadTask(ascir::HintGraph &opti
   for (size_t i = 0U; i < optimize_graphs.size(); ++i) {
     const auto &graph = optimize_graphs[i];
     ScheduleTask task{graph, {}, score_funcs[i], {}, ReduceTemplateType::kAllLoad};
+    task.semantic_name = semantic::kReduceAllLoad;
     GE_CHK_STATUS_RET(ScheduleGroupGraphPartitioner::PartitionByConnectivity(graph, task.grouped_graphs, node_order_),
                       "Failed to partition graph");
     tasks.emplace_back(std::move(task));
@@ -487,6 +490,8 @@ Status ReducePartitionCaseGenerator::GeneratorRCoreTask(ascir::HintGraph &optimi
       ascir::ImplGraph phase_2_graph((task.grouped_graphs[i].GetName() + "_r_multicore_phase_2_graph").c_str());
       GE_CHK_STATUS_RET(RMulticorePhase2Graph(phase_2_graph, phase_1_graph, phase_graph, reduce_node).Construct());
       ascir::utils::DumpGraph(phase_2_graph, "phase2graph_construct");
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(phase_1_graph, semantic::kReducePhase1));
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(phase_2_graph, semantic::kReducePhase2));
       new_task_grouped_graphs.emplace_back(std::move(phase_1_graph));
       new_task_grouped_graphs.emplace_back(std::move(phase_2_graph));
       map[i + phase_2_graph_size] = {i + phase_2_graph_size + 1};
@@ -496,6 +501,7 @@ Status ReducePartitionCaseGenerator::GeneratorRCoreTask(ascir::HintGraph &optimi
       continue;
     }
     ScheduleTask new_task{optimize_graph, new_task_grouped_graphs, task.score_func, map, ReduceTemplateType::kRCore};
+    new_task.semantic_name = semantic::kReduceRCore;
     new_tasks.push_back(new_task);
   }
   tasks.insert(tasks.end(), new_tasks.begin(), new_tasks.end());
@@ -876,6 +882,8 @@ Status ReducePartitionCaseGenerator::PartitionCitationGroups(ascir::ImplGraph &i
       }
       af::AscNodePtr source = citation.source;
       af::AscNodePtr citation_node = citation.citation;
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticRole(source, semantic::kMultiCitation));
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticRole(citation_node, semantic::kMultiCitation));
       GE_CHK_STATUS_RET(PartitionByNode(source, citation_node, impl_graph));
     }
   }
@@ -1239,6 +1247,8 @@ bool ReducePartitionCaseGenerator::IsNorm(const af::AscNodePtr &start, const af:
 Status ReducePartitionCaseGenerator::PartitionNorm(
     ascir::ImplGraph &impl_graph, std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end) {
   for (auto loop : loop_start_end) {
+    GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticRole(loop.first, semantic::kNorm));
+    GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticRole(loop.second, semantic::kNorm));
     for (auto &in_node : loop.second->GetInNodes()) {
       if (IsInputNodePartitioned(loop.first, in_node)) {
         continue;

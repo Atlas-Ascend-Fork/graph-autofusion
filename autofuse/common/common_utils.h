@@ -12,6 +12,7 @@
 #define __COMMON_UTILS_H__
 
 #include <string>
+#include <vector>
 #include "graph/symbolizer/symbolic.h"
 #include "ge_common_af/ge_api_types_af.h"
 #include "graph/ascendc_ir/ascendc_ir_core/ascendc_ir.h"
@@ -21,8 +22,95 @@
 #include "symbolizer/symbolic_utils.h"
 
 namespace ascgen_utils {
+namespace indirect_load {
+enum class SimtAddressPolicy : int64_t;
+}
+
 const string INVALID_TILING = "invalid_tiling";
 constexpr int32_t NOT_SUPPORT_BRC_INLINE = -1;
+
+// Semantic vocabulary is defined here; selection sites record these tokens, not display formats.
+namespace template_semantic {
+inline constexpr char kPointwise[] = "Pointwise";
+inline constexpr char kReduce[] = "Reduce";
+inline constexpr char kConcat[] = "Concat";
+inline constexpr char kSplit[] = "Split";
+inline constexpr char kTranspose[] = "Transpose";
+inline constexpr char kBroadcast[] = "Broadcast";
+inline constexpr char kIndirectLoad[] = "IndirectLoad";
+inline constexpr char kIndirectLoadPrefix[] = "IndirectLoad/";
+inline constexpr char kIndirectLoadMixed[] = "IndirectLoad/Mixed";
+inline constexpr char kBroadcastPrefix[] = "Broadcast.";
+inline constexpr char kReducePrefix[] = "Reduce/";
+inline constexpr char kCommon[] = "Common";
+inline constexpr char kUb[] = "UB";
+inline constexpr char kGm[] = "GM";
+inline constexpr char kSimd[] = "SIMD";
+inline constexpr char kSimt[] = "SIMT";
+inline constexpr char kLoad[] = "Load";
+inline constexpr char kSlice[] = "Slice";
+inline constexpr char kCast[] = "Cast";
+inline constexpr char kOffset32[] = "Offset32";
+inline constexpr char kOffset64[] = "Offset64";
+inline constexpr char kNddma[] = "NDDMA";
+inline constexpr char kNddmaSlice[] = "NDDMA.Slice";
+inline constexpr char kNddmaTranspose[] = "NDDMA.Transpose";
+inline constexpr char kNddmaBroadcast[] = "NDDMA.Broadcast";
+inline constexpr char kNddmaCast[] = "NDDMA.Cast";
+inline constexpr char kLoadToNddma[] = "LoadToNDDMA";
+inline constexpr char kPointwiseRecompute[] = "Pointwise/Recompute";
+inline constexpr char kReduceCommon[] = "Reduce/Common";
+inline constexpr char kReduceAllLoad[] = "Reduce/AllLoad";
+inline constexpr char kReduceRCore[] = "Reduce/RCore";
+inline constexpr char kReducePhase1[] = "Reduce/RCore/Phase1";
+inline constexpr char kReducePhase2[] = "Reduce/RCore/Phase2";
+inline constexpr char kConcatOffsetStore[] = "Concat/GM/OffsetStore";
+inline constexpr char kSplitOffsetLoad[] = "Split/GM/OffsetLoad";
+inline constexpr char kTransposeFold[] = "Transpose/Load/Fold";
+inline constexpr char kUbOneAxis[] = "UB/OneAxis";
+inline constexpr char kUbAllAligned[] = "UB/AllAligned";
+inline constexpr char kUbByGather[] = "UB/ByGather";
+inline constexpr char kUbPadded[] = "UB/Padded";
+inline constexpr char kUbAdaptive[] = "UB/Adaptive";
+inline constexpr char kUbExtendAdaptive[] = "UB/Extend/Adaptive";
+inline constexpr char kUbExtendCopy[] = "UB/Extend/Copy";
+inline constexpr char kUbExtendGather[] = "UB/Extend/Gather";
+inline constexpr char kUbExtendScatter[] = "UB/Extend/Scatter";
+inline constexpr char kUbExtendMixed[] = "UB/Extend/Mixed";
+inline constexpr char kBroadcastScalar[] = "Broadcast.Scalar";
+inline constexpr char kBroadcastTail[] = "Broadcast.Tail";
+inline constexpr char kBroadcastNonTail[] = "Broadcast.NonTail";
+inline constexpr char kSoftmaxAr[] = "Softmax/AR";
+inline constexpr char kAr[] = "AR";
+inline constexpr char kRa[] = "RA";
+inline constexpr char kReuseSrc[] = "ReuseSrc";
+inline constexpr char kNoReuseSrc[] = "NoReuseSrc";
+inline constexpr char kMultiRound[] = "MultiRound";
+inline constexpr char kInner[] = "Inner";
+inline constexpr char kTotalSuffix[] = "/Total";
+inline constexpr char kSimdPrefix[] = "SIMD/";
+inline constexpr char kSimtPrefix[] = "SIMT/";
+inline constexpr char kOffsetPrefix[] = "/Offset";
+inline constexpr char kSk[] = "SK";
+inline constexpr char kAdaptive[] = "Adaptive";
+inline constexpr char kEmbedding[] = "Embedding";
+inline constexpr char kGatherApi[] = "GatherAPI";
+inline constexpr char kInline[] = "Inline";
+inline constexpr char kMultiCitation[] = "MultiCitation";
+inline constexpr char kNorm[] = "Norm";
+inline constexpr char kPhase1[] = "Phase1";
+inline constexpr char kPhase2[] = "Phase2";
+inline constexpr char kReorder[] = "Reorder";
+inline constexpr char kRegisterGather[] = "RegisterGather";
+inline constexpr char kRecursive[] = "Recursive";
+inline constexpr char kStaticInner[] = "StaticInner";
+inline constexpr char kStaticPowerOfTwo[] = "StaticPowerOfTwo";
+inline constexpr char kStrided[] = "Strided";
+inline constexpr char kStructuredMagic[] = "StructuredMagic";
+inline constexpr const char *kRoles[] = {kAdaptive,  kEmbedding,   kGatherApi,        kInline,  kMultiCitation,
+                                         kNorm,      kPhase1,      kPhase2,           kReorder, kRegisterGather,
+                                         kRecursive, kStaticInner, kStaticPowerOfTwo, kStrided, kStructuredMagic};
+}  // namespace template_semantic
 
 const std::string kKernelTaskTypeAIVOnly = "KERNEL_TYPE_AIV_ONLY";
 const std::string kKernelTaskTypeMixAIVOneZero = "KERNEL_TYPE_MIX_AIV_1_0";
@@ -141,8 +229,20 @@ struct MergeBrcAxisParams {
 };
 
 std::string CamelToLowerSneak(const std::string &str);
+std::string GenFinalTilingSelectionSnapshotSnippet();
 std::string SubStringReplace(std::string &ori, const std::string &from, const std::string &to);
 std::string GenValidName(const std::string &t_name);
+std::string NormalizeTemplateSemanticName(const std::string &name);
+const char *GetSimtSemanticRole(indirect_load::SimtAddressPolicy policy);
+std::string MakeTemplateSemanticName(const std::string &family, const std::string &strategy = "",
+                                     const std::string &role = "", const std::vector<std::string> &api_features = {},
+                                     const std::vector<std::string> &transforms = {});
+std::string GetTemplateSemanticName(const af::AscGraph &graph, const std::string &strategy = "");
+std::string RefineTemplateSemanticName(const std::string &base_name, const af::AscGraph &graph);
+af::Status SetTemplateSemanticNameForGraph(const af::AscGraph &graph, const std::string &semantic_name);
+af::Status SetTemplateSemanticRole(const af::AscNodePtr &node, const std::string &role);
+af::Status SetTemplateSemanticTransform(const af::AscNodePtr &node, const std::string &transform);
+std::string GetTemplateSemanticTransform(const af::AscNode &node);
 bool GetRealPath(const std::string &file_path, std::string &real_file_path);
 bool IsEmptyTensorSence(const ascir::FusedScheduledResult &fused_schedule_result);
 

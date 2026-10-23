@@ -9,6 +9,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <fstream>
 #define private public
@@ -16,6 +17,7 @@
 // #include "ascir.h"
 #include "ascir_ops_utils.h"
 #include "common_utils.h"
+#include "indirect_load_utils.h"
 #include "ascir_register.h"
 #include "codegen_api_param/codegen_api_param.h"
 #include "graph/types_af.h"
@@ -94,6 +96,212 @@ TEST_F(CommonUtilsTest, ScalarValuePreProcessTest) {
   EXPECT_EQ(after_pre_pro_value, "AfInfinity<half>()");
 
   EXPECT_NE(ScalarValuePreProcess("inf", "bfloat16_t", after_pre_pro_value), 0);
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameUsesStableVocabulary) {
+  EXPECT_EQ(MakeTemplateSemanticName("Reduce", "Common"), "Reduce/Common");
+  EXPECT_EQ(MakeTemplateSemanticName("Pointwise"), "Pointwise");
+  EXPECT_EQ(MakeTemplateSemanticName("", "Common"), "Unknown");
+  EXPECT_EQ(MakeTemplateSemanticName("Reduce", "Common", "", {"AR", "ReuseSrc"}, {"LoadToNDDMA"}),
+            "Reduce/Common/AR/ReuseSrc+LoadToNDDMA");
+  EXPECT_EQ(MakeTemplateSemanticName("IndirectLoad", "SIMT", "Embedding", {"Offset32"}),
+            "IndirectLoad/SIMT/Embedding/Offset32");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticSimtPolicyMappingIsShared) {
+  using Policy = indirect_load::SimtAddressPolicy;
+  const std::vector<std::pair<Policy, std::string>> cases = {
+      {Policy::kStaticPowerOfTwo, template_semantic::kStaticPowerOfTwo},
+      {Policy::kStaticInner, template_semantic::kStaticInner},
+      {Policy::kStructuredMagic, template_semantic::kStructuredMagic},
+      {Policy::kEmbedding, template_semantic::kEmbedding},
+      {Policy::kRecursive, template_semantic::kRecursive},
+      {Policy::kStrided, template_semantic::kStrided},
+      {static_cast<Policy>(-1), template_semantic::kAdaptive}};
+  for (const auto &[policy, name] : cases) {
+    EXPECT_EQ(GetSimtSemanticRole(policy), name);
+  }
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameNormalizesAtMetadataBoundary) {
+  const std::vector<std::pair<std::string, std::string>> cases = {
+      {"Reduce/Common/Norm/AR/NoReuseSrc+NDDMA.Cast", "Reduce/Common@Norm#AR|NoReuseSrc+NDDMA.Cast"},
+      {"Concat/UB/Extend/Copy", "Concat/UB#Extend|Copy"},
+      {"Reduce/RCore/Phase1", "Reduce/RCore@Phase1"},
+      {"Pointwise/Common", "Pointwise/Common"},
+      {"Reduce/Common@NewRole#NewFeature", "Reduce/Common@NewRole#NewFeature"},
+      {"", ""},
+      {"Unknown", "Unknown"}};
+  for (const auto &[input, expected] : cases) {
+    EXPECT_EQ(NormalizeTemplateSemanticName(input), expected);
+    EXPECT_EQ(NormalizeTemplateSemanticName(expected), expected);
+  }
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameUsesIndirectLoadFinalApiFeature) {
+  af::AscGraph graph("indirect_load_final_feature_graph");
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  const auto node = graph.AddNode(indirect_load);
+  ASSERT_NE(node, nullptr);
+  auto api_param = std::make_shared<codegen::CodegenApiParam>();
+  api_param->semantic_feature = "SIMD/Strided";
+  ASSERT_EQ(codegen::CodegenApiParam::Register(node, api_param), af::SUCCESS);
+
+  EXPECT_EQ(GetTemplateSemanticName(graph), "IndirectLoad/SIMD/Strided");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameClassifiesGraphByNode) {
+  af::AscGraph graph("semantic_graph");
+  Data data_op("data", graph);
+  Load load_op("load");
+  af::ascir_op::Add add_op("add");
+  const auto load_node = graph.AddNode(load_op);
+  graph.AddNode(add_op);
+  load_op.x = data_op.y;
+  add_op.x1 = load_op.y;
+  add_op.x2 = load_op.y;
+
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Pointwise/Common");
+  EXPECT_EQ(GetTemplateSemanticName(graph, "Common"), "Pointwise/Common");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameUsesSuccessTransformSource) {
+  af::AscGraph graph("semantic_nddma_graph");
+  af::ascir_op::Nddma nddma_op("nddma");
+  const auto nddma_node = graph.AddNode(nddma_op);
+  ASSERT_NE(nddma_node, nullptr);
+  ASSERT_EQ(SetTemplateSemanticTransform(nddma_node, "Broadcast"), af::SUCCESS);
+  ASSERT_EQ(SetTemplateSemanticTransform(nddma_node, "Slice"), af::SUCCESS);
+
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Pointwise/Common+NDDMA.Slice+NDDMA.Broadcast");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameUsesGraphSemanticTag) {
+  af::AscGraph graph("semantic_tag_graph");
+  af::ascir_op::Load load_op("load");
+  graph.AddNode(load_op);
+  ASSERT_EQ(SetTemplateSemanticNameForGraph(graph, "Transpose/Load/Fold"), af::SUCCESS);
+
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Transpose/Load/Fold");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticGraphTagKeepsFinalApiFeaturesAndTransforms) {
+  for (const auto &phase : {"Phase1", "Phase2"}) {
+    af::AscGraph graph("semantic_phase_graph");
+    af::ascir_op::Nddma nddma_op("nddma");
+    af::ascir_op::Max reduce_op("reduce");
+    const auto nddma_node = graph.AddNode(nddma_op);
+    const auto reduce_node = graph.AddNode(reduce_op);
+    ASSERT_NE(nddma_node, nullptr);
+    ASSERT_NE(reduce_node, nullptr);
+    ASSERT_EQ(SetTemplateSemanticNameForGraph(graph, std::string("Reduce/RCore/") + phase), af::SUCCESS);
+    ASSERT_EQ(SetTemplateSemanticTransform(nddma_node, "Cast"), af::SUCCESS);
+    auto api_param = std::make_shared<codegen::CodegenApiParam>();
+    api_param->semantic_feature = "AR/NoReuseSrc";
+    ASSERT_EQ(codegen::CodegenApiParam::Register(reduce_node, api_param), af::SUCCESS);
+
+    const std::string name = GetTemplateSemanticName(graph, "Reduce/Common");
+    EXPECT_EQ(name, std::string("Reduce/RCore/") + phase + "/AR/NoReuseSrc+NDDMA.Cast");
+    EXPECT_EQ(RefineTemplateSemanticName(name, graph), name);
+    EXPECT_EQ(NormalizeTemplateSemanticName(name), std::string("Reduce/RCore@") + phase + "#AR|NoReuseSrc+NDDMA.Cast");
+  }
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticGraphTagKeepsSuccessfulGmTransform) {
+  af::AscGraph graph("semantic_gm_graph");
+  af::ascir_op::Nddma nddma_op("nddma");
+  const auto nddma_node = graph.AddNode(nddma_op);
+  ASSERT_NE(nddma_node, nullptr);
+  ASSERT_EQ(SetTemplateSemanticNameForGraph(graph, "Concat/GM/OffsetStore"), af::SUCCESS);
+  ASSERT_EQ(SetTemplateSemanticTransform(nddma_node, "Slice"), af::SUCCESS);
+
+  EXPECT_EQ(GetTemplateSemanticName(graph, "Concat/UB"), "Concat/GM/OffsetStore+NDDMA.Slice");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameUsesCodegenApiFeature) {
+  af::AscGraph graph("semantic_api_feature_graph");
+  Data data_op("data", graph);
+  Load load_op("load");
+  af::ascir_op::Add add_op("add");
+  const auto load_node = graph.AddNode(load_op);
+  graph.AddNode(add_op);
+  load_op.x = data_op.y;
+  add_op.x1 = load_op.y;
+  add_op.x2 = load_op.y;
+  ASSERT_NE(load_node, nullptr);
+
+  auto api_param = std::make_shared<codegen::CodegenApiParam>();
+  api_param->semantic_feature = "Broadcast.Tail";
+  ASSERT_EQ(codegen::CodegenApiParam::Register(load_node, api_param), af::SUCCESS);
+
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Pointwise/Common/Broadcast.Tail");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNamePromotesBroadcastApiFeature) {
+  af::AscGraph graph("semantic_broadcast_api_graph");
+  af::ascir_op::Broadcast broadcast_op("broadcast");
+  const auto broadcast_node = graph.AddNode(broadcast_op);
+  ASSERT_NE(broadcast_node, nullptr);
+
+  auto api_param = std::make_shared<codegen::CodegenApiParam>();
+  api_param->semantic_feature = "Broadcast.Scalar";
+  ASSERT_EQ(codegen::CodegenApiParam::Register(broadcast_node, api_param), af::SUCCESS);
+
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Broadcast/Scalar");
+  EXPECT_EQ(GetTemplateSemanticName(graph, "Broadcast/Adaptive"), "Broadcast/Scalar");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNamePromotesConcatUbFeature) {
+  af::AscGraph graph("semantic_concat_api_graph");
+  af::ascir_op::Concat concat_op("concat");
+  const auto concat_node = graph.AddNode(concat_op);
+  ASSERT_NE(concat_node, nullptr);
+
+  auto api_param = std::make_shared<codegen::CodegenApiParam>();
+  api_param->semantic_feature = "UB/ByGather";
+  ASSERT_EQ(codegen::CodegenApiParam::Register(concat_node, api_param), af::SUCCESS);
+
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Concat/UB/ByGather");
+  EXPECT_EQ(GetTemplateSemanticName(graph, "Concat/Adaptive"), "Concat/UB/ByGather");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameKeepsAdaptiveWithoutPromotableFeature) {
+  af::AscGraph broadcast_graph("semantic_broadcast_parent_graph");
+  af::ascir_op::Broadcast broadcast_op("broadcast");
+  ASSERT_NE(broadcast_graph.AddNode(broadcast_op), nullptr);
+  EXPECT_EQ(GetTemplateSemanticName(broadcast_graph), "Broadcast/Adaptive");
+
+  af::AscGraph concat_graph("semantic_concat_parent_graph");
+  af::ascir_op::Concat concat_op("concat");
+  ASSERT_NE(concat_graph.AddNode(concat_op), nullptr);
+  EXPECT_EQ(GetTemplateSemanticName(concat_graph), "Concat/Adaptive");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNamePromotesBrcInlineRole) {
+  af::AscGraph graph("semantic_brc_inline_graph");
+  af::ascir_op::Broadcast broadcast_op("broadcast");
+  const auto broadcast_node = graph.AddNode(broadcast_op);
+  ASSERT_NE(broadcast_node, nullptr);
+  ASSERT_EQ(SetTemplateSemanticRole(broadcast_node, "Inline"), af::SUCCESS);
+
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Broadcast/Inline");
+  EXPECT_EQ(GetTemplateSemanticName(graph, "Broadcast/Adaptive"), "Broadcast/Inline");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameUsesNodeSemanticRole) {
+  af::AscGraph graph("semantic_role_graph");
+  Data data_op("data", graph);
+  Load load_op("load");
+  af::ascir_op::Add add_op("add");
+  const auto load_node = graph.AddNode(load_op);
+  graph.AddNode(add_op);
+  load_op.x = data_op.y;
+  add_op.x1 = load_op.y;
+  add_op.x2 = load_op.y;
+  ASSERT_NE(load_node, nullptr);
+
+  ASSERT_EQ(SetTemplateSemanticRole(load_node, "Norm"), af::SUCCESS);
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Pointwise/Common/Norm");
 }
 
 // 测试大于2个输入的node, 不支持brc inline
