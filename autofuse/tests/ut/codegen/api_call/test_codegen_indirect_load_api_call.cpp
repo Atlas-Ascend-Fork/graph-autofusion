@@ -2050,6 +2050,28 @@ TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimdLoopWithUbLifecycleAndNo
   EXPECT_EQ(generated.find("MTE2_MTE3"), std::string::npos);
 }
 
+TEST_F(IndirectLoadConstructFromNodesTest, GeneratesTileInnerOffsetFromTileOuterNotBlockOffset) {
+  // IndirectLoad 固定 tile 的轴结构：merged(outer) → TileSplit[T × t] → BlockSplit 作用在 T 上。
+  // TileInner 循环展开 merged 时必须由 TileOuter 与 TileInner 组合（outer = T * t_size + t），
+  // 复用 BlockInner 的 block_dim_offset 会丢失 outerTb 维度，导致多行 block 内 data 行地址不推进。
+  ILTestGraph g("tile_inner_offset");
+  auto z2z3 = g.graph.MergeAxis({g.z2.id, g.z3.id});
+  auto [z2z3T, z2z3t] = g.graph.TileSplit(z2z3->id);
+  auto [z2z3TB, z2z3Tb] = g.graph.BlockSplit(z2z3T->id);
+  (void)z2z3TB;
+
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+
+  const auto tile_inner_code = tiler.CalcFromAxis(z2z3t->id);
+  EXPECT_NE(tile_inner_code.find("z2z3 = z2z3T *"), std::string::npos);
+  EXPECT_EQ(tile_inner_code.find("z2z3 = block_dim_offset"), std::string::npos);
+
+  // BlockInner 的来源轴（z2z3T）仍应使用 block_dim_offset 组合。
+  const auto block_inner_code = tiler.CalcFromAxis(z2z3Tb->id);
+  EXPECT_NE(block_inner_code.find("z2z3T = block_dim_offset + z2z3Tb"), std::string::npos);
+}
+
 TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimtDirectGmCallOutsideBlockInnerLoop) {
   ILTestGraph g("simt_block_inner");
   BuildSimtGraph(g);
