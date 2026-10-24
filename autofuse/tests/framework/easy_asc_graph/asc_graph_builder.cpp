@@ -519,6 +519,30 @@ AscGraphBuilder &AscGraphBuilder::Split(const std::string &name, const std::stri
   return *this;
 }
 
+AscGraphBuilder &AscGraphBuilder::Frexp(const std::string &name, const std::string &input, DataType mantissa_dtype,
+                                        DataType exponent_dtype) {
+  ascir_op::Frexp frexp_op(name.c_str());
+  frexp_op.attr.sched.axis = impl_->axis_ids_;
+
+  auto &input_tensor = GetInputOutputTensor(input);
+  frexp_op.mantissa.dtype = mantissa_dtype;
+  frexp_op.exponent.dtype = exponent_dtype;
+  *frexp_op.mantissa.axis = input_tensor.attr.axis;
+  *frexp_op.mantissa.repeats = input_tensor.attr.repeats;
+  *frexp_op.exponent.axis = input_tensor.attr.axis;
+  *frexp_op.exponent.repeats = input_tensor.attr.repeats;
+
+  auto node = impl_->graph_.AddNode(frexp_op);
+  impl_->nodes_[name] = node;
+
+  ConnectEdge(input, node, 0);
+  // 注册输出端口，使下游可通过 "name:0"(mantissa), "name:1"(exponent) 寻址
+  impl_->output_ports_[name + ":0"] = {name, 0};
+  impl_->output_ports_[name + ":1"] = {name, 1};
+
+  return *this;
+}
+
 void AscGraphBuilder::ConnectEdge(const std::string &src_name, AscNodePtr dst_node, size_t dst_index) {
   auto [node, port] = ResolveOutput(src_name);
   assert(port < node->GetAllOutDataAnchors().size());

@@ -662,15 +662,21 @@ Status InsertCastBeforeNode(AscGraph &asc_graph, const NodePtr &other_node, bool
 }
 
 Status IsNeedInsertCastBeforeStore(const NodePtr &store_node, bool &need_insert, bool &is_increase_precision) {
-  NodePtr peer_out_node;
-  GE_ASSERT_SUCCESS(GetPeerOutNode(store_node, peer_out_node, 0));
-  DataType peer_dtype;
-  GE_ASSERT_SUCCESS(GetNodeOutputDtype(peer_out_node, peer_dtype));
+  need_insert = false;
+  const auto in_anchor = store_node->GetInDataAnchor(0);
+  GE_ASSERT_NOTNULL(in_anchor);
+  const auto peer_out_anchor = in_anchor->GetPeerOutAnchor();
+  GE_ASSERT_NOTNULL(peer_out_anchor);
+  const auto &peer_out_node = peer_out_anchor->GetOwnerNode();
+  GE_ASSERT_NOTNULL(peer_out_node);
+  const auto peer_op_desc = peer_out_node->GetOpDesc();
+  GE_ASSERT_NOTNULL(peer_op_desc);
+  // 多输出算子（如 Frexp）必须取 Store 实际连接的输出 anchor 的 dtype，不能固定取输出 0
+  const auto peer_dtype = peer_op_desc->GetOutputDesc(static_cast<uint32_t>(peer_out_anchor->GetIdx())).GetDataType();
   DataType store_dtype;
   GE_ASSERT_SUCCESS(GetNodeOutputDtype(store_node, store_dtype));
   is_increase_precision = IsHighPrecisionDataType(store_dtype);
   if (peer_dtype == store_dtype) {
-    need_insert = false;
     return af::SUCCESS;
   }
   need_insert = true;
