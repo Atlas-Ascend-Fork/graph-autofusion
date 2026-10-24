@@ -104,7 +104,7 @@ class AclSpecOptimizer final {
   };
 
   aclError ReadTaskIdentity(TaskIdentity &identity) const;
-  aclError SetTaskAdmission(std::vector<TaskIdentity> &identities, bool isScopeJit) const;
+  aclError SetTaskAdmission(std::vector<TaskIdentity> &identities, const FeatureManager &featureManager) const;
   aclError Collect(aclmdlRI model, const model_spec::FeatureManager &featureManager, std::string_view outputDirectory,
                    std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
                    std::vector<ScopeTaskRecord> &scopeMarkers) const;

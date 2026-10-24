@@ -68,9 +68,8 @@ struct aclmdlRISpecOptions {
  * was skipped because its resource, argument metadata, or specialization compilation was unavailable.
  * @retval ACL_ERROR_INVALID_PARAM Invalid model or configuration.
  * @retval ACL_ERROR_BAD_ALLOC Insufficient resources before the model was modified.
- * Failures to read a task's type, parameters, or kernel function name are logged as warnings, and
- * the affected tasks are skipped. Failure to read the task sequence ID only removes its diagnostic
- * ID and does not affect ordinary kernel specialization.
+ * Failures to read a task's sequence ID, type, parameters, or kernel function name are logged as
+ * errors and stop optimization before compilation or task modification.
  * A specialized binary that cannot be loaded, or that lacks its kernel entry, is reported rather
  * than skipped: it indicates a broken artifact or an exhausted resource, and the model is left
  * untouched because loading precedes any modification.
@@ -93,8 +92,7 @@ ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeEnd(aclrtStream stream);
 /**
  * @brief Specialize eligible kernels within valid Spec Scope ranges.
  * Submission disables all recognized Spec Scope Begin/End tasks, as Optimize does.
- * Task identity query failures return an error before compilation or task modification;
- * Optimize instead logs a warning and skips the affected task.
+ * Task identity query failures return an error before compilation or task modification, as Optimize does.
  * ByFlag sorts all tasks by sequence ID and pairs anonymous Begin/End markers across streams.
  * Invalid sequence queries, duplicate IDs, or marker pairing return before compilation.
  * Optimize does not perform sequence sorting or marker pairing validation.
