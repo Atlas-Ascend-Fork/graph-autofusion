@@ -1552,9 +1552,84 @@ af::Status BuildAxisViewByBoundary(af::AscGraph &graph, const std::vector<af::Ax
   return af::SUCCESS;
 }
 
+bool TryGetIndirectLoadPlatformUbSize(int64_t &ub_size);
+
+// SK 模板 IL 节点的 tmp 由窗口循环串行复用：调度器会在 outer 区固定 tile 切分的 tile_outer 轴上做
+// block 切分，其内轴尺寸符号（<tile_outer 名>b_size，即 tiling 变量）等于单窗口 outer 行数。仅当全量
+// 驻留估算超出平台 UB（SK 会被 StaticUbTemplateFilter 误淘汰的形态）时记录窗口语义，供静态 tmp 估算
+// 按单窗口驻留量计算；动态 shape / 平台信息不可得 / 未超限 / outer 退化（size=1）时不填充，保持全量
+// 估算语义，避免改变既有模板选择行为。
+af::Status FillSkWindowReuseInfo(af::AscGraph &graph, const af::AscNodePtr &indirect_load, size_t boundary,
+                                 af::AxisId outer_axis, af::AxisId tile_outer_axis) {
+  const auto *outer = graph.FindAxis(outer_axis);
+  const auto *tile_outer = graph.FindAxis(tile_outer_axis);
+  if (outer == nullptr || tile_outer == nullptr ||
+      af::SymbolicUtils::StaticCheckEq(outer->size, af::sym::kSymbolOne) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateLogicalView(indirect_load, logical_view));
+  if (logical_view.index.sizes.empty() || logical_view.index.sizes.size() != logical_view.input.sizes.size() ||
+      logical_view.input.sizes.size() != logical_view.input.strides.size() ||
+      boundary > logical_view.index.sizes.size()) {
+    return af::SUCCESS;
+  }
+  const auto inputs = indirect_load->inputs();
+  if (inputs.size() <= ascgen_utils::indirect_load::kInputTensorIndex ||
+      inputs[ascgen_utils::indirect_load::kInputTensorIndex] == nullptr) {
+    return af::SUCCESS;
+  }
+  // 全量驻留 tmp 估算，公式与 32B 对齐逐项镜像 CalcTmpBufSize/CalcIndirectLoadSkTmpSize 的全量路径：
+  // Align(outer×slice×dtype, 32) + 4×Π(output sizes)，再整体 Align(·, 32)。任一维动态/非正即放弃，
+  // 回退历史全量语义。
+  int64_t offsets_bytes = static_cast<int64_t>(sizeof(uint32_t));
+  for (const auto &repeat : logical_view.output.sizes) {
+    int64_t value = 0;
+    if (!repeat.GetConstValue(value) || value <= 0) {
+      return af::SUCCESS;
+    }
+    offsets_bytes *= value;
+  }
+  const int64_t dtype_size =
+      static_cast<int64_t>(af::GetSizeByDataType(inputs[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype));
+  int64_t outer_rows = 1;
+  for (size_t dim = 0UL; dim < boundary; ++dim) {
+    int64_t value = 0;
+    if (!logical_view.index.sizes[dim].GetConstValue(value) || value <= 0) {
+      return af::SUCCESS;
+    }
+    outer_rows *= value;
+  }
+  int64_t slice_elems = 1;
+  for (size_t dim = boundary; dim < logical_view.index.sizes.size(); ++dim) {
+    const auto &repeat = dim == boundary ? logical_view.input.sizes[dim] : logical_view.index.sizes[dim];
+    int64_t size_value = 0;
+    int64_t stride_value = 0;
+    if (!repeat.GetConstValue(size_value) || size_value <= 0 ||
+        !logical_view.input.strides[dim].GetConstValue(stride_value)) {
+      return af::SUCCESS;
+    }
+    slice_elems += (size_value - 1) * stride_value;
+  }
+  constexpr int64_t kUbBlockAlignBytes = 32;
+  const int64_t input_bytes = outer_rows * slice_elems * dtype_size;
+  const int64_t aligned_input = (input_bytes + kUbBlockAlignBytes - 1) / kUbBlockAlignBytes * kUbBlockAlignBytes;
+  const int64_t estimate =
+      (aligned_input + offsets_bytes + kUbBlockAlignBytes - 1) / kUbBlockAlignBytes * kUbBlockAlignBytes;
+  int64_t ub_size = 0;
+  if (!TryGetIndirectLoadPlatformUbSize(ub_size) || estimate <= ub_size) {
+    return af::SUCCESS;
+  }
+  logical_view.window_outer_count = af::Symbol((tile_outer->name + "b_size").c_str());
+  logical_view.window_iter_axes = {tile_outer_axis};
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateLogicalView(indirect_load, logical_view));
+  return af::SUCCESS;
+}
+
 af::Status NormalizeAxesForTemplate(af::AscGraph &graph, const af::AscNodePtr &indirect_load, size_t boundary,
-                                    ascir::AxisId input_inner_axis, ascir::AxisId index_inner_axis,
-                                    bool simd_index_uses_output_inner_axis = false, bool solve_tile_size = false) {
+                                    ascir::TemplateId template_id, ascir::AxisId input_inner_axis,
+                                    ascir::AxisId index_inner_axis, bool simd_index_uses_output_inner_axis = false,
+                                    bool solve_tile_size = false) {
   const auto output_axes = indirect_load->outputs()[0]->attr.axis;
   GE_ASSERT_TRUE(!output_axes.empty(), "IndirectLoad output axis is empty.");
   ascir::AxisId outer_axis = af::kIdNone;
@@ -1601,6 +1676,9 @@ af::Status NormalizeAxesForTemplate(af::AscGraph &graph, const af::AscNodePtr &i
   axes.vectorized_axes = std::move(vectorized_axes);
   axes.synthetic_outer = synthetic_outer;
   GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateAxes(indirect_load, axes));
+  if (template_id == ascir::TemplateId::kIndirectLoadSK) {
+    GE_ASSERT_SUCCESS(FillSkWindowReuseInfo(graph, indirect_load, boundary, outer_axis, tile_outer_axis));
+  }
   return af::SUCCESS;
 }
 
@@ -1655,7 +1733,8 @@ af::Status RestoreSkTemplateAxes(std::vector<ascir::ImplGraph> &grouped_graphs) 
                    "IndirectLoad partitioned graph[%s] has unexpected template.", graph.GetName().c_str());
     ascir::AxisId input_inner_axis = af::kIdNone;
     GE_ASSERT_SUCCESS(BuildSkInputInnerAxis(graph, indirect_load, axis_index, input_inner_axis));
-    GE_ASSERT_SUCCESS(NormalizeAxesForTemplate(graph, indirect_load, axis_index, input_inner_axis, af::kIdNone));
+    GE_ASSERT_SUCCESS(NormalizeAxesForTemplate(graph, indirect_load, axis_index, ascir::TemplateId::kIndirectLoadSK,
+                                               input_inner_axis, af::kIdNone));
   }
   return af::SUCCESS;
 }
@@ -1713,8 +1792,9 @@ af::Status NormalizeSimdAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
   }
   GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(analysis.input_region, output_axes, axis_index, true));
   GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(analysis.index_region, output_axes, axis_index, false));
-  return NormalizeAxesForTemplate(graph, indirect_load, axis_index, input_inner_axis, index_inner_axis,
-                                  analysis.simd_index_uses_output_inner_axis, solve_tile_size);
+  return NormalizeAxesForTemplate(graph, indirect_load, axis_index, ascir::TemplateId::kIndirectLoadSimd,
+                                  input_inner_axis, index_inner_axis, analysis.simd_index_uses_output_inner_axis,
+                                  solve_tile_size);
 }
 
 // 多 gather 共享轴归一化：primary 完整建轴（outer/inner/tile/vectorized 与单 gather 完全一致），
@@ -1793,8 +1873,8 @@ af::Status NormalizeSimtAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
   // 对 AR 后置 Reduce 与形状保持的专用 Norm 节点，solve_tile_size 允许调度期按 UB 容量求解多行 tile。
   // SIMT index evaluator 使用完整 output_index 重建每个 Index Load 的逻辑偏移，
   // 因而 direct index 与 Cast/Add/Where 等复合 index 共用该路径。
-  GE_ASSERT_SUCCESS(
-      NormalizeAxesForTemplate(graph, indirect_load, boundary, af::kIdNone, af::kIdNone, false, solve_tile_size));
+  GE_ASSERT_SUCCESS(NormalizeAxesForTemplate(graph, indirect_load, boundary, ascir::TemplateId::kIndirectLoadSimt,
+                                             af::kIdNone, af::kIdNone, false, solve_tile_size));
   return af::SUCCESS;
 }
 
@@ -3071,7 +3151,8 @@ af::Status ApplySkGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_
                  indirect_load->GetNamePtr());
   ascir::AxisId input_inner_axis = af::kIdNone;
   GE_ASSERT_SUCCESS(BuildSkInputInnerAxis(graph, indirect_load, axis_index, input_inner_axis));
-  GE_ASSERT_SUCCESS(NormalizeAxesForTemplate(graph, indirect_load, axis_index, input_inner_axis, af::kIdNone));
+  GE_ASSERT_SUCCESS(NormalizeAxesForTemplate(graph, indirect_load, axis_index, ascir::TemplateId::kIndirectLoadSK,
+                                             input_inner_axis, af::kIdNone));
   const auto input_boundary = ascgen_utils::indirect_load::GetInputProducer(indirect_load, 0UL);
   GE_ASSERT_TRUE(input_boundary != nullptr && af::ops::IsOps<af::ascir_op::Load>(input_boundary),
                  "IndirectLoad SK input boundary must be a Load node, node[%s].", indirect_load->GetNamePtr());

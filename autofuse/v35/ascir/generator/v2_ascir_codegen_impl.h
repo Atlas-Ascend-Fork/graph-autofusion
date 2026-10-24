@@ -3796,6 +3796,52 @@ class GatherAscIrCodegenImplV2 : public AscIrCodegenV2 {
 };
 /*********************************************************************************/
 namespace {
+const af::Axis *FindNodeOwnerAxis(const AscNode &node, af::AxisId axis_id) {
+  const auto compute_graph = node.GetOwnerComputeGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  const auto *graph_attr = compute_graph->GetAttrsGroup<af::AscGraphAttr>();
+  if (graph_attr == nullptr || axis_id < 0L || static_cast<size_t>(axis_id) >= graph_attr->axis.size()) {
+    return nullptr;
+  }
+  const auto &axis = graph_attr->axis[static_cast<size_t>(axis_id)];
+  return axis == nullptr ? nullptr : axis.get();
+}
+
+// 判断输出视图 dim 对应的轴是否为窗口迭代轴：窗口迭代轴（tile_outer 或其派生的外层切分轴，如
+// block_outer）仅承载窗口循环计数，窗口循环串行复用同一块 tmp，静态估算应跳过；其对偶内层轴
+// （block_inner，即 tile 尺寸）承载单窗口驻留量，必须保留。轴信息不可解析时不跳过，保持安全上界。
+bool IsWindowIterAxis(const AscNode &node, af::AxisId axis_id, const std::vector<af::AxisId> &window_iter_axes) {
+  const auto is_window_axis = [&window_iter_axes](af::AxisId candidate) {
+    return std::find(window_iter_axes.begin(), window_iter_axes.end(), candidate) != window_iter_axes.end();
+  };
+  if (is_window_axis(axis_id)) {
+    return true;
+  }
+  const auto *axis = FindNodeOwnerAxis(node, axis_id);
+  if (axis == nullptr ||
+      (axis->type != af::Axis::Type::kAxisTypeBlockOuter && axis->type != af::Axis::Type::kAxisTypeTileOuter)) {
+    return false;
+  }
+  std::vector<af::AxisId> pending = axis->from;
+  std::set<af::AxisId> visited{axis_id};
+  while (!pending.empty()) {
+    const af::AxisId current = pending.back();
+    pending.pop_back();
+    if (is_window_axis(current)) {
+      return true;
+    }
+    if (visited.insert(current).second) {
+      const auto *from_axis = FindNodeOwnerAxis(node, current);
+      if (from_axis != nullptr) {
+        pending.insert(pending.end(), from_axis->from.begin(), from_axis->from.end());
+      }
+    }
+  }
+  return false;
+}
+
 bool CalcIndirectLoadSkTmpSize(const AscNode &node, const Expression &offset_size, Expression &tmp_size) {
   constexpr uint32_t kUbBlockAlignBytes = 32U;
   auto inputs = node.inputs;
@@ -3827,9 +3873,16 @@ bool CalcIndirectLoadSkTmpSize(const AscNode &node, const Expression &offset_siz
     return false;
   }
   const size_t axis_index = static_cast<size_t>(axis < 0L ? axis + rank : axis);
+  // SK tmp 由窗口循环串行复用：outer_count 取单窗口 outer 行数（window_outer_count 含 tile 尺寸符号）。
+  // window_iter_axes 为空（非 SK 填充路径/退化 outer/老节点）时回退全量 outer 积，与历史行为一致。
+  // 注意 Expression 默认构造为合法的空名符号，IsValid 恒真，不能作为"未设置"哨兵。
   Expression outer_count = Symbol(1);
-  for (size_t dim = 0UL; dim < axis_index; ++dim) {
-    outer_count = outer_count * index_repeats[dim];
+  if (!logical_view.window_iter_axes.empty()) {
+    outer_count = logical_view.window_outer_count;
+  } else {
+    for (size_t dim = 0UL; dim < axis_index; ++dim) {
+      outer_count = outer_count * index_repeats[dim];
+    }
   }
   Expression input_slice_count = Symbol(1);
   for (size_t dim = axis_index; dim < index_repeats.size(); ++dim) {
@@ -3867,9 +3920,23 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
     }
     auto node_outputs = node.outputs;
     const auto &y = node_outputs[0].attr;
+    ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+    const auto op_desc = node.GetOpDesc();
+    if (op_desc != nullptr) {
+      logical_view = op_desc->TryGetExtAttr(ascgen_utils::indirect_load::kTemplateLogicalViewAttr,
+                                            ascgen_utils::indirect_load::TemplateLogicalView{});
+    }
+    // offsets 与窗口循环复用的 tmp 同块布局：跳过窗口迭代轴（如 block_outer=总窗口数）的 dim，其余
+    // 照乘并保留 tile 尺寸轴，使表达式携带 tiling 变量。窗口语义仅由 SK 填充，按模板防御性门控；
+    // 无窗口语义时表达式与历史行为逐字节一致。
+    const bool has_window_iter_axes = template_id == ::ascir::TemplateId::kIndirectLoadSK &&
+                                      !logical_view.window_iter_axes.empty() && y.axis.size() == y.repeats.size();
     Expression offset_size = Symbol(sizeof(uint32_t));
-    for (const auto &repeat : y.repeats) {
-      offset_size = offset_size * repeat;
+    for (size_t dim = 0UL; dim < y.repeats.size(); ++dim) {
+      if (has_window_iter_axes && IsWindowIterAxis(node, y.axis[dim], logical_view.window_iter_axes)) {
+        continue;
+      }
+      offset_size = offset_size * y.repeats[dim];
     }
     Expression tmp_size = offset_size;
     if (template_id == ::ascir::TemplateId::kIndirectLoadSK &&

@@ -97,6 +97,14 @@ struct TemplateLogicalView {
   IndirectLoadTensorLayout input;
   IndirectLoadTensorLayout index;
   LogicalTensorView output;
+  // SK 窗口复用语义：单窗口 outer 行数（含 tile 尺寸符号，如 outerTb_size）。仅当全量驻留 tmp 估算
+  // 超出平台 UB 时记录（避免 SK 被 StaticUbTemplateFilter 误淘汰）。注意 Expression 默认构造为
+  // 合法的空名符号，IsValid 恒真，不能作为"未设置"哨兵；未设置判定以 window_iter_axes 为空为准
+  // （填充时两者原子设置），此时消费方按全量 outer 积兜底，与历史行为逐字节等价。
+  af::Expression window_outer_count;
+  // SK 窗口迭代轴（tile_outer 轴 ID），同时是窗口语义的"已设置"哨兵。窗口循环串行复用同一块
+  // tmp，静态估算需跳过该轴及其派生外层轴；为空表示无窗口复用语义。
+  std::vector<af::AxisId> window_iter_axes;
 };
 
 struct IndirectLoadAccessInfo {

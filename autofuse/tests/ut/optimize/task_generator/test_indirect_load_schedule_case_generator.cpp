@@ -303,6 +303,87 @@ af::AscGraph BuildIndirectLoadGraph(int64_t axis, bool has_input_pre_node = fals
   return graph;
 }
 
+// rank4/axis2 常量 shape 图（结构同 BuildIndirectLoadGraph）：input [1024,8,table_rows,16]、
+// index/output [outer0,outer1,16,16]，用于验证 SK 窗口语义仅在"全量驻留估算超出平台 UB"时记录。
+// 全量驻留估算 = outer0*outer1*16*table_rows*2（input 缓存） + 4*outer0*outer1*16*16（offsets）。
+af::AscGraph BuildStaticIndirectLoadGraph(int64_t table_rows, int64_t outer0, int64_t outer1) {
+  af::AscGraph graph("indirect_load_static_ut_graph");
+  const af::Expression s0 = graph.CreateSizeVar(1024L);
+  const af::Expression s1 = graph.CreateSizeVar(8L);
+  const af::Expression s2 = graph.CreateSizeVar(table_rows);
+  const af::Expression s3 = graph.CreateSizeVar(16L);
+  const af::Expression s4 = graph.CreateSizeVar(outer0);
+  const af::Expression s5 = graph.CreateSizeVar(outer1);
+  const af::Expression s6 = graph.CreateSizeVar(16L);
+  const af::Expression s7 = graph.CreateSizeVar(16L);
+  const auto z0 = graph.CreateAxis("z0", s0);
+  const auto z1 = graph.CreateAxis("z1", s1);
+  const auto z2 = graph.CreateAxis("z2", s2);
+  const auto z3 = graph.CreateAxis("z3", s3);
+  const auto z4 = graph.CreateAxis("z4", s4);
+  const auto z5 = graph.CreateAxis("z5", s5);
+  const auto z6 = graph.CreateAxis("z6", s6);
+  const auto z7 = graph.CreateAxis("z7", s7);
+  const std::vector<af::AxisId> input_axes = {z0.id, z1.id, z2.id, z3.id};
+  const std::vector<af::AxisId> output_axes = {z4.id, z5.id, z6.id, z7.id};
+  const std::vector<af::Expression> input_repeats = {s0, s1, s2, s3};
+  const std::vector<af::Expression> output_repeats = {s4, s5, s6, s7};
+  const std::vector<af::Expression> input_strides = {s1 * s2 * s3, s2 * s3, s3, af::sym::kSymbolOne};
+  const std::vector<af::Expression> output_strides = {s5 * s6 * s7, s6 * s7, s7, af::sym::kSymbolOne};
+
+  af::ascir_op::Data x("x", graph);
+  x.y.dtype = ge::DT_FLOAT16;
+  x.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  x.attr.api.type = af::ApiType::kAPITypeBuffer;
+  x.ir_attr.SetIndex(0);
+  x.attr.sched.axis = input_axes;
+  *x.y.axis = input_axes;
+  *x.y.repeats = input_repeats;
+  *x.y.strides = input_strides;
+  af::ascir_op::Load input_load("input_load");
+  input_load.x = x.y;
+  SetNodeView(input_load, af::DT_FLOAT16, input_axes, input_repeats, input_strides);
+
+  af::ascir_op::Data index("index", graph);
+  index.y.dtype = ge::DT_INT32;
+  index.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  index.attr.api.type = af::ApiType::kAPITypeBuffer;
+  index.ir_attr.SetIndex(1);
+  index.attr.sched.axis = output_axes;
+  *index.y.axis = output_axes;
+  *index.y.repeats = output_repeats;
+  *index.y.strides = output_strides;
+  af::ascir_op::Load index_load("index_load");
+  index_load.x = index.y;
+  SetNodeView(index_load, af::DT_INT32, output_axes, output_repeats, output_strides);
+
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  BuildInputPreChain(input_load.y, input_axes, input_repeats, input_strides, false, false, indirect_load);
+  BuildIndexPreChain(index_load.y, output_axes, output_repeats, output_strides, false, indirect_load);
+  indirect_load.y.dtype = ge::DT_FLOAT16;
+  indirect_load.attr.sched.axis = output_axes;
+  indirect_load.ir_attr.SetAxis(2L);
+  *indirect_load.y.axis = output_axes;
+  *indirect_load.y.repeats = output_repeats;
+  *indirect_load.y.strides = output_strides;
+
+  af::ascir_op::Store store("store");
+  store.x = indirect_load.y;
+  SetNodeView(store, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+  af::ascir_op::Output y("y");
+  y.x = store.y;
+  y.y.dtype = ge::DT_FLOAT16;
+  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.ir_attr.SetIndex(0);
+  y.attr.sched.axis = output_axes;
+  *y.y.axis = output_axes;
+  *y.y.repeats = output_repeats;
+  *y.y.strides = output_strides;
+
+  return graph;
+}
+
 struct BroadcastGraphView {
   std::vector<af::AxisId> source_axes;
   std::vector<af::AxisId> input_axes;
@@ -1630,6 +1711,111 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, GeneratorTaskRestoresSkLogicalViewAf
   EXPECT_EQ(logical_view.output.axis_ids, indirect_load->outputs()[0]->attr.axis);
   EXPECT_EQ(logical_view.output.sizes, indirect_load->outputs()[0]->attr.repeats);
   EXPECT_EQ(logical_view.output.strides, indirect_load->outputs()[0]->attr.strides);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, SkRecordsWindowReuseInfoOnlyWhenFullResidencyExceedsUb) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+
+  const auto check_sk_view = [](af::AscGraph &candidate, bool expect_window) {
+    const auto indirect_load = candidate.FindNode("indirect_load");
+    ASSERT_NE(indirect_load, nullptr);
+    ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+    ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateLogicalView(indirect_load, logical_view), af::SUCCESS);
+    if (!expect_window) {
+      EXPECT_TRUE(logical_view.window_iter_axes.empty());
+      return;
+    }
+    ascgen_utils::indirect_load::TemplateAxes axes;
+    ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(indirect_load, axes), af::SUCCESS);
+    EXPECT_EQ(logical_view.window_iter_axes, (std::vector<af::AxisId>{axes.tile_outer_axis}));
+    EXPECT_EQ(logical_view.window_outer_count, af::Symbol("indirect_load_outerTb_size"));
+  };
+
+  // 动态 shape：无法静态判定全量驻留超限，不记录窗口语义，保持全量估算。
+  {
+    auto graph = BuildIndirectLoadGraph(2);
+    optimize::IndirectLoadScheduleCaseGenerator generator;
+    std::vector<af::AscGraph> graphs;
+    std::vector<std::string> score_functions;
+    ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+    const auto sk_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK);
+    ASSERT_NE(sk_iter, graphs.end());
+    check_sk_view(*sk_iter, false);
+  }
+  // 静态 shape 且全量驻留未超限（98KB < 256KB）：保持全量估算。
+  {
+    auto graph = BuildStaticIndirectLoadGraph(16L, 8L, 8L);
+    optimize::IndirectLoadScheduleCaseGenerator generator;
+    std::vector<af::AscGraph> graphs;
+    std::vector<std::string> score_functions;
+    ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+    const auto sk_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK);
+    ASSERT_NE(sk_iter, graphs.end());
+    check_sk_view(*sk_iter, false);
+  }
+  // 静态 shape 且全量驻留超出平台 UB（约 2.1MB > 256KB）：记录单窗口驻留语义。
+  {
+    auto graph = BuildStaticIndirectLoadGraph(1024L, 8L, 8L);
+    optimize::IndirectLoadScheduleCaseGenerator generator;
+    std::vector<af::AscGraph> graphs;
+    std::vector<std::string> score_functions;
+    ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+    for (const ascir::TemplateId template_id :
+         {ascir::TemplateId::kIndirectLoadSimd, ascir::TemplateId::kIndirectLoadSimt}) {
+      const auto candidate = FindGeneratedGraphByTemplate(graphs, template_id);
+      ASSERT_NE(candidate, graphs.end());
+      const auto indirect_load = candidate->FindNode("indirect_load");
+      ASSERT_NE(indirect_load, nullptr);
+      ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+      ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateLogicalView(indirect_load, logical_view), af::SUCCESS);
+      EXPECT_TRUE(logical_view.window_iter_axes.empty());
+    }
+    const auto sk_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK);
+    ASSERT_NE(sk_iter, graphs.end());
+    check_sk_view(*sk_iter, true);
+  }
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, SkRestoresWindowReuseInfoAfterPartition) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  auto graph = BuildStaticIndirectLoadGraph(1024L, 8L, 8L);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<optimize::ScheduleTask> tasks;
+  ASSERT_EQ(generator.GeneratorTask(graph, tasks, {}), af::SUCCESS);
+  const auto sk_task = std::find_if(tasks.begin(), tasks.end(), [](const optimize::ScheduleTask &task) {
+    const auto node = task.optimize_graph.FindNode("indirect_load");
+    return node != nullptr && ascir::GetTemplateIdOrDefault(*node) == ascir::TemplateId::kIndirectLoadSK;
+  });
+  ASSERT_NE(sk_task, tasks.end());
+  const auto grouped_graph =
+      std::find_if(sk_task->grouped_graphs.begin(), sk_task->grouped_graphs.end(),
+                   [](const af::AscGraph &candidate) { return candidate.FindNode("indirect_load") != nullptr; });
+  ASSERT_NE(grouped_graph, sk_task->grouped_graphs.end());
+  const auto indirect_load = grouped_graph->FindNode("indirect_load");
+  ASSERT_NE(indirect_load, nullptr);
+
+  ascgen_utils::indirect_load::TemplateAxes axes;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(indirect_load, axes), af::SUCCESS);
+  ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateLogicalView(indirect_load, logical_view), af::SUCCESS);
+  // 分区后窗口迭代轴刷新为子图内重建的 tile_outer 轴，窗口 outer 行数仍携带 tile 尺寸符号。
+  EXPECT_EQ(logical_view.window_iter_axes, (std::vector<af::AxisId>{axes.tile_outer_axis}));
+  const auto *tile_outer = grouped_graph->FindAxis(axes.tile_outer_axis);
+  ASSERT_NE(tile_outer, nullptr);
+  EXPECT_EQ(tile_outer->type, af::Axis::Type::kAxisTypeTileOuter);
+  EXPECT_EQ(logical_view.window_outer_count, af::Symbol((tile_outer->name + "b_size").c_str()));
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, GeneratorTaskPopulatesCandidateMetadata) {
