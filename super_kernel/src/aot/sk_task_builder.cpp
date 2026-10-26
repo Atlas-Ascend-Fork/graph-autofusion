@@ -1809,12 +1809,11 @@ bool SkTaskBuilder::DispatchSyncTasks(SkTask &skTaskCube, SkTask &skTaskVec, siz
       SK_LOGE("DispatchSyncTasks failed: unknown early start sync mask %s", to_string(mask));
       return false;
     }
-    if (relatedNode == nullptr) {
-      SK_LOGE("DispatchSyncTasks failed: related node is null");
-      return false;
-    }
-    const uint32_t activeCoreCount = GetTaskNumBlocks(*relatedNode, queueType, scopeCoreInfo);
+    uint32_t activeCoreCount = 0;
     const SkKernelType relatedType = GetKernelType(relatedNode);
+    if (relatedType != SkKernelType::DEFAULT) {
+      activeCoreCount = GetTaskNumBlocks(*relatedNode, queueType, scopeCoreInfo);
+    }
     if (!AddSyncTask(skTask, nodeIndex, it->second, static_cast<uint8_t>(mask), activeCoreCount, relatedType)) {
       SK_LOGE("DispatchSyncTasks failed: add early start sync task failed, mask=%s", to_string(mask));
       return false;
