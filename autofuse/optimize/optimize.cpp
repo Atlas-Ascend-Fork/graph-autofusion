@@ -529,7 +529,6 @@ Status Optimizer::ExpandReduceFirstStageResults(std::vector<autoschedule::AutoSc
                                                 size_t index, ScheduleTask &schedule_task) const {
   std::vector<ascir::ScheduledResult> scheduled_results_tmp;
   for (auto &schedule_output : schedule_outputs) {
-    ScheduleGroup schedule_group = {{schedule_output.scheduled_graph}, {}};
     for (auto &d : scheduled_results_cur) {
       for (auto &existing_group : d.schedule_groups) {
         ScheduleGroup copied_group;
@@ -542,12 +541,19 @@ Status Optimizer::ExpandReduceFirstStageResults(std::vector<autoschedule::AutoSc
         copied_group.graph_name_to_score_funcs = existing_group.graph_name_to_score_funcs;
         existing_group = std::move(copied_group);
       }
-      d.schedule_groups.emplace_back(schedule_group);
+      // 与既有分组一致, 第一阶段图在每个展开结果中持有独立拷贝: 多个结果共享同一图对象时,
+      // FinalizeIndexedGraphs 会对该图重复追加 _S{r}G{g}C{i} 索引后缀, codegen 也会按
+      // 出现次数重复生成函数定义, 造成核函数重复定义
+      ScheduleGroup schedule_group;
+      ascir::ImplGraph copied_graph(schedule_output.scheduled_graph.GetName().c_str());
+      GE_ASSERT_TRUE(copied_graph.CopyFrom(schedule_output.scheduled_graph));
+      schedule_group.impl_graphs.push_back(std::move(copied_graph));
+      RegisterScoreFuncInScheduleGroup(schedule_output, schedule_group);
+      d.schedule_groups.emplace_back(std::move(schedule_group));
       RefreshGroupRelation(index, schedule_output.var_relations_, schedule_task, d);
       scheduled_results_tmp.emplace_back(d);
       d.schedule_groups.pop_back();
     }
-    RegisterScoreFuncInScheduleGroup(schedule_output, schedule_group);
   }
   scheduled_results_tmp.swap(scheduled_results_cur);
   return af::SUCCESS;
