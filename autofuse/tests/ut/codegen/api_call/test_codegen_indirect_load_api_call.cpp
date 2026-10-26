@@ -1050,9 +1050,11 @@ TEST(IndirectLoadApiCallTest, GenerateSimdProducesIndirectLoadSimdCall) {
   std::string result;
   GenerateSimdCall(ge::DT_FLOAT16, result);
   EXPECT_NE(result.find("// IndirectLoad SIMD"), std::string::npos);
-  EXPECT_NE(result.find("IndirectLoadSimdStrided<half, int32_t, 2, 1>"), std::string::npos);
-  // Symbolic sizes are dynamic shapes, which use the strided path and require a temporary UB buffer.
-  EXPECT_NE(result.find("tmp_buf_0"), std::string::npos);
+  // 符号 strides 可证连续的动态 shape 视图判 dense，走向量化 RegisterGather
+  // facade（此前动态 shape 一律保守判 strided，需要临时 UB 缓冲逐元素组装）。
+  EXPECT_NE(result.find("IndirectLoadSimd<half, int32_t, 2, 1>"), std::string::npos);
+  EXPECT_EQ(result.find("IndirectLoadSimdStrided"), std::string::npos);
+  EXPECT_EQ(result.find("tmp_buf_0"), std::string::npos);
   EXPECT_NE(result.find("indirect_load_simd_params{static_cast<uint32_t>("), std::string::npos);
   EXPECT_NE(result.find("), static_cast<uint32_t>("), std::string::npos);
 }
@@ -1060,7 +1062,7 @@ TEST(IndirectLoadApiCallTest, GenerateSimdProducesIndirectLoadSimdCall) {
 TEST(IndirectLoadApiCallTest, GenerateSimdUint32InputProducesTypedCall) {
   std::string result;
   GenerateSimdCall(ge::DT_UINT32, result);
-  EXPECT_NE(result.find("IndirectLoadSimdStrided<uint32_t, int32_t, 2, 1>"), std::string::npos);
+  EXPECT_NE(result.find("IndirectLoadSimd<uint32_t, int32_t, 2, 1>"), std::string::npos);
 }
 
 TEST(IndirectLoadApiCallTest, GenerateSimdDenseSelectsDenseApi) {
@@ -2046,6 +2048,28 @@ TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimdLoopWithUbLifecycleAndNo
   EXPECT_NE(generated.find("EnQue"), std::string::npos);
   EXPECT_NE(generated.find("DeQue"), std::string::npos);
   EXPECT_EQ(generated.find("MTE2_MTE3"), std::string::npos);
+}
+
+TEST_F(IndirectLoadConstructFromNodesTest, GeneratesTileInnerOffsetFromTileOuterNotBlockOffset) {
+  // IndirectLoad 固定 tile 的轴结构：merged(outer) → TileSplit[T × t] → BlockSplit 作用在 T 上。
+  // TileInner 循环展开 merged 时必须由 TileOuter 与 TileInner 组合（outer = T * t_size + t），
+  // 复用 BlockInner 的 block_dim_offset 会丢失 outerTb 维度，导致多行 block 内 data 行地址不推进。
+  ILTestGraph g("tile_inner_offset");
+  auto z2z3 = g.graph.MergeAxis({g.z2.id, g.z3.id});
+  auto [z2z3T, z2z3t] = g.graph.TileSplit(z2z3->id);
+  auto [z2z3TB, z2z3Tb] = g.graph.BlockSplit(z2z3T->id);
+  (void)z2z3TB;
+
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+
+  const auto tile_inner_code = tiler.CalcFromAxis(z2z3t->id);
+  EXPECT_NE(tile_inner_code.find("z2z3 = z2z3T *"), std::string::npos);
+  EXPECT_EQ(tile_inner_code.find("z2z3 = block_dim_offset"), std::string::npos);
+
+  // BlockInner 的来源轴（z2z3T）仍应使用 block_dim_offset 组合。
+  const auto block_inner_code = tiler.CalcFromAxis(z2z3Tb->id);
+  EXPECT_NE(block_inner_code.find("z2z3T = block_dim_offset + z2z3Tb"), std::string::npos);
 }
 
 TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimtDirectGmCallOutsideBlockInnerLoop) {

@@ -10,6 +10,7 @@ target_compile_definitions(test_codegen PRIVATE
 )
 target_include_directories(test_codegen PRIVATE
         ${CODE_ROOT_DIR}
+        ${CODE_ROOT_DIR}/att/generator
         ${CODE_ROOT_DIR}/v35
         ${CODE_ROOT_DIR}/tests/framework/share_graph/include
         ${CODE_ROOT_DIR}/tests/depends/runtime/src

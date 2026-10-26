@@ -26,8 +26,10 @@
 #include "platform/platform_factory.h"
 #include "util/mem_utils.h"
 #include "task_generator/cast_optimization_pass.h"
+#include "common_utils.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 constexpr uint32_t kMaxInputNum = 48U;
 constexpr size_t kTemplateSizeAll = 3UL;
@@ -284,6 +286,7 @@ Status ConcatFusionCaseGenerator::ConvertConcatToStores(ascir::HintGraph &owner_
   GE_CHK_STATUS_RET(RemoveUnusedNodes(concat_node, post_concat_nodes_), "RemoveUnusedNodes failed");
   GE_CHK_STATUS_RET(PassUtils::PruneGraph(owner_graph), "Prune graph failed");
   GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(owner_graph));
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(owner_graph, semantic::kConcatOffsetStore));
   ascir::utils::DumpGraph(owner_graph, "AfterConvertConcatToStore");
   return af::SUCCESS;
 }
@@ -317,6 +320,9 @@ Status ConcatFusionCaseGenerator::SplitConcats(ascir::HintGraph &owner_graph, co
   GE_CHK_STATUS_RET(RemoveUnusedNodes(concat_node, post_concat_nodes_), "RemoveUnusedNodes failed");
   GE_CHK_STATUS_RET(PassUtils::PruneGraph(owner_graph), "Prune graph failed");
   GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(owner_graph));
+  if (split) {
+    GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(owner_graph, semantic::kConcatOffsetStore));
+  }
   ascir::utils::DumpGraph(owner_graph, "AfterSplitConcat");
   split = true;
   return af::SUCCESS;

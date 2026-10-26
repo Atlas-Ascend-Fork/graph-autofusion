@@ -1103,6 +1103,9 @@ Status Optimizer::InitializeScheduledResults(std::vector<ascir::ScheduledResult>
   schedule_result.score_func = schedule_task.score_func.c_str();
   schedule_result.is_reduce_mem_reuse = schedule_task.reduce_type == ReduceTemplateType::kAllLoad;
   schedule_result.cube_type = schedule_task.cube_type;
+  schedule_result.semantic_name = schedule_task.semantic_name.empty()
+                                      ? ascgen_utils::GetTemplateSemanticName(schedule_task.optimize_graph)
+                                      : schedule_task.semantic_name;
   scheduled_results_cur.emplace_back(schedule_result);
   return af::SUCCESS;
 }

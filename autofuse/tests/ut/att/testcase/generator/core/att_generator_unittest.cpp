@@ -572,7 +572,9 @@ TEST(GeneratorUT, AutofuseAtomicHeadersOwnPgoConfigAndGlobalApiTypes) {
   EXPECT_NE(pgo_header.find("class PgoConfigRuntimeGuard"), std::string::npos);
   EXPECT_NE(pgo_header.find("void *stream = nullptr;"), std::string::npos);
   EXPECT_NE(api_header.find("struct AutofuseTilingData;\nstruct AutofuseTilingDataPerf;"), std::string::npos);
-  EXPECT_NE(api_header.find("struct FinalTilingGroupSelection;\nstruct AutofuseTilingData;"), std::string::npos);
+  EXPECT_NE(api_header.find("struct FinalTilingGroupSelection;\nstruct TemplateSemanticInfo;\n"
+                            "struct AutofuseTilingData;"),
+            std::string::npos);
   EXPECT_NE(api_header.find("bool GetWorkspaceSize(const AutofuseTilingData &tiling_data, uint64_t &workspace_size);"),
             std::string::npos);
   EXPECT_EQ(api_header.find("uint32_t GetWorkspaceSize"), std::string::npos);
@@ -906,10 +908,14 @@ TEST(GeneratorUT, ReuseGroupStateHeaderKeepsGroupNamespacesAndForwardDeclaration
 }
 
 TEST(GeneratorUT, ReuseGroupFinalTilingSelectionIncludesCompleteType) {
-  TilingModelInfo primary_group{CreateModelInfo()};
-  TilingModelInfo reuse_group{CreateModelInfo()};
-  primary_group[0].schedule_group_ident = {0UL, 0UL, 0UL};
-  reuse_group[0].schedule_group_ident = {0UL, 0UL, 1UL};
+  TilingModelInfo primary_group{CreateModelInfo(), CreateModelInfo()};
+  TilingModelInfo reuse_group{CreateModelInfo(), CreateModelInfo()};
+  for (size_t index = 0UL; index < primary_group.size(); ++index) {
+    primary_group[index].schedule_group_ident = {0UL, 0UL, 0UL};
+    reuse_group[index].schedule_group_ident = {0UL, 0UL, 1UL};
+    reuse_group[index].tiling_case_id = 7U;
+    primary_group[index].sub_case_tag = reuse_group[index].sub_case_tag = std::to_string(index);
+  }
   ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 0UL}, primary_group), af::SUCCESS);
   ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 1UL}, reuse_group), af::SUCCESS);
   auto shared_reuse_group = primary_group[0].reuse_schedule_group;
@@ -936,7 +942,119 @@ TEST(GeneratorUT, ReuseGroupFinalTilingSelectionIncludesCompleteType) {
   // the complete definition from the log header instead of the api-header forward declaration.
   EXPECT_NE(reuse_source.find("bool GetFinalTilingSelection("), std::string::npos);
   EXPECT_NE(reuse_source.find("selection.group = 1U;"), std::string::npos);
+  EXPECT_EQ(CountSubstr(reuse_source, "case 7: requested_case_id = 0; break;"), 1U);
   EXPECT_NE(reuse_source.find("#include \"autofuse_tiling_func_log.h\""), std::string::npos);
+}
+
+TEST(GeneratorUT, ReuseGroupTemplateSemanticInfosDelegatesToPrimaryGroup) {
+  TilingModelInfo primary_group{CreateModelInfo(), CreateModelInfo()};
+  TilingModelInfo reuse_group{CreateModelInfo(), CreateModelInfo()};
+  for (size_t index = 0UL; index < primary_group.size(); ++index) {
+    primary_group[index].schedule_group_ident = {0UL, 0UL, 0UL};
+    reuse_group[index].schedule_group_ident = {0UL, 0UL, 1UL};
+    primary_group[index].tiling_case_id = static_cast<uint32_t>(index);
+    reuse_group[index].tiling_case_id = static_cast<uint32_t>(index + 7UL);
+  }
+  primary_group[1].sub_case_tag = "case1";
+  reuse_group[1].sub_case_tag = "case1";
+  primary_group[1].semantic_name = "Pointwise/Primary";
+  reuse_group[1].semantic_name = "Pointwise/Test";
+  ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 0UL}, primary_group), af::SUCCESS);
+  ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 1UL}, reuse_group), af::SUCCESS);
+  auto shared_reuse_group = primary_group[0].reuse_schedule_group;
+  shared_reuse_group->schedule_group_to_info[{0UL, 0UL, 1UL}] = reuse_group[0].reuse_schedule_group->info;
+  reuse_group[0].reuse_schedule_group = shared_reuse_group;
+
+  FusedParsedScheduleResult fused_schedule_result;
+  auto &schedule_result = fused_schedule_result[0UL][0UL];
+  schedule_result.asc_graph_id = 0UL;
+  schedule_result.impl_graph_id = 0UL;
+  schedule_result.groups_tiling_model_info[0UL] = primary_group;
+  schedule_result.groups_tiling_model_info[1UL] = reuse_group;
+  TilingCodeGenConfig config;
+  config.type = TilingImplType::HIGH_PERF;
+  config.tiling_data_type_name = "AutofuseTilingData";
+  config.is_autofuse = true;
+  config.is_inductor_scene = true;
+  std::map<std::string, std::string> tiling_res;
+  TilingCodeGenerator generator;
+
+  ASSERT_EQ(generator.GenTilingCode(op_name, fused_schedule_result, config, tiling_res), af::SUCCESS);
+  const auto &api_header = tiling_res.at(kTilingApiHeaderIdentify);
+  const auto &reuse_source = tiling_res.at("asc_graph0_schedule_result0_g1");
+  EXPECT_NE(api_header.find("struct TemplateSemanticInfo;"), std::string::npos);
+  EXPECT_NE(reuse_source.find("std::vector<::TemplateSemanticInfo> GetTemplateSemanticInfos("), std::string::npos);
+  EXPECT_NE(reuse_source.find("AscGraph0ScheduleResult0G0::GetTemplateSemanticInfos(reuse_tiling_data)"),
+            std::string::npos);
+  EXPECT_NE(reuse_source.find("info.group = 1U;"), std::string::npos);
+  EXPECT_NE(reuse_source.find("info.semantic_name = \"Pointwise/Test\";"), std::string::npos);
+  EXPECT_NE(reuse_source.find("info.graph = 0U;"), std::string::npos);
+  EXPECT_NE(reuse_source.find("info.result = 0U;"), std::string::npos);
+  EXPECT_NE(reuse_source.find("info.tiling_key = tiling_data.get_tiling_key();"), std::string::npos);
+  EXPECT_NE(reuse_source.find("info.template_name = \"graph0_result0_g1_7\";"), std::string::npos);
+  EXPECT_NE(reuse_source.find("info.template_name = \"graph0_result0_g1_case18\";"), std::string::npos);
+  EXPECT_NE(reuse_source.find("case 7: requested_case_id = 0; break;"), std::string::npos);
+  EXPECT_NE(reuse_source.find("case 8: requested_case_id = 1; break;"), std::string::npos);
+}
+
+TEST(GeneratorUT, TemplateSemanticInfoKeepsSameKeySubCasesSelectable) {
+  TilingModelInfo model_infos{CreateModelInfo(), CreateModelInfo(), CreateModelInfo()};
+  model_infos[0].tiling_case_id = 0U;
+  model_infos[1].tiling_case_id = 0U;
+  model_infos[2].tiling_case_id = 0U;
+  model_infos[0].sub_case_tag = "caseA";
+  model_infos[1].sub_case_tag = "caseB";
+  model_infos[2].sub_case_tag = "";
+  model_infos[0].semantic_name = "Reduce/Common@Norm#AR|NoReuseSrc";
+  model_infos[1].semantic_name = "Reduce/Common@Norm#RA|NoReuseSrc";
+  model_infos[2].semantic_name = "Reduce/Common@Norm#Default";
+  ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 0UL}, model_infos), af::SUCCESS);
+  TilingCodeGenConfig config;
+  config.type = TilingImplType::HIGH_PERF;
+  config.tiling_data_type_name = "OpTestTilingData";
+  config.is_autofuse = true;
+  config.is_inductor_scene = true;
+  std::map<std::string, std::string> tiling_res;
+  TilingCodeGenerator generator;
+
+  ASSERT_EQ(generator.GenTilingCode(op_name, model_infos, config, tiling_res), af::SUCCESS);
+  const auto &group_source = tiling_res.at("asc_graph0_schedule_result0_g0");
+  EXPECT_NE(group_source.find("final_context.semantic_name = semantic_info.semantic_name;"), std::string::npos);
+  EXPECT_NE(group_source.find("set_semantic_fallback();"), std::string::npos);
+  EXPECT_NE(group_source.find("std::string(sub_case_tag) == \"caseA\""), std::string::npos);
+  EXPECT_NE(group_source.find("std::string(sub_case_tag) == \"caseB\""), std::string::npos);
+  EXPECT_NE(group_source.find("std::string(sub_case_tag) == \"\""), std::string::npos);
+  EXPECT_NE(group_source.find("if (sub_case_tag == nullptr) {"), std::string::npos);
+  EXPECT_EQ(group_source.find("sub_case_tag == nullptr || sub_case_tag[0] == '\\0' ||"), std::string::npos);
+  EXPECT_NE(group_source.find("info.semantic_names = {\"Reduce/Common@Norm\"};"), std::string::npos);
+  EXPECT_NE(group_source.find("info.semantic_name = \"Reduce/Common@Norm\";"), std::string::npos);
+  EXPECT_NE(group_source.find("info.name_status = \"ambiguous\";"), std::string::npos);
+  EXPECT_EQ(CountSubstr(group_source, "semantic_infos.push_back(info);"), 1U);
+  EXPECT_NE(group_source.find("bool HasAmbiguousFinalTilingCase("), std::string::npos);
+}
+
+TEST(GeneratorUT, TemplateSemanticInfoMarksSameKeyIdentityAmbiguous) {
+  TilingModelInfo model_infos{CreateModelInfo(), CreateModelInfo()};
+  model_infos[0].tiling_case_id = 0U;
+  model_infos[1].tiling_case_id = 0U;
+  model_infos[0].sub_case_tag = "caseA";
+  model_infos[1].sub_case_tag = "caseB";
+  model_infos[0].semantic_name = "Reduce/Common#AR";
+  model_infos[1].semantic_name = "Reduce/Common#AR";
+  ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 0UL}, model_infos), af::SUCCESS);
+  TilingCodeGenConfig config;
+  config.type = TilingImplType::HIGH_PERF;
+  config.tiling_data_type_name = "OpTestTilingData";
+  config.is_autofuse = true;
+  config.is_inductor_scene = true;
+  std::map<std::string, std::string> tiling_res;
+  TilingCodeGenerator generator;
+
+  ASSERT_EQ(generator.GenTilingCode(op_name, model_infos, config, tiling_res), af::SUCCESS);
+  const auto &group_source = tiling_res.at("asc_graph0_schedule_result0_g0");
+  EXPECT_NE(group_source.find("info.semantic_name = \"Reduce/Common#AR\";"), std::string::npos);
+  EXPECT_NE(group_source.find("info.name_status = \"ambiguous\";"), std::string::npos);
+  EXPECT_NE(group_source.find("info.template_name = \"\";"), std::string::npos);
 }
 
 TEST(GeneratorUT, WorkspaceReuseRelationIsOmittedFromGroupCache) {
@@ -2204,15 +2322,17 @@ TEST(GeneratorUT, InductorTilingCasesGenerateSearchOverrideForSingleAndMultipleG
     TilingCodeGenConfig config;
     config.is_inductor_scene = true;
     config.tiling_data_type_name = is_uniq_group ? "AutofuseTilingData" : "AscGraph0ScheduleResult0G0TilingData";
-    MockHighPerfTilingCodeGenImpl gen_impl(op_name, config, {model_info}, {}, is_uniq_group);
+    TilingModelInfo model_infos{model_info};
+    MockHighPerfTilingCodeGenImpl gen_impl(op_name, config, model_infos, {}, is_uniq_group);
 
+    gen_impl.SetFinalTilingObservationMetadata(0UL, 1UL, {{model_info.sub_case_tag, 0}});
     ASSERT_EQ(gen_impl.GenTilingCaseImpl(model_info), af::SUCCESS);
     const std::string output = gen_impl.tiling_func_.GetOutputStr();
     const std::string solver = ExtractGuardBody(output, "const SearchConfig *search_cfg=nullptr) override");
     ASSERT_FALSE(solver.empty()) << "is_uniq_group=" << is_uniq_group;
     EXPECT_NE(output.find("const SearchConfig *search_cfg=nullptr) override"), std::string::npos);
     EXPECT_NE(solver.find("pending_search_cfg_ = search_cfg;"), std::string::npos);
-    EXPECT_NE(solver.find("tiling_data_list.push_back(tiling_perf);"), std::string::npos);
+    EXPECT_NE(solver.find("tiling_data_list.push_back(std::move(tiling_perf));"), std::string::npos);
     EXPECT_NE(solver.find("pending_search_cfg_ = nullptr;"), std::string::npos);
     EXPECT_EQ(solver.find("EmitFinalTiling"), std::string::npos);
     EXPECT_EQ(solver.find("GetTilingDataRepr"), std::string::npos);

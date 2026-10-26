@@ -1829,6 +1829,16 @@ af::Status ApiCall::RegisterBasicDumpParam(const std::string &api_name,
   return af::SUCCESS;
 }
 
+af::Status ApiCall::SetSemanticFeature(const std::string &semantic_feature) const {
+  GE_ASSERT_NOTNULL(this->node);
+  auto api_param = CodegenApiParam::TryGetNodeApiParam(this->node);
+  if (api_param == nullptr) {
+    return af::SUCCESS;
+  }
+  api_param->semantic_feature = semantic_feature;
+  return af::SUCCESS;
+}
+
 namespace {
 static void GenTemplateParams(const CodegenApiParam &api_param, stringstream &ss) {
   if (api_param.template_params.empty()) {

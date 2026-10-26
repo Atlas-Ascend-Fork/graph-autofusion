@@ -904,7 +904,7 @@ std::map<std::string, std::string> TilingLib::GetTilingHeaders(const ascir::Fuse
     return tiling_file_name_to_content;
   }
 
-  const bool use_att_codegen = this->codegen_func_ != nullptr && !IsEmptyTensorSence(fused_schedule_result);
+  const bool use_att_codegen = UseAttCodegen(fused_schedule_result);
   if ((enable_autofuse_pgo_ || is_inductor_scene) && !use_att_codegen) {
     ss << PGOProfilingCallbackDef(fused_schedule_result, tiling_name);
   }
@@ -936,6 +936,10 @@ std::map<std::string, std::string> TilingLib::GetTilingHeaders(const ascir::Fuse
     AddCvDeclarationsToApiHeader(tiling_file_name_to_content);
   }
   return tiling_file_name_to_content;
+}
+
+bool TilingLib::UseAttCodegen(const ascir::FusedScheduledResult &fused_schedule_result) const {
+  return codegen_func_ != nullptr && !IsEmptyTensorSence(fused_schedule_result);
 }
 
 std::string TilingLib::TilingFuncDefForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
@@ -1248,8 +1252,9 @@ std::string TilingLib::GenCubeFusionTilingBodyInductor(const ascir::FusedSchedul
   ss << "  tiling->tiling_data.set_block_dim(limit->aiv_num);" << std::endl;
   ss << "  tiling->tiling_data.set_ub_size(limit->ub_size - 256);" << std::endl;
 
+  const bool use_att_codegen = UseAttCodegen(elemwise_schedule_result);
   const std::string fallback_final_tiling_call =
-      codegen_func_ != nullptr && ascgen_utils::IsSingleGroup(elemwise_schedule_result)
+      use_att_codegen && ascgen_utils::IsSingleGroup(elemwise_schedule_result)
           ? "optiling::EmitFinalTilingByCase(tiling->tiling_data, tiling->tiling_data.get_block_dim(), \"runtime\", "
             "\"default\", 0U, static_cast<int32_t>(choice_case_id));"
           : "";
@@ -1257,12 +1262,12 @@ std::string TilingLib::GenCubeFusionTilingBodyInductor(const ascir::FusedSchedul
   // fp32且K轴大于阈值且未启用hf32时, CV融合UB模板有精度问题, 强制走common兜底
   std::string fp32_large_k_cond = GenFp32LargeKCondition(cube_info);
   ss << "  if (cube_tiling_key_ub != 1 || (" << fp32_large_k_cond << ")) {" << std::endl;
-  const std::string tiling_entry = codegen_func_ != nullptr ? "GetTilingCore" : "GetTiling";
+  const std::string tiling_entry = use_att_codegen ? "GetTilingCore" : "GetTiling";
   GenInductorCvSafetyFallback(ss, count, "    ", fallback_final_tiling_call, tiling_entry);
   ss << "  }" << std::endl;
 
   GenInductorGetTilingBranch(ss, count, cube_info.type_size, fallback_final_tiling_call, tiling_entry,
-                             codegen_func_ != nullptr && ascgen_utils::IsSingleGroup(elemwise_schedule_result));
+                             use_att_codegen && ascgen_utils::IsSingleGroup(elemwise_schedule_result));
   ss << "  *blockDim = cube_block_dim;" << std::endl;
   ss << "  uint64_t vector_workspace_size = 0U;" << std::endl;
   ss << "  if (!GetWorkspaceSize(tiling->tiling_data, vector_workspace_size) ||" << std::endl;
@@ -1365,6 +1370,10 @@ std::string TilingLib::GenPlainInductorTilingTail(const ascir::FusedScheduledRes
   ss << "  tiling->set_block_dim(limit->aiv_num);" << std::endl;
   ss << "  tiling->set_ub_size(limit->ub_size - 256);" << std::endl;
   ss << "  if (!optiling::GetTiling(*tiling, -1, nullptr)) {return -1;}" << std::endl;
+  if (UseAttCodegen(elemwise_schedule_result) && ascgen_utils::IsSingleGroup(elemwise_schedule_result)) {
+    ss << "  optiling::EmitFinalTilingByCase(*tiling, tiling->get_block_dim(), \"runtime\", \"default\", 0U, -1);"
+       << std::endl;
+  }
   ss << "  *blockDim = tiling->get_block_dim();" << std::endl;  // Only consider 48 for now
   ss << "  using namespace optiling;" << std::endl;
   ss << "  if (!GetWorkspaceSize(*tiling, *workspaceSize)) {" << std::endl;

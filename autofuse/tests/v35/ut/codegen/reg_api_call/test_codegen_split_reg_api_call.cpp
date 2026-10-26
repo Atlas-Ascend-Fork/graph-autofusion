@@ -150,6 +150,9 @@ TEST_F(SplitRegApiCallUTest, AllAligned) {
 
   std::string result;
   EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), af::SUCCESS);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(split);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "UB/AllAligned");
   EXPECT_EQ(result,
             "constexpr SplitTilingAllAligned<2> split_tiling {\n"
             "  .src_col_size = 48,\n"

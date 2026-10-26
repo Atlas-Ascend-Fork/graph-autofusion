@@ -1020,8 +1020,16 @@ std::string codegen::Tiler::CalcFromAxis(const ascir::AxisId id, bool is_define)
   auto axis = this->GetAxis(id);
   if (axis.IsInner()) {
     auto from = this->GetAxis(axis.from[0]);
-    ss << (is_define ? from.AsArg() : from.Str()) << " = " << "block_dim_offset" << " + " << axis.Str() << ";"
-       << std::endl;
+    if (axis.type == Axis::Type::kAxisTypeTileInner) {
+      // TileInner 的来源轴由 TileOuter 与 TileInner 两级展开：from = TileOuter * inner_size + inner。
+      // block_dim_offset 是 BlockInner 对应的 BlockOuter 偏移，仅适用于 BlockInner。
+      auto peer = this->GetAxis(axis.split_pair_other_id);
+      ss << (is_define ? from.AsArg() : from.Str()) << " = " << peer.Str() << " * " << this->Size(axis.size) << " + "
+         << axis.Str() << ";" << std::endl;
+    } else {
+      ss << (is_define ? from.AsArg() : from.Str()) << " = " << "block_dim_offset" << " + " << axis.Str() << ";"
+         << std::endl;
+    }
     ss << this->CalcFromAxis(from.id, is_define);
   } else if (axis.type == Axis::Type::kAxisTypeMerged) {
     for (size_t i = 0; i < axis.from.size(); i++) {

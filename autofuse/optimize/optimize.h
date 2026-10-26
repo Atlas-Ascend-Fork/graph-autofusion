@@ -45,6 +45,7 @@ struct ScheduleTask {
   ReduceTemplateType reduce_type{ReduceTemplateType::kDefault};
   ::ascir::CubeTemplateType cube_type{::ascir::CubeTemplateType::kDefault};
   bool has_load_store_conversion{false};
+  std::string semantic_name{};
 };
 
 class Optimizer {

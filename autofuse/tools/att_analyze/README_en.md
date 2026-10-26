@@ -6,7 +6,7 @@ In-repository ATT log analysis utilities. Run:
 python3 autofuse/tools/att_analyze/src/att.py --help
 ```
 
-The CLI provides `summary`, `compare`, `split-slog`, `perf-formula`, `verify-tiling`, and `evidence`. `summary` is read-only. `verify-tiling` compiles and executes code, so review its inputs and authorization first.
+The CLI provides `summary`, `compare`, `split-slog`, `perf-formula`, `verify-tiling`, `evidence`, and `topn-templates`. `summary` is read-only. `verify-tiling` compiles and executes code, so review its inputs and authorization first.
 
 `LogParser` exposes `OperatorSummary.parse_status` to make incomplete evidence explicit. `ok` means complete selection records; `inferred_graph_result` means graph/result came from template lines; `missing_group_case`, `missing_result_performance`, and `missing_graph_result` identify missing records. Existing CSV column meanings are unchanged.
 
@@ -64,6 +64,34 @@ keep the first valid record and mark later records
 candidate `GetTilingDataRepr` calls are not treated as runtime final records. A cache hit whose
 sub-case identity cannot be recovered is intentionally omitted rather than reported with the
 wrong template identity.
+
+`topn-templates` reads only an Autofuse worker log and writes static Top1/TopN template CSV and
+Markdown tables. Top1 uses every group under `topn_output output_index=0`. If the log contains
+`output[i]: perf=`, the command records TopN modeled performance; otherwise that field is left
+empty. The command does not infer measured Task Duration from the log and does not read analysis
+CSV files produced by an external test framework.
+
+## TEMPLATE log contract
+
+Vocabulary and normalization are defined in `autofuse/common/common_utils.*`. The producer stores the
+canonical `semantic_name` in ModelInfo; logging and offline tools consume it without separate role dictionaries
+or reclassification.
+
+The core `[ATT][TEMPLATE]` line uses the field `semantic_name` in the format
+`<family>/<strategy>[@<role>][#<api-feature>|...][+<transform>...]`. Fields and identity are emitted separately:
+
+```text
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 semantic_name="Pointwise/Common"
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 fields semantic_schema=1 family="Pointwise" strategy="Common" role="" api_features="" transforms=""
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 detail graph=0 result=0 tiling_key=0 template="graph0_result0_g0_0"
+```
+
+`name_status` is emitted only as `unavailable` or `ambiguous`; a default unique match omits it.
+When a field or an entire line exceeds 700 bytes, the formatter emits `<field>_hash`, `<field>_len`,
+`line_hash`, or `line_len` summaries instead of truncating the string. TopN analysis separates rows by
+case/visit/shape, the operator in `GenerateTopnSolutions enter`, and the call ordinal of that operator;
+multiple kernels or repeated calls in one visit are never merged. If the log has no operator association, the CSV
+`association_status` is `unconfirmed` instead of treating the call boundary as confirmed.
 
 ## verify-tiling ABI input
 

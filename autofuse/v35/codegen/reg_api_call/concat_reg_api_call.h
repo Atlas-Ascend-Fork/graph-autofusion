@@ -36,6 +36,7 @@ class ConcatRegApiCall : public ConcatApiCall {
   static Status GenerateForOneAxis(const vector<std::reference_wrapper<const Tensor>> &inputs, const Tensor &y,
                                    std::stringstream &ss);
   static bool CanConcatOneAxis(const std::vector<std::reference_wrapper<const Tensor>> &inputs, const Tensor &y);
+  static std::string GetSemanticFeature(const ConcatTiling &tiling);
   static af::Status GenerateForGather(const vector<std::reference_wrapper<const Tensor>> &inputs, const Tensor &y,
                                       const ConcatApiCall::ConcatTiling &tiling, const TPipe &t_pipe,
                                       std::stringstream &ss, const int64_t tmp_buf_id);

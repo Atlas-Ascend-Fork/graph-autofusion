@@ -14,6 +14,7 @@
 #include "schedule_utils.h"
 #include "ascgraph_info_complete.h"
 #include "graph/utils/graph_utils.h"
+#include "common_utils.h"
 
 namespace {
 constexpr size_t kContinuousOneAxisNum = 2UL;
@@ -55,6 +56,7 @@ size_t CountComputeNodes(const std::unordered_set<af::Node *> &nodes) {
 }  // namespace
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 Status RecomputeCaseGenerator::GeneratorTask(ascir::HintGraph &hint_graph, std::vector<ScheduleTask> &tasks,
                                              const OptimizerOptions &options) {
   (void)options;
@@ -190,6 +192,7 @@ Status RecomputeCaseGenerator::DoTaskGenerator(ascir::ImplGraph &impl_graph, std
   cg->SetName(cg->GetName() + "_recompute_case");
   GE_ASSERT_SUCCESS(DoGraphSplit(impl_graph), "Failed to split recompute graph from [%s].",
                     impl_graph.GetName().c_str());
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(impl_graph, semantic::kPointwiseRecompute));
   GE_ASSERT_SUCCESS(GroupPartitionAndGenTasks(impl_graph, tasks));
 
   return af::SUCCESS;

@@ -124,6 +124,7 @@ class ApiCall {
                                     const std::vector<std::reference_wrapper<const Tensor>> &outputs,
                                     const CombinedExpression &cal_count = CombinedExpression{},
                                     const std::string &tmp_buf_name = "") const;
+  af::Status SetSemanticFeature(const std::string &semantic_feature) const;
 
   // Public Member Variables
   std::string api_name_;

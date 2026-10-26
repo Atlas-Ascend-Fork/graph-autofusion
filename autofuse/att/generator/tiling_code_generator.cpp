@@ -33,6 +33,31 @@ bool IsUniqueGroups(const TilingModelInfo &all_model_infos) {
   return (asc_graphs.size() == 1UL) && (groups_ids.size() == 1UL) && (impl_graphs_ids.size() == 1UL);
 }
 
+std::map<std::string, int32_t> BuildFinalTilingSubCaseIds(const TilingModelInfo &model_infos) {
+  std::set<std::string> sub_case_tags;
+  for (const auto &model_info : model_infos) {
+    sub_case_tags.insert(model_info.sub_case_tag);
+  }
+  std::map<std::string, int32_t> sub_case_ids;
+  int32_t sub_case_id = 0;
+  for (const auto &sub_case_tag : sub_case_tags) {
+    sub_case_ids.emplace(sub_case_tag, sub_case_id++);
+  }
+  return sub_case_ids;
+}
+
+std::map<std::string, int32_t> BuildFinalTilingSubCaseIds(const FusedParsedScheduleResult &fused_schedule_result) {
+  TilingModelInfo model_infos;
+  for (const auto &asc_graph : fused_schedule_result) {
+    for (const auto &schedule_result : asc_graph.second) {
+      for (const auto &group_graphs : schedule_result.second.groups_tiling_model_info) {
+        model_infos.insert(model_infos.end(), group_graphs.second.begin(), group_graphs.second.end());
+      }
+    }
+  }
+  return BuildFinalTilingSubCaseIds(model_infos);
+}
+
 std::string GetSplitHeaderFileName(const std::string &key) {
   if (key == kTilingStateHeaderIdentify) {
     return kTilingStateHeaderFileName;
@@ -93,6 +118,7 @@ af::Status TilingCodeGenerator::GenTilingCode(const std::string &op_type, const 
   GELOGI("[DFX] Start to gen tiling code, config[%s].", config.Debug().c_str());
   TilingCodeGenImplPtr impl = CreateTilingCodeGenImpl(op_type, config, model_infos, {}, true);
   GE_ASSERT_NOTNULL(impl, "Create tiling code gen impl failed, type[%d].", static_cast<int32_t>(config.type));
+  impl->SetFinalTilingObservationMetadata(0UL, 1UL, BuildFinalTilingSubCaseIds(model_infos));
   GE_ASSERT_SUCCESS(impl->GenTilingHead(tiling_res), "Gen tiling head impl failed, type[%d].",
                     static_cast<int32_t>(config.type));
   GE_ASSERT_SUCCESS(impl->GenTiling(tiling_res), "Gen tiling code impl failed, type[%d].",
@@ -235,7 +261,7 @@ af::Status TilingCodeGenerator::GenTilingCode(const std::string &op_type,
 
   GenTilingParams params = {op_type, all_model_infos, config, cache_reuse_info};
   GenTilingTailExtParams ext_params = {schedule_result_score_func, var_relations, enable_group_parallels,
-                                       workspace_tensor_id_set};
+                                       workspace_tensor_id_set, group_num};
   GenTilingTail(params, tiling_res, ext_params);
   GE_ASSERT_SUCCESS(TilingCodeGenImpl::FinishGeneratedHeaders(generated_headers_, config.tiling_data_type_name,
                                                               config.is_autofuse, tiling_res),
@@ -279,6 +305,8 @@ af::Status TilingCodeGenerator::GenTilingTail(const GenTilingParams &params,
   TilingCodeGenImplPtr impl = CreateTilingCodeGenImpl(params.op_type, params.config, params.all_model_infos,
                                                       ext_params.score_funcs, IsUniqueGroups(params.all_model_infos));
   GE_ASSERT_NOTNULL(impl, "Create tiling code gen impl failed, type[%d].", static_cast<int32_t>(params.config.type));
+  impl->SetFinalTilingObservationMetadata(0UL, ext_params.final_tiling_observation_slot_count,
+                                          BuildFinalTilingSubCaseIds(params.all_model_infos));
   GenTilingTailImplExtParams impl_ext_params{std::move(params.cache_reuse_info), std::move(ext_params.var_relations),
                                              std::move(ext_params.enable_group_parallels),
                                              std::move(ext_params.workspace_tensor_id_set)};
@@ -327,14 +355,18 @@ af::Status TilingCodeGenerator::GenScheduleGroupTilingBodies(
     uint32_t cache_capacity, const EnableGroupParallels &enable_group_parallels,
     std::map<std::string, std::string> &tiling_res) {
   GELOGD("[DFX] schedule_results count: %zu, op_type[%s]", fused_parsed_schedule_result.size(), op_type.c_str());
+  const std::map<std::string, int32_t> final_tiling_sub_case_ids =
+      BuildFinalTilingSubCaseIds(fused_parsed_schedule_result);
+  size_t final_tiling_observation_slot = 0UL;
   for (auto &asc_graph : fused_parsed_schedule_result) {
     GELOGD("[DFX] asc_graph_id: %zu, results: %zu, op_type[%s]", asc_graph.first, asc_graph.second.size(),
            op_type.c_str());
     for (auto &result : asc_graph.second) {
       GELOGD("[DFX] got result(impl_graph_id): %zu, op_type[%s]", result.first, op_type.c_str());
-      GE_ASSERT_SUCCESS(GenScheduleResult(op_type, config, cache_reuse_info, cache_capacity, enable_group_parallels,
-                                          result.second, tiling_res),
-                        "Generate schedule result failed.");
+      GE_ASSERT_SUCCESS(
+          GenScheduleResult(op_type, config, cache_reuse_info, cache_capacity, enable_group_parallels, result.second,
+                            final_tiling_sub_case_ids, final_tiling_observation_slot, tiling_res),
+          "Generate schedule result failed.");
     }
   }
   return af::SUCCESS;
@@ -344,7 +376,9 @@ af::Status TilingCodeGenerator::GenScheduleGroupTilingGroup(
     const std::string &op_type, const TilingCodeGenConfig &config,
     const std::unordered_map<std::string, std::string> &cache_reuse_info, uint32_t cache_capacity,
     const EnableGroupParallels &enable_group_parallels, size_t group_num,
-    const std::pair<const size_t, TilingModelInfo> &group_graphs, std::map<std::string, std::string> &tiling_res) {
+    const std::pair<const size_t, TilingModelInfo> &group_graphs,
+    const std::map<std::string, int32_t> &final_tiling_sub_case_ids, size_t final_tiling_observation_slot,
+    std::map<std::string, std::string> &tiling_res) {
   TilingCodeGenConfig cur_config = config;
   const auto &model_infos = group_graphs.second;
   const auto group_prefix = model_infos[0].schedule_group_ident.GetGroupPrefix();
@@ -362,6 +396,7 @@ af::Status TilingCodeGenerator::GenScheduleGroupTilingGroup(
   group_nums[{model_infos[0].schedule_group_ident.asc_graph_id, model_infos[0].schedule_group_ident.impl_graph_id}] =
       group_num;
   impl->SetScheduleResultGroupNums(group_nums);
+  impl->SetFinalTilingObservationMetadata(final_tiling_observation_slot, group_num, final_tiling_sub_case_ids);
   GE_ASSERT_SUCCESS(impl->GenTiling(tiling_res, params.cache_reuse_info, cache_capacity, enable_group_parallels),
                     "Gen tiling body impl failed, type[%d].", params.config.type);
   MergeGeneratedHeaders(*impl);
@@ -374,11 +409,14 @@ af::Status TilingCodeGenerator::GenScheduleResult(const std::string &op_type, co
                                                   uint32_t cache_capacity,
                                                   const EnableGroupParallels &enable_group_parallels,
                                                   const ParsedScheduleResult &result,
+                                                  const std::map<std::string, int32_t> &final_tiling_sub_case_ids,
+                                                  size_t &final_tiling_observation_slot,
                                                   std::map<std::string, std::string> &tiling_res) {
   const size_t group_num = result.groups_tiling_model_info.size();
   for (const auto &group_graphs : result.groups_tiling_model_info) {
-    GE_ASSERT_SUCCESS(GenScheduleGroupTilingGroup(op_type, config, cache_reuse_info, cache_capacity,
-                                                  enable_group_parallels, group_num, group_graphs, tiling_res),
+    GE_ASSERT_SUCCESS(GenScheduleGroupTilingGroup(
+                          op_type, config, cache_reuse_info, cache_capacity, enable_group_parallels, group_num,
+                          group_graphs, final_tiling_sub_case_ids, final_tiling_observation_slot++, tiling_res),
                       "Generate schedule group failed.");
   }
   return af::SUCCESS;

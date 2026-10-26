@@ -269,6 +269,18 @@ Inplace 复用后只需要 2 块内存：
 <img src="../../figures/schedule_graph_rewrite_template.png" alt="改图模板" style="width: 35%; max-width: 800px;">
 </div>
 
+<a id="template-semantic-propagation"></a>
+
+## 新增模板的语义信息传递
+
+新增模板及影响实现分类的变更必须遵循 [Codegen 语义命名规范](codegen.md#template-semantic-naming)。Schedule 负责记录真实调度结果，不推测只有最终 Codegen API 才能确认的 feature。
+
+- 在实际 generator/策略选择点写入 `ScheduleTask.semantic_name`，传递到 `ScheduledResult.semantic_name`；继续复用已有图标签携带必要的角色和转换信息。
+- role 只作用于受影响的逻辑 group；图级父策略不得覆盖 `Phase1`、`Phase2`、`Norm` 等组级职责。多 group 可有不同名称，不要求整图名称一致。
+- 图或搬运转换成功后再记 transform；失败不得污染原图或其它候选，复制/派生必须保留对应标签，后续回退必须反映最终结果。
+- 保留完整 graph/result/group/key/subcase/template 归属；reuse 恢复当前逻辑身份，不以局部 `group_id` 或物理 primary 作为唯一标识。候选私有选择状态随最终 tiling data 一起提交。
+- PR 说明给出分类或继承依据及上述信息来源，复用现有测试验证本次受影响的选择、复制、失败、回退和多 group/reuse 边界；最终 API feature 的适配按 Codegen 规范完成。
+
 ## 相关链接
 
 - 返回 [AutoFuse 架构介绍](../../introduction/architecture.md)

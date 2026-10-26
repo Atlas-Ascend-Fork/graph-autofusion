@@ -19,6 +19,7 @@
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
 #include "codegen_kernel.h"
+#include "codegen_api_param/codegen_api_param.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "common_utils.h"
 #include "utils/api_call_factory.h"
@@ -1580,6 +1581,18 @@ TEST(CodegenKernel, ApiCall_Generate) {
   codegen::TPipe tpipe("tpipe", tiler);
   std::string result;
   EXPECT_EQ(call.Generate(tpipe, {}, {}, {}, result), af::SUCCESS);
+}
+
+TEST(CodegenKernel, ApiCall_SetSemanticFeatureDoesNotCreateApiParam) {
+  af::AscGraph graph("test");
+  af::ascir_op::Data x("x", graph);
+  auto node = graph.FindNode("x");
+  codegen::ApiCall call("call");
+  ASSERT_EQ(call.Init(node), af::SUCCESS);
+  ASSERT_EQ(CodegenApiParam::TryGetNodeApiParam(node), nullptr);
+
+  ASSERT_EQ(call.SetSemanticFeature("SIMD/RegisterGather"), af::SUCCESS);
+  EXPECT_EQ(CodegenApiParam::TryGetNodeApiParam(node), nullptr);
 }
 
 TEST(CodegenKernel, Stage_AddCall_WillCollectInputOutputQues) {

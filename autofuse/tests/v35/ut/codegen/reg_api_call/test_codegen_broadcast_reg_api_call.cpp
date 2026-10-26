@@ -147,6 +147,9 @@ TEST(CodegenKernel, BroadcastRegApiCallAllCommonAxis) {
 
   std::string result;
   call.Generate(tpipe, vector<af::AxisId>{}, result);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(broadcast);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "Broadcast");
   EXPECT_EQ(
       result,
       std::string{
@@ -227,6 +230,9 @@ TEST(CodegenKernel, BroadcastRegApiCallUBScalar) {
 
   std::string result;
   call.Generate(tpipe, vector<af::AxisId>{}, result);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(broadcast);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "Broadcast.Scalar");
   EXPECT_EQ(result, std::string{"Duplicate(local_1[0], local_0_ub_scalar, local_1_actual_size);\n"});
 }
 

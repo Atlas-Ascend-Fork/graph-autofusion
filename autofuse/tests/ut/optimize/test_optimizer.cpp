@@ -13,6 +13,7 @@
 #include <ascendc_ir.h>
 #include <array>
 #include <map>
+#include <set>
 #include "ascir.h"
 #include <ascir_ops.h>
 #include <ascir_utils.h>
@@ -2646,6 +2647,35 @@ TEST_F(TestOptimizer, ReduceTaskGenerate) {
   std::vector<af::AscGraph> graphs;
   std::vector<std::string> score_functions;
   EXPECT_EQ(generator.Generate(graph, graphs, score_functions), 0);
+}
+
+TEST_F(TestOptimizer, TemplateSemanticNamesSurviveOptimize) {
+  af::AscGraph graph("ReduceGraph");
+  ConstructReduceGraphWithMultiOutputs(graph);
+  optimize::AscGraphInfoComplete::CompleteApiInfo(graph);
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), 0);
+
+  std::set<std::string> semantic_names;
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      semantic_names.insert(scheduled_result.semantic_name);
+    }
+  }
+  EXPECT_NE(semantic_names.find("Reduce/Common"), semantic_names.end());
+  EXPECT_NE(semantic_names.find("Reduce/AllLoad"), semantic_names.end());
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      for (const auto &schedule_group : scheduled_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          semantic_names.insert(::ascgen_utils::GetTemplateSemanticName(impl_graph));
+        }
+      }
+    }
+  }
+  EXPECT_NE(semantic_names.find("Reduce/RCore/Phase1"), semantic_names.end());
+  EXPECT_NE(semantic_names.find("Reduce/RCore/Phase2"), semantic_names.end());
 }
 
 static af::AscGraph CreateContinuousAxisGraph(bool with_indirect_load) {

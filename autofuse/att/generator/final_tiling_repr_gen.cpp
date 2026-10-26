@@ -23,14 +23,11 @@ void TilingCodeGenImpl::GenSingleGroupFinalTilingObserveBegin() {
     return;
   }
   tiling_func_.AddLine("  const bool emit_final_tiling = ShouldEmitFinalTiling();");
-  tiling_func_.AddLine("  ::g_final_tiling_observe_enabled = emit_final_tiling;");
+  tiling_func_.AddLine("  FinalTilingObservationSlotGuard final_tiling_observation_slot_guard(0U);");
 }
 
 void TilingCodeGenImpl::GenSingleGroupFinalTilingObserveReset() {
-  if (!is_uniq_group_) {
-    return;
-  }
-  tiling_func_.AddLine("  ::g_final_tiling_observe_enabled = false;");
+  // The call guard is destroyed at function exit. Cache hits reset the current slot explicitly.
 }
 
 void TilingCodeGenImpl::GenSingleGroupFinalTilingObserveEmit(const bool need_operator_cache) {
@@ -61,7 +58,7 @@ af::Status TilingCodeGenImpl::GenSingleGroupGetTilingCoreAlias() {
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
                       "bool GetTilingCore(" + config_.tiling_data_type_name +
                           " &tiling_data, int32_t tiling_case_id, double *perf = nullptr);");
-  tiling_func_.AddLine("  return GetTiling(tiling_data, tiling_case_id, perf);");
+  tiling_func_.AddLine("  return GetTilingWithObservation(tiling_data, tiling_case_id, perf);");
   tiling_func_.AddLine("}");
   return af::SUCCESS;
 }

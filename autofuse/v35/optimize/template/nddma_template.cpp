@@ -17,9 +17,11 @@
 #include "tensor_layout_utils.h"
 #include "autoschedule/alignment_handler.h"
 #include "indirect_load_utils.h"
+#include "common_utils.h"
 #include "platform/common/base_alignment_strategy.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 constexpr uint32_t kAlignBytes = 32U;
 constexpr int32_t kTwoBytes = 2;
@@ -310,6 +312,7 @@ Status NddmaTemplate::GenNddmaNode(const af::AscNodePtr &node_pre, const af::Asc
   // 继承自Load/Nddma节点，把Load/Nddma节点的offset信息和是否brc缓存信息同步继承过来
   node_pre->GetOpDesc()->SetType("Nddma");
   node_pre->attr.type = "Nddma";
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(node_pre, semantic::kBroadcast));
   const auto brc_output_attr = node_brc->outputs[0].attr;
   GE_ASSERT_SUCCESS(ScheduleUtils::RemoveNode(new_case, std::dynamic_pointer_cast<af::AscNode>(node_brc),
                                               node_pre->GetOutDataAnchor(0)));
@@ -367,6 +370,7 @@ Status NddmaTemplate::MergeLoadAndTranspose(const af::AscNodePtr &load_node, af:
   load_node->outputs[0].attr.vectorized_axis = out_node->outputs[0].attr.vectorized_axis;
   load_node->GetOpDesc()->SetType("Nddma");
   load_node->attr.type = "Nddma";
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(load_node, semantic::kTranspose));
   // 删除transpose节点
   GE_ASSERT_SUCCESS(ScheduleUtils::RemoveNode(new_case, out_node, load_node->GetOutDataAnchor(0)));
   GE_ASSERT_SUCCESS(UpdateSimdIndirectLoadDenseInputLayouts(load_out_anchor));
@@ -444,6 +448,7 @@ af::Status NddmaTemplate::ProcessSliceToNddma(const af::AscNodePtr &node_load, b
     if (need_nddma) {
       node_load->GetOpDesc()->SetType("Nddma");
       node_load->attr.type = "Nddma";
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(node_load, semantic::kSlice));
       is_nddma_generated_cur = true;
       GELOGD("Node [%s] is a slice load, converted to Nddma.", node_load->GetNamePtr());
     }
@@ -673,6 +678,7 @@ af::Status NddmaTemplate::SwapCastBrcAndGenNddma(const af::AscNodePtr &node_cast
   node_cast->outputs[0].attr.vectorized_strides = next_node->outputs[0].attr.vectorized_strides;
   GE_ASSERT_SUCCESS(
       GenNddmaNode(node_load, std::dynamic_pointer_cast<af::AscNode>(next_node), new_case, is_need_realignment));
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(node_load, semantic::kCast));
   return af::SUCCESS;
 }
 

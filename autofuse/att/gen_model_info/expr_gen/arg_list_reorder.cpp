@@ -601,8 +601,13 @@ ArgListReorder::AxisCategories ArgListReorder::CategorizeAxesByProperty(const ve
   return categories;
 }
 
-af::Status ArgListReorder::ApplyPriorityRules(bool tiling_R, const AxisCategories &categories) {
-  if (!tiling_R) {
+af::Status ArgListReorder::ApplyPriorityRules(PriorityPolicy policy, const AxisCategories &categories) {
+  if (policy == PriorityPolicy::kNonReduceFirst) {
+    // 父子依赖已先连边；非 reduce 优先边必须早于 innermost 边，避免反向边成环后被忽略。
+    GE_ASSERT_SUCCESS(AddEdgeGroups(categories.non_reduce_arg_names, categories.reduce_arg_names),
+                      "add edge from non reduce to reduce failed");
+  }
+  if (policy == PriorityPolicy::kReduceFirst) {
     GE_ASSERT_SUCCESS(AddEdgeGroups(categories.reduce_arg_names, categories.non_reduce_arg_names),
                       "add edge from reduce to non reduce failed");
     GE_ASSERT_SUCCESS(AddEdgeGroups(categories.broadcast_arg_names, categories.non_broadcast_arg_names),
@@ -641,9 +646,33 @@ af::Status ArgListReorder::ApplyPriorityRules(bool tiling_R, const AxisCategorie
 // 这里有一个冲突点，z0z1t是reduce轴，z2t是非reduce轴以及最内轴，但是连边的时候优先连的是reduce轴
 // 即z0z1t->z2t, 在连最内轴的group到非最内轴的group的时候，会尝试将z2t->z0z1t，这里似乎冲突，但是图数据结构中
 // 连边操作会判环，如果z0z1t->z2t, z2t->z0z1t会成环，因此不会连z2t->z0z1t，这样也是遵循reduce轴优先级高于最内轴这条原则
-af::Status ArgListReorder::BuildArgListPriorityGraph(const vector<AttAxisPtr> &arg_list, bool tiling_R) {
+af::Status ArgListReorder::BuildArgListPriorityGraph(const vector<AttAxisPtr> &arg_list, PriorityPolicy policy) {
   GE_ASSERT_SUCCESS(InitArgListPriorityGraph(arg_list), "init arg list graph failed");
-  return ApplyPriorityRules(tiling_R, CategorizeAxesByProperty(arg_list));
+  return ApplyPriorityRules(policy, CategorizeAxesByProperty(arg_list));
+}
+
+af::Status ArgListReorder::BuildTilingRArgList(const vector<AttAxisPtr> &arg_list,
+                                               const std::vector<size_t> &canonical_order,
+                                               vector<AttAxisPtr> &tiling_R_arg_list) {
+  graph_ = af::MakeShared<ArgPriorityGraph>(arg_list.size());
+  GE_ASSERT_NOTNULL(graph_, "Create tiling_R graph failed.");
+  GE_ASSERT_SUCCESS(BuildArgListPriorityGraph(arg_list, PriorityPolicy::kInnermostFirst),
+                    "build tiling_R arg list graph failed");
+  const auto canonical_tile_order = GetTileSplitOrder(canonical_order, arg_list);
+  auto tiling_r_order = graph_->TopologicalSort();
+  // 原始轴等位置变化不代表 local buffer 求解顺序发生变化。
+  if (GetTileSplitOrder(tiling_r_order, arg_list) == canonical_tile_order) {
+    graph_ = af::MakeShared<ArgPriorityGraph>(arg_list.size());
+    GE_ASSERT_NOTNULL(graph_, "Create non reduce first graph failed.");
+    GE_ASSERT_SUCCESS(BuildArgListPriorityGraph(arg_list, PriorityPolicy::kNonReduceFirst),
+                      "build non reduce first arg list graph failed");
+    tiling_r_order = graph_->TopologicalSort();
+  }
+  tiling_R_arg_list.clear();
+  if (GetTileSplitOrder(tiling_r_order, arg_list) != canonical_tile_order) {
+    tiling_R_arg_list = GetNewArgList(tiling_r_order, arg_list);
+  }
+  return af::SUCCESS;
 }
 
 void ArgListReorder::SetAxesSameOrder(const std::vector<AttAxisPtr> &arg_list,
@@ -799,13 +828,15 @@ af::Status ArgListReorder::SortArgList(vector<AttAxisPtr> &arg_list, vector<AttA
   }
   FindSpecialArgs();
   // 构建最终优先级连边图
-  GE_ASSERT_SUCCESS(BuildArgListPriorityGraph(arg_list, prefer_reduce_tile_), "build arg list graph failed");
-  std::vector<AttAxisPtr> new_arg_list = GetNewArgList(graph_->TopologicalSort(), arg_list);
+  const auto policy = prefer_reduce_tile_ ? PriorityPolicy::kInnermostFirst : PriorityPolicy::kReduceFirst;
+  GE_ASSERT_SUCCESS(BuildArgListPriorityGraph(arg_list, policy), "build arg list graph failed");
+  const auto canonical_order = graph_->TopologicalSort();
+  std::vector<AttAxisPtr> new_arg_list = GetNewArgList(canonical_order, arg_list);
   if ((runtime_reorder_rules != nullptr) && has_dynamic_reduce_tile_reorder_) {
     graph_ = af::MakeShared<ArgPriorityGraph>(arg_list.size());
     GE_ASSERT_NOTNULL(graph_, "Create preferred graph failed");
     RuntimeReorderRule runtime_rule = dynamic_reduce_tile_reorder_rule_;
-    if ((BuildArgListPriorityGraph(arg_list, true) == af::SUCCESS) &&
+    if ((BuildArgListPriorityGraph(arg_list, PriorityPolicy::kInnermostFirst) == af::SUCCESS) &&
         SetRuntimePreferredOrder(new_arg_list, arg_list, graph_->TopologicalSort(), runtime_rule)) {
       runtime_reorder_rules->emplace_back(std::move(runtime_rule));
     } else {
@@ -815,11 +846,8 @@ af::Status ArgListReorder::SortArgList(vector<AttAxisPtr> &arg_list, vector<AttA
 
   if (tiling_R_) {
     GELOGI("ReduceAxis BlockSplit, another reorder ArgList:");
-    graph_ = af::MakeShared<ArgPriorityGraph>(arg_list.size());
-    GE_ASSERT_NOTNULL(graph_, "Create graph_ failed.");
-    GE_ASSERT_SUCCESS(BuildArgListPriorityGraph(arg_list, true), "build tiling_R arg list graph failed");
-    std::vector<AttAxisPtr> tiling_R_new_arg_list = GetNewArgList(graph_->TopologicalSort(), arg_list);
-    tiling_R_arg_list = tiling_R_new_arg_list;
+    GE_ASSERT_SUCCESS(BuildTilingRArgList(arg_list, canonical_order, tiling_R_arg_list),
+                      "build tiling_R arg list failed");
   }
 
   arg_list = new_arg_list;

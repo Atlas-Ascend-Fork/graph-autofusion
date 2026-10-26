@@ -109,6 +109,20 @@ inline __simd_vf__ void CastExtendCommon(__ubuf__ OutT *dstUb, __ubuf__ InT *src
       AscendC::Reg::Cast<OutT, float, castTrait0>(dstVreg, (AscendC::Reg::RegTensor<float> &)dstVreg, exMaskReg);
     } else if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, float>) {
       AscendC::Reg::Truncate<InT, roundMode>(dstVreg, srcVreg, exMaskReg);
+    } else if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, int32_t>) {
+      // CAST_TRUNC does not saturate finite float32 overflow. Apply deterministic saturation explicitly.
+      AscendC::Reg::MaskReg upperOverflowMask, lowerOverflowMask, nanMask;
+      AscendC::Reg::RegTensor<int32_t> upperLimitReg, lowerLimitReg, zeroReg;
+      AscendC::Reg::Compares<float, AscendC::CMPMODE::GE>(upperOverflowMask, srcVreg, 2147483648.0f, exMaskReg);
+      AscendC::Reg::Compares<float, AscendC::CMPMODE::LT>(lowerOverflowMask, srcVreg, -2147483648.0f, exMaskReg);
+      AscendC::Reg::Compare<float, AscendC::CMPMODE::NE>(nanMask, srcVreg, srcVreg, exMaskReg);
+      AscendC::Reg::Cast<OutT, InT, castTrait0>(dstVreg, srcVreg, exMaskReg);
+      AscendC::Reg::Duplicate(upperLimitReg, static_cast<int32_t>(2147483647), exMaskReg);
+      AscendC::Reg::Duplicate(lowerLimitReg, static_cast<int32_t>(-2147483647 - 1), exMaskReg);
+      AscendC::Reg::Duplicate(zeroReg, static_cast<int32_t>(0), exMaskReg);
+      AscendC::Reg::Select(dstVreg, upperLimitReg, dstVreg, upperOverflowMask);
+      AscendC::Reg::Select(dstVreg, lowerLimitReg, dstVreg, lowerOverflowMask);
+      AscendC::Reg::Select(dstVreg, zeroReg, dstVreg, nanMask);
     } else if constexpr (std::is_same_v<InT, bfloat16_t> && std::is_same_v<OutT, float>) {
       AscendC::Reg::Cast<OutT, InT, castTrait1>(dstVreg, srcVreg, exMaskReg);
     } else {
@@ -345,13 +359,60 @@ inline __simd_vf__ void CastExtendFloatBool(__ubuf__ OutT *dstUb, __ubuf__ InT *
 }
 
 template <typename InT, typename OutT, AscendC::RoundMode roundMode>
-inline __simd_vf__ void CastExtendIntToBool(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
+inline __simd_vf__ void CastExtendInt64Bool(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
+                                            uint32_t repeatTimes, uint32_t innerLoopStride) {
+  AscendC::Reg::RegTensor<int64_t> oneReg, zeroReg;
+  AscendC::Reg::MaskReg b64MaskReg, b32MaskReg, allMaskReg, cmpMaskReg;
+  AscendC::Reg::RegTensor<InT> srcReg, tmpReg;
+  AscendC::Reg::RegTensor<uint32_t> dstReg;
+  allMaskReg = AscendC::Reg::CreateMask<int64_t, AscendC::Reg::MaskPattern::ALL>();
+  AscendC::Reg::Duplicate(oneReg, 0x1, allMaskReg);
+  AscendC::Reg::Duplicate(zeroReg, 0x0, allMaskReg);
+
+  for (uint32_t i = 0; i < repeatTimes; i++) {
+    uint32_t blockCount = static_cast<uint32_t>(count) - i * innerLoopStride;
+    blockCount = blockCount < innerLoopStride ? blockCount : innerLoopStride;
+    uint32_t b64Sreg = blockCount;
+    uint32_t b32Sreg = blockCount;
+    b64MaskReg = AscendC::Reg::UpdateMask<int64_t>(b64Sreg);
+    b32MaskReg = AscendC::Reg::UpdateMask<int32_t>(b32Sreg);
+    AscendC::Reg::DataCopy(srcReg, srcUb + innerLoopStride * i);
+    AscendC::Reg::Compares<InT, AscendC::CMPMODE::EQ>(cmpMaskReg, srcReg, static_cast<InT>(0), b64MaskReg);
+    AscendC::Reg::Select(tmpReg, zeroReg, oneReg, cmpMaskReg);
+    AscendC::Reg::Pack((AscendC::Reg::RegTensor<uint32_t> &)dstReg, (AscendC::Reg::RegTensor<InT> &)tmpReg);
+    AscendC::Reg::DataCopy<uint8_t, AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+        (__ubuf__ uint8_t *)(dstUb + innerLoopStride * i), (AscendC::Reg::RegTensor<uint8_t> &)dstReg, b32MaskReg);
+  }
+}
+
+template <typename InT, typename OutT, AscendC::RoundMode roundMode>
+inline __simd_vf__ void CastExtendInt32Bool(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
                                             uint32_t repeatTimes, uint32_t innerLoopStride) {
   uint32_t sreg = static_cast<uint32_t>(count);
+  AscendC::Reg::RegTensor<int32_t> oneReg, zeroReg;
   AscendC::Reg::MaskReg stMaskReg, allMaskReg, cmpMaskReg;
   AscendC::Reg::RegTensor<InT> srcReg;
   AscendC::Reg::RegTensor<InT> dstReg;
-  AscendC::Reg::RegTensor<InT> oneReg, zeroReg;
+  allMaskReg = AscendC::Reg::CreateMask<int32_t, AscendC::Reg::MaskPattern::ALL>();
+  AscendC::Reg::Duplicate(oneReg, 0x1, allMaskReg);
+  AscendC::Reg::Duplicate(zeroReg, 0x0, allMaskReg);
+
+  for (uint32_t i = 0; i < repeatTimes; i++) {
+    stMaskReg = AscendC::Reg::UpdateMask<int32_t>(sreg);
+    AscendC::Reg::DataCopy(srcReg, srcUb + innerLoopStride * i);
+    AscendC::Reg::Compares<InT, AscendC::CMPMODE::EQ>(cmpMaskReg, srcReg, static_cast<InT>(0), stMaskReg);
+    AscendC::Reg::Select(dstReg, zeroReg, oneReg, cmpMaskReg);
+    AscendC::Reg::DataCopy<uint8_t, AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+        (__ubuf__ uint8_t *)(dstUb + innerLoopStride * i), (AscendC::Reg::RegTensor<uint8_t> &)dstReg, stMaskReg);
+  }
+}
+
+template <typename InT, typename OutT, AscendC::RoundMode roundMode>
+inline __simd_vf__ void CastExtendSmallIntBool(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
+                                               uint32_t repeatTimes, uint32_t innerLoopStride) {
+  uint32_t sreg = static_cast<uint32_t>(count);
+  AscendC::Reg::RegTensor<InT> oneReg, zeroReg, srcReg, dstReg;
+  AscendC::Reg::MaskReg stMaskReg, allMaskReg, cmpMaskReg;
   allMaskReg = AscendC::Reg::CreateMask<InT, AscendC::Reg::MaskPattern::ALL>();
   AscendC::Reg::Duplicate(oneReg, 0x1, allMaskReg);
   AscendC::Reg::Duplicate(zeroReg, 0x0, allMaskReg);
@@ -361,17 +422,7 @@ inline __simd_vf__ void CastExtendIntToBool(__ubuf__ OutT *dstUb, __ubuf__ InT *
     AscendC::Reg::DataCopy(srcReg, srcUb + innerLoopStride * i);
     AscendC::Reg::Compares<InT, AscendC::CMPMODE::EQ>(cmpMaskReg, srcReg, static_cast<InT>(0), stMaskReg);
     AscendC::Reg::Select(dstReg, zeroReg, oneReg, cmpMaskReg);
-    if constexpr (sizeof(InT) == 8) {
-      AscendC::Reg::RegTensor<uint32_t> dst32Reg;
-      AscendC::Reg::MaskReg stMask32Reg;
-      AscendC::Reg::Pack((AscendC::Reg::RegTensor<uint32_t> &)dst32Reg, (AscendC::Reg::RegTensor<InT> &)dstReg);
-      AscendC::Reg::MaskPack(stMask32Reg, stMaskReg);
-      AscendC::Reg::DataCopy<uint8_t, AscendC::Reg::StoreDist::DIST_PACK4_B32>(
-          (__ubuf__ uint8_t *)(dstUb + innerLoopStride * i), (AscendC::Reg::RegTensor<uint8_t> &)dst32Reg, stMask32Reg);
-    } else if constexpr (sizeof(InT) == 4) {
-      AscendC::Reg::DataCopy<uint8_t, AscendC::Reg::StoreDist::DIST_PACK4_B32>(
-          (__ubuf__ uint8_t *)(dstUb + innerLoopStride * i), (AscendC::Reg::RegTensor<uint8_t> &)dstReg, stMaskReg);
-    } else if constexpr (sizeof(InT) == 2) {
+    if constexpr (sizeof(InT) == 2) {
       AscendC::Reg::DataCopy<uint8_t, AscendC::Reg::StoreDist::DIST_PACK_B16>(
           (__ubuf__ uint8_t *)(dstUb + innerLoopStride * i), (AscendC::Reg::RegTensor<uint8_t> &)dstReg, stMaskReg);
     } else {
@@ -670,8 +721,9 @@ __aicore__ inline void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
   constexpr bool b4Cast = SupportType<Tuple<OutT, InT>, Tuple<half, int4x2_t>, Tuple<int4x2_t, half>>();
 
   constexpr bool floatBoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, float>>();
-  constexpr bool intToBoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int64_t>, Tuple<bool, int32_t>,
-                                             Tuple<bool, int16_t>, Tuple<bool, int8_t>>();
+  constexpr bool int64BoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int64_t>>();
+  constexpr bool int32BoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int32_t>>();
+  constexpr bool smallIntBoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int16_t>, Tuple<bool, int8_t>>();
 
   constexpr bool b8Cast =
       AscendC::IsSameType<InT, uint8_t>::value && AscendC::SupportType<OutT, float, int32_t, int16_t, int4x2_t>();
@@ -703,8 +755,16 @@ __aicore__ inline void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
     constexpr auto func = CastExtendFloatBool<InT, OutT, roundMode>;
     CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
                                                     output_stride, input_stride);
-  } else if constexpr (intToBoolCast) {
-    constexpr auto func = CastExtendIntToBool<InT, OutT, roundMode>;
+  } else if constexpr (int64BoolCast) {
+    constexpr auto func = CastExtendInt64Bool<InT, OutT, roundMode>;
+    CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
+                                                    output_stride, input_stride);
+  } else if constexpr (int32BoolCast) {
+    constexpr auto func = CastExtendInt32Bool<InT, OutT, roundMode>;
+    CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
+                                                    output_stride, input_stride);
+  } else if constexpr (smallIntBoolCast) {
+    constexpr auto func = CastExtendSmallIntBool<InT, OutT, roundMode>;
     CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
                                                     output_stride, input_stride);
   } else if constexpr (b4Cast) {
@@ -739,7 +799,7 @@ __aicore__ inline void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
     constexpr auto func = CastExtendInt8ToFloat<InT, OutT, roundMode>;
     CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
                                                     output_stride, input_stride);
-  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<int8_t, float>>()) {
+  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<int8_t, float>, Tuple<uint8_t, float>>()) {
     constexpr auto func = CastExtendFloatToInt8<InT, OutT, roundMode>;
     CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
                                                     output_stride, input_stride);

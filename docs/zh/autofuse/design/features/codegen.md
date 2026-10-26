@@ -398,6 +398,36 @@ VfCall（主框架 ApiCall，生成函数定义与调用点）
 - **API 参数 dump**：`CodegenApiParam::DumpGraphApiParams`（autofuse/codegen/codegen_api_param_dump.cpp）可将每张 ImplGraph 中所有节点的 API 入参序列化为文本文件，用于调试和对比生成的调用参数，开发新 ApiCall 时可通过该工具核验参数组装是否正确。
 - **表达式转换**：`ExpressionItem/CombinedExpression` 提供符号表达式到 C++ 代码的统一渲染，并附带工厂函数（`ExprItemFactory/CombinedExprFactory`）用于组装常见表达式模式（如 `SizeMinusActualSize` 尾块计算）。
 
+<a id="template-semantic-naming"></a>
+
+### 6.7 新增模板的语义命名规范
+
+新增模板、实现策略、API 选择或回退分支，以及影响名称的分组、图改写和 reuse 映射变更，必须同步适配 `semantic_name`。仅调整 tile、核数、dtype 或 buffer 数量且未改变实现分类时，说明沿用既有名称的依据，不为数值组合新增分类。
+
+名称格式如下，方括号表示可选部分，`|` 分隔多个 API feature，`+` 分隔成功转换：
+
+```text
+<family>/<strategy>[@<role>][#<api-feature>|...][+<transform>+...]
+Reduce/RCore@Phase1
+Reduce/Common@Norm#AR|NoReuseSrc
+Concat/UB#OneAxis
+IndirectLoad/SIMT@Strided#Offset32
+```
+
+`family` 表示实现家族，`strategy` 表示实现策略，`role` 表示逻辑阶段或职责，`api-feature` 表示最终 API 实现特征，`transform` 表示已成功的图或搬运转换。数值参数保留在原 tiling 信息中。协议使用 `semantic_schema=1`，字段和名称不加 `v2` 后缀。
+
+- **统一入口**：词表统一定义在 `autofuse/common/common_utils.h` 的 `ascgen_utils::template_semantic` 中；枚举到名称的映射也使用公共 helper。实际选择点只引用公共常量，保持原选择条件。`common_utils.cpp` 的 `NormalizeTemplateSemanticName()` 在生成 `ModelInfo` 时规范化一次。ATT、TopN、summary 和离线工具消费规范值，不各建 role 表、重新分类或另写模板选型算法；不得从 Torch 算子名、测试标签、图名或生成源码猜测实现。
+- **采集与传递**：Schedule 按[模板语义信息传递规则](schedule.md#template-semantic-propagation)记录策略、组级角色和成功转换；Codegen 在最终 API 选择成功点通过 `CodegenApiParam.semantic_feature` 或现有 `SetSemanticFeature` 记录 feature。回退后清理或替换旧信息，不能沿用失败分支的标签。
+- **身份与生命周期**：名称必须对应当前调用、候选及完整的 graph/result/group/key/subcase/template 身份。reuse 后恢复当前逻辑身份；最终选择快照随胜出 tiling data 一起提交，不能只按 `group_id` 或共享 primary 最后一次选择推断。cache/PGO 无精确快照时按当前 key 回退，不借用历史状态，不补做求解。
+- **不确定信息**：仅在运行时分支未定、独立 `GenerateTiling` 缺少最终 API 信息等明确条件下使用父名或 `Adaptive`，并给出条件及测试。身份匹配不唯一标 `ambiguous`，信息缺失标 `unavailable`；不得用默认父名或 `Adaptive` 掩盖接入遗漏。
+- **行为与性能**：观测不改变公开 ABI、tiling/cache 数据、候选选择或真实求解异常；诊断失败仅降级观测。INFO 关闭时不做新增的诊断字符串和快照容器构造，不新增求解、图扫描、IO 或 kernel launch。沿用原功能及编译、tiling、kernel 性能 gate，不放宽阈值；INFO 关闭时测性能，开启时单独报告观测开销，未执行项明确列出。
+
+新增模板或分支的设计及 PR 说明必须给出分类或继承理由、真实采集点及复制/失效/回退时机、完整身份与 reuse 处理、不确定状态，以及测试入口、实际分支、期望名称和代码/产物版本。不适用项说明原因。
+
+复用现有 UT 和 backend/生成代码执行测试，验证实际 API 或分支、完整身份、名称及状态的对应关系，不能只检查非空字符串或文件存在。按本次变更覆盖复制、失败、回退、多 group/reuse（含跨 graph/result 同号 group）、同 key 多 subcase、cache/PGO 和 INFO 关闭及诊断失败等受影响边界。名称适配、设备执行、精度和性能分别记录；TopN 候选覆盖不等于设备执行或精度通过。
+
+以上为开发和评审要求。模板注册项与名称测试的自动对应 CI 检查仍待实施，不维护另一份全量模板清单，也不能宣称当前 CI 已能自动拦截所有遗漏。
+
 ## 7. 关键文件索引
 
 | 文件路径 | 职责 |

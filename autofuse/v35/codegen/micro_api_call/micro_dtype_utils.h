@@ -21,6 +21,9 @@ constexpr int DTYPE_SIZE_4BYTE = 4;
 constexpr int DTYPE_SIZE_8BYTE = 8;
 
 inline uint32_t GetDtypeSizeByName(const std::string &dtype_name) {
+  if (dtype_name == "bool") {
+    return DTYPE_SIZE_1BYTE;
+  }
   if (dtype_name == "half") {
     return DTYPE_SIZE_2BYTE;
   }

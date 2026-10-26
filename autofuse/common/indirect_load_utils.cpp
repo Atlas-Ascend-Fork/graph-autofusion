@@ -91,7 +91,23 @@ bool TryClassifyDynamicShapeLayout(const LogicalTensorView &logical, IndirectLoa
     layout.kind = IndirectLoadLayoutKind::kZeroStrideCompact;
     return true;
   }
-  layout.kind = IndirectLoadLayoutKind::kStrided;
+  // 无零 stride 的动态视图与静态流程使用同一符号连续性判据证明 dense：证明成立时
+  // dense facade（RegisterGather/GatherApi）的 kernel 参数全部为运行时表达式，
+  // 动态 shape 可安全使用向量化 Gather；证明不成立（维间存在不可排除的物理间隙）
+  // 时保持 kStrided，由 codegen 运行时推导 offsets。
+  physical_span = af::sym::kSymbolOne;
+  bool has_physical_gap = false;
+  for (size_t index = logical.sizes.size(); index > 0UL; --index) {
+    const size_t dim = index - 1UL;
+    if (af::SymbolicUtils::StaticCheckLt(logical.strides[dim], physical_span) != af::TriBool::kFalse) {
+      layout.kind = IndirectLoadLayoutKind::kStrided;
+      return true;
+    }
+    has_physical_gap =
+        has_physical_gap || af::SymbolicUtils::StaticCheckEq(logical.strides[dim], physical_span) != af::TriBool::kTrue;
+    physical_span = physical_span + (logical.sizes[dim] - af::sym::kSymbolOne) * logical.strides[dim];
+  }
+  layout.kind = has_physical_gap ? IndirectLoadLayoutKind::kStrided : IndirectLoadLayoutKind::kDense;
   return true;
 }
 

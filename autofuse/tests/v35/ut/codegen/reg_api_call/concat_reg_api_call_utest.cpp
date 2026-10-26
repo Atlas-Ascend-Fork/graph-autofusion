@@ -357,6 +357,9 @@ TEST_F(ConcatRegApiCallUTest, AllAligned) {
 
   std::string result;
   EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), af::SUCCESS);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(concat);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "UB/AllAligned");
   EXPECT_EQ(result,
             "constexpr ConcatTilingAllAligned<2> concat_tiling {\n"
             "  .dst_col_size = 48,\n"
@@ -602,6 +605,9 @@ TEST_F(ConcatRegApiCallUTest, Unaligned_B32_padded) {
 
   std::string result;
   EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), af::SUCCESS);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(concat);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "UB/AllAligned");
   std::cout << result << std::endl;
   EXPECT_EQ(result,
             "const ConcatTilingAllAligned<2> concat_tiling {\n  .dst_col_size = (((16 + t->s2_1) * 8))/(1),\n  "
@@ -708,6 +714,9 @@ TEST_F(ConcatRegApiCallUTest, ConcatByGather) {
 
   std::string result;
   EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), af::SUCCESS);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(concat);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "UB/ByGather");
   std::cout << result;
   EXPECT_TRUE(result.find("concat::ConcatExtendByGather") != std::string::npos);
 }

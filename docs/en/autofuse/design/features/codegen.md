@@ -398,6 +398,36 @@ This mechanism also supports kernel generation for the CV-UB fusion scenario.
 - **API parameter dump**: `CodegenApiParam::DumpGraphApiParams` (autofuse/codegen/codegen_api_param_dump.cpp) can serialize the API input parameters of all nodes in each ImplGraph into text files, used for debugging and comparing generated call parameters. When developing a new ApiCall, this tool can be used to verify whether parameter assembly is correct.
 - **Expression conversion**: `ExpressionItem/CombinedExpression` provide unified rendering from symbolic expressions to C++ code, with factory functions (`ExprItemFactory/CombinedExprFactory`) for assembling common expression patterns (such as the `SizeMinusActualSize` tail block computation).
 
+<a id="template-semantic-naming"></a>
+
+### 6.7 Semantic Naming Requirements for New Templates
+
+New templates, implementation strategies, API selection or fallback branches, and naming-related changes to grouping, graph rewrites, or reuse mappings must adapt `semantic_name`. If only tile size, core count, dtype, or buffer count changes without changing the implementation category, explain why the existing name still applies; do not create categories for numeric combinations.
+
+The format below uses brackets for optional parts, `|` between API features, and `+` between successful transformations:
+
+```text
+<family>/<strategy>[@<role>][#<api-feature>|...][+<transform>+...]
+Reduce/RCore@Phase1
+Reduce/Common@Norm#AR|NoReuseSrc
+Concat/UB#OneAxis
+IndirectLoad/SIMT@Strided#Offset32
+```
+
+`family` identifies the implementation family, `strategy` the implementation strategy, `role` the logical phase or responsibility, `api-feature` the final API implementation feature, and `transform` a successful graph or data-movement transformation. Numeric parameters remain in the original tiling information. The protocol uses `semantic_schema=1`; fields and names have no `v2` suffix.
+
+- **Single source**: Define vocabulary in `ascgen_utils::template_semantic` in `autofuse/common/common_utils.h`; use shared helpers for enum-to-name mappings too. Selection sites reference shared constants and retain their original selection conditions. `NormalizeTemplateSemanticName()` in `common_utils.cpp` normalizes names once when generating `ModelInfo`. ATT, TopN, summary, and offline tools consume normalized values without maintaining separate role tables, reclassifying implementations, or duplicating template selection. Do not infer implementations from Torch operator names, test labels, graph names, or generated source.
+- **Collection and propagation**: Schedule records strategies, group roles, and successful transformations under the [semantic propagation rules](schedule.md#template-semantic-propagation). Codegen records features through `CodegenApiParam.semantic_feature` or the existing `SetSemanticFeature` at the successful final API selection point. Clear or replace stale information after fallback; do not retain failed-branch tags.
+- **Identity and lifetime**: Associate names with the current invocation, candidate, and complete graph/result/group/key/subcase/template identity. Restore the current logical identity after reuse. Commit final selection snapshots together with the winning tiling data; neither `group_id` alone nor the last selection of a shared primary establishes ownership. For cache/PGO paths without an exact snapshot, fall back using the current key without borrowing historical state or solving again.
+- **Uncertainty**: Use a parent name or `Adaptive` only for stated conditions such as an unresolved runtime branch or missing final API information in standalone `GenerateTiling`, with corresponding tests. Report non-unique identity matches as `ambiguous` and missing information as `unavailable`; default parent names or `Adaptive` must not hide missing integration.
+- **Behavior and performance**: Observation must not change public ABI, tiling/cache data, candidate selection, or real solver exceptions; diagnostic failures only disable or degrade observation. With INFO disabled, avoid added diagnostic string and snapshot-container construction. Do not add solving, graph scans, IO, or kernel launches. Retain existing functional, compilation, tiling, and kernel performance gates without relaxing thresholds. Measure performance with INFO disabled and report observation overhead separately with INFO enabled; explicitly list checks not run.
+
+The design and PR description for a new template or branch must state its category or inheritance rationale, actual collection points and copy/invalidation/fallback timing, complete identity and reuse handling, uncertainty states, test entry points, actual branches, expected names, and code/artifact versions. Explain items that do not apply.
+
+Reuse existing UT and backend/generated-code execution tests to verify the correspondence between actual APIs or branches, complete identity, names, and states; non-empty strings or file existence alone are insufficient. Cover boundaries affected by the change: copying, failure, fallback, multiple groups/reuse (including equal group IDs across graphs/results), multiple subcases for one key, cache/PGO, INFO disabled, and diagnostic failures. Record naming integration, device execution, accuracy, and performance separately; TopN candidate coverage does not establish device execution or accuracy.
+
+These are development and review requirements. Automatic CI checks linking template registrations to naming tests remain to be implemented. Do not maintain a duplicate full template inventory or claim that current CI automatically rejects every omission.
+
 ## 7. Key File Index
 
 | File Path | Responsibility |

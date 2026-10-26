@@ -42,6 +42,7 @@ file(GLOB SOURCES
 
 add_executable(att_st
         ${SOURCES}
+        ${TC_DIR}/source_mirror/gen_model_info_content/test_tiling_r_reorder.cpp
 )
 target_link_directories(att_st PRIVATE ${ASCEND_INSTALL_LIB_PATH})
 target_include_directories(att_st BEFORE PRIVATE

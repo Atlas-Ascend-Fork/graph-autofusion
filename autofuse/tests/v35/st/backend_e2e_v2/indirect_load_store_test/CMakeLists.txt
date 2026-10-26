@@ -431,6 +431,13 @@ add_indirect_load_graph_case(indirect_load_user_position_bias
     indirect_load_user_position_bias 1
     IL_CASE_BROADCAST_WHERE IL_USER_POSITION_BIAS)
 
+# Dynamic-shape twin of the position-bias case: string-named symbolic sizes (ksN)
+# replicate the inductor dynamic=True embedding+permute scenario where the Arange
+# coordinate arithmetic in the index production chain references runtime sizes.
+add_indirect_load_graph_case(indirect_load_user_position_bias_dynamic
+    indirect_load_user_position_bias_dynamic 1
+    IL_CASE_BROADCAST_WHERE IL_USER_POSITION_BIAS_DYNAMIC)
+
 # User graph: position-bias buckets, axis-1 IndirectLoad over the transposed [8,32,1]
 # table, two broadcast side inputs, Exp and the final Sum over the lookup axis.
 

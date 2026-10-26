@@ -11,11 +11,13 @@
 #include "load_to_nddma_template.h"
 #include "graph_utils.h"
 #include "indirect_load_utils.h"
+#include "common_utils.h"
 #include "un_alignment_strategy.h"
 #include "tensor_layout_utils.h"
 #include "platform/common/base_alignment_strategy.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 
 std::string LoadToNddmaTemplate::GenName(const std::string &general_case_name) {
   return general_case_name + "_load_to_nddma";
@@ -48,6 +50,7 @@ af::Status LoadToNddmaTemplate::Generate(const af::AscGraph &origin_graph,
     bool need_align_at_repeat1 = info.has_multiple_discontinuities && info.is_tail_axis_discontinuous;
     if (IsLoadNeedAlign(node) || need_align_at_repeat1) {
       GE_ASSERT_SUCCESS(GenLoadToGenNddmaNode(node));
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(node, semantic::kLoad));
       is_nddma_generated = true;
     }
   }

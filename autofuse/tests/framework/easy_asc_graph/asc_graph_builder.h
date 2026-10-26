@@ -145,6 +145,11 @@ class AscGraphBuilder {
   };
   AscGraphBuilder &Split(const std::string &name, const std::string &input, const std::vector<SplitOutput> &outputs);
 
+  // Frexp: 双输出异构 dtype 算子（mantissa: 浮点, exponent: int32）
+  // 后续可通过 "name:0"(mantissa), "name:1"(exponent) 寻址各输出端口
+  AscGraphBuilder &Frexp(const std::string &name, const std::string &input, DataType mantissa_dtype = af::DT_FLOAT,
+                         DataType exponent_dtype = af::DT_INT32);
+
   // 常用的 elementwise 节点
   AscGraphBuilder &Abs(const std::string &name, const std::string &input) {
     return Op<ascir_op::Abs>(name, {input});

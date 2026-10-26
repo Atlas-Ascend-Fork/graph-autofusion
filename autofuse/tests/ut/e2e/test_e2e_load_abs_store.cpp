@@ -59,6 +59,28 @@ std::map<std::string, std::string> MakeDefaultShapeInfo() {
   return {{"s0", replace_src("0", "1")}, {"s1", replace_src("1", "1")}, {"s2", replace_src("2", "1")}};
 }
 
+static std::string WithoutFinalTilingMetadata(std::string value) {
+  const size_t begin = value.find("#ifndef AUTOFUSE_FINAL_TILING_SELECTION_SNAPSHOT_DEFINED");
+  if (begin != std::string::npos) {
+    const size_t end = value.find("#endif", begin);
+    const size_t end_size = end == std::string::npos ? 0U : strlen("#endif") + 1U;
+    if (end != std::string::npos) {
+      value.erase(begin, end + end_size - begin);
+    }
+  }
+  const std::string vector_include = "#include <vector>\n";
+  const size_t include_pos = value.find(vector_include);
+  if (include_pos != std::string::npos) {
+    value.erase(include_pos, vector_include.size());
+  }
+  const std::string selections = "  std::vector<FinalTilingSelectionSnapshot> final_tiling_selections;\n";
+  const size_t selections_pos = value.find(selections);
+  if (selections_pos != std::string::npos) {
+    value.erase(selections_pos, selections.size());
+  }
+  return value;
+}
+
 static std::string GetCodegenTilingWithLambdaExpectCode() {
   return R"rawliteral(#include <stdexcept>
 #include <sstream>
@@ -1800,7 +1822,7 @@ struct AutofuseTilingDataPerf {
 };
 #endif
 )rawliteral";
-  EXPECT_EQ(tiling_data_code, test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(tiling_data_code), test_res);
 }
 
 TEST_F(E2E_LoadAbsStore, Codegen_Tiling_With_Lambda) {

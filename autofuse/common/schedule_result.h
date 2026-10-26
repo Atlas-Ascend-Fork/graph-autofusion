@@ -52,6 +52,7 @@ struct ScheduledResult {
   bool is_reduce_mem_reuse{false};
   bool enable_group_parallel{false};
   CubeTemplateType cube_type{CubeTemplateType::kDefault};
+  std::string semantic_name{};
 };
 
 struct GmTensorSizes {

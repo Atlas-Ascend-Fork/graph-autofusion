@@ -17,6 +17,8 @@ target_link_libraries(inductor_topn_test_codegen
 target_compile_definitions(inductor_topn_test_codegen PRIVATE
     ATT_SO_NAME="./libatt.so"
     KERNEL_SRC_LIST="${TOPN_TILING_DEF}:${TOPN_HOST_CODE}:${TOPN_DEVICE_CODE}"
+    EMPTY_TILING_DEF_FILE="${TOPN_WORKDIR}/empty_autofuse_tiling_data.h"
+    EMPTY_HOST_CODE_FILE="${TOPN_WORKDIR}/inductor_topn_empty_host.cpp"
 )
 set(INDUCTOR_TOPN_RUNTIME_LD_LIBRARY_PATH
     "${CMAKE_BINARY_DIR}/autofuse/graph_metadef/graph/ascendc_ir/generator:${CMAKE_BINARY_DIR}/autofuse/graph_metadef/graph/ascendc_ir:${CMAKE_BINARY_DIR}/autofuse/graph_metadef/graph/expression:${CMAKE_BINARY_DIR}/autofuse/graph_metadef/graph:${CMAKE_BINARY_DIR}/autofuse/tests:${CMAKE_BINARY_DIR}/autofuse/tests/depends/common:${CMAKE_BINARY_DIR}/autofuse/tests/depends/slog:${CMAKE_BINARY_DIR}/autofuse/tests/depends/trace:${CMAKE_BINARY_DIR}/autofuse/tests/depends/runtime:${CMAKE_BINARY_DIR}/autofuse/ascir/generator:${CMAKE_BINARY_DIR}/autofuse/ascir/meta:${ASCEND_INSTALL_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/lib64:$ENV{LD_LIBRARY_PATH}")
@@ -57,6 +59,8 @@ target_compile_definitions(inductor_topn_test_e2e PRIVATE
     AUTOFUSE_PYTHON_DIR="${AUTOFUSE_PYTHON_DIR}"
     ASCEND_HOME_PATH="${ASCEND_INSTALL_PATH}"
     HOST_HELPER_BIN="$<TARGET_FILE:inductor_topn_host_abi1_helper>"
+    EMPTY_TILING_DEF_FILE="${TOPN_WORKDIR}/empty_autofuse_tiling_data.h"
+    EMPTY_HOST_CODE_FILE="${TOPN_WORKDIR}/inductor_topn_empty_host.cpp"
 )
 add_test(NAME inductor_topn_test_e2e
     COMMAND inductor_topn_test_e2e --gtest_output=xml:${CMAKE_INSTALL_PREFIX}/report/st/inductor_topn_test_e2e.xml)

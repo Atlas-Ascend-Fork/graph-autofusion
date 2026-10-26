@@ -179,6 +179,7 @@ class ArgListReorder {
   // 轴属性枚举
   enum class AxisProperty : uint8_t { kReduce, kBroadcast };
   enum class ReduceTailTilePolicy : uint8_t { kFallback, kEqual, kPreferTail, kKeepDefault };
+  enum class PriorityPolicy : uint8_t { kReduceFirst, kInnermostFirst, kNonReduceFirst };
 
   struct ReduceTailTileInfo {
     std::string reduce_axis_name;
@@ -199,8 +200,10 @@ class ArgListReorder {
   };
 
   // 核心函数保持原名
-  af::Status BuildArgListPriorityGraph(const vector<AttAxisPtr> &arg_list, bool tiling_R = false);
+  af::Status BuildArgListPriorityGraph(const vector<AttAxisPtr> &arg_list, PriorityPolicy policy);
   af::Status InitArgListPriorityGraph(const vector<AttAxisPtr> &arg_list);
+  af::Status BuildTilingRArgList(const vector<AttAxisPtr> &arg_list, const std::vector<size_t> &canonical_order,
+                                 vector<AttAxisPtr> &tiling_R_arg_list);
 
   // 变量名改为下划线
   std::map<std::string, size_t> axis_name_2_id_map_;
@@ -250,7 +253,7 @@ class ArgListReorder {
   void RecordReduceTileTemplateSelection(const NodeInfo &node, const std::set<std::string> &reduce_axis_ori_axes_set);
   void SaveReduceAxisOrig(const SubAxis *reduce_axis, std::set<std::string> &reduce_axis_ori_axes_set) const;
   AxisCategories CategorizeAxesByProperty(const vector<AttAxisPtr> &arg_list);
-  af::Status ApplyPriorityRules(bool tiling_R, const AxisCategories &categories);
+  af::Status ApplyPriorityRules(PriorityPolicy policy, const AxisCategories &categories);
   std::vector<AttAxisPtr> GetNewArgList(const std::vector<size_t> &topo_order,
                                         const std::vector<AttAxisPtr> &arg_list) const;
   std::vector<Expr> GetTileSplitOrder(const std::vector<size_t> &topo_order,

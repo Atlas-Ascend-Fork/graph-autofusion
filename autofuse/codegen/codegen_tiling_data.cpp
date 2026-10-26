@@ -38,6 +38,7 @@ codegen::TilingData::TilingData(const std::string &kernel, const std::string &na
 
 std::string codegen::TilingData::macros_and_includes = {  // 不却分是否const
     "#include <stdint.h>\n"
+    "#include <vector>\n"
     "#include \"kernel_tiling/kernel_tiling.h\"\n"
     "#define BEGIN_TILING_DATA_DEF_T(name) struct name {\n"
     "#define TILING_DATA_FIELD_DEF_T(type, name) \\\n"
@@ -148,6 +149,7 @@ std::string codegen::TilingData::pgo_perf_struct = {
     "struct AutofuseTilingDataPerf {\n"
     "  AutofuseTilingData tiling_data;\n"
     "  double best_perf;\n"
+    "  std::vector<FinalTilingSelectionSnapshot> final_tiling_selections;\n"
     "};\n"};
 
 af::Status codegen::TilingData::ProcessCubeFusionResult(ascir::FusedScheduledResult &schedule_result) {
@@ -175,6 +177,7 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
     if (input_type != "AutofuseTilingData") {
       ss << "using AutofuseTilingData = " << input_type << ";" << std::endl;
     }
+    ss << ascgen_utils::GenFinalTilingSelectionSnapshotSnippet();
     ss << pgo_perf_struct;
     ss << "#endif" << std::endl;
   };

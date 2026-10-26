@@ -9,12 +9,14 @@
  */
 
 #include "concat_reg_api_call.h"
+#include "common_utils.h"
 #include "api_call/utils/api_call_factory.h"
 #include "codegen/expression_convert_struct.h"
 #include "ascir_ops.h"
 #include "ascir_utils.h"
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 Status ConcatRegApiCall::ParseAttr(const ascir::NodeView &node) {
   node_ = node;
   return af::SUCCESS;
@@ -34,6 +36,7 @@ Status ConcatRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::A
   std::stringstream ss;
   if (CanConcatOneAxis(inputs, y)) {
     // 单维首轴concat
+    GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kUbOneAxis));
     GE_ASSERT_SUCCESS(GenerateForOneAxis(inputs, y, ss));
     result = ss.str();
     return af::SUCCESS;
@@ -43,6 +46,7 @@ Status ConcatRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::A
   GE_ASSERT_SUCCESS(InitializeTiling(concat_dim, inputs, y, concat_tiling));
   if (IsAllAligned(concat_tiling)) {
     // by copy
+    GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kUbAllAligned));
     GE_ASSERT_SUCCESS(GenerateForAllAligned(inputs, y, concat_tiling, tpipe.tiler, ss));
   } else {
     // 获取tmp_buf复用TBuf的id
@@ -53,14 +57,45 @@ Status ConcatRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::A
     id = it->second;
     GE_ASSERT_SUCCESS(CanUseGather(concat_tiling));
     if (concat_tiling.can_use_gather && concat_tiling.dst_col_size_expr.IsConstExpr()) {
+      GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kUbByGather));
       GE_ASSERT_SUCCESS(GenerateForGather(inputs, y, concat_tiling, tpipe, ss, id));
     } else {
       // by scatter
+      GE_ASSERT_SUCCESS(SetSemanticFeature(GetSemanticFeature(concat_tiling)));
       GE_ASSERT_SUCCESS(GenerateDefault(inputs, y, concat_tiling, tpipe, ss, id));
     }
   }
   result = ss.str();
   return af::SUCCESS;
+}
+
+std::string ConcatRegApiCall::GetSemanticFeature(const ConcatTiling &tiling) {
+  if (tiling.any_padded) {
+    return semantic::kUbPadded;
+  }
+  if (tiling.can_use_gather) {
+    return semantic::kUbAdaptive;
+  }
+  constexpr int64_t kVectorRegWidth = 256;
+  const int64_t scatter_max_len = kVectorRegWidth / static_cast<int64_t>(tiling.data_type_size) / 2;
+  bool has_copy = false;
+  bool has_scatter = false;
+  for (const auto &src_col_size : tiling.src_col_size_exprs) {
+    if (!src_col_size.IsConstExpr()) {
+      return semantic::kUbAdaptive;
+    }
+    int64_t col_size = 0;
+    GE_WARN_ASSERT(src_col_size.GetConstValue(col_size));
+    if (col_size > scatter_max_len) {
+      has_copy = true;
+    } else {
+      has_scatter = true;
+    }
+  }
+  if (has_copy && has_scatter) {
+    return semantic::kUbExtendMixed;
+  }
+  return has_copy ? semantic::kUbExtendCopy : semantic::kUbExtendScatter;
 }
 
 bool ConcatRegApiCall::IsShareInputs() const {
