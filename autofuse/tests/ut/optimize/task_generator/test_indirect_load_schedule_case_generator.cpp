@@ -2920,6 +2920,9 @@ struct DualGatherGraphOptions {
   // true: post Reduce 归约外轴（R>G 形态：SIMD/SIMT 不可行，SK 分段桥接承接）；仅与
   // with_post_reduce 组合生效
   bool reduce_outer = false;
+  // true: 全部尺寸符号改用具体值（span 静态可解 → lowering 可判定 offset_width=uint32，
+  // 驱动位宽感知寄存器模型的 32 位细化路径）
+  bool concrete_shapes = false;
 };
 
 af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = {}) {
@@ -2933,7 +2936,8 @@ af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = 
       (options.one_byte_value || options.second_value_one_byte) ? af::DT_INT8 : af::DT_FLOAT16;
   const bool mixed_value_dtype = value0_dtype != value1_dtype;
   const auto make_size = [&graph, &options](const char *name, int64_t value) {
-    return options.with_post_reduce ? af::Expression(graph.CreateSizeVar(value)) : graph.CreateSizeVar(name);
+    return (options.with_post_reduce || options.concrete_shapes) ? af::Expression(graph.CreateSizeVar(value))
+                                                                 : graph.CreateSizeVar(name);
   };
   const af::Expression s0 = make_size("s0", 32);
   const af::Expression s1 = make_size("s1", 16);
@@ -3542,7 +3546,7 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSimtLadderForOneByteValue
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherMixedTemplateFallbackForHeterogeneousMembers) {
   // L5 混模板独立兜底：member0（fp16，index 链含非法外部消费者 → SIMT 不可行）与
-  // member1（int8 值 → SIMD 被 dtype 门控拒绝）输入侧可行性互补——共模板候选全灭后，
+  // member1（int8 值 → SIMD 被 dtype 门控拒绝）输入侧可行性互补——共模板候选均被否决后，
   // 逐成员探测得到 {SIMD, SIMT} 异构选择，各成员以各自模板标注于同一 kernel。
   DualGatherGraphOptions options;
   options.first_index_illegal_consumer = true;
@@ -3639,9 +3643,58 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherMixedTemplateDenseDefault
   EXPECT_EQ(ascir::GetTemplateIdOrDefault(*sk_il0), ascir::TemplateId::kIndirectLoadSK);
 }
 
+TEST(IndirectLoadScheduleCaseGeneratorTest, SimtFusedRegisterDemandWidthAwareBoundaries) {
+  // 位宽感知寄存器压力模型（常数与推导见设计文档「寄存器压力模型」）：
+  // 64 位基准（既有行为）：N=5 可融合（24+18×5=114 ≤ 127），N=6 降级 V2（132 > 127）。
+  EXPECT_LE(ascgen_utils::indirect_load::SimtFusedRegisterDemand(false, 5U, 0U, 0U),
+            ascgen_utils::indirect_load::kSimtFusedMinTierQuota);
+  EXPECT_GT(ascgen_utils::indirect_load::SimtFusedRegisterDemand(false, 6U, 0U, 0U),
+            ascgen_utils::indirect_load::kSimtFusedMinTierQuota);
+  // 全成员 uint32（32 位细化）：每成员偏移路径活值 2 格→1 格（18→10），N=10 可融合
+  // （23+10×10=123），N=11 降级 V2（133 > 127）。
+  EXPECT_LE(ascgen_utils::indirect_load::SimtFusedRegisterDemand(true, 10U, 0U, 0U),
+            ascgen_utils::indirect_load::kSimtFusedMinTierQuota);
+  EXPECT_GT(ascgen_utils::indirect_load::SimtFusedRegisterDemand(true, 11U, 0U, 0U),
+            ascgen_utils::indirect_load::kSimtFusedMinTierQuota);
+  // side load / 链节点系数：64 位 5/3，32 位 4/3（链节点混合宽度共用 3）。
+  EXPECT_EQ(ascgen_utils::indirect_load::SimtFusedRegisterDemand(false, 2U, 2U, 3U), 24U + 36U + 10U + 9U);
+  EXPECT_EQ(ascgen_utils::indirect_load::SimtFusedRegisterDemand(true, 2U, 2U, 3U), 23U + 20U + 8U + 9U);
+  // 档位映射（配额 16/32/64/127 格 → 2048/1024/512/256 线程）。
+  EXPECT_EQ(ascgen_utils::indirect_load::SimtFusedThreadTier(16U), 2048U);
+  EXPECT_EQ(ascgen_utils::indirect_load::SimtFusedThreadTier(17U), 1024U);
+  EXPECT_EQ(ascgen_utils::indirect_load::SimtFusedThreadTier(33U), 512U);
+  EXPECT_EQ(ascgen_utils::indirect_load::SimtFusedThreadTier(65U), 256U);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherFusedTierWidthAwareUint32) {
+  // 具体尺寸（span 静态可解）→ 全成员 lowering 元数据 offset_width=uint32 → 位宽感知
+  // 门控走 32 位细化常数：三成员 R=23+10×3=53 → 512 档。对照 64 位基准（24+18×3=78）
+  // 会给 256 档——线程档差异即位宽贯通的观测点（门控经 FinalizeLoweringMetadata 之后
+  // 读取成员元数据，与 codegen 选 fused OffsetType 的判定同源）。
+  DualGatherGraphOptions options;
+  options.third_indirect_load_merged = true;
+  options.concrete_shapes = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 4UL);
+  const af::AscNodePtr simt_il = [&graphs]() {
+    for (const auto &candidate : graphs) {
+      const auto il = candidate.FindNode("dual_indirect_load0");
+      if (il != nullptr && ascir::GetTemplateIdOrDefault(*il) == ascir::TemplateId::kIndirectLoadSimt) {
+        return il;
+      }
+    }
+    return static_cast<af::AscNodePtr>(nullptr);
+  }();
+  ASSERT_NE(simt_il, nullptr);
+  ASSERT_TRUE(ascgen_utils::indirect_load::IsSimtFusedPrimary(simt_il));
+  const auto merge_info = ascgen_utils::indirect_load::GetSimtFusedMergeInfo(simt_il);
+  EXPECT_EQ(merge_info.member_count, 3U);
+  EXPECT_EQ(merge_info.max_thread_tier, 512U);
+}
+
 TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSkBridgeFallbackSegmentsMembers) {
   // L6 SK 分段桥接（终态兜底）：双成员 index 链含非法外部消费者（SIMT 候选否决）且共享
-  // post Reduce 归约外轴（R>G，SIMD 候选否决）——前五级全灭，逐成员复用单 gather SK
+  // post Reduce 归约外轴（R>G，SIMD 候选否决）——前五级均被否决，逐成员复用单 gather SK
   // 流水：各成员独立 workspace 边界切断成员间及成员↔消费段连通性。
   DualGatherGraphOptions options;
   options.first_index_illegal_consumer = true;
@@ -3697,7 +3750,7 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSkBridgeFallbackSegmentsM
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSkBridgeRejectsOneByteValueMembers) {
   // L6 dtype 门控（与单 gather ApplyGraphPass 对齐）：SK 的 AscendC::Gather 不支持 1 字节
-  // 值。双成员 int8 + index 链非法外部消费者（SIMT 不可行）时六级阶梯全灭，不产生候选
+  // 值。双成员 int8 + index 链非法外部消费者（SIMT 不可行）时六级阶梯均被否决，不产生候选
   // （由前端 BackendSpec 预防兜底承接），而非生成 codegen 不可支持的 SK 候选。
   DualGatherGraphOptions options;
   options.first_index_illegal_consumer = true;

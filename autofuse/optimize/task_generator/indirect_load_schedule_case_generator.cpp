@@ -3426,7 +3426,7 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
     // index GM 直读，输出 tile 写 output workspace）——SK 分段设计对 R 非全载
     // 场景的本意。复合 Norm 区域（多 Reduce）维持既有拒绝语义。
     // 门禁放宽：SIMT 候选可能因布局校验被拒（如 mean(dim=-2) 中间轴归约，
-    // IsSimtUbInfeasible 只看尾轴 UB 下界无法覆盖）——前序 SIMD/SIMT 候选全灭时
+    // IsSimtUbInfeasible 只看尾轴 UB 下界无法覆盖）——前序 SIMD/SIMT 候选均不可行时
     // SK 是最后活路，此时即使 SIMT 的 UB 下界可行也必须重定向。
     if (IsSkWindowUbInfeasible(indirect_load) && IsNormRegionDag(indirect_load) &&
         (IsSimtUbInfeasible(indirect_load) || !has_live_candidate)) {
@@ -3553,18 +3553,12 @@ af::Status AnnotateSimtGroupFanoutBranches(const std::vector<af::AscNodePtr> &me
 // - L3（UB 归并）：其余情形——各路 value 写 UB 局部目标，归并链向量代码执行。
 // 防漂移：此处仅做门控与角色标注；side load 寻址分类与输出链 tensor id 由 codegen 在
 // codegen 期图上用同一分类函数重建（节点名跨图副本稳定，视图/张量 id 会漂移）。
-// 寄存器压力模型共用常数（取值依据与档位配额表见设计文档「寄存器压力模型」）。
-// IsGroupSimtL4UbDoomed 仅取基线 + 每成员项（不含 side load/链节点，方向安全——
-// 基线判定已超配额时 side load/链节点只会更高，不会漏判）。
-constexpr uint64_t kRegisterBase = 24U;
-constexpr uint64_t kRegisterPerMember = 18U;
-constexpr uint64_t kRegisterPerSideLoad = 5U;
-constexpr uint64_t kRegisterPerChainNode = 3U;
-constexpr uint64_t kMinTierQuota = 127U;
+// 寄存器压力模型常数与档位映射已上移至 indirect_load_utils.h（kSimtFusedRegister* /
+// SimtFusedRegisterDemand / SimtFusedThreadTier，位宽感知——调度期门控与 codegen 漂移
+// 防护共用；取值依据与推导见设计文档「寄存器压力模型」）。
 
 af::Status PlanSimtFusedEmission(const af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
-                                 ascgen_utils::indirect_load::SimtFusedMergeInfo &merge_info,
-                                 bool &use_fused_emission) {
+                                 ascgen_utils::indirect_load::SimtFusedMergeInfo &merge_info) {
   merge_info = ascgen_utils::indirect_load::SimtFusedMergeInfo{};
   // 归并树收集：全部成员输出 Consumer 的前向闭包（成员为边界；Store/Reduce 为终端）。
   NodeSet member_set;
@@ -3680,28 +3674,13 @@ af::Status PlanSimtFusedEmission(const af::AscGraph &graph, const std::vector<af
     all_emittable = false;
     break;
   }
-  // 资源压力模型：按成员数、side load 数与 side 链节点数线性估算（见设计文档）。
-  const uint64_t register_demand = kRegisterBase + kRegisterPerMember * static_cast<uint64_t>(members.size()) +
-                                   kRegisterPerSideLoad * static_cast<uint64_t>(side_loads.size()) +
-                                   kRegisterPerChainNode * static_cast<uint64_t>(side_chain_nodes.size());
-  use_fused_emission = register_demand <= kMinTierQuota;
-  if (!use_fused_emission) {
-    GELOGI(
-        "[IndirectLoad] Fused register demand[%llu] exceeds min tier quota[%llu], fall back to V2 (N=%zu, S=%zu, "
-        "E=%zu).",
-        static_cast<unsigned long long>(register_demand), static_cast<unsigned long long>(kMinTierQuota),
-        members.size(), side_loads.size(), side_chain_nodes.size());
-    return af::SUCCESS;
-  }
-  if (register_demand <= 16U) {
-    merge_info.max_thread_tier = 2048U;
-  } else if (register_demand <= 32U) {
-    merge_info.max_thread_tier = 1024U;
-  } else if (register_demand <= 64U) {
-    merge_info.max_thread_tier = 512U;
-  } else {
-    merge_info.max_thread_tier = 256U;
-  }
+  // [位宽感知门控后置] 寄存器压力模型的位宽（全成员 offset_width）来自 lowering 元数据
+  // （与 codegen 选 fused OffsetType 的判定同源），元数据在融合发射标记之前构建——门控
+  // 与线程档由调用方（ApplyGraphPassGroup）在 FinalizeLoweringMetadata 之后执行。此处
+  // 仅收集结构与 R_est 组件计数（stash 进 merge_info），并做结构性的 L2/L3 判定。
+  merge_info.member_count = static_cast<uint32_t>(members.size());
+  merge_info.side_load_count = static_cast<uint32_t>(side_loads.size());
+  merge_info.chain_node_count = static_cast<uint32_t>(side_chain_nodes.size());
   merge_info.register_merge = all_emittable && !has_reduce_terminal && !has_unsupported_side_input &&
                               !store_terminals.empty() && !forward_nodes.empty();
   if (!merge_info.register_merge) {
@@ -3885,7 +3864,7 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     for (const af::AscNodePtr &member : members) {
       GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtGroupMember(member));
     }
-    GE_ASSERT_SUCCESS(PlanSimtFusedEmission(graph, members, merge_info, use_fused_emission));
+    GE_ASSERT_SUCCESS(PlanSimtFusedEmission(graph, members, merge_info));
     if (merge_info.register_merge) {
       // L2 寄存器归并：归并树整链标 kSimtInlineTransform——在 fused evaluator 的 FusedEval
       // 内按拓扑序发射（N 种子 + 表达式折叠），向量 codegen 跳过其发射。
@@ -3921,6 +3900,46 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph, member));
     GE_ASSERT_SUCCESS(FinalizeTemplate(member, template_id));
   }
+  // [位宽感知门控后置] lowering 元数据先于融合发射标记构建（BuildSimtLoweringMetadata 仅
+  // 依赖 simt_group_member 标记的组员分支，与融合标记无关——构建顺序调换不改变内容）。
+  // 门控从各成员元数据读 offset_width（与 codegen 选 fused OffsetType 的判定同源）：
+  // 全成员 uint32 用 32 位细化常数（fused 成员上限与线程档均放宽），否则 64 位基准
+  // （既有行为不变）。
+  for (const af::AscNodePtr &indirect_load : members) {
+    bool metadata_supported = false;
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
+    if (!metadata_supported) {
+      is_candidate_legal = false;
+      GELOGW("[IndirectLoad] Reject gather group candidate: lowering metadata of node[%s] is unsupported.",
+             indirect_load->GetNamePtr());
+      return af::SUCCESS;
+    }
+  }
+  if (is_simt) {
+    bool all_offset_uint32 = true;
+    for (const af::AscNodePtr &member : members) {
+      ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetLoweringMetadata(member, metadata));
+      if (metadata.simt.policy.offset_width != ascgen_utils::indirect_load::SimtOffsetWidth::kUint32) {
+        all_offset_uint32 = false;
+        break;
+      }
+    }
+    const uint64_t register_demand = ascgen_utils::indirect_load::SimtFusedRegisterDemand(
+        all_offset_uint32, merge_info.member_count, merge_info.side_load_count, merge_info.chain_node_count);
+    use_fused_emission = register_demand <= ascgen_utils::indirect_load::kSimtFusedMinTierQuota;
+    if (!use_fused_emission) {
+      GELOGI(
+          "[IndirectLoad] Fused register demand[%llu] (uint32[%d]) exceeds min tier quota[%llu], fall back to "
+          "V2 (N=%zu, S=%zu, E=%zu).",
+          static_cast<unsigned long long>(register_demand), all_offset_uint32 ? 1 : 0,
+          static_cast<unsigned long long>(ascgen_utils::indirect_load::kSimtFusedMinTierQuota),
+          static_cast<size_t>(merge_info.member_count), static_cast<size_t>(merge_info.side_load_count),
+          static_cast<size_t>(merge_info.chain_node_count));
+      return af::SUCCESS;
+    }
+    merge_info.max_thread_tier = ascgen_utils::indirect_load::SimtFusedThreadTier(register_demand);
+  }
   if (is_simt && use_fused_emission) {
     // seq-V1 融合发射标记（L2/L3）：primary 携带全组成员名与归并信息，codegen 生成单个
     // fused invocation（IndirectLoadSimtFused，寄存器归并或 UB 归并）；非 primary 成员跳过
@@ -3936,21 +3955,11 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
       GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtFusedMemberEmitted(members[index]));
     }
   }
-  for (const af::AscNodePtr &indirect_load : members) {
-    bool metadata_supported = false;
-    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
-    if (!metadata_supported) {
-      is_candidate_legal = false;
-      GELOGW("[IndirectLoad] Reject gather group candidate: lowering metadata of node[%s] is unsupported.",
-             indirect_load->GetNamePtr());
-      return af::SUCCESS;
-    }
-  }
   return af::SUCCESS;
 }
 
 // L5 混模板独立兜底（六级降级阶梯第 5 级）：全部共模板候选（SIMD×2 + SIMT）被否决时的
-// 混模板死区承接——逐成员探测可行模板（SIMD 优先含 1 字节 dtype 门控，SIMT 兜底），
+// 混模板形态承接——逐成员探测可行模板（SIMD 优先含 1 字节 dtype 门控，SIMT 兜底），
 // 异构选择时各成员以各自模板标注于同一 kernel：SIMD 成员子集共享 SIMD 模板轴（组机制，
 // per-IL input 内轴提示），SIMT 成员走组员形态（组员标记 + value 写 UB 局部目标）并复用
 // SIMD 子集的 TemplateAxes（SIMD 轴含 outer/inner/tile/vectorized 全集，SIMT 仅消费 outer）；
@@ -4291,6 +4300,7 @@ GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &memb
 // SIMT 且 L4 形态且 N>2（相位 N+1/barrier ×N）；MIXED 且少数派占比 < 1/3（分裂
 // 不均衡时整合开销不划算）。动态 shape / 能力门控不满足时统一 0 或 1（平局按
 // 候选序，与单 gather 行为一致）；Softmax 专用 Norm 加分与单 gather 一致。
+//
 // MIXED 的能力门控（访问形态维度，非结构合法性）：门控取 simt_structured_capable
 // （= AND(embedding_like)）。can_use_simd_embedding ⟹ embedding_like，探测又保证
 // SIMD 侧的偏好选择仅发生于 can_use_simd_embedding 成员，故该门控等价于"每个成员
@@ -4366,10 +4376,9 @@ std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const Template
 
 // ==================== 调度期组候选 UB 可行性预估（硬下界，保守放行） ====================
 // 与单 gather 的 IsSkWindowUbInfeasible/IsSimtUbInfeasible 同源思路：只估"再怎么缩
-// tile 也省不掉的硬下界"；平台信息不可得或任一成员 shape 动态时保守放行（宁漏判
-// 不误杀——并存竞标下漏判的后果是 tiling 期资源否决后由 SK 兜底候选接管，误杀的
-// 后果是白白损失融合机会）。定位为编译期优化（跳过必死候选的生成与求解），非
-// 正确性必需。
+// tile 也省不掉的硬下界"；平台信息不可得或任一成员 shape 动态时保守放行（并存竞标下
+// 漏放行的后果是 tiling 期资源否决后由 SK 兜底候选接管，误放行的后果是白白损失融合
+// 机会）。定位为编译期优化（跳过资源下界超限候选的生成与求解），非正确性必需。
 
 // 组 SIMD 硬下界：共循环流水要求全部成员的 input 切片同时驻留 UB，最小 tile
 // （gather 轴 1 行）时的下界 = Σ 成员切片字节 + 预留。基于原始图成员的 tensor
@@ -4403,12 +4412,16 @@ bool IsGroupSimdUbDoomed(const std::vector<af::AscNodePtr> &members) {
   return slice_floor_sum + kIndirectLoadUbReservedBytes > ub_size;
 }
 
-// 组 SIMT·L4 硬下界：寄存器压力模型基线（24+18×N，side load/链节点只会更高）超
-// 最低档配额（127）时形态定为 L4（N ≥ 6），N 份 value tile 驻留 UB 的下界 =
-// N×R + 预留。L2（寄存器归并）UB≈0、L3 虽有 N 份 tile 但 N≤5 时通常可容纳——
-// 保守起见仅对 L4 判定（漏判 = tiling 期竞标淘汰，无误杀）。
+// 组 SIMT 候选的生成期 UB 预估（编译期优化，非正确性依赖）：仅当两种位宽基准下均不可
+// 融合（32 位细化需求超最低档配额，形态必然为 L4/V2——N 份 value tile 驻留 UB 的下界
+// = N×R + 预留）且该下界超平台 UB 时，跳过 SIMT 候选的生成与求解。生成期不持有位宽
+// 信息，触发条件取"两基准均超限"以避免跳过可融合形态（如全成员 uint32 的 L2/L3——
+// 其融合可行性由候选内部分析阶段的位宽感知门控判定）；未跳过的候选由 tiling 期资源
+// 校验淘汰，SK 兜底候选接管。
 bool IsGroupSimtL4UbDoomed(const std::vector<af::AscNodePtr> &members) {
-  if (kRegisterBase + kRegisterPerMember * static_cast<uint64_t>(members.size()) <= kMinTierQuota) {
+  if (ascgen_utils::indirect_load::kSimtFusedRegisterBase32 +
+          ascgen_utils::indirect_load::kSimtFusedRegisterPerMember32 * static_cast<uint64_t>(members.size()) <=
+      ascgen_utils::indirect_load::kSimtFusedMinTierQuota) {
     return false;
   }
   int64_t ub_size = 0L;
@@ -4518,9 +4531,9 @@ af::Status FinalizeGroupedGraphLoweringMetadata(std::vector<ascir::ImplGraph> &g
 // 多 gather 水平融合候选生成（并存竞标制）：全部形态在调度期并存生成、进同一竞争
 // 池交 CalcScore 竞标——L1/L4 共模板候选（SIMD×2 + SIMT×1，SIMT 内部按寄存器压力
 // 模型定型 L2/L3/L4）+ L5 混模板候选（异构选择时产出，同构跳过）+ L6 SK 分段桥接
-// 候选（打分恒 0 的终态兜底，仅当其余候选全灭/垫底时胜出）。统一打分为成员偏好
+// 候选（打分恒 0 的终态兜底，仅当其余候选均被否决或垫底时胜出）。统一打分为成员偏好
 // 满足模型（GenerateGroupScoreFunc），同一套组聚合输入对全部形态可比；tiling 期
-// 资源死亡的兜底由 SK 在场结构性成立（单 gather 四候选并存机制的组路径推广）。
+// 资源失败的兜底由 SK 在场结构性成立（单 gather 四候选并存机制的组路径推广）。
 af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGroup &group,
                                    std::vector<ascir::ImplGraph> &graphs, std::vector<std::string> &score_functions) {
   std::vector<af::AscNodePtr> members{group.primary};
@@ -4530,6 +4543,10 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
   }
   GELOGI("[IndirectLoad] Generate gather group schedule candidates for graph[%s], primary[%s] with %zu members.",
          graph.GetName().c_str(), group.primary->GetNamePtr(), members.size());
+  // [调度期 UB 预估]（编译期优化，非正确性依赖）：仅对两种位宽基准下均无融合可能的
+  // 形态做资源下界校验（SIMD 共循环流水要求全组切片同时驻留，硬下界 = Σ 切片 + 预留；
+  // SIMT 的 L4 形态需要 N 份 value tile 驻留），下界超平台 UB 即跳过该候选的生成与
+  // 求解，由其余候选（含 SK 兜底）接管——未跳过的候选仍由 tiling 期资源校验把关。
   const bool simd_ub_doomed = IsGroupSimdUbDoomed(members);
   const bool simt_ub_doomed = IsGroupSimtL4UbDoomed(members);
   // [SK 前置检查] 图含 Transpose 时 SK 必非法，组级一次判定（消除逐成员重复扫描）。
@@ -4616,7 +4633,7 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
            static_cast<int32_t>(template_id), static_cast<int32_t>(template_case.implementation),
            candidate_group.primary->GetNamePtr(), members.size());
   }
-  // [L5 混模板候选]（并存，不再以共模板全灭为门槛）：逐成员探测（SIMD 优先 / SIMT
+  // [L5 混模板候选]（并存，不再以共模板全部被否决为门槛）：逐成员探测（SIMD 优先 / SIMT
   // 兜底；dense 双合法默认 SIMT——生存导向，见探测处注释），异构选择时各成员以各自
   // 模板标注于同一 kernel，归并/输出链（含 Reduce）统一作为扇出分支向量代码；同构
   // 选择跳过（与共模板候选重复）。统一打分按成员偏好满足模型：满足率恒为 1（各得其
@@ -4660,7 +4677,7 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
   }
   // [L6 SK 分段桥接候选]（并存兜底，打分恒 0）：逐成员复用单 gather SK 流水（workspace
   // 边界把各路 IL 隔入独立段、归并/输出链作为消费段独立调度——各段保留各自调度）。
-  // 仅当其余候选全灭/垫底时胜出——tiling 期资源死亡的兜底由此结构性成立；SK 自身
+  // 仅当其余候选均被否决或垫底时胜出——tiling 期资源失败的兜底由此结构性成立；SK 自身
   // 不可行（Transpose / 复合 Norm / SK 校验否决 / dtype 门控）时无此候选。
   if (!sk_blocked) {
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
