@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include <algorithm>
 #include "api_perf_utils.h"
 #include "common_utils.h"
 #include "att_utils.h"
@@ -232,6 +233,7 @@ std::map<std::string, float> EnrichParamMapForModel(const std::map<std::string, 
   std::map<std::string, float> param_map = base_params;
   // 添加 block_count_idx（从 node_perf_info 获取）
   param_map["block_count_idx"] = static_cast<float>(node_perf_info.block_count_idx);
+  param_map["loop_mode_dim_count"] = static_cast<float>(node_perf_info.loop_mode_dim_count);
   GELOGD("Enriched param_map with block_count_idx=%d for optype=%s", node_perf_info.block_count_idx,
          node_perf_info.optype.c_str());
   // 添加 data_type_size（从 kDataTypeSizeMap 获取）
@@ -259,16 +261,20 @@ af::Status LoadStoreStrideV2Func(const std::map<std::string, float> &param_map, 
   Expr upper_val = CreateExpr(u_iter->second);
   // 首次发生Stride的轴索引（默认 0）
   int32_t block_count_idx = static_cast<int32_t>(ParseOptionalFloatParam(param_map, "block_count_idx", 0.0f));
+  int32_t loop_mode_dim_count = static_cast<int32_t>(ParseOptionalFloatParam(param_map, "loop_mode_dim_count", 0.0f));
   // Stride惩罚项：k * block_count * stride * data_type_size
-  Expr block_count = CalculateBlockCountByIndex(dims, block_count_idx);
+  const int32_t effective_block_count_idx = std::max(0, block_count_idx - loop_mode_dim_count);
+  const size_t loop_mode_offset = std::min(static_cast<size_t>(std::max(0, loop_mode_dim_count)), dims.size());
+  const std::vector<Expr> dma_dims(dims.begin() + loop_mode_offset, dims.end());
+  Expr block_count = CalculateBlockCountByIndex(dma_dims, effective_block_count_idx);
   Expr stride_used = LimitedStrideUpperBound(stride * GetDataTypeSizeExpr(param_map), upper_val);
   stride_used = af::sym::Min(stride_used, upper_val);
   res = af::sym::Mul(k, af::sym::Mul(block_count, stride_used));
   GELOGD(
       "LoadStoreStrideV2: dims[%s], k=%s, block_count=%s, block_count_idx=%d, "
-      "stride_used=%s, data_type_size=%s, res=%s",
+      "stride_used=%s, data_type_size=%s, loop_mode_dim_count=%d, res=%s",
       GetVecString(dims).c_str(), Str(k).c_str(), Str(block_count).c_str(), block_count_idx, Str(stride_used).c_str(),
-      Str(GetDataTypeSizeExpr(param_map)).c_str(), Str(res).c_str());
+      Str(GetDataTypeSizeExpr(param_map)).c_str(), loop_mode_dim_count, Str(res).c_str());
 
   return af::SUCCESS;
 }
