@@ -365,6 +365,13 @@ class SuperKernelBaseNode {
     return nextNodeId;
   }
 
+  SkQueueType GetExecutionQueueType() const {
+    return executionQueueType;
+  }
+  void SetExecutionQueueType(SkQueueType queueType) {
+    executionQueueType = queueType;
+  }
+
   // SuperKernelKernelNode specific accessors
   virtual uint32_t GetNumBlocks() const {
     return 0;
@@ -554,6 +561,7 @@ class SuperKernelBaseNode {
   uint32_t notifyExpandVecNum;
   uint32_t notifyExpandCubeNum;
   uint32_t streamIdxInGraph;
+  SkQueueType executionQueueType = SkQueueType::UNKNOWN;
   int32_t streamId;
   uint64_t nodeIdxInStream;
   uint64_t nodeId;

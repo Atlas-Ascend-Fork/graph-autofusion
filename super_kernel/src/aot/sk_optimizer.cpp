@@ -20,6 +20,7 @@
 #include "sk_scope_split.h"
 #include "sk_scope_postprocess.h"
 #include "sk_task_builder.h"
+#include "sk_queue_type_resolver.h"
 #include "sk_log.h"
 #include "sk_dump_json.h"
 #include "aprof_pub.h"
@@ -68,6 +69,24 @@ void PrintTaskNodesDetail(const std::vector<SuperKernelBaseNode *> &nodes, const
   }
 }
 }  // namespace
+
+bool SuperKernelOptimizer::ExtractIntraStreamDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes) const {
+  std::unordered_map<uint32_t, SuperKernelBaseNode *> lastNodeByStream;
+  for (auto *node : taskNodes) {
+    if (node == nullptr) {
+      SK_LOGE("null node while extracting intra-stream dependencies");
+      return false;
+    }
+    auto it = lastNodeByStream.find(node->GetStreamIdxInGraph());
+    if (it != lastNodeByStream.end() && it->second != nullptr) {
+      auto *previous = it->second;
+      previous->sendToNodeId.insert(node->GetNodeId());
+      node->receiveNodeId.insert(previous->GetNodeId());
+    }
+    lastNodeByStream[node->GetStreamIdxInGraph()] = node;
+  }
+  return true;
+}
 
 std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::ReorderWaitNodesForTaskBuild(
     const std::vector<SuperKernelBaseNode *> &taskNodes) const {
@@ -283,6 +302,11 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
     return false;
   }
 
+  if (!ExtractIntraStreamDependencies(reorderedTaskNodes)) {
+    SK_LOGE("failed to extract intra-stream graph dependencies");
+    return false;
+  }
+
   std::string skFuncName = GetSkFuncName(reorderedTaskNodes, scopeInfo.GetScopeId(), scopeInfo.GetExtInfo().scopeName);
   PrintTaskNodesDetail(reorderedTaskNodes, "reordered task nodes");
 
@@ -295,6 +319,12 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
   tasks.reserve(reorderedTaskNodes.size() + eventNodes.size());
   for (const auto &eventNode : eventNodes) {
     tasks.emplace_back(eventNode.get());
+  }
+
+  SkQueueTypeResolver queueTypeResolver(graph);
+  if (!queueTypeResolver.Resolve(tasks)) {
+    SK_LOGE("failed to prepare task queue types before task building");
+    return false;
   }
 
   SK_LOGI("schedule scope: graphTaskCount=%zu, eventTaskCount=%zu, taskCount=%zu, updateStreamCount=%zu",

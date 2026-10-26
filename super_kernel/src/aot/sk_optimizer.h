@@ -61,6 +61,7 @@ class SuperKernelOptimizer {
       const std::vector<SuperKernelBaseNode *> &taskNodes) const;
   void ConnectLastKernelsToFirstEvent(const std::vector<SuperKernelBaseNode *> &taskNodes,
                                       SuperKernelBaseNode *firstEvent) const;
+  bool ExtractIntraStreamDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes) const;
   std::vector<SuperKernelScopeInfo> processedScopeInfos_;
   std::unordered_map<std::string, Json> taskQueueJsons_;  // scopeId -> task queue json
   bool Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernelGraph &graph, SkTaskBuilder &builder);

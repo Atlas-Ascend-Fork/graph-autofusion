@@ -42,24 +42,6 @@ inline size_t AlignUp(size_t value, size_t align) {
   return ((value + align - 1) / align) * align;
 }
 
-SkQueueType ToQueueType(SkKernelType kernelType) {
-  switch (kernelType) {
-    case SkKernelType::AIC_ONLY:
-    case SkKernelType::MIX_AIC_1_0:
-      return SkQueueType::AIC;
-    case SkKernelType::AIV_ONLY:
-    case SkKernelType::MIX_AIV_1_0:
-      return SkQueueType::AIV;
-    case SkKernelType::MIX_AIC_1_1:
-      return SkQueueType::MIX_1_1;
-    case SkKernelType::MIX_AIC_1_2:
-      return SkQueueType::MIX_1_2;
-    default:
-      SK_LOGW("Unsupported kernel type %s for super kernel; using AIC as fallback", to_string(kernelType));
-      return SkQueueType::AIC;
-  }
-}
-
 aclrtFuncHandle ResolveSkEntryFunc(const char *funcName) {
   aclrtBinHandle bhdl = AscendGetEntryBinHandle();
   if (bhdl == nullptr) {
@@ -133,27 +115,6 @@ uint32_t GetTaskNumBlocks(const SuperKernelBaseNode &node, SkQueueType queueType
   const bool adaptToMix12 = useVector && scopeCoreInfo.type == SkKernelType::MIX_AIC_1_2 &&
                             (kernelType == SkKernelType::MIX_AIC_1_1 || kernelType == SkKernelType::MIX_AIC_1_2);
   return adaptToMix12 ? node.GetNumBlocks() * 2U : node.GetNumBlocks();
-}
-
-SkQueueType ToEventQueueType(SkQueueType queueType, bool aicAvailable = true, bool aivAvailable = true) {
-  SkQueueType eventQueueType = (queueType == SkQueueType::AIC) ? SkQueueType::AIC : SkQueueType::AIV;
-  if (eventQueueType == SkQueueType::AIC && !aicAvailable) {
-    return SkQueueType::AIV;
-  }
-  if (eventQueueType == SkQueueType::AIV && !aivAvailable) {
-    return SkQueueType::AIC;
-  }
-  return eventQueueType;
-}
-
-SkQueueType InferFirstKernelEventQueueType(const std::vector<SuperKernelBaseNode *> &tasks, bool aicAvailable = true,
-                                           bool aivAvailable = true) {
-  for (const auto *node : tasks) {
-    if (node != nullptr && node->GetNodeType() == SkNodeType::NODE_KERNEL) {
-      return ToEventQueueType(ToQueueType(GetKernelInfos(node).kernelType), aicAvailable, aivAvailable);
-    }
-  }
-  return SkQueueType::UNKNOWN;
 }
 
 struct SimtDcacheSizeResult {
@@ -247,26 +208,6 @@ uint64_t BuildFuncTaskDebugOptions(const SuperKernelOptionsManager &opts, const 
   return debugOptions;
 }
 
-SkQueueType ResolveMixWaitEventQueueType(const SuperKernelBaseNode *prevKernel, const SuperKernelBaseNode *mixKernel) {
-  if (prevKernel == nullptr) {
-    return SkQueueType::AIV;
-  }
-
-  SkQueueType prevKernelQueueType =
-      (prevKernel == nullptr) ? SkQueueType::UNKNOWN : ToQueueType(GetKernelInfos(prevKernel).kernelType);
-
-  if (prevKernelQueueType != SkQueueType::AIC && prevKernelQueueType != SkQueueType::AIV) {
-    return SkQueueType::AIV;
-  }
-
-  const bool sameStream = prevKernel->GetStreamIdxInGraph() == mixKernel->GetStreamIdxInGraph();
-  const bool hasDirectDep = prevKernel->sendToNodeId.count(mixKernel->GetNodeId()) > 0 ||
-                            mixKernel->receiveNodeId.count(prevKernel->GetNodeId()) > 0;
-  return (sameStream || hasDirectDep)
-             ? prevKernelQueueType
-             : ((prevKernelQueueType == SkQueueType::AIV) ? SkQueueType::AIC : SkQueueType::AIV);
-}
-
 uint64_t GetTaskNodeIdByIndex(const std::vector<SuperKernelBaseNode *> &tasks, uint32_t taskIndex) {
   return taskIndex < tasks.size() ? tasks[taskIndex]->GetNodeId() : INVALID_TASK_ID;
 }
@@ -334,124 +275,6 @@ void DumpDeviceArgs(std::string skFuncName, const SkDeviceEntryArgs *args,
   DumpDeviceArgsDetail(skFuncName, args, tasks);
 }
 
-// ========== SkTaskBuilder static helper implementations ==========
-
-// Search direction enum
-enum class SearchDirection : uint8_t { PREV, NEXT };
-const char *to_string(SearchDirection dir) {
-  return (dir == SearchDirection::PREV) ? "PREV" : "NEXT";
-}
-
-std::string BuildSearchPathString(const std::vector<uint64_t> &path) {
-  std::string pathStr;
-  for (size_t idx = 0; idx < path.size(); ++idx) {
-    if (idx > 0) {
-      pathStr += "->";
-    }
-    pathStr += std::to_string(path[idx]);
-  }
-  return pathStr.empty() ? "empty" : pathStr;
-}
-
-void LogKernelSearchFailure(uint64_t startNodeId, SearchDirection direction, const std::vector<uint64_t> &path,
-                            const char *reason, uint64_t failedNodeId) {
-  std::string pathStr = BuildSearchPathString(path);
-  SK_LOGI("FindKernelNodeInDirection unsuccessful: startNodeId=%lu, direction=%s, reason=%s, failedNodeId=%lu, path=%s",
-          startNodeId, to_string(direction), reason, failedNodeId, pathStr.c_str());
-}
-
-const SuperKernelBaseNode *ResolveCurrentKernel(
-    uint64_t curNodeId, const SuperKernelBaseNode *current,
-    const std::unordered_map<uint64_t, const SuperKernelBaseNode *> &cache) {
-  auto it = cache.find(curNodeId);
-  if (it != cache.end()) {
-    return it->second;
-  }
-  if (current->GetNodeType() == SkNodeType::NODE_KERNEL) {
-    return current;
-  }
-  return nullptr;
-}
-
-bool CacheTraversedNodes(const SuperKernelGraph &graph, const std::vector<uint64_t> &path, SkNodeType startNodeType,
-                         const SuperKernelBaseNode *result,
-                         std::unordered_map<uint64_t, const SuperKernelBaseNode *> &cache, uint64_t &failedNodeId) {
-  // This cache is intentionally direction-agnostic: we only care whether a node
-  // has already been attached to a reusable kernel for later inference.
-  for (uint64_t nodeId : path) {
-    auto *pathNode = graph.GetNodeById(nodeId);
-    if (pathNode == nullptr) {
-      failedNodeId = nodeId;
-      return false;
-    }
-    auto nodeType = pathNode->GetNodeType();
-    if (nodeType == SkNodeType::NODE_KERNEL || nodeType == startNodeType) {
-      cache[nodeId] = result;
-    }
-  }
-  return true;
-}
-
-// Find a KERNEL node in the given direction, return nullptr when not found.
-const SuperKernelBaseNode *FindKernelNodeInDirection(uint64_t startNodeId, const SuperKernelGraph &graph,
-                                                     SearchDirection direction,
-                                                     std::unordered_map<uint64_t, const SuperKernelBaseNode *> &cache,
-                                                     int maxHops = 100) {
-  if (startNodeId == INVALID_TASK_ID) {
-    SK_LOGI("FindKernelNodeInDirection skipped: startNodeId is INVALID_TASK_ID, direction=%s", to_string(direction));
-    return nullptr;
-  }
-
-  const auto *startNode = graph.GetNodeById(startNodeId);
-  if (startNode == nullptr) {
-    SK_LOGI("FindKernelNodeInDirection incomplete: startNodeId=%lu, direction=%s, reason=start-node-not-found",
-            startNodeId, to_string(direction));
-    return nullptr;
-  }
-  const SkNodeType startNodeType = startNode->GetNodeType();
-
-  uint64_t curNodeId = startNodeId;
-  std::vector<uint64_t> path;  // Track all visited node IDs along traversal path.
-  for (int i = 0; i < maxHops; ++i) {
-    path.push_back(curNodeId);
-
-    const auto *current = graph.GetNodeById(curNodeId);
-    if (current == nullptr) {
-      LogKernelSearchFailure(startNodeId, direction, path, "node-not-found", curNodeId);
-      SK_LOGI("Node with ID %lu not found in graph.", curNodeId);
-      return nullptr;
-    }
-
-    const auto *result = ResolveCurrentKernel(curNodeId, current, cache);
-    if (result) {
-      uint64_t failedNodeId = INVALID_TASK_ID;
-      if (!CacheTraversedNodes(graph, path, startNodeType, result, cache, failedNodeId)) {
-        LogKernelSearchFailure(startNodeId, direction, path, "path-node-not-found-during-cache-fill", failedNodeId);
-        return nullptr;
-      }
-      return result;
-    }
-
-    curNodeId = (direction == SearchDirection::PREV) ? current->GetPreNodeId() : current->GetNextNodeId();
-    if (curNodeId == INVALID_TASK_ID) {
-      const char *reason = (direction == SearchDirection::PREV) ? "no-suitable-prev-node" : "no-suitable-next-node";
-      LogKernelSearchFailure(startNodeId, direction, path, reason, path.back());
-      SK_LOGI("nodeId:%lu has no %s-node.", startNodeId, to_string(direction));
-      return nullptr;
-    }
-
-    if (std::find(path.cbegin(), path.cend(), curNodeId) != path.cend()) {
-      LogKernelSearchFailure(startNodeId, direction, path, "loop-detected", curNodeId);
-      SK_LOGI("nodeId:%lu detected loop in %s direction.", startNodeId, to_string(direction));
-      return nullptr;
-    }
-  }
-
-  LogKernelSearchFailure(startNodeId, direction, path, "max-hops-exceeded", curNodeId);
-  SK_LOGI("nodeId:%lu search exceeded max hops (%d) in %s direction.", startNodeId, maxHops, to_string(direction));
-  return nullptr;
-}
-
 SyncDirection GenSyncDirection(SkQueueType preType, SkQueueType currType) {
   // Equivalent to Python gen_sync_name.
   switch (preType) {
@@ -486,23 +309,6 @@ SyncDirection GenSyncDirection(SkQueueType preType, SkQueueType currType) {
   }
 }
 
-std::pair<bool, bool> CheckResourceStatus(const std::vector<SuperKernelBaseNode *> &tasks) {
-  bool aicAvailable = false;
-  bool aivAvailable = false;
-  for (const auto *task : tasks) {
-    if (task->GetNodeType() != SkNodeType::NODE_KERNEL) {
-      continue;
-    }
-    const KernelInfos &kernelInfo = GetKernelInfos(task);
-    aicAvailable |= UsesAic(ToQueueType(kernelInfo.kernelType));
-    aivAvailable |= UsesAiv(ToQueueType(kernelInfo.kernelType));
-    if (aicAvailable && aivAvailable) {
-      break;
-    }
-  }
-  return {aicAvailable, aivAvailable};
-}
-
 }  // namespace
 
 // ========== Initialize sync metadata ==========
@@ -510,98 +316,40 @@ bool SkTaskBuilder::InitTaskSyncInfos(const std::vector<SuperKernelBaseNode *> &
   taskSyncInfos_.clear();
   taskSyncInfos_.resize(tasks.size());
 
-  std::tie(aicAvailable_, aivAvailable_) = CheckResourceStatus(tasks);
-  if (!aicAvailable_ && !aivAvailable_) {
-    SK_LOGE("no AIC or AIV resource detected in the tasks, unable to assign queue types.");
-    return false;
-  }
-  // Lookup cache for nearest kernel nodes: nodeId -> kernelNode*
-  std::unordered_map<uint64_t, const SuperKernelBaseNode *> kernelNodeCache;
+  aicAvailable_ = false;
+  aivAvailable_ = false;
 
   size_t kernelCount = 0;
   size_t notifyCount = 0;
   size_t waitCount = 0;
   size_t resetCount = 0;
-  SkQueueType firstKernelEventQueueType = InferFirstKernelEventQueueType(tasks, aicAvailable_, aivAvailable_);
-  SuperKernelBaseNode *prevKernelTask = nullptr;
   for (size_t i = 0; i < tasks.size(); i++) {
+    if (tasks[i] == nullptr) {
+      SK_LOGE("null node in task list at index %zu", i);
+      return false;
+    }
     SkNodeType nodeType = tasks[i]->GetNodeType();
+    taskSyncInfos_[i].queueType = tasks[i]->GetExecutionQueueType();
+    if (taskSyncInfos_[i].queueType == SkQueueType::UNKNOWN) {
+      SK_LOGE("queue type was not prepared by optimizer, nodeId=%lu", tasks[i]->GetNodeId());
+      return false;
+    }
+    aicAvailable_ = aicAvailable_ || UsesAic(taskSyncInfos_[i].queueType);
+    aivAvailable_ = aivAvailable_ || UsesAiv(taskSyncInfos_[i].queueType);
     switch (nodeType) {
       case SkNodeType::NODE_KERNEL: {
-        // KERNEL node: assign queueType from kernel type.
-        const KernelInfos &kernelInfo = GetKernelInfos(tasks[i]);
-        taskSyncInfos_[i].queueType = ToQueueType(kernelInfo.kernelType);
-        prevKernelTask = tasks[i];
         kernelCount++;
         break;
       }
       case SkNodeType::NODE_NOTIFY: {
-        // NOTIFY node: inherit type from previous KERNEL node
-        auto *kernel =
-            FindKernelNodeInDirection(tasks[i]->GetPreNodeId(), graph_, SearchDirection::PREV, kernelNodeCache);
-        if (kernel == nullptr) {
-          if (firstKernelEventQueueType == SkQueueType::UNKNOWN) {
-            SK_LOGE("%s node %zu failed to resolve previous KERNEL node and fallback queue type is UNKNOWN, nodeId=%lu",
-                    to_string(nodeType), i, tasks[i]->GetNodeId());
-            return false;
-          }
-          taskSyncInfos_[i].queueType = firstKernelEventQueueType;
-          SK_LOGI("%s node %zu unable to resolve previous KERNEL node, nodeId=%lu, fallback = %s", to_string(nodeType),
-                  i, tasks[i]->GetNodeId(), to_string(taskSyncInfos_[i].queueType));
-        } else {
-          kernelNodeCache[tasks[i]->GetNodeId()] = kernel;  // cache current NOTIFY node for future searches
-          // Event nodes are executed on a single queue selected by nearest kernel type.
-          taskSyncInfos_[i].queueType =
-              ToEventQueueType(ToQueueType(GetKernelInfos(kernel).kernelType), aicAvailable_, aivAvailable_);
-        }
         notifyCount++;
         break;
       }
       case SkNodeType::NODE_RESET: {
-        // RESET node is an event write-side task; inherit type from previous KERNEL node.
-        auto *kernel =
-            FindKernelNodeInDirection(tasks[i]->GetPreNodeId(), graph_, SearchDirection::PREV, kernelNodeCache);
-        if (kernel == nullptr) {
-          if (firstKernelEventQueueType == SkQueueType::UNKNOWN) {
-            SK_LOGE("%s node %zu failed to resolve previous KERNEL node and fallback queue type is UNKNOWN, nodeId=%lu",
-                    to_string(nodeType), i, tasks[i]->GetNodeId());
-            return false;
-          }
-          taskSyncInfos_[i].queueType = firstKernelEventQueueType;
-          SK_LOGI("%s node %zu unable to resolve previous KERNEL node, nodeId=%lu, fallback = %s", to_string(nodeType),
-                  i, tasks[i]->GetNodeId(), to_string(taskSyncInfos_[i].queueType));
-        } else {
-          kernelNodeCache[tasks[i]->GetNodeId()] = kernel;
-          taskSyncInfos_[i].queueType =
-              ToEventQueueType(ToQueueType(GetKernelInfos(kernel).kernelType), aicAvailable_, aivAvailable_);
-        }
         resetCount++;
         break;
       }
       case SkNodeType::NODE_WAIT: {
-        // WAIT node: inherit type from next KERNEL node
-        auto *kernel =
-            FindKernelNodeInDirection(tasks[i]->GetNextNodeId(), graph_, SearchDirection::NEXT, kernelNodeCache);
-        if (kernel == nullptr) {
-          if (firstKernelEventQueueType == SkQueueType::UNKNOWN) {
-            SK_LOGE("%s node %zu failed to resolve next KERNEL node and fallback queue type is UNKNOWN, nodeId=%lu",
-                    to_string(nodeType), i, tasks[i]->GetNodeId());
-            return false;
-          }
-          taskSyncInfos_[i].queueType = firstKernelEventQueueType;
-          SK_LOGI("%s node %zu unable to resolve next KERNEL node, nodeId=%lu, fallback = %s", to_string(nodeType), i,
-                  tasks[i]->GetNodeId(), to_string(taskSyncInfos_[i].queueType));
-        } else {
-          kernelNodeCache[tasks[i]->GetNodeId()] = kernel;  // cache current WAIT node for future searches
-          // Event nodes are executed on a single queue selected by nearest kernel type.
-          SkQueueType nextKernelQueueType = ToQueueType(GetKernelInfos(kernel).kernelType);
-          if (nextKernelQueueType != SkQueueType::AIC && nextKernelQueueType != SkQueueType::AIV) {
-            taskSyncInfos_[i].queueType =
-                ToEventQueueType(ResolveMixWaitEventQueueType(prevKernelTask, kernel), aicAvailable_, aivAvailable_);
-          } else {
-            taskSyncInfos_[i].queueType = ToEventQueueType(nextKernelQueueType, aicAvailable_, aivAvailable_);
-          }
-        }
         waitCount++;
         break;
       }
@@ -716,16 +464,121 @@ bool SkTaskBuilder::PrecomputeSyncRelationsFromGraph(const std::vector<SuperKern
     return false;
   }
 
-  // 1. Extract intra-stream sync relations.
-  SK_LOGI("[Sync by stream idx]");
-  ExtractIntraStreamSync(tasks);
-  // PrintSyncInfo("[After Sync by stream idx]");
+  if (!BuildTaskIndex(tasks) || !ValidateGraphRelations(tasks, true) || !ExtractSyncRelationsFromGraph(tasks, true)) {
+    SK_LOGE("PrecomputeSyncRelationsFromGraph failed: invalid graph task relations");
+    return false;
+  }
+  return true;
+}
 
-  // 2. Extract inter-stream sync relations based on events.
-  SK_LOGI("[Sync by event]");
-  bool flag = ExtractInterStreamSync(tasks);
-  // PrintSyncInfo("[After Sync by event]");
-  return flag;
+bool SkTaskBuilder::BuildTaskIndex(const std::vector<SuperKernelBaseNode *> &tasks) {
+  nodeIdToIndex_.clear();
+  indexToNodeId_.clear();
+
+  decltype(nodeIdToIndex_) nodeIdToIndex;
+  decltype(indexToNodeId_) indexToNodeId;
+  nodeIdToIndex.reserve(tasks.size());
+  indexToNodeId.reserve(tasks.size());
+
+  for (size_t index = 0; index < tasks.size(); ++index) {
+    const auto *node = tasks[index];
+    if (node == nullptr) {
+      SK_LOGE("BuildTaskIndex failed: null task at index=%zu", index);
+      return false;
+    }
+    const uint64_t nodeId = node->GetNodeId();
+    if (nodeId == INVALID_TASK_ID) {
+      SK_LOGE("BuildTaskIndex failed: invalid node ID at index=%zu", index);
+      return false;
+    }
+    if (!nodeIdToIndex.emplace(nodeId, index).second) {
+      SK_LOGE("BuildTaskIndex failed: duplicate nodeId=%lu, index=%zu", nodeId, index);
+      return false;
+    }
+    indexToNodeId.emplace(index, nodeId);
+  }
+
+  nodeIdToIndex_ = std::move(nodeIdToIndex);
+  indexToNodeId_ = std::move(indexToNodeId);
+  return true;
+}
+
+bool SkTaskBuilder::ValidateGraphRelations(const std::vector<SuperKernelBaseNode *> &tasks,
+                                           bool allowExternalDependencies) {
+  if (nodeIdToIndex_.size() != tasks.size() || indexToNodeId_.size() != tasks.size()) {
+    SK_LOGE("ValidateGraphRelations failed: task index is not built for taskCount=%zu", tasks.size());
+    return false;
+  }
+
+  for (size_t sourceIndex = 0; sourceIndex < tasks.size(); ++sourceIndex) {
+    const auto *source = tasks[sourceIndex];
+    if (source == nullptr) {
+      SK_LOGE("ValidateGraphRelations failed: null source at index=%zu", sourceIndex);
+      return false;
+    }
+    for (uint64_t targetId : source->sendToNodeId) {
+      const auto targetIt = nodeIdToIndex_.find(targetId);
+      if (targetIt == nodeIdToIndex_.end()) {
+        if (allowExternalDependencies) {
+          continue;
+        }
+        SK_LOGE("ValidateGraphRelations failed: missing target nodeId=%lu from source nodeId=%lu", targetId,
+                source->GetNodeId());
+        return false;
+      }
+      const size_t targetIndex = targetIt->second;
+      if (sourceIndex == targetIndex) {
+        SK_LOGE("ValidateGraphRelations failed: self dependency nodeId=%lu", source->GetNodeId());
+        return false;
+      }
+      if (sourceIndex > targetIndex) {
+        SK_LOGE("ValidateGraphRelations failed: non-topological edge %lu -> %lu (index %zu -> %zu)",
+                source->GetNodeId(), targetId, sourceIndex, targetIndex);
+        return false;
+      }
+      const auto *target = tasks[targetIndex];
+      if (target->receiveNodeId.count(source->GetNodeId()) == 0) {
+        SK_LOGW("ValidateGraphRelations: reverse relation missing for edge %lu -> %lu", source->GetNodeId(), targetId);
+      }
+    }
+  }
+  return true;
+}
+
+bool SkTaskBuilder::ExtractSyncRelationsFromGraph(const std::vector<SuperKernelBaseNode *> &tasks,
+                                                  bool allowExternalDependencies) {
+  if (nodeIdToIndex_.size() != tasks.size() || indexToNodeId_.size() != tasks.size()) {
+    SK_LOGE("ExtractSyncRelationsFromGraph failed: task index is not built for taskCount=%zu", tasks.size());
+    return false;
+  }
+
+  std::vector<std::pair<size_t, size_t>> graphEdges;
+  for (size_t sourceIndex = 0; sourceIndex < tasks.size(); ++sourceIndex) {
+    const auto *source = tasks[sourceIndex];
+    for (uint64_t targetId : source->sendToNodeId) {
+      const auto targetIt = nodeIdToIndex_.find(targetId);
+      if (targetIt == nodeIdToIndex_.end()) {
+        if (allowExternalDependencies) {
+          continue;
+        }
+        SK_LOGE("ExtractSyncRelationsFromGraph failed: missing target nodeId=%lu from source nodeId=%lu", targetId,
+                source->GetNodeId());
+        return false;
+      }
+      graphEdges.emplace_back(sourceIndex, targetIt->second);
+    }
+  }
+  std::sort(graphEdges.begin(), graphEdges.end());
+  graphEdges.erase(std::unique(graphEdges.begin(), graphEdges.end()), graphEdges.end());
+  for (const auto &edge : graphEdges) {
+    if (edge.first >= edge.second) {
+      SK_LOGE("ExtractSyncRelationsFromGraph failed: invalid edge index %zu -> %zu", edge.first, edge.second);
+      return false;
+    }
+    InsertSyncEvent(edge.first, edge.second);
+  }
+  SK_LOGI("ExtractSyncRelationsFromGraph complete: edgeCount=%zu", graphEdges.size());
+  return true;
 }
 
 bool SkTaskBuilder::IsMixKernelTask(const SuperKernelBaseNode *task) const {
@@ -771,7 +624,7 @@ bool SkTaskBuilder::SplitTasksByMixGroups(const std::vector<SuperKernelBaseNode 
 
 bool SkTaskBuilder::InitSyncInfoSnapshotForMixGroups(const std::vector<SuperKernelBaseNode *> &tasks,
                                                      std::vector<TaskSyncInfo> &taskSyncInfosOrigin) {
-  // Initialize queue types from complete tasks. Sliced tasks may not resolve WAIT/NOTIFY queue type correctly.
+  // Snapshot queue metadata prepared before task building, before MIX groups are split.
   if (!InitTaskSyncInfos(tasks)) {
     SK_LOGE("InitSyncInfoSnapshotForMixGroups failed: InitTaskSyncInfos failed");
     return false;
@@ -853,12 +706,9 @@ bool SkTaskBuilder::ProcessSyncRelationSplitGroup(const std::vector<SuperKernelB
 
   SK_LOGI("Build sub-phase-1 begin: precompute sync relations, taskCount=%zu, index=%zu", curSplitTasks.size(),
           groupIndex);
-  SK_LOGI("[sub sync by stream idx]");
-  ExtractIntraStreamSync(curSplitTasks);
-
-  SK_LOGI("[sub sync by event]");
-  if (!ExtractInterStreamSync(curSplitTasks)) {
-    SK_LOGE("ProcessSyncRelationSplitGroup failed: ExtractInterStreamSync failed");
+  if (!BuildTaskIndex(curSplitTasks) || !ValidateGraphRelations(curSplitTasks, true) ||
+      !ExtractSyncRelationsFromGraph(curSplitTasks, true)) {
+    SK_LOGE("ProcessSyncRelationSplitGroup failed: invalid graph task relations");
     return false;
   }
 
@@ -921,112 +771,6 @@ bool SkTaskBuilder::PrecomputeSyncRelationsByMixGroups(const std::vector<SuperKe
   indexToNodeId_.clear();
   SK_LOGI("PrecomputeSyncRelationsByMixGroups complete: taskCount=%zu, splitGroupCount=%zu", tasks.size(),
           splitTasks.size());
-  return true;
-}
-
-// label : success
-void SkTaskBuilder::ExtractIntraStreamSync(const std::vector<SuperKernelBaseNode *> &tasks) {
-  SK_LOGI("ExtractIntraStreamSync: processing %zu tasks", tasks.size());
-
-  // Group tasks by stream (aligned with Python insert_sync_by_stream_idx).
-  std::map<uint32_t, std::vector<size_t>> streamOps;
-  for (size_t i = 0; i < tasks.size(); i++) {
-    uint32_t streamIdx = tasks[i]->GetStreamIdxInGraph();
-    streamOps[streamIdx].push_back(i);
-    nodeIdToIndex_[tasks[i]->GetNodeId()] = i;
-    indexToNodeId_[i] = tasks[i]->GetNodeId();
-  }
-
-  auto streamfusionOption = opts.GetOption(aclskOptionType::STREAM_FUSION);
-  uint32_t streamFusionValue = 1;
-  if (streamfusionOption != nullptr) {
-    streamFusionValue = streamfusionOption->GetIntValue();
-  }
-  if (streamFusionValue == 0 && streamOps.size() > 1) {
-    SK_LOGW(
-        "Multi stream fusion is triggered with %zu streams detected, "
-        "but aclskStreamFusionOption is off (value=%u). "
-        "To explicitly enable multi stream fusion, set aclskStreamFusionOption to 1. "
-        "Please confirm whether this fusion behavior meets your expectations.",
-        streamOps.size(), streamFusionValue);
-  }
-
-  // Insert sync for consecutive tasks in each stream.
-  size_t totalInsertedSyncEdges = 0;
-  for (auto &streamPair : streamOps) {
-    SK_LOGI("Process stream sync: streamIdx=%u, opCount=%zu", streamPair.first, streamPair.second.size());
-    auto &opList = streamPair.second;
-    for (size_t j = 1; j < opList.size(); j++) {
-      size_t preIdx = opList[j - 1];
-      size_t currIdx = opList[j];
-      InsertSyncEvent(preIdx, currIdx);
-      ++totalInsertedSyncEdges;
-    }
-  }
-  SK_LOGI("ExtractIntraStreamSync complete: streamCount=%zu, insertedSyncEdges=%zu", streamOps.size(),
-          totalInsertedSyncEdges);
-}
-
-/**
- * @brief Extract inter-stream synchronization relationships based on task dependencies
- *
- * This function identifies synchronization requirements between different execution streams
- * by analyzing task dependencies. It inserts sync events (NOTIFY/WAIT pairs) to establish
- * proper synchronization boundaries when tasks from different streams need to coordinate.
- *
- * @param tasks Vector of super kernel base nodes to analyze
- *
- * @note This function works in two phases:
- *       1. Build a task ID set for quick lookup
- *       2. For each KERNEL node, check its successors and insert sync events
- *          when the successor is also in the current task set
- */
-bool SkTaskBuilder::ExtractInterStreamSync(const std::vector<SuperKernelBaseNode *> &tasks) {
-  SK_LOGI("ExtractInterStreamSync: starting to extract inter-stream synchronization relationships");
-  SK_LOGI("ExtractInterStreamSync: total number of tasks to process = %zu", tasks.size());
-
-  // Aligned with Python insert_sync_by_event behavior.
-  // In C++, NOTIFY/WAIT are standalone nodes mapped to NotifyFunc/WaitFunc.
-  // Sync relation is modeled as: NOTIFY node -> WAIT node.
-
-  // Phase 1: Build task ID set for O(1) lookup
-  std::unordered_set<uint64_t> taskIds;
-  for (size_t i = 0; i < tasks.size(); i++) {
-    SuperKernelBaseNode *node = tasks[i];
-    taskIds.insert(node->GetNodeId());
-  }
-  SK_LOGI("ExtractInterStreamSync: built task ID set with %zu unique IDs", taskIds.size());
-
-  // Phase 2: Traverse tasks and insert sync events for KERNEL nodes
-  uint32_t syncEventCount = 0;
-  for (size_t i = 0; i < tasks.size(); i++) {
-    SuperKernelBaseNode *node = tasks[i];
-    auto preNodeId = node->GetNodeId();
-    SkNodeType nodeType = node->GetNodeType();
-    // Only process KERNEL nodes for synchronization
-    if (nodeType == SkNodeType::NODE_KERNEL) {
-      SK_LOGI("ExtractInterStreamSync: processing KERNEL node %lu with %zu successors", preNodeId,
-              node->sendToNodeId.size());
-      // Check each successor to determine if sync event is needed
-      for (auto nextId : node->sendToNodeId) {
-        // If successor is in the current task set, insert sync event
-        if (taskIds.find(nextId) != taskIds.end()) {
-          SK_LOGI("ExtractInterStreamSync: inserting sync event between %lu -> %lu", preNodeId, nextId);
-          if (nodeIdToIndex_.find(preNodeId) == nodeIdToIndex_.end() ||
-              nodeIdToIndex_.find(nextId) == nodeIdToIndex_.end()) {
-            SK_LOGE("NodeId not exists in task nodes, node id is %lu, %lu", preNodeId, nextId);
-            return false;
-          }
-          InsertSyncEvent(nodeIdToIndex_[preNodeId], nodeIdToIndex_[nextId]);
-          syncEventCount++;
-        } else {
-          SK_LOGI("ExtractInterStreamSync: skipping external successor %lu (not in task set)", nextId);
-        }
-      }
-    }
-  }
-
-  SK_LOGI("ExtractInterStreamSync: completed, inserted %u sync events", syncEventCount);
   return true;
 }
 
@@ -2286,6 +2030,10 @@ SkBuildResult SkTaskBuilder::Build(std::string skFuncName, const std::vector<Sup
     return {};
   }
   for (const auto *task : tasks) {
+    if (task == nullptr || task->GetNodeId() == INVALID_TASK_ID) {
+      SK_LOGE("Build failed: task list contains null or invalid node");
+      return {};
+    }
     if (task->GetNodeType() != SkNodeType::NODE_KERNEL || ValidateTaskCoreRequirement(*task, scopeCoreInfo)) {
       continue;
     }
