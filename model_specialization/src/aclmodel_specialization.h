@@ -61,11 +61,15 @@ struct aclmdlRISpecOptions {
  * The caller must exclude concurrent execution, modification and destruction, and keep the
  * specialized values invariant. options may be null for defaults; its referenced data must remain
  * valid and unchanged during this call. Unsupported kernels retain their original functions.
+ * Recognized Spec Scope Begin/End tasks are disabled during submission, including when no kernel
+ * can be specialized. Markers belonging to SuperKernel are not included in this cleanup.
  *
- * @retval ACL_SUCCESS Optimization completed, including when every kernel was skipped because it
- * could not be specialized.
+ * @retval ACL_SUCCESS Optimization completed, including when every recognizable candidate kernel
+ * was skipped because its resource, argument metadata, or specialization compilation was unavailable.
  * @retval ACL_ERROR_INVALID_PARAM Invalid model or configuration.
  * @retval ACL_ERROR_BAD_ALLOC Insufficient resources before the model was modified.
+ * Failures to read a task's sequence ID, type, parameters, or kernel function name are logged as
+ * errors and stop optimization before compilation or task modification.
  * A specialized binary that cannot be loaded, or that lacks its kernel entry, is reported rather
  * than skipped: it indicates a broken artifact or an exhausted resource, and the model is left
  * untouched because loading precedes any modification.
@@ -74,8 +78,25 @@ struct aclmdlRISpecOptions {
  * decides what to do with it.
  */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecOptimize(aclmdlRI modelRI, aclmdlRISpecOptions *options);
+/**
+ * @brief Dispatch a Begin marker into a non-null stream.
+ * One standalone marker is dispatched per call. The caller owns capture and Scope pairing;
+ * this interface does not query or validate the stream's capture status.
+ * Device and architecture query errors are returned unchanged. ACL_SUCCESS after the generated
+ * void launcher indicates dispatch was attempted; synchronous launch errors are printed by ASC
+ * generated code, and it does not confirm device execution. No thread LastError state is read or cleared.
+ */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeBegin(aclrtStream stream);
+/** @brief Dispatch an End marker with the same capture and error contract as ScopeBegin. */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecScopeEnd(aclrtStream stream);
+/**
+ * @brief Specialize eligible kernels within valid Spec Scope ranges.
+ * Submission disables all recognized Spec Scope Begin/End tasks, as Optimize does.
+ * Task identity query failures return an error before compilation or task modification, as Optimize does.
+ * ByFlag sorts all tasks by sequence ID and pairs anonymous Begin/End markers across streams.
+ * Invalid sequence queries, duplicate IDs, or marker pairing return before compilation.
+ * Optimize does not perform sequence sorting or marker pairing validation.
+ */
 ACL_FUNC_VISIBILITY aclError aclmdlRISpecOptimizeByFlag(aclmdlRI modelRI, aclmdlRISpecOptions *options);
 
 #ifdef __cplusplus

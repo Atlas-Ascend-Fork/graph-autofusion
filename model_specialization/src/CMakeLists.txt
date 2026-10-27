@@ -10,11 +10,25 @@
 
 add_cann_third_party(boost)
 
+set(SPEC_SCOPE_TARGETS)
+foreach(SPEC_KERNEL_ARCH IN ITEMS dav-2201 dav-3510)
+    string(REPLACE "-" "_" SPEC_KERNEL_ARCH_SUFFIX ${SPEC_KERNEL_ARCH})
+    set(SPEC_SCOPE_TARGET spec_scope_${SPEC_KERNEL_ARCH_SUFFIX})
+    add_library(${SPEC_SCOPE_TARGET} STATIC ${CMAKE_CURRENT_SOURCE_DIR}/../kernel/spec_scope_kernel.asc)
+    target_compile_options(${SPEC_SCOPE_TARGET} PRIVATE $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${SPEC_KERNEL_ARCH}>)
+    target_compile_definitions(${SPEC_SCOPE_TARGET} PRIVATE
+        $<$<COMPILE_LANGUAGE:ASC>:SPEC_SCOPE_SYMBOL_SUFFIX=_${SPEC_KERNEL_ARCH_SUFFIX}>
+    )
+    set_property(TARGET ${SPEC_SCOPE_TARGET} PROPERTY POSITION_INDEPENDENT_CODE ON)
+    list(APPEND SPEC_SCOPE_TARGETS ${SPEC_SCOPE_TARGET})
+endforeach()
+
 add_library(model_specialization SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/feature_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel_compile_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/acl_spec_optimizer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/aclmodel_specialization.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/spec_scope_launch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../super_kernel/src/aot/common/pattern_common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../super_kernel/src/aot/sk_log.cpp
 )
@@ -51,6 +65,9 @@ target_include_directories(model_specialization
 
 target_link_libraries(model_specialization
     PRIVATE
+        ${SPEC_SCOPE_TARGETS}
+        ascendc_runtime
+        profapi
         Boost::filesystem
         c_sec_headers
         runtime_headers
