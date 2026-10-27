@@ -1389,12 +1389,10 @@ TEST_P(AclSpecOptimizerCandidateTest, KeepsSkippedTasksAndCleansMarkersAfterComp
   const std::string warning = "[WARN] [SK][SpecializeKernels] aclmdlRISpecOptimize specialized none";
   EXPECT_NE(logs.find(std::string(apiName) + " started:"), std::string::npos);
   if (expected.taskCount == expected.unsupportedCount) {
-    EXPECT_NE(logs.find(std::string(apiName) + " has no candidate kernels"), std::string::npos);
+    EXPECT_NE(logs.find("[WARN] [SK][Optimize] " + std::string(apiName) + " has no candidate kernels"),
+              std::string::npos);
     EXPECT_EQ(logs.find(warning), std::string::npos);
     EXPECT_EQ(logs.find("finished with nothing to specialize"), std::string::npos);
-    if (expected.taskCount == 0) {
-      EXPECT_EQ(logs.find("[WARN]"), std::string::npos);
-    }
   } else if (expected.rewrites == 0) {
     EXPECT_NE(logs.find(warning), std::string::npos);
   }

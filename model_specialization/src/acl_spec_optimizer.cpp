@@ -90,10 +90,8 @@ aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featur
     return result;
   }
   if (requests.empty()) {
-    SK_DLOGI("%s has no candidate kernels: model=%p markers=%zu", apiName, model, scopeMarkers.size());
-    if (scopeMarkers.empty()) {
-      return ACL_SUCCESS;
-    }
+    SK_DLOGW("%s has no candidate kernels: model=%p markers=%zu", apiName, model, scopeMarkers.size());
+    return scopeMarkers.empty() ? ACL_SUCCESS : UpdateTasks(model, requests, scopeMarkers);
   }
   SpecializeKernels(requests);
   result = LoadKernels(requests);
