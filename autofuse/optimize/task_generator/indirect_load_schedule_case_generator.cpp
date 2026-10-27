@@ -4300,7 +4300,6 @@ GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &memb
 // SIMT 且 L4 形态且 N>2（相位 N+1/barrier ×N）；MIXED 且少数派占比 < 1/3（分裂
 // 不均衡时整合开销不划算）。动态 shape / 能力门控不满足时统一 0 或 1（平局按
 // 候选序，与单 gather 行为一致）；Softmax 专用 Norm 加分与单 gather 一致。
-//
 // MIXED 的能力门控（访问形态维度，非结构合法性）：门控取 simt_structured_capable
 // （= AND(embedding_like)）。can_use_simd_embedding ⟹ embedding_like，探测又保证
 // SIMD 侧的偏好选择仅发生于 can_use_simd_embedding 成员，故该门控等价于"每个成员
