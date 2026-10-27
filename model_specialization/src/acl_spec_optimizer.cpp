@@ -133,11 +133,6 @@ aclError AclSpecOptimizer::ReadTaskIdentity(TaskIdentity &identity) const {
              record.streamId, record.taskId, result);
     return result;
   }
-  if (identity.params.type != ACL_MODEL_RI_TASK_KERNEL) {
-    SK_DLOGE("Task identity unavailable: streamId=%d taskId=%" PRId64 " reason=parameter type mismatch ret=%d",
-             record.streamId, record.taskId, ACL_ERROR_FAILURE);
-    return ACL_ERROR_FAILURE;
-  }
   const auto function = identity.params.kernelTaskParams.funcHandle;
   if (function == nullptr) {
     SK_DLOGE("Task identity unavailable: streamId=%d taskId=%" PRId64 " reason=null function handle ret=%d",

@@ -966,10 +966,9 @@ class AclSpecOptimizerScopeTest : public AclSpecOptimizerCollectionTest, public 
 }  // namespace
 
 TEST_P(AclSpecOptimizerScopeTest, RejectsUnreadableTasksBeforeCompilationOrMutation) {
-  const std::array<const char *, 8> reasons{"null task",
+  const std::array<const char *, 7> reasons{"null task",
                                             "task type query failed",
                                             "task parameters query failed",
-                                            "parameter type mismatch",
                                             "null function handle",
                                             "function name query failed",
                                             "empty function name",
@@ -992,18 +991,15 @@ TEST_P(AclSpecOptimizerScopeTest, RejectsUnreadableTasksBeforeCompilationOrMutat
         invalid.paramsError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
         break;
       case 3:
-        invalid.params.type = ACL_MODEL_RI_TASK_DEFAULT;
-        break;
-      case 4:
         invalid.params.kernelTaskParams.funcHandle = nullptr;
         break;
-      case 5:
+      case 4:
         invalidKernel.nameError = ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY;
         break;
-      case 6:
+      case 5:
         invalidKernel.name.clear();
         break;
-      case 7:
+      case 6:
         invalidKernel.unterminatedName = true;
         break;
     }
@@ -1011,7 +1007,7 @@ TEST_P(AclSpecOptimizerScopeTest, RejectsUnreadableTasksBeforeCompilationOrMutat
     identityTypeQueries = 0;
     ut_log::LogBuffer::Instance().Clear();
     const aclError expected =
-        failure == 1 || failure == 2 || failure == 5 ? ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY : ACL_ERROR_FAILURE;
+        failure == 1 || failure == 2 || failure == 4 ? ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY : ACL_ERROR_FAILURE;
     EXPECT_EQ(RunEntry(), expected);
     EXPECT_EQ(identityTypeQueries, failure == 0 ? 2U : 3U);
     EXPECT_EQ(binaryQueries, 0U);
