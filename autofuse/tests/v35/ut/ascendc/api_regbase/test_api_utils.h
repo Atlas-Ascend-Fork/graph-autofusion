@@ -174,6 +174,8 @@ void UnaryTest(int size,
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 template <typename InT, typename OutT>
@@ -235,6 +237,8 @@ void UnaryTest(int size,
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 template <typename T, typename T_ONE>
@@ -298,5 +302,7 @@ void UnaryTest(int size,
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 #endif

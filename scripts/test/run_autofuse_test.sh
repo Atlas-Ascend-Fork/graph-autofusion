@@ -79,6 +79,42 @@ set_test_ld_library_path() {
   fi
 }
 
+print_test_resources() {
+  local phase="$1"
+  local resource
+  local key value unit
+  printf '[autofuse resources][%s] build_jobs=%s\n' "${phase}" "${THREAD_NUM}"
+  if [ -r /proc/meminfo ]; then
+    while read -r key value unit; do
+      case "${key}" in
+        MemTotal:|MemAvailable:|SwapTotal:|SwapFree:)
+          printf '[autofuse resources][%s] %s %s %s\n' "${phase}" "${key}" "${value}" "${unit}"
+          ;;
+      esac
+    done < /proc/meminfo
+  fi
+  for resource in \
+    /sys/fs/cgroup/cpu.max \
+    /sys/fs/cgroup/cpuset.cpus.effective \
+    /sys/fs/cgroup/memory.max \
+    /sys/fs/cgroup/memory.current \
+    /sys/fs/cgroup/memory.peak \
+    /sys/fs/cgroup/memory.events \
+    /sys/fs/cgroup/cpu/cpu.cfs_quota_us \
+    /sys/fs/cgroup/cpu/cpu.cfs_period_us \
+    /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us \
+    /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us \
+    /sys/fs/cgroup/memory/memory.limit_in_bytes \
+    /sys/fs/cgroup/memory/memory.max_usage_in_bytes \
+    /sys/fs/cgroup/memory/memory.failcnt \
+    /sys/fs/cgroup/memory/memory.oom_control; do
+    if [ -r "${resource}" ]; then
+      printf '[autofuse resources][%s] %s=\n' "${phase}" "${resource}"
+      cat "${resource}" || true
+    fi
+  done
+}
+
 # print usage message
 usage() {
   echo "Usage:"
@@ -229,6 +265,10 @@ build_ascgen-dev() {
 
   CMAKE_ARGS="-D CMAKE_C_COMPILER=${C_COMPILER} \
               -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
+              -D CMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} \
+              -D BUILD_AUTOFUSE=ON \
+              -D ENABLE_CPP_UTEST=OFF \
+              -D ENABLE_CPP_STEST=OFF \
               -D ASCEND_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
               -D CANN_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
               -D ASCEND_INSTALL_PATH=${ASCEND_INSTALL_PATH} \
@@ -263,9 +303,13 @@ build_ascgen-dev() {
 
 build_test_ascendc_api_test() {
   echo "create build directory and build ascendc_api_test";
-  cd "${BUILD_PATH}"
+  mk_dir "${BUILD_PATH}" && cd "${BUILD_PATH}" || return 1
   CMAKE_ARGS="-D CMAKE_C_COMPILER=${C_COMPILER} \
               -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
+              -D CMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} \
+              -D BUILD_AUTOFUSE=ON \
+              -D ENABLE_CPP_UTEST=OFF \
+              -D ENABLE_CPP_STEST=OFF \
               -D ASCEND_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
               -D CANN_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
               -D ASCEND_INSTALL_PATH=${ASCEND_INSTALL_PATH} \
@@ -280,11 +324,8 @@ build_test_ascendc_api_test() {
               -D ENABLE_TEST=True \
               -D ENABLE_GE_UT=on \
               -D ENABLE_LLT_PKG=ON"
-  cmake $CMAKE_ARGS ..
-  MAKE_TEST_TARGET="test_ascendc_api
-                    test_ascendc_api_v35 \
-                    test_load_broadcast_store_codegen \
-                    test_load_broadcast_multi_axis_store_codegen"
+  cmake $CMAKE_ARGS .. || return 1
+  MAKE_TEST_TARGET="test_ascendc_api test_ascendc_api_v35"
   echo "[UT AUTOFUSE ASCENDC API] make -j${THREAD_NUM} start"
   make -j${THREAD_NUM} $MAKE_TEST_TARGET
   if [ $? -ne 0 ]; then
@@ -307,14 +348,15 @@ build_test_ascendc_api_test() {
     echo "[UT AUTOFUSE ASCENDC API] test ascendc_v35 failed."
     return 1
   fi
-  ctest --output-on-failure -j${THREAD_NUM} --test-dir ${AUTOFUSE_BUILD_PATH}/tests/ut/e2e --no-tests=error \
-          -O ${BUILD_PATH}/ctest_ut_e2e.log
-  if [ $? -ne 0 ]; then
-    env
-    echo "[UT AUTOFUSE ASCENDC API] test e2e failed."
-    return 1
-  fi
   echo "[UT AUTOFUSE ASCENDC API] test success!"
+}
+
+build_codegen_e2e_ut() {
+  echo "create build directory and build codegen e2e ut"
+  make -C "${BUILD_PATH}" -j${THREAD_NUM} \
+    test_load_broadcast_store_codegen test_load_broadcast_multi_axis_store_codegen || return 1
+  ctest --output-on-failure -j${THREAD_NUM} --test-dir "${AUTOFUSE_BUILD_PATH}/tests/ut/e2e" --no-tests=error \
+    -O "${BUILD_PATH}/ctest_ut_e2e.log"
 }
 
 build_test() {
@@ -1207,6 +1249,7 @@ build_ut() {
       build_ut_common || { echo "test ut common failed."; exit 1; }
       build_test || { echo "test build failed."; exit 1; }
       build_test_ascendc_api_test || { echo "failed to build and run ascendc_api ."; exit 1; }
+      build_codegen_e2e_ut || { echo "test codegen e2e ut failed."; exit 1; }
       py_module_ut || { echo "run py module ut failed."; exit 1; }
       ;;
     *)
@@ -1242,6 +1285,7 @@ build_st() {
       ;;
     "e2e")
       codegen_e2e_st || { echo "test build e2e st code generator failed."; exit 1; }
+      build_codegen_e2e_ut || { echo "test codegen e2e ut failed."; exit 1; }
       ;;
     "ascendc_api")
       build_test_ascir_st || { echo "run ascir st failed."; exit 1; }
@@ -1275,20 +1319,26 @@ build_st() {
 main() {
   cd "${BASEPATH}"
   checkopts "$@"
+  print_test_resources start
+  trap 'print_test_resources exit' EXIT
   INITIAL_LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}"
 
   export ASCEND_CUSTOM_PATH=${ASCEND_INSTALL_PATH}
   ASCEND_INSTALL_LIB_PATH=${ASCEND_INSTALL_PATH}/$(uname -m)-linux/lib64/
   set_test_ld_library_path
 
-  build_ascgen-dev || { echo "ascgen-dev build failed."; exit 1; }
+  # Numeric API UT targets do not depend on pyautofuse, optimize or codegen.
+  # Their handler configures and builds the required simulator targets directly.
+  if [[ "X$ENABLE_UT" != "Xon" || "X$ENABLE_ST" == "Xon" || "${MODEL_NAME}" != "ascendc_api" ]]; then
+    build_ascgen-dev || { echo "ascgen-dev build failed."; exit 1; }
 
-  METADEF_SOS=$(find ${AUTOFUSE_BUILD_PATH}/graph_metadef -name "*.so" 2>/dev/null)
-  for METADEF_SO in ${METADEF_SOS}
-  do
-    cp -rf ${METADEF_SO} ${METADEF_LIB_PATH}
-    echo "cp -rf ${METADEF_SO} ${METADEF_LIB_PATH}"
-  done
+    METADEF_SOS=$(find ${AUTOFUSE_BUILD_PATH}/graph_metadef -name "*.so" 2>/dev/null)
+    for METADEF_SO in ${METADEF_SOS}
+    do
+      cp -rf ${METADEF_SO} ${METADEF_LIB_PATH}
+      echo "cp -rf ${METADEF_SO} ${METADEF_LIB_PATH}"
+    done
+  fi
 
   if [[ "X$ENABLE_UT" = "Xon" ]]; then
     echo "---------------- ascgen-dev build finished ----------------"

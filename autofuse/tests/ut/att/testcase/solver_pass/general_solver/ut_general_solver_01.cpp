@@ -68,7 +68,7 @@ double TilingCaseUT1Solver::GetLeqCost(uint64_t vars[]) {
 
 double TilingCaseUT1Solver::GetLeqDiff(uint64_t *vars, double *weight) {
   double d_x = static_cast<double>(vars[0]);
-  double leq_cost;
+  double leq_cost = 0;
   if (d_x < left_edge) {
     leq_cost = -d_x;
   } else if (d_x > right_edge) {
@@ -583,6 +583,9 @@ TEST_F(UTTEST_GENERAL_SOLVER_01, test_get_func_val) {
   EXPECT_EQ(TestGetFuncVal({15}, {-1}, FuncInfo::BUFFER), 5);
 
   EXPECT_EQ(TestGetFuncVal({10}, {-3}, FuncInfo::LEQ), 0);
+  EXPECT_EQ(TestGetFuncVal({5}, {1}, FuncInfo::LEQ), 0);
+  EXPECT_EQ(TestGetFuncVal({10}, {1}, FuncInfo::LEQ), 0);
+  EXPECT_EQ(TestGetFuncVal({15}, {1}, FuncInfo::LEQ), 0);
   EXPECT_EQ(TestGetFuncVal({18}, {1}, FuncInfo::LEQ), 18);
   EXPECT_EQ(TestGetFuncVal({2}, {1}, FuncInfo::LEQ), -2);
 }

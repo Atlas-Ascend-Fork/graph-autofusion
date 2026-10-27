@@ -332,6 +332,12 @@ bash build.sh --pkg
 
 其中，`.run` 包用于提供测试依赖的动态库。SuperKernel Python UT/ST 直接从当前源码目录加载 `superkernel`，不会替换或卸载通过 `--pylocal` 安装到 CANN 路径下的 wheel 包。
 
+仅选择 Autofuse 测试模块且不带 `--pkg` 时，由测试入口直接构建其目标依赖，不再预先执行产品全量构建。
+默认并行度取当前进程可用 CPU 数，并考虑 CPU 亲和性与容器 CPU 配额，不使用宿主机暴露的核数或固定 14 上限。
+`-u --module=autofuse_ascendc_api` 运行两个架构的数值 API UT，不构建测试版 `pyautofuse/optimize/codegen`。
+广播代码生成与内核执行用例由 `-s --module=autofuse_e2e` 运行；通过
+`bash scripts/test/run_autofuse_test.sh -u -m all -j 8` 执行全部 Autofuse UT 时也保留这些用例。
+
 - UT 验证
 
    ```bash

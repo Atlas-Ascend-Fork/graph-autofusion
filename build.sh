@@ -11,11 +11,46 @@
 
 set -e
 
+get_cgroup_cpu_quota() {
+  if [ -r /sys/fs/cgroup/cpu.max ]; then
+    cat /sys/fs/cgroup/cpu.max
+    return
+  fi
+
+  local controller quota period
+  for controller in /sys/fs/cgroup/cpu /sys/fs/cgroup/cpu,cpuacct; do
+    if [ -r "${controller}/cpu.cfs_quota_us" ] && [ -r "${controller}/cpu.cfs_period_us" ]; then
+      read -r quota < "${controller}/cpu.cfs_quota_us"
+      read -r period < "${controller}/cpu.cfs_period_us"
+      printf '%s %s\n' "${quota}" "${period}"
+      return
+    fi
+  done
+}
+
+get_available_cpu_count() {
+  local cpu_num quota period quota_cpu_num
+  # OpenMP runtime settings must not constrain the build's CPU discovery.
+  cpu_num=$(
+    unset OMP_NUM_THREADS OMP_THREAD_LIMIT
+    nproc
+  ) || return 1
+  if read -r quota period < <(get_cgroup_cpu_quota); then
+    if [[ "${quota}" =~ ^[1-9][0-9]*$ && "${period}" =~ ^[1-9][0-9]*$ ]]; then
+      quota_cpu_num=$((quota / period + (quota % period != 0)))
+      if [ "${quota_cpu_num}" -lt "${cpu_num}" ]; then
+        cpu_num=${quota_cpu_num}
+      fi
+    fi
+  fi
+  printf '%s\n' "${cpu_num}"
+}
+
 BASEPATH=$(cd "$(dirname $0)"; pwd)
 BUILD_PATH="${BASEPATH}/build"
 OUTPUT_PATH="${BASEPATH}/build_out"
-CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)))
-THREAD_NUM=$((CPU_NUM < 14 ? CPU_NUM : 14))
+CPU_NUM=$(get_available_cpu_count)
+THREAD_NUM=${CPU_NUM}
 ASCEND_INSTALL_PATH="${ASCEND_HOME_PATH}"
 BUILD_TYPE="Release"
 CUSTOM_OPTION="-DCMAKE_INSTALL_PREFIX=${BUILD_PATH} -DASCEND_INSTALL_PATH=${ASCEND_INSTALL_PATH}"
@@ -64,7 +99,7 @@ usage() {
   echo "    -h, --help            Print usage"
   echo "    --pkg                 Build package"
   echo "    --no-autofuse         Skip autofuse backend build/package artifacts"
-  echo "    -j                    Compile thread nums, default is min(CPU count, 14), eg: -j 8"
+  echo "    -j                    Compile thread nums, default is available CPU count (affinity/quota), eg: -j 8"
   echo "    -u, --ut              Run unit tests for supported implementations"
   echo "    -s, --st              Run system tests for supported implementations"
   echo "    --impl=<py|cpp|all>   Select implementation under -u/-s (default: all supported)"
@@ -466,6 +501,22 @@ function build()
   cmake --build . --target ${target} -j ${THREAD_NUM}
 }
 
+autofuse_product_build_required() {
+  if [ "X$ENABLE_BUILD_PACKAGE" == "Xon" ]; then
+    return 0
+  fi
+
+  local action_entry
+  for action_entry in "${EXEC_ACTIONS[@]}"; do
+    case "${action_entry%%:*}" in
+      autofuse_*) ;;
+      *) return 0 ;;
+    esac
+  done
+  # Autofuse test handlers configure and build their own target dependencies.
+  return 1
+}
+
 clean_coverage_artifacts() {
   if [ "X$ENABLE_COVERAGE" != "Xon" ]; then
     return
@@ -637,7 +688,7 @@ autofuse_module_test_suite() {
     test_args+=("-c")
   fi
 
-  bash "${BASEPATH}/scripts/test/run_autofuse_test.sh" "${test_args[@]}"
+  BUILD_TYPE="${BUILD_TYPE}" bash "${BASEPATH}/scripts/test/run_autofuse_test.sh" "${test_args[@]}"
 }
 
 multistream_py_ut() {
@@ -753,7 +804,7 @@ PYEOF
 
   clean_coverage_artifacts
 
-  if [ "X$ENABLE_AUTOFUSE" == "Xon" ]; then
+  if [ "X$ENABLE_AUTOFUSE" == "Xon" ] && autofuse_product_build_required; then
     echo "---------------- Start build autofuse ----------------"
     mkdir -pv ${BUILD_PATH} &&
     cd ${BUILD_PATH} || { echo "Prepare autofuse build failed."; exit 1; }
