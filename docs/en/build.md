@@ -40,12 +40,20 @@ If your compilation environment cannot access the network, download the source c
 
 1. In a networked environment, visit the [project homepage](https://gitcode.com/cann/graph-autofusion). Use the `Download zip` or `Clone` button to download the source code.
 
-2. Download the `makeself` and `cann-cmake` third-party open-source software.
+2. Download the `makeself` and `cann-cmake` third-party open-source software. Extract the source code on the networked machine first, then read the version required by that source checkout:
 
    | Open-Source Software | Version | Download Link |
    |---|---|---|
    | makeself | 2.5.0 | [makeself-release-2.5.0-patch1.tar.gz](https://gitcode.com/cann-src-third-party/makeself/releases/download/release-2.5.0-patch1.0/makeself-release-2.5.0-patch1.tar.gz) |
-   | cann-cmake | master-052 | [cmake-master-052.tar.gz](https://cann-3rd.obs.cn-north-4.myhuaweicloud.com/cmake/cmake-master-052.tar.gz) |
+   | cann-cmake | Read `CANN_CMAKE_TAG` from the source checkout | Use the command below |
+
+   Run from the parent directory of the extracted `graph-autofusion` source repository:
+
+   ```bash
+   CANN_CMAKE_TAG=$(sed -n 's/^[[:space:]]*set(CANN_CMAKE_TAG "\([^"]*\)").*/\1/p' graph-autofusion/cmake/fetch_cann_cmake.cmake)
+   test -n "${CANN_CMAKE_TAG}"
+   curl -fLO "https://cann-3rd.obs.cn-north-4.myhuaweicloud.com/cmake/cmake-${CANN_CMAKE_TAG}.tar.gz"
+   ```
 
 3. Upload the source code and third-party open-source software to the offline compilation environment. Extract the source code.
 
@@ -54,14 +62,17 @@ If your compilation environment cannot access the network, download the source c
    unzip graph-autofusion.zip
    ```
 
-4. Create an open_source directory at the same level as the source code. Place the third-party open-source software packages in the open_source directory and extract them.
+4. Create an open_source directory at the same level as the source code for makeself and extract it there. Place the unextracted cann-cmake archive in output/third_party inside the source repository.
 
    ```bash
    # Create open_source directory
    mkdir open_source
    # Move third-party open-source software packages to open_source directory
    mv makeself-release-2.5.0-patch1.tar.gz open_source/
-   mv cmake-master-052.tar.gz open_source/
+   mkdir -p graph-autofusion/output/third_party
+   CANN_CMAKE_TAG=$(sed -n 's/^[[:space:]]*set(CANN_CMAKE_TAG "\([^"]*\)").*/\1/p' graph-autofusion/cmake/fetch_cann_cmake.cmake)
+   test -n "${CANN_CMAKE_TAG}"
+   mv "cmake-${CANN_CMAKE_TAG}.tar.gz" graph-autofusion/output/third_party/
    # Extract third-party open-source software packages and rename (cann-cmake package remains unchanged)
    cd open_source
    tar -zxvf makeself-release-2.5.0-patch1.tar.gz && mv makeself-release-2.5.0 makeself
@@ -72,6 +83,8 @@ If your compilation environment cannot access the network, download the source c
    ```bash
    ├── graph-autofusion           # Extracted source repository
    │  ├── cmake
+   │  ├── output/third_party
+   │  │  └── cmake-${CANN_CMAKE_TAG}.tar.gz
    │  └── ...
    ├── open_source                # Third-party open-source software
    │  └── makeself
@@ -79,7 +92,6 @@ If your compilation environment cannot access the network, download the source c
    │     ├── Makefile
    │     ├── README.md
    │     └── ...
-   │  └── cmake-master-052.tar.gz
    ```
 
 ### 4.2 Install Dependencies
@@ -186,8 +198,17 @@ In environments without any external network access, pre-download third-party so
 
 1. Download the following third-party packages on a networked machine:
 
+   Run from the source root of the same checkout that will be built offline:
+
+   ```bash
+   CANN_CMAKE_TAG=$(sed -n 's/^[[:space:]]*set(CANN_CMAKE_TAG "\([^"]*\)").*/\1/p' cmake/fetch_cann_cmake.cmake)
+   test -n "${CANN_CMAKE_TAG}"
+   curl -fLO "https://cann-3rd.obs.cn-north-4.myhuaweicloud.com/cmake/cmake-${CANN_CMAKE_TAG}.tar.gz"
+   ```
+
    | Third-Party Package | Version | Download Link |
    |---------|------|---------|
+   | cann-cmake | Read `CANN_CMAKE_TAG` from the source checkout | Use the command below |
    | abseil-cpp | 20230802.1 | https://gitcode.com/cann-src-third-party/abseil-cpp/releases/download/20230802.1/abseil-cpp-20230802.1.tar.gz |
    | json | 3.11.3 | https://gitcode.com/cann-src-third-party/json/releases/download/v3.11.3/json-3.11.3.tar.gz |
    | boost | 1.87.0 | https://gitcode.com/cann-src-third-party/boost/releases/download/v1.87.0/boost_1_87_0.tar.gz |
@@ -205,6 +226,7 @@ In environments without any external network access, pre-download third-party so
    mkdir -p output/third_party/{abseil-cpp,json,boost,protobuf,symengine,gtest,mockcpp,makeself}
 
    # Place downloaded packages in corresponding directories (filenames must match the table below)
+   # cmake-${CANN_CMAKE_TAG}.tar.gz              → output/third_party/
    # abseil-cpp-20230802.1.tar.gz           → output/third_party/abseil-cpp/
    # json-3.11.3.tar.gz                     → output/third_party/json/
    # boost_1_87_0.tar.gz                    → output/third_party/boost/
@@ -258,6 +280,8 @@ In environments without any external network access, pre-download third-party so
    > - For offline compilation, prepare both `mockcpp-2.7.tar.gz` and `mockcpp-2.7-h5.patch`. If the patch file is missing, CMake attempts to download it from the network, which causes offline builds to fail.
    > - The preferred mockcpp patch lookup path is `output/third_party/mockcpp-2.7-h5.patch`. If that path does not exist, CMake uses `output/third_party/pkg/mockcpp-2.7-h5.patch`.
    > - The patch is applied automatically during the CMake ExternalProject patch stage. Do not pre-extract and modify the `output/third_party/mockcpp` source directory manually, because later builds may clean or overwrite it.
+
+   > The `cann-cmake` bootstrap dependency must match `CANN_CMAKE_TAG` in `cmake/fetch_cann_cmake.cmake`. Put the archive directly in `output/third_party/` (or the directory specified by `--cann_3rd_lib_path`) without extracting it. The current bootstrap does not recognize older-version archives.
 
 3. During compilation, specify the local path through `--cann_3rd_lib_path` to skip the download step:
 

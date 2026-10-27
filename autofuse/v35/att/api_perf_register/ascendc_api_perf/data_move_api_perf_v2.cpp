@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include <algorithm>
 #include <string>
 #include <numeric>
 #include "common/checker.h"
@@ -18,6 +19,10 @@
 #include "v35/att/api_perf_register/ascendc_regbase_perf.h"
 namespace att {
 namespace ascendcapi_v2 {
+namespace {
+constexpr size_t kCodegenDmaMaxLen = 2U;
+constexpr size_t kCodegenLoopModeMaxLen = 2U;
+}  // namespace
 // 获取 CacheLine 大小，与 TilingScheduleConfigTable 保持一致
 uint32_t GetCacheLineSize() {
   return TilingScheduleConfigTableV2().GetCacheLineSize();
@@ -227,9 +232,13 @@ af::Status StorePerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
                     node_info.ToString().c_str());
   GE_ASSERT_SUCCESS(GetPerf(
       {kMoveUbToGm, node_info.input_dtype[0], node_info.output_dtype[0], padded_dims, CreateExpr(0)}, res_normal));
-  GE_ASSERT_SUCCESS(GetPerf({kMoveUbToGm + "Stride", node_info.input_dtype[0], node_info.output_dtype[0],
-                             node_info.repeats, node_info.gm_stride, node_info.block_count_idx},
-                            res_stride));
+  GE_ASSERT_SUCCESS(
+      GetPerf({kMoveUbToGm + "Stride", node_info.input_dtype[0], node_info.output_dtype[0], node_info.repeats,
+               node_info.gm_stride, node_info.block_count_idx,
+               static_cast<int32_t>(node_info.repeats.size() > kCodegenDmaMaxLen
+                                        ? std::min(node_info.repeats.size() - kCodegenDmaMaxLen, kCodegenLoopModeMaxLen)
+                                        : 0U)},
+              res_stride));
   GE_ASSERT_SUCCESS(AppendCacheLineConfig(node_info, CacheLineDirection::kUbToGm, perf.cache_line_config));
   perf.pipe_res[PipeType::AIV_MTE3] = res_normal + res_stride;
   return af::SUCCESS;

@@ -744,13 +744,13 @@ TEST_F(UTestAscirPerfV2, TestStoreApiForSmallStride) {
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // MTE3 padding: 由于gm_stride>0且z6t_size可能<16(int64的128B是16个元素),会生成三元表达式
-  // StoreStride: 0.0385 * z0z1t_size * min(128*8, 4096) = 9382.9119... * z0z1t_size
-  const std::string kStride = "(9382.91194915771 * z0z1t_size)";
+  // StoreStride uses the DMA block count (34) after the two LoopMode dimensions are removed.
+  const std::string kStride = "1500.41599273682";
   // Note: 由于padding, z6t_size会被替换为TernaryOp表达式,且TernaryOp在z0z1t_size之前
   EXPECT_EQ(Str(res.Replace(ret)),
             "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
             "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + " +
-                kStride + " + 160.0)");
+                kStride + ")");
 }
 
 TEST_F(UTestAscirPerfV2, TestStoreApiForBiggerStride) {
@@ -786,13 +786,57 @@ TEST_F(UTestAscirPerfV2, TestStoreApiForBiggerStride) {
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // MTE3 padding: 由于gm_stride>0且z6t_size可能<16(int64的128B是16个元素),会生成三元表达式
-  // StoreStride calculation: k=0.0385, block_count=238*z0z1t_size, stride_used=min(40960*8, 4096)=4096
-  // Result: 0.0385 * 238 * z0z1t_size * 4096 = 37531.6477966309 * z0z1t_size
-  const std::string kStride = "(37531.6477966309 * z0z1t_size)";
+  // StoreStride uses the DMA block count (34) after the two LoopMode dimensions are removed.
+  const std::string kStride = "5521.66397094727";
   EXPECT_EQ(Str(res.Replace(ret)),
             "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
             "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + " +
-                kStride + " + 160.0)");
+                kStride + ")");
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreStrideLoopModeUsesDmaBlockCount) {
+  const std::map<std::string, float> params = {{"k", 0.0385F},
+                                               {"u", 4096.0F},
+                                               {"data_type_size", 4.0F},
+                                               {"block_count_idx", 1.0F},
+                                               {"loop_mode_dim_count", 1.0F}};
+  Expr result;
+  ASSERT_EQ(LoadStoreStrideV2Func(params, {CreateExpr(20), CreateExpr(57), CreateExpr(20)}, CreateExpr(380), result),
+            af::SUCCESS);
+  Expr expected = CreateExpr(0.0385F) * CreateExpr(57) * CreateExpr(380) * CreateExpr(4);
+  result.Simplify();
+  expected.Simplify();
+  EXPECT_EQ(Str(result), Str(expected));
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreApiLoopModeEndToEnd) {
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr z2t_size = CreateExpr("z2t_size");
+  Expr z0z1t_size = CreateExpr("z0z1t_size");
+  Expr block_len = CreateExpr(20);
+  input_shapes[0].data_type = "float32";
+  input_shapes[0].dims = {z2t_size, z0z1t_size, block_len};
+  input_shapes[0].repeats = input_shapes[0].dims;
+  input_shapes[0].strides = {z0z1t_size * CreateExpr(400), CreateExpr(400), CreateExpr(1)};
+  input_shapes[0].gm_strides = input_shapes[0].strides;
+  input_shapes[0].data_type_size = 4;
+  output_shapes[0] = input_shapes[0];
+  output_shapes[0].strides = {z0z1t_size * CreateExpr(400), CreateExpr(400), CreateExpr(1)};
+  output_shapes[0].gm_strides = output_shapes[0].strides;
+
+  PerfOutputInfo perf_res;
+  auto store_v2 = ApiPerfFactory::Instance().Create("StoreV2");
+  ASSERT_NE(store_v2, nullptr);
+  auto perf = store_v2->GetPerfFunc();
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Store", 1, 1);
+  ASSERT_EQ(perf(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+  auto ternary_ops = perf_res.ternary_ops;
+  auto ret = ConcursiveReplaceVars(ternary_ops);
+  EXPECT_EQ(Str(perf_res.pipe_res[PipeType::AIV_MTE3].Replace(ret)),
+            "((58.5199996829033 * z0z1t_size) + (80 * z0z1t_size * z2t_size / "
+            "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
 }
 
 TEST_F(UTestAscirPerfV2, TestNddmaApiForType) {

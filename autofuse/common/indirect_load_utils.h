@@ -152,6 +152,45 @@ enum class SimtOffsetWidth : int64_t {
   kUint64,
 };
 
+// [SIMT 融合寄存器压力模型] 位宽感知常数与档位映射（调度期 L4 门控/线程档封顶与
+// codegen 位宽漂移防护共用）。64 位基准为既有保守值（行为不变）；全成员 uint32 时
+// fused body 选 32 位 OffsetType（codegen 判定），改用 32 位细化常数（fused 成员
+// 上限与线程档均放宽）。取值依据、推导与档位配额表见设计文档「寄存器压力模型」。
+constexpr uint64_t kSimtFusedRegisterBase64 = 24U;
+constexpr uint64_t kSimtFusedRegisterPerMember64 = 18U;
+constexpr uint64_t kSimtFusedRegisterPerSideLoad64 = 5U;
+constexpr uint64_t kSimtFusedRegisterPerChainNode = 3U;  // 混合宽度，两档共用
+constexpr uint64_t kSimtFusedRegisterBase32 = 23U;
+constexpr uint64_t kSimtFusedRegisterPerMember32 = 10U;
+constexpr uint64_t kSimtFusedRegisterPerSideLoad32 = 4U;
+// 最低档配额：超过即 fused 发射不可行（降级 L4/V2）。
+constexpr uint64_t kSimtFusedMinTierQuota = 127U;
+
+// 位宽感知寄存器需求：all_offset_uint32 用 32 位细化常数，否则 64 位基准。
+inline uint64_t SimtFusedRegisterDemand(const bool all_offset_uint32, const uint64_t member_count,
+                                        const uint64_t side_load_count, const uint64_t chain_node_count) {
+  if (all_offset_uint32) {
+    return kSimtFusedRegisterBase32 + kSimtFusedRegisterPerMember32 * member_count +
+           kSimtFusedRegisterPerSideLoad32 * side_load_count + kSimtFusedRegisterPerChainNode * chain_node_count;
+  }
+  return kSimtFusedRegisterBase64 + kSimtFusedRegisterPerMember64 * member_count +
+         kSimtFusedRegisterPerSideLoad64 * side_load_count + kSimtFusedRegisterPerChainNode * chain_node_count;
+}
+
+// 线程档映射：需求可容纳的最高档。
+inline uint32_t SimtFusedThreadTier(const uint64_t register_demand) {
+  if (register_demand <= 16U) {
+    return 2048U;
+  }
+  if (register_demand <= 32U) {
+    return 1024U;
+  }
+  if (register_demand <= 64U) {
+    return 512U;
+  }
+  return 256U;
+}
+
 enum class SimtLoadAddressSource : int64_t {
   kZeroOffset,
   kOutputOffset,
@@ -395,6 +434,10 @@ std::vector<std::string> GetSimtFusedMemberNames(const af::AscNodePtr &node);
 struct SimtFusedMergeInfo {
   bool register_merge = false;
   uint32_t max_thread_tier = 2048U;
+  // R_est 组件计数（位宽感知门控的输入；codegen 位宽漂移防护按 64 位基准重算档位用）。
+  uint32_t member_count = 0U;
+  uint32_t side_load_count = 0U;
+  uint32_t chain_node_count = 0U;
   std::vector<std::string> merge_node_names;   // 归并树闭包节点名（拓扑序，不含成员 IL 与 Store）
   std::vector<std::string> merge_store_names;  // Store 终端节点名（codegen 按名重解析输出链 tensor id）
 };

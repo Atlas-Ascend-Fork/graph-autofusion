@@ -163,8 +163,14 @@ std::string GenAxesReorderRun(bool enable_equal_order_tiling) {
   // 根据是否使能equal_order生成不同的GetTiling调用
   std::string equal_order_param = enable_equal_order_tiling ? ", enable_equal_order" : "";
   codes += "  // 初始解默认会占满UB，核数使用较少\n";
-  codes += "  if (!GetTiling(is_trade_off, is_block_loop_auto_tune, false" + equal_order_param + ")) {\n";
+  codes += "  // 双阈值策略(NaiveLocalBufTiling)求解失败时，以is_trade_off=false回退到BinaryLocalBufTiling\n";
+  codes += "  // 的简单二分求解重试一次；原本就走Binary的失败路径不重试，第二次仍失败则返回失败\n";
+  codes += "  bool solved = GetTiling(is_trade_off, is_block_loop_auto_tune, false" + equal_order_param + ");\n";
+  codes += "  if (!solved && is_trade_off) {\n";
+  codes += "    solved = GetTiling(false, is_block_loop_auto_tune, false" + equal_order_param + ");\n";
+  codes += "  }\n";
   std::string equal_order_param_str = enable_equal_order_tiling ? ", enable_equal_order:%d" : "";
+  codes += "  if (!solved) {\n";
   codes += "    OP_LOGW(OP_NAME, \"Get default tiling failed, is_trade_off:%d, is_block_loop_tune:%d" +
            equal_order_param_str + ",\"\n";
   codes += "            \" input: %s.\", is_trade_off, is_block_loop_auto_tune" + equal_order_param +
