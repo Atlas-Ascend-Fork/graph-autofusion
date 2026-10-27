@@ -613,12 +613,7 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Multi_Out_NoDepend
 
   size_t shared0_workspace_count = 0UL;
   size_t shared1_workspace_count = 0UL;
-  // RCore 任务由 kCommon 任务派生并复制其子图, workspace 节点会随拷贝重复出现,
-  // 故仅在 kCommon 任务内计数
   for (const auto &task : tasks) {
-    if (task.reduce_type != ReduceTemplateType::kCommon) {
-      continue;
-    }
     for (const auto &grouped_graph : task.grouped_graphs) {
       for (const auto &node : grouped_graph.GetAllNodes()) {
         if (!af::ops::IsOps<af::ascir_op::Workspace>(node)) {
@@ -663,12 +658,7 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_SameReduce_NoDupli
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
 
   size_t shared_workspace_count = 0UL;
-  // RCore 任务由 kCommon 任务派生并复制其子图, workspace 节点会随拷贝重复出现,
-  // 故仅在 kCommon 任务内计数
   for (const auto &task : tasks) {
-    if (task.reduce_type != ReduceTemplateType::kCommon) {
-      continue;
-    }
     for (const auto &grouped_graph : task.grouped_graphs) {
       for (const auto &node : grouped_graph.GetAllNodes()) {
         if (af::ops::IsOps<af::ascir_op::Workspace>(node) &&

@@ -517,11 +517,15 @@ Status ReducePartitionCaseGenerator::GeneratorTask(ascir::HintGraph &optimize_gr
            optimize_graph.GetName().c_str());
     return ge::GRAPH_SUCCESS;
   }
-  GELOGI("Graph %s begin to generate reduce tasks.", optimize_graph.GetName().c_str());
+  const bool force_all_load = ShouldForceAllLoad(optimize_graph);
+  GELOGI("Graph %s force AllLoad = %d, begin to generate reduce tasks.", optimize_graph.GetName().c_str(),
+         static_cast<int32_t>(force_all_load));
   GE_CHK_STATUS_RET(GeneratorGeneralTask(optimize_graph, tasks));
   GELOGI("After GeneralTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
-  GE_CHK_STATUS_RET(GeneratorRCoreTask(optimize_graph, tasks));
-  GELOGI("After RCoreTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
+  if (!force_all_load) {
+    GE_CHK_STATUS_RET(GeneratorRCoreTask(optimize_graph, tasks));
+    GELOGI("After RCoreTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
+  }
   GE_CHK_STATUS_RET(GeneratorAllLoadTask(optimize_graph, tasks));
   GELOGI("After AllLoadTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
   return ge::GRAPH_SUCCESS;
@@ -604,6 +608,22 @@ Status ReducePartitionCaseGenerator::Generate([[maybe_unused]] ascir::HintGraph 
                                               [[maybe_unused]] std::vector<ascir::ImplGraph> &graphs,
                                               [[maybe_unused]] std::vector<std::string> &score_functions) {
   return ge::GRAPH_SUCCESS;
+}
+
+bool ReducePartitionCaseGenerator::ShouldForceAllLoad(ascir::HintGraph &graph) {
+  if (!IsOnlyHasOneOrLessReduce(graph)) {
+    return true;
+  }
+
+  ascir::ImplGraph impl_graph(graph.GetName().c_str());
+  impl_graph.CopyFrom(graph);
+  node_order_.clear();
+  auto loop_start_end = FindNormLoops(impl_graph);
+  if (!loop_start_end.empty()) {
+    return true;
+  }
+
+  return false;
 }
 
 Status ReducePartitionCaseGenerator::GenerateGeneralCase(ascir::HintGraph &graph, std::vector<ascir::ImplGraph> &graphs,
