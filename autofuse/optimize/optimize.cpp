@@ -83,8 +83,8 @@ Status FinalizeIndexedGraphs(std::vector<ascir::ScheduledResult> &scheduled_resu
         auto node = schedule_group.graph_name_to_score_funcs.extract(old_name);
         if (!node.empty()) {
           node.key() = std::move(new_name);
-          schedule_group.graph_name_to_score_funcs.insert(std::move(node));
-          GELOGD("Update score func key: [%s] -> [%s]", old_name.c_str(), node.key().c_str());
+          const auto inserted = schedule_group.graph_name_to_score_funcs.insert(std::move(node));
+          GELOGD("Update score func key: [%s] -> [%s]", old_name.c_str(), inserted.position->first.c_str());
         }
       }
     }

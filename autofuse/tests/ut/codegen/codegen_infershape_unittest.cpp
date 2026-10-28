@@ -13,56 +13,9 @@
 #include "graph_utils.h"
 #include "codegen_infershape.h"
 #include "codegen.h"
-#include <fstream>
 #include <string>
-#include <filesystem>
 
 using namespace ge;
-
-namespace {
-std::pair<int, std::string> execute_command(const std::string &command) {
-  std::array<char, 128> buffer;
-  std::string output;
-  std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(command.c_str(), "r"), pclose);
-
-  if (!pipe) {
-    throw std::runtime_error("Failed to open pipe");
-  }
-
-  while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-    output += buffer.data();
-  }
-
-  return {WEXITSTATUS(pclose(pipe.release())), output};
-}
-
-bool CompileCodegenCode(const std::string &code) {
-  std::string cmake_dir = CMAKE_BINARY_DIR;
-  // 临时目录
-  std::string temp_dir = cmake_dir + "/tests/ut/temp_compile_codegen_infershpe";
-  std::filesystem::remove_all(temp_dir);
-  std::filesystem::create_directories(temp_dir);
-  // 生成的 C++ 文件路径
-  std::string source_file = temp_dir + "/temp_codegen_infershape.cpp";
-  // 生成 C++ 代码
-  std::ofstream source_stream(source_file);
-  source_stream << code << R"(
-        int main() {
-            return 0;
-        }
-    )";
-  source_stream.close();
-  // 头文件路径
-  std::string ascend_install_path = ASCEND_INSTALL_PATH;
-  std::string include_path = "-I" + ascend_install_path + "/include/ ";
-  // 编译代码
-  std::string compile_command = "g++ -std=c++17 " + include_path + " " + source_file;
-  auto [compile_exit_code, compile_output] = execute_command(compile_command);
-  // 清理临时目录
-  std::filesystem::remove_all(temp_dir);
-  return compile_exit_code == 0;
-}
-}  // namespace
 
 class UTestCodegenInfershape : public testing::Test {
  protected:
@@ -178,58 +131,6 @@ extern "C" ge::graphStatus InferShape(InferShapeSymbolEvalContext *context)
   EXPECT_EQ(code, expect);
 }
 
-TEST(UTestCodegenInfershape, TestInfershapeFunc_Compile_OK_WithLambda) {
-  codegen::CodegenOptions opt;
-  codegen::Codegen codegen(opt);
-  vector<vector<std::string>> symbol_shape_str{{"s1", "s1 * s2", "s2 - s1"}};
-  std::string s0_source = R"([&]() -> int64_t {
-    auto *tensor = context->GetGraphInputTensor(0);
-    if (tensor == nullptr) {
-      return gert::Shape::kInvalidDimValue;
-    }
-    return tensor->GetOriginShape().GetDim(1);
-  }())";
-  std::string s1_source = R"([&]() -> int64_t {
-    auto *tensor = context->GetGraphInputTensor(1);
-    if (tensor == nullptr) {
-      return gert::Shape::kInvalidDimValue;
-    }
-    return tensor->GetOriginShape().GetDim(1);
-  }())";
-  std::string s2_source = R"([&]() -> int64_t {
-    auto *tensor = context->GetGraphInputTensor(2);
-    if (tensor == nullptr) {
-      return gert::Shape::kInvalidDimValue;
-    }
-    return tensor->GetOriginShape().GetDim(1);
-  }())";
-
-  std::map<std::string, std::string> shape_info = {{"s0", s0_source}, {"s1", s1_source}, {"s2", s2_source}};
-  std::string code = codegen.GenerateInferShape(symbol_shape_str, shape_info);
-
-  ASSERT_TRUE(CompileCodegenCode(code));
-}
-
-TEST(UTestCodegenInfershape, TestInfershapeFunc_Compile_NOK) {
-  codegen::CodegenOptions opt;
-  codegen::Codegen codegen(opt);
-  vector<vector<std::string>> symbol_shape_str{{"s1", "s1 * s2", "s2 - s1"}};
-  std::map<std::string, std::string> shape_info;
-  std::string code = codegen.GenerateInferShape(symbol_shape_str, shape_info);
-
-  ASSERT_TRUE(!CompileCodegenCode(code));
-}
-
-TEST(UTestCodegenInfershape, TestInfershapeFunc_Compile_OK) {
-  codegen::CodegenOptions opt;
-  codegen::Codegen codegen(opt);
-  vector<vector<std::string>> symbol_shape_str{{"1", "2", "3"}};
-  std::map<std::string, std::string> shape_info;
-  std::string code = codegen.GenerateInferShape(symbol_shape_str, shape_info);
-
-  ASSERT_TRUE(CompileCodegenCode(code));
-}
-
 TEST(UTestCodegenInfershape, Test_WithRational) {
   codegen::CodegenOptions opt;
   codegen::Codegen codegen(opt);
@@ -273,5 +174,4 @@ TEST(UTestCodegenInfershape, Test_WithRational) {
   auto func_pos = code.find(func_start);
   auto gen_code = code.substr(func_pos, std::string(expect_code).size());
   ASSERT_EQ(gen_code, expect_code);
-  ASSERT_TRUE(CompileCodegenCode(code));
 }

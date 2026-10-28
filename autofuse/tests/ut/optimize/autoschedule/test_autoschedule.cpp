@@ -2579,7 +2579,48 @@ TEST_F(AutoSchedulerUT, IndirectLoadPostReduceSetsConnectedInputVectorizedViewAn
   ASSERT_NE(output_first_inner, reduce_output.axis.end());
   const size_t output_inner_offset = static_cast<size_t>(std::distance(reduce_output.axis.begin(), output_first_inner));
   for (size_t i = 0UL; i < output_inner_offset; ++i) {
-    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(reduce_output.repeats[i], One), af::TriBool::kTrue);
+    // Gather 调度不得把保留的 batch 循环轴改写成 Reduce 轴；局部 UB 范围由向量化视图定义。
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(reduce_output.repeats[i], reduce_input.repeats[i]), af::TriBool::kTrue);
+    EXPECT_NE(af::SymbolicUtils::StaticCheckEq(reduce_output.strides[i], Zero), af::TriBool::kTrue);
+  }
+}
+
+TEST_F(AutoSchedulerUT, IndirectLoadMeanPreservesBatchViewForDirectAndElementwiseInputs) {
+  for (const bool with_transform : {false, true}) {
+    auto graph = BuildIndirectLoadAutoScheduleGraph(1L, false, true, with_transform);
+    graph.FindNode("reduce")->GetOpDesc()->SetType("Mean");
+    IndirectLoadScheduleCaseGenerator generator;
+    std::vector<af::AscGraph> candidates;
+    std::vector<std::string> scores;
+    ASSERT_EQ(generator.Generate(graph, candidates, scores), af::SUCCESS);
+    for (const auto template_id : {ascir::TemplateId::kIndirectLoadSimd, ascir::TemplateId::kIndirectLoadSimt}) {
+      auto candidate = FindIndirectLoadCandidate(candidates, template_id);
+      if (candidate == candidates.end()) {
+        // 带输出变换的图可能不支持 SIMT 候选；SIMD 与直连 SIMT 必须存在。
+        EXPECT_TRUE(with_transform && template_id == ascir::TemplateId::kIndirectLoadSimt);
+        continue;
+      }
+      std::vector<autoschedule::AutoScheduleOutput> results;
+      AutoSchedule autoschedule(*candidate, results);
+      ASSERT_EQ(autoschedule.DoAutoSchedule(), af::SUCCESS);
+      ASSERT_FALSE(results.empty());
+      const auto reduce = results[0].scheduled_graph.FindNode("reduce");
+      ASSERT_NE(reduce, nullptr);
+      const auto &input = reduce->inputs[0].attr;
+      const auto &output = reduce->outputs[0].attr;
+      ASSERT_EQ(input.axis, output.axis);
+      bool has_batch = false;
+      for (size_t i = 0; i < input.axis.size(); ++i) {
+        // A 轴不能因 gather 局部窗口化而变成 R 轴；归约轴仍保持输出零步长。
+        if (af::SymbolicUtils::StaticCheckEq(input.repeats[i], One) != af::TriBool::kTrue &&
+            af::SymbolicUtils::StaticCheckEq(output.strides[i], Zero) != af::TriBool::kTrue) {
+          has_batch = true;
+          EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(input.repeats[i], output.repeats[i]), af::TriBool::kTrue);
+        }
+      }
+      EXPECT_TRUE(has_batch);
+      EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(output.strides.back(), Zero), af::TriBool::kTrue);
+    }
   }
 }
 

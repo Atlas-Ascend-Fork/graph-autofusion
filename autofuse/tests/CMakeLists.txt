@@ -431,7 +431,9 @@ target_include_directories(optimize PUBLIC
         ${CODE_ROOT_DIR}/autofuse
 )
 
-target_compile_options(optimize PRIVATE -fPIC -Werror -fno-common -Wextra -Wfloat-equal -O2 -Wall)
+# Host compiler optimization is unnecessary for this test-only library.
+# Keep cold, coverage-enabled builds from spending memory on -O2 optimization.
+target_compile_options(optimize PRIVATE -fPIC -Werror -fno-common -Wextra -Wfloat-equal -O0 -Wall)
 
 if (ENABLE_OPEN_SRC)
     target_link_libraries(optimize PUBLIC

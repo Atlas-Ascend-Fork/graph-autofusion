@@ -1155,6 +1155,34 @@ TEST(IndirectLoadApiCallTest, GenerateFuncDefinitionSimtProducesBodyStruct) {
   EXPECT_NE(def.find(" Outputs("), std::string::npos);
 }
 
+TEST(IndirectLoadApiCallTest, GenerateFuncDefinitionGuardsContextAcrossVariants) {
+  // 同名节点的多个 impl 会拼接到同一源文件；Context 必须独立于 Body 防重，
+  // 避免 Body 的 32/64 位双实例各自带 guard 时遗漏共享 Context。
+  const std::string context_guard = "AUTOFUSE_INDIRECT_LOAD_SIMT_CONTEXT_DEFINED_indirect_load";
+  const std::string context_begin =
+      "#ifndef " + context_guard + "\n#define " + context_guard + "\nstruct IndirectLoadSimtContext_indirect_load {\n";
+  for (bool static_shape : {false, true}) {
+    ILTestGraph first("simt_variant", 2, 8, 2, 8);
+    ILTestGraph second("simt_nddma_variant", 2, 8, 2, 8);
+    ILTestGraph dynamic_first("simt_dynamic_variant");
+    ILTestGraph dynamic_second("simt_dynamic_nddma_variant");
+    std::string first_def;
+    std::string second_def;
+    GenerateSimtFuncDefinition(static_shape ? first : dynamic_first, first_def);
+    GenerateSimtFuncDefinition(static_shape ? second : dynamic_second, second_def);
+    for (const auto &definition : {first_def, second_def}) {
+      const auto begin = definition.find(context_begin);
+      ASSERT_NE(begin, std::string::npos);
+      const auto end = definition.find("};\n#endif\n", begin);
+      ASSERT_NE(end, std::string::npos);
+      // Context 的 guard 先闭合，之后才是独立的 Body guard。
+      const auto body_guard = definition.find("#ifndef AUTOFUSE_INDIRECT_LOAD_SIMT_BODY_DEFINED_", end);
+      ASSERT_NE(body_guard, std::string::npos);
+      EXPECT_LT(end, body_guard);
+    }
+  }
+}
+
 TEST(IndirectLoadApiCallTest, GenerateFuncDefinitionSimtEmitsMultiOutputEvaluator) {
   ILTestGraph g("simt_multi_output");
   std::string def;
@@ -2029,6 +2057,55 @@ TEST_F(IndirectLoadConstructFromNodesTest, ConnectsRedirectedSimtPostReduceWithP
   ASSERT_EQ(kernel.root_loop.Generate(kernel.tiler, kernel.tpipe, generated), af::SUCCESS);
   EXPECT_NE(generated.find("AscendC::IndirectLoadSimt<"), std::string::npos);
   EXPECT_NE(generated.find("global_10.GetPhyAddr()"), std::string::npos);
+}
+
+TEST_F(IndirectLoadConstructFromNodesTest, FinalizesSimtMetadataWithRolelessNddmaSideInput) {
+  // 回归场景：复合 Norm 普通调度侧输入经 NddmaTemplate::GenNddmaNode 就地转 Nddma
+  // （SetType + 吸收 Broadcast 视图）后不携带 SIMT 角色。生产图中 Reduce 直接消费
+  // IL，该 Nddma 只出现在含 Reduce 的被丢弃链中，SIMT 元数据后向 walk 必须把
+  // Nddma 视为 GM 搬运边界，而不是穿过它走到 Data 图输入端子，触发 "has no
+  // input" 断言导致整个 Codegen parse graph failed。
+  ILTestGraph g("simt_post_nddma_side");
+  BuildSimtPostReduceGraph(g);
+  AnnotateSimtTemplate(g.graph);
+
+  auto il = g.graph.FindNode("indirect_load");
+  auto output_transform = g.graph.FindNode("output_transform");
+  auto reduce = g.graph.FindNode("reduce");
+  auto store = g.graph.FindNode("store");
+  ASSERT_NE(il, nullptr);
+  ASSERT_NE(output_transform, nullptr);
+  ASSERT_NE(reduce, nullptr);
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(SetTemplateRole(il, TemplateRole::kSimtOp), af::SUCCESS);
+  ASSERT_EQ(SetTemplateRole(output_transform, TemplateRole::kSimtInlineTransform), af::SUCCESS);
+
+  // 重绑为生产拓扑：Reduce 直接消费 IL（post-Reduce 输入生产者即 IL 本身），侧输入
+  // 在 post-Reduce 区域汇入（output_transform: reduce + addend），store 消费该汇入结果。
+  auto reduce_in = reduce->GetInDataAnchor(0UL);
+  auto transform_in = output_transform->GetInDataAnchor(0UL);
+  auto store_in = store->GetInDataAnchor(0UL);
+  reduce_in->UnlinkAll();
+  transform_in->UnlinkAll();
+  store_in->UnlinkAll();
+  ASSERT_EQ(reduce_in->LinkFrom(il->GetOutDataAnchor(0UL)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(transform_in->LinkFrom(reduce->GetOutDataAnchor(0UL)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(store_in->LinkFrom(output_transform->GetOutDataAnchor(0UL)), af::GRAPH_SUCCESS);
+
+  // 与生产 NddmaTemplate::GenNddmaNode 的就地转换一致：单引用侧输入 Load 转 Nddma
+  // 后不携带 SIMT 角色（普通调度区域节点统一不带角色，避免 no API call found）。
+  // AnnotateSimtTemplate 会给侧输入 Load 标 kSimtDirectGmBoundary，需显式还原为
+  // 无角色状态，否则 walk 在角色判定处截断，覆盖不到 Nddma 类型边界本身。
+  auto side_node = g.graph.FindNode("addend_load");
+  ASSERT_NE(side_node, nullptr);
+  side_node->GetOpDesc()->SetType("Nddma");
+  side_node->attr.type = "Nddma";
+  ASSERT_EQ(SetTemplateRole(side_node, TemplateRole::kNone), af::SUCCESS);
+  ASSERT_TRUE(af::ops::IsOps<af::ascir_op::Nddma>(side_node));
+
+  bool is_supported = false;
+  ASSERT_EQ(ascgen_utils::indirect_load::FinalizeLoweringMetadata(il, is_supported), af::SUCCESS);
+  EXPECT_TRUE(is_supported);
 }
 
 TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimdLoopWithUbLifecycleAndNoLoadStoreSync) {

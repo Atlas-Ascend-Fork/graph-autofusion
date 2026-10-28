@@ -332,6 +332,14 @@ After installation, you can perform developer testing. Ensure you have completed
 
 The `.run` package provides the shared libraries required by the tests. SuperKernel Python UT/ST loads `superkernel` directly from the current source tree and does not replace or uninstall the wheel installed in the CANN path by `--pylocal`.
 
+When only Autofuse test modules are selected without `--pkg`, the test entry point builds its target dependencies directly,
+without a preliminary full product build. `-u --module=autofuse_ascendc_api` runs numeric API UT for both architectures
+without building the test `pyautofuse/optimize/codegen` libraries. Broadcast code-generation and kernel-execution cases
+run under `-s --module=autofuse_e2e` and remain included in the complete Autofuse UT suite invoked with
+`bash scripts/test/run_autofuse_test.sh -u -m all -j 8`.
+Default parallelism uses the CPUs available to the current process, respecting affinity and container CPU quota,
+rather than the host's exposed CPU count or a fixed limit of 14.
+
 - UT Verification
 
    ```bash

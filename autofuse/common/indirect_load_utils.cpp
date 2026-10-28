@@ -743,7 +743,11 @@ af::Status CollectSimtLoweringBackwardNodes(const af::AscNodePtr &root, const af
     if (current == nullptr || current == indirect_load || !nodes.emplace(current.get()).second) {
       continue;
     }
-    if (IsSimtDirectGmBoundary(current) || af::ops::IsOps<af::ascir_op::Scalar>(current) ||
+    // Nddma 无论是否带 SIMT direct-GM 角色，本质都是 GM 搬运节点，标量求值器不能展开其内部：
+    // 复合 Norm 普通调度侧输入经 NddmaTemplate 合并 Load→Broadcast 后即为无角色的队列搬运
+    // Nddma，越过它会走到 Data 图输入端子。Data 按定义无生产者，同样是合法的 walk 终止边界。
+    if (IsSimtDirectGmBoundary(current) || af::ops::IsOps<af::ascir_op::Nddma>(current) ||
+        af::ops::IsOps<af::ascir_op::Data>(current) || af::ops::IsOps<af::ascir_op::Scalar>(current) ||
         af::ops::IsOps<af::ascir_op::ScalarData>(current) || af::ops::IsOps<af::ascir_op::Arange>(current)) {
       continue;
     }

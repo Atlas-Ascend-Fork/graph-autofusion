@@ -587,19 +587,6 @@ Status ApplyIndirectLoadTemplateMerge(ascir::ImplGraph &graph, const af::AscNode
   return af::SUCCESS;
 }
 
-Status SetOuterRepeatsToOne(const af::AscNodePtr &node, const std::vector<ascir::AxisId> &vectorized_axes) {
-  if (node->attr.api.compute_type != af::ComputeType::kComputeReduce) {
-    return af::SUCCESS;
-  }
-  GE_ASSERT_TRUE(!vectorized_axes.empty(), "Node[%s] has no IndirectLoad vector axes.", node->GetNamePtr());
-  for (const auto &output : node->outputs()) {
-    GE_ASSERT_TRUE(output->attr.axis.size() == output->attr.repeats.size());
-    GE_ASSERT_TRUE(output->attr.axis.size() >= vectorized_axes.size());
-    std::fill_n(output->attr.repeats.begin(), output->attr.axis.size() - vectorized_axes.size(), af::sym::kSymbolOne);
-  }
-  return af::SUCCESS;
-}
-
 Status SetInputInnerVectorizedView(const af::AscNodePtr &node, const ascir::Axis &input_inner_axis,
                                    af::AscTensorAttr &attr) {
   GE_ASSERT_TRUE(attr.axis.size() == attr.repeats.size() && attr.axis.size() == attr.strides.size(),
@@ -815,7 +802,8 @@ Status Scheduler::ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &sk
     return af::SUCCESS;
   }
   GE_ASSERT_SUCCESS(ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.inner_axis, false));
-  GE_ASSERT_SUCCESS(SetOuterRepeatsToOne(node, indirect_load_info_.axes.vectorized_axes));
+  // 保留 Reduce 的逻辑外轴尺寸，局部 UB 窗口由 vectorized_axis 定义。
+  // 将保留的 batch 轴强制置 1 会使输入/输出视图不一致，Mean 据此误把 batch 计入归约除数。
   return af::SUCCESS;
 }
 

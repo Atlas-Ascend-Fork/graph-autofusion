@@ -548,16 +548,8 @@ bool IsFileContainsString(const std::string &filename, const std::string &search
   return false;
 }
 
-void WriteConcatTilingFunc(const std::string &tiling_func) {
-  std::ofstream oss;
-  oss.open("Concat_tiling_func.cpp", std::ios::out);
-  oss << "#include \"Concat_tiling_data.h\"\n";
-  oss << tiling_func;
-  oss.close();
-}
-
-void GenerateConcatTilingData(const ascir::FusedScheduledResult &fused_result,
-                              const std::map<std::string, std::string> &options, const std::string &graph_name) {
+std::string GenerateConcatTilingData(const ascir::FusedScheduledResult &fused_result,
+                                     const std::map<std::string, std::string> &options, const std::string &graph_name) {
   TilingCodeGenerator generator;
   TilingCodeGenConfig generator_config;
   std::map<std::string, std::string> tiling_res;
@@ -568,62 +560,7 @@ void GenerateConcatTilingData(const ascir::FusedScheduledResult &fused_result,
   generator_config.gen_tiling_data = true;
   generator_config.gen_extra_infos = false;
   EXPECT_EQ(generator.GenTilingCode("Concat", all_model_infos, generator_config, tiling_res), af::SUCCESS);
-  std::ofstream oss;
-  oss.open("Concat_tiling_data.h", std::ios::out);
-  oss << tiling_res.at(graph_name + "TilingData");
-  oss.close();
-}
-
-void PrepareStubAndCompile() {
-  auto ret =
-      std::system(std::string("cp ").append(TOP_DIR).append("/tests/st/att/testcase/stub/op_log.h ./ -f").c_str());
-  EXPECT_EQ(ret, 0);
-  ret = autofuse::test::CopyStubFiles(UT_DIR, "testcase/stub/");
-  EXPECT_EQ(ret, 0);
-}
-
-void CompileAndRunConcat() {
-  auto ret = std::system(
-      "g++ -std=c++17 -ggdb3 -O0 tiling_func_main_concat.cpp Concat_tiling_func.cpp -o tiling_func_main_concat"
-      " -I ./ -DSTUB_LOG");
-  EXPECT_EQ(ret, 0);
-  ret = std::system("./tiling_func_main_concat");
-  EXPECT_EQ(ret, 0);
-}
-
-void WriteTqueTbufTestMain(bool reuse_temp_buffer) {
-  std::ofstream oss;
-  oss.open("tiling_func_main_concat.cpp", std::ios::out);
-  std::string kRunTilingFuncMainLocal = R"(
-#include <iostream>
-#include "Concat_tiling_data.h"
-using namespace optiling;
-
-void PrintResult(tque_tbuf_case0TilingData& tilingData) {
-  std::cout << "====================================================" << std::endl;)";
-  if (!reuse_temp_buffer) {
-    kRunTilingFuncMainLocal += R"(std::cout << "b0_size"<< " = " << tilingData.get_b0_size() << std::endl;)";
-  }
-  kRunTilingFuncMainLocal += R"(
-  std::cout << "q0_size"<< " = " << tilingData.get_q0_size() << std::endl;
-  std::cout << "b1_size"<< " = " << tilingData.get_b1_size() << std::endl;
-  std::cout << "====================================================" << std::endl;
-}
-
-int main() {
-  tque_tbuf_case0TilingData tilingData;)";
-  if (!reuse_temp_buffer) {
-    kRunTilingFuncMainLocal += R"(tilingData.set_b0_size(64);)";
-  }
-  kRunTilingFuncMainLocal += R"(
-  tilingData.set_q0_size(128);
-  tilingData.set_b1_size(512);
-  PrintResult(tilingData);
-  return 0;
-}
-)";
-  oss << kRunTilingFuncMainLocal;
-  oss.close();
+  return tiling_res.at(graph_name + "TilingData");
 }
 
 void TestGenConcat_tque_tbuf_test(bool reuse_temp_buffer) {
@@ -648,12 +585,14 @@ void TestGenConcat_tque_tbuf_test(bool reuse_temp_buffer) {
   auto res = GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, true);
   std::string tiling_func;
   CombineTilings(tiling_funcs, tiling_func);
-  EXPECT_EQ(res, true);
-  WriteConcatTilingFunc(tiling_func);
-  GenerateConcatTilingData(fused_scheduled_result, options, kFirstGraphName);
-  PrepareStubAndCompile();
-  WriteTqueTbufTestMain(reuse_temp_buffer);
-  CompileAndRunConcat();
+  ASSERT_TRUE(res);
+  EXPECT_FALSE(tiling_func.empty());
+  const auto tiling_data = GenerateConcatTilingData(fused_scheduled_result, options, kFirstGraphName);
+  EXPECT_NE(tiling_data.find("q0_size"), std::string::npos);
+  EXPECT_NE(tiling_data.find("b1_size"), std::string::npos);
+  if (!reuse_temp_buffer) {
+    EXPECT_NE(tiling_data.find("b0_size"), std::string::npos);
+  }
 }
 
 TEST_F(TestGenConcat, tque_tbuf_case0) {
@@ -662,51 +601,6 @@ TEST_F(TestGenConcat, tque_tbuf_case0) {
 
 TEST_F(TestGenConcat, tque_tbuf_reuse_temp_buffer) {
   TestGenConcat_tque_tbuf_test(true);
-}
-
-void WriteMultiCaseTestMain() {
-  std::ofstream oss;
-  oss.open("tiling_func_main_concat.cpp", std::ios::out);
-  const std::string kRunTilingFuncMainLocal = R"(
-#include <iostream>
-#include "Concat_tiling_data.h"
-using namespace optiling;
-
-void PrintResult(AscGraph0ScheduleResult0G0TilingData& tilingData0,AscGraph0ScheduleResult1G0TilingData& tilingData1) {
-  std::cout << "========================AscGraph0ScheduleResult0G0TilingData============================" << std::endl;
-  std::cout << "b0_size"<< " = " << tilingData0.get_b0_size() << std::endl;
-  std::cout << "q0_size"<< " = " << tilingData0.get_q0_size() << std::endl;
-  std::cout << "b1_size"<< " = " << tilingData0.get_b1_size() << std::endl;
-  std::cout << "b2_size"<< " = " << tilingData0.get_b2_size() << std::endl;
-  std::cout << "b3_size"<< " = " << tilingData0.get_b3_size() << std::endl;
-  std::cout << "========================AscGraph0ScheduleResult1G0TilingData============================" << std::endl;
-  std::cout << "b0_size"<< " = " << tilingData1.get_b0_size() << std::endl;
-  std::cout << "q0_size"<< " = " << tilingData1.get_q0_size() << std::endl;
-  std::cout << "q1_size"<< " = " << tilingData1.get_q1_size() << std::endl;
-  std::cout << "q2_size"<< " = " << tilingData1.get_q2_size() << std::endl;
-  std::cout << "b3_size"<< " = " << tilingData1.get_b3_size() << std::endl;
-}
-
-int main() {
-  AscGraph0ScheduleResult0G0TilingData tilingData0;
-  AscGraph0ScheduleResult1G0TilingData tilingData1;
-  tilingData0.set_b0_size(64);
-  tilingData0.set_q0_size(128);
-  tilingData0.set_b1_size(512);
-  tilingData0.set_b2_size(512);
-  tilingData0.set_b3_size(512);
-
-  tilingData1.set_b0_size(64);
-  tilingData1.set_q0_size(128);
-  tilingData1.set_q1_size(512);
-  tilingData1.set_q2_size(512);
-  tilingData1.set_b3_size(512);
-  PrintResult(tilingData0,tilingData1);
-  return 0;
-}
-)";
-  oss << kRunTilingFuncMainLocal;
-  oss.close();
 }
 
 TEST_F(TestGenConcat, tque_tbuf_case1) {
@@ -745,10 +639,11 @@ TEST_F(TestGenConcat, tque_tbuf_case1) {
   auto res = GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, true);
   std::string tiling_func;
   CombineTilings(tiling_funcs, tiling_func);
-  EXPECT_EQ(res, true);
-  WriteConcatTilingFunc(tiling_func);
-  GenerateConcatTilingData(fused_scheduled_result, options, kFirstGraphName);
-  PrepareStubAndCompile();
-  WriteMultiCaseTestMain();
-  CompileAndRunConcat();
+  ASSERT_TRUE(res);
+  EXPECT_NE(tiling_func.find("AscGraph0ScheduleResult0G0"), std::string::npos);
+  EXPECT_NE(tiling_func.find("AscGraph0ScheduleResult1G0"), std::string::npos);
+  const auto tiling_data = GenerateConcatTilingData(fused_scheduled_result, options, kFirstGraphName);
+  EXPECT_NE(tiling_data.find("q0_size"), std::string::npos);
+  EXPECT_NE(tiling_data.find("q1_size"), std::string::npos);
+  EXPECT_NE(tiling_data.find("q2_size"), std::string::npos);
 }

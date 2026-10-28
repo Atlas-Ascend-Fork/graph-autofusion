@@ -29,6 +29,7 @@ namespace {
 constexpr size_t kIndirectLoadInputCount = 2UL;
 constexpr size_t kIndirectLoadOutputCount = 1UL;
 constexpr char kSimtContextNamePrefix[] = "IndirectLoadSimtContext_";
+constexpr char kSimtContextGuardPrefix[] = "AUTOFUSE_INDIRECT_LOAD_SIMT_CONTEXT_DEFINED_";
 constexpr char kSimtBodyNamePrefix[] = "IndirectLoadSimtBody_";
 constexpr char kSimtBodyGuardPrefix[] = "AUTOFUSE_INDIRECT_LOAD_SIMT_BODY_DEFINED_";
 constexpr char kGlobalTensorNamePrefix[] = "global_";
@@ -1900,9 +1901,15 @@ Status IndirectLoadRegApiCall::GenerateFuncDefinition(const TPipe &tpipe, const 
   std::string idx_inner_expr;
   const std::vector<std::string> runtime_size_exprs = CollectSimtRuntimeSizeExprs(
       input_dtype, index_dtype, offset_type, tpipe, use_prepass, prepass_plan, idx_inner_expr);
+  // Context 由所有偏移宽度的 Body 共享，且同名节点可能在多个 impl 中重复发射。
+  // 独立保护 Context，不能只保护下方循环中的 Body 定义。
+  const std::string context_guard = kSimtContextGuardPrefix + valid_node_name;
+  ss << "#ifndef " << context_guard << std::endl;
+  ss << "#define " << context_guard << std::endl;
   GE_ASSERT_SUCCESS(GenerateSimtContextDefinition(context_name, simt_gm_tensors_,
                                                   UseRuntimeOutputInnerSize(has_post_reduce_, logical_view_),
                                                   use_prepass, offset_type, runtime_size_exprs, ss));
+  ss << "#endif" << std::endl;
   const size_t ub_output_count = static_cast<size_t>(std::count_if(
       output_chains_.begin(), output_chains_.end(), [](const SimtOutputChain &chain) { return chain.local_target; }));
   for (const std::string &body_offset_type : body_offset_types) {
