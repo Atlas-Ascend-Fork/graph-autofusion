@@ -507,6 +507,13 @@ add_indirect_load_graph_case(indirect_load_user_embedding_sum_rank2
     indirect_load_user_embedding_sum_rank2 1
     IL_CASE_BROADCAST_WHERE IL_USER_EMBEDDING_SUM IL_USER_EMBEDDING_SUM_RANK2)
 
+# Transposed axis order: the table enters IndirectLoad as a transposed dense
+# view [emb, table_rows] strides=[1, emb] and the gather axis is the tail axis.
+# Guards the end-to-end SIMT path for the transposed-dense layout.
+add_indirect_load_graph_case(indirect_load_user_embedding_sum_transposed
+    indirect_load_user_embedding_sum_transposed 1
+    IL_CASE_BROADCAST_WHERE IL_USER_EMBEDDING_SUM IL_USER_EMBEDDING_SUM_TRANSPOSED)
+
 # Same GraphHint and runtime buffers as the user embedding+Sum graph, but force the SIMD candidate
 # to exercise the vector-gather path used by the board kernel in the simulator.
 add_indirect_load_graph_case(indirect_load_user_embedding_sum_simd indirect_load_user_embedding_sum_simd 0

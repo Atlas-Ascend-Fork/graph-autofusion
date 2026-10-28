@@ -3435,6 +3435,67 @@ std::shared_ptr<af::AscGraph> CreateUserEmbeddingSumRank2SubGraph() {
   SetView(output, axes, reduce, reduce_strides, af::DT_FLOAT);
   return graph;
 }
+#elif defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+// Transposed-axis-order embedding + Sum: the table enters IndirectLoad as a
+// transposed dense view [emb, table_rows] strides=[1, emb], the gather axis is
+// the tail axis (axis=1), and Sum reduces the lookup axis.
+constexpr int64_t kUserEmbeddingSumTransposedEmb = 16;
+constexpr int64_t kUserEmbeddingSumTransposedTableRows = 100;
+constexpr char kUserEmbeddingSumTransposedGraphName[] = "user_embedding_sum_transposed";
+
+std::shared_ptr<af::AscGraph> CreateUserEmbeddingSumTransposedSubGraph() {
+  auto graph = std::make_shared<af::AscGraph>(kUserEmbeddingSumTransposedGraphName);
+  const auto emb = graph->CreateSizeVar(kUserEmbeddingSumTransposedEmb);
+  // lookup 数量保持动态：静态形状会走不同的调度分支，掩盖本变体要覆盖的路径。
+  const auto lookups = graph->CreateSizeVar("ks0");
+  const auto table_rows = graph->CreateSizeVar(kUserEmbeddingSumTransposedTableRows);
+  const auto a0 = graph->CreateAxis("a0", emb).id;
+  const auto a1 = graph->CreateAxis("a1", lookups).id;
+  const std::vector<af::AxisId> axes = {a0, a1};
+  const std::vector<af::Expression> full = {emb, lookups};
+  const std::vector<af::Expression> full_strides = {lookups, af::ops::One};
+  const std::vector<af::Expression> index = {af::ops::One, lookups};
+  const std::vector<af::Expression> index_strides = {af::ops::Zero, af::ops::One};
+
+  af::ascir_op::Load index_load("index_load");
+  af::ascir_op::Broadcast index_broadcast("index_broadcast");
+  InitDataLoadBroadcast("indices", 1, index_load, index_broadcast, *graph, axes, index, index_strides, full,
+                        full_strides, af::DT_INT32);
+
+  af::ascir_op::Load table_load("table_load");
+  // Transposed dense view: the backing table [table_rows, emb] is row-major,
+  // expressed under the unified axis order as [emb, table_rows] strides=[1, emb].
+  InitDataLoad("table", 0, table_load, *graph, axes, {emb, table_rows}, {af::ops::One, emb}, af::DT_FLOAT);
+
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  graph->AddNode(indirect_load);
+  indirect_load.x1 = table_load.y;
+  indirect_load.x2 = index_broadcast.y;
+  indirect_load.ir_attr.SetAxis(1);
+  indirect_load.ir_attr.SetNegative_index_support(true);
+  indirect_load.ir_attr.SetNeed_check_bound(true);
+  indirect_load.ir_attr.SetMax(table_rows);
+  SetView(indirect_load, axes, full, full_strides, af::DT_FLOAT);
+
+  af::ascir_op::Sum sum("sum");
+  graph->AddNode(sum);
+  sum.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  sum.attr.sched.axis = axes;
+  sum.x = indirect_load.y;
+  const std::vector<af::Expression> reduce = {emb, af::ops::One};
+  const std::vector<af::Expression> reduce_strides = {af::ops::One, af::ops::Zero};
+  SetView(sum, axes, reduce, reduce_strides, af::DT_FLOAT);
+  af::ascir_op::Store store("store");
+  graph->AddNode(store);
+  store.x = sum.y;
+  SetView(store, axes, reduce, reduce_strides, af::DT_FLOAT);
+  af::ascir_op::Output output("output");
+  graph->AddNode(output);
+  output.ir_attr.SetIndex(0);
+  output.x = store.y;
+  SetView(output, axes, reduce, reduce_strides, af::DT_FLOAT);
+  return graph;
+}
 #endif
 #elif defined(IL_USER_EMBEDDING_EXP_ABS_ADD)
 // Shrunken version of the user graph: one embedding result fans out to Exp and
@@ -5783,6 +5844,8 @@ TEST_F(TestBackendUserEmbeddingSumE2e, GeneratesUserEmbeddingSumKernel) {
   const auto graph = backend.Finalize(
 #if defined(IL_USER_EMBEDDING_SUM_RANK2)
       CreateUserEmbeddingSumRank2SubGraph(),
+#elif defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+      CreateUserEmbeddingSumTransposedSubGraph(),
 #else
       CreateUserEmbeddingSumSubGraph(),
 #endif

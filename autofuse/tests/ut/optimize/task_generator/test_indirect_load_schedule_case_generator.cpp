@@ -4031,3 +4031,179 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimtScoresAboveSimdWhenDynamicInputG
   ASSERT_EQ(score_functions.size(), graphs.size());
   EXPECT_GT(ParseScore(score_functions[2]), ParseScore(score_functions[0]));
 }
+
+// embedding+sum 的两种轴序形态：标准（gather 轴在前）与转置（payload 轴在前、
+// gather 轴为尾轴，input 为转置稠密视图 [emb, vocab] strides=[1, emb]）。
+af::AscGraph BuildEmbeddingSumGraph(bool transposed_axis_order) {
+  af::AscGraph graph(transposed_axis_order ? "transposed_embedding_sum_ut_graph" : "standard_embedding_sum_ut_graph");
+  constexpr int64_t kEmbDim = 8L;
+  constexpr int64_t kVocab = 1353406L;
+  // 轴：a0/a1 的语义随形态交换，a1 始终承载动态 lookup 长度（ks0）。
+  const af::Expression emb = graph.CreateSizeVar(kEmbDim);
+  const af::Expression vocab = graph.CreateSizeVar(kVocab);
+  const af::Expression seq = graph.CreateSizeVar("ks0");
+  const auto emb_axis = graph.CreateAxis("emb_axis", emb);
+  const auto seq_axis = graph.CreateAxis("seq_axis", seq);
+  const std::vector<af::AxisId> axes = transposed_axis_order ? std::vector<af::AxisId>{emb_axis.id, seq_axis.id}
+                                                             : std::vector<af::AxisId>{seq_axis.id, emb_axis.id};
+
+  // index 路径：where 索引沿 lookup 维展开，payload 维零步长广播。
+  af::ascir_op::Data index_data("index_data", graph);
+  index_data.y.dtype = ge::DT_INT64;
+  index_data.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  index_data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  index_data.ir_attr.SetIndex(1);
+  index_data.attr.sched.axis = axes;
+  *index_data.y.axis = axes;
+  if (transposed_axis_order) {
+    *index_data.y.repeats = {af::ops::One, seq};
+    *index_data.y.strides = {af::sym::kSymbolZero, af::sym::kSymbolOne};
+  } else {
+    *index_data.y.repeats = {seq, af::ops::One};
+    *index_data.y.strides = {af::sym::kSymbolOne, af::sym::kSymbolZero};
+  }
+  af::ascir_op::Load index_load("index_load");
+  index_load.x = index_data.y;
+  index_load.ir_attr.SetOffset(af::ops::Zero);
+  if (transposed_axis_order) {
+    SetNodeView(index_load, ge::DT_INT64, axes, {af::ops::One, seq}, {af::sym::kSymbolZero, af::sym::kSymbolOne});
+  } else {
+    SetNodeView(index_load, ge::DT_INT64, axes, {seq, af::ops::One}, {af::sym::kSymbolOne, af::sym::kSymbolZero});
+  }
+  af::ascir_op::Broadcast index_broadcast("index_broadcast");
+  index_broadcast.x = index_load.y;
+  index_broadcast.attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  if (transposed_axis_order) {
+    SetNodeView(index_broadcast, ge::DT_INT64, axes, {emb, seq}, {seq, af::sym::kSymbolOne});
+  } else {
+    SetNodeView(index_broadcast, ge::DT_INT64, axes, {seq, emb}, {af::sym::kSymbolOne, af::sym::kSymbolZero});
+  }
+
+  // input 路径：embedding 权重表物理布局恒为 [vocab, emb] 行主序稠密；转置形态在统一
+  // 轴序 (emb, seq) 下表现为转置稠密视图 [emb, vocab] strides=[1, emb]。
+  af::ascir_op::Data table_data("table_data", graph);
+  table_data.y.dtype = ge::DT_FLOAT;
+  table_data.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  table_data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  table_data.ir_attr.SetIndex(0);
+  table_data.attr.sched.axis = axes;
+  *table_data.y.axis = axes;
+  if (transposed_axis_order) {
+    *table_data.y.repeats = {emb, vocab};
+    *table_data.y.strides = {af::sym::kSymbolOne, emb};
+  } else {
+    *table_data.y.repeats = {vocab, emb};
+    *table_data.y.strides = {emb, af::sym::kSymbolOne};
+  }
+  af::ascir_op::Load table_load("table_load");
+  table_load.x = table_data.y;
+  table_load.ir_attr.SetOffset(af::ops::Zero);
+  if (transposed_axis_order) {
+    SetNodeView(table_load, ge::DT_FLOAT, axes, {emb, vocab}, {af::sym::kSymbolOne, emb});
+  } else {
+    SetNodeView(table_load, ge::DT_FLOAT, axes, {vocab, emb}, {emb, af::sym::kSymbolOne});
+  }
+
+  // IndirectLoad：gather 轴为 lookup 侧的表行维（转置形态 axis=1 尾轴，标准形态 axis=0）。
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = table_load.y;
+  indirect_load.x2 = index_broadcast.y;
+  indirect_load.ir_attr.SetAxis(transposed_axis_order ? 1L : 0L);
+  if (transposed_axis_order) {
+    SetNodeView(indirect_load, ge::DT_FLOAT, axes, {emb, seq}, {seq, af::sym::kSymbolOne});
+  } else {
+    SetNodeView(indirect_load, ge::DT_FLOAT, axes, {seq, emb}, {emb, af::sym::kSymbolOne});
+  }
+
+  // post-Reduce：sum 沿 lookup 维归约，payload 维保留稠密。
+  af::ascir_op::Sum sum("sum");
+  sum.x = indirect_load.y;
+  sum.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  sum.attr.sched.axis = axes;
+  if (transposed_axis_order) {
+    SetNodeView(sum, ge::DT_FLOAT, axes, {emb, af::ops::One}, {af::sym::kSymbolOne, af::sym::kSymbolZero});
+  } else {
+    SetNodeView(sum, ge::DT_FLOAT, axes, {af::ops::One, emb}, {af::sym::kSymbolZero, af::sym::kSymbolOne});
+  }
+  af::ascir_op::Store store("store");
+  store.x = sum.y;
+  if (transposed_axis_order) {
+    SetNodeView(store, ge::DT_FLOAT, axes, {emb, af::ops::One}, {af::sym::kSymbolOne, af::sym::kSymbolZero});
+  } else {
+    SetNodeView(store, ge::DT_FLOAT, axes, {af::ops::One, emb}, {af::sym::kSymbolZero, af::sym::kSymbolOne});
+  }
+  af::ascir_op::Output y("y");
+  y.x = store.y;
+  y.y.dtype = ge::DT_FLOAT;
+  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.ir_attr.SetIndex(0);
+  y.attr.sched.axis = axes;
+  *y.y.axis = axes;
+  if (transposed_axis_order) {
+    *y.y.repeats = {emb, af::ops::One};
+    *y.y.strides = {af::sym::kSymbolOne, af::sym::kSymbolZero};
+  } else {
+    *y.y.repeats = {af::ops::One, emb};
+    *y.y.strides = {af::sym::kSymbolZero, af::sym::kSymbolOne};
+  }
+  return graph;
+}
+
+// 标准轴序（gather 轴在前）的 embedding+sum：应生成模板候选。
+TEST(IndirectLoadScheduleCaseGeneratorTest, StandardEmbeddingSumGeneratesCandidate) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  auto graph = BuildEmbeddingSumGraph(false);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_FALSE(graphs.empty());
+}
+
+// 转置轴序（gather 轴为尾轴、input 转置稠密视图）：判 kStrided 放行后应恢复生成模板候选。
+TEST(IndirectLoadScheduleCaseGeneratorTest, TransposedEmbeddingSumGeneratesCandidate) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  auto graph = BuildEmbeddingSumGraph(true);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_FALSE(graphs.empty());
+}
+
+// 布局分类：转置稠密视图判 kStrided；物理重叠视图与 stride 互质混洗保持 kUnsupported。
+TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesTransposedDenseLayoutAsStrided) {
+  const af::Expression emb = af::Symbol(8L);
+  const af::Expression vocab = af::Symbol(1353406L);
+  // 表 [vocab, emb] 在轴序 (emb, vocab) 下的转置稠密视图。
+  const ascgen_utils::indirect_load::LogicalTensorView transposed = {{0, 1}, {emb, vocab}, {af::Symbol(1), emb}};
+  ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(transposed, layout), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kStrided);
+  EXPECT_EQ(layout.physical_repeats, transposed.sizes);
+
+  // 物理重叠：strides=[1,1] 时元素 (i,j)->i+j 交叠。
+  const ascgen_utils::indirect_load::LogicalTensorView overlapping = {
+      {0, 1}, {af::Symbol(2), af::Symbol(3)}, {af::Symbol(1), af::Symbol(1)}};
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(overlapping, layout), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kUnsupported);
+
+  // stride 互质混洗：[2,3] strides=[3,2] 每维跨步，不能按倍数链展开，维持拒绝。
+  const ascgen_utils::indirect_load::LogicalTensorView coprime_shuffle = {
+      {0, 1}, {af::Symbol(2), af::Symbol(3)}, {af::Symbol(3), af::Symbol(2)}};
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(coprime_shuffle, layout), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kUnsupported);
+}
