@@ -223,8 +223,14 @@ af::Status ReplaceWithSoftmax(af::AscGraph &graph, const MatchResult &pattern) {
   return RemoveMatchedNodes(pattern);
 }
 
-af::Status NormalizeDirectPostSoftmax(af::AscGraph &graph, const af::AscNodePtr &indirect_load, bool &changed) {
-  changed = false;
+// 仅替换 input_anchor 可回溯到该 IndirectLoad 输出的 Pattern。Pattern 原始输入
+// 同时供给 Max 和 Sub（回流点），两者必须同源；回溯沿 Elementwise 生产者链进行，
+// 中间节点允许是多输入 Elementwise（如 gather 结果 +bias / +bmm 的 Add 链）：
+// 任一输入路径可达 IndirectLoad 输出即视为源自该 IndirectLoad，其余输入是外部
+// 数据，替换后保持链原状（其位于 Softmax 之前，语义不变）。其他形态（Transpose、
+// Broadcast、Reduce 等）终止该路径，交由通用复合区域路径处理。
+bool FindDirectPostSoftmaxPattern(const af::AscGraph &graph, const af::AscNodePtr &indirect_load,
+                                  MatchResult &pattern) {
   GE_ASSERT_NOTNULL(indirect_load);
   const auto outputs = indirect_load->outputs();
   GE_ASSERT_TRUE(!outputs.empty() && outputs[0] != nullptr, "IndirectLoad output tensor is missing, node[%s].",
@@ -232,12 +238,6 @@ af::Status NormalizeDirectPostSoftmax(af::AscGraph &graph, const af::AscNodePtr 
   const auto output_anchor = indirect_load->GetOutDataAnchor(0);
   GE_ASSERT_NOTNULL(output_anchor);
 
-  // 仅替换 input_anchor 可回溯到该 IndirectLoad 输出的 Pattern。Pattern 原始输入
-  // 同时供给 Max 和 Sub（回流点），两者必须同源；回溯沿 Elementwise 生产者链进行，
-  // 中间节点允许是多输入 Elementwise（如 gather 结果 +bias / +bmm 的 Add 链）：
-  // 任一输入路径可达 IndirectLoad 输出即视为源自该 IndirectLoad，其余输入是外部
-  // 数据，替换后保持链原状（其位于 Softmax 之前，语义不变）。其他形态（Transpose、
-  // Broadcast、Reduce 等）终止该路径，交由通用复合区域路径处理。
   const auto trace_to_indirect_load = [&output_anchor](const af::OutDataAnchorPtr &anchor) -> bool {
     const std::function<bool(const af::OutDataAnchorPtr &, const size_t)> visit =
         [&visit, &output_anchor](const af::OutDataAnchorPtr &current, const size_t depth) -> bool {
@@ -267,25 +267,31 @@ af::Status NormalizeDirectPostSoftmax(af::AscGraph &graph, const af::AscNodePtr 
   };
 
   for (const auto &node : graph.GetAllNodes()) {
-    MatchResult pattern;
     if (!MatchStableDedicated(node, pattern)) {
       continue;
     }
     if (!trace_to_indirect_load(pattern.input_anchor)) {
       continue;
     }
-    GELOGI("[IndirectLoad] Normalize direct post Softmax[%s] for IndirectLoad[%s] in candidate graph.",
-           pattern.true_div_node->GetNamePtr(), indirect_load->GetNamePtr());
-    GE_ASSERT_SUCCESS(ReplaceWithSoftmax(graph, pattern));
-    changed = true;
-    // 替换后图结构已变，重新排序一次即可；同一回流点的第二个 Pattern
-    // 不可能存在（消费者闭合校验排除了多 Pattern 共享输入）。
-    break;
+    return true;
   }
-  if (changed) {
-    GE_ASSERT_SUCCESS(PassUtils::PruneGraph(graph));
-    GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(graph));
+  return false;
+}
+
+af::Status NormalizeDirectPostSoftmax(af::AscGraph &graph, const af::AscNodePtr &indirect_load, bool &changed) {
+  changed = false;
+  MatchResult pattern;
+  if (!FindDirectPostSoftmaxPattern(graph, indirect_load, pattern)) {
+    return af::SUCCESS;
   }
+  GELOGI("[IndirectLoad] Normalize direct post Softmax[%s] for IndirectLoad[%s] in candidate graph.",
+         pattern.true_div_node->GetNamePtr(), indirect_load->GetNamePtr());
+  GE_ASSERT_SUCCESS(ReplaceWithSoftmax(graph, pattern));
+  changed = true;
+  // 替换后图结构已变，重新排序一次即可；同一回流点的第二个 Pattern
+  // 不可能存在（消费者闭合校验排除了多 Pattern 共享输入）。
+  GE_ASSERT_SUCCESS(PassUtils::PruneGraph(graph));
+  GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(graph));
   return af::SUCCESS;
 }
 

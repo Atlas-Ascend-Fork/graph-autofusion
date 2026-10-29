@@ -3221,13 +3221,46 @@ bool IsSkWindowUbInfeasible(const af::AscNodePtr &indirect_load) {
   return false;
 }
 
+// 统计 Norm 闭包内尾轴仍为完整 R 的中间张量，作为 fused SIMT 的附加 R 域因子。
+// Reduce 统计量尾轴折叠后自然排除，Store/Output 不重复计入基础输出双缓冲。
+int64_t CountRDomainChainTensors(const af::AscNodePtr &indirect_load, int64_t tail) {
+  int64_t count = 0;
+  std::vector<af::AscNodePtr> pending;
+  std::unordered_set<const af::AscNode *> visited;
+  for (const auto &consumer : indirect_load->GetOutDataNodes()) {
+    pending.emplace_back(std::dynamic_pointer_cast<af::AscNode>(consumer));
+  }
+  for (size_t cursor = 0UL; cursor < pending.size() && cursor < 256UL; ++cursor) {
+    const af::AscNodePtr node = pending[cursor];
+    if (node == nullptr || !visited.emplace(node.get()).second) {
+      continue;
+    }
+    if (!af::ops::IsOps<af::ascir_op::Store>(node) && !af::ops::IsOps<af::ascir_op::Output>(node)) {
+      const auto node_outputs = node->outputs();
+      int64_t node_tail = 0;
+      if (!node_outputs.empty() && node_outputs[0] != nullptr && !node_outputs[0]->attr.repeats.empty() &&
+          node_outputs[0]->attr.repeats.back().GetConstValue(node_tail) && node_tail == tail) {
+        ++count;
+      }
+    }
+    for (const auto &consumer : node->GetOutDataNodes()) {
+      pending.emplace_back(std::dynamic_pointer_cast<af::AscNode>(consumer));
+    }
+  }
+  return count;
+}
+
 // [SK段SIMT化] SIMT 候选自身的 UB 可行性（硬下界）：输出 tile 双缓冲（2R）+
-// Reduce 输入完整 R 域（R）+ 预留（32KB），R=IL 输出尾轴尺寸×dtype。SIMT 可行时
-// SK 候选无需重定向——重定向是为 SK 行窗口不可行且无其他活路时提供的分段替代；
-// SIMT 可用的图（如 softmax 专用形态带 Scalar 标量链/多输入，R 可全载）走原
-// SIMT 内联路径，分段形态对其不支持（生产 9.28：SIMT 可行却重定向，边界化误伤
-// 标量输入链）。
-bool IsSimtUbInfeasible(const af::AscNodePtr &indirect_load) {
+// Reduce 输入完整 R 域（R）+ 预留（32KB），R=IL 输出尾轴尺寸×dtype；softmax
+// 形态（原始 Pattern 链；窗口不可行的 SK 候选不规范化，见 Generate）fused 还需
+// SoftmaxAR tmp 的 1 个 R 域（生产实测 [4,8,16000] fp32 需 288800 ≈ 4R+32K）。
+// 下界漏算该 tmp 会把 R 落在 3R+32K ≤ UB < 4R+32K 区间的 softmax 图误判为
+// SIMT 可行——重定向不触发而 SK 窗口又不可行，全候选被 UB 过滤。其余复合 Norm
+// 链按闭包内尾轴满 R 的中间张量数量扩展 R 域因子。SIMT 可行时 SK 候选无需重定向——
+// 重定向是为 SK 行窗口不可行且无其他活路时提供的分段替代；SIMT 可用的图（如
+// softmax 专用形态带 Scalar 标量链/多输入，R 可全载）走原 SIMT 内联路径，分段形态
+// 对其不支持（生产 9.28：SIMT 可行却重定向，边界化误伤标量输入链）。
+bool IsSimtUbInfeasible(const af::AscGraph &graph, const af::AscNodePtr &indirect_load) {
   int64_t ub_size = 0;
   if (!TryGetIndirectLoadPlatformUbSize(ub_size)) {
     return false;
@@ -3244,7 +3277,18 @@ bool IsSimtUbInfeasible(const af::AscNodePtr &indirect_load) {
     return false;  // 动态 shape 保守不重定向
   }
   const int64_t r_bytes = tail * static_cast<int64_t>(af::GetSizeByDataType(output_dtype));
-  return kSimtRDomainUbFactor * r_bytes + kIndirectLoadUbReservedBytes > ub_size;
+  softmax_pattern::MatchResult softmax_match;
+  int64_t r_domain_factor = kSimtRDomainUbFactor;
+  if (softmax_pattern::FindDirectPostSoftmaxPattern(graph, indirect_load, softmax_match)) {
+    // softmax Pattern 的 fused 候选已规范化为单节点（链中间张量不存在），仅需补
+    // SoftmaxAR tmp 的 1 个 R 域。
+    r_domain_factor += 1;
+  } else {
+    // 复合 Norm 链：fused SIMT 把闭包内每个尾轴满 R 的中间张量各自物化为独立
+    // UB buffer，逐个计入下界。
+    r_domain_factor += CountRDomainChainTensors(indirect_load, tail);
+  }
+  return r_domain_factor * r_bytes + kIndirectLoadUbReservedBytes > ub_size;
 }
 
 // [SK段SIMT化] 重定向的形态约束：IL 输出的下游闭包（DAG，LayerNorm 的
@@ -3424,12 +3468,13 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
     // 全量不可行。保留 SK 的 output workspace 边界（消费子图/Reduce 段独立调度，
     // 承载 R 轴分 tile 归约），IL 段整体重定向为 SIMT 模板走全套流程（input/
     // index GM 直读，输出 tile 写 output workspace）——SK 分段设计对 R 非全载
-    // 场景的本意。复合 Norm 区域（多 Reduce）维持既有拒绝语义。
+    // 场景的本意。softmax 消费链在此形态下不规范化（见 Generate），以原始
+    // Pattern 链作为 Norm Region DAG 进入分段；复合 Norm 区域（多 Reduce）同理。
     // 门禁放宽：SIMT 候选可能因布局校验被拒（如 mean(dim=-2) 中间轴归约，
     // IsSimtUbInfeasible 只看尾轴 UB 下界无法覆盖）——前序 SIMD/SIMT 候选均不可行时
     // SK 是最后活路，此时即使 SIMT 的 UB 下界可行也必须重定向。
     if (IsSkWindowUbInfeasible(indirect_load) && IsNormRegionDag(indirect_load) &&
-        (IsSimtUbInfeasible(indirect_load) || !has_live_candidate)) {
+        (IsSimtUbInfeasible(graph, indirect_load) || !has_live_candidate)) {
       GELOGI("[IndirectLoad] SK candidate redirects IL to SIMT (window exceeds UB), node[%s].",
              indirect_load->GetNamePtr());
       // 先 Norm 边界化再 output 边界：闭包按 IL 下游数据流计算，output 边界插入后
@@ -4761,10 +4806,18 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     // 遇 IndirectLoad 提前返回而不会执行 Softmax 替换，必须在副本内完成，
     // 使 CollectOutputBoundaries 看到的是专用 Softmax 节点而非 Max/Sum 双 Reduce。
     // 仅替换原始输入直接来自本 IndirectLoad 输出的 Pattern；Pattern 未命中或
-    // 中间有 Elementwise 时保持原图形态，由通用复合区域路径处理。
+    // 中间有 Elementwise 时保持原图形态，由通用复合区域路径处理。例外：SK 窗口
+    // 不可行的候选不做规范化，保留原始 Pattern 链——专用 Softmax 节点按整行一次
+    // 归一化，被分段 tiling 切 R 且无跨 tile 合并协议会产生精度错误，而原始链是
+    // Norm Region DAG，可按 SK 分段形态正确归约（重定向见 ApplyGraphPass）；窗口
+    // 可行时维持规范化，SIMD/SIMT 候选不受影响仍走 SoftmaxAR 内联路径。
     bool softmax_normalized = false;
-    GE_ASSERT_SUCCESS(
-        softmax_pattern::NormalizeDirectPostSoftmax(candidate_graph, candidate_indirect_load, softmax_normalized));
+    const bool keep_softmax_pattern_for_sk_redirect =
+        template_id == ascir::TemplateId::kIndirectLoadSK && IsSkWindowUbInfeasible(candidate_indirect_load);
+    if (!keep_softmax_pattern_for_sk_redirect) {
+      GE_ASSERT_SUCCESS(
+          softmax_pattern::NormalizeDirectPostSoftmax(candidate_graph, candidate_indirect_load, softmax_normalized));
+    }
     if (softmax_normalized) {
       // 替换后候选图中节点名不变（Softmax 以原 TrueDiv 名+"_softmax"重建），
       // 后续 ApplyGraphPass 按模板重新执行改图与校验。
