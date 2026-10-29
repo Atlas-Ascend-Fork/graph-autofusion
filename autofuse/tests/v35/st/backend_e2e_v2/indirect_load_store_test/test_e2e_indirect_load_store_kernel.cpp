@@ -1034,12 +1034,23 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   constexpr int32_t kDim = 16;
   constexpr int32_t kTableRows = 100;
   constexpr int32_t kIndexStride = 1;
+#elif defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  constexpr int32_t kLookups = 4;
+  constexpr int32_t kDim = 16;
+  constexpr int32_t kTableRows = 100;
 #else
   constexpr int32_t kLookups = 4;
   constexpr int32_t kDim = 16;
   constexpr int32_t kTableRows = 100;
   constexpr int32_t kIndexStride = 8;
 #endif
+#if defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  // 转置轴序形态的 GM buffer：表 [table_rows, emb] 行主序、索引 [lookups]、
+  // 输出 [emb]（Sum 沿 lookups 轴归约，统一轴序 (emb, lookups)）。
+  auto *indices = static_cast<int32_t *>(AscendC::GmAlloc(sizeof(int32_t) * kLookups));
+  auto *table = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kTableRows * kDim));
+  const int32_t output_elements = kDim;
+#else
   const int32_t kIndexStorage = (kRows - 1) * kIndexStride + kLookups;
   auto *indices = static_cast<int32_t *>(AscendC::GmAlloc(sizeof(int32_t) * kIndexStorage));
   auto *table = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kTableRows * kDim));
@@ -1048,6 +1059,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
       kRows;
 #else
       kRows * kDim;
+#endif
 #endif
   auto *output = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * output_elements));
   ASSERT_NE(indices, nullptr);
@@ -1058,15 +1070,23 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
       table[row * kDim + col] = static_cast<float>(row * kDim + col) * 0.01F;
     }
   }
+#if defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  for (int32_t lookup = 0; lookup < kLookups; ++lookup) {
+    indices[lookup] = (lookup * 3 + 1) % kTableRows;
+  }
+#else
   for (int32_t row = 0; row < kRows; ++row) {
     for (int32_t lookup = 0; lookup < kLookups; ++lookup) {
       indices[row * kIndexStride + lookup] = (row * kLookups + lookup + 1) % kTableRows;
     }
   }
+#endif
   std::fill_n(output, output_elements, 0.0F);
 
   AutofuseTilingData tiling_data{};
-#if !defined(IL_USER_EMBEDDING_SUM_RANK2)
+#if defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  tiling_data.set_ks0(kLookups);
+#elif !defined(IL_USER_EMBEDDING_SUM_RANK2)
 #if defined(IL_USER_EMBEDDING_SUM_SIMD)
   tiling_data.graph0_result0_g0_tiling_data.set_ks0(kRows);
   tiling_data.graph0_result0_g0_tiling_data.set_s44(kIndexStride);
@@ -1082,7 +1102,16 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   ASSERT_TRUE(workspace_size == 0U || workspace != nullptr);
   indirect_load_test::RunKernel(user_embedding_sum, block_dim, reinterpret_cast<uint8_t *>(workspace),
                                 reinterpret_cast<uint8_t *>(&tiling_data), table, indices, output);
-#if defined(IL_USER_EMBEDDING_SUM_RANK2)
+#if defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  // expected[emb_col] = Σ_lookup table[index[lookup] * emb + emb_col]。
+  for (int32_t col = 0; col < kDim; ++col) {
+    float expected = 0.0F;
+    for (int32_t lookup = 0; lookup < kLookups; ++lookup) {
+      expected += table[indices[lookup] * kDim + col];
+    }
+    EXPECT_NEAR(output[col], expected, 0.0625F) << "col=" << col;
+  }
+#elif defined(IL_USER_EMBEDDING_SUM_RANK2)
   for (int32_t row = 0; row < kRows; ++row) {
     float expected = 0.0F;
     const int64_t index = indices[row * kIndexStride];

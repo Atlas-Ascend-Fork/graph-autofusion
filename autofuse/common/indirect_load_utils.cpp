@@ -111,6 +111,47 @@ bool TryClassifyDynamicShapeLayout(const LogicalTensorView &logical, IndirectLoa
   return true;
 }
 
+// 转置稠密视图检测：存在轴排列使行主序稠密链精确衔接（每层 stride 等于已覆盖跨度）
+// 时，视图物理非重叠且完整覆盖底层数据，仅逻辑轴序非行主序，判 kStrided（与动态
+// 分支对动态形状统一判 kStrided 的语义一致；kDense 要求轴序与物理序一致，不适用）。
+// 链按 stride 值唯一吸收：歧义只会出现在重叠视图（链必断，正确拒绝）；退化轴
+// （size==1）单元素，任意位置入链。stride 互质的混洗（如 [2,3] strides=[3,2]）
+// 每维跨步、不在倍数链内，维持拒绝。
+bool TryClassifyTransposedDenseLayout(const LogicalTensorView &logical, IndirectLoadTensorLayout &layout) {
+  const size_t rank = logical.sizes.size();
+  std::vector<bool> used(rank, false);
+  af::Expression expected = af::sym::kSymbolOne;
+  for (;;) {
+    // 非退化轴优先入链并推进已覆盖跨度；退化轴随后扫尾（不改变链）。
+    bool progressed = false;
+    for (size_t dim = 0UL; dim < rank; ++dim) {
+      if (used[dim] || af::SymbolicUtils::StaticCheckEq(logical.sizes[dim], af::ops::One) == af::TriBool::kTrue) {
+        continue;
+      }
+      if (af::SymbolicUtils::StaticCheckEq(logical.strides[dim], expected) != af::TriBool::kTrue) {
+        continue;
+      }
+      used[dim] = true;
+      expected = af::sym::Mul(expected, logical.sizes[dim]);
+      progressed = true;
+    }
+    if (!progressed) {
+      break;
+    }
+  }
+  for (size_t dim = 0UL; dim < rank; ++dim) {
+    if (used[dim] || af::SymbolicUtils::StaticCheckEq(logical.sizes[dim], af::ops::One) != af::TriBool::kTrue) {
+      continue;
+    }
+    used[dim] = true;  // 退化轴（size==1）单元素，任意正 stride 均非重叠。
+  }
+  if (!std::all_of(used.begin(), used.end(), [](bool dim_used) { return dim_used; })) {
+    return false;
+  }
+  layout.kind = IndirectLoadLayoutKind::kStrided;
+  return true;
+}
+
 bool IsValidTensorLayout(const IndirectLoadTensorLayout &layout) {
   return IsValidLogicalTensorView(layout) && layout.kind != IndirectLoadLayoutKind::kUnsupported &&
          layout.physical_repeats.size() == layout.sizes.size();
@@ -1571,6 +1612,8 @@ af::Status ClassifyIndirectLoadLayout(const LogicalTensorView &logical, Indirect
       continue;
     }
     if (af::SymbolicUtils::StaticCheckLt(logical.strides[dim], physical_span) != af::TriBool::kFalse) {
+      // 行主序单调性证明失败，尝试按转置稠密（倍数链）证明非重叠；证不出维持 kUnsupported。
+      static_cast<void>(TryClassifyTransposedDenseLayout(logical, layout));
       return af::SUCCESS;
     }
     has_physical_gap =
