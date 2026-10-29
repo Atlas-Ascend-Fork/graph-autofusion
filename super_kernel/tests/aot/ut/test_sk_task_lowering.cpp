@@ -86,6 +86,21 @@ TEST_F(SkTaskLoweringTest, MapsKernelTypesToResolvedQueues) {
   }
 }
 
+TEST_F(SkTaskLoweringTest, UsesCopiedDeviceArgsAndSize) {
+  auto *kernel = AddKernel(1, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
+  auto *kernelNode = static_cast<SuperKernelKernelNode *>(kernel);
+  kernelNode->taskParams.kernelTaskParams.args = reinterpret_cast<void *>(0x1000);
+  kernelNode->taskParams.kernelTaskParams.argsSize = 64;
+  kernel->nodeInfos.kernelInfos.devArgs = reinterpret_cast<void *>(0x2000);
+  kernel->nodeInfos.kernelInfos.devArgsSize = 96;
+
+  ASSERT_TRUE(RunLowering({kernel}, SkKernelType::AIC_ONLY));
+  ASSERT_EQ(input.tasks.size(), 1U);
+  const auto &lowered = std::get<SkKernelDesc>(input.tasks[0].payload);
+  EXPECT_EQ(lowered.deviceArgs, kernel->nodeInfos.kernelInfos.devArgs);
+  EXPECT_EQ(lowered.argsSize, 96U);
+}
+
 TEST_F(SkTaskLoweringTest, GroupsLoweredKernelPropertiesByBuilderSemantics) {
   auto *kernel = AddKernel(1, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
   auto &kernelInfo = kernel->nodeInfos.kernelInfos;

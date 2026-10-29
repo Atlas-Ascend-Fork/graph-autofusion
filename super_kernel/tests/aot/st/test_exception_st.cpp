@@ -44,6 +44,7 @@ TEST_F(AotSystemTest, ExceptionCallbackReportsRealFusedQueuesAndMatchedSubkernel
     model.AddKernel(stream, "exception_second_" + std::to_string(type), spec);
     aclmdlRITaskParams original{};
     ASSERT_EQ(aclmdlRITaskGetParams(first, &original), ACL_SUCCESS);
+    const auto originalArgs = model.Snapshot(first).args;
     const auto pc = sk::test::RegisterExceptionBinary(first);
     ASSERT_EQ(aclskOptimize(model.Handle(), nullptr), ACL_SUCCESS);
     sk::test::Exception exception(first);
@@ -68,7 +69,12 @@ TEST_F(AotSystemTest, ExceptionCallbackReportsRealFusedQueuesAndMatchedSubkernel
     EXPECT_EQ(mode, Adx::ExceptionDumpMode::DUMP_MODE_OVERWRITE);
     EXPECT_STREQ(dumps[0].kernelName, ("exception_first_" + std::to_string(type)).c_str());
     EXPECT_EQ(dumps[0].argSize, original.kernelTaskParams.argsSize);
-    EXPECT_EQ(dumps[0].argAddr, original.kernelTaskParams.args);
+    EXPECT_NE(dumps[0].argAddr, original.kernelTaskParams.args);
+    std::vector<unsigned char> copiedArgs(originalArgs.size(), 0xff);
+    ASSERT_EQ(aclrtMemcpy(copiedArgs.data(), copiedArgs.size(), dumps[0].argAddr, copiedArgs.size(),
+                          ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_SUCCESS);
+    EXPECT_EQ(copiedArgs, originalArgs);
     EXPECT_EQ(dumps[0].coreType, coreType);
     EXPECT_EQ(dumps[0].extraTensorNum, 1U);
     EXPECT_EQ(dumps[0].extraTensor[0].tensorSize, exception.argsSize);

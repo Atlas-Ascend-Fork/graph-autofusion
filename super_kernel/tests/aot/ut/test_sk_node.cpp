@@ -30,6 +30,7 @@
 #include "sk_options_manager.h"
 #include "ut_common_stubs.h"
 #include "runtime/kernel.h"
+#include "runtime/rt_inner_task.h"
 #include "securec.h"
 #include "sk_lock_detector.h"
 
@@ -76,7 +77,7 @@ struct JudgeTaskKernelInfo {
   std::unique_ptr<char[]> scopeName;
 };
 
-extern bool GetScopeKernelInfo(aclmdlRIKernelTaskParams params, JudgeTaskKernelInfo *info);
+extern bool GetScopeKernelInfo(aclmdlRIKernelTaskParams params, const void *devArgs, JudgeTaskKernelInfo *info);
 extern bool DumpSingleKernelBinary(const KernelInfos &kernelInfo, const std::string &kernelBinsDir);
 aclError FakeAclrtGetFunctionNameFailure(aclrtFuncHandle funcHandle, uint32_t maxLen, char *name);
 
@@ -85,7 +86,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_GetFunctionName_Failed) {
   params.funcHandle = nullptr;
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(FakeAclrtGetFunctionNameFailure));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_EQ(ret, false);
 }
 
@@ -125,13 +126,35 @@ int Fake_aclrtMemcpyFailed(void *dst, size_t dstSize, const void *src, size_t co
   return ACL_ERROR_FAILURE;
 }
 
+TEST_F(SkNodeTest, GetScopeKernelInfo_UsesCopiedDeviceArgs) {
+  ScopeKernelArgs original;
+  ScopeKernelArgs copied;
+  std::strcpy(original.name, "original_scope");
+  std::strcpy(copied.name, "copied_scope");
+  aclmdlRIKernelTaskParams params{};
+  params.args = &original;
+  JudgeTaskKernelInfo info;
+  MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameBeginDav2201));
+  MOCKER(aclrtMemcpy)
+      .expects(once())
+      .with(any(), eq(sizeof(ScopeKernelArgs)), eq(static_cast<const void *>(&copied)), eq(sizeof(ScopeKernelArgs)),
+            eq(ACL_MEMCPY_DEVICE_TO_HOST))
+      .will(invoke(+[](void *dst, size_t, const void *src, size_t count, aclrtMemcpyKind) -> aclError {
+        std::memcpy(dst, src, count);
+        return ACL_SUCCESS;
+      }));
+  ASSERT_TRUE(GetScopeKernelInfo(params, &copied, &info));
+  ASSERT_NE(info.scopeName, nullptr);
+  EXPECT_STREQ(info.scopeName.get(), "copied_scope");
+}
+
 TEST_F(SkNodeTest, GetScopeKernelInfo_CopyScopeArgsFailed) {
   aclmdlRIKernelTaskParams params{};
   params.funcHandle = nullptr;
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameBeginDav2201));
   MOCKER(aclrtMemcpy).stubs().will(invoke(Fake_aclrtMemcpyFailed));
-  EXPECT_FALSE(GetScopeKernelInfo(params, &info));
+  EXPECT_FALSE(GetScopeKernelInfo(params, params.args, &info));
 }
 
 TEST_F(SkNodeTest, GetScopeKernelInfo_Normal_ScopeName) {
@@ -140,7 +163,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_Normal_ScopeName) {
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameBeginDav2201));
   MOCKER(aclrtMemcpy).stubs().will(invoke(Fake_aclrtMemcpy));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_EQ(ret, true);
   EXPECT_TRUE(info.isBegin);
   EXPECT_FALSE(info.isEnd);
@@ -153,7 +176,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_Dav3510EndScopeName) {
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameEndDav3510));
   MOCKER(aclrtMemcpy).stubs().will(invoke(Fake_aclrtMemcpy));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_EQ(ret, true);
   EXPECT_FALSE(info.isBegin);
   EXPECT_TRUE(info.isEnd);
@@ -166,7 +189,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_PlaceholderScopeName) {
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNamePlaceholderDav2201));
   MOCKER(aclrtMemcpy).stubs().will(invoke(Fake_aclrtMemcpy));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_EQ(ret, true);
   EXPECT_FALSE(info.isBegin);
   EXPECT_FALSE(info.isEnd);
@@ -178,7 +201,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_WithoutArchSuffix_ReturnsRegularKernelInfo
   params.funcHandle = nullptr;
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameBeginWithoutSuffix));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_TRUE(ret);
   EXPECT_FALSE(info.isBegin);
   EXPECT_FALSE(info.isEnd);
@@ -645,6 +668,40 @@ TEST_F(SkNodeTest, KernelUpdate_CustomParamsStoredSeparatelyForDump) {
   EXPECT_EQ(node.GetUpdateParams().type, ACL_MODEL_RI_TASK_VALUE_WRITE);
   EXPECT_EQ(node.GetUpdateParams().valueWriteTaskParams.devAddr, &value);
   EXPECT_EQ(node.GetUpdateParams().valueWriteTaskParams.value, 0x1234U);
+}
+
+TEST_F(SkNodeTest, KernelInitNode_StoresCopiedArgsAndPreservesOriginalParams) {
+  for (uint32_t isHostArgs : {0U, 1U}) {
+    UtSkNodeRITaskInternal task{};
+    task.type = ACL_MODEL_RI_TASK_KERNEL;
+    task.params.type = ACL_MODEL_RI_TASK_KERNEL;
+    char original[64]{};
+    char copied[96]{};
+    auto &params = task.params.kernelTaskParams;
+    params.args = original;
+    params.argsSize = sizeof(original);
+    params.isHostArgs = isHostArgs;
+    params.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x3008);
+    params.numBlocks = 1;
+    SuperKernelKernelNode node(MakeOriginTask(task), ACL_MODEL_RI_TASK_KERNEL, 0, 0, 0, INVALID_TASK_ID);
+    void *copiedAddress = copied;
+    size_t copiedSize = sizeof(copied);
+    MOCKER(rtModelTaskCopyArgsDeviceBuffer)
+        .expects(once())
+        .with(eq(static_cast<rtTask_t>(&task)), outBoundP(&copiedAddress, sizeof(copiedAddress)),
+              outBoundP(&copiedSize, sizeof(copiedSize)))
+        .will(returnValue(RT_ERROR_NONE));
+    MOCKER(aclrtGetFunctionName).stubs().will(invoke(FakeAclrtGetFunctionNameRegular));
+    MOCKER(aclrtGetFunctionAttribute).stubs().will(invoke(FakeAclrtGetFunctionAttributeMix11));
+    MOCKER(aclrtFunctionGetBinary).stubs().will(invoke(FakeAclrtFunctionGetBinaryNonNull));
+    ASSERT_TRUE(node.InitNode());
+    EXPECT_EQ(node.GetNodeInfos().kernelInfos.devArgs, copiedAddress);
+    EXPECT_EQ(node.GetNodeInfos().kernelInfos.devArgsSize, sizeof(copied));
+    EXPECT_EQ(node.GetTaskParams().kernelTaskParams.args, original);
+    EXPECT_EQ(node.GetTaskParams().kernelTaskParams.argsSize, sizeof(original));
+    EXPECT_EQ(node.GetTaskParams().kernelTaskParams.isHostArgs, isHostArgs);
+    GlobalMockObject::verify();
+  }
 }
 
 TEST_F(SkNodeTest, KernelInitNode_AcceptsMaximumFunctionName) {

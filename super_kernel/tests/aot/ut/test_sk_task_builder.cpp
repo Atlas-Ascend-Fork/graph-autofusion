@@ -259,7 +259,11 @@ TEST_F(SkTaskBuilderTest, BuildsSingleKernelForEveryCoreType) {
 }
 
 TEST_F(SkTaskBuilderTest, DispatchesKernelAndRollingPreloadToResolvedQueues) {
-  const auto result = builder.Build(MakeInput(SkKernelType::MIX_AIC_1_1));
+  auto input = MakeInput(SkKernelType::MIX_AIC_1_1);
+  auto &kernel = std::get<SkKernelDesc>(input.tasks[0].payload);
+  kernel.argsSize = 96;
+  const auto argsAddress = reinterpret_cast<uintptr_t>(kernel.deviceArgs);
+  const auto result = builder.Build(input);
   const auto *aic = GetQueue(result, SkQueueType::AIC);
   const auto *aiv = GetQueue(result, SkQueueType::AIV);
   ASSERT_NE(aic, nullptr);
@@ -270,6 +274,16 @@ TEST_F(SkTaskBuilderTest, DispatchesKernelAndRollingPreloadToResolvedQueues) {
   EXPECT_EQ(CountTasks(aiv, SkTaskType::TYPE_PRELOAD), 1U);
   EXPECT_EQ(FindTask(aic, SkTaskType::TYPE_PRELOAD)->args, 2U);
   EXPECT_EQ(FindTask(aiv, SkTaskType::TYPE_PRELOAD)->args, 3U);
+  for (const auto *queue : {aic, aiv}) {
+    const auto *func = FindTask(queue, SkTaskType::TYPE_FUNC);
+    const auto *preload = FindTask(queue, SkTaskType::TYPE_PRELOAD);
+    ASSERT_NE(func, nullptr);
+    ASSERT_NE(preload, nullptr);
+    EXPECT_EQ(func->args, argsAddress);
+    EXPECT_EQ(func->argsSize, 96U);
+    EXPECT_EQ(preload->extraInfo, argsAddress);
+    EXPECT_EQ(preload->argsSize, 96U);
+  }
 }
 
 TEST_F(SkTaskBuilderTest, EncodesEventDefaultsAndCustomWaitValues) {

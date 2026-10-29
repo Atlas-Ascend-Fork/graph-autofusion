@@ -21,6 +21,7 @@
 #include "exception_fixture.h"
 #include "runtime/kernel.h"
 #include "runtime/base.h"
+#include "runtime/rt_inner_task.h"
 #include <cstring>
 #include <cstdio>
 extern "C" {
@@ -28,6 +29,21 @@ extern "C" {
 // Error codes
 #define RT_SUCCESS 0
 #define RT_ERROR -1
+
+rtError_t rtModelTaskCopyArgsDeviceBuffer(rtTask_t task, void **devBufferAddr, size_t *size) {
+  if (task == nullptr || devBufferAddr == nullptr || size == nullptr) {
+    return RT_ERROR;
+  }
+  if (sk::test::CopyTaskArgs(task, devBufferAddr, size)) {
+    return RT_SUCCESS;
+  }
+  // Legacy UT use opaque, non-owned device addresses. Keep their no-copy behavior;
+  // argument-source tests supply an independent buffer through mockcpp.
+  const auto &params = static_cast<sk::test::RuntimeTask *>(task)->params.kernelTaskParams;
+  *devBufferAddr = params.args;
+  *size = params.argsSize;
+  return RT_SUCCESS;
+}
 
 // rtBinaryGetMetaNum - stub implementation for unit tests
 // Always returns success for UT stub mode

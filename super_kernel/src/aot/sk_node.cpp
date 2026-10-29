@@ -35,6 +35,7 @@
 #include "sk_common.h"
 #include "sk_options_manager.h"
 #include "runtime/rt_external_kernel.h"
+#include "runtime/rt_inner_task.h"
 #include "kernel.h"
 #include "base.h"
 
@@ -876,7 +877,7 @@ struct JudgeTaskKernelInfo {
   std::unique_ptr<char[]> scopeName;
 };
 
-bool GetScopeKernelInfo(aclmdlRIKernelTaskParams params, JudgeTaskKernelInfo *info) {
+bool GetScopeKernelInfo(aclmdlRIKernelTaskParams params, const void *devArgs, JudgeTaskKernelInfo *info) {
   char kernelName[MAX_FUNC_NAME_LEN] = {0};
   int32_t ret = aclrtGetFunctionName(params.funcHandle, sizeof(kernelName), kernelName);
   if (ret != ACL_SUCCESS) {
@@ -891,7 +892,7 @@ bool GetScopeKernelInfo(aclmdlRIKernelTaskParams params, JudgeTaskKernelInfo *in
     return true;
   }
   auto parseArgsAddr = std::make_unique<ScopeKernelArgs>();
-  ret = aclrtMemcpy((void *)parseArgsAddr.get(), sizeof(ScopeKernelArgs), params.args, sizeof(ScopeKernelArgs),
+  ret = aclrtMemcpy((void *)parseArgsAddr.get(), sizeof(ScopeKernelArgs), devArgs, sizeof(ScopeKernelArgs),
                     ACL_MEMCPY_DEVICE_TO_HOST);
   if (ret != ACL_SUCCESS) {
     SK_LOGE("Failed to copy kernel args from device to host, ret: %d, direction=DEVICE_TO_HOST", ret);
@@ -928,7 +929,15 @@ bool SuperKernelKernelNode::InitNode(const SuperKernelOptionsManager *opts) {
   }
   JudgeTaskKernelInfo scopeKernelInfo;
   auto &kernelParams = taskParams.kernelTaskParams;
-  if (!GetScopeKernelInfo(kernelParams, &scopeKernelInfo)) {
+  void *copiedDevArgs = nullptr;
+  size_t copiedDevArgsSize = 0;
+  rtError_t rtRet = rtModelTaskCopyArgsDeviceBuffer(*originTask, &copiedDevArgs, &copiedDevArgsSize);
+  if (rtRet != 0) {
+    SK_LOGE("Failed to get copied device task args, ret=%d", rtRet);
+    return false;
+  }
+
+  if (!GetScopeKernelInfo(kernelParams, copiedDevArgs, &scopeKernelInfo)) {
     SK_LOGE("Failed to get scope kernel information for kernel node %lu", nodeId);
     return false;
   }
@@ -971,7 +980,8 @@ bool SuperKernelKernelNode::InitNode(const SuperKernelOptionsManager *opts) {
   nodeInfos.kernelInfos.kernelType = NormalizeKernelType((uint32_t)(kernelType), skTaskTatio);
   nodeInfos.kernelInfos.kernelTypeInt = static_cast<uint32_t>(kernelType);
   nodeInfos.kernelInfos.numBlocks = kernelParams.numBlocks;
-  nodeInfos.kernelInfos.devArgs = kernelParams.args;
+  nodeInfos.kernelInfos.devArgs = copiedDevArgs;
+  nodeInfos.kernelInfos.devArgsSize = copiedDevArgsSize;
   nodeInfos.kernelInfos.opInfoPtr = taskParams.opInfoPtr;
   nodeInfos.kernelInfos.opInfoSize = taskParams.opInfoSize;
   nodeInfos.kernelInfos.launchKernelCfg = kernelParams.cfg;

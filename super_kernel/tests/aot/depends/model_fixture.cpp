@@ -33,6 +33,7 @@ struct OwnedTask {
   RuntimeTask task;
   std::vector<unsigned char> args;
   std::vector<unsigned char> opInfo;
+  std::vector<std::vector<unsigned char>> argsBackups;
   std::vector<aclrtLaunchKernelAttr> attributes;
   aclrtLaunchKernelCfg config{};
   bool disabled = false;
@@ -262,11 +263,29 @@ void Model::Destroy() {
       tasks.erase(&task->task);
       std::lock_guard<std::mutex> lock(memoryMutex);
       memory.erase(reinterpret_cast<uintptr_t>(task->args.data()));
+      for (const auto &backup : task->argsBackups) {
+        memory.erase(reinterpret_cast<uintptr_t>(backup.data()));
+      }
     }
     streams.erase(stream.get());
   }
   models.erase(Handle());
   impl_.reset();
+}
+
+bool CopyTaskArgs(aclmdlRITask task, void **address, size_t *size) {
+  auto it = tasks.find(task);
+  if (it == tasks.end()) {
+    return false;
+  }
+  auto &owned = *it->second;
+  owned.argsBackups.push_back(owned.args);
+  auto &backup = owned.argsBackups.back();
+  *address = backup.data();
+  *size = backup.size();
+  std::lock_guard<std::mutex> lock(memoryMutex);
+  memory[reinterpret_cast<uintptr_t>(*address)] = *size;
+  return true;
 }
 
 bool ModelStreams(aclmdlRI model, aclrtStream *output, uint32_t *count, aclError &result) {
