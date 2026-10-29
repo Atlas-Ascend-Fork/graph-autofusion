@@ -56,7 +56,6 @@ class ReducePartitionCaseGenerator : public FusionCaseGenerator {
   // 基础上补充非单输出方向的类 Norm 结构(起点, 归宿点)对
   Status AddNormLikeLoops(ascir::ImplGraph &graph,
                           std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end);
-  bool ShouldForceAllLoad(ascir::HintGraph &graph);
   Status PartitionNorm(ascir::ImplGraph &impl_graph,
                        std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end);
   void FindAllPath(const af::AscNodePtr &start, const af::AscNodePtr &end, std::vector<af::AscNodePtr> &path,
@@ -67,6 +66,7 @@ class ReducePartitionCaseGenerator : public FusionCaseGenerator {
   static Status PartitionDataNode(af::AscNodePtr &src_node, af::AscNodePtr &dst_node, ascir::ImplGraph &impl_graph);
   static bool HasReduce(const ascir::ImplGraph &impl_graph);
   static bool HasArgMaxReduce(const ScheduleTask &task);
+  static bool HasMultiRAxisReduce(const ascir::ImplGraph &impl_graph);
   static bool IsOnlyHasOneOrLessReduce(const ascir::ImplGraph &impl_graph);
   static bool CanFullLoadReduceFuse(const ascir::ImplGraph &impl_graph);
   Status ReducePartitionMultipleCitations(ascir::ImplGraph &impl_graph);
