@@ -67,6 +67,9 @@ class ConcatApiCall : public ApiCall {
   static Status GenerateForAllAligned(const vector<std::reference_wrapper<const Tensor>> &inputs, const Tensor &y,
                                       const ConcatApiCall::ConcatTiling &tiling, const Tiler &tiler,
                                       std::stringstream &ss);
+  // tiler.Size结果用于uint32_t结构体字段初始化: 常量表达式直接输出, 动态表达式可能是int64_t, 需要显式cast
+  static std::string GenSizeWithUint32Cast(const Tiler &tiler, const ascir::SizeExpr &expr,
+                                           bool using_int_tiling_data = false);
 
  private:
   static void GenConcatParams(const vector<std::reference_wrapper<const Tensor>> &inputs, const Tensor &y,

@@ -119,6 +119,12 @@ af::Status ConcatApiCall::GenerateForAllAligned(const vector<std::reference_wrap
   return af::SUCCESS;
 }
 
+std::string ConcatApiCall::GenSizeWithUint32Cast(const Tiler &tiler, const ascir::SizeExpr &expr,
+                                                 bool using_int_tiling_data) {
+  const std::string size_str = tiler.Size(expr, using_int_tiling_data);
+  return expr.IsConstExpr() ? size_str : "static_cast<uint32_t>(" + size_str + ")";
+}
+
 void ConcatApiCall::GenConcatParams(const std::vector<std::reference_wrapper<const Tensor>> &inputs, const Tensor &y,
                                     const Tiler &tiler, const string &dtype_name, std::stringstream &ss) {
   ss << "const ConcatParams<" + dtype_name + ", " << y.vectorized_axis.size() << ">"
@@ -126,14 +132,14 @@ void ConcatApiCall::GenConcatParams(const std::vector<std::reference_wrapper<con
      << ".shape  = {";
   for (size_t i = 0; i < y.vectorized_axis.size(); i++) {
     auto pos = y.vectorized_axis_pos[i];
-    ss << tiler.Size(y.axis_size[pos], true);
+    ss << GenSizeWithUint32Cast(tiler, y.axis_size[pos], true);
     if (i != y.vectorized_axis.size() - 1) {
       ss << ", ";
     }
   }
   ss << "}," << std::endl << ".stride = {";
   for (size_t i = 0; i < y.vectorized_axis.size(); i++) {
-    ss << tiler.Size(y.vectorized_strides[i], true);
+    ss << GenSizeWithUint32Cast(tiler, y.vectorized_strides[i], true);
     if (i != y.vectorized_axis.size() - 1) {
       ss << ", ";
     }
@@ -150,14 +156,14 @@ void ConcatApiCall::GenConcatParams(const std::vector<std::reference_wrapper<con
     ss << "{" << std::endl << ".shape  = {";
     for (size_t i = 0U; i < x.vectorized_axis.size(); i++) {
       auto pos = x.vectorized_axis_pos[i];
-      ss << tiler.Size(x.axis_size[pos], true);
+      ss << GenSizeWithUint32Cast(tiler, x.axis_size[pos], true);
       if (i != x.vectorized_axis.size()) {
         ss << ", ";
       }
     }
     ss << "}," << std::endl << ".stride = {";
     for (size_t i = 0U; i < x.vectorized_axis.size(); i++) {
-      ss << tiler.Size(x.vectorized_strides[i], true);
+      ss << GenSizeWithUint32Cast(tiler, x.vectorized_strides[i], true);
       if (i != x.vectorized_axis.size() - 1) {
         ss << ", ";
       }
@@ -347,28 +353,28 @@ void ConcatApiCall::DefineConcatTiling(const ConcatApiCall::ConcatTiling &tiling
 void ConcatApiCall::DefineConcatShape(const ConcatApiCall::ConcatTiling &tiling, const Tiler &tiler,
                                       std::stringstream &ss) {
   ss << "const ConcatShape<" << tiling.src_col_size_exprs.size() << "> concat_shape {" << std::endl;
-  ss << "  .dst_cols = " << tiler.Size(tiling.dst_row_stride) << ", " << std::endl;
+  ss << "  .dst_cols = " << GenSizeWithUint32Cast(tiler, tiling.dst_row_stride) << ", " << std::endl;
   ss << "  .src_cols = {";
   for (const auto &src_dim_size : tiling.src_col_size_exprs) {
-    ss << tiler.Size(src_dim_size) << ", ";
+    ss << GenSizeWithUint32Cast(tiler, src_dim_size) << ", ";
   }
   ss << "}," << std::endl;
   if (tiling.any_padded) {
     ss << "  .src_row_strides = {";
     for (const auto &src_row_stride : tiling.src_row_strides) {
-      ss << tiler.Size(src_row_stride) << ", ";
+      ss << GenSizeWithUint32Cast(tiler, src_row_stride) << ", ";
     }
     ss << "}," << std::endl;
 
     ss << "  .src_second_last_dim_strides = {";
     for (const auto &second_last_dim_stride : tiling.src_non_zero_strides) {
-      ss << tiler.Size(second_last_dim_stride) << ", ";
+      ss << GenSizeWithUint32Cast(tiler, second_last_dim_stride) << ", ";
     }
     ss << "}," << std::endl;
 
     ss << "  .gather_mask_dim_sizes = {";
     for (const auto &last_dim_size_expr : tiling.last_dim_size_exprs) {
-      ss << tiler.Size(last_dim_size_expr) << ", ";
+      ss << GenSizeWithUint32Cast(tiler, last_dim_size_expr) << ", ";
     }
     ss << "}," << std::endl;
   }
@@ -455,15 +461,15 @@ void ConcatApiCall::GenConcatTilingForAllAligned(const ConcatApiCall::ConcatTili
   const auto qualifier = tiling.all_static ? "constexpr " : "const ";
   ss << qualifier;
   ss << "ConcatTilingAllAligned<" << tiling.src_col_size_exprs.size() << "> concat_tiling {" << std::endl;
-  ss << "  .dst_col_size = " << tiler.Size(tiling.dst_row_stride, true) << "," << std::endl;
+  ss << "  .dst_col_size = " << GenSizeWithUint32Cast(tiler, tiling.dst_row_stride, true) << "," << std::endl;
   ss << "  .src_col_sizes = { ";
   for (const auto &src_col_size : tiling.src_row_strides) {
-    ss << tiler.Size(src_col_size, true) << ", ";
+    ss << GenSizeWithUint32Cast(tiler, src_col_size, true) << ", ";
   }
   ss << "}," << std::endl;
   ss << "  .dst_offsets = { ";
   for (const auto &src_col_size : tiling.dst_offsets) {
-    ss << tiler.Size(src_col_size, true) << ", ";
+    ss << GenSizeWithUint32Cast(tiler, src_col_size, true) << ", ";
   }
   ss << "}," << std::endl;
   ss << "};" << std::endl;
