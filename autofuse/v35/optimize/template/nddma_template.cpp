@@ -695,7 +695,7 @@ af::Status NddmaTemplate::BroadcastInputNodeIsScalar(const af::AscNodePtr &node,
     GE_CHECK_NOTNULL(in_node);
     output_idx = peer_out_anchor->GetIdx();
   }
-  if (af::ops::IsOps<af::ascir_op::Scalar>(in_node) || af::ops::IsOps<af::ascir_op::ScalarData>(in_node)) {
+  if (ScheduleUtils::IsScalarLikeNode(in_node)) {
     is_scalar = true;
     GELOGD("Node [%s] is scalar.", in_node->GetNamePtr());
     return af::SUCCESS;
