@@ -797,6 +797,12 @@ TEST_F(SuperKernelGraphTest, InitFromModelRI_FiltersEmptyStreams) {
   EXPECT_EQ(graph->GetStreams()[1], reinterpret_cast<aclrtStream>(4));
   EXPECT_EQ(graph->GetNodeSizeInStream(), (std::vector<uint64_t>{2, 3}));
   EXPECT_EQ(graph->GetHeadNodes().size(), 2U);
+  const auto &tailNodes = graph->GetTailNodes();
+  ASSERT_EQ(tailNodes.size(), 2U);
+  EXPECT_EQ(graph->GetNodeById(tailNodes[0])->GetNodeIdxInStream(), 1U);
+  EXPECT_EQ(graph->GetNodeById(tailNodes[1])->GetNodeIdxInStream(), 2U);
+  EXPECT_EQ(graph->GetNodeById(tailNodes[0])->GetNextNodeId(), INVALID_TASK_ID);
+  EXPECT_EQ(graph->GetNodeById(tailNodes[1])->GetNextNodeId(), INVALID_TASK_ID);
   EXPECT_EQ(graph->GetSortedNodeIds().size(), 5U);
   SkUtResetTestControls();
 }

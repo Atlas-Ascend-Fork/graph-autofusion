@@ -27,12 +27,13 @@ int64_t LockDetector::deviceRealVecNum = 0;
 void LockDetector::Init(SuperKernelGraph &graph) {
   SK_LOGD("[lock detector] LockDetector::Init: Initializing lock detector");
   nodes.clear();
+  candidateScopeNodes_.clear();
+  activeConcurrentRanges_.clear();
   depOpCubeNum = 0;
   depOpVecNum = 0;
   superKernelCubeNum = 0;
   superKernelVecNum = 0;
   currentScopeId_ = INVALID_SCOPE_ID;
-  fusedNotifyWaitInfos_.clear();
   scopeCoreInfoChanged_ = false;
   nodeNum = 0;
   kernelNodeNum = 0;
@@ -103,6 +104,9 @@ void LockDetector::UpdateScopeInfo(const SuperKernelScopeInfo &scope) {
 
   ScopeRuntimeInfo scopeInfo;
   scopeInfo.coreInfo = scope.GetScopeCoreInfo();
+  scopeInfo.memberNodes = scope.GetNodes();
+  scopeInfo.hasWait = std::any_of(scopeInfo.memberNodes.begin(), scopeInfo.memberNodes.end(),
+                                  [](const auto *node) { return node->GetNodeType() == SkNodeType::NODE_WAIT; });
   for (const auto &streamInfo : scope.GetScopeStreamInfos()) {
     scopeInfo.streamIds.insert(streamInfo.streamIdx);
     scopeInfo.headNodeIds.emplace(streamInfo.streamIdx, streamInfo.headNodeIdx);
@@ -113,6 +117,634 @@ void LockDetector::UpdateScopeInfo(const SuperKernelScopeInfo &scope) {
 
 void LockDetector::RemoveScopeInfo(uint16_t scopeId) {
   scopeInfos_.erase(scopeId);
+}
+
+bool LockDetector::IsInSKStream(const SuperKernelBaseNode &node) const {
+  return std::find(skStreamIds.begin(), skStreamIds.end(), node.GetStreamIdxInGraph()) != skStreamIds.end();
+}
+
+SuperKernelBaseNode *LockDetector::GetScopeBoundary(const ConcurrentRangeState &rangeContext, uint32_t scopeId,
+                                                    uint32_t streamId, bool first) const {
+  if (scopeId == CANDIDATE_CONCURRENT_SCOPE) {
+    SuperKernelBaseNode *boundary = nullptr;
+    for (auto *node : *rangeContext.candidateNodes) {
+      if (node->GetStreamIdxInGraph() == streamId &&
+          (boundary == nullptr ||
+           (first ? node->GetNodeIdxInStream() < boundary->GetNodeIdxInStream()
+                  : node->GetNodeIdxInStream() > boundary->GetNodeIdxInStream()))) {
+        boundary = node;
+      }
+    }
+    return boundary;
+  }
+  const auto scopeIt = scopeInfos_.find(scopeId);
+  if (scopeIt == scopeInfos_.end()) {
+    return nullptr;
+  }
+  const auto &nodeIds = first ? scopeIt->second.headNodeIds : scopeIt->second.tailNodeIds;
+  const auto nodeIt = nodeIds.find(streamId);
+  return nodeIt == nodeIds.end() ? nullptr : graph_->GetNodeById(nodeIt->second);
+}
+
+uint32_t LockDetector::GetTrackedScopeId(const ConcurrentRangeState &rangeContext,
+                                        const SuperKernelBaseNode &node) const {
+  if (std::any_of(rangeContext.candidateNodes->begin(), rangeContext.candidateNodes->end(), [&](const auto *member) {
+        return member->GetNodeId() == node.GetNodeId();
+      })) {
+    return CANDIDATE_CONCURRENT_SCOPE;
+  }
+  const auto scopeIt = scopeInfos_.find(node.GetScopeId());
+  if (scopeIt != scopeInfos_.end() && scopeIt->first != rangeContext.candidateScopeId) {
+    return scopeIt->first;
+  }
+  return INVALID_SCOPE_ID;
+}
+
+void LockDetector::InitializeConcurrentRangeState(const std::vector<SuperKernelBaseNode *> &candidate,
+                                                  uint16_t candidateScopeId, ConcurrentRangeState &rangeContext) const {
+  rangeContext.candidateNodes = &candidate;
+  rangeContext.candidateScopeId = candidateScopeId;
+  for (const auto *node : candidate) {
+    auto &range = rangeContext.ranges[node->GetStreamIdxInGraph()];
+    if (range.firstNodeId == INVALID_TASK_ID ||
+        node->GetNodeIdxInStream() < graph_->GetNodeById(range.firstNodeId)->GetNodeIdxInStream()) {
+      range.firstNodeId = node->GetNodeId();
+    }
+    if (range.lastNodeId == INVALID_TASK_ID ||
+        node->GetNodeIdxInStream() > graph_->GetNodeById(range.lastNodeId)->GetNodeIdxInStream()) {
+      range.lastNodeId = node->GetNodeId();
+    }
+  }
+  const auto &headNodes = graph_->GetHeadNodes();
+  const auto &tailNodes = graph_->GetTailNodes();
+  for (uint32_t streamId = 0; streamId < headNodes.size(); ++streamId) {
+    if (headNodes[streamId] != INVALID_TASK_ID && rangeContext.ranges.count(streamId) == 0) {
+      rangeContext.ranges.emplace(streamId, ConcurrentNodeRange{headNodes[streamId], tailNodes[streamId]});
+    }
+  }
+}
+
+void LockDetector::TightenConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t streamId,
+                                            const SuperKernelBaseNode *boundary, bool left) const {
+  if (GetScopeBoundary(rangeContext, CANDIDATE_CONCURRENT_SCOPE, streamId, true) != nullptr) {
+    return;
+  }
+  const auto rangeIt = rangeContext.ranges.find(streamId);
+  if (rangeIt == rangeContext.ranges.end() || rangeIt->second.firstNodeId == INVALID_TASK_ID) {
+    return;
+  }
+  auto &range = rangeIt->second;
+  if (boundary == nullptr) {
+    range = {};
+    return;
+  }
+  const auto *first = graph_->GetNodeById(range.firstNodeId);
+  const auto *last = graph_->GetNodeById(range.lastNodeId);
+  if (left && boundary->GetNodeIdxInStream() > first->GetNodeIdxInStream()) {
+    range.firstNodeId = boundary->GetNodeId();
+  } else if (!left && boundary->GetNodeIdxInStream() < last->GetNodeIdxInStream()) {
+    range.lastNodeId = boundary->GetNodeId();
+  }
+  if ((left && boundary->GetNodeIdxInStream() > last->GetNodeIdxInStream()) ||
+      (!left && boundary->GetNodeIdxInStream() < first->GetNodeIdxInStream())) {
+    range = {};
+  }
+}
+
+void LockDetector::TightenScopeConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t scopeId,
+                                                 uint32_t entryStreamId, bool left, bool eventBoundary) const {
+  if (scopeId == CANDIDATE_CONCURRENT_SCOPE) {
+    return;
+  }
+  const auto scopeIt = scopeInfos_.find(scopeId);
+  if (scopeIt == scopeInfos_.end()) {
+    return;
+  }
+  for (const auto streamId : scopeIt->second.streamIds) {
+    if (!eventBoundary && streamId == entryStreamId) {
+      continue;
+    }
+    const auto *boundary = GetScopeBoundary(rangeContext, scopeId, streamId, eventBoundary ? left : !left);
+    if (boundary == nullptr) {
+      continue;
+    }
+    const auto adjacentId = left != eventBoundary ? boundary->GetNextNodeId() : boundary->GetPreNodeId();
+    if (eventBoundary && adjacentId == INVALID_TASK_ID) {
+      continue;
+    }
+    boundary = adjacentId == INVALID_TASK_ID ? nullptr : graph_->GetNodeById(adjacentId);
+    TightenConcurrentBoundary(rangeContext, streamId, boundary, left);
+  }
+}
+
+void LockDetector::UpdateConcurrentBoundary(ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
+                                           bool left) const {
+  if (vertex.kind == ConcurrentVertex::Kind::SCOPE) {
+    return;
+  }
+  const auto *node = graph_->GetNodeById(vertex.nodeId);
+  if (node == nullptr) {
+    return;
+  }
+  const auto scopeId = GetTrackedScopeId(rangeContext, *node);
+  if (vertex.kind == ConcurrentVertex::Kind::EVENT_NODE) {
+    if (scopeId != INVALID_SCOPE_ID) {
+      TightenScopeConcurrentBoundary(rangeContext, scopeId, node->GetStreamIdxInGraph(), left, true);
+    } else {
+      const auto adjacentId = left ? node->GetNextNodeId() : node->GetPreNodeId();
+      const auto *boundary = adjacentId == INVALID_TASK_ID ? nullptr : graph_->GetNodeById(adjacentId);
+      TightenConcurrentBoundary(rangeContext, node->GetStreamIdxInGraph(), boundary, left);
+    }
+    return;
+  }
+  const auto scopeIt = scopeInfos_.find(scopeId);
+  if (scopeIt != scopeInfos_.end() && scopeIt->second.streamIds.size() > 1 && vertex.scopeId != scopeId) {
+    TightenScopeConcurrentBoundary(rangeContext, scopeId, node->GetStreamIdxInGraph(), left, false);
+  }
+}
+
+void LockDetector::QueueConcurrentBoundarySeeds(const ConcurrentRangeState &rangeContext, bool left,
+                                               std::deque<ConcurrentVertex> &pending) const {
+  for (const auto *member : *rangeContext.candidateNodes) {
+    const auto *boundary = GetScopeBoundary(rangeContext, CANDIDATE_CONCURRENT_SCOPE,
+                                             member->GetStreamIdxInGraph(), left);
+    if (boundary->GetNodeId() != member->GetNodeId()) {
+      continue;
+    }
+    const auto adjacentId = left ? boundary->GetPreNodeId() : boundary->GetNextNodeId();
+    if (adjacentId != INVALID_TASK_ID) {
+      const auto *adjacent = graph_->GetNodeById(adjacentId);
+      if (adjacent != nullptr) {
+        pending.push_back({ConcurrentVertex::Kind::NODE, INVALID_SCOPE_ID, adjacent->GetNodeId()});
+      }
+    }
+  }
+}
+
+void LockDetector::AppendScopeVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
+                                      bool left, std::deque<ConcurrentVertex> &pending) const {
+  const auto scopeIt = scopeInfos_.find(vertex.scopeId);
+  if (scopeIt == scopeInfos_.end()) {
+    return;
+  }
+  for (const auto streamId : scopeIt->second.streamIds) {
+    const auto *boundary = GetScopeBoundary(rangeContext, vertex.scopeId, streamId, !left);
+    if (boundary != nullptr) {
+      pending.push_back({ConcurrentVertex::Kind::NODE, vertex.scopeId, boundary->GetNodeId()});
+    }
+  }
+}
+
+void LockDetector::AppendConcurrentStreamVertex(const ConcurrentRangeState &rangeContext,
+                                               const SuperKernelBaseNode &node, bool left,
+                                               const ConcurrentVertex &vertex,
+                                               std::deque<ConcurrentVertex> &pending) const {
+  const auto scopeId = GetTrackedScopeId(rangeContext, node);
+  const auto scopeIt = scopeInfos_.find(scopeId);
+  if (scopeIt != scopeInfos_.end() && scopeIt->second.streamIds.size() > 1 && vertex.scopeId != scopeId) {
+    pending.push_back({ConcurrentVertex::Kind::SCOPE, scopeId, INVALID_TASK_ID});
+  }
+  const auto adjacentId = left ? node.GetPreNodeId() : node.GetNextNodeId();
+  if (adjacentId == INVALID_TASK_ID) {
+    return;
+  }
+  const auto *adjacent = graph_->GetNodeById(adjacentId);
+  if (adjacent == nullptr) {
+    return;
+  }
+  const auto nextScopeId = GetTrackedScopeId(rangeContext, *adjacent) == scopeId ? scopeId : INVALID_SCOPE_ID;
+  pending.push_back({ConcurrentVertex::Kind::NODE, nextScopeId, adjacentId});
+}
+
+void LockDetector::AppendForwardVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
+                                        std::deque<ConcurrentVertex> &pending) const {
+  if (vertex.kind == ConcurrentVertex::Kind::SCOPE) {
+    AppendScopeVertices(rangeContext, vertex, false, pending);
+    return;
+  }
+  const auto *node = graph_->GetNodeById(vertex.nodeId);
+  if (node == nullptr) {
+    return;
+  }
+  if (node->GetNodeType() == SkNodeType::NODE_NOTIFY) {
+    for (const auto waitId : node->GetCorrespondingWaitNodeIds()) {
+      if (waitId != INVALID_TASK_ID) {
+        pending.push_back({ConcurrentVertex::Kind::EVENT_NODE, INVALID_SCOPE_ID, waitId});
+      }
+    }
+  }
+  AppendConcurrentStreamVertex(rangeContext, *node, false, vertex, pending);
+}
+
+void LockDetector::AppendReverseVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
+                                        std::deque<ConcurrentVertex> &pending) const {
+  if (vertex.kind == ConcurrentVertex::Kind::SCOPE) {
+    AppendScopeVertices(rangeContext, vertex, true, pending);
+    return;
+  }
+  const auto *node = graph_->GetNodeById(vertex.nodeId);
+  if (node == nullptr) {
+    return;
+  }
+  if (node->GetNodeType() == SkNodeType::NODE_WAIT && node->GetCorrespondingNotifyNodeId() != INVALID_TASK_ID) {
+    pending.push_back({ConcurrentVertex::Kind::EVENT_NODE, INVALID_SCOPE_ID, node->GetCorrespondingNotifyNodeId()});
+  }
+  AppendConcurrentStreamVertex(rangeContext, *node, true, vertex, pending);
+}
+
+void LockDetector::TraverseConcurrentBoundary(ConcurrentRangeState &rangeContext, bool left) const {
+  std::deque<ConcurrentVertex> pending;
+  std::set<ConcurrentVertex> visited;
+  QueueConcurrentBoundarySeeds(rangeContext, left, pending);
+  while (!pending.empty()) {
+    const auto vertex = pending.front();
+    pending.pop_front();
+    if (!visited.insert(vertex).second) {
+      continue;
+    }
+    UpdateConcurrentBoundary(rangeContext, vertex, left);
+    if (left) {
+      AppendReverseVertices(rangeContext, vertex, pending);
+    } else {
+      AppendForwardVertices(rangeContext, vertex, pending);
+    }
+  }
+}
+
+void LockDetector::CalculateLeftConcurrentBoundary(ConcurrentRangeState &rangeContext) const {
+  TraverseConcurrentBoundary(rangeContext, true);
+}
+
+void LockDetector::CalculateRightConcurrentBoundary(ConcurrentRangeState &rangeContext) const {
+  TraverseConcurrentBoundary(rangeContext, false);
+}
+
+std::unordered_map<uint32_t, LockDetector::ConcurrentNodeRange> LockDetector::CalculateScopeConcurrentRanges(
+    const std::vector<SuperKernelBaseNode *> &candidate, uint16_t candidateScopeId) const {
+  ConcurrentRangeState rangeContext;
+  InitializeConcurrentRangeState(candidate, candidateScopeId, rangeContext);
+  CalculateLeftConcurrentBoundary(rangeContext);
+  CalculateRightConcurrentBoundary(rangeContext);
+  return rangeContext.ranges;
+}
+
+bool LockDetector::IsBeforeConcurrentRange(const SuperKernelBaseNode &node,
+                                           const std::unordered_map<uint32_t, ConcurrentNodeRange> &range) const {
+  const auto it = range.find(node.GetStreamIdxInGraph());
+  if (it == range.end()) {
+    return false;
+  }
+  if (it->second.firstNodeId == INVALID_TASK_ID) {
+    return true;
+  }
+  const auto *first = graph_->GetNodeById(it->second.firstNodeId);
+  return first != nullptr && node.GetNodeIdxInStream() < first->GetNodeIdxInStream();
+}
+
+bool LockDetector::CanRunTogether(
+    uint16_t firstScopeId, uint16_t secondScopeId, const ScopeConcurrentRanges &ranges) const {
+  const auto firstIt = scopeInfos_.find(firstScopeId);
+  const auto secondIt = scopeInfos_.find(secondScopeId);
+  if (firstIt == scopeInfos_.end() || secondIt == scopeInfos_.end() ||
+      HasIntersection(firstIt->second.streamIds, secondIt->second.streamIds)) {
+    return false;
+  }
+  const auto overlaps = [&](uint16_t rootId, const ScopeRuntimeInfo &other) {
+    const auto rangeIt = ranges.find(rootId);
+    if (rangeIt == ranges.end()) {
+      return true;
+    }
+    for (const auto streamId : other.streamIds) {
+      const auto windowIt = rangeIt->second.find(streamId);
+      if (windowIt == rangeIt->second.end() || windowIt->second.firstNodeId == INVALID_TASK_ID) {
+        return false;
+      }
+      const auto *first = graph_->GetNodeById(windowIt->second.firstNodeId);
+      const auto *last = graph_->GetNodeById(windowIt->second.lastNodeId);
+      const auto *head = graph_->GetNodeById(other.headNodeIds.at(streamId));
+      const auto *tail = graph_->GetNodeById(other.tailNodeIds.at(streamId));
+      if (first == nullptr || last == nullptr || head == nullptr || tail == nullptr ||
+          tail->GetNodeIdxInStream() < first->GetNodeIdxInStream() ||
+          head->GetNodeIdxInStream() > last->GetNodeIdxInStream()) {
+        return false;
+      }
+    }
+    return true;
+  };
+  return overlaps(firstScopeId, secondIt->second) && overlaps(secondScopeId, firstIt->second);
+}
+
+void LockDetector::QueueScopeWaitNotifies(uint16_t scopeId, ResourceSearchState &state) const {
+  if (!state.expandedWaitScopes.insert(scopeId).second) {
+    return;
+  }
+  const auto scopeIt = scopeInfos_.find(scopeId);
+  if (scopeIt == scopeInfos_.end()) {
+    return;
+  }
+  for (const auto *node : scopeIt->second.memberNodes) {
+    if (node->GetNodeType() == SkNodeType::NODE_WAIT && !ShouldBypassValueWaitDeadlock(*node)) {
+      const auto notifyId = node->GetCorrespondingNotifyNodeId();
+      const auto *notify = graph_->GetNodeById(notifyId);
+      if (notify == nullptr || notify->GetScopeId() != scopeId) {
+        state.pending.push_back(notifyId);
+      }
+    }
+  }
+}
+
+bool LockDetector::ResourceSearchHasRisk(const ResourceSearchState &state) const {
+  uint64_t externalCube = 0;
+  uint64_t externalVec = 0;
+  for (const auto &[streamId, demand] : state.externalByStream) {
+    externalCube = std::max(externalCube, demand.cube);
+    externalVec = std::max(externalVec, demand.vec);
+  }
+  for (const auto &[scopeId, demand] : state.externalScopes) {
+    externalCube = std::max(externalCube, demand.cube);
+    externalVec = std::max(externalVec, demand.vec);
+  }
+  return !HasEnoughDeviceCores(state.residentDemand.cube, state.residentDemand.vec, externalCube, externalVec);
+}
+
+void LockDetector::PrepareResourceSearch(
+    const SuperKernelBaseNode &waitNode, uint16_t rootScopeId, const ResourceDemand &rootDemand,
+    const std::vector<SuperKernelBaseNode *> &rootNodes, const std::unordered_set<uint16_t> &initialResidents,
+    ScopeConcurrentRanges &ranges, ResourceSearchState &state, const ScopeConcurrentRanges *precomputedRanges) {
+  if (precomputedRanges == nullptr) {
+    ranges.emplace(rootScopeId, CalculateScopeConcurrentRanges(rootNodes, rootScopeId));
+    for (const auto &[scopeId, info] : scopeInfos_) {
+      if (scopeId != rootScopeId && info.hasWait) {
+        ranges.emplace(scopeId, CalculateScopeConcurrentRanges(info.memberNodes, scopeId));
+      }
+    }
+  }
+  state.pending.push_back(waitNode.GetCorrespondingNotifyNodeId());
+  state.residentScopes = initialResidents;
+  state.residentScopes.insert(rootScopeId);
+  state.residentDemand = rootDemand;
+  for (const auto scopeId : state.residentScopes) {
+    const auto scopeIt = scopeInfos_.find(scopeId);
+    if (scopeId != rootScopeId && scopeIt != scopeInfos_.end()) {
+      state.residentDemand.cube += scopeIt->second.coreInfo.GetCubeNum();
+      state.residentDemand.vec += scopeIt->second.coreInfo.GetVectorNum();
+    }
+    if (scopeId == rootScopeId) {
+      for (const auto *member : rootNodes) {
+        state.occupiedStreams.emplace(member->GetStreamIdxInGraph(), scopeId);
+      }
+    } else if (scopeIt != scopeInfos_.end()) {
+      for (const auto streamId : scopeIt->second.streamIds) {
+        state.occupiedStreams.emplace(streamId, scopeId);
+      }
+    }
+  }
+}
+
+bool LockDetector::CanStartWaitScope(uint16_t scopeId, const ScopeRuntimeInfo &scope, uint16_t rootScopeId,
+                                     const std::vector<SuperKernelBaseNode *> &rootNodes,
+                                     const ScopeConcurrentRanges &ranges, const ResourceSearchState &state) const {
+  for (const auto residentId : state.residentScopes) {
+    if (residentId != rootScopeId) {
+      if (!CanRunTogether(residentId, scopeId, ranges)) {
+        return false;
+      }
+      continue;
+    }
+    for (const auto *rootNode : rootNodes) {
+      if (scope.streamIds.count(rootNode->GetStreamIdxInGraph()) != 0) {
+        return false;
+      }
+    }
+    const auto &rootRange = ranges.at(rootScopeId);
+    for (const auto scopeStream : scope.streamIds) {
+      const auto windowIt = rootRange.find(scopeStream);
+      if (windowIt == rootRange.end() || windowIt->second.firstNodeId == INVALID_TASK_ID) {
+        return false;
+      }
+      const auto *first = graph_->GetNodeById(windowIt->second.firstNodeId);
+      const auto *last = graph_->GetNodeById(windowIt->second.lastNodeId);
+      const auto *head = graph_->GetNodeById(scope.headNodeIds.at(scopeStream));
+      const auto *tail = graph_->GetNodeById(scope.tailNodeIds.at(scopeStream));
+      if (first == nullptr || last == nullptr || head == nullptr || tail == nullptr ||
+          tail->GetNodeIdxInStream() < first->GetNodeIdxInStream() ||
+          head->GetNodeIdxInStream() > last->GetNodeIdxInStream()) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+void LockDetector::QueueStartedScopeBranch(uint16_t scopeId, const ScopeRuntimeInfo &scope,
+                                           const ResourceSearchState &state,
+                                           std::vector<ResourceSearchState> &branches) const {
+  ResourceSearchState started = state;
+  started.residentScopes.insert(scopeId);
+  started.residentDemand.cube += scope.coreInfo.GetCubeNum();
+  started.residentDemand.vec += scope.coreInfo.GetVectorNum();
+  started.externalScopes.erase(scopeId);
+  for (const auto scopeStream : scope.streamIds) {
+    started.occupiedStreams[scopeStream] = scopeId;
+    started.externalByStream.erase(scopeStream);
+  }
+  for (auto it = started.externalScopes.begin(); it != started.externalScopes.end();) {
+    const auto otherIt = scopeInfos_.find(it->first);
+    if (otherIt != scopeInfos_.end() && HasIntersection(scope.streamIds, otherIt->second.streamIds)) {
+      it = started.externalScopes.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  QueueScopeWaitNotifies(scopeId, started);
+  branches.push_back(std::move(started));
+}
+
+void LockDetector::ExpandUnstartedScope(uint16_t scopeId, const ScopeRuntimeInfo &scope,
+                                        ResourceSearchState &state) const {
+  state.externalScopes[scopeId] = {scope.coreInfo.GetCubeNum(), scope.coreInfo.GetVectorNum()};
+  for (const auto &[headStream, headId] : scope.headNodeIds) {
+    const auto *head = graph_->GetNodeById(headId);
+    if (head != nullptr && head->GetPreNodeId() != INVALID_TASK_ID) {
+      state.pending.push_back(head->GetPreNodeId());
+    }
+  }
+  if (scope.hasWait) {
+    QueueScopeWaitNotifies(scopeId, state);
+  }
+}
+
+bool LockDetector::ProcessResourceSearchNode(uint64_t nodeId, uint16_t rootScopeId,
+                                             const std::vector<SuperKernelBaseNode *> &rootNodes,
+                                             const ScopeConcurrentRanges &ranges, ResourceSearchState &state,
+                                             std::vector<ResourceSearchState> &branches) {
+  if (nodeId == INVALID_TASK_ID) {
+    return false;
+  }
+  const auto *node = graph_->GetNodeById(nodeId);
+  if (node == nullptr) {
+    return false;
+  }
+  if (!state.visited.insert(nodeId).second || IsBeforeConcurrentRange(*node, ranges.at(rootScopeId))) {
+    return true;
+  }
+  const auto streamId = node->GetStreamIdxInGraph();
+  const auto scopeId = node->GetScopeId();
+  const auto occupied = state.occupiedStreams.find(streamId);
+  if (occupied != state.occupiedStreams.end()) {
+    if (occupied->second == scopeId && scopeId != rootScopeId) {
+      QueueScopeWaitNotifies(scopeId, state);
+    }
+    return true;
+  }
+  const auto scopeIt = scopeInfos_.find(scopeId);
+  if (scopeId != rootScopeId && scopeIt != scopeInfos_.end()) {
+    const auto &scope = scopeIt->second;
+    if (scope.hasWait && CanStartWaitScope(scopeId, scope, rootScopeId, rootNodes, ranges, state)) {
+      const uint64_t startedCube = state.residentDemand.cube + scope.coreInfo.GetCubeNum();
+      const uint64_t startedVec = state.residentDemand.vec + scope.coreInfo.GetVectorNum();
+      if (HasEnoughDeviceCores(startedCube, startedVec, 0, 0)) {
+        QueueStartedScopeBranch(scopeId, scope, state, branches);
+      }
+    }
+    ExpandUnstartedScope(scopeId, scope, state);
+    return true;
+  }
+  auto &demand = state.externalByStream[streamId];
+  demand.cube = std::max<uint64_t>(demand.cube, node->GetCubeNum());
+  demand.vec = std::max<uint64_t>(demand.vec, node->GetVecNum());
+  if (node->GetPreNodeId() != INVALID_TASK_ID) {
+    state.pending.push_back(node->GetPreNodeId());
+  }
+  if (node->GetNodeType() == SkNodeType::NODE_WAIT) {
+    state.pending.push_back(node->GetCorrespondingNotifyNodeId());
+  }
+  return true;
+}
+
+bool LockDetector::CheckWaitResourceBranches(
+    const SuperKernelBaseNode &waitNode, uint16_t rootScopeId, const ResourceDemand &rootDemand,
+    const std::vector<SuperKernelBaseNode *> &rootNodes, const std::unordered_set<uint16_t> &initialResidents,
+    const ScopeConcurrentRanges *precomputedRanges) {
+  ScopeConcurrentRanges calculatedRanges;
+  ResourceSearchState initial;
+  PrepareResourceSearch(waitNode, rootScopeId, rootDemand, rootNodes, initialResidents, calculatedRanges, initial,
+                        precomputedRanges);
+  const auto &ranges = precomputedRanges == nullptr ? calculatedRanges : *precomputedRanges;
+  if (!HasEnoughDeviceCores(initial.residentDemand.cube, initial.residentDemand.vec, 0, 0)) {
+    return false;
+  }
+
+  std::vector<ResourceSearchState> branches;
+  branches.push_back(std::move(initial));
+  while (!branches.empty()) {
+    ResourceSearchState state = std::move(branches.back());
+    branches.pop_back();
+    while (!state.pending.empty()) {
+      const auto nodeId = state.pending.back();
+      state.pending.pop_back();
+      if (!ProcessResourceSearchNode(nodeId, rootScopeId, rootNodes, ranges, state, branches)) {
+        return false;
+      }
+    }
+    if (ResourceSearchHasRisk(state)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<const SuperKernelScopeInfo *> LockDetector::CollectWaitScopeCandidates(
+    const std::vector<SuperKernelScopeInfo> &scopes) const {
+  std::vector<const SuperKernelScopeInfo *> candidates;
+  for (const auto &scope : scopes) {
+    const bool hasCheckableWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(), [this](const auto *node) {
+      return node->GetNodeType() == SkNodeType::NODE_WAIT && !ShouldBypassValueWaitDeadlock(*node);
+    });
+    if (scope.GetScopeCoreInfo().IsValid() && hasCheckableWait) {
+      candidates.push_back(&scope);
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(), [](const auto *lhs, const auto *rhs) {
+    return lhs->GetScopeId() < rhs->GetScopeId();
+  });
+  return candidates;
+}
+
+LockDetector::ScopeConcurrentRanges LockDetector::BuildScopeConcurrentRanges() const {
+  ScopeConcurrentRanges ranges;
+  for (const auto &[scopeId, info] : scopeInfos_) {
+    if (info.hasWait) {
+      ranges.emplace(scopeId, CalculateScopeConcurrentRanges(info.memberNodes, scopeId));
+    }
+  }
+  return ranges;
+}
+
+bool LockDetector::CheckSelectedScopeResourceBranches(
+    const std::vector<const SuperKernelScopeInfo *> &selected, const ScopeConcurrentRanges &ranges,
+    uint64_t &riskWaitId) {
+  if (selected.size() < 2) {
+    return true;
+  }
+  std::unordered_set<uint16_t> residents;
+  for (const auto *scope : selected) {
+    residents.insert(scope->GetScopeId());
+  }
+  for (const auto *scope : selected) {
+    currentScopeId_ = scope->GetScopeId();
+    const ResourceDemand rootDemand{scope->GetScopeCoreInfo().GetCubeNum(),
+                                    scope->GetScopeCoreInfo().GetVectorNum()};
+    for (const auto *node : scope->GetNodes()) {
+      if (node->GetNodeType() == SkNodeType::NODE_WAIT && !ShouldBypassValueWaitDeadlock(*node) &&
+          !CheckWaitResourceBranches(*node, currentScopeId_, rootDemand, scope->GetNodes(), residents, &ranges)) {
+        riskWaitId = node->GetNodeId();
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool LockDetector::CheckParallelScopeResources(const std::vector<SuperKernelScopeInfo> &scopes,
+                                               uint64_t &riskWaitId) {
+  riskWaitId = INVALID_TASK_ID;
+  SetScopeInfos(scopes);
+  const auto candidates = CollectWaitScopeCandidates(scopes);
+  const auto ranges = BuildScopeConcurrentRanges();
+  std::vector<const SuperKernelScopeInfo *> selected;
+  ResourceDemand selectedDemand;
+  std::function<bool(size_t)> check = [&](size_t index) {
+    if (index == candidates.size()) {
+      return CheckSelectedScopeResourceBranches(selected, ranges, riskWaitId);
+    }
+    if (!check(index + 1)) {
+      return false;
+    }
+    const auto *candidate = candidates[index];
+    for (const auto *scope : selected) {
+      if (!CanRunTogether(scope->GetScopeId(), candidate->GetScopeId(), ranges)) {
+        return true;
+      }
+    }
+    const uint64_t candidateCube = selectedDemand.cube + candidate->GetScopeCoreInfo().GetCubeNum();
+    const uint64_t candidateVec = selectedDemand.vec + candidate->GetScopeCoreInfo().GetVectorNum();
+    if (!HasEnoughDeviceCores(candidateCube, candidateVec, 0, 0)) {
+      return true;
+    }
+    const auto previousDemand = selectedDemand;
+    selectedDemand = {candidateCube, candidateVec};
+    selected.push_back(candidate);
+    const bool safe = check(index + 1);
+    selected.pop_back();
+    selectedDemand = previousDemand;
+    return safe;
+  };
+  // The recursive search returns false when it finds a resource risk. That
+  // result is reported through riskWaitId; the detector itself completed
+  // successfully, so the public return value remains true.
+  (void)check(0);
+  return true;
 }
 
 bool LockDetector::IsNodeBeforeCandidateScope(const SuperKernelBaseNode &node,
@@ -209,84 +841,67 @@ void LockDetector::MergeCandidateScopeRange(const ScopeRuntimeInfo &candidateSco
   }
 }
 
-bool LockDetector::CheckNotifyWaitScopeCombinations(const SuperKernelBaseNode &waitNode,
-                                                    const SuperKernelBaseNode &notifyNode, uint32_t skCubeNum,
-                                                    uint32_t skVecNum, uint32_t depCubeNum, uint32_t depVecNum,
-                                                    const std::unordered_set<uint32_t> &predecessorStreamIds) {
-  std::map<uint16_t, uint64_t> candidateWaitsByScope;
-  for (const auto candidateWaitNodeId : notifyNode.GetCorrespondingWaitNodeIds()) {
-    const auto *candidateWaitNode = graph_->GetNodeById(candidateWaitNodeId);
-    if (candidateWaitNode == nullptr || candidateWaitNode->GetScopeId() == INVALID_SCOPE_ID ||
-        candidateWaitNode->GetScopeId() == currentScopeId_) {
-      continue;
-    }
-    const auto scopeInfoIt = scopeInfos_.find(candidateWaitNode->GetScopeId());
-    if (scopeInfoIt == scopeInfos_.end()) {
-      continue;
-    }
-    candidateWaitsByScope.emplace(candidateWaitNode->GetScopeId(), candidateWaitNodeId);
-  }
-  std::vector<std::pair<uint64_t, const ScopeRuntimeInfo *>> candidates;
-  for (const auto &[scopeId, candidateWaitId] : candidateWaitsByScope) {
-    candidates.emplace_back(candidateWaitId, &scopeInfos_.at(scopeId));
-  }
-
-  std::function<bool(size_t, uint64_t, uint64_t)> check = [&](size_t index, uint64_t cubeNum, uint64_t vecNum) {
-    if (!HasEnoughDeviceCores(cubeNum, vecNum, depCubeNum, depVecNum)) {
-      return false;
-    }
-    if (index == candidates.size()) {
-      return true;
-    }
-    if (!check(index + 1, cubeNum, vecNum)) {
-      return false;
-    }
-    const auto &[candidateWaitId, candidateScope] = candidates[index];
-    if (HasIntersection(candidateScope->streamIds, skStreamIds) ||
-        HasIntersection(candidateScope->streamIds, predecessorStreamIds) ||
-        IsSerializedWithCandidateScope(waitNode, candidateWaitId, *candidateScope)) {
-      return true;
-    }
-
-    const auto savedStreamIds = skStreamIds;
-    const auto savedRanges = skRangeInStream;
-    const auto savedHeads = parallelScopeHeadNodeIds_;
-    const auto savedTails = parallelScopeTailNodeIds_;
-    skStreamIds.insert(candidateScope->streamIds.begin(), candidateScope->streamIds.end());
-    MergeCandidateScopeRange(*candidateScope);
-    const bool valid = check(index + 1, cubeNum + candidateScope->coreInfo.GetCubeNum(),
-                             vecNum + candidateScope->coreInfo.GetVectorNum());
-    skStreamIds = savedStreamIds;
-    skRangeInStream = savedRanges;
-    parallelScopeHeadNodeIds_ = savedHeads;
-    parallelScopeTailNodeIds_ = savedTails;
-    return valid;
-  };
-  return check(0, skCubeNum, skVecNum);
-}
-
-bool LockDetector::CheckFusedWaitNotifies(uint32_t skCubeNum, uint32_t skVecNum, uint32_t depCubeNum,
-                                          uint32_t depVecNum) {
-  for (const auto &[notifyId, waitInfo] : fusedNotifyWaitInfos_) {
-    const auto *notifyNode = graph_->GetNodeById(notifyId);
-    const auto *waitNode = graph_->GetNodeById(waitInfo.waitId);
-    if (notifyNode != nullptr && waitNode != nullptr &&
-        !CheckNotifyWaitScopeCombinations(*waitNode, *notifyNode, skCubeNum, skVecNum, depCubeNum, depVecNum,
-                                          waitInfo.predecessorStreamIds)) {
-      deadlockReason_ = DeadlockFailReason::NOTIFY_INSUFFICIENT_CORES;
-      return false;
-    }
-  }
-  return true;
-}
-
-bool LockDetector::IsInSKStream(const SuperKernelBaseNode &node) const {
-  return std::find(skStreamIds.begin(), skStreamIds.end(), node.GetStreamIdxInGraph()) != skStreamIds.end();
-}
-
-bool LockDetector::HasDeadlock(SuperKernelBaseNode *curNode) {
+bool LockDetector::HasDeadlock(SuperKernelBaseNode *curNode, DeadlockSearchState &state) {
   curNode->SetVisited(true);
   tempVisitedNodes.emplace_back(curNode->GetNodeId());
+  const auto scopeIt = scopeInfos_.find(curNode->GetScopeId());
+  if (curNode->GetScopeId() != currentScopeId_ && scopeIt != scopeInfos_.end()) {
+    if (!state.expandedScopeIds.insert(curNode->GetScopeId()).second) {
+      return false;
+    }
+    return CheckScopeDeadlock(scopeIt->second, state);
+  }
+  return HasDeadlockPredecessor(curNode, state);
+}
+
+bool LockDetector::CheckScopeDeadlock(const ScopeRuntimeInfo &scopeInfo, DeadlockSearchState &state) {
+  if (scopeInfo.memberNodes.empty()) {
+    return false;
+  }
+  if (!HasEnoughCores(scopeInfo.memberNodes.front(), false)) {
+    deadlockReason_ = DeadlockFailReason::KERNEL_INSUFFICIENT_CORES;
+    return true;
+  }
+
+  std::unordered_set<uint64_t> memberIds;
+  for (const auto *member : scopeInfo.memberNodes) {
+    memberIds.insert(member->GetNodeId());
+  }
+  for (const auto *member : scopeInfo.memberNodes) {
+    if (member->GetNodeType() != SkNodeType::NODE_WAIT ||
+        memberIds.count(member->GetCorrespondingNotifyNodeId()) != 0) {
+      continue;
+    }
+    auto *notify = graph_->GetNodeById(member->GetCorrespondingNotifyNodeId());
+    if (notify == nullptr) {
+      deadlockReason_ = DeadlockFailReason::NOTIFY_NOT_IN_GRAPH;
+      return true;
+    }
+    if (IsAfterSKRange(*notify)) {
+      deadlockReason_ = DeadlockFailReason::NOTIFY_AFTER_SK_RANGE;
+      return true;
+    }
+    if (notify->GetStreamIdxInGraph() != member->GetStreamIdxInGraph() && !IsInSKStream(*notify) &&
+        HasDeadlock(notify, state)) {
+      return true;
+    }
+  }
+
+  for (const auto &[streamId, headId] : scopeInfo.headNodeIds) {
+    auto *head = graph_->GetNodeById(headId);
+    if (head == nullptr) {
+      continue;
+    }
+    head->SetVisited(true);
+    tempVisitedNodes.emplace_back(headId);
+    if (HasDeadlockPredecessor(head, state)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool LockDetector::HasDeadlockPredecessor(SuperKernelBaseNode *curNode, DeadlockSearchState &state) {
   if (curNode->GetPreNodeId() == INVALID_TASK_ID) {
     return false;
   }
@@ -295,6 +910,9 @@ bool LockDetector::HasDeadlock(SuperKernelBaseNode *curNode) {
   SuperKernelBaseNode *preNode = graph_->GetNodeById(preNodeId);
   if (preNode == nullptr) {
     SK_LOGE("[lock detector] HasDeadlock: preNode %lu not found for curNode %lu", preNodeId, curNode->GetNodeId());
+    return false;
+  }
+  if (IsBeforeConcurrentRange(*preNode, activeConcurrentRanges_)) {
     return false;
   }
   // if prenode is visited, means that wait node has already entered the detection process before
@@ -312,22 +930,27 @@ bool LockDetector::HasDeadlock(SuperKernelBaseNode *curNode) {
     return false;
   }
 
+  const auto scopeIt = scopeInfos_.find(preNode->GetScopeId());
+  if (preNode->GetScopeId() != currentScopeId_ && scopeIt != scopeInfos_.end()) {
+    return HasDeadlock(preNode, state);
+  }
+
   bool hasDeadlock = true;
   switch (preNode->GetNodeType()) {
     case SkNodeType::NODE_KERNEL:
-      hasDeadlock = preNode->IsScopeNode() ? HasDeadlock(preNode) : CheckKernelNodeDeadlock(preNode);
+      hasDeadlock = preNode->IsScopeNode() ? HasDeadlock(preNode, state) : CheckKernelNodeDeadlock(preNode, state);
       break;
     case SkNodeType::NODE_WAIT:
-      hasDeadlock = CheckWaitNodeDeadlock(preNode);
+      hasDeadlock = CheckWaitNodeDeadlock(preNode, state);
       break;
     case SkNodeType::NODE_NOTIFY:
-      hasDeadlock = CheckNotifyNodeDeadlock(preNode);
+      hasDeadlock = CheckNotifyNodeDeadlock(preNode, state);
       break;
     case SkNodeType::NODE_DEFAULT:
-      hasDeadlock = HasDeadlock(preNode);
+      hasDeadlock = HasDeadlock(preNode, state);
       break;
     case SkNodeType::NODE_RESET:
-      hasDeadlock = HasDeadlock(preNode);
+      hasDeadlock = HasDeadlock(preNode, state);
       break;
     default:
       SK_LOGD("nodeId: %u, unsupported node type %u in HasDeadlock", preNode->GetNodeId(), preNode->GetNodeType());
@@ -338,21 +961,21 @@ bool LockDetector::HasDeadlock(SuperKernelBaseNode *curNode) {
   return hasDeadlock;
 }
 
-bool LockDetector::CheckKernelNodeDeadlock(SuperKernelBaseNode *preNode) {
+bool LockDetector::CheckKernelNodeDeadlock(SuperKernelBaseNode *preNode, DeadlockSearchState &state) {
   if (!HasEnoughCores(preNode, false)) {
     SK_LOGI("Not enough cores for kernel node, nodeId=%lu, requiredCube=%u, requiredVec=%u", preNode->GetNodeId(),
             preNode->GetCubeNum(), preNode->GetVecNum());
     deadlockReason_ = DeadlockFailReason::KERNEL_INSUFFICIENT_CORES;
     return true;
   }
-  if (HasDeadlock(preNode)) {
+  if (HasDeadlock(preNode, state)) {
     SK_LOGI("Deadlock detected in kernel node, nodeId=%lu", preNode->GetNodeId());
     return true;
   }
   return false;
 }
 
-bool LockDetector::CheckWaitNodeDeadlock(SuperKernelBaseNode *preNode) {
+bool LockDetector::CheckWaitNodeDeadlock(SuperKernelBaseNode *preNode, DeadlockSearchState &state) {
   const uint64_t notifyId = preNode->GetCorrespondingNotifyNodeId();
   // Case 1: notify node not in modelRI
   if (notifyId == INVALID_TASK_ID) {
@@ -375,13 +998,13 @@ bool LockDetector::CheckWaitNodeDeadlock(SuperKernelBaseNode *preNode) {
     return true;
   }
   // Case 3: check node before wait node in current stream
-  if (HasDeadlock(preNode)) {
+  if (HasDeadlock(preNode, state)) {
     SK_LOGI("Deadlock detected in wait node pre-path, waitNodeId=%lu", preNode->GetNodeId());
     return true;
   }
   // Case 4: check node before notify node (notify node not in sk stream) in different stream
   if (notifyNode->GetStreamIdxInGraph() != preNode->GetStreamIdxInGraph() && !IsInSKStream(*notifyNode)) {
-    if (HasDeadlock(notifyNode)) {
+    if (HasDeadlock(notifyNode, state)) {
       SK_LOGI("Deadlock detected in wait node cross-stream path, waitNodeId=%lu, notifyNodeId=%lu",
               preNode->GetNodeId(), notifyNode->GetNodeId());
       return true;
@@ -390,7 +1013,7 @@ bool LockDetector::CheckWaitNodeDeadlock(SuperKernelBaseNode *preNode) {
   return false;
 }
 
-bool LockDetector::CheckNotifyNodeDeadlock(SuperKernelBaseNode *preNode) {
+bool LockDetector::CheckNotifyNodeDeadlock(SuperKernelBaseNode *preNode, DeadlockSearchState &state) {
   const uint32_t cubeNum = preNode->GetCubeNum();
   const uint32_t vecNum = preNode->GetVecNum();
   if ((cubeNum > 0 || vecNum > 0) && !HasEnoughCores(preNode, false)) {
@@ -406,7 +1029,7 @@ bool LockDetector::CheckNotifyNodeDeadlock(SuperKernelBaseNode *preNode) {
     if (IsBeforeSKRange(*waitNode)) {
       break;
     } else {
-      if (HasDeadlock(preNode)) {
+      if (HasDeadlock(preNode, state)) {
         SK_LOGI("Deadlock detected in notify node path, notifyNodeId=%lu", preNode->GetNodeId());
         return true;
       }
@@ -441,7 +1064,7 @@ bool LockDetector::HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSup
       SK_LOGD("[lock detector] Candidate SK for node %s fits available cores (cube %u<=%u, vec %u<=%u)",
               curNode->Format().c_str(), superKernelCubeNum, availableCores.first, superKernelVecNum,
               availableCores.second);
-      return CheckFusedWaitNotifies(superKernelCubeNum, superKernelVecNum, depOpCubeNum, depOpVecNum);
+      return true;
     }
     SK_LOGD("[lock detector] Candidate SK for node %s conflicts with dependent ops (cube %u>%u or vec %u>%u)",
             curNode->Format().c_str(), superKernelCubeNum, availableCores.first, superKernelVecNum,
@@ -452,9 +1075,6 @@ bool LockDetector::HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSup
     const uint32_t candidateDepVecNum = std::max(depOpVecNum, curNodeVecNum);
     std::pair<uint32_t, uint32_t> availableCores = GetAvailableCores(false);
     if (HasEnoughDeviceCores(superKernelCubeNum, superKernelVecNum, candidateDepCubeNum, candidateDepVecNum)) {
-      if (!CheckFusedWaitNotifies(superKernelCubeNum, superKernelVecNum, candidateDepCubeNum, candidateDepVecNum)) {
-        return false;
-      }
       depOpCubeNum = candidateDepCubeNum;
       depOpVecNum = candidateDepVecNum;
       SK_LOGD("[lock detector] Node %s: allocated from device (cube %u, vec %u), new depOp limits: cube %u, vec %u",
@@ -496,7 +1116,6 @@ void LockDetector::Reset() {
   superKernelCubeNum = 0;
   superKernelVecNum = 0;
   currentScopeId_ = INVALID_SCOPE_ID;
-  fusedNotifyWaitInfos_.clear();
   scopeCoreInfoChanged_ = false;
   nodeNum = 0;
   kernelNodeNum = 0;
@@ -504,6 +1123,8 @@ void LockDetector::Reset() {
 
   RollbackVisitedState(nodes);
   RollbackVisitedState(tempVisitedNodes);
+  candidateScopeNodes_.clear();
+  activeConcurrentRanges_.clear();
   skStreamIds.clear();
   skRangeInStream.clear();
   parallelScopeHeadNodeIds_.clear();
@@ -598,6 +1219,14 @@ bool LockDetector::GetWaitNodeFusibleStatus(SuperKernelBaseNode &curNode) {
     deadlockReason_ = DeadlockFailReason::FIRST_WAIT;
     return false;
   }
+  if (currentScopeId_ != INVALID_SCOPE_ID) {
+    auto candidate = candidateScopeNodes_;
+    candidate.push_back(&curNode);
+    activeConcurrentRanges_ = CalculateScopeConcurrentRanges(candidate, currentScopeId_);
+    if (IsBeforeConcurrentRange(*notifyNode, activeConcurrentRanges_)) {
+      return true;
+    }
+  }
   // Case 3: notify node is in the same SK stream
   if (IsInSKStream(*notifyNode)) {
     if (!CheckNotifyInSKStream(curNode, *notifyNode)) {
@@ -619,7 +1248,8 @@ bool LockDetector::GetWaitNodeFusibleStatus(SuperKernelBaseNode &curNode) {
     }
 
     // Case 6: notify node is in different stream, check for deadlock
-    bool hasDeadlock = HasDeadlock(notifyNode);
+    DeadlockSearchState searchState;
+    bool hasDeadlock = HasDeadlock(notifyNode, searchState);
     SK_LOGD("[lock detector] Wait node %s: notify %s HasDeadlock=%d", curNode.Format().c_str(),
             notifyNode->Format().c_str(), hasDeadlock);
     if (hasDeadlock) {
@@ -627,19 +1257,16 @@ bool LockDetector::GetWaitNodeFusibleStatus(SuperKernelBaseNode &curNode) {
     }
   }
 
-  std::unordered_set<uint32_t> predecessorStreamIds;
-  for (const auto nodeId : tempVisitedNodes) {
-    const auto *node = graph_->GetNodeById(nodeId);
-    if (node != nullptr) {
-      predecessorStreamIds.insert(node->GetStreamIdxInGraph());
+  if (currentScopeId_ != INVALID_SCOPE_ID && !candidateScopeNodes_.empty()) {
+    auto candidate = candidateScopeNodes_;
+    candidate.push_back(&curNode);
+    const ResourceDemand rootDemand{superKernelCubeNum, superKernelVecNum};
+    if (!CheckWaitResourceBranches(curNode, currentScopeId_, rootDemand, candidate, {currentScopeId_})) {
+      deadlockReason_ = DeadlockFailReason::NOTIFY_INSUFFICIENT_CORES;
+      return false;
     }
   }
-  if (!CheckNotifyWaitScopeCombinations(curNode, *notifyNode, superKernelCubeNum, superKernelVecNum, depOpCubeNum,
-                                        depOpVecNum, predecessorStreamIds)) {
-    deadlockReason_ = DeadlockFailReason::NOTIFY_INSUFFICIENT_CORES;
-    return false;
-  }
-  fusedNotifyWaitInfos_.emplace(notifyId, FusedNotifyWaitInfo{curNode.GetNodeId(), std::move(predecessorStreamIds)});
+
   return true;
 }
 
@@ -729,7 +1356,7 @@ bool LockDetector::IsFusible(SuperKernelBaseNode &curNode) {
   SK_LOGI("[lock detector] IsFusible: Checking node %s, current state: nodeNum=%u, kernelNodeNum=%u",
           curNode.Format().c_str(), nodeNum, kernelNodeNum);
   deadlockReason_ = DeadlockFailReason::NOT_FIND_DEADLOCK;  // Reset before checking
-  bool canFuse = GetFusibleStatus(curNode);
+  const bool canFuse = GetFusibleStatus(curNode);
   // Only modify state if node can be fused
   if (canFuse) {
     skStreamIds.insert(curNode.GetStreamIdxInGraph());
@@ -737,6 +1364,7 @@ bool LockDetector::IsFusible(SuperKernelBaseNode &curNode) {
     nodeNum++;
     curNode.SetVisited(true);
     nodes.emplace_back(curNode.GetNodeId());
+    candidateScopeNodes_.push_back(&curNode);
 
     if (curNode.GetNodeType() == SkNodeType::NODE_KERNEL && !curNode.IsScopeNode()) {
       kernelNodeNum++;

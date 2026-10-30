@@ -392,10 +392,12 @@ TEST_F(SkOptimizerTaskReorderTest, ThreeStreamParallel_OnlyOp4ToOp9Fusible) {
   // Setup stream connections
   graph->streams.clear();
   graph->headNodes.clear();
+  graph->tailNodes.clear();
 
   // Setup stream 0: op1 -> op4 -> op5 -> op10
   graph->streams.emplace_back();
   graph->headNodes.push_back(1);
+  graph->tailNodes.push_back(10);
   op1->SetNextNodeId(4);
   op1->SetPreNodeId(INVALID_TASK_ID);
   op1->nodeIdxInStream = 0;
@@ -419,6 +421,7 @@ TEST_F(SkOptimizerTaskReorderTest, ThreeStreamParallel_OnlyOp4ToOp9Fusible) {
   // Setup stream 1: op2 -> op6 -> op7 -> op11
   graph->streams.emplace_back();
   graph->headNodes.push_back(2);
+  graph->tailNodes.push_back(11);
   op2->SetNextNodeId(6);
   op2->SetPreNodeId(INVALID_TASK_ID);
   op2->nodeIdxInStream = 0;
@@ -442,6 +445,7 @@ TEST_F(SkOptimizerTaskReorderTest, ThreeStreamParallel_OnlyOp4ToOp9Fusible) {
   // Setup stream 2: op3 -> op8 -> op9 -> op12
   graph->streams.emplace_back();
   graph->headNodes.push_back(3);
+  graph->tailNodes.push_back(12);
   op3->SetNextNodeId(8);
   op3->SetPreNodeId(INVALID_TASK_ID);
   op3->nodeIdxInStream = 0;

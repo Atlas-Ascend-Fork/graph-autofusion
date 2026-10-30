@@ -1262,7 +1262,10 @@ void SuperKernelGraph::RegisterFusibleScope(const std::unique_ptr<SuperKernelBas
 void SuperKernelGraph::UpdateNodeRelations(uint64_t nodeId, uint32_t streamIdx, uint32_t taskIdx, uint64_t &preNodeId) {
   if (taskIdx == 0) {
     headNodes.push_back(nodeId);
+    tailNodes.push_back(nodeId);
     SK_LOGI("Stream %u: Added head node %lu", streamIdx, nodeId);
+  } else {
+    tailNodes[streamIdx] = nodeId;
   }
   if (preNodeId != INVALID_TASK_ID) {
     graphMap[preNodeId]->SetNextNodeId(nodeId);

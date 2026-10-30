@@ -300,12 +300,14 @@ class SuperKernelScopeSplitterTest : public testing::Test {
   void SetupStreams(const std::vector<std::vector<uint64_t>> &streamNodes) {
     graph->streams.clear();
     graph->headNodes.clear();
+    graph->tailNodes.clear();
 
     for (size_t streamIdx = 0; streamIdx < streamNodes.size(); ++streamIdx) {
       const auto &nodes = streamNodes[streamIdx];
       graph->streams.emplace_back();
       if (!nodes.empty()) {
         graph->headNodes.push_back(nodes[0]);
+        graph->tailNodes.push_back(nodes.back());
         // Set up nodeIdxInStream, preNodeId and nextNodeId for each node
         for (size_t i = 0; i < nodes.size(); ++i) {
           auto *currentNode = graph->GetNodeById(nodes[i]);
@@ -322,6 +324,7 @@ class SuperKernelScopeSplitterTest : public testing::Test {
         }
       } else {
         graph->headNodes.push_back(INVALID_TASK_ID);
+        graph->tailNodes.push_back(INVALID_TASK_ID);
       }
     }
   }

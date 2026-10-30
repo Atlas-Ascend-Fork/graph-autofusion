@@ -1471,6 +1471,111 @@ bool DeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   return true;
 }
 
+bool ParallelResourceDeadlockCheckPass::SplitScopeAtRiskWait(std::vector<SuperKernelScopeInfo> &scopes,
+                                                             SuperKernelBaseNode &waitNode) {
+  std::vector<SuperKernelScopeInfo> refinedScopes;
+  refinedScopes.reserve(scopes.size() + 1);
+  bool found = false;
+  for (auto &scope : scopes) {
+    const auto &nodes = scope.GetNodes();
+    if (std::find(nodes.begin(), nodes.end(), &waitNode) == nodes.end()) {
+      refinedScopes.push_back(std::move(scope));
+      continue;
+    }
+    found = true;
+    const auto originalBreakInfo = scope.GetBreakInfo();
+    scope.ClearNodeScopeIds();
+    std::vector<std::vector<SuperKernelBaseNode *>> segments;
+    std::vector<SuperKernelBaseNode *> currentSegment;
+    bool reachedRiskWait = false;
+    bool hasPrefix = false;
+    for (auto *node : nodes) {
+      const bool isWait = node->GetNodeType() == SkNodeType::NODE_WAIT;
+      if (!reachedRiskWait) {
+        if (node == &waitNode) {
+          reachedRiskWait = true;
+          node->SetIsFusible(false);
+          node->SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
+        } else {
+          currentSegment.push_back(node);
+          hasPrefix = true;
+        }
+      } else if (isWait) {
+        node->SetIsFusible(false);
+        node->SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
+        if (!currentSegment.empty()) {
+          segments.push_back(std::move(currentSegment));
+          currentSegment.clear();
+        }
+      } else {
+        currentSegment.push_back(node);
+      }
+    }
+    if (!currentSegment.empty()) {
+      segments.push_back(std::move(currentSegment));
+    }
+    for (size_t index = 0; index < segments.size(); ++index) {
+      SuperKernelScopeInfo splitScope;
+      splitScope.SetScopeBitFlags(scope.GetScopeBitFlags());
+      for (auto *node : segments[index]) {
+        splitScope.AddNode(node);
+      }
+      RebuildStreamInfos(splitScope);
+      if (index == 0 && hasPrefix) {
+        ScopeBreakInfo breakInfo;
+        breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
+            .SetTriggerNode(waitNode.GetNodeId(), waitNode.GetStreamIdxInGraph())
+            .SetDetail("Parallel resource deadlock at Wait node " + std::to_string(waitNode.GetNodeId()));
+        splitScope.SetBreakInfo(std::move(breakInfo));
+      } else {
+        splitScope.SetBreakInfo(originalBreakInfo);
+      }
+      refinedScopes.push_back(std::move(splitScope));
+    }
+  }
+  if (found) {
+    scopes = std::move(refinedScopes);
+  }
+  return found;
+}
+
+bool ParallelResourceDeadlockCheckPass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
+  if (scopes.size() < 2) {
+    return true;
+  }
+  int64_t maxCubeNum = 0;
+  int64_t maxVectorNum = 0;
+  if (GetDeviceCoreNums(maxCubeNum, maxVectorNum) != ACL_SUCCESS) {
+    return false;
+  }
+  ScopeCoreInfoCalculator calculator(maxCubeNum, maxVectorNum);
+  while (scopes.size() >= 2) {
+    for (auto &scope : scopes) {
+      if (std::none_of(scope.GetNodes().begin(), scope.GetNodes().end(), IsExecutableKernelNode)) {
+        scope.ClearScopeCoreInfo();
+        continue;
+      }
+      ScopeCoreInfo coreInfo;
+      if (!calculator.GetValidScopeCoreInfo(scope.GetNodes(), coreInfo)) {
+        return false;
+      }
+      scope.SetScopeCoreInfo(coreInfo);
+    }
+    uint64_t riskWaitId = INVALID_TASK_ID;
+    if (!parallelLockDetector_.CheckParallelScopeResources(scopes, riskWaitId)) {
+      return false;
+    }
+    if (riskWaitId == INVALID_TASK_ID) {
+      break;
+    }
+    auto *waitNode = graph_.GetNodeById(riskWaitId);
+    if (waitNode == nullptr || !waitNode->IsFusible() || !SplitScopeAtRiskWait(scopes, *waitNode)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // ============ ScheModeKernelSplitPass Implementation ============
 
 ScheModeKernelSplitPass::ScheModeKernelSplitPass(SuperKernelGraph &inputGraph) : ScopeSplitPass(inputGraph) {}
@@ -1704,6 +1809,7 @@ SuperKernelScopeSplitter::SuperKernelScopeSplitter(SuperKernelGraph &inputGraph,
       passes_.push_back(std::make_unique<DefaultNodeProcessPass>(inputGraph));
       passes_.push_back(std::make_unique<DeadlockRefinePass>(inputGraph, *opts_));
     }
+    passes_.push_back(std::make_unique<ParallelResourceDeadlockCheckPass>(inputGraph, *opts_));
     passes_.push_back(std::make_unique<EventOnlyStreamRemovePass>(inputGraph));
     // Trim boundaries only after event-only stream removal has converged; keep the remaining partition intact.
     passes_.push_back(std::make_unique<ScopeBoundaryEventRemovePass>(inputGraph));

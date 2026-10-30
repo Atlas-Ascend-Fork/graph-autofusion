@@ -32,6 +32,7 @@
 #ifndef __SK_SCOPE_SPLIT_H__
 #define __SK_SCOPE_SPLIT_H__
 
+#include <memory>
 #include <optional>
 #include <queue>
 #include <set>
@@ -396,6 +397,21 @@ enum class ScopeProcessResult {
   NO_DEADLOCK,          ///< No deadlock found, scope is safe and added to outputScopes
   DEADLOCK_RESOLVED,    ///< Deadlock found and successfully split, remaining part returned via pendingScope
   DEADLOCK_UNRESOLVED,  ///< Deadlock found but cannot split (no Wait node)
+};
+
+class ParallelResourceDeadlockCheckPass : public ScopeSplitPass {
+ public:
+  ParallelResourceDeadlockCheckPass(SuperKernelGraph &inputGraph, const SuperKernelOptionsManager &opts)
+      : ScopeSplitPass(inputGraph), parallelLockDetector_(inputGraph, opts) {}
+
+  bool Run(std::vector<SuperKernelScopeInfo> &scopes) override;
+  std::string GetName() const override {
+    return "ParallelResourceDeadlockCheckPass";
+  }
+
+ private:
+  bool SplitScopeAtRiskWait(std::vector<SuperKernelScopeInfo> &scopes, SuperKernelBaseNode &waitNode);
+  LockDetector parallelLockDetector_;
 };
 
 /*!
