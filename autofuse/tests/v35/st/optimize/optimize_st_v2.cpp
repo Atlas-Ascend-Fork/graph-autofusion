@@ -196,21 +196,19 @@ TEST_F(OptimizerStV2, ReduceNeedAlignment) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  // Max 对 {0,2} 两根轴归约, 属多 R 轴结构: R-core 模板被跳过, 仅剩 Common/AllLoad 两个调度
-  // 结果, 不再产生 r_multicore phase 图(原阶段一逐 case 展开会得到 10 个结果); 对齐(A 轴
-  // stride 10 对齐到 16)的金标检查随 phase-1 布局移除, 对齐逻辑由其它用例继续覆盖
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
-  size_t r_multicore_graph_count = 0UL;
-  for (const auto &scheduled_result : fused_scheduled_result.node_idx_to_scheduled_results[0]) {
-    for (const auto &schedule_group : scheduled_result.schedule_groups) {
-      for (const auto &impl_graph : schedule_group.impl_graphs) {
-        if (impl_graph.GetName().find("r_multicore") != std::string::npos) {
-          ++r_multicore_graph_count;
-        }
-      }
-    }
-  }
-  EXPECT_EQ(r_multicore_graph_count, 0UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 10UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 8UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2UL);
+
+  const auto &impl_graph = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[1];
+  const auto &reduce_node = impl_graph.FindNode("b0_max");
+  std::vector<Expression> golden_stride = {
+      Zero,
+      Symbol(16),
+      One,
+  };
+  EXPECT_EQ(reduce_node->outputs[0].attr.vectorized_strides, golden_stride);
 }
 
 TEST_F(OptimizerStV2, NotRemovePad) {

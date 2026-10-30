@@ -104,10 +104,10 @@ class Optimizer {
   static Status GetNonContinuousAxisPairBySpecialRule(::ascir::ImplGraph &impl_graph,
                                                       std::set<std::pair<int64_t, int64_t>> &non_continuous_pair);
   static bool IsReduceFirstStage(size_t index, ScheduleTask &schedule_task);
-  Status AppendReduceFirstStageGroup(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
-                                     std::vector<::ascir::ScheduledResult> &scheduled_results_cur, size_t index,
-                                     ScheduleTask &schedule_task) const;
-  void RefreshGroupRelation(size_t index, const std::map<std::string, af::Expression> &var_relations,
+  Status ExpandReduceFirstStageResults(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
+                                       std::vector<::ascir::ScheduledResult> &scheduled_results_cur, size_t index,
+                                       ScheduleTask &schedule_task) const;
+  void RefreshGroupRelation(size_t index, std::map<std::string, af::Expression> &var_relations,
                             ScheduleTask &schedule_task, ::ascir::ScheduledResult &schedule_result) const;
   static Status InitializeScheduledResults(std::vector<::ascir::ScheduledResult> &scheduled_results_cur,
                                            ScheduleTask &schedule_task);

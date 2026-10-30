@@ -517,13 +517,12 @@ Status ReducePartitionCaseGenerator::GeneratorTask(ascir::HintGraph &optimize_gr
            optimize_graph.GetName().c_str());
     return ge::GRAPH_SUCCESS;
   }
-  GELOGI("Graph %s begin to generate reduce tasks.", optimize_graph.GetName().c_str());
+  const bool force_all_load = ShouldForceAllLoad(optimize_graph);
+  GELOGI("Graph %s force AllLoad = %d, begin to generate reduce tasks.", optimize_graph.GetName().c_str(),
+         static_cast<int32_t>(force_all_load));
   GE_CHK_STATUS_RET(GeneratorGeneralTask(optimize_graph, tasks));
   GELOGI("After GeneralTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
-  if (HasMultiRAxisReduce(optimize_graph)) {
-    GELOGI("Graph %s has multi R axis reduce, skip R-core template generation to avoid task explosion.",
-           optimize_graph.GetName().c_str());
-  } else {
+  if (!force_all_load) {
     GE_CHK_STATUS_RET(GeneratorRCoreTask(optimize_graph, tasks));
     GELOGI("After RCoreTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
   }
@@ -609,6 +608,22 @@ Status ReducePartitionCaseGenerator::Generate([[maybe_unused]] ascir::HintGraph 
                                               [[maybe_unused]] std::vector<ascir::ImplGraph> &graphs,
                                               [[maybe_unused]] std::vector<std::string> &score_functions) {
   return ge::GRAPH_SUCCESS;
+}
+
+bool ReducePartitionCaseGenerator::ShouldForceAllLoad(ascir::HintGraph &graph) {
+  if (!IsOnlyHasOneOrLessReduce(graph)) {
+    return true;
+  }
+
+  ascir::ImplGraph impl_graph(graph.GetName().c_str());
+  impl_graph.CopyFrom(graph);
+  node_order_.clear();
+  auto loop_start_end = FindNormLoops(impl_graph);
+  if (!loop_start_end.empty()) {
+    return true;
+  }
+
+  return false;
 }
 
 Status ReducePartitionCaseGenerator::GenerateGeneralCase(ascir::HintGraph &graph, std::vector<ascir::ImplGraph> &graphs,
@@ -1266,29 +1281,6 @@ bool ReducePartitionCaseGenerator::HasArgMaxReduce(const ScheduleTask &task) {
       if (ScheduleUtils::IsReduce(node) && node->GetType() == "ArgMax") {
         return true;
       }
-    }
-  }
-  return false;
-}
-
-// 多 R 轴判定: 归约轴为输入 stride 非零而输出 stride 变 0 的轴(与 tiling 的 r_group 推导一致,
-// 复用 CalcReduceAxes)。多 R 轴时 R-core 模板的 phase-1 各 tiling case 切分结构互不相同,
-// 无法共用同一份 var relation, 逐 case 展开会造成模板数爆炸, 因此在 GeneratorRCoreTask 之前
-// 整体跳过该模板。
-bool ReducePartitionCaseGenerator::HasMultiRAxisReduce(const ascir::ImplGraph &impl_graph) {
-  for (const auto &node : impl_graph.GetAllNodes()) {
-    if (!ScheduleUtils::IsReduce(node)) {
-      continue;
-    }
-    const std::vector<ascir::SizeExpr> input_strides = node->inputs[0].attr.strides;
-    const std::vector<ascir::SizeExpr> output_strides = node->outputs[0].attr.strides;
-    const std::vector<ascir::AxisId> output_axes = node->outputs[0].attr.axis;
-    if (input_strides.size() != output_strides.size() || output_strides.size() != output_axes.size()) {
-      continue;
-    }
-    if (ScheduleUtils::CalcReduceAxes(input_strides, output_strides, output_axes).size() > 1UL) {
-      GELOGI("Reduce node [%s] has multiple R axes, skip R-core template generation.", node->GetNamePtr());
-      return true;
     }
   }
   return false;

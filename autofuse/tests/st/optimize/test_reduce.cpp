@@ -432,20 +432,10 @@ TEST_F(OptimizerReduceSt, TestReduce_RARA) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  // RARA 结构含两根 R 轴, 属多 R 轴: R-core 模板被跳过, 仅剩 Common/AllLoad 两个调度结果,
-  // 不再产生 r_multicore phase 图(原阶段一逐 case 展开会得到 6 个结果)
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
-  size_t r_multicore_graph_count = 0UL;
-  for (const auto &scheduled_result : fused_scheduled_result.node_idx_to_scheduled_results[0]) {
-    for (const auto &schedule_group : scheduled_result.schedule_groups) {
-      for (const auto &impl_graph : schedule_group.impl_graphs) {
-        if (impl_graph.GetName().find("r_multicore") != std::string::npos) {
-          ++r_multicore_graph_count;
-        }
-      }
-    }
-  }
-  EXPECT_EQ(r_multicore_graph_count, 0UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 6UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 4UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_MUL_CONSUMER) {
@@ -466,20 +456,10 @@ TEST_F(OptimizerReduceSt, TestReduce_ARAR) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  // ARAR 结构含两根 R 轴, 属多 R 轴: R-core 模板被跳过, 仅剩 Common/AllLoad 两个调度结果,
-  // 不再产生 r_multicore phase 图(原阶段一逐 case 展开会得到 6 个结果)
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
-  size_t r_multicore_graph_count = 0UL;
-  for (const auto &scheduled_result : fused_scheduled_result.node_idx_to_scheduled_results[0]) {
-    for (const auto &schedule_group : scheduled_result.schedule_groups) {
-      for (const auto &impl_graph : schedule_group.impl_graphs) {
-        if (impl_graph.GetName().find("r_multicore") != std::string::npos) {
-          ++r_multicore_graph_count;
-        }
-      }
-    }
-  }
-  EXPECT_EQ(r_multicore_graph_count, 0UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 6UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 4UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_RR) {
@@ -489,8 +469,7 @@ TEST_F(OptimizerReduceSt, TestReduce_RR) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  // R-core phase-1 两个 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 4 减为 3
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Cast_RR) {
@@ -500,8 +479,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Cast_RR) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  // 同 TestReduce_RR: R-core phase-1 多 case 收敛为同 group 多 impl, 调度结果由 4 减为 3
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_PatitionNorm) {
@@ -510,7 +488,7 @@ TEST_F(OptimizerReduceSt, TestReduce_PatitionNorm) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store) {
@@ -554,7 +532,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Four_Elewise_Store_V2) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation) {
@@ -563,7 +541,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Four_Elewise_Store_V3) {
@@ -584,9 +562,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Elewise_Store_MulReduce) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  // 双 reduce 链放开 R 轴分核后新增 RCore 调度结果, phase-1 多 tiling case 收敛为同 group 多
-  // impl, 共 3 个结果(Common/RCore/AllLoad 各一)
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Reduce_Post_Node_Multi_Input_V1) {
@@ -607,7 +583,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Reduce_Post_Node_Multi_Input_
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation_Multi_Out) {
@@ -616,7 +592,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation_Multi_Ou
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
 }
 
 // 双reduce水平融合（同输入不同输出、规约轴相同）场景走全流程Optimize，

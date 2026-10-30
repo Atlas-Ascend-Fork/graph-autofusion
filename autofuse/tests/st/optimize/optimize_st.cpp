@@ -900,7 +900,7 @@ TEST_F(OptimizerSt, TestSoftmaxGraph_OptimizeSuccess) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
 }
 
 TEST_F(OptimizerSt, TestPackGraph_OptimizeSuccess) {
@@ -3684,21 +3684,19 @@ TEST_F(OptimizerSt, ReduceNeedAlignment) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  // Max 对 {0,2} 两根轴归约, 属多 R 轴结构: R-core 模板被跳过, 仅剩 Common/AllLoad 两个调度
-  // 结果, 不再产生 r_multicore phase 图(原阶段一逐 case 展开会得到 6 个结果); 对齐(A 轴
-  // stride 10 对齐到 16)的金标检查随 phase-1 布局移除, 对齐逻辑由其它用例继续覆盖
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
-  size_t r_multicore_graph_count = 0UL;
-  for (const auto &scheduled_result : fused_scheduled_result.node_idx_to_scheduled_results[0]) {
-    for (const auto &schedule_group : scheduled_result.schedule_groups) {
-      for (const auto &impl_graph : schedule_group.impl_graphs) {
-        if (impl_graph.GetName().find("r_multicore") != std::string::npos) {
-          ++r_multicore_graph_count;
-        }
-      }
-    }
-  }
-  EXPECT_EQ(r_multicore_graph_count, 0UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 6UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 4UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2UL);
+
+  const auto &impl_graph = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[1];
+  const auto &reduce_node = impl_graph.FindNode("b0_max");
+  std::vector<Expression> golden_stride = {
+      af::sym::kSymbolZero,
+      Symbol(16),
+      af::sym::kSymbolOne,
+  };
+  EXPECT_EQ(reduce_node->outputs[0].attr.vectorized_strides, golden_stride);
 }
 
 TEST_F(OptimizerSt, ConstantToStoreNeedBroadCast) {
@@ -4078,8 +4076,7 @@ TEST_F(OptimizerSt, NodeCacheMarkerReduce) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  // R-core phase-1 两个 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 3 减为 2
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
   const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 2);
 
