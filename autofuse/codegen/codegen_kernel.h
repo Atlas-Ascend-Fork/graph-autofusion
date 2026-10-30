@@ -322,6 +322,9 @@ class TPipe : public Variable {
   const TBuf &GetBuf(const ascir::BufId id) const;
   const Tensor *GetTensor(ascir::TensorId id) const;
   Tensor *GetTensor(ascir::TensorId id);
+  // 静默存在性查询：探测性回溯（如 fused 成员输入解析的逐级穿透）miss 时不应打
+  // ERROR 日志——健康回退路径保持日志干净，真正缺失仍由 GetTensor/上游断言报错。
+  bool HasTensor(ascir::TensorId id) const;
 
   Status InitTQueBuffers(const TQue &que, std::string &result) const;
   Status InitTBufBuffer(const TBuf &buf, std::string &result) const;

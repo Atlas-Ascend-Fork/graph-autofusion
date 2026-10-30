@@ -44,7 +44,6 @@ constexpr size_t kIndirectLoadOutputCount = 1UL;
 constexpr size_t kIndirectLoadInvalidAxisIndex = std::numeric_limits<size_t>::max();
 constexpr int64_t kInvalidBroadcastIndex = -1L;
 constexpr char kInputInnerAxisName[] = "indirect_load_input_inner";
-constexpr char kIndexInnerAxisName[] = "indirect_load_index_inner";
 constexpr char kSingleOuterAxisName[] = "indirect_load_single_outer";
 constexpr char kOuterAxisName[] = "indirect_load_outer";
 constexpr char kInnerAxisName[] = "indirect_load_inner";
@@ -511,9 +510,12 @@ void CollectSimtOutputConsumerClosure(const af::AscNodePtr &indirect_load, NodeS
 // 的 side-input，如 embedding+reduce 图中消费 index load 的 Ge/Select）∪ IL 输出的
 // 前向闭包（post-Reduce 普通调度链）；守卫只扫 index 链子集，不扫全融合区域。
 bool FoldSimtIndexChainExternalStores(const af::AscNodePtr &indirect_load, const af::AscNodePtr &index_root,
-                                      NodeSet &region) {
+                                      NodeSet &region, const NodeSet &group_exempt,
+                                      const NodeSet *pre_index_chain = nullptr) {
   NodeSet index_chain;
-  if (!CollectSimtBackwardRegion({index_root}, indirect_load, index_chain)) {
+  if (pre_index_chain != nullptr) {
+    index_chain = *pre_index_chain;
+  } else if (!CollectSimtBackwardRegion({index_root}, indirect_load, index_chain)) {
     return false;
   }
   NodeSet output_consumers;
@@ -536,6 +538,11 @@ bool FoldSimtIndexChainExternalStores(const af::AscNodePtr &indirect_load, const
       const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
       if (consumer == nullptr || consumer == indirect_load || region.count(consumer.get()) != 0UL ||
           output_consumers.count(consumer.get()) != 0UL) {
+        continue;
+      }
+      // [跨成员豁免] 消费者在同组另一成员的 SIMT index 链里——由该成员的 evaluator
+      // 逐元素消费（寄存器级），不要求向量侧物化 tensor，不是真正外部消费者。
+      if (group_exempt.count(consumer.get()) != 0UL) {
         continue;
       }
       if (node == index_root && af::ops::IsOps<af::ascir_op::Store>(consumer) && !consumer->inputs().empty() &&
@@ -566,7 +573,7 @@ void CollectSimtFusedRegionMembers(const af::AscNodePtr &indirect_load, const Re
     region.clear();
     return;
   }
-  if (!FoldSimtIndexChainExternalStores(indirect_load, index_root, region)) {
+  if (!FoldSimtIndexChainExternalStores(indirect_load, index_root, region, NodeSet{})) {
     region.clear();
   }
 }
@@ -1783,18 +1790,34 @@ af::Status NormalizeSimdAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
       GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimdInputInnerAxis(node, input_inner_axis));
     }
   }
-  ascir::AxisId index_inner_axis = af::kIdNone;
+  // [per-IL index 内轴] 不再单独 BuildSimdInnerAxis(kIndexInnerAxisName)：该轴在
+  // NormalizeAxesForTemplate 内部会被覆写为 inner_axis（simd_index_uses_output_inner_axis=true）
+  // 或保持 kIdNone（false），单独创建只产生无人消费的孤儿轴。
   const auto index_root =
       ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kIndexTensorIndex);
   GE_ASSERT_NOTNULL(index_root, "IndirectLoad SIMD index producer is missing.");
-  if (analysis.simd_index_uses_output_inner_axis) {
-    GE_ASSERT_SUCCESS(BuildSimdInnerAxis(graph, indirect_load, axis_index, kIndexInnerAxisName, index_inner_axis));
-  }
   GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(analysis.input_region, output_axes, axis_index, true));
   GE_ASSERT_SUCCESS(ReplaceRegionAxisPrefix(analysis.index_region, output_axes, axis_index, false));
-  return NormalizeAxesForTemplate(graph, indirect_load, axis_index, ascir::TemplateId::kIndirectLoadSimd,
-                                  input_inner_axis, index_inner_axis, analysis.simd_index_uses_output_inner_axis,
-                                  solve_tile_size);
+  GE_ASSERT_SUCCESS(NormalizeAxesForTemplate(graph, indirect_load, axis_index, ascir::TemplateId::kIndirectLoadSimd,
+                                             input_inner_axis, af::kIdNone, analysis.simd_index_uses_output_inner_axis,
+                                             solve_tile_size));
+  // [per-IL index 内轴 hint] 与 input hint 同点：primary 的 index-pre 节点也写入 hint。
+  // 取 TemplateAxes 归一化后的最终值（simd_index_uses_output_inner_axis=true 时
+  // NormalizeAxesForTemplate 内部已将 index_inner_axis 覆写为 inner_axis），保证
+  // hint 与调度器回退值（indirect_load_info_.axes.index_inner_axis）一致。
+  // 仅写有效轴：kIdNone hint ≡ 无 hint（调度器回退全局），绝不写入——共享 index 链
+  // 节点会落在多个成员的 region 内，后处理的 flag=false 成员写入 kIdNone 会把先处理
+  // 的 flag=true 成员写的有效 hint 覆盖掉（N≥3 或成员顺序不同时触发）。
+  ascgen_utils::indirect_load::TemplateAxes final_axes;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(indirect_load, final_axes));
+  for (const af::AscNodePtr &node : analysis.index_region) {
+    if (ascgen_utils::indirect_load::GetTemplateRole(node) ==
+            ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre &&
+        final_axes.index_inner_axis != af::kIdNone) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimdIndexInnerAxis(node, final_axes.index_inner_axis));
+    }
+  }
+  return af::SUCCESS;
 }
 
 // 多 gather 共享轴归一化：primary 完整建轴（outer/inner/tile/vectorized 与单 gather 完全一致），
@@ -1840,6 +1863,18 @@ af::Status NormalizeSimdAxesForMember(af::AscGraph &graph, const af::AscNodePtr 
       GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimdInputInnerAxis(node, member_input_inner));
     }
   }
+  // [per-IL index 内轴 hint] 与 input hint 同点：各成员 index 链形态可不同（Broadcast
+  // → 有效轴；计算链 → kIdNone），调度器优先读节点 hint、无 hint 回退全局。
+  // kSimdIndexPre 角色仅在 simd_index_uses_output_inner_axis=true 时赋角，此时轴必有效。
+  // 仅写有效轴（与 primary 侧同因）：共享 index 链节点落在多个成员 region 内，flag=false
+  // 成员的 kIdNone 写入会覆盖其他成员写的有效 hint。
+  for (const af::AscNodePtr &node : member_analysis.index_region) {
+    if (ascgen_utils::indirect_load::GetTemplateRole(node) ==
+            ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre &&
+        member_axes.index_inner_axis != af::kIdNone) {
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimdIndexInnerAxis(node, member_axes.index_inner_axis));
+    }
+  }
   return af::SUCCESS;
 }
 
@@ -1878,11 +1913,44 @@ af::Status NormalizeSimtAxesForTemplate(af::AscGraph &graph, const af::AscNodePt
   return af::SUCCESS;
 }
 
+// [跨成员 index 链共享节点豁免集] 收集全组成员的 backward region 并集 + 全部 IL 节点。
+// 共享 index Load 的跨成员消费者不视为"外部"——由另一成员的 evaluator 逐元素消费
+// （寄存器级），不要求向量侧物化 tensor。单成员/单 gather 语义下并集 = 自身 region，
+// 行为与空集等价。
+NodeSet BuildGroupIndexExemptSet(const std::vector<af::AscNodePtr> &members,
+                                 std::vector<NodeSet> *back_regions = nullptr) {
+  NodeSet group_exempt;
+  if (back_regions != nullptr) {
+    back_regions->resize(members.size());
+  }
+  for (size_t index = 0UL; index < members.size(); ++index) {
+    const af::AscNodePtr index_root =
+        ascgen_utils::indirect_load::GetInputProducer(members[index], ascgen_utils::indirect_load::kIndexTensorIndex);
+    if (index_root == nullptr) {
+      GELOGW("[IndirectLoad] BuildGroupIndexExemptSet: index producer of node[%s] is missing.",
+             members[index]->GetNamePtr());
+      continue;
+    }
+    NodeSet back_region;
+    if (!CollectSimtBackwardRegion({index_root}, members[index], back_region)) {
+      GELOGW("[IndirectLoad] BuildGroupIndexExemptSet: backward region of node[%s] is unsupported.",
+             members[index]->GetNamePtr());
+      continue;
+    }
+    group_exempt.insert(back_region.begin(), back_region.end());
+    if (back_regions != nullptr) {
+      (*back_regions)[index] = std::move(back_region);
+    }
+    group_exempt.emplace(members[index].get());
+  }
+  return group_exempt;
+}
+
 // 多 gather 组员（SIMT）：仅收集本路 index 生产链 backward 区域（含 index 链外部 store 折叠）。
 // 共享归并/输出链不进入任何组员的 SIMT 区域——它们作为普通向量代码在全部组员 invocation
 // 之后执行，避免输出链角色冲突与 evaluator 跨依赖。
-bool CollectSimtGroupIndexRegion(const af::AscGraph &graph, const af::AscNodePtr &indirect_load,
-                                 NodePath &index_region) {
+bool CollectSimtGroupIndexRegion(const af::AscGraph &graph, const af::AscNodePtr &indirect_load, NodePath &index_region,
+                                 const NodeSet &group_exempt, const NodeSet *pre_back_region = nullptr) {
   index_region.clear();
   const af::AscNodePtr index_root =
       ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kIndexTensorIndex);
@@ -1890,10 +1958,15 @@ bool CollectSimtGroupIndexRegion(const af::AscGraph &graph, const af::AscNodePtr
     return false;
   }
   NodeSet region;
-  if (!CollectSimtBackwardRegion({index_root}, indirect_load, region)) {
+  if (pre_back_region != nullptr) {
+    region = *pre_back_region;
+  } else if (!CollectSimtBackwardRegion({index_root}, indirect_load, region)) {
     return false;
   }
-  if (!FoldSimtIndexChainExternalStores(indirect_load, index_root, region)) {
+  // 折叠前的 backward region 快照——FoldSimtIndexChainExternalStores 只增不删（Store 折叠），
+  // 传入快照避免内部第三次遍历。
+  const NodeSet index_chain = region;
+  if (!FoldSimtIndexChainExternalStores(indirect_load, index_root, region, group_exempt, &index_chain)) {
     return false;
   }
   // 按 GetAllNodes 顺序重建（与 CollectRewrittenRegion 的确定性约定一致）。
@@ -1924,9 +1997,17 @@ af::Status NormalizeSimtAxesForGroupTemplate(af::AscGraph &graph, const std::vec
 // SIMT direct-GM nodes deliberately preserve their vectorized view through the
 // scheduler.  User graphs, however, do not necessarily initialize that view;
 // fill it from the node's physical strides before VF partitioning consumes it.
-af::Status CompletePreservedVectorizedViews(const af::AscGraph &graph, const af::AscNodePtr &indirect_load) {
+// 跳过全部 IndirectLoad 节点而非仅当前成员：IL 输出 vectorized 视图按模板约定保持空，
+// 由调度器的 tensor merge/split 主动改写。组路径按成员循环调用本函数，若仅跳过当前
+// 成员，primary 的调用会把其他成员（kSimtOp，preserves_vectorized_axis=true）当普通
+// 保留节点播种——SIMT 组 post_reduce 置空使 outer=全部输出轴合并，调度期 tensor merge
+// 将播种轴重映射为 merged outer，SelectLoopAxis 据此把 outer 放进 not_loop 集并经
+// from 递归过滤掉成员全部调度轴（tile 轴 from={outer}），触发 Cannot find loop axis
+// 断言。
+af::Status CompletePreservedVectorizedViews(const af::AscGraph &graph) {
   for (const auto &node : graph.GetAllNodes()) {
-    if (node == nullptr || node == indirect_load || af::ops::IsOps<af::ascir_op::Output>(node) ||
+    if (node == nullptr || af::ops::IsOps<af::ascir_op::IndirectLoad>(node) ||
+        af::ops::IsOps<af::ascir_op::Output>(node) ||
         !ascgen_utils::indirect_load::GetTemplateBehavior(node).preserves_vectorized_axis) {
       continue;
     }
@@ -1990,6 +2071,28 @@ af::Status CompletePreservedVectorizedViews(const af::AscGraph &graph, const af:
       output->attr.vectorized_strides = {strides[vectorized_index]};
       GELOGD("[IndirectLoad] Seed preserved vectorized view for node[%s], axis[%ld].", node->GetNamePtr(),
              axes[vectorized_index]);
+    }
+  }
+  return af::SUCCESS;
+}
+
+// [护栏] IL 输出 vectorized 轴有效性前置校验：为空，或全部是其当前视图 attr.axis 的
+// 子序列。合法形态（如带 post-Reduce 的单 gather SIMD/SIMT）IL 输出 vectorized 可
+// 非空（inner 轴族）；但轴必须仍存在于视图——生成期任何路径把已失效（被 tensor
+// merge 折叠掉）或外来轴写进 vectorized，调度期会在 GetVectorRepeats/
+// InitTensorMemInfo 或 SelectLoopAxis 以无关断言隐蔽失败。候选产出后前置拦截，
+// 把违约暴露在生成侧。
+af::Status ValidateIndirectLoadOutputVectorizedAxes(const ascir::ImplGraph &graph) {
+  for (const af::AscNodePtr &node : ascgen_utils::indirect_load::GetAllIndirectLoadNodes(graph)) {
+    for (const auto &output : node->outputs()) {
+      if (output == nullptr || output->attr.vectorized_axis.empty()) {
+        continue;
+      }
+      for (const auto vec_axis : output->attr.vectorized_axis) {
+        GE_ASSERT_TRUE(
+            std::find(output->attr.axis.begin(), output->attr.axis.end(), vec_axis) != output->attr.axis.end(),
+            "IndirectLoad node[%s] output vectorized axis[%ld] is absent from its view.", node->GetNamePtr(), vec_axis);
+      }
     }
   }
   return af::SUCCESS;
@@ -3521,7 +3624,7 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
     GE_ASSERT_SUCCESS(ClearNormalScheduleSimtRoles(graph, normal_schedule_nodes, lowering_exempt));
   }
   GE_ASSERT_SUCCESS(NormalizeTemplateAxes(graph, indirect_load, template_id, analysis, boundary));
-  GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph, indirect_load));
+  GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
   GE_ASSERT_SUCCESS(FinalizeTemplate(indirect_load, template_id));
   bool metadata_supported = false;
   GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
@@ -3811,8 +3914,10 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
       GE_ASSERT_SUCCESS(ApplySkGraphPass(graph, member, member_legal));
       if (!member_legal) {
         is_candidate_legal = false;
-        GELOGE(af::FAILED, "[IndirectLoad] Reject gather group SK candidate: member[%s] is SK-illegal.",
-               member->GetNamePtr());
+        // 候选阶梯的正常出局：SK 非法后由 SIMD/SIMT 候选承接，健康路径不应产生
+        // ERROR 告警——与单 gather ApplySkGraphPass 的拒绝日志（GELOGI）及上方
+        // SK dtype 门控（GELOGI）约定一致。
+        GELOGI("[IndirectLoad] Reject gather group SK candidate: member[%s] is SK-illegal.", member->GetNamePtr());
         return af::SUCCESS;
       }
     }
@@ -3870,8 +3975,14 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     // 组员 SIMT 计划收窄：SIMT 区域重收集为仅本路 index 链；共享归并/post-Reduce 链不进入
     // 任何组员的 SIMT 计划（普通向量代码），post_reduce 置空使 ValidateTemplate 的 boundary
     // 保持输出 rank（固定单行 tile 语义，与单 gather 无 post-Reduce SIMT 一致）。
+    // [跨成员 index 链共享节点豁免] 先建全组并集（BuildGroupIndexExemptSet），再做逐成员
+    // 的外部消费者检查——预收集的 backward region 复用传入 CollectSimtGroupIndexRegion，
+    // 消除冗余遍历。
+    std::vector<NodeSet> back_regions;
+    const NodeSet group_exempt = BuildGroupIndexExemptSet(members, &back_regions);
     for (size_t index = 0UL; index < members.size(); ++index) {
-      if (!CollectSimtGroupIndexRegion(graph, members[index], analyses[index].index_region)) {
+      if (!CollectSimtGroupIndexRegion(graph, members[index], analyses[index].index_region, group_exempt,
+                                       &back_regions[index])) {
         is_candidate_legal = false;
         GELOGE(af::FAILED,
                "[IndirectLoad] Reject gather group SIMT candidate: index region of node[%s] is empty or unsupported.",
@@ -3940,9 +4051,11 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
         GE_ASSERT_SUCCESS(SeedPostReduceInputVectorizedView(members.front(), analyses.front().post_reduce));
       }
     }
+    // [per-IL index 内轴 hint] 已下沉至 NormalizeSimdAxesForTemplate（primary）与
+    // NormalizeSimdAxesForMember（非 primary 成员），组路径与混模板路径共用同一设置点。
   }
   for (const af::AscNodePtr &member : members) {
-    GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph, member));
+    GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
     GE_ASSERT_SUCCESS(FinalizeTemplate(member, template_id));
   }
   // [位宽感知门控后置] lowering 元数据先于融合发射标记构建（BuildSimtLoweringMetadata 仅
@@ -4018,11 +4131,16 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
   simd_selected_count = 0UL;
   std::vector<RewrittenGraphAnalysis> analyses(members.size());
   std::vector<ascir::TemplateId> selection(members.size(), ascir::TemplateId::kIndirectLoadSimt);
-  // 逐成员探测：性能序择优（两模板均合法时按单 gather 同款判据 + 同款能力门控选更优
-  // 的模板——embedding 形态且切片 ≥ 2KB、查表 ≥ 32 次选 SIMD，否则选 SIMT）；单模板
-  // 合法时结构强制；dense（无 embedding 能力）无偏好依据，默认选 SIMT（择优处注释）。
-  // 探测在混模板候选自身的图副本上执行，AnalyzeRewrittenGraph 的改图（前置 ele 后移）与
-  // 共模板路径一致，两模板探测间的重复调用幂等（改写模式不匹配即无操作）。
+  // [混模板不做跨成员豁免] 共享 index 链场景下，某节点同时落在 SIMT 成员的 index
+  // region 与 SIMD 成员的 index region，角色赋值冲突（kSimtOp 的 skips_api_emit
+  // 覆盖 kSimdIndexPre 的 staging 发射），执行模型不支持双重消费。此处不建 group_exempt：
+  // 探测自然失败（共享 Load 的跨成员消费者被判外部）→ 该成员结构强制回 SIMD → 全组同构
+  // → 混模板候选不产出。豁免仅保留在"全组 SIMT"的组路径。逐成员探测：性能序择优（两模板
+  // 均合法时按单 gather 同款判据 + 同款能力门控选更优的模板——embedding 形态且切片 ≥ 2KB、
+  // 查表 ≥ 32 次选 SIMD，否则选 SIMT）；单模板合法时结构强制；dense（无 embedding 能力）
+  // 无偏好依据，默认选 SIMT（择优处注释）。探测在混模板候选自身的图副本上执行，
+  // AnalyzeRewrittenGraph 的改图（前置 ele 后移）与共模板路径一致，两模板探测间的重复调用
+  // 幂等（改写模式不匹配即无操作）。
   for (size_t index = 0UL; index < members.size(); ++index) {
     const af::AscNodePtr &member = members[index];
     const auto value_dtype = member->inputs()[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype;
@@ -4050,8 +4168,8 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
       GE_ASSERT_SUCCESS(
           AnalyzeRewrittenGraph(graph, member, ascir::TemplateId::kIndirectLoadSimt, simt_legal, simt_analysis));
       if (simt_legal) {
-        if (!CollectSimtGroupIndexRegion(graph, member, simt_analysis.index_region)) {
-          simt_legal = false;  // SIMT 结构不可行，退回 SIMD（结构强制）
+        if (!CollectSimtGroupIndexRegion(graph, member, simt_analysis.index_region, NodeSet{})) {
+          simt_legal = false;  // 探测失败（含共享 index 链被判外部）：结构强制回 SIMD
         } else {
           simt_analysis.post_reduce = nullptr;
           GE_ASSERT_SUCCESS(CompleteInputDataTensorAttrs(simt_analysis));
@@ -4097,7 +4215,7 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
       GELOGW("[IndirectLoad] Mixed mode: node[%s] is illegal on both templates.", member->GetNamePtr());
       return af::SUCCESS;
     }
-    if (!CollectSimtGroupIndexRegion(graph, member, analyses[index].index_region)) {
+    if (!CollectSimtGroupIndexRegion(graph, member, analyses[index].index_region, NodeSet{})) {
       GELOGW("[IndirectLoad] Mixed mode: index region of node[%s] is empty or unsupported.", member->GetNamePtr());
       return af::SUCCESS;
     }
@@ -4128,6 +4246,11 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
            simt_members.size());
     return af::SUCCESS;
   }
+  // [已知限制] 共享 index 链场景（某节点同时落在 SIMT 与 SIMD 成员的 index region）
+  // 存在角色赋值冲突风险（kSimtOp 的 skips_api_emit 覆盖 kSimdIndexPre 的 staging
+  // 发射），当前执行模型不支持双重消费。group_exempt 豁免只防探测期误拒，不解决
+  // 执行期的角色冲突——共享 index 链的混模板场景需后续专项设计（如按消费侧拆分
+  // 节点角色，或共享 Load 双发射）。
   // 输出链一致性（与共模板组一致）：全组输出边界为同一节点。
   for (size_t index = 1UL; index < members.size(); ++index) {
     if (analyses.front().output_store != analyses[index].output_store) {
@@ -4173,7 +4296,7 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateAxes(simt_member, shared_axes));
   }
   for (size_t index = 0UL; index < members.size(); ++index) {
-    GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph, members[index]));
+    GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
     GE_ASSERT_SUCCESS(FinalizeTemplate(members[index], selection[index]));
   }
   // SIMT 成员组员标记（member-form 元数据：index 链 + value 写 UB 局部目标）；不设融合
@@ -4867,6 +4990,9 @@ Status IndirectLoadScheduleCaseGenerator::GeneratorTask(ascir::HintGraph &optimi
   }
   for (size_t i = 0UL; i < optimize_graphs.size(); ++i) {
     const auto &graph = optimize_graphs[i];
+    // [护栏] 候选产出后校验 IL 输出 vectorized 轴有效（空，或均为视图内轴），违约在
+    // 生成侧报清晰错误，避免调度期以无关断言隐蔽爆炸。
+    GE_ASSERT_SUCCESS(ValidateIndirectLoadOutputVectorizedAxes(graph));
     ScheduleTask task{graph, {}, score_funcs[i]};
     task.has_load_store_conversion = HasLoadStoreConversion();
     // 多 gather 候选图包含组内全部 IndirectLoad（组 SIMD/SIMT 与混模板候选经归并树连通

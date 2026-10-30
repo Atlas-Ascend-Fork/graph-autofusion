@@ -354,6 +354,15 @@ bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node) {
       }
     }
   }
+  // 豁免3：SIMT 组成员（kSimtOp + 组员标记）的输出即成员 value 的 UB 局部目标——
+  // 调度期已按真实 UB buffer/queue 分配（与同 buffer 其他租户共用，不新增分配），
+  // fused GenerateSimt 按 target_tensor_id 从 tpipe 取该张量，L3 归并链的扇出向量
+  // 代码亦经 tpipe 解析输入，必须收集。kSimtOp + post-Reduce 形态已由 GetTemplateBehavior
+  // 清 skip 覆盖（组路径无 post-Reduce 时依赖本豁免）；单 gather IL 无组员标记不受影响。
+  if (af::ops::IsOps<af::ascir_op::IndirectLoad>(node) && GetTemplateRole(node) == TemplateRole::kSimtOp &&
+      IsSimtGroupMember(node)) {
+    return false;
+  }
   return true;
 }
 
@@ -1766,6 +1775,24 @@ af::AxisId GetSimdInputInnerAxis(const af::AscNodePtr &node) {
     return af::kIdNone;
   }
   return node->GetOpDesc()->TryGetExtAttr(kSimdInputInnerAxisHintAttr, static_cast<int64_t>(af::kIdNone));
+}
+
+constexpr char kSimdIndexInnerAxisHintAttr[] = "af.internal.indirect_load.simd_index_inner_axis";
+
+af::Status SetSimdIndexInnerAxis(const af::AscNodePtr &node, af::AxisId axis) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimdIndexInnerAxisHintAttr, static_cast<int64_t>(axis)),
+                 "Set IndirectLoad SIMD index inner axis hint failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+af::AxisId GetSimdIndexInnerAxis(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return af::kIdNone;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimdIndexInnerAxisHintAttr, static_cast<int64_t>(af::kIdNone));
 }
 
 af::Status SetSimtGroupMember(const af::AscNodePtr &node) {

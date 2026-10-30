@@ -2238,3 +2238,190 @@ TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimtPostReduceCallWithUbOutp
   EXPECT_NE(generated.find("static_cast<uint32_t>"), std::string::npos);
   EXPECT_EQ(generated.find("y_ptr"), std::string::npos);
 }
+
+// ==================== fused member input tensor resolution ====================
+
+void BuildFusedMemberInputGraph(ILTestGraph &g) {
+  const af::Expression One = af::sym::kSymbolOne;
+  Data x_data("x", g.graph);
+  x_data.ir_attr.SetIndex(0);
+  x_data.y.dtype = ge::DT_FLOAT16;
+  x_data.attr.sched.axis = {g.z0.id, g.z1.id};
+  *x_data.y.axis = {g.z0.id, g.z1.id};
+  *x_data.y.repeats = {g.s0, g.s1};
+  *x_data.y.strides = {g.s1, One};
+
+  Load x_load("x_load");
+  g.graph.AddNode(x_load);
+  x_load.x = x_data.y;
+  x_load.y.dtype = ge::DT_FLOAT16;
+  x_load.attr.sched.axis = {g.z0.id, g.z1.id};
+  *x_load.y.axis = {g.z0.id, g.z1.id};
+  *x_load.y.repeats = {g.s0, g.s1};
+  *x_load.y.strides = {g.s1, One};
+
+  Data idx_data("idx", g.graph);
+  idx_data.ir_attr.SetIndex(1);
+  idx_data.y.dtype = ge::DT_INT32;
+  idx_data.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx_data.y.axis = {g.z2.id, g.z3.id};
+  *idx_data.y.repeats = {g.s2, g.s3};
+  *idx_data.y.strides = {g.s3, One};
+
+  Load idx_load("idx_load");
+  g.graph.AddNode(idx_load);
+  idx_load.x = idx_data.y;
+  idx_load.y.dtype = ge::DT_INT32;
+  idx_load.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx_load.y.axis = {g.z2.id, g.z3.id};
+  *idx_load.y.repeats = {g.s2, g.s3};
+  *idx_load.y.strides = {g.s3, One};
+
+  IndirectLoad il("indirect_load");
+  g.graph.AddNode(il);
+  il.x1 = x_load.y;
+  il.x2 = idx_load.y;
+  il.ir_attr.SetAxis(1);
+  il.attr.sched.axis = {g.z2.id, g.z3.id};
+  *il.y.axis = {g.z2.id, g.z3.id};
+  *il.y.repeats = {g.s2, g.s3};
+  *il.y.strides = {g.s3, One};
+
+  // direct-GM 输入边界（kSimtInputBoundary 语义）：skips_api_emit、不注册 tpipe、
+  // 不生成 api call——fused 路径按视图 id 直查会失败，须经回溯解析。
+  ASSERT_EQ(SetTemplateRole(g.graph.FindNode("x_load"), TemplateRole::kSimtInputBoundary), af::SUCCESS);
+  ASSERT_EQ(SetTemplateRole(g.graph.FindNode("indirect_load"), TemplateRole::kSimtOp), af::SUCCESS);
+  // 显式分配输出 tensor id（未调度图的默认 id 不区分，无法构造"边界视图已分配、
+  // GM 源已注册"的调度后状态）；resolver 首次查找读直接生产者（x_load）的输出 id。
+  g.graph.FindNode("x")->outputs[0].attr.mem.tensor_id = 0;
+  g.graph.FindNode("x_load")->outputs[0].attr.mem.tensor_id = 4;
+  g.graph.FindNode("idx")->outputs[0].attr.mem.tensor_id = 3;
+  g.graph.FindNode("idx_load")->outputs[0].attr.mem.tensor_id = 5;
+  g.graph.FindNode("indirect_load")->outputs[0].attr.mem.tensor_id = 1;
+}
+
+TEST(IndirectLoadApiCallTest, ResolveFusedMemberInputTensorWalksSkippedBoundaryToData) {
+  ILTestGraph g("fused_member_input_walk");
+  BuildFusedMemberInputGraph(g);
+  const auto member = g.graph.FindNode("indirect_load");
+  const auto data_node = g.graph.FindNode("x");
+  const auto load_node = g.graph.FindNode("x_load");
+  ASSERT_NE(member, nullptr);
+  ASSERT_NE(data_node, nullptr);
+  ASSERT_NE(load_node, nullptr);
+
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  // 仅注册 GM 源（Data 输出张量）——模拟 input_nodes 注册路径；边界 Load 不注册。
+  tpipe.AddTensor(*data_node->outputs()[0]);
+
+  const auto *resolved = codegen::ResolveFusedMemberInputTensor(tpipe, member);
+  ASSERT_NE(resolved, nullptr);
+  EXPECT_EQ(resolved->id, data_node->outputs()[0]->attr.mem.tensor_id);
+}
+
+TEST(IndirectLoadApiCallTest, ResolveFusedMemberInputTensorPrefersRegisteredViewTensor) {
+  ILTestGraph g("fused_member_input_direct");
+  BuildFusedMemberInputGraph(g);
+  const auto member = g.graph.FindNode("indirect_load");
+  const auto data_node = g.graph.FindNode("x");
+  const auto load_node = g.graph.FindNode("x_load");
+  ASSERT_NE(member, nullptr);
+  ASSERT_NE(data_node, nullptr);
+  ASSERT_NE(load_node, nullptr);
+
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  // 成员 value 输入视图张量已注册（无边界或边界已注册形态）：直接命中，不回溯。
+  tpipe.AddTensor(*load_node->outputs()[0]);
+  tpipe.AddTensor(*data_node->outputs()[0]);
+
+  const auto *resolved = codegen::ResolveFusedMemberInputTensor(tpipe, member);
+  ASSERT_NE(resolved, nullptr);
+  EXPECT_EQ(resolved->id, load_node->outputs()[0]->attr.mem.tensor_id);
+}
+
+TEST(IndirectLoadApiCallTest, ResolveFusedMemberInputTensorFailsLoudlyOnMultiInputValueNode) {
+  // 多输入 skips_api_emit 节点（Select/Mul 等）出现在 value 链上：值不再是单一 GM
+  // 表，fused 单 GM 值表指针模型不支持——必须返回 nullptr 显式失败，禁止沿 input 0
+  // 猜测分支把无关 Data 当值表（静默错码）。
+  ILTestGraph g("fused_member_input_multi");
+  const af::Expression One = af::sym::kSymbolOne;
+  Data x_data("x", g.graph);
+  x_data.ir_attr.SetIndex(0);
+  x_data.y.dtype = ge::DT_FLOAT16;
+  x_data.attr.sched.axis = {g.z0.id, g.z1.id};
+  *x_data.y.axis = {g.z0.id, g.z1.id};
+  *x_data.y.repeats = {g.s0, g.s1};
+  *x_data.y.strides = {g.s1, One};
+
+  Load x_load("x_load");
+  g.graph.AddNode(x_load);
+  x_load.x = x_data.y;
+  x_load.y.dtype = ge::DT_FLOAT16;
+  x_load.attr.sched.axis = {g.z0.id, g.z1.id};
+  *x_load.y.axis = {g.z0.id, g.z1.id};
+  *x_load.y.repeats = {g.s0, g.s1};
+  *x_load.y.strides = {g.s1, One};
+
+  Data idx_data("idx", g.graph);
+  idx_data.ir_attr.SetIndex(1);
+  idx_data.y.dtype = ge::DT_INT32;
+  idx_data.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx_data.y.axis = {g.z2.id, g.z3.id};
+  *idx_data.y.repeats = {g.s2, g.s3};
+  *idx_data.y.strides = {g.s3, One};
+
+  Load idx_load("idx_load");
+  g.graph.AddNode(idx_load);
+  idx_load.x = idx_data.y;
+  idx_load.y.dtype = ge::DT_INT32;
+  idx_load.attr.sched.axis = {g.z2.id, g.z3.id};
+  *idx_load.y.axis = {g.z2.id, g.z3.id};
+  *idx_load.y.repeats = {g.s2, g.s3};
+  *idx_load.y.strides = {g.s3, One};
+
+  // value 链：IL.x1 ← Select(cond, x_load, x_load)——三输入 skips_api_emit 节点。
+  Select value_select("value_select");
+  g.graph.AddNode(value_select);
+  value_select.x1 = x_load.y;
+  value_select.x2 = x_load.y;
+  value_select.x3 = x_load.y;
+  value_select.y.dtype = ge::DT_FLOAT16;
+  value_select.attr.sched.axis = {g.z2.id, g.z3.id};
+  *value_select.y.axis = {g.z2.id, g.z3.id};
+  *value_select.y.repeats = {g.s2, g.s3};
+  *value_select.y.strides = {g.s3, One};
+
+  IndirectLoad il("indirect_load");
+  g.graph.AddNode(il);
+  il.x1 = value_select.y;
+  il.x2 = idx_load.y;
+  il.ir_attr.SetAxis(1);
+  il.attr.sched.axis = {g.z2.id, g.z3.id};
+  *il.y.axis = {g.z2.id, g.z3.id};
+  *il.y.repeats = {g.s2, g.s3};
+  *il.y.strides = {g.s3, One};
+
+  ASSERT_EQ(SetTemplateRole(g.graph.FindNode("x_load"), TemplateRole::kSimtInputBoundary), af::SUCCESS);
+  ASSERT_EQ(SetTemplateRole(g.graph.FindNode("value_select"), TemplateRole::kSimtInlineTransform), af::SUCCESS);
+  ASSERT_EQ(SetTemplateRole(g.graph.FindNode("indirect_load"), TemplateRole::kSimtOp), af::SUCCESS);
+  // 显式分配输出 tensor id：成员 value 输入视图读直接生产者（value_select）的输出
+  // id=7（未注册）；GM 源（x）id=0 已注册——验证多输入节点挡住回溯、不得取到 x。
+  g.graph.FindNode("x")->outputs[0].attr.mem.tensor_id = 0;
+  g.graph.FindNode("x_load")->outputs[0].attr.mem.tensor_id = 4;
+  g.graph.FindNode("value_select")->outputs[0].attr.mem.tensor_id = 7;
+  g.graph.FindNode("idx")->outputs[0].attr.mem.tensor_id = 3;
+  g.graph.FindNode("idx_load")->outputs[0].attr.mem.tensor_id = 5;
+
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  // GM 源已注册，但 value 链上的多输入 Select 挡住回溯——不得猜测分支取 Data。
+  tpipe.AddTensor(*g.graph.FindNode("x")->outputs()[0]);
+
+  const auto *resolved = codegen::ResolveFusedMemberInputTensor(tpipe, g.graph.FindNode("indirect_load"));
+  EXPECT_EQ(resolved, nullptr);
+}

@@ -740,7 +740,12 @@ Status Scheduler::ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &sk
   const bool is_index_pre =
       ascgen_utils::indirect_load::GetTemplateRole(node) == ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre;
   if (is_index_pre) {
-    GE_ASSERT_SUCCESS(ApplyInputInnerVectorizedAxis(graph_, node, indirect_load_info_.axes.index_inner_axis));
+    // 双 gather 水平融合：优先使用节点上的 per-IL index 内轴提示（各成员的 index 链形态
+    // 可不同——primary 的 None 不再套到有 Broadcast 的非 primary 成员）；单 gather 场景
+    // 无提示，回退全局模板轴，行为与原实现一致。
+    const auto index_hint_axis = ascgen_utils::indirect_load::GetSimdIndexInnerAxis(node);
+    GE_ASSERT_SUCCESS(ApplyInputInnerVectorizedAxis(
+        graph_, node, index_hint_axis != af::kIdNone ? index_hint_axis : indirect_load_info_.axes.index_inner_axis));
   }
   skip_main_tiling = ascgen_utils::indirect_load::GetTemplateBehavior(node).skips_main_schedule_tiling;
   if (skip_main_tiling) {
