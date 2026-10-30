@@ -57,6 +57,8 @@ PGO_BUNDLE_SCHEMA_VERSION = 2
 PGO_RESULT_PROTOCOL_VERSION = 2
 PGO_KERNEL_FORMAT = "aicore_binary_elf_v1"
 PGO_CACHE_ROOT_NAME = "pgo_v2"
+# rtLaunch 外置 bin 文件交付件的固定文件名（与前端 torchair 的 KERNEL_BIN_NAME 对齐）。
+KERNEL_BIN_NAME = "kernel.aicore_binary_elf_v1"
 if not os.path.exists(ASCEND_PATH):
     ASCEND_PATH = os.getenv("ASCEND_HOME_PATH", ASCEND_PATH)
 
@@ -944,9 +946,9 @@ def generate_get_kernel_obj(args: argparse.Namespace, temp_dir, kernel_obj_path)
     """从 device .o 抽出 aicore 二进制并生成导出 GetKernelBin 的 host 对象。
 
     device .o 内嵌 .aicore_binary section（真正的 aicore 二进制），同时定义 legacy 的
-    AutofuseLaunch host 下发符号。rtLaunch 链路不再链接 device .o（即去掉 AutofuseLaunch），
-    改为抽出二进制、由 GetKernelBin 导出，供 wrapper 经 rtRegisterAllKernel 注册后用
-    rtKernelLaunchWithHandleV2 下发。
+    AutofuseLaunch host 下发符号。rtLaunch 旧交付件不再链接 device .o（即去掉
+    AutofuseLaunch），改为抽出二进制、由 GetKernelBin 导出，供旧前端 wrapper 经
+    dlsym("GetKernelBin") + aclrtBinaryLoadFromData 加载。
     """
     bin_file = os.path.join(temp_dir, "kernel.aicore_binary_elf_v1")
     extract_aicore_binary(kernel_obj_path, bin_file)
@@ -964,6 +966,19 @@ def generate_get_kernel_obj(args: argparse.Namespace, temp_dir, kernel_obj_path)
     return compile_host_obj_file(args, temp_dir, get_kernel_cpp)
 
 
+def publish_kernel_bin(kernel_obj_path, bin_dest):
+    """从 device .o 抽出 .aicore_binary 并发布到指定路径。
+
+    rtLaunch 新交付件（外置 bin 文件）：不再链接 device .o（去掉 AutofuseLaunch），
+    也不再生成/编译 GetKernelBin 宿主源码；改为抽出二进制直接落盘，供 wrapper 经
+    aclrtBinaryLoadFromFile 加载。
+    """
+    bin_dir = os.path.dirname(os.path.realpath(bin_dest))
+    os.makedirs(bin_dir, exist_ok=True)
+    extract_aicore_binary(kernel_obj_path, bin_dest)
+    return bin_dest
+
+
 @inductor_compile_duration("LinkKernelSo")
 def link_kernel_so(
     args: argparse.Namespace, tiling_obj_paths, temp_dir, kernel_obj_path
@@ -971,17 +986,36 @@ def link_kernel_so(
     if not kernel_obj_path:
         raise ValueError("kernel_obj_path is required for linking")
 
-    # rtLaunch 链路：把 device .o 换成导出 GetKernelBin 的 host .o。bin_mode 仅由新增的
-    # *_bin 接口开启（compile_adapter 传入），旧接口仍直接链 device .o，保留 AutofuseLaunch
-    # 供 CV 融合等尚未迁移的场景使用。
-    if getattr(args, "bin_mode", False):
+    tiling_obj_paths = normalize_to_list(tiling_obj_paths)
+
+    # 三条链路，靠接口名区分（prepare_compile_context 传入 bin_file_mode / bin_mode）：
+    # - *_v2（bin_file_mode）：外置 bin 文件新交付件。jit 把 .aicore_binary 发布为
+    #   output_file 同目录的固定名兄弟文件，host tiling objs 仍链成 kernel.so；
+    #   TopN 静态 kernel 无 host tiling，output_file 即为 bin 路径、不产 .so。
+    # - *_bin（bin_mode）：GetKernelBin-so 旧交付件（后续删除）。
+    # - *（无）：直接链 device .o，保留 AutofuseLaunch（CV 融合等）。
+    if getattr(args, "bin_file_mode", False):
+        if tiling_obj_paths:
+            bin_dest = os.path.join(
+                os.path.dirname(os.path.realpath(args.output_file)), KERNEL_BIN_NAME
+            )
+        else:
+            bin_dest = args.output_file
+        publish_kernel_bin(kernel_obj_path, bin_dest)
+        if not tiling_obj_paths:
+            return None
+        obj_files = list(tiling_obj_paths)
+    elif getattr(args, "bin_mode", False):
         kernel_obj_path = generate_get_kernel_obj(args, temp_dir, kernel_obj_path)
+        obj_files = [kernel_obj_path]
+        if tiling_obj_paths:
+            obj_files = tiling_obj_paths + obj_files
+    else:
+        obj_files = [kernel_obj_path]
+        if tiling_obj_paths:
+            obj_files = tiling_obj_paths + obj_files
 
     target_file = os.path.join(temp_dir, os.path.basename(args.output_file))
-    obj_files = [kernel_obj_path]
-    tiling_obj_paths = normalize_to_list(tiling_obj_paths)
-    if tiling_obj_paths:
-        obj_files = tiling_obj_paths + obj_files
     obj_files = append_shared_cv_wrapper_so(args, obj_files)
     link_libraries = (
         CV_HOST_LINK_LIBRARIES
