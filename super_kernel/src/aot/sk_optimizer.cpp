@@ -186,9 +186,9 @@ std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::ReorderWaitNodesForTask
   return reorderedTaskNodes;
 }
 
-void SuperKernelOptimizer::ConnectLastKernelsToFirstEvent(const std::vector<SuperKernelBaseNode *> &taskNodes,
-                                                          SuperKernelBaseNode *firstEvent) const {
-  if (firstEvent == nullptr) {
+void SuperKernelOptimizer::ConnectStreamTailKernelsToFrontReset(const std::vector<SuperKernelBaseNode *> &taskNodes,
+                                                                SuperKernelBaseNode *frontReset) const {
+  if (frontReset == nullptr) {
     return;
   }
 
@@ -199,13 +199,52 @@ void SuperKernelOptimizer::ConnectLastKernelsToFirstEvent(const std::vector<Supe
     }
   }
 
-  const uint64_t firstEventId = firstEvent->GetNodeId();
+  const uint64_t frontResetId = frontReset->GetNodeId();
   for (const auto &[streamIdx, kernel] : lastKernelByStream) {
-    kernel->sendToNodeId.insert(firstEventId);
-    firstEvent->receiveNodeId.insert(kernel->GetNodeId());
-    SK_LOGI("connect last kernel to first event: streamIdx=%u, kernelNodeId=%lu, eventNodeId=%lu", streamIdx,
-            kernel->GetNodeId(), firstEventId);
+    kernel->sendToNodeId.insert(frontResetId);
+    frontReset->receiveNodeId.insert(kernel->GetNodeId());
+    SK_LOGI("connect stream tail kernel to front reset: streamIdx=%u, kernelNodeId=%lu, resetNodeId=%lu", streamIdx,
+            kernel->GetNodeId(), frontResetId);
   }
+}
+
+std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::BuildTaskListWithEarlyNotifies(
+    const std::vector<SuperKernelBaseNode *> &taskNodes,
+    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes) const {
+  std::unordered_map<uint32_t, size_t> lastTaskIndexByStream;
+  for (size_t index = 0; index < taskNodes.size(); ++index) {
+    if (taskNodes[index] != nullptr) {
+      lastTaskIndexByStream[taskNodes[index]->GetStreamIdxInGraph()] = index;
+    }
+  }
+
+  std::vector<std::vector<SuperKernelBaseNode *>> notifyAfter(taskNodes.size());
+  std::vector<SuperKernelBaseNode *> deferredEvents;
+  for (const auto &eventNode : eventNodes) {
+    if (eventNode == nullptr) {
+      continue;
+    }
+    auto streamIt = lastTaskIndexByStream.find(eventNode->GetStreamIdxInGraph());
+    if (eventNode->GetNodeType() != SkNodeType::NODE_NOTIFY || streamIt == lastTaskIndexByStream.end()) {
+      deferredEvents.push_back(eventNode.get());
+      continue;
+    }
+
+    auto *producer = taskNodes[streamIt->second];
+    producer->sendToNodeId.insert(eventNode->GetNodeId());
+    eventNode->receiveNodeId.insert(producer->GetNodeId());
+    eventNode->SetPreNodeId(producer->GetNodeId());
+    notifyAfter[streamIt->second].push_back(eventNode.get());
+  }
+
+  std::vector<SuperKernelBaseNode *> scheduled;
+  scheduled.reserve(taskNodes.size() + eventNodes.size());
+  for (size_t index = 0; index < taskNodes.size(); ++index) {
+    scheduled.push_back(taskNodes[index]);
+    scheduled.insert(scheduled.end(), notifyAfter[index].begin(), notifyAfter[index].end());
+  }
+  scheduled.insert(scheduled.end(), deferredEvents.begin(), deferredEvents.end());
+  return scheduled;
 }
 
 bool SuperKernelOptimizer::ShouldReorderWaitNodesForTaskBuild() const {
@@ -311,15 +350,11 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
   PrintTaskNodesDetail(reorderedTaskNodes, "reordered task nodes");
 
   const auto &eventNodes = scopeInfo.GetExtInfo().eventNodes;
-  if (!eventNodes.empty()) {
-    ConnectLastKernelsToFirstEvent(reorderedTaskNodes, eventNodes.front().get());
+  if (!eventNodes.empty() && eventNodes.front()->GetNodeType() == SkNodeType::NODE_RESET) {
+    ConnectStreamTailKernelsToFrontReset(reorderedTaskNodes, eventNodes.front().get());
   }
 
-  std::vector<SuperKernelBaseNode *> tasks = reorderedTaskNodes;
-  tasks.reserve(reorderedTaskNodes.size() + eventNodes.size());
-  for (const auto &eventNode : eventNodes) {
-    tasks.emplace_back(eventNode.get());
-  }
+  std::vector<SuperKernelBaseNode *> tasks = BuildTaskListWithEarlyNotifies(reorderedTaskNodes, eventNodes);
 
   SkTaskIR taskIR;
   SkTaskLowering lowering(opts, graph);
