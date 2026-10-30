@@ -303,7 +303,8 @@ ExpressionImplPtr ExprParser::ParserSqrtFunction() {
 ExpressionImplPtr ExprParser::ParserNumber() {
   const std::string &numberStr = currentToken_.value;
   try {
-    if (numberStr.find('.') != std::string::npos) {
+    if (numberStr.find('.') != std::string::npos || numberStr.find('e') != std::string::npos ||
+        numberStr.find('E') != std::string::npos) {
       double value = std::stod(numberStr);
       GE_ASSERT_SUCCESS(Eat(TokenType::kNumber));
       return ExpressionImpl::CreateExpressionImpl(value);  // 返回浮点数节点

@@ -112,6 +112,26 @@ Token Scanner::ReadNumber() {
     result += currentChar_;
     Advance();
   }
+  // 兼容 RealDouble 的科学计数法打印形式(如 9.99999993922529e-09)；
+  // 仅当 e/E 后为 [可选符号]+数字 时才并入数字，避免误吞后续标识符
+  if (currentChar_ == 'e' || currentChar_ == 'E') {
+    size_t next = pos_;
+    if (next < input_.length() && (input_[next] == '+' || input_[next] == '-')) {
+      ++next;
+    }
+    if (next < input_.length() && std::isdigit(input_[next])) {
+      result += currentChar_;
+      Advance();
+      if (currentChar_ == '+' || currentChar_ == '-') {
+        result += currentChar_;
+        Advance();
+      }
+      while (std::isdigit(currentChar_)) {
+        result += currentChar_;
+        Advance();
+      }
+    }
+  }
   return {TokenType::kNumber, result};
 }
 }  // namespace af
