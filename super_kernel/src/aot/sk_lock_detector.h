@@ -124,9 +124,10 @@ class LockDetector {
    * @brief 检查多个scope并行运行时是否存在资源死锁
    * @param scopes 待检查的scope集合
    * @param riskWaitId 输出检测到风险的Wait节点ID；无风险时为INVALID_TASK_ID
-   * @return true表示检测过程正常完成，false表示检测过程失败
+   * @return 风险Wait所属scope；无风险时为nullptr
    */
-  bool CheckParallelScopeResources(const std::vector<SuperKernelScopeInfo> &scopes, uint64_t &riskWaitId);
+  const SuperKernelScopeInfo *CheckParallelScopeResources(const std::vector<SuperKernelScopeInfo> &scopes,
+                                                         uint64_t &riskWaitId);
 
   /**
    * @brief 获取最近一次检测到的死锁原因
@@ -299,7 +300,8 @@ class LockDetector {
       const std::vector<SuperKernelScopeInfo> &scopes) const;
   ScopeConcurrentRanges BuildScopeConcurrentRanges() const;
   bool CheckSelectedScopeResourceBranches(const std::vector<const SuperKernelScopeInfo *> &selected,
-                                          const ScopeConcurrentRanges &ranges, uint64_t &riskWaitId);
+                                          const ScopeConcurrentRanges &ranges, uint64_t &riskWaitId,
+                                          const SuperKernelScopeInfo *&riskScope);
   void PrepareResourceSearch(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
                              const ResourceDemand &rootDemand, const std::vector<SuperKernelBaseNode *> &rootNodes,
                              const std::unordered_set<uint16_t> &initialResidents, ScopeConcurrentRanges &ranges,
@@ -324,11 +326,6 @@ class LockDetector {
   void QueueScopeWaitNotifies(uint16_t scopeId, ResourceSearchState &state) const;
   // 判断当前资源搜索状态是否已经超出设备资源限制。
   bool ResourceSearchHasRisk(const ResourceSearchState &state) const;
-  bool IsSerializedWithCandidateScope(const SuperKernelBaseNode &waitNode, uint64_t candidateWaitNodeId,
-                                      const ScopeRuntimeInfo &candidateScope) const;
-  bool IsNodeBeforeCandidateScope(const SuperKernelBaseNode &node, const ScopeRuntimeInfo &candidateScope) const;
-  bool IsNodeAfterCandidateScope(const SuperKernelBaseNode &node, const ScopeRuntimeInfo &candidateScope) const;
-  void MergeCandidateScopeRange(const ScopeRuntimeInfo &candidateScope);
   void RollbackVisitedState(std::vector<uint64_t> &visitedNodes);
 
   std::vector<uint64_t> nodes;  // visited nodes
@@ -348,8 +345,6 @@ class LockDetector {
   uint32_t nodeNum;
   uint32_t kernelNodeNum;
   std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> skRangeInStream;
-  std::unordered_map<uint32_t, uint64_t> parallelScopeHeadNodeIds_;
-  std::unordered_map<uint32_t, uint64_t> parallelScopeTailNodeIds_;
   SuperKernelGraph *graph_;  // 存储graph指针，用于析构时调用Reset
   const SuperKernelOptionsManager *opts_ = nullptr;
   DeadlockFailReason deadlockReason_ = DeadlockFailReason::NOT_FIND_DEADLOCK;  // 当前检测到的死锁原因

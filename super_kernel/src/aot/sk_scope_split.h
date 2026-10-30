@@ -410,7 +410,8 @@ class ParallelResourceDeadlockCheckPass : public ScopeSplitPass {
   }
 
  private:
-  bool SplitScopeAtRiskWait(std::vector<SuperKernelScopeInfo> &scopes, SuperKernelBaseNode &waitNode);
+  void SplitScopeAtRiskWait(SuperKernelScopeInfo &scope, SuperKernelBaseNode &waitNode,
+                            std::vector<SuperKernelScopeInfo> &splitScopes);
   LockDetector parallelLockDetector_;
 };
 

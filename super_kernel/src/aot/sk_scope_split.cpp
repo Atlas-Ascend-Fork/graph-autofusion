@@ -17,6 +17,7 @@
 #include "sk_common.h"
 #include "sk_scope_postprocess.h"
 #include <algorithm>
+#include <iterator>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1471,72 +1472,59 @@ bool DeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   return true;
 }
 
-bool ParallelResourceDeadlockCheckPass::SplitScopeAtRiskWait(std::vector<SuperKernelScopeInfo> &scopes,
-                                                             SuperKernelBaseNode &waitNode) {
-  std::vector<SuperKernelScopeInfo> refinedScopes;
-  refinedScopes.reserve(scopes.size() + 1);
-  bool found = false;
-  for (auto &scope : scopes) {
-    const auto &nodes = scope.GetNodes();
-    if (std::find(nodes.begin(), nodes.end(), &waitNode) == nodes.end()) {
-      refinedScopes.push_back(std::move(scope));
-      continue;
-    }
-    found = true;
-    const auto originalBreakInfo = scope.GetBreakInfo();
-    scope.ClearNodeScopeIds();
-    std::vector<std::vector<SuperKernelBaseNode *>> segments;
-    std::vector<SuperKernelBaseNode *> currentSegment;
-    bool reachedRiskWait = false;
-    bool hasPrefix = false;
-    for (auto *node : nodes) {
-      const bool isWait = node->GetNodeType() == SkNodeType::NODE_WAIT;
-      if (!reachedRiskWait) {
-        if (node == &waitNode) {
-          reachedRiskWait = true;
-          node->SetIsFusible(false);
-          node->SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
-        } else {
-          currentSegment.push_back(node);
-          hasPrefix = true;
-        }
-      } else if (isWait) {
+void ParallelResourceDeadlockCheckPass::SplitScopeAtRiskWait(SuperKernelScopeInfo &scope,
+                                                             SuperKernelBaseNode &waitNode,
+                                                             std::vector<SuperKernelScopeInfo> &splitScopes) {
+  const auto &nodes = scope.GetNodes();
+  const auto originalBreakInfo = scope.GetBreakInfo();
+  scope.ClearNodeScopeIds();
+  std::vector<std::vector<SuperKernelBaseNode *>> segments;
+  std::vector<SuperKernelBaseNode *> currentSegment;
+  bool reachedRiskWait = false;
+  bool hasPrefix = false;
+  for (auto *node : nodes) {
+    const bool isWait = node->GetNodeType() == SkNodeType::NODE_WAIT;
+    if (!reachedRiskWait) {
+      if (node == &waitNode) {
+        reachedRiskWait = true;
         node->SetIsFusible(false);
         node->SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
-        if (!currentSegment.empty()) {
-          segments.push_back(std::move(currentSegment));
-          currentSegment.clear();
-        }
       } else {
         currentSegment.push_back(node);
+        hasPrefix = true;
       }
-    }
-    if (!currentSegment.empty()) {
-      segments.push_back(std::move(currentSegment));
-    }
-    for (size_t index = 0; index < segments.size(); ++index) {
-      SuperKernelScopeInfo splitScope;
-      splitScope.SetScopeBitFlags(scope.GetScopeBitFlags());
-      for (auto *node : segments[index]) {
-        splitScope.AddNode(node);
+    } else if (isWait) {
+      node->SetIsFusible(false);
+      node->SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
+      if (!currentSegment.empty()) {
+        segments.push_back(std::move(currentSegment));
+        currentSegment.clear();
       }
-      RebuildStreamInfos(splitScope);
-      if (index == 0 && hasPrefix) {
-        ScopeBreakInfo breakInfo;
-        breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
-            .SetTriggerNode(waitNode.GetNodeId(), waitNode.GetStreamIdxInGraph())
-            .SetDetail("Parallel resource deadlock at Wait node " + std::to_string(waitNode.GetNodeId()));
-        splitScope.SetBreakInfo(std::move(breakInfo));
-      } else {
-        splitScope.SetBreakInfo(originalBreakInfo);
-      }
-      refinedScopes.push_back(std::move(splitScope));
+    } else {
+      currentSegment.push_back(node);
     }
   }
-  if (found) {
-    scopes = std::move(refinedScopes);
+  if (!currentSegment.empty()) {
+    segments.push_back(std::move(currentSegment));
   }
-  return found;
+  for (size_t index = 0; index < segments.size(); ++index) {
+    SuperKernelScopeInfo splitScope;
+    splitScope.SetScopeBitFlags(scope.GetScopeBitFlags());
+    for (auto *node : segments[index]) {
+      splitScope.AddNode(node);
+    }
+    RebuildStreamInfos(splitScope);
+    if (index == 0 && hasPrefix) {
+      ScopeBreakInfo breakInfo;
+      breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
+          .SetTriggerNode(waitNode.GetNodeId(), waitNode.GetStreamIdxInGraph())
+          .SetDetail("Parallel resource deadlock at Wait node " + std::to_string(waitNode.GetNodeId()));
+      splitScope.SetBreakInfo(std::move(breakInfo));
+    } else {
+      splitScope.SetBreakInfo(originalBreakInfo);
+    }
+    splitScopes.push_back(std::move(splitScope));
+  }
 }
 
 bool ParallelResourceDeadlockCheckPass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
@@ -1545,7 +1533,9 @@ bool ParallelResourceDeadlockCheckPass::Run(std::vector<SuperKernelScopeInfo> &s
   }
   int64_t maxCubeNum = 0;
   int64_t maxVectorNum = 0;
-  if (GetDeviceCoreNums(maxCubeNum, maxVectorNum) != ACL_SUCCESS) {
+  const auto ret = GetDeviceCoreNums(maxCubeNum, maxVectorNum);
+  if (ret != ACL_SUCCESS) {
+    SK_LOGE("[ParallelResource] Failed to get device core counts, ret=%d", ret);
     return false;
   }
   ScopeCoreInfoCalculator calculator(maxCubeNum, maxVectorNum);
@@ -1557,21 +1547,31 @@ bool ParallelResourceDeadlockCheckPass::Run(std::vector<SuperKernelScopeInfo> &s
       }
       ScopeCoreInfo coreInfo;
       if (!calculator.GetValidScopeCoreInfo(scope.GetNodes(), coreInfo)) {
+        SK_LOGE("[ParallelResource] Failed to calculate core info for scope %u", scope.GetScopeId());
         return false;
       }
       scope.SetScopeCoreInfo(coreInfo);
     }
     uint64_t riskWaitId = INVALID_TASK_ID;
-    if (!parallelLockDetector_.CheckParallelScopeResources(scopes, riskWaitId)) {
-      return false;
-    }
-    if (riskWaitId == INVALID_TASK_ID) {
+    const auto *riskScope = parallelLockDetector_.CheckParallelScopeResources(scopes, riskWaitId);
+    if (riskScope == nullptr) {
       break;
     }
     auto *waitNode = graph_.GetNodeById(riskWaitId);
-    if (waitNode == nullptr || !waitNode->IsFusible() || !SplitScopeAtRiskWait(scopes, *waitNode)) {
+    if (waitNode == nullptr) {
+      SK_LOGE("[ParallelResource] Risk Wait %lu not found in graph", riskWaitId);
       return false;
     }
+    if (!waitNode->IsFusible()) {
+      SK_LOGE("[ParallelResource] Failed to split at risk Wait %lu, fusible=%d", riskWaitId, waitNode->IsFusible());
+      return false;
+    }
+    const auto scopeIndex = static_cast<size_t>(riskScope - scopes.data());
+    std::vector<SuperKernelScopeInfo> splitScopes;
+    SplitScopeAtRiskWait(scopes[scopeIndex], *waitNode, splitScopes);
+    scopes.erase(scopes.begin() + scopeIndex);
+    scopes.insert(scopes.begin() + scopeIndex, std::make_move_iterator(splitScopes.begin()),
+                  std::make_move_iterator(splitScopes.end()));
   }
   return true;
 }
