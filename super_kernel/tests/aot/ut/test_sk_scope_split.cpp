@@ -395,6 +395,712 @@ class SuperKernelScopeSplitterTest : public testing::Test {
   ScopeSplitResultReporter reporter;
 };
 
+class SuperKernelHeadTailEventTest : public SuperKernelScopeSplitterTest {
+ protected:
+  SuperKernelBaseNode *EventNotify(uint64_t id, uint32_t stream) {
+    auto *node = CreateNotifyNode(id, stream, id);
+    node->rtNodeType = ACL_MODEL_RI_TASK_EVENT_RECORD;
+    node->taskParams.type = ACL_MODEL_RI_TASK_EVENT_RECORD;
+    return node;
+  }
+
+  SuperKernelBaseNode *EventWait(uint64_t id, uint32_t stream) {
+    auto *node = CreateWaitNode(id, stream, INVALID_TASK_ID);
+    node->rtNodeType = ACL_MODEL_RI_TASK_EVENT_WAIT;
+    node->taskParams.type = ACL_MODEL_RI_TASK_EVENT_WAIT;
+    return node;
+  }
+
+  void Pair(uint64_t notifyId, const std::vector<uint64_t> &waitIds) {
+    auto *notify = graph->GetNodeById(notifyId);
+    notify->SetCorrespondingWaitNodeIds(waitIds);
+    for (auto id : waitIds) {
+      auto *wait = graph->GetNodeById(id);
+      wait->SetCorrespondingNotifyNodeId(notifyId);
+      wait->nodeInfos.syncInfos.eventId = notify->GetEventId();
+    }
+    SetupEvent(notify->GetEventId(), notifyId, waitIds);
+  }
+
+  bool RemoveEvents(const std::vector<SuperKernelBaseNode *> &nodes) {
+    std::vector<SuperKernelScopeInfo> scopes;
+    scopes.push_back(BuildTestScope(nodes));
+    SuperKernelScopeSplitter splitter(*graph, *opts);
+    ScopeBoundaryEventRemovePass pass(*graph);
+    pass.SetSplitter(&splitter);
+    pass.SetScopeSplitResultReporter(&reporter);
+    EXPECT_TRUE(pass.Run(scopes));
+    EXPECT_FALSE(splitter.NeedsResplit());
+    EXPECT_EQ(scopes.size(), 1U);
+    return scopes[0].GetNodes().size() < nodes.size();
+  }
+};
+
+// Run the same dependency and capacity contracts for ordinary and normalized Value tasks.
+class SuperKernelHeadTailTaskTest : public SuperKernelHeadTailEventTest, public testing::WithParamInterface<bool> {
+ protected:
+  SuperKernelBaseNode *EventNotify(uint64_t id, uint32_t stream) {
+    auto *node = SuperKernelHeadTailEventTest::EventNotify(id, stream);
+    if (GetParam()) {
+      node->rtNodeType = ACL_MODEL_RI_TASK_VALUE_WRITE;
+      node->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WRITE;
+      node->nodeInfos.syncInfos.addrValue = &memoryValue_;
+    }
+    return node;
+  }
+
+  SuperKernelBaseNode *EventWait(uint64_t id, uint32_t stream) {
+    auto *node = SuperKernelHeadTailEventTest::EventWait(id, stream);
+    if (GetParam()) {
+      node->rtNodeType = ACL_MODEL_RI_TASK_VALUE_WAIT;
+      node->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WAIT;
+      node->nodeInfos.syncInfos.addrValue = &memoryValue_;
+    }
+    return node;
+  }
+
+  uint64_t memoryValue_ = 1;
+};
+
+INSTANTIATE_TEST_SUITE_P(EventAndMemory, SuperKernelHeadTailTaskTest, testing::Bool(),
+                         [](const testing::TestParamInfo<bool> &info) { return info.param ? "Memory" : "Event"; });
+
+TEST_F(SuperKernelHeadTailEventTest, NormalizedMemoryWriteMovesFromHeadWithoutChangingMemoryInfo) {
+  uint64_t memoryValue = 7;
+  auto *write = EventNotify(1, 0);
+  write->nodeType = SkNodeType::NODE_MEMORY_WRITE;
+  write->rtNodeType = ACL_MODEL_RI_TASK_VALUE_WRITE;
+  write->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WRITE;
+  write->nodeInfos.syncInfos.addrValue = &memoryValue;
+  write->nodeInfos.syncInfos.memoryValue = memoryValue;
+  graph->memoryToNodes[write->GetEventId()].writeNodeIdList.insert(write->GetNodeId());
+  auto *kernel = CreateKernelNode(2, 0);
+  SetupStreams({{1, 2}});
+
+  ASSERT_TRUE(graph->PostProcessMemoryNode());
+  graph->BuildEventNodeAssociations();
+  ASSERT_EQ(write->GetNodeType(), SkNodeType::NODE_NOTIFY);
+  ASSERT_TRUE(write->IsFusible());
+  EXPECT_TRUE(RemoveEvents({write, kernel}));
+  EXPECT_FALSE(write->IsFusible());
+  EXPECT_EQ(write->GetNodeInfos().syncInfos.addrValue, &memoryValue);
+  EXPECT_EQ(write->GetNodeInfos().syncInfos.memoryValue, 7U);
+  EXPECT_EQ(write->GetNextNodeId(), kernel->GetNodeId());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, NormalizedMemoryWaitMovesWithKnownExternalWrite) {
+  uint64_t memoryValue = 7;
+  auto *write = EventNotify(1, 1);
+  auto *wait = EventWait(2, 0);
+  auto *kernel = CreateKernelNode(3, 0);
+  write->nodeType = SkNodeType::NODE_MEMORY_WRITE;
+  write->rtNodeType = ACL_MODEL_RI_TASK_VALUE_WRITE;
+  write->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WRITE;
+  wait->nodeType = SkNodeType::NODE_MEMORY_WAIT;
+  wait->rtNodeType = ACL_MODEL_RI_TASK_VALUE_WAIT;
+  wait->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WAIT;
+  for (auto *node : {write, wait}) {
+    node->nodeInfos.syncInfos.eventId = 1;
+    node->nodeInfos.syncInfos.addrValue = &memoryValue;
+    node->nodeInfos.syncInfos.memoryValue = memoryValue;
+  }
+  wait->nodeInfos.syncInfos.memoryWaitFlag = static_cast<uint32_t>(SkMemoryWaitFlag::EQ);
+  graph->memoryToNodes[1].writeNodeIdList.insert(1);
+  graph->memoryToNodes[1].waitNodeIdList.insert(2);
+  graph->opts_ = opts.get();
+  aclskOption option{};
+  option.optionType = aclskOptionType::AGGRESSIVE_OPT_STRATEGIES;
+  option.aggressiveOpts.valueBreakerBypass = ACLSK_VALUE_BREAKER_BYPASS_PAIRED_WAIT;
+  opts->SetOptOptionValue(&option);
+  SetupStreams({{2, 3}, {1}});
+
+  ASSERT_TRUE(graph->PostProcessMemoryNode());
+  graph->BuildEventNodeAssociations();
+  ASSERT_EQ(wait->GetNodeType(), SkNodeType::NODE_WAIT);
+  ASSERT_TRUE(wait->IsFusible());
+  EXPECT_TRUE(RemoveEvents({wait, kernel}));
+  EXPECT_FALSE(wait->IsFusible());
+  EXPECT_TRUE(write->IsFusible());
+  EXPECT_EQ(wait->GetCorrespondingNotifyNodeId(), write->GetNodeId());
+  EXPECT_EQ(wait->GetNodeInfos().syncInfos.addrValue, &memoryValue);
+  EXPECT_EQ(wait->GetNodeInfos().syncInfos.memoryWaitFlag, static_cast<uint32_t>(SkMemoryWaitFlag::EQ));
+}
+
+TEST_F(SuperKernelHeadTailEventTest, MemoryWriteClassifiedAsResetStillStopsTailScanning) {
+  uint64_t memoryValue = 0;
+  auto *kernel = CreateKernelNode(1, 0);
+  auto *wait = EventWait(2, 0);
+  auto *write = EventNotify(3, 0);
+  write->nodeType = SkNodeType::NODE_MEMORY_WRITE;
+  write->rtNodeType = ACL_MODEL_RI_TASK_VALUE_WRITE;
+  write->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WRITE;
+  write->nodeInfos.syncInfos.addrValue = &memoryValue;
+  write->nodeInfos.syncInfos.memoryValue = memoryValue;
+  graph->memoryToNodes[write->GetEventId()].writeNodeIdList.insert(write->GetNodeId());
+  SetupStreams({{1, 2, 3}});
+
+  ASSERT_TRUE(graph->PostProcessMemoryNode());
+  graph->BuildEventNodeAssociations();
+  ASSERT_EQ(write->GetNodeType(), SkNodeType::NODE_RESET);
+  EXPECT_FALSE(RemoveEvents({kernel, wait, write}));
+  EXPECT_TRUE(wait->IsFusible());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, UnaddressedWriteOnlyNotifyIsPreCancelledWithoutGraphChanges) {
+  auto *notify = EventNotify(1, 0);
+  auto *kernel = CreateKernelNode(2, 0);
+  SetupStreams({{1, 2}});
+  ASSERT_EQ(notify->GetNodeInfos().syncInfos.addrValue, nullptr);
+  ASSERT_TRUE(notify->GetCorrespondingWaitNodeIds().empty());
+  auto scope = BuildTestScope({notify, kernel});
+  const auto originalNodes = scope.GetNodes();
+  ScopeBoundaryEventRemovePass pass(*graph);
+
+  EXPECT_EQ(pass.ProcessScopeBoundaryEvents(scope), 0U);
+  EXPECT_EQ(scope.GetNodes(), originalNodes);
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(kernel->IsFusible());
+  EXPECT_EQ(notify->GetNextNodeId(), kernel->GetNodeId());
+  EXPECT_EQ(kernel->GetPreNodeId(), notify->GetNodeId());
+  EXPECT_EQ(notify->GetNodeInfos().syncInfos.addrValue, nullptr);
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, PreCancelledNotifyWaitPairIsIgnoredByEventOnly) {
+  auto *notify = EventNotify(1, 0);
+  auto *kernel = CreateKernelNode(2, 0);
+  auto *wait = EventWait(3, 1);
+  Pair(1, {3});
+
+  EXPECT_FALSE(RemoveEvents({notify, kernel, wait}));
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(wait->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, PreCancelledSuffixDoesNotExposeAnInteriorNotify) {
+  auto *kernel0 = CreateKernelNode(1, 0);
+  auto *kernel1 = CreateKernelNode(2, 0);
+  auto *candidate = EventNotify(3, 0);
+  auto *cancelledNotify = EventNotify(4, 0);
+  auto *cancelledWait = EventWait(5, 1);
+  auto *kernel2 = CreateKernelNode(6, 1);
+  auto *kernel3 = CreateKernelNode(7, 1);
+  EventWait(8, 2);
+  Pair(3, {8});
+  Pair(4, {5});
+  SetupStreams({{1, 2, 3, 4}, {5, 6, 7}, {8}});
+
+  // The cancelled suffix still occupies native slots. Moving node 3 would
+  // split off node 4 with the second stream, where it has no scheduling slot.
+  EXPECT_FALSE(RemoveEvents({kernel0, kernel1, candidate, cancelledNotify, cancelledWait, kernel2, kernel3}));
+  EXPECT_TRUE(candidate->IsFusible());
+  EXPECT_TRUE(cancelledNotify->IsFusible());
+  EXPECT_TRUE(cancelledWait->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, KeepsTailEventWhenTaskSlotsWouldBecomeInsufficient) {
+  auto *outside = CreateResetNode(0, 0, 100);
+  auto *main0 = CreateKernelNode(1, 0);
+  auto *main1 = CreateKernelNode(2, 0);
+  auto *kernel = CreateKernelNode(3, 1);
+  auto *notify = EventNotify(4, 1);
+  EventWait(5, 2);
+  Pair(4, {5});
+  SetupStreams({{0, 1, 2}, {3, 4}, {5}});
+
+  EXPECT_FALSE(RemoveEvents({main0, main1, kernel, notify}));
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(outside->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, RemovesOnlyOneTailEventWhenTaskSlotsAreLimited) {
+  CreateResetNode(0, 0, 100);
+  auto *main0 = CreateKernelNode(1, 0);
+  auto *main1 = CreateKernelNode(2, 0);
+  auto *kernel = CreateKernelNode(3, 1);
+  auto *inner = EventNotify(4, 1);
+  auto *outer = EventNotify(5, 1);
+  EventWait(6, 2);
+  EventWait(7, 2);
+  Pair(4, {6});
+  Pair(5, {7});
+  SetupStreams({{0, 1, 2}, {3, 4, 5}, {6, 7}});
+
+  EXPECT_TRUE(RemoveEvents({main0, main1, kernel, inner, outer}));
+  EXPECT_FALSE(outer->IsFusible());
+  EXPECT_TRUE(inner->IsFusible());
+  EXPECT_FALSE(RemoveEvents({main0, main1, kernel, inner}));
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, KeepsHeadEventWhenTaskSlotsWouldBecomeInsufficient) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
+  CreateResetNode(0, 0, 100);
+  auto *main0 = CreateKernelNode(1, 0);
+  auto *main1 = CreateKernelNode(2, 0);
+  auto *notify = EventNotify(3, 1);
+  notify->nodeInfos.syncInfos.addrValue = &notifyValue;
+  auto *kernel = CreateKernelNode(4, 1);
+  CreateResetNode(5, 1, 101);
+  SetupStreams({{0, 1, 2}, {3, 4, 5}});
+
+  EXPECT_FALSE(RemoveEvents({main0, main1, notify, kernel}));
+  EXPECT_TRUE(notify->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, RemovesOnlyOneHeadEventWhenTaskSlotsAreLimited) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
+  CreateResetNode(0, 0, 100);
+  auto *main0 = CreateKernelNode(1, 0);
+  auto *main1 = CreateKernelNode(2, 0);
+  auto *outer = EventNotify(3, 1);
+  outer->nodeInfos.syncInfos.addrValue = &notifyValue;
+  auto *inner = EventNotify(4, 1);
+  inner->nodeInfos.syncInfos.addrValue = &notifyValue;
+  auto *kernel = CreateKernelNode(5, 1);
+  CreateResetNode(6, 1, 101);
+  SetupStreams({{0, 1, 2}, {3, 4, 5, 6}});
+
+  EXPECT_TRUE(RemoveEvents({main0, main1, outer, inner, kernel}));
+  EXPECT_FALSE(outer->IsFusible());
+  EXPECT_TRUE(inner->IsFusible());
+  EXPECT_FALSE(RemoveEvents({main0, main1, inner, kernel}));
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, HeadAndTailEventsShareTaskSlotBudget) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
+  CreateResetNode(0, 0, 100);
+  auto *main0 = CreateKernelNode(1, 0);
+  auto *main1 = CreateKernelNode(2, 0);
+  auto *head = EventNotify(3, 1);
+  head->nodeInfos.syncInfos.addrValue = &notifyValue;
+  auto *kernel = CreateKernelNode(4, 1);
+  auto *tail = EventWait(5, 1);
+  EventNotify(6, 2);
+  Pair(6, {5});
+  SetupStreams({{0, 1, 2}, {3, 4, 5}, {6}});
+
+  EXPECT_TRUE(RemoveEvents({main0, main1, head, kernel, tail}));
+  EXPECT_NE(head->IsFusible(), tail->IsFusible());
+  std::vector<SuperKernelBaseNode *> remaining;
+  for (auto *node : {main0, main1, head, kernel, tail}) {
+    if (node->IsFusible()) {
+      remaining.push_back(node);
+    }
+  }
+  EXPECT_FALSE(RemoveEvents(remaining));
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, DifferentStreamsShareTaskSlotBudget) {
+  CreateResetNode(0, 0, 100);
+  auto *kernel0 = CreateKernelNode(1, 0);
+  auto *kernel1 = CreateKernelNode(2, 0);
+  auto *notify0 = EventNotify(3, 0);
+  CreateResetNode(4, 1, 101);
+  auto *kernel2 = CreateKernelNode(5, 1);
+  auto *kernel3 = CreateKernelNode(6, 1);
+  auto *notify1 = EventNotify(7, 1);
+  EventWait(8, 2);
+  EventWait(9, 2);
+  Pair(3, {8});
+  Pair(7, {9});
+  SetupStreams({{0, 1, 2, 3}, {4, 5, 6, 7}, {8, 9}});
+
+  EXPECT_TRUE(RemoveEvents({kernel0, kernel1, kernel2, kernel3, notify0, notify1}));
+  EXPECT_NE(notify0->IsFusible(), notify1->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, KeepsScopeUnchangedWhenOriginalTaskSlotsAreInsufficient) {
+  CreateResetNode(0, 0, 100);
+  auto *kernel0 = CreateKernelNode(1, 0);
+  CreateResetNode(2, 1, 101);
+  auto *kernel1 = CreateKernelNode(3, 1);
+  auto *notify = EventNotify(4, 1);
+  EventWait(5, 2);
+  Pair(4, {5});
+  SetupStreams({{0, 1}, {2, 3, 4}, {5}});
+
+  EXPECT_FALSE(RemoveEvents({kernel0, kernel1, notify}));
+  EXPECT_TRUE(kernel0->IsFusible());
+  EXPECT_TRUE(kernel1->IsFusible());
+  EXPECT_TRUE(notify->IsFusible());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, RemovesContinuousHeadAndTailPairs) {
+  auto *headNotify = EventNotify(1, 0);
+  auto *headWait = EventWait(2, 0);
+  auto *kernel = CreateKernelNode(3, 0);
+  auto *tailNotify = EventNotify(4, 0);
+  auto *tailWait = EventWait(5, 0);
+  Pair(1, {2});
+  Pair(4, {5});
+  SetupStreams({{1, 2, 3, 4, 5}});
+
+  EXPECT_FALSE(RemoveEvents({headNotify, headWait, kernel, tailNotify, tailWait}));
+  for (auto *event : {headNotify, headWait, tailNotify, tailWait}) {
+    EXPECT_TRUE(event->IsFusible());
+  }
+  EXPECT_TRUE(kernel->IsFusible());
+  EXPECT_EQ(headNotify->GetNextNodeId(), 2U);
+  EXPECT_EQ(tailWait->GetPreNodeId(), 4U);
+}
+
+TEST_F(SuperKernelHeadTailEventTest, PreCancelledCrossStreamPairDoesNotRequestResplit) {
+  auto *wait = EventWait(1, 0);
+  auto *kernel0 = CreateKernelNode(2, 0);
+  auto *notify = EventNotify(3, 1);
+  auto *kernel1 = CreateKernelNode(4, 1);
+  auto *kernel2 = CreateKernelNode(5, 2);
+  auto *kernel3 = CreateKernelNode(6, 0);
+  Pair(3, {1});
+  SetupStreams({{1, 2, 6}, {3, 4}, {5}});
+
+  EXPECT_FALSE(RemoveEvents({kernel2, notify, wait, kernel0, kernel1, kernel3}));
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(wait->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, KeepsHeadWaitForInternalNotify) {
+  auto *wait = EventWait(3, 0);
+  auto *kernel0 = CreateKernelNode(4, 0);
+  auto *kernel1 = CreateKernelNode(1, 1);
+  auto *notify = EventNotify(2, 1);
+  auto *kernel2 = CreateKernelNode(5, 1);
+  Pair(2, {3});
+
+  EXPECT_FALSE(RemoveEvents({kernel1, notify, wait, kernel0, kernel2}));
+  EXPECT_TRUE(wait->IsFusible());
+  EXPECT_TRUE(notify->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, RemovesHeadWaitWithKnownExternalNotify) {
+  auto *notify = EventNotify(1, 1);
+  auto *wait = EventWait(2, 0);
+  auto *kernel = CreateKernelNode(3, 0);
+  Pair(1, {2});
+
+  SetupStreams({{2, 3}, {1}});
+
+  EXPECT_TRUE(RemoveEvents({wait, kernel}));
+  EXPECT_FALSE(wait->IsFusible());
+  EXPECT_TRUE(notify->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, TailNotifyMovesWhenAllWaitsAreExternal) {
+  auto *kernel = CreateKernelNode(1, 0);
+  auto *notify = EventNotify(2, 0);
+  EventWait(3, 1);
+  EventWait(4, 2);
+  Pair(2, {3, 4});
+  SetupStreams({{1, 2}, {3}, {4}});
+
+  EXPECT_TRUE(RemoveEvents({kernel, notify}));
+  EXPECT_FALSE(notify->IsFusible());
+  EXPECT_TRUE(kernel->IsFusible());
+  EXPECT_TRUE(graph->GetNodeById(3)->IsFusible());
+  EXPECT_TRUE(graph->GetNodeById(4)->IsFusible());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, TailFanoutWaitsMustAllLeave) {
+  auto *kernel0 = CreateKernelNode(1, 0);
+  auto *notify = EventNotify(2, 0);
+  auto *kernel1 = CreateKernelNode(3, 1);
+  auto *wait1 = EventWait(4, 1);
+  auto *kernel2 = CreateKernelNode(5, 2);
+  auto *wait2 = EventWait(6, 2);
+  Pair(2, {4, 6});
+
+  EXPECT_FALSE(RemoveEvents({kernel0, kernel1, kernel2, notify, wait1, wait2}));
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(wait1->IsFusible());
+  EXPECT_TRUE(wait2->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, RetainedTailNotifyBlocksEarlierNotify) {
+  auto *kernel0 = CreateKernelNode(1, 0);
+  auto *earlier = EventNotify(2, 0);
+  auto *blocked = EventNotify(3, 0);
+  auto *kernel1 = CreateKernelNode(4, 1);
+  auto *insideWait = EventWait(5, 1);
+  auto *kernel2 = CreateKernelNode(6, 1);
+  EventWait(7, 2);
+  EventWait(8, 2);
+  Pair(2, {7});
+  Pair(3, {5, 8});
+
+  SetupStreams({{1, 2, 3}, {4, 5, 6}, {7, 8}});
+  EXPECT_FALSE(RemoveEvents({kernel0, earlier, blocked, kernel1, insideWait, kernel2}));
+  EXPECT_TRUE(earlier->IsFusible());
+  EXPECT_TRUE(blocked->IsFusible());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, PreCancelledValueAndScopeMarkersStopBoundaryScanning) {
+  auto *valueNotify = CreateNotifyNode(1, 0, 1);
+  valueNotify->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WRITE;
+  auto *notify = EventNotify(2, 0);
+  auto *begin = CreateScopeBeginNode(3, 0, "scope");
+  auto *kernel = CreateKernelNode(4, 0);
+  auto *wait = EventWait(5, 0);
+  auto *end = CreateScopeEndNode(6, 0, "scope");
+  Pair(2, {5});
+
+  EXPECT_FALSE(RemoveEvents({valueNotify, notify, begin, kernel, wait, end}));
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(wait->IsFusible());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, ScopeBeginStopsHeadBoundaryScanning) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
+  auto *begin = CreateScopeBeginNode(1, 0, "scope");
+  auto *notify = EventNotify(2, 0);
+  notify->nodeInfos.syncInfos.addrValue = &notifyValue;
+  auto *kernel = CreateKernelNode(3, 0);
+
+  SetupStreams({{1, 2, 3}});
+
+  EXPECT_FALSE(RemoveEvents({begin, notify, kernel}));
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(RemoveEvents({notify, kernel}));
+}
+
+TEST_F(SuperKernelHeadTailEventTest, ScopeEndStopsTailBoundaryScanning) {
+  auto *kernel = CreateKernelNode(1, 0);
+  auto *wait = EventWait(2, 0);
+  auto *end = CreateScopeEndNode(3, 0, "scope");
+
+  EXPECT_FALSE(RemoveEvents({kernel, wait, end}));
+  EXPECT_TRUE(wait->IsFusible());
+  EXPECT_TRUE(RemoveEvents({kernel, wait}));
+}
+
+TEST_F(SuperKernelHeadTailEventTest, ValueWriteAndEventNotifyMoveFromHead) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
+  auto *valueWrite = CreateNotifyNode(1, 0, 1);
+  valueWrite->nodeInfos.syncInfos.addrValue = &notifyValue;
+  valueWrite->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WRITE;
+  auto *notify = EventNotify(2, 0);
+  notify->nodeInfos.syncInfos.addrValue = &notifyValue;
+  auto *kernel = CreateKernelNode(3, 0);
+
+  SetupStreams({{1, 2, 3}});
+
+  EXPECT_TRUE(RemoveEvents({valueWrite, notify, kernel}));
+  EXPECT_FALSE(valueWrite->IsFusible());
+  EXPECT_FALSE(notify->IsFusible());
+  EXPECT_TRUE(kernel->IsFusible());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, ValueWaitAndEventWaitMoveFromTail) {
+  auto *kernel = CreateKernelNode(1, 0);
+  auto *wait = EventWait(2, 0);
+  auto *valueWait = CreateWaitNode(3, 0, INVALID_TASK_ID);
+  valueWait->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WAIT;
+
+  uint64_t memoryValue = 1;
+  valueWait->nodeInfos.syncInfos.addrValue = &memoryValue;
+  EXPECT_TRUE(RemoveEvents({kernel, wait, valueWait}));
+  EXPECT_FALSE(valueWait->IsFusible());
+  EXPECT_FALSE(wait->IsFusible());
+  EXPECT_TRUE(kernel->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, ResetStopsTailBoundaryScanning) {
+  auto *kernel = CreateKernelNode(1, 0);
+  auto *wait = EventWait(2, 0);
+  auto *reset = CreateResetNode(3, 0, 3);
+
+  EXPECT_FALSE(RemoveEvents({kernel, wait, reset}));
+  EXPECT_TRUE(wait->IsFusible());
+  EXPECT_TRUE(RemoveEvents({kernel, wait}));
+}
+
+TEST_F(SuperKernelHeadTailEventTest, UnnormalizedMemoryWaitStopsHeadBoundaryScanning) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
+  auto *memoryWait = CreateWaitNode(1, 0, INVALID_TASK_ID);
+  memoryWait->nodeType = SkNodeType::NODE_MEMORY_WAIT;
+  memoryWait->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WAIT;
+  auto *notify = EventNotify(2, 0);
+  notify->nodeInfos.syncInfos.addrValue = &notifyValue;
+  auto *kernel = CreateKernelNode(3, 0);
+
+  SetupStreams({{1, 2, 3}});
+
+  EXPECT_FALSE(RemoveEvents({memoryWait, notify, kernel}));
+  EXPECT_TRUE(memoryWait->IsFusible());
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(RemoveEvents({notify, kernel}));
+}
+
+TEST_F(SuperKernelHeadTailEventTest, UnnormalizedMemoryWriteStopsTailBoundaryScanning) {
+  auto *kernel = CreateKernelNode(1, 0);
+  auto *wait = EventWait(2, 0);
+  auto *memoryWrite = CreateNotifyNode(3, 0, 3);
+  memoryWrite->nodeType = SkNodeType::NODE_MEMORY_WRITE;
+  memoryWrite->taskParams.type = ACL_MODEL_RI_TASK_VALUE_WRITE;
+
+  EXPECT_FALSE(RemoveEvents({kernel, wait, memoryWrite}));
+  EXPECT_TRUE(memoryWrite->IsFusible());
+  EXPECT_TRUE(wait->IsFusible());
+  EXPECT_TRUE(RemoveEvents({kernel, wait}));
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, PlaceholdersStopHeadAndTailBoundaryScanning) {
+  for (bool withPlaceholders : {true, false}) {
+    SCOPED_TRACE(withPlaceholders);
+    graph = std::make_unique<SuperKernelGraph>();
+    auto *headPlaceholder = CreateKernelNode(1, 0);
+    static_cast<SuperKernelKernelNode *>(headPlaceholder)->isPlaceholder = true;
+    auto *notify = EventNotify(2, 0);
+    auto *kernel = CreateKernelNode(3, 0);
+    auto *wait = EventWait(4, 0);
+    auto *tailPlaceholder = CreateKernelNode(5, 0);
+    static_cast<SuperKernelKernelNode *>(tailPlaceholder)->isPlaceholder = true;
+    EventNotify(6, 1);
+    EventWait(7, 2);
+    Pair(2, {7});
+    Pair(6, {4});
+    const std::vector<uint64_t> stream =
+        withPlaceholders ? std::vector<uint64_t>{1, 2, 3, 4, 5} : std::vector<uint64_t>{2, 3, 4};
+    SetupStreams({stream, {6}, {7}});
+    const std::vector<SuperKernelBaseNode *> nodes =
+        withPlaceholders ? std::vector<SuperKernelBaseNode *>{headPlaceholder, notify, kernel, wait, tailPlaceholder}
+                         : std::vector<SuperKernelBaseNode *>{notify, kernel, wait};
+
+    EXPECT_EQ(RemoveEvents(nodes), !withPlaceholders);
+    EXPECT_EQ(notify->IsFusible(), withPlaceholders);
+    EXPECT_EQ(wait->IsFusible(), withPlaceholders);
+  }
+}
+
+TEST_F(SuperKernelHeadTailEventTest, HeadNotifyAndTailWaitCanKeepTheirInternalPartners) {
+  auto *head = EventNotify(1, 0);
+  auto *kernel0 = CreateKernelNode(2, 0);
+  auto *kernel1 = CreateKernelNode(3, 1);
+  auto *insideWait = EventWait(4, 1);
+  auto *insideNotify = EventNotify(5, 1);
+  auto *kernel2 = CreateKernelNode(6, 1);
+  auto *kernel3 = CreateKernelNode(7, 2);
+  auto *tail = EventWait(8, 2);
+  Pair(1, {4});
+  Pair(5, {8});
+
+  EXPECT_FALSE(RemoveEvents({head, kernel0, kernel1, insideWait, insideNotify, kernel2, kernel3, tail}));
+  EXPECT_TRUE(head->IsFusible());
+  EXPECT_TRUE(tail->IsFusible());
+  EXPECT_TRUE(insideWait->IsFusible());
+  EXPECT_TRUE(insideNotify->IsFusible());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, PipelineMovesOrdinaryHeadPairWithoutPreselection) {
+  auto *notify = EventNotify(1, 0);
+  auto *kernel0 = CreateKernelNode(2, 0);
+  CreateKernelNode(3, 0);
+  auto *wait = EventWait(4, 1);
+  auto *kernel1 = CreateKernelNode(5, 1);
+  CreateKernelNode(6, 1);
+  Pair(1, {4});
+  SetupStreams({{1, 2, 3}, {4, 5, 6}});
+
+  SuperKernelScopeSplitter splitter(*graph, *opts);
+  ASSERT_TRUE(splitter.SplitGraph());
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(wait->IsFusible());
+  EXPECT_NE(kernel0->GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_EQ(kernel0->GetScopeId(), kernel1->GetScopeId());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, PipelineMovesOrdinaryTailPairWithoutPreselection) {
+  auto *kernel0 = CreateKernelNode(1, 0);
+  CreateKernelNode(2, 0);
+  auto *notify = EventNotify(3, 0);
+  auto *kernel1 = CreateKernelNode(4, 1);
+  CreateKernelNode(5, 1);
+  auto *wait = EventWait(6, 1);
+  Pair(3, {6});
+  SetupStreams({{1, 2, 3}, {4, 5, 6}});
+
+  SuperKernelScopeSplitter splitter(*graph, *opts);
+  ASSERT_TRUE(splitter.SplitGraph());
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(wait->IsFusible());
+  EXPECT_NE(kernel0->GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_EQ(kernel0->GetScopeId(), kernel1->GetScopeId());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, PipelineRefinesIndirectHeadWaitBeforeBoundaryPass) {
+  auto *kernelB = CreateKernelNode(1, 1);
+  EventNotify(2, 1);
+  auto *kernelC = CreateKernelNode(3, 1);
+  auto *externalWait = EventWait(4, 2);
+  auto *externalKernel = CreateKernelNode(5, 2);
+  auto *headWait = EventWait(6, 0);
+  auto *kernelA = CreateKernelNode(7, 0);
+  auto *externalNotify = EventNotify(8, 2);
+  Pair(2, {4});
+  Pair(8, {6});
+  for (auto *node : {externalWait, externalKernel, externalNotify}) {
+    node->SetIsFusible(false);
+  }
+  SetupStreams({{6, 7}, {1, 2, 3}, {4, 5, 8}});
+
+  SuperKernelScopeSplitter splitter(*graph, *opts);
+  ASSERT_TRUE(splitter.SplitGraph());
+  EXPECT_EQ(headWait->GetFusionFailReason(), FusionFailReason::EXIST_DEADLOCK);
+  EXPECT_EQ(headWait->GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_NE(kernelA->GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_NE(kernelB->GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_NE(kernelA->GetScopeId(), kernelB->GetScopeId());
+  EXPECT_EQ(kernelB->GetScopeId(), kernelC->GetScopeId());
+}
+
+TEST_F(SuperKernelHeadTailEventTest, PipelinePreservesIndirectTailNotifyWhenSlotsAreLimited) {
+  auto *kernelA = CreateKernelNode(1, 0);
+  auto *tailNotify = EventNotify(2, 0);
+  auto *kernelB = CreateKernelNode(3, 1);
+  auto *externalWait = EventWait(4, 2);
+  auto *externalKernel = CreateKernelNode(5, 2);
+  auto *externalNotify = EventNotify(6, 2);
+  EventWait(7, 1);
+  auto *kernelC = CreateKernelNode(8, 1);
+  Pair(2, {4});
+  Pair(6, {7});
+  for (auto *node : {externalWait, externalKernel, externalNotify}) {
+    node->SetIsFusible(false);
+  }
+  SetupStreams({{1, 2}, {3, 7, 8}, {4, 5, 6}});
+
+  SuperKernelScopeSplitter splitter(*graph, *opts);
+  ASSERT_TRUE(splitter.SplitGraph());
+  EXPECT_TRUE(tailNotify->IsFusible());
+  EXPECT_EQ(tailNotify->GetScopeId(), kernelA->GetScopeId());
+  EXPECT_NE(kernelA->GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_NE(kernelB->GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_NE(kernelA->GetScopeId(), kernelC->GetScopeId());
+  EXPECT_EQ(kernelA->GetScopeId(), kernelB->GetScopeId());
+}
+
+TEST_F(SuperKernelScopeSplitterTest, NamedOriginalScopeExcludesPlaceholder) {
+  CreateScopeBeginNode(1, 0, "scope");
+  auto *kernel = CreateKernelNode(2, 0);
+  auto *placeholder = CreateKernelNode(3, 0);
+  static_cast<SuperKernelKernelNode *>(placeholder)->isPlaceholder = true;
+  CreateScopeEndNode(4, 0, "scope");
+  std::bitset<MAX_SCOPE_NUM> flags;
+  flags.set(0);
+  kernel->SetScopeBitFlags(flags);
+  placeholder->SetScopeBitFlags(flags);
+  SetupStreams({{1, 2, 3, 4}});
+
+  graph->ParseOriginalScopes();
+  const auto &scopes = graph->GetOriginalScopeInfos();
+  ASSERT_EQ(scopes.size(), 1U);
+  EXPECT_EQ(scopes[0].nodeIds, (std::vector<uint64_t>{2}));
+}
+
 TEST_F(SuperKernelScopeSplitterTest, ScopeCoreInfoCalculatorWholeScopeMatchesProgressiveResult) {
   auto *cubeNode = CreateKernelNodeWithCores(1, 0, 2, 3, SkKernelType::AIC_ONLY);
   auto *vectorNode = CreateKernelNodeWithCores(2, 0, INVALID_TASK_ID, 5, SkKernelType::AIV_ONLY);
@@ -744,6 +1450,8 @@ TEST_F(SuperKernelScopeSplitterTest, Unfusible_ConsecutiveUnfusibleNodes) {
  *   - scopes清空触发重切分
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_PassDetectsPureEventStream) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *wait1 = CreateWaitNode(1, 0, 5, 3);
   auto *k1 = CreateKernelNode(3, 0, INVALID_TASK_ID);
 
@@ -751,7 +1459,9 @@ TEST_F(SuperKernelScopeSplitterTest, EventOnly_PassDetectsPureEventStream) {
   auto *k2 = CreateKernelNode(4, 1, INVALID_TASK_ID);
 
   auto *notify1 = CreateNotifyNode(5, 2, 100, 6);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *notify2 = CreateNotifyNode(6, 2, 200, INVALID_TASK_ID);
+  notify2->nodeInfos.syncInfos.addrValue = &notifyValue;
 
   SetupStreams({{1, 3}, {2, 4}, {5, 6}});
   SetupEvent(100, 5, {1});
@@ -1107,6 +1817,9 @@ TEST_F(SuperKernelScopeSplitterTest, Sync_WaitBeforeNotifySuspend) {
   SetupStreams({{1, 3}, {2, 4}});
   SetupEvent(100, 4, {1});
 
+  wait1->nodeInfos.syncInfos.eventId = notify1->GetEventId();
+  notify1->SetCorrespondingWaitNodeIds({1});
+
   SuperKernelScopeSplitter splitter(*graph, *opts);
   bool result = splitter.SplitGraph();
 
@@ -1368,6 +2081,11 @@ TEST_F(SuperKernelScopeSplitterTest, Sync_MultipleSuspendResume) {
   SetupStreams({{1, 3, 5, 7}, {2, 4, 6, 8}, {9}});
   SetupEvent(100, 2, {1});
   SetupEvent(200, 6, {5});
+
+  wait1->nodeInfos.syncInfos.eventId = notify1->GetEventId();
+  notify1->SetCorrespondingWaitNodeIds({1});
+  wait2->nodeInfos.syncInfos.eventId = notify2->GetEventId();
+  notify2->SetCorrespondingWaitNodeIds({5});
 
   SuperKernelScopeSplitter splitter(*graph, *opts);
   bool result = splitter.SplitGraph();
@@ -2627,6 +3345,9 @@ TEST_F(SuperKernelScopeSplitterTest, ScopeBitFlags_WithEventSynchronization) {
   SetupStreams({{1, 2, 3}, {4, 5, 6}});
   SetupEvent(100, 5, {2});
 
+  wait1->nodeInfos.syncInfos.eventId = notify1->GetEventId();
+  notify1->SetCorrespondingWaitNodeIds({2});
+
   SuperKernelScopeSplitter splitter(*graph, *opts);
   bool result = splitter.SplitGraph();
 
@@ -2839,7 +3560,10 @@ TEST_F(SuperKernelScopeSplitterTest, DeadlockRefine_SplitUsesCandidateSnapshotBe
  *   - 无可融合Kernel，生成0个scope
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_FullPipelineOnlyEventNodes) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *notify1 = CreateNotifyNode(1, 0, 0x100, INVALID_TASK_ID);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
 
   SetupStreams({{1}});
   SetupEvent(0x100, 1, {});
@@ -3297,7 +4021,10 @@ TEST_F(SuperKernelScopeSplitterTest, ErrorHandling_SkipUnfusibleNodeNotFound) {
  *   - scopes清空触发重新切分
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_SingleEventOnlyStream) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *notify1 = CreateNotifyNode(1, 0, 0x100, INVALID_TASK_ID);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *k1 = CreateKernelNode(2, 1, INVALID_TASK_ID);
 
   SetupStreams({{1}, {2}});
@@ -3336,7 +4063,10 @@ TEST_F(SuperKernelScopeSplitterTest, EventOnly_SingleEventOnlyStream) {
  *   - scopes清空
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_AllEventOnlyStreams) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *notify1 = CreateNotifyNode(1, 0, 0x100, INVALID_TASK_ID);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *wait1 = CreateWaitNode(2, 1, 100, INVALID_TASK_ID);
 
   SetupStreams({{1}, {2}});
@@ -3376,9 +4106,13 @@ TEST_F(SuperKernelScopeSplitterTest, EventOnly_AllEventOnlyStreams) {
  *   - Stream1混合保持不变
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_MixedStreamsPartialRemove) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *notify1 = CreateNotifyNode(1, 0, 0x100, INVALID_TASK_ID);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *k1 = CreateKernelNode(2, 1, 3);
   auto *notify2 = CreateNotifyNode(3, 1, 0x200, 4);
+  notify2->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *k2 = CreateKernelNode(4, 1, INVALID_TASK_ID);
   auto *wait1 = CreateWaitNode(5, 2, 100, 6);
   auto *reset1 = CreateResetNode(6, 2, 0x300, INVALID_TASK_ID);
@@ -3507,8 +4241,11 @@ TEST_F(SuperKernelScopeSplitterTest, EventOnly_KernelWithEventStreamKept) {
  *   - scopes清空触发重切分
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_MultipleScopesProcessed) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *k1 = CreateKernelNode(1, 0, INVALID_TASK_ID);
   auto *notify1 = CreateNotifyNode(2, 1, 0x100, INVALID_TASK_ID);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *k2 = CreateKernelNode(3, 2, INVALID_TASK_ID);
 
   SetupStreams({{1}, {2}, {3}});
@@ -3555,9 +4292,12 @@ TEST_F(SuperKernelScopeSplitterTest, EventOnly_MultipleScopesProcessed) {
  *   - 生成1个scope仅包含K1/K2
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_FullPipelineWithEventOnlyStream) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *k1 = CreateKernelNode(1, 0, 2);
   auto *k2 = CreateKernelNode(2, 0, INVALID_TASK_ID);
   auto *notify1 = CreateNotifyNode(3, 1, 0x100, INVALID_TASK_ID);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
 
   SetPreNodeId(2, 1);
 
@@ -3592,7 +4332,10 @@ TEST_F(SuperKernelScopeSplitterTest, EventOnly_FullPipelineWithEventOnlyStream) 
  *   - scopes清空
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_AdjacentEventNodesRemoved) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *notify1 = CreateNotifyNode(1, 0, 0x100, 2);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *wait1 = CreateWaitNode(2, 0, 100, 3);
   auto *reset1 = CreateResetNode(3, 0, 0x200, INVALID_TASK_ID);
 
@@ -3634,8 +4377,12 @@ TEST_F(SuperKernelScopeSplitterTest, EventOnly_AdjacentEventNodesRemoved) {
  *   - 无可融合Kernel，生成0个scope
  */
 TEST_F(SuperKernelScopeSplitterTest, EventOnly_MultipleOnlyEventNodes) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *notify1 = CreateNotifyNode(1, 0, 0x100, INVALID_TASK_ID);
+  notify1->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *notify2 = CreateNotifyNode(2, 1, 0x200, INVALID_TASK_ID);
+  notify2->nodeInfos.syncInfos.addrValue = &notifyValue;
 
   SetupStreams({{1}, {2}});
 
@@ -4728,11 +5475,15 @@ TEST_F(SuperKernelScopeSplitterTest, DefaultNode_MultipleScopes_Independent) {
 
 // streamA(default+event)应被移除，streamB(纯event)应交给EventOnlyStreamRemovePass
 TEST_F(SuperKernelScopeSplitterTest, DefaultNode_StreamWithDefaultAndStreamOnlyEvent) {
+  // Keep write-only notifications to exercise boundary/stream handling.
+  uint64_t notifyValue = 0;
   auto *d1 = CreateDefaultNode(1, 0, 2);
   auto *n1 = CreateNotifyNode(2, 0, 100, 3);
+  n1->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *w1 = CreateWaitNode(3, 0, 100);
 
   auto *n2 = CreateNotifyNode(11, 1, 101, 12);
+  n2->nodeInfos.syncInfos.addrValue = &notifyValue;
   auto *w2 = CreateWaitNode(12, 1, 101);
 
   auto *k1 = CreateKernelNode(21, 2);

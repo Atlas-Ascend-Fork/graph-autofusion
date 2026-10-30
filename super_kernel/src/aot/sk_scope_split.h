@@ -287,6 +287,31 @@ class EventOnlyStreamRemovePass : public ScopeSplitPass {
   uint32_t markedCount_;  ///< Total number of nodes marked as non-fusible
 };
 
+// Remove continuous Notify/Wait boundaries, including normalized Value tasks, without re-splitting.
+class ScopeBoundaryEventRemovePass : public ScopeSplitPass {
+ public:
+  explicit ScopeBoundaryEventRemovePass(SuperKernelGraph &inputGraph);
+  bool Run(std::vector<SuperKernelScopeInfo> &scopes) override;
+  std::string GetName() const override {
+    return "ScopeBoundaryEventRemovePass";
+  }
+
+ private:
+  bool IsNotifyOrWaitNode(const SuperKernelBaseNode &node) const;
+  bool CanMoveBoundaryEvent(const SuperKernelBaseNode *node, const std::unordered_set<uint64_t> &scopeNodeIds) const;
+  void CollectMovableBoundaryEvents(const std::vector<SuperKernelBaseNode *> &boundaryNodes,
+                                    const std::unordered_set<uint64_t> &scopeNodeIds,
+                                    std::unordered_set<uint64_t> &headEvents, std::unordered_set<uint64_t> &tailEvents,
+                                    const std::vector<SuperKernelBaseNode *> &scopeNodes,
+                                    const std::unordered_set<SuperKernelBaseNode *> &retainedNodes) const;
+  bool HasCapacityForBoundaryRemoval(const std::vector<SuperKernelBaseNode *> &scopeNodes,
+                                     const std::unordered_set<uint64_t> &headEvents,
+                                     const std::unordered_set<uint64_t> &tailEvents,
+                                     uint64_t removedNodeId = INVALID_TASK_ID) const;
+
+  uint32_t ProcessScopeBoundaryEvents(SuperKernelScopeInfo &scope);
+};
+
 // ============ Pass: Per-Op Max Core Debug Split ============
 
 class PerOpMaxCoreSplitPass : public ScopeSplitPass {
