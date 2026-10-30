@@ -177,15 +177,11 @@ class TestSuperKernel:
             with os.fdopen(fd, "rb") as source:
                 return source.read()
 
-        with (
-            mock.patch("builtins.open", new_callable=mock.mock_open, read_data="{}"),
-            mock.patch("json.load", return_value=sub_op_add_json),
-            mock.patch("subprocess.run"),
-            mock.patch.object(
-                CommonUtility, "is_support_super_kernel", return_value=True
-            ),
-            mock.patch("superkernel.super_kernel.compile_super_kernel"),
-        ):
+        with mock.patch("builtins.open", new_callable=mock.mock_open, read_data="{}"), \
+        mock.patch("json.load", return_value=sub_op_add_json), \
+        mock.patch("subprocess.run"), \
+        mock.patch.object(CommonUtility, "is_support_super_kernel", return_value=True), \
+        mock.patch("superkernel.super_kernel.compile_super_kernel"):
             longer_source = compile_source(reused_dir, two_ops)
             reused_source = compile_source(reused_dir, one_op)
             clean_source = compile_source(clean_dir, one_op)
