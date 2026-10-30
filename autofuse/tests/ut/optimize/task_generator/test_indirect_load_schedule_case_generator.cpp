@@ -2509,14 +2509,14 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, GenerateFailsWhenUnsupportedTopology
 }
 
 // gather 输出经 +bias / +bmm 双输入 Add 链后进入尾轴归约 softmax pattern 的融合图。
-af::AscGraph BuildIndirectLoadSoftmaxPostGraph() {
+af::AscGraph BuildIndirectLoadSoftmaxPostGraph(bool large_window = false) {
   af::AscGraph graph("indirect_load_softmax_post_ut_graph");
-  const af::Expression s0 = graph.CreateSizeVar(2);
-  const af::Expression s1 = graph.CreateSizeVar(3);
-  const af::Expression s2 = graph.CreateSizeVar(5);
-  const af::Expression in0 = graph.CreateSizeVar(2);
-  const af::Expression in1 = graph.CreateSizeVar(4);
-  const af::Expression in2 = graph.CreateSizeVar(5);
+  const af::Expression s0 = graph.CreateSizeVar(large_window ? 4 : 2);
+  const af::Expression s1 = graph.CreateSizeVar(large_window ? 8 : 3);
+  const af::Expression s2 = graph.CreateSizeVar(large_window ? 16000 : 5);
+  const af::Expression in0 = graph.CreateSizeVar(large_window ? 4 : 2);
+  const af::Expression in1 = graph.CreateSizeVar(large_window ? 8 : 4);
+  const af::Expression in2 = graph.CreateSizeVar(large_window ? 16000 : 5);
   const auto y0 = graph.CreateAxis("y0", s0);
   const auto y1 = graph.CreateAxis("y1", s1);
   const auto y2 = graph.CreateAxis("y2", s2);
@@ -2547,7 +2547,7 @@ af::AscGraph BuildIndirectLoadSoftmaxPostGraph() {
   af::ascir_op::IndirectLoad indirect_load("indirect_load");
   indirect_load.x1 = input_load.y;
   indirect_load.x2 = index_load.y;
-  indirect_load.ir_attr.SetAxis(2);  // 尾轴gather：Softmax专用路径要求（非尾轴gather的SIMD输出物理布局有行对齐空洞）
+  indirect_load.ir_attr.SetAxis(large_window ? 1 : 2);  // 大窗口取 axis=1 复现 SK window 超 UB 的 Softmax 分段形态
   SetNodeView(indirect_load, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
 
   af::ascir_op::Data bias_data("bias_data", graph);
@@ -2609,6 +2609,80 @@ af::AscGraph BuildIndirectLoadSoftmaxPostGraph() {
   output.ir_attr.SetIndex(0);
   SetNodeView(output, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
   return graph;
+}
+
+// gather+softmax 大窗口：UB 取盲区值（fp16 R=16000 下 3R+32K=128768 ≤ 147456 <
+// 4R+32K=160768），softmax 感知下界必须触发 SK 分段重定向，且规范化被跳过、
+// 原始 Pattern 链保留。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SoftmaxDedicatedLargeWindowUsesSegmentedSimt) {
+  PlatformContextReset platform_reset;
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 147456;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  auto graph = BuildIndirectLoadSoftmaxPostGraph(true);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  auto segmented = graphs.end();
+  for (auto iter = graphs.begin(); iter != graphs.end(); ++iter) {
+    const auto candidate = iter->FindNode("indirect_load");
+    if (candidate != nullptr && ascir::GetTemplateIdOrDefault(*candidate) == ascir::TemplateId::kIndirectLoadSimt &&
+        ascir::IsSkSegmentedSimt(*candidate)) {
+      segmented = iter;
+      break;
+    }
+  }
+  ASSERT_NE(segmented, graphs.end());
+  // softmax 未规范化：无专用 Softmax 节点，原始 Pattern 链完整保留。
+  EXPECT_EQ(segmented->FindNode("true_div_softmax"), nullptr);
+  EXPECT_NE(segmented->FindNode("max"), nullptr);
+  EXPECT_NE(segmented->FindNode("sum"), nullptr);
+  EXPECT_NE(segmented->FindNode("exp"), nullptr);
+  EXPECT_NE(segmented->FindNode("true_div"), nullptr);
+  EXPECT_NE(segmented->FindNode("indirect_load"), nullptr);
+  EXPECT_NE(segmented->FindNode("indirect_load_sk_output_workspace"), nullptr);
+  EXPECT_EQ(segmented->FindNode("indirect_load_sk_input_workspace"), nullptr);
+  EXPECT_EQ(segmented->FindNode("indirect_load_sk_index_workspace"), nullptr);
+  // Reduce 段（max/sum）与多消费者节点（bmm_add 供 max/sub、exp 供 sum/true_div）
+  // 的输出均插入 workspace 边界，消费子图分段、R 轴分 tile 归约由各段自身承载。
+  int32_t norm_boundaries = 0;
+  for (const auto &node : segmented->GetAllNodes()) {
+    const auto &name = node->GetName();
+    if ((name.find("max_sk_n") != std::string::npos || name.find("sum_sk_n") != std::string::npos ||
+         name.find("bmm_add_sk_n") != std::string::npos || name.find("exp_sk_n") != std::string::npos) &&
+        af::ops::IsOps<af::ascir_op::Workspace>(node)) {
+      ++norm_boundaries;
+    }
+  }
+  EXPECT_GE(norm_boundaries, 4);
+}
+
+// 窗口不可行但 4R+32K ≤ UB（fp16 R=16000：4R+32K=160768 ≤ 245760）：fused SIMT
+// 可行，不触发重定向，SIMT 候选保持规范化——守卫 softmax 感知下界不过度触发。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SoftmaxKeepsFusedSimtWhenUbFitsFourRDomains) {
+  PlatformContextReset platform_reset;
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 245760;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  auto graph = BuildIndirectLoadSoftmaxPostGraph(true);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  for (const auto &candidate_graph : graphs) {
+    const auto candidate = candidate_graph.FindNode("indirect_load");
+    EXPECT_FALSE(candidate != nullptr && ascir::IsSkSegmentedSimt(*candidate));
+  }
+  const auto simt_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_NE(simt_iter, graphs.end());
+  EXPECT_NE(simt_iter->FindNode("true_div_softmax"), nullptr);
 }
 
 // gather+softmax 专用路径：候选图内替换为 Softmax 节点，SIMT 候选的 boundary 覆写为
@@ -3772,7 +3846,7 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSkBridgeRejectsOneByteVal
 // 构造带 Reduce 链的 gather 图：index 可切换收敛/非收敛，shape 可调以触发/不触发
 // 窗口超限。
 af::AscGraph BuildSkRedirectGraph(bool non_converged_index, int64_t input_rows, bool composite_norm,
-                                  int64_t dim = 20000) {
+                                  int64_t dim = 20000, int64_t axis = 0) {
   af::AscGraph graph("sk_redirect_ut_graph");
   const af::Expression s_rows = graph.CreateSizeVar(1);
   const af::Expression s_dim = graph.CreateSizeVar(dim);
@@ -3817,7 +3891,7 @@ af::AscGraph BuildSkRedirectGraph(bool non_converged_index, int64_t input_rows, 
     SetNodeView(index_broadcast, af::DT_INT64, axes, full, full_strides);
     indirect_load.x2 = index_broadcast.y;
   }
-  indirect_load.ir_attr.SetAxis(0);
+  indirect_load.ir_attr.SetAxis(axis);
   indirect_load.ir_attr.SetNegative_index_support(true);
   indirect_load.ir_attr.SetNeed_check_bound(true);
   indirect_load.ir_attr.SetMax(s_table);
@@ -3887,6 +3961,183 @@ void SetUpSkRedirectPlatform() {
   ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
 }
 
+// LayerNorm 形态：双 Reduce、广播/逐元素中间链、标量参数链、仿射侧链和双输出。
+// 尾轴满 R 的中间张量计数应触发非全载分段。
+af::AscGraph BuildSkRedirectNativeLayerNormGraph() {
+  af::AscGraph graph("sk_redirect_native_ln_ut_graph");
+  const af::Expression s0 = graph.CreateSizeVar(4);
+  const af::Expression s1 = graph.CreateSizeVar(8);
+  const af::Expression s2 = graph.CreateSizeVar(16000);
+  const auto y0 = graph.CreateAxis("y0", s0);
+  const auto y1 = graph.CreateAxis("y1", s1);
+  const auto y2 = graph.CreateAxis("y2", s2);
+  const std::vector<af::AxisId> axes = {y0.id, y1.id, y2.id};
+  const std::vector<af::Expression> full = {s0, s1, s2};
+  const std::vector<af::Expression> full_strides = {s1 * s2, s2, af::sym::kSymbolOne};
+  const std::vector<af::Expression> stats = {s0, s1, af::sym::kSymbolOne};
+  const std::vector<af::Expression> stats_strides = {s1 * s2, s2, af::sym::kSymbolZero};
+  // 标量链中间形态（scalar→[4,1,1]→[4,8,1]→full）。
+  const std::vector<af::Expression> scalar_a = {s0, af::sym::kSymbolOne, af::sym::kSymbolOne};
+  const std::vector<af::Expression> scalar_a_strides = {af::sym::kSymbolOne, af::sym::kSymbolZero,
+                                                        af::sym::kSymbolZero};
+  const std::vector<af::Expression> scalar_b = {s0, s1, af::sym::kSymbolOne};
+  const std::vector<af::Expression> scalar_b_strides = {s1, af::sym::kSymbolOne, af::sym::kSymbolZero};
+  // gamma/beta 侧链形态（[1,1,R]→[4,1,R]→full）。
+  const std::vector<af::Expression> vec_row = {af::sym::kSymbolOne, af::sym::kSymbolOne, s2};
+  const std::vector<af::Expression> vec_row_strides = {af::sym::kSymbolZero, af::sym::kSymbolZero, af::sym::kSymbolOne};
+  const std::vector<af::Expression> vec_part = {s0, af::sym::kSymbolOne, s2};
+  const std::vector<af::Expression> vec_part_strides = {s2, af::sym::kSymbolZero, af::sym::kSymbolOne};
+
+  af::ascir_op::Data input_data("nl_input_data", graph);
+  input_data.ir_attr.SetIndex(0);
+  SetNodeView(input_data, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Load input_load("nl_input_load");
+  input_load.x = input_data.y;
+  SetNodeView(input_load, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Data index_data("nl_index_data", graph);
+  index_data.ir_attr.SetIndex(1);
+  SetNodeView(index_data, af::DT_INT64, axes, full, full_strides);
+  af::ascir_op::Load index_load("nl_index_load");
+  index_load.x = index_data.y;
+  SetNodeView(index_load, af::DT_INT64, axes, full, full_strides);
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = input_load.y;
+  indirect_load.x2 = index_load.y;
+  indirect_load.ir_attr.SetAxis(1);
+  indirect_load.ir_attr.SetNegative_index_support(true);
+  indirect_load.ir_attr.SetNeed_check_bound(true);
+  indirect_load.ir_attr.SetMax(s1);
+  SetNodeView(indirect_load, af::DT_FLOAT, axes, full, full_strides);
+
+  // mean 统计段。
+  af::ascir_op::Sum mean_sum("nl_mean_sum");
+  mean_sum.x = indirect_load.y;
+  mean_sum.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  SetNodeView(mean_sum, af::DT_FLOAT, axes, stats, stats_strides);
+  af::ascir_op::Broadcast mean_broadcast("nl_mean_broadcast");
+  mean_broadcast.x = mean_sum.y;
+  SetNodeView(mean_broadcast, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Sub sub("nl_sub");
+  sub.x1 = indirect_load.y;
+  sub.x2 = mean_broadcast.y;
+  SetVectorApi(sub);
+  SetNodeView(sub, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Mul square("nl_square");
+  square.x1 = sub.y;
+  square.x2 = sub.y;
+  SetVectorApi(square);
+  SetNodeView(square, af::DT_FLOAT, axes, full, full_strides);
+  // var 统计段（correction=0：÷R）。
+  af::ascir_op::Sum var_sum("nl_var_sum");
+  var_sum.x = square.y;
+  var_sum.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  SetNodeView(var_sum, af::DT_FLOAT, axes, stats, stats_strides);
+  af::ascir_op::Broadcast var_broadcast("nl_var_broadcast");
+  var_broadcast.x = var_sum.y;
+  SetNodeView(var_broadcast, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Scalar dim_scalar("nl_dim_scalar", graph);
+  dim_scalar.y.dtype = af::DT_FLOAT;
+  af::ascir_op::Broadcast dim_bcast_a("nl_dim_bcast_a");
+  dim_bcast_a.x = dim_scalar.y;
+  SetNodeView(dim_bcast_a, af::DT_FLOAT, axes, scalar_a, scalar_a_strides);
+  af::ascir_op::Broadcast dim_bcast_b("nl_dim_bcast_b");
+  dim_bcast_b.x = dim_bcast_a.y;
+  SetNodeView(dim_bcast_b, af::DT_FLOAT, axes, scalar_b, scalar_b_strides);
+  af::ascir_op::Broadcast dim_full("nl_dim_full");
+  dim_full.x = dim_bcast_b.y;
+  SetNodeView(dim_full, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::TrueDiv var_div("nl_var_div");
+  var_div.x1 = var_broadcast.y;
+  var_div.x2 = dim_full.y;
+  SetVectorApi(var_div);
+  SetNodeView(var_div, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Scalar eps_scalar("nl_eps_scalar", graph);
+  eps_scalar.y.dtype = af::DT_FLOAT;
+  af::ascir_op::Broadcast eps_bcast_a("nl_eps_bcast_a");
+  eps_bcast_a.x = eps_scalar.y;
+  SetNodeView(eps_bcast_a, af::DT_FLOAT, axes, scalar_a, scalar_a_strides);
+  af::ascir_op::Broadcast eps_bcast_b("nl_eps_bcast_b");
+  eps_bcast_b.x = eps_bcast_a.y;
+  SetNodeView(eps_bcast_b, af::DT_FLOAT, axes, scalar_b, scalar_b_strides);
+  af::ascir_op::Broadcast eps_full("nl_eps_full");
+  eps_full.x = eps_bcast_b.y;
+  SetNodeView(eps_full, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Add var_add("nl_var_add");
+  var_add.x1 = var_div.y;
+  var_add.x2 = eps_full.y;
+  SetVectorApi(var_add);
+  SetNodeView(var_add, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Rsqrt rstd("nl_rstd");
+  rstd.x = var_add.y;
+  SetVectorApi(rstd);
+  SetNodeView(rstd, af::DT_FLOAT, axes, full, full_strides);
+  // 归一化段（mean 第二广播消费，菱形）。
+  af::ascir_op::Broadcast mean_broadcast2("nl_mean_broadcast2");
+  mean_broadcast2.x = mean_sum.y;
+  SetNodeView(mean_broadcast2, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Sub sub1("nl_sub1");
+  sub1.x1 = indirect_load.y;
+  sub1.x2 = mean_broadcast2.y;
+  SetVectorApi(sub1);
+  SetNodeView(sub1, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Mul norm_out("nl_norm_out");
+  norm_out.x1 = sub1.y;
+  norm_out.x2 = rstd.y;
+  SetVectorApi(norm_out);
+  SetNodeView(norm_out, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Store norm_store("nl_norm_store");
+  norm_store.x = norm_out.y;
+  SetNodeView(norm_store, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Output norm_output("nl_norm_output");
+  norm_output.x = norm_store.y;
+  norm_output.ir_attr.SetIndex(0);
+  SetNodeView(norm_output, af::DT_FLOAT, axes, full, full_strides);
+  // gamma/beta 仿射段（侧输入前置链，不在 IL 下游闭包内）。
+  af::ascir_op::Data gamma_data("nl_gamma_data", graph);
+  gamma_data.ir_attr.SetIndex(2);
+  SetNodeView(gamma_data, af::DT_FLOAT, axes, vec_row, vec_row_strides);
+  af::ascir_op::Load gamma_load("nl_gamma_load");
+  gamma_load.x = gamma_data.y;
+  SetNodeView(gamma_load, af::DT_FLOAT, axes, vec_row, vec_row_strides);
+  af::ascir_op::Broadcast gamma_bcast_a("nl_gamma_bcast_a");
+  gamma_bcast_a.x = gamma_load.y;
+  SetNodeView(gamma_bcast_a, af::DT_FLOAT, axes, vec_part, vec_part_strides);
+  af::ascir_op::Broadcast gamma_bcast_b("nl_gamma_bcast_b");
+  gamma_bcast_b.x = gamma_bcast_a.y;
+  SetNodeView(gamma_bcast_b, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Mul scale_out("nl_scale_out");
+  scale_out.x1 = norm_out.y;
+  scale_out.x2 = gamma_bcast_b.y;
+  SetVectorApi(scale_out);
+  SetNodeView(scale_out, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Data beta_data("nl_beta_data", graph);
+  beta_data.ir_attr.SetIndex(3);
+  SetNodeView(beta_data, af::DT_FLOAT, axes, vec_row, vec_row_strides);
+  af::ascir_op::Load beta_load("nl_beta_load");
+  beta_load.x = beta_data.y;
+  SetNodeView(beta_load, af::DT_FLOAT, axes, vec_row, vec_row_strides);
+  af::ascir_op::Broadcast beta_bcast_a("nl_beta_bcast_a");
+  beta_bcast_a.x = beta_load.y;
+  SetNodeView(beta_bcast_a, af::DT_FLOAT, axes, vec_part, vec_part_strides);
+  af::ascir_op::Broadcast beta_bcast_b("nl_beta_bcast_b");
+  beta_bcast_b.x = beta_bcast_a.y;
+  SetNodeView(beta_bcast_b, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Add affine_out("nl_affine_out");
+  affine_out.x1 = scale_out.y;
+  affine_out.x2 = beta_bcast_b.y;
+  SetVectorApi(affine_out);
+  SetNodeView(affine_out, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Store affine_store("nl_affine_store");
+  affine_store.x = affine_out.y;
+  SetNodeView(affine_store, af::DT_FLOAT, axes, full, full_strides);
+  af::ascir_op::Output affine_output("nl_affine_output");
+  affine_output.x = affine_store.y;
+  affine_output.ir_attr.SetIndex(1);
+  SetNodeView(affine_output, af::DT_FLOAT, axes, full, full_strides);
+  // 悬空节点在生成器前已清理，此处不构造。
+  return graph;
+}
+
 // 非收敛 index（逐元素独立行号）：index_source_converged 应为 false。
 TEST(IndirectLoadScheduleCaseGeneratorTest, AccessInfoMarksNonConvergedIndexSource) {
   auto graph = BuildSkRedirectGraph(true, 4, false);
@@ -3916,6 +4167,27 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, AccessInfoMarksConvergedIndexSource)
   ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
   ASSERT_EQ(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(indirect_load, access_info), af::SUCCESS);
   EXPECT_TRUE(access_info.index_source_converged);
+}
+
+// 尾轴 gather 没有 payload 后缀轴：空后缀不能把逐元素 index 判为收敛，窗口超限时应重定向。
+TEST(IndirectLoadScheduleCaseGeneratorTest, AxisLastGatherIsNotMarkedConverged) {
+  PlatformContextReset platform_reset;
+  SetUpSkRedirectPlatform();
+  auto graph = BuildSkRedirectGraph(true, 8192, false, 20000, 1);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  auto segmented = graphs.end();
+  for (auto iter = graphs.begin(); iter != graphs.end(); ++iter) {
+    const auto candidate = iter->FindNode("indirect_load");
+    if (candidate != nullptr && ascir::GetTemplateIdOrDefault(*candidate) == ascir::TemplateId::kIndirectLoadSimt &&
+        ascir::IsSkSegmentedSimt(*candidate)) {
+      segmented = iter;
+      break;
+    }
+  }
+  ASSERT_NE(segmented, graphs.end());
 }
 
 // 窗口超限 + 单 Reduce：SK 候选重定向为 SIMT（分段标记 + output workspace 边界，
@@ -4015,6 +4287,100 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkRedirectsCompositeNormChain) {
   }
   // mean(1) + diff(2消费者) + var(1) = 4 个边界 workspace 节点（pre 形态）。
   EXPECT_GE(norm_boundaries, 3);
+}
+
+// 复合 Norm 链：3R 基础下界落入盲区时，链计数应触发分段重定向。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SkRedirectsCompositeNormChainWhenChainExceedsUb) {
+  PlatformContextReset platform_reset;
+  SetUpSkRedirectPlatform();
+  // dim=16000 fp32：3R+32K=224768 ≤ 245760（基础模型盲区）；链计数 8R+32K 触发。
+  auto graph = BuildSkRedirectGraph(true, 8192, true, 16000);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  auto sk_iter = graphs.end();
+  for (auto iter = graphs.begin(); iter != graphs.end(); ++iter) {
+    const auto candidate = iter->FindNode("indirect_load");
+    if (candidate != nullptr && ascir::GetTemplateIdOrDefault(*candidate) == ascir::TemplateId::kIndirectLoadSimt &&
+        ascir::IsSkSegmentedSimt(*candidate)) {
+      sk_iter = iter;
+      break;
+    }
+  }
+  ASSERT_NE(sk_iter, graphs.end());
+  auto &sk_graph = *sk_iter;
+  const auto indirect_load = sk_graph.FindNode("indirect_load");
+  ASSERT_NE(indirect_load, nullptr);
+  int32_t norm_boundaries = 0;
+  for (const auto &node : sk_graph.GetAllNodes()) {
+    const auto &name = node->GetName();
+    if ((name.find("mean_sum_sk_n") != std::string::npos || name.find("var_sum_sk_n") != std::string::npos ||
+         name.find("diff_sk_n") != std::string::npos) &&
+        af::ops::IsOps<af::ascir_op::Workspace>(node)) {
+      ++norm_boundaries;
+    }
+  }
+  EXPECT_GE(norm_boundaries, 3);
+}
+
+// 链计数未超过 UB 时不应过度触发重定向，SIMT 候选保持原路径。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SkKeepsFusedSimtWhenCompositeChainFitsUb) {
+  PlatformContextReset platform_reset;
+  SetUpSkRedirectPlatform();
+  // dim=4096 fp32：8R+32K=163840 ≤ 245760；窗口 input=8192×4096×4B 不可行。
+  auto graph = BuildSkRedirectGraph(true, 8192, true, 4096);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  for (const auto &candidate_graph : graphs) {
+    const auto candidate = candidate_graph.FindNode("indirect_load");
+    EXPECT_FALSE(candidate != nullptr && ascir::IsSkSegmentedSimt(*candidate));
+  }
+  EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
+}
+
+// LayerNorm 双输出形态：链计数触发分段，统计段和归一化段边界存在，两个 Store 保留。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SkRedirectsNativeLayerNormChain) {
+  PlatformContextReset platform_reset;
+  SetUpSkRedirectPlatform();
+  auto graph = BuildSkRedirectNativeLayerNormGraph();
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  auto sk_iter = graphs.end();
+  for (auto iter = graphs.begin(); iter != graphs.end(); ++iter) {
+    const auto candidate = iter->FindNode("indirect_load");
+    if (candidate != nullptr && ascir::GetTemplateIdOrDefault(*candidate) == ascir::TemplateId::kIndirectLoadSimt &&
+        ascir::IsSkSegmentedSimt(*candidate)) {
+      sk_iter = iter;
+      break;
+    }
+  }
+  ASSERT_NE(sk_iter, graphs.end());
+  auto &sk_graph = *sk_iter;
+  const auto indirect_load = sk_graph.FindNode("indirect_load");
+  ASSERT_NE(indirect_load, nullptr);
+  bool has_mean_boundary = false;
+  bool has_var_boundary = false;
+  bool has_norm_boundary = false;
+  for (const auto &node : sk_graph.GetAllNodes()) {
+    const auto &name = node->GetName();
+    if (!af::ops::IsOps<af::ascir_op::Workspace>(node)) {
+      continue;
+    }
+    has_mean_boundary = has_mean_boundary || name.find("nl_mean_sum_sk_n") != std::string::npos;
+    has_var_boundary = has_var_boundary || name.find("nl_var_sum_sk_n") != std::string::npos;
+    has_norm_boundary = has_norm_boundary || name.find("nl_norm_out_sk_n") != std::string::npos;
+  }
+  EXPECT_TRUE(has_mean_boundary);
+  EXPECT_TRUE(has_var_boundary);
+  EXPECT_TRUE(has_norm_boundary);
+  // 双输出保留：norm 原值与仿射结果各自的 Store。
+  EXPECT_NE(sk_graph.FindNode("nl_norm_store"), nullptr);
+  EXPECT_NE(sk_graph.FindNode("nl_affine_store"), nullptr);
 }
 
 // 真 strided 动态形态（输入行间物理间隙，符号不可证连续）：SIMD(kDefault) 候选

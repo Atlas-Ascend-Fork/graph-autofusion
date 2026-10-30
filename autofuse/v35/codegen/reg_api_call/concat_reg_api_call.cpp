@@ -308,27 +308,27 @@ void ConcatRegApiCall::DefineConcatTiling(const ConcatTiling &tiling, const Tile
   auto tiling_data_type = GetTilingDataType(tiling);
   ss << "const " << tiling_data_type << "<" << tiling.src_col_size_exprs.size() << "> concat_tiling {" << std::endl;
   ss << "  .num_rows = static_cast<uint32_t>(" << tiler.ActualSize(tiling.total_rows_expr) << ")," << std::endl;
-  ss << "  .num_dst_cols = " << tiler.Size(tiling.dst_col_size_expr, true) << "," << std::endl;
+  ss << "  .num_dst_cols = " << GenSizeWithUint32Cast(tiler, tiling.dst_col_size_expr, true) << "," << std::endl;
   ss << "  .num_srcs_cols = {";
   for (const auto &src_col_size : tiling.src_col_size_exprs) {
-    ss << tiler.Size(src_col_size, true) << ", ";
+    ss << GenSizeWithUint32Cast(tiler, src_col_size, true) << ", ";
   }
   ss << "}," << std::endl;
   if (tiling.any_padded) {
     ss << "  .src_row_strides = {";
     for (const auto &src_row_stride : tiling.src_row_strides) {
-      ss << tiler.Size(src_row_stride, true) << ", ";
+      ss << GenSizeWithUint32Cast(tiler, src_row_stride, true) << ", ";
     }
     ss << "}," << std::endl;
     ss << "  .src_second_last_dim_strides = {";
     for (size_t i = 0UL; i < tiling.src_non_zero_strides.size(); ++i) {
-      auto stride = tiling.is_padded[i] ? tiler.Size(tiling.src_non_zero_strides[i]) : "0";
+      auto stride = tiling.is_padded[i] ? GenSizeWithUint32Cast(tiler, tiling.src_non_zero_strides[i]) : "0";
       ss << stride << ", ";
     }
     ss << "}," << std::endl;
     ss << "  .gather_mask_dim_sizes = {";
     for (size_t i = 0UL; i < tiling.last_dim_size_exprs.size(); ++i) {
-      auto dim_size = tiling.is_padded[i] ? tiler.Size(tiling.last_dim_size_exprs[i]) : "0";
+      auto dim_size = tiling.is_padded[i] ? GenSizeWithUint32Cast(tiler, tiling.last_dim_size_exprs[i]) : "0";
       ss << dim_size << ", ";
     }
     ss << "}," << std::endl;
@@ -340,8 +340,8 @@ void ConcatRegApiCall::DefineConcatTilingGather(const ConcatTiling &tiling, cons
   std::string tiling_data_type = "concat::ConcatByGatherTiling";
   ss << "const " << tiling_data_type << " concat_tiling {" << std::endl;
   ss << "  .num_rows = static_cast<uint32_t>(" << tiler.ActualSize(tiling.total_rows_expr) << ")," << std::endl;
-  ss << "  .num_dst_cols = " << tiler.Size(tiling.dst_col_size_expr, true) << "," << std::endl;
-  ss << "  .num_src_cols = " << tiler.Size(tiling.src_col_size_exprs[0], true) << "," << std::endl;
+  ss << "  .num_dst_cols = " << GenSizeWithUint32Cast(tiler, tiling.dst_col_size_expr, true) << "," << std::endl;
+  ss << "  .num_src_cols = " << GenSizeWithUint32Cast(tiler, tiling.src_col_size_exprs[0], true) << "," << std::endl;
   ss << "};" << std::endl;
 }
 

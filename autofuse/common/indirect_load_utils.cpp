@@ -570,6 +570,11 @@ bool IsPayloadInvariantView(const af::AscTensorAttr &source_attr, const LogicalT
 
 bool IsIndexPayloadInvariantFromSources(const af::AscNodePtr &indirect_load, const LogicalTensorView &input,
                                         const LogicalTensorView &index, size_t axis_index) {
+  // A converged index requires at least one payload axis after the gather axis.
+  // With an axis-last gather, an empty suffix would otherwise vacuously pass the invariant check.
+  if (axis_index + 1UL >= index.axis_ids.size()) {
+    return false;
+  }
   const af::AscNodePtr root = GetInputProducer(indirect_load, kIndexTensorIndex);
   if (root == nullptr) {
     return false;

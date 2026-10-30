@@ -45,6 +45,11 @@ bool MatchStable(const af::AscNodePtr &true_div_node, MatchResult &pattern);
 // 将命中的 Pattern 替换为专用 Softmax 节点并移除原节点。
 af::Status ReplaceWithSoftmax(af::AscGraph &graph, const MatchResult &pattern);
 
+// 定位以指定 IndirectLoad 输出为原始输入的直接后置稳定 Softmax Pattern（仅匹配，
+// 不改图，未命中返回 false）。供需要感知 softmax 形态但不做替换的调用方（如 SIMT
+// UB 下界模型）与 NormalizeDirectPostSoftmax 复用同一匹配规则。
+bool FindDirectPostSoftmaxPattern(const af::AscGraph &graph, const af::AscNodePtr &indirect_load, MatchResult &pattern);
+
 // 在候选图副本内查找以指定 IndirectLoad 输出为原始输入的稳定 Softmax Pattern
 // 并逐一替换。仅处理 input_anchor 直接来自该 IndirectLoad 的 Pattern：
 // 中间 Elementwise 链形态作为后续扩展，当前不做宽松回溯。
