@@ -19,6 +19,10 @@ af-inductor-cv-validator/**/__pycache__/
 af-inductor-cv-validator/**/*.pyc
 !af-perf-modeler/
 !af-perf-modeler/**
+!att-perf-selection-analysis/
+!att-perf-selection-analysis/**
+att-perf-selection-analysis/**/__pycache__/
+att-perf-selection-analysis/**/*.pyc
 !sk-model-analysis/
 !sk-model-analysis/**
 !sk-operator-asset-adapter/
