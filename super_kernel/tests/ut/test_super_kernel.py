@@ -19,33 +19,7 @@ from unittest import mock
 import pytest
 from utils import compare_files
 from asc_op_compile_base.asc_op_compiler.super_kernel_utility import CommonUtility
-from superkernel.super_kernel import (
-    gen_2_real_stream_code_by_arch,
-    gen_2_real_stream_op_end_debug_sync_all_by_arch,
-    gen_2_real_stream_recv_code,
-    gen_2_real_stream_send_code,
-    gen_2_real_stream_super_kernel_file,
-    gen_2_real_stream_sync_code,
-    gen_clear_syncall_worskspace,
-    gen_clear_wait_sync_addr_code,
-    gen_early_start_config,
-    gen_feed_syncall_var_init_code,
-    gen_inter_ops_barrier,
-    gen_notify_wait_func,
-    gen_op_end_debug_dcci_all,
-    gen_op_end_debug_sync_all,
-    gen_profiling_start_and_end_record,
-    gen_profling_func_code,
-    gen_super_kernel_file,
-    gen_switch_case_call_block_of_dynamic_op,
-    gen_sync_and_event_code,
-    gen_sync_and_event_code_for_two_stream,
-    get_sync_code_by_kernel_type,
-    judge_need_feed_sync_all,
-    print_params_addr,
-    process_gen_stream_send_code,
-    tpl_of_gen_switch_case_call,
-)
+from superkernel.super_kernel import *
 from superkernel.super_kernel import compile as sk_compile
 from superkernel.super_kernel_constants import (
     SuperKernelPreLoadMode,
@@ -60,7 +34,7 @@ from superkernel.super_kernel_constants import (
 )
 from superkernel.super_kernel_sub_op_infos import SubOperatorInfos
 from superkernel.super_kernel_op_infos import SuperOperatorInfos
-from superkernel.super_kernel_feature_manager import get_features
+from superkernel.super_kernel_feature_manager import *
 
 
 THIS_FILE_NAME = __file__
