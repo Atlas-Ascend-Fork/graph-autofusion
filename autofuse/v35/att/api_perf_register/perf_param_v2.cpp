@@ -987,18 +987,18 @@ const std::string kParamV2Info = R"(
     "StoreStride": {
         "model_type": "LoadStoreStrideV2Func",
         "model_params": {
-            "int8toint8": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "int16toint16": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "uint16touint16": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "int32toint32": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "uint32touint32": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "uint64touint64": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "booltobool": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "int64toint64": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "float16tofloat16": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "float32tofloat32": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "uint8touint8": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0},
-            "bfloat16tobfloat16": {"k": 0.0385, "u": 4096.0, "penalty_coeff": 0.0}
+            "int8toint8": {"k": 0.0050441522125085, "u": 4096.0, "penalty_coeff": 0.0},
+            "int16toint16": {"k": 0.0050219521009849, "u": 4096.0, "penalty_coeff": 0.0},
+            "uint16touint16": {"k": 0.0049981859819869, "u": 4096.0, "penalty_coeff": 0.0},
+            "int32toint32": {"k": 0.0050058211763464, "u": 4096.0, "penalty_coeff": 0.0},
+            "uint32touint32": {"k": 0.0050046751614247, "u": 4096.0, "penalty_coeff": 0.0},
+            "uint64touint64": {"k": 0.0049785878890068, "u": 4096.0, "penalty_coeff": 0.0},
+            "booltobool": {"k": 0.0050337712308162, "u": 4096.0, "penalty_coeff": 0.0},
+            "int64toint64": {"k": 0.0050306649073631, "u": 4096.0, "penalty_coeff": 0.0},
+            "float16tofloat16": {"k": 0.005009566773717, "u": 4096.0, "penalty_coeff": 0.0},
+            "float32tofloat32": {"k": 0.0050093180829704, "u": 4096.0, "penalty_coeff": 0.0},
+            "uint8touint8": {"k": 0.0049922306718019, "u": 4096.0, "penalty_coeff": 0.0},
+            "bfloat16tobfloat16": {"k": 0.0050004678761787, "u": 4096.0, "penalty_coeff": 0.0}
         }
     },
     "Nddma": {
