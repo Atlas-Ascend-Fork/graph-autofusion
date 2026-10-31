@@ -2965,6 +2965,92 @@ TEST_F(TestOptimizerV2, NddmaCaseTranspose021OutputWithSingleRef) {
   EXPECT_EQ(impl_graphs[3].scheduled_graph.GetName(), "gen_nddma_B0X2Y1_nddma");
 }
 
+TEST_F(TestOptimizerV2, TransposeFoldNoDuplicateNddmaTemplateCase) {
+  af::AscGraph graph("graph_hint_transpose_add");
+  auto s0 = graph.CreateSizeVar(64);
+  auto s1 = graph.CreateSizeVar(128);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Data data1("data1", graph);
+  data1.y.dtype = af::DT_FLOAT;
+  data1.ir_attr.SetIndex(1);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.repeats = {s0, s1};
+  *load0.y.strides = {s1, One};
+
+  Load load1("load1");
+  load1.attr.sched.axis = {z0.id, z1.id};
+  load1.x = data1.y;
+  *load1.y.axis = {z1.id, z0.id};
+  load1.y.dtype = af::DT_FLOAT;
+  *load1.y.repeats = {s1, s0};
+  *load1.y.strides = {s0, One};
+
+  Transpose transpose("transpose");
+  transpose.x = load1.y;
+  transpose.attr.sched.axis = {z0.id, z1.id};
+  *transpose.y.axis = {z0.id, z1.id};
+  transpose.y.dtype = af::DT_FLOAT;
+  *transpose.y.repeats = {s0, s1};
+  *transpose.y.strides = {s1, One};
+
+  Add add_op("add");
+  add_op.attr.sched.axis = {z0.id, z1.id};
+  add_op.x1 = load0.y;
+  add_op.x2 = transpose.y;
+  add_op.y.dtype = af::DT_FLOAT;
+  *add_op.y.axis = {z0.id, z1.id};
+  *add_op.y.repeats = {s0, s1};
+  *add_op.y.strides = {s1, One};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id};
+  store_op.x = add_op.y;
+  *store_op.y.axis = {z0.id, z1.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.repeats = {s0, s1};
+  *store_op.y.strides = {s1, One};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(0);
+  optimize::AscGraphInfoComplete::CompleteApiInfo(graph);
+
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
+
+  size_t transpose_fold_template_cases = 0UL;
+  for (const auto &scheduled_results : fused_scheduled_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      for (const auto &schedule_group : scheduled_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          const std::string name = impl_graph.GetName();
+          if (name.find("group_transpose") == std::string::npos) {
+            continue;
+          }
+          const bool is_load_to_nddma = name.find("_load_to_nddma_") != std::string::npos;
+          const bool is_plain_nddma = !is_load_to_nddma && name.find("_nddma_") != std::string::npos;
+          if (is_plain_nddma || is_load_to_nddma) {
+            ++transpose_fold_template_cases;
+          }
+        }
+      }
+    }
+  }
+  EXPECT_EQ(transpose_fold_template_cases, 1UL);
+}
+
 TEST_F(TestOptimizerV2, LoadBrcTransposeCase) {
   af::AscGraph graph("gen_nddma");
 
