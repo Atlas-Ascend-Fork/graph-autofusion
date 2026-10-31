@@ -1338,26 +1338,39 @@ DeviceArgsPtr SkTaskBuilder::GenEntryArgs(const SkTask &skTaskCube, const SkTask
 }
 
 std::pair<int, int> SkTaskBuilder::GetPreFetchCnt(const ResolvedFunctionInfo &resolved) const {
-  std::pair<int, int> preFetchCntValue = std::make_pair(resolved.prefetchCnt[0], resolved.prefetchCnt[1]);
+  std::pair<int, int> preFetchCntValue =
+      std::make_pair(static_cast<int>(std::min(resolved.prefetchCnt[0], SK_AIC_MAX_PRELOAD_COUNT)),
+                     static_cast<int>(std::min(resolved.prefetchCnt[1], SK_AIV_MAX_PRELOAD_COUNT)));
   auto preLoadOptions = opts.GetOption(aclskOptionType::PRELOAD_CODE);
 
-  // default: preLoadValue == 1, use func size to prefetch
-  uint32_t preLoadValue = 1;
+  uint32_t preLoadValue = ACLSK_PRELOAD_PER_FUNC;
 
   if (preLoadOptions != nullptr) {
     preLoadValue = preLoadOptions->GetIntValue();
   }
 
-  if (preLoadValue == 0) {
-    // use max size to prefetch
-    preFetchCntValue.first = 16;  // cube's max icache size is 32K(16 * 2)
-    preFetchCntValue.second = 8;  // vec's max icache size is 16K(8 * 2)
-  } else if (preLoadValue == 2) {
-    // no preload
-    preFetchCntValue.first = 0;
-    preFetchCntValue.second = 0;
+  switch (preLoadValue) {
+    case ACLSK_PRELOAD_MAX:
+      preFetchCntValue =
+          std::make_pair(static_cast<int>(SK_AIC_MAX_PRELOAD_COUNT), static_cast<int>(SK_AIV_MAX_PRELOAD_COUNT));
+      break;
+    case ACLSK_PRELOAD_DISABLED:
+      preFetchCntValue = std::make_pair(0, 0);
+      break;
+    case ACLSK_PRELOAD_MIN:
+      preFetchCntValue = std::make_pair(1, 1);
+      break;
+    case ACLSK_PRELOAD_PER_FUNC_HALF_AIV: {
+      preFetchCntValue.second = preFetchCntValue.second / 2 + preFetchCntValue.second % 2;
+      break;
+    }
+    case ACLSK_PRELOAD_PER_FUNC_MIN_AIV:
+      preFetchCntValue.second = std::min(preFetchCntValue.second, 1);
+      break;
+    case ACLSK_PRELOAD_PER_FUNC:
+    default:
+      break;
   }
-  // preLoadValue == 1: use func size (default from resolved.prefetchCnt)
 
   return preFetchCntValue;
 }

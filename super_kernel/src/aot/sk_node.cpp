@@ -775,16 +775,15 @@ const char *GetKernelTypeString(uint32_t kernelType, const uint32_t taskRatio[2]
 
 // Implementation of AlignUpAndClamp (declared in sk_node.h)
 size_t AlignUpAndClamp(size_t value, size_t coreIdx) {
-  constexpr size_t aicFuncMaxPrefetchCnt = 0x800 * 16;                 // 32k
-  constexpr size_t aivFuncMaxPrefetchCnt = 0x800 * 8;                  // 16k
-  constexpr size_t alignNum = 0x800;                                   // 2k
-  size_t prefetchCntValue = (value + alignNum - 1) & ~(alignNum - 1);  // 以2k为单位向上取整
+  constexpr size_t aicFuncMaxPrefetchCnt = SK_PRELOAD_BLOCK_SIZE_BYTES * static_cast<size_t>(SK_AIC_MAX_PRELOAD_COUNT);
+  constexpr size_t aivFuncMaxPrefetchCnt = SK_PRELOAD_BLOCK_SIZE_BYTES * static_cast<size_t>(SK_AIV_MAX_PRELOAD_COUNT);
+  size_t prefetchCntValue = (value + SK_PRELOAD_BLOCK_SIZE_BYTES - 1) & ~(SK_PRELOAD_BLOCK_SIZE_BYTES - 1);
   if (coreIdx == 0 && prefetchCntValue > aicFuncMaxPrefetchCnt) {
     prefetchCntValue = aicFuncMaxPrefetchCnt;
   } else if (coreIdx == 1 && prefetchCntValue > aivFuncMaxPrefetchCnt) {
     prefetchCntValue = aivFuncMaxPrefetchCnt;
   }
-  return prefetchCntValue / alignNum;
+  return prefetchCntValue / SK_PRELOAD_BLOCK_SIZE_BYTES;
 }
 
 const char *SuperKernelBaseNode::GetUpdateTargetTypeName(aclmdlRITaskType type) const {
