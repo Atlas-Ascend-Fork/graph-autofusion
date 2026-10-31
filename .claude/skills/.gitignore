@@ -33,6 +33,8 @@ af-inductor-cv-validator/**/*.pyc
 !sk-operator-sample-gen/**
 !sk-operator-validate/
 !sk-operator-validate/**
+!sk-debug-analysis/
+!sk-debug-analysis/**
 !af-code-reviewer/*
 !af-prune-graph-metadef/
 !af-prune-graph-metadef/**
