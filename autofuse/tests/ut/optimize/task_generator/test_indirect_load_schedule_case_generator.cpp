@@ -912,7 +912,7 @@ void BuildOutputPostChain(af::AscGraph &graph, OutputPostTopology topology, cons
 
 af::AscGraph BuildPostReduceGraph(const std::string &suffix, bool reduce_outer = false,
                                   OutputPostTopology topology = OutputPostTopology::kSum,
-                                  bool cast_reduce_output = false, bool invalid_reduce_successor = false) {
+                                  bool cast_reduce_output = false, bool post_reduce_elementwise = false) {
   af::AscGraph graph("indirect_load_post_reduce_ut_graph");
   const af::Expression s0 = graph.CreateSizeVar(2);
   const af::Expression s1 = suffix[0] == 'B' ? af::Expression(af::sym::kSymbolOne) : graph.CreateSizeVar(3);
@@ -1001,19 +1001,19 @@ af::AscGraph BuildPostReduceGraph(const std::string &suffix, bool reduce_outer =
   output.x = store.y;
   output.ir_attr.SetIndex(0);
   SetNodeView(output, post_dtype, output_axes, store_repeats, store_strides);
-  if (invalid_reduce_successor) {
-    af::ascir_op::Abs invalid_successor("invalid_reduce_successor");
-    invalid_successor.x = sum.y;
-    SetNodeView(invalid_successor, post_dtype, output_axes, reduce_repeats, reduce_strides);
+  if (post_reduce_elementwise) {
+    af::ascir_op::Abs elementwise("post_reduce_elementwise");
+    elementwise.x = sum.y;
+    SetNodeView(elementwise, post_dtype, output_axes, reduce_repeats, reduce_strides);
     const auto sum_node = graph.FindNode("sum");
     const auto store_node = graph.FindNode("store");
-    const auto invalid_node = graph.FindNode("invalid_reduce_successor");
+    const auto elementwise_node = graph.FindNode("post_reduce_elementwise");
     EXPECT_NE(sum_node, nullptr);
     EXPECT_NE(store_node, nullptr);
-    EXPECT_NE(invalid_node, nullptr);
-    if (sum_node != nullptr && store_node != nullptr && invalid_node != nullptr) {
+    EXPECT_NE(elementwise_node, nullptr);
+    if (sum_node != nullptr && store_node != nullptr && elementwise_node != nullptr) {
       EXPECT_EQ(af::GraphUtils::ReplaceEdgeSrc(sum_node->GetOutDataAnchor(0), store_node->GetInDataAnchor(0),
-                                               invalid_node->GetOutDataAnchor(0)),
+                                               elementwise_node->GetOutDataAnchor(0)),
                 af::GRAPH_SUCCESS);
     }
   }
@@ -2093,14 +2093,88 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceAllowsDtypeCastBeforeStore
   EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
 }
 
-TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceRejectsNonCastSuccessor) {
-  auto graph = BuildPostReduceGraph("RAA", false, OutputPostTopology::kSum, false, true);
+TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceStoreControlEdgeRemainsValid) {
+  auto graph = BuildPostReduceGraph("RAA");
+  const auto sum = graph.FindNode("sum");
+  const auto store = graph.FindNode("store");
+  ASSERT_NE(sum, nullptr);
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(af::GraphUtils::AddEdge(sum->GetOutControlAnchor(), store->GetInControlAnchor()), af::SUCCESS);
 
   optimize::IndirectLoadScheduleCaseGenerator generator;
   std::vector<af::AscGraph> graphs;
   std::vector<std::string> score_functions;
-  // 非法 Reduce 后继属于候选级缺陷：四个候选（SIMD×2/SIMT/SK）全部被淘汰，
-  // Generate 本身成功返回（bf5d926c 起不再以断言失败终止）。
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, SingleReduceNormInfoIncludesPostElementwiseChain) {
+  auto graph = BuildPostReduceGraph("RAA", false, OutputPostTopology::kSum, false, true);
+  const auto sum = graph.FindNode("sum");
+  const auto elementwise = graph.FindNode("post_reduce_elementwise");
+  const auto store = graph.FindNode("store");
+  ASSERT_NE(sum, nullptr);
+  ASSERT_NE(elementwise, nullptr);
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(elementwise->GetInDataAnchor(0)->GetPeerOutAnchor(), sum->GetOutDataAnchor(0));
+  ASSERT_EQ(store->GetInDataAnchor(0)->GetPeerOutAnchor(), elementwise->GetOutDataAnchor(0));
+  const auto entry_axes = sum->inputs[0].attr.axis;
+  ASSERT_EQ(entry_axes.size(), 4UL);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  const auto simt_graph = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_NE(simt_graph, graphs.end());
+  const auto indirect_load = simt_graph->FindNode("indirect_load");
+  ASSERT_NE(indirect_load, nullptr);
+  ascgen_utils::norm::NormInfo norm_info;
+  ASSERT_EQ(ascgen_utils::norm::TryGetNormInfo(indirect_load, norm_info), af::SUCCESS);
+  EXPECT_EQ(norm_info.kind, ascgen_utils::norm::NormInfo::Kind::kGenericComposite);
+  EXPECT_EQ(norm_info.entry_node_name, "sum");
+  EXPECT_EQ(norm_info.exit_node_name, "store");
+  EXPECT_EQ(norm_info.region_node_names, (std::vector<std::string>{"sum", "post_reduce_elementwise"}));
+  EXPECT_EQ(norm_info.entry_axes, entry_axes);
+  EXPECT_EQ(norm_info.preserved_axes, (std::vector<af::AxisId>{entry_axes[0], entry_axes[2], entry_axes[3]}));
+  ASSERT_EQ(norm_info.stages.size(), 1UL);
+  EXPECT_EQ(norm_info.stages[0].reduce_node_name, "sum");
+  EXPECT_TRUE(norm_info.stages[0].broadcast_node_name.empty());
+  EXPECT_EQ(norm_info.stages[0].reduced_axes, (std::vector<af::AxisId>{entry_axes[1]}));
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceRejectsElementwiseControlEdge) {
+  auto graph = BuildPostReduceGraph("RAA", false, OutputPostTopology::kSum, false, true);
+  const auto elementwise = graph.FindNode("post_reduce_elementwise");
+  const auto store = graph.FindNode("store");
+  ASSERT_NE(elementwise, nullptr);
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(af::GraphUtils::AddEdge(elementwise->GetOutControlAnchor(), store->GetInControlAnchor()), af::SUCCESS);
+
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  // 中间 Elementwise 携带控制依赖时淘汰候选，终端 Store 控制边仍由正例覆盖。
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_TRUE(graphs.empty());
+  EXPECT_TRUE(score_functions.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceRejectsElementwiseFanout) {
+  auto graph = BuildPostReduceGraph("RAA", false, OutputPostTopology::kSum, false, true);
+  const auto elementwise = graph.FindNode("post_reduce_elementwise");
+  const auto output = graph.FindNode("output");
+  ASSERT_NE(elementwise, nullptr);
+  ASSERT_NE(output, nullptr);
+  // 保留 Abs→Store，同时将 Output 改接 Abs，形成两个数据消费者。
+  ASSERT_EQ(af::GraphUtils::ReplaceEdgeSrc(output->GetInDataAnchor(0)->GetPeerOutAnchor(), output->GetInDataAnchor(0),
+                                           elementwise->GetOutDataAnchor(0)),
+            af::SUCCESS);
+  ASSERT_EQ(elementwise->GetOutDataNodesSize(), 2UL);
+
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
   ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
   EXPECT_TRUE(graphs.empty());
   EXPECT_TRUE(score_functions.empty());

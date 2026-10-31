@@ -1039,8 +1039,12 @@ bool ValidateCompositeRegionOutputView(const af::AscNodePtr &indirect_load, cons
     return false;
   }
   const auto &entry_attr = input_outputs[0]->attr;
+  const auto &exit_attr = exit_node->inputs[0].attr;
+  if (entry_attr.axis.size() != entry_attr.repeats.size() || exit_attr.axis.size() != exit_attr.repeats.size()) {
+    return false;
+  }
   if (analysis.composite_reduces.empty()) {
-    return HasSameLogicalAxisView(entry_attr, exit_node->inputs[0].attr);
+    return HasSameLogicalAxisView(entry_attr, exit_attr);
   }
   std::vector<af::AxisId> folded_axes = entry_attr.axis;
   std::vector<af::Expression> folded_repeats = entry_attr.repeats;
@@ -1048,7 +1052,8 @@ bool ValidateCompositeRegionOutputView(const af::AscNodePtr &indirect_load, cons
     const auto broadcast = FindPairedBroadcast(reduce);
     if (broadcast != nullptr) {
       const auto broadcast_outputs = broadcast->outputs();
-      if (broadcast_outputs.empty() || broadcast_outputs[0] == nullptr) {
+      if (broadcast_outputs.empty() || broadcast_outputs[0] == nullptr ||
+          broadcast_outputs[0]->attr.axis.size() != broadcast_outputs[0]->attr.repeats.size()) {
         return false;
       }
       folded_axes = broadcast_outputs[0]->attr.axis;
@@ -1060,7 +1065,11 @@ bool ValidateCompositeRegionOutputView(const af::AscNodePtr &indirect_load, cons
       if (it == folded_axes.end()) {
         return false;
       }
-      folded_repeats[static_cast<size_t>(std::distance(folded_axes.begin(), it))] = af::sym::kSymbolOne;
+      const auto repeat_index = static_cast<size_t>(std::distance(folded_axes.begin(), it));
+      if (repeat_index >= folded_repeats.size()) {
+        return false;
+      }
+      folded_repeats[repeat_index] = af::sym::kSymbolOne;
     }
   }
   return folded_axes == exit_node->inputs[0].attr.axis &&
@@ -1169,25 +1178,55 @@ af::Status SaveCompositeNormInfo(const af::AscNodePtr &indirect_load, const Rewr
   return af::SUCCESS;
 }
 
-// 保存单 Reduce NormInfo：归约轴由布局分析推导，作为区域元数据的最小记录。
+// 保存单 Reduce NormInfo：单 Reduce 与复合 Norm 共用区域元数据，完整记录归约后的
+// Broadcast/Elementwise 消费链，避免把 Reduce 错误地视为必然的终端节点。
 af::Status SaveSingleReduceNormInfo(const af::AscNodePtr &indirect_load, const af::AscNodePtr &reduce) {
   ascgen_utils::norm::NormInfo info;
   info.kind = ascgen_utils::norm::NormInfo::Kind::kGenericComposite;
   info.entry_node_name = reduce->GetName();
   info.exit_node_name = reduce->GetName();
   info.region_node_names = {reduce->GetName()};
+  const auto reduce_inputs = reduce->inputs();
+  if (!reduce_inputs.empty() && reduce_inputs[0] != nullptr) {
+    info.entry_axes = reduce_inputs[0]->attr.axis;
+  }
   PostReduceLayout layout;
   bool layout_legal = false;
   GE_ASSERT_SUCCESS(BuildPostReduceLayout(reduce, layout, layout_legal));
   if (layout_legal) {
-    info.entry_axes = layout.axes;
     for (size_t i = 0UL; i < layout.kinds.size(); ++i) {
       if (layout.kinds[i] == ReduceAxisKind::kReduced) {
         info.stages.push_back({reduce->GetName(), "", {layout.axes[i]}});
+      } else if (layout.kinds[i] == ReduceAxisKind::kRetained) {
+        info.preserved_axes.emplace_back(layout.axes[i]);
       }
     }
   }
+
+  NodeSet visited;
+  NodePath pending{reduce};
+  af::AscNodePtr exit_store;
+  for (size_t cursor = 0UL; cursor < pending.size(); ++cursor) {
+    const auto node = pending[cursor];
+    if (node == nullptr || !visited.emplace(node.get()).second) {
+      continue;
+    }
+    if (ScheduleUtils::IsStore(node)) {
+      exit_store = node;
+      continue;
+    }
+    if (node != reduce) {
+      info.region_node_names.emplace_back(node->GetName());
+    }
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      pending.emplace_back(std::dynamic_pointer_cast<af::AscNode>(out_node));
+    }
+  }
+  if (exit_store != nullptr) {
+    info.exit_node_name = exit_store->GetName();
+  }
   GE_ASSERT_SUCCESS(ascgen_utils::norm::SetNormInfo(indirect_load, info));
+  GELOGI("[IndirectLoad] NormInfo saved: single Reduce region with %zu nodes.", info.region_node_names.size());
   return af::SUCCESS;
 }
 
@@ -2125,55 +2164,42 @@ af::Status BuildLoadTransposeSourceView(const af::AscNodePtr &transpose, const a
   return af::SUCCESS;
 }
 
-// 单 Reduce 输出终止校验（候选级）：Store 或 Cast→Store 均合法，
-// 其他形态由调用方淘汰当前候选而非断言失败。
+// Reduce 后置 Norm 消费链只允许保持单路径的 Cast/Broadcast/Elementwise，最终收敛到 Store。
+// 不支持的拓扑在候选级淘汰，避免跨分支或跨 Reduce 的依赖进入当前模板。
 af::Status ValidateReduceOutputCandidate(const af::AscNodePtr &reduce, bool &is_valid) {
   is_valid = false;
-  const auto reduce_outputs = reduce->GetOutDataNodes();
-  if (reduce_outputs.size() != 1UL) {
-    GELOGI("[IndirectLoad] Reduce[%s] output count %zu is not 1.", reduce->GetNamePtr(), reduce_outputs.size());
+  if (reduce == nullptr || reduce->GetOutDataNodesSize() != 1UL) {
     return af::SUCCESS;
   }
-  auto successor = std::dynamic_pointer_cast<af::AscNode>(*reduce_outputs.begin());
-  if (successor == nullptr) {
-    return af::SUCCESS;
-  }
-  if (ScheduleUtils::IsStore(successor)) {
-    is_valid = true;
-    return af::SUCCESS;
-  }
-  if (af::ops::IsOps<af::ascir_op::Cast>(successor)) {
-    const auto cast_outputs = successor->GetOutDataNodes();
-    if (cast_outputs.size() != 1UL) {
-      GELOGI("[IndirectLoad] Reduce[%s] Cast output count %zu is not 1.", reduce->GetNamePtr(), cast_outputs.size());
+  NodePath pending;
+  pending.emplace_back(std::dynamic_pointer_cast<af::AscNode>(*reduce->GetOutDataNodes().begin()));
+  NodeSet visited;
+  bool reached_store = false;
+  for (size_t cursor = 0UL; cursor < pending.size(); ++cursor) {
+    const auto node = pending[cursor];
+    if (node == nullptr || !visited.emplace(node.get()).second) {
+      continue;
+    }
+    if (ScheduleUtils::IsStore(node)) {
+      reached_store = true;
+      continue;
+    }
+    if (HasControlEdge(node) || ScheduleUtils::IsReduce(node)) {
       return af::SUCCESS;
     }
-    const auto cast_successor = std::dynamic_pointer_cast<af::AscNode>(*cast_outputs.begin());
-    if (cast_successor != nullptr && ScheduleUtils::IsStore(cast_successor)) {
-      is_valid = true;
+    const bool supported = af::ops::IsOps<af::ascir_op::Cast>(node) || af::ops::IsOps<af::ascir_op::Broadcast>(node) ||
+                           ScheduleUtils::IsElewise(node);
+    if (!supported || node->GetOutDataNodesSize() != 1UL) {
+      return af::SUCCESS;
     }
+    const auto successor = std::dynamic_pointer_cast<af::AscNode>(*node->GetOutDataNodes().begin());
+    if (successor == nullptr) {
+      return af::SUCCESS;
+    }
+    pending.emplace_back(successor);
   }
+  is_valid = reached_store;
   return af::SUCCESS;
-}
-
-af::AscNodePtr GetReduceTerminalStore(const af::AscNodePtr &reduce) {
-  auto outputs = reduce->GetOutDataNodes();
-  if (outputs.size() != 1UL) {
-    return nullptr;
-  }
-  auto successor = std::dynamic_pointer_cast<af::AscNode>(*outputs.begin());
-  if (successor != nullptr && ScheduleUtils::IsStore(successor)) {
-    return successor;
-  }
-  if (successor == nullptr || !af::ops::IsOps<af::ascir_op::Cast>(successor)) {
-    return nullptr;
-  }
-  outputs = successor->GetOutDataNodes();
-  if (outputs.size() != 1UL) {
-    return nullptr;
-  }
-  auto store = std::dynamic_pointer_cast<af::AscNode>(*outputs.begin());
-  return store != nullptr && ScheduleUtils::IsStore(store) ? store : nullptr;
 }
 
 // kUnsupported 同时覆盖动态符号视图与 Reduce/Broadcast 输出的零 stride 约定，二者均为
@@ -2237,16 +2263,8 @@ af::Status ValidateOutputStoreTargets(const af::AscNodePtr &indirect_load, ascir
       stop = true;
       return af::SUCCESS;
     }
-    if (ScheduleUtils::IsReduce(current)) {
-      // 非法 Reduce 后继交由既有 ValidateReduceOutput 报错，此处不重复门控。
-      // SK 例外：SK 候选跳过 CollectRewrittenBoundaries，ValidateReduceOutput 不会执行，
-      // 非法后继时 SK 由其他路径处理/失败，与门控引入前行为一致。
-      const auto store = GetReduceTerminalStore(current);
-      if (store != nullptr) {
-        stores.emplace_back(store);
-      }
-      stop = true;
-    }
+    // Reduce 后的 Norm 消费链由 ValidateReduceOutputCandidate 统一校验；这里继续遍历，
+    // 使 TrueDiv/Broadcast/Elementwise 后的最终 Store 参与输出目标分类。
     return af::SUCCESS;
   };
   GE_ASSERT_SUCCESS(TraverseOutputConsumers(roots, visited, visit));
@@ -2291,7 +2309,8 @@ af::Status CollectOutputBoundaries(const af::AscNodePtr &indirect_load, Rewritte
   GE_ASSERT_SUCCESS(TraverseOutputConsumers(roots, visited, visit));
 
   if (reduce_nodes.size() <= 1UL) {
-    // 单 Reduce：沿用原终止校验语义（Store 或 Cast→Store），不符合则候选级淘汰。
+    // 单 Reduce 作为最小 Norm 区域：允许归约后继续经过归一化 Elementwise 链，
+    // 但必须保持单路径并最终收敛到 Store。
     if (analysis.post_reduce != nullptr) {
       bool output_valid = false;
       GE_ASSERT_SUCCESS(ValidateReduceOutputCandidate(analysis.post_reduce, output_valid));
