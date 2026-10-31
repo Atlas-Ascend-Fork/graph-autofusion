@@ -28,6 +28,7 @@ using namespace ascgen_utils;
 namespace {
 constexpr const char *kAscirNodeParams = "AscirNodeParams";
 constexpr const char *kCompactPddingMode = "AscendC::PaddingMode::Compact";
+constexpr int64_t kDataBlockSize = 32;
 
 std::string GetBroadcastSemanticFeature(const Tensor &input, const Tensor &output) {
   if (IsBroadcastConstantTensor(input)) {
@@ -152,6 +153,113 @@ af::Status GetBroadcastScalarDuplicateCount(const TPipe &tpipe, const Tensor &ou
   return af::SUCCESS;
 }
 
+// 尾轴广播时，广播源的内层可能被对齐成“每元素独占一个 data block”（见尾轴广播对齐策略），
+// 源在 UB 上的 stride 不再是按 shape 连续反推的值。此时代码生成需以 srcInnerPad 实例化
+// BroadcastExtend，使其按 ONE_BLK_SIZE / sizeof(T) 反推源 stride，避免源取址错位。
+bool NeedTailBroadcastSrcInnerPad(const Tensor &x, const Tensor &y) {
+  const size_t rank = x.vectorized_axis.size();
+  if (rank < 2UL || x.vectorized_axis_pos.size() != rank || x.vectorized_strides.size() < rank ||
+      y.vectorized_axis_pos.size() != y.vectorized_axis.size()) {
+    return false;
+  }
+  // 尾轴必须是广播轴：源尾轴 stride 为 0、源内层为 1 且输出不为 1
+  if (af::SymbolicUtils::StaticCheckEq(x.vectorized_strides.back(), af::sym::kSymbolZero) != af::TriBool::kTrue) {
+    return false;
+  }
+  if (af::SymbolicUtils::StaticCheckEq(x.axis_size[x.vectorized_axis_pos.back()], af::sym::kSymbolOne) !=
+          af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(y.axis_size[y.vectorized_axis_pos.back()], af::sym::kSymbolOne) ==
+          af::TriBool::kTrue) {
+    return false;
+  }
+  const int64_t dtype_size = static_cast<int64_t>(ge::GetSizeByDataType(x.dtype));
+  if (dtype_size <= 0) {
+    return false;
+  }
+  // 8 字节类型在 GetBroadcastTilingInfoExtendImpl 中会被 ×2 预处理改写尾轴布局，
+  // srcInnerPad 语义不同（正确基准不是 ONE_BLK_SIZE / sizeof(T)）。当前仅支持
+  // 1/2/4 字节，与 device 侧保持一致，避免生成 srcInnerPad=true 却被静默忽略。
+  if (dtype_size >= static_cast<int64_t>(sizeof(uint64_t))) {
+    return false;
+  }
+  const int64_t block_align = kDataBlockSize / dtype_size;
+  // 源内层最近一个非零 stride 应为 32B 对齐块（每元素独占一个 data block）
+  for (int64_t i = static_cast<int64_t>(rank) - 2; i >= 0; --i) {
+    if (af::SymbolicUtils::StaticCheckEq(x.vectorized_strides[i], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      continue;
+    }
+    return af::SymbolicUtils::StaticCheckEq(x.vectorized_strides[i], af::Symbol(block_align)) == af::TriBool::kTrue;
+  }
+  return false;
+}
+
+// 校验广播输入/输出的向量化轴数量：均在 [1, 9] 且两侧一致。
+af::Status ValidateBroadcastVecAxisSizes(const Tensor &x, const Tensor &y) {
+  constexpr size_t kMinVectorizedAxisSize = 1UL;
+  constexpr size_t kMaxVectorizedAxisSize = 9UL;
+  if (x.vectorized_axis.size() < kMinVectorizedAxisSize || x.vectorized_axis.size() > kMaxVectorizedAxisSize) {
+    GELOGE(af::FAILED, "Codegen broadcast input vec axis size[%zu] is either 0 or greater than 9",
+           x.vectorized_axis.size());
+    return af::FAILED;
+  }
+  if (y.vectorized_axis.size() < kMinVectorizedAxisSize || y.vectorized_axis.size() > kMaxVectorizedAxisSize) {
+    GELOGE(af::FAILED, "Codegen broadcast output vec axis size[%zu] is either 0 or greater than 9",
+           y.vectorized_axis.size());
+    return af::FAILED;
+  }
+  if (x.vectorized_axis.size() != y.vectorized_axis.size()) {
+    GELOGE(af::FAILED, "Codegen broadcast input vec axis size[%zu] not equal output vec axis size[%zu]",
+           x.vectorized_axis.size(), y.vectorized_axis.size());
+    return af::FAILED;
+  }
+  return af::SUCCESS;
+}
+
+// 常量（标量）广播：生成 Duplicate 调用并登记 scalar 相关参数。
+af::Status GenerateScalarBroadcast(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis, const Tensor &x,
+                                   const Tensor &y, const af::AscNodePtr &node, std::string &result) {
+  int64_t id = -1;
+  BroadcastScalar(tpipe, current_axis, x, y, id, result, false);
+  ascir_param::BroadcastNodeParams *broadcast_params = nullptr;
+  if (ResetBroadcastNodeParams(node, broadcast_params) == af::SUCCESS && broadcast_params != nullptr) {
+    broadcast_params->valid = true;
+    broadcast_params->is_scalar = true;
+    broadcast_params->const_rank = -1;
+    GE_ASSERT_SUCCESS(GetBroadcastScalarDuplicateCount(tpipe, y, broadcast_params->duplicate_count));
+    broadcast_params->duplicate_count_role = ascir_param::ParamExprRole::kActualSize;
+  }
+  return af::SUCCESS;
+}
+
+// 发射 BroadcastExtend 调用：模板形参 + dst/src 偏移 + 形状数组名。
+void GenBroadcastCall(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis, const Tensor &x,
+                      const Tensor &y, const std::string &api_name, std::stringstream &ss) {
+  std::string dtype_name;
+  Tensor::DtypeName(x.dtype, dtype_name);
+  ss << api_name << "<" << dtype_name << "," << x.vectorized_axis.size();
+  if (NeedTailBroadcastSrcInnerPad(x, y)) {
+    ss << ",true";
+  }
+  ss << ">(";
+  // 传入参数  const LocalTensor<T> &dst;
+  ss << y << "[" << tpipe.tiler.TensorVectorizedOffset(current_axis, y) << "], ";
+  // 传入参数  const LocalTensor<T> &src;
+  ss << x << "[" << tpipe.tiler.TensorVectorizedOffset(current_axis, x) << "], ";
+  ss << "dst_shape_" << x.id << "_brc_to_" << y.id << ", src_shape_" << x.id << "_brc_to_" << y.id << ");\n";
+}
+
+// 登记 ascir 参数缓存中的广播 dst/src shape。
+void RegisterBroadcastNodeParams(const TPipe &tpipe, const af::AscNodePtr &node, const Tensor &x, const Tensor &y,
+                                 bool is_compact_padding) {
+  ascir_param::BroadcastNodeParams *broadcast_params = nullptr;
+  if (ResetBroadcastNodeParams(node, broadcast_params) == af::SUCCESS && broadcast_params != nullptr) {
+    broadcast_params->valid = true;
+    broadcast_params->const_rank = static_cast<int32_t>(x.vectorized_axis.size());
+    broadcast_params->dst_shape = GetBroadcastShape(tpipe, x, y, false, is_compact_padding);
+    broadcast_params->src_shape = GetBroadcastShape(tpipe, x, y, true, is_compact_padding);
+  }
+}
+
 }  // namespace
 
 static void GenParams(const TPipe &tpipe, const Tensor &input, const Tensor &output, std::stringstream &ss, bool is_src,
@@ -214,64 +322,26 @@ Status BroadcastRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir
   (void)RegisterBasicDumpParam(this->api_name_, inputs, outputs);
   GE_ASSERT_SUCCESS(SetSemanticFeature(GetBroadcastSemanticFeature(x, y)));
   if (IsBroadcastConstantTensor(x)) {
-    int64_t id = -1;
-    BroadcastScalar(tpipe, current_axis, x, y, id, result, false);
-    ascir_param::BroadcastNodeParams *broadcast_params = nullptr;
-    if (ResetBroadcastNodeParams(this->node, broadcast_params) == af::SUCCESS && broadcast_params != nullptr) {
-      broadcast_params->valid = true;
-      broadcast_params->is_scalar = true;
-      broadcast_params->const_rank = -1;
-      GE_ASSERT_SUCCESS(GetBroadcastScalarDuplicateCount(tpipe, y, broadcast_params->duplicate_count));
-      broadcast_params->duplicate_count_role = ascir_param::ParamExprRole::kActualSize;
-    }
-    return af::SUCCESS;
+    return GenerateScalarBroadcast(tpipe, current_axis, x, y, this->node, result);
   }
-  size_t min_vectorized_axis_size = 1UL;
-  size_t max_vectorized_axis_size = 9UL;
-  if (x.vectorized_axis.size() < min_vectorized_axis_size || x.vectorized_axis.size() > max_vectorized_axis_size) {
-    GELOGE(af::FAILED, "Codegen broadcast input vec axis size[%zu] is either 0 or greater than 9",
-           x.vectorized_axis.size());
-    return af::FAILED;
+  const af::Status size_status = ValidateBroadcastVecAxisSizes(x, y);
+  if (size_status != af::SUCCESS) {
+    return size_status;
   }
 
-  if (y.vectorized_axis.size() < min_vectorized_axis_size || y.vectorized_axis.size() > max_vectorized_axis_size) {
-    GELOGE(af::FAILED, "Codegen broadcast output vec axis size[%zu] is either 0 or greater than 9",
-           y.vectorized_axis.size());
-    return af::FAILED;
-  }
-
-  if (x.vectorized_axis.size() != y.vectorized_axis.size()) {
-    GELOGE(af::FAILED, "Codegen broadcast input vec axis size[%zu] not equal output vec axis size[%zu]",
-           x.vectorized_axis.size(), y.vectorized_axis.size());
-    return af::FAILED;
-  }
   std::stringstream ss;
-  // 生成参数 const uint32_t *dst_shape;
-  std::stringstream params_name;
   DataCopyParams data_copy_param;
   (void)CalculateDmaParams(tpipe, y, y, data_copy_param);
   const auto has_transpose = IsGraphHasTransposeNode(this->node);
   const bool is_compact_padding = GetPaddingMode(y, data_copy_param, has_transpose) == kCompactPddingMode;
+  // 生成参数 const uint32_t *dst_shape;
   GenParams(tpipe, x, y, ss, false, is_compact_padding);
   // 生成参数 const uint32_t *src_shape;
   GenParams(tpipe, x, y, ss, true, is_compact_padding);
-  std::string dtype_name;
-  Tensor::DtypeName(x.dtype, dtype_name);
-  ss << this->api_name_ << "<" << dtype_name << "," << x.vectorized_axis.size() << ">(";
-  // 传入参数  const LocalTensor<T> &dst;
-  ss << y << "[" << tpipe.tiler.TensorVectorizedOffset(current_axis, y) << "], ";
-  // 传入参数  const LocalTensor<T> &src;
-  ss << x << "[" << tpipe.tiler.TensorVectorizedOffset(current_axis, x) << "], ";
-  ss << "dst_shape_" << x.id << "_brc_to_" << y.id << ", src_shape_" << x.id << "_brc_to_" << y.id << ");\n";
+  GenBroadcastCall(tpipe, current_axis, x, y, this->api_name_, ss);
 
   result = ss.str();
-  ascir_param::BroadcastNodeParams *broadcast_params = nullptr;
-  if (ResetBroadcastNodeParams(this->node, broadcast_params) == af::SUCCESS && broadcast_params != nullptr) {
-    broadcast_params->valid = true;
-    broadcast_params->const_rank = static_cast<int32_t>(x.vectorized_axis.size());
-    broadcast_params->dst_shape = GetBroadcastShape(tpipe, x, y, false, is_compact_padding);
-    broadcast_params->src_shape = GetBroadcastShape(tpipe, x, y, true, is_compact_padding);
-  }
+  RegisterBroadcastNodeParams(tpipe, this->node, x, y, is_compact_padding);
   return af::SUCCESS;
 }
 

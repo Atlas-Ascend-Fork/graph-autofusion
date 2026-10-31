@@ -780,3 +780,86 @@ TEST(CodegenKernel, BroadcastRegApiCall_PrePosNotFound) {
             "static_cast<uint32_t>(7)};\n"
             "BroadcastExtend<int64_t,3>(local_1[0], local_0[0], dst_shape_0_brc_to_1, src_shape_0_brc_to_1);\n");
 }
+
+// 尾轴广播且广播源内层被对齐成“每元素独占一个 data block”（源内层非零 stride = 32B/dtype）
+// 时，需以 srcInnerPad 实例化 BroadcastExtend，使其按 ONE_BLK_SIZE / sizeof(T) 反推源 stride。
+TEST(CodegenKernel, BroadcastRegApiCall_TailBrcSrcInnerPad) {
+  af::AscGraph graph("test_graph");
+
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar(3);
+  auto s2 = graph.CreateSizeVar(48);
+  auto s3 = graph.CreateSizeVar("s3");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+  auto z3 = graph.CreateAxis("z3", s3);
+
+  Data x_op("x", graph);
+  Load load_op("load");
+  af::ascir_op::Broadcast broadcast_op("broadcast");
+  graph.AddNode(load_op);
+  graph.AddNode(broadcast_op);
+
+  load_op.x = x_op.y;
+  load_op.attr.sched.axis = {z0.id, z1.id, z2.id, z3.id};
+  *load_op.y.axis = {z0.id, z1.id, z2.id, z3.id};
+  *load_op.y.repeats = {s0, s1, s2, One};
+  *load_op.y.strides = {s1 * s2 * af::Symbol(32), s2 * af::Symbol(32), af::Symbol(32), Zero};
+  broadcast_op.x = load_op.y;
+  *broadcast_op.y.axis = {z0.id, z1.id, z2.id, z3.id};
+  *broadcast_op.y.repeats = {s0, s1, s2, s3};
+  *broadcast_op.y.strides = {s1 * s2 * af::Symbol(64), s2 * af::Symbol(64), af::Symbol(64), One};
+
+  auto load = graph.FindNode("load");
+  load->attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load->attr.api.type = af::ApiType::kAPITypeCompute;
+  load->attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load->attr.sched.loop_axis = z0.id;
+  load->outputs[0].attr.vectorized_axis = {z0.id, z1.id, z2.id, z3.id};
+  load->outputs[0].attr.vectorized_strides = {s1 * s2 * af::Symbol(32), s2 * af::Symbol(32), af::Symbol(32), Zero};
+  load->outputs[0].attr.dtype = af::DT_INT8;
+  load->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+  load->outputs[0].attr.mem.tensor_id = 0;
+  load->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  load->outputs[0].attr.que.id = 1;
+  load->outputs[0].attr.opt.merge_scope = af::kIdNone;
+
+  auto broadcast = graph.FindNode("broadcast");
+  broadcast->attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  broadcast->attr.api.type = af::ApiType::kAPITypeCompute;
+  broadcast->attr.api.unit = af::ComputeUnit::kUnitVector;
+  broadcast->attr.sched.loop_axis = z0.id;
+  broadcast->outputs[0].attr.vectorized_axis = {z0.id, z1.id, z2.id, z3.id};
+  broadcast->outputs[0].attr.vectorized_strides = {s1 * s2 * af::Symbol(64), s2 * af::Symbol(64), af::Symbol(64), One};
+  broadcast->outputs[0].attr.dtype = af::DT_INT8;
+  broadcast->outputs[0].attr.mem.position = af::Position::kPositionVecOut;
+  broadcast->outputs[0].attr.mem.tensor_id = 1;
+  broadcast->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  broadcast->outputs[0].attr.que.id = 2;
+  broadcast->outputs[0].attr.opt.merge_scope = af::kIdNone;
+
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  tpipe.AddTensor(load->outputs[0]);
+  tpipe.AddTensor(broadcast->outputs[0]);
+
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddAxis(z2);
+  tiler.AddAxis(z3);
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  tiler.AddSizeVar(af::SizeVar(s2));
+  tiler.AddSizeVar(af::SizeVar(s3));
+
+  codegen::ApiTensor x1;
+  x1.id = load->outputs[0].attr.mem.tensor_id;
+  codegen::BroadcastRegApiCall call("BroadcastExtend");
+  EXPECT_EQ(call.Init(broadcast), 0);
+  call.inputs.push_back(&x1);
+
+  std::string result;
+  EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), af::SUCCESS);
+  EXPECT_NE(result.find("BroadcastExtend<int8_t,4,true>("), std::string::npos);
+}

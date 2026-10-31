@@ -14,11 +14,12 @@
     (__NPU_ARCH__ == 9202)
 #include "broadcast_extend_impl.h"
 
-template <typename T, int constRank = -1>
+template <typename T, int constRank = -1, bool srcInnerPad = false>
 inline __aicore__ void BroadcastExtend(const LocalTensor<T> &dst, const LocalTensor<T> &src, const uint32_t *dst_shape,
                                        const uint32_t *src_shape) {
   AscendC::BroadcastTilingExtend runningTiling;
-  AscendC::GetBroadcastTilingInfoExtendImpl<T, constRank>(constRank, dst_shape, src_shape, false, runningTiling);
+  AscendC::GetBroadcastTilingInfoExtendImpl<T, constRank, nullptr, nullptr, srcInnerPad>(constRank, dst_shape,
+                                                                                         src_shape, runningTiling);
   AscendC::BroadcastExtendImpl<T, constRank>(dst, src, dst_shape, src_shape, &runningTiling);
 }
 #endif
