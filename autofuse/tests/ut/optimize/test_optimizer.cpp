@@ -13,6 +13,7 @@
 #include <ascendc_ir.h>
 #include <array>
 #include <map>
+#include <regex>
 #include <set>
 #include "ascir.h"
 #include <ascir_ops.h>
@@ -7442,7 +7443,11 @@ TEST_F(TestOptimizer, ReducePartition) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
+  // 通用模板 1 + R 轴分核模板 1 (phase_1 各 tiling case 装入同一 group 作为多 impl) + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
+  // R 轴分核结果: phase_1 group + phase_2 groups, phase_1 的两种 tiling case 全部在同一 group 内
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 3);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs.size(), 2);
 }
 
 TEST_F(TestOptimizer, ReducePartitionLoad) {
@@ -7545,7 +7550,8 @@ TEST_F(TestOptimizer, ReducePartitionLoad) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
 }
 
 TEST_F(TestOptimizer, ReducePartition3) {
@@ -7626,11 +7632,11 @@ TEST_F(TestOptimizer, ReducePartition3) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 2);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][3].schedule_groups.size(), 1);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7726,11 +7732,11 @@ TEST_F(TestOptimizer, ReducePartition4) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 2);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 3);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 3);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][3].schedule_groups.size(), 1);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7814,11 +7820,11 @@ TEST_F(TestOptimizer, ReduceRMulticore) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 2);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][3].schedule_groups.size(), 1);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7826,6 +7832,105 @@ TEST_F(TestOptimizer, ReduceRMulticore) {
   auto phase2_workspace1 = impl_graph_phase2.FindNode("reduce_r_multicore_0_r_multicore_phase_2_graph_workspace");
   ASSERT_NE(phase1_workspace, nullptr);
   ASSERT_NE(phase2_workspace1, nullptr);
+}
+
+// 两条互不连通的 reduce 链构成多 reduce 图: 多 reduce + 多 R 轴逐 case 展开会造成模板数随链数
+// 乘性爆炸, 在生成阶段即被 ShouldForceAllLoad 拦截强制走 AllLoad 路径。校验拦截后不产生任何
+// r_multicore phase 图, 且图中各 (result, group, impl) 槽位不共享同一图对象、索引后缀不累积
+TEST_F(TestOptimizer, ReduceRMulticoreMultiRAxisSkipRCorePhase1) {
+  auto graph =
+      af::testing::AscGraphBuilder("reduce_two_first_stage")
+          .Loops({af::testing::Sym("s0"), af::testing::Sym("s1"), af::testing::Sym("s2"), af::testing::Sym("s3")})
+          .Data("data0", 0)
+          .Load("load0", "data0")
+          .Abs("abs0", "load0")
+          .Max("max0", "abs0", {0, 2})
+          .Store("store0", "max0")
+          .Output("output0", "store0", 0)
+          .Data("data1", 1)
+          .Load("load1", "data1")
+          .Abs("abs1", "load1")
+          .Max("max1", "abs1", {0, 2})
+          .Store("store1", "max1")
+          .Output("output1", "store1", 1)
+          .Build();
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  const auto &results = fused_scheduled_result.node_idx_to_scheduled_results[0];
+  ASSERT_FALSE(results.empty());
+
+  std::map<const void *, std::string> slot_to_name;
+  size_t second_chain_phase1_count = 0UL;
+  const std::regex accumulated_suffix("_S[0-9]+G[0-9]+C[0-9]+_S[0-9]+G[0-9]+C[0-9]+");
+  for (size_t r = 0UL; r < results.size(); ++r) {
+    for (const auto &schedule_group : results[r].schedule_groups) {
+      for (const auto &impl_graph : schedule_group.impl_graphs) {
+        const std::string name = impl_graph.GetName();
+        EXPECT_FALSE(std::regex_search(name, accumulated_suffix)) << "graph [" << name << "] has accumulated index";
+        const auto compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
+        ASSERT_NE(compute_graph, nullptr);
+        const auto ret = slot_to_name.emplace(compute_graph.get(), name);
+        EXPECT_TRUE(ret.second) << "graph [" << name << "] is shared with slot of [" << ret.first->second << "]";
+        if ((name.rfind("reduce_two_first_stage_1_", 0UL) == 0UL) &&
+            (name.find("r_multicore_phase_1_graph") != std::string::npos)) {
+          ++second_chain_phase1_count;
+        }
+      }
+    }
+  }
+  // 保证用例非空转: 双 reduce 链 + Max 对 {0,2} 两根轴归约属"多 reduce + 多 R 轴", 在生成阶段被
+  // 拦截强制走 AllLoad, 不应产生任何 r_multicore phase_1 图; 图槽位不共享/索引不累积的不变式仍然成立
+  EXPECT_EQ(second_chain_phase1_count, 0UL);
+}
+
+// 单条 reduce 链, Max 对 {0,2} 两根轴归约: 属"单 reduce 多 R 轴", 生成阶段放行进入 R-core 模板,
+// 但 phase-1 各 tiling case 切分结构不同(var relation 不一致), AppendReduceFirstStageGroup 应回退
+// 既有逐 case 展开流程: 每个 tiling case 展开为独立 result(自身 phase_1 group 仅 1 个 impl),
+// 而非装入同一 group 作为多 impl。同时校验展开后图槽位不共享、索引后缀不累积
+TEST_F(TestOptimizer, ReduceRMulticoreSingleReduceMultiRAxisFallbackExpandPhase1) {
+  auto graph =
+      af::testing::AscGraphBuilder("reduce_single_first_stage")
+          .Loops({af::testing::Sym("s0"), af::testing::Sym("s1"), af::testing::Sym("s2"), af::testing::Sym("s3")})
+          .Data("data0", 0)
+          .Load("load0", "data0")
+          .Abs("abs0", "load0")
+          .Max("max0", "abs0", {0, 2})
+          .Store("store0", "max0")
+          .Output("output0", "store0", 0)
+          .Build();
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  const auto &results = fused_scheduled_result.node_idx_to_scheduled_results[0];
+  ASSERT_FALSE(results.empty());
+
+  std::map<const void *, std::string> slot_to_name;
+  const std::regex accumulated_suffix("_S[0-9]+G[0-9]+C[0-9]+_S[0-9]+G[0-9]+C[0-9]+");
+  size_t rcore_result_count = 0UL;
+  for (size_t r = 0UL; r < results.size(); ++r) {
+    bool has_phase1 = false;
+    for (const auto &schedule_group : results[r].schedule_groups) {
+      for (const auto &impl_graph : schedule_group.impl_graphs) {
+        const std::string name = impl_graph.GetName();
+        EXPECT_FALSE(std::regex_search(name, accumulated_suffix)) << "graph [" << name << "] has accumulated index";
+        const auto compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
+        ASSERT_NE(compute_graph, nullptr);
+        const auto ret = slot_to_name.emplace(compute_graph.get(), name);
+        EXPECT_TRUE(ret.second) << "graph [" << name << "] is shared with slot of [" << ret.first->second << "]";
+        if (name.find("r_multicore_phase_1_graph") != std::string::npos) {
+          has_phase1 = true;
+        }
+      }
+    }
+    if (has_phase1) {
+      ++rcore_result_count;
+      // 逐 case 展开: 该 result 的 phase_1 group 仅含当前 case 的 1 个 impl
+      ASSERT_EQ(results[r].schedule_groups[0].impl_graphs.size(), 1UL);
+    }
+  }
+  // 单 reduce 多 R 轴存在多个 phase_1 tiling case, 应回退展开为多个 result 而非打包为 1 个
+  EXPECT_GT(rcore_result_count, 1UL);
 }
 
 TEST_F(TestOptimizer, ReducePartitionScalar) {
@@ -7911,7 +8016,8 @@ TEST_F(TestOptimizer, ReducePartitionScalar) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
+  // 通用模板 1 + R 轴分核模板 1 (phase_1 各 tiling case 装入同一 group 作为多 impl) + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
 }
 
 TEST_F(TestOptimizer, ReduceAllLoad) {
@@ -8010,7 +8116,8 @@ TEST_F(TestOptimizer, ReduceAllLoad) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
+  // 通用模板 1 + R 轴分核模板 1 (双 reduce 分组各 phase_1 case 装入同一 group 作为多 impl) + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
 }
 
 /**

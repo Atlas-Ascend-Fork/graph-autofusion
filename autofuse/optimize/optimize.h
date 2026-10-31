@@ -104,10 +104,19 @@ class Optimizer {
   static Status GetNonContinuousAxisPairBySpecialRule(::ascir::ImplGraph &impl_graph,
                                                       std::set<std::pair<int64_t, int64_t>> &non_continuous_pair);
   static bool IsReduceFirstStage(size_t index, ScheduleTask &schedule_task);
+  // R 轴分核第一阶段混合展开入口: phase_1 各 tiling case 的 var relation 表达式跨 case 一致
+  // (r_group 单轴, 或全规约退化为空 relation) 时, 各 case 装入同一 group 作为多 impl, 结果数不随
+  // case 数相乘; 不一致 (单 reduce 多 R 轴, 各 case 切分结构不同) 时, 回退调用
+  // ExpandReduceFirstStageResults 走逐 case 展开的既有流程, 保持正确性
+  Status AppendReduceFirstStageGroup(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
+                                     std::vector<::ascir::ScheduledResult> &scheduled_results_cur, size_t index,
+                                     ScheduleTask &schedule_task) const;
+  // 回退路径: 为每个 phase_1 tiling case 展开独立 ScheduledResult (携带该 case 自身的 var
+  // relation), 供 AppendReduceFirstStageGroup 在 relation 跨 case 不一致时调用
   Status ExpandReduceFirstStageResults(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
                                        std::vector<::ascir::ScheduledResult> &scheduled_results_cur, size_t index,
                                        ScheduleTask &schedule_task) const;
-  void RefreshGroupRelation(size_t index, std::map<std::string, af::Expression> &var_relations,
+  void RefreshGroupRelation(size_t index, const std::map<std::string, af::Expression> &var_relations,
                             ScheduleTask &schedule_task, ::ascir::ScheduledResult &schedule_result) const;
   static Status InitializeScheduledResults(std::vector<::ascir::ScheduledResult> &scheduled_results_cur,
                                            ScheduleTask &schedule_task);
