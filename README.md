@@ -23,13 +23,12 @@ Graph-autofusion 是一个面向昇腾（Ascend）芯片的轻量级、解耦式
 
 - 若您想体验 Graph-autofusion 的完整构建、测试与样例运行流程，请参考：[构建验证](docs/zh/build.md)
 - 若您希望了解 SuperKernel 组件的原理与使用，请参考： [SuperKernel 简介](super_kernel/README.md)。
-- 若您希望了解 Autofuse 组件的原理与使用，请参考： [Autofuse 简介与快速上手](autofuse/README.md)。
+- 若您希望了解 Autofuse 组件的原理与使用，请参考：[AutoFuse 架构说明](docs/zh/autofuse/introduction/architecture.md)：整体架构、关键技术、模块职责与启用方式。
 
 ## 📚文档
 
-如果希望了解 Graph-autofusion 架构、模块功能、Skills等，可参考以下文档：
+如果希望参与项目贡献或了解仓内 Skills，可参考以下文档：
 
-- [AutoFuse 架构说明](docs/zh/autofuse/introduction/architecture.md)：介绍 AutoFuse 的整体架构、关键技术方案、处理流程和模块职责。
 - [贡献指南](CONTRIBUTING.md)：说明如何参与项目贡献、提交 Issue 和 Pull Request。
 - [Skills 管理指南](docs/zh/opencode-skill-management.md)：介绍仓内默认使用的 Skills 及其管理方式。
 - [Skill 复用指南](docs/zh/skill-reuse-guide.md)：介绍如何复用 Skill，并使用 Agent 辅助代码阅读、开发和问题定位。
