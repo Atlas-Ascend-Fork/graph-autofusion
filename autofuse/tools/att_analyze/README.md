@@ -94,25 +94,35 @@ pipe cycle、objective 或 profiling 实测值。`sub_case_tag` 是子场景标�
 
 ## 与 ATT 模板/tiling 分析 Skill 配合
 
+ATT 成功求解但默认模板慢于 PGO/实测候选时，使用仓内
+[att-perf-selection-analysis](../../../.claude/skills/att-perf-selection-analysis/SKILL.md)。
+该 Skill 提供按 run 隔离的 pipe 估值/实测对照脚本，并结合最终选择、公式和 result 级
+代价定位排序原因；没有唯一的最终身份或 profiling 归属时会标明证据不足。
+通过 PGO 查找快模板时，先按 Skill 的
+[PGO 对照流程](../../../.claude/skills/att-perf-selection-analysis/references/pgo-comparison.md)
+查使能入口、完成搜索并确认实际选中解，再对默认与 PGO 结果独立 profiling 和比较估值。
+
 `att_analyze` 由本仓维护，Skill 调用的固定入口是
 `autofuse/tools/att_analyze/src/att.py`，不需要安装或访问其他仓库。对已经采集的
 数据做离线分析时，在仓库根目录执行：
 
 ```bash
-python3 .claude/skills/att-template-tiling-analysis/scripts/att_analysis.py \
-  analyze --run-root <run-root> --output <report-dir>
+python3 autofuse/tools/att_analyze/src/att.py evidence <default-log> -o <out>/default-evidence
+python3 autofuse/tools/att_analyze/src/att.py evidence <candidate-log> -o <out>/candidate-evidence
+python3 .claude/skills/att-perf-selection-analysis/scripts/est_vs_measured.py \
+  --plog <default-log> --op-summary <default-op-summary.csv> \
+  --plog <candidate-log> --op-summary <candidate-op-summary.csv> \
+  -o <out>/est_vs_measured.csv
 ```
 
-`run-root/default` 和 `run-root/pgo`（也支持 `base`）放入用户已执行得到的日志；
-目录名称不固定时可显式传 `--default-root` 和 `--candidate-root`，脚本也会递归发现
-`logs/`、`profiling/`、`kernel_meta/` 和 `dump/`。脚本只读取这些数据，不会自行
-选择 case、编造执行命令或重新运行任务。Python 3.9+ 可运行基础分析，安装
-`openpyxl` 后会额外生成 `summary.xlsx`。
+第 N 个 `--plog` 与第 N 个 `--op-summary` 配对；脚本只读取数据，输出文件必须不存在。
+可增加 `--op-filter <substring>`，按日志原始算子名区分大小写筛选；重复参数按“或”匹配。
+全部无命中时生成仅有表头的 CSV，退出码为 0 并提示无可比较项。
+重复 FINAL、多个 group 或重复 profiling 行会标记歧义，不自动聚合采样。
+先按已确认的调用边界隔离数据，再按 Skill 的采样规则比较。
 
-如果需要现场执行，用户需先提供完整 case 范围和命令。本地执行需要可用的
-`python3`；远端执行使用标准 `ssh`，并要求远端 checkout 能访问相同的工具脚本。
-`devssh` 只能作为用户明确提供的 wrapper。编译、profiling、PGO 和
-`verify-tiling` 均需用户单独确认。
+现场执行按用户已授权的 case 范围和命令开展，并核对远端 checkout 能访问所用脚本。
+构建及测试分别遵循仓内 `af-build-runner` 和 `af-test-developer`。
 
 原始证据与分析结论分开保存，建议布局如下：
 
@@ -124,9 +134,9 @@ evidence-archive/<run-name>/      # 原始文件归档
 report-archive/<run-name>/        # report.md、summary.csv、root-cause.jsonl 等
 ```
 
-归档脚本会为同名运行自动创建递增目录并写入 `archive-manifest.json`，不会覆盖
-已有归档。详细交互契约和归档规则见 Skill 的
-`references/execution-contract.md` 与 `references/archive-layout.md`。
+使用新建目录保存输出，并在报告或现有 manifest 中记录原始路径、源码及工具版本、实际命令和库内容标识。
+采样、缓存条件、模型拟合与成对回归的要求见 Skill 的
+[validation-protocol.md](../../../.claude/skills/att-perf-selection-analysis/references/validation-protocol.md)。
 
 ## preset 和真实日志维护
 

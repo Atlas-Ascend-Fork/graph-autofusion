@@ -1420,6 +1420,10 @@ const Tensor *TPipe::GetTensor(ascir::TensorId id) const {
   return &iter->second;
 }
 
+bool TPipe::HasTensor(ascir::TensorId id) const {
+  return tensors.find(id) != tensors.end();
+}
+
 Tensor *TPipe::GetTensor(ascir::TensorId id) {
   auto iter = tensors.find(id);
   GE_CHK_BOOL_EXEC(iter != tensors.end(), return nullptr, "Codegen tensor[%ld] not found", id);

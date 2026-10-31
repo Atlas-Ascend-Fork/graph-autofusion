@@ -46,6 +46,13 @@ using SimtLoadMetadataMap = std::unordered_map<std::string, ascgen_utils::indire
 using SimtLoadIndexOffsetExpressions = std::unordered_map<std::string, std::string>;
 using SimtGraphNodeMap = std::unordered_map<std::string, af::AscNodePtr>;
 
+// [fused 成员 value 输入张量解析] 成员 value 输入链上的 direct-GM 边界节点
+// （kSimtInputBoundary/kSimtInlineTransform，skips_api_emit）不注册 tpipe、不生成
+// api call——按 L4 接线约定沿【单输入】生产者链穿透回溯到 GM 源（Data 输出张量）。
+// 多输入节点（Select/Mul 等）出现在 value 链上时返回 nullptr（该形态无单一 GM 值表，
+// fused 单指针模型不支持，保持显式失败）。实现见 cpp 注释。
+const Tensor *ResolveFusedMemberInputTensor(const TPipe &tpipe, const af::AscNodePtr &member);
+
 class IndirectLoadRegApiCall final : public ApiCall {
  public:
   explicit IndirectLoadRegApiCall(const std::string &api_name) : ApiCall(api_name) {}

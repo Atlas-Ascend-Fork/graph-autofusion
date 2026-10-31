@@ -452,11 +452,14 @@ def get_pgo_env_flag():
     return result.get("autofuse_enable_pgo", "false").lower() == "true"
 
 
-def prepare_compile_context(argv, stage, tiling_repr, bin_mode=False):
+def prepare_compile_context(
+    argv, stage, tiling_repr, bin_mode=False, bin_file_mode=False
+):
     args = parse_compile_args(argv)
     args.stage = stage
     args.tiling_repr = tiling_repr
     args.bin_mode = bin_mode
+    args.bin_file_mode = bin_file_mode
     get_pgo_cache_root = getattr(ascendc_compile, "get_pgo_cache_root", None)
     args.pgo_cache_root = (
         get_pgo_cache_root(args.output_file)
@@ -568,13 +571,14 @@ def compile_core(
     tiling_repr=None,
     trace_stage=None,
     bin_mode=False,
+    bin_file_mode=False,
 ):
     args = None
     total_start = time.time_ns()
     try:
         prepare_start = time.time_ns()
         args, temp_dir_ctx, auto_cleanup = prepare_compile_context(
-            argv, stage, tiling_repr, bin_mode
+            argv, stage, tiling_repr, bin_mode, bin_file_mode
         )
         args.trace_stage = trace_stage if trace_stage is not None else stage
         prepare_end = time.time_ns()
@@ -633,6 +637,24 @@ def jit_compile_bin(tiling_def, host_tiling, op_kernel, argv: List[str]):
     )
 
 
+def jit_compile_v2(tiling_def, host_tiling, op_kernel, argv: List[str]):
+    """jit 编译的 rtLaunch「外置 bin 文件」接口（v2）：直接产 bin，不生成 GetKernelBin。
+
+    链接阶段抽出 device .o 的 .aicore_binary 发布为 output_file 同目录固定名 bin 文件，
+    host tiling objs 仍链成 kernel.so（仅导出 AutofuseTiling）。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def,
+            SOURCES_HOST_IMPL: host_tiling,
+            SOURCES_KERNEL_IMPL: op_kernel,
+        },
+        argv,
+        trace_stage="jit_compile_v2",
+        bin_file_mode=True,
+    )
+
+
 def host_compile(tiling_def_code, tiling_impl_code, argv: List[str]):
     return compile_core(
         {
@@ -681,6 +703,28 @@ def kernel_compile_bin(
         tiling_repr,
         trace_stage="kernel_compile_bin",
         bin_mode=True,
+    )
+
+
+def kernel_compile_v2(
+    tiling_def_code, kernel_impl_code, argv: List[str], *, tiling_repr=None
+):
+    """静态 shape（TopN）kernel 编译的 rtLaunch「外置 bin 文件」接口（v2）。
+
+    无 host tiling，tiling 已由 ``tiling_repr`` 固化进 device 代码；只把 .aicore_binary
+    发布到 output_file（即 bin 路径），不产 .so。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def_code,
+            SOURCES_HOST_IMPL: None,
+            SOURCES_KERNEL_IMPL: kernel_impl_code,
+        },
+        argv,
+        "device",
+        tiling_repr,
+        trace_stage="kernel_compile_v2",
+        bin_file_mode=True,
     )
 
 
@@ -748,6 +792,26 @@ def build_kernel_so_bin(tiling_def_code, argv: List[str], *, tiling_repr=None):
         tiling_repr,
         trace_stage="build_kernel_so_bin",
         bin_mode=True,
+    )
+
+
+def build_kernel_so_v2(tiling_def_code, argv: List[str], *, tiling_repr=None):
+    """链接 host.o（仅 tiling），产出导出 AutofuseTiling 的 kernel.so，并把 device .o
+    的 .aicore_binary 发布为 output_file 同目录固定名 bin 文件。
+
+    对应 ``build_kernel_so_bin`` 的 rtLaunch「外置 bin 文件」v2 接口。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def_code,
+            SOURCES_HOST_IMPL: None,
+            SOURCES_KERNEL_IMPL: None,
+        },
+        argv,
+        "link",
+        tiling_repr,
+        trace_stage="build_kernel_so_v2",
+        bin_file_mode=True,
     )
 
 

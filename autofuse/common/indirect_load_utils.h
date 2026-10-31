@@ -460,6 +460,11 @@ bool IsSimtFusedMemberEmitted(const af::AscNodePtr &node);
 // 用于区分双 gather 中各路 input 边界的向量化内轴归属；单 gather 场景提示值与全局值一致。
 af::Status SetSimdInputInnerAxis(const af::AscNodePtr &node, af::AxisId axis);
 af::AxisId GetSimdInputInnerAxis(const af::AscNodePtr &node);
+// [per-IL index 内轴提示] 与 input 内轴 hint 同构：多 gather 组内各成员的 index 链形态
+// 可不同（成员 A 有 Broadcast → index_inner_axis 有效；成员 B 计算链 → kIdNone），
+// 调度器优先读节点 hint，无 hint 回退 primary 全局轴。
+af::Status SetSimdIndexInnerAxis(const af::AscNodePtr &node, af::AxisId axis);
+af::AxisId GetSimdIndexInnerAxis(const af::AscNodePtr &node);
 af::AscNodePtr GetInputProducer(const af::AscNodePtr &node, size_t input_index);
 af::AscNodePtr GetOnlyOutputConsumer(const af::AscNodePtr &node);
 af::AscNodePtr FindIndirectLoadNode(const af::AscGraph &graph);

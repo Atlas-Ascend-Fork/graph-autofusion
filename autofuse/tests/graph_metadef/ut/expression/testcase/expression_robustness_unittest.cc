@@ -59,6 +59,22 @@ TEST_F(UtestExpression, ExpSqrtSerializeAndDeserialize_RoundTrip) {
   EXPECT_EQ(Expression::Deserialize(guard_str.c_str()), guard);
 }
 
+// float 常量(如 1e-8)经 RealDouble 打印为科学计数法(9.99999993922529e-09)：解析侧需识别
+// e 指数，保证序列化-反序列化往返闭环（Range/Cast 等算子的 value 仍需支持 float）
+TEST_F(UtestExpression, ScientificNotationSerializeAndDeserialize_RoundTrip) {
+  auto s52 = Symbol("s52");
+  const auto expr = Add(Symbol(9.99999993922529e-09), s52);
+  const std::string expr_str(expr.Serialize().get());
+  EXPECT_EQ(expr_str, "(9.99999993922529e-09 + s52)");
+  EXPECT_EQ(Expression::Deserialize(expr_str.c_str()), expr);
+
+  // 无小数点/正指数/单位数指数的科学计数法均需被正确解析为浮点
+  EXPECT_EQ(Expression::Parse("2e-3"), Symbol(2e-3));
+  EXPECT_EQ(Expression::Parse("2E3"), Symbol(2e3));
+  EXPECT_EQ(Expression::Parse("1e+20"), Symbol(1e20));
+  EXPECT_EQ(Expression::Parse("9.99999993922529e-9"), Symbol(9.99999993922529e-9));
+}
+
 class AttributeGroupShapeEnvUt : public testing::Test {};
 
 // 间接环：已有 s3 == Min(2, s2) 的替换（变量 s3 的替换根为复合表达式 Min(2, s2)）时，

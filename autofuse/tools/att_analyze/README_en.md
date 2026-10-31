@@ -111,28 +111,38 @@ Unknown or missing ABI contracts are rejected before native code is called.
 
 ## Using the ATT template/tiling analysis skill
 
-`att_analyze` is maintained in this repository. The skill always invokes
-`autofuse/tools/att_analyze/src/att.py`; no checkout of another repository is
-required. To analyze an existing run offline from the repository root:
+When ATT succeeds but its default template or tiling is slower than a PGO or measured candidate, use
+[att-perf-selection-analysis](../../../.claude/skills/att-perf-selection-analysis/SKILL.md).
+The skill compares run-local pipe estimates and measurements, checks final identities and formulas,
+and reconstructs result-level ranking. Ambiguous final identities or profile associations remain explicit.
+To find a candidate with PGO, follow the skill's
+[PGO comparison workflow](../../../.claude/skills/att-perf-selection-analysis/references/pgo-comparison.md)
+to locate the enablement settings, complete tuning and confirm the selected solution before independently
+profiling and comparing the default and PGO results.
+
+`att_analyze` is maintained in this repository. Its entry point is
+`autofuse/tools/att_analyze/src/att.py`. To analyze existing data from the repository root:
 
 ```bash
-python3 .claude/skills/att-template-tiling-analysis/scripts/att_analysis.py \
-  analyze --run-root <run-root> --output <report-dir>
+python3 autofuse/tools/att_analyze/src/att.py evidence <default-log> -o <out>/default-evidence
+python3 autofuse/tools/att_analyze/src/att.py evidence <candidate-log> -o <out>/candidate-evidence
+python3 .claude/skills/att-perf-selection-analysis/scripts/est_vs_measured.py \
+  --plog <default-log> --op-summary <default-op-summary.csv> \
+  --plog <candidate-log> --op-summary <candidate-op-summary.csv> \
+  -o <out>/est_vs_measured.csv
 ```
 
-Place user-collected logs in `run-root/default` and `run-root/pgo` (or `base`),
-or pass arbitrary variant directories with `--default-root` and `--candidate-root`.
-The command recursively discovers logs, profiling, `kernel_meta/`, and `dump/`;
-it does not require a producer-specific directory layout. The command
-is read-only: it does not invent case scope or commands and does not rerun a
-workload. Python 3.9+ is sufficient for the base analysis; installing
-`openpyxl` additionally enables `summary.xlsx`.
+The Nth `--plog` is paired with the Nth `--op-summary`. The script only reads inputs,
+and the output file must not already exist. Optional `--op-filter <substring>` filters the original
+log operator names with case-sensitive substring matching; repeated filters use OR semantics.
+If no records match, the script writes a header-only CSV, exits with code 0, and reports no comparable items.
+Repeated FINAL records, multiple groups, or repeated profiling rows are marked as ambiguous;
+the script does not aggregate repeated samples automatically. Isolate data using confirmed call
+boundaries before comparing samples according to the skill.
 
-For live execution, provide the exact cases and command first. Local execution
-requires `python3`; remote execution uses standard `ssh` and a checkout on the
-remote host. A site-specific `devssh` wrapper is accepted only when explicitly
-provided by the user. Build, profiling, PGO, and `verify-tiling` actions require
-separate confirmation.
+Live execution follows the case scope and commands already authorized by the user.
+Check that the remote checkout can access the required scripts. Follow the repository's
+`af-build-runner` and `af-test-developer` skills for builds and tests.
 
 Keep raw evidence and conclusions in separate archives:
 
@@ -144,9 +154,10 @@ evidence-archive/<run-name>/      # raw files
 report-archive/<run-name>/        # report.md, summary.csv, root-cause.jsonl, ...
 ```
 
-The archive helper creates an incremented directory for duplicate run names and
-writes `archive-manifest.json`; existing archives are never overwritten. See
-the skill references for the execution contract and archive rules.
+Use a new output directory. Record original paths, source and tool versions, actual commands,
+and loaded-library content identifiers in the report or an existing manifest.
+For sampling, cache conditions, model fitting, and paired regression checks, see
+[validation-protocol.md](../../../.claude/skills/att-perf-selection-analysis/references/validation-protocol.md).
 
 ## Presets and real-log maintenance
 

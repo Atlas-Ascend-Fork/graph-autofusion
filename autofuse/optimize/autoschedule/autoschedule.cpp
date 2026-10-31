@@ -256,6 +256,20 @@ Status AutoSchedule::SelectLoopAxis(ascir::ImplGraph &impl_graph, bool is_reduce
     if (it != axis.rend()) {
       node->attr.sched.loop_axis = *it;
     }
+    if (node->attr.sched.loop_axis == af::kIdNone && !axis.empty()) {
+      // 打印原始 sched 轴列表（axis 副本中的被滤轴已被置为 kIdNone，不可用），
+      // 供 not_loop 判定与 from 链排查。
+      std::string sched_axis_ids;
+      for (const auto &sched_axis_id : node->attr.sched.axis) {
+        sched_axis_ids += std::to_string(sched_axis_id);
+        sched_axis_ids += ",";
+      }
+      GELOGD("[IndirectLoad] SelectLoopAxis: node[%s] all axes filtered, sched_axes[%s], not_loop_set_size=%zu.",
+             node->GetNamePtr(), sched_axis_ids.c_str(), not_loop_axis_set.size());
+      for (const auto &entry : not_loop_axis_set) {
+        GELOGD("[IndirectLoad] SelectLoopAxis: node[%s] not_loop_axis[%ld].", node->GetNamePtr(), entry);
+      }
+    }
     GE_ASSERT_TRUE((node->attr.sched.loop_axis != af::kIdNone), "Cannot find loop axis for node: [%s].",
                    node->GetNamePtr());
   }

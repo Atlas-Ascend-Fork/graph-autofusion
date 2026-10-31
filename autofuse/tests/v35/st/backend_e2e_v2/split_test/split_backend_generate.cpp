@@ -153,10 +153,10 @@ TEST_F(TestBackendSplitE2e, SplitAllAligned) {
     const auto &kernel = RemoveSubDirInclude(result.kernel);
     std::string expected =
         "constexpr SplitTilingAllAligned<2> split_tiling {\n"
-        "  .src_col_size = 64,\n"
-        "  .dst_col_sizes = { 32, 32, },\n"
-        "  .src_offsets = { 0, 32, },\n"
-        "};\n";
+        "      .src_col_size = 64,\n"
+        "      .dst_col_sizes = { 32, 32, },\n"
+        "      .src_offsets = { 0, 32, },\n"
+        "    };\n";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
     expected = "SplitAllAligned<int8_t, 2>(";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
@@ -254,10 +254,10 @@ TEST_F(TestBackendSplitE2e, SplitNotAllAligned_B8ToB16) {
 
     std::string expected =
         "const split::SplitTiling<2> split_tiling {\n"
-        "  .num_rows = static_cast<uint32_t>(z0t_actual_size), \n"
-        "  .num_src_cols = 14, \n"
-        "  .num_dsts_cols = {7, 7, }\n"
-        "};\n";
+        "      .num_rows = static_cast<uint32_t>(z0t_actual_size), \n"
+        "      .num_src_cols = 14, \n"
+        "      .num_dsts_cols = {7, 7, }\n"
+        "    };\n";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
     expected = "split::SplitExtend<uint16_t, 2>((__ubuf__ uint16_t *)";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);

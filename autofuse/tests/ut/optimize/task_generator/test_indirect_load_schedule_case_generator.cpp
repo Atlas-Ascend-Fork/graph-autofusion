@@ -17,6 +17,8 @@
 #include <vector>
 
 #include "ascir_ops.h"
+#include "autoschedule/autoschedule.h"
+#include "ascgraph_info_complete.h"
 #include "common/platform_context.h"
 #include "graph/debug/ge_attr_define.h"
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
@@ -2997,6 +2999,11 @@ struct DualGatherGraphOptions {
   // true: 全部尺寸符号改用具体值（span 静态可解 → lowering 可判定 offset_width=uint32，
   // 驱动位宽感知寄存器模型的 32 位细化路径）
   bool concrete_shapes = false;
+  // true: 共享 index Load + 掩码链——IL_0（primary）的 index 经 Ne/Select/Mul 掩码链计算
+  // （index 内轴无解），IL_1（non-primary）经 Broadcast 展开；两路共用同一 index
+  // Data/Load 节点（dual_shared_index_load），index 视图均为 [s2, s3]（组配对要求
+  // index 逻辑 shape 逐维符号相等）
+  bool shared_index_with_mask = false;
 };
 
 af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = {}) {
@@ -3090,6 +3097,63 @@ af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = 
     SetNodeView(index_store1, af::DT_INT32, output_axes, index1_repeats, index1_strides);
   }
 
+  // [共享 index + 掩码链] 共享 index 双 gather 形态：两路共用同一 index Data/Load——IL_0
+  // （primary）经掩码链消费（Ne/Select/Mul），IL_1（non-primary）经 Broadcast 展开；两路
+  // index 视图均为 [s2, s3]。跨 if 引用的句柄（shared_broadcast/shared_mul）声明在 if 外
+  // （与 value_cast1 同款轻量句柄模式，未接线时无副作用）。
+  af::ascir_op::Broadcast shared_broadcast("dual_shared_broadcast");
+  af::ascir_op::Mul shared_mul("dual_shared_mul");
+  if (options.shared_index_with_mask) {
+    // 共享 index Data（[D0, 1] stride (1, 0)，单列 index 源）
+    af::ascir_op::Data shared_data("dual_shared_data", graph);
+    shared_data.ir_attr.SetIndex(5);
+    SetNodeView(shared_data, af::DT_INT64, output_axes, {s2, af::ops::One}, {af::ops::One, af::ops::Zero});
+    af::ascir_op::Load shared_load("dual_shared_index_load");
+    shared_load.x = shared_data.y;
+    SetNodeView(shared_load, af::DT_INT64, output_axes, {s2, af::ops::One}, {af::ops::One, af::ops::Zero});
+    // item 路：Broadcast 展开（stride (1,0)→(s3,0)，payload 不变）
+    shared_broadcast.x = shared_load.y;
+    SetNodeView(shared_broadcast, af::DT_INT64, output_axes, output_repeats, {af::ops::One, af::ops::Zero});
+    // pos 路：consumer split 展开（stride (s3,1) 稠密）→ Ne → Select → Mul
+    af::ascir_op::Broadcast shared_split("dual_shared_split");
+    shared_split.x = shared_load.y;
+    SetNodeView(shared_split, af::DT_INT64, output_axes, output_repeats, output_strides);
+    af::ascir_op::Scalar shared_zero("dual_shared_zero", graph);
+    shared_zero.ir_attr.SetValue("0");
+    shared_zero.y.dtype = af::DT_INT64;
+    af::ascir_op::Broadcast shared_zero_bc("dual_shared_zero_bc");
+    shared_zero_bc.x = shared_zero.y;
+    SetNodeView(shared_zero_bc, af::DT_INT64, output_axes, output_repeats, output_strides);
+    af::ascir_op::Ne shared_ne("dual_shared_ne");
+    shared_ne.x1 = shared_split.y;
+    shared_ne.x2 = shared_zero_bc.y;
+    SetNodeView(shared_ne, af::DT_BOOL, output_axes, output_repeats, output_strides);
+    SetVectorApi(shared_ne);
+    af::ascir_op::Scalar shared_one("dual_shared_one", graph);
+    shared_one.ir_attr.SetValue("1");
+    shared_one.y.dtype = af::DT_INT64;
+    af::ascir_op::Broadcast shared_one_bc("dual_shared_one_bc");
+    shared_one_bc.x = shared_one.y;
+    SetNodeView(shared_one_bc, af::DT_INT64, output_axes, output_repeats, output_strides);
+    af::ascir_op::Select shared_select("dual_shared_select");
+    shared_select.x1 = shared_ne.y;
+    shared_select.x2 = shared_one_bc.y;
+    shared_select.x3 = shared_zero_bc.y;
+    SetNodeView(shared_select, af::DT_INT64, output_axes, output_repeats, output_strides);
+    SetVectorApi(shared_select);
+    // 掩码链需要独立的稠密 index 作为 Mul 的另一操作数（模拟 data2 的稠密 index）
+    af::ascir_op::Data mask_data("dual_mask_data", graph);
+    mask_data.ir_attr.SetIndex(6);
+    SetNodeView(mask_data, af::DT_INT64, output_axes, output_repeats, output_strides);
+    af::ascir_op::Load mask_load("dual_mask_index_load");
+    mask_load.x = mask_data.y;
+    SetNodeView(mask_load, af::DT_INT64, output_axes, output_repeats, output_strides);
+    shared_mul.x1 = mask_load.y;
+    shared_mul.x2 = shared_select.y;
+    SetNodeView(shared_mul, af::DT_INT64, output_axes, output_repeats, output_strides);
+    SetVectorApi(shared_mul);
+  }
+
   af::ascir_op::IndirectLoad indirect_load0("dual_indirect_load0");
   if (options.with_input_pre) {
     af::ascir_op::Abs pre_abs0("dual_pre_abs0");
@@ -3100,7 +3164,7 @@ af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = 
   } else {
     indirect_load0.x1 = input_load0.y;
   }
-  indirect_load0.x2 = index_load0.y;
+  indirect_load0.x2 = options.shared_index_with_mask ? shared_mul.y : index_load0.y;
   indirect_load0.ir_attr.SetAxis(1);
   SetNodeView(indirect_load0, value0_dtype, output_axes, output_repeats, output_strides);
 
@@ -3114,7 +3178,7 @@ af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = 
   } else {
     indirect_load1.x1 = input_load1.y;
   }
-  indirect_load1.x2 = index_load1.y;
+  indirect_load1.x2 = options.shared_index_with_mask ? shared_broadcast.y : index_load1.y;
   indirect_load1.ir_attr.SetAxis(options.axis_mismatch ? 0 : 1);
   SetNodeView(indirect_load1, value1_dtype, output_axes, output_repeats, output_strides);
 
@@ -3204,15 +3268,22 @@ af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = 
     af::ascir_op::Load input_load2("dual_input_load2");
     input_load2.x = x2.y;
     SetNodeView(input_load2, value0_dtype, input2_axes, input2_repeats, input2_strides);
-    af::ascir_op::Data index2("dual_index2", graph);
-    index2.ir_attr.SetIndex(5);
-    SetNodeView(index2, af::DT_INT32, output_axes, output_repeats, output_strides);
+    // [N≥3 共享 index hint 覆写回归] shared_index_with_mask 时第三路 IL 与 IL_0 共用
+    // 掩码链（多个掩码链成员 + 一个 Broadcast 成员共享同一 index 源）——
+    // NormalizeSimdAxesForMember 逐成员写 hint，后处理的 flag=false 成员不得把先处理的
+    // flag=true 成员写在共享 Load 上的有效 hint 覆写为 kIdNone。该形态不建独立 index
+    // （未接线的 op 句柄不入图，无悬挂节点）。
     af::ascir_op::Load index_load2("dual_index_load2");
-    index_load2.x = index2.y;
-    SetNodeView(index_load2, af::DT_INT32, output_axes, output_repeats, output_strides);
+    if (!options.shared_index_with_mask) {
+      af::ascir_op::Data index2("dual_index2", graph);
+      index2.ir_attr.SetIndex(5);
+      SetNodeView(index2, af::DT_INT32, output_axes, output_repeats, output_strides);
+      index_load2.x = index2.y;
+      SetNodeView(index_load2, af::DT_INT32, output_axes, output_repeats, output_strides);
+    }
     af::ascir_op::IndirectLoad indirect_load2("dual_indirect_load2");
     indirect_load2.x1 = input_load2.y;
-    indirect_load2.x2 = index_load2.y;
+    indirect_load2.x2 = options.shared_index_with_mask ? shared_mul.y : index_load2.y;
     indirect_load2.ir_attr.SetAxis(1);
     SetNodeView(indirect_load2, value0_dtype, output_axes, output_repeats, output_strides);
     af::ascir_op::Add merge_add2("dual_merge_add2");
@@ -4398,6 +4469,249 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimtScoresAboveSimdWhenDynamicInputG
   EXPECT_GT(ParseScore(score_functions[2]), ParseScore(score_functions[0]));
 }
 
+// ============================================================================
+// 多 gather 融合修复复现用例
+// ============================================================================
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSharedIndexMaskChainSimtNotRejected) {
+  // Bug 1 复现：双 gather 共享 index Load，IL_0（primary）经掩码链（Ne/Select/Mul）消费，
+  // IL_1（non-primary）经 Broadcast 展开。共享 Load 的跨成员消费者（另一成员链上的
+  // Broadcast）在 group_exempt 豁免下不再被 FoldSimtIndexChainExternalStores 判为
+  // unsupported external consumer → 全组 SIMT 候选不被该检查拒绝。
+  // 掩码链 SIMT 标量求值依赖 V2 codegen 实现（Ne/Select/Broadcast 的 IsSimtScalarSupported
+  // 仅注册于 soc 3510/5102/9201/9202），显式设平台避免依赖前序用例的环境残留。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  DualGatherGraphOptions options;
+  options.shared_index_with_mask = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  bool has_simt = false;
+  for (const auto &candidate : graphs) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    if (il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt) {
+      has_simt = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(has_simt) << "SIMT candidate should not be rejected for shared index Load with cross-member consumers";
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSimdIndexInnerAxisHintForNonPrimary) {
+  // Bug 2 复现：primary（indirect_load0）的 index 为掩码链 → index_inner_axis=kIdNone；
+  // 非 primary 成员（indirect_load1，Broadcast index）的 kSimdIndexPre 节点需要有效轴。
+  // 修复后（per-node hint）→ 非 primary 成员的 index-pre 节点 hint=有效轴。
+  // 掩码链 SIMT 标量求值依赖 V2 codegen 实现，显式设平台（同 t1 注释）。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  DualGatherGraphOptions options;
+  options.shared_index_with_mask = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_FALSE(graphs.empty());
+  // 找到 SIMD 候选，硬断言共享 index Load 的角色和 hint（按值持有节点，避免循环体内
+  // 局部变量出作用域后悬垂）。
+  af::AscNodePtr target_load;
+  af::AscNodePtr target_il;
+  for (const auto &candidate : graphs) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    if (il0 == nullptr || ascir::GetTemplateIdOrDefault(*il0) != ascir::TemplateId::kIndirectLoadSimd) {
+      continue;
+    }
+    const auto shared_load = candidate.FindNode("dual_shared_index_load");
+    if (shared_load != nullptr) {
+      target_load = shared_load;
+      target_il = il0;
+      break;
+    }
+  }
+  ASSERT_NE(target_load, nullptr) << "SIMD candidate should contain dual_shared_index_load";
+  ASSERT_NE(target_il, nullptr) << "SIMD candidate should contain dual_indirect_load0";
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateRole(target_load),
+            ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre)
+      << "Shared index Load should have kSimdIndexPre role";
+  const auto hint = ascgen_utils::indirect_load::GetSimdIndexInnerAxis(target_load);
+  ASSERT_NE(hint, af::kIdNone) << "Index-pre node hint must be valid for non-primary member";
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSharedIndexChainSkipsMixedTemplateCandidate) {
+  // 检视结论固定（ApplyGraphPassMixed 不做跨成员豁免）：共享 index 链下，SIMT 探测将
+  // 共享 Load 的跨成员消费者判为外部而自然失败 → 成员结构强制回 SIMD → 全组同构 →
+  // 不产出混模板候选（kSimdIndexPre 与 kSimt* 角色冲突场景无入口）。共模板候选不受
+  // 影响：全组 SIMT 的组路径保留豁免（SharedIndexMaskChainSimtNotRejected），SIMD
+  // 共模板正常产出——两路共模板均在场而 MIXED 缺席，验证的是混模板路径自身的归约。
+  // 掩码链 SIMT 标量求值依赖 V2 codegen 实现，显式设平台（同 t1 注释）。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  DualGatherGraphOptions options;
+  options.shared_index_with_mask = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_FALSE(graphs.empty());
+  bool has_common_simd = false;
+  bool has_common_simt = false;
+  for (const auto &candidate : graphs) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    const auto il1 = candidate.FindNode("dual_indirect_load1");
+    ASSERT_NE(il0, nullptr);
+    ASSERT_NE(il1, nullptr);
+    const auto id0 = ascir::GetTemplateIdOrDefault(*il0);
+    const auto id1 = ascir::GetTemplateIdOrDefault(*il1);
+    EXPECT_EQ(id0, id1) << "Shared index chain must not produce heterogeneous mixed-template candidate";
+    has_common_simd = has_common_simd || id0 == ascir::TemplateId::kIndirectLoadSimd;
+    has_common_simt = has_common_simt || id0 == ascir::TemplateId::kIndirectLoadSimt;
+  }
+  EXPECT_TRUE(has_common_simd);
+  EXPECT_TRUE(has_common_simt);
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSimtGroupCandidateSchedulesLoopAxis) {
+  // 共享 index Load 双 gather 的 SIMT 组候选调度级回归：修复前 SelectLoopAxis 对
+  // IL 成员断言失败（Cannot find loop axis）。根因：CompletePreservedVectorizedViews
+  // 按成员循环调用，primary 的调用把其他成员（kSimtOp，preserves_vectorized_axis=true）
+  // 当普通保留节点播种输出 vectorized_axis；SIMT 组 post_reduce 置空使 outer=全部输出轴
+  // 合并，调度期 tensor merge 将播种轴重映射为 merged outer，SelectLoopAxis 据此把 outer
+  // 塞进 not_loop 集，from 递归过滤掉成员全部调度轴（tile 轴 from={outer}）→ 断言。
+  // 修复后播种跳过全部 IndirectLoad，成员输出 vectorized 保持空（单 gather 不变式），
+  // 调度可完成。掩码链 SIMT 标量求值依赖 V2 codegen 实现，显式设平台（同 t1 注释）。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  DualGatherGraphOptions options;
+  options.shared_index_with_mask = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  // 主管线（OptimizeForHintGraph）由 CompleteApiInfo 补全 api 标注（IL 节点
+  // compute_type=kComputeGather 等）；生成器级 builder 不设置（默认 kComputeInvalid），
+  // 调度级验证前补齐，与主管线输入对齐。
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_FALSE(graphs.empty());
+  size_t simt_index = graphs.size();
+  for (size_t index = 0UL; index < graphs.size(); ++index) {
+    const auto il0 = graphs[index].FindNode("dual_indirect_load0");
+    if (il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt) {
+      simt_index = index;
+      break;
+    }
+  }
+  ASSERT_LT(simt_index, graphs.size()) << "Shared index mask chain should keep the SIMT group candidate";
+  // 不变式硬断言：SIMT 组候选内全部 IL 成员输出 vectorized 视图保持空。
+  for (const char *member_name : {"dual_indirect_load0", "dual_indirect_load1"}) {
+    const auto member = graphs[simt_index].FindNode(member_name);
+    ASSERT_NE(member, nullptr);
+    EXPECT_TRUE(member->outputs()[0]->attr.vectorized_axis.empty())
+        << "IndirectLoad output vectorized view must stay empty for member " << member_name;
+  }
+  // 调度级验证：SIMT 组候选可完成自动调度（修复前在 SelectLoopAxis 断言失败）。
+  std::vector<optimize::autoschedule::AutoScheduleOutput> results;
+  optimize::autoschedule::AutoSchedule autoschedule(graphs[simt_index], results);
+  EXPECT_EQ(autoschedule.DoAutoSchedule(), af::SUCCESS);
+  EXPECT_FALSE(results.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherMixedTemplateSchedulesLoopAxis) {
+  // 混模板候选（L5 兜底）调度级回归：SIMD 成员角色 kNone 不被播种，SIMT 成员
+  // （kSimtOp，preserves_vectorized_axis=true）修复前会被 CompletePreservedVectorizedViews
+  // 播种输出 vectorized_axis——SIMT 成员消 boundary=输出 rank（无 post-Reduce）时 outer
+  // 合并承载全部输出轴，调度期 tensor merge 将播种轴重映射为 merged outer，同样触发
+  // Cannot find loop axis。修复后混模板路径同样跳过全部 IndirectLoad，调度可完成。
+  // 形态与 MultiGatherMixedTemplateFallbackForHeterogeneousMembers 一致：
+  // first_index_illegal_consumer（member0 SIMT 不可行）+ second_value_one_byte
+  // （member1 SIMD 被 dtype 门控拒绝），互补产出唯一 {SIMD, SIMT} 混模板候选。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  DualGatherGraphOptions options;
+  options.first_index_illegal_consumer = true;
+  options.second_value_one_byte = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_EQ(graphs.size(), 1UL);
+  const auto simt_member = graphs[0].FindNode("dual_indirect_load1");
+  const auto simd_member = graphs[0].FindNode("dual_indirect_load0");
+  ASSERT_NE(simt_member, nullptr);
+  ASSERT_NE(simd_member, nullptr);
+  ASSERT_EQ(ascir::GetTemplateIdOrDefault(*simt_member), ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_EQ(ascir::GetTemplateIdOrDefault(*simd_member), ascir::TemplateId::kIndirectLoadSimd);
+  // 不变式：混模板候选内两个 IL 成员输出 vectorized 视图均保持空。
+  EXPECT_TRUE(simt_member->outputs()[0]->attr.vectorized_axis.empty());
+  EXPECT_TRUE(simd_member->outputs()[0]->attr.vectorized_axis.empty());
+  std::vector<optimize::autoschedule::AutoScheduleOutput> results;
+  optimize::autoschedule::AutoSchedule autoschedule(graphs[0], results);
+  EXPECT_EQ(autoschedule.DoAutoSchedule(), af::SUCCESS);
+  EXPECT_FALSE(results.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSharedIndexHintNotClobberedByMaskMember) {
+  // N≥3 hint 覆写回归：共享 index 链节点（dual_shared_index_load）落在多个成员的
+  // index_region 内。成员归一按序执行——IL_1（Broadcast，flag=true）先写有效 hint，
+  // IL_2（掩码链，flag=false）后处理，若无条件写入会把共享 Load 上的有效 hint 覆写为
+  // kIdNone，调度器回退 primary 全局轴（掩码链场景即 kIdNone）复现原始崩溃。
+  // 修复后 kIdNone 不写入（kIdNone hint ≡ 无 hint 回退），有效 hint 得以保留。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  DualGatherGraphOptions options;
+  options.shared_index_with_mask = true;
+  options.third_indirect_load_merged = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_FALSE(graphs.empty());
+  size_t simd_index = graphs.size();
+  for (size_t index = 0UL; index < graphs.size(); ++index) {
+    const auto il0 = graphs[index].FindNode("dual_indirect_load0");
+    if (il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimd) {
+      simd_index = index;
+      break;
+    }
+  }
+  ASSERT_LT(simd_index, graphs.size()) << "Shared index mask chain should keep the SIMD group candidate";
+  const auto shared_load = graphs[simd_index].FindNode("dual_shared_index_load");
+  ASSERT_NE(shared_load, nullptr);
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateRole(shared_load),
+            ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre);
+  // 硬断言：Broadcast 成员（IL_1）写的有效 hint 不被掩码链成员（IL_2，后处理）覆写。
+  EXPECT_NE(ascgen_utils::indirect_load::GetSimdIndexInnerAxis(shared_load), af::kIdNone);
+}
+
 // embedding+sum 的两种轴序形态：标准（gather 轴在前）与转置（payload 轴在前、
 // gather 轴为尾轴，input 为转置稠密视图 [emb, vocab] strides=[1, emb]）。
 af::AscGraph BuildEmbeddingSumGraph(bool transposed_axis_order) {
@@ -4530,7 +4844,7 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, StandardEmbeddingSumGeneratesCandida
   std::vector<af::AscGraph> graphs;
   std::vector<std::string> score_functions;
   ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
-  EXPECT_FALSE(graphs.empty());
+  ASSERT_FALSE(graphs.empty());
 }
 
 // 转置轴序（gather 轴为尾轴、input 转置稠密视图）：判 kStrided 放行后应恢复生成模板候选。
