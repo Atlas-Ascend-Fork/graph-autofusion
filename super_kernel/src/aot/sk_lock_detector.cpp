@@ -18,7 +18,6 @@
 #include "sk_options_manager.h"
 #include "sk_common.h"
 #include "super_kernel.h"
-#include <functional>
 #include <map>
 
 int64_t LockDetector::deviceRealCubeNum = 0;
@@ -671,104 +670,6 @@ bool LockDetector::CheckWaitResourceBranches(
     }
   }
   return true;
-}
-
-std::vector<const SuperKernelScopeInfo *> LockDetector::CollectWaitScopeCandidates(
-    const std::vector<SuperKernelScopeInfo> &scopes) const {
-  std::vector<const SuperKernelScopeInfo *> candidates;
-  for (const auto &scope : scopes) {
-    const bool hasCheckableWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(), [this](const auto *node) {
-      return node->GetNodeType() == SkNodeType::NODE_WAIT && !ShouldBypassValueWaitDeadlock(*node);
-    });
-    if (scope.GetScopeCoreInfo().IsValid() && hasCheckableWait) {
-      candidates.push_back(&scope);
-    }
-  }
-  std::sort(candidates.begin(), candidates.end(), [](const auto *lhs, const auto *rhs) {
-    return lhs->GetScopeId() < rhs->GetScopeId();
-  });
-  return candidates;
-}
-
-LockDetector::ScopeConcurrentRanges LockDetector::BuildScopeConcurrentRanges() const {
-  ScopeConcurrentRanges ranges;
-  for (const auto &[scopeId, info] : scopeInfos_) {
-    if (info.hasWait) {
-      ranges.emplace(scopeId, CalculateScopeConcurrentRanges(info.memberNodes, scopeId));
-    }
-  }
-  return ranges;
-}
-
-bool LockDetector::CheckSelectedScopeResourceBranches(
-    const std::vector<const SuperKernelScopeInfo *> &selected, const ScopeConcurrentRanges &ranges,
-    uint64_t &riskWaitId, const SuperKernelScopeInfo *&riskScope) {
-  if (selected.size() < 2) {
-    return true;
-  }
-  std::unordered_set<uint16_t> residents;
-  for (const auto *scope : selected) {
-    residents.insert(scope->GetScopeId());
-  }
-  for (const auto *scope : selected) {
-    currentScopeId_ = scope->GetScopeId();
-    const ResourceDemand rootDemand{scope->GetScopeCoreInfo().GetCubeNum(),
-                                    scope->GetScopeCoreInfo().GetVectorNum()};
-    for (const auto *node : scope->GetNodes()) {
-      if (node->GetNodeType() == SkNodeType::NODE_WAIT && !ShouldBypassValueWaitDeadlock(*node) &&
-          !CheckWaitResourceBranches(*node, currentScopeId_, rootDemand, scope->GetNodes(), residents, &ranges)) {
-        riskWaitId = node->GetNodeId();
-        riskScope = scope;
-        SK_LOGI("[ParallelResource] Risk Wait %lu in scope %u; %zu resident scopes", riskWaitId, currentScopeId_,
-                selected.size());
-        for (const auto *resident : selected) {
-          SK_LOGI("[ParallelResource] Resident scope %u: cube=%u, vec=%u", resident->GetScopeId(),
-                  resident->GetScopeCoreInfo().GetCubeNum(), resident->GetScopeCoreInfo().GetVectorNum());
-        }
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-const SuperKernelScopeInfo *LockDetector::CheckParallelScopeResources(const std::vector<SuperKernelScopeInfo> &scopes,
-                                                                     uint64_t &riskWaitId) {
-  riskWaitId = INVALID_TASK_ID;
-  const SuperKernelScopeInfo *riskScope = nullptr;
-  SetScopeInfos(scopes);
-  const auto candidates = CollectWaitScopeCandidates(scopes);
-  const auto ranges = BuildScopeConcurrentRanges();
-  std::vector<const SuperKernelScopeInfo *> selected;
-  ResourceDemand selectedDemand;
-  std::function<bool(size_t)> check = [&](size_t index) {
-    if (index == candidates.size()) {
-      return CheckSelectedScopeResourceBranches(selected, ranges, riskWaitId, riskScope);
-    }
-    if (!check(index + 1)) {
-      return false;
-    }
-    const auto *candidate = candidates[index];
-    for (const auto *scope : selected) {
-      if (!CanRunTogether(scope->GetScopeId(), candidate->GetScopeId(), ranges)) {
-        return true;
-      }
-    }
-    const uint64_t candidateCube = selectedDemand.cube + candidate->GetScopeCoreInfo().GetCubeNum();
-    const uint64_t candidateVec = selectedDemand.vec + candidate->GetScopeCoreInfo().GetVectorNum();
-    if (!HasEnoughDeviceCores(candidateCube, candidateVec, 0, 0)) {
-      return true;
-    }
-    const auto previousDemand = selectedDemand;
-    selectedDemand = {candidateCube, candidateVec};
-    selected.push_back(candidate);
-    const bool safe = check(index + 1);
-    selected.pop_back();
-    selectedDemand = previousDemand;
-    return safe;
-  };
-  (void)check(0);
-  return riskScope;
 }
 
 bool LockDetector::HasDeadlock(SuperKernelBaseNode *curNode, DeadlockSearchState &state) {

@@ -87,8 +87,8 @@ class ScopeVerifyRunner {
     }
 
     SuperKernelOptionsManager opts;
-    if (!RunScopeVerifyDeadlockRefinePass(graph_, opts, scopes_, splitRecords_)) {
-      SK_DLOGE("aclskScopeVerify DeadlockRefinePass failed");
+    if (!RunScopeVerifyPrecheckDeadlockPass(graph_, opts, scopes_, splitRecords_)) {
+      SK_DLOGE("aclskScopeVerify PrecheckDeadlockPass failed");
       return ACL_ERROR_FAILURE;
     }
 

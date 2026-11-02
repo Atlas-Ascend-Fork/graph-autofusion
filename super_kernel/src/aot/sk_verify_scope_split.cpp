@@ -33,11 +33,11 @@ class ScopeVerifyScheModeSplitPass : public ScheModeKernelSplitPass {
   std::vector<ScopeVerifySplitRecord> &splitRecords_;
 };
 
-class ScopeVerifyDeadlockRefinePass : public DeadlockRefinePass {
+class ScopeVerifyPrecheckDeadlockPass : public PrecheckDeadlockPass {
  public:
-  ScopeVerifyDeadlockRefinePass(SuperKernelGraph &inputGraph, SuperKernelOptionsManager &opts,
+  ScopeVerifyPrecheckDeadlockPass(SuperKernelGraph &inputGraph, SuperKernelOptionsManager &opts,
                                 std::vector<ScopeVerifySplitRecord> &splitRecords)
-      : DeadlockRefinePass(inputGraph, opts), splitRecords_(splitRecords) {}
+      : PrecheckDeadlockPass(inputGraph, opts), splitRecords_(splitRecords) {}
 
  protected:
   void RecordDeadlockSplitResult(SuperKernelBaseNode *deadlockNode, SuperKernelBaseNode *deadlockWaitNode) override {
@@ -61,9 +61,9 @@ bool RunScopeVerifyScheModeSplitPass(SuperKernelGraph &graph, std::vector<SuperK
   return scheModePass.Run(scopes);
 }
 
-bool RunScopeVerifyDeadlockRefinePass(SuperKernelGraph &graph, SuperKernelOptionsManager &opts,
+bool RunScopeVerifyPrecheckDeadlockPass(SuperKernelGraph &graph, SuperKernelOptionsManager &opts,
                                       std::vector<SuperKernelScopeInfo> &scopes,
                                       std::vector<ScopeVerifySplitRecord> &splitRecords) {
-  ScopeVerifyDeadlockRefinePass deadlockPass(graph, opts, splitRecords);
+  ScopeVerifyPrecheckDeadlockPass deadlockPass(graph, opts, splitRecords);
   return deadlockPass.Run(scopes);
 }

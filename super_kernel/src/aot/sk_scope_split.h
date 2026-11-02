@@ -43,6 +43,7 @@
 #include "sk_graph.h"
 #include "sk_log.h"
 #include "sk_lock_detector.h"
+#include "sk_scope_deadlock_detector.h"
 #include "sk_options_manager.h"
 #include "sk_scope_info.h"
 #include "sk_scope_split_result_reporter.h"
@@ -402,7 +403,7 @@ enum class ScopeProcessResult {
 class ParallelResourceDeadlockCheckPass : public ScopeSplitPass {
  public:
   ParallelResourceDeadlockCheckPass(SuperKernelGraph &inputGraph, const SuperKernelOptionsManager &opts)
-      : ScopeSplitPass(inputGraph), parallelLockDetector_(inputGraph, opts) {}
+      : ScopeSplitPass(inputGraph), scopeLockDetector_(inputGraph, opts) {}
 
   bool Run(std::vector<SuperKernelScopeInfo> &scopes) override;
   std::string GetName() const override {
@@ -412,11 +413,11 @@ class ParallelResourceDeadlockCheckPass : public ScopeSplitPass {
  private:
   void SplitScopeAtRiskWait(SuperKernelScopeInfo &scope, SuperKernelBaseNode &waitNode,
                             std::vector<SuperKernelScopeInfo> &splitScopes);
-  LockDetector parallelLockDetector_;
+  ScopeDeadlockDetector scopeLockDetector_;
 };
 
 /*!
- * \class DeadlockRefinePass
+ * \class PrecheckDeadlockPass
  * \brief Pass 2: Detect deadlocks and refine scopes
  *
  * This pass performs fine-grained scope refinement:
@@ -424,14 +425,14 @@ class ParallelResourceDeadlockCheckPass : public ScopeSplitPass {
  * - Splits scopes at Wait nodes that would cause deadlocks
  * - The Wait split point is NOT included in either split scope
  */
-class DeadlockRefinePass : public ScopeSplitPass {
+class PrecheckDeadlockPass : public ScopeSplitPass {
  public:
-  DeadlockRefinePass(SuperKernelGraph &inputGraph, SuperKernelOptionsManager &opts);
-  ~DeadlockRefinePass() = default;
+  PrecheckDeadlockPass(SuperKernelGraph &inputGraph, SuperKernelOptionsManager &opts);
+  ~PrecheckDeadlockPass() = default;
 
   bool Run(std::vector<SuperKernelScopeInfo> &scopes) override;
   std::string GetName() const override {
-    return "DeadlockRefinePass";
+    return "PrecheckDeadlockPass";
   }
 
  protected:

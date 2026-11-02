@@ -27,6 +27,7 @@
 #include "sk_log.h"
 #include "sk_options_manager.h"
 #include "sk_lock_detector.h"
+#include "sk_scope_deadlock_detector.h"
 #include "sk_scope_split.h"
 
 class TestLockDetector : public ::testing::Test {
@@ -35,6 +36,7 @@ class TestLockDetector : public ::testing::Test {
     opts = std::make_unique<SuperKernelOptionsManager>();
     graph = std::make_unique<SuperKernelGraph>();
     lockDetector = std::make_unique<LockDetector>(*graph, *opts);
+    scopeDetector = std::make_unique<ScopeDeadlockDetector>(*graph, *opts);
     lockDetector->Reset();
     // Initialize device core numbers for LockDetector
     LockDetector::GetDeviceCores();
@@ -49,6 +51,7 @@ class TestLockDetector : public ::testing::Test {
 
   void TearDown() override {
     lockDetector->Reset();
+    scopeDetector.reset();
     graph.reset();
   }
 
@@ -310,6 +313,7 @@ class TestLockDetector : public ::testing::Test {
   std::unique_ptr<SuperKernelGraph> graph;
   std::unique_ptr<SuperKernelOptionsManager> opts;
   std::unique_ptr<LockDetector> lockDetector;
+  std::unique_ptr<ScopeDeadlockDetector> scopeDetector;
 };
 
 // Test 1: one stream, kernel node (after wait node) exceeds max sk cube/vec num
@@ -1452,7 +1456,7 @@ TEST_F(TestLockDetector, SKRangeIsTrackedIndependentlyPerStream) {
     EXPECT_EQ(lockDetector->depOpCubeNum, 4U) << waitId;
   }
   uint64_t riskWaitId = INVALID_TASK_ID;
-  const auto *riskScope = lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  const auto *riskScope = scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, 156U);
   EXPECT_EQ(riskScope, &scopes[1]);
 
@@ -1471,7 +1475,7 @@ TEST_F(TestLockDetector, SKRangeIsTrackedIndependentlyPerStream) {
   graph->GetNodeById(157)->SetIsFusible(false);
 
   riskWaitId = INVALID_TASK_ID;
-  const auto *nextRiskScope = lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  const auto *nextRiskScope = scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, INVALID_TASK_ID);
   EXPECT_EQ(nextRiskScope, nullptr);
   LockDetector::deviceRealCubeNum = savedDeviceCubeNum;
@@ -1649,7 +1653,7 @@ TEST_F(TestLockDetector, DependencyEq2SingleStreamWaitScopes) {
   SetScopeMembers(scopes[1], {22, 23, 24});
   EXPECT_TRUE(CanScopesOverlap(scopes));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, INVALID_TASK_ID);
 }
 
@@ -1670,7 +1674,7 @@ TEST_F(TestLockDetector, DependencyEq3MultiStreamProducerScope) {
   SetScopeMembers(scopes[1], {32, 33, 34});
   EXPECT_TRUE(CanScopesOverlap(scopes));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, INVALID_TASK_ID);
 }
 
@@ -1699,7 +1703,7 @@ TEST_F(TestLockDetector, DependencyEq4ThreeWaitScopesInDependencyChain) {
       {{firstId, lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), firstId)},
        {secondId, lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), secondId)}}));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -1719,7 +1723,7 @@ TEST_F(TestLockDetector, DependencyEq5KernelsBetweenWaitScopes) {
   SetScopeMembers(scopes[1], {22, 23, 24});
   EXPECT_TRUE(CanScopesOverlap(scopes));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -1740,7 +1744,7 @@ TEST_F(TestLockDetector, DependencyEq6MultiStreamScopePrecedesExternalKernels) {
   SetScopeMembers(scopes[1], {31, 32, 33});
   EXPECT_TRUE(CanScopesOverlap(scopes));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -1770,7 +1774,7 @@ TEST_F(TestLockDetector, DependencyEq7SharedNotifyAcrossWaitScopes) {
       {{firstId, lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), firstId)},
        {secondId, lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), secondId)}}));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -1792,7 +1796,7 @@ TEST_F(TestLockDetector, DependencyEq8IndependentNotifyBranches) {
   SetScopeMembers(scopes[1], {30, 31, 32});
   EXPECT_TRUE(CanScopesOverlap(scopes));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -1860,7 +1864,7 @@ TEST_F(TestLockDetector, DependencyEq10WaitFreeProducerCannotStartWithBothWaitSc
   const auto savedCores = LockDetector::deviceRealCubeNum;
   LockDetector::deviceRealCubeNum = 32;
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, 11U);
   LockDetector::deviceRealCubeNum = savedCores;
 }
@@ -1882,7 +1886,7 @@ TEST_F(TestLockDetector, DependencyEq11SameStreamWaitScopesCannotOverlap) {
   SetScopeMembers(scopes[1], {13, 14, 15});
   EXPECT_FALSE(CanScopesOverlap(scopes));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, INVALID_TASK_ID);
 }
 
@@ -1914,7 +1918,7 @@ TEST_F(TestLockDetector, DependencyEq12TwoWaitScopesLeaveOneCoreForProducer) {
   const auto savedCores = LockDetector::deviceRealCubeNum;
   LockDetector::deviceRealCubeNum = 32;
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   LockDetector::deviceRealCubeNum = savedCores;
 }
 
@@ -1948,7 +1952,7 @@ TEST_F(TestLockDetector, DependencyEq13UnrelatedWaitFreeScopeDoesNotBlockNotify)
   EXPECT_TRUE(lockDetector->IsFusible(*graph->GetNodeById(10)));
   EXPECT_TRUE(lockDetector->IsFusible(*graph->GetNodeById(11)));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   LockDetector::deviceRealCubeNum = savedCores;
 }
 
@@ -2005,7 +2009,7 @@ TEST_F(TestLockDetector, DependencyEq15MultiStreamScopesShareOneStream) {
   SetScopeMembers(scopes[1], {13, 14, 15, 16, 31, 32});
   EXPECT_FALSE(CanScopesOverlap(scopes));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -2039,7 +2043,7 @@ TEST_F(TestLockDetector, DependencyEq16SharedStreamPreventsProducerScopeCombinat
   EXPECT_FALSE(lockDetector->CanRunTogether(producerId, waitId, ranges));
   EXPECT_EQ(ranges.at(rootId).at(0).firstNodeId, 42U);
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -2072,7 +2076,7 @@ TEST_F(TestLockDetector, DependencyEq16Change1ExtraEventMovesProducerTail) {
   const auto rootConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(rootConcurrentRange.at(0).firstNodeId, 42U);
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -2107,7 +2111,7 @@ TEST_F(TestLockDetector, DependencyEq16Change2ThirdWaitScope) {
   EXPECT_TRUE(lockDetector->CanRunTogether(rootId, thirdId, ranges));
   EXPECT_EQ(ranges.at(rootId).at(0).firstNodeId, 42U);
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
 }
 
 /*
@@ -2142,7 +2146,7 @@ TEST_F(TestLockDetector, DependencyEq19IndependentWaitScopesExhaustCores) {
   const auto savedCores = LockDetector::deviceRealCubeNum;
   LockDetector::deviceRealCubeNum = 32;
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, 2U);
   LockDetector::deviceRealCubeNum = savedCores;
 }
@@ -2182,7 +2186,7 @@ TEST_F(TestLockDetector, DependencyEq20WaitFreeProducerCanReleaseCores) {
   const auto savedCores = LockDetector::deviceRealCubeNum;
   LockDetector::deviceRealCubeNum = 32;
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, INVALID_TASK_ID);
   LockDetector::deviceRealCubeNum = savedCores;
 }
@@ -2679,7 +2683,7 @@ TEST_F(TestLockDetector, IndependentWaitScopesCanStarveExternalKernelTogether) {
   const auto savedCores = LockDetector::deviceRealCubeNum;
   LockDetector::deviceRealCubeNum = 10;
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, 2U);
   LockDetector::deviceRealCubeNum = savedCores;
 }
@@ -2901,7 +2905,7 @@ TEST_F(TestLockDetector, ParallelResourcePassSplitsAtRiskWait) {
   EXPECT_EQ(riskWait->GetFusionFailReason(), FusionFailReason::EXIST_DEADLOCK);
 }
 
-TEST_F(TestLockDetector, ParallelResourcePassRechecksScopeAfterRiskWait) {
+TEST_F(TestLockDetector, ParallelResourcePassSplitsLaterWaitsAfterRiskWait) {
   // ======================= graph =======================
   /*
   stream0: [k1 -> w2 -> k3 -> w4 -> k5]
@@ -2932,15 +2936,65 @@ TEST_F(TestLockDetector, ParallelResourcePassRechecksScopeAfterRiskWait) {
 
   ParallelResourceDeadlockCheckPass pass(*graph, *opts);
   ASSERT_TRUE(pass.Run(scopes));
-  ASSERT_EQ(scopes.size(), 3U);
+  ASSERT_EQ(scopes.size(), 4U);
+  EXPECT_EQ(scopes[0].GetNodes().front()->GetNodeId(), 1U);
+  EXPECT_EQ(scopes[1].GetNodes().front()->GetNodeId(), 3U);
+  EXPECT_EQ(scopes[2].GetNodes().front()->GetNodeId(), 5U);
+  EXPECT_EQ(scopes[3].GetNodes().front()->GetNodeId(), 10U);
+  for (const auto waitId : {2U, 4U}) {
+    const auto *wait = graph->GetNodeById(waitId);
+    EXPECT_EQ(wait->GetScopeId(), INVALID_SCOPE_ID);
+    EXPECT_FALSE(wait->IsFusible());
+    EXPECT_EQ(wait->GetFusionFailReason(), FusionFailReason::EXIST_DEADLOCK);
+  }
+}
+
+TEST_F(TestLockDetector, ParallelResourcePassSplitsRiskWaitAndLaterWaits) {
+  // ======================= graph =======================
+  /*
+  stream0: [k1 -> w2 -> k3 -> w4 -> k5 -> w6 -> k7]
+  stream1: [k10 -> w11]
+  stream2: n21
+  stream3: k20 -> n31
+  stream4: n40
+  stream5: n50
+  event21: n21 -> w2
+  event31: n31 -> w4
+  event50: n50 -> w6
+  event40: n40 -> w11
+  */
+  CreateGraphFromStreams({{1, 2, 3, 4, 5, 6, 7}, {10, 11}, {21}, {20, 31}, {40}, {50}},
+                         {{21, {2}}, {31, {4}}, {50, {6}}, {40, {11}}});
+  for (const auto nodeId : {1U, 3U, 5U, 7U}) {
+    auto *node = graph->GetNodeById(nodeId);
+    node->nodeInfos.kernelInfos.numBlocks = 20;
+    node->nodeInfos.kernelInfos.cubeNum = 20;
+  }
+  graph->GetNodeById(10)->nodeInfos.kernelInfos.numBlocks = 10;
+  graph->GetNodeById(10)->nodeInfos.kernelInfos.cubeNum = 10;
+  graph->GetNodeById(20)->nodeInfos.kernelInfos.numBlocks = 4;
+  graph->GetNodeById(20)->nodeInfos.kernelInfos.cubeNum = 4;
+  std::vector<SuperKernelScopeInfo> scopes(2);
+  SetScopeMembers(scopes[0], {1, 2, 3, 4, 5, 6, 7});
+  SetScopeMembers(scopes[1], {10, 11});
+
+  ParallelResourceDeadlockCheckPass pass(*graph, *opts);
+  ASSERT_TRUE(pass.Run(scopes));
+  ASSERT_EQ(scopes.size(), 4U);
   EXPECT_EQ(scopes[0].GetNodes().front()->GetNodeId(), 1U);
   EXPECT_EQ(scopes[0].GetNodes().back()->GetNodeId(), 3U);
-  EXPECT_EQ(scopes[1].GetNodes().front()->GetNodeId(), 5U);
-  EXPECT_EQ(scopes[2].GetNodes().front()->GetNodeId(), 10U);
-  const auto *riskWait = graph->GetNodeById(4);
-  EXPECT_EQ(riskWait->GetScopeId(), INVALID_SCOPE_ID);
-  EXPECT_FALSE(riskWait->IsFusible());
-  EXPECT_EQ(riskWait->GetFusionFailReason(), FusionFailReason::EXIST_DEADLOCK);
+  ASSERT_EQ(scopes[1].GetNodes().size(), 1U);
+  EXPECT_EQ(scopes[1].GetNodes()[0]->GetNodeId(), 5U);
+  ASSERT_EQ(scopes[2].GetNodes().size(), 1U);
+  EXPECT_EQ(scopes[2].GetNodes()[0]->GetNodeId(), 7U);
+  EXPECT_EQ(scopes[3].GetNodes().front()->GetNodeId(), 10U);
+  EXPECT_TRUE(graph->GetNodeById(2)->IsFusible());
+  for (const auto waitId : {4U, 6U}) {
+    const auto *wait = graph->GetNodeById(waitId);
+    EXPECT_EQ(wait->GetScopeId(), INVALID_SCOPE_ID);
+    EXPECT_FALSE(wait->IsFusible());
+    EXPECT_EQ(wait->GetFusionFailReason(), FusionFailReason::EXIST_DEADLOCK);
+  }
 }
 
 TEST_F(TestLockDetector, ThreeWaitScopesOnlyFailWhenAllAreResident) {
@@ -2977,7 +3031,7 @@ TEST_F(TestLockDetector, ThreeWaitScopesOnlyFailWhenAllAreResident) {
   const auto savedCores = LockDetector::deviceRealCubeNum;
   LockDetector::deviceRealCubeNum = 10;
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, 2U);
   LockDetector::deviceRealCubeNum = savedCores;
 }
@@ -3224,7 +3278,7 @@ TEST_F(TestLockDetector, SerializedWaitScopesDoNotFormParallelCombination) {
   EXPECT_FALSE(lockDetector->CanRunTogether(scopes[0].GetScopeId(), scopes[1].GetScopeId(),
                                              {{scopes[0].GetScopeId(), aConcurrentRange}, {scopes[1].GetScopeId(), bConcurrentRange}}));
   uint64_t riskWaitId = INVALID_TASK_ID;
-  lockDetector->CheckParallelScopeResources(scopes, riskWaitId);
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, INVALID_TASK_ID);
   LockDetector::deviceRealCubeNum = savedCores;
 }
