@@ -350,8 +350,11 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
   PrintTaskNodesDetail(reorderedTaskNodes, "reordered task nodes");
 
   const auto &eventNodes = scopeInfo.GetExtInfo().eventNodes;
-  if (!eventNodes.empty() && eventNodes.front()->GetNodeType() == SkNodeType::NODE_RESET) {
-    ConnectStreamTailKernelsToFrontReset(reorderedTaskNodes, eventNodes.front().get());
+  auto frontReset = std::find_if(eventNodes.begin(), eventNodes.end(), [](const auto &eventNode) {
+    return eventNode != nullptr && eventNode->GetNodeType() == SkNodeType::NODE_RESET;
+  });
+  if (frontReset != eventNodes.end()) {
+    ConnectStreamTailKernelsToFrontReset(reorderedTaskNodes, frontReset->get());
   }
 
   std::vector<SuperKernelBaseNode *> tasks = BuildTaskListWithEarlyNotifies(reorderedTaskNodes, eventNodes);
