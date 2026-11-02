@@ -2727,6 +2727,10 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
       ss << "    uint64_t " << SimtRuntimeSizeRegistry::MagicFieldName(i) << ";\n";
       ss << "    uint64_t " << SimtRuntimeSizeRegistry::ShiftFieldName(i) << ";\n";
     }
+    // Policy 对象存入 FusedCtx（向量侧每 tile 构造一次，热循环内只读）。
+    for (size_t k = 0UL; k < member_count; ++k) {
+      ss << "    AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << k << ">::Policy policy" << k << ";\n";
+    }
     ss << "  };\n";
     ss << "  FusedCtx fctx = {\n";
     for (size_t k = 0UL; k < member_count; ++k) {
@@ -2759,6 +2763,11 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
          << SimtRuntimeSizeRegistry::MagicFieldName(i) << ", fctx." << SimtRuntimeSizeRegistry::ShiftFieldName(i)
          << ", static_cast<uint64_t>(fctx." << SimtRuntimeSizeRegistry::FieldName(i) << "));\n";
     }
+    // Policy 每 tile 构造一次，热循环内 FusedEval 只读。
+    for (size_t k = 0UL; k < member_count; ++k) {
+      ss << "  fctx.policy" << k << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << k
+         << ">::MakePolicy(fctx.params" << k << ");\n";
+    }
     // Phase 3：FusedBody。线程档上限 = 位宽感知压力模型档位（schedule 侧按成员元数据
     // offset_width 推得——全 uint32 用 32 位细化常数）与 offset 位宽门槛（64 位封顶
     // 1024，对齐单 gather IndirectLoadUse2048Threads）取小（模型规格见设计文档
@@ -2778,6 +2787,12 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
     // FusedBody 是函数内局部类——C++ 禁止局部类静态数据成员，枚举常量合法且为编译期
     // 常量（API 侧按 FusedBody::kMaxThreadTier 常量消费，语义等价）。
     ss << "    enum : uint32_t { kMaxThreadTier = " << max_thread_tier << "U };\n";
+    // kUsesInputAxis 通过枚举下沉到 FusedBody（局部类禁止 static 数据成员）。
+    for (size_t k = 0; k < member_count; ++k) {
+      ss << "    enum : uint8_t { uses_input_axis" << k
+         << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << k
+         << ">::Policy::kUsesInputAxis ? 1 : 0 };\n";
+    }
     if (merge_info.register_merge) {
       ss << "    struct OutputTargets {";
       for (size_t i = 0; i < merge_chains.size(); ++i) {
@@ -2805,24 +2820,13 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
       }
       ss << " };\n";
     }
-    // [simt 属性链] FusedEval 折叠 per-member index 链与归并树的坐标分解，其中
-    // Simt::UintDiv（__simt_callee__ magic 除法）要求直接调用方同为 simt 上下文
-    // （单 gather 的 Index/Outputs/Store 成员均带 __simt_callee__ __aicore__ 标注，
-    // 共享发射器在单 gather 侧合法）；fused 的 FusedEval/Store 由
-    // IndirectLoadSimtFusedKernel（__simt_vf__）调用，与单 gather 同构标注——
-    // 缺失时裸 static 函数体内的 UintDiv 候选被判不可行（no matching function）。
     ss << "    __simt_callee__ __aicore__ inline static OutputPack FusedEval(OffsetType output_index, "
           "const FusedCtx& context) {\n";
     ss << "      OutputPack out;\n";
     for (size_t k = 0; k < member_count; ++k) {
       ss << "      " << members[k].dtype_name << " value" << k << ";\n";
       ss << "      {\n";
-      ss << "        using Policy" << k << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << k
-         << ">::Policy;\n";
-      ss << "        const Policy" << k << " policy" << k
-         << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << k << ">::MakePolicy(context.params" << k
-         << ");\n";
-      ss << "        const auto addr" << k << " = policy" << k << ".GetAddress(output_index);\n";
+      ss << "        const auto addr" << k << " = context.policy" << k << ".GetAddress(output_index);\n";
       ss << "        const OffsetType index_offset = static_cast<OffsetType>(addr" << k << ".index_offset);\n";
       SimtLoadMetadataMap load_map;
       for (const auto &load : members[k].index_loads) {
@@ -2841,8 +2845,8 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
                      k);
       ss << "        const OffsetType idx" << k << " = static_cast<OffsetType>(" << index_result->second << ");\n";
       ss << "        OffsetType input_offset" << k << " = static_cast<OffsetType>(addr" << k << ".input_base);\n";
-      ss << "        if constexpr (Policy" << k << "::kUsesInputAxis) {\n";
-      ss << "          input_offset" << k << " += idx" << k << " * static_cast<OffsetType>(policy" << k
+      ss << "        if constexpr (uses_input_axis" << k << ") {\n";
+      ss << "          input_offset" << k << " += idx" << k << " * static_cast<OffsetType>(context.policy" << k
          << ".input_axis_stride);\n";
       ss << "        }\n";
       ss << "        value" << k << " = context.in" << k << "[input_offset" << k << "];\n";

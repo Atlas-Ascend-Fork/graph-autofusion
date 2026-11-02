@@ -1966,8 +1966,28 @@ TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimtFusedRegisterMergeWithDi
   EXPECT_NE(generated.find("__gm__ half *in1;"), std::string::npos);
   // Store 终端经 OutputTargets 直写 GM（merge_store_names → out0；Store 自身跳过独立发射）。
   EXPECT_NE(generated.find("struct OutputTargets { __gm__ half *out0; };"), std::string::npos);
-  EXPECT_NE(generated.find("static OutputPack FusedEval(OffsetType output_index, const FusedCtx& context)"),
+  // [simt 栈预算] Policy（含 magic/shift）已在向量侧每 tile 构造一次存入 FusedCtx
+  // （走 VF_CALL 参数区/UB 6KB）；热循环内 FusedEval 每元素只读
+  // context.policyK.GetAddress(output_index)——乘移级，零除法零循环。
+  EXPECT_NE(generated.find("AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase0>::Policy policy0;"),
             std::string::npos);
+  EXPECT_NE(generated.find("fctx.policy0 = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase0>::MakePolicy("),
+            std::string::npos);
+  EXPECT_NE(generated.find("context.policy0.GetAddress(output_index)"), std::string::npos);
+  EXPECT_NE(generated.find("__simt_callee__ __aicore__ inline static OutputPack FusedEval(OffsetType output_index, "
+                           "const FusedCtx& context)"),
+            std::string::npos);
+  // [simt 栈预算防回退] MakePolicy 只允许出现在 fctx 构造段（向量侧、每 tile 一次）；
+  // FusedEval 函数体内不得出现 MakePolicy（每元素重算 magic/shift 是 354 的根因）。
+  const auto fctx_pos = generated.find("fctx.policy0 = AscendC::Internal::IndirectLoadSimtCaseSelector");
+  ASSERT_NE(fctx_pos, std::string::npos);
+  const auto fused_eval_pos = generated.find("OutputPack FusedEval(OffsetType output_index, const FusedCtx& context)");
+  ASSERT_NE(fused_eval_pos, std::string::npos);
+  ASSERT_LT(fctx_pos, fused_eval_pos) << "MakePolicy must precede FusedEval (vector-side, per-tile)";
+  const auto eval_body_end = generated.find("__simt_callee__ __aicore__ inline static void Store");
+  ASSERT_NE(eval_body_end, std::string::npos);
+  EXPECT_EQ(generated.substr(fused_eval_pos, eval_body_end - fused_eval_pos).find("MakePolicy"), std::string::npos)
+      << "MakePolicy must NOT appear inside FusedEval body (per-element magic computation is the 354 root cause)";
   // 逐成员 index 链求值 + AddressPolicy 寻址 + GM load（关键寻址表达式）。
   EXPECT_NE(generated.find("value0 = context.in0[input_offset0];"), std::string::npos);
   EXPECT_NE(generated.find("value1 = context.in1[input_offset1];"), std::string::npos);

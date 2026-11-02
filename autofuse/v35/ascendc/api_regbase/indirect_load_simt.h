@@ -203,6 +203,7 @@ struct IndirectLoadSimtStaticInnerPolicy {
   static constexpr bool kUsesInputAxis = true;
   static constexpr bool kEmbedding = false;
 
+  IndirectLoadSimtStaticInnerPolicy() = default;  // 仅供聚合初始化——默认状态无效
   __aicore__ explicit IndirectLoadSimtStaticInnerPolicy(OffsetT output_axis_span) {
     Internal::IndirectLoadGetUintDivMagicAndShift(output_axis_magic, output_axis_shift, output_axis_span);
   }
@@ -225,6 +226,8 @@ struct IndirectLoadSimtStructuredMagicPolicy {
   static constexpr bool kUsesInputAxis = true;
   static constexpr bool kEmbedding = false;
 
+  IndirectLoadSimtStructuredMagicPolicy() =
+      default;  // 默认构造仅供聚合初始化——无效状态，必须被 MakePolicy 覆盖后 VF 侧才读
   __aicore__ explicit IndirectLoadSimtStructuredMagicPolicy(OffsetT inner_span_arg, OffsetT output_axis_span_arg,
                                                             OffsetT input_axis_stride_arg, OffsetT input_axis_span_arg)
       : inner_span(inner_span_arg), input_axis_stride(input_axis_stride_arg), input_axis_span(input_axis_span_arg) {
@@ -260,6 +263,7 @@ struct IndirectLoadSimtEmbeddingPolicy {
   static constexpr bool kUsesInputAxis = true;
   static constexpr bool kEmbedding = Rank == 2 && Axis == 0 && InputStrideMask == 0U && IndexStrideMask == 0U;
 
+  IndirectLoadSimtEmbeddingPolicy() = default;  // 仅供聚合初始化
   template <typename... ShapeArgs>
   __aicore__ explicit IndirectLoadSimtEmbeddingPolicy(ShapeArgs... shape_args)
       : shape{static_cast<OffsetT>(shape_args)...} {
@@ -332,6 +336,7 @@ struct IndirectLoadSimtRecursivePolicy {
   static constexpr bool kUsesInputAxis = true;
   static constexpr bool kEmbedding = false;
 
+  IndirectLoadSimtRecursivePolicy() = default;  // 仅供聚合初始化
   template <typename... ShapeArgs>
   __aicore__ explicit IndirectLoadSimtRecursivePolicy(ShapeArgs... shape_args)
       : shape{static_cast<OffsetT>(shape_args)...} {
@@ -385,6 +390,7 @@ struct IndirectLoadSimtStridedPolicy {
   static constexpr bool kUsesInputAxis = (InputStrideMask & (1ULL << Axis)) != 0U;
   static constexpr bool kEmbedding = false;
 
+  IndirectLoadSimtStridedPolicy() = default;  // 仅供聚合初始化
   template <typename... ShapeArgs>
   __aicore__ explicit IndirectLoadSimtStridedPolicy(ShapeArgs... shape_args)
       : shape{static_cast<OffsetT>(shape_args)...} {
@@ -909,7 +915,8 @@ __aicore__ inline void IndirectLoadSimtMulti(
 }
 
 // [seq-V1] 多 gather 水平融合 fused kernel：单 evaluator、逐路 load + 寄存器归并。
-// FusedBody 由 codegen 生成，Context 包含 N 路 input 指针、N 路 index 链 GM 张量、N 路 AddressPolicy。
+// FusedBody 由 codegen 生成：Context 含 N 路 input 指针 / index 链 GM 张量 / 策略参数 /
+// 完整 Policy 对象（向量侧每 tile 构造一次，VF 侧只读）。
 template <uint32_t ThreadNum, typename FusedBody, typename Context>
 __simt_vf__ __aicore__ LAUNCH_BOUND(ThreadNum) inline void IndirectLoadSimtFusedKernel(
     typename FusedBody::OutputTargets targets, Context context, uint32_t actual_size,
