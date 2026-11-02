@@ -512,7 +512,10 @@ af::Status CodeGen::HandleDeviceCodeGenForCVFusion(CodeGen::Object *self,
   ascir::FusedScheduledResult ub_schedule_result = fused_schedule_result;
   ascir::FusedScheduledResult common_schedule_result = fused_schedule_result;
 
-  GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionUBResult(ub_schedule_result));
+  // Dynamic tiling selects UB or Common at runtime, so both branches must be generated together.
+  if (ascgen_utils::IsFrontendStaticSchedResult(fused_schedule_result)) {
+    GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionUBResult(ub_schedule_result));
+  }
   GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionCommonResult(common_schedule_result));
 
   // 生成UB模板的代码，存在没有UB模板的场景
@@ -578,7 +581,10 @@ af::Status CodeGen::HandleHostCodeGenForCVFusion(CodeGen::Object *self,
   ascir::FusedScheduledResult ub_schedule_result = fused_schedule_result;
   ascir::FusedScheduledResult common_schedule_result = fused_schedule_result;
 
-  GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionUBResult(ub_schedule_result));
+  // Keep the Common cases reachable by the dynamic UB host's runtime fallback.
+  if (ascgen_utils::IsFrontendStaticSchedResult(fused_schedule_result)) {
+    GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionUBResult(ub_schedule_result));
+  }
   GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionCommonResult(common_schedule_result));
 
   // 生成UB模板的代码,存在没有UB模板的场景

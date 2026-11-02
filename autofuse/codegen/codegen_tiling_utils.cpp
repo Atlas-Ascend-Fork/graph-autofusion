@@ -37,9 +37,10 @@ void AppendCvSafetyBlockIdxScheduledModeDef(std::stringstream &ss, bool is_batch
   if (is_batch) {
     for (auto key : {257, 273, 321, 337, 769, 785, 833, 849, 2097409, 2097425, 2097473, 2097489}) {
       ss << "      case " << key << ":" << std::endl;
+      ss << "      case " << (key + 1) << ":" << std::endl;  // Tensor API uses the same block-index scheduling.
     }
+    ss << "        return true;" << std::endl;
   }
-  ss << "        return true;" << std::endl;
   ss << "      default:" << std::endl;
   ss << "        return false;" << std::endl;
   ss << "    }" << std::endl;
@@ -53,6 +54,7 @@ void AppendCvSafetyMixModeDef(std::stringstream &ss, bool is_batch) {
     for (auto key :
          {513, 4097, 4113, 4161, 4177, 8193, 2097409, 2097425, 2097473, 2097489, 2101249, 2101265, 2101313, 2101329}) {
       ss << "      case " << key << ":" << std::endl;
+      ss << "      case " << (key + 1) << ":" << std::endl;
     }
   } else {
     for (auto key : {4097,    4113,    4161,    4177,    8193,    8209,    8257,    8273,    12289,   12305,   12353,
@@ -60,6 +62,7 @@ void AppendCvSafetyMixModeDef(std::stringstream &ss, bool is_batch) {
                      1179665, 1179713, 1179729, 2097153, 2097169, 2097217, 2097233, 2101249, 2101265, 2101313, 2101329,
                      2125825, 2125841, 2125889, 2125905, 2228225, 2228241, 2228289, 2228305}) {
       ss << "      case " << key << ":" << std::endl;
+      ss << "      case " << (key + 1) << ":" << std::endl;
     }
   }
   ss << "        return true;" << std::endl;

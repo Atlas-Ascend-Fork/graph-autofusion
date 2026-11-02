@@ -659,6 +659,7 @@ Status VfCall::GenerateFuncDefinition(const TPipe &tpipe, const Tiler &tiler, st
   //   uint32_t element_count = static_cast<uint32_t>(output_dims_0);
   //   uint16_t loop_times = static_cast<uint16_t>((element_count + ELEMENT_PER_VECTOR_LENGTH - 1) /
   //   ELEMENT_PER_VECTOR_LENGTH);
+  params << GenCvUbFuseFlatLoopParams(tpipe, this->ub_inputs_, this->ub_outputs_, loop_dtype);
   GenerateVfCallLoopParams(tpipe, loop_dtype, stride_depth, merge_info, params);
   root_loop_.SetLoopDtype(loop_dtype);
   GenerateVfCallBodyPreamble(tpipe, tensor_mgr_, root_loop_, this->ub_outputs_, this->ub_inputs_, loop_dtype, vf_body);

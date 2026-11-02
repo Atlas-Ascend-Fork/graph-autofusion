@@ -115,6 +115,20 @@ bool SuccessSocCodegenFunc(const std::string &op_name, const ascir::FusedSchedul
   return true;
 }
 
+bool VectorOnlyCvCodegenFunc(const std::string &op_name, const ascir::FusedScheduledResult &fused_schedule_result,
+                             std::map<std::string, std::string> &options,
+                             std::map<std::string, std::string> &tiling_file_name_to_content, bool is_inductor_scene) {
+  for (const auto &results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &result : results) {
+      EXPECT_EQ(result.schedule_groups.size(), 1U);
+      for (const auto &group : result.schedule_groups) {
+        EXPECT_FALSE(ascgen_utils::IsCubeGroupType(group));
+      }
+    }
+  }
+  return SuccessSocCodegenFunc(op_name, fused_schedule_result, options, tiling_file_name_to_content, is_inductor_scene);
+}
+
 class ScopedSocPlatformState {
  public:
   ScopedSocPlatformState() {
@@ -1284,6 +1298,23 @@ class TestCodegenTiling : public testing::Test, public codegen::TilingLib {
   TestCodegenTiling() : codegen::TilingLib("test", "test") {}
 };
 
+TEST_F(TestCodegenTiling, CvRuntimeShapeMetadataGetsInitializedWithoutAnExtraSolverAxis) {
+  ascir::FusedScheduledResult result;
+  ascir::ScheduleGroup group;
+  group.impl_graphs.emplace_back("vector");
+  group.runtime_shape_vars = {af::Symbol("cube_k")};
+  ascir::ScheduledResult scheduled;
+  scheduled.schedule_groups = {group};
+  result.node_idx_to_scheduled_results = {{scheduled}};
+  std::stringstream code;
+  TilingSetShapeDim(code, "cube_k", result, "tiling->");
+  EXPECT_EQ(code.str(), "  tiling->set_cube_k(cube_k);\n");
+  EXPECT_TRUE(result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0].GetAllAxis().empty());
+  code.str("");
+  TilingSetShapeDim(code, "unused", result, "tiling->");
+  EXPECT_TRUE(code.str().empty());
+}
+
 TEST_F(TestCodegenTiling, DynamicShapeCacheKeyGuardsCapacityAndPreservesSymbolOrder) {
   const auto result = this->GenTilingCode({af::Symbol("s0"), af::Symbol("s1")}, {{"s0", "32"}, {"s1", "64"}});
   const auto &source = result.at("tiling_def_and_tiling_const");
@@ -1350,6 +1381,24 @@ TEST_F(TestCodegenTiling, GenerateTilingAcceptsV2ArchitecturesUnknownSocAndLegac
       EXPECT_TRUE(g_soc_codegen_func_called);
     }
   }
+}
+
+TEST_F(TestCodegenTiling, FrontendDynamicShapeMissingInfoIsRejected) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol(10)});
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("ks0")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
+  fused_schedule_result.node_idx_to_scheduled_results[0][0].cube_type = ascir::CubeTemplateType::kUBFuse;
+
+  const auto result = this->Generate(fused_schedule_result, {}, "", "0");
+  ASSERT_TRUE(result.find(codegen::kTilingDefAndConstIdentify) != result.end());
+  EXPECT_EQ(result.at(codegen::kTilingDefAndConstIdentify), ascgen_utils::INVALID_TILING);
+}
+
+TEST_F(TestCodegenTiling, CubeTilingCopiesIntoTilingDataAddress) {
+  std::stringstream code;
+  this->GenerateTilingCallCode(code, false);
+  EXPECT_NE(code.str().find("std::memset(&tiling_data->matmul_tiling_data,"), std::string::npos);
+  EXPECT_NE(code.str().find("std::memcpy(&tiling_data->matmul_tiling_data,"), std::string::npos);
 }
 
 class RuntimeStubWithFullSocName : public ge::RuntimeStubV2Common {
@@ -1454,6 +1503,22 @@ TEST_F(TestCodegenTiling, PrepareMatMulAttrsShouldUseDefaultOpImplModeForMatMulV
   EXPECT_EQ(attrs[3].name, "opImplMode");
   EXPECT_EQ(attrs[3].dtype, "int");
   EXPECT_EQ(attrs[3].value_int, 0);
+}
+
+TEST_F(TestCodegenTiling, PrepareMatMulAttrsPreservesOffsetX) {
+  for (const bool is_batch : {false, true}) {
+    for (const int64_t offset_x : {0L, 17L, 128L}) {
+      codegen::MatMulCubeInfo cube_info;
+      cube_info.is_batch = is_batch;
+      cube_info.offset_x = offset_x;
+      std::vector<codegen::AttrInfo> attrs;
+      PrepareMatMulAttrs(cube_info, attrs);
+      const auto attr = std::find_if(attrs.begin(), attrs.end(),
+                                     [](const codegen::AttrInfo &item) { return item.name == "offset_x"; });
+      ASSERT_NE(attr, attrs.end());
+      EXPECT_EQ(attr->value_int, offset_x);
+    }
+  }
 }
 
 TEST_F(TestCodegenTiling, SingleGroupWorkspaceSymbolTest) {
@@ -1591,6 +1656,8 @@ TEST_F(TestCodegenTiling, TilingParseShouldReserveUbExceptAscend910And910B) {
   EXPECT_EQ(tiling_impl.find("ascendc_platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950 && "
                              "ub_size % 1024 == 0"),
             std::string::npos);
+  EXPECT_EQ(tiling_impl.find("api_workspace_size"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("GetLibApiWorkSpaceSize"), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, GetWorkspaceSizeGuardsDynamicDenominator) {
@@ -3034,6 +3101,8 @@ TEST_F(TestCodegenTiling, TestMatmulElemwiseFuse) {
   auto res = this->Generate(fused_schedule_result, shape_info, "", "0");
 
   std::fstream tiling_func("Mutmul_fuse_tiling_func.cpp", std::ios::out);
+  EXPECT_EQ(res.at(codegen::kTilingDefAndConstIdentify).find("api_workspace_size"), std::string::npos);
+  EXPECT_EQ(res.at(codegen::kTilingDefAndConstIdentify).find("GetLibApiWorkSpaceSize"), std::string::npos);
   tiling_func << res["tiling_def_and_tiling_const"];
 
   auto pos = res["tiling_def_and_tiling_const"].find("extern \"C\" int64_t FindBestTilingKey");
@@ -3907,10 +3976,88 @@ TEST_F(TestCodegenTiling, TestMatmulElemwiseDynamicShapeFuse) {
 
   auto pos = res["tiling_def_and_tiling_const"].find("TilingResult result = wrapper.DoMatMulTiling(");
   ASSERT_NE(pos, std::string::npos);
+  EXPECT_NE(res["tiling_def_and_tiling_const"].find("std::memcpy(&tiling_data->matmul_tiling_data"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, CvUbFragmentPaddingIsOptInAndPreservesConvAndSourceGraphs) {
+  for (const bool is_conv : {false, true}) {
+    for (const bool allow_fragment_padding : {false, true}) {
+      af::AscGraph vector("vector");
+      vector.CreateAxis("zt", af::Symbol("tile"));
+      vector.GetAllAxis()[0]->type = af::Axis::kAxisTypeTileInner;
+      ascir::ScheduledResult result;
+      result.cube_type = ascir::CubeTemplateType::kUBFuse;
+      ascir::ScheduleGroup vector_group;
+      vector_group.impl_graphs.push_back(vector);
+      result.schedule_groups.push_back(vector_group);
+      if (is_conv) {
+        af::AscGraph cube("conv");
+        af::ascir_op::Conv2D conv("conv");
+        cube.AddNode(conv);
+        conv.attr.api.compute_type = af::ComputeType::kComputeCube;
+        ascir::ScheduleGroup cube_group;
+        cube_group.impl_graphs.push_back(cube);
+        result.schedule_groups.push_back(cube_group);
+      }
+      ascir::FusedScheduledResult fused;
+      fused.node_idx_to_scheduled_results = {{result}};
+      ASSERT_EQ(ascgen_utils::CreateCVFusionResult(fused, allow_fragment_padding), af::SUCCESS);
+      const auto axis = fused.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0].GetAllAxis()[0];
+      EXPECT_EQ(axis->allow_oversize_axis, allow_fragment_padding && !is_conv);
+      EXPECT_FALSE(vector.GetAllAxis()[0]->allow_oversize_axis);
+    }
+  }
+}
+
+TEST_F(TestCodegenTiling, GeDynamicCvPreservesAllUbCandidatesAndCommonBoundary) {
+  af::AscGraph graph("matmul_multi_candidates");
+  CreateMatmulElemwiseDynamicGraph(graph);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  auto &ub = fused.node_idx_to_scheduled_results[0][0];
+  const auto original = ub.schedule_groups[0].impl_graphs[0];
+  ub.schedule_groups[0].impl_graphs.clear();
+  // Candidate identities and buffer policies come from the optimizer order, not their numeric position.
+  size_t candidate = 0U;
+  for (const auto &name : {"y0_non_db", "nddma_non_db", "y0_db", "nddma_db"}) {
+    af::AscGraph impl(name);
+    ASSERT_TRUE(impl.CopyFrom(original));
+    for (const auto &axis : impl.GetAllAxis()) {
+      if (axis->type == af::Axis::kAxisTypeTileInner) {
+        axis->name = "cv_stage_" + std::to_string(candidate % 2U);
+      }
+    }
+    ++candidate;
+    ub.schedule_groups[0].impl_graphs.push_back(impl);
+  }
+  af::AscGraph cube("matmul");
+  CreateMatmulGraph(cube, true);
+  ascir::ScheduleGroup cube_group;
+  cube_group.impl_graphs.push_back(cube);
+  ub.schedule_groups.push_back(cube_group);
+  ub.cube_type = ascir::CubeTemplateType::kUBFuse;
+  auto common = ub;
+  common.cube_type = ascir::CubeTemplateType::kCommon;
+  fused.node_idx_to_scheduled_results[0].push_back(common);
+
+  const auto files = this->Generate(fused, {{"s0", "64"}, {"s1", "64"}}, "", "0");
+  const auto &host = files.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_NE(host.find("const bool non_db_cases[] = {true, true, false, false}"), std::string::npos);
+  EXPECT_NE(host.find("ub_case < 4U"), std::string::npos);
+  EXPECT_NE(host.find("for (size_t i = 4U; i < 8; i++)"), std::string::npos);
+  EXPECT_NE(host.find("get_tiling_key() - 4"), std::string::npos);
+  EXPECT_NE(host.find("ub_mode = (non_db ? 0U : 1U)"), std::string::npos);
+  EXPECT_NE(host.find("GetCvUbStageSize(tiling->tiling_data, ub_case)"), std::string::npos);
+  EXPECT_NE(host.find("case 1U: return data.get_cv_stage_1_size();"), std::string::npos);
+  EXPECT_NE(host.find("case 2U: return data.get_cv_stage_0_size();"), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, CubeTilingUsesAclrtSocName) {
   const auto tiling_code = GenerateMatmulTilingForSoc(std::make_shared<RuntimeStubWithFullSocName>(), "3510");
+  EXPECT_NE(tiling_code.find("uint64_t api_workspace_size;"), std::string::npos);
+  EXPECT_NE(tiling_code.find("GetLibApiWorkSpaceSize()"), std::string::npos);
+  EXPECT_NE(tiling_code.find("parse->api_workspace_size"), std::string::npos);
 
   EXPECT_NE(tiling_code.find("compile_info.soc_version = \"Ascend910_9591\";"), std::string::npos);
 }
@@ -4027,6 +4174,9 @@ TEST_F(TestCodegenTiling, TestConv2dElemwiseFuse) {
 
   const std::map<std::string, std::string> shape_info;
   auto res = this->Generate(fused_schedule_result, shape_info, "", "0");
+  const auto &source = res.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_EQ(source.find("api_workspace_size"), std::string::npos);
+  EXPECT_EQ(source.find("GetLibApiWorkSpaceSize"), std::string::npos);
 
   std::fstream tiling_func("Conv2d_fuse_tiling_func.cpp", std::ios::out);
   tiling_func << res["tiling_def_and_tiling_const"];
@@ -4359,6 +4509,89 @@ TEST_F(TestCodegenTiling, TestBatchMatmulDynamicShapeFuse) {
 
   auto dynamic_pos = res["tiling_def_and_tiling_const"].find("AutofuseIsStaticShape() {\n  return false;");
   ASSERT_NE(dynamic_pos, std::string::npos);
+  EXPECT_NE(res["tiling_def_and_tiling_const"].find("auto ret = ge::GRAPH_SUCCESS;"), std::string::npos);
+  EXPECT_NE(res["tiling_def_and_tiling_const"].find("GetTilingDataSize()\n{\n  return sizeof(CVAutofuseTilingData);"),
+            std::string::npos);
+
+  auto mixed_shape_result = fused_schedule_result;
+  mixed_shape_result.origin_vars = {af::Symbol(1)};
+  mixed_shape_result.frontend_shape_vars = {af::Symbol("batch"), af::Symbol("m"), af::Symbol("n"), af::Symbol("k")};
+  mixed_shape_result.frontend_shape_vars_collected = true;
+  const auto mixed_shape_res = this->Generate(mixed_shape_result, shape_info, "", "0");
+  const auto mixed_dynamic_pos =
+      mixed_shape_res.at("tiling_def_and_tiling_const").find("AutofuseIsStaticShape() {\n  return false;");
+  ASSERT_NE(mixed_dynamic_pos, std::string::npos);
+  EXPECT_NE(mixed_shape_res.at("tiling_def_and_tiling_const").find("CallCubeTiling"), std::string::npos);
+
+  auto common_result = fused_schedule_result;
+  common_result.node_idx_to_scheduled_results[0][0].cube_type = ascir::CubeTemplateType::kCommon;
+  const auto common_res = this->Generate(common_result, shape_info, "", "0");
+  const auto &common_source = common_res.at("tiling_def_and_tiling_const");
+  EXPECT_NE(common_source.find("auto ret = ge::GRAPH_SUCCESS;"), std::string::npos);
+  EXPECT_EQ(common_source.find("tiling_data->cube_ub_stage_size"), std::string::npos);
+  EXPECT_EQ(common_source.find("tiling_data->tiling_data.STAGE_SIZE_NAME"), std::string::npos);
+  EXPECT_NE(common_source.find("tiling_data->cv_tiling_data.fusion_mode = 1;"), std::string::npos);
+  EXPECT_NE(common_source.find("const bool aiv_only = is_cv_safety_aiv_only_mode(cube_tiling_key);"),
+            std::string::npos);
+  EXPECT_NE(common_source.find("launch_block_dim = aiv_only ? block_dim"), std::string::npos);
+  EXPECT_NE(common_source.find("mix_mode = aiv_only ? 2"), std::string::npos);
+  EXPECT_NE(common_source.find("cv_aic_num = is_cv_safety_blockidx_scheduled_mode(cube_tiling_key)"),
+            std::string::npos);
+  EXPECT_EQ(common_source.find("GetCvUbStageSize("), std::string::npos);
+
+  auto workspace_common_result = common_result;
+  af::AscGraph workspace_graph("dynamic_cv_workspace");
+  af::ascir_op::Workspace workspace("workspace");
+  workspace_graph.AddNode(workspace);
+  ascir::ScheduleGroup workspace_group;
+  workspace_group.impl_graphs.push_back(workspace_graph);
+  workspace_common_result.node_idx_to_scheduled_results[0][0].schedule_groups.insert(
+      workspace_common_result.node_idx_to_scheduled_results[0][0].schedule_groups.begin(), workspace_group);
+  const auto workspace_res = this->Generate(workspace_common_result, shape_info, "", "0");
+  EXPECT_NE(workspace_res.at("tiling_def_and_tiling_const").find("context->SetScheduleMode(1);"), std::string::npos);
+
+  const std::map<std::string, std::string> missing_shape_info;
+  const auto missing_shape_res = this->Generate(fused_schedule_result, missing_shape_info, "", "0");
+  ASSERT_TRUE(missing_shape_res.find(codegen::kTilingDefAndConstIdentify) != missing_shape_res.end());
+  EXPECT_EQ(missing_shape_res.at(codegen::kTilingDefAndConstIdentify), ascgen_utils::INVALID_TILING);
+}
+
+TEST_F(TestCodegenTiling, DynamicCvSplitAndCombinedTemplatesPassOnlyVectorGraphsToAtt) {
+  af::AscGraph vector_graph("dynamic_cv_vector");
+  CreateBatchMatmulElemwiseDynamicGraph(vector_graph);
+  af::AscGraph cube_graph("dynamic_cv_cube");
+  CreateBatchMatmulDynamicGraph(cube_graph);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused_result;
+  ASSERT_EQ(optimizer.Optimize(vector_graph, fused_result), af::SUCCESS);
+  ASSERT_EQ(fused_result.node_idx_to_scheduled_results.size(), 1U);
+  ASSERT_EQ(fused_result.node_idx_to_scheduled_results[0].size(), 1U);
+  auto &ub_result = fused_result.node_idx_to_scheduled_results[0][0];
+  ascir::ScheduleGroup cube_group;
+  cube_group.impl_graphs.push_back(cube_graph);
+  ub_result.schedule_groups.push_back(cube_group);
+  ub_result.cube_type = ascir::CubeTemplateType::kUBFuse;
+  auto common_result = ub_result;
+  common_result.cube_type = ascir::CubeTemplateType::kCommon;
+  const std::map<std::string, std::string> shape_info{{"batch", "16"}, {"m", "64"}, {"n", "64"}, {"k", "64"}};
+  codegen_func_ = VectorOnlyCvCodegenFunc;
+
+  for (const bool use_common : {false, true}) {
+    auto split_result = fused_result;
+    if (use_common) {
+      split_result.node_idx_to_scheduled_results[0][0] = common_result;
+    }
+    g_soc_codegen_func_called = false;
+    const auto generated = Generate(split_result, shape_info, "", "0");
+    EXPECT_TRUE(g_soc_codegen_func_called);
+    EXPECT_NE(generated.at(codegen::kTilingDefAndConstIdentify), ascgen_utils::INVALID_TILING);
+  }
+
+  fused_result.node_idx_to_scheduled_results[0].push_back(common_result);
+  g_soc_codegen_func_called = false;
+  const auto generated = Generate(fused_result, shape_info, "", "0");
+  EXPECT_TRUE(g_soc_codegen_func_called);
+  EXPECT_NE(generated.at(codegen::kTilingDefAndConstIdentify), ascgen_utils::INVALID_TILING);
 }
 
 // ==================== Conv2D with Groups 测试 ====================
@@ -5815,6 +6048,8 @@ TEST_F(TestCodegenTiling, CodegenGenerateForInductorCvFusionShouldFallbackToSafe
 
   ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), af::SUCCESS);
 
+  // FP32 B-full-load can use the Tensor CV epilogue; failed UB cases still fall back to Common.
+  EXPECT_NE(result.tiling.find("cube_tiling_key_ub != 0x20002"), std::string::npos);
   EXPECT_EQ(result.tiling.find("if (!optiling::GetTiling(tiling->tiling_data, 1)) {\n      return -1;"),
             std::string::npos);
   const std::string tiling_entry =

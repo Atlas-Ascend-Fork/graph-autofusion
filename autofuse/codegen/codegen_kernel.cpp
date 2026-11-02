@@ -21,6 +21,7 @@
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "common/checker.h"
 #include "api_call/utils/api_call_factory.h"
+#include "api_call/utils/api_call_utils.h"
 #include "ascir_utils.h"
 #include "backend/backend_spec.h"
 #include "graph/symbolizer/symbolic_utils.h"
@@ -128,6 +129,386 @@ std::string GetSingleWorkspaceName(const ascir::ImplGraph &graph) {
     workspace_name = node->GetName();
   }
   return workspace_name;
+}
+
+ascir::TensorId GetCommonBmmWorkspaceTensorId(const std::vector<ascir::ScheduleGroup> &groups) {
+  ascir::TensorId result = af::kIdNone;
+  for (const auto &group : groups) {
+    for (const auto &graph : group.impl_graphs) {
+      if (!ascgen_utils::IsCubeType(graph)) {
+        continue;
+      }
+      if (!ascgen_utils::IsMatMulTypeWithBatch(graph)) {
+        return af::kIdNone;
+      }
+      size_t cube_count = 0U;
+      for (const auto &node : graph.GetAllNodes()) {
+        cube_count += node->attr.api.compute_type == af::ComputeType::kComputeCube ? 1U : 0U;
+      }
+      if (cube_count != 1U) {
+        return af::kIdNone;
+      }
+      const auto workspace_name = GetSingleWorkspaceName(graph);
+      const auto workspace = graph.FindNode(workspace_name.c_str());
+      if (workspace == nullptr || workspace->GetInDataNodesSize() != 1U ||
+          workspace->outputs[0].attr.dtype != ge::DT_FLOAT) {
+        return af::kIdNone;
+      }
+      const auto store = std::dynamic_pointer_cast<af::AscNode>(*workspace->GetInDataNodes().begin());
+      if (store == nullptr || !IsOps<Store>(store) || store->GetInDataNodesSize() != 1U) {
+        return af::kIdNone;
+      }
+      const auto cube = std::dynamic_pointer_cast<af::AscNode>(*store->GetInDataNodes().begin());
+      if (cube == nullptr || cube->attr.api.compute_type != af::ComputeType::kComputeCube) {
+        return af::kIdNone;
+      }
+      const auto id = workspace->outputs[0].attr.mem.tensor_id;
+      if (result != af::kIdNone && result != id) {
+        return af::kIdNone;
+      }
+      result = id;
+    }
+  }
+  return result;
+}
+
+// Only positive products are admitted, so runtime byte counts can be checked
+// before each multiplication. Unknown expressions keep the original copy.
+bool CollectByteSizeFactors(af::Expression expr, std::vector<af::Expression> &factors) {
+  if (!expr.IsValid()) {
+    return false;
+  }
+  int64_t value = 0;
+  if (expr.IsVariableExpr() || (expr.GetConstValue(value) && value > 0)) {
+    factors.push_back(expr);
+    return true;
+  }
+  const auto args = expr.GetArgs();
+  if (args.size() < 2U) {
+    return false;
+  }
+  auto product = af::ops::One;
+  for (const auto &arg : args) {
+    product = af::sym::Mul(product, arg);
+  }
+  if (product == expr) {
+    for (const auto &arg : args) {
+      if (!CollectByteSizeFactors(arg, factors)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  int64_t exponent = 0;
+  if (args.size() == 2U && args[1].GetConstValue(exponent) && exponent > 0 &&
+      exponent <= std::numeric_limits<uint64_t>::digits && af::sym::Pow(args[0], args[1]) == expr) {
+    for (int64_t i = 0; i < exponent; ++i) {
+      if (!CollectByteSizeFactors(args[0], factors)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+bool HasGmByteSpan(const ascir::TensorAttr &tensor, const af::Expression &bytes) {
+  if (tensor.attr.repeats.empty() || tensor.attr.repeats.size() != tensor.attr.strides.size()) {
+    return false;
+  }
+  auto span = af::ops::One;
+  for (size_t i = 0U; i < tensor.attr.repeats.size(); ++i) {
+    std::vector<af::Expression> factors;
+    if (tensor.attr.strides[i] != af::ops::Zero && !CollectByteSizeFactors(tensor.attr.strides[i], factors)) {
+      return false;
+    }
+    span = span + (tensor.attr.repeats[i] - af::ops::One) * tensor.attr.strides[i];
+  }
+  const auto dtype_bytes = af::GetSizeByDataType(tensor.attr.dtype);
+  return dtype_bytes > 0 && (span * af::Symbol(dtype_bytes)).Simplify() == bytes.Simplify();
+}
+
+std::string FindCommonCopyOutput(const ascir::ImplGraph &graph, const std::string &workspace_name,
+                                 std::set<std::pair<std::string, std::string>> &copy_stores) {
+  std::string result;
+  for (const auto &output : graph.GetAllNodes()) {
+    if (!IsOps<Output>(output) || output->GetInDataNodesSize() != 1U) {
+      continue;
+    }
+    const auto store = std::dynamic_pointer_cast<af::AscNode>(*output->GetInDataNodes().begin());
+    if (store == nullptr || !IsOps<Store>(store) || store->GetInDataNodesSize() != 1U ||
+        store->GetOutDataNodesSize() != 1U) {
+      continue;
+    }
+    const auto load = std::dynamic_pointer_cast<af::AscNode>(*store->GetInDataNodes().begin());
+    if (load == nullptr || !IsOps<Load>(load) || load->GetInDataNodesSize() != 1U ||
+        (*load->GetInDataNodes().begin())->GetName() != workspace_name ||
+        load->outputs[0].attr.dtype != store->outputs[0].attr.dtype ||
+        load->outputs[0].attr.axis != store->outputs[0].attr.axis ||
+        load->outputs[0].attr.repeats != store->outputs[0].attr.repeats ||
+        load->outputs[0].attr.strides != store->outputs[0].attr.strides) {
+      continue;
+    }
+    af::Expression offset = af::ops::Zero;
+    af::Expression load_offset = af::ops::Zero;
+    (void)store->attr.ir_attr->GetAttrValue("offset", offset);
+    (void)load->attr.ir_attr->GetAttrValue("offset", load_offset);
+    if (offset != af::ops::Zero || load_offset != af::ops::Zero || !result.empty()) {
+      return "";
+    }
+    result = GenValidName(output->GetName());
+    copy_stores.emplace(graph.GetName(), store->GetName());
+  }
+  return result;
+}
+
+bool ValidateCommonIoViews(const ascir::FusedScheduledResult &fused, const ascir::ImplGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->GetInControlNodesSize() != 0U || node->GetOutControlNodesSize() != 0U) {
+      return false;
+    }
+    if (!IsOps<Data>(node) && !IsOps<Output>(node)) {
+      continue;
+    }
+    int64_t index = -1;
+    if (node->attr.ir_attr->GetAttrValue("index", index) != af::GRAPH_SUCCESS || index < 0) {
+      return false;
+    }
+    const auto &sizes = IsOps<Data>(node) ? fused.gm_tensor_sizes.input_sizes : fused.gm_tensor_sizes.output_sizes;
+    if (static_cast<size_t>(index) >= sizes.size() ||
+        !HasGmByteSpan(IsOps<Data>(node) ? node->outputs[0] : node->inputs[0], sizes[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsDenseCommonView(const ascir::TensorAttr &tensor) {
+  if (tensor.attr.axis.empty() || tensor.attr.axis.size() != tensor.attr.repeats.size() ||
+      tensor.attr.repeats.size() != tensor.attr.strides.size() ||
+      std::set<int64_t>(tensor.attr.axis.begin(), tensor.attr.axis.end()).size() != tensor.attr.axis.size()) {
+    return false;
+  }
+  auto stride = af::ops::One;
+  for (size_t i = tensor.attr.repeats.size(); i > 0U; --i) {
+    const auto &repeat = tensor.attr.repeats[i - 1U];
+    std::vector<af::Expression> factors;
+    // Tiled repeats can contain divisions at any position. Prove density from
+    // the positive strides and their recurrence; validate the full GM span too.
+    const auto &actual_stride = tensor.attr.strides[i - 1U];
+    if (!repeat.IsValid() || (actual_stride != af::ops::Zero && !CollectByteSizeFactors(actual_stride, factors)) ||
+        (repeat != af::ops::One && tensor.attr.strides[i - 1U].Simplify() != stride.Simplify())) {
+      return false;
+    }
+    stride = stride * repeat;
+  }
+  return true;
+}
+
+bool HasDataDependency(const af::NodePtr &node, const af::NodePtr &source) {
+  std::vector<af::NodePtr> pending{node};
+  std::unordered_set<af::NodePtr> visited;
+  while (!pending.empty()) {
+    const auto current = pending.back();
+    pending.pop_back();
+    if (current == source) {
+      return true;
+    }
+    if (visited.insert(current).second) {
+      for (const auto &input : current->GetInDataNodes()) {
+        pending.push_back(input);
+      }
+    }
+  }
+  return false;
+}
+
+bool CanReuseCommonVectorOutput(const af::AscNodePtr &load, const af::AscNodePtr &store) {
+  if (store == nullptr || !IsOps<Store>(store) || store->GetInDataNodesSize() != 1U ||
+      store->GetOutDataNodesSize() != 1U || load->attr.sched.axis.empty() ||
+      load->attr.sched.axis != store->attr.sched.axis || load->attr.sched.loop_axis != store->attr.sched.loop_axis ||
+      load->attr.sched.exec_condition != af::ExecuteCondition::kNoCache ||
+      store->attr.sched.exec_condition != af::ExecuteCondition::kNoCache) {
+    return false;
+  }
+  const auto &reader = load->outputs[0].attr;
+  const auto &writer = store->outputs[0].attr;
+  af::Expression offset = af::ops::Zero;
+  (void)store->attr.ir_attr->GetAttrValue("offset", offset);
+  // One dense Load per tile, followed by a dependent Store to exactly that tile:
+  // no core or later iteration can still need the GM elements being overwritten.
+  return offset == af::ops::Zero && reader.dtype == writer.dtype && reader.axis == writer.axis &&
+         reader.repeats == writer.repeats && reader.strides == writer.strides && HasDataDependency(store, load);
+}
+
+std::string FindCommonVectorOutput(const ascir::FusedScheduledResult &fused, const ascir::ImplGraph &graph,
+                                   const std::string &workspace_name) {
+  const auto workspace = graph.FindNode(workspace_name.c_str());
+  if (workspace == nullptr || workspace->GetOutDataNodesSize() != 1U) {
+    return "";
+  }
+  const auto load = std::dynamic_pointer_cast<af::AscNode>(*workspace->GetOutDataNodes().begin());
+  if (load == nullptr || !IsOps<Load>(load) || !IsDenseCommonView(load->outputs[0])) {
+    return "";
+  }
+  // Keep the existing copy-elimination proof authoritative when a direct copy
+  // exists, including its rejected layouts and multiple-consumer cases.
+  for (const auto &consumer : load->GetOutDataNodes()) {
+    if (consumer->GetType() == Store::Type) {
+      return "";
+    }
+  }
+  for (const auto &fused_output : fused.output_nodes) {
+    const auto output = graph.FindNode(fused_output->GetName().c_str());
+    if (output != nullptr && IsOps<Output>(output) && output->GetInDataNodesSize() == 1U &&
+        CanReuseCommonVectorOutput(load, std::dynamic_pointer_cast<af::AscNode>(*output->GetInDataNodes().begin()))) {
+      return GenValidName(output->GetName());
+    }
+  }
+  return "";
+}
+
+bool CollectCommonOutputReuse(const ascir::FusedScheduledResult &fused, const ascir::ScheduledResult &scheduled,
+                              const std::string &workspace_name, CommonOutputReusePlan &plan) {
+  size_t cube_groups = 0U;
+  for (const auto &group : scheduled.schedule_groups) {
+    if (group.impl_graphs.empty()) {
+      return false;
+    }
+    const bool cube_group = ascgen_utils::IsCubeType(group.impl_graphs[0]);
+    cube_groups += cube_group ? 1U : 0U;
+    if (cube_group && group.impl_graphs.size() != 1U) {
+      return false;
+    }
+    for (const auto &graph : group.impl_graphs) {
+      if (ascgen_utils::IsCubeType(graph) != cube_group || GetSingleWorkspaceName(graph) != workspace_name ||
+          !ValidateCommonIoViews(fused, graph)) {
+        return false;
+      }
+      if (!cube_group) {
+        auto output_name = FindCommonCopyOutput(graph, workspace_name, plan.copy_stores);
+        const bool reuses_vector_output = output_name.empty();
+        if (reuses_vector_output) {
+          output_name = FindCommonVectorOutput(fused, graph, workspace_name);
+        }
+        if (output_name.empty() || (!plan.output_name.empty() && (plan.output_name != output_name ||
+                                                                  plan.reuses_vector_output != reuses_vector_output))) {
+          return false;
+        }
+        plan.output_name = output_name;
+        plan.reuses_vector_output = reuses_vector_output;
+        plan.vector_impl_names.insert(graph.GetName());
+      }
+    }
+  }
+  return cube_groups == 1U && !plan.output_name.empty();
+}
+
+bool HasFullCommonMmWriter(const ascir::ImplGraph &graph, const af::AscNodePtr &workspace,
+                           const af::Expression &bytes) {
+  size_t cube_count = 0U;
+  for (const auto &node : graph.GetAllNodes()) {
+    cube_count += node->attr.api.compute_type == af::ComputeType::kComputeCube ? 1U : 0U;
+  }
+  if (cube_count != 1U || workspace->GetInDataNodesSize() != 1U) {
+    return false;
+  }
+  const auto store = std::dynamic_pointer_cast<af::AscNode>(*workspace->GetInDataNodes().begin());
+  if (store == nullptr || !IsOps<Store>(store) || store->GetInDataNodesSize() != 1U ||
+      !HasGmByteSpan(store->outputs[0], bytes)) {
+    return false;
+  }
+  af::Expression offset = af::ops::Zero;
+  (void)store->attr.ir_attr->GetAttrValue("offset", offset);
+  const auto mm = std::dynamic_pointer_cast<af::AscNode>(*store->GetInDataNodes().begin());
+  return offset == af::ops::Zero && mm != nullptr && mm->attr.api.compute_type == af::ComputeType::kComputeCube &&
+         (mm->GetType() == kMatMul || mm->GetType() == kMatMulBias || mm->GetType() == kBatchMatMul ||
+          mm->GetType() == kBatchMatMulBias);
+}
+
+bool HasFullCommonWorkspaceReaders(const af::AscNodePtr &workspace, const af::Expression &bytes) {
+  size_t loads = 0U;
+  for (const auto &node : workspace->GetOutDataNodes()) {
+    const auto load = std::dynamic_pointer_cast<af::AscNode>(node);
+    af::Expression offset = af::ops::Zero;
+    if (load == nullptr || !IsOps<Load>(load) || load->GetInDataNodesSize() != 1U ||
+        !HasGmByteSpan(load->outputs[0], bytes)) {
+      return false;
+    }
+    (void)load->attr.ir_attr->GetAttrValue("offset", offset);
+    if (offset != af::ops::Zero) {
+      return false;
+    }
+    ++loads;
+  }
+  return loads != 0U;
+}
+
+bool ValidateCommonWorkspaceViews(const ascir::FusedScheduledResult &fused, const ascir::ScheduledResult &scheduled,
+                                  const std::string &workspace_name, const CommonOutputReusePlan &plan) {
+  const auto output = std::find_if(fused.output_nodes.begin(), fused.output_nodes.end(),
+                                   [&](const auto &node) { return GenValidName(node->GetName()) == plan.output_name; });
+  if (output == fused.output_nodes.end()) {
+    return false;
+  }
+  const auto &bytes = fused.gm_tensor_sizes.output_sizes[std::distance(fused.output_nodes.begin(), output)];
+  for (const auto &group : scheduled.schedule_groups) {
+    for (const auto &graph : group.impl_graphs) {
+      const auto workspace = graph.FindNode(workspace_name.c_str());
+      if (workspace == nullptr || workspace->outputs[0].attr.mem.tensor_id != plan.workspace_id ||
+          workspace->outputs[0].attr.dtype != (*output)->inputs[0].attr.dtype || plan.workspace_id == af::kIdNone) {
+        return false;
+      }
+      // Workspace boundary nodes have no shape; check the actual writer and every reader.
+      if (ascgen_utils::IsCubeType(graph) ? !HasFullCommonMmWriter(graph, workspace, bytes)
+                                          : !HasFullCommonWorkspaceReaders(workspace, bytes)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool CollectCommonBufferSizes(const ascir::FusedScheduledResult &fused, CommonOutputReusePlan &plan) {
+  const auto shape_vars = GetFrontendShapeVars(fused);
+  auto append_size = [&](const std::string &name, const af::Expression &size) {
+    std::vector<af::Expression> factors;
+    if (!CollectByteSizeFactors(size, factors)) {
+      return false;
+    }
+    for (const auto &factor : factors) {
+      if (factor.IsVariableExpr() && std::find(shape_vars.begin(), shape_vars.end(), factor) == shape_vars.end()) {
+        return false;
+      }
+    }
+    plan.buffer_sizes.emplace_back(name, std::move(factors));
+    return true;
+  };
+  for (size_t i = 0U; i < fused.output_nodes.size(); ++i) {
+    if (!append_size(GenValidName(fused.output_nodes[i]->GetName()), fused.gm_tensor_sizes.output_sizes[i])) {
+      return false;
+    }
+  }
+  for (size_t i = 0U; i < fused.input_nodes.size(); ++i) {
+    if (!IsOps<ScalarData>(fused.input_nodes[i]) &&
+        !append_size(GenValidName(fused.input_nodes[i]->GetName()), fused.gm_tensor_sizes.input_sizes[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool HasFlatCommonTiling(const ascir::FusedScheduledResult &fused) {
+  if (fused.node_idx_to_scheduled_results.size() != 1U) {
+    return false;
+  }
+  size_t common = 0U;
+  size_t ub = 0U;
+  for (const auto &result : fused.node_idx_to_scheduled_results[0]) {
+    common += result.cube_type == ascir::CubeTemplateType::kCommon ? 1U : 0U;
+    ub += result.cube_type == ascir::CubeTemplateType::kUBFuse ? 1U : 0U;
+  }
+  return common == 1U && ub <= 1U && common + ub == fused.node_idx_to_scheduled_results[0].size();
 }
 
 bool GetSingleConsumerByTensorId(const ascir::ImplGraph &graph, ascir::TensorId tensor_id, af::AscNodePtr &consumer) {
@@ -569,6 +950,65 @@ TQue::TQue(ascir::QueId que_id, ascir::Position pos, std::string &position_name)
       depth(this->name + "_depth"),
       buf_num(this->name + "_buf_num"),
       buf(Type("LocalTensor<uint8_t>"), name + "_buf") {}
+
+TQue::TQue(const TQue &queue, const std::string &queue_name, const std::string &buffer_name)
+    : Variable(queue.type, queue_name),
+      id(queue.id),
+      position(queue.position),
+      merge_scopes(queue.merge_scopes),
+      not_merge_tensors(queue.not_merge_tensors),
+      share_group(queue.share_group),
+      size(queue.size),
+      depth(queue.depth),
+      buf_num(queue.buf_num),
+      buf(queue.buf.type, buffer_name),
+      is_cv_ub_fusion(queue.is_cv_ub_fusion),
+      skip_init_for_simt_direct_gm(queue.skip_init_for_simt_direct_gm),
+      is_bind(queue.is_bind) {}
+
+std::string CommonQueueSplitPlan::QueueAliasName() const {
+  return "q" + std::to_string(queue_id) + "_mm";
+}
+
+std::string CommonQueueSplitPlan::BufferAliasName() const {
+  return QueueAliasName() + "_buf";
+}
+
+bool CommonQueueSplitPlan::UsesMmQueue(const ApiCall &call) const {
+  return std::any_of(call.inputs.begin(), call.inputs.end(),
+                     [this](const ApiTensor *tensor) { return tensor != nullptr && tensor->id == mm_tensor_id; }) ||
+         std::any_of(call.outputs.begin(), call.outputs.end(),
+                     [this](const ApiTensor &tensor) { return tensor.id == mm_tensor_id; });
+}
+
+Status CommonQueueSplitPlan::GenerateQueueInit(const TPipe &tpipe, const TQue &queue, std::string &result) const {
+  const auto *small = tpipe.GetTensor(small_tensor_id);
+  GE_ASSERT_NOTNULL(small);
+  const auto prefix = QueueAliasName();
+  std::stringstream ss;
+  for (const auto &name : ub_containers) {
+    ss << "const uint64_t " << prefix << "_" << name << " = t->" << name << ";\n";
+  }
+  ss << "const uint64_t " << prefix << "_original_ub = " << original_ub_expr << ";\n";
+  ss << "const uint64_t " << prefix << "_small_bytes = KernelUtils::BlkAlign<uint8_t>("
+     << "static_cast<uint64_t>(" << small->size << ") * sizeof(float));\n";
+  ss << "const uint64_t " << prefix << "_extra_bytes = static_cast<uint64_t>(" << queue.buf_num << ") * " << prefix
+     << "_small_bytes;\n";
+  ss << "const bool " << prefix << "_split = " << prefix << "_original_ub <= " << ub_limit << "ULL && " << prefix
+     << "_extra_bytes <= " << ub_limit << "ULL - " << prefix << "_original_ub;\n";
+  const Variable extra(queue.type, prefix + "_storage");
+  ss << extra.Define() << "\nif (" << prefix << "_split) {\n";
+  ss << tpipe << ".InitBuffer(" << queue << ", " << queue.buf_num << ", " << prefix << "_small_bytes);\n";
+  ss << tpipe << ".InitBuffer(" << extra << ", " << queue.buf_num << ", t->q" << queue.id << "_size);\n";
+  ss << "} else {\n";
+  std::string original_init;
+  GE_ASSERT_SUCCESS(tpipe.InitTQueBuffers(queue, original_init));
+  ss << original_init << "\n}\n";
+  ss << "auto &" << prefix << " = " << prefix << "_split ? " << extra << " : " << queue << ";\n";
+  ss << "LocalTensor<uint8_t> " << BufferAliasName() << ";\n";
+  result = ss.str();
+  return af::SUCCESS;
+}
 
 TQue::TQue(ascir::QueId que_id, ascir::Position src_position, const std::string &src_position_name,
            const std::string &dst_position_name)
@@ -1547,7 +1987,12 @@ std::string TPipe::TensorActualSizeCalc(const ascir::TensorId id) const {
   auto &t = *t_ptr;
   if (this->cv_fusion_type != ascir::CubeTemplateType::kUBFuse) {
     ss << t.actual_size.DefineConst(this->tiler.TensorActualSize(t));
+  } else if (this->is_dynamic && !this->is_conv2d) {
+    // CV UB tensors use the current fragment layout, not the original graph axes.
+    const std::string actual_size = t.is_ub_scalar ? "1" : "curAivM * " + GenBlockAlignNExpr(t, "curAivN");
+    ss << t.actual_size.Str() << " = " << actual_size << ";";
   } else {
+    // Static CV and Conv callbacks also update actual_size; preserve their writable member.
     ss << t.actual_size.Str() << " = " << this->tiler.TensorActualSize(t) << ";";
   }
   ss << std::endl;
@@ -1700,7 +2145,11 @@ Status TPipe::LocalTQueAlloc(std::string &result) const {
       ss << que.Define() << std::endl;
     }
     std::string init;
-    GE_CHK_STATUS_RET(this->InitTQueBuffers(que, init), "Codegen init tque buffers failed");
+    if (common_queue_split_plan != nullptr && id == common_queue_split_plan->queue_id) {
+      GE_ASSERT_SUCCESS(common_queue_split_plan->GenerateQueueInit(*this, que, init));
+    } else {
+      GE_CHK_STATUS_RET(this->InitTQueBuffers(que, init), "Codegen init tque buffers failed");
+    }
     ss << init << std::endl;
   }
 
@@ -1946,6 +2395,218 @@ Kernel::Kernel(const std::string &kernel_name)
 
 Kernel::~Kernel() {
   root_loop.Destruct();
+}
+
+std::shared_ptr<const CommonOutputReusePlan> CommonOutputReusePlan::Create(const ascir::FusedScheduledResult &fused,
+                                                                           const ascir::ScheduledResult &scheduled,
+                                                                           bool use_list_tensor) {
+  if (use_list_tensor || scheduled.enable_group_parallel || scheduled.cube_type != ascir::CubeTemplateType::kCommon ||
+      ascgen_utils::IsConv2DFusedScheduled(fused) || scheduled.schedule_groups.size() != 2U ||
+      !HasFlatCommonTiling(fused) || fused.workspace_nodes.size() != 1U ||
+      fused.gm_tensor_sizes.input_sizes.size() != fused.input_nodes.size() ||
+      fused.gm_tensor_sizes.output_sizes.size() != fused.output_nodes.size()) {
+    return nullptr;
+  }
+  auto plan = std::make_shared<CommonOutputReusePlan>();
+  const auto &workspace = fused.workspace_nodes[0];
+  plan->workspace_id = workspace->outputs[0].attr.mem.tensor_id;
+  if (!CollectCommonOutputReuse(fused, scheduled, workspace->GetName(), *plan) ||
+      !ValidateCommonWorkspaceViews(fused, scheduled, workspace->GetName(), *plan) ||
+      !CollectCommonBufferSizes(fused, *plan)) {
+    return nullptr;
+  }
+  if (plan->reuses_vector_output) {
+    for (size_t i = 0U; i < scheduled.schedule_groups.size(); ++i) {
+      if (!GetCommonCvCubeReuseOutputName(scheduled.schedule_groups, i).empty()) {
+        return nullptr;  // Already supported: preserve its original code and selection.
+      }
+    }
+  } else {
+    // Preserve the original copy-elimination eligibility. Vector output reuse
+    // explicitly retains any missing frontend dimensions in the tiling payload.
+    for (const auto &group : scheduled.schedule_groups) {
+      for (const auto &graph : group.impl_graphs) {
+        if (!optimize::L2CacheHintManager::AllExprSymbolsInGraph(fused.gm_tensor_sizes, graph)) {
+          return nullptr;
+        }
+      }
+    }
+  }
+  return plan;
+}
+
+void CommonOutputReusePlan::PreserveShapeVars(const ascir::FusedScheduledResult &source,
+                                              ascir::FusedScheduledResult &vector_result) {
+  std::map<std::string, af::Expression> required;
+  std::set<std::string> vector_names;
+  for (const auto &results : source.node_idx_to_scheduled_results) {
+    for (const auto &result : results) {
+      const auto plan = Create(source, result, false);
+      if (plan == nullptr) {
+        continue;
+      }
+      vector_names.insert(plan->vector_impl_names.begin(), plan->vector_impl_names.end());
+      for (const auto &buffer : plan->buffer_sizes) {
+        for (const auto &factor : buffer.second) {
+          if (factor.IsVariableExpr()) {
+            required.emplace(std::string(factor.Str().get()), factor);
+          }
+        }
+      }
+    }
+  }
+  if (required.empty()) {
+    return;
+  }
+  for (auto &results : vector_result.node_idx_to_scheduled_results) {
+    for (auto &result : results) {
+      for (auto &group : result.schedule_groups) {
+        std::set<std::string> fields;
+        bool selected = false;
+        for (const auto &graph : group.impl_graphs) {
+          selected = selected || vector_names.count(graph.GetName()) != 0U;
+        }
+        if (selected) {
+          // A declared size variable may be unused by the vector axes. Retain every
+          // guard dimension as an input to each template and its tiling cache.
+          for (const auto &var : group.runtime_shape_vars) {
+            fields.insert(std::string(var.Str().get()));
+          }
+          for (const auto &var : required) {
+            if (fields.insert(var.first).second) {
+              group.runtime_shape_vars.push_back(var.second);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+std::string CommonOutputReusePlan::GenerateGuard(const CodegenConfig &config, bool is_dynamic) const {
+  std::stringstream ss;
+  if (config.is_inductor) {
+    ss << "#ifdef INDUCTOR_CONST_TILING_DATA\n"
+          "const auto &cv_output_tiling = kConstTilingData.tiling_data;\n#else\n"
+          "const auto &cv_output_tiling = t.tiling_data;\n#endif\n";
+  } else if (is_dynamic) {
+    ss << "const auto &cv_output_tiling = cv_tiling.tiling_data;\n";
+  } else {
+    ss << "const AutofuseTilingData cv_output_tiling{};\n";
+  }
+  ss << "bool cv_reuse_common_output = cv_output_tiling.workspace" << workspace_id << " == 0U;\n";
+  if (reuses_vector_output) {
+    // The layout proof covers the vector consumer, not a native AIV producer.
+    // Keep MIX results in workspace until their in-place handoff is supported.
+    if (is_dynamic || config.is_inductor) {
+      ss << "cv_reuse_common_output = cv_reuse_common_output && cv_tiling_data.mix_mode == 0U;\n";
+    } else {
+      ss << "#ifdef CV_SAFETY_FUSION_MIX_MODE\ncv_reuse_common_output = false;\n#endif\n";
+    }
+  }
+  size_t output_index = 0U;
+  for (size_t i = 0U; i < buffer_sizes.size(); ++i) {
+    if (buffer_sizes[i].first == output_name) {
+      output_index = i;
+    }
+    const auto bytes = "cv_output_bytes_" + std::to_string(i);
+    ss << "uint32_t " << bytes << " = 1U;\n";
+    for (const auto &factor : buffer_sizes[i].second) {
+      const auto value = factor.IsVariableExpr() ? "cv_output_tiling." + std::string(factor.Str().get())
+                                                 : std::string(factor.Str().get());
+      // A bounded 32-bit product uses a 64-bit intermediate. A full uint64
+      // overflow check may lower to unsupported __multi3 on the device.
+      ss << "if ((" << value << ") > 0 && static_cast<uint64_t>(" << value << ") <= UINT32_MAX && "
+         << "static_cast<uint64_t>(" << bytes << ") * static_cast<uint32_t>(" << value << ") <= UINT32_MAX) { " << bytes
+         << " *= static_cast<uint32_t>(" << value << "); } else { cv_reuse_common_output = false; }\n";
+    }
+    ss << "const uint64_t cv_output_addr_" << i << " = reinterpret_cast<uint64_t>(" << buffer_sizes[i].first << ");\n";
+    ss << "cv_reuse_common_output = cv_reuse_common_output && " << bytes << " <= UINT64_MAX - cv_output_addr_" << i
+       << ";\n";
+  }
+  const auto out_addr = "cv_output_addr_" + std::to_string(output_index);
+  const auto out_size = "cv_output_bytes_" + std::to_string(output_index);
+  ss << "cv_reuse_common_output = cv_reuse_common_output && " << out_addr << " != 0U;\n";
+  for (size_t i = 0U; i < buffer_sizes.size(); ++i) {
+    if (i == output_index) {
+      continue;
+    }
+    const auto addr = "cv_output_addr_" + std::to_string(i);
+    ss << "cv_reuse_common_output = cv_reuse_common_output && " << addr << " != 0U && (" << out_addr << " <= " << addr
+       << " ? " << addr << " - " << out_addr << " >= " << out_size << " : " << out_addr << " - " << addr
+       << " >= cv_output_bytes_" << i << ");\n";
+  }
+  return ss.str();
+}
+
+Status CommonOutputReusePlan::CreateDirectOutputGraph(const ascir::ImplGraph &source, ascir::ImplGraph &target) const {
+  const auto copy = std::find_if(copy_stores.begin(), copy_stores.end(),
+                                 [&](const auto &identity) { return identity.first == source.GetName(); });
+  GE_ASSERT_TRUE(vector_impl_names.count(source.GetName()) == 1U);
+  GE_ASSERT_TRUE(reuses_vector_output || copy != copy_stores.end());
+  GE_ASSERT_TRUE(target.CopyFrom(source));
+  // Keep node handles while removing the copied Store/Output from the private graph.
+  af::AscNodePtr output;
+  af::AscNodePtr gm;
+  for (const auto &node : target.GetAllNodes()) {
+    if (IsOps<Workspace>(node) && node->outputs[0].attr.mem.tensor_id == workspace_id) {
+      gm = node;
+    }
+    if (IsOps<Output>(node) && GenValidName(node->GetName()) == output_name) {
+      output = node;
+    }
+  }
+  GE_ASSERT_NOTNULL(output);
+  GE_ASSERT_NOTNULL(gm);
+  if (!reuses_vector_output) {
+    const auto store = target.FindNode(copy->second.c_str());
+    GE_ASSERT_NOTNULL(store);
+    GE_ASSERT_TRUE(store->GetInDataNodesSize() == 1U);
+    const auto load = std::dynamic_pointer_cast<af::AscNode>(*store->GetInDataNodes().begin());
+    GE_ASSERT_SUCCESS(optimize::ScheduleUtils::RemoveNode(target, output, gm->GetOutDataAnchor(0)));
+    GE_ASSERT_SUCCESS(optimize::ScheduleUtils::RemoveNode(target, store, gm->GetOutDataAnchor(0)));
+    if (load != nullptr && load->GetOutDataNodesSize() == 0U) {
+      GE_ASSERT_SUCCESS(optimize::ScheduleUtils::RemoveNode(target, load, gm->GetOutDataAnchor(0)));
+    }
+  }
+  // VF helper names come from their nodes, not the enclosing implementation name.
+  for (const auto &node : target.GetAllNodes()) {
+    if (IsOps<VectorFunc>(node)) {
+      node->GetOpDesc()->SetName(node->GetName() + "_" + template_semantic::kOutputReuse);
+    }
+  }
+  GE_ASSERT_SUCCESS(SetTemplateSemanticTransform(gm, template_semantic::kOutputReuse));
+  return af::SUCCESS;
+}
+
+Status Kernel::BindWorkspaceInput(ascir::TensorId tensor_id, const std::string &input_name, size_t input_index) {
+  GE_ASSERT_TRUE(!use_list_tensor_ && tpipe.tensors.count(tensor_id) != 0U);
+  GE_ASSERT_TRUE(workspace_tensors.erase(tensor_id) == 1U);
+  const auto offset_name = "workspace" + std::to_string(tensor_id);
+  decltype(workspaces) retained_workspaces;
+  for (const auto &workspace : workspaces) {
+    if (workspace.Str() != offset_name) {
+      retained_workspaces.emplace_back(workspace);
+    }
+  }
+  workspaces.swap(retained_workspaces);
+  // Variables have immutable names/types, so rebuild the private argument lists.
+  decltype(outputs) retained_outputs;
+  decltype(output_tensors) retained_tensors;
+  for (size_t i = 0U; i < outputs.size(); ++i) {
+    if (outputs[i].Str() != input_name) {
+      retained_outputs.emplace_back(outputs[i]);
+      retained_tensors.emplace_back(output_tensors[i]);
+    }
+  }
+  outputs.swap(retained_outputs);
+  output_tensors.swap(retained_tensors);
+  inputs.emplace_back(GM_ADDR(input_name));
+  input_tensors.emplace_back(tensor_id);
+  input_name_to_index_[input_name] = input_index;
+  // This is the former Workspace read: retain its existing cache policy.
+  skip_l2_cache_hint_input_indices_.insert(input_index);
+  return af::SUCCESS;
 }
 
 std::string Kernel::TilingKeyFuncDeclare(const std::string &impl_graph_name, const std::string &tiling_data) const {
@@ -2230,6 +2891,7 @@ Status Kernel::ParseGraph(const ascir::ImplGraph &graph, const ascir::FusedSched
                           Kernel &kernel) {
   // Parse kernel input output
   GE_CHK_STATUS_RET(CheckGraphValidity(graph), "Graph: %s is invalid", graph.GetName().c_str());
+  kernel.tpipe.is_conv2d = ascgen_utils::IsConv2DFusedScheduled(fused_schedule_result);
   std::map<size_t, std::string> input_index_to_name;
   std::map<size_t, std::string> output_index_to_name;
   std::unordered_map<ascir::TensorId, size_t> output_tensorid_to_index;
@@ -2486,6 +3148,7 @@ Status Kernel::Generate(const std::string &impl_graph_name, const std::string &t
   if (ascgen_utils::IsCubeType(graph)) {
     return af::SUCCESS;
   }
+  this->tpipe.PrepareCommonQueueSplitPlan(this->root_loop, graph);
   stringstream ss;
 
   GE_ASSERT_SUCCESS(GenerateSubGraphFuncDef(&(this->root_loop), ss));
@@ -2880,46 +3543,97 @@ Status Kernel::GenSingleGroupKernelWithParseTilingData(const ascir::FusedSchedul
   return af::SUCCESS;
 }
 
+Status Kernel::GenCommonVectorImpl(const ascir::FusedScheduledResult &fused, const ascir::ImplGraph &graph,
+                                   const CodegenConfig &config, size_t index, bool enable_group_parallel,
+                                   bool use_list_tensor, ascir::TensorId cube_output_id,
+                                   const CommonOutputReusePlan *direct_output, const std::string &workspace_override,
+                                   std::stringstream &ss, std::stringstream &calls,
+                                   std::unordered_set<const std::string *> &kernel_files) {
+  Kernel kernel(graph.GetName());
+  kernel.SetUsingAttCalcQBTSizeConfig(config.using_att_calc_qbt_size);
+  kernel.SetUseListTensor(use_list_tensor);
+  kernel.tiler.SetTilingCaseId(index);
+  kernel.tiler.EnableGroupParallel(enable_group_parallel);
+  kernel.tpipe.cv_fusion_type = ascir::CubeTemplateType::kCommon;
+  kernel.tpipe.is_inductor = config.is_inductor;
+  GE_ASSERT_SUCCESS(Kernel::ParseGraph(graph, fused, kernel));
+  kernel.tpipe.cube_output_tensor_id = cube_output_id;
+  if (direct_output != nullptr && !direct_output->reuses_vector_output) {
+    GE_ASSERT_SUCCESS(
+        kernel.BindWorkspaceInput(direct_output->workspace_id, direct_output->output_name, fused.input_nodes.size()));
+  }
+  const bool is_dynamic = !IsFrontendStaticSchedResult(fused) || config.is_inductor;
+  GE_ASSERT_SUCCESS(kernel.GenerateKernelByNode(graph, ss, kernel_files, is_dynamic));
+  std::string result;
+  GE_ASSERT_SUCCESS(kernel.Generate(graph.GetName(), "AutofuseTilingData", result, graph, workspace_override));
+  ss << result;
+  AppendCommonCvVectorTilingFuncCall(kernel, fused, config, graph.GetName(), index, enable_group_parallel, calls);
+  return af::SUCCESS;
+}
+
 Status Kernel::GenCubeCommonFuncForScheduleGroup(const ascir::FusedScheduledResult &fused_schedule_result,
                                                  const size_t graph_id, const size_t common_index,
                                                  const size_t group_index, const CodegenConfig &config,
                                                  std::stringstream &ss, std::stringstream &res_ss,
                                                  const bool use_list_tensor,
                                                  std::unordered_set<const std::string *> &kernel_file_ptr) {
-  const auto &scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[graph_id];
-  const auto &schedule_groups = scheduled_results[common_index].schedule_groups;
-  auto enable_group_parallel = scheduled_results[common_index].enable_group_parallel;
-  ascir::CubeTemplateType cv_fusion_type = scheduled_results[common_index].cube_type;
-  const auto &schedule_graphs = schedule_groups[group_index].impl_graphs;
-  const auto cube_output_override = GetCommonCvCubeReuseOutputName(schedule_groups, group_index);
-  const auto vector_workspace_override = GetCommonCvVectorReuseOutputName(schedule_groups, group_index);
-  GE_ASSERT_TRUE(!schedule_graphs.empty(), "schedule_graphs is empty");
-  for (size_t k = 0U; k < schedule_graphs.size(); k++) {
-    Kernel kernel(schedule_graphs[k].GetName());
+  const auto &scheduled = fused_schedule_result.node_idx_to_scheduled_results[graph_id][common_index];
+  const auto &groups = scheduled.schedule_groups;
+  const auto &graphs = groups[group_index].impl_graphs;
+  const auto plan = CommonOutputReusePlan::Create(fused_schedule_result, scheduled, use_list_tensor);
+  GE_ASSERT_TRUE(!graphs.empty());
+  if (ascgen_utils::IsCubeType(graphs[0])) {
+    Kernel kernel(graphs[0].GetName());
     kernel.SetUsingAttCalcQBTSizeConfig(config.using_att_calc_qbt_size);
     kernel.SetUseListTensor(use_list_tensor);
-    kernel.tiler.SetTilingCaseId(k);
-    kernel.tiler.EnableGroupParallel(enable_group_parallel);
-    kernel.tpipe.cv_fusion_type = cv_fusion_type;
+    kernel.tiler.SetTilingCaseId(0U);
+    kernel.tiler.EnableGroupParallel(scheduled.enable_group_parallel);
+    kernel.tpipe.cv_fusion_type = scheduled.cube_type;
     kernel.tpipe.is_inductor = config.is_inductor;
-    GE_CHK_STATUS_RET(Kernel::ParseGraph(schedule_graphs[k], fused_schedule_result, kernel),
-                      "Codegen parse graph failed");
-    auto is_dynamic = !IsStaticSchedResult(fused_schedule_result) || config.is_inductor;
-    GE_CHK_STATUS_RET(kernel.GenerateKernelByNode(schedule_graphs[k], ss, kernel_file_ptr, is_dynamic),
-                      "Gen api headers failed");
-
-    if (ascgen_utils::IsCubeType(schedule_graphs[k])) {
-      res_ss << kernel.GenCubeCommonTilingSingleFuncCall(schedule_graphs[k], cube_output_override);
-      return af::SUCCESS;
-    } else {
-      std::string tmp;
-      GE_CHK_STATUS_RET(kernel.Generate(schedule_graphs[k].GetName(), "AutofuseTilingData", tmp, schedule_graphs[k],
-                                        vector_workspace_override),
-                        "Codegen generate cv kernel for %s failed", schedule_graphs[k].GetName().c_str());
-      ss << tmp;
-      AppendCommonCvVectorTilingFuncCall(kernel, fused_schedule_result, config, schedule_graphs[k].GetName(), k,
-                                         enable_group_parallel, res_ss);
+    GE_ASSERT_SUCCESS(Kernel::ParseGraph(graphs[0], fused_schedule_result, kernel));
+    const bool is_dynamic = !IsFrontendStaticSchedResult(fused_schedule_result) || config.is_inductor;
+    GE_ASSERT_SUCCESS(kernel.GenerateKernelByNode(graphs[0], ss, kernel_file_ptr, is_dynamic));
+    const auto output = plan == nullptr ? GetCommonCvCubeReuseOutputName(groups, group_index)
+                                        : "(cv_reuse_common_output ? " + plan->output_name + " : workspace)";
+    res_ss << kernel.GenCubeCommonTilingSingleFuncCall(graphs[0], output, is_dynamic);
+    return af::SUCCESS;
+  }
+  std::stringstream original_calls;
+  std::stringstream direct_calls;
+  const auto override_name = plan == nullptr ? GetCommonCvVectorReuseOutputName(groups, group_index) : "";
+  const auto cube_output_id = GetCommonBmmWorkspaceTensorId(groups);
+  for (size_t i = 0U; i < graphs.size(); ++i) {
+    std::unique_ptr<ascir::ImplGraph> direct_graph;
+    if (plan != nullptr) {
+      direct_graph =
+          std::make_unique<ascir::ImplGraph>((graphs[i].GetName() + "_" + template_semantic::kOutputReuse).c_str());
+      GE_ASSERT_SUCCESS(plan->CreateDirectOutputGraph(graphs[i], *direct_graph));
     }
+    GE_ASSERT_SUCCESS(GenCommonVectorImpl(fused_schedule_result, graphs[i], config, i, scheduled.enable_group_parallel,
+                                          use_list_tensor, cube_output_id, nullptr, override_name, ss, original_calls,
+                                          kernel_file_ptr));
+    if (direct_graph != nullptr) {
+      GE_ASSERT_SUCCESS(GenCommonVectorImpl(fused_schedule_result, *direct_graph, config, i,
+                                            scheduled.enable_group_parallel, use_list_tensor, cube_output_id,
+                                            plan.get(), plan->reuses_vector_output ? plan->output_name : "", ss,
+                                            direct_calls, kernel_file_ptr));
+      if (IsLogEnable(GE_MODULE_NAME, DLOG_INFO)) {
+        // The device address guard selects the branch; the ATT candidate keeps its parent name.
+        GELOGI(
+            "[DFX] CV Common templates: graph=%zu result=%zu group=%zu tiling_key=%zu "
+            "implementation=%s fallback_semantic_name=%s reuse_semantic_name=%s selection=runtime_guard",
+            graph_id, common_index, group_index, i, graphs[i].GetName().c_str(),
+            NormalizeTemplateSemanticName(GetTemplateSemanticName(graphs[i])).c_str(),
+            NormalizeTemplateSemanticName(GetTemplateSemanticName(*direct_graph)).c_str());
+      }
+    }
+  }
+  if (plan != nullptr) {
+    res_ss << "if (cv_reuse_common_output) {\n"
+           << direct_calls.str() << "\n} else {\n"
+           << original_calls.str() << "\n}\n";
+  } else {
+    res_ss << original_calls.str();
   }
   return af::SUCCESS;
 }
@@ -3054,7 +3768,15 @@ Status Kernel::GenCubeCommonFuncOfCVFusion(const ascir::FusedScheduledResult &fu
       }
     }
   }
+  const auto output_reuse =
+      CommonOutputReusePlan::Create(fused_schedule_result, scheduled_results[common_index], use_list_tensor);
+  if (output_reuse != nullptr) {
+    ss1 << "{\n" << output_reuse->GenerateGuard(config, is_dynamic);
+  }
   AppendFuncCall(ss1, per_group_func_calls.cbegin(), per_group_func_calls.cend());
+  if (output_reuse != nullptr) {
+    ss1 << "}\n";
+  }
   return af::SUCCESS;
 }
 
@@ -3269,11 +3991,13 @@ Status Kernel::GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fu
     ss1 << "const TILING_DATA_T& gm_tiling_data = t;" << std::endl;
     ss1 << "#endif" << std::endl;
   } else {
-    ss1 << "GET_TILING_DATA_WITH_STRUCT(CVTilingData, cv_tiling_data, gm_tiling_data + "
-           "sizeof(AutofuseTilingData));"
-        << std::endl;
+    const auto tiling_type =
+        IsConv2DFusedScheduled(fused_schedule_result) ? "CVAutofuseTilingData" : "CVVectorTilingData";
+    ss1 << "GET_TILING_DATA_WITH_STRUCT(" << tiling_type << ", cv_tiling, gm_tiling_data);" << std::endl;
+    ss1 << "const auto &cv_tiling_data = cv_tiling.cv_tiling_data;" << std::endl;
   }
-  ss1 << "if constexpr (FUSION_MODE == 0) {" << std::endl;
+  ss1 << (config.is_inductor ? "if constexpr (FUSION_MODE == 0) {" : "if (cv_tiling_data.fusion_mode == 0) {")
+      << std::endl;
   for (size_t graph_id = 0; graph_id < fused_schedule_result.node_idx_to_scheduled_results.size(); graph_id++) {
     auto scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[graph_id];
     uint32_t function_id = kFuncIdBegin;
@@ -3289,6 +4013,8 @@ Status Kernel::GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fu
           ss1 << "#else" << std::endl;
           ss1 << "const CVTilingData &cv_tiling_data = t.cv_tiling_data;" << std::endl;
           ss1 << "#endif" << std::endl;
+        } else {
+          ss1 << "const auto &t = cv_tiling.tiling_data;" << std::endl;
         }
         GE_ASSERT_SUCCESS(GenCubeCommonFuncOfCVFusion(fused_schedule_result, graph_id, i, config, ss, ss1,
                                                       use_list_tensor, kernel_file_ptr, true));
@@ -3297,6 +4023,12 @@ Status Kernel::GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fu
       } else if (cv_fusion_type == ascir::CubeTemplateType::kDefault) {
         ss1 << (i == 0 ? "  if" : " else if ") << "(t." << "graph" << std::to_string(graph_id)
             << "_tiling_key == " << std::to_string(i) << ") {" << std::endl;
+      }
+      if (!config.is_inductor && cv_fusion_type == ascir::CubeTemplateType::kUBFuse &&
+          !IsConv2DFusedScheduled(fused_schedule_result)) {
+        GE_ASSERT_SUCCESS(GenGeDynamicCvUbFuncs(fused_schedule_result, graph_id, i, config, use_list_tensor, ss, ss1,
+                                                kernel_file_ptr));
+        continue;
       }
       std::vector<std::vector<std::string>> per_group_func_calls;
       bool enable_parallel_compile = true;
@@ -3329,7 +4061,8 @@ Status Kernel::GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fu
                 kernel.GenerateVecFuncOfCVFusion(ss, vector_no_db_flag, IsConv2DFusedScheduled(fused_schedule_result),
                                                  true, config.is_inductor),
                 "Gen CV fusion Func failed");
-            GE_CHK_STATUS_RET(kernel.InitCVFusionAddr(ss1, vector_no_db_flag, true, config.is_inductor),
+            GE_CHK_STATUS_RET(kernel.InitCVFusionAddr(ss1, vector_no_db_flag, true, config.is_inductor,
+                                                      IsConv2DFusedScheduled(fused_schedule_result)),
                               "Init CV Fusion Addr failed");
             vector_no_db_flag = false;  // 和schedule约定，不开db的vector在前面
             continue;
@@ -3360,6 +4093,9 @@ Status Kernel::GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fu
         ss1 << "  }";
       }
     }
+    if (!ascgen_utils::IsCubeCommonFusedScheduled(fused_schedule_result)) {
+      ss1 << "}" << std::endl;
+    }
     if (support_parallel_compile) {
       FakeTilingIds(ss, function_id);
     }
@@ -3380,7 +4116,7 @@ int64_t Kernel::GetMaxGroupPerCompileUnit(bool enable_parallel_compile) {
 }
 
 af::Status Kernel::GenCubeCommonTiling(std::stringstream &ss, const bool is_batch, bool is_conv2d, bool is_dynamic,
-                                       bool is_db) const {
+                                       bool is_db, const std::string &callback_name) const {
   if (is_conv2d) {
     // conv2d
     ss << "AscendC::TPipe pipe;" << std::endl;
@@ -3389,19 +4125,9 @@ af::Status Kernel::GenCubeCommonTiling(std::stringstream &ss, const bool is_batc
           "WeightUbTrans, FmapCopyMode, InnerBatch, DisContinuous, BatchOne, NoPad, SmallWeight, SmallKernel>(";
   } else {
     if (is_dynamic) {
-      if (is_db) {
-        if (is_batch) {
-          ss << "  batch_mat_mul_v3_fusion_db<TILING_DATA_T, ";
-        } else {
-          ss << "  mat_mul_v3_fusion_db<TILING_DATA_T, ";
-        }
-      } else {
-        if (is_batch) {
-          ss << "  batch_mat_mul_v3_fusion<TILING_DATA_T, ";
-        } else {
-          ss << "  mat_mul_v3_fusion<TILING_DATA_T, ";
-        }
-      }
+      ss << (is_batch ? "  batch_mat_mul_v3_fusion" : "  mat_mul_v3_fusion");
+      ss << (is_db ? "_db" : "");
+      ss << (tpipe.is_inductor ? "<TILING_DATA_T, " : "<");
     } else {
       if (is_batch) {
         ss << "#ifdef INDUCTOR_TILING_DATA" << std::endl;
@@ -3417,7 +4143,11 @@ af::Status Kernel::GenCubeCommonTiling(std::stringstream &ss, const bool is_batc
         ss << "#endif" << std::endl;
       }
     }
-    ss << "API_LEVEL, A_TRANS, B_TRANS, BATCH_MODEL, MODEL, FULL_LOAD, L0C2OUT_MODEL>(";
+    ss << "API_LEVEL, A_TRANS, B_TRANS, BATCH_MODEL, MODEL, FULL_LOAD, L0C2OUT_MODEL";
+    if (!callback_name.empty()) {
+      ss << ", " << callback_name;
+    }
+    ss << ">(";
   }
   return af::SUCCESS;
 }
@@ -3482,10 +4212,64 @@ CubeTilingOptions GetCubeTilingOptions(const ascir::ImplGraph &impl_graph) {
 }
 }  // namespace
 
-std::string Kernel::GenCubeTilingSingleFuncCall(const CubeTilingOptions &options) const {
+Status Kernel::GenGeDynamicCvUbFuncs(const ascir::FusedScheduledResult &fused_schedule_result, size_t graph_id,
+                                     size_t result_id, const CodegenConfig &config, bool use_list_tensor,
+                                     std::stringstream &ss, std::stringstream &calls,
+                                     std::unordered_set<const std::string *> &kernel_file_ptr) {
+  const auto &groups = fused_schedule_result.node_idx_to_scheduled_results[graph_id][result_id].schedule_groups;
+  const ascir::ImplGraph *cube_graph = nullptr;
+  for (const auto &group : groups) {
+    for (const auto &graph : group.impl_graphs) {
+      if (ascgen_utils::IsCubeType(graph)) {
+        cube_graph = &graph;
+      }
+    }
+  }
+  GE_ASSERT_NOTNULL(cube_graph);
+  Kernel cube(cube_graph->GetName());
+  cube.SetUseListTensor(use_list_tensor);
+  cube.tpipe.cv_fusion_type = ascir::CubeTemplateType::kUBFuse;
+  GE_ASSERT_SUCCESS(Kernel::ParseGraph(*cube_graph, fused_schedule_result, cube));
+  GE_ASSERT_SUCCESS(cube.GenerateKernelByNode(*cube_graph, ss, kernel_file_ptr, true));
+  uint64_t case_id = 0U;
+  for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+    const auto &graphs = groups[group_id].impl_graphs;
+    for (size_t impl_id = 0; impl_id < graphs.size(); ++impl_id) {
+      const auto &graph = graphs[impl_id];
+      if (ascgen_utils::IsCubeType(graph)) {
+        continue;
+      }
+      // The allocator uses the same non_db marker when selecting queue buffer counts.
+      const bool non_db = graph.GetName().find("non_db") != std::string::npos;
+      const std::string callback = "AutoFusionVectorG" + std::to_string(graph_id) + "R" + std::to_string(result_id) +
+                                   "G" + std::to_string(group_id) + "I" + std::to_string(impl_id);
+      Kernel vector(graph.GetName());
+      vector.SetUseListTensor(use_list_tensor);
+      vector.SetUsingAttCalcQBTSizeConfig(config.using_att_calc_qbt_size);
+      vector.tiler.SetTilingCaseId(impl_id);
+      vector.tpipe.cv_fusion_type = ascir::CubeTemplateType::kUBFuse;
+      GE_ASSERT_SUCCESS(Kernel::ParseGraph(graph, fused_schedule_result, vector));
+      GE_ASSERT_SUCCESS(vector.GenerateKernelByNode(graph, ss, kernel_file_ptr, true));
+      GE_ASSERT_SUCCESS(vector.GenerateVecFuncOfCVFusion(ss, non_db, false, true, false, callback));
+      calls << "if (cv_tiling.tiling_data.tiling_key == " << case_id++ << ") {\n";
+      GE_ASSERT_SUCCESS(vector.InitCVFusionAddr(calls, non_db, true, false, false, callback));
+      auto options = GetCubeTilingOptions(*cube_graph);
+      options.is_dynamic = true;
+      options.is_cv_fuse = true;
+      options.is_db = !non_db;
+      calls << cube.GenCubeTilingSingleFuncCall(options, callback);
+      calls << "}\n";
+    }
+  }
+  return af::SUCCESS;
+}
+
+std::string Kernel::GenCubeTilingSingleFuncCall(const CubeTilingOptions &options,
+                                                const std::string &callback_name) const {
   std::stringstream ss;
-  GE_CHK_STATUS(GenCubeCommonTiling(ss, options.is_batch, options.is_conv2d, options.is_dynamic, options.is_db),
-                "GenCubeCommonTilingHead failed");
+  GE_CHK_STATUS(
+      GenCubeCommonTiling(ss, options.is_batch, options.is_conv2d, options.is_dynamic, options.is_db, callback_name),
+      "GenCubeCommonTilingHead failed");
   if (this->use_list_tensor_) {
     ss << kInputTensorDescName << ", " << kOutputTensorDescName << ", ";
   } else {
@@ -3497,6 +4281,9 @@ std::string Kernel::GenCubeTilingSingleFuncCall(const CubeTilingOptions &options
   }
   ss << this->workspace_arg.Str() << ", ";
   ss << "gm_tiling_data";
+  if (options.is_dynamic && !tpipe.is_inductor) {
+    ss << " + __builtin_offsetof(CVAutofuseTilingData, matmul_tiling_data)";
+  }
   if (options.is_cv_fuse) {
     ss << (options.is_dynamic && options.is_db ? ", &CV_FUSION_ADDR_DB" : ", &CV_FUSION_ADDR");
   }
@@ -3505,7 +4292,7 @@ std::string Kernel::GenCubeTilingSingleFuncCall(const CubeTilingOptions &options
 }
 
 std::string Kernel::GenCubeCommonTilingSingleFuncCall(const ascir::ImplGraph &impl_graph,
-                                                      const std::string &output_arg_override) const {
+                                                      const std::string &output_arg_override, bool is_dynamic) const {
   const auto options = GetCubeTilingOptions(impl_graph);
   std::stringstream ss;
   GE_CHK_STATUS(GenCubeCommonTiling(ss, options.is_batch, options.is_conv2d), "GenCubeCommonTilingHead failed");
@@ -3528,7 +4315,11 @@ std::string Kernel::GenCubeCommonTilingSingleFuncCall(const ascir::ImplGraph &im
   }
   ss << this->workspace_arg.Str();
   // cube workspace的位置需要计算 workspace + vector的偏移
-  ss << " + vec_wss, gm_tiling_data);" << std::endl;
+  ss << " + vec_wss, gm_tiling_data";
+  if (is_dynamic && !tpipe.is_inductor) {
+    ss << " + __builtin_offsetof(CVAutofuseTilingData, matmul_tiling_data)";
+  }
+  ss << ");" << std::endl;
   return ss.str();
 }
 
@@ -3538,7 +4329,7 @@ std::string Kernel::GenCubeTilingFuncCall(const ascir::ImplGraph &impl_graph, bo
   std::stringstream ss;
   if (is_dynamic) {
     options.is_cv_fuse = true;
-    ss << "if constexpr (UB_MODE == 0) {" << std::endl;
+    ss << (tpipe.is_inductor ? "if constexpr (UB_MODE == 0) {" : "if (cv_tiling_data.ub_mode == 0) {") << std::endl;
     ss << GenCubeTilingSingleFuncCall(options);
     ss << "} else {" << std::endl;
     options.is_db = true;
@@ -3571,7 +4362,7 @@ Status Kernel::GenKernelFuncByTilingKey(const ascir::FusedScheduledResult &fused
     ss1 << "  ListTensorDesc " << kOutputTensorDescName << "((__gm__ void *)outputs);" << std::endl;
   }
 
-  auto is_dynamic = !IsStaticSchedResult(fused_schedule_result);
+  auto is_dynamic = !IsFrontendStaticSchedResult(fused_schedule_result);
   // cv 兜底模板当前没有区分c、v的tiling_key，默认都走tiling_data解析
   if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) && (config.is_inductor || is_dynamic)) {
     GE_ASSERT_SUCCESS(GenCVKernelFuncWithMulGroup(fused_schedule_result, config, ss, ss1, use_list_tensor));
@@ -3784,6 +4575,7 @@ Status Kernel::GenerateMacro(stringstream &ss) {
 
 Status Kernel::GenerateKernelByNode(const ascir::ImplGraph &graph, stringstream &ss,
                                     std::unordered_set<const std::string *> &kernel_file_ptr, bool is_dynamic) {
+  this->tpipe.is_dynamic = is_dynamic;
   GE_CHK_STATUS_RET(GenerateMacro(ss), "Generate Macro failed");
   std::string npu_arch;
   GE_ASSERT_SUCCESS(ge::PlatformContext::GetInstance().GetCurrentPlatformString(npu_arch));
@@ -4120,7 +4912,7 @@ Status TPipe::BlkTensorAssign(std::string &result) const {
 }
 
 Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_no_db_flag, bool is_conv2d,
-                                         bool is_dynamic, bool is_inductor) {
+                                         bool is_dynamic, bool is_inductor, const std::string &callback_name) {
   this->tpipe.is_inductor = is_inductor;
   std::string tiling_data_type = "AutofuseTilingData";
   if (vector_no_db_flag) {
@@ -4149,19 +4941,11 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
       result << "#ifdef CV_UB_DB" << std::endl;
     }
   }
-  if (is_dynamic && !vector_no_db_flag) {
-    result << R"(
-class AutoFusionVectorDB {
-  public:
-    __aicore__ inline AutoFusionVectorDB() {};
-)" << std::endl;
-  } else {
-    result << R"(
-class AutoFusionVector {
-  public:
-    __aicore__ inline AutoFusionVector() {};
-)" << std::endl;
-  }
+  const std::string vector_class = callback_name.empty()
+                                       ? (is_dynamic && !vector_no_db_flag ? "AutoFusionVectorDB" : "AutoFusionVector")
+                                       : callback_name;
+  result << "class " << vector_class << " {\n  public:\n";
+  result << "    __aicore__ inline " << vector_class << "() {};\n";
 
   result << "    struct Arguments {" << std::endl;
   for (auto &input : this->inputs) {
@@ -4172,12 +4956,12 @@ class AutoFusionVector {
     result << "     " << output.AsArg() << "{nullptr};" << std::endl;
   }
   if (is_dynamic) {
-    if (is_inductor) {
+    if (is_inductor || !is_conv2d) {
       result << "     uint32_t stage_size_name{0};" << std::endl;
       result << "     uint32_t cube_ub_stage_size{0};" << std::endl;
       result << "     uint32_t cube_m_stage_size{0};" << std::endl;
     } else {
-      result << "     const CVAutofuseTilingData *cv_tiling_data{nullptr};" << std::endl;
+      result << "     GM_ADDR cv_tiling_data{nullptr};" << std::endl;
     }
   }
   result << "    };" << std::endl << std::endl;
@@ -4191,12 +4975,12 @@ class AutoFusionVector {
     result << "     " << output.AsArg() << "{nullptr};" << std::endl;
   }
   if (is_dynamic) {
-    if (is_inductor) {
+    if (is_inductor || !is_conv2d) {
       result << "     uint32_t stage_size_name{0};" << std::endl;
       result << "     uint32_t cube_ub_stage_size{0};" << std::endl;
       result << "     uint32_t cube_m_stage_size{0};" << std::endl;
     } else {
-      result << "     const CVAutofuseTilingData *cv_tiling_data{nullptr};" << std::endl;
+      result << "     GM_ADDR cv_tiling_data{nullptr};" << std::endl;
     }
   }
   result << "    };" << std::endl;
@@ -4208,12 +4992,12 @@ class AutoFusionVector {
     result << "    " << output.AsArg() << "{nullptr};" << std::endl;
   }
   if (is_dynamic) {
-    if (is_inductor) {
+    if (is_inductor || !is_conv2d) {
       result << "     uint32_t stage_size_name{0};" << std::endl;
       result << "     uint32_t cube_ub_stage_size{0};" << std::endl;
       result << "     uint32_t cube_m_stage_size{0};" << std::endl;
     } else {
-      result << "     const CVAutofuseTilingData *cv_tiling_data{nullptr};" << std::endl;
+      result << "     GM_ADDR cv_tiling_data{nullptr};" << std::endl;
     }
   }
   result << std::endl;
@@ -4315,6 +5099,11 @@ class AutoFusionVector {
              << std::endl;
       result << "stage_size_type = static_cast<int64_t>(params.cube_m_stage_size);" << std::endl;
       result << "#endif" << std::endl;
+    } else if (is_dynamic) {
+      result << "const uint32_t stage_size_name = params.stage_size_name;" << std::endl;
+      result << "const int32_t basen_basem_align = params.cube_ub_stage_size * sizeof(" << dtype_name << ");"
+             << std::endl;
+      result << "stage_size_type = static_cast<int64_t>(params.cube_m_stage_size);" << std::endl;
     } else {
       result << "GET_TILING_DATA_WITH_STRUCT(MatMulV3BasicTilingData, tmpTilingData, tmpTilingGM);" << std::endl;
       result << "const int32_t ub_align_value = 32;" << std::endl;
@@ -4507,9 +5296,10 @@ class AutoFusionVector {
   return af::SUCCESS;
 }
 
-Status Kernel::InitCVFusionAddr(std::stringstream &result, bool vector_no_db_flag, bool is_dynamic, bool is_inductor) {
+Status Kernel::InitCVFusionAddr(std::stringstream &result, bool vector_no_db_flag, bool is_dynamic, bool is_inductor,
+                                bool is_conv2d, const std::string &callback_name) {
   if (vector_no_db_flag) {
-    result << "  AutoFusionVector::Params CV_FUSION_ADDR;\n";
+    result << "  " << (callback_name.empty() ? "AutoFusionVector" : callback_name) << "::Params CV_FUSION_ADDR;\n";
     if (is_dynamic && is_inductor) {
       result << "  if constexpr (UB_MODE == 0) {" << std::endl;
     }
@@ -4537,12 +5327,19 @@ Status Kernel::InitCVFusionAddr(std::stringstream &result, bool vector_no_db_fla
         result << "#endif" << std::endl;
         result << "  }" << std::endl;
       } else {
-        result << "  CV_FUSION_ADDR.cv_tiling_data = gm_tiling_data;" << std::endl;
+        if (is_conv2d) {
+          result << "  CV_FUSION_ADDR.cv_tiling_data = gm_tiling_data;" << std::endl;
+        } else {
+          result << "  CV_FUSION_ADDR.stage_size_name = cv_tiling.stage_size_name;" << std::endl;
+          result << "  CV_FUSION_ADDR.cube_ub_stage_size = cv_tiling.cube_ub_stage_size;" << std::endl;
+          result << "  CV_FUSION_ADDR.cube_m_stage_size = cv_tiling.cube_m_stage_size;" << std::endl;
+        }
       }
     }
   } else {
     if (is_dynamic) {
-      result << "  AutoFusionVectorDB::Params CV_FUSION_ADDR_DB;\n";
+      result << "  " << (callback_name.empty() ? "AutoFusionVectorDB" : callback_name)
+             << "::Params CV_FUSION_ADDR_DB;\n";
       if (is_inductor) {
         result << "  if constexpr (UB_MODE != 0) {" << std::endl;
       }
@@ -4566,7 +5363,13 @@ Status Kernel::InitCVFusionAddr(std::stringstream &result, bool vector_no_db_fla
         result << "#endif" << std::endl;
         result << "  }" << std::endl;
       } else {
-        result << "  CV_FUSION_ADDR_DB.cv_tiling_data = gm_tiling_data;" << std::endl;
+        if (is_conv2d) {
+          result << "  CV_FUSION_ADDR_DB.cv_tiling_data = gm_tiling_data;" << std::endl;
+        } else {
+          result << "  CV_FUSION_ADDR_DB.stage_size_name = cv_tiling.stage_size_name;" << std::endl;
+          result << "  CV_FUSION_ADDR_DB.cube_ub_stage_size = cv_tiling.cube_ub_stage_size;" << std::endl;
+          result << "  CV_FUSION_ADDR_DB.cube_m_stage_size = cv_tiling.cube_m_stage_size;" << std::endl;
+        }
       }
     }
   }
@@ -4963,61 +5766,87 @@ std::string Kernel::GenKernelFuncCallForInductor(const ascir::FusedScheduledResu
             "BATCH_ITER_MODEL == 0) {"
          << std::endl;
       ss << "    _DISPATCH_BATCH_MATMUL(0, 0, 0, 0, 0, BatchMatMulV3TilingData);" << std::endl;
-      // 分支2: BASIC_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, FOR_BATCH
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 0) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 0, 0, 0, 0, BatchMatMulV3BasicTilingData);" << std::endl;
-      // 分支3: BASIC_LEVEL, BASIC, A_FULL_LOAD, ON_THE_FLY, FOR_BATCH
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 0 && BATCH_FULL_LOAD == 1 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 0) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 0, 1, 0, 0, BatchMatMulV3BasicTilingData);" << std::endl;
-      // 分支4: BASIC_LEVEL, BASIC, B_FULL_LOAD, ON_THE_FLY, FOR_BATCH
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 0 && BATCH_FULL_LOAD == 2 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 0) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 0, 2, 0, 0, BatchMatMulV3BasicTilingData);" << std::endl;
-      // 分支5: BASIC_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, ITER_BATCH_SINGLE_BIAS
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 1) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 0, 0, 0, 1, BatchMatMulV3IterBatchBasicTilingData);" << std::endl;
-      // 分支6: BASIC_LEVEL, STREAM_K, NO_FULL_LOAD, ON_THE_FLY, FOR_BATCH
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 1 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 0) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 1, 0, 0, 0, BatchMatMulV3BasicTilingData);" << std::endl;
-      // 分支7: BASIC_LEVEL, STREAM_K, NO_FULL_LOAD, 1V2_ND_ALIG_FIXPIPE, FOR_BATCH
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 1 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 2 && "
-            "BATCH_ITER_MODEL == 0) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 1, 0, 2, 0, BatchMatMulV3BasicTilingData);" << std::endl;
-      // 分支8: HIGH_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, ITER_BATCH_SINGLE_BIAS
-      ss << "  } else if (BATCH_API_LEVEL == 0 && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 1) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(0, 0, 0, 0, 1, BatchMatMulV3TilingData);" << std::endl;
-      // 分支9: BASIC_LEVEL, BASIC, NO_FULL_LOAD, 1V2_ND_ALIG_FIXPIPE, ITER_BATCH_SINGLE_BIAS
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 2 && "
-            "BATCH_ITER_MODEL == 1) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 0, 0, 2, 1, BatchMatMulV3IterBatchBasicTilingData);" << std::endl;
-      // 分支10: BASIC_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, MERGE_BATCH
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 3) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 0, 0, 0, 3, BatchMatMulV3MergeBatchBasicTilingData);" << std::endl;
-      // 分支11: BASIC_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, BATCH_MATMUL_TO_MUL
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 2) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 0, 0, 0, 2, BatchMatMulToMulBasicTilingData);" << std::endl;
-      // 分支12: BASIC_LEVEL, K_EQUAL_ZERO, NO_FULL_LOAD, ON_THE_FLY, FOR_BATCH
-      ss << "  } else if (BATCH_API_LEVEL == 1 && BMODEL == 2 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
-            "BATCH_ITER_MODEL == 0) {"
-         << std::endl;
-      ss << "    _DISPATCH_BATCH_MATMUL(1, 2, 0, 0, 0, MatMulV3KEqZeroBasicTilingData);" << std::endl;
+      for (const int api_level : {1, 2}) {
+        // 分支2: BASIC_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, FOR_BATCH
+        ss << "  } else if (BATCH_API_LEVEL == " << api_level
+           << " && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
+              "BATCH_ITER_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 0, 0, 0, 0, BatchMatMulV3BasicTilingData);" << std::endl;
+        // 分支3: BASIC_LEVEL, BASIC, A_FULL_LOAD, ON_THE_FLY, FOR_BATCH
+        ss << "  } else if (BATCH_API_LEVEL == " << api_level
+           << " && BMODEL == 0 && BATCH_FULL_LOAD == 1 && BATCH_L0C2OUT_MODEL == 0 && "
+              "BATCH_ITER_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 0, 1, 0, 0, BatchMatMulV3BasicTilingData);" << std::endl;
+        // 分支4: BASIC_LEVEL, BASIC, B_FULL_LOAD, ON_THE_FLY, FOR_BATCH
+        ss << "  } else if (BATCH_API_LEVEL == " << api_level
+           << " && BMODEL == 0 && BATCH_FULL_LOAD == 2 && BATCH_L0C2OUT_MODEL == 0 && "
+              "BATCH_ITER_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 0, 2, 0, 0, BatchMatMulV3BasicTilingData);" << std::endl;
+        // 分支5: BASIC_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, ITER_BATCH_SINGLE_BIAS
+        ss << "  } else if (BATCH_API_LEVEL == " << api_level
+           << " && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
+              "BATCH_ITER_MODEL == 1) {"
+           << std::endl;
+        ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 0, 0, 0, 1, BatchMatMulV3IterBatchBasicTilingData);"
+           << std::endl;
+        // 分支6: BASIC_LEVEL, STREAM_K, NO_FULL_LOAD, ON_THE_FLY, FOR_BATCH
+        ss << "  } else if (BATCH_API_LEVEL == " << api_level
+           << " && BMODEL == 1 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
+              "BATCH_ITER_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 1, 0, 0, 0, BatchMatMulV3BasicTilingData);" << std::endl;
+        // 分支7: BASIC_LEVEL, STREAM_K, NO_FULL_LOAD, 1V2_ND_ALIG_FIXPIPE, FOR_BATCH
+        ss << "  } else if (BATCH_API_LEVEL == " << api_level
+           << " && BMODEL == 1 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 2 && "
+              "BATCH_ITER_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 1, 0, 2, 0, BatchMatMulV3BasicTilingData);" << std::endl;
+        if (api_level == 1) {
+          // 分支8: HIGH_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, ITER_BATCH_SINGLE_BIAS
+          ss << "  } else if (BATCH_API_LEVEL == 0 && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 "
+                "&& "
+                "BATCH_ITER_MODEL == 1) {"
+             << std::endl;
+          ss << "    _DISPATCH_BATCH_MATMUL(0, 0, 0, 0, 1, BatchMatMulV3TilingData);" << std::endl;
+        }
+        // 分支9: BASIC_LEVEL, BASIC, NO_FULL_LOAD, 1V2_ND_ALIG_FIXPIPE, ITER_BATCH_SINGLE_BIAS
+        ss << "  } else if (BATCH_API_LEVEL == " << api_level
+           << " && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 2 && "
+              "BATCH_ITER_MODEL == 1) {"
+           << std::endl;
+        ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 0, 0, 2, 1, BatchMatMulV3IterBatchBasicTilingData);"
+           << std::endl;
+        if (api_level == 1) {
+          // 分支10: BASIC_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, MERGE_BATCH
+          ss << "  } else if (BATCH_API_LEVEL == " << api_level
+             << " && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
+                "BATCH_ITER_MODEL == 3) {"
+             << std::endl;
+          ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 0, 0, 0, 3, BatchMatMulV3MergeBatchBasicTilingData);"
+             << std::endl;
+        }
+        if (api_level == 1) {
+          // 分支11: BASIC_LEVEL, BASIC, NO_FULL_LOAD, ON_THE_FLY, BATCH_MATMUL_TO_MUL
+          ss << "  } else if (BATCH_API_LEVEL == " << api_level
+             << " && BMODEL == 0 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
+                "BATCH_ITER_MODEL == 2) {"
+             << std::endl;
+          ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 0, 0, 0, 2, BatchMatMulToMulBasicTilingData);"
+             << std::endl;
+        }
+        if (api_level == 1) {
+          // 分支12: BASIC_LEVEL, K_EQUAL_ZERO, NO_FULL_LOAD, ON_THE_FLY, FOR_BATCH
+          ss << "  } else if (BATCH_API_LEVEL == " << api_level
+             << " && BMODEL == 2 && BATCH_FULL_LOAD == 0 && BATCH_L0C2OUT_MODEL == 0 && "
+                "BATCH_ITER_MODEL == 0) {"
+             << std::endl;
+          ss << "    _DISPATCH_BATCH_MATMUL(" << api_level << ", 2, 0, 0, 0, MatMulV3KEqZeroBasicTilingData);"
+             << std::endl;
+        }
+      }
       ss << "  } else {" << std::endl;
       ss << "    return -1;" << std::endl;
       ss << "  }" << std::endl;
@@ -5029,54 +5858,78 @@ std::string Kernel::GenKernelFuncCallForInductor(const ascir::FusedScheduledResu
       ss << "  // BATCH_MODEL is fixed to 0 (not used in matmul)" << std::endl;
       ss << std::endl;
 
-      // 分支1: BASIC_LEVEL, NO_FULL_LOAD, BASIC, ON_THE_FLY
-      ss << "  if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 0 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 0, 0, 0, MatMulV3BasicTilingData);" << std::endl;
-      // 分支2: BASIC_LEVEL, NO_FULL_LOAD, SLICE, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 5 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 5, 0, 0, MatMulV3BasicTilingData);" << std::endl;
-      // 分支3: BASIC_LEVEL, NO_FULL_LOAD, BASIC_SPLIT_K, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 6 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 6, 0, 0, MatMulV3BasicTilingData);" << std::endl;
-      // 分支4: BASIC_LEVEL, B_FULL_LOAD, BASIC, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 2 && MODEL == 0 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 0, 2, 0, MatMulV3BasicTilingData);" << std::endl;
-      // 分支5: BASIC_LEVEL, A_FULL_LOAD, BASIC, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 1 && MODEL == 0 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 0, 1, 0, MatMulV3BasicTilingData);" << std::endl;
-      // 分支6: BASIC_LEVEL, NO_FULL_LOAD, STREAM_K, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 1 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 1, 0, 0, MatMulV3BasicTilingData);" << std::endl;
-      // 分支7: BASIC_LEVEL, NO_FULL_LOAD, STREAM_K, 1V2_ND_ALIG_FIXPIPE
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 1 && L0C2OUT_MODEL == 2) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 1, 0, 2, MatMulV3BasicTilingData);" << std::endl;
-      // 分支8: BASIC_LEVEL, NO_FULL_LOAD, SK_SPLIT_K, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 7 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 7, 0, 0, MatMulV3BasicTilingData);" << std::endl;
-      // 分支9: BASIC_LEVEL, NO_FULL_LOAD, SK_SPLIT_K, 1V2_ND_ALIG_FIXPIPE
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 7 && L0C2OUT_MODEL == 2) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 7, 0, 2, MatMulV3BasicTilingData);" << std::endl;
-      // 分支10: BASIC_LEVEL, NO_FULL_LOAD, K_EQUAL_ZERO, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 2 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 2, 0, 0, MatMulV3KEqZeroBasicTilingData);" << std::endl;
-      // 分支11: BASIC_LEVEL, B_FULL_LOAD, BASIC, 1V1_ND_ALIG_FIXPIPE
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 2 && MODEL == 0 && L0C2OUT_MODEL == 1) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 0, 2, 1, MatMulV3BasicTilingData);" << std::endl;
-      // 分支12: BASIC_LEVEL, NO_FULL_LOAD, BASIC, 1V1_ND_ALIG_FIXPIPE
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 0 && L0C2OUT_MODEL == 1) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 0, 0, 1, MatMulV3BasicTilingData);" << std::endl;
-      // 分支13: BASIC_LEVEL, NO_FULL_LOAD, BASIC, 1V2_ND_ALIG_FIXPIPE
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 0 && L0C2OUT_MODEL == 2) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 0, 0, 2, MatMulV3BasicTilingData);" << std::endl;
-      // 分支14: BASIC_LEVEL, B_FULL_LOAD, BASIC, 1V2_ND_ALIG_FIXPIPE
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 2 && MODEL == 0 && L0C2OUT_MODEL == 2) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 0, 2, 2, MatMulV3BasicTilingData);" << std::endl;
-      // 分支15: BASIC_LEVEL, NO_FULL_LOAD, TO_MUL, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 3 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 3, 0, 0, MatMulToMulBasicTilingData);" << std::endl;
-      // 分支16: BASIC_LEVEL, NO_FULL_LOAD, TO_MULTI_MUL, ON_THE_FLY
-      ss << "  } else if (API_LEVEL == 1 && FULL_LOAD == 0 && MODEL == 4 && L0C2OUT_MODEL == 0) {" << std::endl;
-      ss << "    _DISPATCH_MATMUL(1, 4, 0, 0, MatMulToVectorBasicTilingData);" << std::endl;
+      for (const int api_level : {1, 2}) {
+        // 分支1: BASIC_LEVEL, NO_FULL_LOAD, BASIC, ON_THE_FLY
+        ss << (api_level == 1 ? "  if (API_LEVEL" : "  } else if (API_LEVEL") << " == " << api_level
+           << " && FULL_LOAD == 0 && MODEL == 0 && L0C2OUT_MODEL == 0) {" << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 0, 0, 0, MatMulV3BasicTilingData);" << std::endl;
+        // 分支2: BASIC_LEVEL, NO_FULL_LOAD, SLICE, ON_THE_FLY
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 5 && L0C2OUT_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 5, 0, 0, MatMulV3BasicTilingData);" << std::endl;
+        // 分支3: BASIC_LEVEL, NO_FULL_LOAD, BASIC_SPLIT_K, ON_THE_FLY
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 6 && L0C2OUT_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 6, 0, 0, MatMulV3BasicTilingData);" << std::endl;
+        // 分支4: BASIC_LEVEL, B_FULL_LOAD, BASIC, ON_THE_FLY
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 2 && MODEL == 0 && L0C2OUT_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 0, 2, 0, MatMulV3BasicTilingData);" << std::endl;
+        // 分支5: BASIC_LEVEL, A_FULL_LOAD, BASIC, ON_THE_FLY
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 1 && MODEL == 0 && L0C2OUT_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 0, 1, 0, MatMulV3BasicTilingData);" << std::endl;
+        // 分支6: BASIC_LEVEL, NO_FULL_LOAD, STREAM_K, ON_THE_FLY
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 1 && L0C2OUT_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 1, 0, 0, MatMulV3BasicTilingData);" << std::endl;
+        // 分支7: BASIC_LEVEL, NO_FULL_LOAD, STREAM_K, 1V2_ND_ALIG_FIXPIPE
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 1 && L0C2OUT_MODEL == 2) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 1, 0, 2, MatMulV3BasicTilingData);" << std::endl;
+        // 分支8: BASIC_LEVEL, NO_FULL_LOAD, SK_SPLIT_K, ON_THE_FLY
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 7 && L0C2OUT_MODEL == 0) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 7, 0, 0, MatMulV3BasicTilingData);" << std::endl;
+        // 分支9: BASIC_LEVEL, NO_FULL_LOAD, SK_SPLIT_K, 1V2_ND_ALIG_FIXPIPE
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 7 && L0C2OUT_MODEL == 2) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 7, 0, 2, MatMulV3BasicTilingData);" << std::endl;
+        if (api_level == 1) {
+          // 分支10: BASIC_LEVEL, NO_FULL_LOAD, K_EQUAL_ZERO, ON_THE_FLY
+          ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 2 && L0C2OUT_MODEL == 0) {"
+             << std::endl;
+          ss << "    _DISPATCH_MATMUL(" << api_level << ", 2, 0, 0, MatMulV3KEqZeroBasicTilingData);" << std::endl;
+        }
+        // 分支11: BASIC_LEVEL, B_FULL_LOAD, BASIC, 1V1_ND_ALIG_FIXPIPE
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 2 && MODEL == 0 && L0C2OUT_MODEL == 1) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 0, 2, 1, MatMulV3BasicTilingData);" << std::endl;
+        // 分支12: BASIC_LEVEL, NO_FULL_LOAD, BASIC, 1V1_ND_ALIG_FIXPIPE
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 0 && L0C2OUT_MODEL == 1) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 0, 0, 1, MatMulV3BasicTilingData);" << std::endl;
+        // 分支13: BASIC_LEVEL, NO_FULL_LOAD, BASIC, 1V2_ND_ALIG_FIXPIPE
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 0 && L0C2OUT_MODEL == 2) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 0, 0, 2, MatMulV3BasicTilingData);" << std::endl;
+        // 分支14: BASIC_LEVEL, B_FULL_LOAD, BASIC, 1V2_ND_ALIG_FIXPIPE
+        ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 2 && MODEL == 0 && L0C2OUT_MODEL == 2) {"
+           << std::endl;
+        ss << "    _DISPATCH_MATMUL(" << api_level << ", 0, 2, 2, MatMulV3BasicTilingData);" << std::endl;
+        if (api_level == 1) {
+          // 分支15: BASIC_LEVEL, NO_FULL_LOAD, TO_MUL, ON_THE_FLY
+          ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 3 && L0C2OUT_MODEL == 0) {"
+             << std::endl;
+          ss << "    _DISPATCH_MATMUL(" << api_level << ", 3, 0, 0, MatMulToMulBasicTilingData);" << std::endl;
+        }
+        if (api_level == 1) {
+          // 分支16: BASIC_LEVEL, NO_FULL_LOAD, TO_MULTI_MUL, ON_THE_FLY
+          ss << "  } else if (API_LEVEL == " << api_level << " && FULL_LOAD == 0 && MODEL == 4 && L0C2OUT_MODEL == 0) {"
+             << std::endl;
+          ss << "    _DISPATCH_MATMUL(" << api_level << ", 4, 0, 0, MatMulToVectorBasicTilingData);" << std::endl;
+        }
+      }
       ss << "  } else {" << std::endl;
       ss << "    return -1;" << std::endl;
       ss << "  }" << std::endl;

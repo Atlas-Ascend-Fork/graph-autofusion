@@ -185,6 +185,30 @@ TEST_F(CommonUtilsTest, TemplateSemanticNameUsesGraphSemanticTag) {
   EXPECT_EQ(GetTemplateSemanticName(graph), "Transpose/Load/Fold");
 }
 
+TEST_F(CommonUtilsTest, TemplateSemanticNameCollectsWorkspaceOutputReuseWithoutLosingNddma) {
+  af::AscGraph graph("guarded_common_implementation");
+  Workspace workspace("workspace");
+  Nddma nddma("nddma");
+  const auto workspace_node = graph.AddNode(workspace);
+  const auto nddma_node = graph.AddNode(nddma);
+  ASSERT_EQ(SetTemplateSemanticNameForGraph(graph, "Pointwise/Common"), af::SUCCESS);
+  ASSERT_EQ(SetTemplateSemanticTransform(workspace_node, template_semantic::kOutputReuse), af::SUCCESS);
+  ASSERT_EQ(SetTemplateSemanticTransform(workspace_node, template_semantic::kOutputReuse), af::SUCCESS);
+  const auto name = GetTemplateSemanticName(graph);
+  EXPECT_EQ(name, "Pointwise/Common+NDDMA+OutputReuse");
+  EXPECT_EQ(RefineTemplateSemanticName(name, graph), name);
+  ASSERT_EQ(SetTemplateSemanticTransform(nddma_node, "Broadcast"), af::SUCCESS);
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Pointwise/Common+NDDMA.Broadcast+OutputReuse");
+}
+
+TEST_F(CommonUtilsTest, TemplateSemanticNameDoesNotInferOutputReuseFromUnrelatedNodes) {
+  af::AscGraph graph("ordinary_vector_implementation");
+  Load load("load");
+  const auto node = graph.AddNode(load);
+  ASSERT_EQ(SetTemplateSemanticTransform(node, template_semantic::kOutputReuse), af::SUCCESS);
+  EXPECT_EQ(GetTemplateSemanticName(graph), "Pointwise/Common");
+}
+
 TEST_F(CommonUtilsTest, TemplateSemanticGraphTagKeepsFinalApiFeaturesAndTransforms) {
   for (const auto &phase : {"Phase1", "Phase2"}) {
     af::AscGraph graph("semantic_phase_graph");
