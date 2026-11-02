@@ -123,16 +123,12 @@ bool LockDetector::IsInSKStream(const SuperKernelBaseNode &node) const {
 SuperKernelBaseNode *LockDetector::GetScopeBoundary(const ConcurrentRangeState &rangeContext, uint32_t scopeId,
                                                     uint32_t streamId, bool first) const {
   if (scopeId == CANDIDATE_CONCURRENT_SCOPE) {
-    SuperKernelBaseNode *boundary = nullptr;
-    for (auto *node : *rangeContext.candidateNodes) {
-      if (node->GetStreamIdxInGraph() == streamId &&
-          (boundary == nullptr ||
-           (first ? node->GetNodeIdxInStream() < boundary->GetNodeIdxInStream()
-                  : node->GetNodeIdxInStream() > boundary->GetNodeIdxInStream()))) {
-        boundary = node;
-      }
+    const auto boundaryIt = rangeContext.candidateBoundaries.find(streamId);
+    if (boundaryIt == rangeContext.candidateBoundaries.end()) {
+      return nullptr;
     }
-    return boundary;
+    const auto nodeId = first ? boundaryIt->second.firstNodeId : boundaryIt->second.lastNodeId;
+    return graph_->GetNodeById(nodeId);
   }
   const auto scopeIt = scopeInfos_.find(scopeId);
   if (scopeIt == scopeInfos_.end()) {
@@ -144,10 +140,9 @@ SuperKernelBaseNode *LockDetector::GetScopeBoundary(const ConcurrentRangeState &
 }
 
 uint32_t LockDetector::GetTrackedScopeId(const ConcurrentRangeState &rangeContext,
-                                        const SuperKernelBaseNode &node) const {
-  if (std::any_of(rangeContext.candidateNodes->begin(), rangeContext.candidateNodes->end(), [&](const auto *member) {
-        return member->GetNodeId() == node.GetNodeId();
-      })) {
+                                         const SuperKernelBaseNode &node) const {
+  if (std::any_of(rangeContext.candidateNodes->begin(), rangeContext.candidateNodes->end(),
+                  [&](const auto *member) { return member->GetNodeId() == node.GetNodeId(); })) {
     return CANDIDATE_CONCURRENT_SCOPE;
   }
   const auto scopeIt = scopeInfos_.find(node.GetScopeId());
@@ -162,7 +157,7 @@ void LockDetector::InitializeConcurrentRangeState(const std::vector<SuperKernelB
   rangeContext.candidateNodes = &candidate;
   rangeContext.candidateScopeId = candidateScopeId;
   for (const auto *node : candidate) {
-    auto &range = rangeContext.ranges[node->GetStreamIdxInGraph()];
+    auto &range = rangeContext.candidateBoundaries[node->GetStreamIdxInGraph()];
     if (range.firstNodeId == INVALID_TASK_ID ||
         node->GetNodeIdxInStream() < graph_->GetNodeById(range.firstNodeId)->GetNodeIdxInStream()) {
       range.firstNodeId = node->GetNodeId();
@@ -172,6 +167,7 @@ void LockDetector::InitializeConcurrentRangeState(const std::vector<SuperKernelB
       range.lastNodeId = node->GetNodeId();
     }
   }
+  rangeContext.ranges = rangeContext.candidateBoundaries;
   const auto &headNodes = graph_->GetHeadNodes();
   const auto &tailNodes = graph_->GetTailNodes();
   for (uint32_t streamId = 0; streamId < headNodes.size(); ++streamId) {
@@ -182,7 +178,7 @@ void LockDetector::InitializeConcurrentRangeState(const std::vector<SuperKernelB
 }
 
 void LockDetector::TightenConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t streamId,
-                                            const SuperKernelBaseNode *boundary, bool left) const {
+                                             const SuperKernelBaseNode *boundary, bool left) const {
   if (GetScopeBoundary(rangeContext, CANDIDATE_CONCURRENT_SCOPE, streamId, true) != nullptr) {
     return;
   }
@@ -209,7 +205,7 @@ void LockDetector::TightenConcurrentBoundary(ConcurrentRangeState &rangeContext,
 }
 
 void LockDetector::TightenScopeConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t scopeId,
-                                                 uint32_t entryStreamId, bool left, bool eventBoundary) const {
+                                                  uint32_t entryStreamId, bool left, bool eventBoundary) const {
   if (scopeId == CANDIDATE_CONCURRENT_SCOPE) {
     return;
   }
@@ -235,7 +231,7 @@ void LockDetector::TightenScopeConcurrentBoundary(ConcurrentRangeState &rangeCon
 }
 
 void LockDetector::UpdateConcurrentBoundary(ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
-                                           bool left) const {
+                                            bool left) const {
   if (vertex.kind == ConcurrentVertex::Kind::SCOPE) {
     return;
   }
@@ -261,10 +257,10 @@ void LockDetector::UpdateConcurrentBoundary(ConcurrentRangeState &rangeContext, 
 }
 
 void LockDetector::QueueConcurrentBoundarySeeds(const ConcurrentRangeState &rangeContext, bool left,
-                                               std::deque<ConcurrentVertex> &pending) const {
+                                                std::deque<ConcurrentVertex> &pending) const {
   for (const auto *member : *rangeContext.candidateNodes) {
-    const auto *boundary = GetScopeBoundary(rangeContext, CANDIDATE_CONCURRENT_SCOPE,
-                                             member->GetStreamIdxInGraph(), left);
+    const auto *boundary =
+        GetScopeBoundary(rangeContext, CANDIDATE_CONCURRENT_SCOPE, member->GetStreamIdxInGraph(), left);
     if (boundary->GetNodeId() != member->GetNodeId()) {
       continue;
     }
@@ -279,7 +275,7 @@ void LockDetector::QueueConcurrentBoundarySeeds(const ConcurrentRangeState &rang
 }
 
 void LockDetector::AppendScopeVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
-                                      bool left, std::deque<ConcurrentVertex> &pending) const {
+                                       bool left, std::deque<ConcurrentVertex> &pending) const {
   const auto scopeIt = scopeInfos_.find(vertex.scopeId);
   if (scopeIt == scopeInfos_.end()) {
     return;
@@ -293,9 +289,9 @@ void LockDetector::AppendScopeVertices(const ConcurrentRangeState &rangeContext,
 }
 
 void LockDetector::AppendConcurrentStreamVertex(const ConcurrentRangeState &rangeContext,
-                                               const SuperKernelBaseNode &node, bool left,
-                                               const ConcurrentVertex &vertex,
-                                               std::deque<ConcurrentVertex> &pending) const {
+                                                const SuperKernelBaseNode &node, bool left,
+                                                const ConcurrentVertex &vertex,
+                                                std::deque<ConcurrentVertex> &pending) const {
   const auto scopeId = GetTrackedScopeId(rangeContext, node);
   const auto scopeIt = scopeInfos_.find(scopeId);
   if (scopeIt != scopeInfos_.end() && scopeIt->second.streamIds.size() > 1 && vertex.scopeId != scopeId) {
@@ -314,7 +310,7 @@ void LockDetector::AppendConcurrentStreamVertex(const ConcurrentRangeState &rang
 }
 
 void LockDetector::AppendForwardVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
-                                        std::deque<ConcurrentVertex> &pending) const {
+                                         std::deque<ConcurrentVertex> &pending) const {
   if (vertex.kind == ConcurrentVertex::Kind::SCOPE) {
     AppendScopeVertices(rangeContext, vertex, false, pending);
     return;
@@ -334,7 +330,7 @@ void LockDetector::AppendForwardVertices(const ConcurrentRangeState &rangeContex
 }
 
 void LockDetector::AppendReverseVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
-                                        std::deque<ConcurrentVertex> &pending) const {
+                                         std::deque<ConcurrentVertex> &pending) const {
   if (vertex.kind == ConcurrentVertex::Kind::SCOPE) {
     AppendScopeVertices(rangeContext, vertex, true, pending);
     return;
@@ -398,8 +394,8 @@ bool LockDetector::IsBeforeConcurrentRange(const SuperKernelBaseNode &node,
   return first != nullptr && node.GetNodeIdxInStream() < first->GetNodeIdxInStream();
 }
 
-bool LockDetector::CanRunTogether(
-    uint16_t firstScopeId, uint16_t secondScopeId, const ScopeConcurrentRanges &ranges) const {
+bool LockDetector::CanRunTogether(uint16_t firstScopeId, uint16_t secondScopeId,
+                                  const ScopeConcurrentRanges &ranges) const {
   const auto firstIt = scopeInfos_.find(firstScopeId);
   const auto secondIt = scopeInfos_.find(secondScopeId);
   if (firstIt == scopeInfos_.end() || secondIt == scopeInfos_.end() ||
@@ -461,13 +457,14 @@ bool LockDetector::ResourceSearchHasRisk(const ResourceSearchState &state) const
     externalCube = std::max(externalCube, demand.cube);
     externalVec = std::max(externalVec, demand.vec);
   }
-  const bool hasRisk = !HasEnoughDeviceCores(state.residentDemand.cube, state.residentDemand.vec, externalCube,
-                                              externalVec);
+  const bool hasRisk =
+      !HasEnoughDeviceCores(state.residentDemand.cube, state.residentDemand.vec, externalCube, externalVec);
   if (hasRisk) {
-    SK_LOGI("[ParallelResource] Resource risk: residentCube=%lu, externalCube=%lu, totalCube=%lu, deviceCube=%ld, "
-            "residentVec=%lu, externalVec=%lu, totalVec=%lu, deviceVec=%ld",
-            state.residentDemand.cube, externalCube, state.residentDemand.cube + externalCube, deviceRealCubeNum,
-            state.residentDemand.vec, externalVec, state.residentDemand.vec + externalVec, deviceRealVecNum);
+    SK_LOGI(
+        "[ParallelResource] Resource risk: residentCube=%lu, externalCube=%lu, totalCube=%lu, deviceCube=%ld, "
+        "residentVec=%lu, externalVec=%lu, totalVec=%lu, deviceVec=%ld",
+        state.residentDemand.cube, externalCube, state.residentDemand.cube + externalCube, deviceRealCubeNum,
+        state.residentDemand.vec, externalVec, state.residentDemand.vec + externalVec, deviceRealVecNum);
     for (const auto &[streamId, demand] : state.externalByStream) {
       SK_LOGI("[ParallelResource] External stream %u: cube=%lu, vec=%lu", streamId, demand.cube, demand.vec);
     }
@@ -478,10 +475,12 @@ bool LockDetector::ResourceSearchHasRisk(const ResourceSearchState &state) const
   return hasRisk;
 }
 
-void LockDetector::PrepareResourceSearch(
-    const SuperKernelBaseNode &waitNode, uint16_t rootScopeId, const ResourceDemand &rootDemand,
-    const std::vector<SuperKernelBaseNode *> &rootNodes, const std::unordered_set<uint16_t> &initialResidents,
-    ScopeConcurrentRanges &ranges, ResourceSearchState &state, const ScopeConcurrentRanges *precomputedRanges) {
+void LockDetector::PrepareResourceSearch(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
+                                         const ResourceDemand &rootDemand,
+                                         const std::vector<SuperKernelBaseNode *> &rootNodes,
+                                         const std::unordered_set<uint16_t> &initialResidents,
+                                         ScopeConcurrentRanges &ranges, ResourceSearchState &state,
+                                         const ScopeConcurrentRanges *precomputedRanges) {
   if (precomputedRanges == nullptr) {
     ranges.emplace(rootScopeId, CalculateScopeConcurrentRanges(rootNodes, rootScopeId));
     for (const auto &[scopeId, info] : scopeInfos_) {
@@ -635,10 +634,11 @@ bool LockDetector::ProcessResourceSearchNode(uint64_t nodeId, uint16_t rootScope
   return true;
 }
 
-bool LockDetector::CheckWaitResourceBranches(
-    const SuperKernelBaseNode &waitNode, uint16_t rootScopeId, const ResourceDemand &rootDemand,
-    const std::vector<SuperKernelBaseNode *> &rootNodes, const std::unordered_set<uint16_t> &initialResidents,
-    const ScopeConcurrentRanges *precomputedRanges) {
+bool LockDetector::CheckWaitResourceBranches(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
+                                             const ResourceDemand &rootDemand,
+                                             const std::vector<SuperKernelBaseNode *> &rootNodes,
+                                             const std::unordered_set<uint16_t> &initialResidents,
+                                             const ScopeConcurrentRanges *precomputedRanges) {
   ScopeConcurrentRanges calculatedRanges;
   ResourceSearchState initial;
   PrepareResourceSearch(waitNode, rootScopeId, rootDemand, rootNodes, initialResidents, calculatedRanges, initial,
@@ -978,7 +978,6 @@ void LockDetector::UpdateSKRangeInStream(uint32_t streamId, const SuperKernelBas
     rangeIt->second.first = std::min(rangeIt->second.first, headPosition);
     rangeIt->second.second = std::max(rangeIt->second.second, tailPosition);
   }
-
 }
 
 bool LockDetector::IsBeforeSKRange(const SuperKernelBaseNode &curNode) {

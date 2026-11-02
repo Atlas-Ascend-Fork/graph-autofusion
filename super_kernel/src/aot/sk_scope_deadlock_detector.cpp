@@ -17,16 +17,16 @@ std::vector<const SuperKernelScopeInfo *> ScopeDeadlockDetector::CollectWaitScop
     const std::vector<SuperKernelScopeInfo> &scopes) const {
   std::vector<const SuperKernelScopeInfo *> candidates;
   for (const auto &scope : scopes) {
-    const bool hasCheckableWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(), [this](const auto *node) {
-      return node->GetNodeType() == SkNodeType::NODE_WAIT && !analysis_.ShouldBypassValueWaitDeadlock(*node);
-    });
+    const bool hasCheckableWait =
+        std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(), [this](const auto *node) {
+          return node->GetNodeType() == SkNodeType::NODE_WAIT && !analysis_.ShouldBypassValueWaitDeadlock(*node);
+        });
     if (scope.GetScopeCoreInfo().IsValid() && hasCheckableWait) {
       candidates.push_back(&scope);
     }
   }
-  std::sort(candidates.begin(), candidates.end(), [](const auto *lhs, const auto *rhs) {
-    return lhs->GetScopeId() < rhs->GetScopeId();
-  });
+  std::sort(candidates.begin(), candidates.end(),
+            [](const auto *lhs, const auto *rhs) { return lhs->GetScopeId() < rhs->GetScopeId(); });
   return candidates;
 }
 
@@ -34,11 +34,11 @@ ScopeDeadlockDetector::ScopeConcurrentRanges ScopeDeadlockDetector::BuildScopeCo
     const std::vector<SuperKernelScopeInfo> &scopes) const {
   ScopeConcurrentRanges ranges;
   for (const auto &scope : scopes) {
-    const bool hasWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(), [](const auto *node) {
-      return node->GetNodeType() == SkNodeType::NODE_WAIT;
-    });
+    const bool hasWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(),
+                                     [](const auto *node) { return node->GetNodeType() == SkNodeType::NODE_WAIT; });
     if (scope.GetScopeCoreInfo().IsValid() && hasWait) {
-      ranges.emplace(scope.GetScopeId(), analysis_.CalculateScopeConcurrentRanges(scope.GetNodes(), scope.GetScopeId()));
+      ranges.emplace(scope.GetScopeId(),
+                     analysis_.CalculateScopeConcurrentRanges(scope.GetNodes(), scope.GetScopeId()));
     }
   }
   return ranges;
@@ -57,7 +57,7 @@ bool ScopeDeadlockDetector::CheckSelectedScopeResourceBranches(
   for (const auto *scope : selected) {
     const auto scopeId = scope->GetScopeId();
     const LockDetector::ResourceDemand rootDemand{scope->GetScopeCoreInfo().GetCubeNum(),
-                                                   scope->GetScopeCoreInfo().GetVectorNum()};
+                                                  scope->GetScopeCoreInfo().GetVectorNum()};
     for (const auto *node : scope->GetNodes()) {
       if (node->GetNodeType() == SkNodeType::NODE_WAIT && !analysis_.ShouldBypassValueWaitDeadlock(*node) &&
           !analysis_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents, &ranges)) {

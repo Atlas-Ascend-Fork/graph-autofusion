@@ -1193,8 +1193,8 @@ PrecheckDeadlockPass::PrecheckDeadlockPass(SuperKernelGraph &inputGraph, SuperKe
     : ScopeSplitPass(inputGraph), lockDetector_(graph_, opts) {}
 
 bool PrecheckDeadlockPass::FindDeadlockInScope(const SuperKernelScopeInfo &scope, SuperKernelBaseNode **deadlockNode,
-                                             SuperKernelBaseNode **deadlockWaitNode,
-                                             ScopeCoreInfo *checkedScopeCoreInfo) {
+                                               SuperKernelBaseNode **deadlockWaitNode,
+                                               ScopeCoreInfo *checkedScopeCoreInfo) {
   const auto &nodes = scope.GetNodes();
   SK_LOGI("[PrecheckDeadlock] checking scope with %zu nodes for deadlock", nodes.size());
   lockDetector_.Reset();
@@ -1248,7 +1248,7 @@ bool PrecheckDeadlockPass::FindDeadlockInScope(const SuperKernelScopeInfo &scope
 }
 
 void PrecheckDeadlockPass::SplitScopeAtWaitNode(const SuperKernelScopeInfo &scope, SuperKernelBaseNode *waitNode,
-                                              SuperKernelScopeInfo &scopeBefore, SuperKernelScopeInfo &scopeAfter) {
+                                                SuperKernelScopeInfo &scopeBefore, SuperKernelScopeInfo &scopeAfter) {
   scopeBefore.SetScopeBitFlags(scope.GetScopeBitFlags());
   scopeAfter.SetScopeBitFlags(scope.GetScopeBitFlags());
   scope.ClearNodeScopeIds();
@@ -1312,11 +1312,11 @@ static void SetupScopeAfterBreakInfo(ScopeSplitResultReporter &reporter, SuperKe
  * @return Processing result of deadlock resolution
  */
 ScopeProcessResult PrecheckDeadlockPass::HandleDeadlockSplit(SuperKernelScopeInfo &workingScope,
-                                                           SuperKernelBaseNode *deadlockNode,
-                                                           SuperKernelBaseNode *deadlockWaitNode,
-                                                           const ScopeCoreInfo &scopeBeforeCoreInfo,
-                                                           std::vector<SuperKernelScopeInfo> &outputScopes,
-                                                           std::optional<SuperKernelScopeInfo> &pendingScope) {
+                                                             SuperKernelBaseNode *deadlockNode,
+                                                             SuperKernelBaseNode *deadlockWaitNode,
+                                                             const ScopeCoreInfo &scopeBeforeCoreInfo,
+                                                             std::vector<SuperKernelScopeInfo> &outputScopes,
+                                                             std::optional<SuperKernelScopeInfo> &pendingScope) {
   // Save original scope break information
   const ScopeBreakInfo &originalBreakInfo = workingScope.GetBreakInfo();
   const uint16_t originalScopeId = workingScope.GetScopeId();
@@ -1355,7 +1355,8 @@ ScopeProcessResult PrecheckDeadlockPass::HandleDeadlockSplit(SuperKernelScopeInf
   // Set pending scope for further processing
   if (!scopeAfter.GetNodes().empty()) {
     pendingScope = std::move(scopeAfter);
-    SK_LOGI("[PrecheckDeadlock] scopeAfter has %zu nodes and will be processed further", pendingScope->GetNodes().size());
+    SK_LOGI("[PrecheckDeadlock] scopeAfter has %zu nodes and will be processed further",
+            pendingScope->GetNodes().size());
   } else {
     SK_LOGI("[PrecheckDeadlock] scopeAfter is empty, no further processing required for this scope");
   }
@@ -1364,8 +1365,8 @@ ScopeProcessResult PrecheckDeadlockPass::HandleDeadlockSplit(SuperKernelScopeInf
 }
 
 ScopeProcessResult PrecheckDeadlockPass::ProcessSingleScope(SuperKernelScopeInfo &&scopeToProcess,
-                                                          std::vector<SuperKernelScopeInfo> &outputScopes,
-                                                          std::optional<SuperKernelScopeInfo> &pendingScope) {
+                                                            std::vector<SuperKernelScopeInfo> &outputScopes,
+                                                            std::optional<SuperKernelScopeInfo> &pendingScope) {
   pendingScope.reset();
 
   SuperKernelScopeInfo workingScope = std::move(scopeToProcess);
@@ -1472,8 +1473,7 @@ bool PrecheckDeadlockPass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   return true;
 }
 
-void ParallelResourceDeadlockCheckPass::SplitScopeAtRiskWait(SuperKernelScopeInfo &scope,
-                                                             SuperKernelBaseNode &waitNode,
+void ParallelResourceDeadlockCheckPass::SplitScopeAtRiskWait(SuperKernelScopeInfo &scope, SuperKernelBaseNode &waitNode,
                                                              std::vector<SuperKernelScopeInfo> &splitScopes) {
   const auto &nodes = scope.GetNodes();
   const auto originalBreakInfo = scope.GetBreakInfo();

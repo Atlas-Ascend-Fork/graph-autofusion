@@ -36,7 +36,7 @@ class ScopeVerifyScheModeSplitPass : public ScheModeKernelSplitPass {
 class ScopeVerifyPrecheckDeadlockPass : public PrecheckDeadlockPass {
  public:
   ScopeVerifyPrecheckDeadlockPass(SuperKernelGraph &inputGraph, SuperKernelOptionsManager &opts,
-                                std::vector<ScopeVerifySplitRecord> &splitRecords)
+                                  std::vector<ScopeVerifySplitRecord> &splitRecords)
       : PrecheckDeadlockPass(inputGraph, opts), splitRecords_(splitRecords) {}
 
  protected:
@@ -62,8 +62,8 @@ bool RunScopeVerifyScheModeSplitPass(SuperKernelGraph &graph, std::vector<SuperK
 }
 
 bool RunScopeVerifyPrecheckDeadlockPass(SuperKernelGraph &graph, SuperKernelOptionsManager &opts,
-                                      std::vector<SuperKernelScopeInfo> &scopes,
-                                      std::vector<ScopeVerifySplitRecord> &splitRecords) {
+                                        std::vector<SuperKernelScopeInfo> &scopes,
+                                        std::vector<ScopeVerifySplitRecord> &splitRecords) {
   ScopeVerifyPrecheckDeadlockPass deadlockPass(graph, opts, splitRecords);
   return deadlockPass.Run(scopes);
 }

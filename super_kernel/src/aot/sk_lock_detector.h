@@ -169,8 +169,7 @@ class LockDetector {
       const std::vector<SuperKernelBaseNode *> &candidate, uint16_t candidateScopeId) const;
   bool CanRunTogether(uint16_t firstScopeId, uint16_t secondScopeId, const ScopeConcurrentRanges &ranges) const;
   bool CheckWaitResourceBranches(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
-                                 const ResourceDemand &rootDemand,
-                                 const std::vector<SuperKernelBaseNode *> &rootNodes,
+                                 const ResourceDemand &rootDemand, const std::vector<SuperKernelBaseNode *> &rootNodes,
                                  const std::unordered_set<uint16_t> &initialResidents,
                                  const ScopeConcurrentRanges *precomputedRanges = nullptr);
   bool HasEnoughDeviceCores(uint64_t skCubeNum, uint64_t skVecNum, uint64_t depCubeNum, uint64_t depVecNum) const;
@@ -207,6 +206,7 @@ class LockDetector {
   struct ConcurrentRangeState {
     uint16_t candidateScopeId = INVALID_SCOPE_ID;
     const std::vector<SuperKernelBaseNode *> *candidateNodes = nullptr;
+    std::unordered_map<uint32_t, ConcurrentNodeRange> candidateBoundaries;
     std::unordered_map<uint32_t, ConcurrentNodeRange> ranges;
   };
 
@@ -270,16 +270,16 @@ class LockDetector {
   void TraverseConcurrentBoundary(ConcurrentRangeState &rangeContext, bool left) const;
   void TightenConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t streamId,
                                  const SuperKernelBaseNode *boundary, bool left) const;
-  void TightenScopeConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t scopeId,
-                                      uint32_t entryStreamId, bool left, bool eventBoundary) const;
+  void TightenScopeConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t scopeId, uint32_t entryStreamId,
+                                      bool left, bool eventBoundary) const;
   void UpdateConcurrentBoundary(ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex, bool left) const;
   void QueueConcurrentBoundarySeeds(const ConcurrentRangeState &rangeContext, bool left,
                                     std::deque<ConcurrentVertex> &pending) const;
   void AppendScopeVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex, bool left,
-                            std::deque<ConcurrentVertex> &pending) const;
+                           std::deque<ConcurrentVertex> &pending) const;
   void AppendConcurrentStreamVertex(const ConcurrentRangeState &rangeContext, const SuperKernelBaseNode &node,
-                                     bool left, const ConcurrentVertex &vertex,
-                                     std::deque<ConcurrentVertex> &pending) const;
+                                    bool left, const ConcurrentVertex &vertex,
+                                    std::deque<ConcurrentVertex> &pending) const;
   void AppendForwardVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
                              std::deque<ConcurrentVertex> &pending) const;
   void AppendReverseVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
@@ -311,12 +311,12 @@ class LockDetector {
   bool ResourceSearchHasRisk(const ResourceSearchState &state) const;
   void RollbackVisitedState(std::vector<uint64_t> &visitedNodes);
 
-  std::vector<uint64_t> nodes;  // visited nodes
-  std::vector<SuperKernelBaseNode *> candidateScopeNodes_;  // 当前候选scope中的节点
+  std::vector<uint64_t> nodes;                                                // visited nodes
+  std::vector<SuperKernelBaseNode *> candidateScopeNodes_;                    // 当前候选scope中的节点
   std::unordered_map<uint32_t, ConcurrentNodeRange> activeConcurrentRanges_;  // 当前生效的流并行范围
-  std::vector<uint64_t> tempVisitedNodes;  // temporary visited nodes for HasDeadlock
-  uint32_t depOpCubeNum;                   // visited op cube num outside superkernel
-  uint32_t depOpVecNum;                    // visited op vec num outside superkernel
+  std::vector<uint64_t> tempVisitedNodes;                                     // temporary visited nodes for HasDeadlock
+  uint32_t depOpCubeNum;                                                      // visited op cube num outside superkernel
+  uint32_t depOpVecNum;                                                       // visited op vec num outside superkernel
   uint32_t superKernelCubeNum;
   uint32_t superKernelVecNum;
   uint16_t currentScopeId_ = INVALID_SCOPE_ID;

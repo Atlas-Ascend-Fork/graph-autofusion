@@ -208,7 +208,7 @@ class TestLockDetector : public ::testing::Test {
   }
 
   void ExpectConcurrencyRange(const std::vector<SuperKernelBaseNode *> &members,
-                       const std::map<uint32_t, std::pair<uint64_t, uint64_t>> &expected) {
+                              const std::map<uint32_t, std::pair<uint64_t, uint64_t>> &expected) {
     const auto actual = lockDetector->CalculateScopeConcurrentRanges(members, members.front()->GetScopeId());
     ASSERT_EQ(actual.size(), expected.size());
     for (const auto &[streamId, bounds] : expected) {
@@ -248,13 +248,14 @@ class TestLockDetector : public ::testing::Test {
     const auto secondId = scopes[1].GetScopeId();
     const auto firstConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), firstId);
     const auto secondConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), secondId);
-    return lockDetector->CanRunTogether(firstId, secondId, {{firstId, firstConcurrentRange}, {secondId, secondConcurrentRange}});
+    return lockDetector->CanRunTogether(firstId, secondId,
+                                        {{firstId, firstConcurrentRange}, {secondId, secondConcurrentRange}});
   }
 
   enum class UpstreamScopeWait { NONE, INTERNAL, EXTERNAL };
 
   void ExpectUpstreamScopeConcurrencyRange(bool notifyInScope, UpstreamScopeWait scopeWait,
-                                    const std::map<uint32_t, std::pair<uint64_t, uint64_t>> &expected) {
+                                           const std::map<uint32_t, std::pair<uint64_t, uint64_t>> &expected) {
     // stream0: w1 -> candidate k2
     // stream1: k10 -> n11/k11 -> notifyf n20 -> k21 -> k22
     // stream2: k30 -> w31/k31 -> k32 -> k33
@@ -1105,27 +1106,27 @@ TEST_F(TestLockDetector, NotifyPredecessorCountsScopeCoresOnce) {
 
 TEST_F(TestLockDetector, LeftSearchNotifyAfterMultiStreamScopeWithoutWait) {
   ExpectUpstreamScopeConcurrencyRange(false, UpstreamScopeWait::NONE,
-                               {{0, {2, 2}}, {1, {21, 22}}, {2, {33, 33}}, {3, {40, 41}}});
+                                      {{0, {2, 2}}, {1, {21, 22}}, {2, {33, 33}}, {3, {40, 41}}});
 }
 
 TEST_F(TestLockDetector, LeftSearchNotifyAfterMultiStreamScopeWithExternalWait) {
   ExpectUpstreamScopeConcurrencyRange(false, UpstreamScopeWait::EXTERNAL,
-                               {{0, {2, 2}}, {1, {21, 22}}, {2, {33, 33}}, {3, {41, 41}}});
+                                      {{0, {2, 2}}, {1, {21, 22}}, {2, {33, 33}}, {3, {41, 41}}});
 }
 
 TEST_F(TestLockDetector, LeftSearchNotifyInMultiStreamScopeWithoutWait) {
   ExpectUpstreamScopeConcurrencyRange(true, UpstreamScopeWait::NONE,
-                               {{0, {2, 2}}, {1, {10, 22}}, {2, {30, 33}}, {3, {40, 41}}});
+                                      {{0, {2, 2}}, {1, {10, 22}}, {2, {30, 33}}, {3, {40, 41}}});
 }
 
 TEST_F(TestLockDetector, LeftSearchNotifyInMultiStreamScopeWithInternalWait) {
   ExpectUpstreamScopeConcurrencyRange(true, UpstreamScopeWait::INTERNAL,
-                               {{0, {2, 2}}, {1, {10, 22}}, {2, {30, 33}}, {3, {40, 41}}});
+                                      {{0, {2, 2}}, {1, {10, 22}}, {2, {30, 33}}, {3, {40, 41}}});
 }
 
 TEST_F(TestLockDetector, LeftSearchNotifyInMultiStreamScopeWithExternalWait) {
   ExpectUpstreamScopeConcurrencyRange(true, UpstreamScopeWait::EXTERNAL,
-                               {{0, {2, 2}}, {1, {10, 22}}, {2, {30, 33}}, {3, {41, 41}}});
+                                      {{0, {2, 2}}, {1, {10, 22}}, {2, {30, 33}}, {3, {41, 41}}});
 }
 
 TEST_F(TestLockDetector, LeftSearchIncludesUpstreamScopeWithLaterWait) {
@@ -1257,7 +1258,8 @@ TEST_F(TestLockDetector, CandidateNotifyWithoutWaitKeepsConcurrentRangeUnbounded
 
   // sk2/sk3 both contain WAIT nodes, so each scope's concurrentRange should cover all three streams.
   lockDetector->SetCurrentScopeId(scopes[1].GetScopeId());
-  const auto scope2ConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), scopes[1].GetScopeId());
+  const auto scope2ConcurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), scopes[1].GetScopeId());
   ASSERT_EQ(scope2ConcurrentRange.size(), 3U);
   EXPECT_EQ(scope2ConcurrentRange.at(0).firstNodeId, 1U);
   EXPECT_EQ(scope2ConcurrentRange.at(0).lastNodeId, 3U);
@@ -1267,7 +1269,8 @@ TEST_F(TestLockDetector, CandidateNotifyWithoutWaitKeepsConcurrentRangeUnbounded
   EXPECT_EQ(scope2ConcurrentRange.at(2).lastNodeId, 22U);
 
   lockDetector->SetCurrentScopeId(scopes[2].GetScopeId());
-  const auto scope3ConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[2].GetNodes(), scopes[2].GetScopeId());
+  const auto scope3ConcurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[2].GetNodes(), scopes[2].GetScopeId());
   ASSERT_EQ(scope3ConcurrentRange.size(), 3U);
   EXPECT_EQ(scope3ConcurrentRange.at(0).firstNodeId, 1U);
   EXPECT_EQ(scope3ConcurrentRange.at(0).lastNodeId, 3U);
@@ -1484,11 +1487,11 @@ TEST_F(TestLockDetector, SKRangeIsTrackedIndependentlyPerStream) {
 TEST_F(TestLockDetector, SampleScopeConcurrencyRange) {
   // ======================= graph =======================
   /*
-  stream180: n0(e0) -> n4(e4) -> k8..s184【.k21 -> n22(e22) -> k23...k26 -> w34(e30) -> k35...k37 -> w38(e33) -> k39 -> k40 -> w41(e7) -> k42.】..k56 ->
-             n57(e57) -> k58...k63 -> n64(e64) -> k65...k73 -> w74(e71) -> k75...k94 -> n95(e95) -> w96(e95) -> w98(e97) -> w100(e99) -> reset101...reset112
-  stream179: w1(e0) -> w65(e57) -> k66 -> k67 -> k68 -> w69(e64) -> k70 -> n71(e71) -> n99(e99)
-  stream178: w2(e0) -> 【w27(e22) -> k28 -> k29 -> n30(e30) -> k31 -> k32 -> n33(e33) -> n97(e97) 】
-  stream177: w3(e0) -> w5(e4) -> default6 -> n7(e7) -> n95(e95)
+  stream180: n0(e0) -> n4(e4) -> k8..s184【.k21 -> n22(e22) -> k23...k26 -> w34(e30) -> k35...k37 -> w38(e33) -> k39 ->
+  k40 -> w41(e7) -> k42.】..k56 -> n57(e57) -> k58...k63 -> n64(e64) -> k65...k73 -> w74(e71) -> k75...k94 -> n95(e95)
+  -> w96(e95) -> w98(e97) -> w100(e99) -> reset101...reset112 stream179: w1(e0) -> w65(e57) -> k66 -> k67 -> k68 ->
+  w69(e64) -> k70 -> n71(e71) -> n99(e99) stream178: w2(e0) -> 【w27(e22) -> k28 -> k29 -> n30(e30) -> k31 -> k32 ->
+  n33(e33) -> n97(e97) 】 stream177: w3(e0) -> w5(e4) -> default6 -> n7(e7) -> n95(e95)
 
   event0: n0 -> w1, w2, w3
   event4: n4 -> w5       event7: n7 -> w41
@@ -1535,10 +1538,8 @@ TEST_F(TestLockDetector, SampleScopeConcurrencyRange) {
       {0, {95, 95}}, {1, {INVALID_TASK_ID, INVALID_TASK_ID}}, {2, {65, 99}}, {3, {46, 64}}};
   const std::map<uint32_t, std::pair<uint64_t, uint64_t>> scope186ConcurrentRange = {
       {0, {95, 95}}, {1, {INVALID_TASK_ID, INVALID_TASK_ID}}, {2, {INVALID_TASK_ID, INVALID_TASK_ID}}, {3, {73, 88}}};
-  const std::map<uint32_t, std::pair<uint64_t, uint64_t>> scope187ConcurrentRange = {{0, {95, 95}},
-                                                                               {1, {INVALID_TASK_ID, INVALID_TASK_ID}},
-                                                                               {2, {INVALID_TASK_ID, INVALID_TASK_ID}},
-                                                                               {3, {90, 96}}};
+  const std::map<uint32_t, std::pair<uint64_t, uint64_t>> scope187ConcurrentRange = {
+      {0, {95, 95}}, {1, {INVALID_TASK_ID, INVALID_TASK_ID}}, {2, {INVALID_TASK_ID, INVALID_TASK_ID}}, {3, {90, 96}}};
 
   std::vector<std::vector<uint64_t>> streams(4);
   streams[0] = {3, 5, 6, 7, 95};
@@ -1624,8 +1625,7 @@ stream2：k2 -> w1 -> k6 -> n2
 stream3：k4 -> k5 -> [k7 -> w2 -> k8]
 */
 TEST_F(TestLockDetector, DependencyEq1KernelOnlyPredecessors) {
-  CreateGraphFromStreams({{1, 2, 3, 4}, {10, 11, 12, 13}, {20, 21, 22, 23, 24}},
-                         {{2, {11}}, {13, {23}}});
+  CreateGraphFromStreams({{1, 2, 3, 4}, {10, 11, 12, 13}, {20, 21, 22, 23, 24}}, {{2, {11}}, {13, {23}}});
   std::vector<SuperKernelScopeInfo> scopes(1);
   SetScopeMembers(scopes[0], {22, 23, 24});
   scopes[0].SetScopeCoreInfo({SkKernelType::AIC_ONLY, 8});
@@ -1634,7 +1634,8 @@ TEST_F(TestLockDetector, DependencyEq1KernelOnlyPredecessors) {
   lockDetector->SetScopeCoreInfo(scopes[0].GetScopeCoreInfo());
   EXPECT_TRUE(lockDetector->IsFusible(*graph->GetNodeById(22)));
   EXPECT_TRUE(lockDetector->IsFusible(*graph->GetNodeById(23)));
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(2).firstNodeId, 22U);
   EXPECT_EQ(concurrentRange.at(2).lastNodeId, 24U);
 }
@@ -1646,8 +1647,7 @@ stream2：k2 -> [w1 -> k6] -> n2
 stream3：k4 -> k5 -> [k7 -> w2 -> k8]
 */
 TEST_F(TestLockDetector, DependencyEq2SingleStreamWaitScopes) {
-  CreateGraphFromStreams({{1, 2, 3, 4}, {10, 11, 12, 13}, {20, 21, 22, 23, 24}},
-                         {{2, {11}}, {13, {23}}});
+  CreateGraphFromStreams({{1, 2, 3, 4}, {10, 11, 12, 13}, {20, 21, 22, 23, 24}}, {{2, {11}}, {13, {23}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {11, 12});
   SetScopeMembers(scopes[1], {22, 23, 24});
@@ -1699,7 +1699,8 @@ TEST_F(TestLockDetector, DependencyEq4ThreeWaitScopesInDependencyChain) {
   lockDetector->SetScopeInfos(scopes);
   const auto firstId = scopes[0].GetScopeId();
   const auto secondId = scopes[1].GetScopeId();
-  EXPECT_TRUE(lockDetector->CanRunTogether(firstId, secondId,
+  EXPECT_TRUE(lockDetector->CanRunTogether(
+      firstId, secondId,
       {{firstId, lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), firstId)},
        {secondId, lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), secondId)}}));
   uint64_t riskWaitId = INVALID_TASK_ID;
@@ -1716,8 +1717,7 @@ scope1: w1 k3
 scope2: k7 w2 k8
 */
 TEST_F(TestLockDetector, DependencyEq5KernelsBetweenWaitScopes) {
-  CreateGraphFromStreams({{1, 2}, {10, 11, 12, 13, 14, 15}, {20, 21, 22, 23, 24}},
-                         {{2, {11}}, {15, {23}}});
+  CreateGraphFromStreams({{1, 2}, {10, 11, 12, 13, 14, 15}, {20, 21, 22, 23, 24}}, {{2, {11}}, {15, {23}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {11, 12});
   SetScopeMembers(scopes[1], {22, 23, 24});
@@ -1737,8 +1737,7 @@ scope1: w1 k3 k6 k7
 scope2: k10 w2 k11
 */
 TEST_F(TestLockDetector, DependencyEq6MultiStreamScopePrecedesExternalKernels) {
-  CreateGraphFromStreams({{1, 2}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}, {30, 31, 32, 33}},
-                         {{2, {11}}, {14, {32}}});
+  CreateGraphFromStreams({{1, 2}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}, {30, 31, 32, 33}}, {{2, {11}}, {14, {32}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {11, 12, 21, 22});
   SetScopeMembers(scopes[1], {31, 32, 33});
@@ -1761,8 +1760,7 @@ candidate: scope2
 event: n1 -> w1, w3; n2 -> w2
 */
 TEST_F(TestLockDetector, DependencyEq7SharedNotifyAcrossWaitScopes) {
-  CreateGraphFromStreams({{1, 2}, {10, 11, 12, 13}, {20, 21, 22}, {30, 31, 32}},
-                         {{2, {11, 31}}, {13, {21}}});
+  CreateGraphFromStreams({{1, 2}, {10, 11, 12, 13}, {20, 21, 22}, {30, 31, 32}}, {{2, {11, 31}}, {13, {21}}});
   std::vector<SuperKernelScopeInfo> scopes(3);
   SetScopeMembers(scopes[0], {10, 11, 12, 13});
   SetScopeMembers(scopes[1], {20, 21, 22});
@@ -1770,7 +1768,8 @@ TEST_F(TestLockDetector, DependencyEq7SharedNotifyAcrossWaitScopes) {
   lockDetector->SetScopeInfos(scopes);
   const auto firstId = scopes[0].GetScopeId();
   const auto secondId = scopes[1].GetScopeId();
-  EXPECT_TRUE(lockDetector->CanRunTogether(firstId, secondId,
+  EXPECT_TRUE(lockDetector->CanRunTogether(
+      firstId, secondId,
       {{firstId, lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), firstId)},
        {secondId, lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), secondId)}}));
   uint64_t riskWaitId = INVALID_TASK_ID;
@@ -1789,8 +1788,7 @@ scope2: k5 w2 k6
 candidate: scope1
 */
 TEST_F(TestLockDetector, DependencyEq8IndependentNotifyBranches) {
-  CreateGraphFromStreams({{1, 2}, {10, 11, 12}, {20, 21}, {30, 31, 32}},
-                         {{2, {11}}, {21, {31}}});
+  CreateGraphFromStreams({{1, 2}, {10, 11, 12}, {20, 21}, {30, 31, 32}}, {{2, {11}}, {21, {31}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {10, 11, 12});
   SetScopeMembers(scopes[1], {30, 31, 32});
@@ -1858,7 +1856,8 @@ TEST_F(TestLockDetector, DependencyEq10WaitFreeProducerCannotStartWithBothWaitSc
   lockDetector->SetScopeInfos(scopes);
   const auto secondId = scopes[1].GetScopeId();
   const auto thirdId = scopes[2].GetScopeId();
-  EXPECT_TRUE(lockDetector->CanRunTogether(secondId, thirdId,
+  EXPECT_TRUE(lockDetector->CanRunTogether(
+      secondId, thirdId,
       {{secondId, lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), secondId)},
        {thirdId, lockDetector->CalculateScopeConcurrentRanges(scopes[2].GetNodes(), thirdId)}}));
   const auto savedCores = LockDetector::deviceRealCubeNum;
@@ -1967,8 +1966,7 @@ event: n1 -> w1; n3 -> w3; n2 -> w2
 device: 32c
 */
 TEST_F(TestLockDetector, DependencyEq14TwoWaitsUseDifferentProducerStages) {
-  CreateGraphFromStreams({{1, 2}, {10, 11, 12}, {20, 21, 22, 23, 24, 25}},
-                         {{2, {21}}, {22, {10}}, {12, {24}}});
+  CreateGraphFromStreams({{1, 2}, {10, 11, 12}, {20, 21, 22, 23, 24, 25}}, {{2, {21}}, {22, {10}}, {12, {24}}});
   graph->GetNodeById(1)->nodeInfos.kernelInfos.cubeNum = 16;
   graph->GetNodeById(11)->nodeInfos.kernelInfos.cubeNum = 16;
   graph->GetNodeById(20)->nodeInfos.kernelInfos.cubeNum = 16;
@@ -2026,8 +2024,8 @@ scope1：k37 k38 k39 k40
 scope2: k27 k28 w1 k29 k30
 */
 TEST_F(TestLockDetector, DependencyEq16SharedStreamPreventsProducerScopeCombination) {
-  CreateGraphFromStreams({{1, 42, 43, 44}, {51, 37, 39, 52}, {27, 28, 55, 38, 40},
-                          {65, 29, 30}, {61}, {70}}, {{51, {55}}, {52, {43}}, {61, {65}}});
+  CreateGraphFromStreams({{1, 42, 43, 44}, {51, 37, 39, 52}, {27, 28, 55, 38, 40}, {65, 29, 30}, {61}, {70}},
+                         {{51, {55}}, {52, {43}}, {61, {65}}});
   std::vector<SuperKernelScopeInfo> scopes(3);
   SetScopeMembers(scopes[0], {42, 43, 44});
   SetScopeMembers(scopes[1], {37, 38, 39, 40});
@@ -2060,8 +2058,7 @@ scope1：k37 k38 k39 k40
 scope2: k27 k28 w1 k29 k30
 */
 TEST_F(TestLockDetector, DependencyEq16Change1ExtraEventMovesProducerTail) {
-  CreateGraphFromStreams({{1, 42, 43, 44}, {51, 37, 52}, {27, 28, 55, 38, 57},
-                          {65, 29, 30}, {61}, {58, 39, 40}},
+  CreateGraphFromStreams({{1, 42, 43, 44}, {51, 37, 52}, {27, 28, 55, 38, 57}, {65, 29, 30}, {61}, {58, 39, 40}},
                          {{51, {55}}, {52, {43}}, {57, {58}}, {61, {65}}});
   std::vector<SuperKernelScopeInfo> scopes(3);
   SetScopeMembers(scopes[0], {42, 43, 44});
@@ -2070,10 +2067,12 @@ TEST_F(TestLockDetector, DependencyEq16Change1ExtraEventMovesProducerTail) {
   lockDetector->SetScopeInfos(scopes);
   const auto producerId = scopes[1].GetScopeId();
   const auto waitId = scopes[2].GetScopeId();
-  EXPECT_FALSE(lockDetector->CanRunTogether(producerId, waitId,
+  EXPECT_FALSE(lockDetector->CanRunTogether(
+      producerId, waitId,
       {{producerId, lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), producerId)},
        {waitId, lockDetector->CalculateScopeConcurrentRanges(scopes[2].GetNodes(), waitId)}}));
-  const auto rootConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto rootConcurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(rootConcurrentRange.at(0).firstNodeId, 42U);
   uint64_t riskWaitId = INVALID_TASK_ID;
   scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
@@ -2094,9 +2093,9 @@ scope2: k27 k28 w1 k29 k30
 scope3: w3 k14 k15 k16
 */
 TEST_F(TestLockDetector, DependencyEq16Change2ThirdWaitScope) {
-  CreateGraphFromStreams({{1, 42, 43, 44}, {51, 37, 39, 52}, {27, 28, 55, 38, 40},
-                          {65, 29, 30}, {58, 14, 61}, {59, 15, 16}},
-                         {{51, {55}}, {52, {43}}, {59, {58}}, {61, {65}}});
+  CreateGraphFromStreams(
+      {{1, 42, 43, 44}, {51, 37, 39, 52}, {27, 28, 55, 38, 40}, {65, 29, 30}, {58, 14, 61}, {59, 15, 16}},
+      {{51, {55}}, {52, {43}}, {59, {58}}, {61, {65}}});
   std::vector<SuperKernelScopeInfo> scopes(4);
   SetScopeMembers(scopes[0], {42, 43, 44});
   SetScopeMembers(scopes[1], {37, 38, 39, 40});
@@ -2293,7 +2292,6 @@ TEST_F(TestLockDetector, ReachabilityEq6DependencyEndsAtInternalWait) {
   EXPECT_TRUE(CanScopesOverlap(scopes));
 }
 
-
 // 原流程误判场景
 /*
 eq7:
@@ -2303,8 +2301,7 @@ stream3: k6 -> w3 -> [w2 -> k7]
 终止
 */
 TEST_F(TestLockDetector, ReachabilityEq7PrecedingScopeCannotOverlap) {
-  CreateGraphFromStreams({{1, 2, 3, 4}, {10, 11, 12, 13}, {20, 21, 22, 23}},
-                         {{2, {11}}, {4, {21}}, {13, {22}}});
+  CreateGraphFromStreams({{1, 2, 3, 4}, {10, 11, 12, 13}, {20, 21, 22, 23}}, {{2, {11}}, {4, {21}}, {13, {22}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {1, 2});
   SetScopeMembers(scopes[1], {22, 23});
@@ -2319,12 +2316,12 @@ stream3: k6 -> w3 -> [w2 -> k7]
 终止
 */
 TEST_F(TestLockDetector, ReachabilityEq8EarlierNotifyIsOutsideConcurrentRange) {
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}},
-                         {{2, {11}}, {4, {21}}, {13, {22}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}}, {{2, {11}}, {4, {21}}, {13, {22}}});
   std::vector<SuperKernelScopeInfo> scopes(1);
   SetScopeMembers(scopes[0], {22, 23});
   lockDetector->SetScopeInfos(scopes);
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_LT(2U, concurrentRange.at(0).firstNodeId);
 }
@@ -2345,7 +2342,8 @@ TEST_F(TestLockDetector, ReachabilityEq9InternalNotifyCompletedBeforeScopeStarts
   SetScopeMembers(scopes[0], {11, 12, 13});
   scopes[0].SetScopeCoreInfo({SkKernelType::AIC_ONLY, 6});
   lockDetector->SetScopeInfos(scopes);
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 4U);
   graph->GetNodeById(1)->nodeInfos.kernelInfos.cubeNum = 7;
   graph->GetNodeById(11)->nodeInfos.kernelInfos.cubeNum = 6;
@@ -2378,20 +2376,21 @@ stream2：[w1,k4]
 stream3：[k6,k6]
 */
 TEST_F(TestLockDetector, ConcurrentRangeEq1CompletedProducerScope) {
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}},
-                         {{2, {11}}, {4, {21}}, {13, {22}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}}, {{2, {11}}, {4, {21}}, {13, {22}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {22, 23});
   SetScopeMembers(scopes[1], {2, 3, 11, 12});
   lockDetector->SetScopeInfos(scopes);
-  const auto rootConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto rootConcurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(rootConcurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(rootConcurrentRange.at(0).lastNodeId, 5U);
   EXPECT_EQ(rootConcurrentRange.at(1).firstNodeId, 13U);
   EXPECT_EQ(rootConcurrentRange.at(1).lastNodeId, 14U);
   EXPECT_EQ(rootConcurrentRange.at(2).firstNodeId, 22U);
   EXPECT_EQ(rootConcurrentRange.at(2).lastNodeId, 23U);
-  const auto producerConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), scopes[1].GetScopeId());
+  const auto producerConcurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), scopes[1].GetScopeId());
   EXPECT_EQ(producerConcurrentRange.at(0).firstNodeId, 2U);
   EXPECT_EQ(producerConcurrentRange.at(0).lastNodeId, 3U);
   EXPECT_EQ(producerConcurrentRange.at(1).firstNodeId, 11U);
@@ -2417,13 +2416,13 @@ stream2：[k3,k9]
 stream3：[w2,k7]
 */
 TEST_F(TestLockDetector, ConcurrentRangeEq2WholeProducerScopeIncluded) {
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22}},
-                         {{2, {11}}, {4, {20}}, {13, {21}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22}}, {{2, {11}}, {4, {20}}, {13, {21}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {21, 22});
   SetScopeMembers(scopes[1], {2, 3, 4, 11, 12});
   lockDetector->SetScopeInfos(scopes);
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 1U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(1).firstNodeId, 10U);
@@ -2449,13 +2448,13 @@ stream2：[n2,k9]
 stream3：[w2,k7]
 */
 TEST_F(TestLockDetector, ConcurrentRangeEq2RejectedNarrowAlternative) {
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22}},
-                         {{2, {11}}, {4, {20}}, {13, {21}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22}}, {{2, {11}}, {4, {20}}, {13, {21}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {21, 22});
   SetScopeMembers(scopes[1], {2, 3, 4, 11, 12});
   lockDetector->SetScopeInfos(scopes);
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_NE(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_NE(concurrentRange.at(1).firstNodeId, 13U);
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 1U);
@@ -2478,13 +2477,13 @@ stream2：[k4,k9]
 stream3：[w2,k7]
 */
 TEST_F(TestLockDetector, ConcurrentRangeEq3PrecedingMultiStreamScope) {
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}},
-                         {{2, {11}}, {4, {21}}, {13, {22}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}}, {{2, {11}}, {4, {21}}, {13, {22}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {22, 23});
   SetScopeMembers(scopes[1], {10, 20, 11, 21});
   lockDetector->SetScopeInfos(scopes);
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(1).firstNodeId, 12U);
@@ -2516,7 +2515,8 @@ TEST_F(TestLockDetector, ConcurrentRangeEq4LaterWaitBlocksTail) {
   SetScopeMembers(scopes[0], {22, 23});
   SetScopeMembers(scopes[1], {10, 20, 11, 21});
   lockDetector->SetScopeInfos(scopes);
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 6U);
   EXPECT_EQ(concurrentRange.at(1).firstNodeId, 12U);
@@ -2548,7 +2548,8 @@ TEST_F(TestLockDetector, ConcurrentRangeEq5LaterWaitScopeExtendsBoundary) {
   SetScopeMembers(scopes[1], {10, 20, 11, 21});
   SetScopeMembers(scopes[2], {6, 15, 16});
   lockDetector->SetScopeInfos(scopes);
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 7U);
   EXPECT_EQ(concurrentRange.at(1).firstNodeId, 12U);
@@ -2574,15 +2575,15 @@ stream3：[w2,k7]
 
 */
 TEST_F(TestLockDetector, ConcurrentRangeEq6LaterScopeCannotStartBeforeRootFinishes) {
-  CreateGraphFromStreams({{1, 2, 3, 4, 5, 6, 7, 8}, {10, 11, 12, 13, 14, 15, 16, 17},
-                          {20, 21, 22, 23, 24}},
+  CreateGraphFromStreams({{1, 2, 3, 4, 5, 6, 7, 8}, {10, 11, 12, 13, 14, 15, 16, 17}, {20, 21, 22, 23, 24}},
                          {{2, {11}}, {4, {21}}, {13, {22}}, {24, {15}}, {17, {7}}});
   std::vector<SuperKernelScopeInfo> scopes(3);
   SetScopeMembers(scopes[0], {22, 23});
   SetScopeMembers(scopes[1], {10, 20, 11, 21});
   SetScopeMembers(scopes[2], {6, 17});
   lockDetector->SetScopeInfos(scopes);
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(1).firstNodeId, 12U);
@@ -2729,14 +2730,14 @@ TEST_F(TestLockDetector, ConcurrentRangeExcludesScopeCompletedBeforeLaunch) {
   scope1: stream0[n2,k3], stream1[w11,k12]
   scope2: stream2[w21,k22]
   */
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22}},
-                         {{2, {11}}, {4, {20}}, {13, {21}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22}}, {{2, {11}}, {4, {20}}, {13, {21}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {21, 22});
   SetScopeMembers(scopes[1], {2, 3, 11, 12});
   lockDetector->SetScopeInfos(scopes);
 
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   ASSERT_EQ(concurrentRange.size(), 3U);
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 5U);
@@ -2758,14 +2759,14 @@ TEST_F(TestLockDetector, ConcurrentRangeIncludesWholeScopeReachedThroughInternal
   scope1: stream0[n2,k3,n4], stream1[w11,k12]
   scope2: stream2[w21,k22]
   */
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22}},
-                         {{2, {11}}, {4, {20}}, {13, {21}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22}}, {{2, {11}}, {4, {20}}, {13, {21}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {21, 22});
   SetScopeMembers(scopes[1], {2, 3, 4, 11, 12});
   lockDetector->SetScopeInfos(scopes);
 
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   ASSERT_EQ(concurrentRange.size(), 3U);
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 1U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 5U);
@@ -2787,14 +2788,14 @@ TEST_F(TestLockDetector, ConcurrentRangeMovesPastCompletedMultiStreamScope) {
   scope1: stream1[k10,w11], stream2[k20,w21]
   scope2: stream2[k22,k23]
   */
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}},
-                         {{2, {11}}, {4, {21}}, {13, {22}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11, 12, 13, 14}, {20, 21, 22, 23}}, {{2, {11}}, {4, {21}}, {13, {22}}});
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {22, 23});
   SetScopeMembers(scopes[1], {10, 20, 11, 21});
   lockDetector->SetScopeInfos(scopes);
 
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(1).firstNodeId, 12U);
   EXPECT_EQ(concurrentRange.at(2).firstNodeId, 22U);
@@ -2822,7 +2823,8 @@ TEST_F(TestLockDetector, ConcurrentRangeIncludesLaterWaitScopeAndItsSuccessor) {
   SetScopeMembers(scopes[2], {6, 15, 16});
   lockDetector->SetScopeInfos(scopes);
 
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 7U);
   EXPECT_EQ(concurrentRange.at(1).firstNodeId, 12U);
@@ -2845,8 +2847,7 @@ TEST_F(TestLockDetector, ConcurrentRangeExcludesScopeStartingAfterRootFinishes) 
   scope1: stream1[k10,w11], stream2[k20,w21]
   scope2: stream0[k6], stream1[n17]
   */
-  CreateGraphFromStreams({{1, 2, 3, 4, 5, 6, 7, 8}, {10, 11, 12, 13, 14, 15, 16, 17},
-                          {20, 21, 22, 23, 24}},
+  CreateGraphFromStreams({{1, 2, 3, 4, 5, 6, 7, 8}, {10, 11, 12, 13, 14, 15, 16, 17}, {20, 21, 22, 23, 24}},
                          {{2, {11}}, {4, {21}}, {13, {22}}, {24, {15}}, {17, {7}}});
   std::vector<SuperKernelScopeInfo> scopes(3);
   SetScopeMembers(scopes[0], {22, 23});
@@ -2854,7 +2855,8 @@ TEST_F(TestLockDetector, ConcurrentRangeExcludesScopeStartingAfterRootFinishes) 
   SetScopeMembers(scopes[2], {6, 17});
   lockDetector->SetScopeInfos(scopes);
 
-  const auto concurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto concurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
   EXPECT_EQ(concurrentRange.at(0).firstNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(0).lastNodeId, 5U);
   EXPECT_EQ(concurrentRange.at(1).firstNodeId, 12U);
@@ -2916,8 +2918,7 @@ TEST_F(TestLockDetector, ParallelResourcePassSplitsLaterWaitsAfterRiskWait) {
   event31: n31 -> w4
   event40: n40 -> w11
   */
-  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11}, {20, 21, 30, 31}, {40}},
-                         {{21, {2}}, {31, {4}}, {40, {11}}});
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {10, 11}, {20, 21, 30, 31}, {40}}, {{21, {2}}, {31, {4}}, {40, {11}}});
   for (const auto nodeId : {1U, 3U, 5U}) {
     auto *node = graph->GetNodeById(nodeId);
     node->nodeInfos.kernelInfos.numBlocks = 20;
@@ -3013,8 +3014,7 @@ TEST_F(TestLockDetector, ThreeWaitScopesOnlyFailWhenAllAreResident) {
   scope2: stream1[k10,w11]
   scope3: stream2[k20,w21]
   */
-  CreateGraphFromStreams({{1, 2}, {10, 11}, {20, 21}, {30, 31}, {40}, {50}},
-                         {{31, {2}}, {40, {11}}, {50, {21}}});
+  CreateGraphFromStreams({{1, 2}, {10, 11}, {20, 21}, {30, 31}, {40}, {50}}, {{31, {2}}, {40, {11}}, {50, {21}}});
   graph->GetNodeById(1)->nodeInfos.kernelInfos.cubeNum = 4;
   graph->GetNodeById(10)->nodeInfos.kernelInfos.cubeNum = 3;
   graph->GetNodeById(20)->nodeInfos.kernelInfos.cubeNum = 3;
@@ -3117,13 +3117,11 @@ TEST_F(TestLockDetector, ConcurrentBoundaryLeftScansScopeTailAfterEventEntry) {
   event11: n11 -> w2; event41: n41 -> w13
   scope1: stream1[n11,k12,w13], stream2[k31]
   */
-  CreateGraphFromStreams({{1, 2, 3}, {10, 11, 12, 13, 14}, {30, 31, 32}, {40, 41, 42}},
-                         {{11, {2}}, {41, {13}}});
+  CreateGraphFromStreams({{1, 2, 3}, {10, 11, 12, 13, 14}, {30, 31, 32}, {40, 41, 42}}, {{11, {2}}, {41, {13}}});
   std::vector<SuperKernelScopeInfo> scopes(1);
   SetScopeMembers(scopes[0], {11, 12, 13, 31});
   lockDetector->SetScopeInfos(scopes);
-  ExpectConcurrencyRange({graph->GetNodeById(3)},
-                         {{0, {3, 3}}, {1, {10, 14}}, {2, {30, 32}}, {3, {42, 42}}});
+  ExpectConcurrencyRange({graph->GetNodeById(3)}, {{0, {3, 3}}, {1, {10, 14}}, {2, {30, 32}}, {3, {42, 42}}});
 }
 
 TEST_F(TestLockDetector, ConcurrentBoundaryLeftScopeOnlyTightensOtherStreams) {
@@ -3172,13 +3170,11 @@ TEST_F(TestLockDetector, ConcurrentBoundaryRightScansScopeHeadBeforeEventEntry) 
   event2: n2 -> w13; event11: n11 -> w41
   scope1: stream1[w11,k12,n13], stream2[k31]
   */
-  CreateGraphFromStreams({{1, 2, 3}, {10, 11, 12, 13, 14}, {30, 31, 32}, {40, 41, 42}},
-                         {{2, {13}}, {11, {41}}});
+  CreateGraphFromStreams({{1, 2, 3}, {10, 11, 12, 13, 14}, {30, 31, 32}, {40, 41, 42}}, {{2, {13}}, {11, {41}}});
   std::vector<SuperKernelScopeInfo> scopes(1);
   SetScopeMembers(scopes[0], {11, 12, 13, 31});
   lockDetector->SetScopeInfos(scopes);
-  ExpectConcurrencyRange({graph->GetNodeById(1)},
-                         {{0, {1, 1}}, {1, {10, 14}}, {2, {30, 32}}, {3, {40, 40}}});
+  ExpectConcurrencyRange({graph->GetNodeById(1)}, {{0, {1, 1}}, {1, {10, 14}}, {2, {30, 32}}, {3, {40, 40}}});
 }
 
 TEST_F(TestLockDetector, ConcurrentBoundaryLeftScopePropagatesWaitToOtherStream) {
@@ -3255,8 +3251,7 @@ TEST_F(TestLockDetector, SerializedWaitScopesDoNotFormParallelCombination) {
   scope1: stream0[w2,w3]
   scope2: stream1[k10,k11,k12]
   */
-  CreateGraphFromStreams({{1, 2, 3}, {10, 11, 12, 13}, {20, 21}, {30}},
-                         {{13, {1}}, {30, {11}}, {21, {3}}});
+  CreateGraphFromStreams({{1, 2, 3}, {10, 11, 12, 13}, {20, 21}, {30}}, {{13, {1}}, {30, {11}}, {21, {3}}});
   graph->GetNodeById(2)->nodeInfos.kernelInfos.cubeNum = 6;
   graph->GetNodeById(10)->nodeInfos.kernelInfos.cubeNum = 3;
   graph->GetNodeById(20)->nodeInfos.kernelInfos.cubeNum = 3;
@@ -3270,13 +3265,16 @@ TEST_F(TestLockDetector, SerializedWaitScopesDoNotFormParallelCombination) {
   const auto savedCores = LockDetector::deviceRealCubeNum;
   LockDetector::deviceRealCubeNum = 10;
   lockDetector->SetScopeInfos(scopes);
-  const auto aConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
-  const auto bConcurrentRange = lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), scopes[1].GetScopeId());
+  const auto aConcurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[0].GetNodes(), scopes[0].GetScopeId());
+  const auto bConcurrentRange =
+      lockDetector->CalculateScopeConcurrentRanges(scopes[1].GetNodes(), scopes[1].GetScopeId());
   EXPECT_EQ(aConcurrentRange.at(1).firstNodeId, INVALID_TASK_ID);
   EXPECT_EQ(aConcurrentRange.at(1).lastNodeId, INVALID_TASK_ID);
   EXPECT_EQ(bConcurrentRange.at(0).firstNodeId, INVALID_TASK_ID);
-  EXPECT_FALSE(lockDetector->CanRunTogether(scopes[0].GetScopeId(), scopes[1].GetScopeId(),
-                                             {{scopes[0].GetScopeId(), aConcurrentRange}, {scopes[1].GetScopeId(), bConcurrentRange}}));
+  EXPECT_FALSE(lockDetector->CanRunTogether(
+      scopes[0].GetScopeId(), scopes[1].GetScopeId(),
+      {{scopes[0].GetScopeId(), aConcurrentRange}, {scopes[1].GetScopeId(), bConcurrentRange}}));
   uint64_t riskWaitId = INVALID_TASK_ID;
   scopeDetector->CheckParallelScopeResources(scopes, riskWaitId);
   EXPECT_EQ(riskWaitId, INVALID_TASK_ID);
