@@ -1002,22 +1002,22 @@ TEST_F(SkEventRecorderTest, PrintModelIdIndexMap_EmptyMapDoesNotCrash) {
 // ==================== modelIdIndexAndSkScopeId 编码测试 ====================
 
 // Test: modelIdIndexAndSkScopeId 编码格式验证
-// 布局: modelIdIdx(16bit)[47:32] | skScopeId(16bit)[31:16] | 低16bit预留[15:0]
+// 布局: modelIdIdx(16bit)[55:40] | skScopeId(16bit)[39:24] | 低24bit预留[23:0]
 TEST_F(SkEventRecorderTest, ModelIdIndexAndSkScopeId_EncodingLayout) {
   std::string modelId = "model_123_1";
   uint16_t skScopeId = 42;
 
   uint16_t modelIdIdx = SkEventRecorder::Instance().RegisterModelId(modelId);
-  uint64_t encoded = (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(skScopeId) << 16);
+  uint64_t encoded = (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(skScopeId) << 24);
 
   // 解码验证
-  uint16_t decodedIdx = static_cast<uint16_t>((encoded >> 32) & 0xFFFF);
-  uint16_t decodedScopeId = static_cast<uint16_t>((encoded >> 16) & 0xFFFF);
-  uint16_t decodedLow16 = static_cast<uint16_t>(encoded & 0xFFFF);
+  uint16_t decodedIdx = static_cast<uint16_t>((encoded >> 40) & 0xFFFF);
+  uint16_t decodedScopeId = static_cast<uint16_t>((encoded >> 24) & 0xFFFF);
+  uint32_t decodedLow24 = static_cast<uint32_t>(encoded & 0xFFFFFF);
 
   EXPECT_EQ(decodedIdx, modelIdIdx);
   EXPECT_EQ(decodedScopeId, skScopeId);
-  EXPECT_EQ(decodedLow16, 0);  // 低16bit预留，应为0
+  EXPECT_EQ(decodedLow24, 0);  // 低24bit预留，应为0
 }
 
 // Test: modelIdIndexAndSkScopeId 编码后能通过 index 反查原始 modelId
@@ -1026,10 +1026,10 @@ TEST_F(SkEventRecorderTest, ModelIdIndexAndSkScopeId_EncodeDecodeRoundTrip) {
   uint16_t skScopeId = 100;
 
   uint16_t modelIdIdx = SkEventRecorder::Instance().RegisterModelId(modelId);
-  uint64_t encoded = (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(skScopeId) << 16);
+  uint64_t encoded = (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(skScopeId) << 24);
 
   // 从编码中解码出 index
-  uint16_t decodedIdx = static_cast<uint16_t>((encoded >> 32) & 0xFFFF);
+  uint16_t decodedIdx = static_cast<uint16_t>((encoded >> 40) & 0xFFFF);
   // 通过 index 反查原始 modelId
   std::string recoveredModelId = SkEventRecorder::Instance().GetModelIdByIndex(decodedIdx);
 
@@ -1116,8 +1116,8 @@ TEST_F(SkEventRecorderTest, DumpProfilingDetailDisabledEncodesModelIdIndexInDevA
   EXPECT_TRUE(DumpProfilingDetail(taskNodes, launchInfo, scopeInfo, graph));
 
   uint64_t encoded = launchInfo.devArgs.Get()->skHeader.modelIdIndexAndSkScopeId;
-  uint16_t decodedModelIdIndex = static_cast<uint16_t>((encoded >> 32) & 0xFFFF);
-  uint16_t decodedScopeId = static_cast<uint16_t>((encoded >> 16) & 0xFFFF);
+  uint16_t decodedModelIdIndex = static_cast<uint16_t>((encoded >> 40) & 0xFFFF);
+  uint16_t decodedScopeId = static_cast<uint16_t>((encoded >> 24) & 0xFFFF);
 
   EXPECT_EQ(SkEventRecorder::Instance().GetModelIdByIndex(decodedModelIdIndex), modelId);
   EXPECT_EQ(decodedScopeId, scopeInfo.GetScopeId());
@@ -1156,9 +1156,9 @@ TEST_F(SkEventRecorderTest, DumpProfilingDetailEnabledUpdatesRuntimeConfigAndMap
     SkEventConfig *eventConfig = reinterpret_cast<SkEventConfig *>(
         reinterpret_cast<uint8_t *>(launchInfo.devArgs.Get()) + sizeof(SkDeviceEntryArgs));
     uint16_t headerModelIdIndex =
-        static_cast<uint16_t>((launchInfo.devArgs.Get()->skHeader.modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
+        static_cast<uint16_t>((launchInfo.devArgs.Get()->skHeader.modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
     uint16_t headerScopeId =
-        static_cast<uint16_t>((launchInfo.devArgs.Get()->skHeader.modelIdIndexAndSkScopeId >> 16) & 0xFFFF);
+        static_cast<uint16_t>((launchInfo.devArgs.Get()->skHeader.modelIdIndexAndSkScopeId >> 24) & 0xFFFF);
 
     EXPECT_EQ(launchInfo.eventGmAddr, ctx->gmAddr.get());
     EXPECT_EQ(SkEventRecorder::Instance().GetModelIdByIndex(static_cast<uint16_t>(launchInfo.modelIdIndex)), modelId);
@@ -1216,9 +1216,9 @@ TEST_F(SkEventRecorderTest, SkHeaderInfoModelIdIndexAndSkScopeId_FieldVerificati
   uint16_t modelIdIdx = 1;
   uint16_t skScopeId = 2;
   headerInfo.modelIdIndexAndSkScopeId =
-      (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(skScopeId) << 16);
-  EXPECT_EQ(static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 32) & 0xFFFF), modelIdIdx);
-  EXPECT_EQ(static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 16) & 0xFFFF), skScopeId);
+      (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(skScopeId) << 24);
+  EXPECT_EQ(static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 40) & 0xFFFF), modelIdIdx);
+  EXPECT_EQ(static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 24) & 0xFFFF), skScopeId);
 }
 
 // Test: 多个不同 modelId 注册后完整编解码验证
@@ -1238,14 +1238,14 @@ TEST_F(SkEventRecorderTest, ModelIdIndexAndSkScopeId_MultipleModelIdEndToEnd) {
 
   for (const auto &item : items) {
     uint16_t modelIdIdx = SkEventRecorder::Instance().RegisterModelId(item.modelId);
-    uint64_t encoded = (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(item.skScopeId) << 16);
+    uint64_t encoded = (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(item.skScopeId) << 24);
     encodedValues.push_back(encoded);
   }
 
   // 验证每个编码值可以解码回原始值
   for (size_t i = 0; i < items.size(); i++) {
-    uint16_t decodedIdx = static_cast<uint16_t>((encodedValues[i] >> 32) & 0xFFFF);
-    uint16_t decodedScopeId = static_cast<uint16_t>((encodedValues[i] >> 16) & 0xFFFF);
+    uint16_t decodedIdx = static_cast<uint16_t>((encodedValues[i] >> 40) & 0xFFFF);
+    uint16_t decodedScopeId = static_cast<uint16_t>((encodedValues[i] >> 24) & 0xFFFF);
     std::string recoveredModelId = SkEventRecorder::Instance().GetModelIdByIndex(decodedIdx);
 
     EXPECT_EQ(recoveredModelId, items[i].modelId);
@@ -1448,8 +1448,8 @@ TEST_F(SkEventRecorderTest, DumpProfilingDetail_DisabledRegistersModelAndSkName)
   EXPECT_EQ(launchInfo.modelIdIndex, 0);
   EXPECT_EQ(launchInfo.skId, 0);
   const uint64_t encoded = launchInfo.devArgs.Get()->skHeader.modelIdIndexAndSkScopeId;
-  const uint16_t modelIdIdx = static_cast<uint16_t>((encoded >> 32) & 0xFFFF);
-  const uint16_t skScopeId = static_cast<uint16_t>((encoded >> 16) & 0xFFFF);
+  const uint16_t modelIdIdx = static_cast<uint16_t>((encoded >> 40) & 0xFFFF);
+  const uint16_t skScopeId = static_cast<uint16_t>((encoded >> 24) & 0xFFFF);
   EXPECT_EQ(skScopeId, scopeInfo.GetScopeId());
   EXPECT_EQ(SkEventRecorder::Instance().GetModelIdByIndex(modelIdIdx), modelId);
   EXPECT_EQ(SkEventRecorder::Instance().GetSkName(modelId, scopeInfo.GetScopeId()), launchInfo.skFuncName);

@@ -54,6 +54,23 @@ TEST_F(FeatureManagerTest, JobsAndEnableSkAreModelLevelOptions) {
   EXPECT_EQ(manager.Get<Feature::SK_COMPILE_OPTIONS>("add"), (Arguments{"--enable-super-kernel"}));
 }
 
+TEST_F(FeatureManagerTest, ScopeModeIsLocalAndChangesOnlyAfterSuccessfulInitialization) {
+  FeatureManager other;
+  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
+  aclmdlRISpecOptions invalid{};
+  invalid.specCompileOptionCount = 1;
+  for (bool scope : {true, false}) {
+    ASSERT_TRUE(manager.Init(nullptr, scope));
+    EXPECT_EQ(manager.Get<Feature::IS_SCOPE_JIT>(), scope);
+    EXPECT_FALSE(other.Get<Feature::IS_SCOPE_JIT>());
+    EXPECT_FALSE(manager.Init(&invalid, !scope));
+    EXPECT_EQ(manager.Get<Feature::IS_SCOPE_JIT>(), scope);
+  }
+  ASSERT_TRUE(manager.Init(nullptr, true));
+  ASSERT_TRUE(manager.Init(nullptr));
+  EXPECT_FALSE(manager.Get<Feature::IS_SCOPE_JIT>());
+}
+
 TEST_F(FeatureManagerTest, BasicCompileOptionsUseGlobalAndPatternRules) {
   const char *globalArgs[] = {"-DGLOBAL=1"};
   const char *addArgs[] = {"-O2", "-DADD=1"};

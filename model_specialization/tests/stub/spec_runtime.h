@@ -27,8 +27,9 @@ static const int ACL_ERROR_BAD_ALLOC = 200000;
 static const int ACL_ERROR_INTERNAL_ERROR = 500000;
 static const int ACL_ERROR_RT_INSUFFICIENT_INPUT_ARRAY = 107039;
 
-extern "C" {
+static const int ACL_ERROR_FEATURE_UNSUPPORTED = 200006;
 
+extern "C" {
 typedef struct aclrtcKernelSpecRequest {
   const char *resourceId;
   const char *kernelEntry;

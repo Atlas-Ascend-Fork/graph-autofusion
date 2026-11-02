@@ -110,7 +110,7 @@ bool SuperKernelExceptionHandler::CopySkDeviceEntryArgsToHost(
     return false;
   }
 
-  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
+  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
   std::string modelId = SkEventRecorder::Instance().GetModelIdByIndex(modelIdIdx);
   logContext = std::make_unique<sk::logger::LogContextGuard>(modelId.empty() ? UNKNOWN_MODEL_ID : modelId);
 
@@ -299,8 +299,8 @@ void SuperKernelExceptionHandler::PrintSkHeaderInfo() const {
   SK_LOGI("dfxOffset: %u", skHeaderInfoHost->dfxOffset);
   SK_LOGI("nodeCnt: %u", skHeaderInfoHost->nodeCnt);
   SK_LOGI("totalSize: %lu", skHeaderInfoHost->totalSize);
-  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
-  uint16_t skScopeId = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 16) & 0xFFFF);
+  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
+  uint16_t skScopeId = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 24) & 0xFFFF);
   std::string modelId = SkEventRecorder::Instance().GetModelIdByIndex(modelIdIdx);
   SK_LOGI("modelIdIndexAndSkScopeId: 0x%lx (modelIdIdx=%u, skScopeId=%u, modelId=%s)",
           skHeaderInfoHost->modelIdIndexAndSkScopeId, modelIdIdx, skScopeId, modelId.c_str());
@@ -418,10 +418,12 @@ uint64_t SuperKernelExceptionHandler::GetCondRegValue(const rtExceptionErrRegInf
 
 void SuperKernelExceptionHandler::ParseAndPrintCondInfo(uint32_t coreId, rtCoreType_t coreType, uint64_t condValue) {
   // Cond value is set by sk_entry kernel via set_cond instruction.
-  // Format: cond = modelIdIndexAndSkScopeId | (opState + (task->index << 8))
+  // Host pre-packs model/scope in the header; kernel adds the task index and state.
   //   bits [7:0]   : opState (SkOpTraceType)
-  //   bits [15:8]  : task->index (sub-operator index)
-  //   bits [63:16] : modelIdIndexAndSkScopeId
+  //   bits [23:8]  : task->index (low 16 bits)
+  //   bits [39:24] : skScopeId (16 bits)
+  //   bits [55:40] : modelIdIndex (16 bits)
+  //   bits [63:56] : reserved
   // If cond is 0, the runtime/driver does not support this feature yet, skip printing.
   if (condValue == 0) {
     SK_LOGE("[Core %u] Failed to get COND register value, possible reason: driver package not upgraded", coreId);
@@ -429,18 +431,28 @@ void SuperKernelExceptionHandler::ParseAndPrintCondInfo(uint32_t coreId, rtCoreT
   }
 
   uint8_t opState = static_cast<uint8_t>(condValue & 0xFF);
-  uint32_t opIndex = static_cast<uint32_t>((condValue >> 8) & 0xFF);
   const char *coreTypeName = (coreType == RT_CORE_TYPE_AIC) ? "AIC" : "AIV";
 
+  const uint32_t opIndex = static_cast<uint32_t>((condValue >> 8) & 0xFFFF);
   SK_LOGE("[Core %u] %s COND register value: 0x%lx (opState=%u, opIndex=%u)", coreId, coreTypeName, condValue, opState,
           opIndex);
 
+  if (opState == static_cast<uint8_t>(SkOpTraceType::WAIT_LAUNCHED)) {
+    SK_LOGE("[Core %u] COND: Currently executing waitfunc, task->index=%u (nodeIndex=%u), opState=%u", coreId, opIndex,
+            opIndex, opState);
+    return;
+  }
+  if (opState == static_cast<uint8_t>(SkOpTraceType::WAIT_FINISHED)) {
+    SK_LOGE("[Core %u] COND: Last completed waitfunc, task->index=%u (nodeIndex=%u), opState=%u", coreId, opIndex,
+            opIndex, opState);
+    return;
+  }
   PrintCondSubKernelInfo(coreId, condValue);
 }
 
 void SuperKernelExceptionHandler::PrintCondSubKernelInfo(uint32_t coreId, uint64_t condValue) {
   uint8_t opState = static_cast<uint8_t>(condValue & 0xFF);
-  uint32_t opIndex = static_cast<uint32_t>((condValue >> 8) & 0xFF);
+  uint32_t opIndex = static_cast<uint32_t>((condValue >> 8) & 0xFFFF);
 
   if (opState == static_cast<uint8_t>(SkOpTraceType::ORIGIN)) {
     SK_LOGE("[Core %u] COND: No SK entry executed yet (opState=ORIGIN).", coreId);
@@ -547,8 +559,8 @@ void SuperKernelExceptionHandler::PrintMatchedNodeBasicInfo(uint32_t coreId, rtC
                                                             uint64_t entryAddr, uint64_t endAddr, uint32_t funcSize,
                                                             const SkDfxInfo &dfxNode) const {
   const char *coreTypeName = (coreType == RT_CORE_TYPE_AIC) ? "AIC" : "AIV";
-  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
-  uint16_t skScopeId = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 16) & 0xFFFF);
+  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
+  uint16_t skScopeId = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 24) & 0xFFFF);
   std::string modelId = SkEventRecorder::Instance().GetModelIdByIndex(modelIdIdx);
 
   SK_LOGE("============================================================");
@@ -635,8 +647,8 @@ void SuperKernelExceptionHandler::PrintNodeDevArgs(uint32_t coreId, rtCoreType_t
 void SuperKernelExceptionHandler::PrintNoMatchInfo(uint32_t coreId, rtCoreType_t coreType, uint64_t startPC,
                                                    uint64_t currentPC) const {
   const char *coreTypeName = (coreType == RT_CORE_TYPE_AIC) ? "AIC" : "AIV";
-  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
-  uint16_t skScopeId = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 16) & 0xFFFF);
+  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
+  uint16_t skScopeId = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 24) & 0xFFFF);
   std::string modelId = SkEventRecorder::Instance().GetModelIdByIndex(modelIdIdx);
 
   SK_LOGE("============================================================");
@@ -765,6 +777,12 @@ void SuperKernelExceptionHandler::PrintCoreSymbols(uint32_t coreId, rtCoreType_t
     } else {
       SK_LOGE("[Core %u] > No next operator (opId=%u/%u)", coreId, opId, skHeaderInfoHost->nodeCnt);
     }
+  } else if (opState == static_cast<uint8_t>(SkOpTraceType::WAIT_LAUNCHED) ||
+             opState == static_cast<uint8_t>(SkOpTraceType::WAIT_FINISHED)) {
+    const char *phase =
+        opState == static_cast<uint8_t>(SkOpTraceType::WAIT_LAUNCHED) ? "Currently executing" : "Last completed";
+    SK_LOGE("[Core %u] OP_TRACE: %s waitfunc, task->index=%u (nodeIndex=%u), opState=%u", coreId, phase, opId, opId,
+            opState);
   } else if (opState == static_cast<uint8_t>(SkOpTraceType::SK_ENTRY_FINISHED)) {
     // SK operator execution completed
     SK_LOGE("[Core %u] SK entry operator execution completed.", coreId);
@@ -943,8 +961,8 @@ aclError SuperKernelExceptionHandler::PopulateSkEntryFields(Adx::ExceptionDumpIn
     return ACL_ERROR_FAILURE;
   }
 
-  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
-  uint16_t skScopeId = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 16) & 0xFFFF);
+  uint16_t modelIdIdx = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
+  uint16_t skScopeId = static_cast<uint16_t>((skHeaderInfoHost->modelIdIndexAndSkScopeId >> 24) & 0xFFFF);
   std::string modelId = SkEventRecorder::Instance().GetModelIdByIndex(modelIdIdx);
   const std::string skNameFromRecorder = SkEventRecorder::Instance().GetSkName(modelId, skScopeId);
   if (!skNameFromRecorder.empty()) {

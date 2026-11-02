@@ -896,16 +896,16 @@ TEST_F(SkDfxExceptionHandlerTest, GetOrLoadKernelSymbols_OpIdExceedsNodeCnt_Retu
 // Test: SkHeaderInfo.modelIdIndexAndSkScopeId 字段偏移验证
 TEST_F(SkDfxExceptionHandlerTest, ModelIdIndexAndSkScopeId_FieldOffsetInSkHeaderInfo) {
   SkHeaderInfo headerInfo = {};
-  // 编码: (modelIdIdx << 32) | (skScopeId << 16) = (3 << 32) | (5 << 16)
-  headerInfo.modelIdIndexAndSkScopeId = 0x0000000300050000ULL;
+  // 编码: (modelIdIdx << 40) | (skScopeId << 24) = (3 << 40) | (5 << 24)
+  headerInfo.modelIdIndexAndSkScopeId = 0x0000030005000000ULL;
 
   // 验证字段存在且可以赋值
-  EXPECT_EQ(headerInfo.modelIdIndexAndSkScopeId, 0x0000000300050000ULL);
+  EXPECT_EQ(headerInfo.modelIdIndexAndSkScopeId, 0x0000030005000000ULL);
   EXPECT_EQ(sizeof(headerInfo.modelIdIndexAndSkScopeId), sizeof(uint64_t));
 
   // 解码
-  uint16_t modelIdIdx = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
-  uint16_t skScopeId = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 16) & 0xFFFF);
+  uint16_t modelIdIdx = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
+  uint16_t skScopeId = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 24) & 0xFFFF);
   EXPECT_EQ(modelIdIdx, 3);
   EXPECT_EQ(skScopeId, 5);
 }
@@ -927,7 +927,7 @@ TEST_F(SkDfxExceptionHandlerTest, IdentifyErrorNodeByPC_ModelIdIndexAndSkScopeId
   headerInfo.nodeCnt = 1;
   headerInfo.totalSize = sizeof(buffer);
   headerInfo.modelIdIndexAndSkScopeId =
-      (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(skScopeId) << 16);
+      (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(skScopeId) << 24);
 
   SkDeviceEntryArgs *deviceArgs = reinterpret_cast<SkDeviceEntryArgs *>(buffer);
   deviceArgs->skHeader = headerInfo;
@@ -946,8 +946,8 @@ TEST_F(SkDfxExceptionHandlerTest, IdentifyErrorNodeByPC_ModelIdIndexAndSkScopeId
   handler->skHeaderInfoHost = &headerInfo;
 
   // 验证解码逻辑
-  uint16_t decodedIdx = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
-  uint16_t decodedScopeId = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 16) & 0xFFFF);
+  uint16_t decodedIdx = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
+  uint16_t decodedScopeId = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 24) & 0xFFFF);
   std::string recoveredModelId = SkEventRecorder::Instance().GetModelIdByIndex(decodedIdx);
 
   EXPECT_EQ(decodedIdx, modelIdIdx);
@@ -969,46 +969,26 @@ TEST_F(SkDfxExceptionHandlerTest, ModelIdIndexAndSkScopeId_ZeroValue_GetModelIdR
   SkHeaderInfo headerInfo = {};
   headerInfo.modelIdIndexAndSkScopeId = 0;
 
-  uint16_t decodedIdx = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 32) & 0xFFFF);
+  uint16_t decodedIdx = static_cast<uint16_t>((headerInfo.modelIdIndexAndSkScopeId >> 40) & 0xFFFF);
   std::string recoveredModelId = SkEventRecorder::Instance().GetModelIdByIndex(decodedIdx);
   EXPECT_EQ(decodedIdx, 0);
   EXPECT_TRUE(recoveredModelId.empty());  // index 0 不存在，返回空串
 }
 
-// Test: cond 寄存器完整 48bit 布局编解码验证
-// 排布: modelIdIdx(16bit)[47:32] | skScopeId(16bit)[31:16] | task->index(8bit)[15:8] | SkOpTraceType(8bit)[7:0]
-TEST_F(SkDfxExceptionHandlerTest, CondRegister_48bitLayout_EncodeDecode) {
-  std::string modelId = "model_123456_1";
-  uint16_t skScopeId = 1234;
-  uint16_t modelIdIdx = SkEventRecorder::Instance().RegisterModelId(modelId);
-
-  uint64_t modelIdIndexAndSkScopeId =
-      (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(skScopeId) << 16);
-
-  // OP_LAUNCHED + task->index = 7
-  uint64_t cond = static_cast<uint64_t>(SkOpTraceType::OP_LAUNCHED) + (static_cast<uint64_t>(7) << 8);
-  cond = modelIdIndexAndSkScopeId | cond;
-
-  // 解码
-  uint16_t decodedModelIdIdx = static_cast<uint16_t>((cond >> 32) & 0xFFFF);
-  uint16_t decodedSkScopeId = static_cast<uint16_t>((cond >> 16) & 0xFFFF);
-  uint8_t decodedTaskIndex = static_cast<uint8_t>((cond >> 8) & 0xFF);
-  uint8_t decodedOpTraceType = static_cast<uint8_t>(cond & 0xFF);
-
-  EXPECT_EQ(decodedModelIdIdx, modelIdIdx);
-  EXPECT_EQ(decodedSkScopeId, skScopeId);
-  EXPECT_EQ(decodedTaskIndex, 7);
-  EXPECT_EQ(decodedOpTraceType, static_cast<uint8_t>(SkOpTraceType::OP_LAUNCHED));
-
-  // 通过 index 反查原始 modelId
-  EXPECT_EQ(SkEventRecorder::Instance().GetModelIdByIndex(decodedModelIdIdx), modelId);
-
-  // 清理
-  SkEventRecorder::Instance().modelIdIndexMap.clear();
-  SkEventRecorder::Instance().modelIdToIndexMap.clear();
+// COND preserves full 16-bit model/scope identities in their original order.
+TEST_F(SkDfxExceptionHandlerTest, CondRegister_56bitLayout_EncodeDecode) {
+  constexpr uint16_t modelIdIdx = 0x1234;
+  constexpr uint16_t skScopeId = 0xABCD;
+  const uint64_t headerIdentity = (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(skScopeId) << 24);
+  const uint64_t cond = headerIdentity | (0xBEEFULL << 8) | static_cast<uint64_t>(SkOpTraceType::WAIT_LAUNCHED);
+  EXPECT_EQ(cond, 0x001234ABCDBEEF05ULL);
+  EXPECT_EQ((cond >> 40) & 0xFFFF, modelIdIdx);
+  EXPECT_EQ((cond >> 24) & 0xFFFF, skScopeId);
+  EXPECT_EQ((cond >> 8) & 0xFFFF, 0xBEEF);
+  ut_log::LogBuffer::Instance().Clear();
+  handler->ParseAndPrintCondInfo(0, RT_CORE_TYPE_AIV, cond);
+  EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find("task->index=48879 (nodeIndex=48879)"), std::string::npos);
 }
-
-// ==================== PrintMatchedNodeBasicInfo Tests ====================
 
 TEST_F(SkDfxExceptionHandlerTest, PrintMatchedNodeBasicInfo_AICCoreType) {
   SkHeaderInfo headerInfo = {};
@@ -1046,7 +1026,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintMatchedNodeBasicInfo_WithModelId) {
 
   SkHeaderInfo headerInfo = {};
   headerInfo.modelIdIndexAndSkScopeId =
-      (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(skScopeId) << 16);
+      (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(skScopeId) << 24);
   handler->skHeaderInfoHost = &headerInfo;
 
   SkDfxInfo dfxNode = {};
@@ -1350,7 +1330,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintNoMatchInfo_WithModelId) {
 
   SkHeaderInfo headerInfo = {};
   headerInfo.modelIdIndexAndSkScopeId =
-      (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(skScopeId) << 16);
+      (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(skScopeId) << 24);
   handler->skHeaderInfoHost = &headerInfo;
 
   handler->PrintNoMatchInfo(5, RT_CORE_TYPE_AIC, 0x1000, 0xFFFF);
@@ -1573,7 +1553,7 @@ TEST_F(SkDfxExceptionHandlerTest, GetCondRegValue_Dav3510_Integration_ParseAndPr
   MOCKER(GetCurrentSkKernelArch).stubs().will(invoke(FakeGetCurrentSkKernelArch_Dav3510));
   // Build an rtExceptionErrRegInfo_t with COND values at 3510 indices
   // opState=OP_FINISHED(3), opIndex=1, modelRIIdAndSkScopeId in upper bits
-  uint64_t expectedCond = static_cast<uint64_t>(SkOpTraceType::OP_FINISHED) | (1ULL << 8) | (0xABCDULL << 16);
+  uint64_t expectedCond = static_cast<uint64_t>(SkOpTraceType::OP_FINISHED) | (1ULL << 8) | (0xABCDULL << 24);
 
   rtExceptionErrRegInfo_t regInfo = {};
   regInfo.coreId = 3;
@@ -1616,7 +1596,7 @@ TEST_F(SkDfxExceptionHandlerTest, ParseAndPrintCondInfo_CondValueZero_ShouldLogD
 
 TEST_F(SkDfxExceptionHandlerTest, ParseAndPrintCondInfo_AICCoreType) {
   // opState=ORIGIN(0), opIndex=0, with non-zero condValue
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::ORIGIN) | (0ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::ORIGIN) | (0ULL << 8) | (0x1000ULL << 24);
   handler->ParseAndPrintCondInfo(5, RT_CORE_TYPE_AIC, condValue);
   SUCCEED();
 }
@@ -1638,7 +1618,7 @@ TEST_F(SkDfxExceptionHandlerTest, ParseAndPrintCondInfo_AIVCoreType) {
 
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionName_other));
 
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_LAUNCHED) | (1ULL << 8) | (0x2000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_LAUNCHED) | (1ULL << 8) | (0x2000ULL << 24);
   handler->ParseAndPrintCondInfo(10, RT_CORE_TYPE_AIV, condValue);
 
   free(buffer);
@@ -1648,7 +1628,7 @@ TEST_F(SkDfxExceptionHandlerTest, ParseAndPrintCondInfo_AIVCoreType) {
 // ==================== PrintCondSubKernelInfo Tests (PR 485) ====================
 
 TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_Origin) {
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::ORIGIN) | (0ULL << 8) | (0xABCDULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::ORIGIN) | (0ULL << 8) | (0xABCDULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
   SUCCEED();
 }
@@ -1668,7 +1648,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_SkEntryLaunched_OpIndex
 
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionName_other));
 
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::SK_ENTRY_LAUNCHED) | (0ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::SK_ENTRY_LAUNCHED) | (0ULL << 8) | (0x1000ULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
 
   free(buffer);
@@ -1685,7 +1665,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_SkEntryLaunched_OpIndex
   }
 
   // opIndex=5 but nodeCnt=1, should skip GetOrLoadKernelSymbols
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::SK_ENTRY_LAUNCHED) | (5ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::SK_ENTRY_LAUNCHED) | (5ULL << 8) | (0x1000ULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
 
   free(buffer);
@@ -1708,7 +1688,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_OpLaunched_OpIndexWithi
 
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionName_sk_entry));
 
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_LAUNCHED) | (1ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_LAUNCHED) | (1ULL << 8) | (0x1000ULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
 
   free(buffer);
@@ -1724,7 +1704,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_OpLaunched_OpIndexExcee
     return;
   }
 
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_LAUNCHED) | (10ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_LAUNCHED) | (10ULL << 8) | (0x1000ULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
 
   free(buffer);
@@ -1747,7 +1727,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_OpFinished_CurrentAndNe
 
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionName_other));
 
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_FINISHED) | (1ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_FINISHED) | (1ULL << 8) | (0x1000ULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
 
   free(buffer);
@@ -1770,7 +1750,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_OpFinished_LastNode_NoN
 
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionName_other));
 
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_FINISHED) | (2ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::OP_FINISHED) | (2ULL << 8) | (0x1000ULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
 
   free(buffer);
@@ -1785,7 +1765,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_SkEntryFinished) {
     return;
   }
 
-  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::SK_ENTRY_FINISHED) | (99ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = static_cast<uint64_t>(SkOpTraceType::SK_ENTRY_FINISHED) | (99ULL << 8) | (0x1000ULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
 
   free(buffer);
@@ -1801,7 +1781,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_UnknownOpState) {
   }
 
   // opState=255 (unknown value)
-  uint64_t condValue = 0xFF | (7ULL << 8) | (0x1000ULL << 16);
+  uint64_t condValue = 0xFF | (7ULL << 8) | (0x1000ULL << 24);
   handler->PrintCondSubKernelInfo(0, condValue);
 
   free(buffer);
@@ -1813,7 +1793,7 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCondSubKernelInfo_UnknownOpState) {
 TEST_F(SkDfxExceptionHandlerTest, GetCondRegValue_ParseAndPrintCondInfo_Integration) {
   // Build an rtExceptionErrRegInfo_t with known COND register values
   // opState=OP_FINISHED(3), opIndex=1, modelIdIndexAndSkScopeId in upper bits
-  uint64_t expectedCond = static_cast<uint64_t>(SkOpTraceType::OP_FINISHED) | (1ULL << 8) | (0xABCDULL << 16);
+  uint64_t expectedCond = static_cast<uint64_t>(SkOpTraceType::OP_FINISHED) | (1ULL << 8) | (0xABCDULL << 24);
 
   rtExceptionErrRegInfo_t regInfo = {};
   regInfo.coreId = 3;
@@ -1851,8 +1831,8 @@ TEST_F(SkDfxExceptionHandlerTest, SkHeaderInfo_SizeAndFieldOffsetsStable) {
   // 验证 SkHeaderInfo 的关键字段偏移不会被误改
   SkHeaderInfo headerInfo = {};
 
-  // 验证 modelIdIndexAndSkScopeId 可以存储完整的 48bit cond 编码
-  uint64_t testValue = 0xFFFFFFFF00000000ULL;  // modelIdIdx=0xFFFF, skScopeId=0xFFFF
+  // 验证 modelIdIndexAndSkScopeId 可以存储完整的 56bit cond 编码
+  uint64_t testValue = 0x00FFFFFFFF000000ULL;  // modelIdIdx=0xFFFF, skScopeId=0xFFFF
   headerInfo.modelIdIndexAndSkScopeId = testValue;
   EXPECT_EQ(headerInfo.modelIdIndexAndSkScopeId, testValue);
 
@@ -2344,7 +2324,7 @@ TEST_F(SkDfxExceptionHandlerTest, PopulateDumpInfoFields_FillsKernelNameField) {
 
 TEST_F(SkDfxExceptionHandlerTest, PopulateSkEntryFields_AcceptsMaximumFunctionNameAndTruncatesDisplayName) {
   SkHeaderInfo headerInfo = {};
-  headerInfo.modelIdIndexAndSkScopeId = static_cast<uint64_t>(UINT16_MAX) << 32;
+  headerInfo.modelIdIndexAndSkScopeId = static_cast<uint64_t>(UINT16_MAX) << 40;
   handler->skHeaderInfoHost = &headerInfo;
 
   aclrtExceptionInfo *exceptionInfo = reinterpret_cast<aclrtExceptionInfo *>(0x500);
@@ -2663,7 +2643,7 @@ TEST_F(SkDfxExceptionHandlerTest, ExceptionDumpInfoCallBack_SuperKernelException
   headerInfo.aicQueOffset = headerInfo.dfxOffset + sizeof(SkDfxInfo);
   const std::string modelId = "model_dfx_callback_route_model";
   uint16_t modelIdIndex = SkEventRecorder::Instance().RegisterModelId(modelId);
-  headerInfo.modelIdIndexAndSkScopeId = static_cast<uint64_t>(modelIdIndex) << 32;
+  headerInfo.modelIdIndexAndSkScopeId = static_cast<uint64_t>(modelIdIndex) << 40;
 
   SkDfxInfo *dfxInfo = reinterpret_cast<SkDfxInfo *>(buffer + headerInfo.dfxOffset);
   dfxInfo[0].binHdl = 0xAAAA;
@@ -3046,7 +3026,7 @@ TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_RoutesToHeaderModelAndGuard
   uint16_t modelIdIndex = SkEventRecorder::Instance().RegisterModelId(modelId);
   auto *deviceArgs = reinterpret_cast<SkDeviceEntryArgs *>(buffer);
   deviceArgs->skHeader.totalSize = bufferSize;
-  deviceArgs->skHeader.modelIdIndexAndSkScopeId = static_cast<uint64_t>(modelIdIndex) << 32;
+  deviceArgs->skHeader.modelIdIndexAndSkScopeId = static_cast<uint64_t>(modelIdIndex) << 40;
 
   g_mockDeviceBuffer = buffer;
   g_mockDeviceBufferSize = bufferSize;
@@ -3093,7 +3073,7 @@ TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_UnknownModelIndexWritesFall
 
   auto *deviceArgs = reinterpret_cast<SkDeviceEntryArgs *>(buffer);
   deviceArgs->skHeader.totalSize = bufferSize;
-  deviceArgs->skHeader.modelIdIndexAndSkScopeId = static_cast<uint64_t>(UINT16_MAX) << 32;
+  deviceArgs->skHeader.modelIdIndexAndSkScopeId = static_cast<uint64_t>(UINT16_MAX) << 40;
 
   g_mockDeviceBuffer = buffer;
   g_mockDeviceBufferSize = bufferSize;
@@ -3127,4 +3107,41 @@ TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_UnknownModelIndexWritesFall
   g_mockDeviceBuffer = nullptr;
   g_mockDeviceBufferSize = 0;
   free(buffer);
+}
+
+TEST_F(SkDfxExceptionHandlerTest, WaitCondUsesTaskIndexForBothPhases) {
+  constexpr uint32_t nodeIndex = 0xBEEF;
+  for (auto state : {SkOpTraceType::WAIT_LAUNCHED, SkOpTraceType::WAIT_FINISHED}) {
+    const uint64_t cond =
+        (0x1234ULL << 40) | (0xABCDULL << 24) | (static_cast<uint64_t>(nodeIndex) << 8) | static_cast<uint64_t>(state);
+    ut_log::LogBuffer::Instance().Clear();
+    handler->ParseAndPrintCondInfo(0, RT_CORE_TYPE_AIV, cond);
+    const auto log = ut_log::LogBuffer::Instance().GetContent();
+    EXPECT_NE(
+        log.find(state == SkOpTraceType::WAIT_LAUNCHED ? "Currently executing waitfunc" : "Last completed waitfunc"),
+        std::string::npos);
+    EXPECT_NE(log.find("task->index=48879 (nodeIndex=48879)"), std::string::npos);
+    EXPECT_EQ(log.find("taskQueueIndex"), std::string::npos);
+  }
+}
+
+TEST_F(SkDfxExceptionHandlerTest, OpTraceWaitUsesTaskIndexWithoutKernelSymbols) {
+  SkHeaderInfo headerInfo{};
+  SkDeviceEntryArgs *deviceArgs = nullptr;
+  std::unique_ptr<uint8_t, decltype(&free)> buffer(
+      SetupOpTraceTestBuffer(0, false, headerInfo, deviceArgs, handler.get()), &free);
+  ASSERT_NE(buffer, nullptr);
+  handler->hasOpTrace_ = true;
+  handler->aicoreNums = 1;
+  auto *counter = reinterpret_cast<SkCounterInfo *>(buffer.get() + headerInfo.counterOffset);
+  counter[0].index = 3;
+  for (auto state : {SkOpTraceType::WAIT_LAUNCHED, SkOpTraceType::WAIT_FINISHED}) {
+    counter[0].opState = static_cast<uint8_t>(state);
+    ut_log::LogBuffer::Instance().Clear();
+    handler->PrintCoreSymbols(0, RT_CORE_TYPE_AIV, 0, 0);
+    const auto log = ut_log::LogBuffer::Instance().GetContent();
+    EXPECT_NE(log.find("task->index=3 (nodeIndex=3)"), std::string::npos);
+    EXPECT_EQ(log.find("taskQueueIndex"), std::string::npos);
+    EXPECT_TRUE(handler->opSymbolCache.empty());
+  }
 }

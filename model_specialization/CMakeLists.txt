@@ -14,6 +14,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+find_cann_package(ASC REQUIRED PATHS $ENV{ASCEND_HOME_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
+enable_language(ASC)
+
 add_subdirectory(src)
 
 if(ENABLE_CPP_UTEST OR ENABLE_CPP_STEST)

@@ -596,10 +596,10 @@ TEST_F(SkNodeTest, FusionFailReasonStrings_CoverAllEnumNamesAndDetails) {
 
 TEST_F(SkNodeTest, AlignUpAndClamp_CoversAlignmentAndCoreClamp) {
   EXPECT_EQ(AlignUpAndClamp(1, 0), 1);
-  EXPECT_EQ(AlignUpAndClamp(0x801, 0), 2);
-  EXPECT_EQ(AlignUpAndClamp(0x800 * 20, 0), 16);
-  EXPECT_EQ(AlignUpAndClamp(0x800 * 20, 1), 8);
-  EXPECT_EQ(AlignUpAndClamp(0x800 * 20, 2), 20);
+  EXPECT_EQ(AlignUpAndClamp(SK_PRELOAD_BLOCK_SIZE_BYTES + 1, 0), 2);
+  EXPECT_EQ(AlignUpAndClamp(SK_PRELOAD_BLOCK_SIZE_BYTES * 20, 0), 16);
+  EXPECT_EQ(AlignUpAndClamp(SK_PRELOAD_BLOCK_SIZE_BYTES * 20, 1), 8);
+  EXPECT_EQ(AlignUpAndClamp(SK_PRELOAD_BLOCK_SIZE_BYTES * 20, 2), 20);
 }
 
 TEST_F(SkNodeTest, InValidateNode_SetsInvalidatedFlag) {

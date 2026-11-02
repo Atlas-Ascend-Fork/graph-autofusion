@@ -624,6 +624,28 @@ TEST_F(SuperKernelGraphTest, AddNode_DuplicateNodeId) {
   EXPECT_EQ(graph->graphMap.size(), 1);
 }
 
+TEST_F(SuperKernelGraphTest, AllocateSyntheticNodeId_StartsAfterLargestOriginalNodeAndIncrements) {
+  auto node1 = std::make_unique<SuperKernelKernelNode>(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, 0, INVALID_STREAM_ID,
+                                                       INVALID_TASK_ID);
+  node1->SetNodeId(7);
+  ASSERT_TRUE(graph->AddNode(std::move(node1)));
+
+  auto node2 = std::make_unique<SuperKernelKernelNode>(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, 0, INVALID_STREAM_ID,
+                                                       INVALID_TASK_ID);
+  node2->SetNodeId(42);
+  ASSERT_TRUE(graph->AddNode(std::move(node2)));
+
+  EXPECT_EQ(graph->AllocateSyntheticNodeId(), 43);
+  EXPECT_EQ(graph->AllocateSyntheticNodeId(), 44);
+}
+
+TEST_F(SuperKernelGraphTest, AllocateSyntheticNodeId_ReturnsInvalidAtIdLimit) {
+  graph->maxNodeId_ = INVALID_TASK_ID - 1U;
+
+  EXPECT_EQ(graph->AllocateSyntheticNodeId(), INVALID_TASK_ID);
+  EXPECT_EQ(graph->maxNodeId_, INVALID_TASK_ID - 1U);
+}
+
 // ==================== ExpandUpdateNodes Tests ====================
 
 TEST_F(SuperKernelGraphTest, ExpandUpdateNodes_EmptyList) {

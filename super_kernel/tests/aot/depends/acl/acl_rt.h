@@ -126,6 +126,7 @@ typedef enum aclrtMemcpyKind {
 typedef enum aclrtDevAttr {
   ACL_DEV_ATTR_CUBE_CORE_NUM,
   ACL_DEV_ATTR_VECTOR_CORE_NUM,
+  ACL_DEV_ATTR_NPU_ARCH = 601U,
 } aclrtDevAttr;
 
 // Task types

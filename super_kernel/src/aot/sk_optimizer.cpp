@@ -20,6 +20,7 @@
 #include "sk_scope_split.h"
 #include "sk_scope_postprocess.h"
 #include "sk_task_builder.h"
+#include "sk_queue_type_resolver.h"
 #include "sk_log.h"
 #include "sk_dump_json.h"
 #include "aprof_pub.h"
@@ -68,6 +69,24 @@ void PrintTaskNodesDetail(const std::vector<SuperKernelBaseNode *> &nodes, const
   }
 }
 }  // namespace
+
+bool SuperKernelOptimizer::ExtractIntraStreamDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes) const {
+  std::unordered_map<uint32_t, SuperKernelBaseNode *> lastNodeByStream;
+  for (auto *node : taskNodes) {
+    if (node == nullptr) {
+      SK_LOGE("null node while extracting intra-stream dependencies");
+      return false;
+    }
+    auto it = lastNodeByStream.find(node->GetStreamIdxInGraph());
+    if (it != lastNodeByStream.end() && it->second != nullptr) {
+      auto *previous = it->second;
+      previous->sendToNodeId.insert(node->GetNodeId());
+      node->receiveNodeId.insert(previous->GetNodeId());
+    }
+    lastNodeByStream[node->GetStreamIdxInGraph()] = node;
+  }
+  return true;
+}
 
 std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::ReorderWaitNodesForTaskBuild(
     const std::vector<SuperKernelBaseNode *> &taskNodes) const {
@@ -167,6 +186,28 @@ std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::ReorderWaitNodesForTask
   return reorderedTaskNodes;
 }
 
+void SuperKernelOptimizer::ConnectLastKernelsToFirstEvent(const std::vector<SuperKernelBaseNode *> &taskNodes,
+                                                          SuperKernelBaseNode *firstEvent) const {
+  if (firstEvent == nullptr) {
+    return;
+  }
+
+  std::unordered_map<uint32_t, SuperKernelBaseNode *> lastKernelByStream;
+  for (auto *node : taskNodes) {
+    if (node != nullptr && node->GetNodeType() == SkNodeType::NODE_KERNEL) {
+      lastKernelByStream[node->GetStreamIdxInGraph()] = node;
+    }
+  }
+
+  const uint64_t firstEventId = firstEvent->GetNodeId();
+  for (const auto &[streamIdx, kernel] : lastKernelByStream) {
+    kernel->sendToNodeId.insert(firstEventId);
+    firstEvent->receiveNodeId.insert(kernel->GetNodeId());
+    SK_LOGI("connect last kernel to first event: streamIdx=%u, kernelNodeId=%lu, eventNodeId=%lu", streamIdx,
+            kernel->GetNodeId(), firstEventId);
+  }
+}
+
 bool SuperKernelOptimizer::ShouldReorderWaitNodesForTaskBuild() const {
   const auto *autoOpParallel = opts.GetOption(aclskOptionType::AUTO_OP_PARALLEL);
   if (autoOpParallel == nullptr) {
@@ -261,20 +302,35 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
     return false;
   }
 
+  if (!ExtractIntraStreamDependencies(reorderedTaskNodes)) {
+    SK_LOGE("failed to extract intra-stream graph dependencies");
+    return false;
+  }
+
   std::string skFuncName = GetSkFuncName(reorderedTaskNodes, scopeInfo.GetScopeId(), scopeInfo.GetExtInfo().scopeName);
   PrintTaskNodesDetail(reorderedTaskNodes, "reordered task nodes");
 
-  std::vector<SuperKernelBaseNode *> customTasks;
-  customTasks.reserve(scopeInfo.GetExtInfo().eventNodes.size());
-  for (const auto &eventNode : scopeInfo.GetExtInfo().eventNodes) {
-    customTasks.emplace_back(eventNode.get());
+  const auto &eventNodes = scopeInfo.GetExtInfo().eventNodes;
+  if (!eventNodes.empty()) {
+    ConnectLastKernelsToFirstEvent(reorderedTaskNodes, eventNodes.front().get());
   }
 
-  SK_LOGI("schedule scope: taskCount=%zu, customTaskCount=%zu, updateStreamCount=%zu", reorderedTaskNodes.size(),
-          customTasks.size(), scopeInfo.GetScopeStreamInfos().size());
+  std::vector<SuperKernelBaseNode *> tasks = reorderedTaskNodes;
+  tasks.reserve(reorderedTaskNodes.size() + eventNodes.size());
+  for (const auto &eventNode : eventNodes) {
+    tasks.emplace_back(eventNode.get());
+  }
 
-  SkBuildResult buildResult =
-      builder.Build(skFuncName, reorderedTaskNodes, customTasks, scopeInfo.GetScopeId(), scopeInfo.GetScopeCoreInfo());
+  SkQueueTypeResolver queueTypeResolver(graph);
+  if (!queueTypeResolver.Resolve(tasks)) {
+    SK_LOGE("failed to prepare task queue types before task building");
+    return false;
+  }
+
+  SK_LOGI("schedule scope: graphTaskCount=%zu, eventTaskCount=%zu, taskCount=%zu, updateStreamCount=%zu",
+          reorderedTaskNodes.size(), eventNodes.size(), tasks.size(), scopeInfo.GetScopeStreamInfos().size());
+
+  SkBuildResult buildResult = builder.Build(skFuncName, tasks, scopeInfo.GetScopeId(), scopeInfo.GetScopeCoreInfo());
   SkLaunchInfo &launchInfo = buildResult.launchInfo;
 
   // Collect task queue JSON for this scope

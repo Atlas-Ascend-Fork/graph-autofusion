@@ -41,10 +41,38 @@ constexpr uint32_t TASK_QUE_EXPAND_FACTOR = 2;  // TaskQue扩容因子
 constexpr uint32_t MAX_SCOPE_NUM = 1024;
 constexpr uint32_t MAX_FUNC_NAME_LEN = 4096;
 constexpr size_t SK_TOTAL_UB_SIZE = 256U * 1024U;
+constexpr size_t SK_PRELOAD_BLOCK_SIZE_BYTES = 0x800U;
+constexpr uint64_t SK_AIC_MAX_PRELOAD_COUNT = 16U;
+constexpr uint64_t SK_AIV_MAX_PRELOAD_COUNT = 8U;
 constexpr uint16_t INVALID_SCOPE_ID = std::numeric_limits<uint16_t>::max();
 constexpr uint32_t INVALID_STREAM_ID = std::numeric_limits<uint32_t>::max();
 constexpr uint64_t INVALID_TASK_ID = std::numeric_limits<uint64_t>::max();
 constexpr char UNKNOWN_MODEL_ID[] = "model_unknown";
+
+enum class SkQueueType : uint8_t {
+  AIC,
+  AIV,
+  MIX_1_1,
+  MIX_1_2,
+  UNKNOWN,
+};
+
+inline const char *to_string(SkQueueType type) {
+  switch (type) {
+    case SkQueueType::AIC:
+      return "AIC";
+    case SkQueueType::AIV:
+      return "AIV";
+    case SkQueueType::MIX_1_1:
+      return "MIX_1_1";
+    case SkQueueType::MIX_1_2:
+      return "MIX_1_2";
+    case SkQueueType::UNKNOWN:
+      return "UNKNOWN";
+    default:
+      return "UNKNOWN";
+  }
+}
 
 class TaskQuePtr {
   std::unique_ptr<uint8_t[]> data_;

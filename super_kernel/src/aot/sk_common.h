@@ -149,6 +149,8 @@ enum class SkOpTraceType : uint8_t {
   OP_LAUNCHED,
   OP_FINISHED,
   SK_ENTRY_FINISHED,
+  WAIT_LAUNCHED,  // TYPE_EVENT_WAIT entered; index identifies the wait task node.
+  WAIT_FINISHED,  // TYPE_EVENT_WAIT returned; not evidence that the core is still waiting.
 };
 
 inline const char *to_string(SkTaskType type) {
@@ -330,12 +332,12 @@ struct SkHeaderInfo {
   uint32_t dfxOffset;
   uint32_t eventConfigOffset;  // 算子打印事件配置偏移量
   uint32_t nodeCnt;
-  uint64_t modelIdIndexAndSkScopeId;
+  uint64_t modelIdIndexAndSkScopeId;  // COND identity: model[55:40], scope[39:24].
   uint64_t totalSize;
 };
 
 struct SkCounterInfo {
-  uint32_t index;
+  uint32_t index;   // Node index for OP and WAIT states.
   uint8_t opState;  // operator trace state, see SkOpTraceType
   // dcci single cacheline size is 64bytes
   uint8_t reserve[59];

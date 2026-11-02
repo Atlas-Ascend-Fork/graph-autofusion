@@ -61,8 +61,17 @@ enum class aclskOptionType : uint32_t {
 
 enum class SkInnerOptionType : uint32_t { MIX_KERNEL_SPLIT = 0, SIMT_OP_SUPPORT = 1, SK_INNER_OPTION_MAX };
 
+enum aclskPreloadMode : uint32_t {
+  ACLSK_PRELOAD_MAX = 0U,                // AIC/AIV use the maximum supported preload count
+  ACLSK_PRELOAD_PER_FUNC = 1U,           // use function size, capped by the AIC/AIV limits
+  ACLSK_PRELOAD_DISABLED = 2U,           // disable instruction-cache preload
+  ACLSK_PRELOAD_MIN = 3U,                // AIC/AIV preload one 2-KB block
+  ACLSK_PRELOAD_PER_FUNC_HALF_AIV = 4U,  // AIC uses function size; AIV uses half, rounded up
+  ACLSK_PRELOAD_PER_FUNC_MIN_AIV = 5U,   // AIC uses function size; AIV uses at most one block
+};
+
 typedef struct aclskPreloadOption {
-  uint32_t preloadMode;
+  uint32_t preloadMode;  // aclskPreloadMode
 } aclskPreloadOption;
 
 typedef struct aclskSplitModeOption {

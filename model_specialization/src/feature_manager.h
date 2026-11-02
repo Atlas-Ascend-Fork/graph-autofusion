@@ -17,7 +17,13 @@
 
 namespace model_spec {
 
-enum class Feature : uint32_t { COMPILE_JOBS = 0, ENABLE_SK = 1, BASIC_COMPILE_OPTIONS = 2, SK_COMPILE_OPTIONS = 3 };
+enum class Feature : uint32_t {
+  COMPILE_JOBS = 0,
+  ENABLE_SK = 1,
+  BASIC_COMPILE_OPTIONS = 2,
+  SK_COMPILE_OPTIONS = 3,
+  IS_SCOPE_JIT = 4
+};
 
 // Init owns its inputs. Init/destruction require exclusive access; Get supports concurrent readers.
 class FeatureManager final {
@@ -27,7 +33,7 @@ class FeatureManager final {
   FeatureManager &operator=(const FeatureManager &) = delete;
 
   // Configuration errors return false; exceptions propagate. Either failure preserves the old configuration.
-  [[nodiscard]] bool Init(const aclmdlRISpecOptions *options);
+  [[nodiscard]] bool Init(const aclmdlRISpecOptions *options, bool isScopeJit = false);
   template <Feature F>
   auto Get() const;
   template <Feature F>
@@ -38,12 +44,13 @@ class FeatureManager final {
   detail::CompileOptionFeature compileOptions_;
   uint64_t compileJobs_{0};
   bool enableSk_{false};
+  bool isScopeJit_{false};
   bool initialized_{false};
 };
 
 template <Feature F>
 auto FeatureManager::Get() const {
-  static_assert(F == Feature::COMPILE_JOBS || F == Feature::ENABLE_SK,
+  static_assert(F == Feature::COMPILE_JOBS || F == Feature::ENABLE_SK || F == Feature::IS_SCOPE_JIT,
                 "Unsupported model feature or missing kernel entry");
   if (!initialized_) {
     SK_DLOGE("FeatureManager must be initialized before Get");
@@ -53,6 +60,9 @@ auto FeatureManager::Get() const {
   }
   if constexpr (F == Feature::ENABLE_SK) {
     return enableSk_;
+  }
+  if constexpr (F == Feature::IS_SCOPE_JIT) {
+    return isScopeJit_;
   }
 }
 

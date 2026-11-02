@@ -47,8 +47,10 @@ run_llt_test(
 
 add_executable(acl_spec_optimize_ut
     ${CMAKE_CURRENT_SOURCE_DIR}/test_acl_spec_optimizer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_spec_scope_launch.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src/acl_spec_optimizer.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src/aclmodel_specialization.cpp
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src/spec_scope_launch.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src/feature_manager.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src/kernel_compile_features.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/common/pattern_common.cpp
