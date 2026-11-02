@@ -909,7 +909,9 @@ build_backend() {
                     axpy_abs_half_test_e2e \
                     pgo_add_abs_test_e2e \
                     matmul_elemwise_test_e2e \
-                    inductor_matmul_elemwise_test_e2e"
+                    inductor_matmul_elemwise_test_e2e \
+                    workspace_uint64_multi_reduce_test_e2e \
+                    workspace_uint64_tiling_test_e2e"
   if [[ "X$RUN_V35_TESTS" = "Xon" ]]; then
     MAKE_TARGET_LIST="${MAKE_TARGET_LIST} \
                       load_loop_mode_test_e2e_v2 \

@@ -19,11 +19,13 @@ extern "C" __global__ __aicore__ void workspace_uint64_multi_reduce(GM_ADDR inpu
                                                                     GM_ADDR tiling);
 extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling_data, uint64_t *workspace_size, uint32_t *block_dim,
                                   uint32_t aiv_num, uint32_t ub_size);
+extern "C" void GetWorkspaceOffsets(const AutofuseTilingData *tiling_data, uint64_t *offsets);
 
 namespace {
-constexpr uint64_t kWorkspaceBytes = 0x90000000ULL;
+constexpr uint64_t kWorkspaceBytes = 4096ULL;
 constexpr uint64_t kReservedWorkspaceBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kMinimumWorkspaceBytes = 3 * kWorkspaceBytes + kReservedWorkspaceBytes;
+constexpr uint64_t kMaximumWorkspaceBytes = 32ULL * 1024ULL * 1024ULL;
 constexpr size_t kInputCount = 65536U;
 constexpr size_t kOutputCount = 1024U;
 constexpr float kExpectedOutput = 192.0F;
@@ -31,16 +33,19 @@ constexpr float kExpectedOutput = 192.0F;
 
 class TestBackendWorkspaceUint64MultiReduceE2e : public testing::Test {};
 
-TEST_F(TestBackendWorkspaceUint64MultiReduceE2e, ThreeWorkspacesUseUint64OffsetsAndReduceCorrectly) {
+TEST_F(TestBackendWorkspaceUint64MultiReduceE2e, SmallWorkspaceReducesCorrectly) {
   AutofuseTilingData tiling_data = {};
   uint64_t workspace_size = 0;
   uint32_t block_dim = 0;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48, 192 * 1024), 0);
 
-  EXPECT_EQ(tiling_data.get_workspace8() - tiling_data.get_workspace7(), kWorkspaceBytes);
-  EXPECT_EQ(tiling_data.get_workspace9() - tiling_data.get_workspace8(), kWorkspaceBytes);
-  EXPECT_GE(tiling_data.get_workspace9(), 2 * kWorkspaceBytes);
+  uint64_t workspace_offsets[3] = {};
+  GetWorkspaceOffsets(&tiling_data, workspace_offsets);
+  EXPECT_EQ(workspace_offsets[1] - workspace_offsets[0], kWorkspaceBytes);
+  EXPECT_EQ(workspace_offsets[2] - workspace_offsets[1], kWorkspaceBytes);
+  EXPECT_GE(workspace_offsets[2], 2 * kWorkspaceBytes);
   EXPECT_GE(workspace_size, kMinimumWorkspaceBytes);
+  ASSERT_LE(workspace_size, kMaximumWorkspaceBytes);
 
   float *input = static_cast<float *>(AscendC::GmAlloc(kInputCount * sizeof(float)));
   float *output = static_cast<float *>(AscendC::GmAlloc(kOutputCount * sizeof(float)));
@@ -49,7 +54,7 @@ TEST_F(TestBackendWorkspaceUint64MultiReduceE2e, ThreeWorkspacesUseUint64Offsets
     AscendC::GmFree(input);
     AscendC::GmFree(output);
     AscendC::GmFree(workspace);
-    GTEST_SKIP() << "Insufficient device memory for uint64 workspace E2E";
+    FAIL() << "Failed to allocate bounded workspace for reduce E2E";
   }
 
   for (size_t i = 0; i < kInputCount; ++i) {
