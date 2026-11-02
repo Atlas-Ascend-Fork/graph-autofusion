@@ -900,7 +900,7 @@ TEST_F(OptimizerSt, TestSoftmaxGraph_OptimizeSuccess) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
 }
 
 TEST_F(OptimizerSt, TestPackGraph_OptimizeSuccess) {
@@ -3684,6 +3684,8 @@ TEST_F(OptimizerSt, ReduceNeedAlignment) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
+  // Max 对 {0,2} 两根轴归约, 单 reduce 双 R 轴: phase-1 各 tiling case 切分结构不同(relation 不一致),
+  // AppendReduceFirstStageGroup 回退逐 case 展开, 6 = Common 1 + RCore 展开 4 + AllLoad 1
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 6UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 4UL);
@@ -4076,7 +4078,8 @@ TEST_F(OptimizerSt, NodeCacheMarkerReduce) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
+  // R-core phase-1 两个 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 3 减为 2
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
   const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 2);
 

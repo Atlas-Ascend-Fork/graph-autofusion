@@ -965,7 +965,8 @@ TEST_F(VectorFuncSt, CastHorizontolFusion) {
   EXPECT_EQ(res, af::SUCCESS);
 
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4UL);
+  // R-core phase-1 多 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 4 减为 3
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_TRUE(!fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.empty());
   std::vector<af::AscGraph> asc_graphs;
@@ -1054,7 +1055,8 @@ TEST_F(VectorFuncSt, vectorized_not_empty) {
   EXPECT_EQ(res, af::SUCCESS);
 
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4UL);
+  // R-core phase-1 多 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 4 减为 3
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 2UL);
   std::vector<af::AscGraph> asc_graphs;

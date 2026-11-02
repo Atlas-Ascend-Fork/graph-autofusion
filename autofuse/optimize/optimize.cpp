@@ -522,7 +522,57 @@ Status RemoveDanglingNodes(af::AscGraph &graph) {
   GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(graph));
   return af::SUCCESS;
 }
+
+// 判定 R 轴分核 phase-1 各 tiling case 的 var relation 表达式是否跨 case 一致: relation 表达式以
+// src group tiling data 字段求值, 运行时读到的是胜出 impl 写入的求解值, 一致(各 case 切分结构
+// 相同, 如 r_group 单轴或全规约退化空 relation)时单一表达式可覆盖全部 impl; 不一致(单 reduce
+// 多 R 轴, 各 case 切分结构不同)时单一表达式会算错 workspace 尺寸, 调用方不可做多 impl 打包
+bool IsVarRelationsConsistent(const std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs) {
+  const auto &base_relations = schedule_outputs.front().var_relations_;
+  for (const auto &schedule_output : schedule_outputs) {
+    const auto &cur_relations = schedule_output.var_relations_;
+    if (cur_relations.size() != base_relations.size()) {
+      return false;
+    }
+    for (const auto &relation : cur_relations) {
+      const auto base_it = base_relations.find(relation.first);
+      if (base_it == base_relations.end() ||
+          af::SymbolicUtils::ToString(base_it->second) != af::SymbolicUtils::ToString(relation.second)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 }  // namespace
+
+Status Optimizer::AppendReduceFirstStageGroup(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
+                                              std::vector<ascir::ScheduledResult> &scheduled_results_cur, size_t index,
+                                              ScheduleTask &schedule_task) const {
+  GE_ASSERT_TRUE(!schedule_outputs.empty(), "No phase-1 tiling case for reduce first stage.");
+  // 单 reduce 多 R 轴非 norm 图 (ReducePartitionCaseGenerator 仅对多 reduce / norm 类多 R 轴图跳过
+  // R-core 模板生成) 会进入此处且 relation 不一致, 回退 ExpandReduceFirstStageResults 走逐 case
+  // 展开的既有流程; 一致时走下方多 impl 打包路径
+  if (!IsVarRelationsConsistent(schedule_outputs)) {
+    return ExpandReduceFirstStageResults(schedule_outputs, scheduled_results_cur, index, schedule_task);
+  }
+  // phase_1 各 tiling case 装进同一 group 作为多 impl(与 CopyImplGraphs 的 phase_2 模式一致), 由
+  // kernel 侧 GenMulGroupKernelWithRegTilingKey 生成 TILING_KEY_IS 组合分支, 结果数不随 case 数相乘
+  const auto &base_relations = schedule_outputs.front().var_relations_;
+  for (auto &d : scheduled_results_cur) {
+    ScheduleGroup schedule_group;
+    schedule_group.impl_graphs.reserve(schedule_outputs.size());
+    for (const auto &schedule_output : schedule_outputs) {
+      ascir::ImplGraph copied_graph(schedule_output.scheduled_graph.GetName().c_str());
+      GE_ASSERT_TRUE(copied_graph.CopyFrom(schedule_output.scheduled_graph));
+      schedule_group.impl_graphs.push_back(std::move(copied_graph));
+      RegisterScoreFuncInScheduleGroup(schedule_output, schedule_group);
+    }
+    d.schedule_groups.emplace_back(std::move(schedule_group));
+    RefreshGroupRelation(index, base_relations, schedule_task, d);
+  }
+  return af::SUCCESS;
+}
 
 Status Optimizer::ExpandReduceFirstStageResults(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
                                                 std::vector<ascir::ScheduledResult> &scheduled_results_cur,
@@ -1057,7 +1107,7 @@ bool Optimizer::IsReduceFirstStage(size_t index, ScheduleTask &schedule_task) {
   return false;
 }
 
-void Optimizer::RefreshGroupRelation(size_t index, std::map<std::string, af::Expression> &var_relations,
+void Optimizer::RefreshGroupRelation(size_t index, const std::map<std::string, af::Expression> &var_relations,
                                      ScheduleTask &schedule_task, ScheduledResult &schedule_result) const {
   auto iter = schedule_task.groups_relations_in.find(index);
   if (iter == schedule_task.groups_relations_in.end()) {
@@ -1149,7 +1199,7 @@ Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, Sc
     GELOGI("AutoScheduler end: %s, number of tiling cases = %zu", grouped_graph.GetName().c_str(),
            schedule_outputs.size());
     if (is_reduce_first_stage) {
-      GE_ASSERT_SUCCESS(ExpandReduceFirstStageResults(schedule_outputs, scheduled_results_cur, index, schedule_task));
+      GE_ASSERT_SUCCESS(AppendReduceFirstStageGroup(schedule_outputs, scheduled_results_cur, index, schedule_task));
     } else {
       if (schedule_task.reduce_type == ReduceTemplateType::kRCore) {
         GE_ASSERT_SUCCESS(CopyImplGraphs(schedule_outputs, scheduled_results_cur));

@@ -745,7 +745,9 @@ TEST_F(UTestAscirPerfV2, TestStoreApiForSmallStride) {
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // MTE3 padding: 由于gm_stride>0且z6t_size可能<16(int64的128B是16个元素),会生成三元表达式
   // StoreStride uses the DMA block count (34) after the two LoopMode dimensions are removed.
-  const std::string kStride = "1500.41599273682";
+  Expr stride_cost = CreateExpr(160) + CreateExpr(0.0050306649073631F) * CreateExpr(34) * CreateExpr(1024);
+  stride_cost.Simplify();
+  const std::string kStride = Str(stride_cost);
   // Note: 由于padding, z6t_size会被替换为TernaryOp表达式,且TernaryOp在z0z1t_size之前
   EXPECT_EQ(Str(res.Replace(ret)),
             "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
@@ -787,7 +789,9 @@ TEST_F(UTestAscirPerfV2, TestStoreApiForBiggerStride) {
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // MTE3 padding: 由于gm_stride>0且z6t_size可能<16(int64的128B是16个元素),会生成三元表达式
   // StoreStride uses the DMA block count (34) after the two LoopMode dimensions are removed.
-  const std::string kStride = "5521.66397094727";
+  Expr stride_cost = CreateExpr(160) + CreateExpr(0.0050306649073631F) * CreateExpr(34) * CreateExpr(4096);
+  stride_cost.Simplify();
+  const std::string kStride = Str(stride_cost);
   EXPECT_EQ(Str(res.Replace(ret)),
             "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
             "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + " +
@@ -834,9 +838,12 @@ TEST_F(UTestAscirPerfV2, TestStoreApiLoopModeEndToEnd) {
   ASSERT_EQ(perf(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr stride_cost = CreateExpr(0.0050093180829704F) * CreateExpr(380) * CreateExpr(4);
+  stride_cost.Simplify();
   EXPECT_EQ(Str(perf_res.pipe_res[PipeType::AIV_MTE3].Replace(ret)),
-            "((58.5199996829033 * z0z1t_size) + (80 * z0z1t_size * z2t_size / "
-            "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
+            "((" + Str(stride_cost) +
+                " * z0z1t_size) + (80 * z0z1t_size * z2t_size / "
+                "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
 }
 
 TEST_F(UTestAscirPerfV2, TestNddmaApiForType) {
@@ -1418,6 +1425,12 @@ TEST_F(UTestAscirPerfV2, TestLoadStoreStrideModelParamsCoverSupportedTypes) {
   const auto table = Json::parse(kParamV2Info);
   const std::vector<std::string> dtypes = {"int8",  "uint8",  "int16",   "uint16",   "int32",   "uint32",
                                            "int64", "uint64", "float16", "bfloat16", "float32", "bool"};
+  const std::map<std::string, float> store_coefficients = {
+      {"int8", 0.0050441522125085F},     {"uint8", 0.0049922306718019F},  {"bool", 0.0050337712308162F},
+      {"int16", 0.0050219521009849F},    {"uint16", 0.0049981859819869F}, {"float16", 0.005009566773717F},
+      {"bfloat16", 0.0050004678761787F}, {"int32", 0.0050058211763464F},  {"uint32", 0.0050046751614247F},
+      {"float32", 0.0050093180829704F},  {"int64", 0.0050306649073631F},  {"uint64", 0.0049785878890068F},
+  };
   for (const auto &op : {"LoadStride", "StoreStride"}) {
     const auto &params = table.at(op).at("model_params");
     EXPECT_EQ(params.size(), dtypes.size());
@@ -1425,11 +1438,41 @@ TEST_F(UTestAscirPerfV2, TestLoadStoreStrideModelParamsCoverSupportedTypes) {
       SCOPED_TRACE(std::string(op) + ":" + dtype);
       const auto key = dtype + "to" + dtype;
       ASSERT_TRUE(params.contains(key));
-      EXPECT_FLOAT_EQ(params.at(key).at("k").get<float>(), std::string(op) == "LoadStride" ? 0.005f : 0.0385f);
+      EXPECT_FLOAT_EQ(params.at(key).at("k").get<float>(),
+                      std::string(op) == "LoadStride" ? 0.005f : store_coefficients.at(dtype));
       EXPECT_FLOAT_EQ(params.at(key).at("u").get<float>(), 4096.0f);
       EXPECT_FLOAT_EQ(params.at(key).at("penalty_coeff").get<float>(), 0.0f);
     }
     EXPECT_FALSE(params.contains("int4toint4"));
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreStrideUsesPerTypeCostAndDtypeSize) {
+  const auto table = Json::parse(kParamV2Info);
+  const auto &types = table.at("StoreStride").at("model_params");
+  for (const auto &[dtype, type_size] : kDataTypeSizeMap) {
+    const auto key = dtype + "to" + dtype;
+    if (!types.contains(key)) {
+      continue;
+    }
+    SCOPED_TRACE(dtype);
+    int32_t bytes_per_element = 0;
+    type_size.GetConstValue(bytes_per_element);
+    ASSERT_GT(bytes_per_element, 0);
+    const std::map<std::string, float> params = {{"k", types.at(key).at("k").get<float>()},
+                                                 {"u", types.at(key).at("u").get<float>()},
+                                                 {"data_type_size", static_cast<float>(bytes_per_element)}};
+    for (const int32_t stride_elements : {0, 31, 124, 1024, 8192}) {
+      Expr result;
+      ASSERT_EQ(LoadStoreStrideV2Func(params, {CreateExpr(34), CreateExpr(32 / bytes_per_element)},
+                                      CreateExpr(stride_elements), result),
+                af::SUCCESS);
+      Expr expected =
+          CreateExpr(params.at("k")) * CreateExpr(34) * CreateExpr(std::min(stride_elements * bytes_per_element, 4096));
+      result.Simplify();
+      expected.Simplify();
+      EXPECT_EQ(Str(result), Str(expected));
+    }
   }
 }
 

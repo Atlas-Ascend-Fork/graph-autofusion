@@ -493,6 +493,8 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Three_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
+  // Sum 对 z0/z1 两轴全归约属多 R 轴, 但单 reduce 非 norm 图放行进入 R-core 模板, 由
+  // AppendReduceFirstStageGroup 一致性判定后打包或回退, Common/RCore/AllLoad 三任务齐全
   ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 2UL);
@@ -506,6 +508,7 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_One_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
+  // 同 TestReduce_Three_Elewise_Store: 单 reduce 多 R 轴放行, Common/RCore/AllLoad 三任务齐全
   ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 2UL);
@@ -519,6 +522,7 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Four_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
+  // 同 TestReduce_Three_Elewise_Store: 单 reduce 多 R 轴放行, Common/RCore/AllLoad 三任务齐全
   ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 2UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 3UL);
@@ -613,7 +617,12 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Multi_Out_NoDepend
 
   size_t shared0_workspace_count = 0UL;
   size_t shared1_workspace_count = 0UL;
+  // RCore 任务由 kCommon 任务派生并复制其子图, workspace 节点会随拷贝重复出现,
+  // 故仅在 kCommon 任务内计数
   for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
     for (const auto &grouped_graph : task.grouped_graphs) {
       for (const auto &node : grouped_graph.GetAllNodes()) {
         if (!af::ops::IsOps<af::ascir_op::Workspace>(node)) {
@@ -658,7 +667,12 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_SameReduce_NoDupli
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
 
   size_t shared_workspace_count = 0UL;
+  // RCore 任务由 kCommon 任务派生并复制其子图, workspace 节点会随拷贝重复出现,
+  // 故仅在 kCommon 任务内计数
   for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
     for (const auto &grouped_graph : task.grouped_graphs) {
       for (const auto &node : grouped_graph.GetAllNodes()) {
         if (af::ops::IsOps<af::ascir_op::Workspace>(node) &&
@@ -782,6 +796,7 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_ScalarData_Input) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
+  // Sum 对两轴全归约属多 R 轴, 但单 reduce 非 norm 图放行进入 R-core 模板, Common/RCore/AllLoad 三任务齐全
   ASSERT_EQ(tasks.size(), 3UL);
   // ScalarData直连算子，reduce拆分时ScalarData走PartitionScalar分支，保持ScalarData类型
   for (const auto &task : tasks) {

@@ -196,6 +196,8 @@ TEST_F(OptimizerStV2, ReduceNeedAlignment) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
+  // Max 对 {0,2} 两根轴归约, 单 reduce 双 R 轴: phase-1 各 tiling case 切分结构不同(relation 不一致),
+  // AppendReduceFirstStageGroup 回退逐 case 展开, 10 = Common 1 + RCore 展开 8 + AllLoad 1
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 10UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 8UL);

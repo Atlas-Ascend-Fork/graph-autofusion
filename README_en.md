@@ -22,13 +22,12 @@ Component features:
 
 - To experience the complete build, test, and sample running process of Graph-autofusion, see [Build Verification](docs/en/build.md).
 - To understand the principle and usage of the SuperKernel component, see [SuperKernel Introduction](super_kernel/README_en.md).
-- To understand the principle and usage of the Autofuse component, see [Autofuse Introduction and Quick Start](autofuse/README_en.md).
+- To understand the principle and usage of the Autofuse component, see [AutoFuse Architecture Description](docs/en/autofuse/introduction/architecture.md): Introduces the overall architecture, key technical solutions, module responsibilities, and enablement methods of AutoFuse.
 
 ## 📚 Documents
 
-If you want to understand the architecture, module functions, and skills of Graph-autofusion, please refer to the following documents:
+If you want to contribute to the project or understand the skills in the repository, please refer to the following documents:
 
-- [AutoFuse Architecture Description](docs/en/autofuse/introduction/architecture.md): Introduces the overall architecture, key technical solutions, processing flow and module responsibilities of AutoFuse.
 - [Contribution Guide](CONTRIBUTING_en.md): Describes how to contribute to the project, submit Issues and Pull Requests.
 - [Skills Management Guide](docs/en/opencode-skill-management.md): Introduces the default Skills used in the repository and their management methods.
 - [Skill Reuse Guide](docs/en/skill-reuse-guide.md): Introduces how to reuse Skills and use Agent to assist code reading, development and problem location.
