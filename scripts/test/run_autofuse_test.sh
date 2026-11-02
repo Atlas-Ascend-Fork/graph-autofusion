@@ -654,6 +654,7 @@ codegen_e2e_st() {
                     load_where_x2x3_is_ubscalar_throwfor_store_expect_code_e2e \
                     constant_load_gt_store_expect_code_e2e \
                     constant_load_le_store_expect_code_e2e \
+                    load_ub_scalar_gt_store_expect_code_e2e \
                     discrete_store_e2e \
                     discrete_load_e2e \
                     broadcast_force_merge_e2e \

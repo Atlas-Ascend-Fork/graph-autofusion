@@ -87,14 +87,28 @@ Status CompareApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axi
       std::string output_inner_offset = output_strides_size == 1 ? "0" : CalcInnerOffset(tpipe, inner_output_strides);
 
       std::string dtype_size = "4";
+      // ub_scalar广播输入可能是池化复用张量切片，size元数据不一定等于一个block，
+      // CompareExtend按32B判定广播语义，调用前用局部视图矫正size，避免误走非广播分支
+      std::stringstream ss2;
+      std::string src1_arg = scalar_local_blk_tensor_name_x2 + "[0]";
+      std::string call_end = ");";
+      if (!x2.IsConstScalar()) {
+        const std::string x2_brc_view = x2.name + "_brc_view";
+        ss2 << "{LocalTensor<" << dtype_name << "> " << x2_brc_view << " = " << scalar_local_blk_tensor_name_x2
+            << "[0];" << std::endl;
+        ss2 << x2_brc_view << ".SetSize(ONE_BLK_SIZE / sizeof(" << dtype_name << "));" << std::endl;
+        src1_arg = x2_brc_view;
+        call_end = ");}";
+      }
+      ss1 << ss2.str();
       ss1 << "CompareExtend<" << dtype_name << ", CMPMODE::" << this->api_name_ << ">(" << y << "["
-          << output_inner_offset << "], " << x1 << "[" << input0_inner_offset << "], "
-          << scalar_local_blk_tensor_name_x2 << "[0], " << param.outer_repeats[outer_repeats_size - 1] << ", "
+          << output_inner_offset << "], " << x1 << "[" << input0_inner_offset << "], " << src1_arg << ", "
+          << param.outer_repeats[outer_repeats_size - 1] << ", "
           << (IsCVFusionStage(this->api_call_context) ? GenBlockAlignNExpr(x1, tpipe.tiler.ActualSize(param.cal_count))
                                                       : tpipe.tiler.ActualSize(param.cal_count))
           << ", " << tpipe.tiler.Size(param.input_second_to_last_stride) << ", "
           << tpipe.tiler.Size(param.output_second_to_last_stride) << ", " << tpipe.tmp_buf << "_" << std::to_string(id)
-          << ");" << std::endl;
+          << call_end << std::endl;
       CreateComputeNodeOuterForIfRequired(outer_repeats_size, param, ss1, ss);
     }
   } else {
