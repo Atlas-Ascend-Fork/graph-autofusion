@@ -64,6 +64,45 @@ TEST(AscirNodeParamsTest, EnrichGraphRegistersSkippedForUnsupportedApi) {
   EXPECT_TRUE(std::holds_alternative<std::monostate>(params->specific_params));
 }
 
+TEST(AscirNodeParamsTest, BroadcastCacheRecordsUseBoundDefinitionWithoutInferringAxes) {
+  using Mode = ascir_param::CacheExecutionMode;
+  af::AscGraph graph("bound_cache_guard");
+  af::ascir_op::Add add("add");
+  graph.AddNode(add);
+  auto node = graph.FindNode("add");
+  ASSERT_NE(node, nullptr);
+  ascir::Axis loop;
+  loop.id = 0;
+  loop.name = "loop";
+  loop.size = Expr(20);
+  ascir::Axis decoy;
+  decoy.id = 1;
+  decoy.type = ascir::Axis::Type::kAxisTypeTileOuter;
+  decoy.size = Expr(1116);
+  ascir::Axis emitted_period;
+  emitted_period.size = Expr(7);
+  const ascir_param::CacheExecutionContext::AxisMap axes{{loop.id, &loop}, {decoy.id, &decoy}};
+  ascir_param::CacheExecutionContext context{axes, 0U, {}, {}};
+  for (const auto mode : {Mode::kOriginBroadcast, Mode::kFusedBroadcast}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    ascir_param::BindCacheCondition(context, mode, loop, emitted_period, Expr(23));
+    ASSERT_EQ(ascir_param::CollectCacheExecution(context, node, {loop.id}, loop.id, mode, {}), af::SUCCESS);
+    const auto params = ascir_param::GetAscirNodeParams(node);
+    ASSERT_NE(params, nullptr);
+    const auto &record = params->cache_executions.back();
+    EXPECT_EQ(record.mode, mode);
+    EXPECT_EQ(record.guard.guard_axis, af::Symbol("loop"));
+    EXPECT_EQ(record.guard.loop_extent, Expr(20));
+    if (mode == Mode::kFusedBroadcast) {
+      EXPECT_EQ(record.guard.period, Expr(7));
+      EXPECT_EQ(record.guard.block_inner_extent, Expr(23));
+    }
+    context.broadcast_bindings.erase(mode);
+    ASSERT_EQ(ascir_param::CollectCacheExecution(context, node, {loop.id}, loop.id, mode, {}), af::SUCCESS);
+    EXPECT_EQ(params->cache_executions.back().mode, Mode::kUnknown);
+  }
+}
+
 TEST(AscirNodeParamsTest, VectorFuncParamsCanBeStoredInAscirNodeParams) {
   ascir_param::AscirNodeParams params;
   ascir_param::VectorFuncNodeParams vf_params;

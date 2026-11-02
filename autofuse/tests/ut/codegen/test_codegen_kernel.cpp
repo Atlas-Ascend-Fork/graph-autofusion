@@ -20,6 +20,7 @@
 #include "ascir_ops_utils.h"
 #include "codegen_kernel.h"
 #include "codegen_api_param/codegen_api_param.h"
+#include "ascir_node_param/ascir_node_param.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "common_utils.h"
 #include "utils/api_call_factory.h"
@@ -6356,42 +6357,179 @@ TEST(CodegenKernel, CacheGuardPredicateUsesFirstMiddleAndLastTileForNineteen) {
   EXPECT_EQ(std::count(result.begin(), result.end(), '{'), std::count(result.begin(), result.end(), '}'));
 }
 
-TEST(CodegenKernel, ReduceDoubleTileUsesReduceSpecificCacheCondition) {
-  af::SizeVar outer_size(af::Symbol("outer_size"));
-  af::SizeVar tile0_size(af::Symbol("tile0_size"));
-  af::SizeVar tile1_size(af::Symbol("tile1_size"));
-  af::Axis outer{.id = 0, .name = "outer", .size = outer_size.expr};
-  af::Axis tile0{.id = 1, .name = "tile0", .type = af::Axis::Type::kAxisTypeTileInner, .size = tile0_size.expr};
-  af::Axis tile1{.id = 2, .name = "tile1", .type = af::Axis::Type::kAxisTypeTileInner, .size = tile1_size.expr};
+TEST(CodegenKernel, RecordsActualOriginAndFusedGuards) {
+  using Mode = ascir_param::CacheExecutionMode;
+  for (auto mode : {Mode::kNoGuard, Mode::kOriginBroadcast, Mode::kFusedBroadcast}) {
+    af::Axis axis{.id = 0, .name = "guarded", .size = af::Symbol(20)};
+    af::Axis tile{.id = 1, .name = "tile", .type = af::Axis::Type::kAxisTypeTileOuter, .size = af::Symbol(1116)};
+    af::Axis inner{.id = 2, .name = "inner", .type = af::Axis::Type::kAxisTypeBlockInner, .size = af::Symbol(20)};
+    codegen::Tiler tiler;
+    tiler.AddAxis(axis);
+    tiler.AddAxis(tile);
+    tiler.AddAxis(inner);
+    tiler.axis_map.at(axis.id).is_split_b = true;
+    af::AscGraph graph("cache_record");
+    af::ascir_op::Data input("input", graph);
+    MockApiCall call("mock");
+    call.node = graph.FindNode("input");
+    call.unit = af::ComputeUnit::kUnitVector;
+    call.enable_cache = mode != Mode::kNoGuard;
+    call.exec_condition = mode == Mode::kOriginBroadcast ? af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis
+                                                         : af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
+    codegen::Loop loop(axis.id);
+    loop.AddCall(&call);
+    codegen::TPipe tpipe("tpipe", tiler);
+    std::string source;
+    ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+    const auto params = ascir_param::GetAscirNodeParams(call.node);
+    ASSERT_NE(params, nullptr);
+    EXPECT_EQ(params->cache_executions.front().mode, mode);
+    EXPECT_EQ(params->cache_executions.front().call_loop_axis_id, axis.id);
+    if (mode == Mode::kNoGuard) {
+      EXPECT_EQ(source.find("if (enable_cache_"), std::string::npos);
+    } else {
+      EXPECT_NE(source.find(mode == Mode::kOriginBroadcast ? "if (enable_cache_origin_brc_axis)"
+                                                           : "if (enable_cache_fused_brc_axis)"),
+                std::string::npos);
+      EXPECT_EQ(params->cache_executions.front().guard.loop_extent, af::Symbol(20));
+      if (mode == Mode::kFusedBroadcast) {
+        EXPECT_EQ(params->cache_executions.front().guard.period, af::Symbol(1116));
+        EXPECT_EQ(params->cache_executions.front().guard.block_inner_extent, af::Symbol(20));
+      }
+    }
+  }
+}
+
+TEST(CodegenKernel, FusedCacheWithoutBlockInnerDoesNotInventExtent) {
+  af::Axis axis{.id = 0, .name = "guarded", .size = af::Symbol(20)};
   codegen::Tiler tiler;
-  tiler.AddSizeVar(outer_size);
-  tiler.AddSizeVar(tile0_size);
-  tiler.AddSizeVar(tile1_size);
-  tiler.AddAxis(outer);
-  tiler.AddAxis(tile0);
-  tiler.AddAxis(tile1);
-  tiler.axis_map.at(outer.id).is_split_b = true;
-  tiler.axis_map.at(tile0.id).is_split_b = true;
-  tiler.axis_map.at(tile1.id).is_split_b = true;
-
+  ASSERT_EQ(tiler.AddAxis(axis), af::SUCCESS);
+  tiler.axis_map.at(axis.id).is_split_b = true;
+  af::AscGraph graph("cache_without_block_inner");
+  af::ascir_op::Data input("input", graph);
+  MockApiCall call("mock");
+  call.node = graph.FindNode("input");
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.enable_cache = true;
+  call.exec_condition = af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
+  codegen::Loop loop(axis.id);
+  loop.AddCall(&call);
   codegen::TPipe tpipe("tpipe", tiler);
-  codegen::Loop loop(tile1.id);
-  loop.is_graph_has_reduce_node = true;
+  std::string source;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+  EXPECT_NE(source.find("if (enable_cache_fused_brc_axis)"), std::string::npos);
+  const auto params = ascir_param::GetAscirNodeParams(call.node);
+  ASSERT_NE(params, nullptr);
+  ASSERT_EQ(params->cache_executions.size(), 1U);
+  EXPECT_EQ(params->cache_executions.front().guard.block_inner_extent, Zero);
+}
 
-  auto cached_call = new MockApiCall("cached_call");
-  cached_call->enable_cache = true;
-  cached_call->enable_cache_with_condition = "dis_enable_cache_r";
-  cached_call->exec_condition = af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
-  cached_call->unit = af::ComputeUnit::kUnitVector;
+TEST(CodegenKernel, ChangingGmOffsetRecordsNoGuardForReduceMovement) {
+  for (const auto *type : {"Load", "Nddma"}) {
+    SCOPED_TRACE(type);
+    af::Axis axis{.id = 0, .name = "tile", .size = af::Symbol(20)};
+    codegen::Tiler tiler;
+    tiler.AddAxis(axis);
+    tiler.axis_map.at(axis.id).is_split_b = true;
+    af::AscGraph graph("address_variant");
+    af::ascir_op::Load load("load");
+    graph.AddNode(load);
+    auto node = graph.FindNode("load");
+    node->GetOpDesc()->SetType(type);
+    node->attr.api.compute_type = af::ComputeType::kComputeLoad;
+    node->outputs[0].attr.axis = {axis.id};
+    node->outputs[0].attr.strides = {af::Symbol(235)};
+    MockApiCall call("mock");
+    call.node = node;
+    call.unit = af::ComputeUnit::kUnitVector;
+    call.enable_cache = true;
+    call.exec_condition = af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
+    codegen::Loop loop(axis.id);
+    loop.is_graph_has_reduce_node = true;
+    loop.AddCall(&call);
+    codegen::TPipe tpipe("tpipe", tiler);
+    std::string source;
+    ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+    EXPECT_EQ(source.find("if (enable_cache_fused_brc_axis)"), std::string::npos);
+    ASSERT_NE(ascir_param::GetAscirNodeParams(node), nullptr);
+    EXPECT_EQ(ascir_param::GetAscirNodeParams(node)->cache_executions.front().mode,
+              ascir_param::CacheExecutionMode::kNoGuard);
+  }
+}
 
-  const auto &axis = tiler.GetAxis(tile1.id);
-  const bool is_split_b = axis.is_split_b;
-  const bool is_double_tile = true;
-  ASSERT_TRUE(is_split_b);
-  ASSERT_TRUE(is_double_tile);
-  EXPECT_EQ(cached_call->enable_cache_with_condition, "dis_enable_cache_r");
-  EXPECT_EQ(cached_call->exec_condition, af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis);
-  delete cached_call;
+TEST(CodegenKernel, ReduceDoubleTileUsesReduceSpecificCacheCondition) {
+  af::Axis a{.id = 0, .name = "a", .size = af::Symbol(64)};
+  af::Axis r{.id = 1, .name = "r", .size = af::Symbol(64)};
+  af::Axis at{.id = 2, .name = "at", .type = af::Axis::Type::kAxisTypeTileOuter, .size = af::Symbol(4)};
+  af::Axis ai{.id = 3, .name = "ai", .type = af::Axis::Type::kAxisTypeTileInner, .size = af::Symbol(16)};
+  af::Axis rt{.id = 4, .name = "rt", .type = af::Axis::Type::kAxisTypeTileOuter, .size = af::Symbol(4)};
+  af::Axis ri{.id = 5, .name = "ri", .type = af::Axis::Type::kAxisTypeTileInner, .size = af::Symbol(16)};
+  af::Axis block{.id = 6, .name = "block", .type = af::Axis::Type::kAxisTypeBlockOuter, .size = af::Symbol(2)};
+  af::Axis inner{.id = 7, .name = "inner", .type = af::Axis::Type::kAxisTypeBlockInner, .size = af::Symbol(2)};
+  at.from = ai.from = {a.id};
+  rt.from = ri.from = {r.id};
+  block.from = inner.from = {at.id};
+  at.split_pair_other_id = ai.id;
+  ai.split_pair_other_id = at.id;
+  rt.split_pair_other_id = ri.id;
+  ri.split_pair_other_id = rt.id;
+  block.split_pair_other_id = inner.id;
+  inner.split_pair_other_id = block.id;
+  codegen::Tiler tiler;
+  for (const auto &axis : {a, r, at, ai, rt, ri, block, inner}) {
+    ASSERT_EQ(tiler.AddAxis(axis), af::SUCCESS);
+    tiler.axis_map.at(axis.id).is_split_b = true;
+  }
+  af::AscGraph graph("double_tile_cache");
+  af::ascir_op::Data input("input", graph);
+  auto node = graph.FindNode("input");
+  auto tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_FLOAT;
+  tensor.attr.axis = {ai.id, ri.id};
+  tensor.attr.repeats = {ai.size, ri.size};
+  tensor.attr.strides = {ri.size, One};
+  tensor.attr.vectorized_axis = {ai.id, ri.id};
+  tensor.attr.vectorized_strides = {ri.size, One};
+  tensor.attr.mem.position = af::Position::kPositionVecIn;
+  codegen::TPipe tpipe("tpipe", tiler);
+  std::string dtype_name("float");
+  tpipe.tensors.emplace(0, codegen::Tensor(tensor, dtype_name));
+  codegen::Loop root(block.id);
+  codegen::Loop middle(inner.id);
+  codegen::Loop loop(rt.id);
+  for (auto *current : {&root, &middle, &loop}) {
+    current->is_graph_has_reduce_node = true;
+  }
+  MockApiCall call("cached_call");
+  call.node = node;
+  call.enable_cache = true;
+  call.enable_cache_with_condition = {ascir_param::ReduceCacheCondition::kR};
+  call.exec_condition = af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
+  call.unit = af::ComputeUnit::kUnitVector;
+  root.AddLoop(&middle);
+  middle.AddLoop(&loop);
+  loop.AddCall(&call);
+  std::string source;
+  ASSERT_EQ(root.Generate(tiler, tpipe, source), af::SUCCESS);
+  EXPECT_NE(source.find("if (dis_enable_cache_r)"), std::string::npos);
+  const auto params = ascir_param::GetAscirNodeParams(node);
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(params->cache_executions.front().mode, ascir_param::CacheExecutionMode::kReduceDoubleTile);
+  const auto &r_guard = params->cache_executions.front().reduce_guards.at(ascir_param::ReduceCacheCondition::kR);
+  EXPECT_EQ(r_guard.guard_axis, af::Symbol("rt"));
+  EXPECT_EQ(r_guard.period, af::Symbol(4));
+  EXPECT_FALSE(r_guard.clip_to_period);
+  call.enable_cache_with_condition = {ascir_param::ReduceCacheCondition::kA,
+                                      ascir_param::ReduceCacheCondition::kControl,
+                                      ascir_param::ReduceCacheCondition::kR};
+  ASSERT_EQ(root.Generate(tiler, tpipe, source), af::SUCCESS);
+  ASSERT_EQ(params->cache_executions.size(), 1U);
+  const auto &guards = params->cache_executions.front().reduce_guards;
+  ASSERT_EQ(guards.size(), 3U);
+  EXPECT_EQ(guards.at(ascir_param::ReduceCacheCondition::kA).guard_axis, af::Symbol("inner"));
+  EXPECT_EQ(guards.at(ascir_param::ReduceCacheCondition::kControl).loop_extent, af::Symbol(4));
+  EXPECT_NE(source.find("if (dis_enable_cache_a || control_dis_enable_cache_a || dis_enable_cache_r)"),
+            std::string::npos);
 }
 
 TEST(CodegenKernel, BroadcastInlineInCvStage_NoBlockDimCacheCondition) {
@@ -6842,4 +6980,86 @@ TEST_F(CodegenKernelConv2DTest, SetUsingGlobalTpipe_ShouldSetFlagCorrectly) {
 
   // 通过设置验证功能正常工作
   EXPECT_TRUE(true);
+}
+
+TEST(CodegenKernel, CacheRecordStartsANewGeneration) {
+  af::Axis axis{.id = 0, .name = "tile", .size = af::Symbol(20)};
+  codegen::Tiler tiler;
+  tiler.AddAxis(axis);
+  tiler.axis_map.at(axis.id).is_split_b = true;
+  af::AscGraph graph("regenerate_cache");
+  af::ascir_op::Data input("input", graph);
+  MockApiCall call("mock");
+  call.node = graph.FindNode("input");
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.enable_cache = true;
+  call.exec_condition = af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis;
+  codegen::Loop loop(axis.id);
+  loop.AddCall(&call);
+  codegen::TPipe tpipe("tpipe", tiler);
+  std::string source;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+  call.enable_cache = false;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+  EXPECT_EQ(ascir_param::GetAscirNodeParams(call.node)->cache_executions.front().mode,
+            ascir_param::CacheExecutionMode::kNoGuard);
+}
+
+TEST(CodegenKernel, CacheRecordsRetainDistinctEmittedCalls) {
+  af::Axis a{.id = 0, .name = "a", .size = af::Symbol(3)};
+  af::Axis b{.id = 1, .name = "b", .size = af::Symbol(5)};
+  codegen::Tiler tiler;
+  tiler.AddAxis(a);
+  tiler.AddAxis(b);
+  tiler.axis_map.at(a.id).is_split_b = true;
+  af::AscGraph graph("distinct_calls");
+  af::ascir_op::Data input("input", graph);
+  MockApiCall first("first"), second("second");
+  first.node = second.node = graph.FindNode("input");
+  first.unit = second.unit = af::ComputeUnit::kUnitVector;
+  first.enable_cache = true;
+  first.exec_condition = af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis;
+  codegen::Loop root(af::kIdNone), loop_a(a.id), loop_b(b.id);
+  root.AddLoop(&loop_a);
+  root.AddLoop(&loop_b);
+  loop_a.AddCall(&first);
+  loop_b.AddCall(&second);
+  codegen::TPipe tpipe("tpipe", tiler);
+  std::string source;
+  ASSERT_EQ(root.Generate(tiler, tpipe, source), af::SUCCESS);
+  auto params = ascir_param::GetAscirNodeParams(first.node);
+  ASSERT_NE(params, nullptr);
+  ASSERT_EQ(params->cache_executions.size(), 2U);
+  EXPECT_EQ(params->cache_executions[0].mode, ascir_param::CacheExecutionMode::kOriginBroadcast);
+  EXPECT_EQ(params->cache_executions[1].mode, ascir_param::CacheExecutionMode::kNoGuard);
+  EXPECT_EQ(params->cache_executions[0].loops.front().extent, af::Symbol(3));
+  EXPECT_EQ(params->cache_executions[1].loops.front().extent, af::Symbol(5));
+  // A second complete emission round does not duplicate either call.
+  ASSERT_EQ(root.Generate(tiler, tpipe, source), af::SUCCESS);
+  EXPECT_EQ(params->cache_executions.size(), 2U);
+}
+
+TEST(CodegenKernel, CacheRecordResetKeepsOtherStages) {
+  af::Axis axis{.id = 0, .name = "tile", .size = af::Symbol(3)};
+  codegen::Tiler tiler;
+  tiler.AddAxis(axis);
+  af::AscGraph graph("stage_calls");
+  af::ascir_op::Data input("input", graph);
+  MockApiCall call("mock");
+  call.node = graph.FindNode("input");
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.api_call_context.stage = codegen::ComputeStage::kCVFuseStage1;
+  codegen::Loop loop(axis.id);
+  loop.AddCall(&call);
+  codegen::TPipe tpipe("tpipe", tiler);
+  std::string source;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source, codegen::ComputeStage::kCVFuseStage1), af::SUCCESS);
+  auto params = ascir_param::GetAscirNodeParams(call.node);
+  ASSERT_NE(params, nullptr);
+  call.api_call_context.stage = codegen::ComputeStage::kCVFuseStage2;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source, codegen::ComputeStage::kCVFuseStage2), af::SUCCESS);
+  ASSERT_EQ(params->cache_executions.size(), 2U);
+  EXPECT_EQ(params->cache_executions[0].stage, static_cast<uint32_t>(codegen::ComputeStage::kCVFuseStage1));
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source, codegen::ComputeStage::kCVFuseStage2), af::SUCCESS);
+  EXPECT_EQ(params->cache_executions.size(), 2U);
 }

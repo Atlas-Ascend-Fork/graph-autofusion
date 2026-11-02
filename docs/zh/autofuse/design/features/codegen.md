@@ -46,6 +46,16 @@ ImplGraph 是 Schedule 与 Codegen 之间唯一的接口，Codegen 不做任何�
 - **性能建模在 ATT 侧**：Codegen 在组装 API 参数时会计算 `outer_call_count`（API 外层调用次数）等信息写入节点参数，Auto Tiling 的性能公式（耗时 ≈ API 调用次数 × 单次耗时）以此为输入做 tiling 候选评估。性能公式本体不在 Codegen 中，Codegen 新增 API 参数时需确认 ATT 侧公式是否依赖该参数；
 - **PGO/TopN 的兜底限制**：tiling_key 数量超过上限（10000）时 PGO 搜索自动关闭，回退到常规 tiling 生成；tiling_key 数量超过单编译单元上限时，kernel 会自动拆分为多个编译单元分别编译，两处上限不同，独立生效。
 
+### 3.2.1 缓存执行次数：Codegen 与 ATT 必须共用同一份条件
+
+Reduce/Broadcast 链上的 cache guard 会跳过重复的 Load/Broadcast 调用，ATT 需要按同一条件估算"这个调用实际执行几次"，否则搬运成本失真、模板选错。这条链路有三条必须一起改的约束：
+
+- **条件只能有一个来源**。Codegen 在 `Loop::GenerateBody` 组装 `ApiCall` 时，把真正发射到设备代码里的条件（`enable_cache_origin_brc_axis`、`enable_cache_fused_brc_axis`，或 DoubleTile 的 `dis_enable_cache_a` / `dis_enable_cache_r` / `control_dis_enable_cache_a`）以 `CacheExecutionParams` 记录到节点参数，普通 Origin/Fused 与 DoubleTile 均在条件定义的发射点绑定所用循环轴、周期及块内范围，common 不再次扫描轴来推导条件。ATT 只读不重建。ATT 早期按调度轴关系反推 guard，对 NDDMA 放宽尾随向量轴限制并假设地址不变，与实际发射不符：曾把小输入广播场景的 NDDMA 从 20 次误算成 1 次，MTE2 估值低估约 49k cycle，默认解因此选中慢模板（约 93 μs，快解约 45 μs）。**任何"从轴关系推断缓存条件"的做法都会重新引入这类低估，禁止在 ATT 侧恢复。**
+- **记录缺失或不一致时保留完整次数**。记录为空、`mode` 为 `kUnknown`/`kNoGuard`、调用轴与记录不符、或表达式无法校验时，ATT 一律返回原始基数 `E_base`，不做任何压缩。保守放大只让候选显得更贵，低估才会让慢模板胜出，两者代价不对称，因此所有不确定分支都必须偏向高估。
+- **计数必须与谓词语义逐项对齐**。普通 guard 用 `Ceiling(L / P)` 表达命中；DoubleTile 的 R 条件 `(i<1) || (i%P<1)` 不含 `block_dim`，可精确计为 `1 + Floor((L-1)/P)`；A 条件含 `block_dim × block_inner_extent`，而 DoubleTile 记录的 `block_inner_extent` 与 `period` 来自两条不同轴（`codegen_kernel_loop.cpp` 的 `bind`），符号化下无法证明块间相位一致，此时取与相位无关的上界 `1 + Ceiling((L-1)/P)` 作为命中上界、再算跳过次数的下界，保证 `次数 ≥ 真实值`。修改 `IsBlockCountUniform` 或 `CountGuardHits` 时必须同步更新这三条语义，并保留枚举型 UT 作为独立 oracle。
+
+缓存只在 `WaitInputs`/`AllocOutputs` 之后、`SyncOutputs`/`FreeInputs` 之前包住一次 API 调用，buffer 生命周期不受 guard 影响；这一骨架见 6.2.2。
+
 ### 3.3 与外部 tiling 库的依赖
 
 Host 侧 tiling 函数的实际生成逻辑位于外部 gen_tiling 库中，Codegen 通过函数指针（`TilingLibCodegenFunc`，指向 gen_tiling.so 的 `CodegenTiling` 符号）回调生成，再由 Codegen 负责组装头文件、拼接翻译单元。这意味着：

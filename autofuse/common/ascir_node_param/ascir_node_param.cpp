@@ -75,6 +75,10 @@ const codegen::ReduceSpecificParams &GetCanonicalReduceParams(const ReduceNodePa
   return params.canonical_params;
 }
 
+void RecordCacheExecution(AscirNodeParams &params, const CacheExecutionParams &execution) {
+  params.cache_executions.push_back(execution);
+}
+
 ge::Expression ResolveForAtt(const ParamExprProduct &expr) {
   ge::Expression value = ge::Symbol(1U);
   if (!expr.valid) {

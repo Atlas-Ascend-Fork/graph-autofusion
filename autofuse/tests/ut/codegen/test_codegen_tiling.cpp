@@ -55,6 +55,13 @@
 #include "optimize/optimize.h"
 #include "share_graph.h"
 #include "tests/common/inductor_pgo_codegen_test_utils.h"
+#include "ascir_node_param/ascir_node_param.h"
+#include "att/gen_model_info/parser/ascend_graph_parser.h"
+#include "att/gen_model_info/expr_gen/exe_time_pass.h"
+#include "att/gen_model_info/gen_model_info.h"
+#include "att/gen_model_info/utils/node_expr_id.h"
+#include "tests/ut/att/testcase/gen_model_info/core/test_brc_buf_graph.h"
+#include "tests/ut/att/utils/graph_construct_utils.h"
 #include <fstream>
 #include <set>
 
@@ -5878,4 +5885,329 @@ TEST_F(TestCodegenTiling, TransposeApiCallGetTransposeTypeInvalid) {
   AutoFuseTransposeType transpose_type;
   call.CodeGenGetTransposeType(input, output, transpose_type);
   EXPECT_EQ(transpose_type, AutoFuseTransposeType::TRANSPOSE_INVALID);
+}
+
+TEST_F(TestCodegenTiling, CacheExecutionHostOnlyAndDeviceHostUseTheSameBroadcastGraph) {
+  af::AscGraph graph("cache_execution_broadcast");
+  CreateMatmulElemwiseDynamicGraph(graph);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult scheduled;
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled), af::SUCCESS);
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+
+  // A standalone host entry remains supported, with no inferred cache record.
+  std::map<std::string, std::string> host_only;
+  ASSERT_EQ(codegen.GenerateTiling(scheduled, {}, "", "0", host_only), af::SUCCESS);
+  ASSERT_FALSE(host_only.empty());
+  for (const auto &results : scheduled.node_idx_to_scheduled_results) {
+    for (const auto &result : results) {
+      for (const auto &group : result.schedule_groups) {
+        for (const auto &impl : group.impl_graphs) {
+          auto space = std::make_shared<att::TuningSpace>();
+          att::AscendGraphParser parser(space);
+          ASSERT_EQ(parser.GraphParser(impl), af::SUCCESS);
+          att::ExeTimePassManager manager(space);
+          for (const auto &node : space->node_infos) {
+            EXPECT_TRUE(node.cache_executions.empty());
+            att::Expr base = af::Symbol(1U);
+            for (const auto *axis : node.loop_axes) {
+              base = base * axis->repeat;
+            }
+            EXPECT_EQ(manager.UpdateNodeExeTime(node, base).GetTernaryOpStr(), att::Str(base));
+          }
+        }
+      }
+    }
+  }
+
+  // The same graph instance now goes through actual API/kernel generation, then
+  // the actual parser and execution-count pass. Do not inject cache metadata.
+  std::string kernel;
+  ASSERT_EQ(codegen.GenerateKernel(scheduled, kernel), af::SUCCESS);
+  size_t guarded = 0U;
+  size_t unguarded = 0U;
+  for (const auto &results : scheduled.node_idx_to_scheduled_results) {
+    for (const auto &result : results) {
+      for (const auto &group : result.schedule_groups) {
+        for (const auto &impl : group.impl_graphs) {
+          auto space = std::make_shared<att::TuningSpace>();
+          att::AscendGraphParser parser(space);
+          ASSERT_EQ(parser.GraphParser(impl), af::SUCCESS);
+          att::ExeTimePassManager manager(space);
+          for (const auto &node : space->node_infos) {
+            if (node.cache_executions.empty()) {
+              continue;
+            }
+            const auto mode = node.cache_executions.front().mode;
+            if (mode == ascir_param::CacheExecutionMode::kUnknown) {
+              continue;
+            }
+            const auto params = ascir_param::GetAscirNodeParams(node.node_ptr);
+            ASSERT_NE(params, nullptr);
+            EXPECT_EQ(mode, params->cache_executions.front().mode);
+            att::Expr base = af::Symbol(1U);
+            for (const auto *axis : node.loop_axes) {
+              base = base * axis->repeat;
+            }
+            const auto actual = manager.UpdateNodeExeTime(node, base).GetTernaryOpStr();
+            if (mode == ascir_param::CacheExecutionMode::kNoGuard) {
+              ++unguarded;
+              EXPECT_EQ(actual, att::Str(base));
+            } else if (mode == ascir_param::CacheExecutionMode::kFusedBroadcast) {
+              ++guarded;
+            } else if (mode == ascir_param::CacheExecutionMode::kOriginBroadcast) {
+              ++guarded;
+              // Origin guard re-executes only on the first iteration of its loop.
+              const auto &loop_extent = node.cache_executions.front().guard.loop_extent;
+              ASSERT_TRUE(loop_extent.IsValid());
+              EXPECT_EQ(actual, att::Str((base / loop_extent).Simplify()));
+            }
+          }
+        }
+      }
+    }
+  }
+  EXPECT_GT(guarded, 0U);
+  EXPECT_GT(unguarded, 0U);
+  EXPECT_NE(kernel.find("if (enable_cache_fused_brc_axis)"), std::string::npos);
+  std::map<std::string, std::string> host_after_device;
+  EXPECT_EQ(codegen.GenerateTiling(scheduled, {}, "", "0", host_after_device), af::SUCCESS);
+}
+
+namespace {
+ascir::FusedScheduledResult MakeCacheExecutionBrcSchedule(af::AscGraph &graph, int reduce) {
+  if (reduce) {
+    if (reduce == 2) {
+      att::BrcBufBeforeAutoFuse2(graph);
+    } else {
+      att::BrcBufBeforeAutoFuse1(graph);
+    }
+    optimize::AscGraphInfoComplete::CompleteApiInfo(graph);
+    att::BrcBufAfterScheduler1(graph);
+    att::BrcBufAfterQueBufAlloc1(graph);
+    graph.FindNode("sum")->attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 5},
+                                               {{af::Symbol(8192), 0}, af::MemAttr(), 6}};
+  } else {
+    att::BrcBufBeforeAutoFuse3(graph);
+    optimize::AscGraphInfoComplete::CompleteApiInfo(graph);
+    att::BrcBufAfterScheduler3(graph);
+    att::BrcBufAfterQueBufAlloc3(graph);
+  }
+  dynamic_cast<af::ascir_op::Data::AscDataIrAttrDef &>(*graph.FindNode("input_data")->attr.ir_attr).SetIndex(0);
+  dynamic_cast<af::ascir_op::Output::AscOutputIrAttrDef &>(*graph.FindNode("output_data")->attr.ir_attr).SetIndex(0);
+  int64_t tensor_id = 0;
+  for (const auto &node : graph.GetAllNodes()) {
+    for (auto &output : node->outputs()) {
+      output->attr.mem.tensor_id = tensor_id;
+      output->attr.mem.reuse_id = tensor_id++;
+      output->attr.opt.ref_tensor = af::kIdNone;
+    }
+  }
+  att::GraphConstructUtils::UpdateGraphVectorizedStride(graph);
+  ascir::FusedScheduledResult scheduled;
+  scheduled.fused_graph_name = af::AscendString(graph.GetName().c_str());
+  scheduled.input_nodes.push_back(graph.FindNode("input_data"));
+  scheduled.output_nodes.push_back(graph.FindNode("output_data"));
+  ascir::ScheduledResult result;
+  result.schedule_groups.resize(1);
+  result.schedule_groups[0].impl_graphs.emplace_back(graph);
+  scheduled.node_idx_to_scheduled_results.push_back({result});
+  return scheduled;
+}
+}  // namespace
+
+TEST_F(TestCodegenTiling, CacheExecutionCountsActualDoubleTilePeriod) {
+  af::AscGraph graph("cache_execution_double_tile");
+  const auto scheduled = MakeCacheExecutionBrcSchedule(graph, true);
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  std::string kernel;
+  ASSERT_EQ(codegen.GenerateKernel(scheduled, kernel), af::SUCCESS);
+  auto space = std::make_shared<att::TuningSpace>();
+  att::AscendGraphParser parser(space);
+  ASSERT_EQ(parser.GraphParser(graph), af::SUCCESS);
+  att::ExeTimePassManager manager(space);
+  bool checked = false;
+  size_t unguarded = 0U;
+  for (const auto &node : space->node_infos) {
+    att::Expr base = af::Symbol(1U);
+    for (const auto *axis : node.loop_axes) {
+      base = base * axis->repeat;
+    }
+    const auto actual = manager.UpdateNodeExeTime(node, base).GetTernaryOpStr();
+    if (node.name == "cast0") {
+      EXPECT_EQ(node.cache_executions.front().mode, ascir_param::CacheExecutionMode::kReduceDoubleTile);
+      // R refreshes at i==0 and at every emitted period. In particular it can
+      // execute more than once when z1T has more iterations than z2T.
+      for (const auto z1 : {64, 96}) {
+        auto evaluated = manager.UpdateNodeExeTime(node, base);
+        evaluated.Replace({{af::Symbol("Z0"), af::Symbol(1)},
+                           {af::Symbol("Z1"), af::Symbol(z1)},
+                           {af::Symbol("Z2"), af::Symbol(64)},
+                           {af::Symbol("z1t_size"), af::Symbol(16)},
+                           {af::Symbol("z2t_size"), af::Symbol(16)},
+                           {af::Symbol("z0z2Tb_size"), af::Symbol(2)}});
+        const auto branch = evaluated.DeepCopyIfCase();
+        ASSERT_TRUE(branch->IsLeaf());
+        int64_t calls = 0;
+        ASSERT_TRUE(branch->GetExpr().Simplify().GetConstValue(calls));
+        int64_t expected = 0;
+        for (int64_t i = 0; i < z1 / 16; ++i) {
+          expected += (i == 0 || i % 4 == 0) ? 2 : 0;
+        }
+        EXPECT_EQ(calls, expected);
+      }
+      checked = true;
+    } else if (!node.cache_executions.empty() &&
+               node.cache_executions.front().mode == ascir_param::CacheExecutionMode::kNoGuard) {
+      EXPECT_EQ(actual, att::Str(base)) << node.name;
+      ++unguarded;
+    }
+  }
+  EXPECT_TRUE(checked);
+  EXPECT_GT(unguarded, 0U);
+  EXPECT_NE(kernel.find("if (dis_enable_cache_"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, CacheExecutionBroadcastChainFollowsOwnGuard) {
+  for (const auto condition :
+       {af::ExecuteCondition::kNoCache, af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis}) {
+    SCOPED_TRACE(static_cast<uint32_t>(condition));
+    af::AscGraph graph("cache_execution_broadcast_chain");
+    const auto scheduled = MakeCacheExecutionBrcSchedule(graph, false);
+    graph.FindNode("cast0")->attr.sched.exec_condition = condition;
+    codegen::Codegen codegen(codegen::CodegenOptions{});
+    std::string kernel;
+    ASSERT_EQ(codegen.GenerateKernel(scheduled, kernel), af::SUCCESS);
+    auto space = std::make_shared<att::TuningSpace>();
+    att::AscendGraphParser parser(space);
+    ASSERT_EQ(parser.GraphParser(graph), af::SUCCESS);
+    att::ExeTimePassManager manager(space);
+    bool checked = false;
+    for (const auto &node : space->node_infos) {
+      if (node.name != "cast0") {
+        continue;
+      }
+      att::Expr base = af::Symbol(1U);
+      for (const auto *axis : node.loop_axes) {
+        base = base * axis->repeat;
+      }
+      const auto actual = manager.UpdateNodeExeTime(node, base).GetTernaryOpStr();
+      if (condition == af::ExecuteCondition::kNoCache) {
+        EXPECT_EQ(node.cache_executions.front().mode, ascir_param::CacheExecutionMode::kNoGuard);
+        EXPECT_EQ(actual, att::Str(base));
+        EXPECT_EQ(kernel.find("if (enable_cache_origin_brc_axis)"), std::string::npos);
+      } else {
+        EXPECT_EQ(node.cache_executions.front().mode, ascir_param::CacheExecutionMode::kOriginBroadcast);
+        EXPECT_EQ(actual, "z0z2Tb_size");
+        EXPECT_NE(kernel.find("if (enable_cache_origin_brc_axis)"), std::string::npos);
+      }
+      checked = true;
+    }
+    EXPECT_TRUE(checked);
+  }
+}
+
+TEST_F(TestCodegenTiling, CacheExecutionCvUbModelUsesFullCallCount) {
+  const auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult scheduled;
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled), af::SUCCESS);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(scheduled));
+  ASSERT_EQ(ascgen_utils::FilterCVFusionUBResult(scheduled), af::SUCCESS);
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  std::string kernel;
+  ASSERT_EQ(codegen.GenerateKernel(scheduled, kernel), af::SUCCESS);
+  // Match the static CV host entry: ATT models the vector result produced by
+  // the common CV conversion, rather than raw Cube-stage placeholder Loads.
+  ASSERT_EQ(ascgen_utils::CreateCVFusionResult(scheduled), af::SUCCESS);
+  att::FusedParsedScheduleResult models;
+  ASSERT_EQ(att::GetModelInfoMap(scheduled, {}, models), af::SUCCESS);
+  size_t checked = 0U;
+  size_t recorded = 0U;
+  for (size_t asc_id = 0U; asc_id < scheduled.node_idx_to_scheduled_results.size(); ++asc_id) {
+    const auto &results = scheduled.node_idx_to_scheduled_results[asc_id];
+    for (size_t result_id = 0U; result_id < results.size(); ++result_id) {
+      ASSERT_EQ(results[result_id].cube_type, ascir::CubeTemplateType::kUBFuse);
+      for (size_t group_id = 0U; group_id < results[result_id].schedule_groups.size(); ++group_id) {
+        const auto &graphs = results[result_id].schedule_groups[group_id].impl_graphs;
+        const auto &group_models = models.at(asc_id).at(result_id).groups_tiling_model_info.at(group_id);
+        ASSERT_EQ(graphs.size(), group_models.size());
+        for (size_t impl_id = 0U; impl_id < graphs.size(); ++impl_id) {
+          auto space = std::make_shared<att::TuningSpace>();
+          att::AscendGraphParser parser(space);
+          ASSERT_EQ(parser.GraphParser(graphs[impl_id]), af::SUCCESS);
+          const auto &counts = group_models[impl_id].ternary_op_map;
+          for (const auto &node : space->node_infos) {
+            const auto key = af::Symbol((att::SanitizeNodeName(node.name) + "_exe_time").c_str());
+            const auto count = counts.find(key);
+            if (count == counts.end()) {
+              continue;
+            }
+            att::Expr base = af::Symbol(1U);
+            for (const auto *axis : node.loop_axes) {
+              base = base * axis->repeat;
+            }
+            EXPECT_EQ(count->second.GetTernaryOpStr(), att::Str(base)) << node.name;
+            EXPECT_TRUE(node.cache_executions.empty() ||
+                        node.cache_executions.front().mode != ascir_param::CacheExecutionMode::kReduceDoubleTile);
+            if (!node.cache_executions.empty() &&
+                node.cache_executions.front().mode == ascir_param::CacheExecutionMode::kNoGuard) {
+              ++recorded;
+            }
+            ++checked;
+          }
+        }
+      }
+    }
+  }
+  EXPECT_GT(checked, 0U);
+  EXPECT_GT(recorded, 0U);
+  EXPECT_EQ(kernel.find("if (enable_cache_origin_brc_axis)"), std::string::npos);
+  EXPECT_EQ(kernel.find("if (enable_cache_fused_brc_axis)"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, CacheExecutionDoubleTileUsesEmittedControlCondition) {
+  af::AscGraph graph("double_tile_control");
+  const auto scheduled = MakeCacheExecutionBrcSchedule(graph, 2);
+  const std::vector<std::pair<af::Expression, af::Expression>> values = {
+      {af::Symbol("Z0"), af::Symbol(1)},        {af::Symbol("Z1"), af::Symbol(64)},
+      {af::Symbol("Z2"), af::Symbol(64)},       {af::Symbol("z1t_size"), af::Symbol(16)},
+      {af::Symbol("z2t_size"), af::Symbol(16)}, {af::Symbol("z0z2Tb_size"), af::Symbol(1)}};
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  std::string kernel;
+  ASSERT_EQ(codegen.GenerateKernel(scheduled, kernel), af::SUCCESS);
+  EXPECT_NE(kernel.find("if (dis_enable_cache_a || control_dis_enable_cache_a)"), std::string::npos);
+  auto space = std::make_shared<att::TuningSpace>();
+  att::AscendGraphParser parser(space);
+  ASSERT_EQ(parser.GraphParser(graph), af::SUCCESS);
+  att::ExeTimePassManager manager(space);
+  bool checked = false;
+  for (const auto &node : space->node_infos) {
+    if (node.name == "cast0") {
+      // The emitted control condition is true for all four z1T iterations.
+      att::Expr base = af::Symbol(1U);
+      for (const auto *axis : node.loop_axes) {
+        base = base * axis->repeat;
+      }
+      auto count = manager.UpdateNodeExeTime(node, base);
+      count.Replace(values);
+      auto branch = count.DeepCopyIfCase();
+      while (!branch->IsLeaf()) {
+        int64_t left = 0, right = 0;
+        ASSERT_TRUE(branch->GetCondLeft().Simplify().GetConstValue(left));
+        double real_right = 0.0;
+        if (!branch->GetCondRight().Simplify().GetConstValue(right)) {
+          ASSERT_TRUE(branch->GetCondRight().Simplify().GetConstValue(real_right));
+          right = static_cast<int64_t>(real_right);
+        }
+        ASSERT_EQ(branch->GetCondType(), att::CondType::K_EQ);
+        branch = left == right ? branch->GetChoiceA() : branch->GetChoiceB();
+      }
+      int64_t actual = 0;
+      ASSERT_TRUE(branch->GetExpr().Simplify().GetConstValue(actual));
+      EXPECT_EQ(actual, 4);
+      checked = true;
+    }
+  }
+  EXPECT_TRUE(checked);
 }

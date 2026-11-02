@@ -352,7 +352,11 @@ target_link_libraries(att PRIVATE
         error_manager
         ascend_protobuf
         ge_log_utils
+        # ATT probes the builtin performance registry even when the test graph
+        # uses no builtin APIs. Keep the registration-only library loaded.
+        -Wl,--push-state,--no-as-needed
         ascir_builtin_ops
+        -Wl,--pop-state
         autofuse_runtime_stub
         ascgen_common
 )
@@ -388,6 +392,11 @@ target_include_directories(codegen PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/depends/runtime/src
 )
 
+# codegen calls optimize::BackendSpec::GetInstance() directly (codegen_kernel.cpp,
+# codegen_tiling.cpp, codegen_tiling_pgo_common.cpp), so it must name optimize in
+# both branches.  Relying on att to bring it in transitively is not enough: att
+# links optimize PRIVATE, so libcodegen.so ends up with an undefined symbol and
+# the UT/ST framework fails to load it.
 if (ENABLE_OPEN_SRC)
     target_link_libraries(codegen PUBLIC
         -lgcov
@@ -396,6 +405,7 @@ if (ENABLE_OPEN_SRC)
         ascgen_common
         aihac_symbolizer_af
         error_manager
+        optimize
         att
         json
         ascendc_api_extend
@@ -406,6 +416,7 @@ else ()
         $<BUILD_INTERFACE:msprof_headers>
         $<BUILD_INTERFACE:runtime_headers>
         $<BUILD_INTERFACE:atrace_headers>
+        optimize
         mmpa
         c_sec
         unified_dlog

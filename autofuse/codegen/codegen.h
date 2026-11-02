@@ -42,6 +42,9 @@ class Codegen {
   std::string GenerateTilingData(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                  bool is_inductor = false) const;
 
+  // Host-only generation is supported. Cache execution counts are conservative
+  // without final records from GenerateKernel on this same scheduled graph.
+  // GenerateKernel resets and republishes those records for a new generation.
   Status GenerateTiling(const ::ascir::FusedScheduledResult &fused_schedule_result,
                         const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
                         const std::string &core_num,
