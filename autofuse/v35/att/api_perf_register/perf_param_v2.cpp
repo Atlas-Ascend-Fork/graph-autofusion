@@ -964,6 +964,43 @@ const std::string kParamV2Info = R"(
             "bfloat16tobfloat16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0}
         }
     },
+    "LoadSingleCore": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "int64toint64": {"h": 160, "b": 0, "a": 23.0520, "hl": 0, "data_type_size": 8},
+            "float16tofloat16": {"h": 160, "b": 0, "a": 23.0520, "hl": 0, "data_type_size": 2},
+            "float32tofloat32": {"h": 160, "b": 0, "a": 23.0520, "hl": 0, "data_type_size": 4},
+            "uint8touint8": {"h": 160, "b": 0, "a": 23.0520, "hl": 0, "data_type_size": 1},
+            "bfloat16tobfloat16": {"h": 160, "b": 0, "a": 23.0520, "hl": 0, "data_type_size": 2}
+        }
+    },
+    "LoadSmallBlkSingleCore": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "int64toint64": {"h": 160, "b": 6.4088, "a": 13.1355, "hl": 0, "data_type_size": 8},
+            "float16tofloat16": {"h": 160, "b": 6.4088, "a": 13.1355, "hl": 0, "data_type_size": 2},
+            "float32tofloat32": {"h": 160, "b": 6.4088, "a": 13.1355, "hl": 0, "data_type_size": 4},
+            "uint8touint8": {"h": 160, "b": 6.4088, "a": 13.1355, "hl": 0, "data_type_size": 1},
+            "bfloat16tobfloat16": {"h": 160, "b": 6.4088, "a": 13.1355, "hl": 0, "data_type_size": 2}
+        }
+    },
+    "LoadStrideSingleCore": {
+        "model_type": "LoadStoreStrideV2Func",
+        "model_params": {
+            "int8toint8": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "int16toint16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "uint16touint16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "int32toint32": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "uint32touint32": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "uint64touint64": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "booltobool": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "int64toint64": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "float16tofloat16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "float32tofloat32": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "uint8touint8": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0},
+            "bfloat16tobfloat16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 0.0}
+        }
+    },
     "NddmaStride": {
         "model_type": "LoadStoreStrideV2WithPenaltyFunc",
         "model_params": {

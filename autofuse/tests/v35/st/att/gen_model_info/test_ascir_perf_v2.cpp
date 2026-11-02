@@ -49,6 +49,28 @@ class STestAscirPerfV2 : public ::testing::Test {
 af::RuntimeStubV2 STestAscirPerfV2::stub_v_2;
 
 namespace {
+// LoadV2 引入单核分支后，pipe_res[AIV_MTE2]为外层load_core_case_node三元变量（block_dim==1选单核参数）。
+// 用例通过本函数取指定分支的表达式后再做公式断言；取分支失败时记录失败并返回哑值，避免解引用UB。
+Expr SelectLoadCoreBranch(const std::map<Expr, TernaryOp, ExprCmp> &ternary_ops, bool single_core) {
+  const Expr var = CreateExpr("load_core_case_node");
+  const auto iter = ternary_ops.find(var);
+  if (iter == ternary_ops.end()) {
+    ADD_FAILURE() << "load_core_case_node not found in ternary_ops";
+    return CreateExpr(0);
+  }
+  const auto if_case = iter->second.DeepCopyIfCase();
+  if (if_case == nullptr) {
+    ADD_FAILURE() << "DeepCopyIfCase of load_core_case_node returned nullptr";
+    return CreateExpr(0);
+  }
+  const auto branch = single_core ? if_case->GetChoiceA() : if_case->GetChoiceB();
+  if (branch == nullptr) {
+    ADD_FAILURE() << "branch of load_core_case_node is nullptr, single_core=" << single_core;
+    return CreateExpr(0);
+  }
+  return branch->GetExpr();
+}
+
 NodePerfInfo MakeSocStAbsPerfInfo() {
   NodePerfInfo node;
   node.optype = "Abs";
@@ -333,10 +355,10 @@ TEST_F(STestAscirPerfV2, TestLoadApiForTypev1) {
   node.node_ptr = node_ptr;
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 存在外抛
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   EXPECT_EQ(
       Str(res.Replace(ret)),
       "TernaryOp((-256 + z0t_size) < 0, ((4 * z0t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + "
@@ -377,10 +399,10 @@ TEST_F(STestAscirPerfV2, TestLoadApiForTypev2) {
   node.node_ptr = node_ptr;
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 外抛for循环
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   const std::string is_cache_line = "(-256 + z0z1t_size) < 0";
   const std::string perf1 = "((8 * z0z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0)";
   const std::string perf2 = "((8 * z0z1t_size / (((6.61549997329712 / (block_dim)) + 11.8291997909546))) + 160.0))";
