@@ -27,7 +27,6 @@
 #include "sk_log.h"
 #include "sk_options_manager.h"
 #include "sk_lock_detector.h"
-#include "sk_scope_deadlock_detector.h"
 #include "sk_scope_split.h"
 
 class TestLockDetector : public ::testing::Test {

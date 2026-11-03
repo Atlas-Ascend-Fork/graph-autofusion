@@ -43,7 +43,6 @@
 #include "sk_graph.h"
 #include "sk_log.h"
 #include "sk_lock_detector.h"
-#include "sk_scope_deadlock_detector.h"
 #include "sk_options_manager.h"
 #include "sk_scope_info.h"
 #include "sk_scope_split_result_reporter.h"
