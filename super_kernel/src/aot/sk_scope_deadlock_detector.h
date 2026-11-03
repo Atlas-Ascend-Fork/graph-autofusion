@@ -15,14 +15,19 @@
 
 class ScopeDeadlockDetector {
  public:
-  ScopeDeadlockDetector(SuperKernelGraph &graph, const SuperKernelOptionsManager &opts) : analysis_(graph, opts) {}
+  ScopeDeadlockDetector(SuperKernelGraph &graph, const SuperKernelOptionsManager &opts)
+      : concurrentRanges_(graph, scopeInfos_),
+        waitResources_(graph, &opts, scopeInfos_, concurrentRanges_, LockDetector::GetDeviceCubeNum(),
+                       LockDetector::GetDeviceVecNum()) {
+    LockDetector::GetDeviceCores();
+  }
 
   // 返回风险Wait所属scope，并通过riskWaitId输出对应节点；无风险时返回nullptr。
   const SuperKernelScopeInfo *CheckParallelScopeResources(const std::vector<SuperKernelScopeInfo> &scopes,
                                                           uint64_t &riskWaitId);
 
  private:
-  using ScopeConcurrentRanges = LockDetector::ScopeConcurrentRanges;
+  using ScopeConcurrentRanges = ScopeConcurrentRangeAnalyzer::ScopeConcurrentRanges;
 
   std::vector<const SuperKernelScopeInfo *> CollectWaitScopeCandidates(
       const std::vector<SuperKernelScopeInfo> &scopes) const;
@@ -31,7 +36,9 @@ class ScopeDeadlockDetector {
                                           const ScopeConcurrentRanges &ranges, uint64_t &riskWaitId,
                                           const SuperKernelScopeInfo *&riskScope);
 
-  LockDetector analysis_;
+  std::unordered_map<uint16_t, ScopeRuntimeInfo> scopeInfos_;
+  ScopeConcurrentRangeAnalyzer concurrentRanges_;
+  WaitResourceDependencyAnalyzer waitResources_;
 };
 
 #endif

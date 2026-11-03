@@ -25,7 +25,7 @@ std::vector<const SuperKernelScopeInfo *> ScopeDeadlockDetector::CollectWaitScop
     const bool hasCheckableWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(),
                                               [this, &memberIds](const auto *node) {
                                                 return node->GetNodeType() == SkNodeType::NODE_WAIT &&
-                                                       !analysis_.ShouldBypassValueWaitDeadlock(*node) &&
+                                                       !waitResources_.ShouldBypassValueWaitDeadlock(*node) &&
                                                        !IsWaitNotifyInScope(*node, memberIds);
                                               });
     if (scope.GetScopeCoreInfo().IsValid() && hasCheckableWait) {
@@ -45,7 +45,7 @@ ScopeDeadlockDetector::ScopeConcurrentRanges ScopeDeadlockDetector::BuildScopeCo
                                      [](const auto *node) { return node->GetNodeType() == SkNodeType::NODE_WAIT; });
     if (scope.GetScopeCoreInfo().IsValid() && hasWait) {
       ranges.emplace(scope.GetScopeId(),
-                     analysis_.CalculateScopeConcurrentRanges(scope.GetNodes(), scope.GetScopeId()));
+                     concurrentRanges_.CalculateScopeConcurrentRanges(scope.GetNodes(), scope.GetScopeId()));
     }
   }
   return ranges;
@@ -63,11 +63,12 @@ bool ScopeDeadlockDetector::CheckSelectedScopeResourceBranches(
   }
   for (const auto *scope : selected) {
     const auto scopeId = scope->GetScopeId();
-    const LockDetector::ResourceDemand rootDemand{scope->GetScopeCoreInfo().GetCubeNum(),
-                                                  scope->GetScopeCoreInfo().GetVectorNum()};
+    const WaitResourceDependencyAnalyzer::ResourceDemand rootDemand{scope->GetScopeCoreInfo().GetCubeNum(),
+                                                                    scope->GetScopeCoreInfo().GetVectorNum()};
     for (const auto *node : scope->GetNodes()) {
-      if (node->GetNodeType() == SkNodeType::NODE_WAIT && !analysis_.ShouldBypassValueWaitDeadlock(*node) &&
-          !analysis_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents, &ranges)) {
+      if (node->GetNodeType() == SkNodeType::NODE_WAIT && !waitResources_.ShouldBypassValueWaitDeadlock(*node) &&
+          !waitResources_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents,
+                                                    &ranges)) {
         riskWaitId = node->GetNodeId();
         riskScope = scope;
         SK_LOGI("[ParallelResource] Risk Wait %lu in scope %u; %zu resident scopes", riskWaitId, scopeId,
@@ -87,11 +88,16 @@ const SuperKernelScopeInfo *ScopeDeadlockDetector::CheckParallelScopeResources(
     const std::vector<SuperKernelScopeInfo> &scopes, uint64_t &riskWaitId) {
   riskWaitId = INVALID_TASK_ID;
   const SuperKernelScopeInfo *riskScope = nullptr;
-  analysis_.SetScopeInfos(scopes);
+  scopeInfos_.clear();
+  for (const auto &scope : scopes) {
+    if (scope.GetScopeCoreInfo().IsValid()) {
+      scopeInfos_.emplace(scope.GetScopeId(), ScopeRuntimeInfo::FromScope(scope));
+    }
+  }
   const auto candidates = CollectWaitScopeCandidates(scopes);
   const auto ranges = BuildScopeConcurrentRanges(scopes);
   std::vector<const SuperKernelScopeInfo *> selected;
-  LockDetector::ResourceDemand selectedDemand;
+  WaitResourceDependencyAnalyzer::ResourceDemand selectedDemand;
   std::function<bool(size_t)> check = [&](size_t index) {
     if (index == candidates.size()) {
       return CheckSelectedScopeResourceBranches(selected, ranges, riskWaitId, riskScope);
@@ -101,13 +107,13 @@ const SuperKernelScopeInfo *ScopeDeadlockDetector::CheckParallelScopeResources(
     }
     const auto *candidate = candidates[index];
     for (const auto *scope : selected) {
-      if (!analysis_.CanRunTogether(scope->GetScopeId(), candidate->GetScopeId(), ranges)) {
+      if (!concurrentRanges_.CanRunTogether(scope->GetScopeId(), candidate->GetScopeId(), ranges)) {
         return true;
       }
     }
     const uint64_t candidateCube = selectedDemand.cube + candidate->GetScopeCoreInfo().GetCubeNum();
     const uint64_t candidateVec = selectedDemand.vec + candidate->GetScopeCoreInfo().GetVectorNum();
-    if (!analysis_.HasEnoughDeviceCores(candidateCube, candidateVec, 0, 0)) {
+    if (!waitResources_.HasEnoughDeviceCores(candidateCube, candidateVec, 0, 0)) {
       return true;
     }
     const auto previousDemand = selectedDemand;
