@@ -392,6 +392,26 @@ target_include_directories(codegen PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/depends/runtime/src
 )
 
+if(ENABLE_AUTOFUSE_MLIR)
+    autofuse_enable_mlir_bridge(codegen PUBLIC)
+
+    # aarch64 上这个库已经贴着 `R_AARCH64_CALL26` 的 ±128 MiB 跳转范围（2026-10-27 实测：
+    # 把 MLIR 桥链进来之后 `.text` 已占 98%），再多几个 op 就链不过，报
+    # `relocation truncated to fit ... against __aarch64_ldadd4_acq_rel`。
+    #
+    # 只在把 MLIR 链进来的那一档加这几个选项：不链 MLIR 的 legacy 档离上限还远，不必动。
+    target_compile_options(codegen PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(codegen PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL)
+
+    target_link_libraries(codegen PUBLIC AutofuseMlirScheduleBridge)
+    # MLIRLLVMDialect is an IMPORTED target created by find_package(MLIR) inside
+    # the sibling mlir/ subdirectory; imported targets aren't visible across
+    # sibling directory scopes, so re-resolve it here (MLIR_DIR is already
+    # cached from the mlir/ subtree, which is added before tests/).
+    find_package(MLIR REQUIRED CONFIG)
+    target_link_libraries(codegen PUBLIC MLIRLLVMDialect)
+endif()
+
 # codegen calls optimize::BackendSpec::GetInstance() directly (codegen_kernel.cpp,
 # codegen_tiling.cpp, codegen_tiling_pgo_common.cpp), so it must name optimize in
 # both branches.  Relying on att to bring it in transitively is not enough: att

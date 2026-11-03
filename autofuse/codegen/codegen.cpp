@@ -14,6 +14,10 @@
 #include <sstream>
 #include <fstream>
 
+#ifdef ENABLE_AUTOFUSE_MLIR
+#include "bridge/CodegenOrchestration/CodegenOrchestration.h"
+#endif
+
 #include "ascir_node_param/ascir_param_builder.h"
 #include "codegen_kernel.h"
 #include "codegen_tiling_data.h"
@@ -380,7 +384,8 @@ std::string RemoveSubDirInclude(const std::string &kernel_str) {
 
 Codegen::Codegen(const CodegenOptions &options)
     : tiling_lib_(options.tiling_lib_path, options.tiling_lib_codegen_symbol),
-      using_att_calc_qbt_size_(options.using_att_calc_qbt_size) {}
+      using_att_calc_qbt_size_(options.using_att_calc_qbt_size),
+      soc_version_(options.soc_version) {}
 
 Status Codegen::Generate(const ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result) const {
   // for UT/ST shape info stub
@@ -392,6 +397,13 @@ Status Codegen::Generate(const ascir::FusedScheduledResult &fused_schedule_resul
 Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
                                     CodegenResult &result) const {
   GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
+#ifdef ENABLE_AUTOFUSE_MLIR
+  const auto mlir_status = mlir::bridge::RunMlirCodegen(fused_schedule_result, mlir::bridge::MlirCallerScene::kInductor,
+                                                        soc_version_, result);
+  if (mlir_status != mlir::bridge::MlirCodegenStatus::kNotSupported) {
+    return mlir_status == mlir::bridge::MlirCodegenStatus::kSucceeded ? af::SUCCESS : af::FAILED;
+  }
+#endif
   if (tiling_lib_.ShouldFallbackPgo(fused_schedule_result)) {
     GELOGW("Tiling key count exceeds 10000, fallback to non-PGO Inductor codegen");
     Codegen fallback(*this);
@@ -431,6 +443,13 @@ Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_sch
 Status Codegen::Generate(const std::map<std::string, std::string> &shape_info,
                          const ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result) const {
   GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
+#ifdef ENABLE_AUTOFUSE_MLIR
+  const auto mlir_status = mlir::bridge::RunMlirCodegen(
+      fused_schedule_result, mlir::bridge::MlirCallerScene::kTensorFlow, soc_version_, result);
+  if (mlir_status != mlir::bridge::MlirCodegenStatus::kNotSupported) {
+    return mlir_status == mlir::bridge::MlirCodegenStatus::kSucceeded ? af::SUCCESS : af::FAILED;
+  }
+#endif
   GE_CHK_STATUS_RET(GenerateKernel(fused_schedule_result, result.kernel, false), "Codegen generate kernel failed");
   result.tiling_data = GenerateTilingData(fused_schedule_result, false);
   std::map<std::string, std::string> tiling_file_name_to_content;

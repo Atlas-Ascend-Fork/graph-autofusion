@@ -610,9 +610,6 @@ Status ReducePartitionCaseGenerator::Generate([[maybe_unused]] ascir::HintGraph 
   return ge::GRAPH_SUCCESS;
 }
 
-// 多 R 轴图的 R-core 模板分流: 多 reduce / norm 类多 R 轴图逐 case 展开会造成模板数随链数乘性爆炸,
-// 整体跳过 R-core 模板生成; 单 reduce 多 R 轴非 norm 图模板数有界, 放行进入 R-core 模板, 由
-// Optimizer::AppendReduceFirstStageGroup 做 relation 一致性判定后决定打包或回退逐 case 展开
 bool ReducePartitionCaseGenerator::ShouldForceAllLoad(ascir::HintGraph &graph) {
   if (!IsOnlyHasOneOrLessReduce(graph) && HasMultiRAxisReduce(graph)) {
     return true;
@@ -1289,10 +1286,6 @@ bool ReducePartitionCaseGenerator::HasArgMaxReduce(const ScheduleTask &task) {
   return false;
 }
 
-// 多 R 轴判定: 归约轴为输入 stride 非零而输出 stride 变 0 的轴(与 tiling 的 r_group 推导一致,
-// 复用 CalcReduceAxes)。多 R 轴时 R-core 模板的 phase-1 各 tiling case 切分结构互不相同,
-// 无法共用同一份 var relation, 逐 case 展开会造成模板数爆炸, 因此在 GeneratorRCoreTask 之前
-// 整体跳过该模板。
 bool ReducePartitionCaseGenerator::HasMultiRAxisReduce(const ascir::ImplGraph &impl_graph) {
   for (const auto &node : impl_graph.GetAllNodes()) {
     if (!ScheduleUtils::IsReduce(node)) {
@@ -1305,7 +1298,7 @@ bool ReducePartitionCaseGenerator::HasMultiRAxisReduce(const ascir::ImplGraph &i
       continue;
     }
     if (ScheduleUtils::CalcReduceAxes(input_strides, output_strides, output_axes).size() > 1UL) {
-      GELOGI("Reduce node [%s] has multiple R axes, skip R-core template generation.", node->GetNamePtr());
+      GELOGI("Reduce node [%s] has multiple R axes.", node->GetNamePtr());
       return true;
     }
   }

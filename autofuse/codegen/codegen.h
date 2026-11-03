@@ -29,6 +29,7 @@ struct CodegenOptions {
   std::string tiling_lib_path;
   std::string tiling_lib_codegen_symbol;
   bool using_att_calc_qbt_size = true;
+  std::string soc_version;
 };
 
 class Codegen {
@@ -69,6 +70,7 @@ class Codegen {
  private:
   TilingLib tiling_lib_;
   bool using_att_calc_qbt_size_;
+  std::string soc_version_;
 };
 }  // namespace codegen
 

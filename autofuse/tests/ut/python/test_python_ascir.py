@@ -544,6 +544,17 @@ class TestAscir:
             assert e.args[0] == "target param is invalid"
 
 
+def assert_graph_debug_string(graph):
+    debug_str = ascir.utils.debug_str(graph)
+    assert debug_str
+
+
+def schedule_graph(graph):
+    options = AutofuserOptions()
+    fuser = Autofuser(options)
+    return fuser.schedule(graph)
+
+
 class TestAutofuseLoadAbsStore:
     @staticmethod
     def construct_graph():
@@ -618,16 +629,10 @@ class TestAutofuseLoadAbsStore:
         return graph
 
     def test_construct_graph(self):
-        graph = self.construct_graph()
-        debug_str = ascir.utils.debug_str(graph)
-        assert debug_str
+        assert_graph_debug_string(self.construct_graph())
 
     def test_optimize(self):
-        options = AutofuserOptions()
-        fuser = Autofuser(options)
-
-        hint_graph = self.construct_graph()
-        schedule_results = fuser.schedule(hint_graph)
+        schedule_results = schedule_graph(self.construct_graph())
         schedule_results.get_name()
         schedule_results.get_input_num()
         schedule_results.get_output_num()
@@ -716,6 +721,170 @@ class TestAutofuseLoadAbsStore:
             match=r"^Codegen generate kernel failed: pyautofuse runtime error test$",
         ):
             fuser.autofuse_backend(hint_graph)
+
+
+def configure_concrete_op(op, axis, size):
+    op.attr.sched.axis = [axis]
+    op.y.dtype = ascir.dtypes.float16
+    op.y.axis = [axis]
+    op.y.size = [ascir.SizeExpr(size)]
+    op.y.strides = [ascir.SizeExpr(1)]
+
+
+def make_concrete_data(graph, name, index, axis, size):
+    op = ascir.ops.Data(name, graph)
+    op.attr.ir_attr.index = index
+    configure_concrete_op(op, axis, size)
+    return op
+
+
+def make_concrete_load(name, source, axis, size):
+    op = ascir.ops.Load(name)
+    op.attr.ir_attr.offset = ascir.SizeExpr(0)
+    op.x = source
+    configure_concrete_op(op, axis, size)
+    return op
+
+
+class TestAutofuseLoadAddStore:
+    # 与 TestAutofuseLoadAbsStore 同构，但算子换成二元 Add：
+    # Data(arg0)+Data(arg1) → Load → Add → Store → Output，计算 y = x0 + x1。
+    # 用于让真实 Autofuser.schedule 对 binary elementwise 也产出 AFIR（ScheduleToAfir）。
+    @staticmethod
+    def construct_graph():
+        graph = ascir.HintGraph("LoadAddStore")
+        s0 = graph.create_size("s0")
+        s1 = graph.create_size("s1")
+        s2 = graph.create_size("s2")
+
+        z0 = graph.create_axis("z0", s0 + 100)
+        assert z0.size.expression == "(100 + s0)"
+        z1 = graph.create_axis("z1", s1)
+        z2 = graph.create_axis("z2", s2)
+        buf_z0 = graph.create_axis("buf_z0", 100)
+        buf_z1 = graph.create_axis("buf_z1", s1)
+        buf_z2 = graph.create_axis("buf_z2", s2)
+
+        # 两个输入 Data（index 0 / 1）
+        arg0 = ascir.ops.Data("arg0", graph)
+        arg0.attr.ir_attr.index = 0
+        arg0.attr.sched.axis = [z0, z1, z2]
+        arg0.y.dtype = ascir.dtypes.float16
+        arg0.y.axis = [z0, z1, z2]
+        arg0.y.size = [100 + s0, s1, s2]
+        arg0.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        arg1 = ascir.ops.Data("arg1", graph)
+        arg1.attr.ir_attr.index = 1
+        arg1.attr.sched.axis = [z0, z1, z2]
+        arg1.y.dtype = ascir.dtypes.float16
+        arg1.y.axis = [z0, z1, z2]
+        arg1.y.size = [100 + s0, s1, s2]
+        arg1.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        offset_of_0 = ascir.SizeExpr(0)
+
+        load0 = ascir.ops.Load("load0")
+        load0.attr.ir_attr.offset = offset_of_0
+        load0.x = arg0
+        load0.attr.sched.axis = [z0, z1, z2]
+        load0.y.dtype = ascir.dtypes.float16
+        load0.y.axis = [z0, z1, z2]
+        load0.y.size = [100 + s0, s1, s2]
+        load0.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        load1 = ascir.ops.Load("load1")
+        load1.attr.ir_attr.offset = offset_of_0
+        load1.x = arg1
+        load1.attr.sched.axis = [z0, z1, z2]
+        load1.y.dtype = ascir.dtypes.float16
+        load1.y.axis = [z0, z1, z2]
+        load1.y.size = [100 + s0, s1, s2]
+        load1.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        add_op = ascir.ops.Add("add")
+        add_op.x1 = load0
+        add_op.x2 = load1
+        add_op.attr.sched.axis = [z0, z1, z2]
+        add_op.y.dtype = ascir.dtypes.float16
+        add_op.y.axis = [z0, z1, z2]
+        add_op.y.size = [100 + s0, s1, s2]
+        add_op.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        store = ascir.ops.Store("store")
+        store.attr.ir_attr.offset = offset_of_0 + 1
+        assert store.attr.ir_attr.offset.expression == "1"
+        store.x = add_op
+        store.attr.sched.axis = [z0, z1, z2]
+        store.y.dtype = ascir.dtypes.float16
+        store.y.axis = [z0, z1, z2]
+        store.y.size = [100 + s0, s1, s2]
+        store.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        buf1 = ascir.ops.Output("buf1", graph)
+        buf1.attr.ir_attr.index = 0
+        assert buf1.attr.ir_attr.index == 0
+        buf1.x = store
+        buf1.attr.sched.axis = [z0, z1, z2]
+        buf1.y.dtype = ascir.dtypes.float16
+        buf1.y.axis = [z0, z1, z2]
+        buf1.y.size = [100 + s0, s1, s2]
+        buf1.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+        graph.set_axis_map({z0: [buf_z0], z1: [buf_z1], z2: [buf_z2]})
+        return graph
+
+    # --- 具体 shape 变体：单轴 size=32，用于让真实调度产出可执行（count 非 0）的 AFIR ---
+    @staticmethod
+    def construct_graph_concrete(n=32):
+        graph = ascir.HintGraph("LoadAddStoreConcrete")
+        z0 = graph.create_axis("z0", ascir.SizeExpr(n))
+        buf_z0 = graph.create_axis("buf_z0", ascir.SizeExpr(n))
+
+        arg0 = make_concrete_data(graph, "arg0", 0, z0, n)
+        arg1 = make_concrete_data(graph, "arg1", 1, z0, n)
+        load0 = make_concrete_load("load0", arg0, z0, n)
+        load1 = make_concrete_load("load1", arg1, z0, n)
+
+        add_op = ascir.ops.Add("add")
+        add_op.x1 = load0
+        add_op.x2 = load1
+        configure_concrete_op(add_op, z0, n)
+
+        store = ascir.ops.Store("store")
+        store.attr.ir_attr.offset = ascir.SizeExpr(0)
+        store.x = add_op
+        configure_concrete_op(store, z0, n)
+
+        output = ascir.ops.Output("buf1", graph)
+        output.attr.ir_attr.index = 0
+        output.x = store
+        configure_concrete_op(output, z0, n)
+        graph.set_axis_map({z0: [buf_z0]})
+        return graph
+
+    def test_construct_graph(self):
+        assert_graph_debug_string(self.construct_graph())
+
+    def test_optimize(self):
+        schedule_results = schedule_graph(self.construct_graph())
+        assert schedule_results.get_input_num() == 2
+        assert schedule_results.get_output_num() == 1
+
+    def test_codegen(self):
+        options = AutofuserOptions()
+        fuser = Autofuser(options)
+
+        hint_graph = self.construct_graph()
+        impl_graphs = fuser.schedule(hint_graph)
+        tiling_def, host_tiling, op_kernel = fuser.codegen(impl_graphs)
+
+    def test_codegen_concrete(self):
+        options = AutofuserOptions()
+        fuser = Autofuser(options)
+
+        hint_graph = self.construct_graph_concrete()
+        impl_graphs = fuser.schedule(hint_graph)
+        tiling_def, host_tiling, op_kernel = fuser.codegen(impl_graphs)
 
 
 class TestAutofuseLoadMatMulStore:

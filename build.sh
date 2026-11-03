@@ -92,6 +92,7 @@ usage() {
   echo "  sh build.sh [-h|--help] [--pkg] [-u|--ut] [-s|--st] [--impl=<py|cpp|all>]"
   echo "              [--module=<name>] [-c|--coverage] [-j]"
   echo "              [--output_path=<PATH>] [--cann_3rd_lib_path=<PATH>] [--build-type=<TYPE>] [--no-autofuse]"
+  echo "              [--enable-mlir]"
   echo "              [--pkg-type=<TYPE>]"
   echo "              [-f <FILE>]"
   echo ""
@@ -99,6 +100,8 @@ usage() {
   echo "    -h, --help            Print usage"
   echo "    --pkg                 Build package"
   echo "    --no-autofuse         Skip autofuse backend build/package artifacts"
+  echo "    --enable-mlir"
+  echo "                          Enable Autofuse MLIR migration infrastructure"
   echo "    -j                    Compile thread nums, default is available CPU count (affinity/quota), eg: -j 8"
   echo "    -u, --ut              Run unit tests for supported implementations"
   echo "    -s, --st              Run system tests for supported implementations"
@@ -352,10 +355,11 @@ checkopts() {
   TARGET_MODULE="all"
   CANN_3RD_LIB_PATH="$BASEPATH/output/third_party"
   ENABLE_AUTOFUSE="on"
+  ENABLE_AUTOFUSE_MLIR="auto"
   CHANGED_FILES=""
   PACKAGE_TYPE="run"
 
-  parsed_args=$(getopt -a -o j:huscf: -l help,pkg,autofuse,no-autofuse,impl:,module:,test_case:,ut,st,coverage,output_path:,cann_3rd_lib_path:,build-type:,pkg-type: -- "$@") || {
+  parsed_args=$(getopt -a -o j:huscf: -l help,pkg,autofuse,no-autofuse,enable-mlir,impl:,module:,test_case:,run_example,ut,st,coverage,output_path:,cann_3rd_lib_path:,build-type:,pkg-type: -- "$@") || {
     usage
     exit 1
   }
@@ -378,6 +382,10 @@ checkopts() {
         ;;
       --no-autofuse)
         ENABLE_AUTOFUSE="off"
+        shift
+        ;;
+      --enable-mlir)
+        ENABLE_AUTOFUSE_MLIR="on"
         shift
         ;;
       -j)
@@ -471,6 +479,14 @@ checkopts() {
     esac
   done
 
+  if [[ "${ENABLE_AUTOFUSE_MLIR}" == "auto" ]]; then
+    if [[ "${BUILD_TYPE}" == "Debug" ]]; then
+      ENABLE_AUTOFUSE_MLIR="on"
+    else
+      ENABLE_AUTOFUSE_MLIR="off"
+    fi
+  fi
+
   normalize_test_selection
 
   if [ "X$ENABLE_BUILD_PACKAGE" != "Xon" ] && [ ${#EXEC_ACTIONS[@]} -eq 0 ]; then
@@ -490,6 +506,11 @@ function cmake_config()
   fi
   if [ "X$ENABLE_AUTOFUSE" == "Xoff" ]; then
     extra_option="${extra_option} -DBUILD_AUTOFUSE=OFF"
+  fi
+  if [ "X$ENABLE_AUTOFUSE_MLIR" == "Xon" ]; then
+    extra_option="${extra_option} -DENABLE_AUTOFUSE_MLIR=ON"
+  else
+    extra_option="${extra_option} -DENABLE_AUTOFUSE_MLIR=OFF"
   fi
   echo "Info: cmake config ${cmake_option} ${extra_option} ."
   cmake .. ${cmake_option} ${extra_option}
@@ -687,7 +708,6 @@ autofuse_module_test_suite() {
   if [ "X${ENABLE_COVERAGE}" == "Xon" ]; then
     test_args+=("-c")
   fi
-
   BUILD_TYPE="${BUILD_TYPE}" bash "${BASEPATH}/scripts/test/run_autofuse_test.sh" "${test_args[@]}"
 }
 

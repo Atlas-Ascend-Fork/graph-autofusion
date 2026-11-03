@@ -32,6 +32,25 @@ inline __aicore__ void ClipByValue(const AscendC::LocalTensor<T> &dst, const Asc
   }
 }
 
+// 场景1的另一种实参顺序：`calCount` 在前、`tmp_buf` 在后。
+//
+// **这个重载只有 MLIR 路径在用**（`ascendc.clip_by_value_contiguous` 的 emitter）。
+// 这一族的其余扩展包装（`where.h` 的 `Where`、`true_div.h` 的 `TrueDivExtend` 等）都是
+// 「先 calCount 后 tmp_buf」，只有上面那个反过来。AFIR 侧一条路上两种顺序会让 emitter
+// 多一个只为这一个 op 存在的参数，所以在这里补一个转发重载把顺序对齐。
+//
+// 上面那个原样保留，legacy 的 `ClipByValueApiCall` 仍按原顺序发调用，行为一个字不变；
+// 但**这个头是整段内联进 kernel 的**（`ascendc_api_registry` 的 `clipbyvalue.h`），所以
+// legacy 生成的 kernel 源码里会多出下面这十行——文本不同，语义相同。
+//
+// 两者的第 5 / 6 个形参类型不同（`LocalTensor<uint8_t>&` 与 `uint32_t`），不会有重载歧义。
+template <typename T>
+inline __aicore__ void ClipByValue(const AscendC::LocalTensor<T> &dst, const AscendC::LocalTensor<T> &src_x,
+                                   const AscendC::LocalTensor<T> &src_min, const AscendC::LocalTensor<T> &src_max,
+                                   const uint32_t calCount, AscendC::LocalTensor<uint8_t> &tmp_buf) {
+  ClipByValue(dst, src_x, src_min, src_max, tmp_buf, calCount);
+}
+
 // 场景2，x是tensor，min, max是scalar
 template <typename T>
 inline __aicore__ void ClipByValue(const AscendC::LocalTensor<T> &dst, const AscendC::LocalTensor<T> &src_x,
@@ -107,6 +126,35 @@ inline __aicore__ void ClipByValue(const AscendC::LocalTensor<T> &dst, const Asc
     AscendC::PipeBarrier<PIPE_V>();
     AscendC::Maxs(dst[offset], dst[offset], src_min, tail_cnt);
   }
+}
+
+// 场景 2 / 3 / 4 的另一种实参顺序：`calCount` 在前、`tmp_buf` 在后。
+//
+// 与场景 1 那个转发重载（上面第 35 行那段）**同一个理由、同一个做法**：MLIR 这条路上这一族
+// 的实参序只有一种（count 在 tmp 之前，与 `where.h` 一致），emitter 才能与选择族逐字共用。
+// legacy 仍按各场景原来的顺序发，行为一个字不变；代价是这个头整段内联进 kernel 时多出下面
+// 这些行。
+//
+// 三个转发都不会有重载歧义：第 5 / 6 个形参类型不同（`LocalTensor<uint8_t>&` 与 `uint32_t`）。
+template <typename T>
+inline __aicore__ void ClipByValue(const AscendC::LocalTensor<T> &dst, const AscendC::LocalTensor<T> &src_x,
+                                   const T &src_min, const T &src_max, const uint32_t calCount,
+                                   AscendC::LocalTensor<uint8_t> &tmp_buf) {
+  ClipByValue(dst, src_x, src_min, src_max, tmp_buf, calCount);
+}
+
+template <typename T>
+inline __aicore__ void ClipByValue(const AscendC::LocalTensor<T> &dst, const AscendC::LocalTensor<T> &src_x,
+                                   const AscendC::LocalTensor<T> &src_min, const T &src_max, const uint32_t calCount,
+                                   AscendC::LocalTensor<uint8_t> &tmp_buf) {
+  ClipByValue(dst, src_x, src_min, src_max, tmp_buf, calCount);
+}
+
+template <typename T>
+inline __aicore__ void ClipByValue(const AscendC::LocalTensor<T> &dst, const AscendC::LocalTensor<T> &src_x,
+                                   const T &src_min, const AscendC::LocalTensor<T> &src_max, const uint32_t calCount,
+                                   AscendC::LocalTensor<uint8_t> &tmp_buf) {
+  ClipByValue(dst, src_x, src_min, src_max, tmp_buf, calCount);
 }
 
 // 场景4， x，min，max都是scalar

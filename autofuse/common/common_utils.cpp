@@ -103,22 +103,6 @@ bool HasSemanticPart(const std::string &name, const std::string &part, const cha
   return name.find(std::string(1U, separator) + part) != std::string::npos;
 }
 
-std::string GenFinalTilingSelectionSnapshotSnippet() {
-  return R"(#ifndef AUTOFUSE_FINAL_TILING_SELECTION_SNAPSHOT_DEFINED
-#define AUTOFUSE_FINAL_TILING_SELECTION_SNAPSHOT_DEFINED
-struct FinalTilingSelectionSnapshot {
-  bool valid{false};
-  uint32_t graph{0U};
-  uint32_t result{0U};
-  uint32_t group{0U};
-  uint32_t tiling_key{0U};
-  int32_t case_id{-1};
-  int32_t sub_case_id{-1};
-};
-#endif
-)";
-}
-
 std::string CamelToLowerSneak(const std::string &str) {
   std::string s1 = std::regex_replace(str, std::regex("(.)([A-Z][a-z]+)"), "$1_$2");
   std::string s2 = std::regex_replace(s1, std::regex("([a-z0-9])([A-Z])"), "$1_$2");

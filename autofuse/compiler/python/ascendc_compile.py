@@ -11,13 +11,14 @@
 # -----------------------------------------------------------------------------------------------------------
 import ctypes
 import fcntl
+import hashlib
 import json
 import os
-import hashlib
 import re
+import shutil
+import stat
 import sys
 import tbe.common.utils.log as logger
-import shutil
 import argparse
 import subprocess
 import platform
@@ -41,7 +42,11 @@ def _log_warning(message, *args):
 
 
 PYF_PATH = os.path.dirname(os.path.realpath(__file__))
-ASCEND_PATH = os.path.join(PYF_PATH, "..", "..", "..")
+# An explicit ASCEND_HOME_PATH identifies the active CANN installation. Fall back
+# to the install-tree-relative path only when the environment does not select one.
+ASCEND_PATH = os.getenv("ASCEND_HOME_PATH", "")
+if not ASCEND_PATH:
+    ASCEND_PATH = os.path.join(PYF_PATH, "..", "..", "..")
 machine = platform.machine()
 HOST_LINK_LIBRARIES = ["tiling_api", "platform", "graph_base", "register", "acl_rt"]
 CV_HOST_LINK_LIBRARIES = HOST_LINK_LIBRARIES + ["nnopbase"]
@@ -59,8 +64,6 @@ PGO_KERNEL_FORMAT = "aicore_binary_elf_v1"
 PGO_CACHE_ROOT_NAME = "pgo_v2"
 # rtLaunch 外置 bin 文件交付件的固定文件名（与前端 torchair 的 KERNEL_BIN_NAME 对齐）。
 KERNEL_BIN_NAME = "kernel.aicore_binary_elf_v1"
-if not os.path.exists(ASCEND_PATH):
-    ASCEND_PATH = os.getenv("ASCEND_HOME_PATH", ASCEND_PATH)
 
 PCH_FILENAME = "autofuse_tiling_pch.h"
 PCH_OUTPUT_NAME = "autofuse_tiling_pch.h.gch"
@@ -1414,6 +1417,12 @@ def build_kernel_target_from_objects(args, tiling_obj_paths, kernel_obj_path, te
     return link_kernel_so(args, tiling_obj_paths, temp_dir, kernel_obj_path)
 
 
+def remove_group_other_write(path):
+    # torch_npu rejects generated shared libraries with group/other write permission.
+    mode = os.stat(path).st_mode
+    os.chmod(path, mode & ~stat.S_IWGRP & ~stat.S_IWOTH)
+
+
 @inductor_compile_duration("CopyOutput", args_index=1)
 def copy_so_to_output(so_file, args, src_directory):
     dst_file = os.path.realpath(args.output_file)
@@ -1422,6 +1431,7 @@ def copy_so_to_output(so_file, args, src_directory):
         os.makedirs(dst_dir_path)
 
     shutil.copy(so_file, dst_file)
+    remove_group_other_write(dst_file)
     shared_cv_wrapper_so = getattr(args, "shared_cv_wrapper_so", None)
     if shared_cv_wrapper_so:
         wrapper_dst_dir = os.path.join(dst_dir_path, CV_WRAPPER_CACHE_DIR_NAME)
@@ -1431,6 +1441,7 @@ def copy_so_to_output(so_file, args, src_directory):
         )
         if os.path.realpath(shared_cv_wrapper_so) != os.path.realpath(wrapper_dst_file):
             shutil.copy(shared_cv_wrapper_so, wrapper_dst_file)
+            remove_group_other_write(wrapper_dst_file)
     logger.info("copy file %s to %s", so_file, dst_file)
     os.chdir(src_directory)
 

@@ -3306,7 +3306,7 @@ af::Status TilingCodeGenImpl::GenFinalTilingRepresentation() {
 }
 
 void TilingCodeGenImpl::GenFinalTilingSemanticFallback() {
-  tiling_func_.AddLine("  auto set_semantic_fallback = [&]() {");
+  tiling_func_.AddLine("  auto ApplySemanticFallback = [&]() {");
   tiling_func_.AddLine("    for (const auto &semantic_info : GetTemplateSemanticInfos(tiling_data)) {");
   tiling_func_.AddLine("      final_context.semantic_name = semantic_info.semantic_name;");
   tiling_func_.AddLine("      final_context.semantic_names = semantic_info.semantic_names;");
@@ -3362,11 +3362,11 @@ af::Status TilingCodeGenImpl::GenFinalTilingContextQuery() {
   tiling_func_.AddLine("  final_context.case_id = final_case_id;");
   tiling_func_.AddLine("  final_context.tiling_key = final_tiling_key;");
   GenFinalTilingSemanticFallback();
-  tiling_func_.AddLine("  if (final_case_id < 0) { set_semantic_fallback(); return false; }");
+  tiling_func_.AddLine("  if (final_case_id < 0) { ApplySemanticFallback(); return false; }");
   tiling_func_.AddLine(
       "  TilingCaseImplPtr final_case_impl = GetSelectedTilingImplPtr(static_cast<uint32_t>(final_case_id), corenum, "
       "has_selected_snapshot ? final_selection.sub_case_tag.c_str() : nullptr);");
-  tiling_func_.AddLine("  if (final_case_impl == nullptr) { set_semantic_fallback(); return false; }");
+  tiling_func_.AddLine("  if (final_case_impl == nullptr) { ApplySemanticFallback(); return false; }");
   tiling_func_.AddLine("  final_case_impl->CollectPipeEstimates(tiling_data, final_context.pipe_estimates);");
   tiling_func_.AddLine("  final_context.score = final_case_impl->CalcScore(tiling_data);");
   tiling_func_.AddLine("  final_context.sub_case_tag = final_case_impl->GetSubCaseTag();");

@@ -1,0 +1,244 @@
+# 候选准备那道闸门的首因 —— 69 格逐格量出（2026-10-20）
+#
+# 这 69 格是 legacy 接管表上 `state=hard-failure` 且 `gate=candidate-preparation` 的全部格子
+# （reg 侧 55 + mem 侧 14，取自 2026-10-19-legacy-takeover-table-reg-m1.txt 与
+# 2026-10-17-legacy-takeover-table-mem.txt）。它们占全部硬失败 87 格的八成，而在这次量之前
+# **「第一条诊断」一栏全是空的**：那道闸门的理由只走 `GELOGW`，而 legacy e2e 把 dlog 调到
+# ERROR，看不见。
+#
+# 这次只做两件事，都不改行为：
+#   1. `PlanSelection.cpp` 三条 `TemplateSupportsMlir*` 谓词各自答得出「为什么不行」；
+#   2. `ReportStrictVerdict` 在严格模式下把下降之前那几道闸门自己的诊断按 `error: <理由>`
+#      打到 stderr。
+#
+# **没碰行为的判据已验**：69 格的 `state` / `gate` / `shortfall` 三列与基线逐格比，`diff` 为空。
+#
+# 量具（build 要在 legacy ST 那一档；本机那一档必须 -j 2，-j 6 会 OOM。aihac_codegen 是动态库，
+# 库编完之后这 69 格可以 --no-build 跑，不必重链）：
+#   bash autofuse/mlir/test/probe/legacy_takeover_table.sh --no-build -R '<69 格的正则>'
+#
+#===----------------------------------------------------------------------===#
+# 首因分桶
+#
+#   桶                          格数   mem   reg
+#   --------------------------------------------
+#   queue-resources              28     2    26
+#   att-tiling-key               27    11    16
+#   elementwise-broadcast        11     0    11
+#   data-movement                 3     1     2
+#   --------------------------------------------
+#   合计                         69    14    55
+#
+# **设计文档对这 69 格的归因（「concat / topn / reduce / int64 比较这些节点类型 MLIR 本来就
+# 没建模」）不成立。** 两条理由：
+#
+#   1. 候选枚举那三条谓词**一条都不看节点类型**，它们是形状 / 布局 / 队列判据。所谓「节点类型
+#      没建模」在这道闸门上没有对应的判据。
+#   2. 27 格（四成）**根本不在候选枚举上**。它们过了 plan selection，死在 `RunAttForCandidates`
+#      之后的 tiling 字段校验（`AttSchemaAdapter.cpp:130`）。文档点名的 `concat_test` /
+#      `brc_reduce_test` / `gather_reduce_store_test` 恰好都在这一桶。
+#
+# 四个桶的性质各不相同，所以 **F-4 不能按文档那一条修法做**（把枚举失败统一标成能力不足）：
+# 那样会把 att-tiling-key 那 27 格的缺陷一并埋进「能力不足」里。
+#
+#   - att-tiling-key（27 格）：**看起来是缺陷，不是能力不足。** 诊断是 ATT 生成的 tiling_func
+#     引用了 `graph0_tiling_key` 与 `tiling_key`，而 `TilingFieldSchema` 里没有这两个名字。
+#     `tiling_field_schema.cpp:147` 发的是 `tiling_key`（flat）或 `graph<N>_result<M>_tiling_key`
+#     （嵌套）两种拼法之一，ATT 那边引用的是第三种 `graph0_tiling_key`——**两侧拼法对不上**。
+#     这道校验本身是防静默错编的（注释写在 `AttSchemaAdapter.cpp:107`），不该放开。
+#     **哪一侧的拼法是对的还没判**，要读 ATT 的 tiling_func 生成器，那是独立一步。
+#   - queue-resources（28 格）：同一个 queue id + reuse id 上挂了两份不同的 tile view。调度
+#     确实给了两份，MLIR 的资源 verifier 收不了——这一桶有可能是真的能力不足，但**要逐格确认
+#     是「调度给的」还是「我们读错了」**。
+#   - elementwise-broadcast（11 格）：某个 elewise 节点的某个输入广播不到输出视图。全在 reg 侧。
+#   - data-movement（3 格）：局部 tile 收不成一段。**这一桶比预期小得多**——开量之前怀疑
+#     `TemplateSupportsMlirDataMovement` 在 `afir.nddma` 接通之后变成过度拒收，69 格里它只命中
+#     3 格，那条怀疑按量级不成立。
+#
+#===----------------------------------------------------------------------===#
+# 逐格（case / 桶）
+#
+brc_reduce_test_codegen_v2                                     att-tiling-key
+compare_test_codegen                                           att-tiling-key
+compare_x2_tensor_int32_test_codegen                           att-tiling-key
+compare_x2_tensor_int64_eq_test_codegen                        att-tiling-key
+compare_x2_tensor_int64_gt_test_codegen                        att-tiling-key
+compare_x2_tensor_test_codegen                                 att-tiling-key
+concat_all_aligned_test_codegen                                att-tiling-key
+concat_test_codegen_v2                                         att-tiling-key
+concat_to_stores_test_codegen                                  att-tiling-key
+gather_reduce_store_test_codegen_v2                            att-tiling-key
+indirect_load_both_transpose_simd_test_codegen_v2              att-tiling-key
+indirect_load_broadcast_axis_simd_test_codegen_v2              att-tiling-key
+indirect_load_broadcast_inner_adjacent_simd_test_codegen_v2    att-tiling-key
+indirect_load_complex_broadcast_simd_test_codegen_v2           att-tiling-key
+indirect_load_complex_input_broadcast_simd_test_codegen_v2     att-tiling-key
+indirect_load_embedding_tail_simd_codegen_v2                   att-tiling-key
+indirect_load_embedding_test_codegen_v2                        att-tiling-key
+indirect_load_index_binary_same_view_simd_test_codegen_v2      att-tiling-key
+indirect_load_mixed_rank4_axis2_simd_codegen_v2                att-tiling-key
+indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_codegen_v2 att-tiling-key
+inductor_tail_brc_tail_reduce_test_codegen                     att-tiling-key
+inductor_topn_concat_test_codegen                              att-tiling-key
+le_bool_store_test_codegen_v2                                  att-tiling-key
+load_compare_cast_sum_store_test_codegen_v2                    att-tiling-key
+pgo_add_abs_inductor_concat_test_codegen                       att-tiling-key
+pgo_add_abs_inductor_test_codegen                              att-tiling-key
+tail_brc_tail_reduce_test_codegen_v2                           att-tiling-key
+indirect_load_rank3_axis1_input_index_gap_simd_test_codegen_v2 data-movement
+load_where_store_test_codegen_v2                               data-movement
+workspace_uint64_multi_reduce_test_codegen                     data-movement
+binary_api_scalar_test_codegen_v2                              elementwise-broadcast
+floordiv_mul_le_select_test_codegen_v2                         elementwise-broadcast
+indirect_load_broadcast_axis_simt_test_codegen_v2              elementwise-broadcast
+indirect_load_broadcast_index_abs_simt_test_codegen_v2         elementwise-broadcast
+indirect_load_embedding_reduce_simt_test_codegen_v2            elementwise-broadcast
+indirect_load_user_fanout_side_input_simt_codegen_v2           elementwise-broadcast
+indirect_load_user_masked_embedding_minimal_codegen_v2         elementwise-broadcast
+indirect_load_user_masked_embedding_sum_full_auto_codegen_v2   elementwise-broadcast
+indirect_load_user_side_input_fanout_simd_codegen_v2           elementwise-broadcast
+load_loop_mode_test_codegen_v2                                 elementwise-broadcast
+ub_scalar_brc_abs_add_test_codegen_v2                          elementwise-broadcast
+brc_inline_test_codegen                                        queue-resources
+indirect_load_both_transpose_simd_fallback_test_codegen_v2     queue-resources
+indirect_load_both_transpose_simd_nddma_test_codegen_v2        queue-resources
+indirect_load_broadcast_continuous_simd_test_codegen_v2        queue-resources
+indirect_load_broadcast_elements_sk_test_codegen_v2            queue-resources
+indirect_load_broadcast_index_physical_view_simt_test_codegen_v2 queue-resources
+indirect_load_broadcast_reduce_simt_fallback_test_codegen_v2   queue-resources
+indirect_load_broadcast_retained_simd_test_codegen_v2          queue-resources
+indirect_load_broadcast_retained_simt_test_codegen_v2          queue-resources
+indirect_load_graph_hint_simd_repro_codegen_v2                 queue-resources
+indirect_load_rank3_axis1_float_int64_gather_codegen_v2        queue-resources
+indirect_load_rank3_axis1_input_index_gap_simt_test_codegen_v2 queue-resources
+indirect_load_rank3_axis1_input_index_outer_gap_simt_test_codegen_v2 queue-resources
+indirect_load_user_dtype_sweep_codegen_v2                      queue-resources
+indirect_load_user_dynamic_shape_sweep_codegen_v2              queue-resources
+indirect_load_user_embedding_exp_abs_add_simt_codegen_v2       queue-resources
+indirect_load_user_embedding_sum_codegen_v2                    queue-resources
+indirect_load_user_embedding_sum_rank2_codegen_v2              queue-resources
+indirect_load_user_embedding_sum_simd_codegen_v2               queue-resources
+indirect_load_user_fanout_direct_reduce_simt_codegen_v2        queue-resources
+indirect_load_user_fanout_direct_stores_simd_codegen_v2        queue-resources
+indirect_load_user_fanout_direct_stores_simt_codegen_v2        queue-resources
+indirect_load_user_fanout_post_reduce_simt_codegen_v2          queue-resources
+indirect_load_user_fanout_post_stores_simd_codegen_v2          queue-resources
+indirect_load_user_fanout_post_stores_simt_codegen_v2          queue-resources
+indirect_load_user_int64_dense_sweep_codegen_v2                queue-resources
+indirect_load_user_layernorm_codegen_v2                        queue-resources
+inductor_topn_test_codegen                                     queue-resources
+
+#===----------------------------------------------------------------------===#
+# 原始三批表（量具逐字输出，诊断截断在 150 字符）
+
+
+case                                                 state         gate                     shortfall  first diagnostic
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+binary_api_scalar_test_codegen_v2                    hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'logical_and0' i
+brc_reduce_test_codegen_v2                           hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+concat_test_codegen_v2                               hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+floordiv_mul_le_select_test_codegen_v2               hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'floor_div0' inp
+gather_reduce_store_test_codegen_v2                  hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_both_transpose_simd_fallback_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_both_transpose_simd_nddma_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_both_transpose_simd_test_codegen_v2    hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_broadcast_axis_simd_test_codegen_v2    hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_broadcast_axis_simt_test_codegen_v2    hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'index_abs_0' in
+indirect_load_broadcast_continuous_simd_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_broadcast_elements_sk_test_codegen_v2  hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 2 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_broadcast_index_abs_simt_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'index_abs_0' in
+indirect_load_broadcast_index_physical_view_simt_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_broadcast_inner_adjacent_simd_test_codegen_v2 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_broadcast_reduce_simt_fallback_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_broadcast_retained_simd_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_broadcast_retained_simt_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_complex_broadcast_simd_test_codegen_v2 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_complex_input_broadcast_simd_test_codegen_v2 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_embedding_reduce_simt_test_codegen_v2  hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'ge' input 0 doe
+indirect_load_embedding_tail_simd_codegen_v2         hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+
+state                              count
+------------------------------------------------
+hard-failure                       22
+
+gate                               count
+------------------------------------------------
+candidate-preparation              22
+
+二进制不存在的行: 0
+没打出标签的行: 0
+
+case                                                 state         gate                     shortfall  first diagnostic
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+indirect_load_embedding_test_codegen_v2              hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_graph_hint_simd_repro_codegen_v2       hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_index_binary_same_view_simd_test_codegen_v2 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_mixed_rank4_axis2_simd_codegen_v2      hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_rank3_axis1_float_int64_gather_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_rank3_axis1_input_index_gap_simd_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by data-movement: Load 'graph_hint/load' local
+indirect_load_rank3_axis1_input_index_gap_simt_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_rank3_axis1_input_index_outer_gap_simt_test_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_codegen_v2 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_user_dtype_sweep_codegen_v2            hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_dynamic_shape_sweep_codegen_v2    hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_embedding_exp_abs_add_simt_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_embedding_sum_codegen_v2          hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_embedding_sum_rank2_codegen_v2    hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_embedding_sum_simd_codegen_v2     hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_fanout_direct_reduce_simt_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_fanout_direct_stores_simd_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_fanout_direct_stores_simt_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_fanout_post_reduce_simt_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_fanout_post_stores_simd_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+
+state                              count
+------------------------------------------------
+hard-failure                       20
+
+gate                               count
+------------------------------------------------
+candidate-preparation              20
+
+二进制不存在的行: 0
+没打出标签的行: 0
+
+case                                                 state         gate                     shortfall  first diagnostic
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+brc_inline_test_codegen                              hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+compare_test_codegen                                 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+compare_x2_tensor_int32_test_codegen                 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+compare_x2_tensor_int64_eq_test_codegen              hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+compare_x2_tensor_int64_gt_test_codegen              hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+compare_x2_tensor_test_codegen                       hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+concat_all_aligned_test_codegen                      hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+concat_to_stores_test_codegen                        hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+indirect_load_user_fanout_post_stores_simt_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_fanout_side_input_simt_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'side_add' input
+indirect_load_user_int64_dense_sweep_codegen_v2      hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_layernorm_codegen_v2              hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+indirect_load_user_masked_embedding_minimal_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'graph_hint/cast
+indirect_load_user_masked_embedding_sum_full_auto_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'graph_hint/sele
+indirect_load_user_side_input_fanout_simd_codegen_v2 hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'user_side_input
+inductor_tail_brc_tail_reduce_test_codegen           hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+inductor_topn_concat_test_codegen                    hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+inductor_topn_test_codegen                           hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by queue-resources: queue 0 reuse 0 carries two
+le_bool_store_test_codegen_v2                        hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+load_compare_cast_sum_store_test_codegen_v2          hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+load_loop_mode_test_codegen_v2                       hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'add0' input 0 d
+load_where_store_test_codegen_v2                     hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by data-movement: Load 'load2' local tile does
+pgo_add_abs_inductor_concat_test_codegen             hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+pgo_add_abs_inductor_test_codegen                    hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+tail_brc_tail_reduce_test_codegen_v2                 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+ub_scalar_brc_abs_add_test_codegen_v2                hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by elementwise-broadcast: node 'ub_scalar_brc_a
+workspace_uint64_multi_reduce_test_codegen           hard-failure  candidate-preparation    no         error: subgraph 0 contains no plan with an MLIR-supported template; plan 0 stage 0 template 0 rejected by data-movement: Load 'load1' local tile does
+
+state                              count
+------------------------------------------------
+hard-failure                       27
+
+gate                               count
+------------------------------------------------
+candidate-preparation              27
+
+二进制不存在的行: 0
+没打出标签的行: 0

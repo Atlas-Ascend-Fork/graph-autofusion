@@ -1,0 +1,72 @@
+# legacy 接管表 —— mem 侧（NpuArch 2201），2026-10-17
+#
+# 量具: autofuse/mlir/test/probe/legacy_takeover_table.sh -R '_test_codegen$' -j 6
+# 口径与已知限制见该脚本头部，以及
+# autofuse/mlir/docs/development/2026-10-16-afir-elementwise-broadcast-closeout-design.md
+# 的「功能需求 2」。要点三条：
+#   1. 入口是 Codegen::Generate（kTensorFlow），不是 GenerateForInductor —— gate=candidate-preparation
+#      那一栏要按这一条打折扣看；
+#   2. hard-failure 那 21 行在缺省那一档（AF_ENABLE_MLIR_CODEGEN=1）今天也是红的，与严格模式无关；
+#   3. no-hook-call 那 3 行已归因：conv2d/matmul 走 TilingLib::Generate，pgo_add_abs 直接调
+#      GenerateKernel/GenerateTiling —— 都不经过挂钩点。
+#
+# reg 侧（169 个用例）本轮没量，原因与解锁条件见设计文档「功能需求 2」输出第三条。
+
+
+case                                                 state         gate                     shortfall  first diagnostic
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+add_abs_test_codegen                                 takeover      none                     no
+add_gelu_test_codegen                                takeover      none                     no
+add_neg_test_codegen                                 takeover      none                     no
+add_rsqrt_test_codegen                               takeover      none                     no
+axpy_abs_half_test_codegen                           hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+axpy_abs_test_codegen                                takeover      none                     no
+brc_inline_test_codegen                              hard-failure  candidate-preparation    no
+compare_test_codegen                                 hard-failure  candidate-preparation    no
+compare_x2_tensor_int32_test_codegen                 hard-failure  candidate-preparation    no
+compare_x2_tensor_int64_eq_test_codegen              hard-failure  candidate-preparation    no
+compare_x2_tensor_int64_gt_test_codegen              hard-failure  candidate-preparation    no
+compare_x2_tensor_test_codegen                       hard-failure  candidate-preparation    no
+concat_all_aligned_test_codegen                      hard-failure  candidate-preparation    no
+concat_to_stores_test_codegen                        hard-failure  candidate-preparation    no
+conv2d_elemwise_test_codegen                         no-hook-call  -                        -
+inductor_matmul_elemwise_test_codegen                out-of-scope  cube-fusion              no
+inductor_tail_brc_tail_reduce_test_codegen           hard-failure  candidate-preparation    no
+inductor_topn_concat_test_codegen                    hard-failure  candidate-preparation    no
+inductor_topn_test_codegen                           hard-failure  candidate-preparation    no
+isinf_maskedfill_test_codegen                        takeover      none                     no
+load_logical_not_store_test_codegen                  takeover      none                     no
+load_pow_all_input_is_scalar_store_test_codegen      takeover      none                     no
+load_to_store_and_abs_test_codegen                   takeover      none                     no
+load_unalign_pad_test_codegen                        hard-failure  lowering                 no         error: failed to legalize operation 'afir.load'
+load_where_store_test_codegen                        takeover      none                     no
+load_where_x2_is_ubscalar_store_test_codegen         takeover      none                     no
+load_where_x2_x3_is_ubscalar_store_test_codegen      takeover      none                     no
+load_where_x3_is_ubscalar_store_test_codegen         takeover      none                     no
+matmul_elemwise_test_codegen                         no-hook-call  -                        -
+pgo_add_abs_inductor_concat_test_codegen             hard-failure  candidate-preparation    no
+pgo_add_abs_inductor_test_codegen                    hard-failure  candidate-preparation    no
+pgo_add_abs_test_codegen                             no-hook-call  -                        -
+scalar_cast_add_test_codegen                         hard-failure  lowering                 no         error: 'afir.cast' op operand #0 must be Tensor or MemRef of 4-bit signless integer or 8-bit signless integer or 8-bit unsigned integer or 16-bit sign
+scalar_div_inf_test_codegen                          hard-failure  lowering                 no         error: UnsupportedOperation: Scalar node 'scalar0' value 'inf' is not a numeric literal
+scalar_float_inf_test_codegen                        hard-failure  lowering                 no         error: UnsupportedOperation: Scalar node 'scalar0' value 'inf' is not a numeric literal
+sub_abs_test_codegen                                 hard-failure  lowering                 no         error: 'afir.sub' op buffer form expects at least one shaped input; all-scalar inputs have no tile to compute over
+truediv_abs_test_codegen                             hard-failure  lowering                 no         error: 'afir.truediv' op buffer form expects at least one shaped input; all-scalar inputs have no tile to compute over
+workspace_uint64_multi_reduce_test_codegen           hard-failure  candidate-preparation    no
+
+state                              count
+------------------------------------------------
+hard-failure                       21
+no-hook-call                       3
+out-of-scope                       1
+takeover                           13
+
+gate                               count
+------------------------------------------------
+-                                  3
+candidate-preparation              14
+cube-fusion                        1
+lowering                           7
+none                               13
+
+没打出标签的行: 3 —— 逐个归因：是走了没挂钩的 API，还是二进制没编出来？归完才算不是「状态未知」

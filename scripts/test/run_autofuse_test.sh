@@ -23,7 +23,6 @@ PYTHON_MODULE_PATH=${AUTOFUSE_PATH}/compiler/python/
 TESTS_ST_PATH="${AUTOFUSE_PATH}/tests/st/"
 LOCAL_RUNTIME_LIB_PATH="${AUTOFUSE_BUILD_PATH}/ascir/generator:${AUTOFUSE_BUILD_PATH}/ascir/meta:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/ascendc_ir/generator:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/ascendc_ir:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/expression:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph:${AUTOFUSE_BUILD_PATH}/tests:${AUTOFUSE_BUILD_PATH}/tests/depends/trace:${AUTOFUSE_BUILD_PATH}/tests/depends/runtime"
 RUN_V35_TESTS="off"
-
 select_compilers() {
   local selected_cc="${CC:-}"
   local selected_cxx="${CXX:-}"
@@ -115,6 +114,11 @@ print_test_resources() {
   done
 }
 
+
+mlir_tests_requested() {
+  [[ "${MODEL_NAME:-}" = "mlir" ]]
+}
+
 # print usage message
 usage() {
   echo "Usage:"
@@ -126,13 +130,14 @@ usage() {
   echo "    -s, --st       Build all st"
   echo "    -u, --ut       Build all ut"
   echo "    -m, --module    Option arg, specify the model name to build st or ut, default all"
+  echo "                     Use '-m mlir' to run all Autofuse MLIR tests"
   echo "    -j<N>            Set the number of threads used for llt, default 8."
   echo "    -c, --cov        Build ut with coverage tag"
   echo "                     Please ensure that the environment has correctly installed lcov, gcov, and genhtml."
   echo "                     and the version matched gcc/g++."
   echo "    -h, --help     Print usage"
   echo "    --ascend_install_path=<PATH>"
-  echo "                   Set ascend package install path, default /usr/local/Ascend/ascend-toolkit/latest"
+  echo "                   Set ascend package install path, default ASCEND_HOME_PATH or /usr/local/Ascend/ascend-toolkit/latest"
   echo "    --ascend_3rd_lib_path=<PATH>"
   echo "                     Set ascend third_party package install path, default ./output/third_party"
   echo ""
@@ -145,11 +150,7 @@ checkopts() {
   ENABLE_COV="off"
   THREAD_NUM=8
   MODEL_NAME="all"
-  if [ -n "$ASCEND_INSTALL_PATH" ]; then
-    ASCEND_INSTALL_PATH="$ASCEND_INSTALL_PATH"
-  else
-    ASCEND_INSTALL_PATH="/usr/local/Ascend/ascend-toolkit/latest"
-  fi
+  ASCEND_INSTALL_PATH="${ASCEND_INSTALL_PATH:-${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}}"
   if [ -n "$ASCEND_3RD_LIB_PATH" ]; then
     ASCEND_3RD_LIB_PATH="$ASCEND_3RD_LIB_PATH"
   else
@@ -217,6 +218,28 @@ checkopts() {
         ;;
     esac
   done
+
+  if mlir_tests_requested && [[ "X${ENABLE_UT}" != "Xon" && "X${ENABLE_ST}" != "Xon" ]]; then
+    ENABLE_UT="on"
+    ENABLE_ST="on"
+  fi
+
+  AUTOFUSE_NON_MLIR_CMAKE_ARGS="-D ENABLE_AUTOFUSE_MLIR=OFF -D ENABLE_AUTOFUSE_MLIR_TESTS=OFF"
+}
+
+require_coverage_tools() {
+  local missing_tools=()
+  local tool
+  for tool in lcov genhtml gcov; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+      missing_tools+=("${tool}")
+    fi
+  done
+  if [ "${#missing_tools[@]}" -ne 0 ]; then
+    echo "ERROR: coverage requires missing tool(s): ${missing_tools[*]}" >&2
+    echo "       Install lcov package in the dev image; it provides lcov and genhtml." >&2
+    return 1
+  fi
 }
 
 mk_dir() {
@@ -282,7 +305,8 @@ build_ascgen-dev() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=${ENABLE_TEST_FLAG} \
               -D ENABLE_GE_UT=${ENABLE_GE_UT_FLAG} \
-              -D ENABLE_GE_ST=${ENABLE_GE_ST_FLAG}"
+              -D ENABLE_GE_ST=${ENABLE_GE_ST_FLAG} \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
 
   echo "CMAKE_ARGS is: $CMAKE_ARGS"
   export BUILD_METADEF=${BUILD_METADEF}
@@ -323,9 +347,11 @@ build_test_ascendc_api_test() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=True \
               -D ENABLE_GE_UT=on \
-              -D ENABLE_LLT_PKG=ON"
+              -D ENABLE_LLT_PKG=ON \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   cmake $CMAKE_ARGS .. || return 1
-  MAKE_TEST_TARGET="test_ascendc_api test_ascendc_api_v35"
+  MAKE_TEST_TARGET="test_ascendc_api
+                    test_ascendc_api_v35"
   echo "[UT AUTOFUSE ASCENDC API] make -j${THREAD_NUM} start"
   make -j${THREAD_NUM} $MAKE_TEST_TARGET
   if [ $? -ne 0 ]; then
@@ -387,6 +413,57 @@ build_test() {
   echo "$(date '+%F %T') ascgen-dev test success!"
 }
 
+configure_mlir_tests() {
+  if ! bash "${BASEPATH}/autofuse/mlir/scripts/check_llvm_dependency_resolution.sh"; then
+    echo "check_llvm_dependency_resolution failed."
+    return 1
+  fi
+
+  mk_dir "${BUILD_PATH}"
+
+  if ! cmake -S "${BASEPATH}" -B "${BUILD_PATH}" \
+      -D RUN_TEST=1 \
+      -D CMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} \
+      -D CMAKE_C_COMPILER=${C_COMPILER} \
+      -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
+      -D ASCEND_3RD_LIB_PATH="${ASCEND_3RD_LIB_PATH}" \
+      -D CANN_3RD_LIB_PATH="${ASCEND_3RD_LIB_PATH}" \
+      -D ASCEND_INSTALL_PATH="${ASCEND_INSTALL_PATH}" \
+      -D ENABLE_OPEN_SRC=True \
+      -D ENABLE_SYMENGINE=True \
+      -D ENABLE_AUTOFUSE_MLIR_TESTS=ON \
+      -D ENABLE_AUTOFUSE_MLIR=ON; then
+    echo "configure Autofuse MLIR tests failed."
+    return 1
+  fi
+}
+
+run_mlir_targets() {
+  local targets=("$@")
+  echo "$(date '+%F %T') build and run Autofuse MLIR targets: ${targets[*]}"
+
+  configure_mlir_tests || return 1
+
+  if ! cmake --build "${BUILD_PATH}" --target "${targets[@]}" -j "${THREAD_NUM}"; then
+    echo "build targets ${targets[*]} failed."
+    return 1
+  fi
+
+  echo "$(date '+%F %T') Autofuse MLIR targets succeeded: ${targets[*]}"
+}
+
+build_mlir_tests() {
+  local test_targets=()
+  if [[ "X${ENABLE_UT}" = "Xon" ]]; then
+    test_targets+=(check-ut check-lit)
+  fi
+  if [[ "X${ENABLE_ST}" = "Xon" ]]; then
+    test_targets+=(check-st check-e2e)
+  fi
+
+  run_mlir_targets "${test_targets[@]}"
+}
+
 build_test_ascir_st() {
   echo "$(date '+%F %T') create build directory and build test_ascir_st";
   cd "${BUILD_PATH}"
@@ -404,7 +481,8 @@ build_test_ascir_st() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=True \
               -D ENABLE_GE_ST=on \
-              -D ENABLE_LLT_PKG=ON"
+              -D ENABLE_LLT_PKG=ON \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   cmake $CMAKE_ARGS ..
 
   make -j${THREAD_NUM} test_ascir_st
@@ -643,7 +721,8 @@ codegen_e2e_st() {
             -D ENABLE_TEST=True \
             -D RUN_TEST=1 \
             -D ENABLE_GE_ST=on \
-            -D ENABLE_LLT_PKG=ON"
+            -D ENABLE_LLT_PKG=ON \
+            ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   env
 
   cmake $CMAKE_ARGS ../
@@ -877,7 +956,8 @@ build_backend() {
             -D ENABLE_PKG=${ENABLE_PKG} \
             -D ENABLE_TEST=True \
             -D ENABLE_GE_ST=on \
-            -D ENABLE_LLT_PKG=ON"
+            -D ENABLE_LLT_PKG=ON \
+            ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   env
 
   cmake $CMAKE_ARGS ../
@@ -1157,7 +1237,8 @@ build_ut_att() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=True \
               -D ENABLE_GE_UT=on \
-              -D ENABLE_LLT_PKG=ON"
+              -D ENABLE_LLT_PKG=ON \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   cmake $CMAKE_ARGS ..
   make -j${THREAD_NUM} att_ut
   if [ $? -ne 0 ]
@@ -1196,7 +1277,8 @@ build_st_att() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=True \
               -D ENABLE_GE_ST=on \
-              -D ENABLE_LLT_PKG=ON"
+              -D ENABLE_LLT_PKG=ON \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   cmake $CMAKE_ARGS ..
   make -j${THREAD_NUM} att_st
   if [ $? -ne 0 ]
@@ -1244,6 +1326,7 @@ build_ut() {
       build_ut_common || { echo "test ut common failed."; exit 1; }
       build_test || { echo "test build failed."; exit 1; }
       py_module_ut || { echo "run py module ut failed."; exit 1; }
+      run_mlir_targets check-ut check-lit || { echo "MLIR UT/lit tests failed."; exit 1; }
       ;;
     "all")
       build_ut_att || { echo "failed to build and run att ut."; exit 1; }
@@ -1256,7 +1339,7 @@ build_ut() {
       py_module_ut || { echo "run py module ut failed."; exit 1; }
       ;;
     *)
-      echo "输入无效，输入范围att/autofuse/optimize/codegen/all."
+      echo "输入无效，UT输入范围att/autofuse_utils/optimize/codegen/common/ascendc_api/framework/mlir/all."
       ;;
   esac
 }
@@ -1289,6 +1372,7 @@ build_st() {
     "e2e")
       codegen_e2e_st || { echo "test build e2e st code generator failed."; exit 1; }
       build_codegen_e2e_ut || { echo "test codegen e2e ut failed."; exit 1; }
+      run_mlir_targets check-e2e || { echo "MLIR CPU E2E tests failed."; exit 1; }
       ;;
     "ascendc_api")
       build_test_ascir_st || { echo "run ascir st failed."; exit 1; }
@@ -1301,6 +1385,7 @@ build_st() {
       build_st_common || { echo "run common st failed."; exit 1; }
       build_st_optimize || { echo "run optimize st failed."; exit 1; }
       py_module_st || { echo "run py module st failed."; exit 1; }
+      run_mlir_targets check-st || { echo "MLIR ST tests failed."; exit 1; }
       ;;
     "all")
       build_st_att || { echo "failed to build and run att st."; exit 1; }
@@ -1325,10 +1410,22 @@ main() {
   print_test_resources start
   trap 'print_test_resources exit' EXIT
   INITIAL_LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}"
+  if [[ "X${ENABLE_COV}" = "Xon" ]]; then
+    require_coverage_tools || exit 1
+  fi
 
   export ASCEND_CUSTOM_PATH=${ASCEND_INSTALL_PATH}
   ASCEND_INSTALL_LIB_PATH=${ASCEND_INSTALL_PATH}/$(uname -m)-linux/lib64/
   set_test_ld_library_path
+
+  if mlir_tests_requested; then
+    build_mlir_tests || { echo "MLIR tests failed."; exit 1; }
+    if [[ "X${ENABLE_COV}" = "Xon" ]]; then
+      get_coverage
+    fi
+    echo "---------------- test mlir finished ----------------"
+    return
+  fi
 
   # Numeric API UT targets do not depend on pyautofuse, optimize or codegen.
   # Their handler configures and builds the required simulator targets directly.

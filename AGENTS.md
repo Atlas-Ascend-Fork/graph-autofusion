@@ -81,6 +81,14 @@ GitCode PR、Issue、流水线相关操作使用项目默认 skills：
 - 触发或查看流水线：`gitcode-pipeline`
 - skills 缺失或安装默认 skills：`default-skills`
 
+GitCode API 令牌按以下顺序获取：
+
+1. 环境变量 `GITCODE_API_TOKEN`。
+2. 当前仓库配置 `git config --local --get gitcode.token`。
+
+Agent 不得输出或记录令牌值。检查仓库配置时，只确认配置是否存在；调用 GitCode API 时，应通过临时环境变量
+传递令牌，避免令牌出现在命令输出和日志中。
+
 ### 代码检视
 
 **使用技能**： `af-code-reviewer`
