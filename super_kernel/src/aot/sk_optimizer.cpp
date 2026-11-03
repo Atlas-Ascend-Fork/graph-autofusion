@@ -123,7 +123,8 @@ struct EarlyBackBlockNotifyPlan {
   SuperKernelBaseNode *notify = nullptr;
 };
 
-bool HasBackBlockNotifyInStream(const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes, uint32_t streamIdx) {
+bool HasBackBlockNotifyInStream(const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+                                uint32_t streamIdx) {
   return std::any_of(eventNodes.begin(), eventNodes.end(), [streamIdx](const auto &eventNode) {
     return eventNode != nullptr && eventNode->GetNodeType() == SkNodeType::NODE_NOTIFY &&
            eventNode->GetStreamIdxInGraph() == streamIdx;
@@ -131,7 +132,7 @@ bool HasBackBlockNotifyInStream(const std::vector<std::unique_ptr<SuperKernelBas
 }
 
 bool CollectFrontWaitResetNodesByStream(const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
-                               std::unordered_map<uint32_t, SuperKernelBaseNode *> &resetsByStream) {
+                                        std::unordered_map<uint32_t, SuperKernelBaseNode *> &resetsByStream) {
   for (const auto &eventNode : eventNodes) {
     if (eventNode == nullptr || eventNode->GetNodeType() != SkNodeType::NODE_RESET) {
       continue;
@@ -148,8 +149,9 @@ bool CollectFrontWaitResetNodesByStream(const std::vector<std::unique_ptr<SuperK
 }
 
 bool CollectBackBlockNotifySources(const std::vector<SuperKernelBaseNode *> &taskNodes,
-                          const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
-                          const SuperKernelGraph &graph, std::vector<EarlyBackBlockNotifyPlan> &earlyNotifySources) {
+                                   const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+                                   const SuperKernelGraph &graph,
+                                   std::vector<EarlyBackBlockNotifyPlan> &earlyNotifySources) {
   std::unordered_map<uint32_t, size_t> lastTaskIndexByStream;
   for (size_t index = 0; index < taskNodes.size(); ++index) {
     auto *taskNode = taskNodes[index];
