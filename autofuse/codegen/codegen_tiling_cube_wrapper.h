@@ -909,7 +909,6 @@ void FillBatchTilingMeta(TilingResult &result, const size_t tiling_data_len) {
   }
   BatchMatMulV3IterBatchBasicTilingData iter_batch_tiling_data = {};
   if (CopyExactTilingData(result, tiling_data_len, iter_batch_tiling_data)) {
-    result.cube_used_core_num = PositiveOrDefault(result.block_dim, 1U);
     result.cube_base_m = std::max(iter_batch_tiling_data.baseM, 1U);
     result.cube_base_n = std::max(iter_batch_tiling_data.baseN, 1U);
     return;
@@ -920,11 +919,7 @@ void FillBatchTilingMeta(TilingResult &result, const size_t tiling_data_len) {
     return;
   }
   BatchMatMulV3MergeBatchBasicTilingData merge_batch_tiling_data = {};
-  if (CopyExactTilingData(result, tiling_data_len, merge_batch_tiling_data)) {
-    // MergeBatch does not expose usedCoreNum/baseM/baseN; the tiling context block dim is authoritative.
-    result.cube_used_core_num = PositiveOrDefault(result.block_dim, 1U);
-    return;
-  }
+  (void)CopyExactTilingData(result, tiling_data_len, merge_batch_tiling_data);
 }
 
 void FillMatMulTilingMeta(TilingResult &result, const size_t tiling_data_len) {

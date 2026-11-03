@@ -15,7 +15,6 @@
 #include "ascir_ops.h"
 #include "micro_api_call/micro_api_call_factory.h"
 #include "vf_loop.h"
-#include "api_call/utils/api_call_utils.h"
 #include "ascir_ops.h"
 
 using namespace af::ops;
@@ -218,39 +217,6 @@ std::string GenCvUbFuseAddrOffset(const TPipe &tpipe, const Tensor &ub_tensor) {
     offset_expr << " + cv_n * ELEMENT_PER_VECTOR_LENGTH";
   }
   return offset_expr.str();
-}
-
-std::string GenCvUbFuseFlatLoopParams(const TPipe &tpipe, const std::vector<Tensor> &inputs,
-                                      const std::vector<Tensor> &outputs, const std::string &loop_dtype) {
-  if (tpipe.cv_fusion_type != ascir::CubeTemplateType::kUBFuse || tpipe.is_conv2d || inputs.empty() ||
-      outputs.empty() || inputs.front().axis_size.empty()) {
-    return "";
-  }
-  std::set<std::string> row_strides;
-  const auto collect = [&](const std::vector<Tensor> &tensors) {
-    for (const auto &tensor : tensors) {
-      std::string dtype;
-      if (Tensor::DtypeName(tensor.dtype, dtype) != af::SUCCESS || dtype != loop_dtype ||
-          !IsCvUbFuseDenseTensor(tensor, inputs.front())) {
-        return false;
-      }
-      row_strides.insert(GenCvUbFuseRowStride(tpipe, tensor));
-    }
-    return true;
-  };
-  if (!collect(inputs) || !collect(outputs)) {
-    return "";
-  }
-  std::stringstream ss;
-  ss << "  if (";
-  bool first = true;
-  for (const auto &stride : row_strides) {
-    ss << (first ? "" : " && ") << stride << " == curAivN";
-    first = false;
-  }
-  // Flatten only physical rows without padding; broadcast and mixed dtype views retain their row loops.
-  ss << ") {\n    curAivN *= curAivM;\n    curAlignN = curAivN;\n    curAivM = 1;\n  }\n";
-  return ss.str();
 }
 
 VFLoop::VFLoop(const ascir::AxisId axis) {

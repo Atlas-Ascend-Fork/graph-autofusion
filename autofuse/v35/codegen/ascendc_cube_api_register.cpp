@@ -39,26 +39,6 @@ Register::Register() {
 #include "mat_mul_pingpong_basic_cmct_str.h"
 
   };
-  const std::string kAscendcMatMulTensorCVBlock = {
-#include "mat_mul_tensor_cv_block_str.h"
-
-  };
-  const std::string kAscendcmat_mul_pingpong_tensor_cv = {
-#include "mat_mul_pingpong_tensor_cv_str.h"
-
-  };
-  const std::string kAscendcMatMulTensorCommonScheduler = {
-#include "mat_mul_tensor_common_scheduler_str.h"
-
-  };
-  const std::string kAscendcMatMulTensorIncludeHeaders = {
-#include "mat_mul_tensor_include_headers_str.h"
-
-  };
-  const std::string kAscendcMatMulTensorCommon = {
-#include "mat_mul_tensor_common_str.h"
-
-  };
   const std::string kAscendcbatch_matmul = {
 #include "batch_matmul_str.h"
 
@@ -110,11 +90,6 @@ Register::Register() {
       {"mat_mul_tiling_key.h", kAscendcmat_mul_tiling_key},
       {"batch_mat_mul_v3_tiling_key.h", kAscendcbatch_mat_mul_v3_tiling_key},
       {"mat_mul_pingpong_basic_cmct.h", kAscendcmat_mul_pingpong_basic_cmct},
-      {"mat_mul_tensor_cv_block.h", kAscendcMatMulTensorCVBlock},
-      {"mat_mul_pingpong_tensor_cv.h", kAscendcmat_mul_pingpong_tensor_cv},
-      {"mat_mul_tensor_common_scheduler.h", kAscendcMatMulTensorCommonScheduler},
-      {"mat_mul_tensor_include_headers.h", kAscendcMatMulTensorIncludeHeaders},
-      {"mat_mul_tensor_common.h", kAscendcMatMulTensorCommon},
       {"batch_matmul.h", kAscendcbatch_matmul},
       {"batch_matmul_include_headers.h", kAscendcbatch_matmul_include_headers},
       {"conv2d_include_headers.h", kAscendcconv2d_include_headers},

@@ -270,8 +270,6 @@ def generate_cmake_lists(host_ctx, cross_info=None):
         source += "    *get_kernel*.cpp\n"
     source += ")\n\n"
     source += f"add_library({kernel_name} SHARED ${{ALL_CPP_SRCS}})\n\n"
-    if not is_static_shape and is_cube:
-        source += f"target_compile_definitions({kernel_name} PRIVATE _GLIBCXX_USE_CXX11_ABI=0)\n\n"
 
     opt_level = "-O0" if is_static_shape else "-O2"
     source += (
@@ -287,15 +285,10 @@ def generate_cmake_lists(host_ctx, cross_info=None):
         f"target_link_libraries({kernel_name} PRIVATE c_sec ascendalog platform error_manager"
         f" tiling_api {graph_lib} register)\n"
     )
-    if not is_static_shape and is_cube:
-        source += f"target_link_libraries({kernel_name} PRIVATE opp_registry)\n"
     source += f"target_include_directories({kernel_name} PRIVATE\n"
     source += f"    {ASCEND_PATH}/include\n"
     source += f"    {ASCEND_PATH}/include/base\n"
     source += f"    {ASCEND_PATH}/include/experiment\n"
-    if not is_static_shape and is_cube:
-        source += f"    {ASCEND_PATH}/pkg_inc\n"
-        source += f"    {ASCEND_PATH}/include/external\n"
     source += f"    {ASCEND_PATH}/{machine}-linux/include\n"
     source += f"    {ASCEND_PATH}/{machine}-linux/pkg_inc/base\n"
     source += f"    {ASCEND_PATH}/{machine}-linux/ascendc/include/highlevel_api/tiling/platform\n"
@@ -735,14 +728,14 @@ def dynamic_shape_compile(
         host_build_dir = os.path.join(temp_dir, "host")
     ascbc_host_compile(
         HostCompileContext(
-            graph_name, kernel_name, host_build_dir, False, False, is_cube
+            graph_name, kernel_name, host_build_dir, False, True, is_cube
         ),
         cross_info=cross_info,
     )
     if is_cross_compile_flag:
         compile_native_host_so(
             HostCompileContext(
-                graph_name, kernel_name, host_build_dir, False, False, is_cube
+                graph_name, kernel_name, host_build_dir, False, True, is_cube
             )
         )
 
@@ -784,11 +777,8 @@ def dynamic_shape_compile(
 
     # 备份原tilingdata文件
     shutil.copy(tiling_data, tiling_data_bak)
-    with open(tiling_data_bak) as file:
-        original_tiling_data = file.read()
     with open(tiling_data, "w") as file:
         file.write(const_tiling_data)
-        file.write(original_tiling_data)
 
 
 def _compile_and_load_cv_host_so(
@@ -1818,45 +1808,17 @@ def _should_use_safety_fusion(
     """判断是否需要走safety兜底模式"""
     if tiling_key == -1:
         return True
-    tensor_bfull_ub = (
-        cube_tiling_key_ub == 0x20002
-        and cube_info is not None
-        and len(cube_info) > 1
-        and cube_info[0] == 4
-        and not cube_info[1]
-    )
-    if cube_tiling_key_ub not in (1, 2, 0x20001) and not tensor_bfull_ub:
+    if cube_tiling_key_ub != 1:
         return True
     return is_fp32_large_k_matmul(tiling_info, cube_info, enable_hf32)
-
-
-def _is_bmm_blockidx_scheduled(tiling_key):
-    api_level = tiling_key & 0xF
-    batch_model = (tiling_key >> 8) & 0xF
-    model = (tiling_key >> 12) & 0xF
-    full_load = (tiling_key >> 16) & 0xF
-    l0c2out = (tiling_key >> 20) & 0xF
-    return (
-        api_level in (1, 2)
-        and model == 0
-        and full_load == 0
-        and (
-            (batch_model == 1 and l0c2out in (0, 2))
-            or (batch_model == 3 and l0c2out == 0)
-        )
-    )
 
 
 def _apply_safety_fusion(ctx):
     """safety兜底融合模式: 走common模板"""
     tiling_info = ctx.tiling_info
-    # Tensor API changes the API-level bits; the native strategy keeps its MIX requirements.
-    strategy_key = tiling_info.tiling_key
-    if strategy_key & 0xF == 2:
-        strategy_key -= 1
     is_in_mix_white_list = (
-        ctx.is_batch and strategy_key in CV_COMMON_BMM_MIX_WHITE_LIST
-    ) or (not ctx.is_batch and strategy_key in CV_COMMON_MIX_WHITE_LIST)
+        ctx.is_batch and tiling_info.tiling_key in CV_COMMON_BMM_MIX_WHITE_LIST
+    ) or (not ctx.is_batch and tiling_info.tiling_key in CV_COMMON_MIX_WHITE_LIST)
     if is_in_mix_white_list:
         tiling_info.file_content += "\n#define CV_SAFETY_FUSION_MIX_MODE 1\n"
     logger.info(
@@ -1876,20 +1838,18 @@ def _apply_safety_fusion(ctx):
         str(vec_block_dim),
         str(wss),
     )
-    new_block_dim = max(ctx.cube_block_dim, (vec_block_dim + 1) // 2)
-    # IterBatch/MergeBatch stride their work by the launch block count.
-    cube_core_num = (
-        new_block_dim
-        if ctx.is_batch and _is_bmm_blockidx_scheduled(tiling_info.tiling_key)
-        else ctx.cube_block_dim
-    )
     for name, value in [
-        ("CV_AIC_NUM", cube_core_num),
+        ("CV_AIC_NUM", ctx.cube_block_dim),
         ("CV_AIV_NUM", vec_block_dim),
         ("CV_VEC_WSS", wss),
     ]:
         if value >= 0:
             tiling_info.file_content += f"\n#define {name} {value}\n"
+    new_block_dim = (
+        (vec_block_dim + 1) // 2
+        if ctx.cube_block_dim * 2 < vec_block_dim
+        else ctx.cube_block_dim
+    )
     return f"#define CUBE_BLOCK_DIM {new_block_dim}\n"
 
 
@@ -1927,17 +1887,8 @@ def template_decider(
         target_machine=compile_context.target_machine,
     )
     tiling_key = static_shape_cv_compile(**compile_kwargs, cross_info=cross_info)
-    # GE's fused MatMul task uses the Basic/MIX runtime key for the Tensor API
-    # CV epilogue.  Keep the vector schedule key independent from that key.
-    runtime_tiling_key = (
-        tiling_info.tiling_key if tiling_info.tiling_key == 2 else tiling_key
-    )
-    host_tiling_content = f"#define CUBE_TILING_KEY {runtime_tiling_key}\n"
-    logger.info(
-        "CV fusion op, get vector tilingkey(%s), runtime tilingkey(%s)",
-        tiling_key,
-        runtime_tiling_key,
-    )
+    host_tiling_content = f"#define CUBE_TILING_KEY {tiling_key}\n"
+    logger.info("CV fusion op, get vector tilingkey(%s)", tiling_key)
     use_cv_common = use_cv_common or [False]
     cube_tiling_key_ub = tiling_info.tiling_key & ~0xF0
 
@@ -2091,45 +2042,15 @@ def create_matmul_dynamic_tiling_data(temp_dir, cube_info):
         use_cv_common[0] if isinstance(use_cv_common, list) else bool(use_cv_common)
     )
     # 生成host端tiling数据
-    # The runtime key may select a different native template on each shape.
-    # Preserve the complete tiling payload, including Common fallbacks.
-    tiling_types = (
-        (
-            "BatchMatMulV3BasicTilingData",
-            "BatchMatMulV3TilingData",
-            "BatchMatMulV3IterBatchBasicTilingData",
-            "BatchMatMulV3MergeBatchBasicTilingData",
-            "BatchMatMulToMulBasicTilingData",
-            "MatMulV3KEqZeroBasicTilingData",
-        )
-        if is_batch
-        else (
-            "MatMulV3BasicTilingData",
-            "MatMulV3TilingDataCopy",
-            "MatMulV3TilingData",
-            "MatMulToMulBasicTilingData",
-            "MatMulV3KEqZeroBasicTilingData",
-        )
+    struct_name = (
+        "BatchMatMulV3BasicTilingData" if is_batch else "MatMulV3BasicTilingData"
     )
-    capacity = f"sizeof({tiling_types[0]})"
-    for tiling_type in tiling_types[1:]:
-        capacity = f"CV_DYNAMIC_TILING_MAX_SIZE({capacity}, sizeof({tiling_type}))"
-    tiling_storage = f"uint8_t matmul_tiling_data[{capacity}];"
-    storage_macros = (
-        "#define CV_DYNAMIC_TILING_MAX_SIZE(lhs, rhs) ((lhs) > (rhs) ? (lhs) : (rhs))\n"
-    )
-    # Both views share the vector prefix. Device dispatch need not copy the native MM payload.
-    vector_tiling_fields = """    AutofuseTilingData tiling_data;
-    CVTilingData cv_tiling_data;
-    uint32_t stage_size_name;
-    uint32_t cube_ub_stage_size;
-    uint32_t cube_m_stage_size;"""
     head_tiling_data = f"""
 #ifndef DYNAMIC_MM_TILING_DATA
 #define DYNAMIC_MM_TILING_DATA
 #include "arch35/mat_mul_tiling_data.h"
 #include "autofuse_tiling_data.h"
-{storage_macros}struct CVTilingData {{
+struct CVTilingData {{
     uint32_t fusion_mode; // 0:ub; 1:safety
     uint32_t ub_mode; // 0:no db; 1:db
     uint32_t cv_aic_num;
@@ -2137,15 +2058,11 @@ def create_matmul_dynamic_tiling_data(temp_dir, cube_info):
     uint32_t cv_vec_wss;
     uint32_t mix_mode;
 }};
-struct alignas(8) CVVectorTilingData {{
-{vector_tiling_fields}
-}};
 struct CVAutofuseTilingData {{
-{vector_tiling_fields}
-    alignas(8) {tiling_storage}
+    AutofuseTilingData tiling_data;
+    CVTilingData  cv_tiling_data;
+    {struct_name} matmul_tiling_data;
 }};
-static_assert(sizeof(CVVectorTilingData) == __builtin_offsetof(CVAutofuseTilingData, matmul_tiling_data),
-              "CV vector prefix must preserve the native tiling offset");
 """
 
     # 写入host端文件
@@ -2506,6 +2423,7 @@ def ascbc_matmul_kernel_tiling_pro(
         "dtype": "bool",
         "value": cube_attributes.get("transpose_x2", False),
     }
+    mm_attr3 = {"name": "offset_x", "dtype": "int", "value": 0x80}
     if is_batch:
         mm_attr4 = {
             "name": "enable_hf32",
@@ -2520,11 +2438,6 @@ def ascbc_matmul_kernel_tiling_pro(
         }
 
     mm_input_num = cube_attributes.get("input_num", 0)
-    mm_attr3 = {
-        "name": "offset_x",
-        "dtype": "int",
-        "value": cube_attributes.get("offset_x", 0),
-    }
     _origin_inputs_, _origin_outputs_, _inputs_ = _build_mm_args(
         args_list, input_num=mm_input_num, mm_attr1=mm_attr1, mm_attr2=mm_attr2
     )

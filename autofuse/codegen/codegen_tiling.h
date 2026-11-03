@@ -377,7 +377,6 @@ class TilingLib {
   void GenInductorPgoProxySpawn(std::stringstream &ss) const;
   void GenInductorPgoProxyFunction(std::stringstream &ss, const std::string &tiling) const;
   std::string GenExternTilingFunc(const ::ascir::FusedScheduledResult &fused_schedule_result,
-                                  const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                   const std::map<std::string, std::string> &shape_info, const std::string tiling,
                                   const std::string &pgo_dir, const std::string &core_num) const;
   void TilingSetShapeDim(std::stringstream &tiling_set_shape_dim, const std::string &var_define,
@@ -418,15 +417,11 @@ class TilingLib {
   std::map<std::string, std::string> GenerateCVFusion(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                                       const std::map<std::string, std::string> &shape_info,
                                                       const std::string &pgo_dir, const std::string &core_num) const;
-  void AppendCubeFusionUbModeCode(std::stringstream &ss, const ::ascir::FusedScheduledResult &elemwise_schedule_result,
-                                  const MatMulCubeInfo &cube_info, const std::vector<bool> &non_db_cases) const;
   std::string GenCubeFusionTilingBody(const ::ascir::FusedScheduledResult &fused_schedule_result,
-                                      const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                       const std::string &shape_dim_param) const;
   std::string GenNonCubeFusionTilingBody(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                          const std::string &tiling, const std::string &shape_dim_param) const;
   std::string GenExternTilingFuncBody(const ::ascir::FusedScheduledResult &fused_schedule_result,
-                                      const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                       const std::map<std::string, std::string> &shape_info, const std::string &tiling,
                                       const std::string &pgo_dir) const;
   Status ExtractMatMulCubeInfoFromImplGraph(const ge::AscGraph &impl_graph, MatMulCubeInfo &cube_info) const;

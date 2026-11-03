@@ -7,7 +7,6 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#include "arch35/batch_mat_mul_v3_iterbatch.h"
 
 /* !
  * \file batch_mat_mul_v3.cpp
@@ -151,12 +150,7 @@ __global__ __aicore__ void batch_mat_mul_v3(
 #if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 5102))
   using aLayout = std::conditional_t<aTran, layout::ColumnMajor, layout::RowMajor>;
   using bLayout = std::conditional_t<(format_x2 == CubeFormat::NZ), std::conditional_t<bTran, layout::Zn, layout::Nz>,
-                                     std::conditional_t<bTran, layout::ColumnMajor, layout::RowMajor>>;
-  using layoutA = std::conditional_t<aTran, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
-  using layoutB = std::conditional_t<
-      bTran, std::conditional_t<(format_x2 == CubeFormat::NZ), asc::te::zn_layout_ptn, asc::te::dn_ext_layout_ptn>,
-      std::conditional_t<(format_x2 == CubeFormat::NZ), asc::te::nz_layout_ptn, asc::te::nd_ext_layout_ptn>>;
-  using layoutC = asc::te::nd_ext_layout_ptn;
+                                     std::conditional_t<bTran, layout::ColumnMajor, layout::RowMajor> >;
 #endif
 
   REGISTER_TILING_DEFAULT(BatchMatMulV3TilingData);
@@ -164,6 +158,7 @@ __global__ __aicore__ void batch_mat_mul_v3(
 #else
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 #endif
+
   if constexpr (BATCH_API_LEVEL == MAT_MUL_HIGH_LEVEL && BMODEL == MAT_MUL_BASIC &&
                 BATCH_FULL_LOAD == MAT_MUL_NO_FULL_LOAD && BATCH_L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY &&
                 BATCH_ITER_MODEL == MAT_MUL_FOR_BATCH) {
@@ -254,37 +249,6 @@ __global__ __aicore__ void batch_mat_mul_v3(
     TPipe pipe;
     GET_TILING_DATA_WITH_STRUCT(MatMulV3KEqZeroBasicTilingData, tilingData, tilingGM);
     MatmulV3Advanced::MatMulInputKEqZeroClearOutput(biasGM, cGM, tilingData);
-  } else if constexpr (BATCH_API_LEVEL == MAT_MUL_TENSOR_LEVEL && BMODEL == MAT_MUL_BASIC &&
-                       BATCH_FULL_LOAD == MAT_MUL_NO_FULL_LOAD &&
-                       (BATCH_L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY ||
-                        BATCH_L0C2OUT_MODEL == MAT_MUL_1V2_ND_ALIG_FIXPIPE) &&
-                       BATCH_ITER_MODEL == MAT_MUL_ITER_BATCH_SINGLE_BIAS) {
-    GET_TILING_DATA_WITH_STRUCT(BatchMatMulV3IterBatchBasicTilingData, tilingData, tilingGM);
-    BatchMatMulV3Advanced::BatchMatMulIterBatchKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB,
-                                                      layoutC,
-                                                      static_cast<Blaze::Gemm::MatMulL0C2Out>(BATCH_L0C2OUT_MODEL)>(
-        aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
-  } else if constexpr (BATCH_API_LEVEL == MAT_MUL_TENSOR_LEVEL && BMODEL == MAT_MUL_STREAM_K &&
-                       BATCH_FULL_LOAD == MAT_MUL_NO_FULL_LOAD && BATCH_ITER_MODEL == MAT_MUL_FOR_BATCH) {
-    GET_TILING_DATA_WITH_STRUCT(BatchMatMulV3BasicTilingData, tilingData, tilingGM);
-    MatmulV3Advanced::MatMulTensorCommonKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
-                                               BMODEL, BATCH_FULL_LOAD, BATCH_L0C2OUT_MODEL>(
-        aGM, bGM, biasGM, cGM, workspaceGM, tilingData.matMulTilingData, tilingData.batchDimAll);
-  } else if constexpr (BATCH_API_LEVEL == MAT_MUL_TENSOR_LEVEL && BMODEL == MAT_MUL_BASIC &&
-                       BATCH_L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY && BATCH_ITER_MODEL == MAT_MUL_FOR_BATCH) {
-    GET_TILING_DATA_WITH_STRUCT(BatchMatMulV3BasicTilingData, tilingData, tilingGM);
-#ifdef CV_UB_FUSION
-    if constexpr (BATCH_FULL_LOAD == MAT_MUL_NO_FULL_LOAD) {
-      MatmulV3Advanced::MatMulTensorCVKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
-                                             MAT_MUL_NO_FULL_LOAD, MAT_MUL_ON_THE_FLY, AutoFusionVector>(
-          aGM, bGM, biasGM, cGM, workspaceGM, tilingData.matMulTilingData, param, tilingData.batchDimAll);
-    } else
-#endif
-    {
-      MatmulV3Advanced::MatMulTensorCommonKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
-                                                 BMODEL, BATCH_FULL_LOAD, BATCH_L0C2OUT_MODEL>(
-          aGM, bGM, biasGM, cGM, workspaceGM, tilingData.matMulTilingData, tilingData.batchDimAll);
-    }
 #endif
   }
 }

@@ -5207,19 +5207,10 @@ class MatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic) const override {
     if (is_dynamic) {
-      return {"mat_mul_tiling_key_dynamic.h",          "matmul_include_headers.h",  "mat_mul_tensor_include_headers.h",
-              "mat_mul_pingpong_basic_cmct_dynamic.h", "mat_mul_tensor_cv_block.h", "mat_mul_pingpong_tensor_cv.h",
-              "mat_mul_tensor_common_scheduler.h",     "mat_mul_tensor_common.h",   "matmul_dynamic.h"};
+      return {"mat_mul_tiling_key_dynamic.h", "matmul_include_headers.h", "mat_mul_pingpong_basic_cmct_dynamic.h",
+              "matmul_dynamic.h"};
     } else {
-      return {"mat_mul_tiling_key.h",
-              "matmul_include_headers.h",
-              "mat_mul_tensor_include_headers.h",
-              "mat_mul_pingpong_basic_cmct.h",
-              "mat_mul_tensor_cv_block.h",
-              "mat_mul_pingpong_tensor_cv.h",
-              "mat_mul_tensor_common_scheduler.h",
-              "mat_mul_tensor_common.h",
-              "matmul.h"};
+      return {"mat_mul_tiling_key.h", "matmul_include_headers.h", "mat_mul_pingpong_basic_cmct.h", "matmul.h"};
     }
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
@@ -5247,14 +5238,11 @@ class BatchMatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic) const override {
     if (is_dynamic) {
-      return {
-          "batch_mat_mul_v3_tiling_key_dynamic.h", "batch_matmul_include_headers.h", "mat_mul_tensor_include_headers.h",
-          "mat_mul_pingpong_basic_cmct_dynamic.h", "mat_mul_tensor_cv_block.h",      "mat_mul_pingpong_tensor_cv.h",
-          "mat_mul_tensor_common_scheduler.h",     "mat_mul_tensor_common.h",        "batch_matmul_dynamic.h"};
+      return {"batch_mat_mul_v3_tiling_key_dynamic.h", "batch_matmul_include_headers.h",
+              "mat_mul_pingpong_basic_cmct_dynamic.h", "batch_matmul_dynamic.h"};
     } else {
-      return {"batch_mat_mul_v3_tiling_key.h",     "batch_matmul_include_headers.h", "mat_mul_tensor_include_headers.h",
-              "mat_mul_pingpong_basic_cmct.h",     "mat_mul_tensor_cv_block.h",      "mat_mul_pingpong_tensor_cv.h",
-              "mat_mul_tensor_common_scheduler.h", "mat_mul_tensor_common.h",        "batch_matmul.h"};
+      return {"batch_mat_mul_v3_tiling_key.h", "batch_matmul_include_headers.h", "mat_mul_pingpong_basic_cmct.h",
+              "batch_matmul.h"};
     }
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {

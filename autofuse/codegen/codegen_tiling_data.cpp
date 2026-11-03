@@ -9,7 +9,6 @@
  */
 
 #include "codegen_tiling_data.h"
-#include "codegen_kernel.h"
 #include <sstream>
 #include <iomanip>
 
@@ -154,11 +153,7 @@ std::string codegen::TilingData::pgo_perf_struct = {
     "};\n"};
 
 af::Status codegen::TilingData::ProcessCubeFusionResult(ascir::FusedScheduledResult &schedule_result) {
-  if (!ascgen_utils::IsFrontendStaticSchedResult(schedule_result) &&
-      ascgen_utils::IsCubeUBFusedScheduled(schedule_result) &&
-      ascgen_utils::IsCubeCommonFusedScheduled(schedule_result)) {
-    GE_ASSERT_SUCCESS(ascgen_utils::ProcessCubeFusionResultDynamic(schedule_result));
-  } else if (ascgen_utils::IsCubeUBFusedScheduled(schedule_result)) {
+  if (ascgen_utils::IsCubeUBFusedScheduled(schedule_result)) {
     GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionResult(schedule_result));
   } else if (ascgen_utils::IsCubeCommonFusedScheduled(schedule_result)) {
     GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionCommonResult(schedule_result));
@@ -205,7 +200,6 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
   } else {
     GE_ASSERT_SUCCESS(ProcessCubeFusionResult(elemwise_schedule_result));
   }
-  CommonOutputReusePlan::PreserveShapeVars(fused_schedule_result, elemwise_schedule_result);
 
   ss1 << this->ClassBegin(this->kernel_name, this->class_name) << std::endl;
   ss1 << GetCommonTilingField(false, elemwise_schedule_result) << std::endl;
@@ -552,12 +546,6 @@ void codegen::TilingData::ProcessSingleGroup(const ascir::ScheduleGroup &schedul
     AddApiTilingData(graph, ss, i);
     GELOGI("TilingCaseId:ProcessSingleGroup, tilingcaseNum:%d\n", schedule_group.impl_graphs.size());
   }
-  for (const auto &var : schedule_group.runtime_shape_vars) {
-    if (size_var_names.emplace(std::string(var.Str().get())).second) {
-      ascir::SizeVar size(var);
-      ss << "  " << (const_mode_ ? DataFieldConstDefine(size) : DataFieldDefine(size)) << std::endl;
-    }
-  }
   GenTqueTbufTmpBufFunc(q_ids, b_ids, ss);
   return;
 }
@@ -598,12 +586,6 @@ void codegen::TilingData::ProcessMultiGroup(uint64_t pos, const int graph_id,
       AddApiTilingData(graph, ss2, j);
       GELOGI("TilingCaseId:ProcessMultiGroup, i_%d, i_num:%d, j_%d, j_num:%d\n", i, schedule_groups.size(), j,
              schedule_groups[i].impl_graphs.size());
-    }
-    for (const auto &var : schedule_groups[i].runtime_shape_vars) {
-      if (size_var_names.emplace(std::string(var.Str().get())).second) {
-        ascir::SizeVar size(var);
-        ss2 << "  " << (const_mode_ ? DataFieldConstDefine(size) : DataFieldDefine(size)) << std::endl;
-      }
     }
     GenTqueTbufTmpBufFunc(q_ids, b_ids, ss2);
     ss2 << this->ClassEnd() << std::endl;

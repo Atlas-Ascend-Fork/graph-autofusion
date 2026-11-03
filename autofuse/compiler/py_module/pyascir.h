@@ -21,12 +21,8 @@ void pyautofuse_type_init();
 void pyascir_type_init();
 void pyascir_types_type_init();
 
-// Older Python headers do not export module initializers under -fvisibility=hidden.
-__attribute__((visibility("default"))) PyObject *PyInit_graph(void);
-__attribute__((visibility("default"))) PyObject *PyInit_ascir(void);
-__attribute__((visibility("default"))) PyObject *PyInit_pyautofuse(void);
-__attribute__((visibility("default"))) PyObject *PyInit_autofuse_pyautofuse(void);
-__attribute__((visibility("default"))) PyObject *PyInit_autofuse(void);
+PyMODINIT_FUNC PyInit_ascir(void);
+PyMODINIT_FUNC PyInit_pyautofuse(void);
 
 #ifdef __cplusplus
 }

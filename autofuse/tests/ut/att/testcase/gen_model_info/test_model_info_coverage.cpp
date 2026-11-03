@@ -8,7 +8,6 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -22,7 +21,6 @@
 #include "schedule_result.h"
 #include "test_fa_ascir_graph.h"
 #include "util/thread_local_context.h"
-#include "generator/preprocess/args_manager.h"
 
 namespace af {
 namespace ascir {
@@ -128,27 +126,6 @@ TEST_F(ModelInfoCoverageTest, SerializesConfigurationNamesAndAlignmentValues) {
   to_json(json, config);
   EXPECT_TRUE(json.at("config_inputs").empty());
   EXPECT_TRUE(json.at("align_config").empty());
-}
-
-TEST_F(ModelInfoCoverageTest, RuntimeShapeMetadataBecomesAnInputWithoutChangingSolverAxes) {
-  const auto graph = MakeScheduledGraph("runtime_shape_metadata");
-  auto schedules = ScheduleGraphs({graph});
-  FusedParsedScheduleResult before;
-  ASSERT_EQ(GetModelInfoMap(schedules, {}, before), af::SUCCESS);
-  const auto k = af::Symbol("cube_k");
-  schedules.node_idx_to_scheduled_results[0][0].schedule_groups[0].runtime_shape_vars = {k};
-  FusedParsedScheduleResult after;
-  ASSERT_EQ(GetModelInfoMap(schedules, {}, after), af::SUCCESS);
-  const auto &old_model = before[0][0].groups_tiling_model_info[0][0];
-  const auto &model = after[0][0].groups_tiling_model_info[0][0];
-  EXPECT_EQ(model.arg_list.size(), old_model.arg_list.size());
-  EXPECT_NE(std::find(model.sizes.begin(), model.sizes.end(), k), model.sizes.end());
-  ArgsManager args(model);
-  ASSERT_TRUE(args.Process(false));
-  const auto inputs = args.GetInputVars();
-  EXPECT_NE(std::find(inputs.begin(), inputs.end(), k), inputs.end());
-  const auto searchable = args.GetSearchableVars();
-  EXPECT_EQ(std::find(searchable.begin(), searchable.end(), k), searchable.end());
 }
 
 TEST_F(ModelInfoCoverageTest, RejectsEmptyAndOverlongPathsAndNormalizesExistingDirectory) {

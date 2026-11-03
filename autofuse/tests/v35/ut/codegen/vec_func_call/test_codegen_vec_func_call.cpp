@@ -1162,43 +1162,6 @@ TEST(CodegenKernel, CvUbFuseVfLayoutHelperUsesPhysicalRowStride) {
   EXPECT_EQ(codegen::GenCvUbFuseAddrOffset(tpipe, broadcast_input), "0");
 }
 
-TEST(CodegenKernel, CvUbFuseFlatLoopRequiresDenseSameShapeTensors) {
-  codegen::Tiler tiler;
-  codegen::TPipe tpipe("tpipe", tiler);
-  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kUBFuse;
-  tpipe.cube_output_tensor_id = 0;
-  af::AscGraph graph("test_graph");
-  af::ascir_op::Data x("x", graph);
-  const auto m = af::Symbol("m");
-  const auto n = af::Symbol("n");
-  auto cube = MakeCvUbFuseTensor(graph, af::DT_FLOAT, 0, {n, One}, "local_0");
-  auto output = MakeCvUbFuseTensor(graph, af::DT_FLOAT, 1, {n, One}, "local_1");
-  cube.axis_size = {m, n};
-  output.axis_size = cube.axis_size;
-  const auto generate = [&]() { return codegen::GenCvUbFuseFlatLoopParams(tpipe, {cube}, {output}, "float"); };
-  const auto dense = generate();
-  EXPECT_NE(dense.find("curAlignN == curAivN"), std::string::npos);
-  EXPECT_NE(dense.find("KernelUtils::BlkAlign<float>(curAivN) == curAivN"), std::string::npos);
-  EXPECT_NE(dense.find("curAivN *= curAivM;"), std::string::npos);
-
-  output.vectorized_strides = {Zero, One};
-  EXPECT_TRUE(generate().empty());
-  output.vectorized_strides = {One, m};
-  EXPECT_TRUE(generate().empty());
-  output.vectorized_strides = {n, One};
-  output.axis_size = {n};
-  EXPECT_TRUE(generate().empty());
-  output.axis_size = cube.axis_size;
-  output.dtype = af::DT_FLOAT16;
-  EXPECT_TRUE(generate().empty());
-  output.dtype = af::DT_FLOAT;
-  tpipe.is_conv2d = true;
-  EXPECT_TRUE(generate().empty());
-  tpipe.is_conv2d = false;
-  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kDefault;
-  EXPECT_TRUE(generate().empty());
-}
-
 TEST(CodegenKernel, CvUbFuseTensorSizeAssignUsesTensorDtype) {
   codegen::Tiler tiler;
   codegen::TPipe tpipe("tpipe", tiler);
