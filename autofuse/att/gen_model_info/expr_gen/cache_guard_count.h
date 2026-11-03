@@ -11,22 +11,11 @@
 #define EXPR_GEN_CACHE_GUARD_COUNT_H_
 
 #include "base/base_types.h"
+#include "ascir_node_param/ascir_node_param.h"
 
 namespace att {
-enum class CacheGuardKind { kNone, kOriginBroadcast, kFusedBroadcast };
-
-struct CacheGuardInfo {
-  CacheGuardKind kind{CacheGuardKind::kNone};
-  Expr guard_axis;
-  Expr period;
-  Expr block_inner_extent;
-  Expr loop_extent;
-  bool address_invariant{false};
-  // Set only when metadata came from parser/scheduler axis repeats whose
-  // positive range is guaranteed by the scheduling contract.  Generic
-  // symbolic expressions must leave this false and take the legacy path.
-  bool positive_range_proven{false};
-};
+using ascir_param::CacheGuardInfo;
+using ascir_param::CacheGuardKind;
 
 Expr CountGuardHits(const CacheGuardInfo &info, const Expr &block_idx);
 bool IsBlockCountUniform(const CacheGuardInfo &info, const Expr &block_dim);

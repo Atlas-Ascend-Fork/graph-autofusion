@@ -37,7 +37,31 @@ using namespace af::ascir;
 namespace att {
 af::Status LoadStoreStrideV2Func(const std::map<std::string, float> &param_map, const std::vector<Expr> &dims,
                                  const Expr &stride, Expr &res);
+}  // namespace att
+
+namespace {
+// LoadV2 引入单核分支后，pipe_res[AIV_MTE2]为外层load_core_case_node三元变量（block_dim==1选单核参数）。
+// 用例通过本函数取指定分支的表达式后再做公式断言；取分支失败时记录失败并返回哑值，避免解引用UB。
+Expr SelectLoadCoreBranch(const std::map<Expr, TernaryOp, ExprCmp> &ternary_ops, bool single_core) {
+  const Expr var = CreateExpr("load_core_case_node");
+  const auto iter = ternary_ops.find(var);
+  if (iter == ternary_ops.end()) {
+    ADD_FAILURE() << "load_core_case_node not found in ternary_ops";
+    return CreateExpr(0);
+  }
+  const auto if_case = iter->second.DeepCopyIfCase();
+  if (if_case == nullptr) {
+    ADD_FAILURE() << "DeepCopyIfCase of load_core_case_node returned nullptr";
+    return CreateExpr(0);
+  }
+  const auto branch = single_core ? if_case->GetChoiceA() : if_case->GetChoiceB();
+  if (branch == nullptr) {
+    ADD_FAILURE() << "branch of load_core_case_node is nullptr, single_core=" << single_core;
+    return CreateExpr(0);
+  }
+  return branch->GetExpr();
 }
+}  // namespace
 
 class UTestAscirPerfV2 : public ::testing::Test {
  public:
@@ -552,10 +576,10 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev1) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 存在外抛
   const auto ternary_ops = perf_res.ternary_ops;
   const auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // LoadStride calculation: k=0.005, block_count=z0t_size*z1t_size, stride_used=min(448*4, 4096)=1792
   // Result: 0.005 * z0t_size * z1t_size * 1792 = 8.96 * z0t_size * z1t_size
   const std::string expect_stride = "(8.95999979972839 * z0t_size * z1t_size)";
@@ -589,10 +613,10 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev2) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 存在外抛
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   EXPECT_EQ(Str(res.Replace(ret)),
             "((256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0)");
 }
@@ -629,15 +653,96 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev3) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 存在外抛
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   EXPECT_EQ(Str(res.Replace(ret)),
             "TernaryOp(((1666 * z0z1t_size * z4t_size) + -256) < 0, ((13328 * z0z1t_size * z4t_size / "
             "(((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0), ((13328 * z0z1t_size * z4t_size / "
             "(((6.61549997329712 / (block_dim)) + 11.8291997909546))) + 160.0))");
   EXPECT_EQ(config.size(), 1);
+}
+
+// LoadV2: block_dim==1 时切换 LoadSingleCore 参数分支；静态 use_case 下两分支均为具体公式
+TEST_F(UTestAscirPerfV2, TestLoadApiSingleCoreBranchStructure) {
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr z0t_size = CreateExpr("z0t_size");
+  Expr z1t_size = CreateExpr("z1t_size");
+
+  input_shapes[0].data_type = "float32";
+  input_shapes[0].repeats = {z0t_size, z1t_size, CreateExpr(64)};
+  input_shapes[0].gm_strides = {z0t_size * CreateExpr(512), CreateExpr(512), CreateExpr(1)};
+  input_shapes[0].strides = input_shapes[0].gm_strides;
+  output_shapes[0].data_type = "float32";
+  output_shapes[0].repeats = input_shapes[0].repeats;
+  output_shapes[0].gm_strides = {z0t_size * CreateExpr(512), CreateExpr(512), CreateExpr(1)};
+  output_shapes[0].strides = output_shapes[0].gm_strides;
+  input_shapes[0].data_type_size = 2;
+  output_shapes[0].data_type_size = 2;
+
+  PerfOutputInfo perf_res;
+  NodeInfo node;
+  auto load_v2 = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load_v2, nullptr);
+  auto perf = load_v2->GetPerfFunc();
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+  auto result = perf(input_shapes, output_shapes, node, perf_res);
+  EXPECT_EQ(result, af::SUCCESS);
+  EXPECT_EQ(Str(perf_res.pipe_res[PipeType::AIV_MTE2]), "load_core_case_node");
+  const auto ternary_ops = perf_res.ternary_ops;
+  const auto ret = ConcursiveReplaceVars(ternary_ops);
+  const auto iter = ternary_ops.find(CreateExpr("load_core_case_node"));
+  ASSERT_NE(iter, ternary_ops.end());
+  const auto if_case = iter->second.DeepCopyIfCase();
+  ASSERT_NE(if_case, nullptr);
+  EXPECT_EQ(if_case->GetCondType(), CondType::K_EQ);
+  EXPECT_EQ(Str(if_case->GetCondLeft()), "block_dim");
+  EXPECT_EQ(Str(if_case->GetCondRight()), "1");
+  // 单核条目当前占位值与多核一致，两分支公式相同；上板拟合值合入后需更新单核分支断言
+  const std::string expect_stride = "(8.95999979972839 * z0t_size * z1t_size)";
+  const std::string load_perf = "(256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
+  const std::string expect_expr = "(" + load_perf + " + " + expect_stride + " + 160.0)";
+  EXPECT_EQ(Str(SelectLoadCoreBranch(ternary_ops, false).Replace(ret)), expect_expr);
+  EXPECT_EQ(Str(SelectLoadCoreBranch(ternary_ops, true).Replace(ret)), expect_expr);
+}
+
+// LoadV2: 动态 use_case 时外层单核/多核分支分别为内层三元变量 load_single_core_node / load_node
+TEST_F(UTestAscirPerfV2, TestLoadApiSingleCoreDynamicCaseNested) {
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr z0t_size = CreateExpr("z0t_size");
+  Expr dyn_len = CreateExpr("dyn_len");
+
+  input_shapes[0].data_type = "float32";
+  input_shapes[0].repeats = {z0t_size, dyn_len};
+  input_shapes[0].gm_strides = {CreateExpr(512), CreateExpr(1)};
+  input_shapes[0].strides = input_shapes[0].gm_strides;
+  output_shapes[0].data_type = "float32";
+  output_shapes[0].repeats = input_shapes[0].repeats;
+  output_shapes[0].gm_strides = input_shapes[0].gm_strides;
+  output_shapes[0].strides = output_shapes[0].gm_strides;
+  input_shapes[0].data_type_size = 2;
+  output_shapes[0].data_type_size = 2;
+
+  PerfOutputInfo perf_res;
+  NodeInfo node;
+  auto load_v2 = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load_v2, nullptr);
+  auto perf = load_v2->GetPerfFunc();
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+  auto result = perf(input_shapes, output_shapes, node, perf_res);
+  EXPECT_EQ(result, af::SUCCESS);
+  const auto ternary_ops = perf_res.ternary_ops;
+  const auto iter = ternary_ops.find(CreateExpr("load_core_case_node"));
+  ASSERT_NE(iter, ternary_ops.end());
+  const auto if_case = iter->second.DeepCopyIfCase();
+  ASSERT_NE(if_case, nullptr);
+  EXPECT_EQ(Str(if_case->GetChoiceA()->GetExpr()), "load_single_core_node");
+  EXPECT_EQ(Str(if_case->GetChoiceB()->GetExpr()), "load_node");
+  EXPECT_NE(ternary_ops.find(CreateExpr("load_single_core_node")), ternary_ops.end());
+  EXPECT_NE(ternary_ops.find(CreateExpr("load_node")), ternary_ops.end());
 }
 
 TEST_F(UTestAscirPerfV2, TestStoreApiForType) {
@@ -1472,6 +1577,34 @@ TEST_F(UTestAscirPerfV2, TestStoreStrideUsesPerTypeCostAndDtypeSize) {
       result.Simplify();
       expected.Simplify();
       EXPECT_EQ(Str(result), Str(expected));
+    }
+  }
+}
+
+// 单核参数条目必须与对应多核条目的 model_type 和 dtype 覆盖一致，保证 CalculatePerfFromParams 查表不回退
+TEST_F(UTestAscirPerfV2, TestLoadSingleCoreModelParamsEntryCover) {
+  const auto table = Json::parse(kParamV2Info);
+  const std::vector<std::pair<std::string, std::string>> single_to_multi = {
+      {"LoadSingleCore", "Load"}, {"LoadSmallBlkSingleCore", "LoadSmallBlk"}, {"LoadStrideSingleCore", "LoadStride"}};
+  for (const auto &entry : single_to_multi) {
+    SCOPED_TRACE(entry.first);
+    ASSERT_TRUE(table.contains(entry.first));
+    EXPECT_EQ(table.at(entry.first).at("model_type").get<std::string>(),
+              table.at(entry.second).at("model_type").get<std::string>());
+    const auto &single_params = table.at(entry.first).at("model_params");
+    const auto &multi_params = table.at(entry.second).at("model_params");
+    ASSERT_EQ(single_params.size(), multi_params.size());
+    for (auto param_iter = multi_params.begin(); param_iter != multi_params.end(); ++param_iter) {
+      ASSERT_TRUE(single_params.contains(param_iter.key()));
+      const auto &single_dtype_params = single_params.at(param_iter.key());
+      EXPECT_EQ(single_dtype_params.size(), param_iter.value().size());
+      for (auto field_iter = param_iter.value().begin(); field_iter != param_iter.value().end(); ++field_iter) {
+        EXPECT_TRUE(single_dtype_params.contains(field_iter.key()));
+      }
+      // per-instruction头开销h须与多核条目同口径，避免核数分支切换处出现成本断崖
+      if (param_iter.value().contains("h")) {
+        EXPECT_EQ(single_dtype_params.at("h"), param_iter.value().at("h"));
+      }
     }
   }
 }
@@ -3413,9 +3546,9 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenSmallBlock) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // ExpandLoadBlockLen: block_len(8)*2=16B < 128B, stride>0 → pad to 64(=128/2)
   // data_size = z0t * z1t * 64 * 2 = 128 * z0t * z1t, SmallBlk case
   // stride_cost = 0.005 * z0t * z1t * min((64-8)*2, 4096) = 0.56 * z0t * z1t
@@ -3523,7 +3656,12 @@ TEST_F(UTestAscirPerfV2, TestLoadApiCodegenTailAxisSwapUsesVectorizedShape) {
   PerfOutputInfo perf;
   ASSERT_EQ(GetDmaPerf(shape, node, perf, 2, true), af::SUCCESS);
   EXPECT_NE(perf.pipe_res.find(PipeType::AIV_MTE2), perf.pipe_res.end());
-  EXPECT_TRUE(perf.ternary_ops.empty());
+  // 仅剩 LoadV2 固有的单核分支三元表达式（swap 场景 GetDMAActualPerf 执行两次，各产生一个）；
+  // 静态 swap 择优不应引入维度大小比较的三元表达式
+  ASSERT_EQ(perf.ternary_ops.size(), 2U);
+  for (const auto &ternary_op : perf.ternary_ops) {
+    EXPECT_NE(Str(ternary_op.first).find("load_core_case_node"), std::string::npos);
+  }
 }
 
 TEST_F(UTestAscirPerfV2, TestLoadApiCodegenTailAxisContinuous) {
@@ -3567,9 +3705,9 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenLargeBlock) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // block_len=128*2=256B > 128B, 不触发pad; SmallBlk case
   // data_size = 256 * z0t * z1t
   // stride = 0.005 * z0t * z1t * min((256-128)*2, 4096) = 1.28 * z0t * z1t
@@ -3602,9 +3740,9 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenContinuous) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // 连续: gm_stride=0, 不触发pad, SmallBlk case
   // data_size = 10 * 8 * 2 = 160
   const std::string load_perf = "(160 / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";

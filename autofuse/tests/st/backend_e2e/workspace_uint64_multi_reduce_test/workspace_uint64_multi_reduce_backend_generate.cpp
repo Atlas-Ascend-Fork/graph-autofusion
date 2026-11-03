@@ -20,11 +20,18 @@
 #include "optimize.h"
 
 namespace {
+#ifdef WORKSPACE_TILING_ONLY
+constexpr bool kTilingOnly = true;
 constexpr uint64_t kWorkspaceBytes = 0x90000000ULL;
+#else
+constexpr bool kTilingOnly = false;
+constexpr uint64_t kWorkspaceBytes = 4096ULL;
+#endif
 constexpr int64_t kWorkspaceFloatCount = static_cast<int64_t>(kWorkspaceBytes / sizeof(float));
+constexpr size_t kWorkspaceCount = 3U;
 constexpr size_t kKernelFileIndex = 0;
-constexpr size_t kTilingFileIndex = 1;
-constexpr size_t kTilingDataFileIndex = 2;
+constexpr size_t kTilingFileIndex = kTilingOnly ? 0U : 1U;
+constexpr size_t kTilingDataFileIndex = kTilingFileIndex + 1U;
 const std::string kTilingStub = R"(
 #define REGISTER_TILING_DEFAULT(tiling)
 #define GET_TILING_DATA(t, tiling) AutofuseTilingData t = *(AutofuseTilingData*)tiling;
@@ -63,7 +70,26 @@ bool CloneScheduledResult(const ascir::ScheduledResult &source, ascir::Scheduled
   return true;
 }
 
-void InjectLargeWorkspaces(af::AscGraph &impl_graph, std::vector<af::AscNodePtr> &workspace_nodes) {
+ascir::TensorId GetNextTensorId(const ascir::ScheduledResult &result,
+                                const std::vector<af::AscNodePtr> &workspace_nodes) {
+  ascir::TensorId next_tensor_id = 0;
+  for (const auto &group : result.schedule_groups) {
+    for (const auto &graph : group.impl_graphs) {
+      for (const auto &node : graph.GetAllNodes()) {
+        for (const auto &output : node->outputs()) {
+          next_tensor_id = std::max(next_tensor_id, output->attr.mem.tensor_id + 1);
+        }
+      }
+    }
+  }
+  for (const auto &node : workspace_nodes) {
+    next_tensor_id = std::max(next_tensor_id, node->outputs[0].attr.mem.tensor_id + 1);
+  }
+  return next_tensor_id;
+}
+
+void InjectWorkspaces(af::AscGraph &impl_graph, std::vector<af::AscNodePtr> &workspace_nodes,
+                      ascir::TensorId next_tensor_id, std::vector<ascir::TensorId> &workspace_ids) {
   af::ascir_op::Scalar workspace_size_scalar("workspace_size_scalar", impl_graph);
   workspace_size_scalar.ir_attr.SetValue("0");
   auto scalar_node = impl_graph.FindNode("workspace_size_scalar");
@@ -71,33 +97,45 @@ void InjectLargeWorkspaces(af::AscGraph &impl_graph, std::vector<af::AscNodePtr>
   scalar_node->outputs[0].attr.dtype = af::DT_FLOAT;
   scalar_node->outputs[0].attr.repeats = {af::Symbol(kWorkspaceFloatCount)};
   scalar_node->outputs[0].attr.strides = {af::Symbol(1)};
+  scalar_node->outputs[0].attr.mem.tensor_id = next_tensor_id++;
 
-  const std::vector<ascir::TensorId> workspace_ids = {7, 8, 9};
-  for (size_t i = 0; i < workspace_ids.size(); ++i) {
-    const std::string workspace_name = "workspace" + std::to_string(workspace_ids[i]);
+  // Reserve IDs above every scheduled tensor, including local tensors in other groups.
+  for (size_t i = 0; i < kWorkspaceCount; ++i) {
+    const auto workspace_id = next_tensor_id++;
+    const std::string workspace_name = "workspace" + std::to_string(workspace_id);
     af::ascir_op::Workspace workspace_op(workspace_name.c_str());
     auto workspace = impl_graph.AddNode(workspace_op);
     ASSERT_NE(workspace, nullptr);
-    workspace->outputs[0].attr.mem.tensor_id = workspace_ids[i];
+    workspace->outputs[0].attr.mem.tensor_id = workspace_id;
     workspace->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
     ASSERT_EQ(af::GraphUtils::AddEdge(scalar_node->GetOutDataAnchor(0), workspace->GetInDataAnchor(0)),
               ge::GRAPH_SUCCESS);
     workspace_nodes.push_back(workspace);
+    workspace_ids.push_back(workspace_id);
   }
 }
 
-void WriteGeneratedFiles(const codegen::CodegenResult &workspace_result, const codegen::CodegenResult &reduce_result) {
+void WriteGeneratedFiles(const codegen::CodegenResult &result, const std::vector<ascir::TensorId> &workspace_ids) {
   const auto parts = splitString(KERNEL_SRC_LIST, ':');
-  ASSERT_EQ(parts.size(), 3U);
-  std::fstream kernel_file(parts[kKernelFileIndex], std::ios::out);
+  ASSERT_EQ(parts.size(), kTilingDataFileIndex + 1U);
+  if (!kTilingOnly) {
+    std::fstream kernel_file(parts[kKernelFileIndex], std::ios::out);
+    ASSERT_TRUE(kernel_file.is_open());
+    kernel_file << kTilingStub << RemoveSubDirInclude(result.kernel);
+  }
   std::fstream tiling_file(parts[kTilingFileIndex], std::ios::out);
   std::fstream tiling_data_file(parts[kTilingDataFileIndex], std::ios::out);
-  ASSERT_TRUE(kernel_file.is_open());
   ASSERT_TRUE(tiling_file.is_open());
   ASSERT_TRUE(tiling_data_file.is_open());
-  kernel_file << kTilingStub << RemoveSubDirInclude(reduce_result.kernel);
-  tiling_file << workspace_result.tiling;
-  tiling_data_file << workspace_result.tiling_data;
+  tiling_file << result.tiling;
+  // Expose the injected offsets to E2E without depending on the optimizer's tensor numbering.
+  tiling_file
+      << "\nextern \"C\" void GetWorkspaceOffsets(const AutofuseTilingData *tiling_data, uint64_t *offsets) {\n";
+  for (size_t i = 0; i < workspace_ids.size(); ++i) {
+    tiling_file << "  offsets[" << i << "] = tiling_data->get_workspace" << workspace_ids[i] << "();\n";
+  }
+  tiling_file << "}\n";
+  tiling_data_file << result.tiling_data;
 }
 
 }  // namespace
@@ -117,28 +155,29 @@ TEST_F(TestBackendWorkspaceUint64MultiReduce, WorkspaceUint64MultiReduceCodegen)
   ASSERT_NE(selected_result, scheduled_results.end());
   ASSERT_FALSE(selected_result->schedule_groups.empty());
   ASSERT_FALSE(selected_result->schedule_groups.front().impl_graphs.empty());
-  const auto original_scheduled_results = scheduled_results;
   const auto original_workspace_nodes = fused_schedule_result.workspace_nodes;
   ascir::ScheduledResult workspace_scheduled_result;
   ASSERT_TRUE(CloneScheduledResult(*selected_result, workspace_scheduled_result));
   auto &impl_graph = workspace_scheduled_result.schedule_groups.front().impl_graphs.front();
   fused_schedule_result.workspace_nodes = original_workspace_nodes;
-  InjectLargeWorkspaces(impl_graph, fused_schedule_result.workspace_nodes);
+  const auto next_tensor_id = GetNextTensorId(workspace_scheduled_result, original_workspace_nodes);
+  std::vector<ascir::TensorId> workspace_ids;
+  InjectWorkspaces(impl_graph, fused_schedule_result.workspace_nodes, next_tensor_id, workspace_ids);
   scheduled_results = {workspace_scheduled_result};
-  ASSERT_EQ(fused_schedule_result.workspace_nodes.size(), original_workspace_nodes.size() + 3U);
+  ASSERT_EQ(workspace_ids.size(), kWorkspaceCount);
+  ASSERT_EQ(fused_schedule_result.workspace_nodes.size(), original_workspace_nodes.size() + kWorkspaceCount);
 
   codegen::CodegenResult workspace_result;
   ASSERT_EQ(codegen.Generate({}, fused_schedule_result, workspace_result), af::SUCCESS);
-  EXPECT_NE(workspace_result.tiling_data.find("TILING_DATA_FIELD_DEF_T(uint64_t, workspace7);"), std::string::npos);
-  EXPECT_NE(workspace_result.tiling_data.find("TILING_DATA_FIELD_DEF_T(uint64_t, workspace8);"), std::string::npos);
-  EXPECT_NE(workspace_result.tiling_data.find("TILING_DATA_FIELD_DEF_T(uint64_t, workspace9);"), std::string::npos);
+  for (const auto workspace_id : workspace_ids) {
+    EXPECT_NE(workspace_result.tiling_data.find("TILING_DATA_FIELD_DEF_T(uint64_t, workspace" +
+                                                std::to_string(workspace_id) + ");"),
+              std::string::npos);
+  }
   EXPECT_NE(workspace_result.tiling.find("uint64_t* workspaceSize"), std::string::npos);
   EXPECT_NE(workspace_result.tiling.find("bool GetWorkspaceSize("), std::string::npos);
   EXPECT_NE(workspace_result.tiling.find("__builtin_add_overflow"), std::string::npos);
 
-  scheduled_results = original_scheduled_results;
-  fused_schedule_result.workspace_nodes = original_workspace_nodes;
-  codegen::CodegenResult reduce_result;
-  ASSERT_EQ(codegen.Generate({}, fused_schedule_result, reduce_result), af::SUCCESS);
-  WriteGeneratedFiles(workspace_result, reduce_result);
+  // Kernel, tiling and tiling data must describe the same selected schedule and workspace layout.
+  WriteGeneratedFiles(workspace_result, workspace_ids);
 }

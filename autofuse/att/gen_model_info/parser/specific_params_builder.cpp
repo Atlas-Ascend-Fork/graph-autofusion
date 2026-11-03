@@ -80,6 +80,7 @@ af::Status FillSpecificParams(const af::AscNodePtr &ge_node, NodeInfo &node_info
   if (params == nullptr) {
     return af::SUCCESS;
   }
+  node_info.cache_executions = params->cache_executions;
   if (params->status == ascir_param::ParamBuildStatus::kSkipped) {
     return af::SUCCESS;
   }

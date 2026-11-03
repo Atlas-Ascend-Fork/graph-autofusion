@@ -22,6 +22,8 @@ namespace ascendcapi_v2 {
 namespace {
 constexpr size_t kCodegenDmaMaxLen = 2U;
 constexpr size_t kCodegenLoopModeMaxLen = 2U;
+// Load单核独立参数生效的block_dim（AIV核数）边界值
+constexpr int32_t kSingleCoreBlockDim = 1;
 }  // namespace
 // 获取 CacheLine 大小，与 TilingScheduleConfigTable 保持一致
 uint32_t GetCacheLineSize() {
@@ -180,11 +182,33 @@ af::Status ExpandLoadBlockLen(const NodeDetail &node_info, PerfOutputInfo &perf,
   return af::SUCCESS;
 }
 
+// 按一套Load参数组装单次MTE2表达式：blocklen>256B走normal，否则走small_blk；动态shape生成内层三元表达式
+Expr AssembleLoadBranch(const Expr &res_normal, const Expr &res_small_blk, const Expr &res_stride, const Expr &blk,
+                        int32_t use_case, const std::string &ternary_var_name, PerfOutputInfo &perf) {
+  if (use_case == kCaseOne) {
+    return res_normal + res_stride;
+  }
+  if (use_case == kCaseTwo) {
+    return res_small_blk + res_stride;
+  }
+  Expr res = CreateExpr(ternary_var_name.c_str());
+  std::shared_ptr<IfCase> branch_a = std::make_shared<IfCase>(res_normal + res_stride);
+  std::shared_ptr<IfCase> branch_b = std::make_shared<IfCase>(res_small_blk + res_stride);
+  // blocklen < 256B时走branch_b；否则走branch_a
+  TernaryOp ternary_op = TernaryOp(CondType::K_LT, blk, CreateExpr(0), std::move(branch_b), std::move(branch_a));
+  ternary_op.SetVariable(res);
+  perf.ternary_ops[res] = ternary_op;
+  return res;
+}
+
 af::Status LoadPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
   Expr res_normal;
   Expr res_small_blk;
+  Expr res_normal_single_core;
+  Expr res_small_blk_single_core;
   Expr blk;
   Expr res_stride;
+  Expr res_stride_single_core;
   int32_t use_case;
   GELOGD("Dma with Load: %s", node_info.ToString().c_str());
   // 非连续且block_len小于cache line时，扩展block_len到cache line大小
@@ -199,24 +223,35 @@ af::Status LoadPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
   GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb + "Stride", node_info.input_dtype[0], node_info.output_dtype[0], expanded_dims,
                              node_info.gm_stride, node_info.block_count_idx},
                             res_stride));
+  // 单核(block_dim==1)无带宽抢占，多核拟合参数外推单核失真，切换独立参数条目；
+  // 参数待按上板实测拟合替换(归档autofuse/att/modeling/mte2/load/)，当前占位值与多核一致保证行为等价
+  GE_ASSERT_SUCCESS(GetPerf(
+      {kMoveGmToUb + "SingleCore", node_info.input_dtype[0], node_info.output_dtype[0], expanded_dims, CreateExpr(0)},
+      res_normal_single_core));
+  GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb + "SmallBlkSingleCore", node_info.input_dtype[0], node_info.output_dtype[0],
+                             expanded_dims, CreateExpr(0)},
+                            res_small_blk_single_core));
+  GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb + "StrideSingleCore", node_info.input_dtype[0], node_info.output_dtype[0],
+                             expanded_dims, node_info.gm_stride, node_info.block_count_idx},
+                            res_stride_single_core));
   GE_ASSERT_SUCCESS(GetLoadCase(node_info, blk, use_case));
   GE_ASSERT_SUCCESS(AppendCacheLineConfig(node_info, CacheLineDirection::kGmToUb, perf.cache_line_config));
-  if (use_case == kCaseOne) {
-    perf.pipe_res[PipeType::AIV_MTE2] = res_normal + res_stride;
-  } else if (use_case == kCaseTwo) {
-    perf.pipe_res[PipeType::AIV_MTE2] = res_small_blk + res_stride;
-  } else {
-    Expr res = CreateExpr("load_node");
-    std::shared_ptr<IfCase> branch_a = std::make_shared<IfCase>(res_normal + res_stride);
-    GE_ASSERT_NOTNULL(branch_a);
-    std::shared_ptr<IfCase> branch_b = std::make_shared<IfCase>(res_small_blk + res_stride);
-    GE_ASSERT_NOTNULL(branch_b);
-    // blocklen < 512B时走branch_b；否则走branch_a
-    TernaryOp ternary_op = TernaryOp(CondType::K_LT, blk, CreateExpr(0), std::move(branch_b), std::move(branch_a));
-    ternary_op.SetVariable(res);
-    perf.ternary_ops[res] = ternary_op;
-    perf.pipe_res[PipeType::AIV_MTE2] = res;
-  }
+  const Expr multi_core_branch =
+      AssembleLoadBranch(res_normal, res_small_blk, res_stride, blk, use_case, "load_node", perf);
+  const Expr single_core_branch =
+      AssembleLoadBranch(res_normal_single_core, res_small_blk_single_core, res_stride_single_core, blk, use_case,
+                         "load_single_core_node", perf);
+  // block_dim==1时切换单核参数公式；block_dim为tiling求解变量，条件以三元表达式进入求解
+  Expr res = CreateExpr("load_core_case_node");
+  std::shared_ptr<IfCase> single_core_case = std::make_shared<IfCase>(single_core_branch);
+  GE_ASSERT_NOTNULL(single_core_case);
+  std::shared_ptr<IfCase> multi_core_case = std::make_shared<IfCase>(multi_core_branch);
+  GE_ASSERT_NOTNULL(multi_core_case);
+  TernaryOp ternary_op = TernaryOp(CondType::K_EQ, CreateExpr("block_dim"), CreateExpr(kSingleCoreBlockDim),
+                                   std::move(single_core_case), std::move(multi_core_case));
+  ternary_op.SetVariable(res);
+  perf.ternary_ops[res] = ternary_op;
+  perf.pipe_res[PipeType::AIV_MTE2] = res;
   return af::SUCCESS;
 }
 

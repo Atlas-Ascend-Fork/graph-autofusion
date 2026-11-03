@@ -9,6 +9,7 @@
  */
 
 #include "codegen_kernel_loop.h"
+#include <functional>
 #include "codegen_kernel.h"
 #include "codegen_api_param/codegen_api_param.h"
 #include "codegen/expression_convert_struct.h"
@@ -19,12 +20,14 @@
 #include "api_call/utils/api_call_factory.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "indirect_load_utils.h"
+#include "ascir_node_param/ascir_param_builder.h"
 
 using namespace std;
 using namespace af::ops;
 using namespace codegen;
 using namespace af::ascir_op;
 using namespace ascgen_utils;
+using ReduceCondition = ascir_param::ReduceCacheCondition;
 
 namespace {
 constexpr size_t kDoubleAxisSize = 2U;
@@ -350,11 +353,12 @@ static bool IsRemovePadLinkBroadcast(const ascir::NodeView &node) {
   return IsOps<RemovePad>(node) && node->GetInDataNodesSize() == 1UL && IsOps<Broadcast>(node->GetInDataNodes().at(0));
 }
 
-static bool IsLoadNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, std::string &enable_cache_with_condition,
-                             bool is_ar, bool is_link_to_brc) {
+static bool IsLoadNodeSplitB(const ascir::NodeView &node, const Tiler &tiler,
+                             std::vector<ReduceCondition> &enable_cache_with_condition, bool is_ar,
+                             bool is_link_to_brc) {
   auto out = node->outputs[0];
   bool split_b = false;
-  std::ostringstream ss;
+  enable_cache_with_condition.clear();
   int32_t matching_counts = 0;
   int32_t matching_success_counts = 0;
   int32_t matching_success_current = 0;
@@ -375,17 +379,15 @@ static bool IsLoadNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, st
   }
 
   if (matching_success_counts > 1) {
-    ss << kEnCacheR;
+    enable_cache_with_condition.push_back(ReduceCondition::kR);
   } else if (matching_success_counts == 1) {
     const bool enableCacheA = (matching_success_current == 1 && is_ar) || (matching_success_current != 1 && !is_ar);
 
-    ss << (enableCacheA ? kEnCacheA : kEnCacheR);
+    enable_cache_with_condition.push_back(enableCacheA ? ReduceCondition::kA : ReduceCondition::kR);
     if (enableCacheA) {
-      ss << " || control_dis_enable_cache_a";
+      enable_cache_with_condition.push_back(ReduceCondition::kControl);
     }
   }
-
-  enable_cache_with_condition = ss.str();
 
   if (is_link_to_brc) {
     return split_b;
@@ -397,40 +399,36 @@ static bool IsLoadNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, st
 }
 
 // 多输入节点的缓存刷新条件按 “||” 语义取并集：任一输入到达自身刷新点就必须重新执行，复用仅在
-// 所有输入都保持不变的窗口内有效。按 “ || ” 拆分子项去重，避免嵌套多输入场景重复累加同一条件。
+// 所有输入都保持不变的窗口内有效。按条件类型去重并保留首次出现的顺序，供设备代码和 ATT 共用。
 // 示例：Add 的两个输入链分别缓存于 A 轴和 R 轴，输入0的条件为
 // "dis_enable_cache_a || control_dis_enable_cache_a"、输入1的条件为 "dis_enable_cache_r"，
 // 合并结果为 "dis_enable_cache_a || control_dis_enable_cache_a || dis_enable_cache_r"；
 // 若两个输入的条件相同（如均为 "dis_enable_cache_r"），去重后合并结果仍为 "dis_enable_cache_r"。
-static void MergeCacheACacheRCondition(const std::string &cur_input_cache_condition, std::string &merged) {
-  static const std::string kCondSep = " || ";
-  if (cur_input_cache_condition.empty()) {
-    return;
-  }
-  std::vector<std::string> merged_terms;
-  size_t pos = 0;
-  while (pos < merged.size()) {
-    size_t end = merged.find(kCondSep, pos);
-    merged_terms.emplace_back(merged.substr(pos, end == std::string::npos ? end : end - pos));
-    pos = (end == std::string::npos) ? end : end + kCondSep.size();
-  }
-  pos = 0;
-  while (pos < cur_input_cache_condition.size()) {
-    size_t end = cur_input_cache_condition.find(kCondSep, pos);
-    std::string term = cur_input_cache_condition.substr(pos, end == std::string::npos ? end : end - pos);
-    if (std::find(merged_terms.begin(), merged_terms.end(), term) == merged_terms.end()) {
-      if (!merged.empty()) {
-        merged += kCondSep;
-      }
-      merged += term;
-      merged_terms.emplace_back(term);
+static void MergeCacheACacheRCondition(const std::vector<ReduceCondition> &input,
+                                       std::vector<ReduceCondition> &merged) {
+  for (const auto term : input) {
+    if (std::find(merged.begin(), merged.end(), term) == merged.end()) {
+      merged.push_back(term);
     }
-    pos = (end == std::string::npos) ? end : end + kCondSep.size();
   }
 }
 
-static bool IsNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, std::string &enable_cache_with_condition,
-                         bool is_ar, bool is_link_to_brc = false) {
+static std::string ReduceCacheConditionString(const std::vector<ReduceCondition> &conditions) {
+  std::string result;
+  for (const auto term : conditions) {
+    if (!result.empty()) {
+      result += " || ";
+    }
+    result += term == ReduceCondition::kA   ? kEnCacheA
+              : term == ReduceCondition::kR ? kEnCacheR
+                                            : "control_dis_enable_cache_a";
+  }
+  return result;
+}
+
+static bool IsNodeSplitB(const ascir::NodeView &node, const Tiler &tiler,
+                         std::vector<ReduceCondition> &enable_cache_with_condition, bool is_ar,
+                         bool is_link_to_brc = false) {
   if (IsOps<Data>(node) || node->GetInDataNodesSize() == 0U) {
     return false;
   }
@@ -447,12 +445,12 @@ static bool IsNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, std::s
     return false;
   }
   // 各输入链的缓存刷新条件相互独立，必须取并集：任一输入数据变化都会使本节点的缓存失效。
-  std::string all_inputs_merged_cache_condition;
+  std::vector<ReduceCondition> all_inputs_merged_cache_condition;
   for (const auto &in_node : node->GetInDataNodes()) {
     GE_ASSERT_NOTNULL(in_node, "Input of node %s[%s] is null", node->GetTypePtr(), node->GetNamePtr());
     GE_ASSERT_NOTNULL(std::dynamic_pointer_cast<af::AscNode>(in_node));
     const auto &prev_node = std::dynamic_pointer_cast<af::AscNode>(in_node);
-    std::string cur_input_cache_condition;
+    std::vector<ReduceCondition> cur_input_cache_condition;
     if (!IsOps<Scalar>(prev_node) && !IsNodeSplitB(prev_node, tiler, cur_input_cache_condition, is_ar, true)) {
       return false;
     }
@@ -537,7 +535,8 @@ Status Loop::ConstructFromNodes(ascir::NodeViewVisitorConst nodes, const Tiler &
         "exec_condition[%u], reduce_cache_condition[%s]",
         node->GetNamePtr(), node->GetTypePtr(), static_cast<int32_t>(this->is_graph_has_reduce_node),
         static_cast<int32_t>(call->enable_cache), static_cast<int32_t>(is_fixed_indirect_load_parameter),
-        static_cast<uint32_t>(call->exec_condition), call->enable_cache_with_condition.c_str());
+        static_cast<uint32_t>(call->exec_condition),
+        ReduceCacheConditionString(call->enable_cache_with_condition).c_str());
     call->axis = current_loop->axis_id;
     call->depth = current_axis.size();
     InitApiCallContext(node, tpipe, call, lifecycle_edge);
@@ -670,7 +669,7 @@ static std::string GetCacheGuardCondition(const ApiCall &call, bool is_enable_ca
   }
   // 双 Tile Reduce 使用专用的 A/R 缓存条件。
   if (is_double_tile) {
-    return call.enable_cache_with_condition;
+    return ReduceCacheConditionString(call.enable_cache_with_condition);
   }
   // 普通 Reduce 的缓存刷新周期不能覆盖会改变 GM 地址的循环轴；无法证明地址不变时，
   // 返回空条件，调用方会在每个 Tile 正常执行 Load/Broadcast。
@@ -689,7 +688,7 @@ static std::string GetCacheGuardCondition(const ApiCall &call, bool is_enable_ca
 }
 
 Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<ascir::AxisId> &current_axis,
-                          std::stringstream &ss) {
+                          std::stringstream &ss, CacheContext &cache_context) {
   std::map<ascir::AxisId, std::map<Loop *, std::vector<ApiCall *>>> api_calls_cross_loop;
   if (this->bodys.size() > 1) {
     CollectTensorCrossLoop(api_calls_cross_loop);
@@ -710,7 +709,11 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
         used_calls.insert(call);
       }
       body.loop->compute_stage = this->compute_stage;
-      GE_CHK_STATUS_RET(body.loop->GenerateLoop(tiler, tpipe, current_axis, ss), "Generate loop for body failed");
+      auto nested_cache_context = cache_context;
+      GE_CHK_STATUS_RET(body.loop->GenerateLoop(tiler, tpipe, current_axis, ss, nested_cache_context),
+                        "Generate loop for body failed");
+      // A/R 的绑定随循环退出；control 保留内层对外层可变标志的最后一次更新。
+      cache_context.bindings[ReduceCondition::kControl] = nested_cache_context.bindings[ReduceCondition::kControl];
       for (auto call : cross_loop_calls) {
         GE_CHK_BOOL_RET_STATUS(call->SyncOutputs(tpipe, ss), af::FAILED, "Func SyncOutputs return false");
       }
@@ -730,6 +733,8 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       }
       std::string call;
       std::string cache_guard;
+      using Mode = ascir_param::CacheExecutionMode;
+      Mode cache_mode = Mode::kNoGuard;
 
       if (this->axis_id != af::kIdNone && this->compute_stage == ComputeStage::kDefault) {
         auto axis = tiler.GetAxis(this->axis_id);
@@ -747,10 +752,19 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
                  body.call->node_name.c_str(), body.call->type.c_str(), this->axis_id);
         }
         if (!cache_guard.empty()) {
+          cache_mode = is_double_tile
+                           ? Mode::kReduceDoubleTile
+                           : (body.call->exec_condition == af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis
+                                  ? Mode::kOriginBroadcast
+                                  : Mode::kFusedBroadcast);
           ss << "if (" << cache_guard << ") {" << std::endl;
         }
       }
       GE_CHK_STATUS_RET(body.call->Generate(tpipe, current_axis, call), "Codegen generate call failed");
+      // 调用生成成功后发布实际条件；无 guard 时也记录 kNoGuard，避免 ATT 自行推断缓存。
+      GE_CHK_STATUS_RET(ascir_param::CollectCacheExecution(cache_context, body.call->node, current_axis, this->axis_id,
+                                                           cache_mode, body.call->enable_cache_with_condition),
+                        "Record cache execution failed");
       ss << call;
 
       if (!cache_guard.empty()) {
@@ -860,9 +874,9 @@ static void CreateInnerLoopSizeAndActualSize(const TPipe &tpipe, const Tiler &ti
 }
 
 Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<ascir::AxisId> &current_axis,
-                          std::stringstream &ss) {
+                          std::stringstream &ss, CacheContext &cache_context) {
   if (this->axis_id == af::kIdNone) {
-    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss),
+    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss, cache_context),
                       "Codegen generate body failed when axis id is none");
     return af::SUCCESS;
   }
@@ -871,7 +885,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
   current_axis.push_back(this->axis_id);
   if (axis.type == Axis::Type::kAxisTypeBlockOuter) {
     CreateInnerLoopSizeAndActualSize(tpipe, tiler, axis, ss);
-    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss),
+    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss, cache_context),
                       "Codegen generate body failed when axis type is block outer");
   } else {
     if (axis.type == Axis::Type::kAxisTypeTileInner && FindIndirectLoadOpCall(this, false) != nullptr) {
@@ -882,6 +896,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       ss << "uint32_t " << reduce_dim_a << ";" << std::endl;
     }
     if (axis.type != Axis::Type::kAxisTypeBlockInner && this->is_graph_has_reduce_node) {
+      cache_context.bindings[ReduceCondition::kControl].loop_extent = axis.size;
       ss << "control_dis_enable_cache_a = true;" << std::endl;
       ss << "if ( " << axis.loop_size.Str() << " == 1) {" << std::endl;
       ss << "control_dis_enable_cache_a = false;" << std::endl;
@@ -916,7 +931,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       ss << tiler.CalcFromAxis(axis.id);
     }
     if (this->compute_stage == ComputeStage::kDefault) {
-      GenerateEnCacheCondition(tiler, tpipe, axis, ss);
+      GenerateEnCacheCondition(tiler, tpipe, axis, ss, cache_context);
     }
     if (tpipe.cv_fusion_type != ascir::CubeTemplateType::kUBFuse) {
       std::set<ascir::AxisId> vectorized_axis;
@@ -941,7 +956,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
                              tpipe.cube_output_tensor_id);
       ss << ub_tensor->Str() << "_actual_size = " << tile_inner.actual_size.Str() << ";" << std::endl;
     }
-    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss),
+    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss, cache_context),
                       "Codegen generate body failed for normal loop");
     ss << "}" << std::endl;
     if (IsReduceDoubleTile(tiler, tpipe, this->is_graph_has_reduce_node) && GetReduceType() == "Mean") {
@@ -1015,17 +1030,19 @@ static const Axis &GetTileOutAxis(const Tiler &tiler, const Axis &axis) {
   return axis;
 }
 
-void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, const Axis &axis,
-                                    std::stringstream &ss) const {
+void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, const Axis &axis, std::stringstream &ss,
+                                    CacheContext &cache_context) const {
   (void)tpipe;
   if (!axis.is_split_b) {
     return;
   }
   af::Expression block_in_size = Zero;
+  af::Expression block_in_extent = One;
   for (auto &[id, cur_axis] : tiler.axis_map) {
     (void)id;
     if (cur_axis.type == ascir::Axis::Type::kAxisTypeBlockInner) {
       block_in_size = af::Symbol(cur_axis.axis_size.name.c_str());
+      block_in_extent = cur_axis.size;
       break;
     }
   }
@@ -1037,6 +1054,7 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
     Axis thile_out_axis_another = GetTileOutAxisAnother(tiler, axis);
     for (auto body : this->bodys) {
       if (body.type == LoopType::LOOP) {
+        ascir_param::BindCacheCondition(cache_context, ReduceCondition::kA, axis, tile_out_axis, block_in_extent);
         ss << "bool " << kEnCacheA << " = (" << axis << " < 1) || ((" << tiler.block_dim << " * "
            << block_in_size.Str().get() << " + " << axis << ") % " << tile_out_axis.loop_size << " < 1);" << std::endl;
         break;
@@ -1046,6 +1064,7 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
         continue;
       }
 
+      ascir_param::BindCacheCondition(cache_context, ReduceCondition::kR, axis, thile_out_axis_another, One);
       ss << "bool " << kEnCacheR << " = (" << axis << " < 1) || ((" << axis << ") % "
          << thile_out_axis_another.loop_size << " < 1);" << std::endl;
       break;
@@ -1059,6 +1078,8 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
       }
       if (body.call->exec_condition == af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis &&
           need_create_fused_cond) {
+        ascir_param::BindCacheCondition(cache_context, ascir_param::CacheExecutionMode::kFusedBroadcast, axis,
+                                        tile_out_axis, block_in_size == Zero ? Zero : block_in_extent);
         ss << "bool " << kEnCacheFusedBroadcastAxis << " = (" << axis << " < 1) || ((" << tiler.block_dim << " * "
            << block_in_size.Str().get() << " + " << axis << ") % " << tile_out_axis.loop_size << " < 1);" << std::endl;
         need_create_fused_cond = false;
@@ -1066,6 +1087,8 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
       }
       if (body.call->exec_condition == af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis &&
           need_create_origin_cond) {
+        ascir_param::BindCacheCondition(cache_context, ascir_param::CacheExecutionMode::kOriginBroadcast, axis,
+                                        tile_out_axis, block_in_extent);
         ss << "bool " << kEnCacheOriginBroadcastAxis << " = (" << axis << " < 1);" << std::endl;
         need_create_origin_cond = false;
         continue;
@@ -1077,11 +1100,28 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
 Status Loop::Generate(const Tiler &tiler, const TPipe &tpipe, std::string &result, ComputeStage stage) {
   std::vector<ascir::AxisId> current_axis;
   this->compute_stage = stage;
+  CacheContext::AxisMap cache_axes;
+  for (const auto &[id, axis] : tiler.axis_map) {
+    cache_axes.emplace(id, &axis);
+  }
+  CacheContext cache_context{cache_axes, static_cast<uint32_t>(stage), {}, {}};
+  cache_context.bindings[ReduceCondition::kControl].loop_extent = af::Symbol(2U);  // control 初始为 true。
+  // 当前 Loop 树定义本次发射范围；记录的 stage 清理由公共采集层处理。
+  std::function<void(Loop &)> reset = [&](Loop &loop) {
+    for (const auto &body : loop.bodys) {
+      if (body.type == LoopType::LOOP) {
+        reset(*body.loop);
+      } else {
+        ascir_param::ResetCacheExecutions(body.call->node, cache_context.stage);
+      }
+    }
+  };
+  reset(*this);
   stringstream ss;
   if (this->is_graph_has_reduce_node) {
     ss << "bool control_dis_enable_cache_a = true;" << std::endl;
   }
-  GE_CHK_STATUS_RET(this->GenerateLoop(tiler, tpipe, current_axis, ss), "Generate loop failed");
+  GE_CHK_STATUS_RET(this->GenerateLoop(tiler, tpipe, current_axis, ss, cache_context), "Generate loop failed");
   result = ss.str();
   return af::SUCCESS;
 }

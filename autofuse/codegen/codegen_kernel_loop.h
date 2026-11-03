@@ -18,6 +18,7 @@
 #include "ascgen_log.h"
 #include "ascir_ops_utils.h"
 #include "codegen_api_param/codegen_api_param.h"
+#include "ascir_node_param/ascir_param_builder.h"
 
 namespace codegen {
 // 前向声明，避免循环依赖
@@ -138,7 +139,7 @@ class ApiCall {
   bool enable_cache{false};
   bool is_input_tbuf_contiguous = false;
   bool skip_api_emit{false};
-  std::string enable_cache_with_condition;
+  std::vector<ascir_param::ReduceCacheCondition> enable_cache_with_condition;
   // 用于标记Call节点执行状态
   // broadcast cache场景：在Call节点外生成控制条件
   af::ExecuteCondition exec_condition;
@@ -158,6 +159,7 @@ class ApiCall {
 };
 
 struct Loop {
+  using CacheContext = ascir_param::CacheExecutionContext;
   ascir::AxisId axis_id;
   struct Loop *parent;
   std::vector<LoopBody> bodys;
@@ -183,10 +185,11 @@ struct Loop {
 
  private:
   Status GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<ascir::AxisId> &current_axis,
-                      std::stringstream &ss);
+                      std::stringstream &ss, CacheContext &cache_context);
   Status GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<ascir::AxisId> &current_axis,
-                      std::stringstream &ss);
-  void GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, const Axis &axis, std::stringstream &ss) const;
+                      std::stringstream &ss, CacheContext &cache_context);
+  void GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, const Axis &axis, std::stringstream &ss,
+                                CacheContext &cache_context) const;
   bool IsFindInUsedCalls(const ApiCall *call) const;
   std::string GetReduceType() const;
   bool IsHaveReduceType(const std::string &type) const;

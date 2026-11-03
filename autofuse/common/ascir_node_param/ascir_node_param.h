@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 #include <variant>
 #include <vector>
@@ -20,6 +21,39 @@
 #include "codegen_api_param/codegen_api_param.h"
 
 namespace ascir_param {
+enum class CacheGuardKind { kNone, kOriginBroadcast, kFusedBroadcast };
+
+struct CacheGuardInfo {
+  CacheGuardKind kind{CacheGuardKind::kNone};
+  ge::Expression guard_axis;
+  ge::Expression period;
+  ge::Expression block_inner_extent;
+  ge::Expression loop_extent;
+  bool address_invariant{false};
+  // Only Codegen/scheduler expressions with a proven positive range may set this.
+  bool positive_range_proven{false};
+  bool clip_to_period{true};
+};
+
+enum class CacheExecutionMode { kUnknown, kNoGuard, kOriginBroadcast, kFusedBroadcast, kReduceDoubleTile };
+enum class ReduceCacheCondition { kA, kR, kControl };
+
+struct CacheLoopInfo {
+  int64_t axis_id{-1};
+  ge::Expression axis;
+  ge::Expression extent;
+};
+
+struct CacheExecutionParams {
+  CacheExecutionMode mode{CacheExecutionMode::kUnknown};
+  int64_t call_loop_axis_id{-1};
+  CacheGuardInfo guard;
+  // One record per emitted call. Repeated generation replaces the same stage.
+  uint32_t stage{0U};
+  std::vector<CacheLoopInfo> loops;
+  std::map<ReduceCacheCondition, CacheGuardInfo> reduce_guards;
+};
+
 enum class ParamBuildStatus {
   // ASCIR 参数构建前的默认状态。
   kUnknown,
@@ -142,12 +176,15 @@ struct AscirNodeParams {
   ParamBuildStatus status{ParamBuildStatus::kUnknown};
   // API 专用参数，跳过构建或载荷为空时使用 std::monostate。
   AnySpecificParams specific_params;
+  // Final call-site decision; independent of API-specific build status.
+  std::vector<CacheExecutionParams> cache_executions;
 };
 
 using AscirNodeParamsPtr = std::shared_ptr<AscirNodeParams>;
 
 AscirNodeParamsPtr GetAscirNodeParams(af::AscNodePtr node);
 AscirNodeParamsPtr GetOrCreateAscirNodeParams(af::AscNodePtr node);
+void RecordCacheExecution(AscirNodeParams &params, const CacheExecutionParams &execution);
 const codegen::ReduceSpecificParams &GetCanonicalReduceParams(const ReduceNodeParams &params);
 ge::Expression ResolveForAtt(const ParamExprProduct &expr);
 af::Status ValidateReduceNodeParams(const ReduceNodeParams &params);

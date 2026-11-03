@@ -131,7 +131,12 @@ af::Status RegisterBroadcastAscirNodeParams(const af::AscNodePtr &node) {
   if (existing_params != nullptr) {
     const auto *broadcast_params = GetSpecificParams<BroadcastNodeParams>(*existing_params);
     if (broadcast_params != nullptr && broadcast_params->valid) {
-      return af::SUCCESS;
+      // CopyFrom 可能共享已有 Broadcast 载荷；仅此复用分支需要隔离候选的执行记录。
+      auto params = std::make_shared<AscirNodeParams>();
+      params->api_name = existing_params->api_name;
+      params->status = existing_params->status;
+      params->specific_params = existing_params->specific_params;
+      return RegisterAscirNodeParams(node, params);
     }
   }
   auto params = std::make_shared<AscirNodeParams>();
@@ -598,6 +603,93 @@ af::Status EnrichAscirGraphNodeParams(const af::AscGraph &graph) {
   for (const auto &node : graph.GetAllNodes()) {
     GE_ASSERT_SUCCESS(EnrichAscirNodeParams({node, &graph}));
   }
+  return af::SUCCESS;
+}
+
+void ResetCacheExecutions(const af::AscNodePtr &node, uint32_t stage) {
+  const auto params = GetAscirNodeParams(node);
+  if (params == nullptr) {
+    return;
+  }
+  auto &records = params->cache_executions;
+  records.erase(
+      std::remove_if(records.begin(), records.end(), [stage](const auto &record) { return record.stage == stage; }),
+      records.end());
+}
+
+namespace {
+CacheGuardInfo BuildCacheGuard(CacheGuardKind kind, const ascir::Axis &axis, const ascir::Axis &period,
+                               const ge::Expression &block_inner_extent) {
+  CacheGuardInfo guard;
+  guard.kind = kind;
+  guard.guard_axis = ge::Symbol(axis.name.c_str());
+  guard.loop_extent = axis.size;
+  if (kind == CacheGuardKind::kFusedBroadcast) {
+    guard.period = period.size;
+    guard.block_inner_extent = block_inner_extent;
+  }
+  guard.address_invariant = true;
+  guard.positive_range_proven = true;
+  return guard;
+}
+}  // namespace
+
+void BindCacheCondition(CacheExecutionContext &context, ReduceCacheCondition condition, const ascir::Axis &axis,
+                        const ascir::Axis &period, const ge::Expression &block_inner_extent) {
+  auto guard = BuildCacheGuard(CacheGuardKind::kFusedBroadcast, axis, period, block_inner_extent);
+  guard.clip_to_period = false;
+  context.bindings[condition] = guard;
+}
+
+void BindCacheCondition(CacheExecutionContext &context, CacheExecutionMode mode, const ascir::Axis &axis,
+                        const ascir::Axis &period, const ge::Expression &block_inner_extent) {
+  const auto kind =
+      mode == CacheExecutionMode::kOriginBroadcast ? CacheGuardKind::kOriginBroadcast : CacheGuardKind::kFusedBroadcast;
+  context.broadcast_bindings[mode] = BuildCacheGuard(kind, axis, period, block_inner_extent);
+}
+
+af::Status CollectCacheExecution(const CacheExecutionContext &context, const af::AscNodePtr &node,
+                                 const std::vector<ascir::AxisId> &loop_axes, ascir::AxisId call_axis,
+                                 CacheExecutionMode mode, const std::vector<ReduceCacheCondition> &conditions) {
+  if (node == nullptr) {
+    return af::SUCCESS;
+  }
+  CacheExecutionParams execution;
+  execution.mode = mode;
+  execution.call_loop_axis_id = call_axis;
+  execution.stage = context.stage;
+  for (const auto id : loop_axes) {
+    const auto axis = context.axes.find(id);
+    GE_ASSERT_TRUE(axis != context.axes.end());
+    if (axis->second->type != ascir::Axis::kAxisTypeBlockOuter) {
+      execution.loops.push_back({id, ge::Symbol(axis->second->name.c_str()), axis->second->size});
+    }
+  }
+  if (mode == CacheExecutionMode::kReduceDoubleTile) {
+    for (const auto condition : conditions) {
+      const auto binding = context.bindings.find(condition);
+      if (binding == context.bindings.end()) {
+        execution.mode = CacheExecutionMode::kUnknown;
+      } else {
+        execution.reduce_guards.emplace(*binding);
+      }
+    }
+  } else if (mode == CacheExecutionMode::kOriginBroadcast || mode == CacheExecutionMode::kFusedBroadcast) {
+    const auto binding = context.broadcast_bindings.find(mode);
+    if (binding == context.broadcast_bindings.end()) {
+      execution.mode = CacheExecutionMode::kUnknown;
+    } else {
+      execution.guard = binding->second;
+    }
+  }
+  auto params = GetAscirNodeParams(node);
+  if (params == nullptr) {
+    params = GetOrCreateAscirNodeParams(node);
+    GE_ASSERT_NOTNULL(params);
+    // 单独生成 kernel 时可能没有 API 专用载荷，执行记录与其构建状态独立。
+    params->status = ParamBuildStatus::kSkipped;
+  }
+  RecordCacheExecution(*params, execution);
   return af::SUCCESS;
 }
 }  // namespace ascir_param
