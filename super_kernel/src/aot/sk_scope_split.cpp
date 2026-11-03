@@ -15,8 +15,10 @@
 
 #include "sk_scope_split.h"
 #include "sk_common.h"
+#include "sk_scope_postprocess.h"
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace {
 bool IsExecutableKernelNode(const SuperKernelBaseNode *node) {
@@ -248,6 +250,163 @@ bool EventOnlyStreamRemovePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   SK_LOGI("[EventOnlyStreamRemove] %s pass completed, marked %u event-only stream nodes total", GetName().c_str(),
           markedCount_);
 
+  return true;
+}
+
+// ============ ScopeBoundaryEventRemovePass Implementation ============
+
+ScopeBoundaryEventRemovePass::ScopeBoundaryEventRemovePass(SuperKernelGraph &inputGraph) : ScopeSplitPass(inputGraph) {}
+
+bool ScopeBoundaryEventRemovePass::IsNotifyOrWaitNode(const SuperKernelBaseNode &node) const {
+  // Memory dependency analysis also normalizes Value tasks to these semantic types.
+  return node.GetNodeType() == SkNodeType::NODE_NOTIFY || node.GetNodeType() == SkNodeType::NODE_WAIT;
+}
+
+bool ScopeBoundaryEventRemovePass::CanMoveBoundaryEvent(const SuperKernelBaseNode *node,
+                                                        const std::unordered_set<uint64_t> &scopeNodeIds) const {
+  // Called only for Notify/Wait nodes retained by pre-cancellation.
+  if (node->GetNodeType() == SkNodeType::NODE_WAIT) {
+    return true;
+  }
+  // Keep Notify when an internal Wait depends on it, preserving that Wait's cancellation.
+  for (const auto waitId : node->GetCorrespondingWaitNodeIds()) {
+    if (scopeNodeIds.count(waitId) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ScopeBoundaryEventRemovePass::HasCapacityForBoundaryRemoval(const std::vector<SuperKernelBaseNode *> &scopeNodes,
+                                                                 const std::unordered_set<uint64_t> &headEvents,
+                                                                 const std::unordered_set<uint64_t> &tailEvents,
+                                                                 uint64_t removedNodeId) const {
+  std::unordered_map<uint32_t, ScopeStreamInfo> streams;
+  for (const auto *node : scopeNodes) {
+    const uint64_t nodeId = node->GetNodeId();
+    const uint32_t streamIdx = node->GetStreamIdxInGraph();
+    if (nodeId == removedNodeId || headEvents.count(nodeId) != 0 || tailEvents.count(nodeId) != 0) {
+      continue;
+    }
+    auto &stream = streams[streamIdx];
+    stream.streamIdx = streamIdx;
+    if (stream.nodeSize == 0) {
+      stream.headNodeIdx = nodeId;
+    }
+    stream.tailNodeIdx = nodeId;
+    ++stream.nodeSize;
+  }
+  std::vector<ScopeStreamInfo> streamInfos;
+  for (const auto &entry : streams) {
+    streamInfos.push_back(entry.second);
+  }
+  std::sort(streamInfos.begin(), streamInfos.end(),
+            [](const ScopeStreamInfo &a, const ScopeStreamInfo &b) { return a.streamIdx < b.streamIdx; });
+  return SuperKernelScopePostProcessor(graph_).HasSufficientTaskSlots(streamInfos);
+}
+
+void ScopeBoundaryEventRemovePass::CollectMovableBoundaryEvents(
+    const std::vector<SuperKernelBaseNode *> &boundaryNodes, const std::unordered_set<uint64_t> &scopeNodeIds,
+    std::unordered_set<uint64_t> &headEvents, std::unordered_set<uint64_t> &tailEvents,
+    const std::vector<SuperKernelBaseNode *> &scopeNodes,
+    const std::unordered_set<SuperKernelBaseNode *> &retained) const {
+  for (auto *node : boundaryNodes) {
+    if (!IsNotifyOrWaitNode(*node) || retained.count(node) == 0) {
+      break;
+    }
+    if (!CanMoveBoundaryEvent(node, scopeNodeIds)) {
+      break;
+    }
+    if (!HasCapacityForBoundaryRemoval(scopeNodes, headEvents, tailEvents, node->GetNodeId())) {
+      SK_LOGD("[ScopeBoundaryEventRemove] Keep head event %lu to preserve scope task slots", node->GetNodeId());
+      break;
+    }
+    headEvents.insert(node->GetNodeId());
+  }
+  for (auto it = boundaryNodes.rbegin(); it != boundaryNodes.rend(); ++it) {
+    const auto *node = *it;
+    if (!IsNotifyOrWaitNode(*node) || retained.count(*it) == 0) {
+      break;
+    }
+    if (!CanMoveBoundaryEvent(node, scopeNodeIds)) {
+      break;
+    }
+    if (!HasCapacityForBoundaryRemoval(scopeNodes, headEvents, tailEvents, node->GetNodeId())) {
+      SK_LOGD("[ScopeBoundaryEventRemove] Keep tail event %lu to preserve scope task slots", node->GetNodeId());
+      break;
+    }
+    tailEvents.insert(node->GetNodeId());
+  }
+}
+
+uint32_t ScopeBoundaryEventRemovePass::ProcessScopeBoundaryEvents(SuperKernelScopeInfo &scope) {
+  if (scope.GetNodes().empty()) {
+    return 0;
+  }
+
+  std::vector<SuperKernelBaseNode *> nodes;
+  for (auto *node : scope.GetNodes()) {
+    if (node != nullptr) {
+      nodes.push_back(node);
+    }
+  }
+  std::unordered_set<uint64_t> headEvents;
+  std::unordered_set<uint64_t> tailEvents;
+  if (!HasCapacityForBoundaryRemoval(nodes, headEvents, tailEvents)) {
+    return 0;
+  }
+
+  const auto filteredNodes = FilterCancelledNodes(nodes);
+  const std::unordered_set<SuperKernelBaseNode *> retainedNodes(filteredNodes.begin(), filteredNodes.end());
+  // Cancellation is read-only: native slots and scanning barriers remain in place.
+  std::unordered_map<uint32_t, std::vector<SuperKernelBaseNode *>> streamNodes;
+  std::unordered_set<uint64_t> scopeNodeIds;
+  for (auto *node : nodes) {
+    streamNodes[node->GetStreamIdxInGraph()].push_back(node);
+    scopeNodeIds.insert(node->GetNodeId());
+  }
+
+  std::vector<uint32_t> streamOrder;
+  for (const auto &pair : streamNodes) {
+    streamOrder.push_back(pair.first);
+  }
+  std::sort(streamOrder.begin(), streamOrder.end());
+
+  for (const auto streamIdx : streamOrder) {
+    CollectMovableBoundaryEvents(streamNodes.at(streamIdx), scopeNodeIds, headEvents, tailEvents, nodes, retainedNodes);
+  }
+
+  if (headEvents.empty() && tailEvents.empty()) {
+    return 0;
+  }
+
+  uint32_t removedCount = 0;
+  std::vector<SuperKernelBaseNode *> remaining;
+  for (auto *node : nodes) {
+    const bool isHead = headEvents.count(node->GetNodeId()) != 0;
+    const bool isTail = tailEvents.count(node->GetNodeId()) != 0;
+    if (!isHead && !isTail) {
+      remaining.push_back(node);
+      continue;
+    }
+    node->SetIsFusible(false);
+    node->SetFusionFailReason(FusionFailReason::ISOLATED_EVENT);
+    ++removedCount;
+    SK_LOGD("[ScopeBoundaryEventRemove] Boundary event %lu removed from scope (head=%d, tail=%d)", node->GetNodeId(),
+            isHead, isTail);
+  }
+  scope.SetNodes(std::move(remaining));
+  RebuildStreamInfos(scope);
+  return removedCount;
+}
+
+bool ScopeBoundaryEventRemovePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
+  uint32_t removedCount = 0;
+  for (auto &scope : scopes) {
+    removedCount += ProcessScopeBoundaryEvents(scope);
+  }
+  SK_LOGI("[ScopeBoundaryEventRemove] Removed %u boundary event nodes without re-splitting", removedCount);
+  PrintScopeResults(scopes, graph_, GetName().c_str());
   return true;
 }
 
@@ -1546,6 +1705,8 @@ SuperKernelScopeSplitter::SuperKernelScopeSplitter(SuperKernelGraph &inputGraph,
       passes_.push_back(std::make_unique<DeadlockRefinePass>(inputGraph, *opts_));
     }
     passes_.push_back(std::make_unique<EventOnlyStreamRemovePass>(inputGraph));
+    // Trim boundaries only after event-only stream removal has converged; keep the remaining partition intact.
+    passes_.push_back(std::make_unique<ScopeBoundaryEventRemovePass>(inputGraph));
   }
 
   for (auto &pass : passes_) {

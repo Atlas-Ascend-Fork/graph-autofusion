@@ -94,6 +94,8 @@ bool ShouldCancelNotify(const SuperKernelBaseNode &node) {
   return !node.GetCorrespondingWaitNodeIds().empty();
 }
 
+}  // namespace
+
 std::vector<SuperKernelBaseNode *> FilterCancelledNodes(const std::vector<SuperKernelBaseNode *> &nodes) {
   // Constraints:
   // 1) Within one scope, each event has at most one NOTIFY and may have multiple WAIT nodes.
@@ -149,6 +151,7 @@ std::vector<SuperKernelBaseNode *> FilterCancelledNodes(const std::vector<SuperK
   return filteredNodes;
 }
 
+namespace {
 bool EnsureStreamCapacity(const ScopeStreamInfo &streamInfo, const std::vector<aclmdlRITaskParams> &customParams) {
   SK_LOGI("stream capacity check: streamId=%u, nodeSize=%lu, customParamSize=%zu", streamInfo.streamIdx,
           streamInfo.nodeSize, customParams.size());
@@ -563,14 +566,27 @@ bool SuperKernelScopePostProcessor::ApplyEventMemoryForFilteredNodes(
   return true;
 }
 
-bool SuperKernelScopePostProcessor::CollectStreamBoundaryPlans(const SuperKernelScopeInfo &scopeInfo,
+bool SuperKernelScopePostProcessor::HasSufficientTaskSlots(const std::vector<ScopeStreamInfo> &scopeStreamInfos) {
+  if (scopeStreamInfos.empty()) {
+    return false;
+  }
+  std::vector<StreamPostPlan> plans(scopeStreamInfos.size());
+  uint32_t needFrontWaitCount = 0;
+  uint32_t mainStreamIdx = INVALID_STREAM_ID;
+  std::vector<uint32_t> subStreamOrder;
+  ScopeExtInfo extInfo;
+  return CollectStreamBoundaryPlans(scopeStreamInfos, plans, needFrontWaitCount) &&
+         GetMainAndSubStreamOrder(graph, plans, scopeStreamInfos, extInfo, needFrontWaitCount, mainStreamIdx,
+                                  subStreamOrder);
+}
+
+bool SuperKernelScopePostProcessor::CollectStreamBoundaryPlans(const std::vector<ScopeStreamInfo> &scopeStreamInfos,
                                                                std::vector<StreamPostPlan> &plans,
                                                                uint32_t &needFrontWaitCount) {
-  uint32_t streamCount = scopeInfo.GetScopeStreamInfos().size();
+  uint32_t streamCount = scopeStreamInfos.size();
   for (uint32_t curStreamIdx = 0; curStreamIdx < streamCount; ++curStreamIdx) {
-    SK_LOGI("collect stream info: streamIdx=%u, nodeSize=%lu", curStreamIdx,
-            scopeInfo.GetScopeStreamInfos()[curStreamIdx].nodeSize);
-    const auto &scopeStreamInfo = scopeInfo.GetScopeStreamInfos()[curStreamIdx];
+    SK_LOGI("collect stream info: streamIdx=%u, nodeSize=%lu", curStreamIdx, scopeStreamInfos[curStreamIdx].nodeSize);
+    const auto &scopeStreamInfo = scopeStreamInfos[curStreamIdx];
 
     auto *headNode = graph.GetNodeById(scopeStreamInfo.headNodeIdx);
     auto *tailNode = graph.GetNodeById(scopeStreamInfo.tailNodeIdx);
@@ -691,7 +707,7 @@ bool SuperKernelScopePostProcessor::PostProcess(SuperKernelScopeInfo &scopeInfo)
   std::vector<SuperKernelBaseNode *> needUpdateNodes;
 
   // Step 5: Collect stream boundary plans
-  if (!CollectStreamBoundaryPlans(scopeInfo, plans, needFrontWaitCount)) {
+  if (!CollectStreamBoundaryPlans(scopeInfo.GetScopeStreamInfos(), plans, needFrontWaitCount)) {
     scopeInfo.MutableExtInfo().processStatus = ScopeProcessStatus::UNRECOVERABLE_FAIL;
     return false;
   }
