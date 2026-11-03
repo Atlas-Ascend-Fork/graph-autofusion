@@ -124,7 +124,7 @@ bool LockDetector::CheckWaitResourceBranches(const SuperKernelBaseNode &waitNode
                                              const ScopeConcurrentRanges *precomputedRanges,
                                              ResourceConflictInfo *conflictInfo) {
   return waitResources_.CheckWaitResourceBranches(waitNode, rootScopeId, rootDemand, rootNodes, initialResidents,
-                                                 precomputedRanges, conflictInfo);
+                                                  precomputedRanges, conflictInfo);
 }
 
 bool LockDetector::ShouldBypassValueWaitDeadlock(const SuperKernelBaseNode &curNode) const {
@@ -189,8 +189,8 @@ void ScopeConcurrentRangeAnalyzer::CalculateRightConcurrentBoundary(ConcurrentRa
 
 // Resolve scope boundaries and initialize the candidate's per-stream windows.
 SuperKernelBaseNode *ScopeConcurrentRangeAnalyzer::GetScopeBoundary(const ConcurrentRangeState &rangeContext,
-                                                                     uint32_t scopeId, uint32_t streamId,
-                                                                     bool first) const {
+                                                                    uint32_t scopeId, uint32_t streamId,
+                                                                    bool first) const {
   if (scopeId == CANDIDATE_CONCURRENT_SCOPE) {
     const auto boundaryIt = rangeContext.candidateBoundaries.find(streamId);
     if (boundaryIt == rangeContext.candidateBoundaries.end()) {
@@ -209,7 +209,7 @@ SuperKernelBaseNode *ScopeConcurrentRangeAnalyzer::GetScopeBoundary(const Concur
 }
 
 uint32_t ScopeConcurrentRangeAnalyzer::GetTrackedScopeId(const ConcurrentRangeState &rangeContext,
-                                                          const SuperKernelBaseNode &node) const {
+                                                         const SuperKernelBaseNode &node) const {
   if (std::any_of(rangeContext.candidateNodes->begin(), rangeContext.candidateNodes->end(),
                   [&](const auto *member) { return member->GetNodeId() == node.GetNodeId(); })) {
     return CANDIDATE_CONCURRENT_SCOPE;
@@ -364,9 +364,9 @@ void ScopeConcurrentRangeAnalyzer::AppendScopeVertices(const ConcurrentRangeStat
 }
 
 void ScopeConcurrentRangeAnalyzer::AppendConcurrentStreamVertex(const ConcurrentRangeState &rangeContext,
-                                                                 const SuperKernelBaseNode &node, bool left,
-                                                                 const ConcurrentVertex &vertex,
-                                                                 std::deque<ConcurrentVertex> &pending) const {
+                                                                const SuperKernelBaseNode &node, bool left,
+                                                                const ConcurrentVertex &vertex,
+                                                                std::deque<ConcurrentVertex> &pending) const {
   const auto scopeId = GetTrackedScopeId(rangeContext, node);
   const auto scopeIt = scopeInfos_.find(scopeId);
   if (scopeIt != scopeInfos_.end() && scopeIt->second.streamIds.size() > 1 && vertex.activeScopeId != scopeId) {
@@ -586,14 +586,13 @@ bool WaitResourceDependencyAnalyzer::ResourceSearchHasRisk(const ResourceSearchS
     externalVec = std::max(externalVec, demand.vectorCoreNum);
   }
   const bool hasRisk = !HasEnoughDeviceCores(state.residentDemand.cubeCoreNum, state.residentDemand.vectorCoreNum,
-                                            externalCube, externalVec);
+                                             externalCube, externalVec);
   if (hasRisk) {
     if (conflictInfo != nullptr) {
       const bool cubeRisk = deviceRealCubeNum < 0 ||
                             state.residentDemand.cubeCoreNum + externalCube > static_cast<uint64_t>(deviceRealCubeNum);
-      const bool vectorRisk = deviceRealVecNum < 0 ||
-                              state.residentDemand.vectorCoreNum + externalVec >
-                                  static_cast<uint64_t>(deviceRealVecNum);
+      const bool vectorRisk = deviceRealVecNum < 0 || state.residentDemand.vectorCoreNum + externalVec >
+                                                          static_cast<uint64_t>(deviceRealVecNum);
       for (const auto scopeId : state.residentScopes) {
         const auto scopeIt = scopeInfos_.find(scopeId);
         if (scopeId != rootScopeId && scopeIt != scopeInfos_.end() &&
@@ -709,8 +708,8 @@ bool WaitResourceDependencyAnalyzer::CanStartWaitScope(uint16_t scopeId, const S
 }
 
 void WaitResourceDependencyAnalyzer::QueueStartedScopeBranch(uint16_t scopeId, const ScopeRuntimeInfo &scope,
-                                                              const ResourceSearchState &state,
-                                                              std::vector<ResourceSearchState> &branches) const {
+                                                             const ResourceSearchState &state,
+                                                             std::vector<ResourceSearchState> &branches) const {
   ResourceSearchState started = state;
   started.residentScopes.insert(scopeId);
   started.residentDemand.cubeCoreNum += scope.coreInfo.GetCubeNum();
@@ -733,7 +732,7 @@ void WaitResourceDependencyAnalyzer::QueueStartedScopeBranch(uint16_t scopeId, c
 }
 
 void WaitResourceDependencyAnalyzer::ExpandUnstartedScope(uint16_t scopeId, const ScopeRuntimeInfo &scope,
-                                                           ResourceSearchState &state) const {
+                                                          ResourceSearchState &state) const {
   state.externalScopes[scopeId] = {scope.coreInfo.GetCubeNum(), scope.coreInfo.GetVectorNum()};
   for (const auto &[headStream, headId] : scope.headNodeIds) {
     const auto *head = graph_->GetNodeById(headId);
@@ -891,7 +890,7 @@ bool LockDetector::CheckScopeDeadlock(const ScopeRuntimeInfo &scopeInfo,
 }
 
 bool LockDetector::HasDeadlockPredecessor(SuperKernelBaseNode *curNode,
-                                         std::unordered_set<uint16_t> &expandedScopeIds) {
+                                          std::unordered_set<uint16_t> &expandedScopeIds) {
   if (curNode->GetPreNodeId() == INVALID_TASK_ID) {
     return false;
   }
@@ -1032,8 +1031,8 @@ bool LockDetector::CheckNotifyNodeDeadlock(SuperKernelBaseNode *preNode,
 }
 
 // LockDetector: maintain core demand and visited nodes while checking the current scope.
-void LockDetector::RecordResourceConflict(uint32_t externalCubeNum, uint32_t externalVecNum,
-                                          uint64_t cubeSourceNodeId, uint64_t vectorSourceNodeId) {
+void LockDetector::RecordResourceConflict(uint32_t externalCubeNum, uint32_t externalVecNum, uint64_t cubeSourceNodeId,
+                                          uint64_t vectorSourceNodeId) {
   resourceConflictInfo_ = {};
   const auto addSource = [this](uint64_t nodeId) {
     const auto *node = graph_->GetNodeById(nodeId);
@@ -1468,12 +1467,11 @@ std::vector<const SuperKernelScopeInfo *> ScopeDeadlockDetector::CollectWaitScop
     for (const auto *node : scope.GetNodes()) {
       memberIds.insert(node->GetNodeId());
     }
-    const bool hasCheckableWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(),
-                                              [this, &memberIds](const auto *node) {
-                                                return node->GetNodeType() == SkNodeType::NODE_WAIT &&
-                                                       !waitResources_.ShouldBypassValueWaitDeadlock(*node) &&
-                                                       !IsWaitNotifyInScope(*node, memberIds);
-                                              });
+    const bool hasCheckableWait =
+        std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(), [this, &memberIds](const auto *node) {
+          return node->GetNodeType() == SkNodeType::NODE_WAIT && !waitResources_.ShouldBypassValueWaitDeadlock(*node) &&
+                 !IsWaitNotifyInScope(*node, memberIds);
+        });
     if (scope.GetScopeCoreInfo().IsValid() && hasCheckableWait) {
       candidates.push_back(&scope);
     }
@@ -1513,8 +1511,8 @@ bool ScopeDeadlockDetector::CheckSelectedScopeResourceBranches(
                                                                 scope->GetScopeCoreInfo().GetVectorNum()};
     for (const auto *node : scope->GetNodes()) {
       if (node->GetNodeType() == SkNodeType::NODE_WAIT && !waitResources_.ShouldBypassValueWaitDeadlock(*node) &&
-          !waitResources_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents,
-                                                    &ranges, conflictInfo)) {
+          !waitResources_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents, &ranges,
+                                                    conflictInfo)) {
         riskWaitId = node->GetNodeId();
         riskScope = scope;
         SK_LOGI("[ParallelResource] Risk Wait %lu in scope %u; %zu resident scopes", riskWaitId, scopeId,

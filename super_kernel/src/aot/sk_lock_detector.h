@@ -187,7 +187,11 @@ class WaitResourceDependencyAnalyzer {
                                  const std::unordered_map<uint16_t, ScopeRuntimeInfo> &scopeInfos,
                                  const ScopeConcurrentRangeAnalyzer &ranges, const int64_t &deviceCubeNum,
                                  const int64_t &deviceVecNum)
-      : graph_(&graph), opts_(opts), scopeInfos_(scopeInfos), ranges_(ranges), deviceRealCubeNum(deviceCubeNum),
+      : graph_(&graph),
+        opts_(opts),
+        scopeInfos_(scopeInfos),
+        ranges_(ranges),
+        deviceRealCubeNum(deviceCubeNum),
         deviceRealVecNum(deviceVecNum) {}
 
   bool CheckWaitResourceBranches(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
@@ -200,24 +204,24 @@ class WaitResourceDependencyAnalyzer {
 
  private:
   struct ResourceSearchState {
-    std::vector<uint64_t> pendingNodeIds;  // 待沿前驱或Wait对应Notify追踪的节点ID。
-    std::unordered_set<uint64_t> visited;  // 当前分支已处理的节点ID。
-    std::unordered_set<uint16_t> residentScopes;  // 假定已经启动并占用核资源的scope。
-    std::unordered_set<uint16_t> expandedWaitScopes;  // 已将内部Wait的外部Notify加入搜索的scope。
+    std::vector<uint64_t> pendingNodeIds;                    // 待沿前驱或Wait对应Notify追踪的节点ID。
+    std::unordered_set<uint64_t> visited;                    // 当前分支已处理的节点ID。
+    std::unordered_set<uint16_t> residentScopes;             // 假定已经启动并占用核资源的scope。
+    std::unordered_set<uint16_t> expandedWaitScopes;         // 已将内部Wait的外部Notify加入搜索的scope。
     std::unordered_map<uint32_t, uint16_t> occupiedStreams;  // 流ID到占用该流的常驻scope ID。
-    std::unordered_map<uint32_t, CoreDemand> externalByStream;  // 未归入scope的外部流需求上界。
-    std::unordered_map<uint32_t, uint64_t> cubeSourceNodeByStream;  // 流ID -> cube需求上界的节点ID。
+    std::unordered_map<uint32_t, CoreDemand> externalByStream;        // 未归入scope的外部流需求上界。
+    std::unordered_map<uint32_t, uint64_t> cubeSourceNodeByStream;    // 流ID -> cube需求上界的节点ID。
     std::unordered_map<uint32_t, uint64_t> vectorSourceNodeByStream;  // 流ID -> vector需求上界的节点ID。
-    std::unordered_map<uint16_t, CoreDemand> externalScopes;  // 尚未启动的外部scope需求。
-    CoreDemand residentDemand;  // 当前分支所有常驻scope的核数之和。
+    std::unordered_map<uint16_t, CoreDemand> externalScopes;          // 尚未启动的外部scope需求。
+    CoreDemand residentDemand;                                        // 当前分支所有常驻scope的核数之和。
   };
 
   // WAIT资源依赖搜索、分支展开与核需求判定。
   void QueueScopeWaitNotifies(uint16_t scopeId, ResourceSearchState &state) const;
   bool ResourceSearchHasRisk(const ResourceSearchState &state, uint16_t rootScopeId,
                              ResourceConflictInfo *conflictInfo) const;
-  void PrepareResourceSearch(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
-                             const CoreDemand &rootDemand, const std::vector<SuperKernelBaseNode *> &rootNodes,
+  void PrepareResourceSearch(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId, const CoreDemand &rootDemand,
+                             const std::vector<SuperKernelBaseNode *> &rootNodes,
                              const std::unordered_set<uint16_t> &initialResidents, ScopeConcurrentRanges &ranges,
                              ResourceSearchState &state, const ScopeConcurrentRanges *precomputedRanges);
   bool CanStartWaitScope(uint16_t scopeId, const ScopeRuntimeInfo &scope, uint16_t rootScopeId,
