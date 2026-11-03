@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef __RUNTIME_RT_INNER_TASK_H_STUB__
-#define __RUNTIME_RT_INNER_TASK_H_STUB__
+#ifndef __RUNTIME_RT_MODEL_H_STUB__
+#define __RUNTIME_RT_MODEL_H_STUB__
 
 #include "base.h"
 
@@ -18,4 +18,4 @@ typedef void *rtTask_t;
 rtError_t rtModelTaskCopyArgsDeviceBuffer(rtTask_t task, void **devBufferAddr, size_t *size);
 }
 
-#endif  // __RUNTIME_RT_INNER_TASK_H_STUB__
+#endif  // __RUNTIME_RT_MODEL_H_STUB__

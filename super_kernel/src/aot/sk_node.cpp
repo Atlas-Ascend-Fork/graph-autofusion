@@ -35,7 +35,7 @@
 #include "sk_common.h"
 #include "sk_options_manager.h"
 #include "runtime/rt_external_kernel.h"
-#include "runtime/rt_inner_task.h"
+#include "runtime/rt_model.h"
 #include "kernel.h"
 #include "base.h"
 

@@ -21,7 +21,7 @@
 #include "exception_fixture.h"
 #include "runtime/kernel.h"
 #include "runtime/base.h"
-#include "runtime/rt_inner_task.h"
+#include "runtime/rt_model.h"
 #include <cstring>
 #include <cstdio>
 extern "C" {
