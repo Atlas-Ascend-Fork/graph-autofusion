@@ -141,8 +141,6 @@ For undefined `testing::*` symbols, check that the gtest core library is linked.
 assertions, check model destruction versus stub reset ordering. Task types, disabled states,
 parameter update counts, and synchronization addresses in assertions help identify rewriting differences.
 
-Two production problem reproductions are retained: when a mixed pipeline's final task declares
-both wait/set capabilities, early-start may create synchronization without an associated node
-and fail; when a single kernel exceeds the device core limit, scope splitting may not terminate.
-The latter test, `DISABLED_RuntimeCoreLimitKeepsOversizedKernelOutsideFusion`, is disabled by default
-and must not be counted as passing. Do not enable it in regular runs before fixing production code.
+One production problem reproduction is retained: when a single kernel exceeds the device core limit,
+scope splitting may not terminate. The test `DISABLED_RuntimeCoreLimitKeepsOversizedKernelOutsideFusion`
+is disabled by default and must not be counted as passing. Do not enable it in regular runs before fixing production code.
