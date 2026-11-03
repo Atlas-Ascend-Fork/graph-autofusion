@@ -2535,6 +2535,48 @@ TEST_F(SkTaskBuilderTest, ApplyEarlyStartSyncPass_RewritesAicAndAivSyncInfo) {
   EXPECT_TRUE(builder->taskSyncInfos_[3].vecRecvInfo.empty());
 }
 
+TEST_F(SkTaskBuilderTest, ApplyEarlyStartSyncPass_FirstAicQueueTaskAbsorbsReceiveSync) {
+  auto *aivProducer = CreateKernelNodeEx(43005, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIV_ONLY);
+  auto *aicWait = CreateKernelNodeEx(43006, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
+  aicWait->nodeInfos.kernelInfos.capBits.earlyStartWaitFlag = true;
+
+  std::vector<SuperKernelBaseNode *> tasks = {aivProducer, aicWait};
+  builder->taskSyncInfos_.clear();
+  builder->taskSyncInfos_.resize(tasks.size());
+  builder->taskSyncInfos_[0].queueType = SkQueueType::AIV;
+  builder->taskSyncInfos_[1].queueType = SkQueueType::AIC;
+  builder->taskSyncInfos_[1].cubRecvInfo[0] = SyncDirection::VEC_TO_CUB;
+
+  ASSERT_TRUE(builder->ApplyEarlyStartSyncPass(tasks));
+
+  const auto &aicWaitInfo = builder->taskSyncInfos_[1];
+  EXPECT_EQ(aicWaitInfo.earlyStartInfo.relatedWaitNode, aicWait);
+  EXPECT_TRUE(aicWaitInfo.earlyStartInfo.CheckSyncMask(SkEarlyStartMask::AIV_TO_AIC_WAIT));
+  EXPECT_TRUE(aicWaitInfo.earlyStartInfo.CheckFuncMask(SkEarlyStartMask::AIV_TO_AIC_WAIT));
+  EXPECT_TRUE(aicWaitInfo.cubRecvInfo.empty());
+}
+
+TEST_F(SkTaskBuilderTest, ApplyEarlyStartSyncPass_FirstAivQueueTaskAbsorbsReceiveSync) {
+  auto *aicProducer = CreateKernelNodeEx(43007, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
+  auto *aivWait = CreateKernelNodeEx(43008, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIV_ONLY);
+  aivWait->nodeInfos.kernelInfos.capBits.earlyStartWaitFlag = true;
+
+  std::vector<SuperKernelBaseNode *> tasks = {aicProducer, aivWait};
+  builder->taskSyncInfos_.clear();
+  builder->taskSyncInfos_.resize(tasks.size());
+  builder->taskSyncInfos_[0].queueType = SkQueueType::AIC;
+  builder->taskSyncInfos_[1].queueType = SkQueueType::AIV;
+  builder->taskSyncInfos_[1].vecRecvInfo[0] = SyncDirection::CUB_TO_VEC;
+
+  ASSERT_TRUE(builder->ApplyEarlyStartSyncPass(tasks));
+
+  const auto &aivWaitInfo = builder->taskSyncInfos_[1];
+  EXPECT_EQ(aivWaitInfo.earlyStartInfo.relatedWaitNode, aivWait);
+  EXPECT_TRUE(aivWaitInfo.earlyStartInfo.CheckSyncMask(SkEarlyStartMask::AIC_TO_AIV_WAIT));
+  EXPECT_TRUE(aivWaitInfo.earlyStartInfo.CheckFuncMask(SkEarlyStartMask::AIC_TO_AIV_WAIT));
+  EXPECT_TRUE(aivWaitInfo.vecRecvInfo.empty());
+}
+
 TEST_F(SkTaskBuilderTest, ApplyEarlyStartSyncPass_RewritesPreviousCrossSyncWithoutSetFlag) {
   auto *prev = CreateKernelNodeEx(43101, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
   auto *cur = CreateKernelNodeEx(43102, 0, INVALID_TASK_ID, INVALID_TASK_ID, SkKernelType::AIC_ONLY);
