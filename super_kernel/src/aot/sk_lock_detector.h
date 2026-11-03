@@ -98,9 +98,9 @@ class ScopeConcurrentRangeAnalyzer {
 
   std::unordered_map<uint32_t, ConcurrentNodeRange> CalculateScopeConcurrentRanges(
       const std::vector<SuperKernelBaseNode *> &candidate, uint16_t candidateScopeId) const;
-  bool CanRunTogether(uint16_t firstScopeId, uint16_t secondScopeId, const ScopeConcurrentRanges &ranges) const;
   bool IsBeforeConcurrentRange(const SuperKernelBaseNode &node,
                                const std::unordered_map<uint32_t, ConcurrentNodeRange> &range) const;
+  bool CanRunTogether(uint16_t firstScopeId, uint16_t secondScopeId, const ScopeConcurrentRanges &ranges) const;
   bool HasIntersection(const std::unordered_set<uint32_t> &lhsStreams,
                        const std::unordered_set<uint32_t> &rhsStreams) const;
 
@@ -129,16 +129,25 @@ class ScopeConcurrentRangeAnalyzer {
     }
   };
 
-  void InitializeConcurrentRangeState(const std::vector<SuperKernelBaseNode *> &candidate, uint16_t candidateScopeId,
-                                      ConcurrentRangeState &rangeContext) const;
+  // 计算入口依次沿左右依赖收紧区间。
   void CalculateLeftConcurrentBoundary(ConcurrentRangeState &rangeContext) const;
   void CalculateRightConcurrentBoundary(ConcurrentRangeState &rangeContext) const;
-  void TraverseConcurrentBoundary(ConcurrentRangeState &rangeContext, bool left) const;
+
+  // 查找scope边界并初始化候选节点在各流上的区间。
+  SuperKernelBaseNode *GetScopeBoundary(const ConcurrentRangeState &rangeContext, uint32_t scopeId, uint32_t streamId,
+                                        bool first) const;
+  uint32_t GetTrackedScopeId(const ConcurrentRangeState &rangeContext, const SuperKernelBaseNode &node) const;
+  void InitializeConcurrentRangeState(const std::vector<SuperKernelBaseNode *> &candidate, uint16_t candidateScopeId,
+                                      ConcurrentRangeState &rangeContext) const;
+
+  // 根据跨流scope和Notify/Wait依赖收紧区间。
   void TightenConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t streamId,
                                  const SuperKernelBaseNode *boundary, bool left) const;
   void TightenScopeConcurrentBoundary(ConcurrentRangeState &rangeContext, uint32_t scopeId, uint32_t entryStreamId,
                                       bool left, bool eventBoundary) const;
   void UpdateConcurrentBoundary(ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex, bool left) const;
+
+  // 在流内及Notify/Wait边之间扩展遍历顶点。
   void QueueConcurrentBoundarySeeds(const ConcurrentRangeState &rangeContext, bool left,
                                     std::deque<ConcurrentVertex> &pending) const;
   void AppendScopeVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex, bool left,
@@ -150,9 +159,7 @@ class ScopeConcurrentRangeAnalyzer {
                              std::deque<ConcurrentVertex> &pending) const;
   void AppendReverseVertices(const ConcurrentRangeState &rangeContext, const ConcurrentVertex &vertex,
                              std::deque<ConcurrentVertex> &pending) const;
-  uint32_t GetTrackedScopeId(const ConcurrentRangeState &rangeContext, const SuperKernelBaseNode &node) const;
-  SuperKernelBaseNode *GetScopeBoundary(const ConcurrentRangeState &rangeContext, uint32_t scopeId, uint32_t streamId,
-                                        bool first) const;
+  void TraverseConcurrentBoundary(ConcurrentRangeState &rangeContext, bool left) const;
 
   SuperKernelGraph *graph_;
   const std::unordered_map<uint16_t, ScopeRuntimeInfo> &scopeInfos_;  // scope ID -> 运行时信息；由调用方维护。
@@ -194,6 +201,9 @@ class WaitResourceDependencyAnalyzer {
     CoreDemand residentDemand;  // 当前分支所有常驻scope的核数之和。
   };
 
+  // WAIT资源依赖搜索、分支展开与核需求判定。
+  void QueueScopeWaitNotifies(uint16_t scopeId, ResourceSearchState &state) const;
+  bool ResourceSearchHasRisk(const ResourceSearchState &state) const;
   void PrepareResourceSearch(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
                              const CoreDemand &rootDemand, const std::vector<SuperKernelBaseNode *> &rootNodes,
                              const std::unordered_set<uint16_t> &initialResidents, ScopeConcurrentRanges &ranges,
@@ -208,8 +218,6 @@ class WaitResourceDependencyAnalyzer {
                                  const std::vector<SuperKernelBaseNode *> &rootNodes,
                                  const ScopeConcurrentRanges &ranges, ResourceSearchState &state,
                                  std::vector<ResourceSearchState> &branches);
-  void QueueScopeWaitNotifies(uint16_t scopeId, ResourceSearchState &state) const;
-  bool ResourceSearchHasRisk(const ResourceSearchState &state) const;
 
   SuperKernelGraph *graph_;
   const SuperKernelOptionsManager *opts_;  // 可为空；用于判断无配对Value Wait的绕过策略。
@@ -332,42 +340,31 @@ class LockDetector {
   using ScopeRuntimeInfo = ::ScopeRuntimeInfo;
 
   void Init(SuperKernelGraph &graph);
-
   std::pair<uint64_t, uint64_t> GetAvailableCores(bool isSuperKernel) const;
-
   bool IsInSKStream(const SuperKernelBaseNode &node) const;
-
   void UpdateNodeInfo(const SuperKernelBaseNode &node);
 
+  // 单scope前驱依赖死锁检查。
+  bool HasDeadlock(SuperKernelBaseNode *curNode, std::unordered_set<uint16_t> &expandedScopeIds);
+  bool CheckScopeDeadlock(const ScopeRuntimeInfo &scopeInfo, std::unordered_set<uint16_t> &expandedScopeIds);
+  bool HasDeadlockPredecessor(SuperKernelBaseNode *curNode, std::unordered_set<uint16_t> &expandedScopeIds);
+  bool CheckKernelNodeDeadlock(SuperKernelBaseNode *preNode, std::unordered_set<uint16_t> &expandedScopeIds);
+  bool CheckWaitNodeDeadlock(SuperKernelBaseNode *preNode, std::unordered_set<uint16_t> &expandedScopeIds);
+  bool CheckNotifyNodeDeadlock(SuperKernelBaseNode *preNode, std::unordered_set<uint16_t> &expandedScopeIds);
+
+  // 核需求、已访问节点与当前scope的流范围。
+  bool HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSuperKernel);
+  void RollbackVisitedState(std::vector<uint64_t> &visitedNodes);
   void UpdateSKRangeInStream(const SuperKernelBaseNode &curNode);
   void UpdateSKRangeInStream(uint32_t streamId, const SuperKernelBaseNode &headNode,
                              const SuperKernelBaseNode &tailNode);
-
   bool IsBeforeSKRange(const SuperKernelBaseNode &curNode);
-
   bool IsAfterSKRange(const SuperKernelBaseNode &curNode);
 
-  // 检查当前节点及其依赖链是否形成死锁。
-  bool HasDeadlock(SuperKernelBaseNode *curNode, std::unordered_set<uint16_t> &expandedScopeIds);
-  // 沿当前节点的前驱依赖查找死锁。
-  bool HasDeadlockPredecessor(SuperKernelBaseNode *curNode, std::unordered_set<uint16_t> &expandedScopeIds);
-  // 检查一个scope内部的节点依赖是否形成死锁。
-  bool CheckScopeDeadlock(const ScopeRuntimeInfo &scopeInfo, std::unordered_set<uint16_t> &expandedScopeIds);
-
-  // 分别处理前驱链中的kernel、Wait和Notify节点。
-  bool CheckKernelNodeDeadlock(SuperKernelBaseNode *preNode, std::unordered_set<uint16_t> &expandedScopeIds);
-
-  bool CheckWaitNodeDeadlock(SuperKernelBaseNode *preNode, std::unordered_set<uint16_t> &expandedScopeIds);
-
-  bool CheckNotifyNodeDeadlock(SuperKernelBaseNode *preNode, std::unordered_set<uint16_t> &expandedScopeIds);
-
-  bool GetWaitNodeFusibleStatus(SuperKernelBaseNode &curNode);
-
-  bool CheckNotifyInSKStream(SuperKernelBaseNode &curNode, SuperKernelBaseNode &notifyNode);
-
+  // 按节点类型分派融合判定，并处理Wait与Notify的依赖。
   bool GetFusibleStatus(SuperKernelBaseNode &curNode);
-  bool HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSuperKernel);
-  void RollbackVisitedState(std::vector<uint64_t> &visitedNodes);
+  bool GetWaitNodeFusibleStatus(SuperKernelBaseNode &curNode);
+  bool CheckNotifyInSKStream(SuperKernelBaseNode &curNode, SuperKernelBaseNode &notifyNode);
 
   std::vector<uint64_t> nodes;                                                // visited nodes
   std::vector<SuperKernelBaseNode *> candidateScopeNodes_;                    // 当前候选scope中的节点
