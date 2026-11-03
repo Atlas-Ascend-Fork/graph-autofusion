@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <set>
+#include <string>
 #include "sk_types.h"
 #include "sk_node.h"
 #include "sk_graph.h"
@@ -81,6 +82,13 @@ struct ScopeRuntimeInfo {
   std::unordered_map<uint32_t, uint64_t> tailNodeIds;  // 流ID -> scope在该流的尾节点ID。
   std::vector<SuperKernelBaseNode *> memberNodes;
   bool hasWait = false;
+};
+
+struct ResourceConflictInfo {
+  std::vector<uint64_t> parallelNodeIds;
+  std::vector<uint16_t> parallelScopeIds;
+
+  std::string Format() const;
 };
 
 class ScopeConcurrentRangeAnalyzer {
@@ -185,7 +193,8 @@ class WaitResourceDependencyAnalyzer {
   bool CheckWaitResourceBranches(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
                                  const CoreDemand &rootDemand, const std::vector<SuperKernelBaseNode *> &rootNodes,
                                  const std::unordered_set<uint16_t> &initialResidents,
-                                 const ScopeConcurrentRanges *precomputedRanges = nullptr);
+                                 const ScopeConcurrentRanges *precomputedRanges = nullptr,
+                                 ResourceConflictInfo *conflictInfo = nullptr);
   bool HasEnoughDeviceCores(uint64_t skCubeNum, uint64_t skVecNum, uint64_t depCubeNum, uint64_t depVecNum) const;
   bool ShouldBypassValueWaitDeadlock(const SuperKernelBaseNode &curNode) const;
 
@@ -197,13 +206,16 @@ class WaitResourceDependencyAnalyzer {
     std::unordered_set<uint16_t> expandedWaitScopes;  // 已将内部Wait的外部Notify加入搜索的scope。
     std::unordered_map<uint32_t, uint16_t> occupiedStreams;  // 流ID到占用该流的常驻scope ID。
     std::unordered_map<uint32_t, CoreDemand> externalByStream;  // 未归入scope的外部流需求上界。
+    std::unordered_map<uint32_t, uint64_t> cubeSourceNodeByStream;  // 流ID -> cube需求上界的节点ID。
+    std::unordered_map<uint32_t, uint64_t> vectorSourceNodeByStream;  // 流ID -> vector需求上界的节点ID。
     std::unordered_map<uint16_t, CoreDemand> externalScopes;  // 尚未启动的外部scope需求。
     CoreDemand residentDemand;  // 当前分支所有常驻scope的核数之和。
   };
 
   // WAIT资源依赖搜索、分支展开与核需求判定。
   void QueueScopeWaitNotifies(uint16_t scopeId, ResourceSearchState &state) const;
-  bool ResourceSearchHasRisk(const ResourceSearchState &state) const;
+  bool ResourceSearchHasRisk(const ResourceSearchState &state, uint16_t rootScopeId,
+                             ResourceConflictInfo *conflictInfo) const;
   void PrepareResourceSearch(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
                              const CoreDemand &rootDemand, const std::vector<SuperKernelBaseNode *> &rootNodes,
                              const std::unordered_set<uint16_t> &initialResidents, ScopeConcurrentRanges &ranges,
@@ -293,6 +305,9 @@ class LockDetector {
   DeadlockFailReason GetDeadlockReason() const {
     return deadlockReason_;
   }
+  const ResourceConflictInfo &GetResourceConflictInfo() const {
+    return resourceConflictInfo_;
+  }
 
   /**
    * @brief 判断节点是否可融合到SuperKernel中
@@ -331,7 +346,8 @@ class LockDetector {
   bool CheckWaitResourceBranches(const SuperKernelBaseNode &waitNode, uint16_t rootScopeId,
                                  const CoreDemand &rootDemand, const std::vector<SuperKernelBaseNode *> &rootNodes,
                                  const std::unordered_set<uint16_t> &initialResidents,
-                                 const ScopeConcurrentRanges *precomputedRanges = nullptr);
+                                 const ScopeConcurrentRanges *precomputedRanges = nullptr,
+                                 ResourceConflictInfo *conflictInfo = nullptr);
   bool HasEnoughDeviceCores(uint64_t skCubeNum, uint64_t skVecNum, uint64_t depCubeNum, uint64_t depVecNum) const;
   bool ShouldBypassValueWaitDeadlock(const SuperKernelBaseNode &curNode) const;
 
@@ -354,6 +370,8 @@ class LockDetector {
 
   // 核需求、已访问节点与当前scope的流范围。
   bool HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSuperKernel);
+  void RecordResourceConflict(uint32_t externalCubeNum, uint32_t externalVecNum, uint64_t cubeSourceNodeId,
+                              uint64_t vectorSourceNodeId);
   void RollbackVisitedState(std::vector<uint64_t> &visitedNodes);
   void UpdateSKRangeInStream(const SuperKernelBaseNode &curNode);
   void UpdateSKRangeInStream(uint32_t streamId, const SuperKernelBaseNode &headNode,
@@ -372,6 +390,9 @@ class LockDetector {
   std::vector<uint64_t> tempVisitedNodes;                                     // temporary visited nodes for HasDeadlock
   uint32_t depOpCubeNum;                                                      // visited op cube num outside superkernel
   uint32_t depOpVecNum;                                                       // visited op vec num outside superkernel
+  uint64_t depOpCubeSourceNodeId_ = INVALID_TASK_ID;
+  uint64_t depOpVectorSourceNodeId_ = INVALID_TASK_ID;
+  ResourceConflictInfo resourceConflictInfo_;
   uint32_t superKernelCubeNum;
   uint32_t superKernelVecNum;
   uint16_t currentScopeId_ = INVALID_SCOPE_ID;
@@ -401,7 +422,8 @@ class ScopeDeadlockDetector {
 
   // 返回风险Wait所属scope，并通过riskWaitId输出对应节点；无风险时返回nullptr。
   const SuperKernelScopeInfo *CheckParallelScopeResources(const std::vector<SuperKernelScopeInfo> &scopes,
-                                                          uint64_t &riskWaitId);
+                                                          uint64_t &riskWaitId,
+                                                          ResourceConflictInfo *conflictInfo = nullptr);
 
  private:
   using ScopeConcurrentRanges = ScopeConcurrentRangeAnalyzer::ScopeConcurrentRanges;
@@ -411,7 +433,7 @@ class ScopeDeadlockDetector {
   ScopeConcurrentRanges BuildScopeConcurrentRanges(const std::vector<SuperKernelScopeInfo> &scopes) const;
   bool CheckSelectedScopeResourceBranches(const std::vector<const SuperKernelScopeInfo *> &selected,
                                           const ScopeConcurrentRanges &ranges, uint64_t &riskWaitId,
-                                          const SuperKernelScopeInfo *&riskScope);
+                                          const SuperKernelScopeInfo *&riskScope, ResourceConflictInfo *conflictInfo);
 
   std::unordered_map<uint16_t, ScopeRuntimeInfo> scopeInfos_;
   ScopeConcurrentRangeAnalyzer concurrentRanges_;

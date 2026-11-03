@@ -1275,22 +1275,46 @@ void SingleScopeDeadlockRefinePass::SplitScopeAtWaitNode(const SuperKernelScopeI
   RebuildStreamInfos(scopeAfter);
 }
 
-/**
- * @brief Setup break info for scopeAfter after deadlock split
- */
+static ScopeBreakInfo BuildSingleScopeDeadlockBreakInfo(const SuperKernelBaseNode &deadlockNode,
+                                                        const SuperKernelBaseNode &deadlockWaitNode,
+                                                        const ResourceConflictInfo &conflictInfo) {
+  std::string detail = "Deadlock at node " + std::to_string(deadlockNode.GetNodeId()) + ", split at Wait node " +
+                       std::to_string(deadlockWaitNode.GetNodeId());
+  const auto resourceConflictDetail = conflictInfo.Format();
+  if (!resourceConflictDetail.empty()) {
+    detail += ", " + resourceConflictDetail;
+  }
+  ScopeBreakInfo breakInfo;
+  breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
+      .SetTriggerNode(deadlockNode.GetNodeId(), deadlockNode.GetStreamIdxInGraph())
+      .SetDetail(std::move(detail));
+  return breakInfo;
+}
+
+static ScopeBreakInfo BuildParallelScopeDeadlockBreakInfo(const SuperKernelBaseNode &waitNode,
+                                                          const ResourceConflictInfo &conflictInfo) {
+  std::string detail = "Parallel resource deadlock at Wait node " + std::to_string(waitNode.GetNodeId());
+  const auto resourceConflictDetail = conflictInfo.Format();
+  if (!resourceConflictDetail.empty()) {
+    detail += ", " + resourceConflictDetail;
+  }
+  ScopeBreakInfo breakInfo;
+  breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
+      .SetTriggerNode(waitNode.GetNodeId(), waitNode.GetStreamIdxInGraph())
+      .SetDetail(std::move(detail));
+  return breakInfo;
+}
+
 static void SetupScopeBeforeBreakInfo(ScopeSplitResultReporter &reporter, SuperKernelScopeInfo &scopeBefore,
                                       const ScopeBreakInfo &originalBreakInfo, SuperKernelBaseNode *deadlockNode,
-                                      SuperKernelBaseNode *deadlockWaitNode, bool hasSameStructureAsOriginal) {
+                                      SuperKernelBaseNode *deadlockWaitNode, const ResourceConflictInfo &conflictInfo,
+                                      bool hasSameStructureAsOriginal) {
   if (hasSameStructureAsOriginal) {
     reporter.ReportInheritedBreak(scopeBefore, originalBreakInfo);
     SK_LOGI("[SingleScopeDeadlockRefine] scopeBefore structure same as original, inherits break info");
   } else {
-    ScopeBreakInfo breakInfo;
-    breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
-        .SetTriggerNode(deadlockNode->GetNodeId(), deadlockNode->GetStreamIdxInGraph())
-        .SetDetail("Deadlock at node " + std::to_string(deadlockNode->GetNodeId()) + ", split at Wait node " +
-                   std::to_string(deadlockWaitNode->GetNodeId()));
-    reporter.ReportNewBreak(scopeBefore, std::move(breakInfo));
+    reporter.ReportNewBreak(scopeBefore,
+                            BuildSingleScopeDeadlockBreakInfo(*deadlockNode, *deadlockWaitNode, conflictInfo));
     SK_LOGI("[SingleScopeDeadlockRefine] scopeBefore structure different, gets deadlock break info");
   }
 
@@ -1340,7 +1364,8 @@ ScopeProcessResult SingleScopeDeadlockRefinePass::HandleDeadlockSplit(SuperKerne
   if (scopeSplitResultReporter_ != nullptr) {
     bool hasSameStructureAsOriginal = scopeSplitResultReporter_->HasSameScopeStructure(workingScope, scopeBefore);
     SetupScopeBeforeBreakInfo(*scopeSplitResultReporter_, scopeBefore, originalBreakInfo, deadlockNode,
-                              deadlockWaitNode, hasSameStructureAsOriginal);
+                              deadlockWaitNode, lockDetector_.GetResourceConflictInfo(),
+                              hasSameStructureAsOriginal);
     SetupScopeAfterBreakInfo(*scopeSplitResultReporter_, scopeAfter, originalBreakInfo);
   }
   // Add valid scopeBefore to output
@@ -1479,7 +1504,8 @@ bool SingleScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scope
 }
 
 void ParallelScopeDeadlockRefinePass::SplitScopeAtRiskWait(SuperKernelScopeInfo &scope, SuperKernelBaseNode &waitNode,
-                                                             std::vector<SuperKernelScopeInfo> &splitScopes) {
+                                                             std::vector<SuperKernelScopeInfo> &splitScopes,
+                                                             const ResourceConflictInfo &conflictInfo) {
   const auto &nodes = scope.GetNodes();
   const auto originalBreakInfo = scope.GetBreakInfo();
   scope.ClearNodeScopeIds();
@@ -1521,11 +1547,7 @@ void ParallelScopeDeadlockRefinePass::SplitScopeAtRiskWait(SuperKernelScopeInfo 
     }
     RebuildStreamInfos(splitScope);
     if (index == 0 && hasPrefix) {
-      ScopeBreakInfo breakInfo;
-      breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
-          .SetTriggerNode(waitNode.GetNodeId(), waitNode.GetStreamIdxInGraph())
-          .SetDetail("Parallel resource deadlock at Wait node " + std::to_string(waitNode.GetNodeId()));
-      splitScope.SetBreakInfo(std::move(breakInfo));
+      splitScope.SetBreakInfo(BuildParallelScopeDeadlockBreakInfo(waitNode, conflictInfo));
     } else {
       splitScope.SetBreakInfo(originalBreakInfo);
     }
@@ -1559,7 +1581,8 @@ bool ParallelScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &sco
       scope.SetScopeCoreInfo(coreInfo);
     }
     uint64_t riskWaitId = INVALID_TASK_ID;
-    const auto *riskScope = scopeLockDetector_.CheckParallelScopeResources(scopes, riskWaitId);
+    ResourceConflictInfo conflictInfo;
+    const auto *riskScope = scopeLockDetector_.CheckParallelScopeResources(scopes, riskWaitId, &conflictInfo);
     if (riskScope == nullptr) {
       break;
     }
@@ -1574,7 +1597,7 @@ bool ParallelScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &sco
     }
     const auto scopeIndex = static_cast<size_t>(riskScope - scopes.data());
     std::vector<SuperKernelScopeInfo> splitScopes;
-    SplitScopeAtRiskWait(scopes[scopeIndex], *waitNode, splitScopes);
+    SplitScopeAtRiskWait(scopes[scopeIndex], *waitNode, splitScopes, conflictInfo);
     scopes.erase(scopes.begin() + scopeIndex);
     scopes.insert(scopes.begin() + scopeIndex, std::make_move_iterator(splitScopes.begin()),
                   std::make_move_iterator(splitScopes.end()));

@@ -2901,6 +2901,7 @@ TEST_F(TestLockDetector, ParallelResourcePassSplitsAtRiskWait) {
   std::vector<SuperKernelScopeInfo> scopes(2);
   SetScopeMembers(scopes[0], {1, 2});
   SetScopeMembers(scopes[1], {10, 11});
+  const auto parallelScopeId = scopes[1].GetScopeId();
   auto *riskWait = graph->GetNodeById(2);
   ASSERT_TRUE(riskWait->IsFusible());
 
@@ -2910,6 +2911,9 @@ TEST_F(TestLockDetector, ParallelResourcePassSplitsAtRiskWait) {
   ASSERT_EQ(scopes[0].GetNodes().size(), 1U);
   EXPECT_EQ(scopes[0].GetNodes()[0]->GetNodeId(), 1U);
   EXPECT_EQ(scopes[0].GetBreakInfo().GetReason(), ScopeBreakReason::DEADLOCK_DETECTED);
+  EXPECT_NE(scopes[0].GetBreakInfo().GetDetail().find("parallelNodes=[20]"), std::string::npos);
+  EXPECT_NE(scopes[0].GetBreakInfo().GetDetail().find("parallelScopes=[" + std::to_string(parallelScopeId) + "]"),
+            std::string::npos);
   EXPECT_EQ(scopes[1].GetNodes().size(), 2U);
   EXPECT_EQ(scopes[1].GetNodes()[0]->GetScopeId(), scopes[1].GetScopeId());
   EXPECT_EQ(riskWait->GetScopeId(), INVALID_SCOPE_ID);

@@ -24,6 +24,26 @@
 int64_t LockDetector::deviceRealCubeNum = 0;
 int64_t LockDetector::deviceRealVecNum = 0;
 
+std::string ResourceConflictInfo::Format() const {
+  if (parallelNodeIds.empty() && parallelScopeIds.empty()) {
+    return "";
+  }
+  const auto formatIds = [](const auto &ids) {
+    auto sortedIds = ids;
+    std::sort(sortedIds.begin(), sortedIds.end());
+    sortedIds.erase(std::unique(sortedIds.begin(), sortedIds.end()), sortedIds.end());
+    std::string result;
+    for (const auto id : sortedIds) {
+      if (!result.empty()) {
+        result += ",";
+      }
+      result += std::to_string(id);
+    }
+    return result;
+  };
+  return "parallelNodes=[" + formatIds(parallelNodeIds) + "], parallelScopes=[" + formatIds(parallelScopeIds) + "]";
+}
+
 // LockDetector: device resources, scope index, and shared analyzer entry points.
 void LockDetector::Init(SuperKernelGraph &graph) {
   SK_LOGD("[lock detector] LockDetector::Init: Initializing lock detector");
@@ -32,6 +52,9 @@ void LockDetector::Init(SuperKernelGraph &graph) {
   activeConcurrentRanges_.clear();
   depOpCubeNum = 0;
   depOpVecNum = 0;
+  depOpCubeSourceNodeId_ = INVALID_TASK_ID;
+  depOpVectorSourceNodeId_ = INVALID_TASK_ID;
+  resourceConflictInfo_ = {};
   superKernelCubeNum = 0;
   superKernelVecNum = 0;
   currentScopeId_ = INVALID_SCOPE_ID;
@@ -98,9 +121,10 @@ bool LockDetector::CheckWaitResourceBranches(const SuperKernelBaseNode &waitNode
                                              const CoreDemand &rootDemand,
                                              const std::vector<SuperKernelBaseNode *> &rootNodes,
                                              const std::unordered_set<uint16_t> &initialResidents,
-                                             const ScopeConcurrentRanges *precomputedRanges) {
+                                             const ScopeConcurrentRanges *precomputedRanges,
+                                             ResourceConflictInfo *conflictInfo) {
   return waitResources_.CheckWaitResourceBranches(waitNode, rootScopeId, rootDemand, rootNodes, initialResidents,
-                                                 precomputedRanges);
+                                                 precomputedRanges, conflictInfo);
 }
 
 bool LockDetector::ShouldBypassValueWaitDeadlock(const SuperKernelBaseNode &curNode) const {
@@ -479,13 +503,29 @@ bool WaitResourceDependencyAnalyzer::CheckWaitResourceBranches(const SuperKernel
                                                                uint16_t rootScopeId, const CoreDemand &rootDemand,
                                                                const std::vector<SuperKernelBaseNode *> &rootNodes,
                                                                const std::unordered_set<uint16_t> &initialResidents,
-                                                               const ScopeConcurrentRanges *precomputedRanges) {
+                                                               const ScopeConcurrentRanges *precomputedRanges,
+                                                               ResourceConflictInfo *conflictInfo) {
+  if (conflictInfo != nullptr) {
+    *conflictInfo = {};
+  }
   ScopeConcurrentRanges calculatedRanges;
   ResourceSearchState initial;
   PrepareResourceSearch(waitNode, rootScopeId, rootDemand, rootNodes, initialResidents, calculatedRanges, initial,
                         precomputedRanges);
   const auto &ranges = precomputedRanges == nullptr ? calculatedRanges : *precomputedRanges;
   if (!HasEnoughDeviceCores(initial.residentDemand.cubeCoreNum, initial.residentDemand.vectorCoreNum, 0, 0)) {
+    if (conflictInfo != nullptr) {
+      const bool cubeRisk = deviceRealCubeNum < 0 || initial.residentDemand.cubeCoreNum > deviceRealCubeNum;
+      const bool vectorRisk = deviceRealVecNum < 0 || initial.residentDemand.vectorCoreNum > deviceRealVecNum;
+      for (const auto scopeId : initial.residentScopes) {
+        const auto scopeIt = scopeInfos_.find(scopeId);
+        if (scopeId != rootScopeId && scopeIt != scopeInfos_.end() &&
+            ((cubeRisk && scopeIt->second.coreInfo.GetCubeNum() != 0) ||
+             (vectorRisk && scopeIt->second.coreInfo.GetVectorNum() != 0))) {
+          conflictInfo->parallelScopeIds.push_back(scopeId);
+        }
+      }
+    }
     SK_LOGI("[ParallelResource] Wait %lu: resident scopes require cube=%lu, vec=%lu; device has cube=%ld, vec=%ld",
             waitNode.GetNodeId(), initial.residentDemand.cubeCoreNum, initial.residentDemand.vectorCoreNum,
             deviceRealCubeNum, deviceRealVecNum);
@@ -505,7 +545,7 @@ bool WaitResourceDependencyAnalyzer::CheckWaitResourceBranches(const SuperKernel
         return false;
       }
     }
-    if (ResourceSearchHasRisk(state)) {
+    if (ResourceSearchHasRisk(state, rootScopeId, conflictInfo)) {
       SK_LOGI("[ParallelResource] Wait %lu in scope %u has resource risk", waitNode.GetNodeId(), rootScopeId);
       return false;
     }
@@ -533,7 +573,8 @@ void WaitResourceDependencyAnalyzer::QueueScopeWaitNotifies(uint16_t scopeId, Re
   }
 }
 
-bool WaitResourceDependencyAnalyzer::ResourceSearchHasRisk(const ResourceSearchState &state) const {
+bool WaitResourceDependencyAnalyzer::ResourceSearchHasRisk(const ResourceSearchState &state, uint16_t rootScopeId,
+                                                           ResourceConflictInfo *conflictInfo) const {
   uint64_t externalCube = 0;
   uint64_t externalVec = 0;
   for (const auto &[streamId, demand] : state.externalByStream) {
@@ -547,6 +588,35 @@ bool WaitResourceDependencyAnalyzer::ResourceSearchHasRisk(const ResourceSearchS
   const bool hasRisk = !HasEnoughDeviceCores(state.residentDemand.cubeCoreNum, state.residentDemand.vectorCoreNum,
                                             externalCube, externalVec);
   if (hasRisk) {
+    if (conflictInfo != nullptr) {
+      const bool cubeRisk = deviceRealCubeNum < 0 ||
+                            state.residentDemand.cubeCoreNum + externalCube > static_cast<uint64_t>(deviceRealCubeNum);
+      const bool vectorRisk = deviceRealVecNum < 0 ||
+                              state.residentDemand.vectorCoreNum + externalVec >
+                                  static_cast<uint64_t>(deviceRealVecNum);
+      for (const auto scopeId : state.residentScopes) {
+        const auto scopeIt = scopeInfos_.find(scopeId);
+        if (scopeId != rootScopeId && scopeIt != scopeInfos_.end() &&
+            ((cubeRisk && scopeIt->second.coreInfo.GetCubeNum() != 0) ||
+             (vectorRisk && scopeIt->second.coreInfo.GetVectorNum() != 0))) {
+          conflictInfo->parallelScopeIds.push_back(scopeId);
+        }
+      }
+      for (const auto &[streamId, demand] : state.externalByStream) {
+        if (cubeRisk && externalCube != 0 && demand.cubeCoreNum == externalCube) {
+          conflictInfo->parallelNodeIds.push_back(state.cubeSourceNodeByStream.at(streamId));
+        }
+        if (vectorRisk && externalVec != 0 && demand.vectorCoreNum == externalVec) {
+          conflictInfo->parallelNodeIds.push_back(state.vectorSourceNodeByStream.at(streamId));
+        }
+      }
+      for (const auto &[scopeId, demand] : state.externalScopes) {
+        if ((cubeRisk && externalCube != 0 && demand.cubeCoreNum == externalCube) ||
+            (vectorRisk && externalVec != 0 && demand.vectorCoreNum == externalVec)) {
+          conflictInfo->parallelScopeIds.push_back(scopeId);
+        }
+      }
+    }
     SK_LOGI(
         "[ParallelResource] Resource risk: residentCube=%lu, externalCube=%lu, totalCube=%lu, deviceCube=%ld, "
         "residentVec=%lu, externalVec=%lu, totalVec=%lu, deviceVec=%ld",
@@ -716,8 +786,14 @@ bool WaitResourceDependencyAnalyzer::ProcessResourceSearchNode(uint64_t nodeId, 
     return true;
   }
   auto &demand = state.externalByStream[streamId];
-  demand.cubeCoreNum = std::max<uint64_t>(demand.cubeCoreNum, node->GetCubeNum());
-  demand.vectorCoreNum = std::max<uint64_t>(demand.vectorCoreNum, node->GetVecNum());
+  if (node->GetCubeNum() > demand.cubeCoreNum) {
+    demand.cubeCoreNum = node->GetCubeNum();
+    state.cubeSourceNodeByStream[streamId] = nodeId;
+  }
+  if (node->GetVecNum() > demand.vectorCoreNum) {
+    demand.vectorCoreNum = node->GetVecNum();
+    state.vectorSourceNodeByStream[streamId] = nodeId;
+  }
   if (node->GetPreNodeId() != INVALID_TASK_ID) {
     state.pendingNodeIds.push_back(node->GetPreNodeId());
   }
@@ -956,6 +1032,29 @@ bool LockDetector::CheckNotifyNodeDeadlock(SuperKernelBaseNode *preNode,
 }
 
 // LockDetector: maintain core demand and visited nodes while checking the current scope.
+void LockDetector::RecordResourceConflict(uint32_t externalCubeNum, uint32_t externalVecNum,
+                                          uint64_t cubeSourceNodeId, uint64_t vectorSourceNodeId) {
+  resourceConflictInfo_ = {};
+  const auto addSource = [this](uint64_t nodeId) {
+    const auto *node = graph_->GetNodeById(nodeId);
+    if (node == nullptr) {
+      return;
+    }
+    const auto scopeIt = scopeInfos_.find(node->GetScopeId());
+    if (scopeIt != scopeInfos_.end() && scopeIt->first != currentScopeId_) {
+      resourceConflictInfo_.parallelScopeIds.push_back(scopeIt->first);
+    } else {
+      resourceConflictInfo_.parallelNodeIds.push_back(nodeId);
+    }
+  };
+  if (deviceRealCubeNum < 0 || static_cast<uint64_t>(superKernelCubeNum) + externalCubeNum > deviceRealCubeNum) {
+    addSource(cubeSourceNodeId);
+  }
+  if (deviceRealVecNum < 0 || static_cast<uint64_t>(superKernelVecNum) + externalVecNum > deviceRealVecNum) {
+    addSource(vectorSourceNodeId);
+  }
+}
+
 bool LockDetector::HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSuperKernel) {
   uint32_t curNodeCubeNum = curNode->GetCubeNum();
   uint32_t curNodeVecNum = curNode->GetVecNum();
@@ -987,14 +1086,19 @@ bool LockDetector::HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSup
     SK_LOGD("[lock detector] Candidate SK for node %s conflicts with dependent ops (cube %u>%u or vec %u>%u)",
             curNode->Format().c_str(), superKernelCubeNum, availableCores.first, superKernelVecNum,
             availableCores.second);
+    RecordResourceConflict(depOpCubeNum, depOpVecNum, depOpCubeSourceNodeId_, depOpVectorSourceNodeId_);
     return false;
   } else {
     const uint32_t candidateDepCubeNum = std::max(depOpCubeNum, curNodeCubeNum);
     const uint32_t candidateDepVecNum = std::max(depOpVecNum, curNodeVecNum);
+    const uint64_t cubeSourceNodeId = curNodeCubeNum > depOpCubeNum ? curNode->GetNodeId() : depOpCubeSourceNodeId_;
+    const uint64_t vectorSourceNodeId = curNodeVecNum > depOpVecNum ? curNode->GetNodeId() : depOpVectorSourceNodeId_;
     std::pair<uint32_t, uint32_t> availableCores = GetAvailableCores(false);
     if (HasEnoughDeviceCores(superKernelCubeNum, superKernelVecNum, candidateDepCubeNum, candidateDepVecNum)) {
       depOpCubeNum = candidateDepCubeNum;
       depOpVecNum = candidateDepVecNum;
+      depOpCubeSourceNodeId_ = cubeSourceNodeId;
+      depOpVectorSourceNodeId_ = vectorSourceNodeId;
       SK_LOGD("[lock detector] Node %s: allocated from device (cube %u, vec %u), new depOp limits: cube %u, vec %u",
               curNode->Format().c_str(), curNodeCubeNum, curNodeVecNum, depOpCubeNum, depOpVecNum);
       return true;
@@ -1003,6 +1107,7 @@ bool LockDetector::HasEnoughCores(const SuperKernelBaseNode *curNode, bool isSup
         "[lock detector] Node %s: insufficient cores for depOp (required: cube %u, vec %u, available: cube %u, "
         "vec %u)",
         curNode->Format().c_str(), curNodeCubeNum, curNodeVecNum, availableCores.first, availableCores.second);
+    RecordResourceConflict(candidateDepCubeNum, candidateDepVecNum, cubeSourceNodeId, vectorSourceNodeId);
     return false;
   }
 }
@@ -1031,6 +1136,9 @@ void LockDetector::Reset() {
 
   depOpCubeNum = 0;
   depOpVecNum = 0;
+  depOpCubeSourceNodeId_ = INVALID_TASK_ID;
+  depOpVectorSourceNodeId_ = INVALID_TASK_ID;
+  resourceConflictInfo_ = {};
   superKernelCubeNum = 0;
   superKernelVecNum = 0;
   currentScopeId_ = INVALID_SCOPE_ID;
@@ -1097,6 +1205,7 @@ bool LockDetector::IsFusible(SuperKernelBaseNode &curNode) {
   SK_LOGI("[lock detector] IsFusible: Checking node %s, current state: nodeNum=%u, kernelNodeNum=%u",
           curNode.Format().c_str(), nodeNum, kernelNodeNum);
   deadlockReason_ = DeadlockFailReason::NOT_FIND_DEADLOCK;  // Reset before checking
+  resourceConflictInfo_ = {};
   const bool canFuse = GetFusibleStatus(curNode);
   // Only modify state if node can be fused
   if (canFuse) {
@@ -1237,7 +1346,8 @@ bool LockDetector::GetWaitNodeFusibleStatus(SuperKernelBaseNode &curNode) {
     auto candidate = candidateScopeNodes_;
     candidate.push_back(&curNode);
     const CoreDemand rootDemand{superKernelCubeNum, superKernelVecNum};
-    if (!CheckWaitResourceBranches(curNode, currentScopeId_, rootDemand, candidate, {currentScopeId_})) {
+    if (!CheckWaitResourceBranches(curNode, currentScopeId_, rootDemand, candidate, {currentScopeId_}, nullptr,
+                                   &resourceConflictInfo_)) {
       deadlockReason_ = DeadlockFailReason::NOTIFY_INSUFFICIENT_CORES;
       return false;
     }
@@ -1304,8 +1414,11 @@ void LockDetector::ResetNotifyExpandNumForScope(SuperKernelScopeInfo &scope) {
 
 // ScopeDeadlockDetector: enumerate concurrent scope combinations and check their Wait resource branches.
 const SuperKernelScopeInfo *ScopeDeadlockDetector::CheckParallelScopeResources(
-    const std::vector<SuperKernelScopeInfo> &scopes, uint64_t &riskWaitId) {
+    const std::vector<SuperKernelScopeInfo> &scopes, uint64_t &riskWaitId, ResourceConflictInfo *conflictInfo) {
   riskWaitId = INVALID_TASK_ID;
+  if (conflictInfo != nullptr) {
+    *conflictInfo = {};
+  }
   const SuperKernelScopeInfo *riskScope = nullptr;
   scopeInfos_.clear();
   for (const auto &scope : scopes) {
@@ -1319,7 +1432,7 @@ const SuperKernelScopeInfo *ScopeDeadlockDetector::CheckParallelScopeResources(
   WaitResourceDependencyAnalyzer::CoreDemand selectedDemand;
   std::function<bool(size_t)> check = [&](size_t index) {
     if (index == candidates.size()) {
-      return CheckSelectedScopeResourceBranches(selected, ranges, riskWaitId, riskScope);
+      return CheckSelectedScopeResourceBranches(selected, ranges, riskWaitId, riskScope, conflictInfo);
     }
     if (!check(index + 1)) {
       return false;
@@ -1386,7 +1499,7 @@ ScopeDeadlockDetector::ScopeConcurrentRanges ScopeDeadlockDetector::BuildScopeCo
 
 bool ScopeDeadlockDetector::CheckSelectedScopeResourceBranches(
     const std::vector<const SuperKernelScopeInfo *> &selected, const ScopeConcurrentRanges &ranges,
-    uint64_t &riskWaitId, const SuperKernelScopeInfo *&riskScope) {
+    uint64_t &riskWaitId, const SuperKernelScopeInfo *&riskScope, ResourceConflictInfo *conflictInfo) {
   if (selected.size() < 2) {
     return true;
   }
@@ -1401,7 +1514,7 @@ bool ScopeDeadlockDetector::CheckSelectedScopeResourceBranches(
     for (const auto *node : scope->GetNodes()) {
       if (node->GetNodeType() == SkNodeType::NODE_WAIT && !waitResources_.ShouldBypassValueWaitDeadlock(*node) &&
           !waitResources_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents,
-                                                    &ranges)) {
+                                                    &ranges, conflictInfo)) {
         riskWaitId = node->GetNodeId();
         riskScope = scope;
         SK_LOGI("[ParallelResource] Risk Wait %lu in scope %u; %zu resident scopes", riskWaitId, scopeId,

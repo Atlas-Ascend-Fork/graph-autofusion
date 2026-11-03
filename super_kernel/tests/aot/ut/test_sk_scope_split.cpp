@@ -3501,6 +3501,8 @@ TEST_F(SuperKernelScopeSplitterTest, DeadlockRefine_ResourceDeadlockSplitAtWait)
   EXPECT_EQ(k2->GetFusionFailReason(), FusionFailReason::EXIST_DEADLOCK);
   EXPECT_EQ(scopeInfos[0].GetBreakInfo().GetReason(), ScopeBreakReason::DEADLOCK_DETECTED);
   EXPECT_EQ(scopeInfos[0].GetBreakInfo().GetTriggerNodeId(), 3U);
+  EXPECT_EQ(scopeInfos[0].GetBreakInfo().GetDetail(),
+            "Deadlock at node 3, split at Wait node 2, parallelNodes=[4], parallelScopes=[]");
 
   // 恢复默认核心数
   LockDetector::deviceRealCubeNum = 32;
