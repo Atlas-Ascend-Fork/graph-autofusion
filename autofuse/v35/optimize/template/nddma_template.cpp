@@ -495,13 +495,38 @@ af::Status NddmaTemplate::ProcessSliceNodes(af::AscGraph &new_case, bool &is_ndd
   return af::SUCCESS;
 }
 
+af::Status NddmaTemplate::GenNddmaForNode(const af::AscNodePtr &node, const af::AscNodePtr &out_node,
+                                          bool origin_has_transpose, af::AscGraph &new_case, bool &is_nddma_generated) {
+  bool is_nddma_generated_cur = false;
+  if (af::ops::IsOps<af::ascir_op::Broadcast>(out_node)) {
+    GE_ASSERT_SUCCESS(NddmaTemplate::GenNddmaNode(node, out_node, new_case));
+    is_nddma_generated_cur = true;
+  }
+  if (af::ops::IsOps<af::ascir_op::Cast>(out_node) &&
+      NddmaTemplate::SwapCastBrcAndGenNddma(out_node, node, new_case) == af::SUCCESS) {
+    is_nddma_generated_cur = true;
+  }
+  ascgen_utils::DiscontinuityInfo info;
+  GE_ASSERT_SUCCESS(ascgen_utils::TensorLayoutUtils::AnalyzeLoadDiscontinuity(node->outputs[0].attr, info),
+                    "Failed to analyze discontinuity info for node:[%s].", node->GetNamePtr());
+  const bool need_align_at_repeat1 = info.has_multiple_discontinuities && info.is_tail_axis_discontinuous;
+  if (!is_nddma_generated_cur && origin_has_transpose && (IsLoadNeedAlign(node) || need_align_at_repeat1)) {
+    GE_ASSERT_SUCCESS(GenLoadToGenNddmaNode(node));
+    is_nddma_generated_cur = true;
+  }
+  is_nddma_generated = is_nddma_generated || is_nddma_generated_cur;
+  return af::SUCCESS;
+}
+
 af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_graph,
                                    [[maybe_unused]] const af::AscGraph &based_case, af::AscGraph &new_case) {
   const auto indirect_load = ascgen_utils::indirect_load::FindIndirectLoadNode(new_case);
   const bool is_simd_indirect_load =
       indirect_load != nullptr && ascir::GetTemplateIdOrDefault(*indirect_load) == ascir::TemplateId::kIndirectLoadSimd;
-  if (indirect_load != nullptr && !is_simd_indirect_load &&
-      ScheduleUtils::HasComputeType(origin_graph, af::ComputeType::kComputeTranspose)) {
+  const bool origin_has_transpose = ScheduleUtils::HasComputeType(origin_graph, af::ComputeType::kComputeTranspose);
+  GELOGD("NddmaTemplate graph[%s]: origin_has_transpose=%d.", new_case.GetName().c_str(),
+         static_cast<int32_t>(origin_has_transpose));
+  if (indirect_load != nullptr && !is_simd_indirect_load && origin_has_transpose) {
     GELOGD("Skip NDDMA transpose template for IndirectLoad graph[%s].", new_case.GetName().c_str());
     return af::FAILED;
   }
@@ -528,24 +553,7 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
     GE_CHECK_NOTNULL(peer_in_anchor);
     const auto &out_node = std::dynamic_pointer_cast<af::AscNode>(peer_in_anchor->GetOwnerNode());
     GE_CHECK_NOTNULL(out_node);
-    bool is_nddma_generated_cur = false;
-    if (af::ops::IsOps<af::ascir_op::Broadcast>(out_node)) {
-      GE_ASSERT_SUCCESS(GenNddmaNode(node, std::dynamic_pointer_cast<af::AscNode>(out_node), new_case));
-      is_nddma_generated_cur = true;
-    }
-    if (af::ops::IsOps<af::ascir_op::Cast>(out_node) &&
-        SwapCastBrcAndGenNddma(std::dynamic_pointer_cast<af::AscNode>(out_node), node, new_case) == af::SUCCESS) {
-      is_nddma_generated_cur = true;
-    }
-    ascgen_utils::DiscontinuityInfo info;
-    GE_ASSERT_SUCCESS(ascgen_utils::TensorLayoutUtils::AnalyzeLoadDiscontinuity(node->outputs[0].attr, info),
-                      "Failed to analyze discontinuity info for node:[%s].", node->GetNamePtr());
-    bool need_align_at_repeat1 = info.has_multiple_discontinuities && info.is_tail_axis_discontinuous;
-    if (!is_nddma_generated_cur && (IsLoadNeedAlign(node) || need_align_at_repeat1)) {
-      GE_ASSERT_SUCCESS(GenLoadToGenNddmaNode(node));
-      is_nddma_generated_cur = true;
-    }
-    is_nddma_generated = is_nddma_generated || is_nddma_generated_cur;
+    GE_ASSERT_SUCCESS(GenNddmaForNode(node, out_node, origin_has_transpose, new_case, is_nddma_generated));
   }
   if (!is_nddma_generated) {
     GELOGD("No nddma template generated.");
