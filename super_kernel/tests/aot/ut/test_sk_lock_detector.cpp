@@ -2689,6 +2689,17 @@ TEST_F(TestLockDetector, IndependentWaitScopesCanStarveExternalKernelTogether) {
   LockDetector::deviceRealCubeNum = savedCores;
 }
 
+TEST_F(TestLockDetector, CollectWaitScopeCandidatesSkipsInternalWaitOnlyScope) {
+  CreateGraphFromStreams({{1, 2}, {10, 11}, {20, 21, 22}, {30}}, {{1, {11}}, {20, {22}}, {30, {21}}});
+  std::vector<SuperKernelScopeInfo> scopes(2);
+  SetScopeMembers(scopes[0], {1, 2, 10, 11});
+  SetScopeMembers(scopes[1], {20, 21, 22});
+
+  const auto candidates = scopeDetector->CollectWaitScopeCandidates(scopes);
+  ASSERT_EQ(candidates.size(), 1U);
+  EXPECT_EQ(candidates[0], &scopes[1]);
+}
+
 TEST_F(TestLockDetector, NotifyCompletedBeforeScopeLaunchStopsResourceSearch) {
   // ======================= graph =======================
   /*
@@ -2894,7 +2905,7 @@ TEST_F(TestLockDetector, ParallelResourcePassSplitsAtRiskWait) {
   auto *riskWait = graph->GetNodeById(2);
   ASSERT_TRUE(riskWait->IsFusible());
 
-  ParallelResourceDeadlockCheckPass pass(*graph, *opts);
+  ParallelScopeDeadlockRefinePass pass(*graph, *opts);
   ASSERT_TRUE(pass.Run(scopes));
   ASSERT_EQ(scopes.size(), 2U);
   ASSERT_EQ(scopes[0].GetNodes().size(), 1U);
@@ -2905,6 +2916,43 @@ TEST_F(TestLockDetector, ParallelResourcePassSplitsAtRiskWait) {
   EXPECT_EQ(riskWait->GetScopeId(), INVALID_SCOPE_ID);
   EXPECT_FALSE(riskWait->IsFusible());
   EXPECT_EQ(riskWait->GetFusionFailReason(), FusionFailReason::EXIST_DEADLOCK);
+}
+
+TEST_F(TestLockDetector, ParallelResourceSplitKeepsLaterWaitNotifiedByPrefix) {
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {8}, {30}}, {{8, {4}}, {30, {2}}});
+  SuperKernelScopeInfo scope;
+  SetScopeMembers(scope, {1, 8, 2, 3, 4, 5});
+  auto *riskWait = graph->GetNodeById(2);
+  auto *laterWait = graph->GetNodeById(4);
+
+  ParallelScopeDeadlockRefinePass pass(*graph, *opts);
+  std::vector<SuperKernelScopeInfo> splitScopes;
+  pass.SplitScopeAtRiskWait(scope, *riskWait, splitScopes);
+
+  ASSERT_EQ(splitScopes.size(), 2U);
+  EXPECT_EQ(splitScopes[0].GetNodes().back()->GetNodeId(), 8U);
+  ASSERT_EQ(splitScopes[1].GetNodes().size(), 3U);
+  EXPECT_EQ(splitScopes[1].GetNodes()[1], laterWait);
+  EXPECT_FALSE(riskWait->IsFusible());
+  EXPECT_TRUE(laterWait->IsFusible());
+}
+
+TEST_F(TestLockDetector, ParallelResourceSplitCutsLaterWaitNotifiedAfterRiskWait) {
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {8}, {30}}, {{8, {4}}, {30, {2}}});
+  SuperKernelScopeInfo scope;
+  SetScopeMembers(scope, {1, 2, 3, 8, 4, 5});
+  auto *riskWait = graph->GetNodeById(2);
+  auto *laterWait = graph->GetNodeById(4);
+
+  ParallelScopeDeadlockRefinePass pass(*graph, *opts);
+  std::vector<SuperKernelScopeInfo> splitScopes;
+  pass.SplitScopeAtRiskWait(scope, *riskWait, splitScopes);
+
+  ASSERT_EQ(splitScopes.size(), 3U);
+  EXPECT_EQ(splitScopes[1].GetNodes().back()->GetNodeId(), 8U);
+  EXPECT_EQ(laterWait->GetScopeId(), INVALID_SCOPE_ID);
+  EXPECT_FALSE(laterWait->IsFusible());
+  EXPECT_EQ(laterWait->GetFusionFailReason(), FusionFailReason::EXIST_DEADLOCK);
 }
 
 TEST_F(TestLockDetector, ParallelResourcePassSplitsLaterWaitsAfterRiskWait) {
@@ -2935,7 +2983,7 @@ TEST_F(TestLockDetector, ParallelResourcePassSplitsLaterWaitsAfterRiskWait) {
   SetScopeMembers(scopes[0], {1, 2, 3, 4, 5});
   SetScopeMembers(scopes[1], {10, 11});
 
-  ParallelResourceDeadlockCheckPass pass(*graph, *opts);
+  ParallelScopeDeadlockRefinePass pass(*graph, *opts);
   ASSERT_TRUE(pass.Run(scopes));
   ASSERT_EQ(scopes.size(), 4U);
   EXPECT_EQ(scopes[0].GetNodes().front()->GetNodeId(), 1U);
@@ -2979,7 +3027,7 @@ TEST_F(TestLockDetector, ParallelResourcePassSplitsRiskWaitAndLaterWaits) {
   SetScopeMembers(scopes[0], {1, 2, 3, 4, 5, 6, 7});
   SetScopeMembers(scopes[1], {10, 11});
 
-  ParallelResourceDeadlockCheckPass pass(*graph, *opts);
+  ParallelScopeDeadlockRefinePass pass(*graph, *opts);
   ASSERT_TRUE(pass.Run(scopes));
   ASSERT_EQ(scopes.size(), 4U);
   EXPECT_EQ(scopes[0].GetNodes().front()->GetNodeId(), 1U);

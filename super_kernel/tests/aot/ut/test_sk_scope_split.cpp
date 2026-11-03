@@ -380,7 +380,7 @@ class SuperKernelScopeSplitterTest : public testing::Test {
   }
 
   bool RunDeadlockRefine(std::vector<SuperKernelScopeInfo> &scopes) {
-    PrecheckDeadlockPass pass(*graph, *opts);
+    SingleScopeDeadlockRefinePass pass(*graph, *opts);
     pass.SetScopeSplitResultReporter(&reporter);
     return pass.Run(scopes);
   }
@@ -1176,7 +1176,7 @@ TEST_F(SuperKernelScopeSplitterTest, PassOrder_ScheModeSplitBeforeDeadlockRefine
   ASSERT_GE(splitter.passes_.size(), 3);
   EXPECT_NE(dynamic_cast<InitialScopeSplitPass *>(splitter.passes_[0].get()), nullptr);
   EXPECT_NE(dynamic_cast<ScheModeKernelSplitPass *>(splitter.passes_[1].get()), nullptr);
-  EXPECT_NE(dynamic_cast<PrecheckDeadlockPass *>(splitter.passes_[2].get()), nullptr);
+  EXPECT_NE(dynamic_cast<SingleScopeDeadlockRefinePass *>(splitter.passes_[2].get()), nullptr);
 }
 
 TEST_F(SuperKernelScopeSplitterTest, LockDetectorRecordsScopeInfoByScopeId) {
@@ -1187,7 +1187,7 @@ TEST_F(SuperKernelScopeSplitterTest, LockDetectorRecordsScopeInfoByScopeId) {
   scope.AddNode(wait);
   scope.AddScopeStreamInfo({1, wait->GetNodeId(), wait->GetNodeId(), 1});
 
-  PrecheckDeadlockPass pass(*graph, *opts);
+  SingleScopeDeadlockRefinePass pass(*graph, *opts);
   const ScopeCoreInfo scopeCoreInfo{SkKernelType::MIX_AIC_1_2, 4};
   scope.SetScopeCoreInfo(scopeCoreInfo);
   pass.lockDetector_.UpdateScopeInfo(scope);
@@ -3410,7 +3410,7 @@ TEST_F(SuperKernelScopeSplitterTest, Sync_CrossStreamWaitNotifySuspendResume) {
 }
 
 /**
- * @brief PrecheckDeadlockPass资源不足导致死锁切分
+ * @brief SingleScopeDeadlockRefinePass资源不足导致死锁切分
  *
  * 场景描述:
  *   设备资源: cube=25, vec=32 (强制设置)
@@ -3422,7 +3422,7 @@ TEST_F(SuperKernelScopeSplitterTest, Sync_CrossStreamWaitNotifySuspendResume) {
  *   1. InitialScopeSplitPass: Notify1(unfusible)加入visitedNotifies，不进scope
  *   2. Wait1发现Notify1已visited，融合进scope
  *   3. scope节点: K1 -> Wait1 -> K2
- *   4. PrecheckDeadlockPass检查:
+ *   4. SingleScopeDeadlockRefinePass检查:
  *      - 加入K1后，候选SK核数为12C
  *      - GetWaitNodeFusibleStatus(Wait1):
  *        -> HasDeadlock(Notify1) -> CheckKernelNodeDeadlock(K3)
@@ -3590,7 +3590,7 @@ TEST_F(SuperKernelScopeSplitterTest, DeadlockRefinePassWithoutValueBreakerDropsU
   auto *k2 = CreateKernelNode(2, 0, INVALID_TASK_ID);
   wait1->nodeInfos.syncInfos.addrValue = reinterpret_cast<void *>(0x1234);
   SuperKernelScopeSplitter splitter(*graph, *opts);
-  auto *deadlockPass = dynamic_cast<PrecheckDeadlockPass *>(splitter.passes_[2].get());
+  auto *deadlockPass = dynamic_cast<SingleScopeDeadlockRefinePass *>(splitter.passes_[2].get());
   ASSERT_NE(deadlockPass, nullptr);
 
   SuperKernelScopeInfo scope;
@@ -3626,7 +3626,7 @@ TEST_F(SuperKernelScopeSplitterTest, DeadlockRefinePassValueBreakerBypassKeepsUn
   option.aggressiveOpts.valueBreakerBypass = ACLSK_VALUE_BREAKER_BYPASS_UNPAIRED_WAIT;
   opts->SetOptOptionValue(&option);
   SuperKernelScopeSplitter splitter(*graph, *opts);
-  auto *deadlockPass = dynamic_cast<PrecheckDeadlockPass *>(splitter.passes_[2].get());
+  auto *deadlockPass = dynamic_cast<SingleScopeDeadlockRefinePass *>(splitter.passes_[2].get());
   ASSERT_NE(deadlockPass, nullptr);
 
   SuperKernelScopeInfo scope;
@@ -3653,7 +3653,7 @@ TEST_F(SuperKernelScopeSplitterTest, DeadlockRefinePassValueBreakerBypassKeepsUn
 TEST_F(SuperKernelScopeSplitterTest, DeadlockRefinePassStoresScopeCoreInfoAfterCheck) {
   auto *kernel = CreateKernelNode(1, 0, INVALID_TASK_ID);
   SuperKernelScopeSplitter splitter(*graph, *opts);
-  auto *deadlockPass = dynamic_cast<PrecheckDeadlockPass *>(splitter.passes_[2].get());
+  auto *deadlockPass = dynamic_cast<SingleScopeDeadlockRefinePass *>(splitter.passes_[2].get());
   ASSERT_NE(deadlockPass, nullptr);
 
   SuperKernelScopeInfo scope;
@@ -3671,7 +3671,7 @@ TEST_F(SuperKernelScopeSplitterTest, DeadlockRefinePassStoresScopeCoreInfoAfterC
 TEST_F(SuperKernelScopeSplitterTest, DeadlockRefinePassRefreshesStaleScopeCoreInfoAfterCheck) {
   auto *kernel = CreateKernelNode(1, 0, INVALID_TASK_ID);
   SuperKernelScopeSplitter splitter(*graph, *opts);
-  auto *deadlockPass = dynamic_cast<PrecheckDeadlockPass *>(splitter.passes_[2].get());
+  auto *deadlockPass = dynamic_cast<SingleScopeDeadlockRefinePass *>(splitter.passes_[2].get());
   ASSERT_NE(deadlockPass, nullptr);
 
   SuperKernelScopeInfo scope;
@@ -5536,7 +5536,7 @@ TEST_F(SuperKernelScopeSplitterTest, DefaultNode_StreamWithDefaultAndStreamOnlyE
  *      - 执行RemoveDefaultsAndStreams移除Default1
  *      - RemoveStreamFromScope移除stream 1所有节点（Notify1被移除）
  *   4. 剩余scope: {K1,Wait1,K2}
- *   5. PrecheckDeadlockPass检查:
+ *   5. SingleScopeDeadlockRefinePass检查:
  *      - 加入K1后，候选SK核数为12C
  *      - Wait1检查Notify1(不在scope内):
  *        -> GetWaitNodeFusibleStatus: Notify1不在SK stream

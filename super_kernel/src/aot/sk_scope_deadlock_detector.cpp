@@ -12,15 +12,22 @@
 #include "sk_log.h"
 #include <algorithm>
 #include <functional>
+#include <unordered_set>
 
 std::vector<const SuperKernelScopeInfo *> ScopeDeadlockDetector::CollectWaitScopeCandidates(
     const std::vector<SuperKernelScopeInfo> &scopes) const {
   std::vector<const SuperKernelScopeInfo *> candidates;
   for (const auto &scope : scopes) {
-    const bool hasCheckableWait =
-        std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(), [this](const auto *node) {
-          return node->GetNodeType() == SkNodeType::NODE_WAIT && !analysis_.ShouldBypassValueWaitDeadlock(*node);
-        });
+    std::unordered_set<uint64_t> memberIds;
+    for (const auto *node : scope.GetNodes()) {
+      memberIds.insert(node->GetNodeId());
+    }
+    const bool hasCheckableWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(),
+                                              [this, &memberIds](const auto *node) {
+                                                return node->GetNodeType() == SkNodeType::NODE_WAIT &&
+                                                       !analysis_.ShouldBypassValueWaitDeadlock(*node) &&
+                                                       !IsWaitNotifyInScope(*node, memberIds);
+                                              });
     if (scope.GetScopeCoreInfo().IsValid() && hasCheckableWait) {
       candidates.push_back(&scope);
     }
