@@ -117,6 +117,125 @@ bool HasForwardTaskRelations(const std::vector<SuperKernelBaseNode *> &tasks,
   }
   return true;
 }
+
+struct NotifySource {
+  size_t producerIndex = 0;
+  SuperKernelBaseNode *producer = nullptr;
+  SuperKernelBaseNode *reset = nullptr;
+  SuperKernelBaseNode *notify = nullptr;
+};
+
+bool HasNotifyInStream(const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes, uint32_t streamIdx) {
+  return std::any_of(eventNodes.begin(), eventNodes.end(), [streamIdx](const auto &eventNode) {
+    return eventNode != nullptr && eventNode->GetNodeType() == SkNodeType::NODE_NOTIFY &&
+           eventNode->GetStreamIdxInGraph() == streamIdx;
+  });
+}
+
+bool CollectResetNodesByStream(const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+                               std::unordered_map<uint32_t, SuperKernelBaseNode *> &resetsByStream) {
+  for (const auto &eventNode : eventNodes) {
+    if (eventNode == nullptr || eventNode->GetNodeType() != SkNodeType::NODE_RESET) {
+      continue;
+    }
+    const uint32_t streamIdx = eventNode->GetStreamIdxInGraph();
+    const auto result = resetsByStream.emplace(streamIdx, eventNode.get());
+    if (!result.second) {
+      SK_LOGW("early notify fallback: duplicate reset for streamIdx=%u, resetNodeId=%lu", streamIdx,
+              eventNode->GetNodeId());
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CollectNotifySources(const std::vector<SuperKernelBaseNode *> &taskNodes,
+                          const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+                          const SuperKernelGraph &graph, std::vector<NotifySource> &notifySources) {
+  std::unordered_map<uint32_t, size_t> lastTaskIndexByStream;
+  for (size_t index = 0; index < taskNodes.size(); ++index) {
+    auto *taskNode = taskNodes[index];
+    if (taskNode != nullptr) {
+      lastTaskIndexByStream[taskNode->GetStreamIdxInGraph()] = index;
+    }
+  }
+  std::unordered_map<uint32_t, SuperKernelBaseNode *> resetsByStream;
+  if (!CollectResetNodesByStream(eventNodes, resetsByStream)) {
+    return false;
+  }
+  for (const auto &eventNode : eventNodes) {
+    if (eventNode == nullptr) {
+      SK_LOGW("early notify fallback: null event node");
+      return false;
+    }
+    if (eventNode->GetNodeType() != SkNodeType::NODE_NOTIFY) {
+      continue;
+    }
+    const uint32_t streamIdx = eventNode->GetStreamIdxInGraph();
+    const auto streamIt = lastTaskIndexByStream.find(streamIdx);
+    if (streamIt == lastTaskIndexByStream.end()) {
+      SK_LOGW("early notify fallback: uncertain source for notifyId=%lu, streamIdx=%u", eventNode->GetNodeId(),
+              streamIdx);
+      return false;
+    }
+    const size_t producerIndex = streamIt->second;
+    auto *producer = taskNodes[producerIndex];
+    if (!HasReliableNotifyQueueSource(graph, producer)) {
+      SK_LOGW("early notify fallback: uncertain source for notifyId=%lu, streamIdx=%u", eventNode->GetNodeId(),
+              streamIdx);
+      return false;
+    }
+    auto resetIt = resetsByStream.find(streamIdx);
+    auto *reset = resetIt == resetsByStream.end() ? nullptr : resetIt->second;
+    notifySources.push_back({producerIndex, producer, reset, eventNode.get()});
+  }
+  return true;
+}
+
+std::vector<SuperKernelBaseNode *> BuildEarlyNotifyTaskList(
+    const std::vector<SuperKernelBaseNode *> &taskNodes,
+    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+    const std::vector<NotifySource> &notifySources) {
+  std::vector<std::vector<SuperKernelBaseNode *>> eventsAfterTask(taskNodes.size());
+  for (const auto &source : notifySources) {
+    if (source.reset != nullptr) {
+      eventsAfterTask[source.producerIndex].push_back(source.reset);
+    }
+    eventsAfterTask[source.producerIndex].push_back(source.notify);
+  }
+  std::vector<SuperKernelBaseNode *> scheduled;
+  scheduled.reserve(taskNodes.size() + eventNodes.size());
+  for (size_t index = 0; index < taskNodes.size(); ++index) {
+    scheduled.push_back(taskNodes[index]);
+    scheduled.insert(scheduled.end(), eventsAfterTask[index].begin(), eventsAfterTask[index].end());
+  }
+  for (const auto &eventNode : eventNodes) {
+    if (eventNode->GetNodeType() == SkNodeType::NODE_NOTIFY) {
+      continue;
+    }
+    if (eventNode->GetNodeType() == SkNodeType::NODE_RESET &&
+        HasNotifyInStream(eventNodes, eventNode->GetStreamIdxInGraph())) {
+      continue;
+    }
+    scheduled.push_back(eventNode.get());
+  }
+  return scheduled;
+}
+
+void ConnectEarlyNotifyDependencies(const std::vector<NotifySource> &notifySources) {
+  for (const auto &source : notifySources) {
+    auto *predecessor = source.producer;
+    if (source.reset != nullptr) {
+      predecessor->sendToNodeId.insert(source.reset->GetNodeId());
+      source.reset->receiveNodeId.insert(predecessor->GetNodeId());
+      source.reset->SetPreNodeId(predecessor->GetNodeId());
+      predecessor = source.reset;
+    }
+    predecessor->sendToNodeId.insert(source.notify->GetNodeId());
+    source.notify->receiveNodeId.insert(predecessor->GetNodeId());
+    source.notify->SetPreNodeId(source.producer->GetNodeId());
+  }
+}
 }  // namespace
 
 bool SuperKernelOptimizer::ExtractIntraStreamDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes) const {
@@ -248,12 +367,12 @@ void SuperKernelOptimizer::ConnectStreamTailKernelsToEvent(const std::vector<Sup
     }
   }
 
-  const uint64_t eventId = eventNode->GetNodeId();
+  const uint64_t eventNodeId = eventNode->GetNodeId();
   for (const auto &[streamIdx, kernel] : lastKernelByStream) {
-    kernel->sendToNodeId.insert(eventId);
+    kernel->sendToNodeId.insert(eventNodeId);
     eventNode->receiveNodeId.insert(kernel->GetNodeId());
     SK_LOGI("connect stream tail kernel to event: streamIdx=%u, kernelNodeId=%lu, eventNodeId=%lu", streamIdx,
-            kernel->GetNodeId(), eventId);
+            kernel->GetNodeId(), eventNodeId);
   }
 }
 
@@ -266,90 +385,23 @@ std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::BuildTaskListWithEarlyN
   const auto buildFallbackTaskList = [&taskNodes, &eventNodes]() {
     std::vector<SuperKernelBaseNode *> tasks = taskNodes;
     tasks.reserve(taskNodes.size() + eventNodes.size());
-
     for (const auto &eventNode : eventNodes) {
       tasks.push_back(eventNode.get());
     }
-
     return tasks;
   };
 
-  std::unordered_map<uint32_t, size_t> lastTaskIndexByStream;
-  for (size_t index = 0; index < taskNodes.size(); ++index) {
-    auto *taskNode = taskNodes[index];
-    if (taskNode != nullptr) {
-      lastTaskIndexByStream[taskNode->GetStreamIdxInGraph()] = index;
-    }
-  }
-
-  struct NotifySource {
-    SuperKernelBaseNode *producer;
-    SuperKernelBaseNode *notify;
-  };
-
-  std::vector<std::vector<SuperKernelBaseNode *>> notifyAfter(taskNodes.size());
-  std::vector<SuperKernelBaseNode *> deferredEvents;
   std::vector<NotifySource> notifySources;
-
-  const auto collectEvents = [&]() {
-    for (const auto &eventNode : eventNodes) {
-      if (eventNode == nullptr) {
-        SK_LOGW("early notify fallback: null event node");
-        return false;
-      }
-
-      if (eventNode->GetNodeType() != SkNodeType::NODE_NOTIFY) {
-        deferredEvents.push_back(eventNode.get());
-        continue;
-      }
-
-      const auto streamIndex = eventNode->GetStreamIdxInGraph();
-      const auto streamIt = lastTaskIndexByStream.find(streamIndex);
-      if (streamIt == lastTaskIndexByStream.end()) {
-        SK_LOGW("early notify fallback: uncertain source for notifyId=%lu, streamIdx=%u", eventNode->GetNodeId(),
-                streamIndex);
-        return false;
-      }
-
-      const size_t producerIndex = streamIt->second;
-      auto *producer = taskNodes[producerIndex];
-      if (!HasReliableNotifyQueueSource(graph, producer)) {
-        SK_LOGW("early notify fallback: uncertain source for notifyId=%lu, streamIdx=%u", eventNode->GetNodeId(),
-                streamIndex);
-        return false;
-      }
-
-      notifySources.push_back({producer, eventNode.get()});
-      notifyAfter[producerIndex].push_back(eventNode.get());
-    }
-
-    return true;
-  };
-
-  if (!collectEvents() || notifySources.empty()) {
+  if (!CollectNotifySources(taskNodes, eventNodes, graph, notifySources) || notifySources.empty()) {
     return buildFallbackTaskList();
   }
-
-  std::vector<SuperKernelBaseNode *> scheduled;
-  scheduled.reserve(taskNodes.size() + eventNodes.size());
-
-  for (size_t index = 0; index < taskNodes.size(); ++index) {
-    scheduled.push_back(taskNodes[index]);
-    scheduled.insert(scheduled.end(), notifyAfter[index].begin(), notifyAfter[index].end());
-  }
-  scheduled.insert(scheduled.end(), deferredEvents.begin(), deferredEvents.end());
-
+  std::vector<SuperKernelBaseNode *> scheduled = BuildEarlyNotifyTaskList(taskNodes, eventNodes, notifySources);
   if (!HasForwardTaskRelations(scheduled, eventNodes)) {
     SK_LOGW("early notify fallback: candidate task order is not topological");
     return buildFallbackTaskList();
   }
 
-  for (const auto &source : notifySources) {
-    source.producer->sendToNodeId.insert(source.notify->GetNodeId());
-    source.notify->receiveNodeId.insert(source.producer->GetNodeId());
-    source.notify->SetPreNodeId(source.producer->GetNodeId());
-  }
-
+  ConnectEarlyNotifyDependencies(notifySources);
   usedEarlyRelease = true;
   return scheduled;
 }
@@ -461,8 +513,11 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
   std::vector<SuperKernelBaseNode *> tasks =
       BuildTaskListWithEarlyNotifies(reorderedTaskNodes, eventNodes, graph, usedEarlyRelease);
   if (usedEarlyRelease) {
-    auto frontReset = std::find_if(eventNodes.begin(), eventNodes.end(), [](const auto &eventNode) {
-      return eventNode != nullptr && eventNode->GetNodeType() == SkNodeType::NODE_RESET;
+    auto frontReset = std::find_if(eventNodes.begin(), eventNodes.end(), [&eventNodes](const auto &eventNode) {
+      if (eventNode == nullptr || eventNode->GetNodeType() != SkNodeType::NODE_RESET) {
+        return false;
+      }
+      return !HasNotifyInStream(eventNodes, eventNode->GetStreamIdxInGraph());
     });
     if (frontReset != eventNodes.end()) {
       ConnectStreamTailKernelsToEvent(reorderedTaskNodes, frontReset->get());
