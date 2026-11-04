@@ -41,8 +41,6 @@ class NddmaTemplate : public BaseTemplate {
                                         af::AscGraph &new_case);
   static Status ProcessTransposeNodes(af::AscGraph &new_case, bool &is_nddma_generated);
   static Status ProcessSliceNodes(af::AscGraph &new_case, bool &is_nddma_generated);
-  static af::Status GenNddmaForNode(const af::AscNodePtr &node, const af::AscNodePtr &out_node,
-                                    bool origin_has_transpose, af::AscGraph &new_case, bool &is_nddma_generated);
   static af::Status IsNeedDropTransposeBrcFuse(af::AscGraph &graph, bool &is_need_drop);
   static af::Status BroadcastInputNodeIsScalar(const af::AscNodePtr &node, bool &is_scalar);
   static af::Status IsVectorizedAxisDoubleCut(af::AscGraph &graph, const af::AscNodePtr &node,
