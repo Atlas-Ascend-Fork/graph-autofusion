@@ -920,6 +920,19 @@ TEST_F(SuperKernelGraphTest, AddMemoryAssociateWrite_Success) {
   EXPECT_TRUE(graph->memoryToNodes[100].writeNodeIdList.count(10) > 0);
 }
 
+TEST_F(SuperKernelGraphTest, AddMemoryAssociateWrite_RejectsDuplicateNode) {
+  auto node = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_VALUE_WRITE, 0, 0, INVALID_STREAM_ID,
+                                                      INVALID_TASK_ID);
+  node->SetNodeId(10);
+  node->SetNodeType(SkNodeType::NODE_MEMORY_WRITE);
+  SuperKernelBaseNode *nodePtr = node.get();
+  graph->graphMap[10] = std::move(node);
+
+  ASSERT_TRUE(graph->AddMemoryAssociateWrite(100, nodePtr));
+  EXPECT_FALSE(graph->AddMemoryAssociateWrite(100, nodePtr));
+  EXPECT_EQ(graph->memoryToNodes[100].writeNodeIdList.count(10), 1);
+}
+
 TEST_F(SuperKernelGraphTest, AddMemoryAssociateWait_Success) {
   auto node = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_VALUE_WAIT, 0, 0, INVALID_STREAM_ID,
                                                       INVALID_TASK_ID);
