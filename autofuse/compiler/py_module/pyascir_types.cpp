@@ -957,7 +957,30 @@ PyTypeObject ShapeInfo::type = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
 /** FusedScheduledResult */
 namespace pyascir {
-static bool ProcessMatMulNode(const af::AscNodePtr &node, PyObject *attr_dict) {
+static bool SetStaticMatMulInputShapes(const af::AscNodePtr &node, PyObject *attr_dict) {
+  PyObject *input_shapes = PyList_New(node->inputs.Size());
+  PY_ASSERT_NOTNULL(input_shapes);
+  GE_DISMISSABLE_GUARD(input_shapes_guard, [input_shapes]() { Py_DECREF(input_shapes); });
+  for (size_t i = 0U; i < node->inputs.Size(); ++i) {
+    const auto &repeats = node->inputs[i].attr.repeats;
+    PyObject *shape = PyList_New(repeats.size());
+    PY_ASSERT_NOTNULL(shape);
+    GE_DISMISSABLE_GUARD(shape_guard, [shape]() { Py_DECREF(shape); });
+    for (size_t j = 0U; j < repeats.size(); ++j) {
+      int64_t dim = 0;
+      PY_ASSERT(repeats[j].GetConstValue(dim) && dim >= 0, "Static MatMul input shape must be concrete.");
+      PyObject *value = PyLong_FromLongLong(dim);
+      PY_ASSERT_NOTNULL(value);
+      PY_ASSERT(PyList_SetItem(shape, j, value) == 0);
+    }
+    GE_DISMISS_GUARD(shape_guard);
+    PY_ASSERT(PyList_SetItem(input_shapes, i, shape) == 0);
+  }
+  PY_ASSERT(PyDict_SetItemString(attr_dict, "input_shapes", input_shapes) == 0);
+  return true;
+}
+
+static bool ProcessMatMulNode(const af::AscNodePtr &node, PyObject *attr_dict, bool is_static) {
   ascgen_utils::MatMulAttr mm_attr_data;
   PY_ASSERT_GRAPH_SUCCESS(ascgen_utils::ParseMatmulAttr(node, mm_attr_data));
   uint32_t length = 0U;
@@ -979,6 +1002,9 @@ static bool ProcessMatMulNode(const af::AscNodePtr &node, PyObject *attr_dict) {
   uint32_t mm_input_num = 0U;
   PY_ASSERT_GRAPH_SUCCESS(ascgen_utils::GetCubeInputNum(node, mm_input_num));
   SET_DICT_LONG(attr_dict, "input_num", mm_input_num);
+  if (is_static) {
+    return SetStaticMatMulInputShapes(node, attr_dict);
+  }
   return true;
 }
 
@@ -1036,7 +1062,7 @@ static bool ProcessConv2DNode(const af::AscNodePtr &node, PyObject *attr_dict) {
   return true;
 }
 
-static bool ProcessImplGraphs(PyObject *result_dict, const std::vector<af::AscGraph> &impl_graphs) {
+static bool ProcessImplGraphs(PyObject *result_dict, const std::vector<af::AscGraph> &impl_graphs, bool is_static) {
   for (auto &impl_graph : impl_graphs) {
     for (auto node : impl_graph.GetAllNodes()) {
       if (node->attr.api.compute_type != ge::ComputeType::kComputeCube) {
@@ -1052,7 +1078,7 @@ static bool ProcessImplGraphs(PyObject *result_dict, const std::vector<af::AscGr
           return false;
         }
       } else {
-        if (!ProcessMatMulNode(node, attr_dict)) {
+        if (!ProcessMatMulNode(node, attr_dict, is_static)) {
           return false;
         }
       }
@@ -1145,7 +1171,8 @@ PyObject *FusedScheduledResult::GetCubeAttributes(PyObject *self_pyobject) {
         continue;
       }
       for (auto &schedule_group : scheduled_result.schedule_groups) {
-        if (ProcessImplGraphs(result_dict, schedule_group.impl_graphs)) {
+        if (ProcessImplGraphs(result_dict, schedule_group.impl_graphs,
+                              ascgen_utils::IsFrontendStaticSchedResult(self->fused_schedule_result))) {
           GE_DISMISS_GUARD(result_dict_guard);
           return result_dict;
         }

@@ -59,6 +59,7 @@ inline constexpr char kNddmaTranspose[] = "NDDMA.Transpose";
 inline constexpr char kNddmaBroadcast[] = "NDDMA.Broadcast";
 inline constexpr char kNddmaCast[] = "NDDMA.Cast";
 inline constexpr char kLoadToNddma[] = "LoadToNDDMA";
+inline constexpr char kOutputReuse[] = "OutputReuse";
 inline constexpr char kPointwiseRecompute[] = "Pointwise/Recompute";
 inline constexpr char kReduceCommon[] = "Reduce/Common";
 inline constexpr char kReduceAllLoad[] = "Reduce/AllLoad";
@@ -135,6 +136,8 @@ const std::string kExtendConv2D = "ExtendConv2D";
 const std::string kExtendConv2DBias = "ExtendConv2DBias";
 const std::string kExtendConv2DScale = "ExtendConv2DScale";
 const std::string kExtendConv2DBiasScale = "ExtendConv2DBiasScale";
+
+constexpr int64_t kAvoidTensorApiOffset = 0x80;
 
 struct MatMulAttr {
   int64_t transpose_x1{0};
@@ -382,8 +385,10 @@ bool IsSatetyResultType(const ascir::ScheduledResult &sched_result);
 af::Status GetCubeOutputTypeSize(const ascir::NodeView &node, uint32_t &length);
 af::Status GetCubeInputNum(const ascir::NodeView &node, uint32_t &num);
 af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_result);
+af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_result, bool allow_fragment_padding);
 af::Status CreateCVFusionCommonResult(ascir::FusedScheduledResult &elemwise_schedule_result);
 af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result);
+af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result, bool allow_fragment_padding);
 bool IsCVFusionUBGraph(const ascir::ImplGraph &impl_graph, ascir::CubeTemplateType cv_fusion_type);
 af::Status FilterCVFusionUBResult(ascir::FusedScheduledResult &ub_schedule_result);
 af::Status FilterCVFusionCommonResult(ascir::FusedScheduledResult &common_schedule_result);
@@ -396,6 +401,8 @@ bool IsConv2DTypeWithOffsetW(const ascir::ImplGraph &impl_graph);
 bool IsConv2DTypeWithScale0(const ascir::ImplGraph &impl_graph);
 af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
                        std::string &input_type, std::string &output_type);
+af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
+                       std::string &input_type, std::string &output_type, MatMulAttr &matmul_attr);
 }  // namespace ascgen_utils
 
 #endif

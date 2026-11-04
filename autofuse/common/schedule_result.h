@@ -34,6 +34,8 @@ struct ScheduleGroup {
   std::vector<af::AscGraph> impl_graphs;
   std::map<std::string, std::string> graph_name_to_score_funcs;
   bool double_buffer{false};
+  // Frontend dimensions retained for generated runtime checks, not solver axes.
+  std::vector<af::Expression> runtime_shape_vars{};
 };
 
 enum class CubeTemplateType : int32_t {

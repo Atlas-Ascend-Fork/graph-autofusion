@@ -9,6 +9,7 @@
  */
 
 #include "codegen_tiling_data.h"
+#include "codegen_kernel.h"
 #include <sstream>
 #include <iomanip>
 
@@ -153,7 +154,11 @@ std::string codegen::TilingData::pgo_perf_struct = {
     "};\n"};
 
 af::Status codegen::TilingData::ProcessCubeFusionResult(ascir::FusedScheduledResult &schedule_result) {
-  if (ascgen_utils::IsCubeUBFusedScheduled(schedule_result)) {
+  if (!ascgen_utils::IsFrontendStaticSchedResult(schedule_result) &&
+      ascgen_utils::IsCubeUBFusedScheduled(schedule_result) &&
+      ascgen_utils::IsCubeCommonFusedScheduled(schedule_result)) {
+    GE_ASSERT_SUCCESS(ascgen_utils::ProcessCubeFusionResultDynamic(schedule_result));
+  } else if (ascgen_utils::IsCubeUBFusedScheduled(schedule_result)) {
     GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionResult(schedule_result));
   } else if (ascgen_utils::IsCubeCommonFusedScheduled(schedule_result)) {
     GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionCommonResult(schedule_result));
@@ -200,6 +205,7 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
   } else {
     GE_ASSERT_SUCCESS(ProcessCubeFusionResult(elemwise_schedule_result));
   }
+  CommonOutputReusePlan::PreserveShapeVars(fused_schedule_result, elemwise_schedule_result);
 
   ss1 << this->ClassBegin(this->kernel_name, this->class_name) << std::endl;
   ss1 << GetCommonTilingField(false, elemwise_schedule_result) << std::endl;
@@ -224,8 +230,10 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
     bool is_conv = false;
     std::string input_type;
     std::string output_type;
-    GE_ASSERT_SUCCESS(ascgen_utils::GetCubeInfo(fused_schedule_result, is_batch, is_conv, input_type, output_type),
-                      "Failed to get cube info from FusedScheduledResult");
+    ascgen_utils::MatMulAttr matmul_attr;
+    GE_ASSERT_SUCCESS(
+        ascgen_utils::GetCubeInfo(fused_schedule_result, is_batch, is_conv, input_type, output_type, matmul_attr),
+        "Failed to get cube info from FusedScheduledResult");
     std::string axis_name;
     if ((elemwise_schedule_result.node_idx_to_scheduled_results.size() > 0U) &&
         (elemwise_schedule_result.node_idx_to_scheduled_results[0].size() > 0U) &&
@@ -308,6 +316,22 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
        << "#define DTYPE_Y " << output_type << "\n"
        << "#define DTYPE_BIAS " << output_type << "\n"
        << "#define OP_TYPE_RELU_VALUE 0\n";
+    if (!is_conv) {
+      // Use the same capability macro as native MM/BMM registration, for both host and device compilation.
+      ss << "#if defined(__FIXED_POINT_ONLY_CUBE_TO_L0C__) && __FIXED_POINT_ONLY_CUBE_TO_L0C__\n"
+         << "#define CV_TENSOR_API_SUPPORTED 0\n#else\n#define CV_TENSOR_API_SUPPORTED 1\n#endif\n"
+         << "#define CV_AVOID_TENSOR_API " << (matmul_attr.offset_x == ascgen_utils::kAvoidTensorApiOffset ? 1 : 0)
+         << "\n"
+         << "#define CV_MM_DISPATCH_SUPPORTED(API, MD, FL, LO) \\\n"
+         << "  (CV_TENSOR_API_SUPPORTED ? \\\n"
+         << "   ((API) != 1 || CV_AVOID_TENSOR_API || (MD) != 0) : \\\n"
+         << "   ((API) == 1 && (MD) == 0 && (LO) == 0))\n"
+         << "#define CV_BMM_DISPATCH_SUPPORTED(API, MD, FL, LO, ITER) \\\n"
+         << "  (CV_TENSOR_API_SUPPORTED ? \\\n"
+         << "   ((API) != 1 || CV_AVOID_TENSOR_API || (FL) == 0) : \\\n"
+         << "   ((MD) == 0 && (LO) == 0 && (((API) == 0 && (ITER) == 0) || \\\n"
+         << "    ((API) == 1 && ((ITER) == 0 || (ITER) == 1)))))\n";
+    }
     if (const_mode_) {
       ss << "template <typename T>\n"
          << "T convert_from_bytes(const uint8_t *bytes) {\n"
@@ -546,6 +570,12 @@ void codegen::TilingData::ProcessSingleGroup(const ascir::ScheduleGroup &schedul
     AddApiTilingData(graph, ss, i);
     GELOGI("TilingCaseId:ProcessSingleGroup, tilingcaseNum:%d\n", schedule_group.impl_graphs.size());
   }
+  for (const auto &var : schedule_group.runtime_shape_vars) {
+    if (size_var_names.emplace(std::string(var.Str().get())).second) {
+      ascir::SizeVar size(var);
+      ss << "  " << (const_mode_ ? DataFieldConstDefine(size) : DataFieldDefine(size)) << std::endl;
+    }
+  }
   GenTqueTbufTmpBufFunc(q_ids, b_ids, ss);
   return;
 }
@@ -586,6 +616,12 @@ void codegen::TilingData::ProcessMultiGroup(uint64_t pos, const int graph_id,
       AddApiTilingData(graph, ss2, j);
       GELOGI("TilingCaseId:ProcessMultiGroup, i_%d, i_num:%d, j_%d, j_num:%d\n", i, schedule_groups.size(), j,
              schedule_groups[i].impl_graphs.size());
+    }
+    for (const auto &var : schedule_groups[i].runtime_shape_vars) {
+      if (size_var_names.emplace(std::string(var.Str().get())).second) {
+        ascir::SizeVar size(var);
+        ss2 << "  " << (const_mode_ ? DataFieldConstDefine(size) : DataFieldDefine(size)) << std::endl;
+      }
     }
     GenTqueTbufTmpBufFunc(q_ids, b_ids, ss2);
     ss2 << this->ClassEnd() << std::endl;

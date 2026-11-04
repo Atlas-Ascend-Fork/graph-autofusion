@@ -212,12 +212,45 @@ class TQue : public Variable {
   bool is_bind{false};
 
   TQue(ascir::QueId que_id, ascir::Position pos, std::string &position_name);
+  TQue(const TQue &queue, const std::string &queue_name, const std::string &buffer_name);
   TQue(ascir::QueId que_id, ascir::Position src_position, const std::string &src_position_name,
        const std::string &dst_position_name);
   std::string AllocBuf(const bool with_define = true) const;
   std::string EnqueBuf() const;
   std::string DequeBuf(const bool is_unit_first) const;
   std::string FreeBuf() const;
+};
+
+struct CommonQueueSplitPlan {
+  ascir::QueId queue_id = af::kIdNone;
+  ascir::TensorId mm_tensor_id = af::kIdNone;
+  ascir::TensorId small_tensor_id = af::kIdNone;
+  uint64_t ub_limit = 0U;
+  std::vector<std::string> ub_containers;
+  std::string original_ub_expr;
+
+  std::string QueueAliasName() const;
+  std::string BufferAliasName() const;
+  bool UsesMmQueue(const ApiCall &call) const;
+  Status GenerateQueueInit(const TPipe &tpipe, const TQue &queue, std::string &result) const;
+};
+
+struct CodegenConfig;
+
+struct CommonOutputReusePlan {
+  std::string output_name;
+  ascir::TensorId workspace_id = af::kIdNone;
+  bool reuses_vector_output = false;
+  std::set<std::string> vector_impl_names;
+  std::set<std::pair<std::string, std::string>> copy_stores;
+  std::vector<std::pair<std::string, std::vector<af::Expression>>> buffer_sizes;
+
+  static std::shared_ptr<const CommonOutputReusePlan> Create(const ascir::FusedScheduledResult &fused,
+                                                             const ascir::ScheduledResult &scheduled,
+                                                             bool use_list_tensor);
+  static void PreserveShapeVars(const ascir::FusedScheduledResult &source, ascir::FusedScheduledResult &vector_result);
+  std::string GenerateGuard(const CodegenConfig &config, bool is_dynamic) const;
+  Status CreateDirectOutputGraph(const ascir::ImplGraph &source, ascir::ImplGraph &target) const;
 };
 
 class TBuf : public Variable {
@@ -299,6 +332,7 @@ class TPipe : public Variable {
   map<ascir::TensorId, Tensor> tensors;
   map<ascir::MergeScopeId, MergeScope> merge_scopes;
   map<ascir::QueId, TQue> ques;
+  std::shared_ptr<const CommonQueueSplitPlan> common_queue_split_plan;
   map<ascir::BufId, TBuf> bufs;
   std::set<ascir::QueId> load_store_qids;
   std::set<ascir::QueId> non_load_store_qids;
@@ -306,6 +340,8 @@ class TPipe : public Variable {
   std::vector<ascir::TensorId> need_gen_blk_tensors;
   ascir::CubeTemplateType cv_fusion_type{ascir::CubeTemplateType::kDefault};
   bool is_inductor{false};
+  bool is_dynamic{false};
+  bool is_conv2d{false};
   ascir::TensorId cube_output_tensor_id = af::kIdNone;
   ascir::TensorId cube_output_que_id = af::kIdNone;
   std::vector<ascir::BufId> contiguous_buf_ids;
@@ -338,6 +374,7 @@ class TPipe : public Variable {
   std::string AllocTmpBuf(const TBuf &buf, const bool with_define = true) const;
   std::string GenDuplicateBufAlloc(const std::set<std::pair<std::string, std::string>> &pre_api_extract_dup) const;
   Status LocalTQueAlloc(std::string &result) const;
+  void PrepareCommonQueueSplitPlan(const Loop &loop, const af::AscGraph &graph);
   Status LocalTensorQueBufAlloc(std::string &result) const;
   std::string SyncMte3ToMte2(const Tensor in_tensor) const;
   std::string SyncMte2ToMte3(const Tensor in_tensor) const;
@@ -439,14 +476,18 @@ class Kernel {
                                 const std::string &workspace_tiling_data = "t") const;
   std::string GenTilingFuncCall(const std::string &impl_graph_name, const std::string &tiling_data) const;
   std::string GenCubeTilingFuncCall(const ascir::ImplGraph &impl_graph, bool is_dynamic = false) const;
-  std::string GenCubeTilingSingleFuncCall(const CubeTilingOptions &options) const;
+  std::string GenCubeTilingSingleFuncCall(const CubeTilingOptions &options,
+                                          const std::string &callback_name = "") const;
   af::Status GenCubeCommonTiling(std::stringstream &ss, const bool is_batch, bool is_conv2d = false,
-                                 bool is_dynamic = false, bool is_db = false) const;
+                                 bool is_dynamic = false, bool is_db = false,
+                                 const std::string &callback_name = "") const;
   std::string GenCubeCommonTilingSingleFuncCall(const ascir::ImplGraph &impl_graph,
-                                                const std::string &output_arg_override = "") const;
+                                                const std::string &output_arg_override = "",
+                                                bool is_dynamic = false) const;
   static std::string KernelFuncDeclare(const std::string &graph_name,
                                        const ascir::FusedScheduledResult &fused_schedule_result,
                                        bool use_list_tensor = false, bool is_inductor = false, bool is_conv2d = false);
+  Status BindWorkspaceInput(ascir::TensorId tensor_id, const std::string &input_name, size_t input_index);
   Status GlobalTensorInit(std::string &result, const std::string &workspace_buffer_arg_override = "") const;
   Status GlobalTensorAssign(std::string &result) const;
   Status GlobalTensorDefine(std::string &result) const;
@@ -467,10 +508,15 @@ class Kernel {
   void SetEnableParallelCompile(bool enable_parallel_compile);
   bool GetEnableParallelCompile() const;
   Status InitL2CacheHintInfo(const ascir::FusedScheduledResult &fused_scheduled_result, const ascir::ImplGraph &graph);
+  static Status GenGeDynamicCvUbFuncs(const ascir::FusedScheduledResult &fused_schedule_result, size_t graph_id,
+                                      size_t result_id, const CodegenConfig &config, bool use_list_tensor,
+                                      std::stringstream &ss, std::stringstream &calls,
+                                      std::unordered_set<const std::string *> &kernel_file_ptr);
   Status GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_no_db_flag, bool is_conv2d,
-                                   bool is_dynamic = false, bool is_inductor = false);
+                                   bool is_dynamic = false, bool is_inductor = false,
+                                   const std::string &callback_name = "");
   Status InitCVFusionAddr(std::stringstream &result, bool vector_no_db_flag, bool is_dynamic = false,
-                          bool is_inductor = false);
+                          bool is_inductor = false, bool is_conv2d = false, const std::string &callback_name = "");
   static std::string GenKernelFuncCallForInductor(const ascir::FusedScheduledResult &fused_schedule_result);
   Status ParseUbScalarOptimizationInfo(const ascir::NodeView &node, Tensor &t, ascir::TensorId id, bool is_all_link_vf);
   Status JudgeIsLoadLinkStoreAndVec(const ascir::NodeView &node, Tensor &t, ascir::TensorId id) const;
@@ -536,6 +582,12 @@ class Kernel {
   Status AppendOutputGlobalTensorInit(std::stringstream &ss) const;
   Status AppendConstTensorInit(std::stringstream &ss) const;
   Status AppendUbScalarTensorInit(std::stringstream &ss) const;
+  static Status GenCommonVectorImpl(const ascir::FusedScheduledResult &fused, const ascir::ImplGraph &graph,
+                                    const CodegenConfig &config, size_t index, bool enable_group_parallel,
+                                    bool use_list_tensor, ascir::TensorId cube_output_id,
+                                    const CommonOutputReusePlan *direct_output, const std::string &workspace_override,
+                                    std::stringstream &ss, std::stringstream &calls,
+                                    std::unordered_set<const std::string *> &kernel_files);
   Status AppendWorkspaceTensorInit(std::stringstream &ss, const std::string &workspace_buffer_arg_override) const;
   Status GenL2CacheHintCode(std::stringstream &ss) const;
   static Status GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fused_schedule_result,
