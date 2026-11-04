@@ -10,16 +10,20 @@
 
 #include "sk_queue_type_resolver.h"
 
+#include <algorithm>
 #include <unordered_map>
-#include <unordered_set>
 
 #include "sk_graph.h"
 #include "sk_log.h"
 #include "sk_node.h"
 
 namespace {
-SkQueueType QueueTypeFromKernel(SkKernelType type) {
-  switch (type) {
+constexpr int kMaxKernelSearchHops = 100;
+
+enum class SearchDirection : uint8_t { PREV, NEXT };
+
+SkQueueType ToQueueType(SkKernelType kernelType) {
+  switch (kernelType) {
     case SkKernelType::AIC_ONLY:
     case SkKernelType::MIX_AIC_1_0:
       return SkQueueType::AIC;
@@ -31,149 +35,156 @@ SkQueueType QueueTypeFromKernel(SkKernelType type) {
     case SkKernelType::MIX_AIC_1_2:
       return SkQueueType::MIX_1_2;
     default:
-      SK_LOGW("unsupported kernel type %s for queue preparation, using AIC fallback", to_string(type));
+      SK_LOGW("Unsupported kernel type %s for super kernel; using AIC as fallback", to_string(kernelType));
       return SkQueueType::AIC;
   }
 }
 
-bool UsesAicQueue(SkQueueType type) {
+bool UsesAic(SkQueueType type) {
   return type == SkQueueType::AIC || type == SkQueueType::MIX_1_1 || type == SkQueueType::MIX_1_2;
 }
 
-bool UsesAivQueue(SkQueueType type) {
+bool UsesAiv(SkQueueType type) {
   return type == SkQueueType::AIV || type == SkQueueType::MIX_1_1 || type == SkQueueType::MIX_1_2;
 }
 
-SkQueueType EventQueueType(SkQueueType type, bool aicAvailable, bool aivAvailable) {
-  SkQueueType eventType = type == SkQueueType::AIC ? SkQueueType::AIC : SkQueueType::AIV;
-  if (eventType == SkQueueType::AIC && !aicAvailable) {
+SkQueueType ToEventQueueType(SkQueueType queueType, bool aicAvailable, bool aivAvailable) {
+  SkQueueType result = queueType == SkQueueType::AIC ? SkQueueType::AIC : SkQueueType::AIV;
+  if (result == SkQueueType::AIC && !aicAvailable) {
     return SkQueueType::AIV;
   }
-  if (eventType == SkQueueType::AIV && !aivAvailable) {
+  if (result == SkQueueType::AIV && !aivAvailable) {
     return SkQueueType::AIC;
   }
-  return eventType;
+  return result;
 }
 
-SkQueueType ResolveMixWaitEventQueueType(const SuperKernelBaseNode *previousKernel,
-                                         const SuperKernelBaseNode *mixKernel) {
-  if (previousKernel == nullptr) {
-    return SkQueueType::AIV;
-  }
-
-  const SkQueueType previousKernelQueueType = QueueTypeFromKernel(previousKernel->GetKernelType());
-  if (previousKernelQueueType != SkQueueType::AIC && previousKernelQueueType != SkQueueType::AIV) {
-    return SkQueueType::AIV;
-  }
-
-  const bool sameStream = previousKernel->GetStreamIdxInGraph() == mixKernel->GetStreamIdxInGraph();
-  const bool hasDirectDependency = previousKernel->sendToNodeId.count(mixKernel->GetNodeId()) > 0 ||
-                                   mixKernel->receiveNodeId.count(previousKernel->GetNodeId()) > 0;
-  return (sameStream || hasDirectDependency)
-             ? previousKernelQueueType
-             : ((previousKernelQueueType == SkQueueType::AIV) ? SkQueueType::AIC : SkQueueType::AIV);
-}
-
-const SuperKernelBaseNode *FindKernel(const SuperKernelGraph &graph, uint64_t startId, bool previous,
-                                      std::unordered_map<uint64_t, const SuperKernelBaseNode *> &cache,
-                                      int maxHops = 100) {
-  if (startId == INVALID_TASK_ID) {
+const SuperKernelBaseNode *FindKernelNodeInDirection(uint64_t startNodeId, const SuperKernelGraph &graph,
+                                                     SearchDirection direction,
+                                                     std::unordered_map<uint64_t, const SuperKernelBaseNode *> &cache) {
+  if (startNodeId == INVALID_TASK_ID) {
     return nullptr;
   }
-  const auto *startNode = graph.GetNodeById(startId);
+  const auto *startNode = graph.GetNodeById(startNodeId);
   if (startNode == nullptr) {
     return nullptr;
   }
   const SkNodeType startNodeType = startNode->GetNodeType();
-  std::unordered_set<uint64_t> visited;
+  uint64_t currentNodeId = startNodeId;
   std::vector<uint64_t> path;
-  uint64_t currentId = startId;
-  for (int hop = 0; hop < maxHops && currentId != INVALID_TASK_ID; ++hop) {
-    if (!visited.insert(currentId).second) {
+  path.reserve(kMaxKernelSearchHops);
+  for (int hop = 0; hop < kMaxKernelSearchHops; ++hop) {
+    path.push_back(currentNodeId);
+    const auto *current = graph.GetNodeById(currentNodeId);
+    if (current == nullptr) {
       return nullptr;
     }
-    path.push_back(currentId);
-    const auto *node = graph.GetNodeById(currentId);
-    if (node == nullptr) {
-      return nullptr;
+    const SuperKernelBaseNode *result = nullptr;
+    const auto cached = cache.find(currentNodeId);
+    if (cached != cache.end()) {
+      result = cached->second;
+    } else if (current->GetNodeType() == SkNodeType::NODE_KERNEL) {
+      result = current;
     }
-    auto cacheIt = cache.find(currentId);
-    const SuperKernelBaseNode *kernel = cacheIt == cache.end() ? nullptr : cacheIt->second;
-    if (kernel == nullptr && node->GetNodeType() == SkNodeType::NODE_KERNEL) {
-      kernel = node;
-    }
-    if (kernel != nullptr) {
+    if (result != nullptr) {
       for (uint64_t pathNodeId : path) {
         const auto *pathNode = graph.GetNodeById(pathNodeId);
         if (pathNode == nullptr) {
           return nullptr;
         }
         if (pathNode->GetNodeType() == SkNodeType::NODE_KERNEL || pathNode->GetNodeType() == startNodeType) {
-          cache[pathNodeId] = kernel;
+          cache[pathNodeId] = result;
         }
       }
-      return kernel;
+      return result;
     }
-    currentId = previous ? node->GetPreNodeId() : node->GetNextNodeId();
+    currentNodeId = direction == SearchDirection::PREV ? current->GetPreNodeId() : current->GetNextNodeId();
+    if (currentNodeId == INVALID_TASK_ID || std::find(path.cbegin(), path.cend(), currentNodeId) != path.cend()) {
+      return nullptr;
+    }
   }
   return nullptr;
 }
+
+SkQueueType ResolveMixWaitQueue(const SuperKernelBaseNode *previousKernel, const SuperKernelBaseNode &mixKernel) {
+  if (previousKernel == nullptr) {
+    return SkQueueType::AIV;
+  }
+  const SkQueueType previousQueue = ToQueueType(previousKernel->GetKernelType());
+  if (previousQueue != SkQueueType::AIC && previousQueue != SkQueueType::AIV) {
+    return SkQueueType::AIV;
+  }
+  const bool sameStream = previousKernel->GetStreamIdxInGraph() == mixKernel.GetStreamIdxInGraph();
+  const bool directDependency = previousKernel->sendToNodeId.count(mixKernel.GetNodeId()) > 0 ||
+                                mixKernel.receiveNodeId.count(previousKernel->GetNodeId()) > 0;
+  if (sameStream || directDependency) {
+    return previousQueue;
+  }
+  return previousQueue == SkQueueType::AIV ? SkQueueType::AIC : SkQueueType::AIV;
+}
+
+bool IsSupportedTask(const SuperKernelBaseNode &node) {
+  const auto type = node.GetNodeType();
+  return type == SkNodeType::NODE_KERNEL || type == SkNodeType::NODE_NOTIFY || type == SkNodeType::NODE_WAIT ||
+         type == SkNodeType::NODE_RESET;
+}
 }  // namespace
 
-bool SkQueueTypeResolver::Resolve(const std::vector<SuperKernelBaseNode *> &tasks) const {
+bool SkQueueTypeResolver::Resolve(const std::vector<SuperKernelBaseNode *> &tasks,
+                                  std::vector<SkQueueType> &queueTypes) const {
+  queueTypes.clear();
+  std::vector<SkQueueType> resolved(tasks.size(), SkQueueType::UNKNOWN);
   bool aicAvailable = false;
   bool aivAvailable = false;
-  for (auto *node : tasks) {
-    if (node == nullptr) {
+  for (size_t i = 0; i < tasks.size(); ++i) {
+    const auto *node = tasks[i];
+    if (node == nullptr || !IsSupportedTask(*node)) {
+      SK_LOGE("Resolve queue type failed: null or unsupported task node");
       return false;
     }
-    if (node->GetNodeType() == SkNodeType::NODE_KERNEL) {
-      SkQueueType type = QueueTypeFromKernel(node->GetKernelType());
-      if (type == SkQueueType::UNKNOWN) {
-        SK_LOGE("unsupported kernel queue type, nodeId=%lu", node->GetNodeId());
-        return false;
-      }
-      node->SetExecutionQueueType(type);
-      aicAvailable = aicAvailable || UsesAicQueue(type);
-      aivAvailable = aivAvailable || UsesAivQueue(type);
+    if (node->GetNodeType() != SkNodeType::NODE_KERNEL) {
+      continue;
     }
+    resolved[i] = ToQueueType(node->GetKernelType());
+    aicAvailable |= UsesAic(resolved[i]);
+    aivAvailable |= UsesAiv(resolved[i]);
   }
-  SkQueueType fallback = SkQueueType::UNKNOWN;
-  for (auto *node : tasks) {
-    if (node->GetNodeType() == SkNodeType::NODE_KERNEL) {
-      fallback = EventQueueType(node->GetExecutionQueueType(), aicAvailable, aivAvailable);
-      break;
-    }
-  }
-  if (fallback == SkQueueType::UNKNOWN) {
+  if (!aicAvailable && !aivAvailable) {
+    SK_LOGE("Resolve queue type failed: no AIC or AIV resource detected in tasks");
     return false;
   }
 
-  SuperKernelBaseNode *previousKernel = nullptr;
-  std::unordered_map<uint64_t, const SuperKernelBaseNode *> kernelNodeCache;
-  for (auto *node : tasks) {
-    const auto type = node->GetNodeType();
-    if (type == SkNodeType::NODE_KERNEL) {
-      previousKernel = node;
+  SkQueueType firstKernelEventQueue = SkQueueType::UNKNOWN;
+  for (SkQueueType queueType : resolved) {
+    if (queueType != SkQueueType::UNKNOWN) {
+      firstKernelEventQueue = ToEventQueueType(queueType, aicAvailable, aivAvailable);
+      break;
+    }
+  }
+
+  std::unordered_map<uint64_t, const SuperKernelBaseNode *> cache;
+  const SuperKernelBaseNode *previousScheduledKernel = nullptr;
+  for (size_t i = 0; i < tasks.size(); ++i) {
+    const auto *node = tasks[i];
+    if (node->GetNodeType() == SkNodeType::NODE_KERNEL) {
+      previousScheduledKernel = node;
       continue;
     }
-    if (type != SkNodeType::NODE_NOTIFY && type != SkNodeType::NODE_RESET && type != SkNodeType::NODE_WAIT) {
-      SK_LOGE("unsupported node type for queue preparation, nodeId=%lu", node->GetNodeId());
-      return false;
+    const bool searchPrevious = node->GetNodeType() != SkNodeType::NODE_WAIT;
+    const uint64_t anchor = searchPrevious ? node->GetPreNodeId() : node->GetNextNodeId();
+    const auto *kernel = FindKernelNodeInDirection(
+        anchor, graph_, searchPrevious ? SearchDirection::PREV : SearchDirection::NEXT, cache);
+    if (kernel == nullptr) {
+      resolved[i] = firstKernelEventQueue;
+      continue;
     }
-    const bool previous = type != SkNodeType::NODE_WAIT;
-    const auto *kernel =
-        FindKernel(graph_, previous ? node->GetPreNodeId() : node->GetNextNodeId(), previous, kernelNodeCache);
-    SkQueueType resolved = fallback;
-    if (kernel != nullptr) {
-      kernelNodeCache[node->GetNodeId()] = kernel;
-      resolved = EventQueueType(QueueTypeFromKernel(kernel->GetKernelType()), aicAvailable, aivAvailable);
-      if (type == SkNodeType::NODE_WAIT && (QueueTypeFromKernel(kernel->GetKernelType()) == SkQueueType::MIX_1_1 ||
-                                            QueueTypeFromKernel(kernel->GetKernelType()) == SkQueueType::MIX_1_2)) {
-        resolved = EventQueueType(ResolveMixWaitEventQueueType(previousKernel, kernel), aicAvailable, aivAvailable);
-      }
+    cache[node->GetNodeId()] = kernel;
+    SkQueueType queue = ToQueueType(kernel->GetKernelType());
+    if (node->GetNodeType() == SkNodeType::NODE_WAIT && queue != SkQueueType::AIC && queue != SkQueueType::AIV) {
+      queue = ResolveMixWaitQueue(previousScheduledKernel, *kernel);
     }
-    node->SetExecutionQueueType(resolved);
+    resolved[i] = ToEventQueueType(queue, aicAvailable, aivAvailable);
   }
+  queueTypes = std::move(resolved);
   return true;
 }
