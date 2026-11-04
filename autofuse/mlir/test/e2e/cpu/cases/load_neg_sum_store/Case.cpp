@@ -13,7 +13,7 @@
 #include <cassert>
 #include <vector>
 
-#include "test/e2e/cpu/cases/load_neg_sum_store/Case.h"
+#include "test/e2e/cpu/cases/load_neg_sum_store/LoadNegSumStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "asc_graph_builder.h"
 

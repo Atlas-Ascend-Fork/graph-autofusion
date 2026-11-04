@@ -9,7 +9,7 @@
  */
 
 #include "ascir/Dialect/Asc/IR/Asc.h"
-#include "ascir/Dialect/Asc/Transforms/Passes.h"
+#include "ascir/Dialect/Asc/Transforms/AscTransformsPasses.h"
 #include "ascir/Dialect/Asc/Utils/Utils.h"
 #include "ascir/Dialect/EmitAsc/IR/EmitAsc.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -40,7 +40,7 @@
 #include "dialect/AFPlan/IR/AFPlan.h"
 #include "conversion/AFIRToAscendC/AFIRToAscendCPasses.h"
 #include "artifact/KernelSource/AggregateLaunchDriver.h"
-#include "artifact/KernelSource/Passes.h"
+#include "artifact/KernelSource/KernelSourcePasses.h"
 #include "dialect/AFIR/Transforms/AFIRPasses.h"
 #include "target/Ascend/TargetProfileRegistry.h"
 #include "target/Ascend/TargetSelection.h"

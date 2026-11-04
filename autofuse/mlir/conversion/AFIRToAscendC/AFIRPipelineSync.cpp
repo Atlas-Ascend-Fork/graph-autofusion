@@ -12,8 +12,8 @@
 
 #include "conversion/AFIRToAscendC/AFIRToAscendCPasses.h"
 #include "conversion/AFIRToAscendC/AFIRPipelineSync.h"
-#include "conversion/AFIRToAscendC/LoweringStage.h"
-#include "dialect/AFIR/Transforms/LoweringStage.h"
+#include "conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h"
+#include "dialect/AFIR/Transforms/AFIRLoweringStage.h"
 
 #include <cstdint>
 #include <limits>

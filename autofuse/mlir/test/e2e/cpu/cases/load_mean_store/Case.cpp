@@ -15,7 +15,7 @@
 #include <cctype>
 #include <iterator>
 
-#include "test/e2e/cpu/cases/load_mean_store/Case.h"
+#include "test/e2e/cpu/cases/load_mean_store/LoadMeanStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "test/Support/ReduceGraphBuilder.h"
 

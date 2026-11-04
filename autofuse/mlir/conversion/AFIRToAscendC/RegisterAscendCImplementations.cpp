@@ -11,7 +11,7 @@
 #include "conversion/AFIRToAscendC/RegisterAscendCImplementations.h"
 
 #include "conversion/AFIRToAscendC/Implementations/BinaryElementwise.h"
-#include "conversion/AFIRToAscendC/Implementations/Broadcast.h"
+#include "conversion/AFIRToAscendC/Implementations/BroadcastImplementation.h"
 #include "conversion/AFIRToAscendC/Implementations/DataMovement.h"
 #include "conversion/AFIRToAscendC/Implementations/Execution.h"
 #include "conversion/AFIRToAscendC/Implementations/Nddma.h"

@@ -48,7 +48,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "conversion/AFIRToAscendC/Implementations/Broadcast.h"
+#include "conversion/AFIRToAscendC/Implementations/BroadcastImplementation.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
 #include "dialect/AFIR/Analysis/TransferPlan.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"

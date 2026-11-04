@@ -36,7 +36,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_add_index_expr_dynamic_store/Case.h"
+#include "test/e2e/cpu/cases/load_add_index_expr_dynamic_store/LoadAddIndexExprDynamicStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "asc_graph_builder.h"
 

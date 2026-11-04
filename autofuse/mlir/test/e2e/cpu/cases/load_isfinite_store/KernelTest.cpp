@@ -15,7 +15,7 @@
 #include <gtest/gtest.h>
 
 #include "autofuse_tiling_data.h"
-#include "test/e2e/cpu/cases/load_isfinite_store/Case.h"
+#include "test/e2e/cpu/cases/load_isfinite_store/LoadIsfiniteStoreCase.h"
 #include "test/e2e/cpu/support/E2eTilingShape.h"
 #include "tikicpulib.h"
 

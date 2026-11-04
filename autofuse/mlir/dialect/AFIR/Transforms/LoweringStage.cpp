@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "dialect/AFIR/Transforms/LoweringStage.h"
+#include "dialect/AFIR/Transforms/AFIRLoweringStage.h"
 
 #include "dialect/AFIR/IR/AFIR.h"
 #include "mlir/IR/BuiltinTypes.h"

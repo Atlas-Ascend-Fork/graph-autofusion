@@ -30,7 +30,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_eq_scalar_reg_base_store/Case.h"
+#include "test/e2e/cpu/cases/load_eq_scalar_reg_base_store/LoadEqScalarRegBaseStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "asc_graph_builder.h"
 

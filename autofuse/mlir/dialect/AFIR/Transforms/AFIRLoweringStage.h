@@ -11,7 +11,7 @@
 //===- LoweringStage.h - 下降阶段的结构判据（AFIR 侧）------------*- C++ -*-===//
 //
 // 「某个下降阶段是否已经发生」的判据，取 IR 自身的结构而不是「哪个 pass 跑过」的标记
-// 属性（设计文档 D5）。理由与边界见 conversion/AFIRToAscendC/LoweringStage.h——那里放的
+// 属性（设计文档 D5）。理由与边界见 conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h——那里放的
 // 是同一族里判据要认后端算子的那两个。
 //
 // 本文件只放判据是纯 AFIR 事实的那一个。分开是因为它们的依赖不同：「资源还欠债吗」只问

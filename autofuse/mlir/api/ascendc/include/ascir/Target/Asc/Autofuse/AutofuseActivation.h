@@ -13,7 +13,7 @@
 
 // For printApiExtensionUnary: SigmoidExtend prints like every other Autofuse
 // wrapper, and that rule is written down once, next to the unary emitters.
-#include "ascir/Target/Asc/Autofuse/VecUnary.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseVecUnary.h"
 
 namespace mlir {
 namespace ascendc {

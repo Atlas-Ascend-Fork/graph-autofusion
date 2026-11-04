@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "ascir/Dialect/Asc/Transforms/Passes.h"
+#include "ascir/Dialect/Asc/Transforms/AscTransformsPasses.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 

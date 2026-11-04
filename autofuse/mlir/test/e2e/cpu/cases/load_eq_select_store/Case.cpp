@@ -31,7 +31,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_eq_select_store/Case.h"
+#include "test/e2e/cpu/cases/load_eq_select_store/LoadEqSelectStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "asc_graph_builder.h"
 

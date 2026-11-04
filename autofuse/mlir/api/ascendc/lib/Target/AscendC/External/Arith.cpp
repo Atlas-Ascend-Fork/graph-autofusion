@@ -8,10 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "ascir/Target/Asc/External/Arith.h"
+#include "ascir/Target/Asc/External/ExternalArith.h"
 // Seam: `getResultBitWidth` teaches this emitter about `index`, which is an
 // Autofuse requirement; the rule lives with the Autofuse arith emitters.
-#include "ascir/Target/Asc/Autofuse/Arith.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseArith.h"
 
 using namespace mlir;
 

@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "conversion/AFIRToAscendC/LoweringStage.h"
+#include "conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h"
 #include "conversion/AFIRToAscendC/MemoryAllocate/CanonicalMemoryAllocator.h"
 
 #include "conversion/AFIRToAscendC/AFIRToAscendCPasses.h"

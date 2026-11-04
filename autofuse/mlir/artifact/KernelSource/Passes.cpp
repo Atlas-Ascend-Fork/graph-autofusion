@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "artifact/KernelSource/Passes.h"
+#include "artifact/KernelSource/KernelSourcePasses.h"
 
 namespace mlir::ascend::kernel {
 

@@ -25,7 +25,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_leaky_relu_store/Case.h"
+#include "test/e2e/cpu/cases/load_leaky_relu_store/LoadLeakyReluStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "asc_graph_builder.h"
 

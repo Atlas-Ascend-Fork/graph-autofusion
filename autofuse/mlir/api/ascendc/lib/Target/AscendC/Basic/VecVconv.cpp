@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "ascir/Target/Asc/Basic/VecVconv.h"
-#include "ascir/Target/Asc/Basic/VecUnary.h"
+#include "ascir/Target/Asc/Basic/BasicVecVconv.h"
+#include "ascir/Target/Asc/Basic/BasicVecUnary.h"
 
 using namespace mlir;
 using namespace mlir::ascendc;

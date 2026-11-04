@@ -9,7 +9,7 @@
  */
 
 #include "ascir/Dialect/Asc/IR/Asc.h"
-#include "ascir/Dialect/Asc/Transforms/Passes.h"
+#include "ascir/Dialect/Asc/Transforms/AscTransformsPasses.h"
 #include "ascir/Dialect/Asc/Utils/Utils.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"

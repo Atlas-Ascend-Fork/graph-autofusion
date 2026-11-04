@@ -10,7 +10,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/workspace_readback/Case.h"
+#include "test/e2e/cpu/cases/workspace_readback/WorkspaceReadbackCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "asc_graph_builder.h"
 

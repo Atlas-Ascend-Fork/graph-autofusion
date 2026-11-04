@@ -203,7 +203,7 @@ class CanonicalFunctionMemoryAllocator {
 
   // 成功路径没有对应的 `commit()`：此前它只写 `afir.memory_allocated` /
   // `afir.ascendc_materialized` 两个标记属性，验收 8 删除标记之后函数体为空。
-  // 「物化过没有」现在直接问 IR，见 conversion/AFIRToAscendC/LoweringStage.h。
+  // 「物化过没有」现在直接问 IR，见 conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h。
   void rollback();
 
   func::FuncOp func;

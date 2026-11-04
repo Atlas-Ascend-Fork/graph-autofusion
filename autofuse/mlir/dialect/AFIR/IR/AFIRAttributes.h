@@ -71,7 +71,7 @@ inline constexpr llvm::StringLiteral kDimSymbolExprKey = "expr";
 // 产出 enque / deque / pipe_barrier），而且 pass 执行状态既不是 payload 也不是候选
 // 身份，按 2.2 不该出现在 `afir` 公开命名空间上。判据现在直接问 IR：
 //   循环   -> `afir::hasGeneratedLoops`（dialect/AFIR/Transforms/LoopGenerate.h）
-//   其余两个 -> conversion/AFIRToAscendC/LoweringStage.h
+//   其余两个 -> conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h
 inline constexpr llvm::StringLiteral kVarRelationsAttrName = "afir.var_relations";
 inline constexpr llvm::StringLiteral kVarRelationDstStageKey = "dst_stage";
 inline constexpr llvm::StringLiteral kVarRelationSrcStageKey = "src_stage";

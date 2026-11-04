@@ -20,7 +20,7 @@
 //   1b) NOSTAGE 前缀——四个记录「哪个 pass 跑过」的阶段标记属性也不再出现
 //       （设计文档 D5 / 验收 8）。它们同样是第二份编码：每个阶段的产物就摆在 IR 里，
 //       判据见 dialect/AFIR/Transforms/LoopGenerate.h 与
-//       conversion/AFIRToAscendC/LoweringStage.h；
+//       conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h；
 //   2) CHECK 部分——被它们复述的事实仍然结构性地存在于 IR 里，即删除是去重而非丢信息。
 //
 // 事实的唯一落点对照：

@@ -11,20 +11,20 @@
 #ifndef ASCIR_TARGET_ASC_AUTOFUSE_OPS_H
 #define ASCIR_TARGET_ASC_AUTOFUSE_OPS_H
 
-#include "ascir/Target/Asc/Autofuse/Activation.h"
-#include "ascir/Target/Asc/Autofuse/Arith.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseActivation.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseArith.h"
 #include "ascir/Target/Asc/Autofuse/ControlFlow.h"
-#include "ascir/Target/Asc/Autofuse/DataCopy.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseDataCopy.h"
 #include "ascir/Target/Asc/Autofuse/RegDataCopy.h"
 #include "ascir/Target/Asc/Autofuse/Index.h"
-#include "ascir/Target/Asc/Autofuse/VecBinary.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseVecBinary.h"
 #include "ascir/Target/Asc/Autofuse/VecBroadcast.h"
-#include "ascir/Target/Asc/Autofuse/VecCmpsel.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseVecCmpsel.h"
 #include "ascir/Target/Asc/Autofuse/VecRemovePad.h"
 #include "ascir/Target/Asc/Autofuse/VecReduceND.h"
 #include "ascir/Target/Asc/Autofuse/VecTernary.h"
-#include "ascir/Target/Asc/Autofuse/VecUnary.h"
-#include "ascir/Target/Asc/Autofuse/VecVconv.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseVecUnary.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseVecVconv.h"
 
 #include <tuple>
 

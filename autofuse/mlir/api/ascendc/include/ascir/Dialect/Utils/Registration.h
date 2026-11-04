@@ -12,7 +12,7 @@
 #define ASCIR_DIALECT_UTILS_REGISTRATION_H
 
 #include "ascir/Dialect/Asc/IR/Asc.h"
-#include "ascir/Dialect/Asc/Transforms/Passes.h"
+#include "ascir/Dialect/Asc/Transforms/AscTransformsPasses.h"
 #include "ascir/Dialect/EmitAsc/IR/EmitAsc.h"
 
 #include "mlir/InitAllDialects.h"

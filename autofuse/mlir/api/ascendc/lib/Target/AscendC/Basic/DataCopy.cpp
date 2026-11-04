@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "ascir/Target/Asc/Basic/DataCopy.h"
+#include "ascir/Target/Asc/Basic/BasicDataCopy.h"
 
 using namespace mlir;
 using namespace mlir::ascendc;

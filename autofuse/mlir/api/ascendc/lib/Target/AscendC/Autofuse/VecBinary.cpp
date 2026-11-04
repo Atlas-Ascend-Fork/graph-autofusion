@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "ascir/Target/Asc/Autofuse/VecBinary.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseVecBinary.h"
 
 using namespace mlir;
 

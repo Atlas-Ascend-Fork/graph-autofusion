@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "ascir/Target/Asc/Autofuse/VecCmpsel.h"
+#include "ascir/Target/Asc/Autofuse/AutofuseVecCmpsel.h"
 
 using namespace mlir;
 using namespace mlir::ascendc;

@@ -50,7 +50,7 @@ module {
 // `emitasc.member` 只在 lowering 里出现一次（RUN 行的 implicit-check-not 钉住这条）。
 // CHECK: %[[S0:.*]] = afir.tiling_param "s0"
 // 「资源已物化」不再由 `afir.ascendc_materialized` 属性宣告——下面这行 `ascendc.pipe`
-// 就是它的结构证据，判据见 conversion/AFIRToAscendC/LoweringStage.h。
+// 就是它的结构证据，判据见 conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h。
 // CHECK: %[[PIPE:.*]] = ascendc.pipe
 // queue_depth 由 QueueType 的第二个参数承载，不再另发扁平属性（设计文档 I2/I3，5.1 步 2）。
 // CHECK: %[[QUEUE:.*]] = ascendc.queue : <vecin, 2>

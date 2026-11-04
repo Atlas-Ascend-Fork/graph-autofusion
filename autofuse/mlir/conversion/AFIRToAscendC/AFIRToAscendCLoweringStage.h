@@ -63,7 +63,7 @@ bool hasMaterializedAscendCResources(func::FuncOp func);
 // 产出，同步之前就已经在了。
 bool hasPipelineSynchronization(func::FuncOp func);
 
-// 「资源物化还欠债吗」是纯 AFIR 判据，住在 dialect/AFIR/Transforms/LoweringStage.h。
+// 「资源物化还欠债吗」是纯 AFIR 判据，住在 dialect/AFIR/Transforms/AFIRLoweringStage.h。
 
 }  // namespace mlir::ascend::kernel
 

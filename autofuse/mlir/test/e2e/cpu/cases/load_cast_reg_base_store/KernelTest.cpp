@@ -14,7 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "autofuse_tiling_data.h"
-#include "test/e2e/cpu/cases/load_cast_reg_base_store/Case.h"
+#include "test/e2e/cpu/cases/load_cast_reg_base_store/LoadCastRegBaseStoreCase.h"
 #include "tikicpulib.h"
 
 namespace {

@@ -27,7 +27,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_add_scalar_data_store/Case.h"
+#include "test/e2e/cpu/cases/load_add_scalar_data_store/LoadAddScalarDataStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "asc_graph_builder.h"
 

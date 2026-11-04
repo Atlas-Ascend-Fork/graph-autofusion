@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "conversion/AFIRToAscendC/LoweringStage.h"
+#include "conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h"
 
 #include "ascir/Dialect/Asc/IR/Asc.h"
 #include "dialect/AFIR/IR/AFIR.h"

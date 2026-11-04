@@ -38,7 +38,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_cast_abs_cast_reg_base_store/Case.h"
+#include "test/e2e/cpu/cases/load_cast_abs_cast_reg_base_store/LoadCastAbsCastRegBaseStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
 #include "asc_graph_builder.h"
 

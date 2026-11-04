@@ -11,7 +11,7 @@
 #ifndef ASCIR_TARGET_ASC_AUTOFUSE_VEC_UNARY_H
 #define ASCIR_TARGET_ASC_AUTOFUSE_VEC_UNARY_H
 
-#include "ascir/Target/Asc/Basic/VecUnary.h"
+#include "ascir/Target/Asc/Basic/BasicVecUnary.h"
 
 namespace mlir {
 namespace ascendc {

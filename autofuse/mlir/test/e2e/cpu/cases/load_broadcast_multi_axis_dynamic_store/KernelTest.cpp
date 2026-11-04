@@ -13,7 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "autofuse_tiling_data.h"
-#include "test/e2e/cpu/cases/load_broadcast_multi_axis_dynamic_store/Case.h"
+#include "test/e2e/cpu/cases/load_broadcast_multi_axis_dynamic_store/LoadBroadcastMultiAxisDynamicStoreCase.h"
 #include "tikicpulib.h"
 
 namespace {
