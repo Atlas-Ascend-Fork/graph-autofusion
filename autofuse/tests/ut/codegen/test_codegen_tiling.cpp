@@ -6445,7 +6445,7 @@ TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldAcceptGroupParallelWit
   EXPECT_NE(result.tiling.find("std::fill(func_handles.begin(), func_handles.end(), func_handle)"), std::string::npos);
 }
 
-TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldRejectCvFusion) {
+TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldKeepCvFusionWithoutPgo) {
   ScopedAutofusePgoFlag pgo_flag(true);
   auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
@@ -6455,8 +6455,79 @@ TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldRejectCvFusion) {
   codegen::Codegen codegen(codegen::CodegenOptions{});
   codegen::CodegenResult result;
 
-  EXPECT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), af::FAILED);
+  ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), af::SUCCESS);
+  EXPECT_NE(result.tiling_data.find("CVAutofuseTilingData"), std::string::npos);
+  EXPECT_NE(result.tiling.find("CallCubeTiling"), std::string::npos);
+  EXPECT_NE(result.kernel.find("AutofuseLaunch"), std::string::npos);
   EXPECT_EQ(result.tiling.find("AUTOFUSE_SPLIT_FILE_BEGIN: PgoRunner"), std::string::npos);
+  EXPECT_EQ(result.tiling.find("AUTOFUSE_SPLIT_FILE_BEGIN: PgoDeviceSource"), std::string::npos);
+  EXPECT_EQ(result.tiling.find("GenerateTopnSolutions"), std::string::npos);
+
+  codegen::Codegen non_pgo_codegen(codegen);
+  non_pgo_codegen.tiling_lib_.DisableInductorPgo();
+  codegen::CodegenResult non_pgo_result;
+  ASSERT_EQ(non_pgo_codegen.GenerateForInductor(fused_schedule_result, non_pgo_result), af::SUCCESS);
+  EXPECT_EQ(result.tiling_data, non_pgo_result.tiling_data);
+  EXPECT_EQ(result.tiling, non_pgo_result.tiling);
+  EXPECT_EQ(result.kernel, non_pgo_result.kernel);
+}
+
+TEST_F(TestCodegenTiling, GenerateForInductorCvShouldPreservePgoForFollowingVvOnSameObject) {
+  ScopedAutofusePgoFlag pgo_flag(true);
+  auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult cv_result;
+  ASSERT_EQ(optimizer.Optimize(graph, cv_result), af::SUCCESS);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(cv_result));
+  auto vv_result = this->GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
+  vv_result.node_idx_to_scheduled_results[0].resize(1);
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+
+  for (size_t iteration = 0U; iteration < 2U; ++iteration) {
+    SCOPED_TRACE(iteration);
+    codegen::CodegenResult cv_code;
+    ASSERT_EQ(codegen.GenerateForInductor(cv_result, cv_code), af::SUCCESS);
+    EXPECT_NE(cv_code.tiling.find("CallCubeTiling"), std::string::npos);
+    EXPECT_TRUE(GetSplitContent(cv_code.tiling, "PgoRunner").empty());
+    EXPECT_TRUE(codegen.tiling_lib_.IsInductorPgoEnabled());
+
+    codegen::CodegenResult vv_code;
+    ASSERT_EQ(codegen.GenerateForInductor(vv_result, vv_code), af::SUCCESS);
+    AssertSchemeAContract(vv_code);
+    EXPECT_TRUE(codegen.tiling_lib_.IsInductorPgoEnabled());
+    EXPECT_STREQ(std::getenv("AUTOFUSE_FLAGS"), "--autofuse_enable_pgo=true");
+  }
+}
+
+TEST_F(TestCodegenTiling, GenerateTilingForInductorCvShouldOverrideAttPgoWithoutChangingOriginalObject) {
+  ScopedAutofusePgoFlag pgo_flag(true);
+  auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused_schedule_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), af::SUCCESS);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  const auto original_codegen_func = codegen.tiling_lib_.codegen_func_;
+  codegen.tiling_lib_.codegen_func_ = [](const std::string &op_name,
+                                         const ascir::FusedScheduledResult &scheduled_result,
+                                         std::map<std::string, std::string> &options,
+                                         std::map<std::string, std::string> &files, bool is_inductor_scene) {
+    EXPECT_TRUE(is_inductor_scene);
+    EXPECT_EQ(options[att::kInternalEnableAutofusePgo], "false");
+    return att::GenTilingImplAutoFuseV3(op_name, scheduled_result, options, files, is_inductor_scene);
+  };
+  std::map<std::string, std::string> files;
+  ASSERT_EQ(codegen.GenerateTilingForInductor(fused_schedule_result, files), af::SUCCESS);
+  EXPECT_NE(files.at(codegen::kTilingDefAndConstIdentify).find("CallCubeTiling"), std::string::npos);
+  EXPECT_EQ(files.count(codegen::kPgoRunnerIdentify), 0U);
+  EXPECT_TRUE(codegen.tiling_lib_.IsInductorPgoEnabled());
+
+  codegen.tiling_lib_.codegen_func_ = original_codegen_func;
+  auto vv_result = this->GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
+  vv_result.node_idx_to_scheduled_results[0].resize(1);
+  ASSERT_EQ(codegen.GenerateTilingForInductor(vv_result, files), af::SUCCESS);
+  EXPECT_EQ(files.count(codegen::kPgoRunnerIdentify), 1U);
+  EXPECT_FALSE(files.at(codegen::kPgoRunnerIdentify).empty());
 }
 
 TEST_F(TestCodegenTiling, SingleGroupEvaluateModeledPerfShouldUsePublicGetPerf) {
