@@ -1600,11 +1600,12 @@ af::Status BuildAxisViewByBoundary(af::AscGraph &graph, const std::vector<af::Ax
 
 bool TryGetIndirectLoadPlatformUbSize(int64_t &ub_size);
 
-// SK 模板 IL 节点的 tmp 由窗口循环串行复用：调度器会在 outer 区固定 tile 切分的 tile_outer 轴上做
-// block 切分，其内轴尺寸符号（<tile_outer 名>b_size，即 tiling 变量）等于单窗口 outer 行数。仅当全量
-// 驻留估算超出平台 UB（SK 会被 StaticUbTemplateFilter 误淘汰的形态）时记录窗口语义，供静态 tmp 估算
-// 按单窗口驻留量计算；动态 shape / 平台信息不可得 / 未超限 / outer 退化（size=1）时不填充，保持全量
-// 估算语义，避免改变既有模板选择行为。
+// SK 模板 IL 节点的 tmp 由串行窗口循环复用：单次 IndirectLoadSk 调用仅驻留固定 tile 行数
+// （tile_inner 尺寸）的输入与 offsets；tile_outer 轴上 block 切分出的每核串行循环次数
+// （<tile_outer 名>b_size）不进入驻留量，否则 UB 上限会与多核切分下限互相矛盾致 tiling
+// 无解。填充条件：静态 shape 下全量驻留估算超出平台 UB（SK 会被 StaticUbTemplateFilter
+// 误淘汰的形态）；动态 shape 下全量驻留量不可静态判定，同样填充。平台信息不可得 / outer
+// 退化（size=1）时不填充，保持全量估算语义。
 af::Status FillSkWindowReuseInfo(af::AscGraph &graph, const af::AscNodePtr &indirect_load, size_t boundary,
                                  af::AxisId outer_axis, af::AxisId tile_outer_axis) {
   const auto *outer = graph.FindAxis(outer_axis);
@@ -1625,13 +1626,22 @@ af::Status FillSkWindowReuseInfo(af::AscGraph &graph, const af::AscNodePtr &indi
       inputs[ascgen_utils::indirect_load::kInputTensorIndex] == nullptr) {
     return af::SUCCESS;
   }
+  int64_t ub_size = 0;
+  if (!TryGetIndirectLoadPlatformUbSize(ub_size)) {
+    return af::SUCCESS;
+  }
   // 全量驻留 tmp 估算，公式与 32B 对齐逐项镜像 CalcTmpBufSize/CalcIndirectLoadSkTmpSize 的全量路径：
-  // Align(outer×slice×dtype, 32) + 4×Π(output sizes)，再整体 Align(·, 32)。任一维动态/非正即放弃，
-  // 回退历史全量语义。
+  // Align(outer×slice×dtype, 32) + 4×Π(output sizes)，再整体 Align(·, 32)。任一维非正即放弃，回退历史
+  // 全量语义；任一维动态则驻留量不可判定，改按窗口语义建模。
+  bool has_dynamic_dim = false;
   int64_t offsets_bytes = static_cast<int64_t>(sizeof(uint32_t));
   for (const auto &repeat : logical_view.output.sizes) {
     int64_t value = 0;
-    if (!repeat.GetConstValue(value) || value <= 0) {
+    if (!repeat.GetConstValue(value)) {
+      has_dynamic_dim = true;
+      break;
+    }
+    if (value <= 0) {
       return af::SUCCESS;
     }
     offsets_bytes *= value;
@@ -1639,34 +1649,49 @@ af::Status FillSkWindowReuseInfo(af::AscGraph &graph, const af::AscNodePtr &indi
   const int64_t dtype_size =
       static_cast<int64_t>(af::GetSizeByDataType(inputs[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype));
   int64_t outer_rows = 1;
-  for (size_t dim = 0UL; dim < boundary; ++dim) {
-    int64_t value = 0;
-    if (!logical_view.index.sizes[dim].GetConstValue(value) || value <= 0) {
-      return af::SUCCESS;
+  if (!has_dynamic_dim) {
+    for (size_t dim = 0UL; dim < boundary; ++dim) {
+      int64_t value = 0;
+      if (!logical_view.index.sizes[dim].GetConstValue(value)) {
+        has_dynamic_dim = true;
+        break;
+      }
+      if (value <= 0) {
+        return af::SUCCESS;
+      }
+      outer_rows *= value;
     }
-    outer_rows *= value;
   }
   int64_t slice_elems = 1;
-  for (size_t dim = boundary; dim < logical_view.index.sizes.size(); ++dim) {
-    const auto &repeat = dim == boundary ? logical_view.input.sizes[dim] : logical_view.index.sizes[dim];
-    int64_t size_value = 0;
-    int64_t stride_value = 0;
-    if (!repeat.GetConstValue(size_value) || size_value <= 0 ||
-        !logical_view.input.strides[dim].GetConstValue(stride_value)) {
+  if (!has_dynamic_dim) {
+    for (size_t dim = boundary; dim < logical_view.index.sizes.size(); ++dim) {
+      const auto &repeat = dim == boundary ? logical_view.input.sizes[dim] : logical_view.index.sizes[dim];
+      int64_t size_value = 0;
+      int64_t stride_value = 0;
+      if (!repeat.GetConstValue(size_value)) {
+        has_dynamic_dim = true;
+        break;
+      }
+      if (size_value <= 0 || !logical_view.input.strides[dim].GetConstValue(stride_value)) {
+        return af::SUCCESS;
+      }
+      slice_elems += (size_value - 1) * stride_value;
+    }
+  }
+  if (!has_dynamic_dim) {
+    constexpr int64_t kUbBlockAlignBytes = 32;
+    const int64_t input_bytes = outer_rows * slice_elems * dtype_size;
+    const int64_t aligned_input = (input_bytes + kUbBlockAlignBytes - 1) / kUbBlockAlignBytes * kUbBlockAlignBytes;
+    const int64_t estimate =
+        (aligned_input + offsets_bytes + kUbBlockAlignBytes - 1) / kUbBlockAlignBytes * kUbBlockAlignBytes;
+    if (estimate <= ub_size) {
       return af::SUCCESS;
     }
-    slice_elems += (size_value - 1) * stride_value;
   }
-  constexpr int64_t kUbBlockAlignBytes = 32;
-  const int64_t input_bytes = outer_rows * slice_elems * dtype_size;
-  const int64_t aligned_input = (input_bytes + kUbBlockAlignBytes - 1) / kUbBlockAlignBytes * kUbBlockAlignBytes;
-  const int64_t estimate =
-      (aligned_input + offsets_bytes + kUbBlockAlignBytes - 1) / kUbBlockAlignBytes * kUbBlockAlignBytes;
-  int64_t ub_size = 0;
-  if (!TryGetIndirectLoadPlatformUbSize(ub_size) || estimate <= ub_size) {
-    return af::SUCCESS;
-  }
-  logical_view.window_outer_count = af::Symbol((tile_outer->name + "b_size").c_str());
+  const auto *tile_inner = graph.FindAxis(tile_outer->split_pair_other_id);
+  GE_ASSERT_NOTNULL(tile_inner);
+  GE_ASSERT_TRUE(tile_inner->type == af::Axis::Type::kAxisTypeTileInner);
+  logical_view.window_outer_count = tile_inner->size;
   logical_view.window_iter_axes = {tile_outer_axis};
   GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateLogicalView(indirect_load, logical_view));
   return af::SUCCESS;

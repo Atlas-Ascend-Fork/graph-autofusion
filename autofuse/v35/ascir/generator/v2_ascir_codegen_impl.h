@@ -3809,9 +3809,10 @@ const af::Axis *FindNodeOwnerAxis(const AscNode &node, af::AxisId axis_id) {
   return axis == nullptr ? nullptr : axis.get();
 }
 
-// 判断输出视图 dim 对应的轴是否为窗口迭代轴：窗口迭代轴（tile_outer 或其派生的外层切分轴，如
-// block_outer）仅承载窗口循环计数，窗口循环串行复用同一块 tmp，静态估算应跳过；其对偶内层轴
-// （block_inner，即 tile 尺寸）承载单窗口驻留量，必须保留。轴信息不可解析时不跳过，保持安全上界。
+// 判断输出视图 dim 对应的轴是否为窗口迭代轴：窗口迭代轴（tile_outer）及其派生的 block 切分轴
+// （block_outer/block_inner）仅承载串行窗口循环计数，不增加单次调用的 tmp 驻留量，静态估算应
+// 跳过；原始 tile_inner 不派生自 tile_outer（from 链不触及窗口轴），承载单次调用驻留量，必须
+// 保留。轴信息不可解析时不跳过，保持安全上界。
 bool IsWindowIterAxis(const AscNode &node, af::AxisId axis_id, const std::vector<af::AxisId> &window_iter_axes) {
   const auto is_window_axis = [&window_iter_axes](af::AxisId candidate) {
     return std::find(window_iter_axes.begin(), window_iter_axes.end(), candidate) != window_iter_axes.end();
@@ -3821,7 +3822,8 @@ bool IsWindowIterAxis(const AscNode &node, af::AxisId axis_id, const std::vector
   }
   const auto *axis = FindNodeOwnerAxis(node, axis_id);
   if (axis == nullptr ||
-      (axis->type != af::Axis::Type::kAxisTypeBlockOuter && axis->type != af::Axis::Type::kAxisTypeTileOuter)) {
+      (axis->type != af::Axis::Type::kAxisTypeBlockOuter && axis->type != af::Axis::Type::kAxisTypeBlockInner &&
+       axis->type != af::Axis::Type::kAxisTypeTileOuter)) {
     return false;
   }
   std::vector<af::AxisId> pending = axis->from;
@@ -3873,7 +3875,8 @@ bool CalcIndirectLoadSkTmpSize(const AscNode &node, const Expression &offset_siz
     return false;
   }
   const size_t axis_index = static_cast<size_t>(axis < 0L ? axis + rank : axis);
-  // SK tmp 由窗口循环串行复用：outer_count 取单窗口 outer 行数（window_outer_count 含 tile 尺寸符号）。
+  // SK tmp 由窗口循环串行复用：outer_count 取单次 API 调用驻留的 outer 行数（window_outer_count，
+  // 即固定 tile_inner 尺寸，不含每核串行循环次数）。
   // window_iter_axes 为空（非 SK 填充路径/退化 outer/老节点）时回退全量 outer 积，与历史行为一致。
   // 注意 Expression 默认构造为合法的空名符号，IsValid 恒真，不能作为"未设置"哨兵。
   Expression outer_count = Symbol(1);
@@ -3926,9 +3929,9 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
       logical_view = op_desc->TryGetExtAttr(ascgen_utils::indirect_load::kTemplateLogicalViewAttr,
                                             ascgen_utils::indirect_load::TemplateLogicalView{});
     }
-    // offsets 与窗口循环复用的 tmp 同块布局：跳过窗口迭代轴（如 block_outer=总窗口数）的 dim，其余
-    // 照乘并保留 tile 尺寸轴，使表达式携带 tiling 变量。窗口语义仅由 SK 填充，按模板防御性门控；
-    // 无窗口语义时表达式与历史行为逐字节一致。
+    // offsets 与 input staging 同块布局，同样按单次调用驻留：跳过窗口迭代轴及其派生的 block 切分轴
+    // （串行循环计数），保留原始 tile_inner 与窗口内输出维度。窗口语义仅由 SK 填充，按模板防御性
+    // 门控；无窗口语义时表达式与历史行为逐字节一致。
     const bool has_window_iter_axes = template_id == ::ascir::TemplateId::kIndirectLoadSK &&
                                       !logical_view.window_iter_axes.empty() && y.axis.size() == y.repeats.size();
     Expression offset_size = Symbol(sizeof(uint32_t));
