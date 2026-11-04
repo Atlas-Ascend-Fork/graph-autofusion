@@ -1997,6 +1997,258 @@ TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimtFusedRegisterMergeWithDi
   EXPECT_NE(generated.find("AscendC::IndirectLoadSimtFused<FusedBody>(ftgt, fctx"), std::string::npos);
 }
 
+// L3（UB 归并）标注：register_merge=false 时归并链作为扇出分支向量代码（无核内归并树
+// 与 Store 终端名，PlanSimtFusedEmission 判非寄存器归并即提前返回），成员 value 写各自
+// UB 局部目标。成员侧标注（index 链 GM 直读 + input 边界 + 组员标记 + lowering 元数据）
+// 与 L2 一致（组员元数据只含本路 index 链，与归并档位无关）。
+void AnnotateSimtFusedUbMergeGroupTemplate(ILTestGraph &g) {
+  af::AxisId outer_id = af::kIdNone;
+  for (const auto &axis : g.graph.GetAllAxis()) {
+    if (axis != nullptr && axis->name == "z2z3") outer_id = axis->id;
+  }
+  ASSERT_NE(outer_id, af::kIdNone);
+  const auto axes = g.graph.GetAllAxis();
+  const af::Expression One = af::sym::kSymbolOne;
+  TemplateLogicalView view;
+  view.input.axis_ids = {axes[0]->id, axes[1]->id};
+  view.input.sizes = {g.graph.FindAxis(axes[0]->id)->size, g.graph.FindAxis(axes[1]->id)->size};
+  view.input.strides = {g.graph.FindAxis(axes[1]->id)->size, One};
+  view.index.axis_ids = {axes[2]->id, axes[3]->id};
+  view.index.sizes = {g.graph.FindAxis(axes[2]->id)->size, g.graph.FindAxis(axes[3]->id)->size};
+  view.index.strides = {g.graph.FindAxis(axes[3]->id)->size, One};
+  view.output.axis_ids = {axes[2]->id, axes[3]->id};
+  view.output.sizes = {g.graph.FindAxis(axes[2]->id)->size, g.graph.FindAxis(axes[3]->id)->size};
+  view.output.strides = {g.graph.FindAxis(axes[3]->id)->size, One};
+
+  for (const char *name : {"indirect_load0", "indirect_load1"}) {
+    auto il = g.graph.FindNode(name);
+    ASSERT_NE(il, nullptr);
+    ASSERT_EQ(::ascir::SetTemplateId(il, ::ascir::TemplateId::kIndirectLoadSimt), af::SUCCESS);
+    ASSERT_EQ(SetImplementation(il, Implementation::kDefault), af::SUCCESS);
+    TemplateAxes t{outer_id, af::kIdNone, af::kIdNone};
+    ASSERT_EQ(SetTemplateAxes(il, t), af::SUCCESS);
+    ASSERT_EQ(ClassifyIndirectLoadLayout(view.input, view.input), af::SUCCESS);
+    ASSERT_EQ(ClassifyIndirectLoadLayout(view.index, view.index), af::SUCCESS);
+    ASSERT_EQ(SetTemplateLogicalView(il, view), af::SUCCESS);
+  }
+  for (const char *name : {"x_load0", "x_load1"}) {
+    ASSERT_EQ(SetTemplateRole(g.graph.FindNode(name), TemplateRole::kSimtInputBoundary), af::SUCCESS);
+  }
+  for (const char *name : {"idx_load0", "idx_load1"}) {
+    ASSERT_EQ(SetTemplateRole(g.graph.FindNode(name), TemplateRole::kSimtDirectGmBoundary), af::SUCCESS);
+  }
+  for (const char *name : {"indirect_load0", "indirect_load1"}) {
+    auto il = g.graph.FindNode(name);
+    ASSERT_EQ(SetSimtGroupMember(il), af::SUCCESS);
+    bool metadata_supported = false;
+    ASSERT_EQ(FinalizeLoweringMetadata(il, metadata_supported), af::SUCCESS);
+    ASSERT_TRUE(metadata_supported);
+  }
+  auto primary = g.graph.FindNode("indirect_load0");
+  ASSERT_EQ(SetSimtFusedPrimary(primary, {"indirect_load0", "indirect_load1"}), af::SUCCESS);
+  SimtFusedMergeInfo merge_info;
+  merge_info.member_count = 2U;
+  ASSERT_EQ(SetSimtFusedMergeInfo(primary, merge_info), af::SUCCESS);
+}
+
+class IndirectLoadSimtFusedUbMergeTest : public IndirectLoadConstructFromNodesTest {
+ protected:
+  // 生成 L3 融合发射并返回 Store 静态方法体区段（Store 签名至 Phase 4 的 ftgt 初始化之间，
+  // 该区段内不得出现 tiling 数据指针引用——t 在静态方法作用域不可见）。
+  std::string GenerateUbMergeStoreSection(ILTestGraph &g, std::string &generated) {
+    AnnotateSimtFusedUbMergeGroupTemplate(g);
+    auto il0 = g.graph.FindNode("indirect_load0");
+    EXPECT_NE(il0, nullptr);
+    Tiler tiler;
+    SetupTiler(g.graph, tiler);
+    TPipe tpipe("tpipe", tiler);
+    tpipe.CollectQues(g.graph);
+
+    IndirectLoadRegApiCall call("IndirectLoadRegApiCall");
+    EXPECT_EQ(call.Init(il0), af::SUCCESS);
+    ApiTensor x1, x2;
+    x1.id = il0->inputs[0].attr.mem.tensor_id;
+    x2.id = il0->inputs[1].attr.mem.tensor_id;
+    call.inputs.push_back(&x1);
+    call.inputs.push_back(&x2);
+    for (const char *name : {"x_load0", "idx_load0", "x_load1", "idx_load1", "indirect_load0", "indirect_load1"}) {
+      const auto node = g.graph.FindNode(name);
+      EXPECT_NE(node, nullptr);
+      tpipe.AddTensor(*node->outputs()[0]);
+    }
+
+    ascir::AxisId outer_tb = af::kIdNone;
+    for (const auto &axis : g.graph.GetAllAxis()) {
+      if (axis != nullptr && axis->name == "z2z3Tb") outer_tb = axis->id;
+    }
+    EXPECT_NE(outer_tb, af::kIdNone);
+    EXPECT_EQ(call.Generate(tpipe, {outer_tb}, generated), af::SUCCESS);
+
+    const auto store_pos = generated.find("__simt_callee__ __aicore__ inline static void Store");
+    const auto ftgt_pos = generated.find("FusedBody::OutputTargets ftgt = {");
+    EXPECT_NE(store_pos, std::string::npos);
+    EXPECT_NE(ftgt_pos, std::string::npos);
+    EXPECT_LT(store_pos, ftgt_pos);
+    // 空区段守卫：任一未命中（或逆序）时返回空串——本 helper 非 void（ASSERT_* 的
+    // return; 不可编译），调用方 ASSERT_FALSE(empty()) 干净失败；避免 substr 抛
+    // out_of_range（store_pos 为 npos）或按溢出 count 截获错误区段（ftgt_pos 为 npos）。
+    if (store_pos == std::string::npos || ftgt_pos == std::string::npos || store_pos >= ftgt_pos) {
+      return {};
+    }
+    return generated.substr(store_pos, ftgt_pos - store_pos);
+  }
+};
+
+TEST_F(IndirectLoadSimtFusedUbMergeTest, GeneratesUbMergeStoreRowWidthViaContextRuntimeSize) {
+  // 动态 shape（s0~s3 符号尺寸）：Store 行宽（output inner size）为运行期符号尺寸
+  // （t->sN，tiling 数据指针 t 在 FusedBody 静态方法作用域不可见），必须经 FusedCtx 的
+  // rt_size_N 字段传入，否则设备侧编译报 t 未声明（与单 gather 动态 shape 同根因）。
+  ILTestGraph g("simt_fused_ub_merge_dynamic");
+  BuildSimtFusedGroupGraph(g);
+  std::string generated;
+  const std::string store_section = GenerateUbMergeStoreSection(g, generated);
+  ASSERT_FALSE(store_section.empty());
+
+  // L3 融合发射头：单 evaluator（seq-V1）+ UB 归并。
+  EXPECT_NE(generated.find("// IndirectLoad SIMT Fused (seq-V1: single evaluator, serial loads, 2 paths, UB merge)"),
+            std::string::npos);
+  // L3 OutputTargets：成员 value 的 UB 局部目标；FusedEval 仅逐成员取值（无核内归并树）。
+  EXPECT_NE(generated.find("struct OutputTargets { __ubuf__ half *val0; __ubuf__ half *val1; };"), std::string::npos);
+  EXPECT_NE(generated.find("out.v0 = value0;"), std::string::npos);
+  EXPECT_NE(generated.find("out.v1 = value1;"), std::string::npos);
+  EXPECT_EQ(generated.find("out.out0 = "), std::string::npos);
+  // FusedCtx 运行期尺寸字段 + magic/shift 配对（kernel 作用域 t 可见处初始化/预算）。
+  EXPECT_NE(generated.find("uint64_t rt_size_"), std::string::npos);
+  EXPECT_NE(generated.find("uint64_t rt_div_magic_"), std::string::npos);
+  EXPECT_NE(generated.find("static_cast<uint64_t>(t->"), std::string::npos);
+  EXPECT_NE(generated.find("IndirectLoadGetUintDivMagicAndShift"), std::string::npos);
+  // Store 行宽经 FusedCtx 运行期尺寸寻址（行对齐 + 取余），不得渲染 tiling 数据指针引用。
+  EXPECT_NE(store_section.find("context.rt_size_"), std::string::npos);
+  EXPECT_NE(store_section.find("KernelUtils::SizeAlign("), std::string::npos);
+  EXPECT_EQ(store_section.find("t->"), std::string::npos);
+  EXPECT_NE(generated.find("AscendC::IndirectLoadSimtFused<FusedBody>(ftgt, fctx"), std::string::npos);
+}
+
+TEST_F(IndirectLoadSimtFusedUbMergeTest, KeepsUbMergeStoreRowWidthConstInlineForStaticShape) {
+  // 静态 shape：Store 行宽为编译期常量直接内联（uint32/uint64 偏移仅差 static_cast 包装），
+  // 注册表为空——不新增 FusedCtx 运行期尺寸字段，与既有静态路径产物一致。
+  ILTestGraph g("simt_fused_ub_merge_static", 8L, 64L, 4L, 16L);
+  BuildSimtFusedGroupGraph(g);
+  std::string generated;
+  const std::string store_section = GenerateUbMergeStoreSection(g, generated);
+  ASSERT_FALSE(store_section.empty());
+
+  EXPECT_NE(generated.find("// IndirectLoad SIMT Fused (seq-V1: single evaluator, serial loads, 2 paths, UB merge)"),
+            std::string::npos);
+  // 行宽编译期常量直接内联（精确形态）：偏移位宽 uint32 渲染 local_index / (16)；
+  // uint64 经 PromoteSizeExpr 包装为 local_index / (static_cast<uint64_t>(16))——两形态之一。
+  EXPECT_TRUE(store_section.find("local_index / (16)") != std::string::npos ||
+              store_section.find("local_index / (static_cast<uint64_t>(16))") != std::string::npos)
+      << "static UB-merge Store must inline the constant row width";
+  EXPECT_NE(store_section.find("KernelUtils::SizeAlign("), std::string::npos);
+  EXPECT_EQ(store_section.find("context.rt_size_"), std::string::npos);
+  EXPECT_EQ(store_section.find("t->"), std::string::npos);
+  EXPECT_EQ(generated.find("uint64_t rt_size_"), std::string::npos);
+  EXPECT_EQ(generated.find("static_cast<uint64_t>(t->"), std::string::npos);
+}
+
+// L4（V2 逐成员发射）标注：成员携带组员标记与 lowering 元数据，但不设 fused
+// primary——各成员走标准单 gather 发射（codegen 完整复用单 gather 机制）。组员形态
+// post-Reduce 置空、value 直写 UB 局部目标（输出链为合成 local-target 链）。
+void AnnotateSimtGroupMemberTemplate(ILTestGraph &g) {
+  af::AxisId outer_id = af::kIdNone;
+  for (const auto &axis : g.graph.GetAllAxis()) {
+    if (axis != nullptr && axis->name == "z2z3") outer_id = axis->id;
+  }
+  ASSERT_NE(outer_id, af::kIdNone);
+  const auto axes = g.graph.GetAllAxis();
+  const af::Expression One = af::sym::kSymbolOne;
+  TemplateLogicalView view;
+  view.input.axis_ids = {axes[0]->id, axes[1]->id};
+  view.input.sizes = {g.graph.FindAxis(axes[0]->id)->size, g.graph.FindAxis(axes[1]->id)->size};
+  view.input.strides = {g.graph.FindAxis(axes[1]->id)->size, One};
+  view.index.axis_ids = {axes[2]->id, axes[3]->id};
+  view.index.sizes = {g.graph.FindAxis(axes[2]->id)->size, g.graph.FindAxis(axes[3]->id)->size};
+  view.index.strides = {g.graph.FindAxis(axes[3]->id)->size, One};
+  view.output.axis_ids = {axes[2]->id, axes[3]->id};
+  view.output.sizes = {g.graph.FindAxis(axes[2]->id)->size, g.graph.FindAxis(axes[3]->id)->size};
+  view.output.strides = {g.graph.FindAxis(axes[3]->id)->size, One};
+
+  for (const char *name : {"x_load0", "x_load1"}) {
+    ASSERT_EQ(SetTemplateRole(g.graph.FindNode(name), TemplateRole::kSimtInputBoundary), af::SUCCESS);
+  }
+  for (const char *name : {"idx_load0", "idx_load1"}) {
+    ASSERT_EQ(SetTemplateRole(g.graph.FindNode(name), TemplateRole::kSimtDirectGmBoundary), af::SUCCESS);
+  }
+  auto il = g.graph.FindNode("indirect_load0");
+  ASSERT_NE(il, nullptr);
+  ASSERT_EQ(::ascir::SetTemplateId(il, ::ascir::TemplateId::kIndirectLoadSimt), af::SUCCESS);
+  ASSERT_EQ(SetImplementation(il, Implementation::kDefault), af::SUCCESS);
+  TemplateAxes t{outer_id, af::kIdNone, af::kIdNone};
+  ASSERT_EQ(SetTemplateAxes(il, t), af::SUCCESS);
+  ASSERT_EQ(ClassifyIndirectLoadLayout(view.input, view.input), af::SUCCESS);
+  ASSERT_EQ(ClassifyIndirectLoadLayout(view.index, view.index), af::SUCCESS);
+  ASSERT_EQ(SetTemplateLogicalView(il, view), af::SUCCESS);
+  ASSERT_EQ(SetSimtGroupMember(il), af::SUCCESS);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+}
+
+TEST_F(IndirectLoadConstructFromNodesTest, GeneratesGroupMemberStoreRowWidthViaContextRuntimeSize) {
+  // L4 逐成员发射 + 动态 shape（s0~s3 符号尺寸）：组员 Store（local-target 行对齐
+  // 寻址）的行宽在静态方法体内消费，动态 shape 下是运行期符号尺寸（t->sN），必须经
+  // Context 的 rt_size_N 字段传入——组员形态 post-Reduce 置空，不走 post-Reduce 主
+  // 路径的 output_inner_size 专用字段，否则设备侧编译报 t 未声明。
+  // Body/Context 定义经 GenerateFuncDefinition 发射（resolver 的 Generate 只发射
+  // kernel 作用域的 Context 初始化与调用段）。
+  ILTestGraph g("simt_group_member_dynamic");
+  BuildSimtFusedGroupGraph(g);
+  AnnotateSimtGroupMemberTemplate(g);
+
+  auto il0 = g.graph.FindNode("indirect_load0");
+  ASSERT_NE(il0, nullptr);
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  tpipe.CollectQues(g.graph);
+
+  IndirectLoadRegApiCall call("IndirectLoadRegApiCall");
+  ASSERT_EQ(call.Init(il0), af::SUCCESS);
+  ApiTensor x1, x2;
+  x1.id = il0->inputs[0].attr.mem.tensor_id;
+  x2.id = il0->inputs[1].attr.mem.tensor_id;
+  call.inputs.push_back(&x1);
+  call.inputs.push_back(&x2);
+  for (const char *name : {"x_load0", "idx_load0", "indirect_load0"}) {
+    const auto node = g.graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    tpipe.AddTensor(*node->outputs()[0]);
+  }
+
+  std::stringstream definition_stream;
+  ASSERT_EQ(call.GenerateFuncDefinition(tpipe, tiler, definition_stream), af::SUCCESS);
+  const std::string definition = definition_stream.str();
+  ascir::AxisId outer_tb = af::kIdNone;
+  for (const auto &axis : g.graph.GetAllAxis()) {
+    if (axis != nullptr && axis->name == "z2z3Tb") outer_tb = axis->id;
+  }
+  ASSERT_NE(outer_tb, af::kIdNone);
+  std::string invocation;
+  ASSERT_EQ(call.Generate(tpipe, {outer_tb}, invocation), af::SUCCESS);
+
+  // 定义段：成员 Store 行宽经 Context 运行期尺寸寻址——除法操作数直接是 t-> 是
+  // 成员形态的历史 bug 形态，不得出现。
+  EXPECT_EQ(definition.find("local_index / (t->"), std::string::npos);
+  EXPECT_NE(definition.find("local_index / (static_cast<"), std::string::npos);
+  // 定义段：Context 携带 rt_size_N 字段（空跑收集含 Store 发射）。
+  EXPECT_NE(definition.find("uint64_t rt_size_"), std::string::npos);
+  // 组员形态不走 post-Reduce 主路径的专用字段。
+  EXPECT_EQ(definition.find("output_inner_size"), std::string::npos);
+  // 调用段：Context 初始化在 kernel 作用域（t 可见）取 tiler 表达式。
+  EXPECT_NE(invocation.find("static_cast<uint64_t>(t->"), std::string::npos);
+}
+
 TEST_F(IndirectLoadConstructFromNodesTest, ConnectsRedirectedSimtOutputToReduce) {
   ILTestGraph g("simt_post_construct");
   BuildSimtPostReduceGraph(g);
