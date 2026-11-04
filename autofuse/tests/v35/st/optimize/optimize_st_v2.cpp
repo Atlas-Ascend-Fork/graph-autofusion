@@ -1115,6 +1115,251 @@ TEST_F(OptimizerStV2, LoadCastBrcSingleVecAxisStrideUnalignedRealign) {
 }
 
 /**
+ * 双轴场景: load(fp16)-cast(fp16->fp32)-brc(次尾轴广播)-Mul 全链路生成nddma。
+ * brc输出[s0, s1, s2]连续, 尾轴s2=72, 次尾轴stride=72: 72*4=288B满足fp32侧32B对齐
+ * (调度期不塞padding, stride保持自然连续值), swap后nddma输出dtype变为cast输入dtype
+ * (fp16, 2B), 72*2=144B不满足32B对齐, 次尾轴需重排到Align(72, 32/2)=80。
+ * 断言1(不变式): nddma所有非常量以外且非0/1的向量化stride按fp16均满足32B整数倍;
+ * 断言2(重排值): 向量化视图覆盖{s1系, s2}时, 次尾轴stride重排为80, 尾轴stride保持1。
+ */
+TEST_F(OptimizerStV2, LoadCastBrcSecondaryTailAxisContiguousUnalignedRealign) {
+  AscGraph graph("load_cast_brc_secondary_realign");
+
+  auto s0 = graph.CreateSizeVar(256);
+  auto s1 = graph.CreateSizeVar(100);
+  auto s2 = graph.CreateSizeVar(72);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Data data1("data1", graph);
+  data1.y.dtype = af::DT_FLOAT16;
+  data1.ir_attr.SetIndex(1);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id, z2.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.repeats = {s0, s1, s2};
+  *load0.y.strides = {s1 * s2, s2, One};
+
+  Load load1("load1");
+  load1.attr.sched.axis = {z0.id, z1.id, z2.id};
+  load1.x = data1.y;
+  *load1.y.axis = {z0.id, z1.id, z2.id};
+  load1.y.dtype = af::DT_FLOAT16;
+  *load1.y.repeats = {s0, One, s2};
+  *load1.y.strides = {s2, Zero, One};
+
+  Cast cast1("cast1");
+  cast1.x = load1.y;
+  cast1.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *cast1.y.axis = {z0.id, z1.id, z2.id};
+  cast1.y.dtype = af::DT_FLOAT;
+  *cast1.y.repeats = {s0, One, s2};
+  *cast1.y.strides = {s2, Zero, One};
+
+  Broadcast broadcast1("broadcast1");
+  broadcast1.x = cast1.y;
+  broadcast1.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *broadcast1.y.axis = {z0.id, z1.id, z2.id};
+  broadcast1.y.dtype = af::DT_FLOAT;
+  *broadcast1.y.repeats = {s0, s1, s2};
+  *broadcast1.y.strides = {s1 * s2, s2, One};
+
+  Mul mul0("mul0");
+  mul0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  mul0.x1 = load0.y;
+  mul0.x2 = broadcast1.y;
+  mul0.y.dtype = af::DT_FLOAT;
+  *mul0.y.axis = {z0.id, z1.id, z2.id};
+  *mul0.y.repeats = {s0, s1, s2};
+  *mul0.y.strides = {s1 * s2, s2, One};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id, z2.id};
+  store_op.x = mul0.y;
+  *store_op.y.axis = {z0.id, z1.id, z2.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.repeats = {s0, s1, s2};
+  *store_op.y.strides = {s1 * s2, s2, One};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
+  ASSERT_FALSE(fused_scheduled_result.node_idx_to_scheduled_results.empty());
+  ASSERT_FALSE(fused_scheduled_result.node_idx_to_scheduled_results[0].empty());
+  ASSERT_FALSE(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.empty());
+
+  const af::AscNodePtr nddma_node = [&fused_scheduled_result]() {
+    for (const auto &schedule_result : fused_scheduled_result.node_idx_to_scheduled_results[0]) {
+      for (const auto &schedule_group : schedule_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          if (impl_graph.GetName().find("_nddma") == std::string::npos) {
+            continue;
+          }
+          for (const auto &node : impl_graph.GetAllNodes()) {
+            if (node->GetName() == "load1") {
+              return node;
+            }
+          }
+        }
+      }
+    }
+    return static_cast<af::AscNodePtr>(nullptr);
+  }();
+  ASSERT_NE(nddma_node, nullptr);
+  EXPECT_EQ(nddma_node->GetType(), "Nddma");
+  // swap后nddma输出dtype为cast输入dtype(fp16, 2B)
+  EXPECT_EQ(nddma_node->outputs[0].attr.dtype, af::DT_FLOAT16);
+  const auto &vec_strides = nddma_node->outputs[0].attr.vectorized_strides;
+  ASSERT_FALSE(vec_strides.empty());
+  // 不变式: 非0/1的常量stride按fp16(2B)均满足32B整数倍
+  for (const auto &stride : vec_strides) {
+    int64_t stride_val = 0;
+    if (!stride.IsConstExpr() || !stride.GetConstValue(stride_val)) {
+      continue;
+    }
+    if (stride_val == 0 || stride_val == 1) {
+      continue;
+    }
+    EXPECT_EQ((stride_val * 2) % 32, 0);
+  }
+  // 向量化视图覆盖{次尾轴, 尾轴}时, 次尾轴stride重排为Align(72, 32/2)=80, 尾轴stride保持1
+  if (vec_strides.size() >= 2UL) {
+    EXPECT_EQ(
+        af::SymbolicUtils::StaticCheckEq(vec_strides[vec_strides.size() - 2UL], af::sym::Align(af::Symbol(72), 16U)),
+        af::TriBool::kTrue);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(vec_strides.back(), One), af::TriBool::kTrue);
+  }
+}
+
+/**
+ * 动态shape场景: load(fp16)-cast(fp16->fp32)-brc(次尾轴广播)-Mul, 尾轴为动态size var,
+ * 调度期brc次尾轴stride为Align(动态值, 8)的非常量表达式, 无法静态判定32B对齐,
+ * 需保守触发重排(次尾轴stride按fp16重新Align), 并保证全链路不异常。
+ */
+TEST_F(OptimizerStV2, LoadCastBrcSecondaryTailAxisDynamicStrideConservativeRealign) {
+  AscGraph graph("load_cast_brc_dynamic_realign");
+
+  auto s0 = graph.CreateSizeVar(256);
+  auto s1 = graph.CreateSizeVar(100);
+  auto s2 = graph.CreateSizeVar("s2");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Data data1("data1", graph);
+  data1.y.dtype = af::DT_FLOAT16;
+  data1.ir_attr.SetIndex(1);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id, z2.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.repeats = {s0, s1, s2};
+  *load0.y.strides = {s1 * s2, s2, One};
+
+  Load load1("load1");
+  load1.attr.sched.axis = {z0.id, z1.id, z2.id};
+  load1.x = data1.y;
+  *load1.y.axis = {z0.id, z1.id, z2.id};
+  load1.y.dtype = af::DT_FLOAT16;
+  *load1.y.repeats = {s0, One, s2};
+  *load1.y.strides = {s2, Zero, One};
+
+  Cast cast1("cast1");
+  cast1.x = load1.y;
+  cast1.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *cast1.y.axis = {z0.id, z1.id, z2.id};
+  cast1.y.dtype = af::DT_FLOAT;
+  *cast1.y.repeats = {s0, One, s2};
+  *cast1.y.strides = {s2, Zero, One};
+
+  Broadcast broadcast1("broadcast1");
+  broadcast1.x = cast1.y;
+  broadcast1.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *broadcast1.y.axis = {z0.id, z1.id, z2.id};
+  broadcast1.y.dtype = af::DT_FLOAT;
+  *broadcast1.y.repeats = {s0, s1, s2};
+  *broadcast1.y.strides = {s1 * s2, s2, One};
+
+  Mul mul0("mul0");
+  mul0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  mul0.x1 = load0.y;
+  mul0.x2 = broadcast1.y;
+  mul0.y.dtype = af::DT_FLOAT;
+  *mul0.y.axis = {z0.id, z1.id, z2.id};
+  *mul0.y.repeats = {s0, s1, s2};
+  *mul0.y.strides = {s1 * s2, s2, One};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id, z2.id};
+  store_op.x = mul0.y;
+  *store_op.y.axis = {z0.id, z1.id, z2.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.repeats = {s0, s1, s2};
+  *store_op.y.strides = {s1 * s2, s2, One};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
+  ASSERT_FALSE(fused_scheduled_result.node_idx_to_scheduled_results.empty());
+  ASSERT_FALSE(fused_scheduled_result.node_idx_to_scheduled_results[0].empty());
+  ASSERT_FALSE(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.empty());
+
+  const af::AscNodePtr nddma_node = [&fused_scheduled_result]() {
+    for (const auto &schedule_result : fused_scheduled_result.node_idx_to_scheduled_results[0]) {
+      for (const auto &schedule_group : schedule_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          if (impl_graph.GetName().find("_nddma") == std::string::npos) {
+            continue;
+          }
+          for (const auto &node : impl_graph.GetAllNodes()) {
+            if (node->GetName() == "load1") {
+              return node;
+            }
+          }
+        }
+      }
+    }
+    return static_cast<af::AscNodePtr>(nullptr);
+  }();
+  ASSERT_NE(nddma_node, nullptr);
+  EXPECT_EQ(nddma_node->GetType(), "Nddma");
+  // swap后nddma输出dtype为cast输入dtype(fp16, 2B)
+  EXPECT_EQ(nddma_node->outputs[0].attr.dtype, af::DT_FLOAT16);
+  const auto &vec_strides = nddma_node->outputs[0].attr.vectorized_strides;
+  ASSERT_FALSE(vec_strides.empty());
+  // 次尾轴stride为非常量时保守触发重排: 重排后stride被Align(…,16)包裹, 不再等于调度期原值
+  // (kNotAligned时原值为s2, kAligned时原值为Align(s2,8), 两种调度下漏重排都会命中其中一条断言)
+  if (vec_strides.size() >= 2UL) {
+    EXPECT_NE(af::SymbolicUtils::StaticCheckEq(vec_strides[vec_strides.size() - 2UL], s2), af::TriBool::kTrue);
+    EXPECT_NE(af::SymbolicUtils::StaticCheckEq(vec_strides[vec_strides.size() - 2UL], af::sym::Align(s2, 8U)),
+              af::TriBool::kTrue);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(vec_strides.back(), One), af::TriBool::kTrue);
+  }
+}
+
+/**
  *           data0         data1
  *             |             |
  *           load0         load1
