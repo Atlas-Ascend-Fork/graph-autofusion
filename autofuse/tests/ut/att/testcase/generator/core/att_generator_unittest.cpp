@@ -1020,7 +1020,7 @@ TEST(GeneratorUT, TemplateSemanticInfoKeepsSameKeySubCasesSelectable) {
   ASSERT_EQ(generator.GenTilingCode(op_name, model_infos, config, tiling_res), af::SUCCESS);
   const auto &group_source = tiling_res.at("asc_graph0_schedule_result0_g0");
   EXPECT_NE(group_source.find("final_context.semantic_name = semantic_info.semantic_name;"), std::string::npos);
-  EXPECT_NE(group_source.find("set_semantic_fallback();"), std::string::npos);
+  EXPECT_NE(group_source.find("ApplySemanticFallback();"), std::string::npos);
   EXPECT_NE(group_source.find("std::string(sub_case_tag) == \"caseA\""), std::string::npos);
   EXPECT_NE(group_source.find("std::string(sub_case_tag) == \"caseB\""), std::string::npos);
   EXPECT_NE(group_source.find("std::string(sub_case_tag) == \"\""), std::string::npos);

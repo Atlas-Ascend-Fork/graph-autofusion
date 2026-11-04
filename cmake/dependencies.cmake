@@ -34,3 +34,6 @@ find_cann_package(msprof MODULE REQUIRED)
 find_cann_package(platform MODULE REQUIRED)
 find_cann_package(asc_devkit MODULE REQUIRED)
 add_cann_third_party(json)
+
+include(${CMAKE_CURRENT_LIST_DIR}/llvm21/Bootstrap.cmake)
+autofuse_prepare_llvm21()

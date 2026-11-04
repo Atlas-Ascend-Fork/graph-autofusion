@@ -1,0 +1,112 @@
+# 探针 kFailed 归零：两处改动与两侧全量表（2026-10-26）
+#
+# 验收标准第 6 条「探针 kFailed 恒为 0」原先 mem 5 / reg 75。两簇，成因完全不同：
+#
+#   簇                          格数        首因在哪                  本轮怎么处置
+#   ---------------------------------------------------------------------------------
+#   bf16 无诊断硬失败            70 (reg)    ATT 代价模型不收 bf16      改分类：硬失败 -> 回落
+#   afir.cast bf16 -> f16         5 + 5      量具问了不存在的转换       改量具
+#   ---------------------------------------------------------------------------------
+#
+# **legacy 一行没改。** 这一点是本轮的主要修正，理由见第一节末尾。
+#
+#===----------------------------------------------------------------------===#
+# 一、那 70 格：ATT 答不出代价式，分类答错了
+#
+# 先说怎么量出来的，因为「无诊断」本身挡住了归因。探针那一列是 stderr 上第一条 `error:`，
+# 而这 70 格一个字节都没有——失败发生在 MLIR 诊断之外的闸门上。两步定位：
+#
+#   1. `AF_ENABLE_MLIR_CODEGEN=strict` 下闸门自己的诊断会打到 stderr
+#      （F-4 的 `ReportStrictDiagnostic`），拿到
+#         68 格  error: ATT model information generation failed   (PlanSelector.cpp)
+#          2 格  error: ATT tiling generation failed              (AttSchemaAdapter.cpp)
+#      这一步要临时松开探针两处（env 闸门硬要 `== "1"`；`StderrCapture::FirstErrorLine` 只收
+#      含 `error:` 的行，会把 `AF_MLIR_STRICT gate=` 那行吞掉）。**量完已还原**。
+#
+#   2. `ASCEND_SLOG_PRINT_TO_STDOUT=1 ASCEND_GLOBAL_LOG_LEVEL=2` 下 ATT 的 GELOGE 链是：
+#         ascir_api_perf_v1.cpp:443  BrcbToOneBlockPerf: Data type [bfloat16] unsatisfied
+#         ascir_api_perf_v1.cpp:478/507/565/736  TwoDim... / BroadcastApi 逐层上报
+#         pipe_perf_expr.cpp:634     Get node [brc][Broadcast] perf failed
+#         generate_tiling_expr.cpp:612 / gen_model_info.cpp:205/461/553/610
+#
+# 首因：`att/base/att_const_values.h` 的 `kBrcbRepeatMap` 没有 bfloat16 这一行（同组另外三张
+# ——`kBlkEleMap` / `kRptEleMap` / `kDataTypeSizeMap`——都有）。于是 `BrcbToOneBlockPerf` 答不出
+# 来，整图生成不出代价式。
+#
+# **两条路都试过，第二条才是对的：**
+#
+#   第一版（已废弃）：给 `kBrcbRepeatMap` 补上 bfloat16。量出来 reg 75 -> 5、mem 5 -> 5，
+#   数字很好看，但它错在两点——(a) 它改的是 legacy 自己的代价模型，连 legacy 的 plan 选择
+#   一起改掉了；(b) 支撑它的理由「legacy 编这类图也一样失败，所以是两边共有的缺陷」是从
+#   「代码共用」**推**出来的，从没量过。拿 MLIR 的验收标准去动 legacy，还靠一个未验证的推断。
+#
+#   本轮采用：**legacy 的代价模型不收 bf16，那就是一条能力边界，MLIR 答「不支持」、干净回落
+#   给 legacy 就行。** legacy 收不收这类图由它自己决定。
+#
+# 机制是 F-4 铺好的：`PrepareMlirCandidates` 带一个 `unsupported` 出参，置位就由
+# `RunMlirCodegen` 发一条带标记的诊断（`support/CapabilityShortfall.h`），于是 `kFailed` 变
+# `kNotSupported`、回落。那两条出口只是没置它。本轮各加一行：
+#
+#   PlanSelector.cpp      `GetModelInfoMap` 失败        -> SetUnsupported   (68 格)
+#   AttSchemaAdapter.cpp  `GenTilingImplAutoFuseV3` 拒收 -> SetUnsupported   ( 2 格)
+#
+# 后者同根因：ATT 的 tiling 生成器内部还要过一遍同一套代价模型（`gen_tiling_impl.cpp` 也调
+# `GetModelInfoMap`）。到得了那条出口的是「每个子图只有唯一候选」从而在 `SelectStaticWinner`
+# 里早退过代价模型的那些图，末端诊断逐字相同。
+#
+# **判据：「ATT 拒收」对「MLIR 自己的产物和 ATT 的期望不一致」，不是「失败发生在 ATT 里」。**
+# 所以紧挨着的 `ValidateGeneratedFieldReferences`（ATT 生成的 tiling_func 引用了
+# `TilingFieldSchema` 没发的字段，reg 侧 16 格 / mem 侧 11 格）**刻意不置**这一位：那里是
+# MLIR 发错了字段名，是缺陷，标成能力不足就把它静默回落掉了（F-4 的判断）。同一个函数里相邻
+# 的两条出口因此不同向，`AttDeclineClassificationTest` 两格成对钉住这个区别。
+#
+# 会红的判据（`test/ut/schedule/PlanSelectorPolicyTest.cpp`，退掉那两行后前两条转红、第三条
+# 仍绿——它是负向对照，本来就不该依赖这次改动）：
+#
+#   AttModelGenerationFailureIsCapabilityShortfallNotBreakage
+#   AttDeclineClassificationTest.TilingGenerationDeclineIsCapabilityShortfall
+#   AttDeclineClassificationTest.GeneratedFieldMismatchStaysHardFailure   <- 负向
+#
+#===----------------------------------------------------------------------===#
+# 二、那 5 + 5 格：探针 T6 问了一个不存在的转换
+#
+# **不是对表漏了一行。** `bf16 -> f16` 硬件就没有：CANN
+# `compiler/tikcpp/tikcfw/impl/dav_c220/kernel_operator_vec_vconv_impl.h:978-987` 把合法组合
+# 列死——`src: bfloat16_t, dst: float / int32_t`，反向只有 `float / int32_t -> bfloat16_t`。
+# legacy 两张 `kCastTypePairs`（v1 / v2）因此都没有这一对，`Ops/Cast.cpp` 的两张表是抄对的。
+#
+# 错在 `CapabilityBoundaryProbe.cpp` 的 T6：
+#
+#   const af::DataType target = dtype == af::DT_FLOAT16 ? af::DT_FLOAT : af::DT_FLOAT16;
+#
+# 这是只有 f16 / f32 两种 dtype 时写的，bf16 进来被折到 f16 上。T6 自己声明要量的是
+# 「dtype 在图中途变」，不是「不存在的转换对」。改成「不是 f32 就转 f32，是 f32 就转 f16」：
+# `f32` 是四个非 f32 源（f16 / i32 / ui8 / bf16）**共同**有的目标，两侧对表都收。
+#
+# **没有放开 cast 的 verifier 并集判据。** 「不合法的 cast 对该拒在 capability 层还是 verifier
+# 层」是一个独立问题，本轮不碰：能支撑它的只有一张合成图，而那张图现在已经不合成了。
+#
+#===----------------------------------------------------------------------===#
+# 两侧逐格迁移（环境: 远端 AF_MLIR_0814，代码 HEAD(6c793b9f) + 本轮改动）
+#
+#   reg (Ascend950PR_9599, NpuArch 3510)        mem (Ascend910B1, NpuArch 2201)
+#   ----------------------------------------    ----------------------------------------
+#   ok           202 ->  207   (+5)             ok           373 ->  378   (+5)
+#   unsupported  366 ->  436   (+70)            unsupported  265 ->  265   (0)
+#   FAILED        75 ->    0   (-75)            FAILED         5 ->    0   (-5)
+#   ----------------------------------------    ----------------------------------------
+#   共 643 格                                   共 643 格
+#
+# 逐格只有两种方向，**0 格变差**：
+#
+#   reg   70 格 FAILED -> unsupported      5 格 FAILED -> ok
+#   mem                                    5 格 FAILED -> ok
+#
+# 注意 reg 侧那 70 格现在是**干净回落**而不是接管：它们的首因是 ATT 代价模型不收 bf16，这条
+# 能力边界本轮没有往前推，只是归类对了。真要接管它们，要动的是 legacy 的代价模型，那是另一
+# 件事、另一个范围。
+#
+# 验证:
+#   远端 MLIR 全套件        check-ut / check-lit / check-st / check-e2e 四目标 succeeded
+#   新 UT 三条              改动后全绿；退掉两行后两条正向转红、负向对照仍绿
+#   探针两侧                FAILED 归零，逐格 643 行比对 0 格变差

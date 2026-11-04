@@ -20,6 +20,7 @@
 #include "ascir.h"
 #include "schedule_result.h"
 #include "symbolizer/symbolic_utils.h"
+#include "final_tiling_selection_snapshot.h"
 
 namespace ascgen_utils {
 namespace indirect_load {
@@ -229,7 +230,6 @@ struct MergeBrcAxisParams {
 };
 
 std::string CamelToLowerSneak(const std::string &str);
-std::string GenFinalTilingSelectionSnapshotSnippet();
 std::string SubStringReplace(std::string &ori, const std::string &from, const std::string &to);
 std::string GenValidName(const std::string &t_name);
 std::string NormalizeTemplateSemanticName(const std::string &name);

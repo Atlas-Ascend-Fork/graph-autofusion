@@ -12,7 +12,10 @@
 
 #include "autofuse_config/auto_fuse_config.h"
 #include "gen_tiling_impl.h"
+#include "final_tiling_log_gen.h"
 #define private public
+#define protected public
+#include "high_perf_tiling_code_gen_impl.h"
 #include "codegen.h"
 #include "codegen_tiling.h"
 #include "codegen_tiling_cube_wrapper.h"
@@ -62,10 +65,103 @@
 #include "att/gen_model_info/utils/node_expr_id.h"
 #include "tests/ut/att/testcase/gen_model_info/core/test_brc_buf_graph.h"
 #include "tests/ut/att/utils/graph_construct_utils.h"
+#include <cstdlib>
 #include <fstream>
 #include <set>
 
 namespace {
+// RAII guard so a failed ASSERT_* mid-test still restores the environment
+// instead of leaking the MLIR codegen configuration into later tests.
+struct ScopedMlirCodegenEnv {
+  ScopedMlirCodegenEnv() {
+    const char *old_value = getenv("AUTOFUSE_DFX_FLAGS");
+    saved_value = old_value == nullptr ? "" : old_value;
+    had_value = old_value != nullptr;
+    setenv("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;", 1);
+  }
+  ~ScopedMlirCodegenEnv() {
+    if (had_value) {
+      setenv("AUTOFUSE_DFX_FLAGS", saved_value.c_str(), 1);
+    } else {
+      unsetenv("AUTOFUSE_DFX_FLAGS");
+    }
+  }
+
+ private:
+  std::string saved_value;
+  bool had_value = false;
+};
+
+std::pair<int, std::string> execute_command(const std::string &command) {
+  std::array<char, 128> buffer;
+  std::string output;
+  std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(command.c_str(), "r"), pclose);
+
+  if (!pipe) {
+    throw std::runtime_error("Failed to open pipe");
+  }
+
+  while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+    output += buffer.data();
+  }
+
+  return {WEXITSTATUS(pclose(pipe.release())), output};
+}
+
+bool CompileCode(const std::string &code, bool append_main = true) {
+  std::string cmake_dir = CMAKE_BINARY_DIR;
+  // 临时目录
+  std::string temp_dir = cmake_dir + "/tests/ut/temp_compile_codegen_tiling";
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir);
+  // 生成的 C++ 文件路径
+  std::string source_file = temp_dir + "/temp_codegen_infershape.cpp";
+  // 生成 C++ 代码
+  std::ofstream source_stream(source_file);
+  source_stream << code;
+  if (append_main) {
+    source_stream << R"(
+        int main() {
+            return 0;
+        }
+    )";
+  }
+  source_stream.close();
+  // 头文件路径
+  std::string ascend_install_path = ASCEND_INSTALL_PATH;
+  std::string include_path = "-I" + ascend_install_path + "/include/ ";
+  std::string link_path = "-L" + ascend_install_path + "/lib64";
+  // 编译代码
+  std::string compile_command = "g++ -std=c++17 " + include_path + " " + link_path + " " + source_file + " -lc_sec";
+  auto [compile_exit_code, compile_output] = execute_command(compile_command);
+  // 清理临时目录
+  std::filesystem::remove_all(temp_dir);
+  return compile_exit_code == 0;
+}
+
+bool CompileAndRunCode(const std::string &code) {
+  const std::string temp_dir = std::string(CMAKE_BINARY_DIR) + "/tests/ut/temp_run_codegen_tiling";
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir);
+  const std::string source_file = temp_dir + "/temp_codegen_tiling.cpp";
+  const std::string binary_file = temp_dir + "/temp_codegen_tiling";
+
+  std::ofstream source_stream(source_file);
+  source_stream << code;
+  source_stream.close();
+
+  const std::string compile_command = "g++ -std=c++17 " + source_file + " -o " + binary_file;
+  const auto [compile_exit_code, compile_output] = execute_command(compile_command);
+  if (compile_exit_code != 0) {
+    std::filesystem::remove_all(temp_dir);
+    return false;
+  }
+
+  const auto [run_exit_code, run_output] = execute_command(binary_file);
+  std::filesystem::remove_all(temp_dir);
+  return run_exit_code == 0;
+}
+
 void ExpectSystemHeaders(const std::string &source, const std::vector<std::string> &required,
                          const std::vector<std::string> &forbidden) {
   for (const auto &header : required) {
@@ -1240,6 +1336,141 @@ class TestCodegenTiling : public testing::Test, public codegen::TilingLib {
     }
     std::vector<ascir::ScheduledResult> schedule_results;
     schedule_results.push_back(schedule_result);
+    schedule_results.push_back(schedule_result);
+
+    ascir::FusedScheduledResult fused_schedule_result;
+    fused_schedule_result.fused_graph_name = af::AscendString(graph.GetName().c_str());
+    fused_schedule_result.input_nodes.push_back(x);
+    fused_schedule_result.output_nodes.push_back(y);
+    fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+    fused_schedule_result.origin_vars = origin_vars;
+    return fused_schedule_result;
+  }
+
+  // Single-plan variant of GenBasicFusedScheduleResult: the shared fixture
+  // deliberately duplicates the same schedule_result into two plans, which is
+  // fine for legacy codegen but produces two identically-named leaf tiling
+  // fields (e.g. "s0") once each plan gets its own MLIR tiling-schema scope.
+  // MLIR's ValidateSchema (mlir/bridge/AttSchemaAdapter/AttSchemaAdapter.cpp)
+  // dedups field names globally rather than per-scope, so it rejects that as
+  // a duplicate — even though BuildTilingFieldSchema's own (path, name)
+  // dedup considers it valid. Keep exactly one plan here so MLIR-path tests
+  // exercise dynamic candidate selection without tripping that mismatch.
+  // AFIRPipelineSync (invoked from ConvertAFIRToAscendCPass) only supports
+  // MTE2->Vector, Vector->MTE3 and Vector->Vector pipeline transitions; a
+  // direct Load->Store (MTE2->MTE3) edge is intentionally rejected. Insert a
+  // self-add compute node between load and store so the fixture exercises a
+  // supported MTE2->Vector->MTE3 chain, mirroring the golden
+  // afir-plan-candidate-pipeline.mlir reference's load -> add -> store shape.
+  void SetupAddAttrs(af::AscNode &add, uint64_t z0_id, const af::Expression &z0_size) {
+    auto &attr = add.outputs[0].attr;
+    attr.dtype = ge::DT_FLOAT16;
+    attr.axis = {static_cast<int64_t>(z0_id)};
+    attr.vectorized_axis = {static_cast<int64_t>(z0_id)};
+    attr.vectorized_strides = {af::ops::One};
+    attr.repeats = {z0_size};
+    attr.strides = {af::ops::One};
+    attr.mem.position = af::Position::kPositionVecIn;
+    attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+    attr.mem.tensor_id = 4;
+    attr.mem.reuse_id = 0;
+    attr.que.id = 1;
+    attr.que.depth = 2;
+    attr.que.buf_num = 2;
+    add.attr.sched.axis = {static_cast<int64_t>(z0_id)};
+    add.attr.sched.loop_axis = z0_id;
+  }
+
+  ascir::FusedScheduledResult GenSingleDynamicPlanFusedScheduleResult(
+      const std::vector<af::Expression> &origin_vars = {}, const af::Expression &axis_size = af::ops::Zero) {
+    af::AscGraph graph("test_graph");
+    graph.SetTilingKey(10);
+    auto s0 = graph.CreateSizeVar("s0");
+    auto z0 = graph.CreateAxis("z0", axis_size);
+
+    af::ascir_op::Data x_op("x", graph);
+    x_op.ir_attr.SetIndex(0);
+    af::ascir_op::Load load_op("load");
+    af::ascir_op::Add add_op("add");
+    af::ascir_op::Store store_op("store");
+    af::ascir_op::Output y_op("y");
+    y_op.ir_attr.SetIndex(0);
+    graph.AddNode(load_op);
+    graph.AddNode(add_op);
+    graph.AddNode(store_op);
+    graph.AddNode(y_op);
+
+    load_op.x = x_op.y;
+    load_op.y.dtype = ge::DT_FLOAT16;
+    add_op.x1 = load_op.y;
+    add_op.x2 = load_op.y;
+    add_op.y.dtype = ge::DT_FLOAT16;
+    store_op.x = add_op.y;
+    y_op.x = store_op.y;
+
+    auto x = graph.FindNode("x");
+    auto load = graph.FindNode("load");
+    auto add = graph.FindNode("add");
+    auto store = graph.FindNode("store");
+    auto y = graph.FindNode("y");
+
+    x->outputs[0].attr.dtype = ge::DT_FLOAT16;
+    load->outputs[0].attr.dtype = ge::DT_FLOAT16;
+    add->outputs[0].attr.dtype = ge::DT_FLOAT16;
+    store->outputs[0].attr.dtype = ge::DT_FLOAT16;
+    y->outputs[0].attr.dtype = ge::DT_FLOAT16;
+    x->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+    x->outputs[0].attr.mem.tensor_id = 0;
+    x->attr.api.unit = af::ComputeUnit::kUnitNone;
+    y->attr.api.unit = af::ComputeUnit::kUnitNone;
+    // afir.load's operand indexing map is derived from the graph input node's
+    // own AscTensorAttr (mirrors the y/"Output" case below for afir.store),
+    // not from load's own output attr. Leaving these unset degrades the
+    // operand view rank to 0, which fails DataMovement's buildTransferPlan
+    // (rank-mismatched indexing maps), surfacing as "afir.load has no
+    // supported Ascend implementation". Mirror SetupLoadAttrs' values since x
+    // and load describe the same logical buffer.
+    x->outputs[0].attr.axis = {static_cast<int64_t>(z0.id)};
+    x->outputs[0].attr.vectorized_axis = {static_cast<int64_t>(z0.id)};
+    x->outputs[0].attr.vectorized_strides = {af::ops::One};
+    x->outputs[0].attr.repeats = {z0.size};
+    x->outputs[0].attr.strides = {af::ops::One};
+    // Legacy codegen tolerates an unset (kIdNone) tensor_id on the graph output,
+    // but MLIR's ScheduleToAfir::ValidateScheduleBinding requires tensor_id >= 0
+    // for every tensor it binds, so this fixture needs one explicitly assigned.
+    y->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+    y->outputs[0].attr.mem.tensor_id = 3;
+    // afir.store's destination memref view type is derived from the graph
+    // output node's own AscTensorAttr (see ScheduleToAfir.cpp's AppendNodeIo
+    // for nodeInfo.type == "Output"), not from the store node's output attr.
+    // Leaving these unset degrades the view rank to 0, which trips
+    // afir.store's InvalidIndexingMaps check ("destination map result rank
+    // must match destination view rank"). Mirror SetupStoreAttrs' values
+    // since y and store describe the same logical buffer.
+    y->outputs[0].attr.axis = {static_cast<int64_t>(z0.id)};
+    y->outputs[0].attr.vectorized_axis = {static_cast<int64_t>(z0.id)};
+    y->outputs[0].attr.vectorized_strides = {af::ops::One};
+    y->outputs[0].attr.repeats = {z0.size};
+    y->outputs[0].attr.strides = {af::ops::One};
+
+    SetupLoadAttrs(*load, z0.id, z0.size);
+    SetupAddAttrs(*add, z0.id, z0.size);
+    SetupStoreAttrs(*store, z0.id, z0.size);
+    // AFIRLoopGenerate requires afir.sched_axis + afir.loop_axis together on
+    // every templated node (AFIRLoopGenerate.cpp's getScheduledLoopAxes), which
+    // ScheduleToAfir derives from node->attr.sched.{axis,loop_axis} -- distinct
+    // from the per-output axis/repeats/strides SetupLoadAttrs/SetupStoreAttrs set.
+    load->attr.sched.axis = {static_cast<int64_t>(z0.id)};
+    load->attr.sched.loop_axis = z0.id;
+    store->attr.sched.axis = {static_cast<int64_t>(z0.id)};
+    store->attr.sched.loop_axis = z0.id;
+
+    ::ascir::ScheduledResult schedule_result;
+    schedule_result.schedule_groups.resize(1);
+    for (auto &schedule_group : schedule_result.schedule_groups) {
+      schedule_group.impl_graphs.emplace_back(graph);
+    }
+    std::vector<ascir::ScheduledResult> schedule_results;
     schedule_results.push_back(schedule_result);
 
     ascir::FusedScheduledResult fused_schedule_result;
@@ -4783,7 +5014,7 @@ TEST_F(TestCodegenTiling, TemplateSemanticInductorSingleGroupEmitsAttReturn) {
             std::string::npos);
   EXPECT_NE(all_tiling_code.find("record.tiling_key = context.tiling_key;"), std::string::npos);
   EXPECT_NE(all_tiling_code.find("HasAmbiguousFinalTilingCase(final_tiling_key, nullptr)"), std::string::npos);
-  EXPECT_NE(all_tiling_code.find("set_semantic_fallback();"), std::string::npos);
+  EXPECT_NE(all_tiling_code.find("ApplySemanticFallback();"), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, TemplateSemanticTopnAggregatesMultiGroupInfos) {
@@ -4878,6 +5109,494 @@ TEST_F(TestCodegenTiling, TemplateSemanticLogUsesBoundedFormatterAndEscapeHelper
   EXPECT_NE(all_tiling_code.find("TemplateSemanticLineSummary"), std::string::npos);
   EXPECT_NE(all_tiling_code.find("line.size() > kTemplateSemanticLineBudget"), std::string::npos);
   EXPECT_EQ(all_tiling_code.find("TemplateSemanticShellQuote"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticFormatterBoundsEveryGeneratedLine) {
+  const std::string helpers = att::final_tiling::GenFinalTilingLogHelpers(false);
+  std::string source = R"(
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, ...) (void)0
+#define OP_NAME "test"
+)";
+  source += helpers;
+  source += R"(
+int main() {
+  const auto bounded = [](const std::vector<std::string> &lines) {
+    for (const auto &line : lines) {
+      if (line.size() > 700U) { return false; }
+    }
+    return true;
+  };
+  TemplateSemanticRecord core;
+  core.stage = "topn_output";
+  core.has_output = true;
+  core.has_group = true;
+  core.semantic_name.assign(800U, 'x');
+  if (!bounded(FormatTemplateSemanticRecord(core))) { return 1; }
+
+  TemplateSemanticRecord detail = core;
+  detail.semantic_name = "Pointwise/Test";
+  detail.has_identity = true;
+  detail.template_name.assign(800U, 'x');
+  const auto lines = FormatTemplateSemanticRecord(detail);
+  bool has_template_summary = false;
+  for (const auto &line : lines) {
+    if (line.find("template_hash=") != std::string::npos) { has_template_summary = true; }
+  }
+  return bounded(lines) && has_template_summary ? 0 : 1;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticFormatterReadsCanonicalFields) {
+  std::string source = R"(
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, ...) (void)0
+#define OP_NAME "test"
+)";
+  source += att::final_tiling::GenFinalTilingLogHelpers(false);
+  source += R"(
+int main() {
+  const std::string name = "Reduce/Common@Norm#AR|NoReuseSrc+NDDMA.Cast";
+  const auto fields = ParseTemplateSemanticName(name);
+  if (fields.family != "Reduce" || fields.strategy != "Common" || fields.role != "Norm" ||
+      fields.api_features != std::vector<std::string>{"AR", "NoReuseSrc"} ||
+      fields.transforms != std::vector<std::string>{"NDDMA.Cast"}) { return 1; }
+  const auto parent = ParseTemplateSemanticName("Reduce/Common@Norm");
+  if (parent.strategy != "Common" || parent.role != "Norm" || !parent.api_features.empty()) { return 3; }
+  const auto api_only = ParseTemplateSemanticName("Reduce/Common#AR|ReuseSrc");
+  if (api_only.strategy != "Common" || !api_only.role.empty() || api_only.api_features.size() != 2U) { return 4; }
+  const auto family = ParseTemplateSemanticName("Reduce");
+  if (family.family != "Reduce" || !family.strategy.empty()) { return 5; }
+  FinalTilingGroupSelection group{};
+  group.semantic_name = name;
+  const std::string summary = FinalTilingGroupsJson({group});
+  return summary.find("\"semantic_name\":\"" + name + "\"") != std::string::npos ? 0 : 6;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, CachedTemplateSemanticFallbackExecutesKeyMapping) {
+  att::TilingModelInfo models(3);
+  for (size_t index = 0; index < models.size(); ++index) {
+    models[index].tiling_case_id = index == 0 ? 0U : 1U;
+    models[index].sub_case_tag = std::to_string(index);
+    models[index].semantic_name =
+        index == 0 ? "Pointwise/Common" : (index == 1 ? "Reduce/Common@Norm#AR" : "Reduce/Common@Norm#RA");
+  }
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "TestTilingData";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  ASSERT_EQ(generator.GenTemplateSemanticInfos(), af::SUCCESS);
+  const std::string mapping = generator.tiling_func_.GetOutputStr();
+  generator.GenFinalTilingSemanticFallback();
+  std::string source = R"(
+#include <string>
+#include <vector>
+std::vector<std::string> emitted_lines;
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) emitted_lines.emplace_back(value)
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct TestTilingData { uint32_t key; uint32_t get_tiling_key() { return key; } };
+int32_t GetFinalTilingCaseId(uint32_t key) { return key < 2U ? key : -1; }
+)" + mapping + R"(
+int main() {
+  const char *source = "runtime", *selection_mode = "default";
+  const uint32_t group_id = 0U;
+  const bool ambiguous_sub_case = false;
+  for (uint32_t key : {0U, 1U, 99U}) {
+    TestTilingData tiling_data{key};
+    FinalTilingContext final_context{};
+    final_context.tiling_key = key;
+)" + generator.tiling_func_.GetOutputStr().substr(mapping.size()) +
+                       R"(
+    emitted_lines.clear();
+    ApplySemanticFallback();
+    EmitTemplateSemanticRecord(final_context, key == 1U);
+    if (emitted_lines.empty()) { return 1; }
+    const std::string &line = emitted_lines.front();
+    const std::string name = key == 0U ? "Pointwise/Common" : (key == 1U ? "Reduce/Common@Norm" : "Unknown");
+    const std::string status = key == 0U ? "" : (key == 1U ? "ambiguous" : "unavailable");
+    if (line.find("semantic_name=\"" + name + "\"") == std::string::npos ||
+        (!status.empty() && line.find("name_status=" + status) == std::string::npos)) { return 2; }
+  }
+  return 0;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, ReuseFinalTilingLogsCurrentIdentityForSelectedAndCachedCases) {
+  att::TilingModelInfo models(3);
+  att::ReuseScheduleGroupInfo primary, current;
+  primary.tiling_keys = {0U, 1U, 1U};
+  current.tiling_keys = {7U, 8U, 8U};
+  for (size_t index = 0UL; index < models.size(); ++index) {
+    models[index].schedule_group_ident = {2UL, 3UL, 4UL};
+    models[index].reuse_schedule_group = std::make_shared<att::ReuseScheduleGroup>();
+    models[index].tiling_case_id = current.tiling_keys[index];
+    models[index].sub_case_tag = std::to_string(index);
+    models[index].semantic_name =
+        index == 0UL ? "Pointwise/Common" : (index == 1UL ? "Reduce/Common@Norm#AR" : "Reduce/Common@Norm#RA");
+  }
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  std::map<att::ScheduleGroupIdent, att::ReuseScheduleGroupInfo> infos{{{2UL, 3UL, 4UL}, current}};
+  ASSERT_EQ(generator.GenTemplateSemanticInfos(), af::SUCCESS);
+  ASSERT_EQ(generator.GenReuseGroupTilingWrapperFinalEmitter("Cur", "Primary", primary, infos.cbegin()), af::SUCCESS);
+  std::string source = R"(
+#include <string>
+#include <vector>
+std::vector<std::string> emitted_lines;
+bool log_enabled = true;
+#define CheckCachedLogLevel(level) log_enabled
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) emitted_lines.emplace_back(value)
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct Data { uint32_t key; uint32_t get_tiling_key() const { return key; } void set_tiling_key(uint32_t v) { key = v; } };
+using CurTilingData = Data;
+using PrimaryTilingData = Data;
+template<class TI, class TO> TO &RefToRef(TI &v) { return reinterpret_cast<TO &>(v); }
+namespace Primary {
+bool exact = true; bool fail_context = false;
+int calls = 0;
+void FillContext(Data &data, int32_t id, FinalTilingContext &context) {
+  ++calls; if (fail_context) { throw std::bad_alloc(); }
+  if (id >= 0 && id != static_cast<int32_t>(data.key)) { std::abort(); }
+  context.case_id = id; context.tiling_key = data.key; context.score = 17;
+  context.sub_case_tag = data.key == 0U ? "primary_tag" : "1";
+  context.template_name = "graph0_result0_g0_0";
+  context.semantic_name = data.key == 0U ? "Pointwise/Common" : "Reduce/Common@Norm#AR";
+  context.semantic_names = {context.semantic_name};
+}
+bool GetFinalTilingContextFromSnapshot(Data &data, uint32_t, int32_t id,
+                                       const FinalTilingSelectionSnapshot &snapshot, FinalTilingContext &context) {
+  if (!snapshot.valid || snapshot.graph != 0U || snapshot.result != 0U || snapshot.group != 0U ||
+      snapshot.tiling_key != data.key) { return false; }
+  FillContext(data, id, context);
+  return exact;
+}
+bool GetFinalTilingSelectionFromSnapshot(Data &data, const FinalTilingSelectionSnapshot &snapshot,
+                                         FinalTilingGroupSelection &selection) {
+  selection.case_id = snapshot.case_id;
+  selection.tiling_key = data.key;
+  selection.score = 17;
+  selection.sub_case_tag = data.key == 0U ? "primary_tag" : "1";
+  selection.template_name = "graph0_result0_g0_0";
+  selection.semantic_name = data.key == 0U ? "Pointwise/Common" : "Reduce/Common@Norm#AR";
+  return exact;
+}
+}
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+int main() {
+  log_enabled = false;
+  Data disabled{7U};
+  EmitFinalTilingByCase(disabled, 32U, "runtime", "default", 4U, 7);
+  if (Primary::calls != 0 || !emitted_lines.empty()) { return 3; }
+  log_enabled = true;
+  FinalTilingObservationContext observation;
+  FinalTilingObservationCallGuard observation_guard(observation, true, 1U);
+  FinalTilingObservationSlotGuard observation_slot_guard(0U);
+  for (bool exact : {true, false}) {
+    Primary::exact = exact;
+    for (uint32_t key : {7U, 8U}) {
+      Data data{key}; emitted_lines.clear();
+      CommitCurrentFinalTilingSelection(
+          {true, 2U, 3U, 4U, key, static_cast<int32_t>(key), key == 7U ? 0 : 1});
+      EmitFinalTilingByCase(data, 32U, "runtime", "default", 4U, static_cast<int32_t>(key));
+      const std::string name = key == 7U ? "Pointwise/Common" :
+          (exact ? "Reduce/Common@Norm#AR" : "Reduce/Common@Norm");
+      const std::string templ = key == 7U ? "graph2_result3_g4_07" :
+          (exact ? "graph2_result3_g4_18" : "");
+      std::string logs;
+      for (const auto &line : emitted_lines) { logs += line + "\n"; }
+      if (data.key != key || logs.find("semantic_name=\"" + name + "\"") == std::string::npos ||
+          logs.find("detail graph=2 result=3 tiling_key=" + std::to_string(key) + " template=\"" + templ + "\"") ==
+              std::string::npos) { return 1; }
+      if (exact && logs.find("score=17") == std::string::npos) { return 4; }
+      if (!exact && key == 8U && logs.find("name_status=ambiguous") == std::string::npos) { return 2; }
+    }
+  }
+  Primary::fail_context = true;
+  CommitCurrentFinalTilingSelection({true, 2U, 3U, 4U, 7U, 7, 0});
+  Data unchanged{7U};
+  try { EmitFinalTilingByCase(unchanged, 32U, "runtime", "default", 4U, 7); } catch (...) { return 5; }
+  return unchanged.key == 7U && !observation.enabled ? 0 : 6;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticMetadataIsCanonicalBeforeLogging) {
+  att::TilingModelInfo models(3);
+  const std::vector<std::string> names = {"Reduce/Common/Norm/AR/NoReuseSrc+NDDMA.Cast", "Concat/UB/Extend/Copy",
+                                          "Reduce/Common@Norm#RA"};
+  for (size_t index = 0UL; index < models.size(); ++index) {
+    models[index].tiling_case_id = index;
+    models[index].semantic_name = ascgen_utils::NormalizeTemplateSemanticName(names[index]);
+  }
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, true);
+  ASSERT_EQ(generator.GenTemplateSemanticInfos(), af::SUCCESS);
+  std::string source = R"(
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct Data { uint32_t key; uint32_t get_tiling_key() const { return key; } };
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+int main() {
+  const std::vector<std::string> expected = {"Reduce/Common@Norm#AR|NoReuseSrc+NDDMA.Cast",
+                                           "Concat/UB#Extend|Copy", "Reduce/Common@Norm#RA"};
+  for (uint32_t key = 0U; key < expected.size(); ++key) {
+    Data data{key}; const auto infos = GetTemplateSemanticInfos(data);
+    if (infos.size() != 1U || infos[0].semantic_name != expected[key]) { return 1; }
+  }
+  return 0;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, ReuseObservationStoresLogicalGroupIdentity) {
+  att::TilingModelInfo models(1);
+  models[0].schedule_group_ident = {2UL, 3UL, 4UL};
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  generator.SetFinalTilingObservationMetadata(1UL, 2UL, {{"", 0}});
+  att::ReuseScheduleGroupInfo primary;
+  primary.tiling_keys = {0U};
+  std::map<att::ScheduleGroupIdent, att::ReuseScheduleGroupInfo> infos{{{2UL, 3UL, 4UL}, primary}};
+  ASSERT_EQ(generator.GenReuseGroupTilingWrapperGetTiling("Cur", "Primary", primary, infos.cbegin()), af::SUCCESS);
+  std::string source = R"(
+#include <unordered_map>
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct Data { uint32_t key{0}; uint32_t get_tiling_key() const { return key; }
+  void set_tiling_key(uint32_t value) { key = value; } };
+using CurTilingData = Data;
+using PrimaryTilingData = Data;
+template<class TI, class TO> TO &RefToRef(TI &value) { return value; }
+namespace Primary {
+bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t) {
+  FinalTilingObservationSlotGuard guard(0U);
+  CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 0U, 0, 1}); return true;
+}
+}
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+int main() {
+  FinalTilingObservationContext context;
+  FinalTilingObservationCallGuard guard(context, true, 2U);
+  Data data; std::unordered_map<int64_t, uint64_t> workspace;
+  if (!GetTiling(data, workspace, -1)) { return 1; }
+  const auto &snapshot = context.selections[1];
+  return snapshot.valid && snapshot.graph == 2U && snapshot.result == 3U && snapshot.group == 4U ? 0 : 2;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, PgoObservationCapturesCurrentCaseInsteadOfDefault) {
+  att::TilingModelInfo models(1);
+  models[0].tiling_case_id = 7U;
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, true);
+  generator.GenInductorExecutePGOSolver(models[0]);
+  std::string source = R"(
+#include <unordered_map>
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+struct Data { uint32_t key{0}; uint32_t get_tiling_key() const { return key; } };
+using AutofuseTilingData = Data;
+struct AutofuseTilingDataPerf { Data tiling_data; double best_perf;
+  std::vector<FinalTilingSelectionSnapshot> final_tiling_selections; };
+struct SearchConfig {};
+struct Base { virtual bool ExecutePGOSolver(Data &, std::vector<AutofuseTilingDataPerf> &, Data *, void *,
+  std::unordered_map<int64_t, uint64_t> &, std::vector<uint32_t *>, const SearchConfig *) = 0; };
+struct Case : Base {
+  const SearchConfig *pending_search_cfg_{nullptr};
+  bool GetTiling(Data &data, double &) { data.key = 7U; return true; }
+  double GetPerf(Data &) { return 1.0; }
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+};
+int main() {
+  FinalTilingObservationContext context;
+  FinalTilingObservationCallGuard guard(context, true, 2U);
+  { FinalTilingObservationSlotGuard slot(0U);
+    CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 14U, 14, 0}); }
+  Data data; std::vector<AutofuseTilingDataPerf> candidates;
+  std::unordered_map<int64_t, uint64_t> workspace;
+  Case impl;
+  if (!impl.ExecutePGOSolver(data, candidates, nullptr, nullptr, workspace)) { return 1; }
+  const auto &snapshots = candidates[0].final_tiling_selections;
+  if (snapshots[0].tiling_key != 7U || snapshots[1].valid || context.selections[0].tiling_key != 14U) { return 2; }
+  RestoreFinalTilingSelectionSnapshots(snapshots);
+  return context.selections[0].tiling_key == 7U && !context.selections[1].valid ? 0 : 3;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, TemplateSemanticTopnDedupKeepsWinningObservationWithoutCopy) {
+  for (bool measured : {false, true}) {
+    std::stringstream helpers;
+    if (measured) {
+      GenDeduplicateMeasuredCandidateSolutions(helpers);
+    } else {
+      GenDeduplicateCandidateSolutions(helpers);
+    }
+    std::string source = R"(
+#include <cmath>
+#include <map>
+#include <unordered_map>
+#define OP_LOGI(...) (void)0
+#define OP_LOGW(...) (void)0
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                         R"(
+struct Data {}; struct ResLimit {};
+)" + GenCandidateSolutionProtocolForInductor("Data", true) +
+                         helpers.str() + "constexpr bool kMeasured = " + (measured ? "true;" : "false;") + R"(
+int main() {
+  std::vector<CandidateSolution> solutions(3U);
+  for (size_t index = 0UL; index < solutions.size(); ++index) {
+    auto &solution = solutions[index];
+    solution.canonical_repr = index < 2UL ? "same" : "other";
+    solution.modeled_perf = kMeasured ? 3.0 - index : 3.0;
+    solution.is_default = !kMeasured && index == 1UL;
+    solution.semantic_infos.resize(1U);
+    solution.semantic_infos[0].semantic_name.assign(128U, static_cast<char>('A' + index));
+  }
+  const char *kept_name = solutions[1].semantic_infos[0].semantic_name.data();
+  DeduplicateCandidateSolutions(solutions);
+  return solutions.size() == 2U && solutions[0].semantic_infos[0].semantic_name.data() == kept_name &&
+      solutions[0].semantic_infos[0].semantic_name == std::string(128U, 'B') ? 0 : 1;
+}
+)";
+    ASSERT_TRUE(CompileAndRunCode(source));
+  }
+}
+
+TEST_F(TestCodegenTiling, FinalTilingObservationAllocationFailuresPreserveSolverAndReentry) {
+  std::string source = R"(
+#include <cstdlib>
+#include <new>
+bool fail_allocation = false;
+void *operator new(std::size_t size) {
+  if (fail_allocation) { fail_allocation = false; throw std::bad_alloc(); }
+  if (auto *value = std::malloc(size)) { return value; }
+  throw std::bad_alloc();
+}
+void operator delete(void *value) noexcept { std::free(value); }
+void operator delete(void *value, std::size_t) noexcept { std::free(value); }
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+int main() {
+  FinalTilingObservationContext outer;
+  FinalTilingObservationCallGuard outer_guard(outer, true, 1U);
+  FinalTilingObservationSlotGuard outer_slot(0U);
+  CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 7U, 7, 0});
+  for (size_t count : {1UL, 64UL, 4096UL}) {
+    FinalTilingObservationContext inner;
+    fail_allocation = true;
+    try {
+      FinalTilingObservationCallGuard inner_guard(inner, true, count);
+      if (inner.enabled || IsFinalTilingObservationEnabled()) { return 1; }
+    } catch (...) { return 2; }
+    if (!IsFinalTilingObservationEnabled() || outer.selections[0].tiling_key != 7U) { return 3; }
+    for (bool capture : {false, true}) {
+      FinalTilingObservationContext trial;
+      FinalTilingObservationCallGuard trial_guard(trial, true, count);
+      fail_allocation = true;
+      const auto snapshots = capture ? CaptureFinalTilingSelectionSnapshot(0U, {}) : GetFinalTilingSelectionSnapshots();
+      if (!snapshots.empty() || trial.enabled) { return 4; }
+    }
+  }
+  return outer.selections[0].tiling_key == 7U ? 0 : 5;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, TopnObservationVisitsOnlySelectedResultWithPerGroupFallback) {
+  auto fused = GenBasicFusedScheduleResult({}, af::ops::One);
+  const auto result = fused.node_idx_to_scheduled_results[0][0];
+  fused.node_idx_to_scheduled_results[0].assign(2U, result);
+  codegen_func_ = att::GenTilingImplAutoFuseV3;
+  std::string source = R"(
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+int fallback_calls = 0; bool fail_names = false;
+struct Data { uint32_t get_tiling_key() const { return 0U; } };
+struct AutofuseTilingData { Data graph0_result0_g0_tiling_data, graph0_result1_g0_tiling_data;
+  uint32_t get_graph0_tiling_key() const { return 1U; } };
+template<uint32_t Result> std::vector<TemplateSemanticInfo> Fallback(Data &) {
+  ++fallback_calls; if (fail_names) { throw std::bad_alloc(); }
+  TemplateSemanticInfo info; info.result = Result; info.semantic_name = "fallback"; return {info}; }
+bool Selected(Data &, const FinalTilingSelectionSnapshot &snapshot, FinalTilingGroupSelection &selection) {
+  selection.semantic_name = "selected"; return snapshot.valid; }
+namespace optiling {
+namespace AscGraph0ScheduleResult0G0 { auto GetTemplateSemanticInfos(Data &data) { return Fallback<0>(data); }
+  auto GetFinalTilingSelectionFromSnapshot(Data &d, const FinalTilingSelectionSnapshot &s,
+    FinalTilingGroupSelection &v) { return Selected(d, s, v); } }
+namespace AscGraph0ScheduleResult1G0 { auto GetTemplateSemanticInfos(Data &data) { return Fallback<1>(data); }
+  auto GetFinalTilingSelectionFromSnapshot(Data &d, const FinalTilingSelectionSnapshot &s,
+    FinalTilingGroupSelection &v) { return Selected(d, s, v); } }
+}
+)" + GenTemplateSemanticInfosForInductor(fused) +
+                       R"(
+int main() {
+  AutofuseTilingData data;
+  std::vector<FinalTilingSelectionSnapshot> snapshots(2U);
+  snapshots[1] = {true, 0U, 1U, 0U, 0U, 0, 0};
+  FinalTilingObservationContext context;
+  {
+    FinalTilingObservationCallGuard disabled(context, false, 2U);
+    for (size_t count = 0UL; count < 4096UL; ++count) {
+      if (!optiling::GetTemplateSemanticInfos(data, snapshots).empty() || fallback_calls != 0) { return 3; }
+    }
+  }
+  FinalTilingObservationCallGuard enabled(context, true, 2U);
+  auto infos = optiling::GetTemplateSemanticInfos(data, snapshots);
+  if (infos.size() != 1U || infos[0].result != 1U || infos[0].semantic_name != "selected") { return 1; }
+  snapshots[1].valid = false;
+  infos = optiling::GetTemplateSemanticInfos(data, snapshots);
+  if (infos.size() != 1U || infos[0].result != 1U || infos[0].semantic_name != "fallback") { return 2; }
+  fail_names = true;
+  if (!optiling::GetTemplateSemanticInfos(data, snapshots).empty() || context.enabled) { return 4; }
+  const auto calls = fallback_calls;
+  return optiling::GetTemplateSemanticInfos(data, snapshots).empty() && fallback_calls == calls ? 0 : 5;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
 }
 
 // Task 2: Config truth table — request construction & config semantics
@@ -6210,4 +6929,80 @@ TEST_F(TestCodegenTiling, CacheExecutionDoubleTileUsesEmittedControlCondition) {
     }
   }
   EXPECT_TRUE(checked);
+}
+
+TEST_F(TestCodegenTiling, CodegenViaMlirDisabledOrCubeFusionFallsBackToLegacyByteIdentical) {
+  auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused_schedule_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), 0);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+
+  codegen::Codegen legacy_codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult legacy_result;
+  ASSERT_EQ(legacy_codegen.GenerateForInductor(fused_schedule_result, legacy_result), af::SUCCESS);
+
+  ScopedMlirCodegenEnv scoped_mlir_env;
+  codegen::CodegenOptions mlir_options;
+  mlir_options.soc_version = "Ascend910B1";
+  codegen::Codegen mlir_codegen(mlir_options);
+  codegen::CodegenResult mlir_result;
+  ASSERT_EQ(mlir_codegen.GenerateForInductor(fused_schedule_result, mlir_result), af::SUCCESS);
+
+  EXPECT_EQ(mlir_result.kernel, legacy_result.kernel);
+  EXPECT_EQ(mlir_result.tiling, legacy_result.tiling);
+  EXPECT_EQ(mlir_result.tiling_data, legacy_result.tiling_data);
+  // proto/infer_shape are written by neither path, so comparing them proves nothing.
+}
+
+TEST_F(TestCodegenTiling, CodegenViaMlirConfigUnsetFallsBackToLegacyByteIdentical) {
+  // The MLIR codegen config deliberately remains unset here: even a non-Cube,
+  // MLIR-eligible plan must fall back to the legacy path byte-for-byte when
+  // the configuration is none, since ReadMlirCodegenOptions gates CodegenViaMlir.
+  auto fused_schedule_result =
+      this->GenSingleDynamicPlanFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::ops::One);
+  ASSERT_FALSE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+
+  codegen::CodegenOptions options;
+  options.soc_version = "Ascend910B1";
+  codegen::Codegen codegen_off(options);
+  codegen::CodegenResult result_off;
+  ASSERT_EQ(codegen_off.GenerateForInductor(fused_schedule_result, result_off), af::SUCCESS);
+
+  codegen::Codegen legacy_codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult legacy_result;
+  ASSERT_EQ(legacy_codegen.GenerateForInductor(fused_schedule_result, legacy_result), af::SUCCESS);
+
+  EXPECT_EQ(result_off.kernel, legacy_result.kernel);
+  EXPECT_EQ(result_off.tiling, legacy_result.tiling);
+  EXPECT_EQ(result_off.tiling_data, legacy_result.tiling_data);
+  // proto/infer_shape are written by neither path, so comparing them proves nothing.
+}
+
+TEST_F(TestCodegenTiling, CodegenViaMlirTensorFlowSceneCubeFusionFallsBackToLegacyByteIdentical) {
+  // Design doc 9.2 row 5: Codegen::Generate() (the TensorFlow-scene call site)
+  // must apply the same Cube-fused guard as the Inductor scene, even with the
+  // switch enabled, and stay byte-identical to the legacy path.
+  auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused_schedule_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), 0);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+
+  std::map<std::string, std::string> shape_info;
+  codegen::Codegen legacy_codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult legacy_result;
+  ASSERT_EQ(legacy_codegen.Generate(shape_info, fused_schedule_result, legacy_result), af::SUCCESS);
+
+  ScopedMlirCodegenEnv scoped_mlir_env;
+  codegen::CodegenOptions mlir_options;
+  mlir_options.soc_version = "Ascend910B1";
+  codegen::Codegen mlir_codegen(mlir_options);
+  codegen::CodegenResult mlir_result;
+  ASSERT_EQ(mlir_codegen.Generate(shape_info, fused_schedule_result, mlir_result), af::SUCCESS);
+
+  EXPECT_EQ(mlir_result.kernel, legacy_result.kernel);
+  EXPECT_EQ(mlir_result.tiling, legacy_result.tiling);
+  EXPECT_EQ(mlir_result.tiling_data, legacy_result.tiling_data);
+  // proto/infer_shape are written by neither path, so comparing them proves nothing.
 }

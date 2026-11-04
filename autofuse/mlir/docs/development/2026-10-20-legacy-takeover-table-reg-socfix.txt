@@ -1,0 +1,253 @@
+# legacy 接管表 —— reg 侧（NpuArch 3510 / Ascend950PR_9599），2026-10-20
+#
+# **这是第一张 MLIR 真的按 reg 侧 profile 量出来的 reg 表。** 在它之前的两张
+# （2026-10-17-legacy-takeover-table-reg.txt 与 2026-10-19-...-reg-m1.txt）里，legacy 的
+# 调度按 NpuArch 3510 走 reg 侧，而 MLIR 按 **mem 侧** profile 下降——两边不是同一个平台。
+#
+# 成因：`v35/st/backend_e2e_v2` 的 `*_codegen_v2`（也就是本表这 200 格）按 include 路径
+# （`-I .../tests/st/common`）解析到的 `runtime_stub.h` 是 `tests/st/common/runtime_stub.h`，
+# 而 2026-10-17 补 `aclrtGetSocName` 的那一提交（4ca857ac）补的是
+# `tests/v35/st/optimize/runtime_stub.h` 里的**同名类**。两个 `RuntimeStubV2` 分头演化，
+# 改一个不会让另一个变红。缺覆写时继承基类的 `"Ascend910B1"`，MLIR 的 `ResolveSocVersion`
+# 读的正是它。
+#
+# 被看见是因为 `afir.ndtr`：第一个 **legacy 只有 reg 侧有** 的 op（对照表 `mem_present=0`），
+# 在 mem profile 上一个 implementation 都选不出来。在它之前接通的 op 两侧都有实现，按 mem 侧
+# 选中一个照样走得完，所以这个错配一直是静默的。
+#
+# 量具: autofuse/mlir/test/probe/legacy_takeover_table.sh -R '_v2$'
+# 代码: HEAD(bceb67e7) + tests/st/common/runtime_stub.h 的 aclrtGetSocName 覆写，无其他改动。
+#
+#   takeover      5  ->  15   （+10）
+#   fallback    127  -> 117   （-10）
+#   hard-failure 66  ->  66   （**不增加**）
+#   out-of-scope  2  ->   2
+#   未知 0、缺二进制 0；**没有任何一格变差**。
+#
+# **+10 不全是 SoC 修复的功劳**：m1 是 M1 之后量的，而本表在 HEAD 上量，中间隔着 M2
+# （c561127a）、`afir.neg`（0c33b230）与 dtype 供给表收真源（bceb67e7）三个提交。M2 那张
+# 6 格表（2026-10-19-...-m2-vf6.txt）已外推 takeover 5 -> 7，其中就有 cast_abs 与
+# cast_abs_float16_float 两格。要精确拆开 SoC 修复各占几格，得再跑一遍 HEAD 不带本修复的
+# 全表——本轮没跑，因为关心的判据（硬失败不增加）与归属无关。
+#
+# 转 takeover 的 10 格：
+#   abs_clip_by_value_test              cast_abs_test
+#   cast_abs_float16_float_test         cast_nan_test
+#   continues_brc_test                  floor_div_int32_store_test
+#   load_compare_store_test             load_where_x2_is_ubscalar_store_test
+#   load_where_x2_x3_is_ubscalar_store_test
+#   load_where_x3_is_ubscalar_store_test
+#
+# 状态没变、首因变了的 3 格：
+#   load_brc_test / load_compare_where_store_test —— 同一条消息，算子名单因 `afir.neg`
+#     进表而变长，截断位置不同；
+#   scalar_brc_test —— `afir.broadcast` -> `afir.nddma`，reg profile 下 `Load -> Broadcast`
+#     融成 nddma 的那条路，仍是干净回落。
+#
+# **跑之前先 `find build -name '*.gcda' -delete`。** 构建目录里留着上一轮二进制的覆盖率
+# 数据时，`libgcov ... overwriting an existing profile data with a different checksum` 会被
+# 脚本的 `grep -m1 'error:'` 当成第一条诊断。实测污染 71 行（takeover 14 / 硬失败 55 /
+# out-of-scope 2）——**fallback 那 117 行不受影响**，因为它们本来就有真诊断排在前面。
+#
+case                                                 state         gate                     shortfall  first diagnostic
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+abs_bf16_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+abs_brc_add_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc subgraph node 'Scalar_scalar' of type 'Scalar' is not modeled yet; scalar operands inside a vector function ar
+abs_clip_by_value_test_codegen_v2                    takeover      none                     no
+abs_fma_bf16_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+abs_fma_test_codegen_v2                              fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'fma' of type 'Fma'
+abs_uint8_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc node 'abs_uint8_test_0_B0Y2_S0G0C0_VfNode_0' reads 'int16', which the register-form lowering does not model ye
+acos_bf16_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+acosh_bf16_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+add_abs_float_scalar_test_codegen_v2                 fallback      lowering                 yes        error: 'afir.load' op has no supported Ascend implementation
+add_abs_half_scalar_test_codegen_v2                  fallback      lowering                 yes        error: 'afir.load' op has no supported Ascend implementation
+add_abs_int8_scalar_test_codegen_v2                  fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+add_abs_test_codegen_v2                              takeover      none                     no
+add_exp2_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'exp2' of type 'Exp2'
+add_exp_bf16_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+add_floor_bf16_test_codegen_v2                       fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+add_floor_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'floor' of type 'Floor'
+asin_bf16_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+asinh_bf16_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+atan2_bf16_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+atan_bf16_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+atanh_bf16_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+bessel_j0_store_test_codegen_v2                      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bessel_j0' of type 'BesselJ0'
+bessel_j1_store_test_codegen_v2                      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bessel_j1' of type 'BesselJ1'
+bessel_y0_store_test_codegen_v2                      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bessel_y0' of type 'BesselY0'
+bessel_y1_store_test_codegen_v2                      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bessel_y1' of type 'BesselY1'
+bf16_add_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+bf16_nddma_add_test_codegen_v2                       fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+binary_api_scalar_test_codegen_v2                    hard-failure  candidate-preparation    no
+bitwise_bool_store_test_codegen_v2                   fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+bool_mask_flow_test_codegen_v2                       fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+brc_reduce_test_codegen_v2                           hard-failure  candidate-preparation    no
+cast_abs_float16_float_test_codegen_v2               takeover      none                     no
+cast_abs_test_codegen_v2                             takeover      none                     no
+cast_nan_test_codegen_v2                             takeover      none                     no
+ceil2int_bf16_test_codegen_v2                        fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+ceil_bf16_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+chebyshev_polynomial_t_store_test_codegen_v2         fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'chebyshev_polynomial_t' of type 'ChebyshevPolynomialT'
+chebyshev_polynomial_u_store_test_codegen_v2         fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'chebyshev_polynomial_u' of type 'ChebyshevPolynomialU'
+chebyshev_polynomial_v_store_test_codegen_v2         fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'chebyshev_polynomial_v' of type 'ChebyshevPolynomialV'
+chebyshev_polynomial_w_store_test_codegen_v2         fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'chebyshev_polynomial_w' of type 'ChebyshevPolynomialW'
+concat_test_codegen_v2                               hard-failure  candidate-preparation    no
+continues_brc_test_codegen_v2                        takeover      none                     no
+copysign_bf16_test_codegen_v2                        fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+cos_bf16_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+cosh_bf16_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+digamma_bf16_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+div_abs_test_codegen_v2                              takeover      none                     no
+erf_bf16_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+erfc_bf16_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+erfcx_test_codegen_v2                                fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+expm1_test_codegen_v2                                fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+float_logical_not_test_codegen_v2                    hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+floordiv_abs_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+floor_div_int32_store_test_codegen_v2                takeover      none                     no
+floordiv_mul_le_select_test_codegen_v2               hard-failure  candidate-preparation    no
+floortoint_float_test_codegen_v2                     fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'floortoint' of type 'FloorToInt'
+fmod_float_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'fmod' of type 'Fmod'
+frexp_store_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'frexp' of type 'Frexp'
+gather_reduce_store_test_codegen_v2                  hard-failure  candidate-preparation    no
+half_logical_not_test_codegen_v2                     hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+hermite_polynomial_he_store_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'hermite_polynomial_he' of type 'HermitePolynomialHe'
+hermite_polynomial_h_store_test_codegen_v2           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'hermite_polynomial_h' of type 'HermitePolynomialH'
+hypot_float_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'hypot' of type 'Hypot'
+i0e_store_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'i0e' of type 'I0e'
+i0_store_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'i0' of type 'I0'
+i1e_store_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'i1e' of type 'I1e'
+indirect_load_add_il_reduce_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_both_transpose_simd_fallback_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_both_transpose_simd_nddma_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_both_transpose_simd_test_codegen_v2    hard-failure  candidate-preparation    no
+indirect_load_both_transpose_simt_test_codegen_v2    fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'input_transpose' of type 'Transpose'
+indirect_load_broadcast_axis_simd_test_codegen_v2    hard-failure  candidate-preparation    no
+indirect_load_broadcast_axis_simt_test_codegen_v2    hard-failure  candidate-preparation    no
+indirect_load_broadcast_continuous_index_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_continuous_simd_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_broadcast_cross_boundary_simt_fallback_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_cross_boundary_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_elements_sk_test_codegen_v2  hard-failure  candidate-preparation    no
+indirect_load_broadcast_index_abs_simt_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_broadcast_index_mixed_view_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_index_physical_view_simt_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_broadcast_index_where_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_inner_adjacent_simd_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_broadcast_reduce_simt_fallback_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_broadcast_retained_simd_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_broadcast_retained_simt_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_complex_broadcast_simd_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_complex_broadcast_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_complex_input_broadcast_simd_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_embedding_reduce_simt_test_codegen_v2  hard-failure  candidate-preparation    no
+indirect_load_embedding_tail_simd_codegen_v2         hard-failure  candidate-preparation    no
+indirect_load_embedding_test_codegen_v2              hard-failure  candidate-preparation    no
+indirect_load_graph_hint_embedding_slice_codegen_v2  fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_graph_hint_reduce_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_graph_hint_simd_repro_codegen_v2       hard-failure  candidate-preparation    no
+indirect_load_index_binary_same_view_simd_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_mixed_rank4_axis2_simd_codegen_v2      hard-failure  candidate-preparation    no
+indirect_load_rank2_axis1_simd_codegen_v2            fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'indirect_load' of type 'IndirectLoad'
+indirect_load_rank3_axis1_float_int64_gather_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_rank3_axis1_input_index_gap_simd_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_rank3_axis1_input_index_gap_simt_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_rank3_axis1_input_index_outer_gap_simt_test_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_rank3_axis1_torch_gather_frontend_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_dtype_sweep_codegen_v2            hard-failure  candidate-preparation    no
+indirect_load_user_dynamic_shape_sweep_codegen_v2    hard-failure  candidate-preparation    no
+indirect_load_user_embedding_exp_abs_add_simt_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_embedding_sum_codegen_v2          hard-failure  candidate-preparation    no
+indirect_load_user_embedding_sum_rank2_codegen_v2    hard-failure  candidate-preparation    no
+indirect_load_user_embedding_sum_simd_codegen_v2     hard-failure  candidate-preparation    no
+indirect_load_user_fanout_direct_reduce_simt_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_fanout_direct_stores_simd_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_fanout_direct_stores_simt_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_fanout_post_reduce_simt_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_fanout_post_stores_simd_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_fanout_post_stores_simt_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_fanout_side_input_simt_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_int64_dense_sweep_codegen_v2      hard-failure  candidate-preparation    no
+indirect_load_user_layernorm_codegen_v2              hard-failure  candidate-preparation    no
+indirect_load_user_masked_embedding_minimal_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_masked_embedding_sum_full_auto_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_position_bias_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'transpose' of type 'Transpose'
+indirect_load_user_side_input_fanout_simd_codegen_v2 hard-failure  candidate-preparation    no
+indirect_load_user_side_input_fanout_simt_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+int16_logical_not_test_codegen_v2                    hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+int32_logical_not_test_codegen_v2                    hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+laguerre_polynomial_l_store_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'laguerre_polynomial_l' of type 'LaguerrePolynomialL'
+le_bool_store_test_codegen_v2                        hard-failure  candidate-preparation    no
+legendre_polynomial_p_store_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'legendre_polynomial_p' of type 'LegendrePolynomialP'
+lgamma_float_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'lgamma' of type 'Lgamma'
+load_airy_ai_store_test_codegen_v2                   fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'airy_ai' of type 'AiryAi'
+load_bitwise_and_store_test_codegen_v2               hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+load_bitwise_not_store_test_codegen_v2               fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bitwisenot' of type 'BitwiseNot'
+load_bitwise_or_store_test_codegen_v2                fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bitwiseor' of type 'BitwiseOr'
+load_bitwise_xor_store_test_codegen_v2               fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bitwisexor' of type 'BitwiseXor'
+load_brc_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: 'afir.mul' has no register-form lowering; the modeled operations are afir.add, afir.div, afir.abs, afir.exp, afir.relu, a
+load_compare_cast_sum_store_test_codegen_v2          hard-failure  candidate-preparation    no
+load_compare_scalar_where_store_test_codegen_v2      fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc subgraph node 'Scalar_scalar0' of type 'Scalar' is not modeled yet; scalar operands inside a vector function a
+load_compare_store_test_codegen_v2                   takeover      none                     no
+load_compare_where_store_test_codegen_v2             fallback      lowering                 yes        error: UnsupportedOperation: 'afir.eq' has no register-form lowering; the modeled operations are afir.add, afir.div, afir.abs, afir.exp, afir.relu, af
+load_erfinv_store_test_codegen_v2                    fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'erfinv' of type 'Erfinv'
+load_gather_one_axis_split_b_t_abs_store_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'gather' of type 'Gather'
+load_gather_split_b_t_abs_store_test_codegen_v2      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'gather' of type 'Gather'
+load_gather_tail_split_b_t_abs_store_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'gather' of type 'Gather'
+load_leaky_relu_store_test_codegen_v2                takeover      none                     no
+load_log2_store_test_codegen_v2                      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'log2' of type 'Log2'
+load_logicaland_store_test_codegen_v2                hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+load_logicalor_store_test_codegen_v2                 hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+load_loop_mode_test_codegen_v2                       hard-failure  candidate-preparation    no
+load_lshift_store_test_codegen_v2                    fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+load_modified_bessel_i0_store_test_codegen_v2        fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'modified_bessel_i0' of type 'ModifiedBesselI0'
+load_modified_bessel_i1_store_test_codegen_v2        fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'modified_bessel_i1' of type 'ModifiedBesselI1'
+load_modified_bessel_k0_store_test_codegen_v2        fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'modified_bessel_k0' of type 'ModifiedBesselK0'
+load_modified_bessel_k1_store_test_codegen_v2        fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'modified_bessel_k1' of type 'ModifiedBesselK1'
+load_tanh_store_test_codegen_v2                      takeover      none                     no
+load_where_store_test_codegen_v2                     hard-failure  candidate-preparation    no
+load_where_x2_is_ubscalar_store_test_codegen_v2      takeover      none                     no
+load_where_x2_x3_is_ubscalar_store_test_codegen_v2   takeover      none                     no
+load_where_x3_is_ubscalar_store_test_codegen_v2      takeover      none                     no
+log10_float_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'log10' of type 'Log10'
+log1p_bfloat16_test_codegen_v2                       fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+logicalxor_float_test_codegen_v2                     fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'logicalxor' of type 'LogicalXor'
+log_ndtr_store_test_codegen_v2                       fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'log_ndtr' of type 'LogNdtr'
+matmul_compare_scalar_test_codegen_v2                out-of-scope  cube-fusion              no
+matmul_elemwise_brc_test_codegen_v2                  out-of-scope  cube-fusion              no
+mod_test_codegen_v2                                  fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'mod' of type 'Mod'
+ndtri_store_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'ndtri' of type 'Ndtri'
+ndtr_store_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'ndtr' of type 'Ndtr'
+next_after_store_test_codegen_v2                     fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'next_after' of type 'NextAfter'
+poly_gamma_store_test_codegen_v2                     fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'poly_gamma' of type 'PolyGamma'
+pow_bf16_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+randn_store_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'randn' of type 'Randn'
+rand_store_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'rand' of type 'Rand'
+reciprocal_bf16_test_codegen_v2                      fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+relu_uint8_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc node 'relu_uint8_test_0_B0Y3_S0G0C0_VfNode_0' reads 'uint8', which the register-form lowering does not model y
+remainder_int32_store_test_codegen_v2                takeover      none                     no
+round_bf16_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+round_to_int_float_to_int32_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'round_to_int' of type 'RoundToInt'
+rshift_uint8_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+scalar_brc_test_codegen_v2                           fallback      lowering                 yes        error: 'afir.nddma' op has no supported Ascend implementation
+scalar_cast_add_test_codegen_v2                      hard-failure  lowering                 no         error: 'afir.cast' op operand #0 must be Tensor or MemRef of 4-bit signless integer or 8-bit signless integer or 8-bit unsigned integer or 16-bit sign
+scalar_div_inf_test_codegen_v2                       hard-failure  lowering                 no         error: UnsupportedOperation: Scalar node 'scalar0' value 'inf' is not a numeric literal
+scaled_modified_bessel_k0_store_test_codegen_v2      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'scaled_modified_bessel_k0' of type 'ScaledModifiedBesselK0'
+scaled_modified_bessel_k1_store_test_codegen_v2      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'scaled_modified_bessel_k1' of type 'ScaledModifiedBesselK1'
+select_bool_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+shifted_chebyshev_polynomial_t_store_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'shifted_chebyshev_polynomial_t' of type 'ShiftedChebyshevPolynomialT'
+shifted_chebyshev_polynomial_u_store_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'shifted_chebyshev_polynomial_u' of type 'ShiftedChebyshevPolynomialU'
+shifted_chebyshev_polynomial_v_store_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'shifted_chebyshev_polynomial_v' of type 'ShiftedChebyshevPolynomialV'
+shifted_chebyshev_polynomial_w_store_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'shifted_chebyshev_polynomial_w' of type 'ShiftedChebyshevPolynomialW'
+sign_bf16_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+signbit_store_test_codegen_v2                        fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'signbit' of type 'SignBit'
+sign_uint8_test_codegen_v2                           hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+spherical_bessel_j0_store_test_codegen_v2            fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'spherical_bessel_j0' of type 'SphericalBesselJ0'
+tail_brc_tail_reduce_test_codegen_v2                 hard-failure  candidate-preparation    no
+transpose_bool_test_codegen_v2                       fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+truediv_bf16_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+trunc_to_int_bf16_to_int32_test_codegen_v2           fallback      lowering                 yes        error: UnsupportedOperation: element type 'bfloat16' is not in the AFIR supply table
+ub_scalar_brc_abs_add_test_codegen_v2                hard-failure  candidate-preparation    no
+uint8_logical_not_test_codegen_v2                    hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+zeta_store_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'zeta' of type 'Zeta'

@@ -1,0 +1,87 @@
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+#include <cmath>
+#include <cstdint>
+#include <limits>
+
+#include <gtest/gtest.h>
+
+#include "autofuse_tiling_data.h"
+#include "test/e2e/cpu/cases/load_isfinite_store/LoadIsfiniteStoreCase.h"
+#include "test/e2e/cpu/support/E2eTilingShape.h"
+#include "tikicpulib.h"
+
+namespace {
+using mlir::afir::load_isfinite_store::GetShapeConfig;
+using mlir::afir::load_isfinite_store::kInputShapes;
+using mlir::afir::load_isfinite_store::kOutputShapes;
+}  // namespace
+
+extern "C" __global__ __aicore__ void AF_MLIR_E2E_CPU_KERNEL_SYMBOL(GM_ADDR input0, GM_ADDR output, GM_ADDR workspace,
+                                                                    AutofuseTilingData tilingData);
+extern "C" int64_t AutofuseE2eInitTiling(AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim);
+
+TEST(MlirE2eCpu, LoadIsFiniteStoreCalculatesCorrectResult) {
+  const uint32_t input_element_count = GetShapeConfig(kInputShapes, 0).element_count;
+  const uint32_t output_element_count = GetShapeConfig(kOutputShapes, 0).element_count;
+  float *input0 = static_cast<float *>(AscendC::GmAlloc(input_element_count * sizeof(float)));
+  uint8_t *output = static_cast<uint8_t *>(AscendC::GmAlloc(output_element_count * sizeof(uint8_t)));
+  ASSERT_NE(input0, nullptr);
+  ASSERT_NE(output, nullptr);
+
+  // 四个一组：有限值、+inf、-inf、NaN。三类非有限值都要在，不然 isfinite 和 isinf
+  // 分不开——只喂 +inf 的话，「把 NaN 也算成 inf」这种错整块都是对的。
+  for (uint32_t index = 0; index < input_element_count; ++index) {
+    switch (index % 4) {
+      case 1:
+        input0[index] = std::numeric_limits<float>::infinity();
+        break;
+      case 2:
+        input0[index] = -std::numeric_limits<float>::infinity();
+        break;
+      case 3:
+        input0[index] = std::numeric_limits<float>::quiet_NaN();
+        break;
+      default:
+        input0[index] = (static_cast<float>(index % 17) - 8.0F) * 0.25F;
+        break;
+    }
+  }
+  for (uint32_t index = 0; index < output_element_count; ++index) {
+    output[index] = 0xFF;
+  }
+
+  AutofuseTilingData tilingData{};
+  uint64_t workspaceSize = 0;
+  uint32_t blockDim = 1;
+  ASSERT_EQ(AutofuseE2eInitTiling(&tilingData, &workspaceSize, &blockDim), 0);
+
+  // Record which terms of the scheduled-transfer offset this run actually reaches.
+  // ATT picks the split at run time, so without this the case can keep passing while
+  // silently covering less than it was registered to cover.
+  const mlir::afir::TilingShape tiling_shape = AF_E2E_TILING_SHAPE(tilingData, blockDim, output_element_count);
+  mlir::afir::ReportTilingShape(AF_MLIR_E2E_CPU_CASE_NAME, tiling_shape);
+  AF_E2E_ASSERT_TILING_COVERAGE(tiling_shape);
+  uint8_t *workspace = static_cast<uint8_t *>(AscendC::GmAlloc(workspaceSize == 0 ? 1 : workspaceSize));
+  ASSERT_NE(workspace, nullptr);
+
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(AF_MLIR_E2E_CPU_KERNEL_SYMBOL, blockDim, reinterpret_cast<GM_ADDR>(input0),
+              reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(workspace), tilingData);
+
+  for (uint32_t index = 0; index < output_element_count; ++index) {
+    EXPECT_EQ(output[index] != 0, std::isfinite(input0[index])) << "element " << index;
+  }
+
+  AscendC::GmFree(input0);
+  AscendC::GmFree(output);
+  AscendC::GmFree(workspace);
+}

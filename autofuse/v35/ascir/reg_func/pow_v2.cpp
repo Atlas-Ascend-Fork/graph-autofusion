@@ -27,8 +27,17 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcPowTmpSizeV2(const AscNode &node) {
   GELOGD("Node %s[%s] inputs[%u] data type size is: %d", node.GetTypePtr(), node.GetNamePtr(), input_id,
          data_type_size);
   if (IsAllScalarOrUbScalar(node_inputs)) {
-    // 当两个输入都为scalar，或都为ub scalar，或一个scalar，一个ub scalar时，需要额外分配2个blockSize的tmp buffer
-    const Expression total_size = Symbol(data_type_size) * input_size + Symbol(32 * 2);
+    // 当两个输入都为scalar，或都为ub scalar，或一个scalar，一个ub scalar时，需要额外分配2个blockSize的tmp buffer；
+    // f32/bf16非特判指数走Power DOUBLE_FLOAT_TECH，scratch从tmp_buf前两块（src1_buf/dst_buf复用区）之后偏移
+    // 传入（pow.h中left_tmp_buf），scratch需求3段*4B*alignCount（block_cnt(f32=8/bf16=16)对齐后恒384B），需一并分配
+    uint32_t pow_scratch_size = 0U;
+    if (data_type == ge::DT_FLOAT || data_type == ge::DT_BF16) {
+      constexpr uint32_t POW_SCRATCH_SEG = 3U;     // tmpLHI/tmpLLO/tmpLog三段
+      constexpr uint32_t POW_SCRATCH_ALIGN = 32U;  // alignCount = (calCount+31)/32*32，block_cnt<=32时恒为32
+      constexpr uint32_t FLOAT_SIZE = 4U;          // DOUBLE_FLOAT_TECH中间量为float
+      pow_scratch_size = POW_SCRATCH_SEG * FLOAT_SIZE * POW_SCRATCH_ALIGN;
+    }
+    const Expression total_size = Symbol(data_type_size) * input_size + Symbol(32 * 2) + Symbol(pow_scratch_size);
     GELOGD("Node %s[%s] inputs are all scalar or ub scalar, return size= %s.", node.GetTypePtr(), node.GetNamePtr(),
            total_size.Str().get());
     return GetTmpBuffer(total_size);

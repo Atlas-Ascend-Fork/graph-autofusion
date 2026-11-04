@@ -1,0 +1,73 @@
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+#include <cstdint>
+
+#include <gtest/gtest.h>
+
+#include "autofuse_tiling_data.h"
+#include "test/e2e/cpu/cases/load_add_index_expr_dynamic_store/LoadAddIndexExprDynamicStoreCase.h"
+#include "tikicpulib.h"
+
+namespace {
+using mlir::afir::load_add_index_expr_dynamic_store::GetShapeConfig;
+using mlir::afir::load_add_index_expr_dynamic_store::kInputShapes;
+using mlir::afir::load_add_index_expr_dynamic_store::kOutputShapes;
+
+// 建图时给的表达式是 `2 * s0`，而 s0 是**第一根轴**的运行期尺寸（每根轴各登记一个符号，
+// 见 Case.cpp）。从形状表里读，不写字面量：形状改了这里跟着改，不会留一个对不上的常量。
+uint32_t FirstAxisExtent() {
+  return static_cast<uint32_t>(GetShapeConfig(kInputShapes, 0).shape.begin()[0]);
+}
+}  // namespace
+
+// **签名里没有 `IndexExpr`。** 它不是 kernel 输入——值在 kernel 顶部由 size var 算出来，
+// 折成一个常量。这与 `load_add_scalar_data_store` 恰好相反，那边标量占一个形参。
+extern "C" __global__ __aicore__ void AF_MLIR_E2E_CPU_KERNEL_SYMBOL(GM_ADDR input0, GM_ADDR output, GM_ADDR workspace,
+                                                                    AutofuseTilingData tilingData);
+extern "C" int64_t AutofuseE2eInitTiling(AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim);
+
+TEST(MlirE2eCpu, LoadAddIndexExprDynamicStoreCalculatesCorrectResult) {
+  const uint32_t input_element_count = GetShapeConfig(kInputShapes, 0).element_count;
+  const uint32_t output_element_count = GetShapeConfig(kOutputShapes, 0).element_count;
+  auto *input0 = static_cast<float *>(AscendC::GmAlloc(input_element_count * sizeof(float)));
+  auto *output = static_cast<float *>(AscendC::GmAlloc(output_element_count * sizeof(float)));
+  ASSERT_NE(input0, nullptr);
+  ASSERT_NE(output, nullptr);
+
+  // 取值在 f32 里全部精确可表示，加上 2.5 之后也是，所以逐元素比相等。
+  for (uint32_t index = 0; index < input_element_count; ++index) {
+    input0[index] = static_cast<float>(static_cast<int32_t>(index % 9U) - 4) * 0.5F;
+  }
+  for (uint32_t index = 0; index < output_element_count; ++index) {
+    output[index] = 0.0F;
+  }
+
+  // 运行期尺寸由生成的 `AutofuseE2eInitTiling` 传给 `AutofuseTiling`（见 Case.cpp 里的
+  // `g_e2eRuntimeShapeArgs`），这里不用手填 TilingData 字段。
+  AutofuseTilingData tilingData{};
+  uint64_t workspaceSize = 0;
+  uint32_t blockDim = 1;
+  ASSERT_EQ(AutofuseE2eInitTiling(&tilingData, &workspaceSize, &blockDim), 0);
+  auto *workspace = static_cast<uint8_t *>(AscendC::GmAlloc(workspaceSize == 0 ? 1 : workspaceSize));
+  ASSERT_NE(workspace, nullptr);
+
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(AF_MLIR_E2E_CPU_KERNEL_SYMBOL, blockDim, reinterpret_cast<GM_ADDR>(input0),
+              reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(workspace), tilingData);
+
+  for (uint32_t index = 0; index < output_element_count; ++index) {
+    EXPECT_FLOAT_EQ(output[index], input0[index] + static_cast<float>(2 * FirstAxisExtent())) << "element " << index;
+  }
+
+  AscendC::GmFree(input0);
+  AscendC::GmFree(output);
+  AscendC::GmFree(workspace);
+}

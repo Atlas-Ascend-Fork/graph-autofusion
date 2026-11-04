@@ -1,0 +1,19 @@
+import os
+
+@LIT_SITE_CFG_IN_HEADER@
+config.llvm_tools_dir = "@LLVM_TOOLS_DIR@"
+config.autofuse_mlir_tools_dir = "@CMAKE_BINARY_DIR@/autofuse/mlir/tools/af-opt"
+config.autofuse_afir_gen_tools_dir = "@CMAKE_BINARY_DIR@/autofuse/mlir/tools/af-afir-gen"
+config.pyasc_tools_dir = "@CMAKE_BINARY_DIR@/bin"
+config.autofuse_mlir_src_root = "@AF_AUTOFUSE_MLIR_LIT_SOURCE_DIR@"
+config.autofuse_mlir_test_exec_root = "@AF_AUTOFUSE_MLIR_LIT_BINARY_DIR@"
+
+import lit.llvm
+
+lit.llvm.initialize(lit_config, config)
+lit.llvm.llvm_config.add_tool_substitutions(["af-opt"], [config.autofuse_mlir_tools_dir])
+lit.llvm.llvm_config.add_tool_substitutions(["af-afir-gen"], [config.autofuse_afir_gen_tools_dir])
+lit.llvm.llvm_config.add_tool_substitutions(["ascir-translate"], [config.pyasc_tools_dir])
+lit.llvm.llvm_config.add_tool_substitutions(["FileCheck"], [config.llvm_tools_dir])
+
+lit_config.load_config(config, os.path.join(config.autofuse_mlir_src_root, "lit.cfg.py"))

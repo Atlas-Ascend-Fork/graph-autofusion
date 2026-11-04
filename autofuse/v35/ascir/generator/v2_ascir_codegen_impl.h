@@ -5139,7 +5139,7 @@ class PowAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "PowApiCall";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "Pow";
+    return IsPowInBlacklist() ? "PowFast" : "Pow";
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"pow_reg_base.h"};
@@ -5160,6 +5160,13 @@ class PowAscIrCodegenImplV2 : public AscIrCodegenV2 {
     GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node, {false, {0, 1}}),
                       "Node %s[%s] check shape consistency failed", node.GetTypePtr(), node.GetNamePtr());
     return true;
+  }
+
+ private:
+  // Pow 命中精度提升黑名单（配置 Pow 或 all）时，codegen 调用 PowFast 快速幂高性能路径（整数指数
+  // 连乘可能引入额外舍入误差）；默认调用 Power 高精度实现；类型字符串与 REG_ASC_IR(Pow) 注册名一致
+  static bool IsPowInBlacklist() {
+    return af::pre_process::PreProcessConfig::Instance().IsInImprovePrecisionBlacklist("Pow");
   }
 };
 

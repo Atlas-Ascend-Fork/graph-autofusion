@@ -1,0 +1,508 @@
+# 剩余工作总表（2026-10-27，不含 VF 的 M3 / M4——那两期另有 session 在做）
+#
+# 为什么要这张表：欠账散在四个来源，之前每次问「还剩什么」都要四处拼，而拼出来的数会串口径。
+#   1. 收尾需求 `2026-10-16-afir-elementwise-broadcast-closeout-design.md` 的**功能需求各节**
+#      （它的「验收标准」八条已全部达成，剩的都在各节正文里）
+#   2. VF 实现设计 `2026-10-18-afir-vector-func-implementation-design.md`（M3/M4 除外）
+#   3. elementwise 总欠账 `2026-09-22-afir-elementwise-remaining-issues.md` 的 L-x
+#   4. 本轮新量的两份：`2026-10-26-feature7-remaining-graphs-rescreen.txt`、
+#      `2026-10-27-c1-vf-hard-failure-rescreen.txt`
+#
+# **三个口径，不能相加**（之前混过一次）：
+#   接管表的「格」 = legacy e2e 的一个 codegen 用例（reg 200 / mem 38）
+#   探针的「格」   = 一个合成形状（reg 643 / mem 643），与接管表不是同一个集合
+#   功能 7 的「图」 = 一个 `ShareGraph::Xxx` 工厂（去重后 183，legacy 在跑的 157）
+#
+# 每条都按 `remaining-issues` 第一条纪律处理：**「文档说卡住了」是待验证的断言**。下面标
+# 「已核」的是本轮实测过的，标「未核」的照旧是断言。
+#
+#===----------------------------------------------------------------------===#
+# A. 可以划掉但没划的（先清这些，否则每次重读都要重新判断）
+#
+#   L-18  元素类型校验分散、真源不可机读
+#         两条完成判据都已标「已做」（真源 `support/AfirElementTypes.h` + 门禁；
+#         `ResultElementRule` 收掉 ODS 4 处 / conversion 2 处 / `sameElementType` 10 处）。
+#         **标题没加删除线，该划掉。** 已核。
+#
+#===----------------------------------------------------------------------===#
+# B. 文档欠账（按能不能动手排）
+#
+#   L-19  新增一个 op 的成本七成在测试样板上
+#         判据 1（E2E 样板收成 CMake 函数 + 头文件模板）**今天做完**（`f5ed44ca`，74 个用例
+#         全收完；原先那个「降到 100 行以内」的数已订正删除）。
+#         **判据 2 一个字没动**：`asc_graph_builder.h` 的 builder 方法要「由一张表生成」，
+#         今天仍是手写 **87** 个。已核。
+#
+#   L-5   常量 block 的预留在 ATT、分配在 MLIR
+#         收尾需求写了「维持现状，不在本阶段动」。失效形态是**运行期 UB 越界且无用例变红**，
+#         所以它不是优先级低，是没有会变红的东西。要动先补判据。未核。
+#
+#   L-20  中文注释的行文约定（三处段落未逐段重写）
+#         收尾需求写了「维持现状」。未核。
+#
+#   行距 32B 对齐没有机器检查（收尾需求功能需求 6 / N1 那一族）
+#         两种形态都靠调度侧不变量兜着，破了是静默算错。与 L-5 同一个形状：缺的是判据。未核。
+#
+#   `afir.add` 的 Any implementation 拆 mem / reg 两份（出自 **VF 实现设计**，不是收尾需求）
+#         已核：接管表上「无 implementation `afir.add`」还有 **3 格**。
+#
+#   VF 实现设计的全程不变量 12 / 13（M3/M4 那个 session 要带着做，列在这里是防漏）
+#         12：每期落地后在该文件追加一行实测记录。
+#         13：VF 接通后拿 `indirect_load_store_test` 比一次 MLIR 与 legacy 的 tiling。
+#         另：该文档「做完 17 格全部变 takeover」这句**已不成立**，今天真卡 VF 且在范围内的
+#         只有 4 格，要订正。已核。
+#
+#===----------------------------------------------------------------------===#
+# C. reg 接管表上的缺口（200 格，2026-10-27 干净表；takeover 67 / fallback 120 /
+#    hard-failure 11 / out-of-scope 2）
+#
+#   C.1 fallback 120 格的首因分族 —— 这是「还能多接管多少」的真实清单
+#
+#        39  候选准备（模板判据拒掉某个 stage 的全部模板）  <- 最大一簇
+#        17  dtype 不在供给表 int64
+#         7  VF 那一层（其中 4 格在范围内，归 M3/M4；3 格是 indirect_load，界外）
+#         5  dtype 不在供给表 int8
+#         5  scheduler dtype value 12（bool）未建模
+#         3  无 implementation afir.add        <- 上面那条「拆两份」
+#         2  无 implementation afir.load
+#         2  无 implementation afir.nddma
+#         1  无 implementation afir.reciprocal
+#        多项式族 bridge 不收节点类型：~~Chebyshev T/U/V/W 4~~、~~ShiftedChebyshev T/U/V/W 4~~
+#        （第 9 批已接，2026-10-28）、Hermite H/He 2、Laguerre L 1、Legendre P 1、
+#        PolyGamma 1  = 13 格里剩 5 格
+#        其他单点 bridge 不收：~~Bitwise Not/Or/Xor 3~~（step 4 已接，测试样板漏设的
+#        Output dtype 补上后接管表真接管，2026-10-28）、~~Ceil2Int 1~~、~~FloorToInt 1~~
+#        （step 2a 已接，2026-10-28）、RoundToInt 1、
+#        TruncToInt 1、Frexp 1、~~Hypot 1~~、~~Log10 1~~（第 8 批已接，2026-10-27）、
+#        SignBit 1、~~Fma 2~~（2026-10-28：接通 1 格 + 样板补 dtype 后另 1 格也接管）
+#        = **13 格里剩 4 格**（RoundToInt / TruncToInt / Frexp / SignBit）
+#        （`Fma` 那 2 格只接得下 1 格：另一格 `abs_fma_bf16` 卡在 `afir.store` 两端 dtype
+#         不同——那条闸门已经从硬失败改成干净拒收（见下面「前置已接」那一节），但还没
+#         放开接管，仍留在回落。RoundToInt / TruncToInt 那 2 格同理，一个字没动。）
+#        （订正 2026-10-27：这一行原写 14 格，逐项相加是 13。于是「在范围内」的合计是
+#         **26** 而不是 27 —— 按 2026-10-27-legacy-takeover-table-reg-b8.txt 逐行数：
+#         带「bridge 不收节点类型」这条诊断的共 39 格，减去界外 13 格，剩 26。）
+#        界外族 bridge 不收：Gather 4、Transpose 3、Max 2、Concat 1、Rand/Randn 2、
+#        IndirectLoad 1  = 13 格（不做）
+#
+#        **注意 int64 那 17 格收益可能是 0**：上一轮量过，i64 的格子基本都是 indirect_load。
+#        开 dtype 位之前先核收益。未核（这一轮没重量）。
+#
+#   C.2 hard-failure 11 格（已核，逐格列在 C1 那份文档里）
+#         9 格  'afir.store' op transfer source and destination must have the same element
+#               type —— 几乎全在逻辑 / 位运算族（logical_not ×5、logicaland、logicalor、
+#               bitwise_and、sign_uint8）
+#         1 格  'afir.cast' op operand #0 类型域（scalar_cast_add）
+#         1 格  Scalar node 'scalar0' value 'inf' 非数值字面量（scalar_div_inf）
+#
+#===----------------------------------------------------------------------===#
+# D. 探针上的缺口（合成形状，reg 643 / mem 643；kFailed 两侧已为 0）
+#
+#   已核，按 dtype × 首因：
+#     ui8  卡 `afir.broadcast`                mem 51 / reg 54   `kDuplicateElementTypes` 不含
+#                                                               ui8（ui8 在 legacy 绑的是包装
+#                                                               重载而不是 `AscendC::Duplicate`），
+#                                                               要另起一个带 `duplicate.h` 的
+#                                                               implementation
+#     bf16 卡 ATT 代价模型（reg 62）           `kBrcbRepeatMap` 不收 bfloat16 —— **legacy 的事**，
+#                                              MLIR 侧已答「不支持」干净回落，不补
+#     bf16 卡 `afir.broadcast`（mem 92 / reg 13）bf16 在 legacy 的 mem 侧计算族本来就没有，
+#                                              是 dtype 边界不是缺口
+#     `afir.nddma` 无实现（reg 71×3 dtype）    reg 侧 nddma 缺口
+#     `afir.load`  无实现（mem 21×3 dtype）    源尾轴为 1 的 tile —— 收尾需求已判**界外**
+#
+#===----------------------------------------------------------------------===#
+# E. 功能 7 的图口径（已核，见 feature7 那份）
+#
+#   分母 157（legacy 在跑的 `ShareGraph` 工厂）、takeover 78、剩余 79，
+#   **其中在范围内 60**。这 60 个与 C.1 不是同一张清单：C.1 数的是用例格、这里数的是输入图，
+#   一个图可能对应多个格，也有图根本没有对应的接管表行。
+#
+#===----------------------------------------------------------------------===#
+# step 3（Fma，2 格）的勘察结论（2026-10-28 核，省得下一轮重做）
+#
+#   供给：`AscendC::Fma`，标准调用、带 tmp，CANN 的 `adv_api/math/fma.h`：
+#
+#     Fma(dst, src0, src1, src2, sharedTmpBuffer, count)     <- tmp 在 count **之前**
+#     Fma(dst, src0, src1, src2, count)                      <- 不带 tmp 的重载也有
+#
+#   `__NPU_ARCH__` 守卫 = {3510, 5102, 3003, 3113}，含 3510（reg_base 那一档用的那个），
+#   所以这一位在我们的平台上不是空实现——与 `Hypot` 同一条，但要记着换平台会静默变空。
+#
+#   legacy 的域：`{DT_BF16, DT_FLOAT16, DT_FLOAT, DT_INT8, DT_INT16, DT_UINT8}`。
+#   i8 不在 AFIR 的 7 位里，所以能注册的是 {f16, f32, bf16, i16, ui8}。
+#
+#   **卡点不在 dtype，而在操作数顺序**：三元那条现成 pattern 建的是
+#
+#     TargetOp(dst, condition, source0, source1, count, tmp)
+#
+#   ——`Where` / `Select` / `ClipByValue` 的形状，tmp 排在 count **之后**，而且第二个槽位
+#   语义上是「条件」。Fma 的三个源是对称的，tmp 还在 count 之前。
+#
+#   这不需要新 pattern：**ODS 的 `arguments` 顺序是我们自己定的**，所以新建的
+#   `FmaL2Op` 按 pattern 的顺序声明（dst, src0, src1, src2, calCount, sharedTmpBuffer），
+#   由 emitter 打成 Fma 真实的顺序即可——`printOperation` 本来就是逐个取字段打的。
+#   动笔前核一件事：`TernaryOperandTiles` 的 `condition` 只是「三个源里的第一个」这个
+#   命名（出自 Select），还是真带条件语义。它要是只是命名，Fma 直接复用那条 pattern。
+#
+#   另外 `Fma` 要进 `kIsStockCall`（标准调用、无扩展头）——漏了整张注册表建不起来，
+#   报 `failed to build the frozen AscendC implementation registry`，step 2 刚踩过。
+#
+#---------------------------------------------------------------------------#
+# step 3 **写过一遍后整体退回**（2026-10-28 实测）。上面那些勘察结论都成立，下面是实测
+# 补上的三件事，照这个顺序读。
+#
+#   1. `condition` **只是命名**，已核。证据有两条：`clip_by_value` 走的就是同一条
+#      pattern 而 `conditionIsMask = false`（它的三个输入同 dtype），而
+#      `Elementwise.td` 的 `AFIR_BufferizableTernaryHomoElementwiseOp` 上那段注释写着
+#      「clip 的 `condition` / `input1` / `input2` 读作 x / min / max」；
+#      `materializeOperandTiles` 对那三位只按下标排（`orderTilesForPlan` 收的是
+#      `{condition, source0, source1}`），没有任何条件语义。
+#      **所以不需要新 pattern**，`FmaL2Op` 按 pattern 的顺序声明 + emitter 打成
+#      `Fma(dst, s0, s1, s2, tmp, count)` 这条路跑通了，产物逐字核过：
+#
+#        IR    ascendc.fma_l2 %arg3, %arg0, %arg1, %arg2, %0, %arg4
+#        C++   AscendC::Fma(v4, v1, v2, v3, v5, v6);
+#
+#   2. **勘察漏了一件会改结论的事：legacy 在这个节点上会自己插 Cast。**
+#      `FmaAscIrCodegenImplV2::GetConversionDtype` 的对表是
+#      `{bf16->f32, i8->f16, i16->f32, ui8->f16}`，由 `optimize/graph_completeness/`
+#      的 `DtypeConsistency` 在调度之前施加。也就是说 legacy **从不发
+#      `Fma<bfloat16>`**，`REG_ASC_IR(Fma)` 那六位里真正发到 `Fma` 的只有 f16 / f32。
+#      注册 {f16,f32,bf16,i16,ui8} 不算错（判据是「不得比 legacy 窄」，对账的是
+#      `REG_ASC_IR`），但**它不是接不接得下来的那根轴**——见下一条。
+#
+#   3. **真卡点：`abs_fma_bf16` 从干净回落变成硬失败，卡在 `afir.store` 的两端 dtype。**
+#      实测（远端 AF_MLIR_0814，量具与 s2a 同一台，自检 WARNING 0 条、没打出标签的行 0）：
+#
+#        takeover      81 -> 82    （abs_fma_test        fallback -> takeover）
+#        hard-failure  11 -> 12    （abs_fma_bf16_test   fallback -> **hard-failure**）
+#        200 行里只有这 2 行变，198 行逐字未变。
+#
+#      诊断：`error: 'afir.store' op transfer source and destination must have the same
+#      element type`。**这与 2b 是同一道闸门**，而且这一格的矛盾更明显——legacy 自己
+#      调度出来的签名就是对不上的（`AutoFuseAfterOptimize` 的 dump）：
+#
+#        func @abs_fma_bf16_test_0_B0Y0_S0G0C0(%data0: bf16[s0], ..., %output: f32[s0])
+#          %7 = ascir.ops.Fma(%3, %4, %6)      -> vector<z0t_sizexf32>
+#          %8 = ascir.ops.Cast(%7)             -> vector<z0t_sizexbf16>   # fma_cast_to_store
+#          %9 = ascir.ops.Store(%8)            -> output: %output         <- %output 是 f32
+#
+#      `DtypeConsistency` 把 Fma 抬到 f32、又在 store 前插了一条回到 bf16 的 Cast，
+#      **但函数签名上的 GM 侧仍是 f32**。store 的两端于是 bf16 / f32。
+#
+#      **这根轴上没有 dtype 旋钮可拧**：把注册集合收窄到 {f16,f32} 也拦不住它——那条
+#      `afir.fma` 在这张图里本来就是 f32，硬失败发生在 bridge 建 `afir.store` 时的
+#      verifier 上，比 implementation 选择更早。唯一的闸门是 bridge 收不收 `Fma`
+#      这个**节点类型**，而那是全有或全无的。
+#
+#   所以 step 3 的 2 格拆成：1 格（`abs_fma_test`）接得下来、1 格（`abs_fma_bf16_test`）
+#   与 2b 的两格、以及 s2a 表里那 9 格带同一条诊断的硬失败共用一个前置。为了 1 格而引入
+#   1 格硬失败（legacy ST 那一档会真红，shortfall=no）不划算，所以**整个 step 3 退回**，
+#   代码一行没留。
+#
+#   **前置变大了，优先级也该变**：给「两端 dtype 不同」的 store 定语义（capability 层
+#   干净拒收，或显式建模成一次 reinterpret）现在挡着 **2b 的 2 格 + Fma 的 1 格**，
+#   并且是 s2a 表里 11 格硬失败中 9 格的首因。它不再是「独立一件小活」，而是这一族里
+#   收益最大的那一件。动它之前要先定判据：按字节宽度放开会把硬失败换成静默算错，更坏。
+#
+#---------------------------------------------------------------------------#
+# 前置已接（2026-10-28）：store 两端 dtype 不同，走 capability 干净拒收
+#
+#   选的是上面列的「风险最低的那一半」：**不碰 `afir.store` 的语义**（两端必须同 dtype
+#   这条不变量原样保留，没有悄悄放开成按字节宽度判等），只是把问出「两端对不上」这件事
+#   从 verifier 挪到 bridge——`AfirBuilder.cpp` 的 `buildBufferNodeOp` 在建搬运节点
+#   （`isTransferNodeType`：Load/Store/Nddma）之前，比一次 source 与 destination 的
+#   memref 元素类型，不等就 `emitCapabilityShortfall`、回落 legacy，不再绕到
+#   `verifyTransferIndexingMaps` 变成硬失败。
+#
+#   **这不是「给 Fma 开绿灯」，是修一个今天就存在的生产缺陷**：s2a 表里那 9 格
+#   （`float/half/int16/int32/uint8_logical_not`、`load_bitwise_and/logicaland/
+#   logicalor_store`、`sign_uint8`）在**缺省配置下也会崩**（`shortfall=no`），不是只有
+#   `AF_MLIR_STRICT` 才看得到。现在逐格核过：
+#
+#     takeover      81 -> 81   （不变——这条路没有新增任何 implementation）
+#     hard-failure  11 -> 2    （那 9 格全部翻成 fallback，198 行里其余 191 行逐字未变）
+#
+#   剩下 2 格硬失败是另外两件事（`scalar_cast_add` 的 `afir.cast` 操作数类型约束、
+#   `scalar_div_inf` 的 `Scalar` 字面量 `inf` 解析），与这条不变量无关，原样保留。
+#
+#   production 侧抽查过一格：`sign_uint8_test_codegen_v2` 在**不带** strict 的缺省配置下
+#   ctest 从 `OK`——以前这一格在缺省配置下也是崩的，现在确认它走的是干净回落、legacy 接管、
+#   结果对。
+#
+#   UT：`ScheduleToAfirTest.StoreElementTypeMismatchIsCapabilityShortfallNotHardFailure`
+#   直接拿 `af::testing::AscGraphBuilder` 搭一张与 `abs_fma_bf16_test` 逐字同形的图
+#   （`Load -> Cast(升) -> Cast(降) -> Store`，`Output` 的 dtype 与 Cast 降回的 dtype
+#   故意写反），钉住 `PlanToAfir` 答 `CapabilityShortfall` 而不是建出一个会在 verifier
+#   上红的 op。
+#
+#===----------------------------------------------------------------------===#
+# step 3（Fma）前置清完后重接（2026-10-28）：接管表 81 -> 82
+#
+#   代码与前一轮写过的那版逐字相同（`FmaL2Op` 按 pattern 顺序声明 `arguments`、emitter
+#   打成 `AscendC::Fma(dst, s0, s1, s2, tmp, count)`，`Fma` 进 `kIsStockCall`），唯一的
+#   区别是前置（store 两端 dtype 不同改走 capability 拒收）已经落地。
+#
+#   接管表逐格核过：
+#
+#     takeover      81 -> 82   （`abs_fma_test`：回落 -> 接管，0 格变差）
+#     hard-failure   2 ->  2   （不变——`abs_fma_bf16_test` 仍是回落，不是硬失败）
+#
+#   `abs_fma_bf16_test` 这一格**停在回落，不是失败**：它的首因诊断从「bridge 不收 Fma
+#   这个节点类型」换成了「Store 两端 bf16/f32 不同，拒收」——这正是前置那条 capability
+#   拒收在接，合预期。这一格还没法接：它卡的不是 Fma 的 dtype 注册（这张图里 `afir.fma`
+#   本来就是 f32），是那条「两端 dtype 不同但字节宽度相同的 store」还没定语义的那一半
+#   （capability 拒收只堵住了硬失败，没有放开接管）——这是前面记的独立设计活，按字节宽度
+#   悄悄放开会把硬失败换成静默算错，这里不做。
+#
+#   所以 step 3 最终交付 **1 格**（不是最初预期的 2 格），`Fma` 本身接通了，节点类型从
+#   `kRegOnlyElementwiseOps` 里摘掉。
+#
+#===----------------------------------------------------------------------===#
+# step 4（Bitwise Not/Or/Xor，3 格）：代码接通，接管表实测 **净增 0 格**（2026-10-28）
+#
+#   三个都只有 reg 一侧，legacy 的 `BitwiseNotAscIrCodegenImplV2` /
+#   `BitwiseOrAscIrCodegenImplV2` / `BitwiseXorAscIrCodegenImplV2` 发的不是标准调用
+#   `AscendC::BitwiseNot` / `BitwiseOr` / `BitwiseXor`（`adv_api/math/` 下确实有这三个
+#   同名函数），是 fork 的包装 `BitwiseNotExtend` / `BitwiseOrExtend` / `BitwiseXorExtend`
+#   （`api_regbase/bitwise_not.h` / `bitwise_or.h` / `bitwise_xor.h`，`LoadApiHeaderFiles`
+#   键是 `bitwise_not_reg_base.h` 等，与 `where_reg_base.h` 对应 `where.h` 同一个命名
+#   惯例）。两条供给对 i16/ui16/i32/ui8 这几位转发等价，但字面不同，照标准调用的名字挑
+#   会发一个 legacy 从不发的调用——与 `afir.hypot` 那次同一种坑，lit 已经钉住反向 CHECK。
+#
+#   代码跑通了，两端套件 succeeded、lit 220/220。但实测**接管表 82 不变**：这三个 op
+#   在 legacy ST 里各自只有唯一一条测试（`load_bitwise_not/or/xor_store_test`），而且
+#   三条**全部硬编码 `DT_UINT8`**（`load_bitwise_*_store_backend_generator.cpp`，仓库里
+#   搜不到第二个 dtype 的实例化）——与 `afir.fma` 接 bf16、`round_to_int`/`trunc_to_int`
+#   卡的是**同一道闸门**：这三张图的 `afir.store` 两端也是 ui8/f32，被前置的 capability
+#   拒收挡住，诊断从「bridge 不收这个节点类型」变成「Store 两端 ui8/f32 不同，拒收」
+#   ——干净回落，不是硬失败，但也不是接管。200 行里只有这 3 行变，197 行逐字未变，
+#   0 格变差。
+#
+#   **这不是抽样运气差**：三个 op 在仓库里都只有这一条测试，没有第二个非 ui8 的实例化
+#   可以挑。所以这一批与 `afir.fma` 不同——Fma 还捡到 1 格干净的（`abs_fma_test`
+#   全程 f32），这三个一格都捡不到，接管表净增 0。
+#
+#   **仍然值得落地**：三个节点类型从 `kRegOnlyElementwiseOps`（bridge 侧）摘掉，代码
+#   正确、经 lit + UT + 两端套件验证、0 格变差，而且**一旦「两端 dtype 不同但字节宽度
+#   相同的 store」那半前置定了语义，这三格 + `abs_fma_bf16` + 2b 的 2 格会一次性解锁**，
+#   不用到时候再补 ODS/bridge/注册这一层。
+#
+#===----------------------------------------------------------------------===#
+# 订正：上面「两端 dtype 不同但字节宽度相同」那半前置**根本不需要存在**——是
+# legacy 用例样板漏了一行，接管表 82 -> **95**（2026-10-28）
+#
+# **先核清字节宽度这件事本身**：`abs_fma_bf16` 是 bf16(2B) 存进 f32(4B)、Bitwise 那四个
+# 是 ui8(1B) 存进 f32(4B)——两端字节宽度根本不相同，「reinterpret」从一开始就不是对的
+# 框架。只有 `round_to_int` / `trunc_to_int`（i32/f32，都 4B）才是真的等宽。
+#
+# 带着这个疑点去查 `AutoFuseAfterOptimize` 的函数签名，发现 `abs_fma_bf16_test` 的
+# `%output` 是 `f32`，而 Store 源是 `bf16`——这与 `fix(mlir): 开 bf16 闸门，补 12 个
+# bf16 用例样板漏设的 Output dtype`（`6a525700d`，2026-10-23）修过的那批**症状逐字
+# 相同**：那次的结论是「查过 22 个 bf16 建图函数，12 个硬失败的全缺 `y.y.dtype = ...`
+# 那一行、10 个接管的全有」。`AbsFmaBf16FusedGraph` 是后来才加的，不在那 22 个里，
+# 带着同一个漏洞；逐个核了另外 10 个仍卡着的（Bitwise 四个、`load_logicaland/or_store`、
+# `sign_uint8`、`float/half/int16/int32/uint8_logical_not`），**全部漏了同一行**——
+# `Output` 节点建完之后没有补 `y.y.dtype = <正确 dtype>`，于是落到 ODS 的缺省（f32）。
+#
+# `scalar_cast_add`（今天仍硬失败的那两格之一）**没有**这个漏洞——它的 `Output` 本来就
+# 补了 `output.y.dtype = out_dtype`，诊断也是另一件事（`afir.cast` 操作数类型约束），
+# 确认这条判据分得开「漏了这一行」与「别的原因」。
+#
+# 不是 `afir.store` 的语义有洞，是**测试样板的 Output 没跟着 Store 一起改 dtype**——
+# 两端在 legacy 真实跑的那条路上从来就没有不一致过，MLIR 的 `afir.store` verifier 揭穿的
+# 是样板的错，不是它自己的判据错。修法与 `6a525700d` 逐字相同：给每个漏的 `Output` 补一行
+# `y.y.dtype = ...`（`share_graph.cc`，9 个漏洞 + `round_to_int` / `trunc_to_int` 那 2 个
+# 还没注册实现、顺手一起补上，补了不白补）。
+#
+# **没有碰 `afir.store` 本身**，`d5930fcd` 那条 capability 干净拒收原样留着——它挡的是
+# 「样板又漏了同一行」这类情况不再变成硬失败，不冲突。
+#
+# 实测：两端套件 succeeded、lit 220/220；接管表 200 行里恰好 13 行从 fallback 翻成
+# takeover（`abs_fma_bf16` + Bitwise 四个 + `logicaland`/`logicalor`/`sign_uint8` +
+# `float/half/int16/int32/uint8_logical_not`），187 行逐字未变，硬失败仍是 2、
+# out-of-scope 仍是 2：
+#
+#   takeover      82 -> 95   （+13）
+#   fallback      114 -> 101
+#
+# **教训**：「两端 dtype 不同但字节宽度相同的 store」这个框架是我自己在这个 session 里
+# 现场编出来的，一次都没有去查过「样板本身对不对」就把它当成了需要新设计的语义缺口。
+# `verify-precedent-before-citing.md` 那条纪律（引先例前先验证）这次吃了亏——`6a525700d`
+# 就是现成的先例，而且诊断字面一模一样，没有理由想不到去搜它。
+#
+#===----------------------------------------------------------------------===#
+# 订正：四个 ToInt **不是同形**，要拆两组（2026-10-28 核 legacy 注册）
+#
+#   之前把 Ceil2Int / FloorToInt / RoundToInt / TruncToInt 排成「四格一组、一个新机制」，
+#   不对。四个的 ApiCall 名字四个都不同（CastV2ApiCall / FloorToIntApiCall /
+#   RoundToIntApiCall / TruncToIntApiCall），照一个抄会全答错。按 REG_ASC_IR 逐个核：
+#
+#     Ceil2Int    输入 {f32,f16,bf16} -> 输出**恒 i32**   Ceil2IntExtend + cast_reg_base.h
+#     FloorToInt  输入 {bf16,f16,f32} -> 输出**恒 i32**   标准调用 FloorToInt
+#       这两个的输出 dtype 单一，像谓词族的 Uint8 规则，加一条 Int32 规则就够 —— 便宜。
+#
+#     RoundToInt  (输入,输出) **逐对对表**   RoundToIntApiCall + tmp
+#     TruncToInt  (输入,输出) **逐对对表**   TruncToIntApiCall + tmp
+#       两个的对表都是 f32->i64 / f32->i32 / f32->i16 / f16->i16 / f16->i32 /
+#       f16->i8 / f16->ui8 / bf16->i32。必须复用 afir.cast 那套
+#       `ResultElementRule::CastPair`，而且 i64 / i8 / ui8 不在 AFIR 供给表里，
+#       只能接可建模的那个子集 —— 要先定子集再动笔。
+#
+#   所以原 step 2 拆成 2a（Ceil2Int + FloorToInt，2 格）与 2b（RoundToInt + TruncToInt，
+#   2 格）。
+#
+#   **2a 已接（2026-10-28），2b 实测卡在别处、已退回（代码写过一遍，结论如下）**：
+#
+#   2b 的卡点**不是那张对表**。对表量清楚了：那 8 对（f32->i64/i32/i16、f16->i16/i32/i8/ui8、
+#   bf16->i32）全在 `getRegBasedCastPairs()` 里，但 reg 的 cast 表还多 `f32->i8` 与
+#   `f16->i64`，所以不能复用 `CastPair`（会比 legacy 宽，宽就是注册表里的假话），要另起一张
+#   8 对表。这部分做完了、UT 也过了。
+#
+#   真卡点是 **`afir.store` 的「两端 dtype 必须相同」**。legacy 自己调度出来的图就是矛盾的：
+#
+#     func @round_to_int_float_to_int32_test_0_B0Y2_S0G0C0(%data: f32[s0,s1], %output: f32[s0,s1])
+#       %2 = ascir.ops.RoundToInt(%1) -> vector<z0z1t_sizexi32>
+#       %3 = ascir.ops.Store(%2) -> output: %output        <- %output 是 f32
+#
+#   存的是 i32、GM 那一侧是 f32。那个 f32 是 legacy 在 MLIR 跑起来之前定的（函数签名出自
+#   legacy 的调度结果，`share_graph.cc` 里那张图自己把 `round_to_int.y` 和 `store.y` 都设成
+#   了 DT_INT32，是外层 GE 图的 netoutput 仍是 f32）。legacy 的 store 按字节搬、i32 与 f32
+#   都是 4 字节所以它「能跑」；MLIR 的 `afir.store` 有那条不变量，于是**硬失败**。
+#
+#   接 2b 的结果实测是 takeover 79 -> 81 而 hard-failure 11 -> 13：2a 那两格干净翻过来，
+#   2b 那两格从干净回落变成硬失败。**与 uint8 那一族是同一道闸门**（见
+#   `uint8 卡在 afir.store 不能换 dtype`），「放开 bridge 白名单会把它从回落翻成硬失败」。
+#
+#   不为这两格放开 store 那条闸门：那会把一个硬失败换成按字节重解释的静默错值，而且影响
+#   所有图。接 2b 的前置是先给 store 这种「两端 dtype 不同但字节宽度相同」的情形定出
+#   语义（要么在 capability 层干净拒收、要么显式建模成一次 reinterpret），那是独立一件活。
+#
+#===----------------------------------------------------------------------===#
+# 阻塞项：aarch64 上 `libcodegen.so` 已到链接上限（2026-10-27 实测，**所有补 op 的前置**）
+#
+#   症状：legacy ST 档链 `autofuse/tests/libcodegen.so` 时
+#         `relocation truncated to fit: R_AARCH64_CALL26 against symbol
+#          __aarch64_ldadd4_acq_rel`（libgcc.a 里），整档编不过，于是接管表量不出来
+#         （200 行全落 `no-hook-call`，量具自检会报「没打出标签的行: 200」）。
+#
+#   量出来的数（远端 AF_MLIR_0814，aarch64）：
+#
+#     R_AARCH64_CALL26 的跳转范围        ±128 MiB = 134,217,728 B
+#     ff7f72dd 干净树   .text            131,625,104 B = 125.53 MiB  (98.1%，余 2.59 MB)
+#     落第 8 批后       .text            132,104,064 B = 125.98 MiB  (98.4%，余 2.11 MB)
+#     第 8 批代价                        478,960 B / 4 个 op 类 ≈ 117 KB 每个 op 类
+#                                        （一个 op = AFIR 1 类 + AscendC 1 类）
+#     libcodegen.so 总大小               228.7 MB，链进去 50 个 LLVM 静态归档
+#     链接选项                           无 --long-plt、无 -mcmodel、无 --gc-sections
+#
+#   **「余 2.11 MB」是上界而不是预算**：这条重定位限的是调用方与被调方的**距离**，
+#   不是 .text 总字节数，所以溢出会在总量到 128 MiB 之前就发生。实测第 9 批那 16 个
+#   op 类（外加 8 次 pattern 实例化）就溢出了，而按 117 KB 估只有 1.87 MB < 2.11 MB
+#   ——照字节数做预算会估乐观。
+#
+#   x86_64 不受影响（相对调用 ±2GB），本地全套件照常绿。**所以这面墙只在 aarch64 上，
+#   而接管表只能在 aarch64 上量**，于是它同时挡着验收。
+#
+#   没解开之前：第 9 批（多项式族八个）代码已写好并在 x86_64 上验过，挂起不落
+#   （补丁留在 session 的 scratchpad）。后面 step 2–6 约 16 个 op = 32 个 op 类，
+#   一步都过不去。
+#
+#   **已解（2026-10-27）**，三个变体逐个实测：
+#
+#     A 基线                        .text 132,104,064 B = 126.0 MiB   余  2.11 MB
+#     B -ffunction-sections -fdata-sections + -Wl,--gc-sections
+#                                   .text 131,283,792 B = 125.2 MiB   余  2.93 MB  省 0.78 MiB
+#     C B + -Wl,--exclude-libs,ALL  .text 105,849,696 B = 100.9 MiB   余 28.37 MB  省 25 MiB
+#
+#   **B 是 C 的前置，不是「C 的弱化版」**：`libcodegen.so` 默认可见性下每个全局函数都进
+#   `.dynsym`、都是 GC 的根，所以单加 `--gc-sections` 基本无事可做（省下的 0.78 MiB 大致
+#   是我们自己那部分代码）。`--exclude-libs,ALL` 把静态归档的符号变成本地的之后，那 50 个
+#   LLVM 归档里用不上的函数才真的成了垃圾；反过来没有 `-ffunction-sections`，exclude-libs
+#   也只能按整个 .o 丢。两个要一起加。
+#
+#   验收判据**不是「链接过了」也不是「测试都 Passed」，而是接管表逐格不变**——链接选项
+#   不该改变任何一格的结论。实测 200 格与 `c0f6719c` 那份逐字相同（0 行差异）。
+#   顺带：`--exclude-libs,ALL` 会把 `graph_af` / `ascir` / `att` 这些非 LLVM 归档的符号也
+#   隐掉，所以「200 个 ctest 还跑得起来」这一条是必须验的，不能只看 .text 掉了多少。
+#
+#   选项只加在 `ENABLE_AUTOFUSE_MLIR` 那一档：不链 MLIR 的 legacy 档离上限还远。
+#   没用上的两条备选（收窄 LLVM 归档清单 / 拆 `libcodegen.so`）留着——余量 28 MB 按第 8 批
+#   量出的 117 KB 每个 op 类算够两百多个，现在不必动。
+#
+#===----------------------------------------------------------------------===#
+# 明确界外，不做
+#
+#   `afir.load` 那 66 格（源尾轴为 1 的 tile）、reduce / matmul / gather / transpose /
+#   concat / rand / indirect_load 族、legacy 自己不跑的那 26 个用例、ATT 代价模型不收 bf16、
+#   VF 的 M5（上游四个优化 pass，文档自己标的备选）。
+#
+#===----------------------------------------------------------------------===#
+# 这张表自己的欠账
+#
+#   「A5 的 83 个算子全部入册」是收尾需求第 5 条的原话，入册 ≠ 接完。**83 个里还有多少没接，
+#   本表没数**——C.1 的族分布是从接管表反推的，不等于册上的剩余项。要准确回答「算子还差多少」，
+#   得去读功能需求 5 那张 83 行的册子逐条对现状，那是独立一件活。
+#
+#===----------------------------------------------------------------------===#
+# 下一步计划（2026-10-28 收尾，接管表当前 95，供后续 session 直接取用）
+#
+# 下面五项排了个大致的「接个算子就行」到「要先设计」的顺序，互相独立，谁先做都不挡别人。
+# 每项给了现成的勘察事实（legacy 供给、dtype 域、header、卡点），不用重新核。
+#
+#   1. RoundToInt / TruncToInt（2b，2 格）—— **纯补注册，样板已经干净**
+#      两个的 `Output` dtype 漏洞已经在 `2b81356e` 里补了（`CreateRoundToIntFloatToInt32AscGraph`
+#      / `CreateTruncToIntBf16ToInt32AscGraph`），现在卡的只是「bridge 不收这个节点类型」
+#      ——implementation 还没注册。legacy 的 `RoundToIntApiCall` / `TruncToIntApiCall` 都带
+#      tmp，(输入,输出) 逐对对表（不是 `Same`/`Int32` 那种统一规则），8 对：
+#      f32->i64/i32/i16、f16->i16/i32/i8/ui8、bf16->i32。**不能复用 `afir.cast` 的
+#      `ResultElementRule::CastPair`**——reg 的 cast 对表还多 `f32->i8` 与 `f16->i64`，
+#      复用会让这两个 op 比 legacy 宽（注册表里的假话）。要另起一张 8 对的查表，
+#      `i64`/`i8`/`ui8` 不在 AFIR 供给表里，只能接可建模的那个子集，先定子集再动笔。
+#      动笔前确认一遍："ToInt" 四个（Ceil2Int/FloorToInt 已接、RoundToInt/TruncToInt 这里）
+#      的 `ApiCall` 名字各不相同，不能照抄同一个 pattern。
+#
+#   2. SignBit（1 格）—— 单点，带 tmp，输入输出 dtype 不同
+#      legacy 的 `SignBitAscIrCodegenImplV2`：`GetApiCallName` = `UnaryApiTmpCall`，
+#      `GetApiName` = `SignBitExtend`，`LoadApiHeaderFiles` = `{"signbit_reg_base.h"}`，
+#      `CalcTmpBufSize` 走 `CalcVoidTmpSizeV2`（尺寸 0 但形参在，与 `afir.hypot` 同一种
+#      情况）。输入 T = {float, int32}，输出 U = {uint8, bool}——与谓词族
+#      （`Uint8Logical`/`AFIR_PredicateElementwiseOp`）同一个「输入输出 dtype 不同」的
+#      形状，但输入域不是纯浮点（带 int32），要单独核 ODS 的 `resultRule` 怎么写。
+#      只有 reg 一侧。先确认 `api_regbase/signbit.h`（或类似文件名）里的包装签名。
+#
+#   3. Frexp（1 格）—— **双输出**，机制与前两项不同
+#      legacy 的 `REG_ASC_IR(Frexp)` 有两个输出（`mantissa`、`exponent`，`T`=float、
+#      `U`=int32）。AFIR 今天唯一的多输出 op 是 `afir.vector_func`（见
+#      `appendBufferNodeAttrs` 里「多输出的算子必须显式传全部」那段注释，
+#      `DescriptorCountMismatch` 是它的硬失败信号）。接 `Frexp` 前先确定要不要让
+#      elementwise 这条路也支持多输出 destination，还是给它单开一条路——这是一个要先
+#      想清楚的设计点，不是照抄就能接的单点算子。
+#
+#   4. scalar_cast_add 硬失败 —— **`afir.cast` 不收标量操作数**
+#      `ScalarCastAddFusedGraph(3, af::DT_FLOAT16, af::DT_FLOAT)`
+#      （`share_graph.cc` 的 `CreateScalarCastAddAscGraph`）：`cast.x = scalar.y`，
+#      Cast 的输入直接是一个 `Scalar` 节点，没有 Load 成 tile。诊断
+#      `'afir.cast' op operand #0 must be Tensor or MemRef of ...`
+#      ——`AFIR_CastElementTypes`（`Cast.td:72`）本身收 F16，不是 dtype 域的问题，是
+#      `afir.cast` 的 ODS 操作数类型要求「必须是 Tensor/MemRef」，不接受裸标量，
+#      与其余二元 op 的 `scalarOperand` 旋钮不是一回事（Cast 是一元）。要不要给
+#      `afir.cast` 开一个标量输入的变体，还是把 bridge 侧的 Scalar 预先物化成一个单元素
+#      tile——两条路都没试过，先定方向。
+#
+#   5. scalar_div_inf 硬失败 —— **先确认 legacy 到底怎么处理 `inf` 字面量**
+#      `CreateScalarInfDivAscGraph`（`share_graph.cc:3322`）的 `Scalar` 字面量是字符串
+#      `"inf"`。`buildTypedConstant`（`AfirBuilder.cpp:966`）故意挡掉非数字开头的字面量
+#      ——那条注释说的是「legacy 把文本直接拼进生成的 C++，`inf` 拼进去编不过」，但这张
+#      图显然是故意测 `inf / x` 这个数值场景，**没有验证过 legacy 自己的 `Codegen` 路径
+#      是不是真的编译失败，还是有另一条特判（例如查表转成
+#      `std::numeric_limits<float>::infinity()`）**。动笔前先跑一遍 legacy 单独编译这张
+#      图，看它是不是真的也编不过；如果编得过，说明那条挡字面量的判据漏了一种合法写法，
+#      要去 legacy 的字面量渲染那一层抄规则，不能直接放开。
+#
+#   以上五项与 [[store-dtype-mismatch-was-fixture-bug]] 那类「先去查样板」的纪律无关
+#   ——都已经确认过不是样板漏洞。另外，`2b81356e` 只核过「当前已知卡住」的 10 个建图
+#   函数，**没有对 `share_graph.cc` 做全量审计**：`grep -n "y.ir_attr.SetIndex(0);" -A1`
+#   再核一遍剩下的建图函数，看是否还有别的潜藏同一个漏洞（被另一道闸门挡着、今天还没
+#   暴露），这件事量不大，值得找个空当单独扫一遍。

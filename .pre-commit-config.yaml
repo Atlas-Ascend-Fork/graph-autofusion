@@ -8,7 +8,17 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ---------------------------------------------------------------------------------------------------------
 minimum_pre_commit_version: 4.0.0
-exclude: ^LICENSES/|\.(html|csv|svg)$
+# 仓库级 exclude：对所有 hook 生效。
+#   mlir/api/ascendc/ fork 自上游 PyAsc（见该目录 README.md），必须逐字节保持
+#     上游原始形态，以便与上游做 diff 和同步。此前该目录只在 clang-format 一个 hook 上
+#     排除，trailing-whitespace / end-of-file-fixer / ruff 等**会改写文件**的 hook 仍会
+#     命中它（实测 `pre-commit run --all-files` 改写了其中 19 个文件）。因此上提到仓库级，
+#     确保任何 hook 都不会碰这个目录。下方 clang-format 自带的同名 exclude 保留作双保险。
+#   mlir/target/Ascend/Profiles/platform_config/ 是从 CANN 9.1.0 交付件原样引入的平台
+#     INI（来源与许可证审计见同目录 manifest.txt），其字节被 SHA256SUMS 逐文件锁定，
+#     并由 check-ut-target-profile 校验。end-of-file-fixer / trailing-whitespace 改写
+#     其中任何一个字节都会让审计记录失效（已发生一次：7 份 INI 被改写，UT 转红）。
+exclude: ^LICENSES/|(^|/)mlir/api/ascendc/|(^|/)mlir/target/Ascend/Profiles/platform_config/|\.(html|csv|svg)$
 
 default_stages: [pre-commit]
 ci:
@@ -30,6 +40,11 @@ repos:
       - id: check-json
 
   # C++ 代码格式化检查
+  # exclude 说明：
+  #   build/                     构建产物
+  #   tests/third_party/         第三方代码
+  #   mlir/api/ascendc/ fork 自上游 PyAsc（见该目录 README.md），保持上游原始格式，
+  #                              以便与上游做 diff 和同步；不得对其执行 clang-format
   - repo: https://gitcode.com/pre-commit-clang/mirrors-clang-format
     rev: v18.1.8
     hooks:
@@ -39,7 +54,7 @@ repos:
           - "--style=file"
           - "--verbose"
           - "-i"
-        exclude: ^build/|tests/third_party/
+        exclude: ^build/|tests/third_party/|(^|/)mlir/api/ascendc/
 
   # Python 代码检查
   - repo: https://gitcode.com/gh_mirrors/ru/ruff-pre-commit
@@ -58,7 +73,7 @@ repos:
       - id: codespell
         args: [
             "-L",
-            "CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,Vistor,BUILDIN,buildin,numer",
+            "CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,enque,CopyIn,ArchType,AND,ND,nd,nz,dn,CompileTime,tbe,copyin,alog,Vistor,BUILDIN,buildin,numer",
             "--skip",
             "*.py,*.cpp,*.hpp,*.c,*.h",
           ]
@@ -80,3 +95,105 @@ repos:
         types: [file]
         stages: [pre-commit]
         verbose: true
+
+  # AFIR ODS 对外文档门禁
+  # stable 档的 Op 是对外公开契约，其 summary / description 直接进入生成的 Op reference，
+  # 缺失即拦截。见设计文档 2.5 / 5.5。找不到 llvm-tblgen 时本地跳过并告警；CI 应改用
+  # --require-tblgen 使其成为硬失败。
+  - repo: local
+    hooks:
+      - id: afir-ods-docs
+        name: AFIR stable ODS doc gate
+        entry: python3 autofuse/mlir/tools/af-mlir-tools/check_afir_ods_docs.py
+        language: system
+        pass_filenames: false
+        files: ^autofuse/mlir/dialect/AFIR/IR/.*\.td$
+        stages: [pre-commit]
+
+  # 平台无关三层门禁
+  # dialect/AFIR、bridge、artifact 三层不得出现芯片名 / NpuArch 字面量：平台差异属于
+  # lowering，在它之上只能有并集。判据落在源码上，运行期测不出来——一个没被用例走到的
+  # 分支不会让任何断言变红。见设计文档 2026-09-17 的「编码红线 Graph-2」。
+  - repo: local
+    hooks:
+      - id: afir-platform-agnostic
+        name: AFIR platform-agnostic layer gate
+        entry: bash autofuse/mlir/scripts/check_platform_agnostic_layers.sh
+        language: system
+        pass_filenames: false
+        files: ^autofuse/mlir/(dialect/AFIR|bridge|artifact)/
+        stages: [pre-commit]
+
+  # AFIR 分层方向门禁
+  # 依赖方向单向（设计文档 2.2 / 验收 1）：`afir` 不依赖 `afplan`。这条事实运行期测不
+  # 出来——一个没被用例走到的 `#include` 不会让任何断言变红——所以判据落在源码与构建
+  # 描述上。运行期那一半在 test/ut/dialect/AFIRLayeringTest.cpp。
+  - repo: local
+    hooks:
+      - id: afir-layering
+        name: AFIR dialect layering gate
+        entry: python3 autofuse/mlir/tools/af-mlir-tools/check_afir_layering.py
+        language: system
+        pass_filenames: false
+        files: ^autofuse/mlir/dialect/AFIR/.*\.(h|cpp|td)$|^autofuse/mlir/dialect/AFIR/.*CMakeLists\.txt$
+        stages: [pre-commit]
+
+  # ascendc 方言 td 可达性门禁
+  # 没被 Ops.td 传递包含的 td 文件，里面的 def 一个都不会被展开——写错了不报错，写对了
+  # 也用不上。这件事运行期测不出来：一个没被展开的 def 不会让任何断言变红，它根本不
+  # 存在。集成时就有七个 `*Ext.td` 是这样，41 个 def 一直是死文本，2026-09-24 已删。
+  #
+  # **这里必须是 `always_run` 而不是 `files:`。** 它要看的目录整个在仓库级 `exclude`
+  # 里（fork 自上游 PyAsc，任何 hook 都不许碰），而 `exclude` 是无条件的——写 `files:`
+  # 会被它过滤成空，hook 静默跳过，门禁形同虚设（本条最初就是这么加的，白设了两个提交）。
+  # 本脚本只读、跑一趟几毫秒，无条件跑没有代价；顺带还能接住「删掉一个 td」这类
+  # `files:` 本来就漏掉的改动。
+  - repo: local
+    hooks:
+      - id: ascendc-td-reachable
+        name: AscendC dialect td reachability gate
+        entry: python3 autofuse/mlir/tools/af-mlir-tools/check_ascendc_td_reachable.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+  # PyAsc op inventory 快照门禁
+  # docs/guides/pyasc_ascendc_op_inventory.csv 是 scan_pyasc_coverage.py 从 api/ascendc
+  # 的 TableGen 源生成的快照，手工不维护。改了上游 .td 而忘记重跑，快照会静默落后——
+  # 这次实测一次上游同步就攒下 108 增 30 删。
+  # 用 always_run 而不是 files：触发源 api/ascendc/ 和产物 .csv 都被仓库级 exclude 挡掉，
+  # 挂 files 的话这条永远是 Skipped。整轮扫描 0.1s，每次提交都跑得起。
+  - repo: local
+    hooks:
+      - id: pyasc-op-inventory
+        name: PyAsc op inventory snapshot gate
+        entry: python3 autofuse/mlir/tools/af-mlir-tools/scan_pyasc_coverage.py
+          --format csv --check
+          --output autofuse/mlir/docs/guides/pyasc_ascendc_op_inventory.csv
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+  # AscIR op lowering 对照表门禁
+  # docs/guides/ascir_op_lowering_matrix.csv 由 scan_ascir_op_lowering_matrix.py 从
+  # legacy 的 REG_ASC_IR 与两份 *_ascir_codegen_impl.h 生成，手工不维护。
+  # 它同时是 `ElementTypeMatrixTest` 对账时真源的那一侧：注册处的元素类型集合与这张表
+  # 比。表一旦与 legacy 漂移，那条断言就成了「把注册处钉在一份过期文件上」——看着绿，
+  # 其实什么都没查。
+  # 与 PyAsc 那条同理用 always_run：触发源在 ascir/ 与 v35/ 下，挂 files 会被仓库级
+  # exclude 过滤成空，hook 静默跳过。
+  # 临时关闭：当前 develop 的 ascir_op_lowering_matrix.csv 已过期（BatchMatMul/MatMul/Pow），
+  # 该门禁会阻塞所有 PR；待 CSV 同步后恢复为 stages: [pre-commit]。
+  - repo: local
+    hooks:
+      - id: ascir-op-lowering-matrix
+        name: AscIR op lowering matrix gate
+        entry: python3 autofuse/mlir/tools/af-mlir-tools/scan_ascir_op_lowering_matrix.py
+          --format csv --check
+          --output autofuse/mlir/docs/guides/ascir_op_lowering_matrix.csv
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [manual]

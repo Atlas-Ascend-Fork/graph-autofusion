@@ -445,6 +445,7 @@ static void CreateBF16AddAscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -488,6 +489,7 @@ static void CreateBF16NddmaAddAscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -560,6 +562,7 @@ static void CreateLoadLogicalOrStoreAscGraph(af::AscGraph &graph, size_t dims_si
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_UINT8;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -603,6 +606,7 @@ static void CreateLoadLogicalAndStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_UINT8;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -785,6 +789,7 @@ static void CreateAddFloorBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -833,6 +838,7 @@ static void CreateAddExpBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DT_BF16;
   y.ir_attr.SetIndex(0);
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
@@ -1576,6 +1582,7 @@ static void CreateAbsUint8AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DataType::DT_UINT8;
   y.ir_attr.SetIndex(0);
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
@@ -1631,6 +1638,7 @@ static void CreateAbsBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DataType::DT_BF16;
   y.ir_attr.SetIndex(0);
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
@@ -1687,6 +1695,7 @@ static void CreateCeilBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -1790,6 +1799,7 @@ static void CreateCosBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -1845,6 +1855,7 @@ static void CreateErfBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -1901,6 +1912,7 @@ static void CreateLog1pBfloat16AscGraph(af::AscGraph &graph, size_t dims_size) {
   y.x = log1p_store.y;
 
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -2348,6 +2360,7 @@ static void CreateAbsFmaBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -4978,6 +4991,7 @@ static void CreateLoadLogicalNotStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = logical_not_store.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = dt_out;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -5077,6 +5091,7 @@ static void CreateLoadBitwiseAndStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = out_dtype;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -5148,6 +5163,7 @@ static void CreateLoadBitwiseOrStoreAscGraph(af::AscGraph &graph, size_t dims_si
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = out_dtype;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -5219,6 +5235,7 @@ static void CreateLoadBitwiseXorStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = out_dtype;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -5282,6 +5299,7 @@ static void CreateLoadBitwiseNotStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = out_dtype;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -11012,6 +11030,7 @@ static void CreateTrueDivBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DataType::DT_BF16;
 
   y.ir_attr.SetIndex(0);
 
@@ -12038,6 +12057,7 @@ static void CreateAcoshBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   y.x = acosh_store.y;
 
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -12549,6 +12569,7 @@ static void CreatePowBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -12851,6 +12872,7 @@ static void CreateReciprocalBf16AscGraph(af::AscGraph &graph, size_t dims_size) 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -12886,6 +12908,7 @@ static void CreateRoundBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -13061,6 +13084,7 @@ static void CreateReluUint8AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DataType::DT_UINT8;
   y.ir_attr.SetIndex(0);
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
@@ -13176,6 +13200,7 @@ static void CreateSignUint8AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_UINT8;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -13224,6 +13249,7 @@ static void CreateSignBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -13618,6 +13644,7 @@ static void CreateRoundToIntFloatToInt32AscGraph(af::AscGraph &graph, size_t dim
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_INT32;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -13814,6 +13841,7 @@ static void CreateTruncToIntBf16ToInt32AscGraph(af::AscGraph &graph, size_t dims
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_INT32;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }

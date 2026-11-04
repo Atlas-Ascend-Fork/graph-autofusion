@@ -29,7 +29,7 @@ def run_shell_main(script, setup, tmp_path):
     program = r"""
 cmake() {
   printf 'TRACE cmake %s\n' "$*"
-  [[ "$PWD" == "$BUILD_PATH" ]] || return 92
+  [[ "$PWD" == "$BUILD_PATH" || "$*" == *"$BUILD_PATH"* ]] || return 92
   return "${MOCK_CMAKE_STATUS:-0}"
 }
 make() {
@@ -158,6 +158,59 @@ def test_cpu_discovery_failure_does_not_produce_unbounded_parallelism(tmp_path):
     setup = "nproc() { return 94; }\nmain() { get_available_cpu_count; }\n"
     result = run_shell_main(ROOT / "build.sh", setup, tmp_path)
     assert result.returncode != 0
+
+
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        ("--pkg", "off"),
+        ("--pkg --build-type Debug", "on"),
+        ("--pkg --build-type Release", "off"),
+        ("--pkg --build-type Release --enable-mlir", "on"),
+    ],
+)
+def test_mlir_default_follows_build_type(tmp_path, arguments, expected):
+    setup = f"""
+normalize_test_selection() {{ :; }}
+main() {{
+  checkopts {arguments}
+  printf 'TRACE mlir=%s build_type=%s\n' "$ENABLE_AUTOFUSE_MLIR" "$BUILD_TYPE"
+}}
+"""
+    result = run_shell_main(ROOT / "build.sh", setup, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"TRACE mlir={expected} " in result.stdout
+
+
+@pytest.mark.parametrize(
+    "arguments,enabled,ut,st",
+    [
+        ("", False, "off", "off"),
+        ("-m mlir", True, "on", "on"),
+        ("-u -m mlir", True, "on", "off"),
+        ("-s -m mlir", True, "off", "on"),
+    ],
+)
+def test_mlir_tests_follow_module_selection(tmp_path, arguments, enabled, ut, st):
+    setup = f"""
+BUILD_TYPE=Debug
+main() {{
+  checkopts {arguments}
+  if mlir_tests_requested; then
+    mlir_tests=on
+  else
+    mlir_tests=off
+  fi
+  printf 'TRACE mlir_tests=%s ut=%s st=%s args=%s\n' "$mlir_tests" "$ENABLE_UT" "$ENABLE_ST" "$AUTOFUSE_NON_MLIR_CMAKE_ARGS"
+}}
+"""
+    result = run_shell_main(ROOT / "scripts/test/run_autofuse_test.sh", setup, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected_state = "on" if enabled else "off"
+    assert f"TRACE mlir_tests={expected_state} ut={ut} st={st}" in result.stdout
+    assert (
+        "-D ENABLE_AUTOFUSE_MLIR=OFF -D ENABLE_AUTOFUSE_MLIR_TESTS=OFF" in result.stdout
+    )
 
 
 def autofuse_setup(module, ut, st):

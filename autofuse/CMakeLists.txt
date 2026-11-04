@@ -39,6 +39,7 @@ if (EXISTS "${CMAKE_SOURCE_DIR}/.dev_env")
 endif ()
 
 set(CODE_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(MLIR_CODE_ROOT_DIR ${CODE_ROOT_DIR}/mlir)
 set(GE_METADEF_DIR ${CODE_ROOT_DIR}/graph_metadef)
 set(GE_METADEF_INC_DIR ${CODE_ROOT_DIR}/inc/graph_metadef)
 set(METADEF_PROTO_DIR ${GE_METADEF_DIR}/proto)
@@ -127,6 +128,39 @@ function(autofuse_apply_shared_visibility target_name)
     target_link_libraries(${target_name} PRIVATE autofuse_shared_visibility)
 endfunction()
 
+function(autofuse_enable_mlir_bridge target_name link_scope)
+    set(schedule_to_afir_source
+        ${MLIR_CODE_ROOT_DIR}/bridge/ScheduleToAfir/ScheduleToAfir.cpp
+        ${MLIR_CODE_ROOT_DIR}/bridge/CodegenOrchestration/CodegenOrchestration.cpp
+    )
+    target_sources(${target_name} PRIVATE ${schedule_to_afir_source})
+    target_compile_definitions(${target_name} PRIVATE ENABLE_AUTOFUSE_MLIR=1)
+
+    if(DEFINED MLIR_INCLUDE_DIRS AND MLIR_INCLUDE_DIRS)
+        target_include_directories(${target_name} SYSTEM PRIVATE ${MLIR_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
+    else()
+        set(af_llvm_root "$ENV{LLVM_BUILD_DIR}")
+        if(NOT af_llvm_root)
+            set(af_llvm_root "${LLVM_BUILD_DIR}")
+        endif()
+        target_include_directories(${target_name} SYSTEM PRIVATE ${af_llvm_root}/include)
+    endif()
+
+    target_include_directories(${target_name} PRIVATE
+        ${MLIR_CODE_ROOT_DIR}
+        ${CMAKE_BINARY_DIR}/autofuse/mlir/dialect/AFIR
+        ${CMAKE_BINARY_DIR}/autofuse/mlir/dialect/AFPlan
+        ${MLIR_CODE_ROOT_DIR}/api/ascendc/include
+        ${CMAKE_BINARY_DIR}/autofuse/mlir/api/ascendc/include
+    )
+    # Call this helper from the directory that created the target because source
+    # properties are directory-scoped in the minimum supported CMake.
+    set_source_files_properties(${schedule_to_afir_source}
+        PROPERTIES COMPILE_OPTIONS "-Wno-error=unused-parameter"
+    )
+    target_link_libraries(${target_name} ${link_scope} AfirBuilder AfirTilingSource AfirKernelSource AFIRDialect AFPlanDialect AFIRToAscendC AscendTargetProfile MLIRTargetAsc)
+endfunction()
+
 # Coverage flags belong to test builds only. build.sh passes -DRUN_TEST=0 when
 # reconfiguring a product/package build, and a bare "DEFINED" check would
 # wrongly instrument the shipped run package with gcov.
@@ -152,6 +186,39 @@ endif()
 if(NOT DEFINED RUN_TEST OR NOT RUN_TEST EQUAL 1)
     add_subdirectory(compiler)
 endif ()
+
+if(ENABLE_AUTOFUSE_MLIR)
+    # Resolve package paths early for the legacy bridge. Package modules and
+    # MLIR include definitions are loaded later in the MLIR directory scope.
+    include(${MLIR_CODE_ROOT_DIR}/cmake/AutofuseMlirPackagePaths.cmake)
+    add_subdirectory(mlir/common)
+    add_subdirectory(mlir/bridge/legacy)
+    add_subdirectory(mlir)
+    autofuse_enable_mlir_bridge(aihac_codegen PRIVATE)
+
+    # codegen.cpp transitively includes tablegen-generated AFIR/EmitAsc *.inc
+    # headers (via AscendCKernelABI.h), which trip -Wunused-parameter under
+    # this target's -Werror. Must be set from this directory scope (where
+    # aihac_codegen's build rules are generated), not codegen/CMakeLists.txt.
+    set_source_files_properties(${CODE_ROOT_DIR}/codegen/codegen.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wno-error=unused-parameter"
+    )
+
+    # GNU ld does not create enough AArch64 range-extension veneers for this
+    # oversized MLIR shared library.  LLD links the same object set successfully
+    # and is already available in the supported Linux build image.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        find_program(AUTOFUSE_LLD_EXECUTABLE
+            NAMES ld.lld lld
+        )
+        if(NOT AUTOFUSE_LLD_EXECUTABLE)
+            message(FATAL_ERROR
+                "Autofuse MLIR on AArch64 requires LLD, but ld.lld was not found.")
+        endif()
+
+        target_link_options(aihac_codegen PRIVATE -fuse-ld=lld)
+    endif()
+endif()
 
 if (DEFINED RUN_TEST AND RUN_TEST EQUAL 1 AND IS_DIRECTORY "${CODE_ROOT_DIR}/tests")
     add_subdirectory(tests)

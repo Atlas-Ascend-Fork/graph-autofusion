@@ -214,7 +214,7 @@ bool DownstreamViewOpBlocksBackward(const NodePtr &start_node) {
       continue;
     }
     if (cur_node->GetType() != kBroadcastType && IsNextViewOp(cur_node)) {
-      GELOGE(af::FAILED, "Downstream view op[%s](%s) blocks broadcast backward.", cur_node->GetName().c_str(),
+      GELOGI("Downstream view op[%s](%s) blocks broadcast backward.", cur_node->GetName().c_str(),
              cur_node->GetType().c_str());
       return true;
     }
@@ -291,7 +291,11 @@ bool GetBroadcastPeerThroughCast(const NodePtr &peer, NodePtr &broadcast_peer, N
     broadcast_peer = peer;
     return true;
   }
-  if (peer->GetType() != kCastType || !IsSingleInNode(peer)) {
+  // 多消费 Cast 不穿透：公共轴后移会在 UpdateOutputTensor 中塌缩 retained Cast 的
+  // 输出视图，多消费时殃及全部消费分支（另一路 shape 不一致）。共享 Cast 由
+  // SplitSharedBroadcastConsumers 先整链拆分为单链后再穿透；拆分 fail-closed（如
+  // Cast 带控制边）的共享 Cast 到此一并拒绝，fail-closed 保持图原状。
+  if (peer->GetType() != kCastType || !IsSingleInNode(peer) || !IsSingleOutNode(peer)) {
     return false;
   }
 
@@ -1329,9 +1333,7 @@ Status ProcessMultiRefBroadcastBackward(AscGraph &graph, bool &is_changed) {
     // 跨 view 的统一 broadcast 展开会破坏其轴语义，必须 fail-closed 在真正改写（BackwardMultiRefBroadcast）
     // 之前整体拒绝。
     if (DownstreamViewOpBlocksBackward(merge_node)) {
-      GELOGE(af::FAILED,
-             "Skip multi-ref broadcast backward at node[%s]: downstream of merge[%s] has view op blocking "
-             "backward.",
+      GELOGI("Skip multi-ref broadcast backward at node[%s]: downstream of merge[%s] has view op blocking backward.",
              candidate_node->GetName().c_str(), merge_node->GetName().c_str());
       continue;
     }

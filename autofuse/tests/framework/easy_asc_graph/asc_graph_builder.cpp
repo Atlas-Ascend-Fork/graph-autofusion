@@ -35,6 +35,10 @@ AscGraphBuilder::AscGraphBuilder(const std::string &name) : impl_(std::make_uniq
 
 AscGraphBuilder::~AscGraphBuilder() = default;
 
+Expression AscGraphBuilder::SizeVar(const std::string &name) {
+  return impl_->graph_.CreateSizeVar(name);
+}
+
 AscGraphBuilder &AscGraphBuilder::Loops(std::initializer_list<int64_t> sizes) {
   std::vector<Expression> expr_sizes;
   for (auto s : sizes) {
@@ -121,13 +125,22 @@ AscGraphBuilder &AscGraphBuilder::ScalarData(const std::string &name, int64_t in
   impl_->nodes_[name] = node;
   return *this;
 }
-
 AscGraphBuilder &AscGraphBuilder::IndexExpr(const std::string &name, const std::string &expr, DataType dtype) {
   ascir_op::IndexExpr index_expr_op(name.c_str(), impl_->graph_);
   index_expr_op.ir_attr.SetExpr(Expression::Parse(expr.c_str()));
   index_expr_op.y.dtype = dtype;
   // 与真实前端一致：scalar-like 节点输出视图为空（不补 axis/repeats/strides），
   // 区别于 Scalar/ScalarData 为测试便利自动补齐 repeats 的行为。
+  auto node = impl_->graph_.FindNode(name.c_str());
+  assert(node != nullptr);
+  impl_->nodes_[name] = node;
+  return *this;
+}
+
+AscGraphBuilder &AscGraphBuilder::IndexExpr(const std::string &name, const Expression &expr, DataType dtype) {
+  ascir_op::IndexExpr index_expr_op(name.c_str(), impl_->graph_);
+  index_expr_op.ir_attr.SetExpr(expr);
+  index_expr_op.y.dtype = dtype;
   auto node = impl_->graph_.FindNode(name.c_str());
   assert(node != nullptr);
   impl_->nodes_[name] = node;
@@ -489,6 +502,37 @@ AscGraphBuilder &AscGraphBuilder::Cast(const std::string &name, const std::strin
   *cast_op.y.repeats = input_tensor.attr.repeats;
 
   CreateNodeAndConnect(name, cast_op, input);
+  return *this;
+}
+
+namespace {
+template <typename OpT>
+void SetupPredicateOp(OpT &op, const std::vector<AxisId> &axis_ids, const af::AscTensorAttr &input_attr) {
+  op.attr.sched.axis = axis_ids;
+  op.y.dtype = af::DT_UINT8;
+  *op.y.axis = input_attr.axis;
+  *op.y.repeats = input_attr.repeats;
+}
+}  // namespace
+
+AscGraphBuilder &AscGraphBuilder::Isnan(const std::string &name, const std::string &input) {
+  ascir_op::Isnan op(name.c_str());
+  SetupPredicateOp(op, impl_->axis_ids_, GetInputOutputTensor(input).attr);
+  CreateNodeAndConnect(name, op, input);
+  return *this;
+}
+
+AscGraphBuilder &AscGraphBuilder::IsFinite(const std::string &name, const std::string &input) {
+  ascir_op::IsFinite op(name.c_str());
+  SetupPredicateOp(op, impl_->axis_ids_, GetInputOutputTensor(input).attr);
+  CreateNodeAndConnect(name, op, input);
+  return *this;
+}
+
+AscGraphBuilder &AscGraphBuilder::IsInf(const std::string &name, const std::string &input) {
+  ascir_op::IsInf op(name.c_str());
+  SetupPredicateOp(op, impl_->axis_ids_, GetInputOutputTensor(input).attr);
+  CreateNodeAndConnect(name, op, input);
   return *this;
 }
 

@@ -116,6 +116,13 @@ int AutofuserOptions::Init(PyObject *self, PyObject *args, PyObject *kwds) {
       int64_t graph_type = PyLong_AsLong(graph_kwarg);
       self_->optimizer->graph_type = static_cast<optimize::GraphType>(graph_type);
     }
+
+    PyObject *soc_version_kwarg = PyDict_GetItemString(kwds, "soc_version");
+    if (soc_version_kwarg != nullptr && PyUnicode_Check(soc_version_kwarg)) {
+      Py_ssize_t soc_version_len;
+      const char *soc_version = PyUnicode_AsUTF8AndSize(soc_version_kwarg, &soc_version_len);
+      self_->codegen->soc_version = std::string(soc_version, soc_version_len);
+    }
   }
 
   return 0;
