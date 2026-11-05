@@ -31,6 +31,7 @@
 
 #include "conversion/AFIRToAscendC/Implementations/UnaryElementwise.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
+#include "target/Ascend/AscendTargetProfile.h"
 #include "dialect/AFIR/Analysis/TransferPlan.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 
@@ -289,7 +290,7 @@ LogicalResult checkConversionLocalViews(SourceOp op) {
 
 template <typename SourceOp, typename OpAdaptor>
 FailureOr<UnaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adaptor,
-                                                     ConversionPatternRewriter &rewriter) {
+                                                     ConversionPatternRewriter &rewriter, bool compactTail) {
   UnaryOperandTiles tiles;
   tiles.source = adaptor.getInput();
   tiles.destination = adaptor.getDestination();
@@ -308,7 +309,7 @@ FailureOr<UnaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adap
   // 常量 0」那条分支，发出来的 Op 与此前逐字相同。多段此前是被
   // `materializeScheduledTileIndices` 的「stride 必须是 0 或 1」挡回去的（**安全地拒绝**，
   // 不是算错），现在变成支持。
-  FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op);
+  FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op, compactTail);
   if (failed(segments)) {
     return failure();
   }
@@ -358,8 +359,11 @@ class UnaryElementwiseConversionPattern final : public OpConversionPattern<Sourc
   using OpAdaptor = typename SourceOp::Adaptor;
 
   UnaryElementwiseConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                    std::shared_ptr<const UnaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                    std::shared_ptr<const UnaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -373,7 +377,7 @@ class UnaryElementwiseConversionPattern final : public OpConversionPattern<Sourc
       return rewriter.notifyMatchFailure(op, "incompatible elementwise local views");
     }
 
-    FailureOr<UnaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter);
+    FailureOr<UnaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -421,6 +425,7 @@ class UnaryElementwiseConversionPattern final : public OpConversionPattern<Sourc
  private:
   ImplementationKey key_;
   std::shared_ptr<const UnaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 // 一元 + **一个由 ODS 属性来的实参**。今天只有 `afir.leaky_relu` 是这个形状：发出去的
@@ -437,8 +442,11 @@ class UnaryScalarAttrConversionPattern final : public OpConversionPattern<Source
   using OpAdaptor = typename SourceOp::Adaptor;
 
   UnaryScalarAttrConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                   std::shared_ptr<const UnaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                   std::shared_ptr<const UnaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -449,7 +457,7 @@ class UnaryScalarAttrConversionPattern final : public OpConversionPattern<Source
       return rewriter.notifyMatchFailure(op, "buffer-form unary elementwise op requires a destination");
     }
 
-    FailureOr<UnaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter);
+    FailureOr<UnaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -481,6 +489,7 @@ class UnaryScalarAttrConversionPattern final : public OpConversionPattern<Source
  private:
   ImplementationKey key_;
   std::shared_ptr<const UnaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 // 一元 + **一个落在模板实参位上的 ODS 属性**，外加一块 tmp buffer。今天是多项式族那
@@ -496,8 +505,11 @@ class UnaryTemplateAttrConversionPattern final : public OpConversionPattern<Sour
   using OpAdaptor = typename SourceOp::Adaptor;
 
   UnaryTemplateAttrConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                     std::shared_ptr<const UnaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                     std::shared_ptr<const UnaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -511,7 +523,7 @@ class UnaryTemplateAttrConversionPattern final : public OpConversionPattern<Sour
       return rewriter.notifyMatchFailure(op, "the selected API requires a tmp buffer operand");
     }
 
-    FailureOr<UnaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter);
+    FailureOr<UnaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -528,6 +540,7 @@ class UnaryTemplateAttrConversionPattern final : public OpConversionPattern<Sour
  private:
   ImplementationKey key_;
   std::shared_ptr<const UnaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 // 一元 + **一个由这个 op 写死的 `RoundMode`**，目标是标准调用
@@ -552,8 +565,11 @@ class UnaryFixedRoundModeConversionPattern final : public OpConversionPattern<So
   using OpAdaptor = typename SourceOp::Adaptor;
 
   UnaryFixedRoundModeConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                       std::shared_ptr<const UnaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                       std::shared_ptr<const UnaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -564,7 +580,7 @@ class UnaryFixedRoundModeConversionPattern final : public OpConversionPattern<So
       return rewriter.notifyMatchFailure(op, "buffer-form unary elementwise op requires a destination");
     }
 
-    FailureOr<UnaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter);
+    FailureOr<UnaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -582,6 +598,7 @@ class UnaryFixedRoundModeConversionPattern final : public OpConversionPattern<So
  private:
   ImplementationKey key_;
   std::shared_ptr<const UnaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 template <typename SourceOp, typename TargetOp, bool TakesTmpBuffer, bool MaterializesReuseSource,
@@ -591,7 +608,8 @@ ImplementationRegistry::PatternRegistration<UnaryElementwiseMapping> createPatte
             std::shared_ptr<const UnaryElementwiseMapping> mapping) {
     patterns.add<
         UnaryElementwiseConversionPattern<SourceOp, TargetOp, TakesTmpBuffer, MaterializesReuseSource, ConstBlock>>(
-        context.typeConverter, patterns.getContext(), key, std::move(mapping));
+        context.typeConverter, patterns.getContext(), key, std::move(mapping),
+        context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) == ascend::FeatureState::Available);
   };
 }
 
@@ -635,8 +653,10 @@ LogicalResult registerUnaryScalarAttr(ImplementationRegistry &registry, llvm::St
                               /*needsTmpBuffer=*/false},
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const UnaryElementwiseMapping> mapping) {
-        patterns.add<UnaryScalarAttrConversionPattern<SourceOp, TargetOp>>(context.typeConverter, patterns.getContext(),
-                                                                           key, std::move(mapping));
+        patterns.add<UnaryScalarAttrConversionPattern<SourceOp, TargetOp>>(
+            context.typeConverter, patterns.getContext(), key, std::move(mapping),
+            context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                ascend::FeatureState::Available);
       });
 }
 
@@ -655,7 +675,9 @@ LogicalResult registerUnaryTemplateAttr(ImplementationRegistry &registry, llvm::
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const UnaryElementwiseMapping> mapping) {
         patterns.add<UnaryTemplateAttrConversionPattern<SourceOp, TargetOp>>(
-            context.typeConverter, patterns.getContext(), key, std::move(mapping));
+            context.typeConverter, patterns.getContext(), key, std::move(mapping),
+            context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                ascend::FeatureState::Available);
       });
 }
 
@@ -677,7 +699,9 @@ LogicalResult registerUnaryFixedRoundMode(ImplementationRegistry &registry, llvm
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const UnaryElementwiseMapping> mapping) {
         patterns.add<UnaryFixedRoundModeConversionPattern<SourceOp, ascendc::CastL2Op, Mode>>(
-            context.typeConverter, patterns.getContext(), key, std::move(mapping));
+            context.typeConverter, patterns.getContext(), key, std::move(mapping),
+            context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                ascend::FeatureState::Available);
       });
 }
 

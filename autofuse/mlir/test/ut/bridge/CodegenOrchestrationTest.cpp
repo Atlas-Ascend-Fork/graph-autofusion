@@ -788,6 +788,17 @@ TEST(CodegenOrchestrationTest, StaticShapeWithUnresolvedCostsKeepsEveryCandidate
   EXPECT_EQ(fused_schedule_result.node_idx_to_scheduled_results[0].size(), 2U);
 }
 
+TEST(CodegenOrchestrationTest, EmptyExtensionHeadersAreEmptyCollections) {
+  EXPECT_TRUE(mlir::ascendc::PadOp::getExtensionHeaders().empty());
+  EXPECT_TRUE(mlir::ascendc::DataCopyBlkAlignedOp::getExtensionHeaders().empty());
+  const auto official = mlir::ascendc::PadOp::getExtensionOfficialIncludes();
+  ASSERT_EQ(official.size(), 1U);
+  EXPECT_EQ(official.front(), "lib/pad/pad.h");
+  const auto prelude = mlir::ascendc::DataCopyBlkAlignedOp::getExtensionPreludeHeaders();
+  ASSERT_EQ(prelude.size(), 1U);
+  EXPECT_EQ(prelude.front(), "utils.h");
+}
+
 TEST(CodegenOrchestrationTest, DeclaredExtensionHeadersResolveInTheRegistry) {
   auto &registry = codegen::AscendCApiRegistry::GetInstance();
   std::vector<llvm::StringRef> headers;
@@ -798,6 +809,7 @@ TEST(CodegenOrchestrationTest, DeclaredExtensionHeadersResolveInTheRegistry) {
            mlir::ascendc::ReciprocalExtendOp::getExtensionHeaders(),
            mlir::ascendc::SigmoidExtendOp::getExtensionHeaders(),
            mlir::ascendc::DataCopyPadExtendOp::getExtensionHeaders(),
+           mlir::ascendc::DataCopyPadExtendRegBaseOp::getExtensionHeaders(),
            mlir::ascendc::DataCopyNddmaRegBaseOp::getExtensionHeaders(),
            mlir::ascendc::IsnanExtendOp::getExtensionHeaders(),
            mlir::ascendc::IsFiniteExtendOp::getExtensionHeaders(),

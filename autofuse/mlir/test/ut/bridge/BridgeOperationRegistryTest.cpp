@@ -87,7 +87,7 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsTheProductionCoverage) {
       bufferForm.insert(mapping.scheduler_name);
     }
   }
-  EXPECT_EQ(bufferForm.size(), 122u);
+  EXPECT_EQ(bufferForm.size(), 124u);
   EXPECT_FALSE(bufferForm.contains("ArgMax"));
   EXPECT_FALSE(bufferForm.contains("ArgMaxMultiRPhase1"));
   EXPECT_FALSE(bufferForm.contains(
@@ -99,6 +99,10 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsTheProductionCoverage) {
   // `Ndtr` 是特殊函数一元族的第一个（2026-10-20），也是**第一个 legacy 只有 reg 侧有**的
   // op（mem 侧的 `ascir_builtin_ops_v1.cpp` 不注册它）。它进侧表，但只进 reg 那一列，
   // 由下面那条按族覆盖的断言连同 `kRegOnlyElementwiseOps` 一起管。
+  //
+  // `RemovePad` / `Transpose` / `Pad` 是布局变换族（2026-09-30 / 2026-10-15 / 2026-10-19）：
+  // 同一组形状契约（Transpose 放宽为同 rank 重排），另一套 lowering，见
+  // `dialect/AFIR/IR/Ops/Layout.td`。
   for (llvm::StringRef name : {"Load",
                                "Store",
                                "Broadcast",
@@ -145,6 +149,8 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsTheProductionCoverage) {
                                "Gt",
                                "Ge",
                                "RemovePad",
+                               "Transpose",
+                               "Pad",
                                "Nddma",
                                "Sum",
                                "Max",

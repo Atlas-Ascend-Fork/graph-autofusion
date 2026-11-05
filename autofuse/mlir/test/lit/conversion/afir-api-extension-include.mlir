@@ -80,10 +80,10 @@ module @plan0 attributes {
 // REGBASE: #include "kernel_operator.h"
 // REGBASE: #include "autofuse_tiling_data.h"
 // REGBASE: #include <cstdint>
-// REGBASE: #include "datacopy.h"
+// REGBASE: #include "datacopy_reg_base.h"
 // The wrapper is a free function, not an `AscendC::` member: an extension API
 // keeps whatever namespace its header declares it in.
-// REGBASE: {{^ *}}DataCopyPadExtend<half>
+// REGBASE: {{^ *}}DataCopyPadExtend<half, AscendC::PaddingMode::Normal>
 // REGBASE: AscendC::Add
 // store 也走包装。`-NOT` 放在最后一条正向 check 之后，管的是从 `Add` 到文件尾这一段，
 // 正好是 store 的位置；load 那一处由上面那条正向 check 管。

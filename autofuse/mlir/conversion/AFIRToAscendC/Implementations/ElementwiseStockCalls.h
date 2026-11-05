@@ -113,6 +113,11 @@ AFIR_ELEMENTWISE_STOCK_CALL(CastL2Op);
 // 与 `HypotL2Op` 逐项同形（标准调用 + 一块 tmp），只是多一个源。前置（store 两端 dtype
 // 不同改走 capability 拒收）已接，`abs_fma_bf16_test` 实测干净回落、0 格硬失败。
 AFIR_ELEMENTWISE_STOCK_CALL(FmaL2Op);
+// `afir.pad` 的包装（`PadOp`）一个扩展头都不引：`AscendC::Pad` 是 CANN 官方 API，
+// 头文件（`lib/pad/pad.h`）走 `ApiExtensionHeader` 的**第三段**官方头列表，
+// 不占前两段，所以它在「表上的 op 加了扩展头会红」那条判据里长得和标准调用一样。
+// legacy 两侧发的是同一个标准调用（tier D1），归第一段「两侧同一个 AscendC:: 调用」。
+AFIR_ELEMENTWISE_STOCK_CALL(PadOp);
 
 #undef AFIR_ELEMENTWISE_STOCK_CALL
 

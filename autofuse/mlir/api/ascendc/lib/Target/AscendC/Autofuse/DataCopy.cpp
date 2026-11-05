@@ -10,6 +10,8 @@
 
 #include "ascir/Target/Asc/Autofuse/AutofuseDataCopy.h"
 
+#include <type_traits>
+
 using namespace mlir;
 using namespace mlir::ascendc;
 
@@ -29,6 +31,9 @@ LogicalResult emitDataCopyPadExtend(CodeEmitter& emitter, CopyOpTy op)
 
     os << "DataCopyPadExtend<";
     FAIL_OR(emitter.emitType(op.getLoc(), tensorType.getElementType()));
+    if constexpr (std::is_same_v<CopyOpTy, ascendc::DataCopyPadExtendRegBaseOp>) {
+        os << (op.getCompact() ? ", AscendC::PaddingMode::Compact" : ", AscendC::PaddingMode::Normal");
+    }
     os << ">(" << emitter.getOrCreateName(op.getDst()) << ", " << emitter.getOrCreateName(op.getSrc()) << ", "
        << "static_cast<uint32_t>(" << emitter.getOrCreateName(op.getBlockCount()) << "), "
        << "static_cast<uint32_t>(" << emitter.getOrCreateName(op.getBlockLen()) << "), "
@@ -40,6 +45,11 @@ LogicalResult emitDataCopyPadExtend(CodeEmitter& emitter, CopyOpTy op)
 } // namespace
 
 LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::DataCopyPadExtendOp op)
+{
+    return emitDataCopyPadExtend(emitter, op);
+}
+
+LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::DataCopyPadExtendRegBaseOp op)
 {
     return emitDataCopyPadExtend(emitter, op);
 }

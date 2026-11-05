@@ -6,6 +6,7 @@ add_afir_gtest(ScheduleToAfirTest
     AutofuseLaunchEmitterTest.cpp
     AggregateLaunchDriverTest.cpp
     CodegenOrchestrationTest.cpp
+    LegacyInductorTransposeTest.cpp
     ${CODE_ROOT_DIR}/tests/framework/easy_asc_graph/asc_graph_builder.cpp
   LIBS
     aihac_codegen

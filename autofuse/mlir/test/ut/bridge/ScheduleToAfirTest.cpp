@@ -3281,6 +3281,85 @@ mlir::Value FindScratchTBuf(mlir::Value value) {
   }
   return {};
 }
+// Snapshot the bridge's API field names against CANN kernel_tiling/kernel_tiling.h.
+// Header emission uses the official external structs, so compiling generated C++
+// alone cannot detect an unused/misspelled modeled member in this metadata.
+TEST(ScheduleToAfirTest, TransposeAndPadApiFieldsMatchCannContract) {
+  auto graph = af::testing::AscGraphBuilder("api_field_contract")
+                   .Loops({2, 37, 23})
+                   .Data("x", 0, af::DT_FLOAT)
+                   .Load("load", "x")
+                   .Transpose("transpose", "load", {0, 2, 1})
+                   .Store("store", "transpose", {af::Symbol(2), af::Symbol(23), af::Symbol(37)}, {})
+                   .Output("output", "store")
+                   .Build();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  const std::vector<std::string> padFields = {"srcHeight",
+                                              "srcWidth",
+                                              "srcOriWidth",
+                                              "widthWithoutLastBlock",
+                                              "blocksPerRow",
+                                              "heightTiling",
+                                              "heightFractal",
+                                              "heightFractalTail",
+                                              "mainLoopOffset",
+                                              "tailBlockOffset",
+                                              "tmpBuffer1BlockNum",
+                                              "tmpBuffer1RowNum",
+                                              "tmpBuffer2Offset",
+                                              "widthTiling",
+                                              "widthFractal",
+                                              "widthFractalTail",
+                                              "widthFractalTailAlingned",
+                                              "brcbTiling",
+                                              "brcbFractal",
+                                              "brcbFractalTail",
+                                              "maxRepeatTimes",
+                                              "brcbTilingRepeatTimes",
+                                              "brcbTilingRepeatTimesTail",
+                                              "brcbFractalTailRepeatTimes",
+                                              "brcbFractalTailRepeatTimesTail",
+                                              "reserved"};
+  size_t padCount = 0U, transposeCount = 0U;
+  mlir::MLIRContext context;
+  ASSERT_FALSE(fused.node_idx_to_scheduled_results.empty());
+  for (size_t planId = 0; planId < fused.node_idx_to_scheduled_results[0].size(); ++planId) {
+    auto module =
+        mlir::afir::bridge::PlanToAfir(context, fused, fused.node_idx_to_scheduled_results[0][planId], 0, planId);
+    ASSERT_TRUE(module);
+    module->walk([&](mlir::func::FuncOp func) {
+      auto fields = func->getAttrOfType<mlir::ArrayAttr>("afir.api_tiling_fields");
+      if (!fields) {
+        return;
+      }
+      for (auto entry : fields) {
+        auto item = mlir::cast<mlir::DictionaryAttr>(entry);
+        std::vector<std::string> actual;
+        for (auto name : item.getAs<mlir::ArrayAttr>("fields")) {
+          actual.push_back(mlir::cast<mlir::StringAttr>(name).getValue().str());
+        }
+        const auto type = item.getAs<mlir::StringAttr>("type").getValue();
+        if (type == "PadTiling") {
+          ++padCount;
+          EXPECT_EQ(actual, padFields);
+        }
+        if (type == "ConfusionTransposeTiling") {
+          ++transposeCount;
+          std::vector<std::string> expected;
+          for (size_t i = 0; i < 18; ++i) {
+            expected.push_back("param" + std::to_string(i));
+          }
+          EXPECT_EQ(actual, expected);
+        }
+      }
+    });
+  }
+  EXPECT_GT(padCount, 0U);
+  EXPECT_GT(transposeCount, 0U);
+}
+
 }  // namespace
 
 template <typename PlanT>

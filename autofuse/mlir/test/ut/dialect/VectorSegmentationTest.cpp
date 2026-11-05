@@ -26,6 +26,7 @@
 #include <string>
 
 #include "dialect/AFIR/IR/AFIR.h"
+#include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -402,6 +403,45 @@ TEST_F(VectorSegmentationTest, RecordsTensorProvenance) {
   EXPECT_EQ(plan->tensors[0].index, 1U);
   EXPECT_EQ(plan->tensors[1].side, VectorTensor::Side::Destination);
   EXPECT_EQ(plan->tensors[1].index, 0U);
+}
+
+TEST_F(VectorSegmentationTest, CompactTailMergesOnlyTheContiguousSuffix) {
+  for (const bool padded : {false, true}) {
+    const std::string rowStride = padded ? "32" : "t";
+    const std::string descriptor =
+        "#t = #afir.tensor_desc<axis = [0, 1], repeats = [#afir.expr<\"4\">, #afir.expr<\"t\">], "
+        "strides = [#afir.expr<\"" +
+        rowStride +
+        "\">, #afir.expr<\"1\">], "
+        "vectorized_axis = [0, 1], vectorized_strides = [#afir.expr<\"" +
+        rowStride + "\">, #afir.expr<\"1\">], role = <compute>>";
+    constexpr int kCollapseRank = 2;
+    ASSERT_TRUE(succeeded(Collapse(descriptor, Unary("#t", "#t", kCollapseRank), kCollapseRank)));
+    auto graph = parseAttribute(R"mlir(#afir.asc_graph<tiling_key = 0, axes = [
+      <id = 0, name = "outer", axis_type = Original, size = #afir.expr<"4">>,
+      <id = 3, name = "inner", axis_type = Original, size = #afir.expr<"23">>,
+      <id = 2, name = "innerT", axis_type = TileOuter, size = #afir.expr<"Ceiling((23 / (t)))">,
+       from = [3], split_pair_other_id = 1>,
+      <id = 1, name = "innert", axis_type = TileInner, size = #afir.expr<"t">,
+       from = [3], split_pair_other_id = 2>], type = Compute, size_var = [#afir.expr<"t">]>)mlir",
+                                &context);
+    ASSERT_TRUE(graph);
+    auto function = *module->getOps<func::FuncOp>().begin();
+    function->setAttr(kAscGraphAttrName, graph);
+    Operation *carrier = nullptr;
+    function.walk([&](Operation *op) {
+      if (op->hasAttr(kOperandDescsAttrName)) {
+        carrier = op;
+      }
+    });
+    ASSERT_NE(carrier, nullptr);
+    auto nominal = collapseVectorizedAxes(carrier);
+    auto compact = collapseVectorizedAxes(carrier, /*compactTail=*/true);
+    ASSERT_TRUE(succeeded(nominal));
+    ASSERT_TRUE(succeeded(compact));
+    EXPECT_EQ(nominal->segments.size(), 2U);
+    EXPECT_EQ(compact->segments.size(), padded ? 2U : 1U);
+  }
 }
 
 }  // namespace

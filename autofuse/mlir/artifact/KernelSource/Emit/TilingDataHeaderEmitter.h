@@ -15,6 +15,8 @@
 
 namespace mlir::ascend::kernel {
 LogicalResult emitTilingDataHeader(ArrayRef<mlir::ascend::kernel::TilingSchema> schemas, llvm::raw_ostream &output);
+// Host-only representation follows the same canonical member order as the header.
+LogicalResult emitTilingDataRepr(TilingSchema schema, llvm::raw_ostream &output);
 }  // namespace mlir::ascend::kernel
 
 #endif

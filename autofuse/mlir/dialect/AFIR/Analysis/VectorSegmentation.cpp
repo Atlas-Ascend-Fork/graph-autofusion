@@ -22,6 +22,7 @@
 #include "llvm/ADT/STLExtras.h"
 
 namespace mlir::afir {
+
 namespace {
 
 constexpr llvm::StringLiteral kOne = "1";
@@ -30,11 +31,18 @@ StringRef exprText(ExprAttr expression) {
   return expression.getValue().getValue();
 }
 
+}  // namespace
+
 // `lhs` 与 `rhs` 可证相等吗。证不了（含 `Unknown` 与解析失败）返回 false。
 //
 // 文本相同先短路：合轴里绝大多数比较是字面量对字面量，短路省掉一次 SymEngine 往返。
 // 它只能答「相等」，答不了「不等」，所以不影响保守方向。
+// 供本文件逐对合并与 `Implementations/` 侧的形态判据（`Transpose.cpp` / `Pad.cpp`）
+// 共用——两侧都是「判不了就拒」的保守方向，短路与 SymEngine 语义必须同一份。
 bool provablyEqual(ExprAttr lhs, ExprAttr rhs) {
+  if (!lhs || !rhs) {
+    return false;
+  }
   if (exprText(lhs) == exprText(rhs)) {
     return true;
   }
@@ -47,6 +55,8 @@ bool provablyOne(ExprAttr expression) {
   }
   return ProveExpressionsEqual(exprText(expression), kOne);
 }
+
+namespace {
 
 // `lhs * rhs` 的规范形式。搬运偏移的强度削减问的是同一件事，实现因此收在
 // `SymbolicBuilder.h`（`multiplyExprs`），这里只留名字。
@@ -91,6 +101,8 @@ bool hasConsistentLengths(TensorDescAttr descriptor) {
          descriptor.getVectorizedAxis().size() == descriptor.getVectorizedStrides().size();
 }
 
+}  // namespace
+
 // `axisId` 在 `descriptor.getAxis()` 里的下标。
 FailureOr<size_t> axisPosition(TensorDescAttr descriptor, int64_t axisId) {
   ArrayRef<int64_t> axis = descriptor.getAxis();
@@ -100,6 +112,8 @@ FailureOr<size_t> axisPosition(TensorDescAttr descriptor, int64_t axisId) {
   }
   return static_cast<size_t>(position - axis.begin());
 }
+
+namespace {
 
 // 一根轴的公共 extent：各张量在该轴上的 repeat 中，凡不可证为 1 的必须互相可证相等。
 // 全为 1 时返回字面量 1，调用方据此丢掉这根轴。
@@ -134,7 +148,7 @@ FailureOr<ExprAttr> commonExtent(MLIRContext *context, ArrayRef<VectorTensor> te
 
 static FailureOr<VectorPlan> mergeVectorSegments(Operation *op, VectorPlan plan, ArrayRef<int64_t> axes,
                                                  ArrayRef<ExprAttr> extents,
-                                                 const SmallVector<SmallVector<ExprAttr>> &strides) {
+                                                 const SmallVector<SmallVector<ExprAttr>> &strides, bool compactTail) {
   MLIRContext *context = op->getContext();
   auto func = op->getParentOfType<func::FuncOp>();
   auto graph = func ? func->getAttrOfType<AscGraphAttrGroupsAttr>(kAscGraphAttrName) : AscGraphAttrGroupsAttr();
@@ -167,8 +181,9 @@ static FailureOr<VectorPlan> mergeVectorSegments(Operation *op, VectorPlan plan,
     int64_t previous = inner;
     int64_t outer = inner - 1;
     while (outer >= 0) {
-      // 实际内轴缩短时行距仍按标称布局；跨过这条边界会把下一行接到上一行尾部。
-      if (canShrink(axes[previous])) {
+      // 标称布局保留尾块边界；紧凑的单位 stride 后缀随实际范围连续存储。
+      const bool compactSuffix = compactTail && llvm::all_of(segment.strides, provablyOne);
+      if (canShrink(axes[previous]) && !compactSuffix) {
         break;
       }
       bool mergeable = true;
@@ -203,7 +218,7 @@ static FailureOr<VectorPlan> mergeVectorSegments(Operation *op, VectorPlan plan,
   return plan;
 }
 
-FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op) {
+FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op, bool compactTail) {
   if (op == nullptr) {
     return failure();
   }
@@ -255,7 +270,7 @@ FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op) {
     }
   }
 
-  return mergeVectorSegments(op, std::move(plan), axes, extents, strides);
+  return mergeVectorSegments(op, std::move(plan), axes, extents, strides, compactTail);
 }
 
 }  // namespace mlir::afir

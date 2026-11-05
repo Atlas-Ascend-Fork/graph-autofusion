@@ -241,14 +241,8 @@ bool provablyLiteral(afir::ExprAttr expression, llvm::StringRef literal) {
   return text == literal || afir::ProveExpressionsEqual(text, literal);
 }
 
-bool provablyEqual(afir::ExprAttr lhs, afir::ExprAttr rhs) {
-  if (!lhs || !rhs) {
-    return false;
-  }
-  llvm::StringRef left = lhs.getValue().getValue();
-  llvm::StringRef right = rhs.getValue().getValue();
-  return left == right || afir::ProveExpressionsEqual(left, right);
-}
+// `provablyEqual` 直接用 `mlir::afir` 导出的那份（`VectorSegmentation.cpp`）：
+// 文本短路 + `ProveExpressionsEqual`，空侧答 false，语义与这里原先的局部副本一致。
 
 // 一个 `afir.broadcast` 在分段之后的形态。
 struct BroadcastSegmentation {

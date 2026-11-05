@@ -26,12 +26,21 @@
 //
 // 段语言与 legacy 的两条分支：`remove_pad_api_call.cpp:78` 的 `is_last_axis_align` 判的是
 // 「x 的尾向量化 stride 是不是既非 1 也非 0」，与这里「最内段的源 stride 是不是 1」是同一件事，
-// 只是这边问的是**合轴之后的段**：
+// 只是这边问的是**合轴之后的段**。四种收的形态：
 //
-//   1 段 + 源 stride 1     → R = 段 extent, N = 1          【纯搬运，legacy 的 `!is_last_axis_align`
-//   且只有一根向量化轴】 1 段 + 源 stride P     → R = 1,        N = 段 extent, P = 该段源 stride  【逐元素收集，legacy
-//   的 `is_last_axis_align`】 2 段                   → R = 内段 extent, N = 外段 extent, P = 外段源 stride  【legacy 的
-//   `!is_last_axis_align` 多轴形态】
+//   1 段 + 源 stride 1（且只有一根向量化轴）
+//     → R = 段 extent, N = 1                          【纯搬运，legacy 的 `!is_last_axis_align`】
+//   1 段 + 源 stride P
+//     → R = 1, N = 段 extent, P = 该段源 stride       【逐元素收集，legacy 的 `is_last_axis_align`】
+//   2 段 + 源 stride 1
+//     → R = 内段 extent, N = 外段 extent, P = 外段源 stride  【legacy 的 `!is_last_axis_align`
+//       多轴形态】
+//   2 段 + 源槽距（gather）
+//     → R = 1, N = 外段实际 extent × 内段名义 extent, P = 槽距（内段源 stride）
+//       【整窗口逐元素收集，legacy 的 `is_last_axis_align` 多段形态——转置折进 Load 布局后
+//       源按 `Align(1, 32/sizeof(T))` 逐元素开槽、向量化区又被 TileInner 边界切成两段时
+//       走这里；legacy 由 `GetOneAxisSize` 逐轴连乘承载，本档见 `classifyRemovePadSegments`
+//       的整窗线性判据与 pattern 的 `gatherWholeWindow` 趟数】
 //
 // **段数 > 2 一律报不支持**，而且不建外层 `scf.for`：legacy 把所有向量化轴连乘进一次调用
 // （`GetNonLastAxisMergeSize`），隐含假设「行距处处相同」；合轴之后段数 ≥ 3 恰好说明那个假设
@@ -131,14 +140,8 @@ bool provablyLiteral(afir::ExprAttr expression, llvm::StringRef literal) {
   return text == literal || afir::ProveExpressionsEqual(text, literal);
 }
 
-bool provablyEqual(afir::ExprAttr lhs, afir::ExprAttr rhs) {
-  if (!lhs || !rhs) {
-    return false;
-  }
-  llvm::StringRef left = lhs.getValue().getValue();
-  llvm::StringRef right = rhs.getValue().getValue();
-  return left == right || afir::ProveExpressionsEqual(left, right);
-}
+// `provablyEqual` 直接用 `mlir::afir` 导出的那份（`VectorSegmentation.cpp`）：
+// 文本短路 + `ProveExpressionsEqual`，空侧答 false，语义与这里原先的局部副本一致。
 
 // 这棵子树的取值一定是整数吗。
 //
@@ -248,6 +251,9 @@ struct RemovePadShape {
   // 趟数 N 取 `segments[repeatSegment].extent`；`repeatIsUnit` 为真时 N 是字面量 1。
   size_t repeatSegment = 0;
   bool repeatIsUnit = false;
+  // 整窗口逐元素收集（两段 gather）：R 是「外段实际元素数 × 内段名义元素数」，不是单段
+  // 的元素数。两段的行距都是槽距（最内段源 stride），见 `classifyRemovePadSegments`。
+  bool gatherWholeWindow = false;
   // 源侧行距 P。`repeatIsUnit` 时它不参与（见 `classifyRemovePadSegments`）。
   afir::ExprAttr pitch;
 };
@@ -259,9 +265,14 @@ struct RemovePadShape {
 //   - 源与目的地各恰好一个；段数在 `[1, 2]` 内（段数 > 2 的理由见文件头）。
 //   - **目的地稠密**：最内段 `strides[dst]` 可证为 1；两段时外段 `strides[dst]` 可证等于内段
 //     `extent`。`GatherMask` 的写是连续的，目的地有任何跨度就是静默写错位置。
-//   - 两段时最内段的源 stride 必须可证为 1：一行内部也有跨度的话，`GatherMask` 的
-//     `src0BlockStride` 表达不了（包装写死 1）。
-//   - 行距是 32B 的整数倍（`isProvablyMultipleOf`）。
+//   - **行形态**（两段、最内段源 stride 可证为 1）：一行内部也有跨度的话，
+//     `GatherMask` 的 `src0BlockStride` 表达不了（包装写死 1）。
+//   - **整窗口逐元素收集**（两段、最内段源 stride 是对齐槽距）：外段源步长可证等于
+//     「槽距 × 内段元素数（名义）」，源侧整窗线性。这是 legacy
+//     `remove_pad_api_call.cpp` `is_last_axis_align` 分支的同款形态：转置折进 Load
+//     布局后，源按 `Align(1, 32/sizeof(T))` 逐元素开槽。单段时同款收集见下面的
+//     else 分支。
+//   - 行距/槽距是 32B 的整数倍（`isProvablyMultipleOf`）。
 //
 // **`N` 可证为 1 时单独放行整除判据**，这是一条有前置条件的放行，前置条件在这里查：
 // `src0RepeatStride` 只被第 2..N 趟 repeat 读，`repeatTimes == 1` 时它读不到。这一格的 `N`
@@ -299,12 +310,33 @@ FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan
   const bool contiguousRow = provablyLiteral(inner.strides[shape.source], "1");
   if (count == 2) {
     const afir::VectorSegment &outer = plan.segments[0];
-    if (!contiguousRow || !provablyEqual(outer.strides[shape.destination], inner.extent)) {
+    // 目的地稠密两种形态共用：外段步长必须等于内段元素数（名义），`GatherMask` 的写
+    // 才是线性的。
+    if (!provablyEqual(outer.strides[shape.destination], inner.extent)) {
       return failure();
     }
-    shape.rowSegment = count - 1;
-    shape.repeatSegment = 0;
-    shape.pitch = outer.strides[shape.source];
+    if (contiguousRow) {
+      // 行形态：外段是行距，内段是整行。
+      shape.rowSegment = count - 1;
+      shape.repeatSegment = 0;
+      shape.pitch = outer.strides[shape.source];
+    } else {
+      // 整窗口逐元素收集（两段 gather）：最内段源 stride 是槽距（对齐粒度，见下面
+      // `isProvablyMultipleOf`），外段源步长必须可证等于「槽距 × 内段元素数（名义）」
+      // ——源侧整窗线性，`GatherMask` 才能用一条线性寻址扫过两段。对应 legacy
+      // `remove_pad_api_call.cpp` 的 `is_last_axis_align` 分支：那边的 R 由
+      // `GetOneAxisSize` 逐轴相乘，非首 TileInner 轴取名义 `Size`、其余取
+      // `ActualSize`，与本处「外段实际 × 内段名义」同一口径。
+      FailureOr<ExprAttr> expected =
+          multiplyExprs(inner.strides[shape.source].getContext(), inner.strides[shape.source], inner.extent);
+      if (failed(expected) || !provablyEqual(outer.strides[shape.source], *expected)) {
+        return failure();
+      }
+      shape.rowIsUnit = true;
+      shape.gatherWholeWindow = true;
+      // Whole-window gathering consumes both extents; repeatSegment is unused.
+      shape.pitch = inner.strides[shape.source];
+    }
   } else if (contiguousRow) {
     // 纯搬运：一行就是整段，趟数 1。
     shape.rowSegment = 0;
@@ -470,7 +502,24 @@ class RemovePadConversionPattern final : public OpConversionPattern<afir::Remove
       one = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 1);
     }
     Value rowSize = shape->rowIsUnit ? one : window->extents[shape->rowSegment];
-    Value repeatCount = shape->repeatIsUnit ? one : window->extents[shape->repeatSegment];
+    Value repeatCount;
+    if (shape->repeatIsUnit) {
+      repeatCount = one;
+    } else if (shape->gatherWholeWindow) {
+      // 整窗口收集的趟数是「外段实际元素数 × 内段名义元素数」。目的地行距按名义布局
+      // （稠密判据钉的是名义 extent），尾块的内段行间空槽要一并线性扫过、写进 tile 缓冲
+      // 的名义空位——消费方按 ActualSize 前缀读，空位不读；外段是本趟真正的行数，取
+      // 实际值，乘积不超过 tile 缓冲的名义容量。与 legacy `GetOneAxisSize` 对非首
+      // TileInner 轴取名义 `Size`、其余取 `ActualSize` 的口径逐字对齐。
+      FailureOr<Value> innerCount =
+          afir::materializeSegmentExtent(op, rewriter, vectorPlan.segments[1], /*scheduledAxis=*/-1, {});
+      if (failed(innerCount)) {
+        return rewriter.notifyMatchFailure(op, "cannot materialize the nominal inner segment extent");
+      }
+      repeatCount = rewriter.create<arith::MulIOp>(op.getLoc(), window->extents[0], *innerCount).getResult();
+    } else {
+      repeatCount = window->extents[shape->repeatSegment];
+    }
     // 行距。`repeatIsUnit` 那一格发的是行长本身：形参在（包装的签名里），但
     // `src0RepeatStride` 只被第 2..N 趟读，`repeatTimes == 1` 时读不到它。
     Value pitch = rowSize;

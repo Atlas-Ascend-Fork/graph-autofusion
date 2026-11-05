@@ -95,6 +95,8 @@ llvm::ArrayRef<AFIRBridgeOpMapping> getAFIRBridgeableOperations();
   M("Nddma", afir::NddmaOp, BridgeOpForm::Both)                                             \
   M("Broadcast", afir::BroadcastOp, BridgeOpForm::Both)                                     \
   M("RemovePad", afir::RemovePadOp, BridgeOpForm::Both)                                     \
+  M("Transpose", afir::TransposeOp, BridgeOpForm::Both)                                     \
+  M("Pad", afir::PadOp, BridgeOpForm::Both)                                                 \
   M("Cast", afir::CastOp, BridgeOpForm::Both)                                               \
   M("Add", afir::AddOp, BridgeOpForm::Both)                                                 \
   M("Sub", afir::SubOp, BridgeOpForm::Both)                                                 \
@@ -403,6 +405,12 @@ struct NodeInfo {
   std::optional<int64_t> int_ir_attr;
   // 只有 `VectorFunc` 节点有：它挂的那张嵌套子图。见 `VectorFuncBodyDTO`。
   std::shared_ptr<VectorFuncBodyDTO> vector_func_body;
+  // host tiling 字段的节点级引用（`afir.transpose` 的 `api_tiling_field`）：字段名由
+  // `ScheduleToAfir` 的 `GetApiTilingInfo` 按节点名生成，func 级
+  // `afir.api_tiling_fields` 声明布局，这一份挂在 op 上说「本节点取哪个字段」。空表示
+  // 这个节点的 API 不需要 host tiling（绝大多数节点如此）。同一个生成点保证两处不会
+  // 说岔——这里只透传，不重算。
+  std::optional<std::string> api_tiling_field;
 };
 
 struct ApiTilingInfo {

@@ -59,6 +59,9 @@ TilingSchema getTilingSchema(Type type);
 // Return an empty type for invalid schemas or missing fields.
 Type getTilingSchemaField(Type type, StringRef field);
 
+// 查询当前 kernel 的 API tiling 字段；缺少 canonical 实参或字段时返回空类型。
+Type getApiTilingFieldType(Operation *op, StringRef field);
+
 // Materialize a field access through the validated schema view. This is the
 // single AscendC-side entry point for reading TilingData members.
 Value createTilingSchemaMember(OpBuilder &builder, Location loc, Value value, StringRef field);

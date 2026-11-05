@@ -9,11 +9,16 @@
  */
 
 #include "conversion/AFIRToAscendC/TilingSchema.h"
+#include "conversion/AFIRToAscendC/AscendCKernelABI.h"
 #include "artifact/KernelSource/Emit/TilingDataHeaderEmitter.h"
 
 #include "ascir/Dialect/EmitAsc/IR/EmitAsc.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "dialect/AFIR/IR/AFIRAttributes.h"
+#include "dialect/AFIR/IR/AFIR.h"
 #include "gtest/gtest.h"
 
 using namespace mlir;
@@ -94,6 +99,30 @@ TEST_F(TilingSchemaTest, RejectsMixedContexts) {
   EXPECT_FALSE(TilingSchema::get(&context, foreignName, empty, empty));
 }
 
+TEST_F(TilingSchemaTest, ApiFieldLookupRequiresCanonicalArgumentAndExistingField) {
+  context.getOrLoadDialect<afir::AFIRDialect>();
+  context.getOrLoadDialect<func::FuncDialect>();
+  context.getOrLoadDialect<arith::ArithDialect>();
+  auto schema = TilingSchema::get(&context, builder.getStringAttr("Stage"),
+                                  builder.getArrayAttr({TypeAttr::get(builder.getI32Type())}),
+                                  builder.getArrayAttr({builder.getStringAttr("api_field")}));
+  auto input = getAscendCGlobalMemRefType(RankedTensorType::get({4}, builder.getF32Type()));
+  auto workspace = getAscendCWorkspaceType(&context);
+  auto func = func::FuncOp::create(builder.getUnknownLoc(), "kernel",
+                                   builder.getFunctionType({input, input, workspace, schema.getType()}, {}));
+  auto module = ModuleOp::create(builder.getUnknownLoc());
+  module.push_back(func);
+  builder.setInsertionPointToStart(func.addEntryBlock());
+  auto user = builder.create<arith::ConstantIndexOp>(builder.getUnknownLoc(), 1);
+  EXPECT_FALSE(getApiTilingFieldType(user, "api_field"));
+  afir::setKernelArgAttr(func, 0U, afir::KernelArgRole::Input, 0);
+  afir::setKernelArgAttr(func, 1U, afir::KernelArgRole::Output, 0);
+  afir::setKernelArgAttr(func, 2U, afir::KernelArgRole::Workspace);
+  afir::setKernelArgAttr(func, 3U, afir::KernelArgRole::Tiling);
+  EXPECT_EQ(getApiTilingFieldType(user, "api_field"), builder.getI32Type());
+  EXPECT_FALSE(getApiTilingFieldType(user, "missing"));
+}
+
 TEST_F(TilingSchemaTest, EmitterRejectsMissingSchemaAndUnsupportedScalar) {
   std::string text;
   llvm::raw_string_ostream stream(text);
@@ -103,6 +132,48 @@ TEST_F(TilingSchemaTest, EmitterRejectsMissingSchemaAndUnsupportedScalar) {
                                   builder.getArrayAttr({builder.getStringAttr("value")}));
   ASSERT_TRUE(schema);
   EXPECT_TRUE(failed(emitTilingDataHeader({schema}, stream)));
+}
+
+TEST_F(TilingSchemaTest, ExternalApiTilingTypesAreIncludedNotDefined) {
+  // ATT 给 api-tiling（Pad / ConfusionTranspose）发的字段类型，C++ 定义在官方
+  // kernel_tiling.h 里；生成头只引用（成员声明）并把 include 打在文件头，
+  // 自己再定义一份就是与官方头的重定义冲突。
+  auto apiTiling =
+      TilingSchema::get(&context, builder.getStringAttr("PadTiling"), builder.getArrayAttr(ArrayRef<Attribute>{}),
+                        builder.getArrayAttr(ArrayRef<Attribute>{}));
+  ASSERT_TRUE(apiTiling);
+  auto stage =
+      TilingSchema::get(&context, builder.getStringAttr("Stage"), builder.getArrayAttr({TypeAttr::get(apiTiling)}),
+                        builder.getArrayAttr({builder.getStringAttr("pad_tiling_0")}));
+  ASSERT_TRUE(stage);
+  auto root = TilingSchema::get(&context, builder.getStringAttr("Root"), builder.getArrayAttr({TypeAttr::get(stage)}),
+                                builder.getArrayAttr({builder.getStringAttr("stage_0")}));
+  ASSERT_TRUE(root);
+
+  std::string text;
+  llvm::raw_string_ostream stream(text);
+  ASSERT_TRUE(succeeded(emitTilingDataHeader({root}, stream)));
+  EXPECT_EQ(text.find("struct PadTiling"), std::string::npos);
+  EXPECT_NE(text.find("PadTiling pad_tiling_0;"), std::string::npos);
+  const size_t includeAt = text.find("#include \"kernel_tiling/kernel_tiling.h\"");
+  EXPECT_NE(includeAt, std::string::npos);
+  EXPECT_LT(includeAt, text.find("struct Stage"));
+  EXPECT_GT(includeAt, text.find("#include <cstdint>"));
+}
+
+TEST_F(TilingSchemaTest, SingleStageWrapperForwardsScalarAccessors) {
+  auto stage = TilingSchema::get(&context, builder.getStringAttr("Stage"),
+                                 builder.getArrayAttr({TypeAttr::get(builder.getI32Type())}),
+                                 builder.getArrayAttr({builder.getStringAttr("block_dim")}));
+  auto wrapper = TilingSchema::get(&context, builder.getStringAttr("Group"),
+                                   builder.getArrayAttr({TypeAttr::get(stage.getType())}),
+                                   builder.getArrayAttr({builder.getStringAttr("stage_data")}));
+  std::string text;
+  llvm::raw_string_ostream stream(text);
+  ASSERT_TRUE(succeeded(emitTilingDataHeader({wrapper}, stream)));
+  EXPECT_NE(text.find("stage_data.set_block_dim(value)"), std::string::npos);
+  EXPECT_NE(text.find("return stage_data.get_block_dim()"), std::string::npos);
+  EXPECT_NE(text.find("return stage_data.get_addr_block_dim()"), std::string::npos);
 }
 
 }  // namespace

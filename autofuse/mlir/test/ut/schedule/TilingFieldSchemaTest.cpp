@@ -16,6 +16,7 @@
 #include <string>
 
 #include "ScheduleTestUtils.h"
+#include "ascir_ops.h"
 
 namespace {
 
@@ -137,6 +138,29 @@ TEST(TilingSchemaTest, MultiPlanFieldsStayIsolatedPerPlan) {
   EXPECT_EQ(outer_names, (std::set<std::string>{"graph0_tiling_key"}));
   // 两个 plan 各一个 stage，两个嵌套作用域，于是两个组局部键。
   EXPECT_EQ(nested_keys, 2U);
+}
+
+TEST(TilingSchemaTest, ApiFieldsKeepStageOwnersWhenScalarFieldsAreFlat) {
+  auto fused = mlir::test::MakeFusedResult(1U, 1U, false, true);
+  auto &graph = fused.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  af::ascir_op::Transpose transpose("transpose");
+  af::ascir_op::Pad pad("pad");
+  graph.AddNode(transpose);
+  graph.AddNode(pad);
+  mlir::common::TilingFieldSchema schema;
+  ASSERT_TRUE(mlir::common::BuildTilingFieldSchema(fused, schema));
+  std::set<std::string> apiNames;
+  for (const auto &field : schema.fields) {
+    if (field.type == mlir::common::TilingFieldType::kOpaqueStruct) {
+      EXPECT_EQ(field.path, "graph0_result0_g0_tiling_data");
+      EXPECT_FALSE(field.device_type_name.empty());
+      apiNames.insert(field.name);
+    }
+    if (field.name == "s0") {
+      EXPECT_TRUE(field.path.empty());
+    }
+  }
+  EXPECT_EQ(apiNames, (std::set<std::string>{"transpose_tilingData_0", "pad_tilingData_0"}));
 }
 
 }  // namespace

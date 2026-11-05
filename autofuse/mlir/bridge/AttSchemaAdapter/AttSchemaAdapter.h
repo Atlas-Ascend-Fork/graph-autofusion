@@ -52,6 +52,8 @@ af::Status RunAttForCandidates(const AttRequest &request, TilingCodeBundle &out,
 // att::GenTilingImplAutoFuseV3 call (which needs a fully-formed schedule
 // graph) to succeed end-to-end. Not part of the adapter's public API.
 namespace detail {
+bool QualifyApiTilingMembers(std::string &source, const common::TilingFieldSchema &schema,
+                             std::string *diagnostic = nullptr);
 std::vector<std::string> ExtractReferencedFieldNames(const std::string &source);
 std::set<std::string> ExtractReferencedGroupMemberNames(const std::string &source);
 bool ValidateGeneratedFieldReferences(const std::map<std::string, std::string> &generated,

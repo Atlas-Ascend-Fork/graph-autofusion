@@ -26,6 +26,8 @@ using namespace mlir;
 using namespace mlir::afir;
 
 namespace {
+constexpr unsigned kMinOperands = 2;
+constexpr unsigned kMaxOperands = 3;
 
 using MemoryEffect = SideEffects::EffectInstance<MemoryEffects::Effect>;
 
@@ -503,5 +505,91 @@ void NddmaOp::getEffects(SmallVectorImpl<MemoryEffect> &effects) {
 }
 
 Speculation::Speculatability NddmaOp::getSpeculatability() {
+  return isBufferizedForm() ? Speculation::NotSpeculatable : Speculation::Speculatable;
+}
+
+//===----------------------------------------------------------------------===//
+// afir.transpose
+//===----------------------------------------------------------------------===//
+//
+// 与 load/store/nddma 共用搬运那一整套（indexing maps、descriptor 契约、destination-style、
+// pipe、副作用），差别在两处：两端 rank 必须相同（重排不增删轴），以及 tmp buffer 是
+// 正当形态——两侧转置包装都吃 tmp（mem `ConfusionTranspose` / reg `TransposeExtend`），
+// 不能复用 load/store 的「恰好两个操作数」判据。
+
+// 转置重排轴序、不增删轴，两端 rank 必须相同（legacy `IsNodeValid` 同一判据，
+// `v2_ascir_codegen_impl.h:3750-3754`）。无秩的一端不比：target 方言的中间形态
+// （`!ascendc.local_tensor`）可能无秩，它们的形状关系由 descriptor 与 maps 表达。
+LogicalResult verifyTransposeSameRank(Operation *op) {
+  auto inputType = dyn_cast<ShapedType>(op->getOperand(0).getType());
+  auto outputType = dyn_cast<ShapedType>(op->getResult(0).getType());
+  if (!inputType || !outputType || !inputType.hasRank() || !outputType.hasRank()) {
+    return success();
+  }
+  if (inputType.getRank() != outputType.getRank()) {
+    return op->emitOpError("transpose must not add or remove axes: input and output ranks differ");
+  }
+  return success();
+}
+
+LogicalResult TransposeOp::verify() {
+  if (isBufferizedForm()) {
+    // 操作数结构：input + destination + 可选 tmp（ODS 三段划分，段长由
+    // AttrSizedOperandSegments 保证）。tmp 在这里不像 load/store 那样报错——见上。
+    // 以下 result/destination/type 判据与 verifyBufferForm 保持一致。
+    if (getOperation()->getNumOperands() < kMinOperands || getOperation()->getNumOperands() > kMaxOperands) {
+      return getOperation()->emitOpError("buffer form expects an input, a destination, and an optional tmp buffer");
+    }
+    if (getOperation()->getNumResults() != 1) {
+      return getOperation()->emitOpError("buffer form has an invalid result count");
+    }
+    if (llvm::any_of(getOperation()->getOperandTypes(), [](Type type) { return isa<TensorType>(type); }) ||
+        llvm::any_of(getOperation()->getResultTypes(), [](Type type) { return isa<TensorType>(type); })) {
+      return getOperation()->emitOpError("buffer form expects non-tensor input, destination, and results");
+    }
+    if (getOperation()->getResult(0).getType() != getOperation()->getOperand(1).getType()) {
+      return getOperation()->emitOpError("buffer result and destination must have the same type");
+    }
+    if (failed(verifyTransposeSameRank(getOperation()))) {
+      return failure();
+    }
+    if (failed(verifyIndexingMaps())) {
+      return failure();
+    }
+    return verifyCanonicalBufferDescriptors(getOperation());
+  }
+  if (failed(verifyTransposeSameRank(getOperation()))) {
+    return failure();
+  }
+  return verifyUnaryOp(getOperation());
+}
+
+FailureOr<Role> TransposeOp::getRole() {
+  return getCanonicalTargetRole(getOperation());
+}
+
+FailureOr<unsigned> TransposeOp::getTiedResultIndex(unsigned destinationIndex) {
+  if (destinationIndex != 0 || !getDestination() || getOperation()->getNumResults() != 1) {
+    return failure();
+  }
+  return 0;
+}
+
+FailureOr<SmallVector<AffineMap>> TransposeOp::getIndexingMapList() {
+  return collectIndexingMaps(getOperation());
+}
+
+// 转置保元素数（两端是同一批元素换摆法），与 load/store 同档；nddma 才是那个改元素数的。
+LogicalResult TransposeOp::verifyIndexingMaps() {
+  return verifyTransferIndexingMaps(getOperation(), /*equalElementCount=*/true);
+}
+
+void TransposeOp::getEffects(SmallVectorImpl<MemoryEffect> &effects) {
+  if (isBufferizedForm()) {
+    getBufferFormEffects(getOperation(), effects);
+  }
+}
+
+Speculation::Speculatability TransposeOp::getSpeculatability() {
   return isBufferizedForm() ? Speculation::NotSpeculatable : Speculation::Speculatable;
 }

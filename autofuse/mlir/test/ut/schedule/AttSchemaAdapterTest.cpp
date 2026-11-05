@@ -81,6 +81,14 @@ TEST(AttSchemaAdapterDetailTest, IgnoresIdentifiersThatAreNotRealAccessorCalls) 
   EXPECT_TRUE(mlir::bridge::detail::ExtractReferencedFieldNames(source).empty());
 }
 
+TEST(AttSchemaAdapterDetailTest, AcceptsArrowAccessorsButIgnoresBareLambdas) {
+  const std::string source = "tiling_data->set_block_dim(1); tiling_data -> get_tiling_key(); set_semantic_fallback();";
+  const auto names = mlir::bridge::detail::ExtractReferencedFieldNames(source);
+  EXPECT_EQ(names.size(), 2U);
+  EXPECT_NE(std::find(names.begin(), names.end(), "block_dim"), names.end());
+  EXPECT_NE(std::find(names.begin(), names.end(), "tiling_key"), names.end());
+}
+
 TEST(AttSchemaAdapterDetailTest, ValidateGeneratedFieldReferencesAcceptsKnownFields) {
   mlir::common::TilingFieldSchema schema;
   schema.fields.push_back({"ub_size", "fusion", mlir::common::TilingFieldType::kUInt32});
@@ -141,6 +149,70 @@ TEST(AttSchemaAdapterDetailTest, ValidateGeneratedFieldReferencesRejectsUnknownG
   std::string diagnostic;
   EXPECT_FALSE(mlir::bridge::detail::ValidateGeneratedFieldReferences(generated, schema, &diagnostic));
   EXPECT_NE(diagnostic.find("graph0_result0_g0_tiling_data"), std::string::npos);
+}
+
+TEST(AttSchemaAdapterDetailTest, QualifiesTransposeAndPadWithoutChangingScalarOrScopedAccesses) {
+  mlir::common::TilingFieldSchema schema;
+  schema.fields.push_back(
+      {"transpose_tilingData_0", "graph0_result0_g0_tiling_data", mlir::common::TilingFieldType::kOpaqueStruct});
+  schema.fields.push_back(
+      {"pad_tilingData_0", "graph1_result0_g0_tiling_data", mlir::common::TilingFieldType::kOpaqueStruct});
+  schema.fields.push_back({"z0t_size", "fusion", mlir::common::TilingFieldType::kUInt32});
+  std::string source =
+      "tiling_data.transpose_tilingData_0; tiling_data.pad_tilingData_0; "
+      "tiling_data.get_z0t_size(); tiling_data.set_z0t_size(1); "
+      "tiling_data.graph0_result0_g0_tiling_data.transpose_tilingData_0;";
+  const std::string expected =
+      "tiling_data.graph0_result0_g0_tiling_data.transpose_tilingData_0; "
+      "tiling_data.graph1_result0_g0_tiling_data.pad_tilingData_0; "
+      "tiling_data.get_z0t_size(); tiling_data.set_z0t_size(1); "
+      "tiling_data.graph0_result0_g0_tiling_data.transpose_tilingData_0;";
+  ASSERT_TRUE(mlir::bridge::detail::QualifyApiTilingMembers(source, schema));
+  EXPECT_EQ(source, expected);
+  ASSERT_TRUE(mlir::bridge::detail::QualifyApiTilingMembers(source, schema));
+  EXPECT_EQ(source, expected);
+  EXPECT_TRUE(mlir::bridge::detail::ValidateGeneratedFieldReferences({{"GetTiling", source}}, schema, nullptr));
+}
+
+TEST(AttSchemaAdapterDetailTest, ApiQualificationRespectsIdentifierBoundaries) {
+  mlir::common::TilingFieldSchema schema;
+  schema.fields.push_back(
+      {"pad_tilingData_0", "graph0_result0_g0_tiling_data", mlir::common::TilingFieldType::kOpaqueStruct});
+  std::string source =
+      "other_tiling_data.pad_tilingData_0; tiling_data.pad_tilingData_01; "
+      "outer.tiling_data.pad_tilingData_0; ptr->tiling_data.pad_tilingData_0;";
+  const auto expected = source;
+  ASSERT_TRUE(mlir::bridge::detail::QualifyApiTilingMembers(source, schema));
+  EXPECT_EQ(source, expected);
+}
+
+TEST(AttSchemaAdapterDetailTest, RejectsAmbiguousUnscopedApiFieldButPreservesScopedFields) {
+  mlir::common::TilingFieldSchema schema;
+  for (const auto *path : {"graph0_result0_g0_tiling_data", "graph0_result0_g1_tiling_data"}) {
+    schema.fields.push_back({"pad_tilingData_0", path, mlir::common::TilingFieldType::kOpaqueStruct});
+  }
+  std::string source =
+      "tiling_data.graph0_result0_g0_tiling_data.pad_tilingData_0; "
+      "tiling_data.graph0_result0_g1_tiling_data.pad_tilingData_0;";
+  const auto expected = source;
+  ASSERT_TRUE(mlir::bridge::detail::QualifyApiTilingMembers(source, schema));
+  EXPECT_EQ(source, expected);
+  source = "tiling_data.pad_tilingData_0;";
+  std::string diagnostic;
+  EXPECT_FALSE(mlir::bridge::detail::QualifyApiTilingMembers(source, schema, &diagnostic));
+  EXPECT_NE(diagnostic.find("ambiguous stage owners"), std::string::npos);
+}
+
+TEST(AttSchemaAdapterDetailTest, KeepsStageTypedApiAccessesRelativeToTheirOwner) {
+  mlir::common::TilingFieldSchema schema;
+  for (const auto *path : {"graph0_result0_g0_tiling_data", "graph0_result1_g0_tiling_data"}) {
+    schema.fields.push_back({"tiling_key", path, mlir::common::TilingFieldType::kUInt32});
+    schema.fields.push_back({"pad_tilingData_0", path, mlir::common::TilingFieldType::kOpaqueStruct});
+  }
+  std::string source = "void DoApiTiling(StageTilingData &tiling_data) { tiling_data.pad_tilingData_0; }";
+  const auto expected = source;
+  ASSERT_TRUE(mlir::bridge::detail::QualifyApiTilingMembers(source, schema));
+  EXPECT_EQ(source, expected);
 }
 
 }  // namespace

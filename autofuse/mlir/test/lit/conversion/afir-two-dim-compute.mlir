@@ -9,8 +9,8 @@
 // 二维 tile 上的逐元素计算按行下降：两个 actual extent 决定尾块的行数与每行长度，
 // nominal local stride 决定 UB 行距。行间空隙不能当成连续元素参与 Add。
 
-// RUN: af-opt --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend910B1 %s | FileCheck %s --check-prefix=IR
-// RUN: af-opt --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=IR
+// RUN: af-opt --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend910B1 %s | FileCheck %s --check-prefixes=IR,MEM
+// RUN: af-opt --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend950DT_950x %s | FileCheck %s --check-prefixes=IR,REG
 
 #gm_buffer = #afir.buffer_desc<space = <gm>, size_bytes_expr = <"(2 * s0 * s1)">, life_time_axis_id = -1>
 #ub_queue = #afir.buffer_desc<space = <ub>, buffer_id = 0, slot_count = 2, queue_depth = 2, size_bytes_expr = <"(2 * z0t_size * z1t_size)">, alignment_bytes = 32, life_time_axis_id = -1>
@@ -105,7 +105,10 @@ module @plan0 attributes {
 
 // IR: %[[BLOCKCOUNT:.*]] = arith.select {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 2, role = actual_size>}
 // IR: %[[BLOCKLEN:.*]] = arith.select {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 7, role = actual_size>}
-// IR: scf.for %[[ROW:.*]] = %{{.*}} to %[[BLOCKCOUNT]] step
-// IR: %[[SRC_OFF:.*]] = arith.muli %[[ROW]], %{{.*}} : index
-// IR: ascendc.local_tensor.subindex %{{.*}}[%[[SRC_OFF]]]
-// IR: ascendc.add_l2 %{{.*}}, %{{.*}}, %{{.*}}, %[[BLOCKLEN]]
+// MEM: scf.for %[[ROW:.*]] = %{{.*}} to %[[BLOCKCOUNT]] step
+// MEM: %[[SRC_OFF:.*]] = arith.muli %[[ROW]], %{{.*}} : index
+// MEM: ascendc.local_tensor.subindex %{{.*}}[%[[SRC_OFF]]]
+// MEM: ascendc.add_l2 %{{.*}}, %{{.*}}, %{{.*}}, %[[BLOCKLEN]]
+
+// REG: %[[COUNT:.*]] = arith.muli %[[BLOCKCOUNT]], %[[BLOCKLEN]] : index
+// REG: ascendc.add_l2 %{{.*}}, %{{.*}}, %{{.*}}, %[[COUNT]]

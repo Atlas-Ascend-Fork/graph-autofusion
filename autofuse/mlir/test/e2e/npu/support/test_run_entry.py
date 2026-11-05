@@ -2,8 +2,12 @@
 # -*- coding: utf-8 -*-
 # ----------------------------------------------------------------------------------------------------------------------
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
-# This program is free software; you can redistribute it and/or modify it under the terms of
-# the CANN Open Software License Agreement Version 2.0 (the "License").
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------------------
 
 """统一入口里**不需要 NPU** 的那部分的自测：机读行解析、与预期对账、退出码、环境装配。
@@ -20,6 +24,7 @@ overlay）测不了，也不该在这里测。
 
 import os
 import io
+import mmap
 from contextlib import redirect_stdout
 from threading import Event, Lock
 from unittest.mock import patch
@@ -203,8 +208,7 @@ def _fake_repo(tmp: Path, script_body: str) -> tuple:
     cann = tmp / "cann"
     (cann / "lib64").mkdir(parents=True)
     os.environ["ASCEND_HOME_PATH"] = str(cann)
-    # 默认的 PYTHONHOME=/usr 是设备上的配方，本机解释器会因此起不来——那样两条
-    # 端到端断言测的就是「python 没启动」，而不是机读行解析。
+    # 假用例仍使用当前解释器，显式指定匹配的标准库前缀。
     os.environ["AF_NPU_PYTHONHOME"] = sys.base_prefix
     return repo, build
 
@@ -268,6 +272,49 @@ def test_silent_death_becomes_an_error_cell():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_overlay_refresh_preserves_loaded_extension_mapping():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        repo, build = _fake_repo(root, "")
+        module = build / "compiler/py_module/pyautofuse.so"
+        module.write_bytes(b"old-extension")
+        overlay = root / "overlay"
+        device_env.ensure_overlay(repo, build, overlay)
+        target = overlay / "python/site-packages/autofuse/pyautofuse.so"
+        with target.open("rb") as loaded:
+            with mmap.mmap(loaded.fileno(), 0, access=mmap.ACCESS_READ) as mapping:
+                module.write_bytes(b"new-extension")
+                device_env.ensure_overlay(repo, build, overlay)
+                assert mapping[:] == b"old-extension"
+                assert target.read_bytes() == b"new-extension"
+
+
+def test_environment_preserves_overlay_and_build_paths():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        build = root / "build"
+        build.mkdir()
+        overlay = root / "overlay"
+        with patch.dict(
+            os.environ,
+            {"PYTHONPATH": "/installed/python", "LD_LIBRARY_PATH": "/installed/lib"},
+        ):
+            os.environ.pop("PYTHONHOME", None)
+            os.environ.pop("AF_NPU_PYTHONHOME", None)
+            for mlir_codegen, config in ((True, "mlir"), (False, "none")):
+                env = device_env.environ_for_run(
+                    root, build, overlay, mlir_codegen=mlir_codegen
+                )
+                assert env["PYTHONPATH"].split(":")[0] == str(
+                    overlay / "python/site-packages"
+                )
+                assert env["LD_LIBRARY_PATH"].split(":")[0] == str(build)
+                assert "--mlir_codegen_config=" + config in env["AUTOFUSE_DFX_FLAGS"]
+                assert "/installed/python" in env["PYTHONPATH"].split(":")
+                assert "/installed/lib" in env["LD_LIBRARY_PATH"].split(":")
+                assert env["PYTHONHOME"] == sys.base_prefix
+
+
 def test_library_path_covers_every_so_dir():
     """LD_LIBRARY_PATH 要带上 build 树里每个放 .so 的目录，漏一个就 undefined symbol。"""
     tmp = Path(tempfile.mkdtemp())
@@ -321,6 +368,28 @@ def test_preflight_rejects_fallback_to_installed_cann():
             raise AssertionError("overlay 没生效却没报错")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_preflight_rejects_unloadable_overlay_module():
+    with tempfile.TemporaryDirectory() as directory:
+        overlay = Path(directory)
+        package = overlay / "autofuse"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        for name in ("pyautofuse", "ascendc_compile", "compile_adapter"):
+            (package / (name + ".py")).write_text("")
+        (package / "ascendc_compile.py").write_text(
+            "raise ImportError('missing_test_dependency')"
+        )
+        for name in ("torch", "torch_npu"):
+            (overlay / (name + ".py")).write_text("")
+        env = dict(os.environ, PYTHONPATH=str(overlay))
+        try:
+            device_env.preflight(env, overlay, python=sys.executable)
+        except device_env.DeviceEnvError as error:
+            assert "missing_test_dependency" in str(error), str(error)
+        else:
+            raise AssertionError("unloadable overlay passed preflight")
 
 
 def test_partial_report_then_exit_or_timeout_is_failure():

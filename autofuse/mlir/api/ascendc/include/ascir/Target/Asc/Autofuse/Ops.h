@@ -17,6 +17,8 @@
 #include "ascir/Target/Asc/Autofuse/AutofuseDataCopy.h"
 #include "ascir/Target/Asc/Autofuse/RegDataCopy.h"
 #include "ascir/Target/Asc/Autofuse/Index.h"
+#include "ascir/Target/Asc/Autofuse/Pad.h"
+#include "ascir/Target/Asc/Autofuse/Transpose.h"
 #include "ascir/Target/Asc/Autofuse/AutofuseVecBinary.h"
 #include "ascir/Target/Asc/Autofuse/VecBroadcast.h"
 #include "ascir/Target/Asc/Autofuse/AutofuseVecCmpsel.h"
@@ -49,7 +51,7 @@ using PrintableOpTypes = std::tuple<
     // Activation operations
     ascendc::GeluOp, ascendc::SigmoidOp, ascendc::SigmoidExtendOp,
     // Data copy operations
-    ascendc::DataCopyPadExtendOp, ascendc::DataCopyNddmaRegBaseOp,
+    ascendc::DataCopyPadExtendOp, ascendc::DataCopyPadExtendRegBaseOp, ascendc::DataCopyNddmaRegBaseOp,
     // UB <-> 向量寄存器的对齐搬运（见 Autofuse/OpRegDataCopy.td）
     ascendc::LoadAlignRegOp, ascendc::StoreAlignRegOp,
     // BinaryL2Op on a stock API -- `HypotL2Op` is the one that also takes a tmp buffer
@@ -111,8 +113,10 @@ using PrintableOpTypes = std::tuple<
     ascendc::CompareRegOp, ascendc::MaskRegOp,
     // Vector broadcast operations (custom emitter -- see VecBroadcast.cpp)
     ascendc::BroadcastL2Op, ascendc::BroadcastDim3Op, ascendc::BroadcastExtendRegBaseOp,
-    // Vector layout operations (custom emitter -- see VecRemovePad.cpp)
-    ascendc::RemovePadExtendOp,
+    // Vector layout operations (custom emitters -- see VecRemovePad.cpp / Transpose.cpp / Pad.cpp)
+    ascendc::RemovePadExtendOp, ascendc::TransposeExtendRegBaseOp, ascendc::ConfusionTransposeOp,
+    ascendc::PadOp, ascendc::DataCopyBlkAlignedOp,
+    // Reduce family (custom emitters -- see VecReduceND.cpp)
     ascendc::ReduceSum2DL2Op, ascendc::ReduceSumInt32Op, ascendc::ReduceMax2DL2Op, ascendc::ReduceMin2DL2Op,
     ascendc::ReduceProd2DL2Op,
     ascendc::ReduceAny2DL2Op, ascendc::ReduceAll2DL2Op, ascendc::ReduceInitOp>;

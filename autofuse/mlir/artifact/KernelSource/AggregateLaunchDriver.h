@@ -21,14 +21,14 @@
 
 namespace mlir::ascend::kernel {
 
-// The three text artifacts a plan candidate set aggregates down to: the
-// translated AscendC kernel body, the generated tiling-data header, and
-// the AutofuseLaunch host wrapper. Concatenated in this order by callers to
-// form the final kernel source (kernel_body + autofuse_launch) and the tiling
-// data header respectively.
+// Canonical artifacts from one aggregate: device kernel body, tiling-data
+// header, host representation helper, and AutofuseLaunch wrapper. The kernel
+// source combines kernel_body + autofuse_launch; the Inductor host source
+// includes tiling_data_repr separately from device compilation.
 struct AggregateLaunchArtifacts {
   std::string kernel_body;
   std::string tiling_data;
+  std::string tiling_data_repr;
   std::string autofuse_launch;
 };
 

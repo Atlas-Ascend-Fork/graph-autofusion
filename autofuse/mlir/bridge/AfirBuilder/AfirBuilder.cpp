@@ -89,13 +89,15 @@ const IntIrAttrMapping kIntIrAttrMappings[] = {
 
 // 带 `indexing_maps` 的那几个节点类型，也就是**跨 GM / 片上边界**的搬运。两端的形状
 // 不同（落点通常是源的一个 tile；`Nddma` 连元素数都不同），所以下标对应必须显式写出来，
-// 而其余算子两端同形、不带这个属性。
+// 而其余算子两端同形、不带这个属性。`Transpose` 也在内：它的两端形状不同（轴序重排），
+// 下标对应同样必须显式写出来——`makeTransferIndexingMapsAttr` 从两端 axis 数组机械生成，
+// perm 不需要额外信息。
 //
 // 一张表而不是两处 `||`：buffer 形态与 tensor 形态各有一个取用点，分开写的话加第三个
 // 搬运 op 时漏掉一处的后果是那个形态下 `indexing_maps` 缺失，而 verifier 把它报成
 // `InvalidIndexingMaps`——看起来像形状错，其实是这张表漏了一行。
 bool isTransferNodeType(llvm::StringRef type) {
-  return type == "Load" || type == "Store" || type == "Nddma";
+  return type == "Load" || type == "Store" || type == "Nddma" || type == "Transpose";
 }
 
 bool isFormSupported(StringRef schedulerName, BridgeOpForm form) {
@@ -648,6 +650,14 @@ LogicalResult appendBufferNodeAttrs(const NodeBuildContext &nodeCtx, SmallVector
       return failure();
     }
     attrs.emplace_back(StringAttr::get(ctx, afir::kIndexingMapsAttrName), *indexingMaps);
+  }
+  // host tiling 字段的节点级引用：`ScheduleToAfir` 那边 `GetApiTilingInfo` 有值的节点
+  // 才带（`Transpose` 与 `Pad`）。挂 op 上而不是只靠 func 级
+  // `afir.api_tiling_fields`，是因为同一个模板里可以有多个同类型节点，func 级分不出
+  // 谁取哪个字段。
+  if (node.api_tiling_field) {
+    attrs.emplace_back(StringAttr::get(ctx, afir::kApiTilingFieldAttrName),
+                       StringAttr::get(ctx, *node.api_tiling_field));
   }
   return success();
 }

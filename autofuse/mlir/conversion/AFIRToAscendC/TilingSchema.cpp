@@ -9,6 +9,8 @@
  */
 
 #include "conversion/AFIRToAscendC/TilingSchema.h"
+#include "conversion/AFIRToAscendC/AscendCKernelABI.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 
 #include "ascir/Dialect/EmitAsc/IR/EmitAsc.h"
 #include "llvm/ADT/DenseSet.h"
@@ -93,6 +95,15 @@ TilingSchema getTilingSchema(Type type) {
 
 Type getTilingSchemaField(Type type, StringRef field) {
   return getTilingSchema(type).getField(field);
+}
+
+Type getApiTilingFieldType(Operation *op, StringRef field) {
+  auto func = op->getParentOfType<func::FuncOp>();
+  if (!func) {
+    return {};
+  }
+  auto tiling = getCanonicalTilingArgument(func);
+  return succeeded(tiling) ? getTilingSchemaField(tiling->getType(), field) : Type();
 }
 
 Value createTilingSchemaMember(OpBuilder &builder, Location loc, Value value, StringRef field) {

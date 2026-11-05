@@ -167,7 +167,8 @@ LogicalResult addApiTilingFields(ArrayRef<func::FuncOp> functions, func::FuncOp 
   return success();
 }
 
-// Field order: common, workspace, tiling_key, size_var, API tiling, q/b sizes.
+// Keep each template's size vars and API fields together, then append shared
+// resources. Inductor's designated-initializer representation uses this order.
 LogicalResult collectStageFields(ArrayRef<func::FuncOp> functions, SchemaFields &fields) {
   func::FuncOp function = functions.front();
   ModuleOp module = function->getParentOfType<ModuleOp>();
@@ -184,17 +185,16 @@ LogicalResult collectStageFields(ArrayRef<func::FuncOp> functions, SchemaFields 
     }
   });
   addField("tiling_key");
-  if (failed(addSizeVarFields(functions, function, addField))) {
-    return failure();
+  for (func::FuncOp templateFunc : functions) {
+    if (failed(addSizeVarFields({templateFunc}, function, addField)) ||
+        failed(addApiTilingFields({templateFunc}, function, fields))) {
+      return failure();
+    }
   }
 
   std::set<int64_t> queueIds;
   std::set<int64_t> bufferIds;
   collectQueueBufferIds(functions, queueIds, bufferIds);
-
-  if (failed(addApiTilingFields(functions, function, fields))) {
-    return failure();
-  }
 
   for (int64_t id : queueIds) {
     addField(mlir::common::MakeQueueSizeName(id));

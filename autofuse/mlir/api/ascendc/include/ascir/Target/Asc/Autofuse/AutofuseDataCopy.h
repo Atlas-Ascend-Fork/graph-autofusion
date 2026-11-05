@@ -18,6 +18,7 @@ namespace ascendc {
 
 LogicalResult printOperation(CodeEmitter& emitter, ascendc::DataCopyPadExtendOp op);
 LogicalResult printOperation(CodeEmitter& emitter, ascendc::DataCopyNddmaRegBaseOp op);
+LogicalResult printOperation(CodeEmitter& emitter, ascendc::DataCopyPadExtendRegBaseOp op);
 
 } // namespace ascendc
 } // namespace mlir

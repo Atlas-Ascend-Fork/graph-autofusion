@@ -89,6 +89,11 @@ inline constexpr llvm::StringLiteral kShapeAssertsAttrName = "afir.shape_asserts
 // 还影响生成的 kernel 吗——是则留 `afir`（如 `module_kind`、`cube_type`），否则归
 // `afplan`。
 inline constexpr llvm::StringLiteral kApiTilingFieldsAttrName = "afir.api_tiling_fields";
+// op 级的那一份（`afir.transpose` 等带 host tiling 的节点）：func 级
+// `afir.api_tiling_fields` 声明嵌套 struct 的字段布局，本属性说这个节点取哪个字段。
+// 名字不带 `afir.` 前缀——它走 ODS `arguments` 声明（`OptionalAttr<StrAttr>`），与前缀
+// 属性那套 discardable 机制无关；同一模板里可以有多个同类型节点，func 级分不出来。
+inline constexpr llvm::StringLiteral kApiTilingFieldAttrName = "api_tiling_field";
 inline constexpr llvm::StringLiteral kApiTilingTypeKey = "type";
 inline constexpr llvm::StringLiteral kApiTilingFieldKey = "field";
 inline constexpr llvm::StringLiteral kApiTilingFieldsKey = "fields";

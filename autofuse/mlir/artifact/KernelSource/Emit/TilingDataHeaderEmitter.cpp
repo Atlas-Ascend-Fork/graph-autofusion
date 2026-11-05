@@ -12,6 +12,7 @@
 #include "final_tiling_selection_snapshot.h"
 #include "support/CxxIdentifier.h"
 
+#include <set>
 #include <string>
 
 #include "mlir/IR/BuiltinTypes.h"
@@ -119,7 +120,8 @@ LogicalResult emitStructFields(mlir::ascend::kernel::TilingSchema structure, llv
     llvm::StringRef field = fieldName.getValue();
     if (auto nested = mlir::ascend::kernel::getTilingSchema(type)) {
       // Matches legacy TILING_DATA_FIELD_DEF_T_STRUCT, which does not
-      // generate accessors for nested-struct fields.
+      // generate accessors for nested-struct fields. 单 stage wrapper 额外的
+      // 转发访问器见 emitGroupForwardingAccessors。
       output << "    " << nested.getNameAttr().getValue() << " " << field << ";\n";
       continue;
     }
@@ -141,7 +143,68 @@ LogicalResult emitStructFields(mlir::ascend::kernel::TilingSchema structure, llv
   return success();
 }
 
-LogicalResult emitType(Type type, llvm::StringMap<std::string> &layouts, llvm::raw_ostream &output) {
+// 单 stage 的 wrapper（ATT 侧的「组结构体」，如 `AscGraph0ScheduleResult0G0TilingData`）：
+// ATT 多 result 模式在组结构体上**直接**调 `tiling_data.get_block_dim()` / `set_z0t_size(...)`
+// （solver、schedule_group_tail），legacy 那一层对应的是逐组扁平结构体（自带全套访问器）。
+// MLIR 把组建成 wrapper{g0_tiling_data}，所以要为 stage 的每个标量字段转发 set/get/get_addr。
+// 只处理「恰好一个嵌套字段」的 wrapper：多 stage 时同名字段会在转发名上撞车，那档今天
+// 没有 ATT 侧对应（见 `GenTilingData` 的命名条件），不转发。根（AutofuseTilingData）也
+// 不走这里——单 plan 的根级转发由 `emitRootForwardingAccessors` 负责，两边同时开会重名。
+LogicalResult emitGroupForwardingAccessors(mlir::ascend::kernel::TilingSchema structure,
+                                           llvm::raw_ostream &accessorStream) {
+  if (structure.getNameAttr().getValue() == "AutofuseTilingData" || structure.getNamesAttr().size() != 1UL) {
+    return success();
+  }
+  auto wrapperFieldType = cast<TypeAttr>(structure.getTypesAttr()[0]).getValue();
+  auto stage = mlir::ascend::kernel::getTilingSchema(wrapperFieldType);
+  if (!stage) {
+    return success();
+  }
+  llvm::StringRef member = cast<StringAttr>(structure.getNamesAttr()[0]).getValue();
+  for (auto [name, fieldType] : llvm::zip(stage.getNamesAttr(), stage.getTypesAttr())) {
+    auto integer = dyn_cast<IntegerType>(cast<TypeAttr>(fieldType).getValue());
+    if (!integer) {
+      continue;
+    }
+    llvm::StringRef field = cast<StringAttr>(name).getValue();
+    std::string typeName = scalarTypeName(integer);
+    accessorStream << "    inline void set_" << field << "(" << typeName << " value) { " << member << ".set_" << field
+                   << "(value); }\n"
+                   << "    inline " << typeName << " get_" << field << "() { return " << member << ".get_" << field
+                   << "(); }\n"
+                   << "    inline " << typeName << " *get_addr_" << field << "() { return " << member << ".get_addr_"
+                   << field << "(); }\n";
+  }
+  return success();
+}
+
+// 这些类型名在生成的 TilingData 头文件里**不定义**：C++ 定义来自 CANN 官方头
+// （`kernel_tiling.h` 里 `namespace AscendC::tiling` 的定义 + 顶层的
+// `using AscendC::tiling::PadTiling;` 转发），本文件只引用——成员声明
+// （`struct Stage { PadTiling pad_tiling_0; };`）不需要布局可见，include 打头就够。
+// 若这里再发一份全局定义，与官方头进同一个 TU 就是重定义冲突。legacy 的生成头
+// （`codegen_tiling_data.cpp:38` 的 macros_and_includes）同样只 include 不定义。
+struct ExternalTilingType {
+  llvm::StringRef typeName;
+  llvm::StringRef providerInclude;
+};
+constexpr ExternalTilingType kExternalTilingTypes[] = {
+    {"ConfusionTransposeTiling", "kernel_tiling/kernel_tiling.h"},
+    {"PadTiling", "kernel_tiling/kernel_tiling.h"},
+};
+
+// 表上的名字返回提供定义的官方头；不在表上返回空。
+llvm::StringRef externalProviderInclude(llvm::StringRef typeName) {
+  for (const ExternalTilingType &entry : kExternalTilingTypes) {
+    if (entry.typeName == typeName) {
+      return entry.providerInclude;
+    }
+  }
+  return {};
+}
+
+LogicalResult emitType(Type type, llvm::StringMap<std::string> &layouts, std::set<llvm::StringRef> &providerIncludes,
+                       llvm::raw_ostream &output) {
   auto structure = mlir::ascend::kernel::getTilingSchema(type);
   if (!structure) {
     return success();
@@ -157,8 +220,13 @@ LogicalResult emitType(Type type, llvm::StringMap<std::string> &layouts, llvm::r
     return success(existingLayout->second == layout);
   }
   layouts.try_emplace(name, std::move(layout));
+  if (llvm::StringRef provider = externalProviderInclude(name); !provider.empty()) {
+    // 外部类型：记下 include、跳过定义；同名同形的查重照走（上面已记账）。
+    providerIncludes.insert(provider);
+    return success();
+  }
   for (Attribute fieldType : structure.getTypesAttr()) {
-    if (failed(emitType(cast<TypeAttr>(fieldType).getValue(), layouts, output))) {
+    if (failed(emitType(cast<TypeAttr>(fieldType).getValue(), layouts, providerIncludes, output))) {
       return failure();
     }
   }
@@ -168,6 +236,7 @@ LogicalResult emitType(Type type, llvm::StringMap<std::string> &layouts, llvm::r
   std::string accessors;
   llvm::raw_string_ostream accessorStream(accessors);
   if (failed(emitStructFields(structure, output, accessorStream)) ||
+      failed(emitGroupForwardingAccessors(structure, accessorStream)) ||
       failed(emitRootForwardingAccessors(structure, accessorStream))) {
     return failure();
   }
@@ -190,13 +259,73 @@ LogicalResult emitType(Type type, llvm::StringMap<std::string> &layouts, llvm::r
 
 LogicalResult mlir::ascend::kernel::emitTilingDataHeader(ArrayRef<mlir::ascend::kernel::TilingSchema> schemas,
                                                          llvm::raw_ostream &output) {
-  output << "#pragma once\n#include <cstdint>\n#include <vector>\n\n"
-         << ascgen_utils::GenFinalTilingSelectionSnapshotSnippet() << "\n";
+  // 先把结构体正文攒进缓冲：外部类型的 include 集要到走完 schema 才知道，而它必须
+  // 打在文件头。std::set 给出确定的发射顺序。
+  std::string body;
+  llvm::raw_string_ostream bodyStream(body);
   llvm::StringMap<std::string> layouts;
+  std::set<llvm::StringRef> providerIncludes;
   for (mlir::ascend::kernel::TilingSchema schema : schemas) {
-    if (!schema || failed(emitType(schema, layouts, output))) {
+    if (!schema || failed(emitType(schema, layouts, providerIncludes, bodyStream))) {
       return failure();
     }
   }
+  bodyStream.flush();
+  output << "#pragma once\n#include <cstdint>\n#include <vector>\n\n"
+         << ascgen_utils::GenFinalTilingSelectionSnapshotSnippet() << "\n";
+  for (llvm::StringRef provider : providerIncludes) {
+    output << "#include \"" << provider << "\"\n";
+  }
+  output << "\n" << body;
+  return success();
+}
+
+namespace {
+LogicalResult emitReprFields(TilingSchema schema, llvm::StringRef access, unsigned depth, llvm::raw_ostream &output) {
+  const std::string indent(depth * 2U, ' ');
+  bool first = true;
+  for (auto [nameAttr, typeAttr] : llvm::zip(schema.getNamesAttr(), schema.getTypesAttr())) {
+    auto name = cast<StringAttr>(nameAttr).getValue();
+    if (!mlir::afir::isValidCxxIdentifier(name)) {
+      return failure();
+    }
+    Type type = cast<TypeAttr>(typeAttr).getValue();
+    const std::string member = access.str() + name.str();
+    output << "  repr << \"" << (first ? "" : ",") << "\\n" << indent << "." << name << " = ";
+    if (auto nested = getTilingSchema(type)) {
+      output << "{\";\n";
+      if (failed(emitReprFields(nested, member + ".", depth + 1U, output))) {
+        return failure();
+      }
+      output << "  repr << \"\\n" << indent << "}\";\n";
+    } else {
+      if (!isa<IntegerType>(type)) {
+        return failure();
+      }
+      // Unary plus prints byte-sized integers as numbers, not characters.
+      output << "\" << +" << member << ";\n";
+    }
+    first = false;
+  }
+  return success();
+}
+}  // namespace
+
+LogicalResult mlir::ascend::kernel::emitTilingDataRepr(TilingSchema schema, llvm::raw_ostream &output) {
+  if (!schema || !mlir::afir::isValidCxxIdentifier(schema.getNameAttr().getValue())) {
+    return failure();
+  }
+  output << "#include <sstream>\n#include <string>\n#include \"autofuse_tiling_data.h\"\n"
+         << "#if defined(__clang__)\n#pragma GCC diagnostic push\n"
+         << "#pragma GCC diagnostic ignored \"-Wreturn-type-c-linkage\"\n#endif\n"
+         << "extern \"C\" std::string GetTilingDataRepr(const " << schema.getNameAttr().getValue()
+         << " *tiling_data) {\n"
+         << "  if (tiling_data == nullptr) { return std::string(); }\n"
+         << "  std::stringstream repr;\n  repr << \"" << schema.getNameAttr().getValue() << "{\";\n";
+  if (failed(emitReprFields(schema, "tiling_data->", 1U, output))) {
+    return failure();
+  }
+  output << "  repr << \"\\n}\";\n  return repr.str();\n}\n"
+         << "#if defined(__clang__)\n#pragma GCC diagnostic pop\n#endif\n";
   return success();
 }

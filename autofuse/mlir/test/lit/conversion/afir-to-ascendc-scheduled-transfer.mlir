@@ -151,7 +151,7 @@ module @plan0 attributes {
 // IR: ascendc.global_tensor.subindex %{{.*}}[%[[OFF]]]
 // IR: ascendc.local_tensor.subindex %{{.*}}[%[[ZERO:.*]]]
 // 搬运长度是上面那个 actual_size 绑定本身，不再就地重算一次尾块 select。
-// IR: ascendc.data_copy_pad_extend %{{.*}}, %{{.*}}, %[[ONE]], %[[TILEACTUAL]], %[[ZEROSTRIDE]], %[[ZEROSTRIDE]]
+// IR: ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %[[ONE]], %[[TILEACTUAL]], %[[ZEROSTRIDE]], %[[ZEROSTRIDE]]
 
 // --- 计算 ---
 // 一维分段直接取 tile 的 actual_size；二维行为由
@@ -167,4 +167,4 @@ module @plan0 attributes {
 // IR: %[[SOFF:.*]] = arith.addi %[[SBLOCK]], %[[SROUND]]
 // IR: ascendc.local_tensor.subindex
 // IR: ascendc.global_tensor.subindex %{{.*}}[%[[SOFF]]]
-// IR: ascendc.data_copy_pad_extend %{{.*}}, %{{.*}}, %{{.*}}, %[[TILEACTUAL]]
+// IR: ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %{{.*}}, %[[TILEACTUAL]]

@@ -16,13 +16,13 @@
 
 #include <atomic>
 #include <algorithm>
+#include <charconv>
+#include <cerrno>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <map>
-#include <stdexcept>
-#include <string>
 #include <sys/stat.h>
 #include <tuple>
 #include <unordered_map>
@@ -360,28 +360,23 @@ std::optional<std::string> MakeSizeBytesExpr(ArrayRef<std::string> repeats, int6
     if (repeat.empty()) {
       return std::nullopt;
     }
-    size_t parsedSize = 0;
     long long value = 0;
-    try {
-      value = std::stoll(repeat, &parsedSize);
-    } catch (const std::invalid_argument &) {
+    const auto parsed = std::from_chars(repeat.data(), repeat.data() + repeat.size(), value);
+    if (parsed.ec == std::errc::result_out_of_range) {
+      return std::nullopt;
+    }
+    if (parsed.ec == std::errc{} && parsed.ptr == repeat.data() + repeat.size()) {
+      if (value <= 0) {
+        return std::nullopt;
+      }
+      const int64_t factor = static_cast<int64_t>(value);
+      if (constant > std::numeric_limits<int64_t>::max() / factor) {
+        return std::nullopt;
+      }
+      constant *= factor;
+    } else {
       symbolic.push_back(repeat);
-      continue;
-    } catch (const std::out_of_range &) {
-      return std::nullopt;
     }
-    if (parsedSize != repeat.size()) {
-      symbolic.push_back(repeat);
-      continue;
-    }
-    if (value <= 0) {
-      return std::nullopt;
-    }
-    const int64_t factor = static_cast<int64_t>(value);
-    if (constant > std::numeric_limits<int64_t>::max() / factor) {
-      return std::nullopt;
-    }
-    constant *= factor;
   }
   if (symbolic.empty()) {
     return std::to_string(constant);
@@ -714,9 +709,35 @@ mlir::afir::CanonicalResourceFacts ToCanonicalResourceFacts(const BufferDescDTO 
 // buffer 上二者可以按调度生命周期先后复用同一块存储。这里是资源视图的分类判据；最终地址
 // 安全还由下降侧的 `sourceBroadcastsToDestination` 钉住，外层行距必须等于后续广播 extents
 // 的乘积。
-bool BroadcastStridesAreCompatible(const TensorValueDTO &first, const TensorValueDTO &second,
-                                   ArrayRef<bool> broadcastAxis) {
-  const size_t rank = broadcastAxis.size();
+bool DifferenceIsExplainedByBroadcast(const TensorValueDTO &first, const TensorValueDTO &second) {
+  // 轴本身对不上就不是广播能解释的了：广播只改 repeats 与 strides，不改轴的构成。
+  if (first.tensor.axis != second.tensor.axis || first.tensor.vectorized_axis != second.tensor.vectorized_axis) {
+    return false;
+  }
+  const size_t rank = first.tensor.strides.size();
+  if (rank != second.tensor.strides.size() || first.tensor.repeats.size() != rank ||
+      second.tensor.repeats.size() != rank) {
+    return false;
+  }
+
+  auto isBroadcastSide = [](const std::string &repeat, const std::string &stride) {
+    return repeat == "1" && stride == "0";
+  };
+  llvm::SmallVector<bool, 4> broadcastAxis(rank, false);
+  bool sawBroadcastAxis = false;
+  for (size_t axis = 0; axis < rank; ++axis) {
+    if (first.tensor.strides[axis] == second.tensor.strides[axis] &&
+        first.tensor.repeats[axis] == second.tensor.repeats[axis]) {
+      continue;
+    }
+    broadcastAxis[axis] = (isBroadcastSide(first.tensor.repeats[axis], first.tensor.strides[axis]) ||
+                           isBroadcastSide(second.tensor.repeats[axis], second.tensor.strides[axis]));
+    sawBroadcastAxis = sawBroadcastAxis || broadcastAxis[axis];
+  }
+  if (!sawBroadcastAxis) {
+    return false;
+  }
+
   for (size_t axis = 0; axis < rank; ++axis) {
     const bool sameStride = first.tensor.strides[axis] == second.tensor.strides[axis];
     const bool sameRepeat = first.tensor.repeats[axis] == second.tensor.repeats[axis];
@@ -758,38 +779,6 @@ bool BroadcastStridesAreCompatible(const TensorValueDTO &first, const TensorValu
     }
   }
   return true;
-}
-
-bool DifferenceIsExplainedByBroadcast(const TensorValueDTO &first, const TensorValueDTO &second) {
-  // 轴本身对不上就不是广播能解释的了：广播只改 repeats 与 strides，不改轴的构成。
-  if (first.tensor.axis != second.tensor.axis || first.tensor.vectorized_axis != second.tensor.vectorized_axis) {
-    return false;
-  }
-  const size_t rank = first.tensor.strides.size();
-  if (rank != second.tensor.strides.size() || first.tensor.repeats.size() != rank ||
-      second.tensor.repeats.size() != rank) {
-    return false;
-  }
-
-  auto isBroadcastSide = [](const std::string &repeat, const std::string &stride) {
-    return repeat == "1" && stride == "0";
-  };
-  llvm::SmallVector<bool, 4> broadcastAxis(rank, false);
-  bool sawBroadcastAxis = false;
-  for (size_t axis = 0; axis < rank; ++axis) {
-    if (first.tensor.strides[axis] == second.tensor.strides[axis] &&
-        first.tensor.repeats[axis] == second.tensor.repeats[axis]) {
-      continue;
-    }
-    broadcastAxis[axis] = (isBroadcastSide(first.tensor.repeats[axis], first.tensor.strides[axis]) ||
-                           isBroadcastSide(second.tensor.repeats[axis], second.tensor.strides[axis]));
-    sawBroadcastAxis = sawBroadcastAxis || broadcastAxis[axis];
-  }
-  if (!sawBroadcastAxis) {
-    return false;
-  }
-
-  return BroadcastStridesAreCompatible(first, second, broadcastAxis);
 }
 
 // 非队列资源上还有一种合法时间复用：同一逻辑 tile 的 padded / unpadded 两种向量视图。
@@ -936,8 +925,13 @@ llvm::ArrayRef<llvm::StringRef> PadApiTilingFields() {
 }
 
 std::optional<ApiTilingInfo> GetApiTilingInfo(llvm::StringRef nodeType, llvm::StringRef nodeName, size_t templateId) {
+  // host 与 device 的字段名约定在 ATT 侧（api_tiling_gen/api/confusion_transpose.cpp 的
+  // `ascgen_utils::GenValidName(node->GetName()) + "_tilingData_" + id`）。节点名可含 '/'
+  // 等分隔符（如 "graph_hint/transpose"），`makeCxxIdentifier` 会把 '/' 编码成 "_x2f"，
+  // 与 ATT 的单下划线替换不一致，host tiling_func 引用与 tiling struct 字段错位、host
+  // 编译失败。两侧必须同名，这里跟随 ATT 的清洗规则。
   const std::string fieldName =
-      mlir::afir::makeCxxIdentifier(nodeName.str() + "_tilingData_" + std::to_string(templateId));
+      ascgen_utils::GenValidName(nodeName.str() + "_tilingData_" + std::to_string(templateId));
   if (nodeType == "Transpose") {
     ApiTilingInfo info{"ConfusionTransposeTiling", fieldName, {}};
     for (int i = 0; i < 18; ++i) {
@@ -1230,120 +1224,22 @@ mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo 
 //
 // 产物是两张按序号配对的边界表（见 `VectorFuncBodyDTO`）：序号取调度给的
 // `vf_root_input_index` 与 `Output` 的 `index`，**不按容器顺序、不按名字猜**。
-mlir::LogicalResult ImportVectorFuncBoundaries(const af::AscGraph &subGraph,
-                                               const std::shared_ptr<VectorFuncBodyDTO> &body,
-                                               TemplateNodeContext &bodyCtx,
-                                               llvm::DenseSet<const void *> &boundaryLoads, mlir::Location loc) {
-  for (const auto &subNode : subGraph.GetAllNodes()) {
-    if (subNode == nullptr || subNode->GetType() != "Data") {
-      continue;
-    }
-    int64_t parentIndex = 0;
-    if (!af::AttrUtils::GetInt(subNode->GetOpDesc(), "vf_root_input_index", parentIndex)) {
-      // 分区器建边后才写 `vf_root_input_index`；缺失说明这张子图没经过分区器（手工构造的
-      // fixture），回退到子图自己的边界序号 `index`——legacy 的 `ParseSubGraph` 也是这么
-      // 回退的，对「按序连接边界」的子图语义等价。
-      mlir::FailureOr<int64_t> boundaryIndex = GetIoIndex(subNode, loc);
-      if (mlir::failed(boundaryIndex)) {
-        return mlir::failure();
-      }
-      parentIndex = *boundaryIndex;
-    }
-    // 外来下标作数组下标之前必须校验（编码红线 2）。越界是产生方与这里对不上，属坏了。
-    if (parentIndex < 0 || static_cast<size_t>(parentIndex) >= body->boundary_input_names.size()) {
-      return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph boundary '" << subNode->GetName()
-                                  << "' maps to parent input " << parentIndex << ", which is out of range ("
-                                  << body->boundary_input_names.size() << " srcs)";
-    }
+template <typename GraphT>
+mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo &vfInfo, const GraphT &graph,
+                                         const TemplateNodeContext &parentCtx) {
+  mlir::Location loc = parentCtx.loc;
+  const std::string *subGraphName = af::AttrUtils::GetStr(vfNode->GetOpDescBarePtr(), "sub_graph_name");
+  if (subGraphName == nullptr) {
+    // 图自称有二次融合却没说子图在哪 —— **产生方坏了，不是能力不足**：回落会把它藏起来。
+    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name
+                                << "' carries no sub_graph_name attribute";
+  }
+  af::AscGraph subGraph("af_vector_func_body");
+  if (graph.FindSubGraph(*subGraphName, subGraph) != af::SUCCESS) {
+    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' names subgraph '"
+                                << *subGraphName << "', which is not on this graph";
+  }
 
-    const auto consumers = subNode->GetOutDataNodes();
-    if (consumers.size() != 1U) {
-      return mlir::afir::emitCapabilityShortfall(loc)
-             << "UnsupportedOperation: VectorFunc subgraph boundary '" << subNode->GetName() << "' feeds "
-             << consumers.size() << " nodes; the bridge models the single boundary load the partitioner inserts";
-    }
-    auto loadNode = std::dynamic_pointer_cast<af::AscNode>(consumers.at(0U));
-    if (loadNode == nullptr || loadNode->GetType() != "Load") {
-      return mlir::afir::emitCapabilityShortfall(loc)
-             << "UnsupportedOperation: VectorFunc subgraph boundary '" << subNode->GetName()
-             << "' is not consumed by a boundary load, which the bridge does not model";
-    }
-    auto loadOutputs = loadNode->outputs();
-    if (loadOutputs.size() != 1U) {
-      return mlir::afir::emitCapabilityShortfall(loc)
-             << "UnsupportedOperation: VectorFunc boundary load '" << loadNode->GetName() << "' has "
-             << loadOutputs.size() << " outputs";
-    }
-    // 这个名字就是 region 的块参数：下游算子按它引用这段数据，所以边界表记它，并且注册进
-    // 子图自己的 producer 表，让下游的 `input_names` 解析得到。
-    const std::string valueName = ResultValueName(loadNode->GetName(), 0, 1);
-    body->boundary_input_names[static_cast<size_t>(parentIndex)] = valueName;
-    const auto outputAnchor = *loadOutputs.begin();
-    mlir::FailureOr<TensorValueDTO> descriptor =
-        ToTensorValueDTO(outputAnchor->attr, mlir::afir::Role::Compute, loc, -1);
-    if (mlir::failed(descriptor)) {
-      return mlir::failure();
-    }
-    bodyCtx.producerByTensor[outputAnchor->attr.mem.tensor_id] = valueName;
-    bodyCtx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = *descriptor;
-    boundaryLoads.insert(static_cast<const void *>(loadNode.get()));
-  }
-  return mlir::success();
-}
-
-mlir::LogicalResult AppendVectorFuncStore(const af::AscNodePtr &subNode, TemplateNodeContext &bodyCtx,
-                                          mlir::Location loc) {
-  const std::string subName = subNode->GetName();
-  // 边界 Store：把它的来源直接记成「产出这条输出的那个名字」，Store 本身不翻。
-  auto inputs = subNode->inputs();
-  if (inputs.size() != 1U) {
-    return mlir::afir::emitCapabilityShortfall(loc)
-           << "UnsupportedOperation: VectorFunc boundary store '" << subName << "' has " << inputs.size() << " inputs";
-  }
-  const int64_t sourceTensor = (*inputs.begin())->attr.mem.tensor_id;
-  auto producer = bodyCtx.producerByTensor.find(sourceTensor);
-  if (producer == bodyCtx.producerByTensor.end()) {
-    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc boundary store '" << subName << "' reads tensor "
-                                << sourceTensor << ", which has no producer in the subgraph";
-  }
-  for (const auto &outputAnchor : subNode->outputs()) {
-    bodyCtx.producerByTensor[outputAnchor->attr.mem.tensor_id] = producer->second;
-    auto descriptor = bodyCtx.descriptorByTensor.find(sourceTensor);
-    if (descriptor != bodyCtx.descriptorByTensor.end()) {
-      bodyCtx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = descriptor->second;
-    }
-  }
-  return mlir::success();
-}
-
-mlir::LogicalResult AppendVectorFuncOutput(const af::AscNodePtr &subNode,
-                                           const std::shared_ptr<VectorFuncBodyDTO> &body, TemplateNodeContext &bodyCtx,
-                                           mlir::Location loc) {
-  const std::string subName = subNode->GetName();
-  mlir::FailureOr<int64_t> outputIndex = GetIoIndex(subNode, loc);
-  if (mlir::failed(outputIndex)) {
-    return mlir::failure();
-  }
-  if (*outputIndex < 0 || static_cast<size_t>(*outputIndex) >= body->boundary_output_names.size()) {
-    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName
-                                << "' maps to parent output " << *outputIndex << ", which is out of range ("
-                                << body->boundary_output_names.size() << " dsts)";
-  }
-  auto inputs = subNode->inputs();
-  if (inputs.size() != 1U) {
-    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName << "' has "
-                                << inputs.size() << " inputs";
-  }
-  auto producer = bodyCtx.producerByTensor.find((*inputs.begin())->attr.mem.tensor_id);
-  if (producer == bodyCtx.producerByTensor.end()) {
-    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName
-                                << "' has no producer in the subgraph";
-  }
-  body->boundary_output_names[static_cast<size_t>(*outputIndex)] = producer->second;
-  return mlir::success();
-}
-
-mlir::LogicalResult VerifyVectorFuncBoundaryTypes(const NodeInfo &vfInfo, mlir::Location loc) {
   // **dtype 白名单，M1 只收 f16 / f32。**
   //
   // 这一条不是「这一期懒得做」，它是在**守一个不变量**：VF 这道闸门此前替一批图挡着，
@@ -1403,47 +1299,6 @@ mlir::LogicalResult VerifyVectorFuncBoundaryTypes(const NodeInfo &vfInfo, mlir::
     }
   }
 
-  return mlir::success();
-}
-
-mlir::LogicalResult VerifyVectorFuncBoundaries(const NodeInfo &vfInfo, const std::shared_ptr<VectorFuncBodyDTO> &body,
-                                               mlir::Location loc) {
-  for (auto [index, name] : llvm::enumerate(body->boundary_input_names)) {
-    if (name.empty()) {
-      return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' src #" << index
-                                  << " has no boundary in the subgraph";
-    }
-  }
-  for (auto [index, name] : llvm::enumerate(body->boundary_output_names)) {
-    if (name.empty()) {
-      return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' dst #" << index
-                                  << " has no boundary in the subgraph";
-    }
-  }
-
-  return mlir::success();
-}
-
-template <typename GraphT>
-mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo &vfInfo, const GraphT &graph,
-                                         const TemplateNodeContext &parentCtx) {
-  mlir::Location loc = parentCtx.loc;
-  const std::string *subGraphName = af::AttrUtils::GetStr(vfNode->GetOpDescBarePtr(), "sub_graph_name");
-  if (subGraphName == nullptr) {
-    // 图自称有二次融合却没说子图在哪 —— **产生方坏了，不是能力不足**：回落会把它藏起来。
-    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name
-                                << "' carries no sub_graph_name attribute";
-  }
-  af::AscGraph subGraph("af_vector_func_body");
-  if (graph.FindSubGraph(*subGraphName, subGraph) != af::SUCCESS) {
-    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' names subgraph '"
-                                << *subGraphName << "', which is not on this graph";
-  }
-
-  if (mlir::failed(VerifyVectorFuncBoundaryTypes(vfInfo, loc))) {
-    return mlir::failure();
-  }
-
   auto body = std::make_shared<VectorFuncBodyDTO>();
   body->boundary_input_names.assign(vfInfo.input_names.size(), std::string());
   body->boundary_output_names.assign(vfInfo.outputs.size(), std::string());
@@ -1460,8 +1315,59 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
   // 的 tensor id。于是「按 id 把 Data 和 Load 串起来」这条路走不通（实测 src #0 找不到
   // 边界就是这么来的），而「Data 的唯一消费者就是它那个 Load」是分区器的结构保证。
   llvm::DenseSet<const void *> boundaryLoads;
-  if (mlir::failed(ImportVectorFuncBoundaries(subGraph, body, bodyCtx, boundaryLoads, loc))) {
-    return mlir::failure();
+  for (const auto &subNode : subGraph.GetAllNodes()) {
+    if (subNode == nullptr || subNode->GetType() != "Data") {
+      continue;
+    }
+    int64_t parentIndex = 0;
+    if (!af::AttrUtils::GetInt(subNode->GetOpDesc(), "vf_root_input_index", parentIndex)) {
+      // 分区器建边后才写 `vf_root_input_index`；缺失说明这张子图没经过分区器（手工构造的
+      // fixture），回退到子图自己的边界序号 `index`——legacy 的 `ParseSubGraph` 也是这么
+      // 回退的，对「按序连接边界」的子图语义等价。
+      mlir::FailureOr<int64_t> boundaryIndex = GetIoIndex(subNode, loc);
+      if (mlir::failed(boundaryIndex)) {
+        return mlir::failure();
+      }
+      parentIndex = *boundaryIndex;
+    }
+    // 外来下标作数组下标之前必须校验（编码红线 2）。越界是产生方与这里对不上，属坏了。
+    if (parentIndex < 0 || static_cast<size_t>(parentIndex) >= body->boundary_input_names.size()) {
+      return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph boundary '" << subNode->GetName()
+                                  << "' maps to parent input " << parentIndex << ", which is out of range ("
+                                  << body->boundary_input_names.size() << " srcs)";
+    }
+
+    const auto consumers = subNode->GetOutDataNodes();
+    if (consumers.size() != 1U) {
+      return mlir::afir::emitCapabilityShortfall(loc)
+             << "UnsupportedOperation: VectorFunc subgraph boundary '" << subNode->GetName() << "' feeds "
+             << consumers.size() << " nodes; the bridge models the single boundary load the partitioner inserts";
+    }
+    auto loadNode = std::dynamic_pointer_cast<af::AscNode>(consumers.at(0U));
+    if (loadNode == nullptr || loadNode->GetType() != "Load") {
+      return mlir::afir::emitCapabilityShortfall(loc)
+             << "UnsupportedOperation: VectorFunc subgraph boundary '" << subNode->GetName()
+             << "' is not consumed by a boundary load, which the bridge does not model";
+    }
+    auto loadOutputs = loadNode->outputs();
+    if (loadOutputs.size() != 1U) {
+      return mlir::afir::emitCapabilityShortfall(loc)
+             << "UnsupportedOperation: VectorFunc boundary load '" << loadNode->GetName() << "' has "
+             << loadOutputs.size() << " outputs";
+    }
+    // 这个名字就是 region 的块参数：下游算子按它引用这段数据，所以边界表记它，并且注册进
+    // 子图自己的 producer 表，让下游的 `input_names` 解析得到。
+    const std::string valueName = ResultValueName(loadNode->GetName(), 0, 1);
+    body->boundary_input_names[static_cast<size_t>(parentIndex)] = valueName;
+    const auto outputAnchor = *loadOutputs.begin();
+    mlir::FailureOr<TensorValueDTO> descriptor =
+        ToTensorValueDTO(outputAnchor->attr, mlir::afir::Role::Compute, loc, -1);
+    if (mlir::failed(descriptor)) {
+      return mlir::failure();
+    }
+    bodyCtx.producerByTensor[outputAnchor->attr.mem.tensor_id] = valueName;
+    bodyCtx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = *descriptor;
+    boundaryLoads.insert(static_cast<const void *>(loadNode.get()));
   }
 
   for (const auto &subNode : subGraph.GetAllNodes()) {
@@ -1487,16 +1393,49 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
     }
 
     if (subType == "Store") {
-      if (mlir::failed(AppendVectorFuncStore(subNode, bodyCtx, loc))) {
-        return mlir::failure();
+      // 边界 Store：把它的来源直接记成「产出这条输出的那个名字」，Store 本身不翻。
+      auto inputs = subNode->inputs();
+      if (inputs.size() != 1U) {
+        return mlir::afir::emitCapabilityShortfall(loc) << "UnsupportedOperation: VectorFunc boundary store '"
+                                                        << subName << "' has " << inputs.size() << " inputs";
+      }
+      const int64_t sourceTensor = (*inputs.begin())->attr.mem.tensor_id;
+      auto producer = bodyCtx.producerByTensor.find(sourceTensor);
+      if (producer == bodyCtx.producerByTensor.end()) {
+        return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc boundary store '" << subName << "' reads tensor "
+                                    << sourceTensor << ", which has no producer in the subgraph";
+      }
+      for (const auto &outputAnchor : subNode->outputs()) {
+        bodyCtx.producerByTensor[outputAnchor->attr.mem.tensor_id] = producer->second;
+        auto descriptor = bodyCtx.descriptorByTensor.find(sourceTensor);
+        if (descriptor != bodyCtx.descriptorByTensor.end()) {
+          bodyCtx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = descriptor->second;
+        }
       }
       continue;
     }
 
     if (subType == "Output") {
-      if (mlir::failed(AppendVectorFuncOutput(subNode, body, bodyCtx, loc))) {
+      mlir::FailureOr<int64_t> outputIndex = GetIoIndex(subNode, loc);
+      if (mlir::failed(outputIndex)) {
         return mlir::failure();
       }
+      if (*outputIndex < 0 || static_cast<size_t>(*outputIndex) >= body->boundary_output_names.size()) {
+        return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName
+                                    << "' maps to parent output " << *outputIndex << ", which is out of range ("
+                                    << body->boundary_output_names.size() << " dsts)";
+      }
+      auto inputs = subNode->inputs();
+      if (inputs.size() != 1U) {
+        return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName << "' has "
+                                    << inputs.size() << " inputs";
+      }
+      auto producer = bodyCtx.producerByTensor.find((*inputs.begin())->attr.mem.tensor_id);
+      if (producer == bodyCtx.producerByTensor.end()) {
+        return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName
+                                    << "' has no producer in the subgraph";
+      }
+      body->boundary_output_names[static_cast<size_t>(*outputIndex)] = producer->second;
       continue;
     }
 
@@ -1525,15 +1464,29 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
     }
   }
 
-  if (mlir::failed(VerifyVectorFuncBoundaries(vfInfo, body, loc))) {
-    return mlir::failure();
+  for (auto [index, name] : llvm::enumerate(body->boundary_input_names)) {
+    if (name.empty()) {
+      return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' src #" << index
+                                  << " has no boundary in the subgraph";
+    }
   }
+  for (auto [index, name] : llvm::enumerate(body->boundary_output_names)) {
+    if (name.empty()) {
+      return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' dst #" << index
+                                  << " has no boundary in the subgraph";
+    }
+  }
+
   body->nodes = std::move(bodyInfo.nodes);
   vfInfo.vector_func_body = std::move(body);
   return mlir::success();
 }
 
-mlir::LogicalResult ReadTemplateNodeIrAttrs(const af::AscNodePtr &node, NodeInfo &nodeInfo, mlir::Location loc) {
+mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo &info, TemplateNodeContext &ctx) {
+  mlir::Location loc = ctx.loc;
+  NodeInfo nodeInfo;
+  nodeInfo.name = node->GetName();
+  nodeInfo.type = node->GetType();
   // `Scalar` / `ScalarData` / `IndexExpr` 与 `Data` / `Output` 同类：它们不产生 AFIR op，
   // 只产生一个值。所以不在「哪些 op 有 buffer 形态」那张表里，也不该被那张表拦住。
   // 三者的值来源各不相同——编译期字面量 / kernel 形参 / 由 size var 算出来的运行期常量
@@ -1555,40 +1508,6 @@ mlir::LogicalResult ReadTemplateNodeIrAttrs(const af::AscNodePtr &node, NodeInfo
   // （带完整的 axis / repeats / strides）。两边都不产生 op，只产生同一块 GM 上的一个值。
   if (const mlir::afir::bridge::IntIrAttrMapping *intAttr = mlir::afir::bridge::findIntIrAttr(nodeInfo.type);
       intAttr != nullptr && mlir::failed(ReadIntIrAttr(node, *intAttr, nodeInfo, loc))) {
-    return mlir::failure();
-  }
-  return mlir::success();
-}
-
-void AppendTemplateResourceIds(const af::AscNodePtr &node, TemplateInfo &info, size_t templateId) {
-  for (const auto &output : node->outputs()) {
-    if (output->attr.que.id >= 0) {
-      info.queue_ids.push_back(output->attr.que.id);
-    }
-    if (output->attr.buf.id >= 0) {
-      info.buffer_ids.push_back(output->attr.buf.id);
-    }
-  }
-  // tmp buffer 的 id 与普通缓冲是**同一个 id 空间**（legacy 的 `AllocTmpBuffGroup` 就在
-  // 这个空间里分配，且跨节点可复用），落到 TilingData 上也是同一套 `b{id}_size`。所以
-  // 它并进同一张表，而不是另立一张——另立的那张（`afir.tmp_buffer_ids`）除了给
-  // GenTilingData 多一条特判之外没有别的读者，两张表说同一件事就会有说岔的一天。
-  for (const auto &tmpBuffer : node->attr.tmp_buffers) {
-    if (tmpBuffer.id >= 0) {
-      info.buffer_ids.push_back(tmpBuffer.id);
-    }
-  }
-  if (auto api = GetApiTilingInfo(node->GetType(), node->GetName(), templateId)) {
-    info.api_tiling_data.push_back(std::move(*api));
-  }
-}
-
-mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo &info, TemplateNodeContext &ctx) {
-  mlir::Location loc = ctx.loc;
-  NodeInfo nodeInfo;
-  nodeInfo.name = node->GetName();
-  nodeInfo.type = node->GetType();
-  if (mlir::failed(ReadTemplateNodeIrAttrs(node, nodeInfo, loc))) {
     return mlir::failure();
   }
   if (info.buffer_form && nodeInfo.type != "Data" && nodeInfo.type != "Output" && nodeInfo.type != "Scalar" &&
@@ -1626,8 +1545,33 @@ mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo 
       mlir::failed(AppendNodeIo(node, nodeInfo, info, ctx))) {
     return mlir::failure();
   }
+  // 在 push_back 之前取：节点级引用（`api_tiling_field`）要随 nodeInfo 进 nodes，func 级
+  // 布局声明进 api_tiling_data——两处来自同一次调用，不会说岔。
+  std::optional<ApiTilingInfo> apiTiling = GetApiTilingInfo(node->GetType(), node->GetName(), ctx.templateId);
+  if (apiTiling) {
+    nodeInfo.api_tiling_field = apiTiling->field_name;
+  }
   info.nodes.push_back(std::move(nodeInfo));
-  AppendTemplateResourceIds(node, info, ctx.templateId);
+  for (const auto &output : node->outputs()) {
+    if (output->attr.que.id >= 0) {
+      info.queue_ids.push_back(output->attr.que.id);
+    }
+    if (output->attr.buf.id >= 0) {
+      info.buffer_ids.push_back(output->attr.buf.id);
+    }
+  }
+  // tmp buffer 的 id 与普通缓冲是**同一个 id 空间**（legacy 的 `AllocTmpBuffGroup` 就在
+  // 这个空间里分配，且跨节点可复用），落到 TilingData 上也是同一套 `b{id}_size`。所以
+  // 它并进同一张表，而不是另立一张——另立的那张（`afir.tmp_buffer_ids`）除了给
+  // GenTilingData 多一条特判之外没有别的读者，两张表说同一件事就会有说岔的一天。
+  for (const auto &tmpBuffer : node->attr.tmp_buffers) {
+    if (tmpBuffer.id >= 0) {
+      info.buffer_ids.push_back(tmpBuffer.id);
+    }
+  }
+  if (apiTiling) {
+    info.api_tiling_data.push_back(std::move(*apiTiling));
+  }
   return mlir::success();
 }
 

@@ -41,6 +41,20 @@ def AscendC_DataCopyPadExtendOp
       extraClassDeclarationBase # ApiExtensionHeader<["datacopy.h"]>.decl;
 }
 
+// Reg-base DMA carries the physical row packing mode explicitly.
+def AscendC_DataCopyPadExtendRegBaseOp
+    : DataCopyOp<"data_copy_pad_extend_reg_base", "DataCopyPadExtend", [ApiExtensionOpInterface]> {
+  let arguments = (ins AscendC_BaseTensorTypeInterface:$dst,
+                       AscendC_BaseTensorTypeInterface:$src,
+                       AnySignlessIntegerOrIndex:$blockCount,
+                       AnySignlessIntegerOrIndex:$blockLen,
+                       AnySignlessIntegerOrIndex:$srcStride,
+                       AnySignlessIntegerOrIndex:$dstStride,
+                       BoolAttr:$compact);
+  let extraClassDeclaration =
+      extraClassDeclarationBase # ApiExtensionHeader<["datacopy_reg_base.h"]>.decl;
+}
+
 // `DataCopyNddma<T, dim>(dst, src, output_dims[dim], output_stride[dim], input_stride[dim])`
 // ——reg 侧那张供给表上的 ND-DMA 包装（`v35/ascendc/api_regbase/datacopy_nddma.h`），
 // legacy 的 `NddmaApiCall` 逐字发的就是它（`v35/codegen/reg_api_call/reg_nddma_api_call.cpp`）。

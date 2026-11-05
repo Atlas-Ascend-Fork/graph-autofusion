@@ -45,16 +45,32 @@
 // same prelude into every kernel; here the operation says what it needs, because
 // the kernel-source layer collects names and must not know which family a name
 // belongs to. Leave it empty for a wrapper that stands on its own.
-class ApiExtensionHeader<list<string> headers, list<string> preludes = []> {
+//
+// `officials` name CANN official headers the kernel needs (`#include` resolved
+// by the device compiler's `-I`, text never inlined here) -- e.g. the reg-based
+// transpose wrapper's `basic_api/reg_compute/kernel_reg_compute_datacopy_intf.h`
+// declaring the MicroAPI `Gather` primitives. They participate in neither the
+// pairwise ordering above nor the family judgment in
+// `Implementations/ElementwiseApiFamily.cpp`: a CANN header is nobody's supply
+// marker. The kernel-source layer emits them after the fixed block and before
+// the extension headers, matching legacy's include order. Leave it empty for a
+// wrapper that stands on stock includes alone.
+class ApiExtensionHeader<list<string> headers, list<string> preludes = [], list<string> officials = []> {
   code decl = [{
     static ::llvm::ArrayRef<::llvm::StringRef> getExtensionHeaders() {
-      static const ::llvm::StringRef kHeaders[] = {"}] # !interleave(headers, "\", \"") # [{"};
-      return kHeaders;
+      }] # !if(!empty(headers), [{return {};}], [{static const ::llvm::StringRef kHeaders[] = {"}]
+          # !interleave(headers, "\", \"") # [{"};
+      return kHeaders;}]) # [{
     }
     static ::llvm::ArrayRef<::llvm::StringRef> getExtensionPreludeHeaders() {
       }] # !if(!empty(preludes), [{return {};}], [{static const ::llvm::StringRef kPreludes[] = {"}]
           # !interleave(preludes, "\", \"") # [{"};
       return kPreludes;}]) # [{
+    }
+    static ::llvm::ArrayRef<::llvm::StringRef> getExtensionOfficialIncludes() {
+      }] # !if(!empty(officials), [{return {};}], [{static const ::llvm::StringRef kOfficials[] = {"}]
+          # !interleave(officials, "\", \"") # [{"};
+      return kOfficials;}]) # [{
     }
   }];
 }

@@ -15,11 +15,13 @@
 #include "conversion/AFIRToAscendC/Implementations/DataMovement.h"
 #include "conversion/AFIRToAscendC/Implementations/Execution.h"
 #include "conversion/AFIRToAscendC/Implementations/Nddma.h"
+#include "conversion/AFIRToAscendC/Implementations/Pad.h"
 #include "conversion/AFIRToAscendC/Implementations/RemovePad.h"
 #include "conversion/AFIRToAscendC/Implementations/Reduce.h"
 #include "conversion/AFIRToAscendC/Implementations/Synchronization.h"
 #include "conversion/AFIRToAscendC/Implementations/TernaryElementwise.h"
 #include "conversion/AFIRToAscendC/Implementations/TilingParam.h"
+#include "conversion/AFIRToAscendC/Implementations/Transpose.h"
 #include "conversion/AFIRToAscendC/Implementations/UnaryElementwise.h"
 #include "target/Ascend/Capability/ImplementationRegistry.h"
 
@@ -37,11 +39,13 @@ constexpr Registrar kCapabilityRegistrars[] = {
     registerDataMovementImplementations,
     registerExecutionImplementations,
     registerNddmaImplementations,
+    registerPadImplementations,
     registerRemovePadImplementations,
     registerReduceImplementations,
     registerSynchronizationImplementations,
     registerTernaryElementwiseImplementations,
     registerTilingParamImplementations,
+    registerTransposeImplementations,
     registerUnaryElementwiseImplementations,
 };
 

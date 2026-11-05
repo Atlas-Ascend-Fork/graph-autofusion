@@ -2,8 +2,12 @@
 # -*- coding: utf-8 -*-
 # ----------------------------------------------------------------------------------------------------------------------
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
-# This program is free software; you can redistribute it and/or modify it under the terms of
-# the CANN Open Software License Agreement Version 2.0 (the "License").
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------------------
 
 """上板跑用例所需的环境装配，以及「环境真的搭起来了」的前置判据。
@@ -35,6 +39,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -177,9 +182,18 @@ def ensure_overlay(
     if rebuild and overlay.exists():
         shutil.rmtree(overlay)
     site.mkdir(parents=True, exist_ok=True)
-    for source in sources:
-        shutil.copy2(source, site / source.name)
-    shutil.copy2(module, site / module.name)
+    for source in sources + [module]:
+        # 已运行的进程可能仍映射旧扩展；原地截断覆盖会使其访问失效页。
+        # 在同目录写完后原子替换，保留已有映射及并发导入看到的完整文件。
+        with tempfile.NamedTemporaryFile(
+            dir=site, prefix=source.name + ".", delete=False
+        ) as staged:
+            staged_path = Path(staged.name)
+        try:
+            shutil.copy2(source, staged_path)
+            staged_path.replace(site / source.name)
+        finally:
+            staged_path.unlink(missing_ok=True)
 
     cann = cann_root()
     for name in CANN_LINK_NAMES:
@@ -217,7 +231,7 @@ def environ_for_run(
     `NpuRunner.configure_work_dir` 按 `--work-dir` 设，一份实验一个目录。在这里再设一遍
     只会和它打架，而且会让「不同 route 不共用 cache」这条取决于谁最后赋值。
     """
-    env = dict(os.environ)
+    env = att_selection.environment_for_mlir_config("mlir" if mlir_codegen else "none")
     libs = library_path_entries(build)
     old_libs = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = ":".join(libs + ([old_libs] if old_libs else []))
@@ -229,13 +243,8 @@ def environ_for_run(
     # 子进程的 cwd 是各实验的 work-dir（§2.4.1：产物不落源码目录），不能靠 cwd 兜。
     env["PYTHONPATH"] = ":".join([env["PYTHONPATH"], str(cases_dir(repo))])
 
-    env.update(
-        att_selection.environment_for_mlir_config("mlir" if mlir_codegen else "none")
-    )
-    # 设备上必须显式给 PYTHONHOME：`source set_env.sh` 之后解释器会按 CANN 带的那套
-    # 前缀找标准库，而用例跑的是系统 python（§2.4.4 要求显式解释器），不设就起不来。
-    # 留一个覆盖口是给非设备环境用的（本仓的离线自测就走这条），默认值仍是设备上的那个。
-    env.setdefault("PYTHONHOME", os.environ.get("AF_NPU_PYTHONHOME", "/usr"))
+    # 默认沿用当前解释器的标准库前缀；显式选择其他解释器时可通过 AF_NPU_PYTHONHOME 覆盖。
+    env.setdefault("PYTHONHOME", os.environ.get("AF_NPU_PYTHONHOME", sys.base_prefix))
     if extra:
         env.update({key: str(value) for key, value in extra.items()})
     return env
@@ -310,6 +319,22 @@ def preflight(
             "    这是静默回落到了 CANN 自带的旧版，本次结论与改动无关。\n"
             "    重编之后要重建 overlay：run.py --rebuild-overlay".format(
                 pyautofuse, overlay
+            )
+        )
+    # find_spec 只证明文件存在；实际导入才能发现缺少依赖或动态库 ABI 不匹配。
+    imports = "import importlib\nfor name in {!r}:\n    importlib.import_module(name)\n".format(
+        list(PROBED_MODULES)
+    )
+    loaded = subprocess.run(
+        [python, "-c", imports],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if loaded.returncode != 0:
+        raise DeviceEnvError(
+            "模块导入失败（退出码 {}）：\n{}".format(
+                loaded.returncode, loaded.stdout.decode("utf-8", "replace")
             )
         )
     return origins

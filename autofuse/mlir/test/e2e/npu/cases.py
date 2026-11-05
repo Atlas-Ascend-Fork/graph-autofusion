@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ----------------------------------------------------------------------------------------------------------------------
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
-# This program is free software; you can redistribute it and/or modify it under the terms of
-# the CANN Open Software License Agreement Version 2.0 (the "License").
-# ----------------------------------------------------------------------------------------------------------------------
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
 
 """上板用例清单：跑哪些、怎么跑、预期是什么。
 
@@ -95,6 +97,73 @@ CASES = (
         expect={
             "load_add_store": case_status.PASS,
         },
+    ),
+    Case(
+        id="load_transpose_add_store",
+        script="load_transpose_add_store.py",
+        argv=NO_PROFILING,
+        groups=("smoke", "layout"),
+        note="load → transpose（ConfusionTranspose/TransposeExtend 双档）→ add → store，"
+        "NPU 上按 bit 级对齐 legacy 验证",
+        expect={
+            "load_transpose_add_store": case_status.PASS,
+        },
+    ),
+    Case(
+        id="sub_transpose_abs",
+        script="sub_transpose_abs.py",
+        argv=NO_PROFILING,
+        groups=("layout",),
+        note="legacy SubTransposeAbs 输入图，a2/a3 数值与接管验证",
+        expect={"sub_transpose_abs": case_status.PASS},
+    ),
+    Case(
+        id="load_transpose_add_store_dynamic",
+        script="load_transpose_add_store.py",
+        argv=NO_PROFILING + ("--dynamic",),
+        groups=("layout", "dynamic"),
+        note="Inductor dynamic=True，复用同一 compiled callable 跨两组 transpose/add shape",
+        expect={"load_transpose_add_store_dynamic": case_status.PASS},
+    ),
+    Case(
+        id="sub_transpose_abs_dynamic",
+        script="sub_transpose_abs.py",
+        argv=NO_PROFILING + ("--dynamic",),
+        groups=("layout", "dynamic"),
+        note="legacy Inductor 的符号尺寸 Sub/Transpose/Abs，多 shape 真机数值验证",
+        expect={"sub_transpose_abs_dynamic": case_status.PASS},
+    ),
+    Case(
+        id="transpose_chain",
+        script="transpose_chain.py",
+        argv=NO_PROFILING,
+        groups=("layout",),
+        note="910B3 legacy/MLIR 双路线已通过",
+        expect={"transpose_chain": case_status.PASS},
+    ),
+    Case(
+        id="cast_transpose",
+        script="cast_transpose.py",
+        argv=NO_PROFILING,
+        groups=("layout",),
+        note="910B3 legacy/MLIR 双路线已通过",
+        expect={"cast_transpose": case_status.PASS},
+    ),
+    Case(
+        id="broadcast_transpose",
+        script="broadcast_transpose.py",
+        argv=NO_PROFILING,
+        groups=("layout",),
+        note="910B3 legacy/MLIR 双路线已通过",
+        expect={"broadcast_transpose": case_status.PASS},
+    ),
+    Case(
+        id="transpose_sum",
+        script="transpose_sum.py",
+        argv=NO_PROFILING,
+        groups=("layout",),
+        note="910B3 legacy/MLIR 双路线已通过",
+        expect={"transpose_sum": case_status.PASS},
     ),
     Case(
         id="mixed_consumption",

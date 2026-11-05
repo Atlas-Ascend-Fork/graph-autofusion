@@ -52,6 +52,9 @@ using namespace mlir::afir;
 using namespace mlir::ascend::kernel;
 
 namespace mlir::ascend::kernel::detail {
+namespace {
+constexpr int kResourcePasses = 2;
+}
 
 LogicalResult CanonicalFunctionMemoryAllocator::validateResourceProperties(const CanonicalValueInfo &info, bool queue) {
   if (queue) {
@@ -435,12 +438,24 @@ LogicalResult CanonicalFunctionMemoryAllocator::createCanonicalResources() {
   }
   Value pipe = resourceBuilder->create<ascendc::PipeOp>(func.getLoc());
   createdOps.push_back(pipe.getDefiningOp());
-  for (auto &entry : resources) {
-    auto &resource = entry.second;
-    LogicalResult created =
-        resource.key.queue ? createQueueResource(pipe, resource) : createBufferResource(pipe, resource);
-    if (failed(created)) {
-      return failure();
+  // 队列先于 TBuf 发 `InitBuffer`：TPipe 按调用序线性分配 UB，这决定了缓冲在 UB 里的
+  // 布局。ConfusionTranspose 一类 scatter 型 API（`TransDataTo5HD` 地址表形态）把尾块
+  // 的目的地址表混排「目标张量（队列槽）+ 共享 tmp（TBuf）」两块区域——CPU 模拟器
+  // （`libcpudebug` 的 `scatter_vnchwconv_b32`）在 tmp 区域位于目标区域**之前**时会丢写
+  // 尾块（输出尾行全 0，e2e `load_transpose_store_2x37x23` 实测）。队列在前、TBuf 在后
+  // 让 tmp 恒在队列槽之上，与 legacy 的布局一致。只改发射顺序，不动 `resources` 的键序
+  // ——那张表还有别的消费方。
+  for (auto pass = 0; pass < kResourcePasses; ++pass) {
+    for (auto &entry : resources) {
+      auto &resource = entry.second;
+      if ((pass == 0) != resource.key.queue) {
+        continue;
+      }
+      LogicalResult created =
+          resource.key.queue ? createQueueResource(pipe, resource) : createBufferResource(pipe, resource);
+      if (failed(created)) {
+        return failure();
+      }
     }
   }
   resourceBuilder->setInsertionPoint(materializationAnchor);

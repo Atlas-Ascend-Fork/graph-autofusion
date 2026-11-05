@@ -18,6 +18,7 @@
 #include "dialect/AFIR/IR/AFIR.h"
 #include "dialect/AFIR/Support/SymbolicExpressionDetail.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -99,8 +100,19 @@ enum class TransferPlanSide { Automatic, Operand };
 // 构造搬运计划；失败不得回落 identity，调度路径不适用时仍须通过 identity 检查。
 FailureOr<TransferPlan> buildTransferPlan(Operation *op, TransferPlanSide side = TransferPlanSide::Automatic);
 
+// 检查 load/store 的 UB 行布局是否能由 block DMA 表达。可证行重叠或步距被截断时
+// 返回 false，未知符号返回 true。Store 零间隙放行；不检查 GM 侧，不适用于 transpose。
+bool blockDmaSegmentGeometryIsSound(Operation *op, const TransferPlan &plan);
+
 // 按指定局部 descriptor 构造计划，不修改 op 属性。
 FailureOr<TransferPlan> buildTransferPlanForDescriptor(Operation *op, TensorDescAttr localDescriptor);
+
+// 局部视图取自 TensorDescAttr：Load 取结果，Store 取操作数；`Implementations/` 侧的
+// 形态判据（`Transpose.cpp` / `Pad.cpp`）与计划构造取同一份事实。
+FailureOr<TensorDescAttr> getLocalDescriptor(Operation *op, TransferPlanSide side);
+
+// 图上的轴表（`afir.asc_graph` 的 axes），按轴 id 索引；取不到（无 func 或无属性）失败。
+FailureOr<llvm::DenseMap<int64_t, AxisAttr>> collectGraphAxes(Operation *op);
 
 // 两个符号表达式的相等性证明。Unknown 表示不能证明，不表示不相等。
 detail::TruthValue proveEqual(ExprAttr lhs, ExprAttr rhs);
@@ -110,8 +122,9 @@ using ScheduledTransferBody = llvm::function_ref<LogicalResult(OpBuilder &, cons
 
 // 最内两项供 DMA，其余项生成嵌套循环，在最内层调用 emitBody。
 // 两项及以内直接调用；循环不变量在循环外物化，行偏移在循环内计算。
+// compact 表示 UB 行紧凑存储；连续后缀的 stride 随尾块实际尺寸变化。
 LogicalResult emitScheduledTransfer(Operation *op, OpBuilder &builder, const TransferPlan &plan,
-                                    ScheduledTransferBody emitBody);
+                                    ScheduledTransferBody emitBody, bool compact = false);
 // 按 ActualSize 物化最多二维的有效范围，保持外到内顺序，不生成 DMA 偏移。
 FailureOr<SmallVector<Value, 2>> materializeScheduledTransferDims(Operation *op, OpBuilder &builder,
                                                                   const TransferPlan &plan);

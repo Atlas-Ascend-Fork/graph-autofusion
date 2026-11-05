@@ -21,6 +21,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 #include <array>
+#include <set>
 #include <string>
 
 using namespace mlir;
@@ -58,12 +59,16 @@ struct Requirements {
   // which name lands here.
   ApiExtensionOrder extensionHeaders;
   // 前导头（今天只有 `utils.h` 一族）要排在**所有**扩展头前面——这比扩展头之间那种两两
-  // 先后更强，所以它单独一张表，而不是当作每个 op 头列表的第一项：混进去就只能保证它排在
+  // 先后更强，所以它单独一张表，而不是当作每个 op 的头列表的第一项：混进去就只能保证它排在
   // 同一个 op 的头前面，排不到别的 op 的头前面（`utils.h` 字典序在 `reciprocal.h` 之后）。
   // 哪个扩展头需要哪个前导由 op 自己声明，这一层照样只收名字。前导彼此之间同样可以有先后
   // （`bessel_j0` 要 `bessel_j_utils` 排在 `trigonometric_function_utils` 之前），所以这张表
   // 与扩展头那张走同一套排序。
   ApiExtensionOrder preludeHeaders;
+  // CANN 官方头（`ApiExtensionHeader` 第三段列表）：真头文件，由 device 编译器的 `-I`
+  // 解析，不内联文本。它们是自足翻译单元，没有扩展头那种先后约束，也不参与家族判别
+  // （CANN 头不是哪张供给表的标记），所以只收名字、字典序发。
+  std::set<llvm::StringRef> officialHeaders;
 };
 
 bool ValidateAggregateModule(mlir::ModuleOp module) {
@@ -80,6 +85,8 @@ void CollectRequirements(mlir::ModuleOp module, Requirements &requirements) {
     if (auto extension = mlir::dyn_cast<mlir::ascendc::ApiExtensionOp>(operation)) {
       requirements.extensionHeaders.declare(operation, extension.getExtensionHeaders());
       requirements.preludeHeaders.declare(operation, extension.getExtensionPreludeHeaders());
+      const llvm::ArrayRef<llvm::StringRef> officials = extension.getExtensionOfficialIncludes();
+      requirements.officialHeaders.insert(officials.begin(), officials.end());
     }
   });
 }
@@ -91,7 +98,8 @@ void CollectRequirements(mlir::ModuleOp module, Requirements &requirements) {
 bool IsManaged(mlir::emitc::IncludeOp include, const Requirements &requirements) {
   llvm::StringRef path = include.getInclude();
   return path == kKernel || path == kTiling || path == kCstdint || path == kListTensor || path == kMatmul ||
-         requirements.preludeHeaders.contains(path) || requirements.extensionHeaders.contains(path);
+         requirements.preludeHeaders.contains(path) || requirements.extensionHeaders.contains(path) ||
+         requirements.officialHeaders.count(path) != 0;
 }
 
 void AddKernelIncludes(mlir::ModuleOp module, const Requirements &requirements,
@@ -122,6 +130,11 @@ void AddKernelIncludes(mlir::ModuleOp module, const Requirements &requirements,
     if (needed) {
       builder.create<mlir::emitc::IncludeOp>(include_spec.path, include_spec.isStandardInclude);
     }
+  }
+  // CANN 官方头：固定块之后、扩展头之前——与 legacy 的 include 顺序一致。它们是
+  // device 编译器 `-I` 解析的真头文件（不内联文本），也不需要那条 using-directive。
+  for (llvm::StringRef official : requirements.officialHeaders) {
+    builder.create<mlir::emitc::IncludeOp>(official, /*isStandardInclude=*/false);
   }
   // After the fixed block, so an extension header can rely on kernel_operator.h
   // having been included, matching the order legacy codegen emits them in.

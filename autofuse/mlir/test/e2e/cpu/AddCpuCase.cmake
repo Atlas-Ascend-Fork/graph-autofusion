@@ -70,8 +70,26 @@ endfunction()
 # NpuArch 那一处走 `PlatformContext::SetPlatformInfo`（见 Generator.cpp），不改共用的
 # runtime stub：stub 是整个测试套件共用的，把它的返回值改成可配会牵连到所有用例。
 function(add_mlir_e2e_cpu_case name)
-    cmake_parse_arguments(PARSE_ARGV 1 CASE "" "PLATFORM;TILE_ACCESSOR;BLOCK_INNER_ACCESSOR"
+    cmake_parse_arguments(PARSE_ARGV 1 CASE "REQUIRES_COMPACT_SDK" "PLATFORM;TILE_ACCESSOR;BLOCK_INNER_ACCESSOR;HOST_TILING_API"
         "GENERATOR_SOURCES;TEST_SOURCES;OUTPUT_SHAPE;INPUT_SHAPES;COVERS;ENVIRONMENT")
+    if(CASE_REQUIRES_COMPACT_SDK)
+        if(NOT CASE_PLATFORM STREQUAL "reg_base")
+            message(FATAL_ERROR "${name}: REQUIRES_COMPACT_SDK requires PLATFORM reg_base")
+        endif()
+        if(NOT AF_MLIR_E2E_CPU_REG_BASE_SDK_PROBED)
+            execute_process(
+                COMMAND "${Python3_EXECUTABLE}" "${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/support/prepare_reg_base_sdk.py"
+                        "${AF_MLIR_E2E_CPU_REG_BASE_NATIVE_SDK}" "${AF_MLIR_E2E_CPU_REG_BASE_SDK}"
+                RESULT_VARIABLE _AF_MLIR_E2E_CPU_REG_BASE_SDK_RESULT
+            )
+            set(AF_MLIR_E2E_CPU_REG_BASE_SDK_PROBED ON)
+            set(AF_MLIR_E2E_CPU_REG_BASE_SDK_PROBED ON PARENT_SCOPE)
+            if(NOT _AF_MLIR_E2E_CPU_REG_BASE_SDK_RESULT EQUAL 0 OR
+               NOT EXISTS "${AF_MLIR_E2E_CPU_REG_BASE_SDK}/impl/basic_api/kernel_operator_data_copy_intf_impl.h")
+                message(FATAL_ERROR "${name}: failed to prepare Compact DMA SDK from ${AF_MLIR_E2E_CPU_REG_BASE_NATIVE_SDK}")
+            endif()
+        endif()
+    endif()
     # 两份源码缺省就是用例目录下那两个固定名字——这个函数只从 `cases/<dir>/CMakeLists.txt` 里
     # 调，所以 `CMAKE_CURRENT_SOURCE_DIR` 就是用例目录。显式传了就用传的那份（一个目录注册多个
     # 形状变体、或要多带一个源文件时需要），所以这只是去掉每个用例都要抄一遍、而且抄错了才发现
@@ -272,6 +290,22 @@ function(add_mlir_e2e_cpu_case name)
     target_include_directories(${target} SYSTEM PRIVATE
         "${ASCEND_INSTALL_PATH}/pkg_inc/base"
     )
+    # reg 侧包装声明的 CANN 官方头（如 `TransposeExtend` 的
+    # `basic_api/reg_compute/kernel_reg_compute_datacopy_intf.h`，见
+    # `OpVecTranspose.td` 的 `ApiExtensionHeader` 第三段）不在 tikicpulib 目标的传递
+    # include 里，由这里补上——目录下恰好只有 `basic_api/` 这一层前缀。
+    if(CASE_PLATFORM)
+        set(case_sdk "${AF_MLIR_E2E_CPU_REG_BASE_NATIVE_SDK}")
+        if(CASE_REQUIRES_COMPACT_SDK)
+            set(case_sdk "${AF_MLIR_E2E_CPU_REG_BASE_SDK}")
+        endif()
+        target_include_directories(${target} SYSTEM BEFORE PRIVATE
+            "${case_sdk}/include"
+            "${case_sdk}/include/basic_api"
+            "${case_sdk}/include/interface"
+            "${case_sdk}/impl"
+        )
+    endif()
     target_compile_definitions(${target} PRIVATE
         AUTO_FUSE_DEVICE=1
         AF_MLIR_E2E_CPU_KERNEL_SYMBOL=mlir_${name}
@@ -282,6 +316,28 @@ function(add_mlir_e2e_cpu_case name)
     target_link_libraries(${target} PRIVATE
         ${case_tikicpulib} GTest::gtest GTest::gtest_main pthread runtime_headers unified_dlog
     )
+    # 走 host tiling API 的 plan（pad/transpose 一类），生成的 tiling.cpp 引用
+    # `AscendC::PadTilingFunc`、`optiling::TilingDef::SaveToBuffer`、`ge::Shape` 等符号。
+    # 库集合与真实交付流逐字一致（`ascendc_compile.py` 的 `HOST_LINK_LIBRARIES`）。这些
+    # CANN 库之间存在交付流（`-shared`）才允许的悬空交叉引用——exe 链接显式放开，
+    # 运行时由测试环境 LD_LIBRARY_PATH 里的 CANN lib64 解析。按用例 opt-in：纯算子的
+    # tiling.cpp 没有这些引用，不改动它们的链接面。
+    if(CASE_HOST_TILING_API)
+        set(host_tiling_libs "")
+        foreach(host_tiling_lib tiling_api platform graph_base register acl_rt)
+            find_library(case_host_tiling_lib_${host_tiling_lib}
+                NAMES ${host_tiling_lib}
+                PATHS ${ASCEND_INSTALL_PATH}/lib64
+                NO_DEFAULT_PATH)
+            if(NOT case_host_tiling_lib_${host_tiling_lib})
+                message(FATAL_ERROR
+                    "${name}: host tiling library '${host_tiling_lib}' not found under ${ASCEND_INSTALL_PATH}/lib64")
+            endif()
+            list(APPEND host_tiling_libs "${case_host_tiling_lib_${host_tiling_lib}}")
+        endforeach()
+        target_link_options(${target} PRIVATE -Wl,--allow-shlib-undefined)
+        target_link_libraries(${target} PRIVATE ${host_tiling_libs})
+    endif()
 
     add_test(NAME ${target} COMMAND ${target})
     set_tests_properties(${target} PROPERTIES

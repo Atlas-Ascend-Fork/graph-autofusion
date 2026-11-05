@@ -32,6 +32,24 @@ target_compile_definitions(MlirCodegenSt PRIVATE
     AUTOFUSE_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
 )
 
+# The legacy Python UT/ST share their graph tests. Reuse that source with a
+# separate ST registration and process, using the production Python binding.
+add_test(NAME LegacyInductorTransposePythonSt
+  COMMAND ${Python3_EXECUTABLE}
+    ${MLIR_CODE_ROOT_DIR}/test/ut/python/test_legacy_inductor_transpose.py
+    --extension $<TARGET_FILE:AutofuseMlirPythonBinding>
+    --python-source ${CODE_ROOT_DIR}/compiler/python
+)
+set_tests_properties(LegacyInductorTransposePythonSt PROPERTIES
+  LABELS "mlir_st;inductor_transpose"
+  ENVIRONMENT "LD_LIBRARY_PATH=${AF_AUTOFUSE_MLIR_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH};LD_PRELOAD=$<TARGET_FILE:${AF_AUTOFUSE_MLIR_RUNTIME_STUB_TARGET}>"
+)
+add_custom_target(check-legacy-inductor-transpose-python-st
+  COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^LegacyInductorTransposePythonSt$"
+  DEPENDS AutofuseMlirPythonBinding ${AF_AUTOFUSE_MLIR_RUNTIME_STUB_TARGET}
+)
+set_property(GLOBAL APPEND PROPERTY AFIR_GTEST_CHECK_TARGETS_st check-legacy-inductor-transpose-python-st)
+
 # Collect the check-* drivers registered by add_afir_gtest() above.
 get_property(AF_ST_CHECK_TARGETS GLOBAL PROPERTY AFIR_GTEST_CHECK_TARGETS_st)
 
