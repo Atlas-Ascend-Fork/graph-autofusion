@@ -320,19 +320,8 @@ def export(
             if final_records and any(
                 record.source != "legacy" for record in final_records
             ):
-                seen = set()
                 for final_record in final_records:
-                    record = _final_record_json(final_record)
-                    identity = (
-                        final_record.op,
-                        final_record.graph,
-                        final_record.result,
-                        final_record.group,
-                    )
-                    if identity in seen and final_record.parse_status == "ok":
-                        record["parse_status"] = "duplicate_final_tiling"
-                    seen.add(identity)
-                    records.append(record)
+                    records.append(_final_record_json(final_record))
             for record in records:
                 stream.write(
                     json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"

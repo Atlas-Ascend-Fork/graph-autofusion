@@ -19,11 +19,122 @@
 #include "common_utils.h"
 #include "utils/api_call_factory.h"
 #include "elewise/unary_api_call.h"
+#include "elewise/binary_api_call.h"
+#include "utils/api_call_utils.h"
 
 using namespace ge;
 using namespace af::ops;
 using namespace af::ascir_op;
 using namespace codegen;
+
+namespace {
+codegen::Tensor MakeCvPointwiseTensor(af::AscGraph &graph, int64_t id) {
+  auto tensor = graph.FindNode("x")->outputs[0];
+  tensor.attr.dtype = DT_FLOAT;
+  tensor.attr.mem.tensor_id = id;
+  tensor.attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  tensor.attr.mem.position = af::Position::kPositionVecIn;
+  tensor.attr.que.id = id;
+  tensor.attr.mem.reuse_id = 0;
+  tensor.attr.axis = {0, 1};
+  tensor.attr.repeats = {af::Symbol("m"), af::Symbol("n")};
+  tensor.attr.strides = {af::Symbol("n"), One};
+  tensor.attr.vectorized_axis = {0, 1};
+  tensor.attr.vectorized_strides = {af::Symbol("n"), One};
+  std::string dtype = "float";
+  return codegen::Tensor(tensor, dtype);
+}
+}  // namespace
+
+TEST(CodegenKernel, CvUbPointwiseFlatCallRetainsPaddingFallback) {
+  af::AscGraph graph("test_graph");
+  Data data("x", graph);
+  auto input = MakeCvPointwiseTensor(graph, 0);
+  auto rhs = MakeCvPointwiseTensor(graph, 1);
+  auto output = MakeCvPointwiseTensor(graph, 2);
+  Tiler tiler;
+  TPipe tpipe("tpipe", tiler);
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kUBFuse;
+  tpipe.cube_output_tensor_id = input.id;
+  std::string result;
+  UnaryApiCall unary("Abs");
+  ASSERT_EQ(unary.Generate(tpipe, {}, {input}, {output}, result), af::SUCCESS);
+  EXPECT_NE(result.find("curAlignN == curAivN"), std::string::npos);
+  EXPECT_NE(result.find(GenBlockAlignNExpr(output, "curAivN") + " == curAivN"), std::string::npos);
+  EXPECT_NE(result.find("Abs(local_2[0], local_0[0], ConvertToUint32(curAivM * curAivN));"), std::string::npos);
+  EXPECT_NE(result.find("} else {\nfor (uint32_t cv_row"), std::string::npos);
+  EXPECT_NE(result.find("local_0[cv_row * ConvertToUint32(curAlignN)]"), std::string::npos);
+  EXPECT_EQ(result.find("curAivN *="), std::string::npos);
+
+  BinaryApiCall binary("Sub");
+  ASSERT_EQ(binary.Generate(tpipe, {}, {input, rhs}, {output}, result), af::SUCCESS);
+  EXPECT_NE(result.find("Sub(local_2[0], local_0[0], local_1[0], ConvertToUint32(curAivM * curAivN));"),
+            std::string::npos);
+  EXPECT_NE(result.find("} else {\nfor (uint32_t cv_row"), std::string::npos);
+
+  tpipe.is_conv2d = true;
+  ASSERT_EQ(unary.Generate(tpipe, {}, {input}, {output}, result), af::SUCCESS);
+  EXPECT_EQ(result.find("curAivM * curAivN"), std::string::npos);
+  tpipe.is_conv2d = false;
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kDefault;
+  ASSERT_EQ(unary.Generate(tpipe, {}, {input}, {output}, result), af::SUCCESS);
+  EXPECT_EQ(result, "Abs(local_2[0], local_0[0], local_0_actual_size);\n");
+  ASSERT_EQ(binary.Generate(tpipe, {}, {input, rhs}, {output}, result), af::SUCCESS);
+  EXPECT_EQ(result, "Sub(local_2[0], local_0[0], local_1[0], local_0_actual_size);\n");
+}
+
+TEST(CodegenKernel, CvUbPointwiseFlatCallRejectsUnsupportedViewsAndAliasing) {
+  af::AscGraph graph("test_graph");
+  Data data("x", graph);
+  auto input = MakeCvPointwiseTensor(graph, 0);
+  auto output = MakeCvPointwiseTensor(graph, 1);
+  Tiler tiler;
+  TPipe tpipe("tpipe", tiler);
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kUBFuse;
+  tpipe.cube_output_tensor_id = input.id;
+  const auto generate = [&]() { return GenCvUbFuseFlatApiCondition(tpipe, {input}, output); };
+  const auto dense = input;
+  ASSERT_FALSE(generate().empty());
+  input.vectorized_strides = {Zero, One};
+  EXPECT_TRUE(generate().empty());
+  input.vectorized_strides = {One, af::Symbol("m")};
+  EXPECT_TRUE(generate().empty());
+  input.vectorized_strides = dense.vectorized_strides;
+  input.axis_size = {af::Symbol("n"), af::Symbol("m")};
+  EXPECT_TRUE(generate().empty());
+  input.axis_size = dense.axis_size;
+  input.axis = {1, 0};
+  EXPECT_TRUE(generate().empty());
+  input.axis = dense.axis;
+  input.dtype = DT_FLOAT16;
+  EXPECT_TRUE(generate().empty());
+  input.dtype = dense.dtype;
+  input.is_constant = true;
+  EXPECT_TRUE(generate().empty());
+  input.is_constant = false;
+  input.alloc_type = af::AllocType::kAllocTypeInvalid;
+  EXPECT_TRUE(generate().empty());
+  input.alloc_type = dense.alloc_type;
+  input.que_id = output.que_id;
+  input.reuse_id = output.reuse_id;
+  EXPECT_TRUE(generate().empty());
+  input.reuse_id = output.reuse_id + 1;
+  EXPECT_TRUE(generate().empty());
+  std::string position = "VECIN";
+  auto queue = tpipe.ques.emplace(output.que_id, TQue(output.que_id, af::Position::kPositionVecIn, position));
+  queue.first->second.share_group[input.reuse_id] = {input.id};
+  queue.first->second.share_group[output.reuse_id] = {output.id};
+  EXPECT_FALSE(generate().empty());
+  queue.first->second.share_group[input.reuse_id].push_back(2);
+  EXPECT_TRUE(generate().empty());
+  input.que_id = dense.que_id;
+  input.reuse_id = dense.reuse_id;
+  output.dtype = DT_FLOAT16;
+  EXPECT_TRUE(generate().empty());
+  output.dtype = DT_FLOAT;
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kCommon;
+  EXPECT_TRUE(generate().empty());
+}
 
 TEST(CodegenKernel, UnaryApicall) {
   af::AscGraph graph("test_graph");

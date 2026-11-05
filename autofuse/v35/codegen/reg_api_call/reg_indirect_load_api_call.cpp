@@ -1196,10 +1196,14 @@ af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const st
     if (!chains[i].local_target) {
       output_offset = store_exprs[i];
     } else if (!logical_view.output.sizes.empty()) {
-      // 编译期常量直接内联；仅运行期符号（如 t->ksN）经 Context 传入，避免在静态 Store 中引用 t->。
-      const std::string inner_size = UseRuntimeOutputInnerSize(has_post_reduce, logical_view)
-                                         ? "static_cast<" + offset_type + ">(context.output_inner_size)"
-                                         : tpipe.tiler.Size(logical_view.output.sizes.back());
+      // 编译期常量直接内联；仅运行期符号（如 t->ksN）经 Context 传入，避免在静态 Store
+      // 中引用 t->。组员形态（post-Reduce 置空、value 直写 UB 局部目标——多 gather L4
+      // 逐成员发射）的动态 shape 行宽经注册表的 rt_size_N 字段寻址（空跑收集已含本
+      // 发射，登记自动完成）；post-Reduce 主路径仍走专用 output_inner_size 字段。
+      const std::string inner_size =
+          UseRuntimeOutputInnerSize(has_post_reduce, logical_view)
+              ? "static_cast<" + offset_type + ">(context.output_inner_size)"
+              : runtime_sizes.InlineOrContext(logical_view.output.sizes.back(), tpipe, offset_type);
       std::string dtype;
       GE_ASSERT_SUCCESS(Tensor::DtypeName(chains[i].dtype, dtype));
       const auto row_stride = "KernelUtils::SizeAlign(" + inner_size + ", 32/sizeof(" + dtype + "))";
@@ -2679,6 +2683,15 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
                                                  members.front().logical_view, "output_index", "output_index", tpipe,
                                                  fused_runtime_sizes, collect_offset_type, scratch_values, scratch));
       }
+      if (!merge_info.register_merge && !members.front().logical_view.output.sizes.empty()) {
+        // [SIMT 动态 shape] L3 Store 行宽（output inner size）在 FusedBody 静态方法体内
+        // 消费：动态 shape 下是运行期符号尺寸（t->ksN，t 在静态方法作用域不可见），须经
+        // FusedCtx 的 rt_size_N 字段传入；FusedCtx 先于 FusedBody 发射，故先在此登记（空跑
+        // 输出丢弃，正式发射按 tiler 表达式命中同一条目）。静态 shape 为编译期常量，
+        // InlineOrContext 直接内联，不新增注册条目。
+        (void)fused_runtime_sizes.InlineOrContext(members.front().logical_view.output.sizes.back(), tpipe,
+                                                  collect_offset_type);
+      }
     }
     // Phase 2 前置：OffsetType 按成员策略位宽选优（全 uint32 → 32 位偏移）——FusedCtx 的
     // rt_div magic/shift 字段类型与其一致，须先于结构体发射求出。
@@ -2890,10 +2903,13 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
       }
     } else {
       // L3：UB 局部目标行对齐寻址（与单 gather GenerateSimtOutputsEvaluator 的 local target
-      // Store 一致；组员无 post-Reduce ⇒ inner size 恒为编译期常量，直接内联）。
+      // Store 一致）。inner size 在 FusedBody 静态方法体内消费：静态 shape 为编译期常量
+      // 直接内联；动态 shape 下是运行期符号尺寸（t->ksN，t 在静态方法作用域不可见），经
+      // FusedCtx 的 rt_size_N 字段传入（登记见上方空跑段）。
       std::string inner_size_expr;
       if (!members.front().logical_view.output.sizes.empty()) {
-        inner_size_expr = tpipe.tiler.Size(members.front().logical_view.output.sizes.back());
+        inner_size_expr = fused_runtime_sizes.InlineOrContext(members.front().logical_view.output.sizes.back(), tpipe,
+                                                              fused_offset_type);
       }
       for (size_t k = 0; k < member_count; ++k) {
         if (inner_size_expr.empty()) {

@@ -275,6 +275,7 @@ std::string GetIndirectLoadSemanticName(const af::AscNodePtr &node) {
   return MakeTemplateSemanticName(semantic::kIndirectLoad, strategy, role, features);
 }
 
+// Collect workspace reuse in the same pass, preserving the existing exported helper.
 void AppendNddmaTransforms(const af::AscGraph &graph, std::vector<std::string> &transforms) {
   const std::vector<std::pair<std::string, std::string>> rules = {{semantic::kSlice, semantic::kNddmaSlice},
                                                                   {semantic::kLoad, semantic::kLoadToNddma},
@@ -283,17 +284,23 @@ void AppendNddmaTransforms(const af::AscGraph &graph, std::vector<std::string> &
                                                                   {semantic::kCast, semantic::kNddmaCast}};
   std::vector<std::string> sources;
   bool has_nddma = false;
+  bool has_output_reuse = false;
   for (const auto &node : graph.GetAllNodes()) {
-    if (!af::ops::IsOps<af::ascir_op::Nddma>(node)) {
+    const bool is_nddma = af::ops::IsOps<af::ascir_op::Nddma>(node);
+    if (!is_nddma && !af::ops::IsOps<af::ascir_op::Workspace>(node)) {
       continue;
     }
-    has_nddma = true;
+    has_nddma = has_nddma || is_nddma;
     const std::string source = GetTemplateSemanticTransform(*node);
     size_t begin = 0UL;
     while (begin <= source.size()) {
       const size_t end = source.find('+', begin);
       const std::string token = source.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
-      AppendSemanticPart(sources, token);
+      if (is_nddma) {
+        AppendSemanticPart(sources, token);
+      } else {
+        has_output_reuse = has_output_reuse || token == semantic::kOutputReuse;
+      }
       if (end == std::string::npos) {
         break;
       }
@@ -307,6 +314,9 @@ void AppendNddmaTransforms(const af::AscGraph &graph, std::vector<std::string> &
   }
   if (has_nddma && transforms.empty()) {
     AppendSemanticPart(transforms, semantic::kNddma);
+  }
+  if (has_output_reuse) {
+    AppendSemanticPart(transforms, semantic::kOutputReuse);
   }
 }
 
@@ -1523,6 +1533,11 @@ af::Status CreateAttResult(ascir::FusedScheduledResult &elemwise_schedule_result
 }
 
 af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_result) {
+  return CreateCVFusionResult(elemwise_schedule_result, false);
+}
+
+af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_result, bool allow_fragment_padding) {
+  allow_fragment_padding = allow_fragment_padding && !IsConv2DFusedScheduled(elemwise_schedule_result);
   if (!IsCubeFusedScheduled(elemwise_schedule_result)) {
     return af::SUCCESS;
   }
@@ -1541,7 +1556,7 @@ af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_r
     }
   }
 
-  auto update_graph_axis = [](af::AscGraph &graph) {
+  auto update_graph_axis = [allow_fragment_padding](af::AscGraph &graph) {
     for (auto &ax : graph.GetAllAxis()) {
       if (ax == nullptr) {
         continue;
@@ -1552,6 +1567,11 @@ af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_r
         // 名字必须为合法标识符：轴属性会经 AscGraph 序列化克隆（FusedGraphUnfolder::CloneAscGraphs），
         // 带 "()" 的名字无法被表达式 scanner/parser 解析，导致克隆图 align 丢失
         ax->align = af::Symbol(kRuntimeAlignFuncName);
+        // A Cube fragment spans rows even when its native N axis is smaller than the fragment budget.
+        // The callback uses the fragment extents; ATT must not bound this budget by one original graph axis.
+        if (allow_fragment_padding) {
+          ax->allow_oversize_axis = true;
+        }
       }
     }
   };
@@ -1584,9 +1604,13 @@ af::Status CreateCVFusionCommonResult(ascir::FusedScheduledResult &elemwise_sche
 }
 
 af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result) {
+  return ProcessCubeFusionResultDynamic(fused_result, false);
+}
+
+af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result, bool allow_fragment_padding) {
   ascir::FusedScheduledResult common_schedule_result = fused_result;
   if (ascgen_utils::IsCubeUBFusedScheduled(fused_result)) {
-    GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionResult(fused_result));
+    GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionResult(fused_result, allow_fragment_padding));
   }
   if (ascgen_utils::IsCubeCommonFusedScheduled(common_schedule_result)) {
     GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionCommonResult(common_schedule_result));
@@ -1636,9 +1660,17 @@ af::Status FilterCVFusionUBResult(ascir::FusedScheduledResult &ub_schedule_resul
 
 af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
                        std::string &input_type, std::string &output_type) {
+  MatMulAttr matmul_attr;
+  return GetCubeInfo(fused_schedule_result, is_batch, is_conv, input_type, output_type, matmul_attr);
+}
+
+af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
+                       std::string &input_type, std::string &output_type, MatMulAttr &matmul_attr) {
   is_batch = false;
   is_conv = false;
-  auto extract_from_impl_graphs = [&is_batch, &is_conv, &input_type, &output_type](const auto &schedule_groups) {
+  matmul_attr = {};
+  auto extract_from_impl_graphs = [&is_batch, &is_conv, &input_type, &output_type,
+                                   &matmul_attr](const auto &schedule_groups) {
     for (const auto &schedule_group : schedule_groups) {
       for (const auto &impl_graph : schedule_group.impl_graphs) {
         for (const auto &node : impl_graph.GetAllNodes()) {
@@ -1649,7 +1681,7 @@ af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result,
             is_batch = false;
             is_conv = true;
           } else {
-            ascgen_utils::MatMulAttr mm_attr_data;
+            auto &mm_attr_data = matmul_attr;
             if (ascgen_utils::ParseMatmulAttr(node, mm_attr_data) != af::SUCCESS) {
               return false;
             }

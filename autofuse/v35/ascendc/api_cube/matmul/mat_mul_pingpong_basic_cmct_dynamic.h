@@ -70,57 +70,10 @@ __aicore__ inline void MatMulActKernel(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM,
 }
 
 template <class A_TYPE, class B_TYPE, class C_TYPE, class BIAS_TYPE, class A_LAYOUT, class B_LAYOUT, class C_LAYOUT,
-          uint64_t FULL_LOAD_MODE = 0, uint64_t FUSED_OP_TYPE = 0>
-__aicore__ inline void MatMulActKernelFusion(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR cGM, GM_ADDR workspaceGM,
-                                             const MatMulV3BasicTilingData &tilingData, AutoFusionVector::Params *param,
-                                             int64_t batch = 0) {
-  // 定义L1和L0的TileShape
-  using L1TileShape = AscendC::Shape<_0, _0, _0>;
-  using L0TileShape = AscendC::Shape<_0, _0, _0>;
-
-  // 定义矩阵的类型和布局
-  using AType = A_TYPE;
-  using BType = B_TYPE;
-  using BiasType = BIAS_TYPE;
-  using OutType = C_TYPE;
-
-  using LayoutA = A_LAYOUT;
-  using LayoutB = B_LAYOUT;
-  using LayoutC = C_LAYOUT;
-
-  // 定义scheduler类型 来自block_scheduler_policy.h
-  using BlockScheduler = BuiltInAswtScheduler<FULL_LOAD_MODE>;
-
-  // 定义MMAD类型
-  using DispatchPolicy = MatmulMultiBlockWithOutQue<AscendC::Shape<_0, _0, _0, _0>, FULL_LOAD_MODE, FUSED_OP_TYPE>;
-  using BlockMmad = Block::BlockMmadBuilder<AType, LayoutA, BType, LayoutB, OutType, LayoutC, BiasType, LayoutC,
-                                            L1TileShape, L0TileShape, BlockScheduler, DispatchPolicy>;
-
-  // 定义Fusion类型
-  using FusionOp = AutoFusionVector;
-
-  // 定义BlockEpilogue类型
-  using BlockEpilogue = Block::BlockEpilogueCV<L0TileShape, OutType, OutType, FusionOp>;
-
-  // 定义shape的形状，tuple保存 m n k batch
-  using ProblemShape = MatmulShape;
-
-  // 定义Kernel类型
-  using MatmulKernel = Kernel::KernelMatmulMixWithoutQue<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
-  using Params = typename MatmulKernel::Params;
-  Params params = {{tilingData.m, tilingData.n, tilingData.k, batch},  // shape
-                   {aGM, bGM, cGM, biasGM},                            // gm addr
-                   {cGM, *param},                                      // epilogue args
-                   {&tilingData}};
-  MatmulKernel mm;
-  mm(params);
-}
-
-template <class A_TYPE, class B_TYPE, class C_TYPE, class BIAS_TYPE, class A_LAYOUT, class B_LAYOUT, class C_LAYOUT,
-          uint64_t FULL_LOAD_MODE = 0, uint64_t FUSED_OP_TYPE = 0>
+          uint64_t FULL_LOAD_MODE, uint64_t FUSED_OP_TYPE, class FusionOp>
 __aicore__ inline void MatMulActKernelFusion(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR cGM, GM_ADDR workspaceGM,
                                              const MatMulV3BasicTilingData &tilingData,
-                                             AutoFusionVectorDB::Params *param, int64_t batch = 0) {
+                                             typename FusionOp::Params *param, int64_t batch = 0) {
   // 定义L1和L0的TileShape
   using L1TileShape = AscendC::Shape<_0, _0, _0>;
   using L0TileShape = AscendC::Shape<_0, _0, _0>;
@@ -144,7 +97,6 @@ __aicore__ inline void MatMulActKernelFusion(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR b
                                             L1TileShape, L0TileShape, BlockScheduler, DispatchPolicy>;
 
   // 定义Fusion类型
-  using FusionOp = AutoFusionVectorDB;
 
   // 定义BlockEpilogue类型
   using BlockEpilogue = Block::BlockEpilogueCV<L0TileShape, OutType, OutType, FusionOp>;
@@ -162,5 +114,6 @@ __aicore__ inline void MatMulActKernelFusion(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR b
   MatmulKernel mm;
   mm(params);
 }
+
 }  // namespace MatmulV3Advanced
 #endif

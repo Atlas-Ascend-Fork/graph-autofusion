@@ -404,7 +404,8 @@ Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_sch
     return mlir_status == mlir::bridge::MlirCodegenStatus::kSucceeded ? af::SUCCESS : af::FAILED;
   }
 #endif
-  if (tiling_lib_.ShouldFallbackPgo(fused_schedule_result)) {
+  if (tiling_lib_.IsInductorPgoEnabled() && !ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) &&
+      tiling_lib_.ShouldFallbackPgo(fused_schedule_result)) {
     GELOGW("Tiling key count exceeds 10000, fallback to non-PGO Inductor codegen");
     Codegen fallback(*this);
     fallback.tiling_lib_.DisableInductorPgo();

@@ -15,6 +15,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 
 SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src"))
 ENTRYPOINT = os.path.join(SRC, "att.py")
@@ -273,3 +275,57 @@ def test_summary_only_final_tiling_is_exported(tmp_path):
     assert record["record_type"] == "final_tiling_summary"
     assert record["operator"] == "Fusion"
     assert record["groups"] == {"0": {"case_id": 2, "tiling_key": 7}}
+
+
+@pytest.mark.parametrize(
+    "second_source,second_case,second_key,expected_status",
+    [
+        ("pgo", 0, 0, "ok"),
+        ("runtime", 1, 1, "ok"),
+        ("runtime", 0, 1, "ok"),
+        ("runtime", 0, 0, "duplicate_final_tiling"),
+    ],
+)
+def test_final_evidence_retains_complete_record_identity(
+    tmp_path, second_source, second_case, second_key, expected_status
+):
+    """Different final choices remain valid; exact repeated identities do not."""
+
+    def final_line(source, case, key):
+        mode = "pgo" if source == "pgo" else "default"
+        return (
+            f'[ATT][FINAL_TILING] schema=1 source="{source}" '
+            f'selection_mode="{mode}" operator="Fusion" graph=0 result=0 '
+            f"group=0 case_id={case} tiling_key={key} score=1 "
+            'sub_case_tag="" template="Case" repr_kind="full_json" '
+            'pipe_estimates="{\\"AIV_MTE2\\":12.0}" '
+            'tiling_repr="{\\"tile_m\\":64}"\n'
+        )
+
+    log = tmp_path / "final-choices.log"
+    log.write_text(
+        final_line("runtime", 0, 0)
+        + final_line(second_source, second_case, second_key),
+        encoding="utf-8",
+    )
+    output = tmp_path / "evidence"
+    result = subprocess.run(
+        [sys.executable, ENTRYPOINT, "evidence", str(log), "-o", str(output)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    records = [
+        json.loads(line)
+        for line in (output / "att-evidence.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [record["parse_status"] for record in records] == ["ok", expected_status]
+    assert [
+        (record["source"], record["case_id"], record["tiling_key"])
+        for record in records
+    ] == [("runtime", 0, 0), (second_source, second_case, second_key)]
+    assert [record["source_line"] for record in records] == [1, 2]
+    manifest = json.loads((output / "tool-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["record_count"] == 2

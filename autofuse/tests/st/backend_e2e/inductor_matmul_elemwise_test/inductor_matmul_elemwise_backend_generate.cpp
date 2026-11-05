@@ -24,6 +24,7 @@
 #include "optimize.h"
 #include "runtime_stub.h"
 #include "share_graph.h"
+#include "tests/common/inductor_pgo_codegen_test_utils.h"
 
 namespace {
 constexpr size_t kTilingDataFileIndex = 0;
@@ -48,6 +49,7 @@ class TestBackendInductorMatmulElemwiseE2e : public testing::Test {
 };
 
 TEST_F(TestBackendInductorMatmulElemwiseE2e, InductorMatmulElemwiseE2eCodegen) {
+  autofuse::tests::ScopedAutofusePgoFlag pgo_flag(true);
   auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
   auto parts = splitString(KERNEL_SRC_LIST, ':');
   ASSERT_EQ(parts.size(), kExpectedKernelSrcCount);

@@ -1715,7 +1715,7 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, GeneratorTaskRestoresSkLogicalViewAf
   EXPECT_EQ(logical_view.output.strides, indirect_load->outputs()[0]->attr.strides);
 }
 
-TEST(IndirectLoadScheduleCaseGeneratorTest, SkRecordsWindowReuseInfoOnlyWhenFullResidencyExceedsUb) {
+TEST(IndirectLoadScheduleCaseGeneratorTest, SkRecordsWindowReuseInfoWhenFullResidencyMayExceedUb) {
   PlatformContextReset platform_reset;
   ge::PlatformContext::GetInstance().Reset();
   ge::PlatformInfo platform_info;
@@ -1736,10 +1736,13 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkRecordsWindowReuseInfoOnlyWhenFull
     ascgen_utils::indirect_load::TemplateAxes axes;
     ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(indirect_load, axes), af::SUCCESS);
     EXPECT_EQ(logical_view.window_iter_axes, (std::vector<af::AxisId>{axes.tile_outer_axis}));
-    EXPECT_EQ(logical_view.window_outer_count, af::Symbol("indirect_load_outerTb_size"));
+    const auto *tile_inner = candidate.FindAxis(axes.tile_inner_axis);
+    ASSERT_NE(tile_inner, nullptr);
+    EXPECT_EQ(logical_view.window_outer_count, tile_inner->size);
   };
 
-  // 动态 shape：无法静态判定全量驻留超限，不记录窗口语义，保持全量估算。
+  // 动态 shape：全量驻留量不可静态判定，记录单次调用驻留语义（tile_inner 行数），
+  // 不把每核串行循环次数计入 tmp。
   {
     auto graph = BuildIndirectLoadGraph(2);
     optimize::IndirectLoadScheduleCaseGenerator generator;
@@ -1748,7 +1751,7 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkRecordsWindowReuseInfoOnlyWhenFull
     ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
     const auto sk_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK);
     ASSERT_NE(sk_iter, graphs.end());
-    check_sk_view(*sk_iter, false);
+    check_sk_view(*sk_iter, true);
   }
   // 静态 shape 且全量驻留未超限（98KB < 256KB）：保持全量估算。
   {
@@ -1782,6 +1785,18 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkRecordsWindowReuseInfoOnlyWhenFull
     ASSERT_NE(sk_iter, graphs.end());
     check_sk_view(*sk_iter, true);
   }
+  // 动态 shape 且平台信息不可得：无法判定 UB 语义，保持全量估算。
+  {
+    ge::PlatformContext::GetInstance().Reset();
+    auto graph = BuildIndirectLoadGraph(2);
+    optimize::IndirectLoadScheduleCaseGenerator generator;
+    std::vector<af::AscGraph> graphs;
+    std::vector<std::string> score_functions;
+    ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+    const auto sk_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK);
+    ASSERT_NE(sk_iter, graphs.end());
+    check_sk_view(*sk_iter, false);
+  }
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, SkRestoresWindowReuseInfoAfterPartition) {
@@ -1812,12 +1827,14 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkRestoresWindowReuseInfoAfterPartit
   ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(indirect_load, axes), af::SUCCESS);
   ascgen_utils::indirect_load::TemplateLogicalView logical_view;
   ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateLogicalView(indirect_load, logical_view), af::SUCCESS);
-  // 分区后窗口迭代轴刷新为子图内重建的 tile_outer 轴，窗口 outer 行数仍携带 tile 尺寸符号。
+  // 分区后窗口迭代轴刷新为子图内重建的 tile_outer 轴，窗口行数取 tile_inner 尺寸。
   EXPECT_EQ(logical_view.window_iter_axes, (std::vector<af::AxisId>{axes.tile_outer_axis}));
   const auto *tile_outer = grouped_graph->FindAxis(axes.tile_outer_axis);
   ASSERT_NE(tile_outer, nullptr);
   EXPECT_EQ(tile_outer->type, af::Axis::Type::kAxisTypeTileOuter);
-  EXPECT_EQ(logical_view.window_outer_count, af::Symbol((tile_outer->name + "b_size").c_str()));
+  const auto *tile_inner = grouped_graph->FindAxis(axes.tile_inner_axis);
+  ASSERT_NE(tile_inner, nullptr);
+  EXPECT_EQ(logical_view.window_outer_count, tile_inner->size);
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, GeneratorTaskPopulatesCandidateMetadata) {

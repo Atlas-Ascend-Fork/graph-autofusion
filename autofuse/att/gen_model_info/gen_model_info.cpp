@@ -560,6 +560,13 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
                                      out_schedule_groups.enable_group_parallel, context, schedule_result.semantic_name),
         "Get model info failed, impl graph id = %ld, group id = %ld.", impl_graph_id, schedule_group_id);
     for (auto &model_info : model_info_list) {
+      // These dimensions describe runtime guards, not searchable axes. Keep
+      // them as input parameters so tiling caches also preserve their values.
+      for (const auto &var : schedule_result.schedule_groups[schedule_group_id].runtime_shape_vars) {
+        if (std::find(model_info.sizes.begin(), model_info.sizes.end(), var) == model_info.sizes.end()) {
+          model_info.sizes.push_back(var);
+        }
+      }
       model_info.schedule_group_ident.asc_graph_id = asc_graph_id;
       model_info.schedule_group_ident.impl_graph_id = impl_graph_id;
       model_info.schedule_group_ident.group_id = schedule_group_id;

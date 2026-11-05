@@ -47,7 +47,7 @@ export AUTOFUSE_FLAGS="--enable_autofuse=true"
 | `--autofuse_enhance_precision_blacklist` | GE 路径 | 控制指定 AscIR 算子类型是否跳过精度提升。取值为 AscIR 算子类型字符串，多个类型使用英文逗号分隔，也可配置为 `all`；默认值为空。`Sum`、`Mean`、`Prod` 不支持低精度类型，即使加入黑名单也仍会提升精度。配置 `Div`、`Reciprocal`、`Rsqrt`、`Sqrt`、`Pow` 或 `all` 后，`Div`、`Reciprocal`、`Rsqrt`、`Sqrt`、`Pow` 算子在代码生成时关闭高精度模式，按默认精度生成，可能影响计算精度。 |
 | `--recomputation_threshold` | GE 路径 | 设置自动融合重计算阈值。取值为 `0`～`255` 的整数，默认值为 `1`。 |
 | `--max_fusion_size` | GE 路径 | 设置单个融合算子最多包含的节点数量。取值为 `0`～`uint64_t` 最大值，配置为 `0` 表示不融合，默认值由实现决定。 |
-| `--autofuse_enable_pgo` | GE 路径、Inductor 路径 | 开启 PGO 调优，通过预先上板采样选择性能更优的 Tiling。取值为 `true` 或 `false`，默认值为 `false`。仅支持静态图调优，需要准备对应版本的 `mspti`；首次配置时不能与其他 Profiling 功能同时开启。 |
+| `--autofuse_enable_pgo` | GE 路径、Inductor 路径 | 开启 PGO 调优，通过预先上板采样选择性能更优的 Tiling。取值为 `true` 或 `false`，默认值为 `false`。仅支持静态图调优，需要准备对应版本的 `mspti`；首次配置时不能与其他 Profiling 功能同时开启。Inductor 路径可与 CV 融合同时开启：CV 子图保留融合并跳过 PGO，静态非 CV 子图执行 PGO，无需关闭 CV 融合。 |
 | `--experimental_enable_jit_executor_v2` | GE 路径 | 开启切图编译。取值为 `true` 或 `false`，默认值为 `false`。动态分档、资源类算子、V1 控制流算子、数据预处理下沉和部分 AOE 调优场景不支持该功能。 |
 
 示例：

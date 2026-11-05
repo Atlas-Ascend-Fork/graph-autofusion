@@ -33,6 +33,8 @@ std::string GenCvUbFuseVfFuncDimParams();
 std::string GenCvUbFuseVfCallDimParams();
 std::string GenCvUbFuseRowStride(const TPipe &tpipe, const Tensor &ub_tensor);
 std::string GenCvUbFuseAddrOffset(const TPipe &tpipe, const Tensor &ub_tensor);
+std::string GenCvUbFuseFlatLoopParams(const TPipe &tpipe, const std::vector<Tensor> &inputs,
+                                      const std::vector<Tensor> &outputs, const std::string &loop_dtype);
 
 class VFLoop;
 struct VFLoopBody {
