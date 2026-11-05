@@ -181,8 +181,6 @@ struct ShareGraph {
   static af::ComputeGraphPtr TruedivAbsFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr BF16AddFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr BF16NddmaAddFusedGraph(size_t dims_size);
-  static af::ComputeGraphPtr LoadCastBrcRealignConstFusedGraph();
-  static af::ComputeGraphPtr LoadCastBrcRealignDynamicFusedGraph();
   static af::ComputeGraphPtr AbsBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr AbsUint8FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ErfBf16FusedGraph(size_t dims_size);

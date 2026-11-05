@@ -34,6 +34,7 @@ class NddmaTemplate : public BaseTemplate {
   bool NeedDropBasedCase(const af::AscGraph &origin_graph, const af::AscGraph &based_case,
                          const af::AscGraph &new_case) override;
   static Status ReAlignVectorizedStrides(const af::AscNodePtr &node);
+  static bool IsSecondaryTailAxisAligned(const af::AscNodePtr &node);
   std::string GetScoreFunc(const af::AscGraph &origin_graph, const af::AscGraph &nddma_graph) override;
   static af::Status ReorderRepeats(const af::AscNodePtr &node_src, const af::AscNodePtr &node_dst);
   static af::Status ProcessSliceToNddma(const af::AscNodePtr &node_load, bool &is_nddma_generated_cur,
