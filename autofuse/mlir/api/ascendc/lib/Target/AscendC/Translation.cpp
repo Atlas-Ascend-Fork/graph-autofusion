@@ -265,28 +265,26 @@ using PrintableOpTypes = std::tuple<
     // Sentinel
     ascendc::NoOp>;
 
-template <typename TypeSwitchT, size_t I, typename TupleT, typename CallbackT>
-void addCaseByIndex(TypeSwitchT& typeSwitch, CallbackT&& callback)
+template <typename TypeSwitchT, typename OpT, typename CallbackT>
+void addCaseByType(TypeSwitchT& typeSwitch, CallbackT&& callback)
 {
-    using ElemType = std::tuple_element_t<I, TupleT>;
-    typeSwitch.template Case<ElemType>([&callback](auto op) { return callback(op); });
+    typeSwitch.template Case<OpT>([&callback](auto op) { return callback(op); });
 }
 
-template <typename TypeSwitchT, typename TupleT, typename CallbackT, size_t... Is>
-void addCasesImpl(TypeSwitchT& typeSwitch, TupleT&&, CallbackT&& callback, std::index_sequence<Is...>)
+template <typename TypeSwitchT, typename... OpTypes, typename CallbackT>
+void addCasesImpl(TypeSwitchT& typeSwitch, std::tuple<OpTypes...>*, CallbackT&& callback)
 {
     using addCaseFunc = void (*)(TypeSwitchT&, CallbackT&);
-    static addCaseFunc caseFunc[] = {&addCaseByIndex<TypeSwitchT, Is, std::decay_t<TupleT>, CallbackT>...};
-    for (size_t i = 0; i < sizeof...(Is); ++i) {
+    static addCaseFunc caseFunc[] = {&addCaseByType<TypeSwitchT, OpTypes, CallbackT>...};
+    for (size_t i = 0; i < sizeof...(OpTypes); ++i) {
         caseFunc[i](typeSwitch, callback);
     }
 }
 
-template <typename TypeSwitchT, typename TupleT, typename CallbackT>
-void addCases(TypeSwitchT& typeSwitch, const TupleT& tuple, const CallbackT& callback)
+template <typename TupleT, typename TypeSwitchT, typename CallbackT>
+void addCases(TypeSwitchT& typeSwitch, const CallbackT& callback)
 {
-    constexpr auto size = std::tuple_size_v<std::decay_t<TupleT>>;
-    addCasesImpl(typeSwitch, tuple, callback, std::make_index_sequence<size>{});
+    addCasesImpl(typeSwitch, static_cast<TupleT*>(nullptr), callback);
 }
 } // namespace
 
@@ -309,8 +307,8 @@ LogicalResult emitOperation(CodeEmitter& emitter, Operation& op, bool trailingSe
         return printOperation(emitter, opNode);
     };
 
-    addCases(typeSwitch, PrintableOpTypes{}, callback);
-    addCases(typeSwitch, autofuse::PrintableOpTypes{}, callback);
+    addCases<PrintableOpTypes>(typeSwitch, callback);
+    addCases<autofuse::PrintableOpTypes>(typeSwitch, callback);
     LogicalResult status = typeSwitch.Default(
         [&](Operation* op) -> LogicalResult { return op->emitOpError("unable to find printer for op"); });
     if (failed(status)) {
