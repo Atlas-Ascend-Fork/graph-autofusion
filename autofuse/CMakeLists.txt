@@ -206,7 +206,9 @@ if(ENABLE_AUTOFUSE_MLIR)
 
     # GNU ld does not create enough AArch64 range-extension veneers for this
     # oversized MLIR shared library.  LLD links the same object set successfully
-    # and is already available in the supported Linux build image.
+    # and is already available in the supported Linux build image.  Keep the
+    # direct shared-library closure on LLD as well: a final LLD link rejects
+    # symbol-version metadata that GNU ld can emit for the intermediate DSOs.
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
         find_program(AUTOFUSE_LLD_EXECUTABLE
             NAMES ld.lld lld
@@ -216,7 +218,15 @@ if(ENABLE_AUTOFUSE_MLIR)
                 "Autofuse MLIR on AArch64 requires LLD, but ld.lld was not found.")
         endif()
 
-        target_link_options(aihac_codegen PRIVATE -fuse-ld=lld)
+        foreach(lld_target IN ITEMS
+                aihac_codegen
+                graph_af
+                graph_base_af
+                aihac_ir
+                aihac_ir_register
+                aihac_symbolizer_af)
+            target_link_options(${lld_target} PRIVATE -fuse-ld=lld)
+        endforeach()
     endif()
 endif()
 

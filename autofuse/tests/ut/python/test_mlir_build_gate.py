@@ -163,11 +163,19 @@ include("${ROOT}/autofuse/CMakeLists.txt")
         )
         assert not any("AutofuseMlir" in item for event in links for item in event[2:])
 
-    uses_lld = any(
-        event[0:2] == ["link_options", "aihac_codegen"] and "-fuse-ld=lld" in event
-        for event in events
-    )
-    assert uses_lld == (mlir_enabled and processor == "aarch64")
+    for lld_target in (
+        "aihac_codegen",
+        "graph_af",
+        "graph_base_af",
+        "aihac_ir",
+        "aihac_ir_register",
+        "aihac_symbolizer_af",
+    ):
+        uses_lld = any(
+            event[0:2] == ["link_options", lld_target] and "-fuse-ld=lld" in event
+            for event in events
+        )
+        assert uses_lld == (mlir_enabled and processor == "aarch64")
     test_sections = any(
         event[0:2] == ["compile_options", "codegen"] and "-ffunction-sections" in event
         for event in events
