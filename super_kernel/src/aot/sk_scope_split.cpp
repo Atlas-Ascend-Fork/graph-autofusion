@@ -17,6 +17,7 @@
 #include "sk_common.h"
 #include "sk_scope_postprocess.h"
 #include <algorithm>
+#include <iterator>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1186,22 +1187,24 @@ bool InitialScopeSplitPass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   return true;
 }
 
-// ============ DeadlockRefinePass Implementation ============
+// ============ SingleScopeDeadlockRefinePass Implementation ============
 
-DeadlockRefinePass::DeadlockRefinePass(SuperKernelGraph &inputGraph, SuperKernelOptionsManager &opts)
+SingleScopeDeadlockRefinePass::SingleScopeDeadlockRefinePass(SuperKernelGraph &inputGraph,
+                                                             SuperKernelOptionsManager &opts)
     : ScopeSplitPass(inputGraph), lockDetector_(graph_, opts) {}
 
-bool DeadlockRefinePass::FindDeadlockInScope(const SuperKernelScopeInfo &scope, SuperKernelBaseNode **deadlockNode,
-                                             SuperKernelBaseNode **deadlockWaitNode,
-                                             ScopeCoreInfo *checkedScopeCoreInfo) {
+bool SingleScopeDeadlockRefinePass::FindDeadlockInScope(const SuperKernelScopeInfo &scope,
+                                                        SuperKernelBaseNode **deadlockNode,
+                                                        SuperKernelBaseNode **deadlockWaitNode,
+                                                        ScopeCoreInfo *checkedScopeCoreInfo) {
   const auto &nodes = scope.GetNodes();
-  SK_LOGI("[DeadlockRefine] checking scope with %zu nodes for deadlock", nodes.size());
+  SK_LOGI("[SingleScopeDeadlockRefine] checking scope with %zu nodes for deadlock", nodes.size());
   lockDetector_.Reset();
   lockDetector_.SetCurrentScopeId(scope.GetScopeId());
 
   ScopeCoreInfoCalculator coreInfoCalculator(maxCubeNum_, maxVectorNum_);
   if (!coreInfoCalculator.GetValidScopeCoreInfo(nodes)) {
-    SK_LOGD("[DeadlockRefine] scope has no valid core info, skip deadlock refinement");
+    SK_LOGD("[SingleScopeDeadlockRefine] scope has no valid core info, skip deadlock refinement");
     *checkedScopeCoreInfo = {};
     return false;
   }
@@ -1242,12 +1245,14 @@ bool DeadlockRefinePass::FindDeadlockInScope(const SuperKernelScopeInfo &scope, 
   }
 
   *checkedScopeCoreInfo = candidateCoreInfo;
-  SK_LOGI("[DeadlockRefine] no deadlock found in scope");
+  SK_LOGI("[SingleScopeDeadlockRefine] no deadlock found in scope");
   return false;
 }
 
-void DeadlockRefinePass::SplitScopeAtWaitNode(const SuperKernelScopeInfo &scope, SuperKernelBaseNode *waitNode,
-                                              SuperKernelScopeInfo &scopeBefore, SuperKernelScopeInfo &scopeAfter) {
+void SingleScopeDeadlockRefinePass::SplitScopeAtWaitNode(const SuperKernelScopeInfo &scope,
+                                                         SuperKernelBaseNode *waitNode,
+                                                         SuperKernelScopeInfo &scopeBefore,
+                                                         SuperKernelScopeInfo &scopeAfter) {
   scopeBefore.SetScopeBitFlags(scope.GetScopeBitFlags());
   scopeAfter.SetScopeBitFlags(scope.GetScopeBitFlags());
   scope.ClearNodeScopeIds();
@@ -1271,34 +1276,58 @@ void DeadlockRefinePass::SplitScopeAtWaitNode(const SuperKernelScopeInfo &scope,
   RebuildStreamInfos(scopeAfter);
 }
 
-/**
- * @brief Setup break info for scopeAfter after deadlock split
- */
+static ScopeBreakInfo BuildSingleScopeDeadlockBreakInfo(const SuperKernelBaseNode &deadlockNode,
+                                                        const SuperKernelBaseNode &deadlockWaitNode,
+                                                        const ResourceConflictInfo &conflictInfo) {
+  std::string detail = "Deadlock at node " + std::to_string(deadlockNode.GetNodeId()) + ", split at Wait node " +
+                       std::to_string(deadlockWaitNode.GetNodeId());
+  const auto resourceConflictDetail = conflictInfo.Format();
+  if (!resourceConflictDetail.empty()) {
+    detail += ", " + resourceConflictDetail;
+  }
+  ScopeBreakInfo breakInfo;
+  breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
+      .SetTriggerNode(deadlockNode.GetNodeId(), deadlockNode.GetStreamIdxInGraph())
+      .SetDetail(std::move(detail));
+  return breakInfo;
+}
+
+static ScopeBreakInfo BuildParallelScopeDeadlockBreakInfo(const SuperKernelBaseNode &waitNode,
+                                                          const ResourceConflictInfo &conflictInfo) {
+  std::string detail = "Parallel resource deadlock at Wait node " + std::to_string(waitNode.GetNodeId());
+  const auto resourceConflictDetail = conflictInfo.Format();
+  if (!resourceConflictDetail.empty()) {
+    detail += ", " + resourceConflictDetail;
+  }
+  ScopeBreakInfo breakInfo;
+  breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
+      .SetTriggerNode(waitNode.GetNodeId(), waitNode.GetStreamIdxInGraph())
+      .SetDetail(std::move(detail));
+  return breakInfo;
+}
+
 static void SetupScopeBeforeBreakInfo(ScopeSplitResultReporter &reporter, SuperKernelScopeInfo &scopeBefore,
                                       const ScopeBreakInfo &originalBreakInfo, SuperKernelBaseNode *deadlockNode,
-                                      SuperKernelBaseNode *deadlockWaitNode, bool hasSameStructureAsOriginal) {
+                                      SuperKernelBaseNode *deadlockWaitNode, const ResourceConflictInfo &conflictInfo,
+                                      bool hasSameStructureAsOriginal) {
   if (hasSameStructureAsOriginal) {
     reporter.ReportInheritedBreak(scopeBefore, originalBreakInfo);
-    SK_LOGI("[DeadlockRefine] scopeBefore structure same as original, inherits break info");
+    SK_LOGI("[SingleScopeDeadlockRefine] scopeBefore structure same as original, inherits break info");
   } else {
-    ScopeBreakInfo breakInfo;
-    breakInfo.SetReason(ScopeBreakReason::DEADLOCK_DETECTED)
-        .SetTriggerNode(deadlockNode->GetNodeId(), deadlockNode->GetStreamIdxInGraph())
-        .SetDetail("Deadlock at node " + std::to_string(deadlockNode->GetNodeId()) + ", split at Wait node " +
-                   std::to_string(deadlockWaitNode->GetNodeId()));
-    reporter.ReportNewBreak(scopeBefore, std::move(breakInfo));
-    SK_LOGI("[DeadlockRefine] scopeBefore structure different, gets deadlock break info");
+    reporter.ReportNewBreak(scopeBefore,
+                            BuildSingleScopeDeadlockBreakInfo(*deadlockNode, *deadlockWaitNode, conflictInfo));
+    SK_LOGI("[SingleScopeDeadlockRefine] scopeBefore structure different, gets deadlock break info");
   }
 
-  SK_LOGI("[DeadlockRefine] scopeBefore break info: %s", scopeBefore.GetBreakInfo().Format().c_str());
+  SK_LOGI("[SingleScopeDeadlockRefine] scopeBefore break info: %s", scopeBefore.GetBreakInfo().Format().c_str());
 }
 
 static void SetupScopeAfterBreakInfo(ScopeSplitResultReporter &reporter, SuperKernelScopeInfo &scopeAfter,
                                      const ScopeBreakInfo &originalBreakInfo) {
   reporter.ReportInheritedBreak(scopeAfter, originalBreakInfo);
-  SK_LOGI("[DeadlockRefine] scopeAfter inherits break info");
+  SK_LOGI("[SingleScopeDeadlockRefine] scopeAfter inherits break info");
 
-  SK_LOGI("[DeadlockRefine] scopeAfter break info: %s", scopeAfter.GetBreakInfo().Format().c_str());
+  SK_LOGI("[SingleScopeDeadlockRefine] scopeAfter break info: %s", scopeAfter.GetBreakInfo().Format().c_str());
 }
 
 /**
@@ -1310,12 +1339,10 @@ static void SetupScopeAfterBreakInfo(ScopeSplitResultReporter &reporter, SuperKe
  * @param pendingScope Output pending scope for further processing
  * @return Processing result of deadlock resolution
  */
-ScopeProcessResult DeadlockRefinePass::HandleDeadlockSplit(SuperKernelScopeInfo &workingScope,
-                                                           SuperKernelBaseNode *deadlockNode,
-                                                           SuperKernelBaseNode *deadlockWaitNode,
-                                                           const ScopeCoreInfo &scopeBeforeCoreInfo,
-                                                           std::vector<SuperKernelScopeInfo> &outputScopes,
-                                                           std::optional<SuperKernelScopeInfo> &pendingScope) {
+ScopeProcessResult SingleScopeDeadlockRefinePass::HandleDeadlockSplit(
+    SuperKernelScopeInfo &workingScope, SuperKernelBaseNode *deadlockNode, SuperKernelBaseNode *deadlockWaitNode,
+    const ScopeCoreInfo &scopeBeforeCoreInfo, std::vector<SuperKernelScopeInfo> &outputScopes,
+    std::optional<SuperKernelScopeInfo> &pendingScope) {
   // Save original scope break information
   const ScopeBreakInfo &originalBreakInfo = workingScope.GetBreakInfo();
   const uint16_t originalScopeId = workingScope.GetScopeId();
@@ -1328,15 +1355,15 @@ ScopeProcessResult DeadlockRefinePass::HandleDeadlockSplit(SuperKernelScopeInfo 
   RecordDeadlockSplitResult(deadlockNode, deadlockWaitNode);
   deadlockNode->SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
 
-  SK_LOGI("[DeadlockRefine] Deadlock detected at node %s, splitting at Wait node %s", deadlockNode->Format().c_str(),
-          deadlockWaitNode->Format().c_str());
-  SK_LOGI("[DeadlockRefine] Before split: original=%zu nodes, scopeBefore=%zu, scopeAfter=%zu",
+  SK_LOGI("[SingleScopeDeadlockRefine] Deadlock detected at node %s, splitting at Wait node %s",
+          deadlockNode->Format().c_str(), deadlockWaitNode->Format().c_str());
+  SK_LOGI("[SingleScopeDeadlockRefine] Before split: original=%zu nodes, scopeBefore=%zu, scopeAfter=%zu",
           workingScope.GetNodes().size(), scopeBefore.GetNodes().size(), scopeAfter.GetNodes().size());
 
   if (scopeSplitResultReporter_ != nullptr) {
     bool hasSameStructureAsOriginal = scopeSplitResultReporter_->HasSameScopeStructure(workingScope, scopeBefore);
     SetupScopeBeforeBreakInfo(*scopeSplitResultReporter_, scopeBefore, originalBreakInfo, deadlockNode,
-                              deadlockWaitNode, hasSameStructureAsOriginal);
+                              deadlockWaitNode, lockDetector_.GetResourceConflictInfo(), hasSameStructureAsOriginal);
     SetupScopeAfterBreakInfo(*scopeSplitResultReporter_, scopeAfter, originalBreakInfo);
   }
   // Add valid scopeBefore to output
@@ -1348,29 +1375,30 @@ ScopeProcessResult DeadlockRefinePass::HandleDeadlockSplit(SuperKernelScopeInfo 
     lockDetector_.SetNotifyNodesExpandNumForScope(scopeBefore, scopeBeforeCoreInfo);
     outputScopes.push_back(std::move(scopeBefore));
   } else {
-    SK_LOGI("[DeadlockRefine] scopeBefore is empty after split, no scope added before Wait node");
+    SK_LOGI("[SingleScopeDeadlockRefine] scopeBefore is empty after split, no scope added before Wait node");
   }
 
   // Set pending scope for further processing
   if (!scopeAfter.GetNodes().empty()) {
     pendingScope = std::move(scopeAfter);
-    SK_LOGI("[DeadlockRefine] scopeAfter has %zu nodes and will be processed further", pendingScope->GetNodes().size());
+    SK_LOGI("[SingleScopeDeadlockRefine] scopeAfter has %zu nodes and will be processed further",
+            pendingScope->GetNodes().size());
   } else {
-    SK_LOGI("[DeadlockRefine] scopeAfter is empty, no further processing required for this scope");
+    SK_LOGI("[SingleScopeDeadlockRefine] scopeAfter is empty, no further processing required for this scope");
   }
 
   return ScopeProcessResult::DEADLOCK_RESOLVED;
 }
 
-ScopeProcessResult DeadlockRefinePass::ProcessSingleScope(SuperKernelScopeInfo &&scopeToProcess,
-                                                          std::vector<SuperKernelScopeInfo> &outputScopes,
-                                                          std::optional<SuperKernelScopeInfo> &pendingScope) {
+ScopeProcessResult SingleScopeDeadlockRefinePass::ProcessSingleScope(
+    SuperKernelScopeInfo &&scopeToProcess, std::vector<SuperKernelScopeInfo> &outputScopes,
+    std::optional<SuperKernelScopeInfo> &pendingScope) {
   pendingScope.reset();
 
   SuperKernelScopeInfo workingScope = std::move(scopeToProcess);
   workingScope.ClearScopeCoreInfo();
   if (workingScope.GetNodes().empty()) {
-    SK_LOGI("[DeadlockRefine] ProcessSingleScope called with empty scope, nothing to do");
+    SK_LOGI("[SingleScopeDeadlockRefine] ProcessSingleScope called with empty scope, nothing to do");
     return ScopeProcessResult::NO_DEADLOCK;
   }
   SuperKernelBaseNode *deadlockNode = nullptr;
@@ -1382,12 +1410,13 @@ ScopeProcessResult DeadlockRefinePass::ProcessSingleScope(SuperKernelScopeInfo &
       workingScope.SetScopeCoreInfo(checkedScopeCoreInfo);
       lockDetector_.UpdateScopeInfo(workingScope);
       lockDetector_.SetNotifyNodesExpandNumForScope(workingScope, checkedScopeCoreInfo);
-      SK_LOGI("[DeadlockRefine] Scope has no deadlock, added as a whole with %zu nodes",
+      SK_LOGI("[SingleScopeDeadlockRefine] Scope has no deadlock, added as a whole with %zu nodes",
               workingScope.GetNodes().size());
     } else {
       lockDetector_.RemoveScopeInfo(workingScope.GetScopeId());
       SK_LOGD(
-          "[DeadlockRefine] Deadlock refinement skipped because SK core info is unavailable, scope kept with "
+          "[SingleScopeDeadlockRefine] Deadlock refinement skipped because SK core info is unavailable, "
+          "scope kept with "
           "%zu nodes",
           workingScope.GetNodes().size());
     }
@@ -1397,7 +1426,7 @@ ScopeProcessResult DeadlockRefinePass::ProcessSingleScope(SuperKernelScopeInfo &
 
   // Deadlock found but no suitable Wait node to split at: treat as fatal
   if (deadlockWaitNode == nullptr) {
-    SK_LOGE("[DeadlockRefine] Deadlock at node %s but no Wait node found to split; refinement failed",
+    SK_LOGE("[SingleScopeDeadlockRefine] Deadlock at node %s but no Wait node found to split; refinement failed",
             deadlockNode != nullptr ? deadlockNode->Format().c_str() : "<null>");
     return ScopeProcessResult::DEADLOCK_UNRESOLVED;
   }
@@ -1407,9 +1436,9 @@ ScopeProcessResult DeadlockRefinePass::ProcessSingleScope(SuperKernelScopeInfo &
                              pendingScope);
 }
 
-bool DeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
-  SK_LOGI("[DeadlockRefine] %s pass starting execution", GetName().c_str());
-  SK_LOGI("[DeadlockRefine] input scopes count: %zu", scopes.size());
+bool SingleScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
+  SK_LOGI("[SingleScopeDeadlockRefine] %s pass starting execution", GetName().c_str());
+  SK_LOGI("[SingleScopeDeadlockRefine] input scopes count: %zu", scopes.size());
 
   std::vector<SuperKernelScopeInfo> refinedScopes;
   size_t splitCount = 0;
@@ -1422,7 +1451,7 @@ bool DeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   lockDetector_.SetScopeInfos(scopes);
 
   for (size_t i = 0; i < scopes.size(); ++i) {
-    SK_LOGI("[DeadlockRefine] Processing scope index %zu with %zu nodes", i, scopes[i].GetNodes().size());
+    SK_LOGI("[SingleScopeDeadlockRefine] Processing scope index %zu with %zu nodes", i, scopes[i].GetNodes().size());
 
     SuperKernelScopeInfo currentScope = std::move(scopes[i]);
     std::optional<SuperKernelScopeInfo> pendingScope;
@@ -1436,7 +1465,10 @@ bool DeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
       ScopeProcessResult result = ProcessSingleScope(std::move(currentScope), refinedScopes, pendingScope);
 
       if (result == ScopeProcessResult::DEADLOCK_UNRESOLVED) {
-        SK_LOGE("[DeadlockRefine] Scope %zu: deadlock detected and cannot be resolved, aborting refinement", i);
+        SK_LOGE(
+            "[SingleScopeDeadlockRefine] Scope %zu: deadlock detected and cannot be resolved, "
+            "aborting refinement",
+            i);
         scopes.clear();
         return false;
       }
@@ -1465,9 +1497,111 @@ bool DeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   // Reset visited state to ensure pass is reentrant
   lockDetector_.Reset();
 
-  SK_LOGI("[DeadlockRefine] %s pass completed, split %zu scopes, total scopes: %zu", GetName().c_str(), splitCount,
-          scopes.size());
+  SK_LOGI("[SingleScopeDeadlockRefine] %s pass completed, split %zu scopes, total scopes: %zu", GetName().c_str(),
+          splitCount, scopes.size());
   PrintScopeResults(scopes, graph_, GetName().c_str());
+  return true;
+}
+
+void ParallelScopeDeadlockRefinePass::SplitScopeAtRiskWait(SuperKernelScopeInfo &scope, SuperKernelBaseNode &waitNode,
+                                                           std::vector<SuperKernelScopeInfo> &splitScopes,
+                                                           const ResourceConflictInfo &conflictInfo) {
+  const auto &nodes = scope.GetNodes();
+  const auto originalBreakInfo = scope.GetBreakInfo();
+  scope.ClearNodeScopeIds();
+  std::vector<std::vector<SuperKernelBaseNode *>> segments;
+  const auto riskWaitIt = std::find(nodes.begin(), nodes.end(), &waitNode);
+  const bool hasPrefix = riskWaitIt != nodes.begin();
+  std::unordered_set<uint64_t> scopeBeforeNodeIds;
+  if (hasPrefix) {
+    segments.emplace_back(nodes.begin(), riskWaitIt);
+    for (auto it = nodes.begin(); it != riskWaitIt; ++it) {
+      scopeBeforeNodeIds.insert((*it)->GetNodeId());
+    }
+  }
+  waitNode.SetIsFusible(false);
+  waitNode.SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
+
+  std::vector<SuperKernelBaseNode *> currentSegment;
+  for (auto it = std::next(riskWaitIt); it != nodes.end(); ++it) {
+    auto *node = *it;
+    if (node->GetNodeType() == SkNodeType::NODE_WAIT && !IsWaitNotifyInScope(*node, scopeBeforeNodeIds)) {
+      node->SetIsFusible(false);
+      node->SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
+      if (!currentSegment.empty()) {
+        segments.push_back(std::move(currentSegment));
+        currentSegment.clear();
+      }
+    } else {
+      currentSegment.push_back(node);
+    }
+  }
+  if (!currentSegment.empty()) {
+    segments.push_back(std::move(currentSegment));
+  }
+  for (size_t index = 0; index < segments.size(); ++index) {
+    SuperKernelScopeInfo splitScope;
+    splitScope.SetScopeBitFlags(scope.GetScopeBitFlags());
+    for (auto *node : segments[index]) {
+      splitScope.AddNode(node);
+    }
+    RebuildStreamInfos(splitScope);
+    if (index == 0 && hasPrefix) {
+      splitScope.SetBreakInfo(BuildParallelScopeDeadlockBreakInfo(waitNode, conflictInfo));
+    } else {
+      splitScope.SetBreakInfo(originalBreakInfo);
+    }
+    splitScopes.push_back(std::move(splitScope));
+  }
+}
+
+bool ParallelScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
+  if (scopes.size() < 2) {
+    return true;
+  }
+  int64_t maxCubeNum = 0;
+  int64_t maxVectorNum = 0;
+  const auto ret = GetDeviceCoreNums(maxCubeNum, maxVectorNum);
+  if (ret != ACL_SUCCESS) {
+    SK_LOGE("[ParallelResource] Failed to get device core counts, ret=%d", ret);
+    return false;
+  }
+  ScopeCoreInfoCalculator calculator(maxCubeNum, maxVectorNum);
+  while (scopes.size() >= 2) {
+    for (auto &scope : scopes) {
+      if (std::none_of(scope.GetNodes().begin(), scope.GetNodes().end(), IsExecutableKernelNode)) {
+        scope.ClearScopeCoreInfo();
+        continue;
+      }
+      ScopeCoreInfo coreInfo;
+      if (!calculator.GetValidScopeCoreInfo(scope.GetNodes(), coreInfo)) {
+        SK_LOGE("[ParallelResource] Failed to calculate core info for scope %u", scope.GetScopeId());
+        return false;
+      }
+      scope.SetScopeCoreInfo(coreInfo);
+    }
+    uint64_t riskWaitId = INVALID_TASK_ID;
+    ResourceConflictInfo conflictInfo;
+    const auto *riskScope = scopeLockDetector_.CheckParallelScopeResources(scopes, riskWaitId, &conflictInfo);
+    if (riskScope == nullptr) {
+      break;
+    }
+    auto *waitNode = graph_.GetNodeById(riskWaitId);
+    if (waitNode == nullptr) {
+      SK_LOGE("[ParallelResource] Risk Wait %lu not found in graph", riskWaitId);
+      return false;
+    }
+    if (!waitNode->IsFusible()) {
+      SK_LOGE("[ParallelResource] Failed to split at risk Wait %lu, fusible=%d", riskWaitId, waitNode->IsFusible());
+      return false;
+    }
+    const auto scopeIndex = static_cast<size_t>(riskScope - scopes.data());
+    std::vector<SuperKernelScopeInfo> splitScopes;
+    SplitScopeAtRiskWait(scopes[scopeIndex], *waitNode, splitScopes, conflictInfo);
+    scopes.erase(scopes.begin() + scopeIndex);
+    scopes.insert(scopes.begin() + scopeIndex, std::make_move_iterator(splitScopes.begin()),
+                  std::make_move_iterator(splitScopes.end()));
+  }
   return true;
 }
 
@@ -1699,11 +1833,12 @@ SuperKernelScopeSplitter::SuperKernelScopeSplitter(SuperKernelGraph &inputGraph,
     }
     passes_.push_back(std::make_unique<InitialScopeSplitPass>(inputGraph, heapType));
     passes_.push_back(std::make_unique<ScheModeKernelSplitPass>(inputGraph));
-    passes_.push_back(std::make_unique<DeadlockRefinePass>(inputGraph, *opts_));
+    passes_.push_back(std::make_unique<SingleScopeDeadlockRefinePass>(inputGraph, *opts_));
     if (enableTaskBreakerBypass_) {
       passes_.push_back(std::make_unique<DefaultNodeProcessPass>(inputGraph));
-      passes_.push_back(std::make_unique<DeadlockRefinePass>(inputGraph, *opts_));
+      passes_.push_back(std::make_unique<SingleScopeDeadlockRefinePass>(inputGraph, *opts_));
     }
+    passes_.push_back(std::make_unique<ParallelScopeDeadlockRefinePass>(inputGraph, *opts_));
     passes_.push_back(std::make_unique<EventOnlyStreamRemovePass>(inputGraph));
     // Trim boundaries only after event-only stream removal has converged; keep the remaining partition intact.
     passes_.push_back(std::make_unique<ScopeBoundaryEventRemovePass>(inputGraph));

@@ -82,6 +82,9 @@ class SuperKernelGraph {
   const std::vector<uint64_t> &GetHeadNodes() const {
     return headNodes;
   }
+  const std::vector<uint64_t> &GetTailNodes() const {
+    return tailNodes;
+  }
   const std::vector<uint64_t> &GetNodeSizeInStream() const {
     return nodeSizeInStream;
   }
@@ -182,6 +185,7 @@ class SuperKernelGraph {
   std::unordered_map<uint64_t, EventInfos> eventToNodes;
   std::unordered_map<uint64_t, MemoryInfos> memoryToNodes;
   std::vector<uint64_t> headNodes;
+  std::vector<uint64_t> tailNodes;
   std::vector<uint64_t> nodeSizeInStream;
   std::vector<aclrtStream> streams;
   aclmdlRI modelRI;

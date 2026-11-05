@@ -32,6 +32,7 @@
 #ifndef __SK_SCOPE_SPLIT_H__
 #define __SK_SCOPE_SPLIT_H__
 
+#include <memory>
 #include <optional>
 #include <queue>
 #include <set>
@@ -398,8 +399,25 @@ enum class ScopeProcessResult {
   DEADLOCK_UNRESOLVED,  ///< Deadlock found but cannot split (no Wait node)
 };
 
+class ParallelScopeDeadlockRefinePass : public ScopeSplitPass {
+ public:
+  ParallelScopeDeadlockRefinePass(SuperKernelGraph &inputGraph, const SuperKernelOptionsManager &opts)
+      : ScopeSplitPass(inputGraph), scopeLockDetector_(inputGraph, opts) {}
+
+  bool Run(std::vector<SuperKernelScopeInfo> &scopes) override;
+  std::string GetName() const override {
+    return "ParallelScopeDeadlockRefinePass";
+  }
+
+ private:
+  void SplitScopeAtRiskWait(SuperKernelScopeInfo &scope, SuperKernelBaseNode &waitNode,
+                            std::vector<SuperKernelScopeInfo> &splitScopes,
+                            const ResourceConflictInfo &conflictInfo = {});
+  ScopeDeadlockDetector scopeLockDetector_;
+};
+
 /*!
- * \class DeadlockRefinePass
+ * \class SingleScopeDeadlockRefinePass
  * \brief Pass 2: Detect deadlocks and refine scopes
  *
  * This pass performs fine-grained scope refinement:
@@ -407,14 +425,14 @@ enum class ScopeProcessResult {
  * - Splits scopes at Wait nodes that would cause deadlocks
  * - The Wait split point is NOT included in either split scope
  */
-class DeadlockRefinePass : public ScopeSplitPass {
+class SingleScopeDeadlockRefinePass : public ScopeSplitPass {
  public:
-  DeadlockRefinePass(SuperKernelGraph &inputGraph, SuperKernelOptionsManager &opts);
-  ~DeadlockRefinePass() = default;
+  SingleScopeDeadlockRefinePass(SuperKernelGraph &inputGraph, SuperKernelOptionsManager &opts);
+  ~SingleScopeDeadlockRefinePass() = default;
 
   bool Run(std::vector<SuperKernelScopeInfo> &scopes) override;
   std::string GetName() const override {
-    return "DeadlockRefinePass";
+    return "SingleScopeDeadlockRefinePass";
   }
 
  protected:
