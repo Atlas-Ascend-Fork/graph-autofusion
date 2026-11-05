@@ -9,3 +9,5 @@ Archive models for load paths such as `load/` and `nddma/`.
 - Validation results, error analysis, and applicability.
 
 See the [archive conventions](../README_en.md) for the model file structure.
+
+NDDMA modeling and ad-hoc tools are maintained in [autofuse/tools/nddma](../../../tools/nddma/README_en.md).
