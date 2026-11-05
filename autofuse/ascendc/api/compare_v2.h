@@ -18,7 +18,7 @@ inline __aicore__ void CompareNormalNoLoop(const AscendC::LocalTensor<uint8_t> &
                                            const AscendC::LocalTensor<T> &src1,       // input 1 is a tensor
                                            const uint8_t repeat_times, const uint32_t last_axis,
                                            const uint8_t dst_repeat_stride, const uint8_t src_repeat_stride,
-                                           AscendC::LocalTensor<uint8_t> &tmp_buf) {
+                                           AscendC::LocalTensor<uint8_t> &tmp_buf, const bool src1_is_one_block) {
   uint32_t tmp_offset = 0;
   // compare_out用1bit表示1个元素
   LocalTensor<uint8_t> compare_out = tmp_buf[tmp_offset].template ReinterpretCast<uint8_t>();
@@ -37,7 +37,7 @@ inline __aicore__ void CompareNormalNoLoop(const AscendC::LocalTensor<uint8_t> &
   const uint64_t mask = last_axis;
   // compare mask必须是连续的，所以dst_repeat_stride为8
   BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-  if (src1.GetSize() * sizeof(T) == 32) {
+  if (src1_is_one_block) {
     repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
   }
   // 处理 float/half 数据类型输入tensor存在NaN场景
@@ -47,7 +47,6 @@ inline __aicore__ void CompareNormalNoLoop(const AscendC::LocalTensor<uint8_t> &
   if constexpr ((AscendC::IsSameType<T, float>::value || AscendC::IsSameType<T, half>::value) && mode == CMPMODE::NE) {
     uint32_t select_bits_per_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(half);
     uint8_t cast_dst_blk_stride = dst_repeat_stride;
-    const bool src1_is_scalar = src1.GetSize() * sizeof(T) == 32;
     const uint32_t src_offset_per_repeat = static_cast<uint32_t>(src_repeat_stride) * ONE_BLK_SIZE / sizeof(T);
     // compare_out的bit数按int16对齐（Not/Or只支持int16），每个int16包含16个比较bit
     uint32_t mask_int16_count = (compare_element_num + kShortBitWidth - 1) / kShortBitWidth;
@@ -56,13 +55,13 @@ inline __aicore__ void CompareNormalNoLoop(const AscendC::LocalTensor<uint8_t> &
     LocalTensor<int16_t> nan_buf_int16 = select_out.ReinterpretCast<int16_t>();
     LocalTensor<int16_t> compare_out_int16 = compare_out.ReinterpretCast<int16_t>();
     BinaryRepeatParams src1_repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-    if (src1_is_scalar) {
+    if (src1_is_one_block) {
       src1_repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
     }
 
     for (uint8_t r = 0; r < repeat_times; r++) {
       const uint32_t src0_offset = r * src_offset_per_repeat;
-      const uint32_t src1_offset = src1_is_scalar ? 0 : src0_offset;
+      const uint32_t src1_offset = src1_is_one_block ? 0 : src0_offset;
       // Step 1: Compare(src0, src0, EQ) → nan_buf (NaN=0, 非NaN=1)
       AscendC::PipeBarrier<PIPE_V>();
       Compare(nan_buf, src0[src0_offset], src0[src0_offset], CMPMODE::EQ, mask, 1,
@@ -124,7 +123,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
                                      const AscendC::LocalTensor<T> &src1,       // input 1 is a tensor
                                      const uint8_t repeat_times, const uint32_t last_axis,
                                      const uint32_t input_last_dim_stride, const uint32_t output_last_dim_stride,
-                                     AscendC::LocalTensor<uint8_t> &tmp_buf) {
+                                     AscendC::LocalTensor<uint8_t> &tmp_buf, const bool src1_is_one_block) {
   const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;  // 由于输出均为uint8_t，所以不用乘类型大小
   const uint8_t src_repeat_stride =
       input_last_dim_stride * sizeof(T) / ONE_BLK_SIZE;  // 这里的stride，应该由用户保证是按block对齐的
@@ -134,7 +133,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
   // 临时空间不满足一条指令做完
   if (last_axis < elem_in_one_repeat) {
     CompareNormalNoLoop<T, mode>(dst, src0, src1, repeat_times, last_axis, dst_repeat_stride, src_repeat_stride,
-                                 tmp_buf);
+                                 tmp_buf, src1_is_one_block);
   } else {  // 如果last_dim轴大于256B，一次repeat做不完，
     uint32_t element_extent = last_axis / elem_in_one_repeat;
     uint32_t element_reminder = last_axis - element_extent * elem_in_one_repeat;
@@ -161,7 +160,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
           LocalTensor<int16_t> nan_buf_int16 = select_out.ReinterpretCast<int16_t>();
           LocalTensor<int16_t> compare_out_int16 = compare_out.ReinterpretCast<int16_t>();
           BinaryRepeatParams src1_repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-          if (src1.GetSize() * sizeof(T) == 32) {
+          if (src1_is_one_block) {
             src1_repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
           }
 
@@ -177,7 +176,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
 
             // Step 3: Compare(src1, src1, EQ) → compare_out
             AscendC::PipeBarrier<PIPE_V>();
-            if (src1.GetSize() * sizeof(T) == 32) {
+            if (src1_is_one_block) {
               Compare(compare_out, src1[0], src1[0], CMPMODE::EQ, mask, 1, src1_repeat_params);
             } else {
               Compare(compare_out, src1[outer_for * elem_in_one_repeat + r * elem_in_one_repeat],
@@ -194,7 +193,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
 
             // Step 6: Compare(src0, src1, NE) → nan_buf
             AscendC::PipeBarrier<PIPE_V>();
-            if (src1.GetSize() * sizeof(T) == 32) {
+            if (src1_is_one_block) {
               Compare(nan_buf, src0[outer_for * elem_in_one_repeat + r * elem_in_one_repeat], src1[0], mode, mask, 1,
                       src1_repeat_params);
             } else {
@@ -220,7 +219,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
         } else {
           PipeBarrier<PIPE_V>();
           BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-          if (src1.GetSize() * sizeof(T) == 32) {
+          if (src1_is_one_block) {
             repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
             Compare(compare_out, src0[outer_for * elem_in_one_repeat], src1[0], mode, mask, repeat_times,
                     repeat_params);
@@ -251,7 +250,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
           LocalTensor<int16_t> nan_buf_int16 = select_out.ReinterpretCast<int16_t>();
           LocalTensor<int16_t> compare_out_int16 = compare_out.ReinterpretCast<int16_t>();
           BinaryRepeatParams src1_repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-          if (src1.GetSize() * sizeof(T) == 32) {
+          if (src1_is_one_block) {
             src1_repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
           }
 
@@ -267,7 +266,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
 
             // Step 3: Compare(src1, src1, EQ) → compare_out
             AscendC::PipeBarrier<PIPE_V>();
-            if (src1.GetSize() * sizeof(T) == 32) {
+            if (src1_is_one_block) {
               Compare(compare_out, src1[0], src1[0], CMPMODE::EQ, mask, 1, src1_repeat_params);
             } else {
               Compare(compare_out, src1[element_extent * elem_in_one_repeat + r * elem_in_one_repeat],
@@ -284,7 +283,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
 
             // Step 6: Compare(src0, src1, NE) → nan_buf
             AscendC::PipeBarrier<PIPE_V>();
-            if (src1.GetSize() * sizeof(T) == 32) {
+            if (src1_is_one_block) {
               Compare(nan_buf, src0[element_extent * elem_in_one_repeat + r * elem_in_one_repeat], src1[0], mode, mask,
                       1, src1_repeat_params);
             } else {
@@ -310,7 +309,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
         } else {
           AscendC::PipeBarrier<PIPE_V>();
           BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-          if (src1.GetSize() * sizeof(T) == 32) {
+          if (src1_is_one_block) {
             repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
             Compare(compare_out, src0[element_extent * elem_in_one_repeat], src1[0], mode, mask, repeat_times,
                     repeat_params);
@@ -358,8 +357,8 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
 
           // Step 3: Compare(src1, src1, EQ) → compare_out
           AscendC::PipeBarrier<PIPE_V>();
-          if (src1.GetSize() * sizeof(T) == 32) {
-            Compare(compare_out, src1, src1, CMPMODE::EQ, src1.GetSize());
+          if (src1_is_one_block) {
+            Compare(compare_out, src1, src1, CMPMODE::EQ, ONE_BLK_SIZE / sizeof(T));
           } else {
             Compare(compare_out, src1[outer_for * input_last_dim_stride], src1[outer_for * input_last_dim_stride],
                     CMPMODE::EQ, last_axis);
@@ -374,7 +373,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
 
           // Step 6: Compare(src0, src1, NE) → nan_buf
           AscendC::PipeBarrier<PIPE_V>();
-          if (src1.GetSize() * sizeof(T) == 32) {
+          if (src1_is_one_block) {
             uint32_t calcount_aligned = (last_axis + elem_in_one_repeat - 1) / elem_in_one_repeat * elem_in_one_repeat;
             Compare(nan_buf, src0[outer_for * input_last_dim_stride], src1, mode, calcount_aligned);
           } else {
@@ -388,7 +387,7 @@ inline __aicore__ void CompareNormal(const AscendC::LocalTensor<uint8_t> &dst,  
           AscendC::Or(compare_out_int16, nan_buf_int16, compare_out_int16, mask_int16_count);
         } else {
           PipeBarrier<PIPE_V>();
-          if (src1.GetSize() * sizeof(T) == 32) {
+          if (src1_is_one_block) {
             event_t eventid_v_to_s = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
             SetFlag<HardEvent::V_S>(eventid_v_to_s);
             WaitFlag<HardEvent::V_S>(eventid_v_to_s);
@@ -526,10 +525,10 @@ inline __aicore__ void ProcessSmallAxisCase(const AscendC::LocalTensor<uint8_t> 
                                             const uint64_t mask, const uint8_t src_repeat_stride,
                                             const uint8_t dst_repeat_stride, AscendC::LocalTensor<int32_t> &inter_buf,
                                             AscendC::LocalTensor<int16_t> &int16_buf,
-                                            AscendC::LocalTensor<half> &half_buf) {
+                                            AscendC::LocalTensor<half> &half_buf, const bool src1_is_one_block) {
   AscendC::PipeBarrier<PIPE_V>();
   BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-  if (src1.GetSize() * sizeof(int32_t) == 32) {
+  if (src1_is_one_block) {
     repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
   }
 
@@ -548,11 +547,12 @@ inline __aicore__ void ProcessBlock(const AscendC::LocalTensor<uint8_t> &dst, co
                                     const uint32_t mask, const uint8_t src_repeat_stride,
                                     const uint8_t dst_repeat_stride, AscendC::LocalTensor<int32_t> &inter_buf,
                                     AscendC::LocalTensor<int16_t> &int16_buf, AscendC::LocalTensor<half> &half_buf,
-                                    uint32_t offset_src0, uint32_t offset_src1, uint32_t offset_dst) {
+                                    uint32_t offset_src0, uint32_t offset_src1, uint32_t offset_dst,
+                                    const bool src1_is_one_block) {
   BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
   AscendC::PipeBarrier<PIPE_V>();
 
-  if (src1.GetSize() * sizeof(int32_t) == 32) {
+  if (src1_is_one_block) {
     repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
     AscendC::Sub(inter_buf, src0[offset_src0], src1[0], mask, repeat_times, repeat_params);
   } else {
@@ -574,7 +574,7 @@ inline __aicore__ void ProcessMediumAxisCase(const AscendC::LocalTensor<uint8_t>
                                              const uint32_t output_last_dim_stride,
                                              AscendC::LocalTensor<int32_t> &inter_buf,
                                              AscendC::LocalTensor<int16_t> &int16_buf,
-                                             AscendC::LocalTensor<half> &half_buf) {
+                                             AscendC::LocalTensor<half> &half_buf, const bool src1_is_one_block) {
   constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int32_t);
   const uint8_t src_repeat_stride = input_last_dim_stride * sizeof(int32_t) / ONE_BLK_SIZE;
   const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;
@@ -586,14 +586,14 @@ inline __aicore__ void ProcessMediumAxisCase(const AscendC::LocalTensor<uint8_t>
     constexpr uint32_t mask = elem_in_one_repeat;
     ProcessBlock<mode>(dst, src0, src1, repeat_times, mask, src_repeat_stride, dst_repeat_stride, inter_buf, int16_buf,
                        half_buf, outer_for * elem_in_one_repeat, outer_for * elem_in_one_repeat,
-                       outer_for * elem_in_one_repeat);
+                       outer_for * elem_in_one_repeat, src1_is_one_block);
   }
 
   if (element_reminder != 0) {
     uint32_t mask = element_reminder;
     ProcessBlock<mode>(dst, src0, src1, repeat_times, mask, src_repeat_stride, dst_repeat_stride, inter_buf, int16_buf,
                        half_buf, element_extent * elem_in_one_repeat, element_extent * elem_in_one_repeat,
-                       element_extent * elem_in_one_repeat);
+                       element_extent * elem_in_one_repeat, src1_is_one_block);
   }
 }
 
@@ -605,7 +605,7 @@ inline __aicore__ void ProcessLargeAxisCase(const AscendC::LocalTensor<uint8_t> 
                                             const uint32_t output_last_dim_stride,
                                             AscendC::LocalTensor<int32_t> &inter_buf,
                                             AscendC::LocalTensor<int16_t> &int16_buf,
-                                            AscendC::LocalTensor<half> &half_buf) {
+                                            AscendC::LocalTensor<half> &half_buf, const bool src1_is_one_block) {
   constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int32_t);
   uint32_t element_extent = last_axis / elem_in_one_repeat;
   uint32_t element_reminder = last_axis - element_extent * elem_in_one_repeat;
@@ -614,7 +614,7 @@ inline __aicore__ void ProcessLargeAxisCase(const AscendC::LocalTensor<uint8_t> 
   for (auto outer_for = 0; outer_for < repeat_times; outer_for++) {
     AscendC::PipeBarrier<PIPE_V>();
 
-    if (src1.GetSize() * sizeof(int32_t) == 32) {
+    if (src1_is_one_block) {
       BinaryRepeatParams repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
       AscendC::Sub(inter_buf, src0[outer_for * input_last_dim_stride], src1[0], elem_in_one_repeat, element_extent,
                    repeat_params);
@@ -647,8 +647,8 @@ inline __aicore__ void CompareExtendInt32(const AscendC::LocalTensor<uint8_t> &d
                                           const AscendC::LocalTensor<int32_t> &src0,
                                           const AscendC::LocalTensor<int32_t> &src1, const uint8_t repeat_times,
                                           const uint32_t last_axis, const uint32_t input_last_dim_stride,
-                                          const uint32_t output_last_dim_stride,
-                                          AscendC::LocalTensor<uint8_t> &tmp_buf) {
+                                          const uint32_t output_last_dim_stride, AscendC::LocalTensor<uint8_t> &tmp_buf,
+                                          const bool src1_is_one_block) {
   const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;
   const uint8_t src_repeat_stride = input_last_dim_stride * sizeof(int32_t) / ONE_BLK_SIZE;
   constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int32_t);
@@ -660,15 +660,15 @@ inline __aicore__ void CompareExtendInt32(const AscendC::LocalTensor<uint8_t> &d
   if (last_axis < elem_in_one_repeat) {
     const uint64_t mask = last_axis;
     ProcessSmallAxisCase<mode>(dst, src0, src1, repeat_times, mask, src_repeat_stride, dst_repeat_stride, inter_buf,
-                               int16_buf, half_buf);
+                               int16_buf, half_buf, src1_is_one_block);
   } else {
     uint32_t element_extent = last_axis / elem_in_one_repeat;
     if (element_extent <= repeat_times) {
       ProcessMediumAxisCase<mode>(dst, src0, src1, repeat_times, last_axis, input_last_dim_stride,
-                                  output_last_dim_stride, inter_buf, int16_buf, half_buf);
+                                  output_last_dim_stride, inter_buf, int16_buf, half_buf, src1_is_one_block);
     } else {
       ProcessLargeAxisCase<mode>(dst, src0, src1, repeat_times, last_axis, input_last_dim_stride,
-                                 output_last_dim_stride, inter_buf, int16_buf, half_buf);
+                                 output_last_dim_stride, inter_buf, int16_buf, half_buf, src1_is_one_block);
     }
   }
 }
@@ -680,7 +680,7 @@ inline __aicore__ void CompareExtendInt64EqNe(const AscendC::LocalTensor<uint8_t
                                               const uint8_t repeat_times, const uint32_t last_axis,
                                               const uint32_t input_last_dim_stride,
                                               const uint32_t output_last_dim_stride,
-                                              AscendC::LocalTensor<uint8_t> &tmp_buf) {
+                                              AscendC::LocalTensor<uint8_t> &tmp_buf, const bool src1_is_one_block) {
   const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;  // 由于输出均为uint8_t，所以不用乘类型大小
   const uint8_t src_repeat_stride = input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE;
   LocalTensor<half> all_one_buf = KernelUtils::NewTensor<half>(tmp_buf, 0, KernelUtils::RptSize<half>());
@@ -708,7 +708,7 @@ inline __aicore__ void CompareExtendInt64EqNe(const AscendC::LocalTensor<uint8_t
     const uint64_t mask = last_axis;
     BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
     AscendC::PipeBarrier<PIPE_V>();
-    if (src1.GetSize() * sizeof(int64_t) == 32) {
+    if (src1_is_one_block) {
       repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
     }
     AscendC::Sub(sub_res_buf, src0_new, src1_new, mask * 2, repeat_times, repeat_params);
@@ -734,7 +734,7 @@ inline __aicore__ void CompareExtendInt64EqNe(const AscendC::LocalTensor<uint8_t
         constexpr uint64_t mask = elem_in_one_repeat;
         BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
         AscendC::PipeBarrier<PIPE_V>();
-        if (src1.GetSize() * sizeof(int64_t) == 32) {
+        if (src1_is_one_block) {
           repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
           AscendC::Sub(sub_res_buf, src0_new[outer_for * elem_in_one_repeat * 2], src1_new[0], mask * 2, repeat_times,
                        repeat_params);
@@ -765,7 +765,7 @@ inline __aicore__ void CompareExtendInt64EqNe(const AscendC::LocalTensor<uint8_t
         uint32_t mask = element_reminder;
         BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
         AscendC::PipeBarrier<PIPE_V>();
-        if (src1.GetSize() * sizeof(int64_t) == 32) {
+        if (src1_is_one_block) {
           repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
           AscendC::Sub(sub_res_buf, src0_new[element_extent * elem_in_one_repeat * 2], src1_new[0], mask * 2,
                        repeat_times, repeat_params);
@@ -798,7 +798,7 @@ inline __aicore__ void CompareExtendInt64EqNe(const AscendC::LocalTensor<uint8_t
         uint64_t mask = elem_in_one_repeat;
         BinaryRepeatParams repeat_params = {1, 1, 1, 8, 8, 8};
         AscendC::PipeBarrier<PIPE_V>();
-        if (src1.GetSize() * sizeof(int64_t) == 32) {
+        if (src1_is_one_block) {
           repeat_params = {1, 1, 0, 8, 8, 0};
           AscendC::Sub(sub_res_buf, src0_new[outer_for * input_last_dim_stride * 2], src1_new[0], mask * 2,
                        element_extent, repeat_params);
@@ -828,7 +828,7 @@ inline __aicore__ void CompareExtendInt64EqNe(const AscendC::LocalTensor<uint8_t
           mask = element_reminder;
           BinaryRepeatParams repeat_params = {1, 1, 1, 8, 8, 8};
           AscendC::PipeBarrier<PIPE_V>();
-          if (src1.GetSize() * sizeof(int64_t) == 32) {
+          if (src1_is_one_block) {
             repeat_params = {1, 1, 0, 8, 8, 0};
             AscendC::Sub(sub_res_buf,
                          src0_new[outer_for * input_last_dim_stride * 2 + element_extent * elem_in_one_repeat * 2],
@@ -864,14 +864,14 @@ inline __aicore__ void GetSignBitTensorNormal(const AscendC::LocalTensor<uint16_
                                               const AscendC::LocalTensor<int64_t> &src,
                                               const AscendC::LocalTensor<uint32_t> &inner_dup, const uint32_t mask,
                                               const uint32_t repeat_times, const uint8_t src_repeat_stride,
-                                              const uint8_t dst_stride) {
+                                              const uint8_t dst_stride, const bool src_is_one_block) {
   AscendC::PipeBarrier<PIPE_V>();
   AscendC::Duplicate(inner_dup, uint32_t(0x80000000), inner_dup.GetSize());
   AscendC::LocalTensor<uint16_t> inner_dup_tmp = inner_dup.ReinterpretCast<uint16_t>();
   AscendC::LocalTensor<uint16_t> src_tmp = src.ReinterpretCast<uint16_t>();
   AscendC::PipeBarrier<PIPE_V>();
   BinaryRepeatParams repeat_params = {1, 1, 1, dst_stride, src_repeat_stride, 0};
-  if (src.GetSize() * sizeof(int64_t) == 32) {
+  if (src_is_one_block) {
     repeat_params = {1, 0, 0, dst_stride, 0, 0};
   }
   AscendC::And(dst, src_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
@@ -936,7 +936,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
                                                 const uint8_t repeat_times, const uint32_t last_axis,
                                                 const uint32_t input_last_dim_stride,
                                                 const uint32_t output_last_dim_stride,
-                                                AscendC::LocalTensor<uint8_t> &tmp_buf) {
+                                                AscendC::LocalTensor<uint8_t> &tmp_buf, const bool src1_is_one_block) {
   const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;  // 由于输出均为uint8_t，所以不用乘类型大小
   const uint8_t src_repeat_stride = input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE;
   constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int64_t);
@@ -972,8 +972,10 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
     uint32_t mask = last_axis;
     uint8_t dst_stride = DivCeil(mask, (ONE_BLK_SIZE / sizeof(uint64_t)));
     // step 1. Get src0 and src1 sign bit
-    GetSignBitTensorNormal(src0_bits, src0, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride);
-    GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride);
+    GetSignBitTensorNormal(src0_bits, src0, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride,
+                           src0.GetSize() * sizeof(int64_t) == ONE_BLK_SIZE);
+    GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride,
+                           src1_is_one_block);
     // step 2. use src0_bits to store sign bit sub results
     AscendC::LocalTensor<int32_t> src0_bits_tmp = src0_bits.ReinterpretCast<int32_t>();
     AscendC::LocalTensor<int32_t> src1_bits_tmp = src1_bits.ReinterpretCast<int32_t>();
@@ -993,7 +995,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
     AscendC::PipeBarrier<PIPE_V>();
     repeat_params = {1, 1, 1, dst_stride, src_repeat_stride, src_repeat_stride};
     AscendC::And(src0_bits, src0_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-    if (src1.GetSize() * sizeof(int64_t) == 32) {
+    if (src1_is_one_block) {
       repeat_params = {1, 0, 1, dst_stride, 0, src_repeat_stride};
     }
     AscendC::And(src1_bits, src1_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
@@ -1047,12 +1049,14 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
       uint8_t dst_stride = DivCeil(mask, (ONE_BLK_SIZE / sizeof(uint64_t)));
       // step 1. Get src0 and src1 sign bit
       GetSignBitTensorNormal(src0_bits, src0[outer_for * elem_in_one_repeat], inner_dup, mask, repeat_times,
-                             src_repeat_stride, dst_stride);
-      if (src1.GetSize() * sizeof(int64_t) == 32) {
-        GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride);
+                             src_repeat_stride, dst_stride,
+                             src0[outer_for * elem_in_one_repeat].GetSize() * sizeof(int64_t) == ONE_BLK_SIZE);
+      if (src1_is_one_block) {
+        GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride,
+                               src1_is_one_block);
       } else {
         GetSignBitTensorNormal(src1_bits, src1[outer_for * elem_in_one_repeat], inner_dup, mask, repeat_times,
-                               src_repeat_stride, dst_stride);
+                               src_repeat_stride, dst_stride, src1_is_one_block);
       }
       // step 2. use src0_bits to store sign bit sub results
       AscendC::LocalTensor<int32_t> src0_bits_tmp = src0_bits.ReinterpretCast<int32_t>();
@@ -1072,7 +1076,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
       repeat_params = {1, 1, 1, dst_stride, src_repeat_stride, src_repeat_stride};
       AscendC::LocalTensor<uint16_t> src0_tmp = src0[outer_for * elem_in_one_repeat].ReinterpretCast<uint16_t>();
       AscendC::And(src0_bits, src0_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-      if (src1.GetSize() * sizeof(int64_t) == 32) {
+      if (src1_is_one_block) {
         repeat_params = {1, 0, 1, dst_stride, 0, src_repeat_stride};
         AscendC::LocalTensor<uint16_t> src1_tmp = src1.ReinterpretCast<uint16_t>();
         AscendC::And(src1_bits, src1_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
@@ -1130,12 +1134,14 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
       uint8_t dst_stride = DivCeil(mask, (ONE_BLK_SIZE / sizeof(uint64_t)));
       // step 1. Get src0 and src1 sign bit
       GetSignBitTensorNormal(src0_bits, src0[element_extent * elem_in_one_repeat], inner_dup, mask, repeat_times,
-                             src_repeat_stride, dst_stride);
-      if (src1.GetSize() * sizeof(int64_t) == 32) {
-        GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride);
+                             src_repeat_stride, dst_stride,
+                             src0[element_extent * elem_in_one_repeat].GetSize() * sizeof(int64_t) == ONE_BLK_SIZE);
+      if (src1_is_one_block) {
+        GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride,
+                               src1_is_one_block);
       } else {
         GetSignBitTensorNormal(src1_bits, src1[element_extent * elem_in_one_repeat], inner_dup, mask, repeat_times,
-                               src_repeat_stride, dst_stride);
+                               src_repeat_stride, dst_stride, src1_is_one_block);
       }
       // step 2. use src0_bits to store sign bit sub results
       AscendC::LocalTensor<int32_t> src0_bits_tmp = src0_bits.ReinterpretCast<int32_t>();
@@ -1155,7 +1161,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
       repeat_params = {1, 1, 1, dst_stride, src_repeat_stride, src_repeat_stride};
       AscendC::LocalTensor<uint16_t> src0_tmp = src0[element_extent * elem_in_one_repeat].ReinterpretCast<uint16_t>();
       AscendC::And(src0_bits, src0_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-      if (src1.GetSize() * sizeof(int64_t) == 32) {
+      if (src1_is_one_block) {
         repeat_params = {1, 0, 1, dst_stride, 0, src_repeat_stride};
         AscendC::LocalTensor<uint16_t> src1_tmp = src1.ReinterpretCast<uint16_t>();
         AscendC::And(src1_bits, src1_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
@@ -1216,7 +1222,7 @@ inline __aicore__ void CompareExtendRepeat(const AscendC::LocalTensor<uint8_t> &
                                            const AscendC::LocalTensor<T> &src1,       // input 1 is a tensor
                                            const uint8_t repeat_times, const uint32_t last_axis,
                                            const uint32_t input_last_dim_stride, const uint32_t output_last_dim_stride,
-                                           AscendC::LocalTensor<uint8_t> &tmp_buf) {
+                                           AscendC::LocalTensor<uint8_t> &tmp_buf, const bool src1_is_one_block) {
   const uint32_t max_stride = 255;
   if constexpr (AscendC::IsSameType<T, int32_t>::value &&
                 (mode == CMPMODE::GT || mode == CMPMODE::NE || mode == CMPMODE::GE || mode == CMPMODE::LE ||
@@ -1224,12 +1230,12 @@ inline __aicore__ void CompareExtendRepeat(const AscendC::LocalTensor<uint8_t> &
     if (input_last_dim_stride * sizeof(int32_t) / ONE_BLK_SIZE <= max_stride &&
         output_last_dim_stride / ONE_BLK_SIZE <= max_stride) {
       CompareExtendInt32<mode>(dst, src0, src1, repeat_times, last_axis, input_last_dim_stride, output_last_dim_stride,
-                               tmp_buf);
+                               tmp_buf, src1_is_one_block);
     } else {
       for (uint32_t i = 0; i < repeat_times; ++i) {
         CompareExtendInt32<mode>(dst[i * output_last_dim_stride], src0[i * input_last_dim_stride],
-                                 src1[i * input_last_dim_stride], 1, last_axis, input_last_dim_stride,
-                                 output_last_dim_stride, tmp_buf);
+                                 src1[src1_is_one_block ? 0 : i * input_last_dim_stride], 1, last_axis,
+                                 input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
       }
     }
   } else if constexpr (AscendC::IsSameType<T, int64_t>::value) {
@@ -1241,24 +1247,24 @@ inline __aicore__ void CompareExtendRepeat(const AscendC::LocalTensor<uint8_t> &
       if (input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE <= max_stride &&
           output_last_dim_stride / ONE_BLK_SIZE <= max_stride) {
         CompareExtendInt64EqNe<mode>(dst, src0, src1, repeat_times, last_axis, input_last_dim_stride,
-                                     output_last_dim_stride, tmp_buf);
+                                     output_last_dim_stride, tmp_buf, src1_is_one_block);
       } else {
         for (uint8_t i = 0; i < repeat_times; ++i) {
           CompareExtendInt64EqNe<mode>(dst[i * output_last_dim_stride], src0[i * input_last_dim_stride],
-                                       src1[i * input_last_dim_stride], 1, 0, input_last_dim_stride,
-                                       output_last_dim_stride, tmp_buf);
+                                       src1[src1_is_one_block ? 0 : i * input_last_dim_stride], 1, 0,
+                                       input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
         }
       }
     } else if constexpr (mode == CMPMODE::LE || mode == CMPMODE::GT || mode == CMPMODE::GE) {
       if (input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE <= max_stride &&
           output_last_dim_stride / ONE_BLK_SIZE <= max_stride) {
         CompareExtendInt64GtGeLe<mode>(dst, src0, src1, repeat_times, last_axis, input_last_dim_stride,
-                                       output_last_dim_stride, tmp_buf);
+                                       output_last_dim_stride, tmp_buf, src1_is_one_block);
       } else {
         for (uint8_t i = 0; i < repeat_times; ++i) {
           CompareExtendInt64GtGeLe<mode>(dst[i * output_last_dim_stride], src0[i * input_last_dim_stride],
-                                         src1[i * input_last_dim_stride], 1, 0, input_last_dim_stride,
-                                         output_last_dim_stride, tmp_buf);
+                                         src1[src1_is_one_block ? 0 : i * input_last_dim_stride], 1, 0,
+                                         input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
         }
       }
     }
@@ -1266,24 +1272,28 @@ inline __aicore__ void CompareExtendRepeat(const AscendC::LocalTensor<uint8_t> &
     if (input_last_dim_stride * sizeof(T) / ONE_BLK_SIZE <= max_stride &&
         output_last_dim_stride / ONE_BLK_SIZE <= max_stride) {
       CompareNormal<T, mode>(dst, src0, src1, repeat_times, last_axis, input_last_dim_stride, output_last_dim_stride,
-                             tmp_buf);
+                             tmp_buf, src1_is_one_block);
     } else {
       for (uint8_t i = 0; i < repeat_times; ++i) {
         CompareNormal<T, mode>(dst[i * output_last_dim_stride], src0[i * input_last_dim_stride],
-                               src1[i * input_last_dim_stride], 1, last_axis, input_last_dim_stride,
-                               output_last_dim_stride, tmp_buf);
+                               src1[src1_is_one_block ? 0 : i * input_last_dim_stride], 1, last_axis,
+                               input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
       }
     }
   }
 }
 
+// src1_valid_bytes is src1's block-aligned storage requirement before buffer reuse,
+// not its allocation capacity or the number of compared elements. A one-block
+// source is reused without source offsets; scalar sources must fill that block.
 template <typename T, CMPMODE mode>
 inline __aicore__ void CompareExtend(const AscendC::LocalTensor<uint8_t> &dst,  // output
                                      const AscendC::LocalTensor<T> &src0,       // input 0 is a tensor
                                      const AscendC::LocalTensor<T> &src1,       // input 1 is a tensor
                                      const uint32_t first_axis, const uint32_t last_axis,
                                      const uint32_t input_last_dim_stride, const uint32_t output_last_dim_stride,
-                                     AscendC::LocalTensor<uint8_t> &tmp_buf) {
+                                     AscendC::LocalTensor<uint8_t> &tmp_buf, const uint32_t src1_valid_bytes) {
+  const bool src1_is_one_block = src1_valid_bytes == ONE_BLK_SIZE;
   uint32_t calc_repeat_time = 0;
   uint64_t inputOffset = calc_repeat_time * input_last_dim_stride;
   uint64_t outputOffset = calc_repeat_time * output_last_dim_stride;
@@ -1291,24 +1301,37 @@ inline __aicore__ void CompareExtend(const AscendC::LocalTensor<uint8_t> &dst,  
     for (; (calc_repeat_time + MAX_REPEAT_TIME) < first_axis; calc_repeat_time += MAX_REPEAT_TIME) {
       inputOffset = calc_repeat_time * input_last_dim_stride;
       outputOffset = calc_repeat_time * output_last_dim_stride;
-      if (src1.GetSize() * sizeof(T) == 32) {
+      if (src1_is_one_block) {
         CompareExtendRepeat<T, mode>(dst[outputOffset], src0[inputOffset], src1, MAX_REPEAT_TIME, last_axis,
-                                     input_last_dim_stride, output_last_dim_stride, tmp_buf);
+                                     input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
       } else {
         CompareExtendRepeat<T, mode>(dst[outputOffset], src0[inputOffset], src1[inputOffset], MAX_REPEAT_TIME,
-                                     last_axis, input_last_dim_stride, output_last_dim_stride, tmp_buf);
+                                     last_axis, input_last_dim_stride, output_last_dim_stride, tmp_buf,
+                                     src1_is_one_block);
       }
     }
   }
   uint8_t remain_repeat_time = (uint8_t)(first_axis - calc_repeat_time);
   inputOffset = calc_repeat_time * input_last_dim_stride;
   outputOffset = calc_repeat_time * output_last_dim_stride;
-  if (src1.GetSize() * sizeof(T) == 32) {
+  if (src1_is_one_block) {
     CompareExtendRepeat<T, mode>(dst[outputOffset], src0[inputOffset], src1, remain_repeat_time, last_axis,
-                                 input_last_dim_stride, output_last_dim_stride, tmp_buf);
+                                 input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
   } else {
     CompareExtendRepeat<T, mode>(dst[outputOffset], src0[inputOffset], src1[inputOffset], remain_repeat_time, last_axis,
-                                 input_last_dim_stride, output_last_dim_stride, tmp_buf);
+                                 input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
   }
+}
+
+// Backward-compatible entry point. The legacy API used the LocalTensor capacity as
+// the only available indication of a one-block source. New callers should pass
+// the source tensor's valid storage size explicitly through the overload above.
+template <typename T, CMPMODE mode>
+inline __aicore__ void CompareExtend(const AscendC::LocalTensor<uint8_t> &dst, const AscendC::LocalTensor<T> &src0,
+                                     const AscendC::LocalTensor<T> &src1, const uint32_t first_axis,
+                                     const uint32_t last_axis, const uint32_t input_last_dim_stride,
+                                     const uint32_t output_last_dim_stride, AscendC::LocalTensor<uint8_t> &tmp_buf) {
+  CompareExtend<T, mode>(dst, src0, src1, first_axis, last_axis, input_last_dim_stride, output_last_dim_stride, tmp_buf,
+                         src1.GetSize() * sizeof(T));
 }
 #endif  // __ASCENDC_API_COMPARE_V2_H__
