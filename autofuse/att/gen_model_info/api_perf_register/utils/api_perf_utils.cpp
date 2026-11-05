@@ -224,6 +224,44 @@ int32_t CalculateBlockCountIdx(int32_t filtered_dim_size, bool actually_swap) {
   constexpr int32_t kBlockLenCountDim = 2;
   return actually_swap ? (filtered_dim_size - kBlockLenCountDim - 1) : (filtered_dim_size - kBlockLenCountDim);
 }
+
+StrideResult RemoveContiguousLoadStride(const std::vector<Expr> &strides, const std::vector<Expr> &repeats,
+                                        StrideResult result) {
+  Expr inner_size = CreateExpr(1);
+  TernaryOp continuous(CreateExpr(0));
+  bool has_condition = false;
+  const TernaryOp original_stride(result.stride);
+  for (size_t i = repeats.size(); i > 0U; --i) {
+    const auto &repeat = repeats[i - 1U];
+    const auto &stride = strides[i - 1U];
+    const auto unit = af::SymbolicUtils::StaticCheckEq(repeat, CreateExpr(1));
+    const auto packed = af::SymbolicUtils::StaticCheckEq(stride, inner_size);
+    if (unit != af::TriBool::kTrue && packed != af::TriBool::kTrue) {
+      if (unit == af::TriBool::kFalse && packed == af::TriBool::kFalse) {
+        return result;
+      }
+      // A unit axis does not advance the address. Otherwise its step must match the inner extent.
+      // Use ATT condition nodes so generated solver comparisons use IsEqual for double-valued axes.
+      auto non_unit = packed == af::TriBool::kFalse
+                          ? original_stride
+                          : TernaryOp(CondType::K_EQ, stride, inner_size, continuous, original_stride);
+      continuous = unit == af::TriBool::kFalse ? non_unit
+                                               : TernaryOp(CondType::K_EQ, repeat, CreateExpr(1), continuous, non_unit);
+      has_condition = true;
+    }
+    inner_size = inner_size * repeat;
+  }
+  if (!has_condition) {
+    return StrideResult(CreateExpr(0), result.block_count_idx);
+  }
+  Expr stride;
+  GetPerfVar("load_gm_contiguous_stride", stride, result.ternary_ops);
+  continuous.SetVariable(stride);
+  result.ternary_ops[stride] = continuous;
+  result.stride = stride;
+  return result;
+}
+
 }  // namespace
 
 // 为性能模型参数添加额外参数（从 node_perf_info 中获取）
@@ -786,8 +824,15 @@ StrideResult CalculateStride(const TensorShapeInfo &shape_info, const bool is_ub
            is_stride_zero, Str(stride).c_str());
     return StrideResult(stride, 0);
   }
-  return CalculateMultiDimStride(filtered_strides, filtered_repeats, node_info, stride_type, supported_max_dma_len,
-                                 need_swap, is_ub_stride);
+  auto result = CalculateMultiDimStride(filtered_strides, filtered_repeats, node_info, stride_type,
+                                        supported_max_dma_len, need_swap, is_ub_stride);
+  if (node_info.optype == kLoad && !is_ub_stride && !need_swap && filtered_dim_size <= supported_max_dma_len &&
+      strides.size() == repeats.size() &&
+      af::SymbolicUtils::StaticCheckEq(result.stride, CreateExpr(0)) != af::TriBool::kTrue) {
+    // Check the complete source layout; a unit inner row alone cannot remove outer gaps.
+    return RemoveContiguousLoadStride(filtered_strides, filtered_repeats, std::move(result));
+  }
+  return result;
 }
 
 af::Status SetStride(const TensorShapeInfo &shape_info, NodeDetail &node_info, const int32_t supported_max_dma_len,
@@ -984,12 +1029,9 @@ af::Status MergeTensorContinuousDims(const af::AscNodePtr &node, const std::stri
     org_dims.emplace_back(af::sym::kSymbolOne);
   } else {
     (void)UpdateIsContinous(tensor.repeats, tensor.strides, is_continuous, "UB");
-    if (AttUtils::IsLoadNode(node.get())) {
-      // 根据转置信息重排 gm_strides
-      GE_ASSERT_SUCCESS(ReorderGmStrideByTranspose(node, tensor), "Failed to reorder gm_strides by transpose");
-    }
     if (AttUtils::IsLoadStoreNode(node.get())) {
-      (void)UpdateIsContinous(tensor.repeats, tensor.gm_strides, is_continuous, "GM");
+      // Both repeats and GM strides are indexed by vectorized_axis.
+      (void)UpdateIsContinous(org_dims, tensor.gm_strides, is_continuous, "GM");
     }
     tensor.dims.emplace_back(org_dims[0]);
     UpdateTensorDim(node.get(), is_continuous, org_dims, tensor);
