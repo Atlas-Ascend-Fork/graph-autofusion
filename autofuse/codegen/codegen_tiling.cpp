@@ -1469,6 +1469,28 @@ std::string TilingLib::GenTilingFuncForInductor(const ascir::FusedScheduledResul
                                                       pgo_shape_dim.shape_dim_use.str());
   }
   ss << GenPlainInductorTilingTail(elemwise_schedule_result, pgo_shape_dim, tiling);
+  ss << GenInductorTilingV2(dynamic_shape_vars, func, tiling);
+  return ss.str();
+}
+
+std::string TilingLib::GenInductorTilingV2(const std::vector<std::string> &dynamic_shape_vars, const std::string &func,
+                                           const std::string &tiling) const {
+  std::stringstream ss;
+  ss << "extern \"C\" int64_t " << func << "V2(const std::vector<int64_t>& symbols," << std::endl;
+  ss << "    void* tiling_data, uint64_t* workspaceSize, uint32_t *blockDim," << std::endl;
+  ss << "    ResLimit *res_limit = nullptr)" << std::endl;
+  ss << "{" << std::endl;
+  ss << "    constexpr size_t k_symbol_count = " << dynamic_shape_vars.size() << ";" << std::endl;
+  ss << "    if (symbols.size() != k_symbol_count) {" << std::endl;
+  ss << "        return -1;" << std::endl;
+  ss << "    }" << std::endl;
+  ss << "    return " << func << "(";
+  for (size_t i = 0; i < dynamic_shape_vars.size(); ++i) {
+    ss << "static_cast<uint32_t>(symbols[" << i << "]), ";
+  }
+  ss << "static_cast<" << tiling << "*>(tiling_data), workspaceSize, blockDim, res_limit);" << std::endl;
+  ss << "}" << std::endl;
+  ss << std::endl;
   return ss.str();
 }
 
