@@ -13,6 +13,7 @@
 #include <stack>
 #include <queue>
 #include <optional>
+#include "common/ge_common/scope_guard.h"
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
 #include "graph/compute_graph.h"
 #include "util/mem_utils.h"
@@ -69,11 +70,23 @@ Status CollectPostReduceNodes(af::Node *start_node, std::unordered_set<af::Node 
   return af::SUCCESS;
 }
 
+// 判断axis_id是否为BlockOuter轴：block级（codegen不生成for循环），不计为有效循环轴；
+// 外提Load的loop_axis标记即指向该类轴，不应参与loop_axis种类统计
+bool IsBlockOuterAxis(const af::AscGraph &graph, const int64_t axis_id) {
+  if (axis_id == af::kIdNone) {
+    return false;
+  }
+  // AscGraph::FindAxis 未声明 const（impl 层为 const 纯查询），此处仅做轴查询，const_cast 安全。
+  const auto *axis = const_cast<af::AscGraph &>(graph).FindAxis(axis_id);
+  return axis != nullptr && axis->type == af::Axis::kAxisTypeBlockOuter;
+}
+
 bool IsNeedFixTopo(const af::AscGraph &graph, bool use_rdfs_v2) {
   if (use_rdfs_v2) {
     std::unordered_set<int64_t> unique_loop_axes;
     for (const auto &node : graph.GetAllNodes()) {
-      if (node->attr.sched.loop_axis != af::kIdNone) {
+      // BlockOuter轴（block级无for循环，含外提Load标记）不计入loop_axis种类
+      if (node->attr.sched.loop_axis != af::kIdNone && !IsBlockOuterAxis(graph, node->attr.sched.loop_axis)) {
         unique_loop_axes.insert(node->attr.sched.loop_axis);
       }
     }
@@ -152,6 +165,31 @@ Status FillLoopGroupFromSeed(const LoopGroupSeed &seed, const size_t group_id, s
                                                node_to_group, fill_queue, seed_queue));
   }
   return af::SUCCESS;
+}
+
+// 外提Load判定：Load节点的loop_axis指向BlockOuter轴（HoistInvariantLoads的标记）
+bool IsHoistedLoad(af::AscGraph &graph, const af::AscNodePtr &node) {
+  if (!af::ops::IsOps<af::ascir_op::Load>(node) || node->attr.sched.loop_axis == af::kIdNone) {
+    return false;
+  }
+  const auto &axis = graph.FindAxis(node->attr.sched.loop_axis);
+  return axis != nullptr && axis->type == af::Axis::kAxisTypeBlockOuter;
+}
+
+// 判断图是否已经过buf_que_alloc：AllocateWithinGroup会为计算节点的输出tensor分配que.id/buf.id
+// （分配前均为kIdNone）。Data/Output（kAPITypeBuffer）节点的GM tensor不参与UB分配，
+// 找到第一个非Buffer节点判断即可，无需遍历整图。
+// 分配发生在ProcessSingleImplGraph末段，故其中的排序调用不受影响；
+// 分配后的重排（如ChangeStartingOutputToWorkspace）据此强制使用RDFSV2，与内存规划的V2序保持一致。
+bool IsAfterBufQueAlloc(const af::AscGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->attr.api.type == af::ApiType::kAPITypeBuffer || node->outputs().empty()) {
+      continue;
+    }
+    const auto &output = node->outputs[0];
+    return output.attr.que.id != af::kIdNone || output.attr.buf.id != af::kIdNone;
+  }
+  return false;
 }
 }  // namespace
 
@@ -458,14 +496,15 @@ bool ScheduleUtils::IsTailAxisAlignedBy(const af::AscNodePtr &node, const uint32
 
 // 判断图是否满足按循环轴分组的前置条件，成立条件：
 // 1. 所有reduce节点的loop_axis均已赋值（存在未赋值说明尚未经过AutoScheduler，直接不成立）；
-// 2. 全图有效loop_axis种类数 > 1（-1不计入，单一循环轴无需分组）。
+// 2. 全图有效loop_axis种类数 > 1（-1与BlockOuter轴不计入，单一循环轴无需分组）。
 // 其中reduce节点数量 > 1 的检查不是必须条件，与条件2重复，保留只是为了控制影响范围。
 bool ScheduleUtils::IsNeedLoopGrouping(const af::AscGraph &graph) {
   size_t reduce_cnt = 0U;
   std::unordered_set<int64_t> unique_loop_axes;
   for (const auto &node : graph.GetAllNodes()) {
     const int64_t loop_axis = node->attr.sched.loop_axis;
-    if (loop_axis != af::kIdNone) {
+    // BlockOuter轴（block级无for循环，含外提Load标记）不计入loop_axis种类
+    if (loop_axis != af::kIdNone && !IsBlockOuterAxis(graph, loop_axis)) {
       unique_loop_axes.insert(loop_axis);
     }
     if (!IsReduce(node)) {
@@ -523,9 +562,63 @@ Status ScheduleUtils::BuildLoopGroups(const af::AscGraph &graph, std::vector<Loo
   return af::SUCCESS;
 }
 
+bool ScheduleUtils::SortHoistedLoadsFirst(af::AscGraph &graph) {
+  std::unordered_map<af::Node *, int64_t> rank;
+  std::unordered_set<af::Node *> front_set;
+  std::vector<af::NodePtr> pending;
+  bool has_hoisted = false;
+  int64_t index = 0;
+  for (const auto &node : graph.GetAllNodes()) {
+    rank.emplace(node.get(), index++);
+    if (IsHoistedLoad(graph, node)) {
+      has_hoisted = true;
+      if (front_set.emplace(node.get()).second) {
+        pending.emplace_back(node);
+      }
+    }
+  }
+  if (!has_hoisted) {
+    return false;
+  }
+  // 前驱闭包：外提Load的前驱节点（Data等）一并前置，保证排序后仍为合法拓扑序
+  while (!pending.empty()) {
+    const auto node = pending.back();
+    pending.pop_back();
+    for (const auto &pred : node->GetInDataNodes()) {
+      if (pred == nullptr) {
+        continue;
+      }
+      if (front_set.emplace(pred.get()).second) {
+        pending.emplace_back(pred);
+      }
+    }
+  }
+  auto compute_graph = af::AscGraphUtils::GetComputeGraph(graph);
+  GE_ASSERT_NOTNULL(compute_graph);
+  const auto comp = [&front_set, &rank](const af::NodePtr &node1, const af::NodePtr &node2) -> bool {
+    const bool node1_front = front_set.count(node1.get()) > 0UL;
+    const bool node2_front = front_set.count(node2.get()) > 0UL;
+    if (node1_front != node2_front) {
+      return node1_front;
+    }
+    return rank.at(node1.get()) < rank.at(node2.get());
+  };
+  compute_graph->TopologicalSorting(comp);
+  GELOGI("Graph [%s] hoisted loads sorted to front, front node cnt = %zu.", graph.GetName().c_str(), front_set.size());
+  return true;
+}
+
 Status ScheduleUtils::TopologicalSorting(af::AscGraph &graph, bool use_rdfs_v2) {
   auto compute_graph = af::AscGraphUtils::GetComputeGraph(graph);
   GE_ASSERT_NOTNULL(compute_graph);
+  // 防止在BufAlloc后又调用TopologicalSorting, 使用了不同算法导致排序变化, 这里强制设置为V2
+  if ((!use_rdfs_v2) && IsAfterBufQueAlloc(graph)) {
+    GELOGW("Graph [%s] has passed buf_que_alloc, force using RDFSV2 topological sorting.", graph.GetName().c_str());
+    use_rdfs_v2 = true;
+  }
+  // guard保证任意分支退出（IsNeedFixTopo/loop-grouping/post_reduce各出口）前外提Load前置，
+  // 对无外提Load的图为no-op，故无需在基础RDFS后显式调用
+  GE_MAKE_GUARD(hoisted_sort_guard, [&graph]() { ScheduleUtils::SortHoistedLoadsFirst(graph); });
   const auto mode = use_rdfs_v2 ? af::TopoSortingMode::kRDFSV2 : af::TopoSortingMode::kRDFS;
   GE_ASSERT_GRAPH_SUCCESS(compute_graph->TopologicalSorting(mode), "TopologicalSorting failed, graph:[%s].",
                           compute_graph->GetName().c_str());

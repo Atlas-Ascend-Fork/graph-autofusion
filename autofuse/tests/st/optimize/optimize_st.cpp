@@ -3984,15 +3984,23 @@ TEST_F(OptimizerSt, NodeCacheMarkerRemovepad) {
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1UL);
-  const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 2);
-  const auto &impl0 = impl_graphs[0];
+  auto &impl0 = impl_graphs[0];
   const auto &impl0_scalar_node = impl0.FindNode("data0");
   EXPECT_NE(impl0_scalar_node, nullptr);
   EXPECT_EQ(impl0_scalar_node->attr.sched.exec_condition, ExecuteCondition::kNoCache);
   const auto &impl0_load1_node = impl0.FindNode("load1");
   EXPECT_NE(impl0_load1_node, nullptr);
-  EXPECT_EQ(impl0_load1_node->attr.sched.exec_condition, ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis);
+  // load1 通过外提判定（IsNodeCacheable 验证了 NodeCacheMarker 的标记）后被转换为 TBuf，
+  // exec_condition 被复位为 kNoCache，loop_axis 被置为其最外层 BlockOuter 轴（block层级一次执行）
+  EXPECT_EQ(impl0_load1_node->attr.sched.exec_condition, ExecuteCondition::kNoCache);
+  const auto load1_loop_axis = impl0_load1_node->attr.sched.loop_axis;
+  ASSERT_NE(load1_loop_axis, af::kIdNone);
+  const auto load1_loop_axis_ptr = impl0.FindAxis(load1_loop_axis);
+  ASSERT_NE(load1_loop_axis_ptr, nullptr);
+  EXPECT_EQ(load1_loop_axis_ptr->type, af::Axis::kAxisTypeBlockOuter);
+  EXPECT_EQ(impl0_load1_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeBuffer);
   const auto &impl0_brc1_node = impl0.FindNode("brc1");
   EXPECT_NE(impl0_brc1_node, nullptr);
   EXPECT_EQ(impl0_brc1_node->attr.sched.exec_condition, ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis);

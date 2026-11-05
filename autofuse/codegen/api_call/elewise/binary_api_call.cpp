@@ -188,20 +188,18 @@ Status BinaryApiCall::BrcInlineGenerate(const TPipe &tpipe, const std::vector<as
                      : v_strides);
   }
 
-  int64_t type_size = GetSizeByDataType(y.dtype);
   stringstream ss;
   std::string dtype_name;
   GE_CHK_STATUS_RET(Tensor::DtypeName(x1.dtype, dtype_name), "Codegen get data type:%d failed",
                     static_cast<int32_t>(x1.dtype));
 
-  ss << "BinaryBrcInlineApiWithTwoVectorizedAxis<" << dtype_name << ">" << "(" << y << "["
+  ss << "BinaryBrcInlineApiWithTwoVectorizedAxisV2<" << dtype_name << ">(" << y << "["
      << tpipe.tiler.TensorVectorizedOffset(current_axis, y) << "], " << x1 << "["
      << tpipe.tiler.TensorVectorizedOffset(current_axis, x1) << "], " << x2 << "["
      << tpipe.tiler.TensorVectorizedOffset(current_axis, x2) << "], " << tpipe.tiler.ActualSize(meger_shape[0]) << ", "
      << tpipe.tiler.ActualSize(meger_shape[1]) << ", " << static_cast<int>(input_idx_2_brc_inline[0] == 0) << ", "
-     << static_cast<int>(input_idx_2_brc_inline[1] == 0) << ", " << tpipe.tiler.ActualSize(v_strides) << ", "
-     << static_cast<int>(type_size) << ", &" << GetAscendApiName(this->api_name_) << ", &"
-     << GetAscendApiName(this->api_name_) << ");" << std::endl;
+     << static_cast<int>(input_idx_2_brc_inline[1] == 0) << ", " << tpipe.tiler.ActualSize(v_strides) << ", &"
+     << GetAscendApiName(this->api_name_) << "<" << dtype_name << ", false>);" << std::endl;
   result = ss.str();
   return af::SUCCESS;
 }

@@ -58,6 +58,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr LoadUnalignPadFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadNeedLoopModeFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr BrcInlineFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr BrcInlineLoadOrderFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadWhereStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadWhereX2X3IsUbscalarStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadWhereX2IsUbscalarStoreFusedGraph(size_t dims_size);

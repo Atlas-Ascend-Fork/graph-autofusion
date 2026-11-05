@@ -1443,8 +1443,8 @@ TEST(CodegenKernel, brc_inline_apicall_test) {
 
   std::string result;
   EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), 0);
-  EXPECT_EQ(result, std::string{"BinaryBrcInlineApiWithTwoVectorizedAxis<float>(local_3[0], local_0[0], local_2[0], "
-                                "t->s0, t->s1, 1, 0, t->s1, 4, &AscendC::Add, &AscendC::Add);\n"});
+  EXPECT_EQ(result, std::string{"BinaryBrcInlineApiWithTwoVectorizedAxisV2<float>(local_3[0], local_0[0], "
+                                "local_2[0], t->s0, t->s1, 1, 0, t->s1, &AscendC::Add<float, false>);\n"});
 }
 
 TEST(CodegenKernel, BinaryApiCallLogicalOrWhenBothAreTensor) {
