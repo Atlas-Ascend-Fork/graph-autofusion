@@ -2343,18 +2343,6 @@ std::string TPipe::SyncMte3ToVec(const Tensor in_tensor) const {
   return ss.str();
 }
 
-// MTE2产出TBuf后V侧消费前的完成等待，用于外提Load的数据同步（对齐MTE2_S事件使用模式，
-// 不依赖局部tpipe对象，外提前导场景通用）。
-std::string TPipe::SyncMte2ToVec(const Tensor in_tensor) const {
-  stringstream ss;
-  const std::string event_name = in_tensor.Str() + "_mte2_v_event";
-
-  ss << "auto " << event_name << " = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));" << std::endl
-     << "SetFlag<HardEvent::MTE2_V>(" << event_name << ");" << std::endl
-     << "WaitFlag<HardEvent::MTE2_V>(" << event_name << ");" << std::endl;
-  return ss.str();
-}
-
 Status TPipe::CollectQues(const ascir::ImplGraph &graph) {
   QueCollection collection;
   for (auto node : graph.GetAllNodes()) {

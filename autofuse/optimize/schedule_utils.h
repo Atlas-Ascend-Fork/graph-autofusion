@@ -39,15 +39,9 @@ class ScheduleUtils {
   // 后端默认采用逆dfs的拓扑排序方式
   static Status TopologicalSorting(af::AscGraph &graph, bool use_rdfs_v2 = false);
 
-  // 外提Load感知排序：存在loop_axis为BlockOuter轴的Load（HoistInvariantLoads标记）时，
-  // 将其与前驱节点排到最前（其余节点保持原相对序），返回是否执行了重排。
-  // codegen按节点序构建循环树：外提call必须先于兄弟深层Loop加入body，
-  // 否则外提拷贝发射在消费循环之后，且同层重复下降会拆出重复循环与重复变量定义。
-  static bool SortHoistedLoadsFirst(af::AscGraph &graph);
-
   // 判断图是否满足按循环轴分组的前置条件：
   // 1. 所有reduce节点的loop_axis均已赋值（保证该处理在AutoScheduler之后才生效）；
-  // 2. 全图有效loop_axis种类数 > 1（-1与BlockOuter轴不计入，单一循环轴无需分组）。
+  // 2. 全图有效loop_axis种类数 > 1（-1不计入，单一循环轴无需分组）。
   // reduce节点数量 > 1 的检查与条件2重复，非必须，仅用于控制影响范围。
   static bool IsNeedLoopGrouping(const af::AscGraph &graph);
 

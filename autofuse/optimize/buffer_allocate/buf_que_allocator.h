@@ -26,11 +26,6 @@ class BufQueAllocator {
   Status CollectFusedIoNodes(::ascir::FusedScheduledResult &fused_scheduled_result);
 
  private:
-  static Status HoistInvariantLoads(af::AscGraph &graph);
-  static bool CanHoist(const af::AscGraph &graph, const af::AscNodePtr &node);
-  static bool IsLoadAddressLoopInvariant(const af::AscTensor *output);
-  static bool IsQueExclusive(const af::AscGraph &graph, const af::AscTensor *output);
-  static int64_t GetMaxBufId(const af::AscGraph &graph);
   Status AllocBufQueForSingleImplGraph(af::AscGraph &impl_graph, size_t max_que_num,
                                        bool is_reduce_mem_reuse = false) const;
   Status ProcessSingleImplGraph(af::AscGraph &impl_graph, BasePlatform &platform, size_t max_que_num,
