@@ -3057,7 +3057,7 @@ TEST(CodegenKernel, CompareApiCallThrowingFor) {
   call.Generate(tpipe, current_axis, result);
   EXPECT_EQ(result, std::string{"CompareExtend<int32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, "
                                 "((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * "
-                                "t->s2))))/(1), tmp_buf_0);\n"});
+                                "t->s2))))/(1), tmp_buf_0, local_1_size * sizeof(int32_t));\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -3176,7 +3176,7 @@ TEST(CodegenKernel, CompareApiCallTwoAxis) {
   call.Generate(tpipe, current_axis, result);
   EXPECT_EQ(result, std::string{"CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, "
                                 "((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * "
-                                "t->s2))))/(1), tmp_buf_0);\n"});
+                                "t->s2))))/(1), tmp_buf_0, local_1_size * sizeof(float));\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -3303,13 +3303,10 @@ TEST(CodegenKernel, CompareApiCallThrowingForWithX2IsUbScalar) {
 
   std::string result;
   call.Generate(tpipe, current_axis, result);
-  EXPECT_EQ(
-      result,
-      std::string{"{LocalTensor<float> local_1_brc_view = local_1[0];\n"
-                  "local_1_brc_view.SetSize(ONE_BLK_SIZE / sizeof(float));\n"
-                  "CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1_brc_view, t->s1, t->s2, ((8 * "
-                  "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), "
-                  "tmp_buf_0);}\n"});
+  EXPECT_EQ(result,
+            std::string{"CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
+                        "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), "
+                        "tmp_buf_0, ONE_BLK_SIZE);\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -3436,13 +3433,10 @@ TEST(CodegenKernel, CompareApiCallThrowingForWithX2IsUbScalarForUint32) {
 
   std::string result;
   call.Generate(tpipe, current_axis, result);
-  EXPECT_EQ(
-      result,
-      std::string{"{LocalTensor<uint32_t> local_1_brc_view = local_1[0];\n"
-                  "local_1_brc_view.SetSize(ONE_BLK_SIZE / sizeof(uint32_t));\n"
-                  "CompareExtend<uint32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1_brc_view, t->s1, t->s2, ((8 * "
-                  "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), "
-                  "tmp_buf_0);}\n"});
+  EXPECT_EQ(result,
+            std::string{"CompareExtend<uint32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
+                        "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), "
+                        "tmp_buf_0, ONE_BLK_SIZE);\n"});
 }
 
 // 测试compare api需要外抛for循环的场景

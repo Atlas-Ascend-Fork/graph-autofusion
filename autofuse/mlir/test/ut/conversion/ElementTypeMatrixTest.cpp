@@ -206,6 +206,16 @@ constexpr KnownNarrowerRow kKnownNarrower[] = {
      "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
     {"broadcast.tensor.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16, kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16,
      "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
+    // mem 档**有意**摘除 i32（连带无位的 ui32 同摘）：v1 布局对非 float 的 transpose 只给
+    // 32B（4 字节整型折 8 元素），而 ConfusionTranspose 公式写死尾轴 16 元素对齐——布局
+    // 与公式错位，数值必错（legacy 生产同错，其 ST 因手搓布局掩盖且无 int32 用例；实测
+    // 1700/1702）。reg 档不受影响（regbase 显式传 strides）。根因链、实测证据与恢复条件
+    // 见 `Implementations/Transpose.cpp` 的「口径 A 修订」注释与设计文档
+    // `2026-10-19-afir-transpose-e2e-design.md` 收尾结论。补齐 = v1 布局/公式口径对齐后，
+    // 把 `kTransposeMemElementTypes` 加回 kI32 并删本行。
+    {"transpose.ub_ub_extend", kF16 | kF32 | kI16 | kUI16, kF16 | kF32 | kI16 | kI32 | kUI16,
+     "i32/ui32 在 mem 档因 v1 布局(8元素)与 ConfusionTranspose 公式(写死16元素)错位而摘除，"
+     "legacy 生产同错；reg 档保留（regbase 显式传 strides）"},
 };
 
 // ODS 比 legacy 的**声明**宽，且宽得有理由。**这不是豁免，是快照**：多出来的那几位逐位

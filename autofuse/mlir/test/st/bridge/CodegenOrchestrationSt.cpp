@@ -20,6 +20,7 @@
 #include "ascir_utils.h"
 #include "codegen.h"
 #include "common_utils.h"
+#include "common/platform_context.h"
 #include "optimize.h"
 #include "test/Support/TestEnvironment.h"
 #include "tests/framework/easy_asc_graph/asc_graph_builder.h"
@@ -41,6 +42,28 @@ af::AscGraph BuildLoadAddStoreGraph() {
       .Store("store", "add")
       .Output("y", "store", 0, DT_FLOAT16)
       .Build();
+}
+
+// Shared legacy E2E input shape, exercised through GenerateForInductor.
+af::AscGraph BuildLegacyInductorTransposeGraph() {
+  using af::testing::AscGraphBuilder;
+  const auto s0 = af::Symbol(2);
+  const auto s1 = af::Symbol(37);
+  const auto s2 = af::Symbol(23);
+  auto graph = AscGraphBuilder("legacy_inductor_transpose_stage")
+                   .Loops({s0, s1, s2})
+                   .Data("x", 0, af::DT_FLOAT)
+                   .Load("load", "x")
+                   .Transpose("transpose", "load", {0, 2, 1})
+                   .Store("store", "transpose", {s0, s2, s1}, {s2 * s1, s1, af::sym::kSymbolOne})
+                   .Output("y", "store", 0, af::DT_FLOAT)
+                   .Build();
+  auto &output = graph.FindNode("y")->outputs()[0]->attr;
+  const auto &stored = graph.FindNode("store")->outputs()[0]->attr;
+  output.axis = stored.axis;
+  output.repeats = stored.repeats;
+  output.strides = stored.strides;
+  return graph;
 }
 
 void ExpectPassDumps(const std::filesystem::path &dump_dir) {
@@ -128,4 +151,74 @@ TEST(CodegenOrchestrationSt, ManualGraphScheduleAndMlirCodegen) {
   ExpectPassDumps(dump_dir);
 
   std::filesystem::remove_all(dump_dir);
+}
+
+TEST(CodegenOrchestrationSt, LegacyInductorTransposeStageContractsAndStableArtifacts) {
+  ge::PlatformContext::GetInstance().Reset();
+  const auto dump_dir = DUMP_DIR_BASE / "LegacyInductorTransposeStageContracts";
+  mlir::test::ScopedEnvVar flags(
+      "AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;--codegen_compile_debug=true;--debug_dir=" + dump_dir.string());
+  ::ascir::utils::ResetDumpConfig();
+  auto graph = BuildLegacyInductorTransposeGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  ASSERT_EQ(fused.input_nodes.size(), 1U);
+  ASSERT_EQ(fused.output_nodes.size(), 1U);
+  codegen::Codegen codegen(codegen::CodegenOptions{.soc_version = "Ascend910B1"});
+  codegen::CodegenResult first;
+  ASSERT_EQ(codegen.GenerateForInductor(fused, first), af::SUCCESS);
+  EXPECT_NE(first.kernel.find("_subgraph0_plan"), std::string::npos);
+  EXPECT_NE(first.kernel.find("codegen::ConfusionTranspose<"), std::string::npos);
+  EXPECT_NE(first.kernel.find("AscendC::TQue"), std::string::npos);
+  EXPECT_NE(first.kernel.find("InitBuffer("), std::string::npos);
+  EXPECT_NE(first.tiling_data.find("ConfusionTransposeTiling"), std::string::npos);
+  EXPECT_NE(first.tiling_data.find("q0_size"), std::string::npos);
+  EXPECT_NE(first.tiling.find("GetTilingDataRepr"), std::string::npos);
+  EXPECT_NE(first.tiling.find(".param17 = "), std::string::npos);
+  ExpectPassDumps(dump_dir);
+  // MLIR has different source from legacy; pin repeatable artifacts and semantic
+  // contracts instead of comparing bytes to a legacy-generated C++ snapshot.
+  codegen::CodegenResult repeated;
+  ASSERT_EQ(codegen.GenerateForInductor(fused, repeated), af::SUCCESS);
+  EXPECT_EQ(first.kernel, repeated.kernel);
+  EXPECT_EQ(first.tiling_data, repeated.tiling_data);
+  EXPECT_EQ(first.tiling, repeated.tiling);
+  std::filesystem::remove_all(dump_dir);
+  ::ascir::utils::ResetDumpConfig();
+}
+
+TEST(CodegenOrchestrationSt, LegacyInductorRejectsInvalidScheduledTransposeWithoutFallback) {
+  ge::PlatformContext::GetInstance().Reset();
+  mlir::test::ScopedEnvVar strict("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir");
+  auto graph = BuildLegacyInductorTransposeGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  codegen::Codegen codegen(codegen::CodegenOptions{.soc_version = "Ascend910B1"});
+  codegen::CodegenResult valid;
+  ASSERT_EQ(codegen.GenerateForInductor(fused, valid), af::SUCCESS);
+  // Exact corruption used by legacy LoadTransposeStoreInvalidTransposeCodegen.
+  size_t corrupted = 0;
+  for (auto &results : fused.node_idx_to_scheduled_results) {
+    for (auto &result : results) {
+      for (auto &group : result.schedule_groups) {
+        for (auto &candidate : group.impl_graphs) {
+          for (const auto &node : candidate.GetAllNodes()) {
+            if (node->GetType() != "Transpose") {
+              continue;
+            }
+            ASSERT_FALSE(node->inputs().empty());
+            node->outputs()[0]->attr.vectorized_axis = node->inputs()[0]->attr.vectorized_axis;
+            node->outputs()[0]->attr.vectorized_strides = node->inputs()[0]->attr.vectorized_strides;
+            ++corrupted;
+          }
+        }
+      }
+    }
+  }
+  ASSERT_GT(corrupted, 0U);
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.GenerateForInductor(fused, result), af::FAILED);
+  EXPECT_TRUE(result.kernel.empty());
 }

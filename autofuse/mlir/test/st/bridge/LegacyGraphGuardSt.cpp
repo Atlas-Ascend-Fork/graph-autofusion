@@ -25,7 +25,7 @@
 // 重筛后是 78 个图 / 剩余 105，见 `2026-10-26-feature7-remaining-graphs-rescreen.txt`；
 // 本文件的看护集合仍是当初那 74 个那一版，新增的 4 个未搬。）
 //
-// **为什么用严格模式**：缺省那一档（`AF_ENABLE_MLIR_CODEGEN=1`）在 MLIR 收不了时回落给
+// **为什么用严格模式**：允许回落的那一档（`--mlir_codegen_config=fallback`）在 MLIR 收不了时回落给
 // legacy，`GenerateForInductor` 照样返回 SUCCESS——那样这条用例在「MLIR 不再接管这张图」时
 // 仍然是绿的，看护不到任何东西。严格模式把回落也判成失败，于是 ASSERT SUCCESS 的含义变成
 // 「这张图确实是 MLIR 发的」。
@@ -62,7 +62,7 @@ using af::testing::Sym;
 
 // 一条看护用例的全部动作。`soc_version` 为空表示走 reg 侧那条（由 stub 供 soc 名）。
 void ExpectMlirOwnsGraph(af::AscGraph graph, const std::string &soc_version) {
-  mlir::test::ScopedEnvVar strict("AF_ENABLE_MLIR_CODEGEN", "strict");
+  mlir::test::ScopedEnvVar strict("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir");
 
   // **不设图级 tiling key。** 一个 stage 调度出多个模板时（`ContinuesBrc` 有 5 个），图级的
   // `AscGraph::SetTilingKey` 识别不了模板，产物装配当场报错并要求去掉它；不设的话每个模板的
@@ -81,8 +81,26 @@ void ExpectMlirOwnsGraph(af::AscGraph graph, const std::string &soc_version) {
   // 严格模式下这一条等价于「MLIR 接管了这张图」——回落会让它返回失败。
   ASSERT_EQ(codegen.GenerateForInductor(fused, result), af::SUCCESS);
   EXPECT_FALSE(result.kernel.empty());
+  EXPECT_NE(result.kernel.find("_subgraph0_plan"), std::string::npos);
   EXPECT_FALSE(result.tiling.empty());
   EXPECT_FALSE(result.tiling_data.empty());
+}
+
+// Legacy optimizer success does not imply an MLIR candidate exists. Keep this
+// boundary explicit instead of accepting a silent legacy fallback as migration.
+void ExpectMlirRejection(af::AscGraph graph, const std::string &reason, const std::string &gate) {
+  mlir::test::ScopedEnvVar strict("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir");
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  mlir::test::ScopedStderrCapture capture;
+  const auto status = codegen.GenerateForInductor(fused, result);
+  const auto diagnostic = capture.Text();
+  EXPECT_EQ(status, af::FAILED);
+  EXPECT_NE(diagnostic.find(reason), std::string::npos) << diagnostic;
+  EXPECT_NE(diagnostic.find("gate=" + gate), std::string::npos) << diagnostic;
 }
 
 // mem 侧（NpuArch 2201）。
@@ -108,6 +126,91 @@ class LegacyGraphGuardRegSt : public testing::Test {
 //===----------------------------------------------------------------------===//
 // 按接管表的 takeover 定侧：一个图在哪一侧被接管就在那一侧发用例，两侧都被接管就发两条。
 //===----------------------------------------------------------------------===//
+
+// legacy backend_e2e/sub_transpose_abs_test 与其 PGO 变体共用的输入图。
+TEST_F(LegacyGraphGuardMemSt, SubTransposeAbs) {
+  ExpectMlirOwnsGraph(AscGraphBuilder("sub_transpose_abs")
+                          .Loops({32, 64, 512})
+                          .Data("data0", 0, af::DT_FLOAT)
+                          .Data("data1", 1, af::DT_FLOAT)
+                          .Load("load0", "data0")
+                          .Load("load1", "data1")
+                          .Sub("sub", "load0", "load1")
+                          .Transpose("transpose", "sub", {1, 0, 2})
+                          .Abs("abs", "transpose")
+                          .Store("store", "abs")
+                          .Output("output", "store", 0, af::DT_FLOAT)
+                          .Build(),
+                      "Ascend910B1");
+}
+
+// legacy v35 optimize_st_v2.cpp 的同名图；只在 CPU 仿真环境生成。
+TEST_F(LegacyGraphGuardRegSt, NddmaCaseTranspose021OutputWithSingleRef) {
+  ExpectMlirOwnsGraph(AscGraphBuilder("transpose021")
+                          .Loops({32, 64, 16})
+                          .Data("data0", 0, af::DT_FLOAT)
+                          .Load("load0", "data0")
+                          .Transpose("transpose", "load0", {0, 2, 1})
+                          .Store("store", "transpose")
+                          .Output("output", "store", 0, af::DT_FLOAT)
+                          .Build(),
+                      "");
+}
+
+TEST_F(LegacyGraphGuardRegSt, LoadCastTransposeCase) {
+  ExpectMlirOwnsGraph(AscGraphBuilder("cast_transpose")
+                          .Loops({64, 64})
+                          .Data("data0", 0, af::DT_FLOAT16)
+                          .Load("load0", "data0")
+                          .Cast("cast", "load0", af::DT_FLOAT)
+                          .Transpose("transpose", "cast", {1, 0})
+                          .Store("store", "transpose")
+                          .Output("output", "store", 0, af::DT_FLOAT)
+                          .Build(),
+                      "");
+}
+
+// Optimizer-only input, not a legacy Inductor migration case. The comparison
+// layout is currently unsupported; keep its strict rejection visible.
+TEST_F(LegacyGraphGuardRegSt, LoadGEWhereTransposeCaseLoweringBoundary) {
+  const auto s0 = Sym(41);
+  const auto s1 = Sym(54);
+  const auto s2 = Sym(38);
+  const auto s3 = Sym(55);
+  ExpectMlirRejection(AscGraphBuilder("where_transpose")
+                          .Loops({s0, s1, s2, s3})
+                          .Data("data0", 0)
+                          .Load("load0", "data0")
+                          .Data("data1", 1)
+                          .Load("load1", "data1")
+                          .Ge("ge", "load0", "load1")
+                          .Where("where", "ge", "load0", "load1")
+                          .Transpose("transpose", "where", {0, 3, 1, 2})
+                          .Store("store", "transpose")
+                          .Output("output", "store", 0)
+                          .Build(),
+                      "'afir.ge' op has no supported Ascend implementation", "lowering");
+}
+
+TEST_F(LegacyGraphGuardRegSt, TransposeTwoAxisSplitCaseNeedInputAlignCandidateBoundary) {
+  auto s0 = Sym(347);
+  auto s2 = Sym(15);
+  auto s3 = Sym(49);
+  ExpectMlirRejection(
+      AscGraphBuilder("transpose_broadcast_mul")
+          .Loops({s0, s2, s3})
+          .Data("data0", 0, af::DT_FLOAT)
+          .Load("load0", "data0", {}, {s2 * s3, s2, af::sym::kSymbolOne})
+          .Transpose("transpose0", "load0", {0, 2, 1})
+          .Data("data1", 1, af::DT_FLOAT)
+          .Load("load1", "data1", {s0, af::sym::kSymbolOne, s3}, {s3, af::sym::kSymbolZero, af::sym::kSymbolOne})
+          .Broadcast("brc0", "load1", {1})
+          .Mul("mul0", "brc0", "transpose0")
+          .Store("store0", "mul0")
+          .Output("output", "store0", 0, af::DT_FLOAT)
+          .Build(),
+      "elementwise-broadcast", "candidate-preparation");
+}
 
 // 对应 `ShareGraph::AcosBf16FusedGraph(3)`。
 TEST_F(LegacyGraphGuardRegSt, AcosBf16) {
@@ -145,7 +248,7 @@ TEST_F(LegacyGraphGuardMemSt, AddAbs) {
                           .Load("load1", "data1")
                           .Op<af::ascir_op::Add>("add", {"load0", "load1"})
                           .Op<af::ascir_op::Abs>("abs", {"add"})
-                          .Store("store", "abs")
+                          .Store("store", "abs", {}, {})
                           .Output("output", "store", 0, af::DT_FLOAT)
                           .Build(),
                       "Ascend910B1");
@@ -161,7 +264,7 @@ TEST_F(LegacyGraphGuardRegSt, AddAbs) {
                           .Load("load1", "data1")
                           .Op<af::ascir_op::Add>("add", {"load0", "load1"})
                           .Op<af::ascir_op::Abs>("abs", {"add"})
-                          .Store("store", "abs")
+                          .Store("store", "abs", {}, {})
                           .Output("output", "store", 0, af::DT_FLOAT)
                           .Build(),
                       /*soc_version=*/"");

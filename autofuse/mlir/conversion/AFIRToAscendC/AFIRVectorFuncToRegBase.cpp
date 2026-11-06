@@ -179,6 +179,9 @@ llvm::ArrayRef<RegOpMapping> regOpMappings() {
       // 那是 legacy 的另一条路，不在本期）。
       {afir::EqOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kPredicate,
        kNoPredicateOperand, buildCompareRegOp<ascendc::CMPMODE::EQ>},
+      // Legacy LoadGEWhereTransposeCase uses the same predicate path with GE mode.
+      {afir::GeOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kPredicate,
+       kNoPredicateOperand, buildCompareRegOp<ascendc::CMPMODE::GE>},
       {afir::WhereOp::getOperationName(), RegOpArity::kTernary, RegOpElementTypes::kUniform, RegOpResult::kValue,
        /*predicateOperand=*/0, buildSelectRegOp},
   };

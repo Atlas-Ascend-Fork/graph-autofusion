@@ -155,9 +155,9 @@ module @plan0 attributes {
 // CHECK-NEXT:   %[[LLOFF:.*]] = arith.muli %[[LIV]], %[[LUBSTRIDE]]
 // CHECK-NEXT:   %{{.*}} = ascendc.global_tensor.subindex %{{.*}}[%[[LGOFF]]]
 // CHECK-NEXT:   %{{.*}} = ascendc.local_tensor.subindex %{{.*}}[%[[LLOFF]]]
-// CHECK-NEXT:   ascendc.data_copy_pad_extend %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[LGMGAP]], %[[LUBGAP]]
+// CHECK-NEXT:   ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[LGMGAP]], %[[LUBGAP]]
 // **只有一层**：DMA 之后立刻收口。少一层的表现是整块没搬，文本上仍是一条合法的 DMA。
-// CHECK-NEXT: }
+// CHECK-NEXT: {{^ *}}}
 
 // Store。同一套形态，方向相反：两个子视图的先后换位，两个缝隙参数也随之**交换位置**
 // （src 侧取 UB、dst 侧取 GM）。
@@ -171,8 +171,8 @@ module @plan0 attributes {
 // CHECK-NEXT:   %[[SLOFF:.*]] = arith.muli %[[SIV]], %[[SUBSTRIDE]]
 // CHECK-NEXT:   %{{.*}} = ascendc.local_tensor.subindex %{{.*}}[%[[SLOFF]]]
 // CHECK-NEXT:   %{{.*}} = ascendc.global_tensor.subindex %{{.*}}[%[[SGOFF]]]
-// CHECK-NEXT:   ascendc.data_copy_pad_extend %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[SUBGAP]], %[[SGMGAP]]
-// CHECK-NEXT: }
+// CHECK-NEXT:   ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[SUBGAP]], %[[SGMGAP]]
+// CHECK-NEXT: {{^ *}}}
 
 // -----
 
@@ -317,10 +317,10 @@ module @plan0 attributes {
 // CHECK-NEXT:     %[[LLOFF:.*]] = arith.addi %[[LL0]], %[[LL1]]
 // CHECK-NEXT:     %{{.*}} = ascendc.global_tensor.subindex %{{.*}}[%[[LGOFF]]]
 // CHECK-NEXT:     %{{.*}} = ascendc.local_tensor.subindex %{{.*}}[%[[LLOFF]]]
-// CHECK-NEXT:     ascendc.data_copy_pad_extend %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[LGMGAP]], %[[LUBGAP]]
+// CHECK-NEXT:     ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[LGMGAP]], %[[LUBGAP]]
 // 恰好两层：DMA 之后连着两个收口。
-// CHECK-NEXT:   }
-// CHECK-NEXT: }
+// CHECK-NEXT: {{^ *}}}
+// CHECK-NEXT: {{^ *}}}
 
 // Store。
 // CHECK:      %[[SGMGAP:.*]] = arith.subi %{{.*}}, %[[BLOCKLEN]] : index
@@ -336,6 +336,6 @@ module @plan0 attributes {
 // CHECK-NEXT:     %[[SLOFF:.*]] = arith.addi %[[SL0]], %[[SL1]]
 // CHECK-NEXT:     %{{.*}} = ascendc.local_tensor.subindex %{{.*}}[%[[SLOFF]]]
 // CHECK-NEXT:     %{{.*}} = ascendc.global_tensor.subindex %{{.*}}[%[[SGOFF]]]
-// CHECK-NEXT:     ascendc.data_copy_pad_extend %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[SUBGAP]], %[[SGMGAP]]
-// CHECK-NEXT:   }
-// CHECK-NEXT: }
+// CHECK-NEXT:     ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[SUBGAP]], %[[SGMGAP]]
+// CHECK-NEXT: {{^ *}}}
+// CHECK-NEXT: {{^ *}}}

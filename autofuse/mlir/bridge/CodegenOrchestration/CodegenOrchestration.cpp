@@ -24,6 +24,7 @@
 #include "common/ge_common/debug/log.h"
 #include "common_utils.h"
 #include "ascir_utils.h"
+#include "gen_tiling_impl.h"
 #include "ascir/Dialect/Asc/IR/Asc.h"
 
 #include "bridge/ScheduleToAfir/ScheduleToAfir.h"
@@ -313,6 +314,11 @@ mlir::FailureOr<MlirCandidatePreparation> PrepareMlirCandidates(
 
   AttOptions att_options;
   att_options.emplace("tiling_data_type_name", "AutofuseTilingData");
+  // The native Inductor ABI uses modeled tiling; legacy PGO helpers must not
+  // be enabled implicitly by an environment flag without their host protocol.
+  if (scene == MlirCallerScene::kInductor) {
+    att_options.emplace(att::kInternalEnableAutofusePgo, "false");
+  }
   const mlir::bridge::AttRequest att_request{prep.op_name, prep.narrowed_result, prep.selections,
                                              schema,       att_options,          scene == MlirCallerScene::kInductor};
   if (mlir::bridge::RunAttForCandidates(att_request, prep.bundle, &diagnostic, &unsupported) != af::SUCCESS) {
@@ -404,6 +410,10 @@ bool FinalizeMlirCodegenResult(llvm::ArrayRef<mlir::ModuleOp> plan_modules, cons
     return false;
   }
   result.tiling = std::move(*tiling);
+  if (scene == MlirCallerScene::kInductor) {
+    result.tiling += "\n// AUTOFUSE_SPLIT_FILE_BEGIN: TilingDataRepr\n" + artifacts->tiling_data_repr +
+                     "// AUTOFUSE_SPLIT_FILE_END: TilingDataRepr\n";
+  }
   result.tiling_data = artifacts->tiling_data;
   return true;
 }

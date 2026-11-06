@@ -148,15 +148,17 @@ std::string GetUnaryPerfExpr(const std::string &api_name, const std::string &inp
 struct TransposePerfResult {
   std::string pipe_expr;
   std::string ternary_expr;
+  PerfOutputInfo perf;
 };
 
 TransposePerfResult GetTransposePerfExpr(uint32_t total_dim, uint32_t inner_dim, const std::vector<Expr> &output_dims,
                                          const std::vector<Expr> &outer_loop_axes,
-                                         const std::vector<Expr> &input_strides, bool valid = true) {
+                                         const std::vector<Expr> &input_strides, bool valid = true,
+                                         const std::string &dtype = kFloat16) {
   auto api = ApiPerfFactory::Instance().Create("TransposeV2");
   EXPECT_NE(api, nullptr);
   NodeDetail node_info;
-  node_info.input_dtype = {kFloat16};
+  node_info.input_dtype = {dtype};
   node_info.input_dims = output_dims;
   node_info.transpose_node_params.valid = valid;
   node_info.transpose_node_params.total_dim = total_dim;
@@ -172,7 +174,7 @@ TransposePerfResult GetTransposePerfExpr(uint32_t total_dim, uint32_t inner_dim,
     const auto &ternary = perf_res.ternary_ops.begin()->second;
     ternary_expr = ternary.GetTernaryOpStr();
   }
-  return {Str(perf_res.pipe_res[PipeType::AIV_VEC]), ternary_expr};
+  return {Str(perf_res.pipe_res[PipeType::AIV_VEC]), ternary_expr, perf_res};
 }
 
 TEST_F(UTestAscirPerfV2, IsNanPerfUsesFloat32BoolFormula) {
@@ -252,6 +254,144 @@ TEST_F(UTestAscirPerfV2, TransposePerfUsesGenericFormulaAndStrideTernary) {
       {CreateExpr(256), CreateExpr(128), CreateExpr(64), CreateExpr(32), CreateExpr("transpose_stride")});
   EXPECT_EQ(result.pipe_expr, "(22 + transpose_stride_count)");
   EXPECT_EQ(result.ternary_expr, "TernaryOp(IsEqual(Mod(transpose_stride, 64), 0), 64, Mod(transpose_stride, 64))");
+}
+
+bool GetTransposeConstantValue(Expr value, double &result) {
+  value.Simplify();
+  if (value.GetExprType() == af::ExprType::kExprConstantInteger) {
+    int64_t integer = 0;
+    if (!value.GetConstValue(integer)) {
+      return false;
+    }
+    result = static_cast<double>(integer);
+    return true;
+  }
+  return value.IsConstExpr() && value.GetConstValue(result);
+}
+
+double EvaluateTransposeCycles(const TransposePerfResult &result, std::vector<std::pair<Expr, Expr>> bindings = {}) {
+  Expr cycles = result.perf.pipe_res.at(PipeType::AIV_VEC);
+  for (size_t pass = 0U; pass <= result.perf.ternary_ops.size(); ++pass) {
+    for (const auto &item : result.perf.ternary_ops) {
+      auto choice = item.second.DeepCopyIfCase();
+      choice->Replace(bindings);
+      bool resolved = true;
+      while (!choice->IsLeaf()) {
+        const auto equal = choice->GetCondType() == CondType::K_GE
+                               ? af::SymbolicUtils::StaticCheckLe(choice->GetCondRight(), choice->GetCondLeft())
+                               : af::SymbolicUtils::StaticCheckEq(choice->GetCondLeft(), choice->GetCondRight());
+        if (equal == af::TriBool::kUnknown) {
+          resolved = false;
+          break;
+        }
+        choice = equal == af::TriBool::kTrue ? choice->GetChoiceA() : choice->GetChoiceB();
+      }
+      double value = 0.0;
+      if (resolved && GetTransposeConstantValue(choice->GetExpr(), value)) {
+        bindings.emplace_back(item.first, CreateExpr(value));
+      }
+    }
+    Expr current = cycles.Replace(bindings);
+    current.Simplify();
+    double value = 0.0;
+    if (GetTransposeConstantValue(current, value)) {
+      return value;
+    }
+  }
+  ADD_FAILURE() << "Unresolved transpose performance: " << result.pipe_expr;
+  return 0.0;
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterMatchesIndependentComponentMeasurements) {
+  // Separate INDEX/GATHER/FULL microkernels; these points are excluded from coefficient fitting.
+  const std::vector<std::pair<std::string, double>> measured = {
+      {kFloat16, 9762.27}, {kFloat32, 11200.04}, {kInt64, 20246.41}};
+  for (const auto &item : measured) {
+    SCOPED_TRACE(item.first);
+    const auto result = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(64), CreateExpr(128)}, {},
+                                             {CreateExpr(8192), CreateExpr(1), CreateExpr(64)}, true, item.first);
+    EXPECT_NEAR(EvaluateTransposeCycles(result), item.second, item.second * 0.1);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterUsesBankGcdForNonPowerOfTwoStride) {
+  for (const auto &dtype : {kFloat16, kFloat32, kInt64}) {
+    const auto stride_twelve = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(12), CreateExpr(64)}, {},
+                                                    {CreateExpr(768), CreateExpr(1), CreateExpr(12)}, true, dtype);
+    const auto stride_four = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(4), CreateExpr(192)}, {},
+                                                  {CreateExpr(768), CreateExpr(1), CreateExpr(4)}, true, dtype);
+    EXPECT_NEAR(EvaluateTransposeCycles(stride_twelve), EvaluateTransposeCycles(stride_four), 1e-6);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterSymbolicPredicateAndGcdMatchConstantDescriptors) {
+  const Expr outer = CreateExpr("unit_outer"), rows = CreateExpr("transpose_rows");
+  const auto symbolic = GetTransposePerfExpr(3, 3, {outer, rows, CreateExpr(64)}, {CreateExpr(2)},
+                                             {CreateExpr(768), CreateExpr(1), rows}, true, kFloat32);
+  for (const int64_t o : {1L, 2L}) {
+    for (const int64_t r : {4L, 12L, 32L, 64L}) {
+      const auto constant = GetTransposePerfExpr(3, 3, {CreateExpr(o), CreateExpr(r), CreateExpr(64)}, {CreateExpr(2)},
+                                                 {CreateExpr(768), CreateExpr(1), CreateExpr(r)}, true, kFloat32);
+      EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{outer, CreateExpr(o)}, {rows, CreateExpr(r)}}),
+                  EvaluateTransposeCycles(constant), 1e-6);
+    }
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterB64SymbolicRowsMatchConstantDescriptors) {
+  const Expr rows = CreateExpr("b64_rows"), columns = CreateExpr("b64_columns");
+  const auto symbolic = GetTransposePerfExpr(3, 3, {CreateExpr(1), rows, columns}, {},
+                                             {rows * columns, CreateExpr(1), rows}, true, kInt64);
+  for (const int64_t r : {5L, 12L, 28L, 40L}) {
+    for (const int64_t c : {8L, 16L, 20L, 36L, 56L, 104L}) {
+      const auto constant = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(r), CreateExpr(c)}, {},
+                                                 {CreateExpr(r * c), CreateExpr(1), CreateExpr(r)}, true, kInt64);
+      EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{rows, CreateExpr(r)}, {columns, CreateExpr(c)}}),
+                  EvaluateTransposeCycles(constant), 1e-6);
+    }
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterB32ShortRowsMatchIndependentMeasurements) {
+  // Independent short-row holdout; no coefficient was fitted to these points.
+  for (const auto &dtype : {kFloat32, kInt32}) {
+    const auto short_row = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(20), CreateExpr(14)}, {},
+                                                {CreateExpr(280), CreateExpr(1), CreateExpr(20)}, true, dtype);
+    const auto near_boundary = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(80), CreateExpr(26)}, {},
+                                                    {CreateExpr(2080), CreateExpr(1), CreateExpr(80)}, true, dtype);
+    EXPECT_NEAR(EvaluateTransposeCycles(short_row), 379.6842, 379.6842 * 0.1);
+    EXPECT_NEAR(EvaluateTransposeCycles(near_boundary), 1718.0726, 1718.0726 * 0.1);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterB32SymbolicShortRowBoundaryMatchesConstantDescriptors) {
+  const Expr rows = CreateExpr("b32_rows"), columns = CreateExpr("b32_columns");
+  const auto symbolic = GetTransposePerfExpr(3, 3, {CreateExpr(1), rows, columns}, {},
+                                             {rows * columns, CreateExpr(1), rows}, true, kFloat32);
+  for (const int64_t r : {12L, 48L, 80L}) {
+    for (const int64_t c : {8L, 24L, 31L, 32L, 33L, 40L}) {
+      const auto constant = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(r), CreateExpr(c)}, {},
+                                                 {CreateExpr(r * c), CreateExpr(1), CreateExpr(r)}, true, kFloat32);
+      EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{rows, CreateExpr(r)}, {columns, CreateExpr(c)}}),
+                  EvaluateTransposeCycles(constant), 1e-6);
+    }
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterSymbolicPaddedInputKeepsLegacyBranch) {
+  const Expr pitch = CreateExpr("transpose_input_pitch");
+  const auto symbolic = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(64), CreateExpr(128)}, {},
+                                             {CreateExpr(8192), CreateExpr(1), pitch}, true, kFloat32);
+  const auto compact = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(64), CreateExpr(128)}, {},
+                                            {CreateExpr(8192), CreateExpr(1), CreateExpr(64)}, true, kFloat32);
+  EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{pitch, CreateExpr(64)}}), EvaluateTransposeCycles(compact), 1e-6);
+  EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{pitch, CreateExpr(128)}}), 6680.0, 1e-6);
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterPreservesPaddedInputLegacyCost) {
+  const auto padded = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(64), CreateExpr(128)}, {},
+                                           {CreateExpr(8192), CreateExpr(1), CreateExpr(128)}, true, kFloat32);
+  EXPECT_NEAR(EvaluateTransposeCycles(padded), 6680.0, 1e-6);
 }
 
 TEST_F(UTestAscirPerfV2, TransposePerfFallsBackToUnitVectorWhenParamsInvalid) {
@@ -555,7 +695,8 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev1) {
   std::vector<att::TensorShapeInfo> input_shapes(1);
   std::vector<att::TensorShapeInfo> output_shapes(1);
   Expr z0t_size = CreateExpr("z0t_size");
-  Expr z1t_size = CreateExpr("z1t_size");
+  // Keep a real repeated row; dynamic unit-axis behavior is covered separately.
+  Expr z1t_size = CreateExpr(2);
 
   input_shapes[0].data_type = "float32";
   input_shapes[0].repeats = {z0t_size, z1t_size, CreateExpr(64)};
@@ -582,10 +723,11 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev1) {
   Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // LoadStride calculation: k=0.005, block_count=z0t_size*z1t_size, stride_used=min(448*4, 4096)=1792
   // Result: 0.005 * z0t_size * z1t_size * 1792 = 8.96 * z0t_size * z1t_size
-  const std::string expect_stride = "(8.95999979972839 * z0t_size * z1t_size)";
-  const std::string load_perf = "(256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
-  // Note: The order of terms in the output is (load_perf + stride + 160.0)
-  EXPECT_EQ(Str(res.Replace(ret)), "(" + load_perf + " + " + expect_stride + " + 160.0)");
+  const Expr expected =
+      CreateExpr(256) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(1792) + CreateExpr(160.0F);
+  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
+      << Str(res.Replace(ret)) << " vs " << Str(expected);
 }
 
 TEST_F(UTestAscirPerfV2, TestLoadApiForTypev2) {
@@ -669,7 +811,8 @@ TEST_F(UTestAscirPerfV2, TestLoadApiSingleCoreBranchStructure) {
   std::vector<att::TensorShapeInfo> input_shapes(1);
   std::vector<att::TensorShapeInfo> output_shapes(1);
   Expr z0t_size = CreateExpr("z0t_size");
-  Expr z1t_size = CreateExpr("z1t_size");
+  // Keep a real repeated row; dynamic unit-axis behavior is covered separately.
+  Expr z1t_size = CreateExpr(2);
 
   input_shapes[0].data_type = "float32";
   input_shapes[0].repeats = {z0t_size, z1t_size, CreateExpr(64)};
@@ -701,9 +844,9 @@ TEST_F(UTestAscirPerfV2, TestLoadApiSingleCoreBranchStructure) {
   EXPECT_EQ(Str(if_case->GetCondLeft()), "block_dim");
   EXPECT_EQ(Str(if_case->GetCondRight()), "1");
   // 单核条目当前占位值与多核一致，两分支公式相同；上板拟合值合入后需更新单核分支断言
-  const std::string expect_stride = "(8.95999979972839 * z0t_size * z1t_size)";
-  const std::string load_perf = "(256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
-  const std::string expect_expr = "(" + load_perf + " + " + expect_stride + " + 160.0)";
+  const std::string expect_stride = "(17.9199995994568 * z0t_size)";
+  const std::string load_perf = "(512 * z0t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
+  const std::string expect_expr = "(" + expect_stride + " + " + load_perf + " + 160.0)";
   EXPECT_EQ(Str(SelectLoadCoreBranch(ternary_ops, false).Replace(ret)), expect_expr);
   EXPECT_EQ(Str(SelectLoadCoreBranch(ternary_ops, true).Replace(ret)), expect_expr);
 }
@@ -3524,7 +3667,8 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenSmallBlock) {
   std::vector<att::TensorShapeInfo> input_shapes(1);
   std::vector<att::TensorShapeInfo> output_shapes(1);
   Expr z0t_size = CreateExpr("z0t_size");
-  Expr z1t_size = CreateExpr("z1t_size");
+  // Keep a real repeated row; dynamic unit-axis behavior is covered separately.
+  Expr z1t_size = CreateExpr(2);
 
   input_shapes[0].data_type = "float16";
   // block_len = 8 elements * 2B = 16B < 128B cache line, 且 gm_stride > 0
@@ -3552,9 +3696,11 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenSmallBlock) {
   // ExpandLoadBlockLen: block_len(8)*2=16B < 128B, stride>0 → pad to 64(=128/2)
   // data_size = z0t * z1t * 64 * 2 = 128 * z0t * z1t, SmallBlk case
   // stride_cost = 0.005 * z0t * z1t * min((64-8)*2, 4096) = 0.56 * z0t * z1t
-  const std::string expect_stride = "(0.559999987483025 * z0t_size * z1t_size)";
-  const std::string load_perf = "(128 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
-  EXPECT_EQ(Str(res.Replace(ret)), "(" + expect_stride + " + " + load_perf + " + 160.0)");
+  const Expr expected =
+      CreateExpr(128) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(112) + CreateExpr(160.0F);
+  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
+      << Str(res.Replace(ret)) << " vs " << Str(expected);
 }
 
 // LoadV2: codegen 对非连续尾轴补 repeat=1，ATT 必须保留合轴后的 block_count。
@@ -3683,7 +3829,8 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenLargeBlock) {
   std::vector<att::TensorShapeInfo> input_shapes(1);
   std::vector<att::TensorShapeInfo> output_shapes(1);
   Expr z0t_size = CreateExpr("z0t_size");
-  Expr z1t_size = CreateExpr("z1t_size");
+  // Keep a real repeated row; dynamic unit-axis behavior is covered separately.
+  Expr z1t_size = CreateExpr(2);
 
   input_shapes[0].data_type = "float16";
   // block_len = 128 elements * 2B = 256B > 128B cache line, gm_stride > 0 但不触发
@@ -3711,9 +3858,11 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenLargeBlock) {
   // block_len=128*2=256B > 128B, 不触发pad; SmallBlk case
   // data_size = 256 * z0t * z1t
   // stride = 0.005 * z0t * z1t * min((256-128)*2, 4096) = 1.28 * z0t * z1t
-  const std::string expect_stride = "(1.27999997138977 * z0t_size * z1t_size)";
-  const std::string load_perf = "(256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
-  EXPECT_EQ(Str(res.Replace(ret)), "(" + expect_stride + " + " + load_perf + " + 160.0)");
+  const Expr expected =
+      CreateExpr(256) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(256) + CreateExpr(160.0F);
+  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
+      << Str(res.Replace(ret)) << " vs " << Str(expected);
 }
 
 // LoadV2: 连续场景(gm_stride=0)，不触发ExpandLoadBlockLen
@@ -3763,4 +3912,178 @@ TEST_F(UTestAscirPerfV2, TestGetDmaParamsSwapDimLessEqual) {
   EXPECT_EQ(Str(used_dims[0]), "z0t");
   EXPECT_EQ(Str(used_dims[1]), "34");
   EXPECT_EQ(Str(outer_repeat), "1");
+}
+
+namespace {
+TensorShapeInfo MakeLoadStrideTestShape(const std::vector<Expr> &dims, const std::vector<Expr> &gm_strides) {
+  TensorShapeInfo shape;
+  shape.dims = dims;
+  shape.repeats = dims;
+  shape.origin_repeats = dims;
+  shape.gm_strides = gm_strides;
+  shape.strides.resize(dims.size());
+  Expr inner = CreateExpr(1);
+  for (size_t i = dims.size(); i > 0U; --i) {
+    shape.strides[i - 1U] = inner;
+    inner = inner * dims[i - 1U];
+  }
+  return shape;
+}
+}  // namespace
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStrideStaticUnitAxes) {
+  NodeDetail node;
+  node.optype = kLoad;
+  const std::vector<TensorShapeInfo> shapes = {
+      MakeLoadStrideTestShape({CreateExpr(1), CreateExpr(512)}, {CreateExpr(65536), CreateExpr(1)}),
+      MakeLoadStrideTestShape({CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                              {CreateExpr(512), CreateExpr(65536), CreateExpr(1)}),
+      MakeLoadStrideTestShape({CreateExpr(3), CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                              {CreateExpr(3584), CreateExpr(512), CreateExpr(65536), CreateExpr(1)})};
+  for (const auto &shape : shapes) {
+    const auto result = CalculateStride(shape, false, node, 4, false);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(result.stride, CreateExpr(0)), af::TriBool::kTrue);
+    EXPECT_TRUE(result.ternary_ops.empty());
+  }
+}
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStrideDynamicUnitAxis) {
+  const Expr m = CreateExpr("load_test_m");
+  const Expr n = CreateExpr("load_test_n");
+  const Expr outer_stride = CreateExpr("load_test_outer_stride");
+  const auto shape = MakeLoadStrideTestShape({m, n, CreateExpr(512)}, {outer_stride, CreateExpr(65536), CreateExpr(1)});
+  NodeDetail node;
+  node.optype = kLoad;
+  const auto result = CalculateStride(shape, false, node, 4, false);
+  const auto branch = result.ternary_ops.find(result.stride);
+  ASSERT_NE(branch, result.ternary_ops.end());
+  EXPECT_EQ(branch->second.GetTernaryOpStr().find("ExpectEq"), std::string::npos);
+  EXPECT_EQ(branch->second.GetTernaryOpStr().find("LogicAnd"), std::string::npos);
+  struct Point {
+    int64_t m;
+    int64_t n;
+    int64_t outer_stride;
+    bool continuous;
+  };
+  // A unit inner row cannot hide a real gap in the outer LoopMode step.
+  for (const auto &point :
+       {Point{7, 1, 512, true}, Point{7, 2, 512, false}, Point{7, 1, 1024, false}, Point{1, 1, 1024, true}}) {
+    auto condition = branch->second.DeepCopyIfCase();
+    ASSERT_NE(condition, nullptr);
+    condition->Replace(
+        {{m, CreateExpr(point.m)}, {n, CreateExpr(point.n)}, {outer_stride, CreateExpr(point.outer_stride)}});
+    while (!condition->IsLeaf()) {
+      ASSERT_EQ(condition->GetCondType(), CondType::K_EQ);
+      const auto equal = af::SymbolicUtils::StaticCheckEq(condition->GetCondLeft(), condition->GetCondRight());
+      ASSERT_NE(equal, af::TriBool::kUnknown);
+      condition = equal == af::TriBool::kTrue ? condition->GetChoiceA() : condition->GetChoiceB();
+      ASSERT_NE(condition, nullptr);
+    }
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(condition->GetExpr(), CreateExpr(point.continuous ? 0 : 65024)),
+              af::TriBool::kTrue);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStridePreservesOtherPaths) {
+  auto shape = MakeLoadStrideTestShape({CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                                       {CreateExpr(1024), CreateExpr(65536), CreateExpr(1)});
+  NodeDetail node;
+  node.optype = kLoad;
+  EXPECT_EQ(Str(CalculateStride(shape, false, node, 4, false).stride), "65024");
+  shape.gm_strides[0] = CreateExpr(512);
+  for (const auto &type : {kNddma, kMoveUbToGm}) {
+    node.optype = type;
+    EXPECT_EQ(Str(CalculateStride(shape, false, node, 4, false).stride), "65024");
+  }
+  node.optype = kLoad;
+  shape.strides = shape.gm_strides;
+  EXPECT_EQ(Str(CalculateStride(shape, true, node, 4, false).stride), "65024");
+
+  const auto larger_shape =
+      MakeLoadStrideTestShape({CreateExpr(2), CreateExpr(3), CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                              {CreateExpr(10752), CreateExpr(3584), CreateExpr(512), CreateExpr(65536), CreateExpr(1)});
+  for (const bool swap : {false, true}) {
+    const auto load_result = CalculateStride(larger_shape, false, node, 4, swap);
+    NodeDetail other_node;
+    other_node.optype = kNddma;
+    const auto existing_result = CalculateStride(larger_shape, false, other_node, 4, swap);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(load_result.stride, existing_result.stride), af::TriBool::kTrue);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStrideFactoryMatchesDenseSource) {
+  auto api = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(api, nullptr);
+  for (const auto &dtype : {std::make_pair("uint8", 1), std::make_pair("float16", 2), std::make_pair("float32", 4),
+                            std::make_pair("int64", 8)}) {
+    SCOPED_TRACE(dtype.first);
+    auto unit = MakeLoadStrideTestShape({CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                                        {CreateExpr(512), CreateExpr(65536), CreateExpr(1)});
+    auto dense = MakeLoadStrideTestShape({CreateExpr(3584)}, {CreateExpr(1)});
+    unit.data_type = dense.data_type = dtype.first;
+    unit.data_type_size = dense.data_type_size = dtype.second;
+    NodeInfo node;
+    node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+    PerfOutputInfo unit_perf;
+    PerfOutputInfo dense_perf;
+    ASSERT_EQ(api->GetPerfFunc()({unit}, {unit}, node, unit_perf), af::SUCCESS);
+    ASSERT_EQ(api->GetPerfFunc()({dense}, {dense}, node, dense_perf), af::SUCCESS);
+    const auto unit_cycles =
+        unit_perf.pipe_res.at(PipeType::AIV_MTE2).Replace(ConcursiveReplaceVars(unit_perf.ternary_ops));
+    const auto dense_cycles =
+        dense_perf.pipe_res.at(PipeType::AIV_MTE2).Replace(ConcursiveReplaceVars(dense_perf.ternary_ops));
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(unit_cycles, dense_cycles), af::TriBool::kTrue)
+        << Str(unit_cycles) << " vs " << Str(dense_cycles);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposedLoadMergesDimsInVectorizedOrder) {
+  af::AscGraph graph("transpose_load_merge");
+  ASSERT_EQ(GraphConstructUtils::CreateSimpleLoadStoreOp(graph), af::SUCCESS);
+  auto node = graph.FindNode("load");
+  ASSERT_NE(node, nullptr);
+  auto &attr = node->outputs[0].attr;
+  attr.axis = {1, 0, 2};
+  attr.vectorized_axis = {0, 1, 2};
+  attr.repeats = {CreateExpr(1), CreateExpr(7), CreateExpr(512)};
+  attr.strides = {CreateExpr(512), CreateExpr(512), CreateExpr(1)};
+
+  auto shape = MakeLoadStrideTestShape({CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                                       {CreateExpr(512), CreateExpr(512), CreateExpr(1)});
+  ASSERT_EQ(MergeTensorContinuousDims(node, "transposed_load", shape), af::SUCCESS);
+  EXPECT_EQ(shape.dims, std::vector<Expr>{CreateExpr(3584)});
+}
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStridePreservesVectorizedRepeatsAfterMerge) {
+  struct Layout {
+    int32_t outer;
+    int32_t rows;
+    int32_t tail;
+    bool is_tail;
+    bool contiguous;
+  };
+  for (const auto &layout : {Layout{7, 1, 512, false, true}, Layout{1, 7, 512, false, false},
+                             Layout{7, 1, 512, true, true}, Layout{7, 1, 256, true, false}}) {
+    auto shape = MakeLoadStrideTestShape({CreateExpr(layout.outer), CreateExpr(layout.rows), CreateExpr(layout.tail)},
+                                         {CreateExpr(512), CreateExpr(65536), CreateExpr(1)});
+    const auto vectorized_repeats = shape.repeats;
+    if (layout.is_tail) {
+      shape.origin_repeats = {CreateExpr(8), CreateExpr(8), CreateExpr(512)};
+    }
+    af::AscGraph graph("transpose_load_stride");
+    ASSERT_EQ(GraphConstructUtils::CreateSimpleLoadStoreOp(graph), af::SUCCESS);
+    auto node = graph.FindNode("load");
+    ASSERT_NE(node, nullptr);
+    node->outputs[0].attr.axis = {1, 0, 2};
+    node->outputs[0].attr.vectorized_axis = {0, 1, 2};
+    node->outputs[0].attr.repeats = {shape.origin_repeats[1], shape.origin_repeats[0], shape.origin_repeats[2]};
+    node->outputs[0].attr.strides = {CreateExpr(65536), CreateExpr(512), CreateExpr(1)};
+    ASSERT_EQ(MergeTensorContinuousDims(node, "transposed_load", shape), af::SUCCESS);
+    EXPECT_EQ(shape.repeats, vectorized_repeats);
+    NodeDetail detail;
+    detail.optype = kLoad;
+    const auto stride = CalculateStride(shape, false, detail, 4, false);
+    const auto expected = CreateExpr(layout.contiguous ? 0 : 65536 - layout.tail);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(stride.stride, expected), af::TriBool::kTrue);
+  }
 }

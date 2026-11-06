@@ -9,6 +9,9 @@
 // RUN: af-opt --afir-vector-func-to-reg-base %s | FileCheck %s --check-prefix=IR
 // RUN: af-opt --afir-vector-func-to-reg-base %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 
+// RUN: sed 's/afir.eq/afir.ge/g' %s | af-opt --afir-vector-func-to-reg-base | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=GE
+// GE: AscendC::Reg::Compare<float, AscendC::CMPMODE::GE>(
+
 // M3：谓词寄存器作为值（`afir.eq` -> `afir.where`）。
 //
 // 这一格钉的是**边界语义与产物形状**，数值那一半在 `load_eq_where_reg_base_store` 那格

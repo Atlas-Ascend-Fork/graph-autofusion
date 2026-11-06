@@ -67,11 +67,14 @@ module @reduce_sum_s0 attributes {afir.cube_type = -1 : i64, afir.enable_group_p
 // 段结果互相覆盖——UB 是紧排的，越界落在邻居身上，未必当场报错。
 // ALLOC: %[[B0:[a-zA-Z0-9_]+]] = afir.tiling_param "b0_size"
 // ALLOC: %[[B1:[a-zA-Z0-9_]+]] = afir.tiling_param "b1_size"
+// 队列先于 TBuf 发 `InitBuffer`：TPipe 按调用序线性分配 UB，scatter 型 API 的共享 tmp
+// 必须位于队列槽之上（`CanonicalResources.cpp` 的两趟发射）。TBuf 之间的相对序仍是
+// `resources` 的键序。
+// ALLOC: %[[QOUT:[a-zA-Z0-9_]+]] = ascendc.queue : <vecout, 2>
 // ALLOC: %[[TSEG:[a-zA-Z0-9_]+]] = ascendc.tbuf : <veccalc>
 // ALLOC: ascendc.pipe.init_buffer %{{[a-zA-Z0-9_]+}}, %[[TSEG]], %[[B0]]
 // ALLOC: %[[TAPI:[a-zA-Z0-9_]+]] = ascendc.tbuf : <veccalc>
 // ALLOC: ascendc.pipe.init_buffer %{{[a-zA-Z0-9_]+}}, %[[TAPI]], %[[B1]]
-// ALLOC: %[[QOUT:[a-zA-Z0-9_]+]] = ascendc.queue : <vecout, 2>
 // `(8 * Ceiling((Rational(1 , 8) * z1t_size)))`：sympy 把字面分数折进 `Rational`，
 // index 侧下降必须认这个形状，否则不收敛——而且是**不收敛**，不是报错：下降器先建了算子
 // 再返回失败，贪婪重写驱动于是反复振荡。

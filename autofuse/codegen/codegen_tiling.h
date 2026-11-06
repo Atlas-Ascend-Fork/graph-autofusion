@@ -203,6 +203,8 @@ class TilingLib {
   std::string GenTilingFuncForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                        const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                        const std::string func, const std::string tiling) const;
+  std::string GenInductorTilingV2(const std::vector<std::string> &dynamic_shape_vars, const std::string &func,
+                                  const std::string &tiling) const;
   void GenInductorShapeDim(const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                            codegen::PgoShapeStringStream &pgo_shape_dim, std::vector<std::string> &dynamic_shape_vars,
                            const std::string &tiling_var) const;

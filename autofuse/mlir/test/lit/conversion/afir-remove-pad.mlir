@@ -7,6 +7,9 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // `afir.remove_pad` 的三种形态，逐个落成一条 `RemovePadExtend(dst, src, R, P, N)`。
+// 第四种形态（整窗口 gather）的 func 必须带 `afir.asc_graph` 才能触发合轴护栏，而本文件的
+// CPP 路线（`ascir-translate`）不认输出里残留的 `afir.*` 属性，所以它住在单独的
+// `afir-remove-pad-whole-window.mlir`。
 //
 // **三个实参的含义按包装内部那条 `GatherMask` 反推**：从 src 取 N 行、行距 P 个元素、每行取
 // 前 R 个，连续写到 dst。`dst` 侧没有跨度参数，所以目的地必须稠密——反例见
@@ -50,8 +53,8 @@
 // 形态三：纯搬运。只有一段、源已经连续，趟数就是 1，行距那一位发的是行长本身
 // ——`repeatTimes == 1` 时 `src0RepeatStride` 读不到它（`removepad.h:22` 只在第 2..N 趟用它）。
 #copy_desc = #afir.tensor_desc<axis = [0], repeats = [#afir.expr<"8">],
-                               strides = [#afir.expr<"1">], vectorized_axis = [0],
-                               vectorized_strides = [#afir.expr<"1">], role = <compute>>
+                                strides = [#afir.expr<"1">], vectorized_axis = [0],
+                                vectorized_strides = [#afir.expr<"1">], role = <compute>>
 
 module {
   func.func @remove_pad_two_segment(%src: !ascendc.local_tensor<?xf32>, %dst: !ascendc.local_tensor<?xf32>) {

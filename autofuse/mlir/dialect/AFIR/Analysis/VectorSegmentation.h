@@ -113,7 +113,19 @@ struct VectorPlan {
 // 互相证不了相等。
 //
 // 「证不了」一律封段（保守方向）：多分一段的后果是多一层循环，少分一段的后果是算错地址。
-FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op);
+FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op, bool compactTail = false);
+
+// 两个 `ExprAttr` 可证相等吗。文本相同先短路，再走 `ProveExpressionsEqual`；任一侧为空
+// 或证不了（含 `Unknown` 与解析失败）返回 false。`VectorSegmentation.cpp` 合轴判据与
+// `Implementations/` 侧（`Transpose.cpp` / `Pad.cpp` / `Broadcast.cpp` / `RemovePad.cpp`）
+// 的形态判据共用——两侧都是「判不了就拒」的保守方向，短路与 SymEngine 语义必须同一份。
+bool provablyEqual(ExprAttr lhs, ExprAttr rhs);
+
+// 表达式可证为字面量 1 吗。同样保守：证不了就是 false。
+bool provablyOne(ExprAttr expression);
+
+// `axisId` 在 `descriptor.getAxis()` 里的下标；轴不在 `axis` 里时失败。
+FailureOr<size_t> axisPosition(TensorDescAttr descriptor, int64_t axisId);
 
 }  // namespace mlir::afir
 

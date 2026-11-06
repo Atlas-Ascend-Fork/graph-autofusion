@@ -142,6 +142,13 @@ FailureOr<AggregateLaunchArtifacts> EmitArtifactsFromEntryModule(ModuleOp entryM
   if (failed(emitAggregateTilingData(entryModule, artifacts.tiling_data, diagnostic))) {
     return failure();
   }
+  auto schemaAttr = entryModule->getAttrOfType<TypeAttr>(kAscendCTilingSchemaAttrName);
+  llvm::raw_string_ostream reprOs(artifacts.tiling_data_repr);
+  if (!schemaAttr || failed(emitTilingDataRepr(getTilingSchema(schemaAttr.getValue()), reprOs))) {
+    setDiagnostic(diagnostic, "emitTilingDataRepr failed");
+    return failure();
+  }
+  reprOs.flush();
 
   constexpr llvm::StringLiteral kTilingTypeName = "AutofuseTilingData";
   auto launchText = emitAutofuseLaunch(layout, kernelArgumentTypes.drop_back(), graphName, kTilingTypeName);

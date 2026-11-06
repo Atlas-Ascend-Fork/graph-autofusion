@@ -69,6 +69,34 @@ FailureOr<Type> getCanonicalTilingDataType(func::FuncOp func) {
     fieldNames.push_back(stringName);
     seen.insert(stringName.getValue());
   }
+  // `afir.api_tiling_fields`（host tiling 的嵌套 struct 布局，bridge 按节点发）在相位 A
+  // 就并进 canonical 实参：conversion（相位 C）按字段名在实参上建 `emitasc.member` 访问，
+  // 字段没并进去的话 mem 档报「TilingData is missing the ... field」。成员一律 ui32、
+  // 嵌套类型名取条目的 "type" 键，与 GenTilingData 的 stage schema 同一口径；字段序也
+  // 对齐那份的注释（size_var → API tiling → q/b 尺寸）。
+  if (auto apiFields = func->getAttrOfType<ArrayAttr>(kApiTilingFieldsAttrName)) {
+    Type ui32 = IntegerType::get(context, 32, IntegerType::Unsigned);
+    for (Attribute entry : apiFields) {
+      auto item = dyn_cast<DictionaryAttr>(entry);
+      auto typeName = item ? item.getAs<StringAttr>(kApiTilingTypeKey) : StringAttr();
+      auto fieldName = item ? item.getAs<StringAttr>(kApiTilingFieldKey) : StringAttr();
+      auto memberNames = item ? item.getAs<ArrayAttr>(kApiTilingFieldsKey) : ArrayAttr();
+      if (!typeName || !fieldName || !memberNames) {
+        return func.emitError("kernel function has a malformed ") << kApiTilingFieldsAttrName << " entry";
+      }
+      if (!seen.insert(fieldName.getValue()).second) {
+        return func.emitError("API tiling field conflicts with an existing TilingData field: ") << fieldName.getValue();
+      }
+      SmallVector<Attribute> memberTypes(memberNames.size(), TypeAttr::get(ui32));
+      auto apiType =
+          mlir::ascend::kernel::TilingSchema::get(context, typeName, ArrayAttr::get(context, memberTypes), memberNames);
+      if (!apiType) {
+        return func.emitError("invalid API tiling field layout for ") << fieldName.getValue();
+      }
+      fieldTypes.push_back(TypeAttr::get(apiType.getType()));
+      fieldNames.push_back(fieldName);
+    }
+  }
   // 字段名由 `makeCanonicalResourceSizeName` 派生，与 memory allocate 把
   // `size_from_resource` 解析回 `afir.tiling_param` 用的是同一处拼法——此前这里是手写的
   // 字符串拼接，与 bridge 那一份只靠约定对齐。

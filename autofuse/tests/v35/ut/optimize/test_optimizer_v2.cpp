@@ -7147,3 +7147,75 @@ TEST_F(TestOptimizerV2, LoadSliceCase) {
   EXPECT_EQ(impl_graphs.size(), 4);
   EXPECT_EQ(impl_graphs[0].scheduled_graph.GetName(), "gen_nddma_slice_B0Y0");
 }
+
+TEST_F(TestOptimizerV2, FoldAlignedOuterTransposeUsesLoadAndPreservesMapping) {
+  struct Scenario {
+    af::DataType dtype;
+    int64_t tail_bytes;
+    bool dynamic_tail;
+    int64_t gm_tail_stride;
+    bool padded_ub_row;
+    bool expect_load;
+  };
+  const std::vector<Scenario> scenarios = {
+      {af::DT_UINT8, 128, false, 1, false, true},  {af::DT_UINT16, 512, false, 1, false, true},
+      {af::DT_FLOAT, 2048, false, 1, false, true}, {af::DT_UINT64, 256, false, 1, false, true},
+      {af::DT_FLOAT, 64, false, 1, false, false},  {af::DT_FLOAT, 132, false, 1, false, false},
+      {af::DT_FLOAT, 512, true, 1, false, false},  {af::DT_FLOAT, 512, false, 2, false, false},
+      {af::DT_FLOAT, 512, false, 0, false, false}, {af::DT_FLOAT, 512, false, 1, true, false},
+  };
+  for (size_t i = 0; i < scenarios.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto &s = scenarios[i];
+    af::AscGraph graph("outer_transpose_load");
+    const auto elem_bytes = af::GetSizeByDataType(s.dtype);
+    const auto tail = s.dynamic_tail ? graph.CreateSizeVar("tail") : graph.CreateSizeVar(s.tail_bytes / elem_bytes);
+    const auto outer0 = graph.CreateAxis("outer0", af::Symbol(3));
+    const auto outer1 = graph.CreateAxis("outer1", af::Symbol(5));
+    const auto inner = graph.CreateAxis("inner", tail);
+    Data data("data", graph);
+    data.y.dtype = s.dtype;
+    data.ir_attr.SetIndex(0);
+    Load load("load");
+    load.x = data.y;
+    load.y.dtype = s.dtype;
+    load.attr.sched.axis = {outer0.id, outer1.id, inner.id};
+    *load.y.axis = {outer0.id, outer1.id, inner.id};
+    *load.y.repeats = {af::Symbol(3), af::Symbol(5), tail};
+    *load.y.strides = {af::Symbol(5) * tail, tail, af::Symbol(s.gm_tail_stride)};
+    *load.y.vectorized_axis = {outer0.id, outer1.id, inner.id};
+    *load.y.vectorized_strides = {af::Symbol(5) * tail, tail, One};
+    Transpose transpose("transpose");
+    transpose.x = load.y;
+    transpose.y.dtype = s.dtype;
+    transpose.attr.sched.axis = {outer1.id, outer0.id, inner.id};
+    *transpose.y.axis = {outer1.id, outer0.id, inner.id};
+    *transpose.y.repeats = {af::Symbol(5), af::Symbol(3), tail};
+    *transpose.y.strides = {af::Symbol(3) * tail, tail, One};
+    *transpose.y.vectorized_axis = {outer1.id, outer0.id, inner.id};
+    const auto row = s.padded_ub_row ? tail + af::Symbol(32 / elem_bytes) : tail;
+    *transpose.y.vectorized_strides = {af::Symbol(3) * row, row, One};
+    Store store("store");
+    store.x = transpose.y;
+    Output output("output");
+    output.x = store.y;
+    output.ir_attr.SetIndex(0);
+    auto load_node = graph.FindNode("load");
+    auto store_node = graph.FindNode("store");
+    ASSERT_NE(load_node, nullptr);
+    ASSERT_NE(store_node, nullptr);
+    const auto original = load_node->outputs[0].attr;
+    const auto transposed = graph.FindNode("transpose")->outputs[0].attr;
+    ASSERT_EQ(NddmaTemplate::MergeLoadAndTranspose(load_node, graph), af::SUCCESS);
+    EXPECT_EQ(load_node->GetType(), s.expect_load ? "Load" : "Nddma");
+    EXPECT_EQ(load_node->attr.type, load_node->GetType());
+    EXPECT_EQ(graph.FindNode("transpose"), nullptr);
+    EXPECT_EQ(store_node->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode(), load_node);
+    EXPECT_EQ(load_node->outputs[0].attr.axis, original.axis);
+    EXPECT_EQ(load_node->outputs[0].attr.repeats, original.repeats);
+    EXPECT_EQ(load_node->outputs[0].attr.strides, original.strides);
+    EXPECT_EQ(load_node->outputs[0].attr.vectorized_axis, transposed.vectorized_axis);
+    EXPECT_EQ(load_node->outputs[0].attr.vectorized_strides, transposed.vectorized_strides);
+    EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*load_node), ascgen_utils::template_semantic::kTranspose);
+  }
+}

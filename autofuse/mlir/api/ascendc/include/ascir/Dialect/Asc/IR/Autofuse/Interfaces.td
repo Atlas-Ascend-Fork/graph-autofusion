@@ -25,6 +25,9 @@ class Autofuse_OpInterface<string name, list<Interface> baseInterfaces = []>
   InterfaceMethod getExtensionPreludeHeaders = InterfaceMethod<
     "Obtain the headers this operation's extension headers must all be preceded by, possibly none",
     "::llvm::ArrayRef<::llvm::StringRef>", "getExtensionPreludeHeaders">;
+  InterfaceMethod getExtensionOfficialIncludes = InterfaceMethod<
+    "Obtain the CANN official headers this operation's kernel must include, possibly none",
+    "::llvm::ArrayRef<::llvm::StringRef>", "getExtensionOfficialIncludes">;
 }
 
 // Autofuse ships two families of AscendC API extension headers that are not
@@ -36,7 +39,7 @@ class Autofuse_OpInterface<string name, list<Interface> baseInterfaces = []>
 // so the name alone identifies the provider and carries no platform axis.
 def ApiExtensionOpInterface : Autofuse_OpInterface<"ApiExtensionOp", [APIOpInterface]> {
   let description = "Operation whose API comes from an Autofuse API extension header";
-  let methods = [getExtensionHeaders, getExtensionPreludeHeaders];
+  let methods = [getExtensionHeaders, getExtensionPreludeHeaders, getExtensionOfficialIncludes];
 }
 
 #endif // ASC_AUTOFUSE_INTERFACES_TD

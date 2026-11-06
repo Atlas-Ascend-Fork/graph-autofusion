@@ -12,6 +12,9 @@ add_afir_gtest(ScheduleSpaceBridgeTest
     AutofuseMlirScheduleLegacyAdapter
     aihac_codegen
     metadef
+    # API tiling schema collection resolves the registered platform implementation.
+    # Keep this fixture independent of real NPU/driver availability.
+    -Wl,--no-as-needed ${AF_AUTOFUSE_MLIR_RUNTIME_STUB_TARGET} -Wl,--as-needed
   COMMENT "Running schedule space bridge unit tests"
 )
 

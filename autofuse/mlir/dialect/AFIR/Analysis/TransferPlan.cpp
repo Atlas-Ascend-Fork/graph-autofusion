@@ -35,6 +35,8 @@
 
 namespace mlir::afir {
 namespace {
+constexpr unsigned kBitsPerByte = 8;
+constexpr size_t kTwoDimensions = 2;
 
 bool isDirectProjection(AffineMap map) {
   if (map.getNumSymbols() != 0) {
@@ -78,7 +80,10 @@ bool hasCanonicalDescriptors(Operation *op) {
   return op != nullptr && op->hasAttr(afir::kOperandDescsAttrName) && op->hasAttr(afir::kDestinationDescsAttrName);
 }
 
+}  // namespace
+
 // 局部视图取自 TensorDescAttr：Load 取结果，Store 取操作数。
+// `Implementations/` 侧（`Transpose.cpp` / `Pad.cpp`）的形态判据取同一份事实，导出共用。
 FailureOr<afir::TensorDescAttr> getLocalDescriptor(Operation *op, TransferPlanSide side) {
   // 显式 Operand 请求取输入侧；否则按操作结果选择局部视图，不跨侧回落。
   StringRef name = side == TransferPlanSide::Operand || op->getNumResults() == 0 ? afir::kOperandDescsAttrName
@@ -94,6 +99,22 @@ FailureOr<afir::TensorDescAttr> getLocalDescriptor(Operation *op, TransferPlanSi
   return descriptor;
 }
 
+// 图上的轴表（`afir.asc_graph` 的 axes），按轴 id 索引。取不到（无 func 或无属性）失败。
+// `Implementations/` 侧（`Pad.cpp` 的 `isTileInnerAxis`）与本文件共用同一份轴表事实。
+FailureOr<llvm::DenseMap<int64_t, AxisAttr>> collectGraphAxes(Operation *op) {
+  auto func = op->getParentOfType<func::FuncOp>();
+  auto graph = func ? func->getAttrOfType<AscGraphAttrGroupsAttr>(afir::kAscGraphAttrName) : AscGraphAttrGroupsAttr();
+  if (!graph) {
+    return failure();
+  }
+  llvm::DenseMap<int64_t, AxisAttr> axesById;
+  for (AxisAttr axis : graph.getAxes()) {
+    axesById[axis.getId()] = axis;
+  }
+  return axesById;
+}
+
+namespace {
 FailureOr<ExprAttr> resolveGlobalStride(MLIRContext *context, const llvm::DenseMap<int64_t, AxisAttr> &axes,
                                         const llvm::DenseMap<int64_t, ExprAttr> &strides, int64_t id,
                                         llvm::SmallDenseSet<int64_t> &visiting);
@@ -226,6 +247,44 @@ bool isProvenZero(ExprAttr expression) {
 
 bool isProvenOne(ExprAttr expression) {
   return provenEqualTo(expression, "1");
+}
+
+// 一段布尔谓词文本交给符号层判定。证不了（含解析、化简失败）一律 Unknown。
+// `proveEqual`（文件尾）与下方两个防御判据共用这一条管线，避免 ExpectEq/Lt/Mod
+// 各自复制一份 Parse-Simplify-Prove。
+detail::TruthValue provePredicateText(StringRef text) {
+  Result<Expression> parsed = Expression::ParseRelaxed(text);
+  if (!parsed) {
+    return detail::TruthValue::Unknown;
+  }
+  Result<Expression> simplified = parsed.value().Simplify();
+  if (!simplified) {
+    return detail::TruthValue::Unknown;
+  }
+  Result<detail::TruthValue> proof = detail::ExpressionAccess::Prove(simplified.value());
+  return proof ? proof.value() : detail::TruthValue::Unknown;
+}
+
+// `lhs < rhs` 可证成立吗。与 `provenEqualTo` 同方向：只有 True 才算数。
+bool isProvenLessThan(ExprAttr lhs, ExprAttr rhs) {
+  if (!lhs || !rhs) {
+    return false;
+  }
+  const std::string text = ("ExpectLt((" + lhs.getValue().getValue() + "), (" + rhs.getValue().getValue() + "))").str();
+  return provePredicateText(text) == detail::TruthValue::True;
+}
+
+// `expression` 可证**不是** `factor` 的整数倍吗。与 RemovePad 档的 `isProvablyMultipleOf`
+// 方向相反：那侧「非可证倍数即拒」（行距恒为对齐形态，答不了就是破契约）；本侧
+// 「可证非倍数才拒」——这里的行距大量是符号形态（`16 * Ceiling(...)` 一类），倍数性
+// 答不了是常态，方向反了会把合法调度产物整片误杀。
+bool isProvenNotMultipleOf(ExprAttr expression, int64_t factor) {
+  if (!expression || factor <= 0) {
+    return false;
+  }
+  const std::string text =
+      ("ExpectEq(Mod((" + expression.getValue().getValue() + "), " + std::to_string(factor) + "), 0)").str();
+  return provePredicateText(text) == detail::TruthValue::False;
 }
 
 // 两个表达式的乘积，交给符号层化简。
@@ -421,7 +480,8 @@ LogicalResult collectTransferOuterAxes(AscGraphAttrGroupsAttr graph, ArrayRef<in
 bool hasProjectedTransferDescriptors(ArrayRef<AffineMap> maps, TensorDescAttr localDescriptor,
                                      TensorDescAttr globalDescriptor) {
   return localDescriptor && globalDescriptor &&
-         (maps.empty() || (maps.size() == 2 && isDirectProjection(maps[0]) && isDirectProjection(maps[1])));
+         (maps.empty() ||
+          (maps.size() == kTwoDimensions && isDirectProjection(maps[0]) && isDirectProjection(maps[1])));
 }
 
 // failure：契约错误，禁止回落 identity。
@@ -679,17 +739,8 @@ detail::TruthValue proveEqual(ExprAttr lhs, ExprAttr rhs) {
     return detail::TruthValue::Unknown;
   }
   const std::string text = ("ExpectEq(" + lhs.getValue().getValue() + ", " + rhs.getValue().getValue() + ")").str();
-  // ExpectEq(a, a) 会规范化为 True，需使用宽松解析。
-  Result<Expression> parsed = Expression::ParseRelaxed(text);
-  if (!parsed) {
-    return detail::TruthValue::Unknown;
-  }
-  Result<Expression> simplified = parsed.value().Simplify();
-  if (!simplified) {
-    return detail::TruthValue::Unknown;
-  }
-  Result<detail::TruthValue> proof = detail::ExpressionAccess::Prove(simplified.value());
-  return proof ? proof.value() : detail::TruthValue::Unknown;
+  // ExpectEq(a, a) 会规范化为 True，需使用宽松解析；其余管线见 provePredicateText。
+  return provePredicateText(text);
 }
 
 namespace {
@@ -744,6 +795,40 @@ FailureOr<TransferPlan> buildTransferPlan(Operation *op, TransferPlanSide side) 
   return buildPlanFromLocalDescriptor(op, local, global);
 }
 
+bool blockDmaSegmentGeometryIsSound(Operation *op, const TransferPlan &plan) {
+  // 只看喂给 DMA 的那一对维（行维 + 最内维，与 `emitScheduledTransfer` 的
+  // `inner = dims.take_back(2)` 同一口径）；更外层的维只生成循环偏移，不进 DMA 参数。
+  if (plan.kind != TransferPlanKind::Scheduled || plan.dims.size() < kTwoDimensions) {
+    return true;
+  }
+  const TransferDim &row = plan.dims[plan.dims.size() - 2];
+  const TransferDim &inner = plan.dims.back();
+  // UB 行不能重叠；GM 的跨步转置读写不受此约束。
+  if (isProvenLessThan(row.localStride, inner.extent)) {
+    return false;
+  }
+  // DMA 的 UB 步距按 32B 量化。只拒绝可证不整除的行距；未知符号保守放行。
+  // Store 的零间隙另行放行，因为物理布局由生产者决定。推进公式与实测依据见
+  // 2026-10-19-afir-transpose-e2e-design.md 的“已补齐的覆盖欠账”。
+  if (op == nullptr || op->getNumOperands() < 1) {
+    return true;
+  }
+  auto shaped = dyn_cast<ShapedType>(op->getOperand(0).getType());
+  if (!shaped || !shaped.getElementType().isIntOrFloat()) {
+    return true;
+  }
+  const unsigned bits = shaped.getElementType().getIntOrFloatBitWidth();
+  constexpr int64_t kUbAccessGranularityBytes = 32;
+  if (bits % kBitsPerByte != 0 || kUbAccessGranularityBytes % (bits / kBitsPerByte) != 0) {
+    return true;
+  }
+  const int64_t granularity = kUbAccessGranularityBytes / (bits / 8);
+  if (isa<afir::StoreOp>(op) && proveEqual(row.localStride, inner.extent) == detail::TruthValue::True) {
+    return true;
+  }
+  return !isProvenNotMultipleOf(row.localStride, granularity);
+}
+
 FailureOr<TransferPlan> buildTransferPlanForDescriptor(Operation *op, afir::TensorDescAttr localDescriptor) {
   if (!op || !localDescriptor) {
     return failure();
@@ -793,11 +878,12 @@ FailureOr<Value> materializeScheduledGlobalOffset(Operation *op, OpBuilder &buil
 static LogicalResult emitOuterTransferLoops(OpBuilder &builder, Location location, ArrayRef<TransferDim> outer,
                                             const SymbolBindingMap &actualSizes, const SymbolBindingMap &symbols,
                                             Value globalOffset, Value blockCount, Value blockLen, Value globalStride,
-                                            Value localStride, ScheduledTransferBody emitBody) {
+                                            Value localStride, ScheduledTransferBody emitBody,
+                                            ArrayRef<bool> actualLocalStrides) {
   // 循环外物化上界和 stride：上界取实际范围，GM stride 用实际尺寸，UB stride 用标称布局。
   SmallVector<OuterLoopTerm, 2> outerTerms;
   outerTerms.reserve(outer.size());
-  for (const TransferDim &dim : outer) {
+  for (auto [index, dim] : llvm::enumerate(outer)) {
     FailureOr<Value> bound = materializeExpression(builder, location, dim.extent, actualSizes);
     if (failed(bound)) {
       return failure();
@@ -805,7 +891,8 @@ static LogicalResult emitOuterTransferLoops(OpBuilder &builder, Location locatio
     OuterLoopTerm term{*bound, Value(), Value()};
     // 零 stride 的一侧不生成偏移项。
     if (failed(materializeStrideOrSkip(builder, location, dim.globalStride, actualSizes, term.globalStride)) ||
-        failed(materializeStrideOrSkip(builder, location, dim.localStride, symbols, term.localStride))) {
+        failed(materializeStrideOrSkip(builder, location, dim.localStride,
+                                       actualLocalStrides[index] ? actualSizes : symbols, term.localStride))) {
       return failure();
     }
     outerTerms.push_back(term);
@@ -844,7 +931,7 @@ static LogicalResult emitOuterTransferLoops(OpBuilder &builder, Location locatio
 }
 
 LogicalResult emitScheduledTransfer(Operation *op, OpBuilder &builder, const TransferPlan &plan,
-                                    ScheduledTransferBody emitBody) {
+                                    ScheduledTransferBody emitBody, bool compact) {
   if (plan.kind != TransferPlanKind::Scheduled || plan.dims.empty()) {
     return failure();
   }
@@ -892,7 +979,8 @@ LogicalResult emitScheduledTransfer(Operation *op, OpBuilder &builder, const Tra
     // 行间距 = 外层 stride − 实际 blockLen。GM stride 使用实际尺寸绑定；
     // UB stride 使用标称布局，尾块缩小范围但不改变对齐后的行距。
     FailureOr<Value> outerGlobalStride = materializeExpression(builder, location, row.globalStride, *actualSizes);
-    FailureOr<Value> outerLocalStride = materializeExpression(builder, location, row.localStride, symbols);
+    FailureOr<Value> outerLocalStride =
+        materializeExpression(builder, location, row.localStride, compact ? *actualSizes : symbols);
     if (failed(count) || failed(outerGlobalStride) || failed(outerLocalStride)) {
       return failure();
     }
@@ -901,8 +989,18 @@ LogicalResult emitScheduledTransfer(Operation *op, OpBuilder &builder, const Tra
     localStride = builder.create<arith::SubIOp>(location, *outerLocalStride, *blockLen);
   }
 
+  // Only the contiguous suffix is repacked on a tail tile; outer gaps retain
+  // their nominal physical strides, just as in the transpose consumer.
+  SmallVector<bool> actualLocalStrides(dims.size(), false);
+  actualLocalStrides.back() = compact;
+  for (size_t i = dims.size() - 1; compact && i > 0; --i) {
+    auto expected = multiplyExpressions(op->getContext(), dims[i].extent, dims[i].localStride);
+    compact = succeeded(expected) && proveEqual(dims[i - 1].localStride, *expected) == detail::TruthValue::True;
+    actualLocalStrides[i - 1] = compact;
+  }
   return emitOuterTransferLoops(builder, location, outer, *actualSizes, symbols, globalOffset, blockCount, *blockLen,
-                                globalStride, localStride, emitBody);
+                                globalStride, localStride, emitBody,
+                                ArrayRef<bool>(actualLocalStrides).take_front(outer.size()));
 }
 
 FailureOr<Value> materializeNominalInnermostExtent(Operation *op, OpBuilder &builder, const TransferPlan &plan) {

@@ -28,6 +28,7 @@ add_mlir_library(AFIRToAscendC
   Implementations/DataMovement.cpp
   Implementations/Execution.cpp
   Implementations/Nddma.cpp
+  Implementations/Pad.cpp
   Implementations/RemovePad.cpp
   Implementations/Reduce.cpp
   Implementations/ReducePadding.cpp
@@ -35,6 +36,7 @@ add_mlir_library(AFIRToAscendC
   Implementations/Synchronization.cpp
   Implementations/TernaryElementwise.cpp
   Implementations/TilingParam.cpp
+  Implementations/Transpose.cpp
   Implementations/UnaryElementwise.cpp
   RegisterAscendCImplementations.cpp
 

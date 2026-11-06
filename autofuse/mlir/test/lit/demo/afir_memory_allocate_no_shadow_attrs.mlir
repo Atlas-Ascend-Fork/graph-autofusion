@@ -88,6 +88,15 @@ module {
 // CHECK-LABEL: func.func private @tbuf_path
 // CHECK-SAME: !emitasc.py_struct<"TilingData", [i64, i64, i64, i64, i64], ["block_dim", "s0", "q2_size", "q9_size", "b5_size"]> {afir.kernel_arg = #afir.kernel_arg<role = tiling>}
 
+// TQue 路径（isQueueBinding 为真，buffer id 2 / 9）：queue_depth 在 QueueType 里，
+// slot_count 是 init_queue 的 count 操作数。队列先于 TBuf 发 init（`createCanonicalResources`
+// 两趟迭代）：TPipe 按调用序分 UB，scatter 型 API（`TransDataTo5HD` 地址表）的「目标队列槽
+// + 共享 tmp TBuf」混排地址表要求 tmp 位于队列槽之上（CPU 模拟器实测约束，见该函数注释）。
+// CHECK: %[[QIN:.*]] = ascendc.queue : <vecin, 2>
+// CHECK: ascendc.pipe.init_queue %{{.*}}, %[[QIN]], %c2_i32
+// CHECK: %[[QOUT:.*]] = ascendc.queue : <vecout, 2>
+// CHECK: ascendc.pipe.init_queue %{{.*}}, %[[QOUT]], %c2_i32
+
 // TBuf 路径（isQueueBinding 为假，buffer id 5）：资源就是这个 SSA 值，不带任何属性。
 // alignment_bytes = 32 没有被复述成属性，而是折进了 size 计算。
 // CHECK: %[[TBUF:.*]] = ascendc.tbuf : <veccalc>
@@ -95,13 +104,6 @@ module {
 // CHECK: %[[TBUF_SIZE:.*]], %{{.*}} = arith.mulsi_extended
 // CHECK: cf.assert %{{.*}}, "aligned resource size must not overflow"
 // CHECK: ascendc.pipe.init_buffer %{{.*}}, %[[TBUF]], %[[TBUF_SIZE]]
-
-// TQue 路径（isQueueBinding 为真，buffer id 2 / 9）：queue_depth 在 QueueType 里，
-// slot_count 是 init_queue 的 count 操作数。
-// CHECK: %[[QIN:.*]] = ascendc.queue : <vecin, 2>
-// CHECK: ascendc.pipe.init_queue %{{.*}}, %[[QIN]], %c2_i32
-// CHECK: %[[QOUT:.*]] = ascendc.queue : <vecout, 2>
-// CHECK: ascendc.pipe.init_queue %{{.*}}, %[[QOUT]], %c2_i32
 
 // 取用点同样不带影子属性；身份由 SSA use-def 给出。
 // CHECK: ascendc.tbuf.get_tensor %[[TBUF]]

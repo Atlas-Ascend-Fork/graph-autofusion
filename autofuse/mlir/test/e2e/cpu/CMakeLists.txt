@@ -16,6 +16,24 @@ set(AF_MLIR_E2E_CPU_REG_BASE_SOC_VERSION "Ascend950PR_9599" CACHE STRING
 set(AF_MLIR_E2E_CPU_REG_BASE_TIKICPULIB_TARGET "tikicpulib_ascend950pr_9599" CACHE STRING
     "tikicpulib target used by reg-base MLIR CPU E2E tests")
 
+# The SDK installation stays read-only. Correct Compact-mode CPU bounds checks
+# in a build-local header tree; Normal mode and the DMA implementation are unchanged.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(AF_MLIR_E2E_CPU_REG_BASE_SDK "${CMAKE_CURRENT_BINARY_DIR}/reg_base_sdk")
+set(AF_MLIR_E2E_CPU_REG_BASE_SDK_PROBED OFF)
+# Ordinary reg-base cases use the original SDK, without requiring a patched copy.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    set(_AF_MLIR_CPU_SDK_ARCH aarch64-linux)
+else()
+    set(_AF_MLIR_CPU_SDK_ARCH x86_64-linux)
+endif()
+set(AF_MLIR_E2E_CPU_REG_BASE_NATIVE_SDK "${ASCEND_INSTALL_PATH}/${_AF_MLIR_CPU_SDK_ARCH}/asc")
+if(NOT IS_DIRECTORY "${AF_MLIR_E2E_CPU_REG_BASE_NATIVE_SDK}/include" AND
+   IS_DIRECTORY "${ASCEND_INSTALL_PATH}/toolkit/${_AF_MLIR_CPU_SDK_ARCH}/asc/include")
+    set(AF_MLIR_E2E_CPU_REG_BASE_NATIVE_SDK "${ASCEND_INSTALL_PATH}/toolkit/${_AF_MLIR_CPU_SDK_ARCH}/asc")
+endif()
+
+
 list(APPEND CMAKE_PREFIX_PATH "${ASCEND_INSTALL_PATH}/tools/tikicpulib/lib")
 find_package(tikicpulib REQUIRED)
 if(NOT TARGET ${AF_MLIR_E2E_CPU_TIKICPULIB_TARGET})
@@ -71,6 +89,14 @@ add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_two_ou
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_diamond_store" cases/load_broadcast_diamond_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_multi_axis_dynamic_store" cases/load_broadcast_multi_axis_dynamic_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_nddma_store" cases/load_broadcast_nddma_store)
+# `load_transpose_store` / `load_transpose_store_2d`：`afir.transpose` 的数值证据
+# （`load -> transpose[0,2,1] -> store`）。3 档实例：mem 默认（910B，a2/a3）两形状
+# 非对齐/对齐各一；`PLATFORM reg_base`（950，a5）一例；2d 为 64x64 对照格。
+# 设计文档 `2026-10-19-afir-transpose-e2e-design.md`（2026-10-27 v2 迁移记录）。
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_transpose_store" cases/load_transpose_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_transpose_store_2d" cases/load_transpose_store_2d)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/sub_transpose_abs" cases/sub_transpose_abs)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/transpose_generalization" cases/transpose_generalization)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_sum_store" cases/load_sum_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_mean_store" cases/load_mean_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_neg_sum_store" cases/load_neg_sum_store)

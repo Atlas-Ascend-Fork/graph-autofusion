@@ -15,6 +15,7 @@
 #include "dialect/AFIR/IR/AFIRVerifierUtils.h"
 #include "dialect/AFIR/IR/SymbolicBuilder.h"
 #include "ascir/Dialect/Asc/IR/Asc.h"
+#include "ascir/Dialect/EmitAsc/IR/EmitAsc.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/STLExtras.h"
@@ -223,8 +224,11 @@ FailureOr<mlir::afir::SymbolBindingMap> mlir::ascend::kernel::materializeAscendC
   for (auto [nameAttr, typeAttr] : llvm::zip(names, types)) {
     auto name = cast<StringAttr>(nameAttr);
     auto fieldType = cast<TypeAttr>(typeAttr);
-    if (!isa<IntegerType, IndexType>(fieldType.getValue())) {
-      return func.emitError("TilingData axis fields must have integer types");
+    // 轴字段（size var / q、b 尺寸）必须是整数；嵌套的 API tiling struct（host tiling，
+    // 如 `ConfusionTransposeTiling`）不是轴字段，它只在 conversion 里按字段名被
+    // `emitasc.member` 访问，不参与任何 `afir.tiling_param` 绑定。
+    if (!isa<IntegerType, IndexType>(fieldType.getValue()) && !isa<emitasc::PyStructType>(fieldType.getValue())) {
+      return func.emitError("TilingData fields must have integer or API tiling struct types");
     }
     auto sizeVariable = llvm::find_if(
         sizeVariables, [&](ExprAttr expression) { return expression.getValue().getValue() == name.getValue(); });

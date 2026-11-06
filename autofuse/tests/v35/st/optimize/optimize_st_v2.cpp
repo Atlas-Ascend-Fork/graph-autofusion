@@ -1391,7 +1391,16 @@ TEST_F(OptimizerStV2, TwoAxisSliceNeedAlign) {
   EXPECT_EQ(res, 0);
   EXPECT_EQ(fused_scheduled.node_idx_to_scheduled_results[0].size(), 1);
   EXPECT_EQ(fused_scheduled.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
-  auto impl_graph = fused_scheduled.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[1];
+  const auto &impl_graphs = fused_scheduled.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  size_t align_graph_index = impl_graphs.size();
+  for (size_t i = 0UL; i < impl_graphs.size(); ++i) {
+    if (impl_graphs[i].GetName().find("B0Y0") != std::string::npos) {
+      align_graph_index = i;
+      break;
+    }
+  }
+  ASSERT_LT(align_graph_index, impl_graphs.size());
+  auto impl_graph = impl_graphs[align_graph_index];
   auto load_node = impl_graph.FindNode("load0");
   // Store 输出尾轴 GM stride = s2 = 3 != 1, 触发 IsNeedDiscontinuousAligned, 回传 kDiscontinuous 到 Load
   // FP32: align_factor = 32 / 4 = 8, 尾轴 stride = Align(1, 8) = 8, 次尾轴 stride = 8 * s1 = 32

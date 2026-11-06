@@ -29,6 +29,7 @@
 
 #include "conversion/AFIRToAscendC/Implementations/BinaryElementwise.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
+#include "target/Ascend/AscendTargetProfile.h"
 #include "dialect/AFIR/Analysis/TransferPlan.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 
@@ -407,7 +408,7 @@ LogicalResult checkConversionLocalViews(SourceOp op) {
 // 算过一次，这里再算一遍就是第二份编码。
 template <typename SourceOp, typename OpAdaptor>
 FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adaptor, BinaryOperandOrder order,
-                                                      ConversionPatternRewriter &rewriter) {
+                                                      ConversionPatternRewriter &rewriter, bool compactTail) {
   const Value operands[] = {adaptor.getLhs(), adaptor.getRhs()};
   BinaryOperandTiles tiles;
   tiles.lhs = operands[order.tile];
@@ -439,7 +440,7 @@ FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ada
   //
   // **标量不必在这里判**：它没有向量化轴，`collapseVectorizedAxes` 不会把它收进来，
   // 于是它拿不到 subindex——与此前按 `isa<LocalTensorType>` 分流的结论相同。
-  FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op);
+  FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op, compactTail);
   if (failed(segments)) {
     return failure();
   }
@@ -480,8 +481,11 @@ class BinaryElementwiseConversionPattern final : public OpConversionPattern<Sour
   using OpAdaptor = typename SourceOp::Adaptor;
 
   BinaryElementwiseConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                     std::shared_ptr<const BinaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                     std::shared_ptr<const BinaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -505,7 +509,7 @@ class BinaryElementwiseConversionPattern final : public OpConversionPattern<Sour
       return rewriter.notifyMatchFailure(op, "incompatible elementwise local views");
     }
 
-    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter);
+    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -534,6 +538,7 @@ class BinaryElementwiseConversionPattern final : public OpConversionPattern<Sour
  private:
   ImplementationKey key_;
   std::shared_ptr<const BinaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 // 标量形态里**方向要发出去**的那一族：`sub` / `div` / `truediv`。
@@ -552,8 +557,11 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
   using OpAdaptor = typename SourceOp::Adaptor;
 
   BinaryScalarDirectionConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                         std::shared_ptr<const BinaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                         std::shared_ptr<const BinaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -570,7 +578,7 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
       return rewriter.notifyMatchFailure(op, "the selected implementation expects one tile and one scalar");
     }
 
-    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter);
+    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -600,6 +608,7 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
  private:
   ImplementationKey key_;
   std::shared_ptr<const BinaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 // 标量形态里**按 AFIR 原次序发射**的那一族：今天只有 `afir.pow`。
@@ -619,8 +628,11 @@ class BinaryScalarInPlaceConversionPattern final : public OpConversionPattern<So
   using OpAdaptor = typename SourceOp::Adaptor;
 
   BinaryScalarInPlaceConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                       std::shared_ptr<const BinaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                       std::shared_ptr<const BinaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -636,7 +648,8 @@ class BinaryScalarInPlaceConversionPattern final : public OpConversionPattern<So
     }
 
     // **发射次序是 AFIR 的原次序**，不是 `emissionOrder` 算出来的那一份。
-    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter);
+    FailureOr<BinaryOperandTiles> tiles =
+        materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -662,6 +675,7 @@ class BinaryScalarInPlaceConversionPattern final : public OpConversionPattern<So
  private:
   ImplementationKey key_;
   std::shared_ptr<const BinaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 // 二元 + **一个由 ODS 属性来的实参** + 一块 tmp buffer。今天只有 `afir.axpy` 是这个
@@ -683,8 +697,11 @@ class BinaryScalarAttrConversionPattern final : public OpConversionPattern<Sourc
   using OpAdaptor = typename SourceOp::Adaptor;
 
   BinaryScalarAttrConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                    std::shared_ptr<const BinaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                    std::shared_ptr<const BinaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -703,7 +720,8 @@ class BinaryScalarAttrConversionPattern final : public OpConversionPattern<Sourc
 
     // Axpy 两个输入都是 tile，没有标量形态（`scalarOperand` 是 `"none"`）——发射顺序
     // 恒是 `{0, 1}`。
-    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter);
+    FailureOr<BinaryOperandTiles> tiles =
+        materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -721,6 +739,7 @@ class BinaryScalarAttrConversionPattern final : public OpConversionPattern<Sourc
  private:
   ImplementationKey key_;
   std::shared_ptr<const BinaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 // 比较族。与 `BinaryElementwiseConversionPattern` 的差别全在建 op 那一行，两处：
@@ -739,8 +758,11 @@ class CompareConversionPattern final : public OpConversionPattern<SourceOp> {
   using OpAdaptor = typename SourceOp::Adaptor;
 
   CompareConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                           std::shared_ptr<const BinaryElementwiseMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                           std::shared_ptr<const BinaryElementwiseMapping> mapping, bool compactTail)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        compactTail_(compactTail) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -765,7 +787,7 @@ class CompareConversionPattern final : public OpConversionPattern<SourceOp> {
       }
     }
 
-    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter);
+    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -787,6 +809,7 @@ class CompareConversionPattern final : public OpConversionPattern<SourceOp> {
  private:
   ImplementationKey key_;
   std::shared_ptr<const BinaryElementwiseMapping> mapping_;
+  bool compactTail_;
 };
 
 template <typename SourceOp, typename TargetOp, ScalarOperand Scalar, TmpBufferUse Tmp>
@@ -794,7 +817,8 @@ ImplementationRegistry::PatternRegistration<BinaryElementwiseMapping> createPatt
   return [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
             std::shared_ptr<const BinaryElementwiseMapping> mapping) {
     patterns.add<BinaryElementwiseConversionPattern<SourceOp, TargetOp, Scalar, Tmp>>(
-        context.typeConverter, patterns.getContext(), key, std::move(mapping));
+        context.typeConverter, patterns.getContext(), key, std::move(mapping),
+        context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) == ascend::FeatureState::Available);
   };
 }
 
@@ -837,7 +861,9 @@ LogicalResult registerCompare(ImplementationRegistry &registry, llvm::StringRef 
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const BinaryElementwiseMapping> mapping) {
         patterns.add<CompareConversionPattern<SourceOp, TargetOp, Mode, Scalar, Tmp>>(
-            context.typeConverter, patterns.getContext(), key, std::move(mapping));
+            context.typeConverter, patterns.getContext(), key, std::move(mapping),
+            context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                ascend::FeatureState::Available);
       });
 }
 
@@ -868,7 +894,9 @@ LogicalResult registerScalarBinaryDirection(ImplementationRegistry &registry, ll
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const BinaryElementwiseMapping> mapping) {
         patterns.add<BinaryScalarDirectionConversionPattern<SourceOp, TargetOp, Tmp>>(
-            context.typeConverter, patterns.getContext(), key, std::move(mapping));
+            context.typeConverter, patterns.getContext(), key, std::move(mapping),
+            context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                ascend::FeatureState::Available);
       });
 }
 
@@ -888,7 +916,9 @@ LogicalResult registerScalarBinaryInPlace(ImplementationRegistry &registry, llvm
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const BinaryElementwiseMapping> mapping) {
         patterns.add<BinaryScalarInPlaceConversionPattern<SourceOp, TargetOp, Tmp>>(
-            context.typeConverter, patterns.getContext(), key, std::move(mapping));
+            context.typeConverter, patterns.getContext(), key, std::move(mapping),
+            context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                ascend::FeatureState::Available);
       });
 }
 
@@ -907,7 +937,9 @@ LogicalResult registerBinaryScalarAttr(ImplementationRegistry &registry, llvm::S
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const BinaryElementwiseMapping> mapping) {
         patterns.add<BinaryScalarAttrConversionPattern<SourceOp, TargetOp>>(
-            context.typeConverter, patterns.getContext(), key, std::move(mapping));
+            context.typeConverter, patterns.getContext(), key, std::move(mapping),
+            context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                ascend::FeatureState::Available);
       });
 }
 

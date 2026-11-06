@@ -33,10 +33,10 @@
 // 支持。同步与寻址无关，跳过它不影响本用例要钉的东西。计算侧的拒绝本身由
 // `TransferPlanTest` 与能力查询覆盖。
 //
-// V2201 与 V3510 各发一遍：二维发射不含任何目标相关的分支，两个目标的产物必须同形。
+// V2201 与 V3510 各发一遍：二维发射不含任何目标相关的分支，mem 使用对齐行距，reg 使用 Compact 紧凑行距。
 
-// RUN: af-opt --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend910B1 %s | FileCheck %s --check-prefix=IR
-// RUN: af-opt --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=IR
+// RUN: af-opt --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend910B1 %s | FileCheck %s --check-prefixes=IR,MEM
+// RUN: af-opt --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend950DT_950x %s | FileCheck %s --check-prefixes=IR,REG
 
 #gm_buffer = #afir.buffer_desc<space = <gm>, size_bytes_expr = <"(2 * s0 * s1)">, life_time_axis_id = -1>
 #ub_queue = #afir.buffer_desc<space = <ub>, buffer_id = 0, slot_count = 2, queue_depth = 2, size_bytes_expr = <"(2 * z0t_size * z1t_size)">, alignment_bytes = 32, life_time_axis_id = -1>
@@ -170,12 +170,13 @@ module @plan0 attributes {
 // legacy `SetDmaParams` 的 `ActualSize(gm − repeat)` 与 `Size(ub) − ActualSize(repeat)`
 // 就是这个区别。写成同一个口径在整块上看不出来，只有尾块会错。
 // IR: %[[GMGAP:.*]] = arith.subi %[[S1]], %[[BLOCKLEN]]
-// IR: %[[UBGAP:.*]] = arith.subi %[[Z1T]], %[[BLOCKLEN]]
+// MEM: %[[UBGAP:.*]] = arith.subi %[[Z1T]], %[[BLOCKLEN]]
+// REG: %[[UBGAP:.*]] = arith.subi %[[BLOCKLEN]], %[[BLOCKLEN]]
 // 方向映射：Load 是 `LocalTensor ← GlobalTensor`，所以 srcStride 取 GM 侧、dstStride 取
 // UB 侧。GM 侧带偏移、UB 侧恒为 0 的规则在二维下不变。
 // IR: ascendc.global_tensor.subindex %{{.*}}[%[[OFF]]]
 // IR: ascendc.local_tensor.subindex %{{.*}}[%[[ZERO:.*]]]
-// IR: ascendc.data_copy_pad_extend %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[GMGAP]], %[[UBGAP]]
+// IR: ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[GMGAP]], %[[UBGAP]]
 
 // --- Store ---
 // 同一个发射点，方向相反：src 是 UB 侧、dst 是 GM 侧，于是两个缝隙参数**交换位置**。
@@ -184,7 +185,8 @@ module @plan0 attributes {
 // global/local 原样传」之后，Load 那条仍然对（它的顺序恰好就是 global, local），只有
 // 这一条会挂——变异验证的判据就是"只有二维 Store 一条失败"。
 // IR: %[[SGMGAP:.*]] = arith.subi %[[S1]], %[[BLOCKLEN]]
-// IR: %[[SUBGAP:.*]] = arith.subi %[[Z1T]], %[[BLOCKLEN]]
+// MEM: %[[SUBGAP:.*]] = arith.subi %[[Z1T]], %[[BLOCKLEN]]
+// REG: %[[SUBGAP:.*]] = arith.subi %[[BLOCKLEN]], %[[BLOCKLEN]]
 // IR: ascendc.local_tensor.subindex
 // IR: ascendc.global_tensor.subindex %{{.*}}[%[[SOFF:.*]]]
-// IR: ascendc.data_copy_pad_extend %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[SUBGAP]], %[[SGMGAP]]
+// IR: ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[SUBGAP]], %[[SGMGAP]]

@@ -89,6 +89,142 @@ const NddmaNg2Params *GetNddmaNg2Params(uint64_t dtype_size) {
   }
 }
 
+// Direct1D whole-API refit. Keep the existing bilinear arithmetic and the
+// legacy higher-rank/NG2 residual tables separate: a fitted direct1D residual
+// is not an independently calibrated higher-rank building block.
+const Nddma1DParams *GetCalibrated1DParams(uint64_t dtype_size) {
+  static constexpr Nddma1DParams kSize1 = {19.804176287674611,
+                                           383.18507637562016,
+                                           7.3622873632996821,
+                                           410.08277965993307,
+                                           0,
+                                           0.01638919820216082,
+                                           0,
+                                           0,
+                                           6.3500085339606187,
+                                           -0.015902012318163614,
+                                           2.1593534546872641,
+                                           0.0016113600504118414,
+                                           -0.076526252749587992,
+                                           -0.002081040746331446};
+  static constexpr Nddma1DParams kSize2 = {110.99512994171366,
+                                           372.03538613769922,
+                                           20.880243660515681,
+                                           392.11553775116982,
+                                           0,
+                                           0.008480690419577443,
+                                           0,
+                                           0,
+                                           2.8654879909598114,
+                                           -0.0067546979518560354,
+                                           2.1985688324677297,
+                                           -0.00050001547789896381,
+                                           -0.024133022925236149,
+                                           -0.0010298012577624018};
+  // The constrained 4/8-byte physical 1D fits reach zero inverse bandwidth in the low-core branch.
+  // A finite t1 of 1e30 makes bytes/t1 negligible while retaining startup and stride costs.
+  static constexpr Nddma1DParams kSize4 = {1e+30,
+                                           399.79451701846955,
+                                           111.30186040884911,
+                                           380.20779936092111,
+                                           0,
+                                           0.0041808859558160605,
+                                           -0.0032385006575487434,
+                                           0.00080962516438718584,
+                                           0.16995157378087231,
+                                           -0.00022404971274912235,
+                                           2.2671010691747822,
+                                           0.00045939527932410191,
+                                           -0.37127013690741806,
+                                           0.000866140142348487};
+  static constexpr Nddma1DParams kSize8 = {1e+30,
+                                           419.59765761088846,
+                                           89.728783044552372,
+                                           411.62148274570325,
+                                           0,
+                                           0.001964136704570765,
+                                           -0.039251990033263379,
+                                           0.0049064987541579223,
+                                           0.072867233427661618,
+                                           -0.00046470078288990109,
+                                           2.1762692322415575,
+                                           0.0035470893458878919,
+                                           -0.12573210312713756,
+                                           -0.0012697028815567149};
+  switch (dtype_size) {
+    case 1U:
+      return &kSize1;
+    case 2U:
+      return &kSize2;
+    case 4U:
+      return &kSize4;
+    case 8U:
+      return &kSize8;
+    default:
+      return nullptr;
+  }
+}
+
+bool BuildPhysical1DView(const NddmaNormalizedDesc &normalized, NddmaNormalizedDesc &physical) {
+  const size_t rank = normalized.output_dims.size();
+  size_t first = rank;
+  Expr elements = af::sym::kSymbolOne;
+  for (size_t pos = 0U; pos < rank; ++pos) {
+    if (af::SymbolicUtils::StaticCheckEq(normalized.output_dims[pos], af::sym::kSymbolOne) == af::TriBool::kTrue) {
+      continue;
+    }
+    if (first == rank) {
+      first = pos;
+    } else if (af::SymbolicUtils::StaticCheckEq(normalized.input_strides[pos],
+                                                normalized.input_strides[first] * elements) != af::TriBool::kTrue ||
+               af::SymbolicUtils::StaticCheckEq(normalized.output_strides[pos],
+                                                normalized.output_strides[first] * elements) != af::TriBool::kTrue) {
+      return false;
+    }
+    elements = elements * normalized.output_dims[pos];
+  }
+  if (first == rank ||
+      af::SymbolicUtils::StaticCheckEq(normalized.input_strides[first], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+    return false;
+  }
+  // This is a cost-only view. Preserve the actual descriptor/rank for logging.
+  // Unit axes and jointly contiguous axes do not create extra DMA payload.
+  physical = NddmaNormalizedDesc{};
+  physical.effective_rank = 1U;
+  physical.output_dims = {elements};
+  physical.input_strides = {normalized.input_strides[first]};
+  physical.output_strides = {normalized.output_strides[first]};
+  physical.vectorized_axis = {normalized.vectorized_axis[first]};
+  return true;
+}
+
+struct CalibratedNg2Params {
+  double small_inner[4];
+  double large_inner[4];
+};
+
+const CalibratedNg2Params *GetCalibratedNg2Params(uint64_t dtype_size) {
+  static constexpr CalibratedNg2Params kSize1 = {
+      {454.62985744360179, 2883.0433674319024, 2539.5240826150948, 0},
+      {155.86615533000824, 16992.537142363326, 502.18408077094404, 1567.2702352776323}};
+  static constexpr CalibratedNg2Params kSize2 = {
+      {454.57389906919423, 1139.3068621999473, 1324.1407381801332, 208.02520354552965},
+      {171.48824711051748, 8983.8345837638135, 28.059865391365431, 35.194618896097147}};
+  static constexpr CalibratedNg2Params kSize4 = {
+      {477.67750975920245, 415.45180464192788, 567.57933302664685, 258.11080050891985},
+      {194.04230121257388, 4640.0150678912751, 189.36469434493978, 359.00573918803889}};
+  switch (dtype_size) {
+    case 1U:
+      return &kSize1;
+    case 2U:
+      return &kSize2;
+    case 4U:
+      return &kSize4;
+    default:
+      return nullptr;
+  }
+}
+
 bool HasValidVectorLengths(const NddmaDescriptorInfo &descriptor) {
   const size_t rank = descriptor.output_dims.size();
   return rank == descriptor.input_strides.size() && rank == descriptor.output_strides.size();
@@ -281,31 +417,34 @@ NddmaFallbackReason BuildNddmaCoreCycles(const NddmaNormalizedDesc &normalized, 
   const Expr total_bytes = total_elements * CreateExpr(dtype_size);
   low_core = total_bytes / CreateExpr(params.t1) + CreateExpr(params.h1);
   high_core = total_bytes / CreateExpr(params.t2) + CreateExpr(params.h2);
-  Expr input_prefix = CreateExpr(0);
-  Expr output_prefix = CreateExpr(0);
+  Expr input_prefix = af::sym::kSymbolZero;
+  Expr output_prefix = af::sym::kSymbolZero;
+  Expr has_inner_axis = af::sym::kSymbolZero;
   for (size_t i = 0; i < normalized.effective_rank; ++i) {
-    if (i > 0U) {
-      input_prefix = input_prefix + normalized.output_dims[i - 1U] * normalized.input_strides[i - 1U];
-      output_prefix = output_prefix + normalized.output_dims[i - 1U] * normalized.output_strides[i - 1U];
-    }
-    Expr input_stride = normalized.input_strides[i];
-    Expr output_stride = normalized.output_strides[i];
-    if (i > 0U) {
-      input_stride = AbsExpr(input_stride - input_prefix) + CreateExpr(1);
-      output_stride = AbsExpr(output_stride - output_prefix) + CreateExpr(1);
-    }
+    // Valid dimensions are positive integers. A unit axis performs no stride advance,
+    // including when a symbolic tiling dimension evaluates to one at runtime.
+    const Expr active = af::sym::Min(af::sym::kSymbolOne, normalized.output_dims[i] - af::sym::kSymbolOne);
+    const Expr input_stride =
+        (af::sym::kSymbolOne - has_inner_axis) * normalized.input_strides[i] +
+        has_inner_axis * (AbsExpr(normalized.input_strides[i] - input_prefix) + af::sym::kSymbolOne);
+    const Expr output_stride =
+        (af::sym::kSymbolOne - has_inner_axis) * normalized.output_strides[i] +
+        has_inner_axis * (AbsExpr(normalized.output_strides[i] - output_prefix) + af::sym::kSymbolOne);
     Expr suffix_elements = CreateExpr(1);
     for (size_t suffix = i; suffix < normalized.effective_rank; ++suffix) {
       suffix_elements = suffix_elements * normalized.output_dims[suffix];
     }
     const Expr bytes = suffix_elements * CreateExpr(dtype_size);
-    low_core = low_core + BuildNddma1DResidual(params, bytes, input_stride, output_stride, dtype_size, false);
-    high_core = high_core + BuildNddma1DResidual(params, bytes, input_stride, output_stride, dtype_size, true);
+    low_core = low_core + active * BuildNddma1DResidual(params, bytes, input_stride, output_stride, dtype_size, false);
+    high_core = high_core + active * BuildNddma1DResidual(params, bytes, input_stride, output_stride, dtype_size, true);
+    input_prefix = input_prefix + active * normalized.output_dims[i] * normalized.input_strides[i];
+    output_prefix = output_prefix + active * normalized.output_dims[i] * normalized.output_strides[i];
+    has_inner_axis = af::sym::Min(af::sym::kSymbolOne, has_inner_axis + active);
   }
   return NddmaFallbackReason::kNone;
 }
 
-bool IsNg2Eligible(const NddmaNormalizedDesc &normalized, NddmaNg2Config &config) {
+bool IsNg2Eligible(const NddmaNormalizedDesc &normalized, NddmaNg2Config &config, bool require_packed = true) {
   std::vector<size_t> non_unit_positions;
   for (size_t pos = 0U; pos < normalized.output_dims.size(); ++pos) {
     // A symbolic tiling dimension cannot always be proven greater than one. Treat only statically unit dimensions
@@ -329,12 +468,12 @@ bool IsNg2Eligible(const NddmaNormalizedDesc &normalized, NddmaNg2Config &config
          config.n_pos, config.m_pos, static_cast<int>(input_order), static_cast<int>(output_unit),
          static_cast<int>(output_dim_eq));
   return input_order == af::TriBool::kTrue && output_unit == af::TriBool::kTrue &&
-         IsStaticallyEqualOrUnknown(output_strides[config.m_pos], dims[config.n_pos]);
+         (!require_packed || IsStaticallyEqualOrUnknown(output_strides[config.m_pos], dims[config.n_pos]));
 }
 
 NddmaFallbackReason BuildNg2Cycles(const NddmaNormalizedDesc &normalized, const Nddma1DParams &params,
                                    const NddmaNg2Params &ng2_params, uint64_t dtype_size, Expr &low_core,
-                                   Expr &high_core, const NddmaNg2Config &config) {
+                                   Expr &high_core, const NddmaNg2Config &config, bool generate_high_core = true) {
   const Expr m = normalized.output_dims[config.m_pos];
   const Expr n = normalized.output_dims[config.n_pos];
   const Expr total_bytes = m * n * CreateExpr(dtype_size);
@@ -350,12 +489,63 @@ NddmaFallbackReason BuildNg2Cycles(const NddmaNormalizedDesc &normalized, const 
   const Expr b1 = n * CreateExpr(dtype_size);
   const Expr low_ng1 =
       BuildNddma1DResidual(params, b1, normalized.input_strides[config.n_pos], CreateExpr(1), dtype_size, false);
-  const Expr high_ng1 =
-      BuildNddma1DResidual(params, b1, normalized.input_strides[config.n_pos], CreateExpr(1), dtype_size, true);
   low_core = total_bytes / CreateExpr(params.t1) + CreateExpr(params.h1) + low_ng1 * ng2;
-  high_core = total_bytes / CreateExpr(params.t2) + CreateExpr(params.h2) + high_ng1 * ng2;
+  if (generate_high_core) {
+    const Expr high_ng1 =
+        BuildNddma1DResidual(params, b1, normalized.input_strides[config.n_pos], CreateExpr(1), dtype_size, true);
+    high_core = total_bytes / CreateExpr(params.t2) + CreateExpr(params.h2) + high_ng1 * ng2;
+  }
   return NddmaFallbackReason::kNone;
 }
+
+bool CanUseCalibratedNg2(const NddmaNormalizedDesc &normalized, const NddmaNg2Config &config, const Expr &block_dim,
+                         bool require_packed = true) {
+  // The collected API is source-unit-stride and packed UB. Preserve the
+  // existing model for padded/uncertain layouts and the unmeasured low cores.
+  return af::SymbolicUtils::StaticCheckLe(block_dim, CreateExpr(kLowCoreUpperBound)) != af::TriBool::kTrue &&
+         af::SymbolicUtils::StaticCheckEq(normalized.input_strides[config.m_pos], af::sym::kSymbolOne) ==
+             af::TriBool::kTrue &&
+         (!require_packed ||
+          af::SymbolicUtils::StaticCheckEq(normalized.output_strides[config.m_pos],
+                                           normalized.output_dims[config.n_pos]) == af::TriBool::kTrue) &&
+         af::SymbolicUtils::StaticCheckLt(normalized.input_strides[config.n_pos],
+                                          normalized.output_dims[config.m_pos]) != af::TriBool::kTrue;
+}
+
+af::Status BuildCalibratedNg2High(const NddmaNormalizedDesc &normalized, const NddmaNg2Config &config,
+                                  const CalibratedNg2Params &params, uint64_t dtype_size, const Expr &block_dim,
+                                  Expr &high_core, NddmaModelResult &result) {
+  const Expr m = normalized.output_dims[config.m_pos];
+  const Expr n = normalized.output_dims[config.n_pos];
+  const Expr bytes = m * n * CreateExpr(dtype_size);
+  const Expr shared = af::sym::Max(block_dim - CreateExpr(32), af::sym::kSymbolZero) / CreateExpr(24);
+  const Expr b_small = bytes / CreateExpr(16384);
+  const Expr b_large = bytes / CreateExpr(65536);
+  const Expr gap =
+      af::sym::Min(af::sym::kSymbolOne, af::sym::Max(normalized.input_strides[config.n_pos] - m, af::sym::kSymbolZero));
+  const auto &p = params.small_inner;
+  const auto &q = params.large_inner;
+  const Expr small =
+      CreateExpr(p[0]) + CreateExpr(p[1]) * b_small +
+      CreateExpr(p[2]) * af::sym::Max(bytes - CreateExpr(16384), af::sym::kSymbolZero) / CreateExpr(16384) +
+      CreateExpr(p[3]) * shared * b_small;
+  const Expr large = CreateExpr(q[0]) + CreateExpr(q[1]) * b_large + CreateExpr(q[2]) * shared * b_large +
+                     CreateExpr(q[3]) * shared * b_large * gap;
+  const Expr inner_bytes = n * CreateExpr(dtype_size);
+  if (af::SymbolicUtils::StaticCheckLt(inner_bytes, CreateExpr(128)) == af::TriBool::kTrue) {
+    high_core = small;
+  } else if (af::SymbolicUtils::StaticCheckGe(inner_bytes, CreateExpr(128)) == af::TriBool::kTrue) {
+    high_core = large;
+  } else {
+    GetPerfVar("nddma_ng2_inner", high_core, result.ternary_ops);
+    TernaryOp ternary(CondType::K_LT, inner_bytes, CreateExpr(128), std::make_shared<IfCase>(small),
+                      std::make_shared<IfCase>(large));
+    ternary.SetVariable(high_core);
+    result.ternary_ops[high_core] = std::move(ternary);
+  }
+  return af::SUCCESS;
+}
+
 }  // namespace
 
 const char *NddmaFallbackReasonToString(NddmaFallbackReason reason) {
@@ -433,7 +623,9 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
     result.fallback_reason = NddmaFallbackReason::kDtypeUnsupported;
     return af::SUCCESS;
   }
-  const auto *params = GetNddma1DParams(dtype_size);
+  NddmaNormalizedDesc physical_1d;
+  const bool direct_1d = BuildPhysical1DView(normalized, physical_1d);
+  const auto *params = direct_1d ? GetCalibrated1DParams(dtype_size) : GetNddma1DParams(dtype_size);
   if (params == nullptr || IsStaticNonPositive(block_dim)) {
     result.fallback_reason =
         params == nullptr ? NddmaFallbackReason::kDtypeUnsupported : NddmaFallbackReason::kSchemaMismatch;
@@ -444,14 +636,47 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
   NddmaNg2Config ng2_config{};
   const auto *ng2_params = IsNg2Eligible(normalized, ng2_config) ? GetNddmaNg2Params(dtype_size) : nullptr;
   if (ng2_params != nullptr) {
+    const auto *calibrated = GetCalibratedNg2Params(dtype_size);
+    const bool use_calibrated = calibrated != nullptr && CanUseCalibratedNg2(normalized, ng2_config, block_dim);
     result.fallback_reason =
-        BuildNg2Cycles(normalized, *params, *ng2_params, dtype_size, low_core, high_core, ng2_config);
-    result.model_name = "NDDMA_ND_MULTICORE_NG2";
+        BuildNg2Cycles(normalized, *params, *ng2_params, dtype_size, low_core, high_core, ng2_config, !use_calibrated);
+    if (use_calibrated && result.fallback_reason == NddmaFallbackReason::kNone) {
+      GE_ASSERT_SUCCESS(
+          BuildCalibratedNg2High(normalized, ng2_config, *calibrated, dtype_size, block_dim, high_core, result));
+    }
+    result.model_name = use_calibrated ? "NDDMA_ND_MULTICORE_NG2_V2" : "NDDMA_ND_MULTICORE_NG2";
   } else {
-    result.fallback_reason = BuildNddmaCoreCycles(normalized, *params, dtype_size, low_core, high_core);
+    result.fallback_reason =
+        BuildNddmaCoreCycles(direct_1d ? physical_1d : normalized, *params, dtype_size, low_core, high_core);
   }
   if (result.fallback_reason != NddmaFallbackReason::kNone) {
     return af::SUCCESS;
+  }
+  // A padded symbolic row pitch can equal the actual inner dimension at runtime
+  // (e.g. 8*ceil(n/8) when n=8). Keep the original padded-layout estimate and
+  // select the calibrated packed API cost only when that equality holds.
+  NddmaNg2Config packed_config{};
+  const auto *packed_params = GetCalibratedNg2Params(dtype_size);
+  bool guarded_packed_ng2 = false;
+  if (packed_params != nullptr && IsNg2Eligible(normalized, packed_config, false) &&
+      CanUseCalibratedNg2(normalized, packed_config, block_dim, false)) {
+    const Expr &pitch = normalized.output_strides[packed_config.m_pos];
+    const Expr &inner = normalized.output_dims[packed_config.n_pos];
+    if ((!pitch.IsConstExpr() || !inner.IsConstExpr()) &&
+        af::SymbolicUtils::StaticCheckEq(pitch, inner) != af::TriBool::kTrue) {
+      Expr packed_high;
+      GE_ASSERT_SUCCESS(BuildCalibratedNg2High(normalized, packed_config, *packed_params, dtype_size, block_dim,
+                                               packed_high, result));
+      Expr guarded_high;
+      GetPerfVar("nddma_ng2_packed", guarded_high, result.ternary_ops);
+      TernaryOp packed_guard(CondType::K_EQ, pitch, inner, std::make_shared<IfCase>(packed_high),
+                             std::make_shared<IfCase>(high_core));
+      packed_guard.SetVariable(guarded_high);
+      result.ternary_ops[guarded_high] = std::move(packed_guard);
+      high_core = guarded_high;
+      guarded_packed_ng2 = true;
+      result.model_name = "NDDMA_ND_MULTICORE_NG2_V2";
+    }
   }
   GE_ASSERT_SUCCESS(SelectCoreBranch(block_dim, low_core, high_core, result));
   // Fitted residual terms can become non-positive outside their measured
@@ -463,8 +688,9 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
     return af::SUCCESS;
   }
   result.selected = true;
-  if (ng2_params == nullptr) {
-    result.model_name = normalized.effective_rank == 1U ? "NDDMA_1D_MULTICORE_V2" : "NDDMA_ND_MULTICORE_V1";
+  if (ng2_params == nullptr && !guarded_packed_ng2) {
+    result.model_name =
+        (direct_1d || normalized.effective_rank == 1U) ? "NDDMA_1D_MULTICORE_V2" : "NDDMA_ND_MULTICORE_V1";
   }
   result.fallback_reason = NddmaFallbackReason::kNone;
   return af::SUCCESS;

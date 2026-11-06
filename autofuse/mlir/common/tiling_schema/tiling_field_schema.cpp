@@ -85,14 +85,15 @@ void AppendApiTilingField(const ascir::NodeView &node, const std::string &path, 
   AppendField(sink, std::move(field_name), path, TilingFieldType::kOpaqueStruct, std::move(device_type_name));
 }
 
-void AppendTemplateFields(const af::AscGraph &graph, const std::string &path, size_t template_id, SchemaSink sink) {
+void AppendTemplateFields(const af::AscGraph &graph, const std::string &field_scope,
+                          const std::string &api_tiling_scope, size_t template_id, SchemaSink sink) {
   // This traversal is deliberately legacy-only.  Do not add AscGraph to a
   // future MLIR-native schema API; replace this adapter when ATT migrates.
   for (const auto &size_var : graph.GetAllSizeVar()) {
     if (size_var == nullptr || size_var->expr.IsConstExpr()) {
       continue;
     }
-    AppendField(sink, ExprText(size_var->expr), path);
+    AppendField(sink, ExprText(size_var->expr), field_scope);
   }
   for (const auto &node : graph.GetAllNodes()) {
     if (node == nullptr) {
@@ -103,18 +104,18 @@ void AppendTemplateFields(const af::AscGraph &graph, const std::string &path, si
         continue;
       }
       if (output->attr.que.id >= 0) {
-        AppendField(sink, MakeQueueSizeName(output->attr.que.id), path);
+        AppendField(sink, MakeQueueSizeName(output->attr.que.id), field_scope);
       }
       if (output->attr.buf.id >= 0) {
-        AppendField(sink, MakeBufferSizeName(output->attr.buf.id), path);
+        AppendField(sink, MakeBufferSizeName(output->attr.buf.id), field_scope);
       }
     }
     for (const auto &tmp_buffer : node->attr.tmp_buffers) {
       if (tmp_buffer.id >= 0) {
-        AppendField(sink, MakeBufferSizeName(tmp_buffer.id), path);
+        AppendField(sink, MakeBufferSizeName(tmp_buffer.id), field_scope);
       }
     }
-    AppendApiTilingField(node, path, template_id, sink);
+    AppendApiTilingField(node, api_tiling_scope, template_id, sink);
   }
 }
 
@@ -158,12 +159,18 @@ bool AppendPlanFields(const ascir::ScheduledResult &scheduled_result, const Plan
       SetDiagnostic(diagnostic, "schedule stage contains no implementation graph");
       return false;
     }
-    const std::string path = NestedStagePath(naming, stage_id);
+    // Preserve ATT layout: scalar fields may be flat; API tiling stays group-scoped.
+    const std::string field_scope = NestedStagePath(naming, stage_id);
+    const std::string api_tiling_scope =
+        naming.is_flat
+            ? MakeScheduleGroupTilingFieldName(static_cast<int64_t>(naming.subgraph_id),
+                                               static_cast<int64_t>(naming.plan_id), static_cast<int64_t>(stage_id))
+            : field_scope;
     if (!naming.is_flat) {
-      AppendField(sink, "tiling_key", path);
+      AppendField(sink, "tiling_key", field_scope);
     }
     for (size_t template_id = 0U; template_id < groups[stage_id].impl_graphs.size(); ++template_id) {
-      AppendTemplateFields(groups[stage_id].impl_graphs[template_id], path, template_id, sink);
+      AppendTemplateFields(groups[stage_id].impl_graphs[template_id], field_scope, api_tiling_scope, template_id, sink);
     }
   }
   return true;

@@ -49,6 +49,45 @@ bool IsIdentifierChar(char value) {
 
 namespace detail {
 
+// ATT uses stage-relative API fields while MLIR owns them in aggregate stage structs.
+// Already scoped accesses stay unchanged; an unscoped field must have exactly one owner.
+bool QualifyApiTilingMembers(std::string &source, const common::TilingFieldSchema &schema, std::string *diagnostic) {
+  // A scope containing ordinary fields already has a stage-typed ATT parameter.
+  // Only the flat scalar projection uses AutofuseTilingData with nested API owners.
+  std::set<std::string> stageScopes;
+  for (const auto &field : schema.fields) {
+    if (field.type != common::TilingFieldType::kOpaqueStruct && !field.path.empty() && field.path != "fusion") {
+      stageScopes.insert(field.path);
+    }
+  }
+  std::map<std::string, std::set<std::string>> owners;
+  for (const auto &field : schema.fields) {
+    if (field.type == common::TilingFieldType::kOpaqueStruct && !field.path.empty() && field.path != "fusion" &&
+        stageScopes.count(field.path) == 0U) {
+      owners[field.name].insert(field.path);
+    }
+  }
+  for (const auto &[name, paths] : owners) {
+    const std::string unqualified = "tiling_data." + name;
+    for (size_t pos = source.find(unqualified); pos != std::string::npos;) {
+      const size_t end = pos + unqualified.size();
+      if ((pos > 0U && (IsIdentifierChar(source[pos - 1U]) || source[pos - 1U] == '.' || source[pos - 1U] == '>')) ||
+          (end < source.size() && IsIdentifierChar(source[end]))) {
+        pos = source.find(unqualified, end);
+        continue;
+      }
+      if (paths.size() != 1U) {
+        SetDiagnostic(diagnostic, "ATT API tiling field has ambiguous stage owners: " + name);
+        return false;
+      }
+      const std::string qualified = "tiling_data." + *paths.begin() + "." + name;
+      source.replace(pos, unqualified.size(), qualified);
+      pos = source.find(unqualified, pos + qualified.size());
+    }
+  }
+  return true;
+}
+
 // ATT's generated tiling_func source accesses TilingData fields exclusively
 // through the accessor macros TILING_DATA_FIELD_DEF_T generates:
 // `get_<field>()`, `set_<field>(...)`, and `get_addr_<field>()`
@@ -97,9 +136,27 @@ std::vector<std::string> ExtractReferencedFieldNames(const std::string &source) 
     while (after < source.size() && std::isspace(static_cast<unsigned char>(source[after])) != 0) {
       ++after;
     }
-    if (name_end > name_start && after < source.size() && source[after] == '(') {
-      names.push_back(source.substr(name_start, name_end - name_start));
+    if (name_end == name_start || after >= source.size() || source[after] != '(') {
+      pos = (name_end > match_start) ? name_end : match_start + 1U;
+      continue;
     }
+    // Accessors are always member calls on the tiling struct (`tiling_data.get_x()`):
+    // 访问器名前面紧跟 `.`（可隔空白）。ATT 侧的生成文本里还有裸调用的自由 lambda
+    // （如 `set_semantic_fallback();`，`GenFinalTilingSemanticFallback` 的产物），
+    // 它们不是字段访问器——少了这条，lambda 调用会被误报成 schema 里不存在的字段。
+    {
+      size_t dot = match_start;
+      while (dot > 0U && std::isspace(static_cast<unsigned char>(source[dot - 1U])) != 0) {
+        --dot;
+      }
+      const bool isDot = dot > 0U && source[dot - 1U] == '.';
+      const bool isArrow = dot >= 2U && source[dot - 2U] == '-' && source[dot - 1U] == '>';
+      if (!isDot && !isArrow) {
+        pos = (name_end > match_start) ? name_end : match_start + 1U;
+        continue;
+      }
+    }
+    names.push_back(source.substr(name_start, name_end - name_start));
     pos = (name_end > match_start) ? name_end : match_start + 1U;
   }
   return names;
@@ -225,6 +282,12 @@ af::Status RunAttForCandidates(const AttRequest &request, TilingCodeBundle &out,
   if (generated.empty()) {
     SetDiagnostic(diagnostic, "ATT generated an empty tiling program");
     return af::FAILED;
+  }
+  for (auto &[functionName, source] : generated) {
+    (void)functionName;
+    if (!detail::QualifyApiTilingMembers(source, schema, diagnostic)) {
+      return af::FAILED;
+    }
   }
   if (!detail::ValidateGeneratedFieldReferences(generated, schema, diagnostic)) {
     return af::FAILED;

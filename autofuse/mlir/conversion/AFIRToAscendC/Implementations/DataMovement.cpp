@@ -9,6 +9,7 @@
  */
 
 #include "conversion/AFIRToAscendC/Implementations/DataMovement.h"
+#include "target/Ascend/AscendTargetProfile.h"
 #include "dialect/AFIR/Analysis/TransferPlan.h"
 #include "conversion/AFIRToAscendC/AscendCAttributes.h"
 
@@ -32,6 +33,7 @@ using namespace mlir::afir;
 
 namespace mlir::ascend::kernel {
 namespace {
+constexpr size_t kTwoDimensions = 2;
 
 using ascend::instruction::CapabilityReason;
 using ascend::instruction::CapabilitySupport;
@@ -42,6 +44,12 @@ using ascend::instruction::PatternBuildContext;
 struct DataMovementMapping {
   bool load = false;
 };
+
+bool hasCompactRows(const TransferPlan &plan) {
+  return plan.kind == TransferPlanKind::Scheduled && plan.dims.size() >= 2 &&
+         proveEqual(plan.dims[plan.dims.size() - 2].localStride, plan.dims.back().extent) ==
+             afir::detail::TruthValue::True;
+}
 
 bool hasCanonicalDescriptors(Operation *op, bool load) {
   if (!op->hasAttr(afir::kOperandDescsAttrName) || !op->hasAttr(afir::kDestinationDescsAttrName)) {
@@ -68,7 +76,7 @@ bool hasExpectedTensorTypes(Operation *op, bool load) {
 
 bool hasTwoIndexingMaps(Operation *op) {
   auto maps = op->getAttrOfType<ArrayAttr>(afir::kIndexingMapsAttrName);
-  return maps && maps.size() == 2;
+  return maps && maps.size() == kTwoDimensions;
 }
 
 class DataMovementCapabilityProvider final : public ascend::instruction::CapabilityProvider {
@@ -87,8 +95,13 @@ class DataMovementCapabilityProvider final : public ascend::instruction::Capabil
     }
     // 建不出计划一律报 `MissingInformation`：寻址这一侧没有形状天花板，失败说的只有
     // 「这条搬运本该走调度路径，而它的标注是破的」。不走调度路径的那一档不会失败，
-    // `buildTransferPlan` 对它返回 Identity 计划。
-    if (failed(buildTransferPlan(operation))) {
+    // `buildTransferPlan` 对它返回 Identity 计划。段几何防御判据（负跨度/不整除）同桶：
+    // 调度器产出的 desc 恒满足约束，违反就是标注破了——违例形态会一路发到
+    // `DataCopyPadExtend`，零报错、结果错。
+    FailureOr<TransferPlan> plan = buildTransferPlan(operation);
+    const bool regBased =
+        context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) == ascend::FeatureState::Available;
+    if (failed(plan) || (!(regBased && hasCompactRows(*plan)) && !blockDmaSegmentGeometryIsSound(operation, *plan))) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
     auto source = dyn_cast<ShapedType>(operation->getOperand(0).getType());
@@ -140,8 +153,11 @@ class DataMovementConversionPattern final : public OpConversionPattern<SourceOp>
   using OpAdaptor = typename SourceOp::Adaptor;
 
   DataMovementConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
-                                std::shared_ptr<const DataMovementMapping> mapping)
-      : OpConversionPattern<SourceOp>(typeConverter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
+                                std::shared_ptr<const DataMovementMapping> mapping, bool regBased)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        regBased_(regBased) {}
 
   LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
     FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
@@ -152,19 +168,25 @@ class DataMovementConversionPattern final : public OpConversionPattern<SourceOp>
     if (failed(plan)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR transfer plan");
     }
+    const bool compact = regBased_ && hasCompactRows(*plan);
+    if (!compact && !blockDmaSegmentGeometryIsSound(op, *plan)) {
+      return rewriter.notifyMatchFailure(op, "segment geometry is not expressible as a block DMA");
+    }
 
     const TransferOperands buffers{
         adaptor.getOperands()[0], adaptor.getOperands()[1], Value(), Value(), Value(), Value()};
     if (plan->kind == TransferPlanKind::Scheduled) {
       // 计划多于两项时发射器会先建外层 `scf.for`，回调在最内层执行——DMA 与它的两个子
       // 视图因此都落在循环体里。
-      LogicalResult emitted =
-          emitScheduledTransfer(op, rewriter, *plan, [&](OpBuilder &builder, const ScheduledTileIndices &indices) {
+      LogicalResult emitted = emitScheduledTransfer(
+          op, rewriter, *plan,
+          [&](OpBuilder &builder, const ScheduledTileIndices &indices) {
             TransferOperands tile = buffers;
             applyScheduledTileOffsets(op, builder, indices, tile);
-            emitTransfer(op, builder, tile);
+            emitTransfer(op, builder, tile, compact);
             return success();
-          });
+          },
+          compact);
       if (failed(emitted)) {
         return rewriter.notifyMatchFailure(op, "cannot emit the scheduled transfer");
       }
@@ -219,7 +241,7 @@ class DataMovementConversionPattern final : public OpConversionPattern<SourceOp>
   // TilingData 字段（尾块与整块走同一条语句），lowering 这一刻看不出它对不对齐；而裸
   // `AscendC::DataCopy` 要求 `count * sizeof(T)` 32B 对齐，不对齐时 NPU 上不报错、
   // 按 32B 向下取整，尾巴静默丢掉。
-  void emitTransfer(SourceOp op, OpBuilder &builder, const TransferOperands &operands) const {
+  void emitTransfer(SourceOp op, OpBuilder &builder, const TransferOperands &operands, bool compact = false) const {
     Value blockCount = operands.blockCount;
     if (!blockCount) {
       blockCount = builder.create<arith::ConstantOp>(op.getLoc(), builder.getI32Type(), builder.getI32IntegerAttr(1));
@@ -240,20 +262,28 @@ class DataMovementConversionPattern final : public OpConversionPattern<SourceOp>
     // （GM 乘 `sizeof(T)`、UB 除 `align_num`），量纲也跟着错。
     Value sourceStride = mapping_->load ? globalStride : localStride;
     Value destinationStride = mapping_->load ? localStride : globalStride;
+    if (regBased_) {
+      builder.create<ascendc::DataCopyPadExtendRegBaseOp>(op.getLoc(), operands.destination, operands.source,
+                                                          blockCount, operands.blockLen, sourceStride,
+                                                          destinationStride, builder.getBoolAttr(compact));
+      return;
+    }
     builder.create<ascendc::DataCopyPadExtendOp>(op.getLoc(), operands.destination, operands.source, blockCount,
                                                  operands.blockLen, sourceStride, destinationStride);
   }
 
   ImplementationKey key_;
   std::shared_ptr<const DataMovementMapping> mapping_;
+  bool regBased_;
 };
 
 template <typename SourceOp>
 ImplementationRegistry::PatternRegistration<DataMovementMapping> createPatternRegistration() {
   return [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
             std::shared_ptr<const DataMovementMapping> mapping) {
-    patterns.add<DataMovementConversionPattern<SourceOp>>(context.typeConverter, patterns.getContext(), key,
-                                                          std::move(mapping));
+    patterns.add<DataMovementConversionPattern<SourceOp>>(
+        context.typeConverter, patterns.getContext(), key, std::move(mapping),
+        context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) == ascend::FeatureState::Available);
   };
 }
 

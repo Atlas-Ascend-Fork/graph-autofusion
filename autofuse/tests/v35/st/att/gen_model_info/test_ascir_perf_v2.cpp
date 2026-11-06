@@ -359,10 +359,8 @@ TEST_F(STestAscirPerfV2, TestLoadApiForTypev1) {
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
   Expr res = SelectLoadCoreBranch(ternary_ops, false);
-  EXPECT_EQ(
-      Str(res.Replace(ret)),
-      "TernaryOp((-256 + z0t_size) < 0, ((4 * z0t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + "
-      "160.0), ((4 * z0t_size / (((6.61549997329712 / (block_dim)) + 11.8291997909546))) + 160.0))");
+  EXPECT_EQ(Str(res.Replace(ret)),
+            "((256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0)");
 }
 
 TEST_F(STestAscirPerfV2, TestLoadApiForTypev2) {
@@ -403,10 +401,11 @@ TEST_F(STestAscirPerfV2, TestLoadApiForTypev2) {
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
   Expr res = SelectLoadCoreBranch(ternary_ops, false);
-  const std::string is_cache_line = "(-256 + z0z1t_size) < 0";
-  const std::string perf1 = "((8 * z0z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0)";
-  const std::string perf2 = "((8 * z0z1t_size / (((6.61549997329712 / (block_dim)) + 11.8291997909546))) + 160.0))";
-  EXPECT_EQ(Str(res.Replace(ret)), "TernaryOp(" + is_cache_line + ", " + perf1 + ", " + perf2);
+  EXPECT_EQ(
+      Str(res.Replace(ret)),
+      "TernaryOp(((7 * z4t_size) + -256) < 0, ((13328 * z0z1t_size * z4t_size / (((6.40880012512207 / (block_dim)) + "
+      "13.1354999542236))) + 160.0), ((13328 * z0z1t_size * z4t_size / (((6.61549997329712 / (block_dim)) + "
+      "11.8291997909546))) + 160.0))");
 }
 
 TEST_F(STestAscirPerfV2, TestStoreApiForType) {
@@ -454,10 +453,11 @@ TEST_F(STestAscirPerfV2, TestStoreApiForType) {
   // 存在外抛
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
-  // 注意：由于 LoadStoreStrideFunc 不支持 block_count_idx，block_count 计算可能不包括 z0z1t_size
-  const std::string expect_stride = "(8 * z0z1t_size)";
-  EXPECT_EQ(Str(res.Replace(ret)),
-            "((8 * z0z1t_size / (((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
+  EXPECT_EQ(
+      Str(res.Replace(ret)),
+      "((0.171042612753808 * Min((8 * Abs(z6t_size)), 4096.0)) + (1904 * TernaryOp(IsEqual(LogicAnd(ExpectLt((8 * "
+      "z6t_size), 128), ExpectLt(0, Abs(z6t_size))), 0), z6t_size, 16) * z0z1t_size / (((10.2650003433228 / "
+      "(block_dim)) + 11.7740001678467))) + 160.0)");
 }
 
 TEST_F(STestAscirPerfV2, TestStoreApiForSmallStride) {
@@ -509,9 +509,9 @@ TEST_F(STestAscirPerfV2, TestStoreApiForSmallStride) {
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // 注意：由于 LoadStoreStrideFunc 不支持 block_count_idx，block_count 计算基于实际维度
   // 当 z6t_size 作为符号变量时，计算结果可能与包含 z0z1t_size 的期望不同
-  const std::string kStride = "(8 * z0z1t_size)";
   EXPECT_EQ(Str(res.Replace(ret)),
-            "((8 * z0z1t_size / (((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
+            "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
+            "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 335.1476354599)");
 }
 
 TEST_F(STestAscirPerfV2, TestStoreApiForBiggerStride) {
@@ -563,9 +563,9 @@ TEST_F(STestAscirPerfV2, TestStoreApiForBiggerStride) {
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // 注意：由于 LoadStoreStrideFunc 不支持 block_count_idx，block_count 计算基于实际维度
   // 当 z6t_size 作为符号变量时，计算结果可能与包含 z0z1t_size 的期望不同
-  const std::string kStride = "(8 * z0z1t_size)";
   EXPECT_EQ(Str(res.Replace(ret)),
-            "((8 * z0z1t_size / (((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
+            "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
+            "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 860.5905418396)");
 }
 
 TEST_F(STestAscirPerfV2, TestNddmaApiForType) {
