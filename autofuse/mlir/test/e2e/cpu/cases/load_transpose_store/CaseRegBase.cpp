@@ -12,7 +12,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_transpose_store/Case.h"
+#include "test/e2e/cpu/cases/load_transpose_store/LoadTransposeStoreCase.h"
 namespace mlir::afir {
 // reg 侧（`PLATFORM reg_base`）那一份的 kernel 文本断言；图在 `Graph.cpp`。
 void CheckGeneratedKernel(const std::string &kernel) {

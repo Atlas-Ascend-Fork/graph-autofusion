@@ -14,7 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "autofuse_tiling_data.h"
-#include "test/e2e/cpu/cases/load_transpose_store_2d/Case.h"
+#include "test/e2e/cpu/cases/load_transpose_store_2d/LoadTransposeStore2dCase.h"
 #include "tikicpulib.h"
 
 namespace {

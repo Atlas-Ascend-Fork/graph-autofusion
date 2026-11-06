@@ -282,12 +282,22 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help="Directory for prediction.json.",
+        help="Directory for the prediction JSON file.",
+    )
+    parser.add_argument(
+        "--prediction-name",
+        default="prediction",
+        help="Basename of the prediction JSON, written as <prediction-name>.<prediction-suffix>.",
+    )
+    parser.add_argument(
+        "--prediction-suffix",
+        default="json",
+        help="Suffix of the prediction JSON.",
     )
     parser.add_argument(
         "--no-write-json",
         action="store_true",
-        help="Only print results; do not write prediction.json.",
+        help="Only print results; do not write the prediction JSON file.",
     )
     args = parser.parse_args()
     if args.block_dim <= 0:
@@ -330,10 +340,12 @@ def main() -> int:
 
     if not args.no_write_json:
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        (args.output_dir / "prediction.json").write_text(
+        file_name = f"{args.prediction_name}.{args.prediction_suffix}"
+        prediction_file = args.output_dir / file_name
+        prediction_file.write_text(
             json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
-        print(f"[INFO] wrote prediction JSON: {args.output_dir / 'prediction.json'}")
+        print(f"[INFO] wrote prediction JSON: {prediction_file}")
 
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     print(f"[RESULT] predicted_cycles={float(result['predicted_cycles']):.12g}")

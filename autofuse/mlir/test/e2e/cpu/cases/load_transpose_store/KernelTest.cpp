@@ -17,7 +17,7 @@
 #include <cstdio>
 
 #include "autofuse_tiling_data.h"
-#include "test/e2e/cpu/cases/load_transpose_store/Case.h"
+#include "test/e2e/cpu/cases/load_transpose_store/LoadTransposeStoreCase.h"
 #include "tikicpulib.h"
 
 namespace {

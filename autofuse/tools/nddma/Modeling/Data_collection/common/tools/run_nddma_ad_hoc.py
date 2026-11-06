@@ -221,7 +221,7 @@ def run(command: Sequence[str], *, dry_run: bool, log_path: Path | None = None) 
     return completed.returncode
 
 
-def reset_run_outputs(output_dir: Path) -> None:
+def reset_run_outputs(output_dir: Path, result_file: str) -> None:
     for child in ("experiment", "profiling_raw", "analysis"):
         target = output_dir / child
         if target.exists():
@@ -231,7 +231,7 @@ def reset_run_outputs(output_dir: Path) -> None:
         "build.log",
         "profile.log",
         "analyze_profile.log",
-        "result.json",
+        result_file,
     ):
         target = output_dir / child
         if target.exists():
@@ -410,6 +410,7 @@ def numeric(row: Mapping[str, str], field: str) -> float:
 
 def run_pipeline(args: argparse.Namespace) -> int:
     output_dir = args.output_dir.resolve()
+    result_file = f"{args.result_name}.{args.result_suffix}"
     try:
         base_model = load_base_model(args.base_model.resolve())
     except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -420,7 +421,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     profiling_dir = output_dir / "profiling_raw"
     analysis_dir = output_dir / "analysis"
     if not args.dry_run and not args.generate_only and not args.keep_output:
-        reset_run_outputs(output_dir)
+        reset_run_outputs(output_dir, result_file)
     row = build_row(args)
     if not args.dry_run:
         write_factor_csv(factor_csv, row)
@@ -584,7 +585,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         "profiling_mean_sample_count": mean_row.get("profiling_mean_sample_count", ""),
         "analysis_csv": str(analysis_dir / "profiling_with_params_mean.csv"),
     }
-    (output_dir / "result.json").write_text(
+    (output_dir / result_file).write_text(
         json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print(json.dumps(result, sort_keys=True))
@@ -680,6 +681,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dst-offset-elem", type=int, default=0)
     parser.add_argument("--generate-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--result-name",
+        default="result",
+        help="Basename of the ad-hoc measurement JSON, written as <result-name>.<result-suffix>.",
+    )
+    parser.add_argument(
+        "--result-suffix",
+        default="json",
+        help="Suffix of the ad-hoc measurement JSON.",
+    )
     parser.add_argument(
         "--keep-output",
         action="store_true",

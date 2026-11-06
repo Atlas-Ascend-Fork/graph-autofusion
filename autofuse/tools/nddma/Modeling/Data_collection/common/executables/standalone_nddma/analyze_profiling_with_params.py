@@ -251,6 +251,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment-log", required=True)
     parser.add_argument("--factor-csv", default="")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--analysis-name",
+        default="analysis_result",
+        help="Basename of the summary JSON, written as <analysis-name>.<analysis-suffix>.",
+    )
+    parser.add_argument(
+        "--analysis-suffix",
+        default="json",
+        help="Suffix of the summary JSON.",
+    )
     parser.add_argument("--pipes", default="mte2")
     parser.add_argument(
         "--op-name-filter",
@@ -832,7 +842,7 @@ def main() -> int:
             matched_mean, "nddma_mte2_cycles"
         ),
     }
-    (output_dir / "analysis_result.json").write_text(
+    (output_dir / f"{args.analysis_name}.{args.analysis_suffix}").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     print(f"[INFO] wrote {output_dir / 'profiling_with_params.csv'}")

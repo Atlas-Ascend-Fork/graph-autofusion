@@ -12,7 +12,7 @@
 #include <vector>
 #include "gtest/gtest.h"
 #include "autofuse_tiling_data.h"
-#include "test/e2e/cpu/cases/sub_transpose_abs/Case.h"
+#include "test/e2e/cpu/cases/sub_transpose_abs/SubTransposeAbsCase.h"
 #include "tikicpulib.h"
 
 extern "C" __global__ __aicore__ void AF_MLIR_E2E_CPU_KERNEL_SYMBOL(GM_ADDR input0, GM_ADDR input1, GM_ADDR output,

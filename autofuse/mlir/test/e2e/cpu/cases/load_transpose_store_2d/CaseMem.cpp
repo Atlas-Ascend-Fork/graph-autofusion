@@ -12,7 +12,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_transpose_store_2d/Case.h"
+#include "test/e2e/cpu/cases/load_transpose_store_2d/LoadTransposeStore2dCase.h"
 namespace mlir::afir {
 // mem 侧（默认平台）那一份的 kernel 文本断言；图在 `Graph.cpp`。2D 用例的段结构断言
 // （`DataCopyPad` 的 block 形态）在批次 2 落地时按 dump 事实补进这里。

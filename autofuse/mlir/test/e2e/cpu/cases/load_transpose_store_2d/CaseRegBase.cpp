@@ -12,7 +12,7 @@
 
 #include <gtest/gtest.h>
 
-#include "test/e2e/cpu/cases/load_transpose_store_2d/Case.h"
+#include "test/e2e/cpu/cases/load_transpose_store_2d/LoadTransposeStore2dCase.h"
 namespace mlir::afir {
 void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(std::string(load_transpose_store_2d::kKernelName) + "_subgraph0_plan0"), std::string::npos);
