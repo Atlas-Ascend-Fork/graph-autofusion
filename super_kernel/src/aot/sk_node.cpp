@@ -674,7 +674,7 @@ Json KernelInfosToJson(const KernelInfos &kernelInfos) {
   kernelJson["numBlocks"] = kernelInfos.numBlocks;
   kernelJson["cap"] = UintToHexString(kernelInfos.cap);
   kernelJson["devargs"] = PtrToHexString(kernelInfos.devArgs);
-  kernelJson["argsSize"] = 0;  // Will be filled by caller if available
+  kernelJson["argsSize"] = kernelInfos.devArgsSize;
   kernelJson["isHostArgs"] = false;
   kernelJson["launchKernelCfg"] = PtrToHexString(kernelInfos.launchKernelCfg);
   kernelJson["binHandle"] = PtrToHexString(kernelInfos.binHdl);
@@ -837,12 +837,32 @@ void SuperKernelBaseNode::LogNodeUpdateResult(const aclmdlRITaskParams *paramsTo
 
   oss << ", type=" << GetUpdateTargetTypeName(paramsToLog->type);
   switch (paramsToLog->type) {
-    case ACL_MODEL_RI_TASK_KERNEL:
+    case ACL_MODEL_RI_TASK_KERNEL: {
+      const auto &kernelParams = paramsToLog->kernelTaskParams;
       oss << ", opInfoPtr=" << paramsToLog->opInfoPtr << ", opInfoSize=" << paramsToLog->opInfoSize
-          << ", funcHandle=" << paramsToLog->kernelTaskParams.funcHandle
-          << ", args=" << paramsToLog->kernelTaskParams.args << ", argsSize=" << paramsToLog->kernelTaskParams.argsSize
-          << ", numBlocks=" << static_cast<uint32_t>(paramsToLog->kernelTaskParams.numBlocks);
+          << ", funcHandle=" << kernelParams.funcHandle << ", numBlocks=" << static_cast<uint32_t>(kernelParams.numBlocks)
+          << ", argsType=" << static_cast<uint32_t>(kernelParams.argsType);
+      switch (static_cast<uint32_t>(kernelParams.argsType)) {
+        case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
+          oss << ", hostArgs=" << kernelParams.hostBuffer.hostArgs
+              << ", hostArgsSize=" << kernelParams.hostBuffer.hostArgsSize
+              << ", placeHolderArray=" << kernelParams.hostBuffer.placeHolderArray
+              << ", placeHolderNum=" << kernelParams.hostBuffer.placeHolderNum;
+          break;
+        case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
+          oss << ", deviceArgs=" << kernelParams.deviceBuffer.deviceArgs
+              << ", deviceArgsSize=" << kernelParams.deviceBuffer.deviceArgsSize;
+          break;
+        case ACL_RT_KERNEL_ARGS_ARRAY:
+          oss << ", argsArray=" << kernelParams.argsArray;
+          break;
+        default:
+          SK_LOGE("Unsupported kernel argsType in node update result: nodeId=%lu, argsType=%u", nodeId,
+                  static_cast<uint32_t>(kernelParams.argsType));
+          return;
+      }
       break;
+    }
     case ACL_MODEL_RI_TASK_VALUE_WRITE:
       oss << ", addr=" << paramsToLog->valueWriteTaskParams.devAddr << ", value=0x" << std::hex
           << paramsToLog->valueWriteTaskParams.value << std::dec;
@@ -1230,9 +1250,11 @@ bool SuperKernelKernelNode::Update(const UpdateContext &ctx) {
     updateParams.type = ACL_MODEL_RI_TASK_KERNEL;
     updateParams.opInfoPtr = ctx.launchInfo->cacheInfo;
     updateParams.opInfoSize = ctx.launchInfo->cacheopInfoSize;
-    updateParams.kernelTaskParams.args = static_cast<void *>(ctx.launchInfo->devArgs.Get());
-    updateParams.kernelTaskParams.argsSize = ctx.launchInfo->devArgs.Get()->skHeader.totalSize;
-    updateParams.kernelTaskParams.isHostArgs = true;
+    updateParams.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+    updateParams.kernelTaskParams.hostBuffer.hostArgs = static_cast<void *>(ctx.launchInfo->devArgs.Get());
+    updateParams.kernelTaskParams.hostBuffer.hostArgsSize = ctx.launchInfo->devArgs.Get()->skHeader.totalSize;
+    updateParams.kernelTaskParams.hostBuffer.placeHolderArray = nullptr;
+    updateParams.kernelTaskParams.hostBuffer.placeHolderNum = 0;
     updateParams.kernelTaskParams.funcHandle = ctx.launchInfo->entryInfo.skEntryFunc;
     updateParams.kernelTaskParams.numBlocks = ctx.launchInfo->entryInfo.numBlocks;
     if (!SetupLaunchKernelCfg(*ctx.launchInfo)) {
@@ -1492,10 +1514,29 @@ Json SuperKernelKernelNodeToJson(const SuperKernelKernelNode *node) {
   const auto &kernelInfos = node->GetNodeInfos().kernelInfos;
   Json kernelParams = KernelInfosToJson(kernelInfos);
 
-  // Get argsSize and isHostArgs from taskParams
+  // Keep device backup information from KernelInfos and serialize the original Runtime args form separately.
   const auto &taskParams = node->GetTaskParams();
-  kernelParams["argsSize"] = taskParams.kernelTaskParams.argsSize;
-  kernelParams["isHostArgs"] = taskParams.kernelTaskParams.isHostArgs;
+  const auto &kernelTaskParams = taskParams.kernelTaskParams;
+  kernelParams["argsType"] = static_cast<uint32_t>(kernelTaskParams.argsType);
+  switch (static_cast<uint32_t>(kernelTaskParams.argsType)) {
+    case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
+      kernelParams["hostBuffer"]["hostArgs"] = PtrToHexString(kernelTaskParams.hostBuffer.hostArgs);
+      kernelParams["hostBuffer"]["hostArgsSize"] = kernelTaskParams.hostBuffer.hostArgsSize;
+      kernelParams["hostBuffer"]["placeHolderArray"] = PtrToHexString(kernelTaskParams.hostBuffer.placeHolderArray);
+      kernelParams["hostBuffer"]["placeHolderNum"] = kernelTaskParams.hostBuffer.placeHolderNum;
+      break;
+    case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
+      kernelParams["deviceBuffer"]["deviceArgs"] = PtrToHexString(kernelTaskParams.deviceBuffer.deviceArgs);
+      kernelParams["deviceBuffer"]["deviceArgsSize"] = kernelTaskParams.deviceBuffer.deviceArgsSize;
+      break;
+    case ACL_RT_KERNEL_ARGS_ARRAY:
+      kernelParams["argsArray"] = PtrToHexString(kernelTaskParams.argsArray);
+      break;
+    default:
+      SK_LOGE("Unsupported kernel argsType in node JSON: nodeId=%lu, argsType=%u", node->GetNodeId(),
+              static_cast<uint32_t>(kernelTaskParams.argsType));
+      break;
+  }
 
   nodeJson["kernelParams"] = kernelParams;
 

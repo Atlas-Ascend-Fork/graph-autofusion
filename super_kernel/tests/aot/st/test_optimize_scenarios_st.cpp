@@ -162,6 +162,36 @@ TEST_F(AotSystemTest, OptimizeDebugDumpPersistsOptionsAndGeneratedTaskQueues) {
   EXPECT_EQ(original.at("options").at("opt_extend_option").at("value").at("mix_kernel_split"), Json::array({"1"}));
   const auto updated = ReadJson(directory / "sk_graph_updated.json");
   EXPECT_EQ(updated.at("options"), original.at("options"));
+  size_t hostBufferNodes = 0;
+  for (const auto &savedStream : updated.at("streams")) {
+    for (const auto &node : savedStream.at("nodes")) {
+      for (const auto &info : node.at("taskInfo")) {
+        if (!info.contains("kernelParams")) {
+          continue;
+        }
+        const auto &kernel = info.at("kernelParams");
+        if (kernel.at("argsType") != ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+          continue;
+        }
+        ++hostBufferNodes;
+        EXPECT_NE(kernel.at("hostBuffer").at("hostArgs"), kernel.at("devargs"));
+        EXPECT_GT(kernel.at("hostBuffer").at("hostArgsSize").get<size_t>(), 0U);
+        EXPECT_EQ(kernel.at("hostBuffer").at("placeHolderNum"), 0);
+        EXPECT_EQ(kernel.at("hostBuffer").at("placeHolderArray"), "0x0");
+        auto task = info.at("taskId").get<uint32_t>() == model.Snapshot(first).id ? first : second;
+        aclmdlRITaskParams params{};
+        ASSERT_EQ(aclmdlRITaskGetParams(task, &params), ACL_SUCCESS);
+        ASSERT_EQ(params.kernelTaskParams.argsType, ACL_RT_KERNEL_ARGS_HOST_BUFFER);
+        const auto &host = params.kernelTaskParams.hostBuffer;
+        EXPECT_EQ(kernel.at("hostBuffer").at("hostArgsSize"), host.hostArgsSize);
+        const auto snapshot = model.Snapshot(task);
+        ASSERT_EQ(snapshot.args.size(), host.hostArgsSize);
+        EXPECT_TRUE(std::equal(snapshot.args.begin(), snapshot.args.end(),
+                               static_cast<const unsigned char *>(host.hostArgs)));
+      }
+    }
+  }
+  EXPECT_EQ(hostBufferNodes, 1U);
   const auto queues = ReadJson(directory / "sk_task_queue.json");
   ASSERT_EQ(queues.at("scopeCount"), 1);
   const auto &aiv = queues.at("scopes").at(0).at("taskQueues").at("aiv");

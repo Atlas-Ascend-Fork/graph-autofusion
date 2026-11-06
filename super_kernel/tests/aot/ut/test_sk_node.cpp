@@ -671,7 +671,7 @@ TEST_F(SkNodeTest, KernelUpdate_CustomParamsStoredSeparatelyForDump) {
 }
 
 TEST_F(SkNodeTest, KernelInitNode_StoresCopiedArgsAndPreservesOriginalParams) {
-  for (uint32_t isHostArgs : {0U, 1U}) {
+  for (auto argsType : {ACL_RT_KERNEL_ARGS_HOST_BUFFER, ACL_RT_KERNEL_ARGS_DEVICE_BUFFER, ACL_RT_KERNEL_ARGS_ARRAY}) {
     UtSkNodeRITaskInternal task{};
     task.type = ACL_MODEL_RI_TASK_KERNEL;
     task.params.type = ACL_MODEL_RI_TASK_KERNEL;
@@ -680,7 +680,16 @@ TEST_F(SkNodeTest, KernelInitNode_StoresCopiedArgsAndPreservesOriginalParams) {
     auto &params = task.params.kernelTaskParams;
     params.args = original;
     params.argsSize = sizeof(original);
-    params.isHostArgs = isHostArgs;
+    params.isHostArgs = 0;
+    params.argsType = argsType;
+    void *array[] = {original};
+    if (argsType == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+      params.hostBuffer = {original, sizeof(original), nullptr, 0};
+    } else if (argsType == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER) {
+      params.deviceBuffer = {original, sizeof(original)};
+    } else {
+      params.argsArray = array;
+    }
     params.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x3008);
     params.numBlocks = 1;
     SuperKernelKernelNode node(MakeOriginTask(task), ACL_MODEL_RI_TASK_KERNEL, 0, 0, 0, INVALID_TASK_ID);
@@ -699,7 +708,17 @@ TEST_F(SkNodeTest, KernelInitNode_StoresCopiedArgsAndPreservesOriginalParams) {
     EXPECT_EQ(node.GetNodeInfos().kernelInfos.devArgsSize, sizeof(copied));
     EXPECT_EQ(node.GetTaskParams().kernelTaskParams.args, original);
     EXPECT_EQ(node.GetTaskParams().kernelTaskParams.argsSize, sizeof(original));
-    EXPECT_EQ(node.GetTaskParams().kernelTaskParams.isHostArgs, isHostArgs);
+    const auto &stored = node.GetTaskParams().kernelTaskParams;
+    EXPECT_EQ(stored.argsType, argsType);
+    if (argsType == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+      EXPECT_EQ(stored.hostBuffer.hostArgs, original);
+      EXPECT_EQ(stored.hostBuffer.hostArgsSize, sizeof(original));
+    } else if (argsType == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER) {
+      EXPECT_EQ(stored.deviceBuffer.deviceArgs, original);
+      EXPECT_EQ(stored.deviceBuffer.deviceArgsSize, sizeof(original));
+    } else {
+      EXPECT_EQ(stored.argsArray, array);
+    }
     GlobalMockObject::verify();
   }
 }
@@ -791,6 +810,9 @@ TEST_F(SkNodeTest, KernelUpdate_LaunchInfoDoesNotInheritOriginParams) {
   task.params.reserved0[0] = 0x12;
   task.params.reserved1[0] = 0x34;
   task.params.kernelTaskParams.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x3019);
+  char originArgs[32]{};
+  task.params.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_DEVICE_BUFFER;
+  task.params.kernelTaskParams.deviceBuffer = {originArgs, sizeof(originArgs)};
   task.params.kernelTaskParams.numBlocks = 1;
   task.params.kernelTaskParams.rsv[0] = 0x56;
   aclrtLaunchKernelAttr originAttr{};
@@ -823,14 +845,19 @@ TEST_F(SkNodeTest, KernelUpdate_LaunchInfoDoesNotInheritOriginParams) {
   EXPECT_EQ(params.opInfoPtr, nullptr);
   EXPECT_EQ(params.opInfoSize, 0U);
   EXPECT_EQ(params.kernelTaskParams.funcHandle, launchInfo.entryInfo.skEntryFunc);
-  EXPECT_EQ(params.kernelTaskParams.args, launchInfo.devArgs.Get());
-  EXPECT_EQ(params.kernelTaskParams.argsSize, sizeof(SkDeviceEntryArgs));
-  EXPECT_EQ(params.kernelTaskParams.isHostArgs, 1U);
+  EXPECT_EQ(params.kernelTaskParams.argsType, ACL_RT_KERNEL_ARGS_HOST_BUFFER);
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.hostArgs, launchInfo.devArgs.Get());
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.hostArgsSize, sizeof(SkDeviceEntryArgs));
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.placeHolderArray, nullptr);
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.placeHolderNum, 0U);
   EXPECT_EQ(params.kernelTaskParams.numBlocks, launchInfo.entryInfo.numBlocks);
   EXPECT_EQ(params.kernelTaskParams.cfg, nullptr);
   EXPECT_EQ(params.reserved0[0], 0U);
   EXPECT_EQ(params.reserved1[0], 0);
   EXPECT_EQ(params.kernelTaskParams.rsv[0], 0U);
+  EXPECT_EQ(node.GetTaskParams().kernelTaskParams.argsType, ACL_RT_KERNEL_ARGS_DEVICE_BUFFER);
+  EXPECT_EQ(node.GetTaskParams().kernelTaskParams.deviceBuffer.deviceArgs, originArgs);
+  EXPECT_EQ(node.GetTaskParams().kernelTaskParams.deviceBuffer.deviceArgsSize, sizeof(originArgs));
   EXPECT_EQ(node.GetTaskParams().kernelTaskParams.cfg, &originCfg);
   EXPECT_EQ(node.GetTaskParams().reserved0[0], 0x12U);
   EXPECT_EQ(node.GetTaskParams().reserved1[0], 0x34U);
