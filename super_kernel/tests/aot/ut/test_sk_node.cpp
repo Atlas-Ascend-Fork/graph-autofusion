@@ -30,7 +30,7 @@
 #include "sk_options_manager.h"
 #include "ut_common_stubs.h"
 #include "runtime/kernel.h"
-#include "runtime/rt_model.h"
+#include "runtime/rt.h"
 #include "securec.h"
 #include "sk_lock_detector.h"
 
