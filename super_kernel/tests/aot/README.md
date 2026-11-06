@@ -10,7 +10,7 @@ ST 链接测试专用 `libascendsk_st.so`，该库使用与生产 `ascendsk`
 
 | 目录 | 职责 |
 | --- | --- |
-| `ut/` | 内部类和函数的单元测试，保留 gtest/mockcpp；包括共享模型夹具的七个 UT |
+| `ut/` | 内部类和函数的单元测试，保留 gtest/mockcpp；包括共享模型夹具 UT |
 | `st/` | 从四个公开 API 验证跨模块行为，只包含公开 API 与测试依赖头文件 |
 | `depends/` | `super_kernel_aot_stub` 共享库、Runtime/ACL stub 和外部 RI 模型夹具 |
 | `cmake/` | 公共测试选项、运行与覆盖率脚本 |
@@ -35,6 +35,9 @@ begin/end marker 和 verify。扩展场景包括 cube/MIX 1:1/MIX 1:2 入口选�
 以及 profiling 启停、退出导出和失败清理。夹具 UT 覆盖查询容量与状态保持、
 多模型隔离和参数快照所有权、同名不同核类型的元数据隔离、参数深拷贝，
 非 kernel 参数复制、编译器 metadata 字节协议，以及旧 UT 使用的不透明设备地址兼容行为。
+参数适配 UT 覆盖 HOST_BUFFER、DEVICE_BUFFER、ARRAY 三种形态的 JSON 输出、零值及未知
+argsType 不回退 legacy 字段，以及 Copy 备份信息与原始参数形态的隔离。更新图 ST 验证
+SK 入口经 Set、Update、Get 后的 HOST_BUFFER 内容、大小及 JSON 输出。
 
 profiling 和 SIMT 场景在独立子进程中运行，隔离生产单例；子进程正常退出以验证 recorder
 清理并写回覆盖率，超时 15 秒则失败并回收进程。子进程不继承 GTest 分片配置，以免精确过滤的
@@ -94,8 +97,19 @@ UT 保留 `collect_coverage_data`。直接配置过滤器时使用
 
 新增 Runtime 行为应在 `depends/` 中表达外部 API 契约，并补充夹具 UT，再以 ST 验证生产流程。
 夹具负责句柄有效性、参数所有权和可观察状态，不应复制融合算法来计算预期结果。
-`SetParams` 保存 host 参数、配置属性与 opInfo 的副本；函数元数据在进程内保持稳定，
-避免生产 binary cache 引用失效。`KernelSpec` 描述核类型、比例和编译器 capability，
+模型夹具的 kernel 参数按 `argsType` 区分，`AddKernel` 默认构造 DEVICE_BUFFER；
+`aclmdlRITaskGetParams` 返回已记录的参数形态。`aclmdlRITaskSetParams` 的测试契约为：
+
+- HOST_BUFFER：深拷贝 host 参数与 placeholder 表，host 缓存和模拟的 loaded device 数据分别保存。
+- DEVICE_BUFFER：保留调用方地址与大小，由调用方保持内存有效。
+- ARRAY：仅记录数组指针；调用方保持数组及其元素有效，不模拟依赖 kernel 元数据的深拷贝和打包。
+- 零值及未知 `argsType` 不作为模型夹具的合法 Set 输入，不实现 Runtime 的 legacy Set 兼容路径。
+
+配置属性与 opInfo 仍保存副本。`rtModelTaskCopyArgsDeviceBuffer` 桩备份已登记的 loaded
+参数内容，由模型持有并在销毁时清理；已有不透明设备地址 UT 保留原桩行为，不代表真实 D2D。
+这些桩不模拟设备执行或 placeholder 地址修补，不能替代 Runtime 联调。
+函数元数据在进程内保持稳定，避免生产 binary cache 引用失效。
+`KernelSpec` 描述核类型、比例和编译器 capability，
 `SetKernelBindings` 覆盖外部二进制绑定，必须在首次 Optimize 消费该 binary 之前设置。
 `AddTask` 只接受非 kernel 任务；其中引用的外部地址由调用方保持有效。
 当前模型夹具提供 AIC/AIV/MIX 元数据、record/wait/reset 事件与内存 wait/write，
