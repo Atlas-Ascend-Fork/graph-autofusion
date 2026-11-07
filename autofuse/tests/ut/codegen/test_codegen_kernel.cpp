@@ -789,6 +789,131 @@ TEST(CodegenKernel, ApiCallPreProcessLoadUbScalarTest) {
                         "}\n"});
 }
 
+TEST(CodegenKernel, ApiCallPostProcessLoadUbScalarInt64Test) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  af::SizeVar s2(af::Symbol("s2"));
+
+  af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s0.expr};
+  af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileInner, .size = s1.expr};
+  af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeOriginal, .size = s2.expr};
+
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  tiler.AddSizeVar(af::SizeVar(s2));
+
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddAxis(z2);
+
+  af::AscGraph graph("test");
+  Load load("load");
+  graph.AddNode(load);
+  auto node = graph.FindNode("load");
+  af::AscTensor tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_INT64;
+  tensor.attr.axis = {z0.id, z1.id, z2.id};
+  tensor.attr.repeats = {One, One, One};
+  tensor.attr.strides = {One, One, One};
+  tensor.attr.vectorized_axis = {z1.id, z2.id};
+  tensor.attr.mem.tensor_id = 1;
+
+  vector<af::Expression> vectorized_strides{One, One};
+  tensor.attr.vectorized_strides = vectorized_strides;
+
+  std::string dtype_name;
+  codegen::Tensor::DtypeName(tensor.attr.dtype, dtype_name);
+  codegen::Tensor t(tensor, dtype_name, "t");
+  EXPECT_EQ(t.Init(), 0);
+
+  codegen::ApiCall call("Load");
+  EXPECT_EQ(call.Init(node), 0);
+  std::string result;
+  std::vector<std::reference_wrapper<const codegen::Tensor>> output_tensors;
+  t.need_gen_get_value_of_ub_scalar = true;
+  t.need_duplicate_value_of_ub_scalar = true;
+  output_tensors.emplace_back(t);
+  std::vector<::ascir::AxisId> current_axis = {z0.id};
+  codegen::TPipe tpipe("tpipe", tiler);
+
+  EXPECT_EQ(call.PostProcess(tpipe, current_axis, output_tensors, result), 0);
+  EXPECT_EQ(result,
+            std::string{"event_t eventID = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));\n"
+                        "SetFlag<HardEvent::MTE2_S>(eventID);\n"
+                        "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
+                        "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "AscendC::PipeBarrier<PIPE_ALL>();\n"
+                        "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(int64_t), "
+                        "int64_dup_scratch_tensor);\n"
+                        "AscendC::PipeBarrier<PIPE_V>();\n"
+                        "}\n"});
+}
+
+TEST(CodegenKernel, Int64DupScratchAllocTest) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  af::SizeVar s2(af::Symbol("s2"));
+
+  af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s0.expr};
+  af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileInner, .size = s1.expr};
+  af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeOriginal, .size = s2.expr};
+
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  tiler.AddSizeVar(af::SizeVar(s2));
+
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddAxis(z2);
+
+  af::AscGraph graph("test");
+  Load load("load");
+  graph.AddNode(load);
+  auto node = graph.FindNode("load");
+  af::AscTensor tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_INT64;
+  tensor.attr.axis = {z0.id, z1.id, z2.id};
+  tensor.attr.repeats = {One, One, One};
+  tensor.attr.strides = {One, One, One};
+  tensor.attr.vectorized_axis = {z1.id, z2.id};
+  tensor.attr.mem.tensor_id = 1;
+
+  vector<af::Expression> vectorized_strides{One, One};
+  tensor.attr.vectorized_strides = vectorized_strides;
+
+  std::string dtype_name;
+  codegen::Tensor::DtypeName(tensor.attr.dtype, dtype_name);
+  codegen::Tensor t(tensor, dtype_name, "t");
+  EXPECT_EQ(t.Init(), 0);
+  t.is_ub_scalar = true;
+  t.need_gen_get_value_of_ub_scalar = true;
+  t.need_duplicate_value_of_ub_scalar = true;
+  codegen::Tensor t_blk(tensor, dtype_name, "t_blk");
+  EXPECT_EQ(t_blk.Init(), 0);
+
+  const std::string expected_alloc{
+      "TBuf<TPosition::VECCALC> int64_dup_scratch_tensor_buffer;\n"
+      "tpipe.InitBuffer(int64_dup_scratch_tensor_buffer, 16 * 16 * sizeof(uint16_t));\n"
+      "LocalTensor<uint8_t> int64_dup_scratch_tensor = int64_dup_scratch_tensor_buffer.Get<uint8_t>();\n"};
+
+  codegen::TPipe tpipe_empty("tpipe", tiler);
+  EXPECT_EQ(tpipe_empty.Int64DupScratchAlloc(), std::string{""});
+
+  codegen::TPipe tpipe_ub("tpipe", tiler);
+  EXPECT_EQ(tpipe_ub.AddTensor(t), 0);
+  EXPECT_EQ(tpipe_ub.Int64DupScratchAlloc(), expected_alloc);
+
+  codegen::TPipe tpipe_blk("tpipe", tiler);
+  EXPECT_EQ(tpipe_blk.AddTensor(t_blk), 0);
+  tpipe_blk.need_gen_blk_tensors.push_back(t_blk.id);
+  EXPECT_EQ(tpipe_blk.Int64DupScratchAlloc(), expected_alloc);
+  std::string blk_result;
+  EXPECT_EQ(tpipe_blk.BlkTensorAllocAndInit(blk_result), af::SUCCESS);
+  EXPECT_NE(blk_result.find(", int64_dup_scratch_tensor);"), std::string::npos);
+}
+
 TEST(CodegenKernel, kernelUbScalarVarDef) {
   af::SizeVar s0(af::Symbol("s0"));
   af::SizeVar s1(af::Symbol("s1"));

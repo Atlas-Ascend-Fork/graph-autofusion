@@ -974,7 +974,8 @@ build_backend() {
                     compare_x2_tensor_test_e2e \
                     compare_x2_tensor_int32_test_e2e \
                     load_to_store_and_abs_test_e2e \
-                    scalar_cast_add_test_e2e \
+                    scalar_cast_add_test_e2e  \
+                    cast_uint8_to_int64_test_e2e \
                     concat_all_aligned_test_e2e \
                     concat_to_stores_test_e2e \
                     load_unalign_pad_test_e2e \

@@ -3085,6 +3085,73 @@ af::ComputeGraphPtr ShareGraph::CastCastFusedGraph(size_t dims_size, af::DataTyp
 }
 
 /**
+ *      output
+ *         |
+ *       store
+ *         |
+ *        cast(uint8 -> int64)
+ *         |
+ *        load
+ *         |
+ *       data0(uint8)
+ */
+static void CreateCastUint8ToInt64AscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data data0("data0", graph);
+  data0.ir_attr.SetIndex(0);
+  data0.y.dtype = af::DT_UINT8;
+
+  af::ascir_op::Load load("load");
+  load.x = data0.y;
+  load.y.dtype = af::DT_UINT8;
+
+  af::ascir_op::Cast cast("cast");
+  cast.x = load.y;
+  cast.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Store store("store");
+  store.x = cast.y;
+  store.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  output.y.dtype = af::DT_INT64;
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+}
+
+/**
+ *       data0
+ *         |
+ *       AscBc
+ *        |
+ *     NetOutput
+ */
+af::ComputeGraphPtr ShareGraph::CastUint8ToInt64FusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("cast_uint8_to_int64_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("cast_uint8_to_int64");
+  CreateCastUint8ToInt64AscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
  *       data0
  *         |
  *       AscBc
