@@ -1123,7 +1123,8 @@ build_backend() {
                       erfcx_test_e2e_v2 \
                       expm1_test_e2e_v2 \
                       rand_store_test_e2e_v2 \
-                      randn_store_test_e2e_v2"
+                      randn_store_test_e2e_v2 \
+                      load_cast_brc_realign_test_e2e_v2"
   fi
   MAKE_TARGET_LIST_CODEGEN=$(echo "${MAKE_TARGET_LIST}" | sed 's/e2e/codegen/g')
   CTEST_BACKEND_TEST1_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST_CODEGEN})
