@@ -704,9 +704,17 @@ __aicore__ inline void IndirectLoadSimdStridedImpl(const LocalTensor<X> &x, cons
   const auto context = MakeIndirectLoadSimdStridedContext<Rank, Axis>(shape, params);
   LocalTensor<uint32_t> offsets = tmp.template ReinterpretCast<uint32_t>();
   BuildIndirectLoadSimdStridedOffsets<X, Index, Rank, Axis>(index, offsets, context);
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+  // 偏移表由标量循环（S 管道）写入 UB，随后的 Gather 为 VEC 指令，跨执行单元读取
+  // 程序序不可见，必须显式同步；这些架构上队列机制独占固定事件号，运行时申请的
+  // 事件号若与固定号冲突，硬件以 set/wait 配对失配报核错误，故改用排空全部流水线
+  // 的屏障，不占用事件号。
+  AscendC::PipeBarrier<PIPE_ALL>();
+#else
   int32_t offset_event_id = static_cast<int32_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_V));
   AscendC::SetFlag<AscendC::HardEvent::S_V>(offset_event_id);
   AscendC::WaitFlag<AscendC::HardEvent::S_V>(offset_event_id);
+#endif
   Gather(y, x, offsets, static_cast<uint32_t>(0), context.logical_size);
   ScatterIndirectLoadSimdStridedOutput<X, Rank, Axis>(y, context);
 }

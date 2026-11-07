@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include "api_call/utils/api_call_factory.h"
@@ -265,6 +266,28 @@ bool TensorViewSpansRows(const TPipe &tpipe, const Tensor &tensor,
   return false;
 }
 
+// 取 layout 轴在张量物理视图中的步长，查找顺序与输出侧一致：向量化视图轴 → 张量物理
+// 轴步长 → 派生后代轴（多行 tile 分裂形态，如 a0 -> a0t）的向量化步长；均未命中返回
+// 空，调用方按自身语义兜底。
+std::optional<ascir::SizeExpr> FindTensorPhysicalStride(const TPipe &tpipe, const Tensor &tensor,
+                                                        const ascir::AxisId &axis_id) {
+  const auto it = std::find(tensor.vectorized_axis.begin(), tensor.vectorized_axis.end(), axis_id);
+  if (it != tensor.vectorized_axis.end()) {
+    return tensor.vectorized_strides[static_cast<size_t>(std::distance(tensor.vectorized_axis.begin(), it))];
+  }
+  const auto axis_it = std::find(tensor.axis.begin(), tensor.axis.end(), axis_id);
+  if (axis_it != tensor.axis.end()) {
+    return tensor.axis_strides[static_cast<size_t>(std::distance(tensor.axis.begin(), axis_it))];
+  }
+  std::optional<ascir::SizeExpr> result;
+  for (size_t vec_pos = 0UL; vec_pos < tensor.vectorized_axis.size(); ++vec_pos) {
+    if (IsAxisDerivedFrom(tpipe, tensor.vectorized_axis[vec_pos], axis_id)) {
+      result = tensor.vectorized_strides[vec_pos];
+    }
+  }
+  return result;
+}
+
 af::Status BuildTensorWindowInfo(const TPipe &tpipe,
                                  const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout,
                                  const Tensor &tensor, size_t axis_pos, LogicalTensorInfo &info) {
@@ -279,6 +302,23 @@ af::Status BuildTensorWindowInfo(const TPipe &tpipe,
   // view, preserve zero-stride axes but derive non-zero window strides from the physical vectorized tensor view;
   // bitwidth-changing producers can introduce padding between logical elements.
   if (layout.kind == ascgen_utils::indirect_load::IndirectLoadLayoutKind::kDense) {
+    // 变位宽生产者（cast）的通用对齐会在行间引入物理 padding（如 int64 cast 输出行步长
+    // 4*Ceil(ks1/4)）：dense 逻辑视图的紧凑步长不体现该 padding，消费者按逻辑步长寻址
+    // 会漂移进 padding 区。物理跨度无法静态证明等于逻辑元素积时按物理向量化步长替换
+    // 窗口步长；轴的物理步长查找与输出侧 GetSimdOutputStrides 共用同一套兜底顺序
+    // （向量化视图 → 张量物理步长 → 派生后代轴），避免两处语义分叉。
+    if (ascgen_utils::indirect_load::MayHaveVectorizedPadding(tensor.axis, tensor.axis_size, tensor.vectorized_axis,
+                                                              tensor.vectorized_strides)) {
+      for (size_t dim = 0UL; dim < info.strides.size(); ++dim) {
+        if (af::SymbolicUtils::StaticCheckEq(layout.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+          continue;
+        }
+        const auto physical_stride = FindTensorPhysicalStride(tpipe, tensor, layout.axis_ids[dim]);
+        if (physical_stride.has_value()) {
+          info.strides[dim] = *physical_stride;
+        }
+      }
+    }
     return af::SUCCESS;
   }
   af::Expression compact_stride = af::sym::kSymbolOne;
@@ -1488,24 +1528,7 @@ std::vector<ascir::SizeExpr> GetSimdOutputStrides(const TPipe &tpipe, const Tens
                                                   const ascgen_utils::indirect_load::LogicalTensorView &layout) {
   std::vector<ascir::SizeExpr> strides(layout.axis_ids.size(), af::sym::kSymbolOne);
   for (size_t dim = 0; dim < layout.axis_ids.size(); ++dim) {
-    const auto it = std::find(tensor.vectorized_axis.begin(), tensor.vectorized_axis.end(), layout.axis_ids[dim]);
-    if (it != tensor.vectorized_axis.end()) {
-      strides[dim] = tensor.vectorized_strides[static_cast<size_t>(std::distance(tensor.vectorized_axis.begin(), it))];
-      continue;
-    }
-    const auto axis_it = std::find(tensor.axis.begin(), tensor.axis.end(), layout.axis_ids[dim]);
-    if (axis_it != tensor.axis.end()) {
-      strides[dim] = tensor.axis_strides[static_cast<size_t>(std::distance(tensor.axis.begin(), axis_it))];
-      continue;
-    }
-    // 可求解多行 tile：逻辑视图轴在张量中被分裂为 TileInner 后代轴（如 a0 -> a0t），
-    // 该维输出步长取后代轴在紧凑 tile 视图中的向量化步长（多行窗口的行步长）。
-    for (size_t vec_pos = 0UL; vec_pos < tensor.vectorized_axis.size(); ++vec_pos) {
-      if (IsAxisDerivedFrom(tpipe, tensor.vectorized_axis[vec_pos], layout.axis_ids[dim])) {
-        strides[dim] = tensor.vectorized_strides[vec_pos];
-        break;
-      }
-    }
+    strides[dim] = FindTensorPhysicalStride(tpipe, tensor, layout.axis_ids[dim]).value_or(af::sym::kSymbolOne);
   }
   return strides;
 }
@@ -2060,43 +2083,26 @@ Status IndirectLoadRegApiCall::GenerateSimd(const TPipe &tpipe, const std::vecto
     GE_ASSERT_TRUE(tmp_iter != tmp_buf_id.end(), "IndirectLoad SIMD requires an API-level tmp buffer.");
   }
   // [padded 视图兜底降级] codegen 期为最终视图（通用对齐已完成），不依赖 lowering
-  // metadata 序列化时的视图时机：输出 tensor 的向量化跨度（与 Tiler::TensorActualSize
-  // 同源）大于逻辑元素积（Π尾轴前有效宽）即视图被 pad——dense facade（RegGather
-  // RunReuse）线性稠密写出与 padded 视图布局冲突（index 按窗口线性读越过真实数据
-  // → 越界读表 AIC 341；strided 解释稠密数据 → 数值错乱），强制降级 strided facade
-  // （按视图 strides 逐行写，行内 pad 由 ReduceInit OptImpl 清中性值）。SIMD 模板
-  // 的 tmp 恒分配（CalcTmpBufSize 只判模板），降级无 tmp 缺口。
+  // metadata 序列化时的视图时机：输出或索引 tensor 的向量化跨度（与 Tiler::TensorActualSize
+  // 同源）无法静态证明等于逻辑元素积（Π尾轴前有效宽）即视图可能被 pad——dense facade
+  // （RegGather RunReuse）线性稠密读写与 padded 视图布局冲突（index 按窗口线性读越过
+  // 真实数据 → 越界读表 AIC 341；strided 解释稠密数据 → 数值错乱），强制降级 strided
+  // facade（按视图 strides 逐行寻址，行内 pad 由 ReduceInit OptImpl 清中性值）。SIMD
+  // 模板的 tmp 恒分配（CalcTmpBufSize 只判模板），降级无 tmp 缺口。
   {
     // codegen::Tensor 直接持有 axis/axis_size/axis_strides 与向量化视图字段，
-    // axis_size 即视图轴宽（Tiler::TensorActualSize 同源）。
-    af::Expression y_span = af::sym::kSymbolOne;
-    af::Expression y_product = af::sym::kSymbolOne;
-    bool y_view_ok = output.vectorized_axis.size() == output.vectorized_strides.size() &&
-                     !output.vectorized_axis.empty() && output.axis.size() == output.axis_size.size();
-    if (y_view_ok) {
-      for (size_t dim = 0UL; dim < output.vectorized_axis.size(); ++dim) {
-        const auto axis_it = std::find(output.axis.begin(), output.axis.end(), output.vectorized_axis[dim]);
-        if (axis_it == output.axis.end()) {
-          y_view_ok = false;
-          break;
-        }
-        const size_t axis_pos_y = static_cast<size_t>(std::distance(output.axis.begin(), axis_it));
-        const auto &y_stride = output.vectorized_strides[dim];
-        if (af::SymbolicUtils::StaticCheckEq(y_stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
-          continue;
-        }
-        y_span = y_span + (output.axis_size[axis_pos_y] - af::sym::kSymbolOne) * y_stride;
-        y_product = y_product * output.axis_size[axis_pos_y];
-      }
-    }
-    const bool y_padded = y_view_ok && output.vectorized_axis.size() > 1UL &&
-                          af::SymbolicUtils::StaticCheckGt(y_span, y_product) == af::TriBool::kTrue;
-    GELOGI("[IndirectLoad] SIMD fallback check: node[%s] span[%s] product[%s] padded[%d] fallback[%d].",
-           node_name.c_str(), y_span.Str().get(), y_product.Str().get(), static_cast<int>(y_padded),
+    // axis_size 即视图轴宽（Tiler::TensorActualSize 同源）。判定与 lowering 期同向
+    // 保守（物理跨度无法静态证明等于逻辑元素积即视为 padded），并覆盖索引视图。
+    const bool y_padded = ascgen_utils::indirect_load::MayHaveVectorizedPadding(
+        output.axis, output.axis_size, output.vectorized_axis, output.vectorized_strides);
+    const bool idx_padded = ascgen_utils::indirect_load::MayHaveVectorizedPadding(
+        index.axis, index.axis_size, index.vectorized_axis, index.vectorized_strides);
+    GELOGI("[IndirectLoad] SIMD fallback check: node[%s] out_padded[%d] index_padded[%d] fallback[%d].",
+           node_name.c_str(), static_cast<int>(y_padded), static_cast<int>(idx_padded),
            static_cast<int>(simd_metadata_.fallback));
-    if (y_padded && simd_metadata_.fallback != ascgen_utils::indirect_load::SimdFallback::kStrided) {
-      GELOGW("[IndirectLoad] SIMD dense fallback downgraded to strided: node[%s] padded view span[%s] > product[%s].",
-             node_name.c_str(), y_span.Str().get(), y_product.Str().get());
+    if ((y_padded || idx_padded) && simd_metadata_.fallback != ascgen_utils::indirect_load::SimdFallback::kStrided) {
+      GELOGW("[IndirectLoad] SIMD dense fallback downgraded to strided: node[%s] out_padded[%d] index_padded[%d].",
+             node_name.c_str(), static_cast<int>(y_padded), static_cast<int>(idx_padded));
       simd_metadata_.fallback = ascgen_utils::indirect_load::SimdFallback::kStrided;
       if (tmp_iter == tmp_buf_id.end()) {
         GE_ASSERT_TRUE(false, "IndirectLoad SIMD strided downgrade requires an API-level tmp buffer, node[%s].",

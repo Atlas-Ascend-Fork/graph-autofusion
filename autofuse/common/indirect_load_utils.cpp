@@ -1502,45 +1502,30 @@ af::Status FinalizeLoweringMetadata(const af::AscNodePtr &node, bool &is_support
   Implementation implementation;
   GE_ASSERT_SUCCESS(GetImplementation(node, implementation));
   if (template_id == ::ascir::TemplateId::kIndirectLoadSimd) {
-    // [padded 输出窗口强制 strided] 通用对齐把输出视图尾轴 pad 到对齐块（如 [32行,
-    // 4有效+4空洞] 的行 stride 8）时，dense facade（RegGather）线性稠密写出与视图
-    // 布局不符——下游（Reduce 按 first×行跨度读取、VF 按视图 strides 访问）会把
-    // 稠密数据按 strided 行解释，数值错乱。strided facade 按输出视图 strides 逐行
-    // 写出，与 padded 视图自洽；行内 pad 区由 ReduceInit 的 OptImpl（inner_r 非对齐
-    // 路径）清中性值。判定：输出视图物理跨度（Σ(size-1)*stride+1）大于逻辑元素积
-    // （Πsize）即存在 pad。
-    // [padded 判定源] 必须用输出 tensor 的 vectorized_strides（通用对齐改写的向量化
-    // 视图，Tiler::TensorActualSize 的 actual_size 公式同源）而非 logical_view 的
-    // strides（图原生视图，可能仍为稠密 (4,1)，而对齐已把 vectorized_strides 改写
-    // 为 (8,1)——生产 gather+sum 即此：判定读 logical 层会漏判）。
+    // [padded 视图强制 strided] 通用对齐把视图尾轴 pad 到对齐块（如 [32行, 4有效+4空洞]
+    // 的行 stride 8）时，dense facade（RegGather）线性稠密读写与视图布局不符——输出侧稠密
+    // 写出被下游按 strided 行解释（数值错乱），索引侧按紧凑布局连续读越过真实数据（越界
+    // 读表 AIC 341）。strided facade 按视图 strides 逐行寻址，与 padded 视图自洽。输出与
+    // 索引两视图都判：变位宽生产者（cast）产生的索引缓冲同样会被通用对齐 pad。
+    // [padded 判定源] 必须用 tensor 的 vectorized_strides（通用对齐改写的向量化视图，
+    // Tiler::TensorActualSize 的 actual_size 公式同源）而非 logical_view 的 strides
+    // （图原生视图，可能仍为稠密 (4,1)，而对齐已把 vectorized_strides 改写为 (8,1)——
+    // 生产 gather+sum 即此：判定读 logical 层会漏判）。
+    // [判定方向保守] 物理跨度（Σ(size-1)*stride+1）无法静态证明等于逻辑元素积（Πsize）
+    // 即视为存在 pad——动态 shape 下对齐取整表达式（Ceiling(Rational..)）通常无法证明相等，
+    // 误判只降级 strided（正确性保持），漏判则产生越界。
     const auto &simd_out_attr = node->outputs()[0]->attr;
-    af::Expression out_span = af::sym::kSymbolOne;
-    af::Expression out_product = af::sym::kSymbolOne;
-    bool out_view_valid = simd_out_attr.vectorized_axis.size() == simd_out_attr.vectorized_strides.size() &&
-                          !simd_out_attr.vectorized_axis.empty();
-    if (out_view_valid) {
-      for (size_t dim = 0UL; dim < simd_out_attr.vectorized_axis.size(); ++dim) {
-        const auto axis_it =
-            std::find(simd_out_attr.axis.begin(), simd_out_attr.axis.end(), simd_out_attr.vectorized_axis[dim]);
-        if (axis_it == simd_out_attr.axis.end()) {
-          out_view_valid = false;
-          break;
-        }
-        const size_t axis_pos = static_cast<size_t>(std::distance(simd_out_attr.axis.begin(), axis_it));
-        const auto &vec_stride = simd_out_attr.vectorized_strides[dim];
-        if (af::SymbolicUtils::StaticCheckEq(vec_stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
-          continue;
-        }
-        out_span = out_span + (simd_out_attr.repeats[axis_pos] - af::sym::kSymbolOne) * vec_stride;
-        out_product = out_product * simd_out_attr.repeats[axis_pos];
-      }
-    }
-    const bool out_padded = out_view_valid && simd_out_attr.vectorized_axis.size() > 1UL &&
-                            af::SymbolicUtils::StaticCheckGt(out_span, out_product) == af::TriBool::kTrue;
-    GELOGI("[IndirectLoad] SIMD fallback pre-check at lowering: node[%s] span[%s] product[%s] padded[%d].",
-           node->GetNamePtr(), out_span.Str().get(), out_product.Str().get(), static_cast<int>(out_padded));
+    const bool out_padded = MayHaveVectorizedPadding(simd_out_attr.axis, simd_out_attr.repeats,
+                                                     simd_out_attr.vectorized_axis, simd_out_attr.vectorized_strides);
+    const auto &simd_index_attr = node->inputs()[kIndexTensorIndex]->attr;
+    const bool index_padded =
+        MayHaveVectorizedPadding(simd_index_attr.axis, simd_index_attr.repeats, simd_index_attr.vectorized_axis,
+                                 simd_index_attr.vectorized_strides);
+    GELOGI("[IndirectLoad] SIMD fallback pre-check at lowering: node[%s] out_padded[%d] index_padded[%d].",
+           node->GetNamePtr(), static_cast<int>(out_padded), static_cast<int>(index_padded));
     const bool strided = metadata.logical_view.input.kind != IndirectLoadLayoutKind::kDense ||
-                         metadata.logical_view.index.kind != IndirectLoadLayoutKind::kDense || out_padded;
+                         metadata.logical_view.index.kind != IndirectLoadLayoutKind::kDense || out_padded ||
+                         index_padded;
     metadata.simd.fallback = strided                                        ? SimdFallback::kStrided
                              : implementation == Implementation::kGatherApi ? SimdFallback::kGatherApi
                                                                             : SimdFallback::kRegisterGather;

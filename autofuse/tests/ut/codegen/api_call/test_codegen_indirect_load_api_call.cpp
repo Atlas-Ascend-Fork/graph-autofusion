@@ -50,6 +50,9 @@ struct ILTestGraph {
   af::Axis z1;
   af::Axis z2;
   af::Axis z3;
+  // BuildSimdGraph 分裂出的向量化视图轴（z2z3Tb / z2z3t），供 padded 视图设置使用。
+  af::AxisId padded_row_axis;
+  af::AxisId padded_tail_axis;
 
   explicit ILTestGraph(const char *name)
       : graph(name),
@@ -78,7 +81,19 @@ struct ILTestGraph {
 // z0, z1: input axes  |  z2, z3: output/index axes
 // IndirectLoad axis=1, rank=2
 
-void BuildSimdGraph(ILTestGraph &g, af::DataType input_dtype = ge::DT_FLOAT16) {
+// 变位宽生产者（cast）经通用对齐 pad 后的视图形态：行轴与尾轴共同构成两维向量化
+// 视图，行间步长被改写到对齐块宽度（此处用 2 倍逻辑行步长模拟），与逻辑紧凑 strides
+// 不一致。
+void SetPaddedVectorizedViews(const ILTestGraph &g) {
+  const auto il_node = g.graph.FindNode("indirect_load");
+  il_node->outputs[0].attr.vectorized_axis = {g.padded_row_axis, g.padded_tail_axis};
+  il_node->outputs[0].attr.vectorized_strides = {g.s3 * af::Symbol(2), af::Symbol(3)};
+  const auto idx_node = g.graph.FindNode("idx_load");
+  idx_node->outputs[0].attr.vectorized_axis = {g.padded_row_axis, g.padded_tail_axis};
+  idx_node->outputs[0].attr.vectorized_strides = {g.s3 * af::Symbol(2), af::Symbol(3)};
+}
+
+void BuildSimdGraph(ILTestGraph &g, af::DataType input_dtype = ge::DT_FLOAT16, bool padded_views = false) {
   const af::Expression One = af::sym::kSymbolOne;
 
   Data x_data("x", g.graph);
@@ -176,6 +191,8 @@ void BuildSimdGraph(ILTestGraph &g, af::DataType input_dtype = ge::DT_FLOAT16) {
   auto z2z3 = g.graph.MergeAxis({z2_id, z3_id});
   auto [z2z3T, z2z3t] = g.graph.TileSplit(z2z3->id);
   auto [z2z3TB, z2z3Tb] = g.graph.BlockSplit(z2z3T->id);
+  g.padded_row_axis = z2z3Tb->id;
+  g.padded_tail_axis = z2z3t->id;
 
   for (auto n : g.graph.GetAllNodes()) {
     if (IsOps<Data>(n) || IsOps<Output>(n) || n->GetName() == "x_load") continue;
@@ -186,10 +203,13 @@ void BuildSimdGraph(ILTestGraph &g, af::DataType input_dtype = ge::DT_FLOAT16) {
   }
 
   il_node->attr.sched.loop_axis = z2z3Tb->id;
-  il_node->outputs[0].attr.vectorized_axis = {z2z3t->id};
-  il_node->outputs[0].attr.vectorized_strides = {One};
-
   store_node->attr.sched.loop_axis = z2z3Tb->id;
+  if (padded_views) {
+    SetPaddedVectorizedViews(g);
+  } else {
+    il_node->outputs[0].attr.vectorized_axis = {z2z3t->id};
+    il_node->outputs[0].attr.vectorized_strides = {One};
+  }
   store_node->outputs[0].attr.vectorized_axis = {z2z3t->id};
   store_node->outputs[0].attr.vectorized_strides = {One};
 
@@ -988,14 +1008,22 @@ TEST(IndirectLoadApiCallTest, FactoryCreatesIndirectLoadRegApiCall) {
 
 void GenerateSimdCallFromGraph(ILTestGraph &g, af::DataType input_dtype, Implementation implementation,
                                std::string &result, ge::DataType output_dtype = ge::DT_UNDEFINED,
-                               bool expect_success = true) {
-  BuildSimdGraph(g, input_dtype);
+                               bool expect_success = true, bool padded_views = false, bool delayed_padding = false) {
+  BuildSimdGraph(g, input_dtype, padded_views);
   AnnotateSimdTemplate(g.graph, implementation);
   auto il_node = g.graph.FindNode("indirect_load");
   ASSERT_NE(il_node, nullptr);
   if (output_dtype != ge::DT_UNDEFINED) {
     // Must be set before the output tensor is registered in the TPipe.
     il_node->outputs[0].attr.dtype = output_dtype;
+  }
+  if (delayed_padding) {
+    // 模拟通用对齐发生在 lowering metadata 序列化之后：先用紧凑视图定格 dense
+    // fallback，再改写向量化视图引入行间 padding，覆盖 codegen 期兜底降级分支。
+    bool metadata_supported = false;
+    ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+    ASSERT_TRUE(metadata_supported);
+    SetPaddedVectorizedViews(g);
   }
   Tiler tiler;
   SetupTiler(g.graph, tiler);
@@ -1084,6 +1112,48 @@ TEST(IndirectLoadApiCallTest, GenerateSimdDenseGatherSelectsGatherApi) {
 
   EXPECT_NE(result.find("IndirectLoadSimdGatherApi<half, int32_t, 2, 1>"), std::string::npos);
   EXPECT_EQ(result.find("IndirectLoadSimdStrided"), std::string::npos);
+}
+
+TEST(IndirectLoadApiCallTest, GenerateSimdPaddedVectorizedViewsDowngradeToStrided) {
+  // 变位宽生产者（cast）的通用对齐会在行间引入物理 padding：行轴与尾轴两维向量化视图
+  // 的行步长无法静态证明等于逻辑紧凑步长时，dense facade（RegGather）按紧凑布局读索引
+  // 会越过真实数据（越界读 UB），必须降级 strided facade，并按物理步长传索引布局。
+  ILTestGraph g("simd_padded_views");
+  std::string result;
+  GenerateSimdCallFromGraph(g, ge::DT_FLOAT16, Implementation::kDefault, result, ge::DT_UNDEFINED, true, true);
+  EXPECT_NE(result.find("IndirectLoadSimdStrided"), std::string::npos);
+  EXPECT_EQ(result.find("IndirectLoadSimdFallback>(0)"), std::string::npos);
+  // 索引窗口步长必须替换为张量物理视图步长（此处逻辑紧凑为 {1, 1}，物理视图后代轴
+  // 步长为 3）：strided facade 按真实布局读索引，否则行漂移读进 padding 区。
+  EXPECT_NE(result.find("{3, 3}"), std::string::npos);
+}
+
+TEST(IndirectLoadApiCallTest, GenerateSimdDelayedPaddingDowngradesAtCodegen) {
+  // lowering metadata 序列化时视图仍紧凑（定格 dense fallback），通用对齐在其后改写
+  // 向量化视图引入 padding：codegen 期兜底必须降级 strided 并按物理步长寻址。
+  ILTestGraph g("simd_delayed_padding");
+  std::string result;
+  GenerateSimdCallFromGraph(g, ge::DT_FLOAT16, Implementation::kDefault, result, ge::DT_UNDEFINED, true, false, true);
+
+  EXPECT_NE(result.find("IndirectLoadSimdStrided"), std::string::npos);
+  EXPECT_EQ(result.find("IndirectLoadSimdFallback>(0)"), std::string::npos);
+  EXPECT_NE(result.find("{3, 3}"), std::string::npos);
+}
+
+TEST(IndirectLoadApiCallTest, FinalizeSimdMetadataPaddedViewsForcesStrided) {
+  // lowering 期判定与 codegen 期兜底同向：输出或索引视图可能带行间 padding 时，
+  // fallback 必须在元数据序列化阶段就定格为 strided。
+  ILTestGraph g("simd_padded_metadata");
+  BuildSimdGraph(g, ge::DT_FLOAT16, true);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(GetLoweringMetadata(il_node, metadata), af::SUCCESS);
+  EXPECT_EQ(metadata.simd.fallback, SimdFallback::kStrided);
 }
 
 TEST(IndirectLoadApiCallTest, GenerateSimdRejectsInputOutputDtypeMismatch) {
@@ -1246,7 +1316,7 @@ TEST(IndirectLoadApiCallTest, GenerateSimtIndexLoadFoldsNonDenseEquivalentView) 
   const auto idx_load = g.graph.FindNode("idx_load");
   ASSERT_NE(idx_load, nullptr);
   idx_load->outputs[0].attr.repeats = {g.s2, g.s3};
-  idx_load->outputs[0].attr.strides = {g.s3 * af::Symbol(2), af::sym::kSymbolOne};
+  idx_load->outputs[0].attr.strides = {g.s3 * af::Symbol(2), af::Symbol(3)};
   AnnotateSimtTemplate(g.graph);
   std::string def;
   GenerateSimtFuncDefinitionFromGraph(g, def);

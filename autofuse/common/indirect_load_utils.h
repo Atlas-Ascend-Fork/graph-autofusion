@@ -11,6 +11,7 @@
 #ifndef __INDIRECT_LOAD_UTILS_H__
 #define __INDIRECT_LOAD_UTILS_H__
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -92,6 +93,37 @@ struct IndirectLoadTensorLayout : LogicalTensorView {
   IndirectLoadLayoutKind kind = IndirectLoadLayoutKind::kUnsupported;
   std::vector<af::Expression> physical_repeats;
 };
+
+// 判定向量化视图是否可能带行间物理 padding：物理跨度（Σ(size-1)*stride+1）无法静态证明
+// 等于逻辑元素积（Πsize）即视为存在。通用对齐把尾轴 pad 到对齐块时跨度含取整结构，动态
+// shape 下通常不可证明相等；变位宽生产者（如 cast）的输出缓冲同样会被 pad。保守误判只会
+// 把 SIMD 降级到布局参数完备的 strided facade 或改按物理步长寻址，漏判则使 dense 消费者按
+// 紧凑布局读写带 padding 的缓冲产生越界。视图信息缺失、视图轴不在张量轴列表或仅单轴
+// （无行间 padding 可言）时不判，维持既有行为。
+template <typename AxisIdRange, typename SizeRange, typename StrideRange>
+inline bool MayHaveVectorizedPadding(const AxisIdRange &axis, const SizeRange &sizes,
+                                     const AxisIdRange &vectorized_axis, const StrideRange &vectorized_strides) {
+  if (axis.size() != sizes.size() || vectorized_axis.size() != vectorized_strides.size() ||
+      vectorized_axis.size() <= 1UL) {
+    return false;
+  }
+  af::Expression span = af::sym::kSymbolOne;
+  af::Expression product = af::sym::kSymbolOne;
+  for (size_t dim = 0UL; dim < vectorized_axis.size(); ++dim) {
+    const auto axis_it = std::find(axis.begin(), axis.end(), vectorized_axis[dim]);
+    if (axis_it == axis.end()) {
+      return false;
+    }
+    const size_t axis_pos = static_cast<size_t>(std::distance(axis.begin(), axis_it));
+    const auto &stride = vectorized_strides[dim];
+    if (af::SymbolicUtils::StaticCheckEq(stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      continue;
+    }
+    span = span + (sizes[axis_pos] - af::sym::kSymbolOne) * stride;
+    product = product * sizes[axis_pos];
+  }
+  return af::SymbolicUtils::StaticCheckEq(span, product) != af::TriBool::kTrue;
+}
 
 struct TemplateLogicalView {
   IndirectLoadTensorLayout input;
