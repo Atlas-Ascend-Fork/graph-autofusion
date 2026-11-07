@@ -32,7 +32,6 @@ file(GLOB SOURCES
         ${TC_DIR}/test_log/*.cpp
         ${TC_DIR}/add_layer_norm/test_add_layer_norm.cpp
         ${TC_DIR}/add_layer_norm/add_layer_norm.cpp
-        ${TC_DIR}/concat/*.cpp
         ${TC_DIR}/reduce_split_penalty/*.cpp
         ${TC_DIR}/e2e_st_test/*.cpp
         ${TC_DIR}/profiler_e2e/*.cpp
@@ -43,6 +42,7 @@ file(GLOB SOURCES
 add_executable(att_st
         ${SOURCES}
         ${TC_DIR}/source_mirror/gen_model_info_content/test_tiling_r_reorder.cpp
+        ${TC_DIR}/scenario/concat/test_concat.cpp
 )
 target_link_directories(att_st PRIVATE ${ASCEND_INSTALL_LIB_PATH})
 target_include_directories(att_st BEFORE PRIVATE
@@ -83,6 +83,7 @@ target_compile_options(att_st PRIVATE
         -fpermissive
         )
 target_compile_definitions(att_st PRIVATE ASCEND_INSTALL_PATH="${ASCEND_INSTALL_PATH}")
+target_compile_definitions(att_st PRIVATE TILING_DATA_DIR="${TC_DIR}/scenario/tiling_data")
 
 target_link_options(att_st PRIVATE
         -rdynamic
@@ -96,6 +97,7 @@ target_link_libraries(att_st
         Boost::boost
         atrace
         att
+        att_axes_solver_resources
         asc_slog_stub
         autofuse_runtime_stub
         aihac_ir

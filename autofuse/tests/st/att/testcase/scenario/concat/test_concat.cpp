@@ -37,11 +37,10 @@ std::map<std::string, std::string> GenerateTilingCodeCommon(const std::string &o
                                                             const std::string &header_file, bool gen_extra_infos);
 
 namespace {
-using att::test_common::CreateTilingMainFunc;
 
 std::string kRunTilingFuncMain = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 void PrintResult(graph_ndTilingData& tilingData) {
@@ -57,7 +56,7 @@ int main() {
   tilingData.set_ub_size(245760);
   tilingData.graph0_result0_g0_tiling_data.set_ND(1024);
   tilingData.graph0_result1_g0_tiling_data.set_S0(1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -68,179 +67,13 @@ int main() {
 )";
 
 std::string kConcatTilingTestHead = R"(
-#ifndef ATT_TILING_TEST_CONCAT_H_
-#define ATT_TILING_TEST_CONCAT_H_
-#include <cstdint>
-#include <array>
-#include <iostream>
-#include <unordered_map>
-
-// 包含主头文件，获取 TilingData 类型定义
-#include "Concat_tiling_data.h"
-
-namespace optiling {
-
-// ATT缓存相关常量
-constexpr size_t kInputShapeSize = 1;
-constexpr size_t kOperatorCacheCapacity = 128;  // 算子级缓存容量
-constexpr double kLoadFactorThreshold = 0.8;   // 负载因子阈值
-
-// TilingDataCopy 结构体 - 用于 Group 级别缓存存储
-struct TilingDataCopy {
-  uint32_t ND;
-  void set_ND(uint32_t val) { ND = val; }
-  inline uint32_t get_ND() { return ND; }
-  uint32_t block_dim;
-  void set_block_dim(uint32_t val) { block_dim = val; }
-  inline uint32_t get_block_dim() { return block_dim; }
-  uint32_t ndb_size;
-  void set_ndb_size(uint32_t val) { ndb_size = val; }
-  inline uint32_t get_ndb_size() { return ndb_size; }
-  uint32_t ndbt_size;
-  void set_ndbt_size(uint32_t val) { ndbt_size = val; }
-  inline uint32_t get_ndbt_size() { return ndbt_size; }
-  uint32_t q0_size;
-  void set_q0_size(uint32_t val) { q0_size = val; }
-  inline uint32_t get_q0_size() { return q0_size; }
-  uint32_t q1_size;
-  void set_q1_size(uint32_t val) { q1_size = val; }
-  inline uint32_t get_q1_size() { return q1_size; }
-  uint32_t tiling_key;
-  void set_tiling_key(uint32_t val) { tiling_key = val; }
-  inline uint32_t get_tiling_key() { return tiling_key; }
-  uint32_t ub_size;
-  void set_ub_size(uint32_t val) { ub_size = val; }
-  inline uint32_t get_ub_size() { return ub_size; }
-};
-// FixedSizeHashMap 模板类 - 固定大小的哈希表，用于缓存
-template <size_t KEY_SIZE, size_t CAPACITY, typename VALUE_TYPE>
-class FixedSizeHashMap {
-private:
-  using Key = std::array<uint32_t, KEY_SIZE>;
-  using Value = VALUE_TYPE;
-
-  enum BucketState { kEmpty, kOccupied, kDeleted };
-  struct Bucket {
-    Key key;
-    Value value;
-    BucketState state;
-  };
-
-  std::array<Bucket, CAPACITY> buckets;
-  size_t size_ = 0;
-
-  // Hash - 大驼峰命名
-  size_t Hash(const Key &key) const {
-    size_t hash = 0;
-    for (const auto& value : key) {
-      constexpr uint32_t kHashPrime = 0x9e3779b9;  // 黄金比例的整数表示，用于hash混合
-      hash ^= value + kHashPrime + (hash << 6) + (hash >> 2);
-    }
-    return hash;
-  }
-
-  // FindIndex - 大驼峰命名
-  size_t FindIndex(const Key &key) const {
-    size_t hash = Hash(key) % CAPACITY;
-    size_t start = hash;
-    do {
-      if (buckets[hash].state == kEmpty) {
-        return CAPACITY;
-      } else if (buckets[hash].state == kOccupied && buckets[hash].key == key) {
-        return hash;
-      }
-      hash = (hash + 1) % CAPACITY;
-    } while (hash != start);
-    return CAPACITY;
-  }
-
-public:
-  FixedSizeHashMap() : size_(0) {
-    for (size_t i = 0; i < CAPACITY; ++i) {
-      buckets[i].state = kEmpty;
-    }
-  }
-
-  // Find - 大驼峰命名
-  Value* Find(const Key &key) {
-    size_t index = FindIndex(key);
-    if (index < CAPACITY && buckets[index].state == kOccupied) {
-      return &buckets[index].value;
-    }
-    return nullptr;
-  }
-const Value* Find(const Key &key) const {
-    return const_cast<FixedSizeHashMap*>(this)->Find(key);
-  }
-
-  // Insert - 大驼峰命名
-  bool Insert(const Key &key, const Value &value) {
-    if (size_ >= CAPACITY * kLoadFactorThreshold) {
-      return false;  // 80%容量阈值
-    }
-    size_t index = FindIndex(key);
-    if (index >= CAPACITY) {
-      size_t hash = Hash(key) % CAPACITY;
-      for (size_t i = 0; i < CAPACITY; ++i) {
-        index = (hash + i) % CAPACITY;
-        if (buckets[index].state == kEmpty) {
-          buckets[index].key = key;
-          buckets[index].value = value;
-          buckets[index].state = kOccupied;
-          size_++;
-          return true;
-        }
-      }
-      return false;
-    }
-    buckets[index].value = value;
-    return true;
-  }
-
-  // Erase - 大驼峰命名
-  bool Erase(const Key &key) {
-    size_t index = FindIndex(key);
-    if (index < CAPACITY && buckets[index].state == kOccupied) {
-      buckets[index].state = kDeleted;
-      size_--;
-      return true;
-    }
-    return false;
-  }
-// Clear - 大驼峰命名
-  void Clear() {
-    for (auto& bucket : buckets) {
-      bucket.state = kEmpty;
-    }
-    size_ = 0;
-  }
-
-  size_t Size() const { return size_; }
-  bool Empty() const { return size_ == 0; }
-};
-
-namespace AscGraph0ScheduleResult0G0 {
-
-// GroupLevelCache 类型别名 - Group 级别缓存
-using GroupLevelCache = FixedSizeHashMap<kInputShapeSize, 4, TilingDataCopy>;
-
-// 前向声明 - GetTiling 函数将在 Concat_tiling_func.cpp 中实现
-bool GetTiling(AscGraph0ScheduleResult0G0TilingData &tiling_data,
-               std::unordered_map<int64_t, uint64_t> &workspace_map,
-               int32_t tilingCaseId,
-               GroupLevelCache *cache = nullptr);
-
-} // namespace AscGraph0ScheduleResult0G0
-
-} // namespace optiling
-
-#endif
+#include "Concat_tiling_api.h"
 )";
 
 std::string kRunTilingFuncMainSameND = R"(
 #include <iostream>
 #include <unordered_map>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 #include "Concat_tiling_test.h"
 
 using namespace optiling;
@@ -320,7 +153,7 @@ int main() {
   tilingData5.set_ub_size(245760);
   tilingData5.graph0_result0_g0_tiling_data.set_ND(4096);
 
-  if (!GetTiling(tilingData5)) {
+  if (!GetTiling(tilingData5, -1, nullptr)) {
     std::cout << "Test 5 failed" << std::endl;
     return -1;
   }
@@ -334,7 +167,7 @@ int main() {
   tilingData6.set_ub_size(245760);
   tilingData6.graph0_result0_g0_tiling_data.set_ND(4096);
 
-  if (!GetTiling(tilingData6)) {
+  if (!GetTiling(tilingData6, -1, nullptr)) {
     std::cout << "Test 6 failed" << std::endl;
     return -1;
   }
@@ -347,6 +180,19 @@ int main() {
 }  // namespace
 using namespace att;
 using namespace att::test;
+
+namespace {
+void SaveConcatTilingApi(const std::map<std::string, std::string> &tiling_funcs) {
+  const auto header = tiling_funcs.find("TilingHead");
+  ASSERT_NE(header, tiling_funcs.end());
+  std::ofstream output("Concat_tiling_api.h", std::ios::out);
+  ASSERT_TRUE(output.is_open());
+  output << "#pragma once\n#include \"Concat_tiling_data.h\"\n";
+  output << att::test::RemoveAutoFuseTilingHeadGuards(header->second);
+  output.close();
+  ASSERT_TRUE(output.good());
+}
+}  // namespace
 
 namespace {
 // 编译命令常量
@@ -755,7 +601,7 @@ void Concat_Normal_AfterQueBufAlloc(ascir::HintGraph &graph) {
   SetGmNode(graph, "cat_out");
 }
 
-namespace ge {
+namespace af {
 namespace ascir {
 namespace cg {
 Status BuildConcatGroupAscendGraphND(af::AscGraph &graph) {
@@ -1253,10 +1099,10 @@ Status BuildSevenInputsMiddleAxisCacheLineConflict(ge::AscGraph &graph) {
 }
 }  // namespace cg
 }  // namespace ascir
-}  // namespace ge
+}  // namespace af
 const std::string kTqueTbufCase0Main = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 void PrintResult(tque_tbuf_case0TilingData& tilingData) {
@@ -1299,6 +1145,7 @@ TEST_F(STestGenConcat, tque_tbuf_case0) {
   fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(
       std::vector<ascir::ScheduledResult>{schedule_result});
   auto res = GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, true);
+  SaveConcatTilingApi(tiling_funcs);
   std::string tiling_func;
   CombineTilings(tiling_funcs, tiling_func);
   EXPECT_EQ(res, true);
@@ -1352,6 +1199,7 @@ void GenConcatTilingFullPipeline(const std::string &op_name, const ascir::FusedS
                                  std::map<std::string, std::string> &options, const std::string &graph_name) {
   std::map<std::string, std::string> tiling_funcs;
   auto res = GenTilingImplAutoFuseV3(op_name, fused_scheduled_result, options, tiling_funcs, true);
+  SaveConcatTilingApi(tiling_funcs);
   std::string tiling_func;
   CombineTilings(tiling_funcs, tiling_func);
   std::ofstream oss;
@@ -1397,7 +1245,7 @@ void WriteMainCompileRunAndCheck(const std::string &main_content, const std::str
 // IsStaticShape测试的raw string常量
 const std::string kIsStaticShapeTestMain = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 extern "C" bool IsStaticShape();
 int main() {
@@ -1431,22 +1279,22 @@ double g_input_corenum_threshold = 1.0;
  } while (false)
 #include <iostream>
 #include <vector>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 #define Max(a, b) ((double)(a) > (double)(b) ? (a) : (b))
 #define Rational(a, b) ((double)(a) / (double)(b))
-inline bool IsEqual(double a, double b)
+inline bool ReferenceIsEqual(double a, double b)
 {
   const double epsilon = 1e-8;
   double abs = (a > b) ? (a - b) : (b - a);
   return abs < epsilon;
 }
 template<typename T>
-inline T Ceiling(T a)
+inline T ReferenceCeiling(T a)
 {
   T value = static_cast<T>(static_cast<int64_t>(a));
-  return (IsEqual(value, a)) ? value : (value + 1);
+  return (ReferenceIsEqual(value, a)) ? value : (value + 1);
 }
 
 struct TestCase {
@@ -1503,14 +1351,14 @@ int main() {
     std::cout << "\n========== Testing: " << tc.name << " ==========" << std::endl;
     std::cout << "Input: S0=" << tc.S0 << ", S1=" << tc.S1 << ", ub_size=" << tc.ub_size << std::endl;
 
-    if (GetTiling(tilingData)) {
+    if (GetTiling(tilingData, -1, nullptr)) {
       std::cout << "tc.name s0t: " << tc.name << " " << tilingData.get_s0t_size() << std::endl;
       std::cout << "tc.name s1t: " << tc.name << " " << tilingData.get_s1t_size() << std::endl;
       std::cout << "tc.name q0_size: " << tc.name << " " << tilingData.get_q0_size() << std::endl;
 
       double tensor_0 = (4 * tilingData.s1t_size_);
       double tensor_1 = (4 * tilingData.s0t_size_ * tilingData.s1t_size_);
-      int64_t ub_size = ((32 * Ceiling((Rational(1, 32) * tensor_0))) + (32 * Ceiling((Rational(1, 32) * tensor_1))));
+      int64_t ub_size = ((32 * ReferenceCeiling((Rational(1, 32) * tensor_0))) + (32 * ReferenceCeiling((Rational(1, 32) * tensor_1))));
       int64_t all_ub_size = ub_size * tilingData.s1Ts0Tb_size_ * tilingData.block_dim_;
       std::cout << "tc.name ub_size: " << tc.name << " " << ub_size << std::endl;
       std::cout << "tc.name block_dim: " << tc.name << " " << tilingData.block_dim_ << std::endl;
@@ -1518,12 +1366,12 @@ int main() {
       bool is_pass = true;
       int64_t ub_ratio_10 = int(tc.ub_size * g_input_ub_threshold);
       std::cout << "tc.name ub_ratio_10: " << tc.name << " " << ub_ratio_10 << std::endl;
-      auto block_dim = Max(0, Ceiling((Ceiling((static_cast<double>(tc.S0) /
-                         static_cast<double>(tilingData.s0t_size_))) * Ceiling((static_cast<double>(tc.S1) /
+      auto block_dim = Max(0, ReferenceCeiling((ReferenceCeiling((static_cast<double>(tc.S0) /
+                         static_cast<double>(tilingData.s0t_size_))) * ReferenceCeiling((static_cast<double>(tc.S1) /
                          static_cast<double>(tilingData.s1t_size_))) / (tilingData.s1Ts0Tb_size_))));
       std::cout << "tc.name block_dim: " << tc.name << " " << block_dim << std::endl;
-      auto raw_block_dim = Ceiling((Ceiling((static_cast<double>(tc.S0) / static_cast<double>(tilingData.s0t_size_)))
-                             * Ceiling((static_cast<double>(tc.S1) / static_cast<double>(tilingData.s1t_size_)))));
+      auto raw_block_dim = ReferenceCeiling((ReferenceCeiling((static_cast<double>(tc.S0) / static_cast<double>(tilingData.s0t_size_)))
+                             * ReferenceCeiling((static_cast<double>(tc.S1) / static_cast<double>(tilingData.s1t_size_)))));
       std::cout << "tc.name raw_block_dim: " << tc.name << " " << raw_block_dim << std::endl;
 
       if (tilingData.block_dim_ == kHardwareCoreNum && ub_size < ub_ratio_10) {
@@ -1586,7 +1434,7 @@ int main() {
 const std::string kEqualPriorityTilingMain = R"(
 #include <iostream>
 #include <vector>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 struct TestCase {
@@ -1618,7 +1466,7 @@ int main() {
     std::cout << "\n========== Testing: " << tc.name << " ==========" << std::endl;
     std::cout << "Input: S0=" << tc.S0 << ", S1=" << tc.S1 << ", ub_size=" << tc.ub_size << std::endl;
 
-    if (GetTiling(tilingData)) {
+    if (GetTiling(tilingData, -1, nullptr)) {
       std::cout << "S0: " << tilingData.get_s0t_size() << std::endl;
       std::cout << "S1: " << tilingData.get_s1t_size() << std::endl;
       std::cout << "q0_size: " << tilingData.get_q0_size() << std::endl;
@@ -1650,7 +1498,7 @@ int main() {
 // fused_schedule_result_reuse_schedule_group的raw string常量
 const std::string kFusedReuseScheduleGroupMain = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 void PrintResult(graph_ndTilingData& tilingData) {
@@ -1670,7 +1518,7 @@ int main() {
   tilingData.graph0_result1_g0_tiling_data.set_ND2(1024);
   tilingData.graph1_result0_g0_tiling_data.set_S0(1024);
   tilingData.graph1_result1_g0_tiling_data.set_S1(1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -1682,7 +1530,7 @@ int main() {
 
 const std::string kDiffSearchAxisMain = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 void PrintResult(graph_ndTilingData& tilingData) {
@@ -1698,7 +1546,7 @@ int main() {
   tilingData.set_ub_size(245760);
   tilingData.graph0_result0_g0_tiling_data.set_ND(1024);
   tilingData.graph0_result1_g0_tiling_data.set_ND2(1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -1710,7 +1558,7 @@ int main() {
 
 const std::string kScoreSameScheduleMain = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 void PrintResult(graph_ndTilingData& tilingData) {
@@ -1726,7 +1574,7 @@ int main() {
   tilingData.set_block_dim(64);
   tilingData.set_ub_size(245760);
   tilingData.set_ND2(1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "tiling func execute failed." << std::endl;
@@ -1738,7 +1586,7 @@ int main() {
 
 const std::string kPromptAlignedMain = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 void PrintResult(graph_ndTilingData& tilingData) {
@@ -1753,7 +1601,7 @@ int main() {
   tilingData.set_block_dim(64);
   tilingData.set_ub_size(245760);
   tilingData.set_ND2(1025);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -1784,6 +1632,7 @@ void GenerateTilingCodeForEmptyTensor(const std::string &op_name,
   ascir::FusedScheduledResult fused_scheduled_result;
   fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(schedule_results);
   auto res = GenTilingImplAutoFuseV3(op_name, fused_scheduled_result, options, tiling_funcs, true);
+  SaveConcatTilingApi(tiling_funcs);
   std::string tiling_func;
   CombineTilings(tiling_funcs, tiling_func);
   EXPECT_EQ(res, true);
@@ -1805,7 +1654,7 @@ void CompileAndRunEmptyTensorTest(const std::string &graph_name) {
   oss.open("tiling_func_main_concat_empty.cpp", std::ios::out);
   const std::string kRunTilingFuncMainLocal = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 int main() {
@@ -1814,7 +1663,7 @@ int main() {
   tilingData.set_ub_size(1024);
   tilingData.set_ND(0);
 
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     std::cout << "GetTiling success with empty tensor ND=0" << std::endl;
     return 0;
   } else {
@@ -1915,6 +1764,7 @@ af::Status GenTilingImpl(std::vector<ascir::ScheduledResult> &schedule_results) 
   ascir::FusedScheduledResult fused_scheduled_result;
   fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(schedule_results);
   auto res = GenTilingImplAutoFuseV3(op_name, fused_scheduled_result, options, tiling_funcs, true);
+  SaveConcatTilingApi(tiling_funcs);
   GE_ASSERT_EQ(res, true);
   GE_ASSERT_EQ(att::test_common::GenTilingCodeToFile(op_name, tiling_funcs, fused_scheduled_result, options,
                                                      kFirstGraphName + "TilingData"),
@@ -1952,14 +1802,19 @@ TEST_F(STestGenConcat, construct_single_case_for_multi_tile) {
   std::ofstream oss;
   oss.open("tiling_func_main_concat.cpp", std::ios::out);
   const std::string kRunTilingFuncMainLocal = R"(
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 void PrintResult(case0TilingData& tilingData) {
   std::cout << "====================================================" << std::endl;
   MY_ASSERT_EQ(tilingData.get_block_dim(), 1);
-  MY_ASSERT_EQ(tilingData.get_s0t_size(), 16); // s1t为Store输出的轴，所以不占UB，可以切最大
-  MY_ASSERT_EQ(tilingData.get_s1t_size(), 16); // ub为1024，类型是fp32, 每个元素4字节，所以s0t_size为256
-  MY_ASSERT_EQ(tilingData.get_q0_size() > 0, true);
+  // FP32 buffers aligned to 32 bytes: q0 = 32*ceil(s1/8), q1 = 32*ceil(s0*s1/8).
+  // (16,16) needs 64+1024=1088 bytes; (16,15) needs 64+960=1024 bytes.
+  MY_ASSERT_EQ(tilingData.get_s0t_size(), 16);
+  MY_ASSERT_EQ(tilingData.get_s1t_size(), 15);
+  MY_ASSERT_EQ(tilingData.get_q0_size(), 64);
+  MY_ASSERT_EQ(tilingData.get_q1_size(), 960);
+  MY_ASSERT_EQ(tilingData.get_q0_size() + tilingData.get_q1_size(), tilingData.get_ub_size());
+  MY_ASSERT_EQ((32 * ((16 + 7) / 8) + 32 * ((16 * 16 + 7) / 8)) > tilingData.get_ub_size(), true);
   std::cout << "====================================================" << std::endl;
 }
 
@@ -1969,7 +1824,7 @@ int main() {
   tilingData.set_ub_size(1024);
   tilingData.set_S1(1024);
   tilingData.set_S0(1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -2034,7 +1889,7 @@ TEST_F(STestGenConcat, tque_tbuf_case1) {
   std::ofstream oss;
   oss.open("tiling_func_main_concat.cpp", std::ios::out);
   const std::string kRunTilingFuncMainLocal = R"(
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 void PrintResult(case0TilingData& tilingData) {
   std::cout << "====================================================" << std::endl;
@@ -2060,7 +1915,7 @@ int main() {
   tilingData.set_ub_size(245760);
   tilingData.graph0_result0_g0_tiling_data.set_ND(1024);
   tilingData.graph0_result1_g0_tiling_data.set_S0(1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -2087,7 +1942,7 @@ TEST_F(STestGenConcat, auto_tuning_accuracy_level_0) {
   std::ofstream oss;
   oss.open("tiling_func_main_concat.cpp", std::ios::out);
   const std::string kRunTilingFuncMainLocal = R"(
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 void PrintResult(case0TilingData& tilingData) {
   std::cout << "====================================================" << std::endl;
@@ -2102,7 +1957,7 @@ int main() {
   tilingData.set_ub_size(256 * 1024);
   tilingData.graph0_result0_g0_tiling_data.set_ND(1024 * 1024);
   tilingData.graph0_result1_g0_tiling_data.set_S0(1024 * 1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -2129,7 +1984,7 @@ TEST_F(STestGenConcat, auto_tuning_accuracy_level_1) {
   std::ofstream oss;
   oss.open("tiling_func_main_concat.cpp", std::ios::out);
   const std::string kRunTilingFuncMainLocal = R"(
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 void PrintResult(case0TilingData& tilingData) {
   std::cout << "====================================================" << std::endl;
@@ -2144,7 +1999,7 @@ int main() {
   tilingData.set_ub_size(256 * 1024);
   tilingData.graph0_result0_g0_tiling_data.set_ND(1024 * 1024);
   tilingData.graph0_result1_g0_tiling_data.set_S0(1024 * 1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -2184,6 +2039,7 @@ af::Status ConstructConcatTwoTilingCaseS0S1() {
   fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(
       std::vector<ascir::ScheduledResult>{schedule_result});
   GE_ASSERT_EQ(GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, true), true);
+  SaveConcatTilingApi(tiling_funcs);
   GE_ASSERT_EQ(att::test_common::GenTilingCodeToFile("Concat", tiling_funcs, fused_scheduled_result, options,
                                                      kFirstName + "TilingData"),
                af::SUCCESS);
@@ -2191,13 +2047,29 @@ af::Status ConstructConcatTwoTilingCaseS0S1() {
   ret = autofuse::test::CopyStubFiles(TOP_DIR, "autofuse/tests/st/att/testcase/stub/");
   GE_ASSERT_TRUE(ret == 0);
   std::ofstream oss("tiling_func_main_concat.cpp", std::ios::out);
-  oss << CreateTilingMainFunc("Concat", "64", "245760", {{"S0", "1024"}, {"S1", "1024"}});
+  oss << R"(
+#include <iostream>
+#include "Concat_tiling_api.h"
+using namespace optiling;
+int main() {
+  ConcatTilingData tilingData;
+  tilingData.set_block_dim(64);
+  tilingData.set_ub_size(245760);
+  tilingData.set_S0(1024);
+  tilingData.set_S1(1024);
+  if (!GetTiling(tilingData, -1, nullptr)) {
+    return -1;
+  }
+  std::cout << "get_tiling_key = " << tilingData.get_tiling_key() << std::endl;
+  return 0;
+}
+)";
   return af::SUCCESS;
 }
 
 const std::string kS0S1TilingTestMain = R"(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 void PrintResult(graph_ndTilingData& tilingData) {
@@ -2213,7 +2085,7 @@ int main() {
   tilingData.set_ub_size(245760);
   tilingData.graph0_result0_g0_tiling_data.set_S0(1024);
   tilingData.graph0_result1_g0_tiling_data.set_S1(1024);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -2253,6 +2125,7 @@ af::Status ConstructTwoScheduleResultS0S1() {
   ascir::FusedScheduledResult fused_scheduled_result;
   fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(schedule_results);
   GE_ASSERT_TRUE(GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, true));
+  SaveConcatTilingApi(tiling_funcs);
   GE_ASSERT_EQ(att::test_common::GenTilingCodeToFile("Concat", tiling_funcs, fused_scheduled_result, options,
                                                      graph_name + "TilingData"),
                af::SUCCESS);
@@ -2299,6 +2172,7 @@ TEST_F(STestGenConcat, case_axes_reorder) {
   EXPECT_EQ(ret, 0);
 
   ret = std::system("./tiling_func_main_concat");
+  EXPECT_EQ(ret, 0);
 }
 
 TEST_F(STestGenConcat, case_axes_reorder_got_static_shape) {
@@ -2362,7 +2236,7 @@ void STestGenConcat::VerifyGroupCacheBehavior() {
 
   // Test 6: ND=4096 Operator Cache HIT
   EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("./info.log", "[Operator Cache] HIT! key=[4096]"), true);
-  EXPECT_TRUE(ResultCheckerUtils::IsFileContainsString("./info.log", "Operator level cache hit, input_shapes[4096]"));
+  // The current cache-hit event is checked above; the removed legacy message is no longer emitted.
 }
 
 void STestGenConcat::VerifyStaticShapeCacheBehavior() {
@@ -2381,8 +2255,7 @@ void STestGenConcat::VerifyStaticShapeCacheBehavior() {
                                                        "std::array<uint32_t, kInputShapeSize> input_shapes = {};"));
 
   // 验证生成的代码包含算子级缓存查询（静态shape）
-  EXPECT_TRUE(
-      ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp", "Operator level cache hit (static shape)"));
+  EXPECT_TRUE(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp", "if (cache_hit) {"));
 }
 
 void STestGenConcat::BuildSingleGraphToScheduleGroup(ascir::AscGraph &graph, ascir::ScheduleGroup &schedule_group,
@@ -2418,6 +2291,7 @@ void STestGenConcat::GenerateTilingFunctionAndWriteToFile(const std::string &op_
                                                           std::map<std::string, std::string> &options) {
   std::map<std::string, std::string> tiling_funcs;
   auto res = GenTilingImplAutoFuseV3(op_name, fused_scheduled_result, options, tiling_funcs, true);
+  SaveConcatTilingApi(tiling_funcs);
   EXPECT_EQ(res, true);
 
   std::string tiling_func;
@@ -2479,7 +2353,7 @@ void STestGenConcat::CompileAndRunTilingTest(const std::string &output_file) {
 
 const std::string STestGenConcat::kStaticShapeCacheTestMain = R"RAW(
 #include <iostream>
-#include "Concat_tiling_data.h"
+#include "Concat_tiling_api.h"
 using namespace optiling;
 
 void PrintResult(graph_static_cacheTilingData& tilingData) {
@@ -2495,15 +2369,22 @@ int main() {
   tilingData.set_ub_size(245760);
 
   // First call: cache miss, normal solve
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "First tiling func execute failed." << std::endl;
     return -1;
   }
 
-  // Second call: cache should hit (static shape uses empty key)
-  if (GetTiling(tilingData)) {
+  // Restore the original resource request: the first solve overwrites block_dim.
+  const auto expected_block_dim = tilingData.get_block_dim();
+  tilingData.set_block_dim(64);
+  tilingData.set_ub_size(245760);
+  // Second call: identical shape and resources must hit the cache.
+  if (GetTiling(tilingData, -1, nullptr)) {
+    if (tilingData.get_block_dim() != expected_block_dim || tilingData.get_ub_size() != 245760) {
+      return -1;
+    }
     std::cout << "Second call success - cache hit" << std::endl;
   } else {
     std::cout << "Second tiling func execute failed." << std::endl;
@@ -2948,6 +2829,9 @@ TEST_F(STestGenConcat, static_shape_cache_support) {
   CompileAndRunTilingTest();
   EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("./info.log", "Static shape cache test"), true);
   EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("./info.log", "Second call success"), true);
+  EXPECT_TRUE(ResultCheckerUtils::IsFileContainsString("./info.log", "[Operator Cache] MISS! key=[]"));
+  EXPECT_TRUE(ResultCheckerUtils::IsFileContainsString("./info.log", "[Operator Cache] SAVE SUCCESS: key=[]"));
+  EXPECT_TRUE(ResultCheckerUtils::IsFileContainsString("./info.log", "[Operator Cache] HIT! key=[]"));
 }
 
 // 用例描述：验证多group场景下enable_group_parallel_optimize=true时的代码生成
@@ -2989,13 +2873,18 @@ TEST_F(STestGenConcat, multi_group_with_enable_group_parallel_optimize) {
   // 验证生成的代码包含core_num参数传递
   EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp", "bool FindPerfBetterTilingbyCaseId"),
             true);
-  EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp", ", uint32_t core_num) {"), true);
+  EXPECT_EQ(ResultCheckerUtils::IsFileContainsString(
+                "Concat_tiling_func.cpp",
+                ", uint32_t core_num, const char *sub_case_tag, const char *&selected_sub_case_tag) {"),
+            true);
   EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp", "bool GetTilingCaseScoreFunc"), true);
   EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp",
                                                      "uint32_t corenum = tiling_data.get_block_dim()"),
             true);
   EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp", ", corenum);"), true);
-  EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp", ", core_num);"), true);
+  EXPECT_EQ(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp",
+                                                     ", core_num, tiling.sub_case_tag, selected_sub_case_tag);"),
+            true);
 
   auto ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);

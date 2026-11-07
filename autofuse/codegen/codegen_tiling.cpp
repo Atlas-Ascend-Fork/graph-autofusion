@@ -643,8 +643,10 @@ std::map<std::string, std::string> TilingLib::GenerateForInductor(
   if (!is_cube_fused_scheduled) {
     GenInductorTopnSources(elemwise_schedule_result, ss, tiling_file_name_to_content);
   }
-  // 生成GenConstTilingData方法（对所有场景生成，包括CV fusion静态shape）
-  ss << TilingData("Autofuse").GenerateConst(fused_schedule_result) << std::endl;
+  // The non-CV constant wrapper calls the shape-free frontend tiling signature.
+  if (is_cube_fused_scheduled || IsFrontendStaticSchedResult(elemwise_schedule_result)) {
+    ss << TilingData("Autofuse").GenerateConst(fused_schedule_result) << std::endl;
+  }
   if (is_cube_fused_scheduled) {
     tiling_file_name_to_content[kCubeKernelTilingWrapperHpp] = kCubeKernelTilingWrapperHppValue;
     tiling_file_name_to_content[kCubeKernelTilingWrapperCpp] = kCubeKernelTilingWrapperInclude;
