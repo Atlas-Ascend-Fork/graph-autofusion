@@ -223,7 +223,7 @@ bool SuperKernelGraph::AddNode(std::unique_ptr<SuperKernelBaseNode> node) {
 bool SuperKernelGraph::AddMemoryAssociateWrite(uint64_t eventId, SuperKernelBaseNode *node) {
   auto &memoryInfo = memoryToNodes[eventId];
   uint64_t nodeId = node->GetNodeId();
-  if (memoryInfo.writeNodeIdList.find(nodeId) != memoryInfo.waitNodeIdList.end()) {
+  if (memoryInfo.writeNodeIdList.find(nodeId) != memoryInfo.writeNodeIdList.end()) {
     // Get the node information for duplicate memory write node binding
     SuperKernelBaseNode *existingNode = GetNodeById(nodeId);
     SK_LOGE("memory event 0x%lx already associated with this node, cannot reassociate!", eventId);
@@ -1017,18 +1017,6 @@ bool SuperKernelGraph::InitSKGraph() {
     return false;
   }
 
-  SK_LOGI("Total nodes added: %zu, total streams: %zu", graphMap.size(), streams.size());
-  SK_LOGI("Starting UpdateNodeScopeBitFlags");
-  if (!UpdateNodeScopeBitFlags()) {
-    SK_LOGE("Failed to update node scope bit flags: scope begin and end nodes are not matched");
-    return false;
-  }
-  SK_LOGI("UpdateNodeScopeBitFlags completed");
-
-  SK_LOGI("Starting ParseOriginalScopes");
-  ParseOriginalScopes();
-  SK_LOGI("ParseOriginalScopes completed");
-
   SK_LOGI("Starting PostProcessMemoryNode");
   bool flag = PostProcessMemoryNode();
   SK_LOGI("PostProcessMemoryNode completed");
@@ -1043,6 +1031,18 @@ bool SuperKernelGraph::InitSKGraph() {
   SK_LOGI("Starting AddEventAssociate");
   AddEventAssociate();
   SK_LOGI("AddEventAssociate completed");
+
+  SK_LOGI("Total nodes added: %zu, total streams: %zu", graphMap.size(), streams.size());
+  SK_LOGI("Starting UpdateNodeScopeBitFlags");
+  if (!UpdateNodeScopeBitFlags()) {
+    SK_LOGE("Failed to update node scope bit flags: scope begin and end nodes are not matched");
+    return false;
+  }
+  SK_LOGI("UpdateNodeScopeBitFlags completed");
+
+  SK_LOGI("Starting ParseOriginalScopes");
+  ParseOriginalScopes();
+  SK_LOGI("ParseOriginalScopes completed");
 
   SK_LOGI("Successfully initialized SuperKernel graph with %zu nodes and %zu streams", graphMap.size(), streams.size());
 
