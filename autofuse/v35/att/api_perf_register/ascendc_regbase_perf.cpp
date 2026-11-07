@@ -515,6 +515,7 @@ af::Status AddTransposeDim4Inner3Perf(const NodeDetail &node_info, const std::st
 // The table retains a head + repeat cost; b64 Gather lowers to two b32 gathers.
 constexpr uint64_t kTransposeRegisterBytes = 256U;
 constexpr uint64_t kTransposeBankSpanBytes = 128U;
+constexpr uint64_t kTransposeB16MinBankCost = 2U;
 
 struct TransposeUnitOuterParams {
   double index_head;
@@ -595,7 +596,8 @@ Expr ApplyTransposeUnitOuterModel(const NodeDetail &node_info, const Expr &legac
                    CreateExpr(data_size == 8U ? 4U : 2U);
   if (data_size == 2U) {
     const Expr row_group = CreateExpr(kTransposeBankSpanBytes / data_size);
-    bank_cost = af::sym::Max(CreateExpr(2), bank_cost * af::sym::Min(params.output_dims.back(), row_group) / row_group);
+    bank_cost = af::sym::Max(CreateExpr(kTransposeB16MinBankCost),
+                             bank_cost * af::sym::Min(params.output_dims.back(), row_group) / row_group);
   }
   if (data_size == 4U || data_size == 8U) {
     // A 128B bank group consumes 32 b32 lanes. Short b32 rows and masked
