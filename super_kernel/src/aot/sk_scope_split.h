@@ -412,7 +412,7 @@ class ParallelScopeDeadlockRefinePass : public ScopeSplitPass {
  private:
   void SplitScopeAtRiskWait(SuperKernelScopeInfo &scope, SuperKernelBaseNode &waitNode,
                             std::vector<SuperKernelScopeInfo> &splitScopes,
-                            const ResourceConflictInfo &conflictInfo = {});
+                            const ResourceConflictInfo &conflictInfo = {}, bool splitAllWaits = false);
   ScopeDeadlockDetector scopeLockDetector_;
 };
 
