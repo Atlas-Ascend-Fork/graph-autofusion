@@ -1089,55 +1089,15 @@ bool ApplyEarlyStartSyncForQueue(const std::vector<SuperKernelBaseNode *> &tasks
               to_string(targetQueue), curIdx, tasks[curIdx]->GetNodeId());
     }
   }
-  if (kernelInfo.capBits.earlyStartWaitFlag && lastIdx != static_cast<size_t>(INVALID_TASK_ID)) {
-    auto &prevSyncInfo = taskSyncInfos[lastIdx];
-    auto &prevSendInfo = isAic ? prevSyncInfo.cubSendInfo : prevSyncInfo.vecSendInfo;
+  if (kernelInfo.capBits.earlyStartWaitFlag) {
     auto &curRecvInfo = isAic ? curSyncInfo.cubRecvInfo : curSyncInfo.vecRecvInfo;
-    if (prevSendInfo.size() > 1) {
-      SK_LOGE(
-          "ApplyEarlyStartSyncPass failed: slot=prev.%s has multiple syncs, "
-          "prevTask[%zu](nodeId=%lu), curTask[%zu](nodeId=%lu), %sSize=%zu",
-          sendInfoName, lastIdx, tasks[lastIdx]->GetNodeId(), curIdx, tasks[curIdx]->GetNodeId(), sendInfoName,
-          prevSendInfo.size());
-      return false;
-    }
+    curSyncInfo.earlyStartInfo.relatedWaitNode = tasks[curIdx];
     if (curRecvInfo.size() > 1) {
       SK_LOGE(
           "ApplyEarlyStartSyncPass failed: slot=cur.%s has multiple syncs, "
-          "prevTask[%zu](nodeId=%lu), curTask[%zu](nodeId=%lu), %sSize=%zu",
-          recvInfoName, lastIdx, tasks[lastIdx]->GetNodeId(), curIdx, tasks[curIdx]->GetNodeId(), recvInfoName,
-          curRecvInfo.size());
+          "curTask[%zu](nodeId=%lu), %sSize=%zu",
+          recvInfoName, curIdx, tasks[curIdx]->GetNodeId(), recvInfoName, curRecvInfo.size());
       return false;
-    }
-    if (isAic) {
-      prevSyncInfo.earlyStartInfo.nextAicRelatedNode = tasks[curIdx];
-    } else {
-      prevSyncInfo.earlyStartInfo.nextAivRelatedNode = tasks[curIdx];
-    }
-    curSyncInfo.earlyStartInfo.relatedWaitNode = tasks[curIdx];
-    auto prevCrossIt = prevSyncInfo.crossSyncInfo.find(queueTypeId);
-    if (prevCrossIt != prevSyncInfo.crossSyncInfo.end() && prevCrossIt->second == selfSyncDir) {
-      // case prev task not enable early-start
-      prevSyncInfo.earlyStartInfo.ApplySyncMask(selfSetMask);
-      prevSyncInfo.earlyStartInfo.ApplySyncMask(selfWaitMask);
-      curSyncInfo.earlyStartInfo.ApplyFuncMask(selfWaitMask);
-      prevSyncInfo.crossSyncInfo.erase(prevCrossIt);
-      SK_LOGI(
-          "early-start rewrite: slot=prev.crossSyncInfo[%s], prevTask[%zu](nodeId=%lu) -> "
-          "curTask[%zu](nodeId=%lu), self sync",
-          to_string(targetQueue), lastIdx, tasks[lastIdx]->GetNodeId(), curIdx, tasks[curIdx]->GetNodeId());
-    } else if (prevSyncInfo.earlyStartInfo.CheckSyncMask(selfSetMask)) {
-      // case prev task already enable early-start, but not set wait config
-      curSyncInfo.earlyStartInfo.ApplyFuncMask(selfWaitMask);
-      SK_LOGI("early-start attach: slot=prev.earlyStartInfo.syncConfig, curTask[%zu](nodeId=%lu), %s wait", curIdx,
-              tasks[curIdx]->GetNodeId(), to_string(targetQueue));
-    }
-    if (!prevSendInfo.empty()) {
-      SK_LOGI("early-start absorb: slot=prev.%s, prevTask[%zu](nodeId=%lu), curTask[%zu](nodeId=%lu)", sendInfoName,
-              lastIdx, tasks[lastIdx]->GetNodeId(), curIdx, tasks[curIdx]->GetNodeId());
-      prevSyncInfo.earlyStartInfo.ApplySyncMask(crossSendMask);
-      curSyncInfo.earlyStartInfo.ApplyFuncMask(crossSendMask);
-      prevSendInfo.clear();
     }
     if (!curRecvInfo.empty()) {
       SK_LOGI("early-start absorb: slot=cur.%s, curTask[%zu](nodeId=%lu)", recvInfoName, curIdx,
@@ -1145,6 +1105,47 @@ bool ApplyEarlyStartSyncForQueue(const std::vector<SuperKernelBaseNode *> &tasks
       curSyncInfo.earlyStartInfo.ApplySyncMask(crossRecvMask);
       curSyncInfo.earlyStartInfo.ApplyFuncMask(crossRecvMask);
       curRecvInfo.clear();
+    }
+    if (lastIdx != static_cast<size_t>(INVALID_TASK_ID)) {
+      auto &prevSyncInfo = taskSyncInfos[lastIdx];
+      auto &prevSendInfo = isAic ? prevSyncInfo.cubSendInfo : prevSyncInfo.vecSendInfo;
+      if (prevSendInfo.size() > 1) {
+        SK_LOGE(
+            "ApplyEarlyStartSyncPass failed: slot=prev.%s has multiple syncs, "
+            "prevTask[%zu](nodeId=%lu), curTask[%zu](nodeId=%lu), %sSize=%zu",
+            sendInfoName, lastIdx, tasks[lastIdx]->GetNodeId(), curIdx, tasks[curIdx]->GetNodeId(), sendInfoName,
+            prevSendInfo.size());
+        return false;
+      }
+      if (isAic) {
+        prevSyncInfo.earlyStartInfo.nextAicRelatedNode = tasks[curIdx];
+      } else {
+        prevSyncInfo.earlyStartInfo.nextAivRelatedNode = tasks[curIdx];
+      }
+      auto prevCrossIt = prevSyncInfo.crossSyncInfo.find(queueTypeId);
+      if (prevCrossIt != prevSyncInfo.crossSyncInfo.end() && prevCrossIt->second == selfSyncDir) {
+        // case prev task not enable early-start
+        prevSyncInfo.earlyStartInfo.ApplySyncMask(selfSetMask);
+        prevSyncInfo.earlyStartInfo.ApplySyncMask(selfWaitMask);
+        curSyncInfo.earlyStartInfo.ApplyFuncMask(selfWaitMask);
+        prevSyncInfo.crossSyncInfo.erase(prevCrossIt);
+        SK_LOGI(
+            "early-start rewrite: slot=prev.crossSyncInfo[%s], prevTask[%zu](nodeId=%lu) -> "
+            "curTask[%zu](nodeId=%lu), self sync",
+            to_string(targetQueue), lastIdx, tasks[lastIdx]->GetNodeId(), curIdx, tasks[curIdx]->GetNodeId());
+      } else if (prevSyncInfo.earlyStartInfo.CheckSyncMask(selfSetMask)) {
+        // case prev task already enable early-start, but not set wait config
+        curSyncInfo.earlyStartInfo.ApplyFuncMask(selfWaitMask);
+        SK_LOGI("early-start attach: slot=prev.earlyStartInfo.syncConfig, curTask[%zu](nodeId=%lu), %s wait", curIdx,
+                tasks[curIdx]->GetNodeId(), to_string(targetQueue));
+      }
+      if (!prevSendInfo.empty()) {
+        SK_LOGI("early-start absorb: slot=prev.%s, prevTask[%zu](nodeId=%lu), curTask[%zu](nodeId=%lu)", sendInfoName,
+                lastIdx, tasks[lastIdx]->GetNodeId(), curIdx, tasks[curIdx]->GetNodeId());
+        prevSyncInfo.earlyStartInfo.ApplySyncMask(crossSendMask);
+        curSyncInfo.earlyStartInfo.ApplyFuncMask(crossSendMask);
+        prevSendInfo.clear();
+      }
     }
   }
   lastIdx = curIdx;
