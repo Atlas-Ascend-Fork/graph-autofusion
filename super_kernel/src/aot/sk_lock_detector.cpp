@@ -1571,8 +1571,8 @@ bool ScopeDeadlockDetector::CheckSelectedScopeResourceBranches(
       if (node->GetNodeType() != SkNodeType::NODE_WAIT || waitResources_.ShouldBypassValueWaitDeadlock(*node)) {
         continue;
       }
-      SK_LOGI("[ParallelResource] Checking scope combination %s: scope=%u, wait=%lu",
-              FormatScopeIds(selected).c_str(), scopeId, node->GetNodeId());
+      SK_LOGI("[ParallelResource] Checking scope combination %s: scope=%u, wait=%lu", FormatScopeIds(selected).c_str(),
+              scopeId, node->GetNodeId());
       if (!waitResources_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents, &ranges,
                                                     conflictInfo)) {
         riskWaitId = node->GetNodeId();
