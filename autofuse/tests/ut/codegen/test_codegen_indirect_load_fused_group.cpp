@@ -106,8 +106,9 @@ class AscBackendGraph {
 };
 
 // 双 gather 共享 index 形态：两路独立值表 + 共享 index Load，IL_0/IL_1 → Add → Store。
-// 静态 shape + int32 index → uint32 offset → fused 发射档位。
-std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph() {
+// 静态 shape + int32 index → uint32 offset → fused 发射档位。with_post_reduce 时归并后
+// 接尾轴 Sum 共享 AR 后置 Reduce（L3 UB 归并 + 逐 tile 调用形态）。
+std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_post_reduce = false) {
   auto graph = std::make_shared<af::AscGraph>("fused_group_codegen_ut_graph");
   const af::Expression rows = graph->CreateSizeVar(8L);
   const af::Expression width = graph->CreateSizeVar(16L);
@@ -234,12 +235,29 @@ std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph() {
 
   af::ascir_op::Store store("store");
   graph->AddNode(store);
-  store.x = add.y;
   store.y.dtype = ge::DT_FLOAT16;
   store.attr.sched.axis = axes;
   *store.y.axis = axes;
-  *store.y.repeats = output;
-  *store.y.strides = output_strides;
+  if (with_post_reduce) {
+    // 共享 AR 后置 Reduce（尾轴）：归约视图与生成器侧组图的约定一致（重复数坍缩尾轴、
+    // 步长 1/0）。
+    af::ascir_op::Sum sum("sum");
+    graph->AddNode(sum);
+    sum.x = add.y;
+    sum.y.dtype = ge::DT_FLOAT16;
+    sum.attr.sched.axis = axes;
+    *sum.y.axis = axes;
+    *sum.y.repeats = {rows, One};
+    *sum.y.strides = {One, Zero};
+    sum.attr.api.compute_type = af::ComputeType::kComputeReduce;
+    store.x = sum.y;
+    *store.y.repeats = {rows, One};
+    *store.y.strides = {One, Zero};
+  } else {
+    store.x = add.y;
+    *store.y.repeats = output;
+    *store.y.strides = output_strides;
+  }
 
   af::ascir_op::Output output_node("output");
   graph->AddNode(output_node);
@@ -289,6 +307,43 @@ TEST(IndirectLoadCodegenFusedGroupTest, GeneratesFusedSimtGroupKernel) {
   codegen::CodegenResult result;
   ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
   EXPECT_NE(result.kernel.find("// IndirectLoad SIMT Fused"), std::string::npos);
+}
+
+TEST(IndirectLoadCodegenFusedGroupTest, PostReduceFusedSimtGroupUsesPerTileInvocation) {
+  // [组员调用形态] 共享 AR 后置 Reduce 的 fused 组（L3 UB 归并、boundary=first_reduce、
+  // outer=G/inner=R）：fused 调用不整核提升——actual_size 为 tile 元素计数（k 行 × R 内
+  // 元素），offset 为行单位 (block_dim_offset + Tb) × tile 元素数；整核形态的
+  // <Tb>_loop_size 实参不得出现。锁 GetPostReduceConsumer 唯一判据的形态选择。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+
+  AscBackendGraph backend("fused_group_post_reduce_codegen_ut_host", {ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_INT32},
+                          {ge::DT_FLOAT16});
+  const auto graph = backend.Finalize(BuildSharedIndexDualGatherGraph(true));
+  ASSERT_NE(graph, nullptr);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
+  ascir::FusedScheduledResult scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);
+
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
+  ASSERT_NE(result.kernel.find("// IndirectLoad SIMT Fused"), std::string::npos);
+  EXPECT_NE(result.kernel.find("UB merge"), std::string::npos);
+  const auto call_pos = result.kernel.find("AscendC::IndirectLoadSimtFused<FusedBody>(ftgt, fctx");
+  ASSERT_NE(call_pos, std::string::npos);
+  const auto call_end = result.kernel.find(");", call_pos);
+  ASSERT_NE(call_end, std::string::npos);
+  const std::string call_text = result.kernel.substr(call_pos, call_end - call_pos);
+  EXPECT_EQ(call_text.find("_loop_size"), std::string::npos)
+      << "post-reduce fused group must use per-tile element count, not whole-core loop size.";
+  EXPECT_NE(call_text.find(")) * "), std::string::npos)
+      << "per-tile offset must be (block_dim_offset + Tb) * tile element count.";
 }
 
 }  // namespace

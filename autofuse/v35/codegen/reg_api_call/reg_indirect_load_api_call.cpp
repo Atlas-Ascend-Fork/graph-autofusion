@@ -2181,11 +2181,41 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
       ss << local_target_alloc;
     }
     af::Expression local_element_count;
-    GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
-    actual_size_expr = tpipe.tiler.ActualSize(local_element_count);
-    const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
-    output_offset_expr = "(static_cast<" + offset_type + ">(block_dim_offset) + static_cast<" + offset_type + ">(" +
-                         outer_tb_var + ")) * " + PromoteSizeExpr(local_tile_size_expr, offset_type);
+    // [组员调用形态与表达式同分支绑定] 判据与 codegen_kernel_loop 的提升判据同源
+    // （GetPostReduceConsumer，仅当前图）：无共享 Reduce 的组员（组路径 boundary=rank、
+    // 整空间合并轴）被提升为一次调用覆盖整核——对齐裸 gather 形态（block_dim_offset
+    // 单位=元素、actual_size=块元素数）；有共享 Reduce 的组员（boundary=first_reduce、
+    // outer=G/inner=R）不被提升、逐 tile 调用——(block_dim_offset + Tb) 单位=行，×tile
+    // 元素数为元素偏移。不叠加 metadata 的 has_post_reduce_（调度期快照，组员恒 false，
+    // 两份图副本存在漂移可能——以当前图的 GetPostReduceConsumer 为唯一权威判据，与
+    // codegen_kernel_loop:908-922 的提升条件、fused 分支的判定保持一致）。
+    const bool has_post_reduce_consumer =
+        node != nullptr && ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr;
+    // [判据漂移检测] 当前图的 GetPostReduceConsumer 是唯一权威判据，调度期 metadata 的
+    // has_post_reduce_ 理论上应与之同值（调度器与 codegen 看同一张结构图——分区
+    // (PartitionSkGraph 含 SK 段 SIMT 化) 与 workspace 化均发生在调度前，调度后仅
+    // ChangeStartingOutputToWorkspace 改图且不影响 IL→Reduce 可达性）。若不一致说明
+    // 上述前提被破坏（图副本结构漂移），打 WARNING 供排查，不改变行为。多 gather 组员
+    // 例外：成员计划收窄使 metadata.has_post_reduce_ 恒为 false（共享归并/输出链不进
+    // 组员 SIMT 计划，见 BuildSimtLoweringMetadata），与当前图判据必然不等——组员不参与
+    // 比较（形态判定本就以当前图判据为唯一权威），否则该 WARN 对全部共享 Reduce 组
+    // 必然误报，淹没真实漂移信号。
+    if (!ascgen_utils::indirect_load::IsSimtGroupMember(node) && has_post_reduce_ != has_post_reduce_consumer) {
+      GELOGW(
+          "[IndirectLoad] Post-reduce judgement drift between schedule and codegen, node[%s]: "
+          "metadata[%d] vs current graph[%d].",
+          node_name.c_str(), has_post_reduce_ ? 1 : 0, has_post_reduce_consumer ? 1 : 0);
+    }
+    if (!has_post_reduce_consumer) {
+      actual_size_expr = outer_tb_var + "_loop_size";
+      output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
+    } else {
+      GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
+      actual_size_expr = tpipe.tiler.ActualSize(local_element_count);
+      const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
+      output_offset_expr = "(static_cast<" + offset_type + ">(block_dim_offset) + static_cast<" + offset_type + ">(" +
+                           outer_tb_var + ")) * " + PromoteSizeExpr(local_tile_size_expr, offset_type);
+    }
     if (prepass_plan != nullptr) {
       // [SIMT index 闭包预计算] 行/槽寻址参数与 Store 行布局一致；scratch 槽宽与
       // CalcTmpBufSize 的申请同源（Align(inner*4,32B)/4 == Align(inner,8)）。
@@ -2955,7 +2985,24 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
     ss << "};\n";
     std::string fused_actual_size_expr;
     std::string fused_output_offset_expr;
-    if (merge_info.register_merge) {
+    // [L3 调用形态与表达式同分支绑定] 判据与 codegen_kernel_loop 的提升判据同源
+    // （GetPostReduceConsumer）：无共享 Reduce 的 L3（组路径 boundary=rank、整空间合并轴、
+    // 恒提升）——一次调用覆盖整核，与 L2 同形态（block_dim_offset 单位=元素、actual_size=
+    // 块元素数，提升作用域内 <Tb>_loop_size 与 block_dim_offset 均已声明）；有共享 Reduce 的
+    // L3（boundary=first_reduce、outer=G/inner=R）不被提升、逐 tile 调用——
+    // (block_dim_offset + Tb) 单位=行，×tile 元素数（成员 value tensor 的向量化元素数）为
+    // 元素偏移，与单 gather post-Reduce 的 local-target 形态同构。
+    const bool fused_has_post_reduce_consumer =
+        node != nullptr && ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr;
+    // 与单路调用的漂移检测同口径：组员（含 fused primary）的 metadata.has_post_reduce_
+    // 被成员计划收窄恒置 false，不参与比较（见 GenerateSimtInvocation 处注释）。
+    if (!ascgen_utils::indirect_load::IsSimtGroupMember(node) && has_post_reduce_ != fused_has_post_reduce_consumer) {
+      GELOGW(
+          "[IndirectLoad] Fused post-reduce judgement drift between schedule and codegen, node[%s]: "
+          "metadata[%d] vs current graph[%d].",
+          node_name.c_str(), has_post_reduce_ ? 1 : 0, fused_has_post_reduce_consumer ? 1 : 0);
+    }
+    if (merge_info.register_merge || !fused_has_post_reduce_consumer) {
       fused_actual_size_expr = outer_tb_var + "_loop_size";
       fused_output_offset_expr = "static_cast<" + fused_offset_type + ">(block_dim_offset)";
     } else {

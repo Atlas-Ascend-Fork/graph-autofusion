@@ -505,6 +505,23 @@ af::AscNodePtr FindIndirectLoadNode(const af::AscGraph &graph);
 af::Status ValidateSingleIndirectLoadNode(const af::AscGraph &graph, af::AscNodePtr &node);
 bool GetPrebuiltYTilingCase(const af::AscGraph &graph, af::AxisId &tile_id,
                             std::pair<af::AxisPtr, af::AxisPtr> &tiling);
+// [组共享轴等价化] 多 gather 融合组成员输出视图中"同索引空间、仅 axis id 不同"的轴
+// （Broadcast 副本轴、split 兄弟轴、前端重复建轴）归一到新建的组共享轴，消除
+// sched_has_all_members 的覆盖误杀。判定规则（等价类）：
+//   同视图位置 + 轴 size 符号相等 + 视图 repeats/strides 相等 + 被改写节点输出是新分配
+//   buffer（IL 输出天然满足）。stride 不等（含 0 vs 1）或 size 不等 → 拒绝候选。
+// 仅在 candidate_graph 副本上执行；不触碰 split/concat/Store 目标节点。
+
+// 覆盖检查（从 schedule.cpp 的 sched_has_all_members 抽出，调度器与候选生成期共用）：
+// 节点的 sched.axis 需包含 merged_axis.from 的全部成员轴，否则模板轴折叠不适用。
+bool GroupAxesCoverable(af::AscGraph &graph, const af::AscNodePtr &node, ascir::AxisId merged_axis_id);
+
+// 等价判定：两个成员输出视图在同一 dim 上的轴是否等价（可归一）。
+bool AreAxesEquivalentInView(af::AscGraph &graph, const af::AscNodePtr &a, ascir::AxisId axis_a,
+                             const af::AscNodePtr &b, ascir::AxisId axis_b);
+
+// 主入口：逐 dim 分等价类，同类但 id 不同时新建组共享轴并替换；不等价时 is_legal=false。
+af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal);
 }  // namespace ascgen_utils::indirect_load
 
 #endif  // __INDIRECT_LOAD_UTILS_H__

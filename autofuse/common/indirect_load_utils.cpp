@@ -2606,4 +2606,204 @@ af::Status BuildSimtIndexPrepassPlan(const af::AscNode &indirect_load, SimtIndex
   return af::SUCCESS;
 }
 
+// [组共享轴等价化] 覆盖检查：从 schedule.cpp 的 sched_has_all_members 抽出，调度器与
+// 候选生成期共用同一判据，避免两处独立实现漂移。节点的 sched.axis 需包含 merged_axis.from
+// 的全部成员轴，否则模板轴折叠（ApplySchedAxisMerge 的连续性断言）不适用于该节点。
+// merged_axis_id 为 kIdNone 或 merged_axis 无 from（非合并轴）时恒真。
+bool GroupAxesCoverable(af::AscGraph &graph, const af::AscNodePtr &node, ascir::AxisId merged_axis_id) {
+  if (merged_axis_id == af::kIdNone) {
+    return true;
+  }
+  const auto merged_axis = graph.FindAxis(merged_axis_id);
+  if (merged_axis == nullptr || merged_axis->from.empty()) {
+    return true;
+  }
+  for (const auto member : merged_axis->from) {
+    if (std::find(node->attr.sched.axis.begin(), node->attr.sched.axis.end(), member) == node->attr.sched.axis.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// [组共享轴等价化] 等价判定：两个成员 IL 的输出视图在同一 dim 上的轴是否指向同一索引
+// 空间（可归一）。判据：视图位置相同 + 轴 size 符号相等 + 视图 repeats/strides 相等。
+// 被改写节点（IL）的输出是新分配 buffer，替换轴不改变地址，天然满足安全前提。
+// [组共享轴等价化] 表达式等价判定：先 StaticCheckEq（同符号/同值/静态可判不等），kUnknown
+// 时退化为序列化串比较。机制澄清：CreateSizeVar(name) 每次调用都新建 SizeVar 对象（不做
+// 按名复用）；同名恒等由符号引擎保证——StaticCheckEq 经 Eq(a.Simplify(), b.Simplify())
+// 按符号名判等，同名即 kTrue，不会进入串比较分支。串比较覆盖的是"静态不可判但序列化结构
+// 相同"的表达式（不同对象构成的等价运算树）；两个真正不同维度的符号名不同 → 静态判不等
+// 或串不同 → 拒绝。前提"同一图内同名符号同值"是前端建轴约定，无代码级校验——若未来前端
+// 允许同名不同值，此处需改为比较 SizeVar 绑定而非串。静态可判不等（kFalse）在串比较之前
+// 短路——值确实不同的不会因串相似误判。
+bool AreExpressionsEquivalent(const af::Expression &a, const af::Expression &b) {
+  const af::TriBool check = af::SymbolicUtils::StaticCheckEq(a, b);
+  if (check == af::TriBool::kTrue) {
+    return true;
+  }
+  if (check == af::TriBool::kFalse) {
+    return false;
+  }
+  const auto a_str = a.Str();
+  const auto b_str = b.Str();
+  return a_str != nullptr && b_str != nullptr && std::string(a_str.get()) == std::string(b_str.get());
+}
+
+bool AreAxesEquivalentInView(af::AscGraph &graph, const af::AscNodePtr &a, ascir::AxisId axis_a,
+                             const af::AscNodePtr &b, ascir::AxisId axis_b) {
+  if (a == nullptr || b == nullptr || a->outputs().empty() || b->outputs().empty()) {
+    return false;
+  }
+  const auto &a_attr = a->outputs()[0]->attr;
+  const auto &b_attr = b->outputs()[0]->attr;
+  const auto a_iter = std::find(a_attr.axis.begin(), a_attr.axis.end(), axis_a);
+  const auto b_iter = std::find(b_attr.axis.begin(), b_attr.axis.end(), axis_b);
+  if (a_iter == a_attr.axis.end() || b_iter == b_attr.axis.end()) {
+    return false;
+  }
+  const auto a_pos = static_cast<size_t>(std::distance(a_attr.axis.begin(), a_iter));
+  const auto b_pos = static_cast<size_t>(std::distance(b_attr.axis.begin(), b_iter));
+  if (a_pos != b_pos) {
+    return false;
+  }
+  if (a_pos >= a_attr.repeats.size() || a_pos >= a_attr.strides.size() || b_pos >= b_attr.repeats.size() ||
+      b_pos >= b_attr.strides.size()) {
+    return false;
+  }
+  const auto *a_axis = graph.FindAxis(axis_a);
+  const auto *b_axis = graph.FindAxis(axis_b);
+  if (a_axis == nullptr || b_axis == nullptr) {
+    return false;
+  }
+  if (!AreExpressionsEquivalent(a_axis->size, b_axis->size)) {
+    return false;
+  }
+  if (!AreExpressionsEquivalent(a_attr.repeats[a_pos], b_attr.repeats[b_pos])) {
+    return false;
+  }
+  if (!AreExpressionsEquivalent(a_attr.strides[a_pos], b_attr.strides[b_pos])) {
+    return false;
+  }
+  return true;
+}
+
+// [组共享轴等价化] 分核/分 tile 类型轴判定：携带切分语义，不可与普通轴互相归一。按
+// 轴类型判定——split_pair_other_id 的创建默认值为 0 而非 kIdNone，普通轴同样携带
+// 非 kIdNone 值，不能作为 split 轴判据（会把全部普通维误判成 split 轴而恒跳过）。
+bool IsSplitTypeAxis(const af::Axis &axis) {
+  return axis.type == af::Axis::kAxisTypeTileOuter || axis.type == af::Axis::kAxisTypeTileInner ||
+         axis.type == af::Axis::kAxisTypeBlockOuter || axis.type == af::Axis::kAxisTypeBlockInner;
+}
+
+// [组共享轴等价化] 主入口：逐 dim 分等价类，同类但 id 不同时新建组共享轴并替换。
+// 失败（非等价、rank 不匹配、split 类型轴、轴缺失）时 is_legal=false，由调用方拒绝
+// 候选；拒绝路径不触碰任何成员视图（原子性：等价判定与逐成员预检全部通过后才替换）。
+// 仅处理输出 rank 内的原始维：primary 复合轴（from 非空）跳过——合法前端结构，由
+// NormalizeSimtAxesForGroupTemplate 统一构建；成员复合轴可替换（视图寻址语义在
+// repeats/strides，id 替换即归一化；成员视图需以组共享轴接入模板 from 覆盖链——成员
+// 不参与模板轴构建，与 primary 是角色差异而非判据单侧）。split 类型轴（分核/分 tile）
+// 双侧统一拒绝：携带切分语义，替换丢语义、跳过会把切分轴留给模板轴合并吞并。
+af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal) {
+  is_legal = true;
+  if (members.size() < 2UL) {
+    return af::SUCCESS;
+  }
+  const auto &primary_attr = members.front()->outputs()[0]->attr;
+  const size_t rank = primary_attr.axis.size();
+  for (size_t dim = 0UL; dim < rank; ++dim) {
+    std::vector<ascir::AxisId> dim_axes(members.size(), af::kIdNone);
+    for (size_t index = 0UL; index < members.size(); ++index) {
+      const auto &attr = members[index]->outputs()[0]->attr;
+      if (dim >= attr.axis.size()) {
+        is_legal = false;
+        GELOGI("[IndirectLoad] Reject: member[%s] output rank[%zu] < dim[%zu].", members[index]->GetNamePtr(),
+               attr.axis.size(), dim);
+        return af::SUCCESS;
+      }
+      dim_axes[index] = attr.axis[dim];
+    }
+    bool all_same = true;
+    for (size_t index = 1UL; index < dim_axes.size(); ++index) {
+      if (dim_axes[index] != dim_axes[0]) {
+        all_same = false;
+        break;
+      }
+    }
+    if (all_same) {
+      continue;
+    }
+    for (size_t index = 1UL; index < members.size(); ++index) {
+      if (!AreAxesEquivalentInView(graph, members.front(), dim_axes[0], members[index], dim_axes[index])) {
+        is_legal = false;
+        const auto *pa = graph.FindAxis(dim_axes[0]);
+        const auto *pb = graph.FindAxis(dim_axes[index]);
+        GELOGI(
+            "[IndirectLoad] Reject: dim[%zu] axis mismatch: primary axis[%ld, size=%s] vs member[%s] "
+            "axis[%ld, size=%s].",
+            dim, dim_axes[0], pa != nullptr ? pa->size.Str().get() : "?", members[index]->GetNamePtr(), dim_axes[index],
+            pb != nullptr ? pb->size.Str().get() : "?");
+        return af::SUCCESS;
+      }
+    }
+    const auto *primary_axis = graph.FindAxis(dim_axes[0]);
+    if (primary_axis == nullptr) {
+      is_legal = false;
+      GELOGI("[IndirectLoad] Reject: primary axis[%ld] at dim[%zu] not found.", dim_axes[0], dim);
+      return af::SUCCESS;
+    }
+    // [split 类型轴双侧统一拒绝] 分核/分 tile 轴携带切分语义：不可替换（丢失切分语义），
+    // 也不可静默跳过（会把切分轴留给模板轴合并吞并）。候选生成期轴系应为原始轴空间，
+    // 出现 split 类型即为异常图态——primary 与成员同口径确定性拒绝，由其余候选/回退承接。
+    if (IsSplitTypeAxis(*primary_axis)) {
+      is_legal = false;
+      GELOGI("[IndirectLoad] Reject: primary axis[%ld] at dim[%zu] is a split axis.", dim_axes[0], dim);
+      return af::SUCCESS;
+    }
+    if (!primary_axis->from.empty()) {
+      continue;  // 复合轴：合法前端结构，由 NormalizeSimtAxesForGroupTemplate 统一构建
+    }
+    // [原子性预检] 等价判定（上方）与逐成员存在性/split 类型核验全部通过后才进入替换：
+    // 拒绝路径不触碰任何成员视图（候选图为独立副本，原子拒绝便于调试与复用）。
+    for (size_t index = 0UL; index < members.size(); ++index) {
+      const auto *member_axis = graph.FindAxis(dim_axes[index]);
+      if (member_axis == nullptr) {
+        is_legal = false;
+        GELOGI("[IndirectLoad] Reject: member[%s] axis[%ld] at dim[%zu] not found.", members[index]->GetNamePtr(),
+               dim_axes[index], dim);
+        return af::SUCCESS;
+      }
+      if (IsSplitTypeAxis(*member_axis)) {
+        is_legal = false;
+        GELOGI("[IndirectLoad] Reject: member[%s] axis[%ld] at dim[%zu] is a split axis, not normalizable.",
+               members[index]->GetNamePtr(), dim_axes[index], dim);
+        return af::SUCCESS;
+      }
+    }
+    const std::string group_name = members.front()->GetName() + "_group_" + std::to_string(dim);
+    auto &group_axis = graph.CreateAxis(group_name, primary_axis->size);
+    for (size_t index = 0UL; index < members.size(); ++index) {
+      const auto *member_axis = graph.FindAxis(dim_axes[index]);
+      if (member_axis == nullptr || !graph.TryApplyAxisReplace(members[index], *member_axis, group_axis)) {
+        is_legal = false;
+        GELOGI(
+            "[IndirectLoad] Reject: axis replace failed for member[%s] at dim[%zu] "
+            "(axis[%ld] not found in node view).",
+            members[index]->GetNamePtr(), dim, dim_axes[index]);
+        return af::SUCCESS;
+      }
+    }
+    GELOGI("[IndirectLoad] Normalized group axis[%ld, name=%s] at dim[%zu] (was %ld..%ld).", group_axis.id,
+           group_name.c_str(), dim, dim_axes[0], dim_axes.back());
+  }
+  // [别名语义说明] ASCIR 中节点的 inputs[i].attr 是对生产者 outputs[j].attr 的引用
+  // （AscTensor::attr 为非拥有引用 + AscNodeInputs::operator[] 每次重新 Init），轴替换
+  // 后消费者输入视图自动同步。消费者自身的 output view 的轴系改写由后续模板轴合并
+  // （调度器 ApplyIndirectNodeAxes → ApplyIndirectLoadTemplateMerge）完成，此处不做
+  // input ⊆ output 前置检查——归一化时点消费者的输出视图尚未被模板轴合并改写，
+  // 检查必然失败（组轴 ∈ 输入视图但 ∉ 原始输出视图）。不变量由 codegen 的
+  // ValidateShapeConsistencyWithSingleOutput 在模板轴合并完成后校验。
+  return af::SUCCESS;
+}
+
 }  // namespace ascgen_utils::indirect_load
