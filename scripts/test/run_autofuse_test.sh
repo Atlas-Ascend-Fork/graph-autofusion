@@ -1118,6 +1118,7 @@ build_backend() {
                       ceil2int_bf16_test_e2e_v2 \
                       bool_mask_flow_test_e2e_v2 \
                       transpose_bool_test_e2e_v2 \
+                      transpose_int8_test_e2e_v2 \
                       select_bool_test_e2e_v2 \
                       copysign_bf16_test_e2e_v2 \
                       erfcx_test_e2e_v2 \

@@ -417,6 +417,56 @@ af::ComputeGraphPtr ShareGraph::TransposeBoolFusedGraph() {
   af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
   return compute_graph;
 }
+
+static void CreateTransposeInt8AscGraph(af::AscGraph &graph) {
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Transpose transpose("transpose");
+  transpose.x = load.y;
+  transpose.y.dtype = af::DT_INT8;
+  transpose.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  af::ascir_op::Store store("store");
+  store.x = transpose.y;
+  store.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.y.dtype = af::DT_INT8;
+  output.ir_attr.SetIndex(0);
+
+  ConstructVVAscGraphAxisInfo(graph, 3, {1, 0, 2});
+}
+
+af::ComputeGraphPtr ShareGraph::TransposeInt8FusedGraph() {
+  auto builder = GraphBuilder("transpose_int8_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("transpose_int8");
+  CreateTransposeInt8AscGraph(sub_graph);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
 static void CreateBF16AddAscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Data x1("data0", graph);
   x1.ir_attr.SetIndex(0);
