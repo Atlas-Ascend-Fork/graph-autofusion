@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ----------------------------------------------------------------------------------------------------------------------
 # Copyright (c) 2025 Huawei Technologies Co., Ltd.
-# This program is free software, you can redistribute it and/or modify it under the terms and contiditions of
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
@@ -55,15 +55,16 @@ def _strip_backend_dfx_section(lines):
 
 
 def _drop_trailing_blank_lines(lines):
-    """Ignore trailing blank lines.
+    """Ignore trailing blank lines and whitespace within other blank lines.
 
     Golden sources cannot keep them because the pre-commit hooks strip them,
-    while the generated kernel source ends with a blank line.
+    while the generated kernel source ends with a blank line. Formatting can
+    also remove spaces from blank lines within generated code.
     """
     end = len(lines)
     while end > 0 and not lines[end - 1].strip():
         end -= 1
-    return lines[:end]
+    return ["\n" if not line.strip() else line for line in lines[:end]]
 
 
 def compare_files(golden_path, codegen_path, encoding="utf-8"):
