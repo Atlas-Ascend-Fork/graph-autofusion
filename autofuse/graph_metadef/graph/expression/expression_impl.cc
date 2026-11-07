@@ -347,6 +347,18 @@ ExpressionImplPtr ExpressionImpl::CanonicalizeBoolExpr() {
   GELOGI("step1 rhs = [%s], lhs = [%s]", sym_str(rhs).c_str(), sym_str(lhs).c_str());
 
   rhs = SymEngine::expand(rhs);
+  // 有理系数通分：分母为正整数且非 1 时用分子替换差值（分母恒正，丢弃不改变
+  // 差值符号，Eq/Ne/Lt/Le 语义均保持）；使 (1/2)*s0 == 680 与 s0 == 1360 归一到
+  // 同一规范形，跨形态 guard 匹配不依赖查询侧与记录侧表达式字面同构
+  SymEngineExprPtr numer;
+  SymEngineExprPtr denom;
+  as_numer_denom(rhs, outArg(numer), outArg(denom));
+  if (SymEngine::is_a<SymEngine::Integer>(*denom)) {
+    const auto &denom_int = SymEngine::down_cast<const SymEngine::Integer &>(*denom);
+    if (denom_int.is_positive() && !(denom_int.is_one())) {
+      rhs = numer;
+    }
+  }
   if (SymEngine::is_a<SymEngine::Add>(*rhs)) {
     SymEngine::integer_class gcd = ComputeExprGCD(rhs);
     GELOGD("[%s], gcd = %lu", sym_str(rhs).c_str(), SymEngine::mp_get_ui(gcd));
