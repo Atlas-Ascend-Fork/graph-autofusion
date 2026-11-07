@@ -551,8 +551,8 @@ REG_ASC_IR(Store).Impl(v2_soc_versions,
 REG_ASC_IR(Broadcast).Impl(v2_soc_versions,
                            {af::ascir::AscIrImplCreator<af::ascir::BroadcastAscIrAttImplV2>(),
                             af::ascir::AscIrImplCreator<af::ascir::BroadcastAscIrCodegenImplV2>(),
-                            {{"T", TensorType{DT_UINT8, DT_INT16, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_INT8, DT_UINT16,
-                                              DT_UINT32, DT_UINT64, DT_INT64, DT_BOOL}}}});
+                            {{"T", TensorType{DT_UINT8, DT_INT16, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_INT8,
+                                              DT_UINT16, DT_UINT32, DT_UINT64, DT_INT64, DT_BOOL}}}});
 
 REG_ASC_IR(RemovePad).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::RemovePadAscIrAttImplV2>(),
                                              af::ascir::AscIrImplCreator<af::ascir::RemovePadAscIrCodegenImplV2>(),

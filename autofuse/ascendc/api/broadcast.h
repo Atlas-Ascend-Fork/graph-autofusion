@@ -549,7 +549,7 @@ inline __aicore__ void Broadcast(const LocalTensor<T> &dst, const LocalTensor<T>
     BroadcastInt64(dst, src, src_m, src_k, src_z, dst_m, dst_k, dst_z, tmp_buf, last_dim_stride);
   } else if constexpr (AscendC::SupportType<T, uint8_t, int8_t>()) {
     BroadcastWithCast(dst, src, src_m, src_k, src_z, dst_m, dst_k, dst_z, tmp_buf, last_dim_stride);
-  } else if constexpr (AscendC::SupportType<T, int16_t, uint16_t, half, float, int32_t, uint32_t>()) {
+  } else if constexpr (AscendC::SupportType<T, int16_t, uint16_t, half, float, bfloat16_t, int32_t, uint32_t>()) {
     BroadcastCommon(dst, src, src_m, src_k, src_z, dst_m, dst_k, dst_z, tmp_buf, last_dim_stride);
   } else {
     KERNEL_LOG(KERNEL_ERROR, "Broadcast type is not supported.");
