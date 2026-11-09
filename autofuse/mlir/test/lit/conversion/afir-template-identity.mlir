@@ -1,8 +1,7 @@
 // RUN: af-opt --afir-gen-kernel-entry %s | FileCheck %s
-// Static selection keeps template 7 rather than renumbering it to template 0.
+// Kernel entry preserves template 7 rather than renumbering it to template 0.
 module @plan2 attributes {
   afir.module_kind = "plan",
-  afplan.static_selection,
   afplan.candidate = #afplan.candidate<subgraph = 0, plan = 2>,
   afplan.stages = #afplan.stages<template_counts = [1]>,
   ascendc.tiling_schema = !emitasc.py_struct<"plan2TilingData", [

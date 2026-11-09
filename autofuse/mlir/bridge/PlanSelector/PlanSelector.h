@@ -10,26 +10,22 @@
 
 #ifndef AUTOFUSE_MLIR_BRIDGE_PLAN_SELECTOR_PLAN_SELECTOR_H
 #define AUTOFUSE_MLIR_BRIDGE_PLAN_SELECTOR_PLAN_SELECTOR_H
-#include <map>
 #include <string>
 #include <vector>
 #include "bridge/PlanSelector/PlanSelection.h"
+#include "common/tiling_schema/resource_budget.h"
 #include "bridge/AttSchemaAdapter/TilingCodeBundle.h"
 namespace mlir::bridge {
-using ConcreteShape = std::map<std::string, int64_t>;
-enum class PlanGenerationMode { Static, Dynamic };
 struct PlanGenerationRequest {
   const ascir::FusedScheduledResult &schedule;
-  PlanGenerationMode mode;
   common::ResourceBudget resources;
   bool is_inductor_scene;
-  ConcreteShape shape;
   AttOptions options;
 };
 // selections and tiling are committed together only after successful preparation.
 struct PlanGenerationResult {
   std::vector<PlanSelection> selections;
-  TilingArtifact tiling;
+  TilingCodeBundle tiling;
 };
 bool SelectDynamicCandidates(const ascir::FusedScheduledResult &schedule, std::vector<PlanSelection> &selections,
                              std::string *diagnostic = nullptr);

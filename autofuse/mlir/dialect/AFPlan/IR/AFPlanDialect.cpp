@@ -29,9 +29,6 @@ void mlir::afplan::AFPlanDialect::initialize() {
 namespace {
 // 名字 -> 该名字必须承载的属性类型。表为空即表示该前缀下没有合法名字。
 bool hasExpectedType(llvm::StringRef name, mlir::Attribute value) {
-  if (name == mlir::afplan::kStaticSelectionAttrName) {
-    return mlir::isa<mlir::UnitAttr>(value);
-  }
   if (name == mlir::afplan::kCandidateAttrName) {
     return mlir::isa<mlir::afplan::CandidateAttr>(value);
   }
@@ -48,8 +45,7 @@ bool hasExpectedType(llvm::StringRef name, mlir::Attribute value) {
 }
 
 bool isKnownName(llvm::StringRef name) {
-  static constexpr llvm::StringLiteral known[] = {mlir::afplan::kStaticSelectionAttrName,
-                                                  mlir::afplan::kCandidateAttrName, mlir::afplan::kVariantAttrName,
+  static constexpr llvm::StringLiteral known[] = {mlir::afplan::kCandidateAttrName, mlir::afplan::kVariantAttrName,
                                                   mlir::afplan::kStagesAttrName, mlir::afplan::kScoreFuncAttrName};
   return llvm::is_contained(known, name);
 }

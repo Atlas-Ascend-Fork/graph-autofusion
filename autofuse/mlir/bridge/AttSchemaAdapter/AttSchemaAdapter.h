@@ -27,8 +27,8 @@ namespace mlir::bridge {
 
 // Generate the host tiling program through the existing ATT entry point and
 // attach the candidate/schema contract consumed by the later MLIR pipeline.
-// This adapter generates source only. Static execution returns a separate frozen
-// artifact; dynamic compilation delivers this source bundle.
+// This adapter generates source only for both static and dynamic shapes.
+// The host tiling program selects plans and solves tile sizes at invocation time.
 //
 // AttRequest 的引用成员只在调用点存活：一律就地构造实参，不要先存成具名变量再隔开使用。
 struct AttRequest {

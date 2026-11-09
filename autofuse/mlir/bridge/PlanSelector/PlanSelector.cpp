@@ -10,33 +10,12 @@
 
 #include "bridge/PlanSelector/PlanSelector.h"
 
-#include <algorithm>
-#include <cctype>
 #include <utility>
 
 #include "bridge/BridgeDiagnostic.h"
 #include "bridge/AttSchemaAdapter/AttSchemaAdapter.h"
 
 namespace mlir::bridge {
-namespace {
-
-bool ValidateShapeSymbols(const ConcreteShape &shape, std::string *diagnostic) {
-  for (const auto &[name, dimension] : shape) {
-    if (name.empty() || !(std::isalpha(static_cast<unsigned char>(name.front())) || name.front() == '_') ||
-        !std::all_of(name.begin() + 1, name.end(), [](unsigned char ch) { return std::isalnum(ch) || ch == '_'; })) {
-      SetDiagnostic(diagnostic, "static plan selection received an invalid shape symbol");
-      return false;
-    }
-    if (dimension <= 0 || static_cast<uint64_t>(dimension) > UINT32_MAX) {
-      SetDiagnostic(diagnostic, "static plan selection shape dimension is outside the uint32 ABI range");
-      return false;
-    }
-  }
-  return true;
-}
-
-}  // namespace
-
 bool SelectDynamicCandidates(const ascir::FusedScheduledResult &schedule, std::vector<PlanSelection> &selections,
                              std::string *diagnostic) {
   return BuildAllCandidateSelections(schedule, selections, diagnostic);
@@ -50,9 +29,6 @@ bool PreparePlanGeneration(const PlanGenerationRequest &request, PlanGenerationR
   }
   if (!request.resources.valid()) {
     SetDiagnostic(diagnostic, "plan generation requires valid target core and UB capacities");
-    return false;
-  }
-  if (!ValidateShapeSymbols(request.shape, diagnostic)) {
     return false;
   }
   PlanGenerationResult prepared;

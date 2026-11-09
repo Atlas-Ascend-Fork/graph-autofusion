@@ -11,7 +11,6 @@
 #include "artifact/TilingSource/TilingFuncEmitter.h"
 
 #include <map>
-#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -360,19 +359,14 @@ void AppendShapeAssignments(const TilingProgramSpec &spec, const std::string &va
   }
 }
 
-FailureOr<std::string> EmitAbi(const TilingProgramSpec &spec, std::optional<uint64_t> workspaceSize = std::nullopt) {
+FailureOr<std::string> EmitAbi(const TilingProgramSpec &spec) {
   std::stringstream out;
   // Const-tiling source emission is not implemented by the MLIR path yet.
   // Export the legacy probe and opt out so compile_adapter keeps the normal
   // runtime-tiling kernel instead of requesting the unavailable static ABI.
   out << "extern \"C\" bool AutofuseIsStaticShape() {\n  return false;\n}\n"
       << "extern \"C\" size_t GetTilingDataSize() {\n  return sizeof(AutofuseTilingData);\n}\n";
-  FailureOr<std::string> workspaceHelper =
-      workspaceSize ? FailureOr<std::string>(
-                          "bool CalculateWorkspaceSize(const AutofuseTilingData &, uint64_t &workspace_size) {\n"
-                          "  workspace_size = " +
-                          std::to_string(*workspaceSize) + "ULL; return true;\n}\n")
-                    : EmitWorkspaceCalculation(spec);
+  auto workspaceHelper = EmitWorkspaceCalculation(spec);
   if (failed(workspaceHelper)) {
     return failure();
   }
@@ -413,103 +407,7 @@ FailureOr<std::string> EmitAbi(const TilingProgramSpec &spec, std::optional<uint
   return out.str();
 }
 
-bool EmitStaticField(const TilingProgramSpec &spec, const StaticTilingData &solved, std::ostringstream &out,
-                     const std::string &scope, const std::string &name, const std::string &access) {
-  auto fields = solved.fields.find(scope);
-  if (fields == solved.fields.end() && solved.flat_schedule) {
-    fields = solved.fields.find("fusion");
-  }
-  if (fields == solved.fields.end()) {
-    emitError(UnknownLoc::get(spec.target.getContext())) << "static ATT result is missing scope " << scope;
-    return false;
-  }
-  auto bytes = fields->second.find(name);
-  if (bytes == fields->second.end() || bytes->second.empty()) {
-    emitError(UnknownLoc::get(spec.target.getContext()))
-        << "static ATT result is missing field " << scope << "." << name;
-    return false;
-  }
-  out << "  { const unsigned char value[] = {";
-  for (auto byte : bytes->second) {
-    out << unsigned(byte) << ',';
-  }
-  out << "}; static_assert(sizeof(" << access << ") == sizeof(value), \"static tiling ABI mismatch\");\n"
-      << "    std::memcpy(&" << access << ", value, sizeof(value)); }\n";
-  return true;
-}
-
-bool EmitStaticWorkspaceFields(const TilingProgramSpec &spec, const StaticTilingData &solved, std::ostringstream &out) {
-  std::set<int64_t> workspaceIds;
-  for (const auto &plan : spec.plans) {
-    workspaceIds.insert(plan.workspace_tensor_ids.begin(), plan.workspace_tensor_ids.end());
-  }
-  for (int64_t id : workspaceIds) {
-    const std::string name = "workspace" + std::to_string(id);
-    if (!EmitStaticField(spec, solved, out, "fusion", name, "t." + name)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-void EmitStaticPlanKeys(const TilingProgramSpec &spec, std::ostringstream &out) {
-  for (const auto &plan : spec.plans) {
-    out << "  t.set_graph" << plan.subgraph_id << "_tiling_key(" << plan.plan_id << "U);\n";
-  }
-}
-
-bool EmitStaticStageFields(const TilingProgramSpec &spec, const StaticTilingData &solved, std::ostringstream &out) {
-  for (const auto &plan : spec.plans) {
-    for (const auto &stage : plan.stages) {
-      for (const auto &field : stage.fields) {
-        // These fields are populated by copyWorkspaceOffsets in the aggregate
-        // kernel entry. ATT owns only their fusion-scope source values.
-        if (llvm::any_of(plan.workspace_tensor_ids,
-                         [&](int64_t id) { return field == "workspace" + std::to_string(id); })) {
-          continue;
-        }
-        if (!EmitStaticField(spec, solved, out, stage.tiling_field_name, field,
-                             "t." + stage.tiling_field_name + "." + field)) {
-          return false;
-        }
-      }
-    }
-  }
-  return true;
-}
-
-FailureOr<std::string> EmitStaticSolver(const TilingProgramSpec &spec, const StaticTilingData &solved) {
-  std::ostringstream out;
-  out << "#include <cstring>\n#include <cstdint>\n#include <cstddef>\n#include <limits>\n"
-         "#include \"autofuse_tiling_data.h\"\nnamespace optiling {\n"
-         "bool GetTiling(AutofuseTilingData &t, int32_t, double *) {\n"
-      << "  if (t.get_block_dim() != " << solved.resources.aiv_num
-      << "U || t.get_ub_size() != " << solved.resources.availableUb() << "U) return false;\n";
-  for (const char *name : {"block_dim", "corenum", "ub_size", "hbm_size"}) {
-    if (!EmitStaticField(spec, solved, out, "fusion", name, "t." + std::string(name))) return failure();
-  }
-  EmitStaticPlanKeys(spec, out);
-  if (!EmitStaticWorkspaceFields(spec, solved, out) || !EmitStaticStageFields(spec, solved, out)) {
-    return failure();
-  }
-  out << "  return true;\n}\n}\n";
-  return out.str();
-}
-
 }  // namespace
-
-FailureOr<std::string> emitStaticTilingFunc(const TilingProgramSpec &spec, const StaticTilingData &solved) {
-  if (!solved.resources.valid() || solved.resources.aiv_num != static_cast<uint64_t>(spec.target.getAivNum()) ||
-      solved.resources.ub_size != static_cast<uint64_t>(spec.target.getUbSize()))
-    return failure();
-  auto solver = EmitStaticSolver(spec, solved);
-  if (failed(solver)) return failure();
-  auto abi = EmitAbi(spec, solved.workspace_size);
-  if (failed(abi)) return failure();
-  // Frozen tiling is one translation unit, without ATT split headers.
-  // Split markers would incorrectly request the Inductor split-source protocol.
-  return *solver + *abi;
-}
 
 FailureOr<std::string> emitInductorTilingFunc(const TilingProgramSpec &spec, const TilingCodeBundle &bundle) {
   std::string result = AssembleSources(bundle.tiling_functions);

@@ -22,7 +22,6 @@ FailureOr<std::string> assembleTilingSources(const TilingCodeBundle &bundle);
 
 // Assembles ATT's split sources and emits the Inductor host tiling ABI from the
 // same MLIR contract that produced TilingData.
-FailureOr<std::string> emitStaticTilingFunc(const TilingProgramSpec &spec, const StaticTilingData &solved);
 
 FailureOr<std::string> emitInductorTilingFunc(const TilingProgramSpec &spec, const TilingCodeBundle &bundle);
 

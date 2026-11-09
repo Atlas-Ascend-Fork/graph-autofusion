@@ -4,7 +4,16 @@
 
 整理 MLIR bridge 的 PlanSelector，使模板选择、ATT 求解、资源预算与代码生成之间具有明确契约。本文供 bridge、ATT、AFIR 和测试维护者评审与实施。
 
-状态：**主要流程已实施，功能回归通过**。原始现状依据 `196052cf`；统一准备入口、静态结果交付、资源来源和 key 校验已完成。下方记录本地及 NPU 验证范围；性能基准和更广的运行时调优组合仍待专项验证。
+状态：**历史设计，静态 winner 冻结方案未接入当前生产流程，相关实现已删除**。本文下方的静态执行、冻结结果、工具链及验收描述保留为历史方案，不代表当前功能或测试覆盖。
+
+当前实现（2026-11-09）：
+
+- `PreparePlanGeneration` 枚举全部候选并返回 `TilingCodeBundle`；静态和动态 shape 均由生成的 host tiling 程序选择 plan/template 和求解 tile size。
+- 已删除独立静态 solver 的结果解析器、冻结快照及 emitter、`afplan.static_selection` 和专属测试；请求中不再保留无行为语义的 `mode` / `shape` 参数。
+- 当前 MLIR emitter 的 `AutofuseIsStaticShape()` 返回 `false`，不启用 Python const tiling bake。本次清理不改变该行为，也不删除 Python 侧的通用 bake 能力。
+- 保留候选枚举、资源预算、字段契约、运行时 tiling 源码生成和原始模板身份测试；这些测试不证明提前选出静态 winner。
+- 本次仅调整 MLIR 内部 C++ 接口及 IR 属性；不改变 SuperKernel、公开 Python 接口、安装打包、runtime 调用或生产 tiling ABI。不新增运行时求解、日志或数据拷贝。历史手工带 `afplan.static_selection` 的 IR 不再受支持。
+
 
 ## 范围
 

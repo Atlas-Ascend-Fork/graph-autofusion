@@ -59,6 +59,3 @@ module @plan attributes {
 // NOAFIR-NOT: afir.template_counts_per_stage
 // NOAFIR-NOT: afir.stage_count
 // NOAFIR-NOT: afir.score_func
-
-// CHECK: afplan.static_selection
-module @static_winner attributes {afplan.static_selection} {}
