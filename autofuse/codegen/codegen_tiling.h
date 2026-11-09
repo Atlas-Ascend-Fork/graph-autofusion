@@ -117,8 +117,8 @@ class TilingLib {
   std::map<std::string, std::string> Generate(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                               const std::map<std::string, std::string> &shape_info,
                                               const std::string &pgo_dir, const std::string &core_num) const;
-  std::map<std::string, std::string> GenerateForInductor(
-      const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  std::map<std::string, std::string> GenerateForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                                         bool launch_decouple = false) const;
 
   // codegen_tiling_pgo_runtime.cpp: TF and Inductor shared PGO runtime orchestration.
   std::string GenerateForPgo(const ::ascir::FusedScheduledResult &fused_schedule_result,
@@ -139,7 +139,8 @@ class TilingLib {
                             const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
                             const std::string &core_num) const;
   std::string TilingFuncDefForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
-                                       const ::ascir::FusedScheduledResult &elemwise_schedule_result) const;
+                                       const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                       bool launch_decouple) const;
   bool IsSupportedInductorPgoScene(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   // codegen_tiling_inductor_topn.cpp: Inductor modeled/measured TopN source generation.
   void GenInductorTopnSources(const ::ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,

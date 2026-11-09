@@ -138,6 +138,12 @@ def parse_compile_args(argv):
     parser.add_argument("--tiling_source_paths", default="", type=str)
     parser.add_argument("--kernel_obj_path", default="", type=str)
     parser.add_argument("--kernel_source_path", default="", type=str)
+    parser.add_argument(
+        "--kernel_obj_path_aiv",
+        default="",
+        type=str,
+        help="AIV dispatch-entry device object (rtLaunch dual-bin CV).",
+    )
     parser.add_argument("--shared_cv_wrapper_so", default="", type=str)
     parser.add_argument("--const_tiling_baked", default=False, type=str2bool)
     # 使用 parse_known_args 容忍上层透传的未声明参数，避免触发 SystemExit 终止编译。
@@ -460,6 +466,7 @@ def prepare_compile_context(
     args.tiling_repr = tiling_repr
     args.bin_mode = bin_mode
     args.bin_file_mode = bin_file_mode
+    args.device_files_aiv = None
     get_pgo_cache_root = getattr(ascendc_compile, "get_pgo_cache_root", None)
     args.pgo_cache_root = (
         get_pgo_cache_root(args.output_file)
@@ -509,17 +516,74 @@ def write_compile_host_sources(sources, args, tiling_def_file, base_host_file):
     )
 
 
+def split_device_sources(kernel_impl_code):
+    """拆分 device 源中 split marker 标记的并列编译单元（rtLaunch 分派入口）。
+
+    与 host 侧 split marker 的差异：device 主内容在 marker 段之外（主编译单元 =
+    公共部分 + MIX 入口），marker 段内为 AIV 编译单元（同一份公共部分 + AIV 入口，
+    独立 bisheng 编译保证 .aicore_binary 内核型单一）。
+    """
+    main_lines = []
+    split_files = {}
+    current_key = None
+    current_lines = []
+    for line in kernel_impl_code.splitlines(keepends=True):
+        begin_key = parse_split_marker(line, SPLIT_BEGIN_PREFIX)
+        end_key = parse_split_marker(line, SPLIT_END_PREFIX)
+        if begin_key is not None:
+            if current_key is not None:
+                raise ascendc_compile.CompileError(
+                    f"split device source marker is nested: {begin_key}"
+                )
+            current_key = begin_key
+            current_lines = []
+            continue
+        if end_key is not None:
+            if current_key is None or current_key != end_key:
+                raise ascendc_compile.CompileError(
+                    f"split device source marker mismatch: {end_key}"
+                )
+            split_files[current_key] = "".join(current_lines)
+            current_key = None
+            current_lines = []
+            continue
+        if current_key is None:
+            main_lines.append(line)
+        else:
+            current_lines.append(line)
+    if current_key is not None:
+        raise ascendc_compile.CompileError(
+            f"split device source marker is not closed: {current_key}"
+        )
+    return "".join(main_lines), split_files
+
+
 def write_compile_device_sources(sources, args, tiling_def_file, base_device_file):
     device_file_path = os.path.join(args.temp_dir, "device")
     generate_file(device_file_path, tiling_def_file, sources[SOURCES_TILING_STRUCT])
-    generate_file(device_file_path, base_device_file, sources[SOURCES_KERNEL_IMPL])
+    main_code, split_files = split_device_sources(sources[SOURCES_KERNEL_IMPL])
+    generate_file(device_file_path, base_device_file, main_code)
     args.device_files = os.path.join(device_file_path, base_device_file)
+    # rtLaunch 双 bin：AIV 编译单元与主单元并列落盘，命名与主文件同名加 _aiv 后缀。
+    args.device_files_aiv = None
+    for split_name, content in split_files.items():
+        generate_file(device_file_path, split_name, content)
+        args.device_files_aiv = os.path.join(device_file_path, split_name)
+    if not split_files and base_device_file.endswith(".cpp"):
+        # 无 split marker（开关 off / 非 CV）时清理残留的 stale AIV 编译单元源，
+        # 避免复用 temp_dir 时旧 AIV 源被误编进双 bin 链路。
+        stale_aiv = os.path.join(device_file_path, f"{base_device_file[:-4]}_aiv.cpp")
+        if os.path.exists(stale_aiv):
+            os.remove(stale_aiv)
 
 
 def execute_compile(sources, args):
     tiling_def_file = "autofuse_tiling_data.h"
     base_host_file = args.graph_name + "_tiling_func.cpp"
     base_device_file = args.graph_name + "_op_kernel.cpp"
+    # 供 is_cv_fusion_compile 判定：link 阶段不重写源文件（host_files/device_files
+    # 未设置），tiling 定义内容是跨阶段最可靠的 CV 判定源。
+    args.tiling_def_content = sources.get(SOURCES_TILING_STRUCT) or ""
     if args.stage in ["all", "host", "host_obj"]:
         with InductorCompileDuration(
             args.trace_stage, "WriteHostSource", args.graph_name
@@ -558,6 +622,7 @@ def _compile_result(args, result):
             "version": 1,
             "stage": args.stage,
             "kernel_obj_path": result["kernel_obj_path"],
+            "kernel_obj_path_aiv": result.get("kernel_obj_path_aiv"),
             "kernel_source_path": result["kernel_source_path"],
             "baked": result.get("baked", False),
         }

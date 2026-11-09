@@ -611,13 +611,13 @@ bool TilingLib::ShouldFallbackPgo(const ascir::FusedScheduledResult &fused_sched
 }
 
 std::map<std::string, std::string> TilingLib::GenerateForInductor(
-    const ascir::FusedScheduledResult &fused_schedule_result) const {
+    const ascir::FusedScheduledResult &fused_schedule_result, bool launch_decouple) const {
   const bool is_cube_fused_scheduled = ascgen_utils::IsCubeFusedScheduled(fused_schedule_result);
   if (enable_autofuse_pgo_ && is_cube_fused_scheduled) {
     // CV keeps its normal tiling path; do not disable PGO for subsequent VV graphs on this object.
     TilingLib cv_codegen(*this);
     cv_codegen.DisableInductorPgo();
-    return cv_codegen.GenerateForInductor(fused_schedule_result);
+    return cv_codegen.GenerateForInductor(fused_schedule_result, launch_decouple);
   }
   if (enable_autofuse_pgo_ && !IsSupportedInductorPgoScene(fused_schedule_result)) {
     GELOGE(af::FAILED, "Inductor ACL event PGO only supports static, non-CV kernels");
@@ -639,7 +639,7 @@ std::map<std::string, std::string> TilingLib::GenerateForInductor(
      << "#endif\n";
   ss << "extern \"C\" std::string GetTilingDataRepr(const AutofuseTilingData *tiling_data);\n";
   ss << "#if defined(__clang__)\n#pragma GCC diagnostic pop\n#endif\n";
-  ss << TilingFuncDefForInductor(fused_schedule_result, elemwise_schedule_result) << std::endl;
+  ss << TilingFuncDefForInductor(fused_schedule_result, elemwise_schedule_result, launch_decouple) << std::endl;
   if (!is_cube_fused_scheduled) {
     GenInductorTopnSources(elemwise_schedule_result, ss, tiling_file_name_to_content);
   }
@@ -977,7 +977,8 @@ bool TilingLib::UseAttCodegen(const ascir::FusedScheduledResult &fused_schedule_
 }
 
 std::string TilingLib::TilingFuncDefForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
-                                                const ::ascir::FusedScheduledResult &elemwise_schedule_result) const {
+                                                const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                                bool launch_decouple) const {
   std::stringstream ss;
   std::string graph_name = ascgen_utils::GenValidName(elemwise_schedule_result.fused_graph_name.GetString());
   std::string tiling_func_name = "AutofuseTiling";
@@ -985,6 +986,15 @@ std::string TilingLib::TilingFuncDefForInductor(const ascir::FusedScheduledResul
 
   if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result)) {
     ss << this->GenGetTilingSizeFunc(fused_schedule_result, graph_name, "CVAutofuseTilingData", true) << std::endl;
+    // rtLaunch：tiling so 导出动态 UB 大小，前端 init 时 dlsym 取值填
+    // rtTaskCfgInfo_t.localMemorySize（原 <<<blockDim, dynUb, stream>>> 第二参数迁移载体）。
+    bool launch_decouple_is_batch = false;
+    if (IsLaunchDecoupleCvVariantEnabled(fused_schedule_result, launch_decouple_is_batch, launch_decouple)) {
+      const int64_t dynamic_ub_size = CalcDynamicUbSize(fused_schedule_result);
+      ss << "extern \"C\" int64_t GetDynamicUbSize() {" << std::endl;
+      ss << "  return " << dynamic_ub_size << ";" << std::endl;
+      ss << "}" << std::endl;
+    }
   } else {
     ss << this->GenGetTilingSizeFunc(fused_schedule_result, graph_name, tiling_data_name, true) << std::endl;
   }

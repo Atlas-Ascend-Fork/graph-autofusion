@@ -147,6 +147,10 @@ class Autofuser {
   static PyObject *AutofuseBackend(PyObject *self, PyObject *args, PyObject *kwds);
   static PyObject *Schedule(PyObject *self, PyObject *args, PyObject *kwds);
   static PyObject *Codegen(PyObject *self, PyObject *args, PyObject *kwds);
+  // rtLaunch 变体：与 codegen 共享实现，仅 launch_decouple=true。前后端独立上库契约：
+  // 老前端只调 codegen → legacy；新前端探测 hasattr(Autofuser, "codegen_bin") 失败即回退。
+  static PyObject *CodegenBin(PyObject *self, PyObject *args, PyObject *kwds);
+  static PyObject *CodegenImpl(PyObject *self, PyObject *args, PyObject *kwds, bool launch_decouple);
 };
 
 PyMethodDef Autofuser::methods[] = {
@@ -154,6 +158,7 @@ PyMethodDef Autofuser::methods[] = {
      nullptr},
     {"schedule", reinterpret_cast<PyCFunction>(Autofuser::Schedule), METH_VARARGS | METH_KEYWORDS, nullptr},
     {"codegen", reinterpret_cast<PyCFunction>(Autofuser::Codegen), METH_VARARGS | METH_KEYWORDS, nullptr},
+    {"codegen_bin", reinterpret_cast<PyCFunction>(Autofuser::CodegenBin), METH_VARARGS | METH_KEYWORDS, nullptr},
     {nullptr, nullptr, 0, nullptr}};
 
 PyTypeObject Autofuser::type = {PyVarObject_HEAD_INIT(nullptr, 0)};
@@ -236,6 +241,14 @@ PyObject *Autofuser::Schedule(PyObject *self, PyObject *args, PyObject *kwds) {
 }
 
 PyObject *Autofuser::Codegen(PyObject *self, PyObject *args, PyObject *kwds) {
+  return CodegenImpl(self, args, kwds, false);
+}
+
+PyObject *Autofuser::CodegenBin(PyObject *self, PyObject *args, PyObject *kwds) {
+  return CodegenImpl(self, args, kwds, true);
+}
+
+PyObject *Autofuser::CodegenImpl(PyObject *self, PyObject *args, PyObject *kwds, bool launch_decouple) {
   (void)kwds;
   DumpGraphGuard guard;
   auto self_ = reinterpret_cast<Autofuser::Object *>(self);
@@ -249,7 +262,7 @@ PyObject *Autofuser::Codegen(PyObject *self, PyObject *args, PyObject *kwds) {
   codegen::CodegenResult result;
   af::Status ret = af::FAILED;
   try {
-    ret = self_->codegen->GenerateForInductor(fused_schedule_result->fused_schedule_result, result);
+    ret = self_->codegen->GenerateForInductor(fused_schedule_result->fused_schedule_result, result, launch_decouple);
   } catch (const std::runtime_error &e) {
     GELOGE(af::FAILED, "Caught a runtime_error: %s", e.what());
   }
@@ -821,12 +834,13 @@ PyObject *CodeGen::get_kernel_and_json_generator(PyObject *self_pyobject, PyObje
   std::string get_kernel;
   const char *kernel_path = nullptr;
   const char *json_path = nullptr;
-  if (PyArg_ParseTuple(args, "ss", &kernel_path, &json_path) == kPythonFail) {
+  const char *export_name = "GetKernelBin";
+  if (PyArg_ParseTuple(args, "ss|s", &kernel_path, &json_path, &export_name) == kPythonFail) {
     return PyErr_Format(PyExc_ValueError, "codegen param parse failed");
   }
 
   af::Status ret = af::SUCCESS;
-  get_kernel = self->codegen->GenGetKernelAndJson(kernel_path, json_path);
+  get_kernel = self->codegen->GenGetKernelAndJson(kernel_path, json_path, export_name);
   if (get_kernel == "") {
     ret = af::FAILED;
   }

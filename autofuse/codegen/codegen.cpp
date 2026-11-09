@@ -394,9 +394,15 @@ Status Codegen::Generate(const ascir::FusedScheduledResult &fused_schedule_resul
 }
 
 // inductor路径仍返回单个host_tiling字符串，通过注释marker保留拆分边界
-Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
-                                    CodegenResult &result) const {
+Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result,
+                                    bool launch_decouple) const {
   GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
+  // PGO 开启时守卫降级 legacy：rtLaunch 形态的 PgoDeviceSource 含 AIV split marker，
+  // PGO sidecar 单文件编译链暂无法消费，待 rtLaunch PGO 适配落地后放开。
+  if (launch_decouple && tiling_lib_.IsInductorPgoEnabled()) {
+    GELOGW("rtLaunch codegen_bin does not support Inductor PGO yet; fall back to legacy codegen");
+    launch_decouple = false;
+  }
 #ifdef ENABLE_AUTOFUSE_MLIR
   const auto mlir_status = mlir::bridge::RunMlirCodegen(fused_schedule_result, mlir::bridge::MlirCallerScene::kInductor,
                                                         soc_version_, result);
@@ -409,9 +415,9 @@ Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_sch
     GELOGW("Tiling key count exceeds 10000, fallback to non-PGO Inductor codegen");
     Codegen fallback(*this);
     fallback.tiling_lib_.DisableInductorPgo();
-    return fallback.GenerateForInductor(fused_schedule_result, result);
+    return fallback.GenerateForInductor(fused_schedule_result, result, launch_decouple);
   }
-  const auto generate_tiling_without_pgo = [this, &fused_schedule_result, &result]() {
+  const auto generate_tiling_without_pgo = [this, &fused_schedule_result, &result, launch_decouple]() {
     if (!tiling_lib_.IsInductorPgoEnabled() || ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) ||
         !ascgen_utils::IsStaticSchedResult(fused_schedule_result)) {
       return af::FAILED;
@@ -419,12 +425,14 @@ Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_sch
     GELOGW("Inductor PGO codegen failed, fallback to non-PGO codegen for static non-CV kernel");
     Codegen fallback(*this);
     fallback.tiling_lib_.DisableInductorPgo();
-    return fallback.GenerateForInductor(fused_schedule_result, result);
+    return fallback.GenerateForInductor(fused_schedule_result, result, launch_decouple);
   };
-  GE_CHK_STATUS_RET(GenerateKernel(fused_schedule_result, result.kernel, true), "Codegen generate kernel failed");
+  GE_CHK_STATUS_RET(GenerateKernel(fused_schedule_result, result.kernel, true, launch_decouple),
+                    "Codegen generate kernel failed");
   result.tiling_data = GenerateTilingData(fused_schedule_result, true);
   std::map<std::string, std::string> tiling_file_name_to_content;
-  const auto tiling_ret = GenerateTilingForInductor(fused_schedule_result, tiling_file_name_to_content);
+  const auto tiling_ret =
+      GenerateTilingForInductor(fused_schedule_result, tiling_file_name_to_content, launch_decouple);
   if (tiling_ret != af::SUCCESS) {
     if (generate_tiling_without_pgo() == af::SUCCESS) {
       return af::SUCCESS;
@@ -468,9 +476,10 @@ std::string Codegen::GenerateTilingData(const ascir::FusedScheduledResult &fused
 }
 
 Status Codegen::GenerateTilingForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
-                                          std::map<std::string, std::string> &tiling_file_name_to_content) const {
+                                          std::map<std::string, std::string> &tiling_file_name_to_content,
+                                          bool launch_decouple) const {
   GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
-  tiling_file_name_to_content = this->tiling_lib_.GenerateForInductor(fused_schedule_result);
+  tiling_file_name_to_content = this->tiling_lib_.GenerateForInductor(fused_schedule_result, launch_decouple);
   for (const auto &pair : tiling_file_name_to_content) {
     GE_CHK_BOOL_RET_STATUS(pair.second != ascgen_utils::INVALID_TILING, af::FAILED, "tilings(%s) is invalid",
                            pair.second.c_str());
@@ -479,9 +488,9 @@ Status Codegen::GenerateTilingForInductor(const ascir::FusedScheduledResult &fus
 }
 
 std::map<std::string, std::string> Codegen::GenerateTilingForInductor(
-    const ascir::FusedScheduledResult &fused_schedule_result) const {
+    const ascir::FusedScheduledResult &fused_schedule_result, bool launch_decouple) const {
   std::map<std::string, std::string> tiling_file_name_to_content;
-  (void)GenerateTilingForInductor(fused_schedule_result, tiling_file_name_to_content);
+  (void)GenerateTilingForInductor(fused_schedule_result, tiling_file_name_to_content, launch_decouple);
   return tiling_file_name_to_content;
 }
 
@@ -519,12 +528,12 @@ std::string Codegen::GeneratorPgo(const ascir::FusedScheduledResult &fused_sched
 }
 
 Status Codegen::GenerateKernel(const ascir::FusedScheduledResult &fused_schedule_result, std::string &result,
-                               bool is_inductor) const {
+                               bool is_inductor, bool launch_decouple) const {
   ascir::utils::FusedGraphNameGuard guard(fused_schedule_result.fused_graph_name.GetString());
   GE_CHK_STATUS_RET(EnrichScheduledResultAscirParams(fused_schedule_result), "Enrich ascir node params failed.");
   const auto io_num = fused_schedule_result.input_nodes.size() + fused_schedule_result.output_nodes.size();
   bool use_list_tensor = io_num >= kMaxUnfoldedIoNum;
-  CodegenConfig config = {is_inductor, using_att_calc_qbt_size_};
+  CodegenConfig config = {is_inductor, using_att_calc_qbt_size_, launch_decouple};
   if (is_inductor) {
     use_list_tensor = false;
     GE_LOGW_IF(io_num >= kKernelMaxIoNum, "Too many io, io num is %zu", io_num);
@@ -540,13 +549,33 @@ Status Codegen::GenerateKernel(const ascir::FusedScheduledResult &fused_schedule
       Kernel::GenKernelFuncByTilingKey(fused_schedule_result, ss, use_list_tensor, config, kernel_task_type),
       "Generate kernel func by tiling_key failed.");
   if (is_inductor) {
-    ss << Kernel::GenKernelFuncCallForInductor(fused_schedule_result);
+    bool launch_decouple_is_batch = false;
+    if (ascgen_utils::IsLaunchDecoupleCvVariantEnabled(fused_schedule_result, launch_decouple_is_batch,
+                                                       launch_decouple)) {
+      // rtLaunch 分派入口方案：公共部分（include + 模板定义）+ MIX 入口构成主编译单元；
+      // AIV 编译单元复用同一份公共部分 + AIV 入口，经 split marker 段传递给 compile 侧
+      // 拆分（每单元一个 bisheng 编译，.aicore_binary 内核型单一）。
+      const std::string common_src = ss.str();
+      ss << Kernel::GenCvDispatchEntryForInductor(fused_schedule_result, kernel_task_type, false);
+      // AIV 单元仅在有 kCommon 兜底组时生成：前端仅 mix_mode==2 选 aiv handle
+      // （mix=2 ⟹ fusion=1 ⟹ 需 kCommon 体），纯 UB 图省一半双 bin 编译。
+      if (Kernel::CountCommonFallbackGroups(fused_schedule_result) > 0UL) {
+        const std::string aiv_split_key = graph_name + "_op_kernel_aiv.cpp";
+        ss << kSplitFileBegin << aiv_split_key << std::endl;
+        ss << common_src;
+        ss << Kernel::GenCvDispatchEntryForInductor(fused_schedule_result, kernel_task_type, true);
+        ss << kSplitFileEnd << aiv_split_key << std::endl;
+      }
+    } else {
+      ss << Kernel::GenKernelFuncCallForInductor(fused_schedule_result);
+    }
   }
   result = FormatIndentation(ss.str());
   return af::SUCCESS;
 }
 
-std::string Codegen::GenGetKernelAndJson(const std::string &kernel_path, const std::string &json_path) const {
+std::string Codegen::GenGetKernelAndJson(const std::string &kernel_path, const std::string &json_path,
+                                         const std::string &export_name) const {
   // 当前只获取kernel，后续计划json也会打包起来
   (void)json_path;
   std::stringstream ss;
@@ -570,7 +599,7 @@ std::string Codegen::GenGetKernelAndJson(const std::string &kernel_path, const s
   ss << "#include <cstdint>" << std::endl;
   ss << "#include <cstring>" << std::endl;
   ss << "#include <vector>" << std::endl;
-  ss << "extern \"C\" void GetKernelBin(std::vector<char> &kernel_bin) {" << std::endl;
+  ss << "extern \"C\" void " << export_name << "(std::vector<char> &kernel_bin) {" << std::endl;
   if (kernel_file_size == 0) {
     ss << "  std::vector<uint8_t> temp_kernel = {};" << std::endl;
     ss << "  return;" << std::endl;

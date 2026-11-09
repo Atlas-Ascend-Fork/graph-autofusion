@@ -23,6 +23,7 @@ target_link_libraries(inductor_matmul_elemwise_test_codegen
 target_compile_definitions(inductor_matmul_elemwise_test_codegen PRIVATE
     ATT_SO_NAME="./libatt.so"
     KERNEL_SRC_LIST="${INDUCTOR_MATMUL_ELEMWISE_KERNEL_SRC_LIST}"
+    INDUCTOR_MATMUL_ELEMWISE_DIAG_DIR="/tmp/opencode/diag"
 )
 add_test(NAME inductor_matmul_elemwise_test_codegen
     COMMAND ${CMAKE_COMMAND} -E env

@@ -7715,6 +7715,75 @@ TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_ShouldGenerateMatMulTemplate_W
   EXPECT_EQ(declare.find("WeightTiling"), std::string::npos);
 }
 
+TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_InductorLegacyKeepsElevenParamsAndGlobal) {
+  af::AscGraph graph("matmul_graph");
+  codegen::Kernel kernel("matmul_kernel");
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString("matmul_fusion");
+  ::ascir::ScheduledResult scheduled_result;
+  scheduled_result.cube_type = ::ascir::CubeTemplateType::kUBFuse;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back({scheduled_result});
+
+  std::string declare = kernel.KernelFuncDeclare("matmul_graph", fused_schedule_result, false, true, false, false);
+
+  // legacy（is_inductor=true, launch_decouple=false）：11 参数模板 + __global__ + 值参。
+  EXPECT_NE(declare.find("typename TILING_DATA_T"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t FUSION_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t UB_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t MIX_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("__global__"), std::string::npos);
+  EXPECT_NE(declare.find("TILING_DATA_T t"), std::string::npos);
+}
+
+TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_LaunchDecoupleDropsModeTemplateParams) {
+  af::AscGraph graph("matmul_graph");
+  codegen::Kernel kernel("matmul_kernel");
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString("matmul_fusion");
+  ::ascir::ScheduledResult scheduled_result;
+  scheduled_result.cube_type = ::ascir::CubeTemplateType::kUBFuse;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back({scheduled_result});
+
+  std::string declare = kernel.KernelFuncDeclare("matmul_graph", fused_schedule_result, false, true, false, true);
+
+  // rtLaunch（launch_decouple=true）：7 参数模板（mode 三元组与 TILING_DATA_T 退出），
+  // 去 __global__（普通 __aicore__ 函数，由 extern "C" 分派入口调用），tiling 形参统一
+  // 为非模板 CVAutofuseTilingData 引用。
+  EXPECT_NE(declare.find("template <int8_t API_LEVEL, int8_t A_TRANS, int8_t B_TRANS, int8_t BATCH_MODEL, "
+                         "int8_t MODEL, int8_t FULL_LOAD, int8_t L0C2OUT_MODEL>"),
+            std::string::npos);
+  EXPECT_EQ(declare.find("typename TILING_DATA_T"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t FUSION_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t UB_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t MIX_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("__global__"), std::string::npos);
+  EXPECT_NE(declare.find("__aicore__ inline __attribute__((always_inline)) void"), std::string::npos);
+  EXPECT_NE(declare.find("const CVAutofuseTilingData &t"), std::string::npos);
+  EXPECT_EQ(declare.find("TILING_DATA_T t"), std::string::npos);
+}
+
+TEST_F(CodegenKernelConv2DTest, GenCubeCommonTiling_TilingTypeArgFollowsLaunchDecouple) {
+  codegen::Kernel kernel("matmul_kernel");
+  kernel.tpipe.is_inductor = true;
+
+  {
+    std::stringstream ss;
+    EXPECT_EQ(kernel.GenCubeCommonTiling(ss, false, false, true, false, "", false), af::SUCCESS);
+    const std::string result = ss.str();
+    EXPECT_NE(result.find("mat_mul_v3_fusion<TILING_DATA_T, "), std::string::npos);
+    EXPECT_EQ(result.find("CVAutofuseTilingData"), std::string::npos);
+  }
+  {
+    std::stringstream ss;
+    EXPECT_EQ(kernel.GenCubeCommonTiling(ss, false, false, true, false, "", true), af::SUCCESS);
+    const std::string result = ss.str();
+    EXPECT_NE(result.find("mat_mul_v3_fusion<CVAutofuseTilingData, "), std::string::npos);
+    EXPECT_EQ(result.find("TILING_DATA_T"), std::string::npos);
+  }
+}
+
 TEST_F(CodegenKernelConv2DTest, GenCubeCommonTiling_ShouldGenerateConv2DAPI_WhenIsConv2dTrue) {
   codegen::Kernel kernel("conv2d_kernel");
 

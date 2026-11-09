@@ -38,6 +38,129 @@ def _host_compile_args(tmpdir):
     )()
 
 
+def _device_compile_args(tmpdir):
+    return type(
+        "Args",
+        (),
+        {
+            "stage": "device",
+            "temp_dir": str(tmpdir),
+            "graph_name": "graph",
+            "trace_stage": "device_compile",
+        },
+    )()
+
+
+AIV_SPLIT_KEY = "graph_op_kernel_aiv.cpp"
+
+
+def _make_rt_launch_kernel_impl(aiv_body='extern "C" __global__ void graph_aiv() {}'):
+    """rtLaunch 双单元形态的 kernel 源：主内容在 marker 外，AIV 入口在 marker 段内。"""
+    return "\n".join(
+        [
+            "// common part + MIX entry",
+            'extern "C" __global__ void graph() {}',
+            f"// AUTOFUSE_SPLIT_FILE_BEGIN: {AIV_SPLIT_KEY}",
+            aiv_body,
+            f"// AUTOFUSE_SPLIT_FILE_END: {AIV_SPLIT_KEY}",
+        ]
+    )
+
+
+def test_split_device_sources_extracts_aiv_unit(compile_adapter_module):
+    main_code, split_files = compile_adapter_module.split_device_sources(
+        _make_rt_launch_kernel_impl()
+    )
+
+    assert 'extern "C" __global__ void graph() {}' in main_code
+    assert "AUTOFUSE_SPLIT_FILE_BEGIN" not in main_code
+    assert "graph_aiv" not in main_code
+    assert list(split_files.keys()) == [AIV_SPLIT_KEY]
+    assert 'extern "C" __global__ void graph_aiv() {}' in split_files[AIV_SPLIT_KEY]
+    assert "AUTOFUSE_SPLIT_FILE_BEGIN" not in split_files[AIV_SPLIT_KEY]
+
+
+def test_split_device_sources_keeps_legacy_content_intact(compile_adapter_module):
+    legacy = 'extern "C" int64_t AutofuseLaunch() { return 0; }\n'
+    main_code, split_files = compile_adapter_module.split_device_sources(legacy)
+
+    assert main_code == legacy
+    assert split_files == {}
+
+
+def test_split_device_sources_rejects_nested_and_mismatched_markers(
+    compile_adapter_module,
+):
+    nested = (
+        f"// AUTOFUSE_SPLIT_FILE_BEGIN: {AIV_SPLIT_KEY}\n"
+        "// AUTOFUSE_SPLIT_FILE_BEGIN: other.cpp\n"
+        "// AUTOFUSE_SPLIT_FILE_END: other.cpp\n"
+        f"// AUTOFUSE_SPLIT_FILE_END: {AIV_SPLIT_KEY}\n"
+    )
+    with pytest.raises(compile_adapter_module.ascendc_compile.CompileError):
+        compile_adapter_module.split_device_sources(nested)
+
+    mismatched = (
+        f"// AUTOFUSE_SPLIT_FILE_BEGIN: {AIV_SPLIT_KEY}\n"
+        "// AUTOFUSE_SPLIT_FILE_END: other.cpp\n"
+    )
+    with pytest.raises(compile_adapter_module.ascendc_compile.CompileError):
+        compile_adapter_module.split_device_sources(mismatched)
+
+    unclosed = f"// AUTOFUSE_SPLIT_FILE_BEGIN: {AIV_SPLIT_KEY}\n"
+    with pytest.raises(compile_adapter_module.ascendc_compile.CompileError):
+        compile_adapter_module.split_device_sources(unclosed)
+
+
+def test_write_compile_device_sources_writes_dual_units(compile_adapter_module, tmpdir):
+    args = _device_compile_args(tmpdir)
+
+    compile_adapter_module.write_compile_device_sources(
+        {
+            "tiling_struct_code": "struct AutofuseTilingData {};",
+            "host_impl_code": None,
+            "kernel_impl_code": _make_rt_launch_kernel_impl(),
+        },
+        args,
+        "autofuse_tiling_data.h",
+        "graph_op_kernel.cpp",
+    )
+
+    device_dir = os.path.join(str(tmpdir), "device")
+    assert args.device_files == os.path.join(device_dir, "graph_op_kernel.cpp")
+    assert args.device_files_aiv == os.path.join(device_dir, AIV_SPLIT_KEY)
+    assert os.path.exists(args.device_files)
+    with open(args.device_files_aiv) as f:
+        assert "graph_aiv" in f.read()
+
+
+def test_write_compile_device_sources_cleans_stale_aiv_unit(
+    compile_adapter_module, tmpdir
+):
+    args = _device_compile_args(tmpdir)
+    device_dir = os.path.join(str(tmpdir), "device")
+    os.makedirs(device_dir, exist_ok=True)
+    stale_aiv = os.path.join(device_dir, AIV_SPLIT_KEY)
+    with open(stale_aiv, "w") as f:
+        f.write("stale aiv unit")
+
+    # legacy 形态（无 marker）：残留的 stale AIV 源必须被清理，防止被误编进双 bin 链路。
+    compile_adapter_module.write_compile_device_sources(
+        {
+            "tiling_struct_code": "struct AutofuseTilingData {};",
+            "host_impl_code": None,
+            "kernel_impl_code": 'extern "C" int64_t AutofuseLaunch() { return 0; }',
+        },
+        args,
+        "autofuse_tiling_data.h",
+        "graph_op_kernel.cpp",
+    )
+
+    assert not os.path.exists(stale_aiv)
+    assert args.device_files == os.path.join(device_dir, "graph_op_kernel.cpp")
+    assert args.device_files_aiv is None
+
+
 def _scheme_a_sources():
     return {
         "tiling_struct_code": "struct AutofuseTilingData {};",

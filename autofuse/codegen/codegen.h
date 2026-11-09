@@ -38,7 +38,10 @@ class Codegen {
   Status Generate(const ::ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result) const;
   Status Generate(const std::map<std::string, std::string> &shape_info,
                   const ::ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result) const;
-  Status GenerateForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result) const;
+  // launch_decouple：rtLaunch 分派入口形态，由 pyautofuse codegen_bin 入口传入 true；
+  // 缺省 false 生成物与 legacy 完全一致。
+  Status GenerateForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result,
+                             bool launch_decouple = false) const;
 
   std::string GenerateTilingData(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                  bool is_inductor = false) const;
@@ -54,13 +57,17 @@ class Codegen {
                                                     const std::map<std::string, std::string> &shape_info,
                                                     const std::string &pgo_dir, const std::string &core_num) const;
   Status GenerateTilingForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
-                                   std::map<std::string, std::string> &tiling_file_name_to_content) const;
+                                   std::map<std::string, std::string> &tiling_file_name_to_content,
+                                   bool launch_decouple = false) const;
   std::map<std::string, std::string> GenerateTilingForInductor(
-      const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+      const ::ascir::FusedScheduledResult &fused_schedule_result, bool launch_decouple = false) const;
 
   Status GenerateKernel(const ::ascir::FusedScheduledResult &fused_schedule_result, std::string &result,
-                        bool is_inductor = false) const;
-  std::string GenGetKernelAndJson(const std::string &kernel_path, const std::string &json_path) const;
+                        bool is_inductor = false, bool launch_decouple = false) const;
+  // export_name 参数化导出符号名（默认 GetKernelBin；CV rtLaunch 双 bin 为
+  // GetKernelBinAic/GetKernelBinAiv）。
+  std::string GenGetKernelAndJson(const std::string &kernel_path, const std::string &json_path,
+                                  const std::string &export_name = "GetKernelBin") const;
   std::string GenerateInferShape(const std::vector<std::vector<std::string>> &symbol_shape_str,
                                  const std::map<std::string, std::string> &shape_info) const;
 

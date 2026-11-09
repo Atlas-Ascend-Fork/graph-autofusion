@@ -136,4 +136,64 @@ TEST_F(TestBackendInductorMatmulElemwiseE2e, CvTilingUsesDirectLogHeaderDependen
   EXPECT_NE(wrapper_cpp.find("#include \"autofuse_tiling_func_log.h\""), std::string::npos);
   EXPECT_EQ(wrapper_cpp.find("autofuse_tiling_data_log.h"), std::string::npos);
 }
+
+// rtLaunch（codegen_bin 入口）形态 ST：真实全流程图（Optimize + Codegen）双态断言——
+// legacy 缺省入口生成物含 <<< / AutofuseLaunch、无分派入口与裁剪宏标记、无
+// GetDynamicUbSize 导出；launch_decouple=true 生成物反向（分派入口 + AIV split 标记 +
+// 宏标记 + GetDynamicUbSize 导出，<<< / AutofuseLaunch 全部退出）。
+TEST_F(TestBackendInductorMatmulElemwiseE2e, InductorMatmulElemwiseRtLaunchCodegen) {
+  auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back({});
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), 0);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+
+  try {
+    codegen::Codegen codegen(codegen::CodegenOptions{});
+
+    codegen::CodegenResult legacy_result;
+    ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, legacy_result), 0);
+    EXPECT_NE(legacy_result.kernel.find("AutofuseLaunch"), std::string::npos);
+    EXPECT_NE(legacy_result.kernel.find("<<<"), std::string::npos);
+    EXPECT_EQ(legacy_result.kernel.find("extern \"C\" __global__ __aicore__ void"), std::string::npos);
+    EXPECT_EQ(legacy_result.kernel.find("#ifndef AF_AIV_UNIT"), std::string::npos);
+    EXPECT_EQ(legacy_result.kernel.find("_op_kernel_aiv.cpp"), std::string::npos);
+    EXPECT_EQ(legacy_result.tiling.find("GetDynamicUbSize"), std::string::npos);
+
+    codegen::CodegenResult rt_result;
+    ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, rt_result, true), 0);
+    {
+      // 诊断落盘：legacy vs rtLaunch 双态 device 源码对比用（临时）。
+      const std::string diag_dir = INDUCTOR_MATMUL_ELEMWISE_DIAG_DIR;
+      if (!diag_dir.empty()) {
+        (void)system(("mkdir -p " + diag_dir).c_str());
+        std::ofstream lf(diag_dir + "/legacy_device.cpp");
+        lf << legacy_result.kernel;
+        std::ofstream rf(diag_dir + "/rt_device.cpp");
+        rf << rt_result.kernel;
+        std::ofstream tf(diag_dir + "/legacy_tiling.cpp");
+        tf << legacy_result.tiling;
+        std::ofstream rf2(diag_dir + "/rt_tiling.cpp");
+        rf2 << rt_result.tiling;
+      }
+    }
+    EXPECT_EQ(rt_result.kernel.find("AutofuseLaunch"), std::string::npos);
+    EXPECT_EQ(rt_result.kernel.find("<<<"), std::string::npos);
+    EXPECT_NE(rt_result.kernel.find("extern \"C\" __global__ __aicore__ void"), std::string::npos);
+    EXPECT_NE(rt_result.kernel.find("#ifndef AF_AIV_UNIT"), std::string::npos);
+    EXPECT_NE(rt_result.kernel.find("#ifndef AF_MIX_UNIT"), std::string::npos);
+    EXPECT_NE(rt_result.kernel.find("_op_kernel_aiv.cpp"), std::string::npos);
+    EXPECT_NE(rt_result.kernel.find("mat_mul_v3_fusion<CVAutofuseTilingData"), std::string::npos);
+    EXPECT_NE(rt_result.kernel.find("if (t.cv_tiling_data.ub_mode == 0)"), std::string::npos);
+    EXPECT_NE(rt_result.tiling.find("GetDynamicUbSize"), std::string::npos);
+    EXPECT_FALSE(rt_result.tiling_data.empty());
+    EXPECT_FALSE(rt_result.tiling.empty());
+    EXPECT_FALSE(rt_result.kernel.empty());
+  } catch (const std::exception &e) {
+    FAIL() << e.what();
+  } catch (...) {
+    FAIL() << "inductor matmul elemwise rtLaunch codegen failed";
+  }
+}
 }  // namespace

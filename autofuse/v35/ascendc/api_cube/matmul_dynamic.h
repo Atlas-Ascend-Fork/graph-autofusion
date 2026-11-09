@@ -7,10 +7,10 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
 #ifndef INDUCTOR_CV_FUSION
 #include "autofuse_cube_tiling_data.h"
 #endif
-
 // 兼容旧版 CANN 工具链中缺失的 mat_mul_v3 model 宏定义
 #ifndef MAT_MUL_K_EQUAL_ZERO
 #define MAT_MUL_K_EQUAL_ZERO 2

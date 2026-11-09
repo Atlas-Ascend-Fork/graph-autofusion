@@ -140,6 +140,43 @@ TEST_F(TestPyModule, AutofuseBackendRejectsUnknownArchBeforeGraphValidation) {
   ge::PlatformContext::GetInstance().Reset();
 }
 
+TEST_F(TestPyModule, AutofuserExposesCodegenAndCodegenBinEntries) {
+  // 前后端独立上库契约锚点：Autofuser 必须同时暴露 codegen（legacy，缺省）与
+  // codegen_bin（rtLaunch 形态）两个入口——torchair 以 hasattr(Autofuser,
+  // "codegen_bin") 做后端能力探测，缺失即回退 legacy。
+  ge::PlatformContext::GetInstance().SetPlatform("UnknownArch");
+  ASSERT_NE(pyautofuse_module_, nullptr);
+  PyObject *options_type = PyObject_GetAttrString(pyautofuse_module_, "AutofuserOptions");
+  ASSERT_NE(options_type, nullptr);
+  PyObject *options = PyObject_CallObject(options_type, nullptr);
+  ASSERT_NE(options, nullptr);
+  PyObject *autofuser_type = PyObject_GetAttrString(pyautofuse_module_, "Autofuser");
+  ASSERT_NE(autofuser_type, nullptr);
+
+  EXPECT_EQ(PyObject_HasAttrString(autofuser_type, "codegen"), 1);
+  EXPECT_EQ(PyObject_HasAttrString(autofuser_type, "codegen_bin"), 1);
+
+  PyObject *autofuser = PyObject_CallFunctionObjArgs(autofuser_type, options, NULL);
+  ASSERT_NE(autofuser, nullptr);
+  EXPECT_EQ(PyObject_HasAttrString(autofuser, "codegen"), 1);
+  EXPECT_EQ(PyObject_HasAttrString(autofuser, "codegen_bin"), 1);
+  // 两个入口均为可调用对象（bound method）。
+  PyObject *codegen_bin_method = PyObject_GetAttrString(autofuser, "codegen_bin");
+  ASSERT_NE(codegen_bin_method, nullptr);
+  EXPECT_EQ(PyCallable_Check(codegen_bin_method), 1);
+  PyObject *codegen_method = PyObject_GetAttrString(autofuser, "codegen");
+  ASSERT_NE(codegen_method, nullptr);
+  EXPECT_EQ(PyCallable_Check(codegen_method), 1);
+
+  Py_XDECREF(codegen_method);
+  Py_XDECREF(codegen_bin_method);
+  Py_XDECREF(autofuser);
+  Py_XDECREF(autofuser_type);
+  Py_XDECREF(options);
+  Py_XDECREF(options_type);
+  ge::PlatformContext::GetInstance().Reset();
+}
+
 TEST_F(TestPyModule, DISABLED_UtilsDeserialize_symbol_source_info) {
   PyObject *args = PyTuple_New(2);
   PyObject *kwds = PyDict_New();

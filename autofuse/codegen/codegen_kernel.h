@@ -409,6 +409,9 @@ class TPipe : public Variable {
 struct CodegenConfig {
   bool is_inductor;
   bool using_att_calc_qbt_size;  // 是否使用att计算tque/tbuf/tmpbuf
+  // Inductor CV rtLaunch 分派入口形态（不走 <<<）。pyautofuse codegen_bin 入口传入 true；
+  // 缺省 false 时生成物与 legacy 链路（AutofuseLaunch + <<<>>>）完全一致。
+  bool launch_decouple = false;
 };
 
 class KernelUtils {
@@ -438,6 +441,9 @@ struct CubeTilingOptions {
   bool is_conv2d{false};
   bool is_dynamic{false};
   bool is_db{false};
+  // rtLaunch 运行时形态（GenCubeTilingFuncCall 的 launch_decouple 透传），驱动
+  // GenCubeCommonTiling 的官方 fusion 模板 tiling 实参类型选择。
+  bool launch_decouple{false};
 };
 
 class Kernel {
@@ -476,18 +482,24 @@ class Kernel {
                                 bool enable_group_parallel = false, bool need_sync_all = false,
                                 const std::string &workspace_tiling_data = "t") const;
   std::string GenTilingFuncCall(const std::string &impl_graph_name, const std::string &tiling_data) const;
-  std::string GenCubeTilingFuncCall(const ascir::ImplGraph &impl_graph, bool is_dynamic = false) const;
+  // launch_decouple：rtLaunch 运行时形态判定（与 fusion_mode_runtime 同口径，排除
+  // conv2d）；缺省 false 走 legacy constexpr 形态（GE 路径不受影响）。
+  std::string GenCubeTilingFuncCall(const ascir::ImplGraph &impl_graph, bool is_dynamic = false,
+                                    bool launch_decouple = false) const;
   std::string GenCubeTilingSingleFuncCall(const CubeTilingOptions &options,
                                           const std::string &callback_name = "") const;
   af::Status GenCubeCommonTiling(std::stringstream &ss, const bool is_batch, bool is_conv2d = false,
-                                 bool is_dynamic = false, bool is_db = false,
-                                 const std::string &callback_name = "") const;
+                                 bool is_dynamic = false, bool is_db = false, const std::string &callback_name = "",
+                                 bool launch_decouple = false) const;
+  // launch_decouple：kCommon 兜底组的 cube 调用经此重载生成——rtLaunch 7 参模板作用域
+  // 无 TILING_DATA_T，缺省 false 发射 mat_mul_v3<TILING_DATA_T> 会编译期 undeclared。
   std::string GenCubeCommonTilingSingleFuncCall(const ascir::ImplGraph &impl_graph,
-                                                const std::string &output_arg_override = "",
-                                                bool is_dynamic = false) const;
+                                                const std::string &output_arg_override = "", bool is_dynamic = false,
+                                                bool launch_decouple = false) const;
   static std::string KernelFuncDeclare(const std::string &graph_name,
                                        const ascir::FusedScheduledResult &fused_schedule_result,
-                                       bool use_list_tensor = false, bool is_inductor = false, bool is_conv2d = false);
+                                       bool use_list_tensor = false, bool is_inductor = false, bool is_conv2d = false,
+                                       bool launch_decouple = false);
   Status BindWorkspaceInput(ascir::TensorId tensor_id, const std::string &input_name, size_t input_index);
   Status GlobalTensorInit(std::string &result, const std::string &workspace_buffer_arg_override = "") const;
   Status GlobalTensorAssign(std::string &result) const;
@@ -509,6 +521,8 @@ class Kernel {
   void SetEnableParallelCompile(bool enable_parallel_compile);
   bool GetEnableParallelCompile() const;
   Status InitL2CacheHintInfo(const ascir::FusedScheduledResult &fused_scheduled_result, const ascir::ImplGraph &graph);
+  // kCommon 兜底组计数：rtLaunch AIV 单元仅在有兜底组时生成（见 codegen.cpp 调用处）。
+  static size_t CountCommonFallbackGroups(const ascir::FusedScheduledResult &fused_schedule_result);
   static Status GenGeDynamicCvUbFuncs(const ascir::FusedScheduledResult &fused_schedule_result, size_t graph_id,
                                       size_t result_id, const CodegenConfig &config, bool use_list_tensor,
                                       std::stringstream &ss, std::stringstream &calls,
@@ -516,9 +530,21 @@ class Kernel {
   Status GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_no_db_flag, bool is_conv2d,
                                    bool is_dynamic = false, bool is_inductor = false,
                                    const std::string &callback_name = "");
+  // launch_decouple：rtLaunch 运行时形态判定（与 fusion_mode_runtime 同口径，排除
+  // conv2d）；缺省 false 走 legacy constexpr 形态（GE 路径不受影响）。
   Status InitCVFusionAddr(std::stringstream &result, bool vector_no_db_flag, bool is_dynamic = false,
-                          bool is_inductor = false, bool is_conv2d = false, const std::string &callback_name = "");
+                          bool is_inductor = false, bool is_conv2d = false, const std::string &callback_name = "",
+                          bool launch_decouple = false);
   static std::string GenKernelFuncCallForInductor(const ascir::FusedScheduledResult &fused_schedule_result);
+  // Inductor CV rtLaunch 分派入口（launch_decouple 开启时替代 AutofuseLaunch，由
+  // pyautofuse codegen_bin 入口驱动）：
+  // extern "C" __global__ 入口函数体内承载原 host 侧位域解码/分发树，tiling 末参为
+  // CVAutofuseTilingData 按值入参（随 launch 命令搬运至参数区，VV 值参同款；静态 const
+  // 场景读 kConstTilingData），模板经引用直吃该值参（无视图 memcpy 中转）。is_aiv_entry=true
+  // 时生成 AIV 入口（KERNEL_TYPE_AIV_ONLY），否则生成 MIX 入口（kernel_task_type 标注）。
+  // 双 bin 拆分谓词为编译单元归属（AIV bin 含核内不可达死分支，由 AF_AIV_UNIT 宏裁剪）。
+  static std::string GenCvDispatchEntryForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
+                                                   const std::string &kernel_task_type, bool is_aiv_entry);
   Status ParseUbScalarOptimizationInfo(const ascir::NodeView &node, Tensor &t, ascir::TensorId id, bool is_all_link_vf);
   Status JudgeIsLoadLinkStoreAndVec(const ascir::NodeView &node, Tensor &t, ascir::TensorId id) const;
 
