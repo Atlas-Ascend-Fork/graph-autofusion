@@ -506,33 +506,84 @@ af::Status BuildSimtPerLoadIndexOffsetExpressions(const ascgen_utils::indirect_l
         expressions[node->GetName()] = append_load_offset("0");
         continue;
       }
-      // 归约为『零贡献前缀（stride==0 或 size==1）+ 常量尺寸的稠密尾段』的广播
-      // side-input（如生产 softmax 图 load4 的 [1,1,1,2048]）：正确寻址是对尾段
-      // 尺寸取模（每 tail_size 个输出元素重复一轮）。尾段尺寸必须为编译期常量：
-      // SIMT body 是静态成员函数，无 tiling data 参数，不能引用 t-> 运行时变量。
-      // （该形态源于 SIMT 角色节点视图 split 产生的 rank 差与 develop ea563ac0
-      // 强制 GM load 坐标重建的交互，与 tile 形态无关，固定 tile 同样触发。）
-      int64_t dense_tail_size = 1;
+      // 归约为『零贡献前缀（stride==0 广播维或 size==1 单例维）+ 单位步长稠密尾段』的
+      // 形态（如生产 softmax 图 load4 的 [1,1,1,2048]）：正确寻址是对尾段尺寸取模
+      // （每 tail_size 个输出元素重复一轮）。尾段尺寸可为运行期符号（动态 shape 图的
+      // index 源 Load：[1,ks0]/[0,1] 经调度期轴 split 改写为 [1,1,ks0]/[0,0,1]）：常量
+      // 走字面量取模，符号经注册表落 rt_size_N Context 字段并以 magic 乘移取模。
+      // [输出侧对齐校验] 取模语义成立的前提是稠密尾段逐维对齐到输出的最内层后缀——
+      // 稠密维落在输出前导轴时（如 [1,s2]/[0,1] 对 [s2,s3] 输出、稠密维在 z2）取模会
+      // 静默错址。判据分级：1) 双侧 axis_ids 齐备 → 按轴 id 对齐输出尾侧逐维比较（尺寸
+      // 巧合不误放，最稳）；2) 否则 → 位置尾对齐 + 逐维 size 相等（axis_ids 基数失配
+      // 的防御回退，GetNodeOutputView 恒带 axis_ids，残余巧合风险近零）；3) 均不满足 →
+      // 不取模，落回后续路径。该校验对常量尾段同样生效（常量路径的校验缺失先于本次
+      // 修改存在）。稠密段必须是尾侧连续块（零贡献维全部在前）：稠密维在前的形态由
+      // 轴对齐分解路径按除法坐标处理，此处不得窃占。另隐含假设：输出尾段为连续
+      // row-major（output.strides 链式递减、最内层为 1）——与坐标循环以 output.strides
+      // 为除数的既有假设同源（非本次引入），模板归一化保证输出视图连续。
+      std::vector<size_t> dense_dim_indices;
       bool has_dense_tail = true;
       for (size_t dim = 0UL; dim < view.sizes.size(); ++dim) {
         const bool zero_contribution =
             (af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::Zero) == af::TriBool::kTrue) ||
             (af::SymbolicUtils::StaticCheckEq(view.sizes[dim], af::ops::One) == af::TriBool::kTrue);
         if (zero_contribution) {
+          if (!dense_dim_indices.empty()) {
+            has_dense_tail = false;  // 稠密段之后再现零贡献维：非尾侧块，取模语义不成立
+            break;
+          }
           continue;
         }
         const bool unit_stride =
             af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::One) == af::TriBool::kTrue;
-        int64_t tail_const = 0;
-        if (!unit_stride || !view.sizes[dim].GetConstValue(tail_const)) {
+        if (!unit_stride) {
           has_dense_tail = false;
           break;
         }
-        dense_tail_size *= tail_const;
+        dense_dim_indices.emplace_back(dim);
       }
-      if (has_dense_tail && dense_tail_size > 1) {
-        expressions[node->GetName()] = append_load_offset(output_index_expr + " % " + std::to_string(dense_tail_size));
-        continue;
+      bool dense_tail_aligned = false;
+      if (has_dense_tail && !dense_dim_indices.empty() && dense_dim_indices.size() <= rank) {
+        dense_tail_aligned = true;
+        const bool axis_ids_usable =
+            view.axis_ids.size() == view.sizes.size() && logical_view.output.axis_ids.size() == rank;
+        for (size_t index = 0UL; index < dense_dim_indices.size(); ++index) {
+          const size_t out_dim = rank - dense_dim_indices.size() + index;
+          if (af::SymbolicUtils::StaticCheckEq(view.sizes[dense_dim_indices[index]],
+                                               logical_view.output.sizes[out_dim]) != af::TriBool::kTrue) {
+            dense_tail_aligned = false;
+            break;
+          }
+          if (axis_ids_usable && view.axis_ids[dense_dim_indices[index]] != logical_view.output.axis_ids[out_dim]) {
+            dense_tail_aligned = false;
+            break;
+          }
+        }
+      }
+      if (dense_tail_aligned) {
+        af::Expression dense_tail_expr = view.sizes[dense_dim_indices.front()];
+        for (size_t index = 1UL; index < dense_dim_indices.size(); ++index) {
+          dense_tail_expr = af::sym::Mul(dense_tail_expr, view.sizes[dense_dim_indices[index]]);
+        }
+        int64_t dense_tail_size = 0;
+        if (dense_tail_expr.GetConstValue(dense_tail_size) && dense_tail_size > 1) {
+          expressions[node->GetName()] =
+              append_load_offset(output_index_expr + " % " + std::to_string(dense_tail_size));
+          continue;
+        }
+        if (!dense_tail_expr.IsConstExpr()) {
+          // 符号尾段（如 ks0）：取模经 rt_size_N 字段 + magic 乘移展开；尾段运行期真值
+          // 为 1 时取模退化为 0（视图仅一个活跃元素，偏移 0 语义正确）；为 0（空张量）
+          // 时 magic 计算退化，但 actual_size=0 循环体不执行、值不被消费。
+          // [类型契约] FusedCtx 的 magic/shift 字段恒为 uint64、单 gather 双实例 Context
+          // 宽度亦可高于 body——除法统一在宽类型上求值后截断回 offset_type（对齐下方
+          // 坐标循环的 wide_type 模式，避免 UintDiv 混参）。
+          const std::string wide_type = (offset_type == "uint32_t") ? "uint64_t" : offset_type;
+          const std::string wide_mod = runtime_sizes.MakeRuntimeMod(
+              "static_cast<" + wide_type + ">(" + output_index_expr + ")", dense_tail_expr, tpipe, wide_type);
+          expressions[node->GetName()] = append_load_offset("static_cast<" + offset_type + ">(" + wide_mod + ")");
+          continue;
+        }
       }
       // [行级广播 side-input] 尾轴零贡献（stride==0 且 size==1、其余轴稠密）的广播
       // 形态（如生产 gather+softmax 图 load3 [8,2048,1]/[2048,1,0]）：每行读一个
@@ -563,6 +614,101 @@ af::Status BuildSimtPerLoadIndexOffsetExpressions(const ascgen_utils::indirect_l
           payload_size > 1) {
         expressions[node->GetName()] = append_load_offset(output_index_expr + " / " + std::to_string(payload_size));
         continue;
+      }
+      // [轴对齐坐标分解] rank 失配视图的通用兜底：负载各维按 axis id 对齐到输出维，
+      // 坐标经输出侧 stride 反解（div + mod，宽类型求值后截断回 offset_type）。维度
+      // 分类（精确语义，勿混淆）：
+      // - 广播维（stride==0 且 size>1）：值沿该轴重复，地址贡献 0，位置不限；
+      // - 单例维（size==1，stride 可非 0）：物理存在的单元素（坐标恒 0），地址贡献
+      //   0，位置不限——覆盖尾侧单例形态（[1,ks0,1]/[0,1,5]：正确寻址
+      //   (output_index/E2) % ks0，E2 为单例维所映射输出维的尺寸，经输出 stride
+      //   除法自然涌现，非简单取模）；
+      // - 稠密维（stride!=0 且 size>1）：按 axis id 在输出维中查找同轴维并要求 size
+      //   相等，坐标 = (output_index / 输出stride) % size——含稠密维在前导轴的形态
+      //   （[1,s2,1]/[0,1,0]：s2 落在输出 dim0 → output_index / s3）。
+      // 稠密维轴无法直接匹配（split/merged 部分轴、axis_ids 基数失配）时落回 flatten
+      // 路径（保留原断言兜底）。坐标表达式按 (输出维, size) 入共享表，与 rank 相等
+      // 坐标循环复用同一键空间。
+      if (view.axis_ids.size() == view.sizes.size() && view.strides.size() == view.sizes.size() &&
+          logical_view.output.axis_ids.size() == rank) {
+        const size_t kNoOutDim = SIZE_MAX;
+        std::vector<size_t> out_dim_of(view.sizes.size(), kNoOutDim);
+        // [R2 唯一性守卫] view.axis_ids 可能含重复 id（split 视图两侧同轴）：两个稠密维
+        // 映射到同一输出维会使坐标被加两次（静默多算）——同轴多稠密维的形态交还
+        // flatten 路径（其相邻轴合并正是处理该形态的机制）。
+        std::vector<bool> out_dim_used(rank, false);
+        bool alignable = true;
+        for (size_t dim = 0UL; dim < view.sizes.size() && alignable; ++dim) {
+          const bool broadcast_dim =
+              af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::Zero) == af::TriBool::kTrue &&
+              af::SymbolicUtils::StaticCheckEq(view.sizes[dim], af::ops::One) != af::TriBool::kTrue;
+          const bool singleton_dim =
+              af::SymbolicUtils::StaticCheckEq(view.sizes[dim], af::ops::One) == af::TriBool::kTrue;
+          if (broadcast_dim || singleton_dim) {
+            continue;  // 地址零贡献，位置不限
+          }
+          size_t matched = rank;
+          for (size_t out_dim = 0UL; out_dim < rank; ++out_dim) {
+            if (logical_view.output.axis_ids[out_dim] == view.axis_ids[dim]) {
+              matched = out_dim;
+              break;
+            }
+          }
+          if (matched == rank || af::SymbolicUtils::StaticCheckEq(
+                                     view.sizes[dim], logical_view.output.sizes[matched]) != af::TriBool::kTrue) {
+            alignable = false;
+            break;
+          }
+          if (out_dim_used[matched]) {
+            alignable = false;
+            break;
+          }
+          out_dim_used[matched] = true;
+          out_dim_of[dim] = matched;
+        }
+        if (alignable) {
+          const std::string wide_type = (offset_type == "uint32_t") ? "uint64_t" : offset_type;
+          std::string axis_aligned_offset;
+          for (size_t dim = 0UL; dim < view.sizes.size(); ++dim) {
+            if (out_dim_of[dim] == kNoOutDim) {
+              continue;
+            }
+            const size_t out_dim = out_dim_of[dim];
+            const std::string output_size = runtime_sizes.InlineOrContext(view.sizes[dim], tpipe, wide_type);
+            const auto key = std::make_pair(out_dim, output_size);
+            auto found = coordinates.find(key);
+            if (found == coordinates.end()) {
+              const std::string name = "index_coord_" + std::to_string(coordinates.size());
+              std::string quotient_var;
+              // [R3 快路径] 输出 stride==1（最内层维）时被积元直取 output_index（宽类型
+              // 包装），免去 /1 除法——与 rank 相等坐标循环的 unit_output_stride 优化
+              // 同款（对齐 :647-653）。
+              const bool unit_output_stride = af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[out_dim],
+                                                                               af::ops::One) == af::TriBool::kTrue;
+              const std::string dividend =
+                  unit_output_stride
+                      ? "static_cast<" + wide_type + ">(" + output_index_expr + ")"
+                      : runtime_sizes.MakeRuntimeDiv(output_index_expr, logical_view.output.strides[out_dim], tpipe,
+                                                     wide_type, &quotient_var);
+              const std::string mod_expr = runtime_sizes.MakeRuntimeMod(dividend, view.sizes[dim], tpipe, wide_type);
+              std::vector<std::string> quotient_stmts;
+              runtime_sizes.TakeQuotientStmts(quotient_stmts);
+              for (const std::string &stmt : quotient_stmts) {
+                ss << stmt << std::endl;
+              }
+              ss << "    const " << offset_type << " " << name << " = static_cast<" << offset_type << ">(" << mod_expr
+                 << ");" << std::endl;
+              found = coordinates.emplace(key, name).first;
+            }
+            const bool unit_load_stride =
+                af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::One) == af::TriBool::kTrue;
+            const std::string load_stride = runtime_sizes.InlineOrContext(view.strides[dim], tpipe, wide_type);
+            const std::string term = unit_load_stride ? found->second : found->second + " * " + load_stride;
+            axis_aligned_offset += (axis_aligned_offset.empty() ? "" : " + ") + term;
+          }
+          expressions[node->GetName()] = append_load_offset(axis_aligned_offset.empty() ? "0" : axis_aligned_offset);
+          continue;
+        }
       }
       // [strided 视图扁平化] 调度器 split 改写产生的 rank 差 strided 视图（如
       // [128]/[39]+offset 列切片被改写为 [128/Tb, Tb, 1]/[39*Tb, 39, 39]）此前

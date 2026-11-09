@@ -1375,6 +1375,139 @@ TEST(IndirectLoadApiCallTest, GenerateSimtIndexLoadFoldsSplitStridedView) {
   EXPECT_EQ(def.find("context.gm_5[index_offset]"), std::string::npos);
 }
 
+// [符号稠密尾段] 动态 shape 图的 index 源 Load 经调度 split 改写为 [1,1,s3]/[0,0,1]
+// （前导零贡献 + 符号尾段，稠密维对齐输出尾维 z3）：取模经 rt_size_N 字段 + magic
+// 乘移展开，且除法在宽类型上求值后截断回 offset_type（UintDiv 无混参，P1）。
+// [R5 收紧] 断言 magic 与宽类型被积元出现在同一表达式（UintDiv 三实参同型的直接
+// 证据）；[R1 结构性结论] Tier 尺寸相等使"符号尾段 ⟹ 输出符号维 ⟹ 档位恒 64"，
+// 32 位档（静态 shape）下尾段必为常量、走字面量取模不出现 UintDiv（见
+// ConstDenseTail 用例的 npos 断言）——"32 位 + 符号尾段混参"场景被结构性排除，
+// wide_type 包裹为纵深防御（覆盖双实例等旁路）。
+TEST(IndirectLoadApiCallTest, GenerateSimtIndexLoadSymbolicDenseTailUsesRuntimeModulo) {
+  SimtCodegenContext context;
+  ILTestGraph g("simt_symbolic_dense_tail");
+  BuildSimtGraph(g);
+  const auto idx_load = g.graph.FindNode("idx_load");
+  ASSERT_NE(idx_load, nullptr);
+  idx_load->outputs[0].attr.axis = {g.z2.id, g.z2.id, g.z3.id};
+  idx_load->outputs[0].attr.repeats = {af::sym::kSymbolOne, af::sym::kSymbolOne, g.s3};
+  idx_load->outputs[0].attr.strides = {af::Symbol(0), af::Symbol(0), af::sym::kSymbolOne};
+  AnnotateSimtTemplate(g.graph);
+  std::string def;
+  GenerateSimtFuncDefinitionFromGraph(g, def);
+
+  EXPECT_NE(def.find("Simt::UintDiv(static_cast<uint64_t>(output_index), context.rt_div_magic_0"), std::string::npos);
+  EXPECT_NE(def.find("static_cast<uint64_t>(output_index)"), std::string::npos);
+  EXPECT_EQ(def.find("index_coord_0"), std::string::npos);
+}
+
+// [常量尾段回归·兼 32 位档锁] 静态 shape 的 [1,1,8]/[0,0,1]（softmax load4 形态，
+// 稠密维对齐输出尾维 z3、尺寸相等）：tier 校验放行，字面量取模路径行为不变；且
+// 静态 shape → offset 档位为 uint32——UintDiv 全程不出现，即 32 位档无任何运行期
+// 除法（P1 混参场景在该档位不可达的直接锁定）。
+TEST(IndirectLoadApiCallTest, GenerateSimtIndexLoadConstDenseTailKeepsLiteralModulo) {
+  SimtCodegenContext context;
+  ILTestGraph g("simt_const_dense_tail", 2, 8, 2, 8);
+  BuildSimtGraph(g);
+  const auto idx_load = g.graph.FindNode("idx_load");
+  ASSERT_NE(idx_load, nullptr);
+  idx_load->outputs[0].attr.axis = {g.z2.id, g.z2.id, g.z3.id};
+  idx_load->outputs[0].attr.repeats = {af::sym::kSymbolOne, af::sym::kSymbolOne, g.s3};
+  idx_load->outputs[0].attr.strides = {af::Symbol(0), af::Symbol(0), af::sym::kSymbolOne};
+  AnnotateSimtTemplate(g.graph);
+  std::string def;
+  GenerateSimtFuncDefinitionFromGraph(g, def);
+
+  EXPECT_NE(def.find("% 8"), std::string::npos);
+  EXPECT_EQ(def.find("UintDiv"), std::string::npos);
+}
+
+// [尾侧单例·轴对齐分解] [1,s3,1]/[0,1,5]（尾侧真实 size-1 维、stride!=0，物理存在
+// 但坐标恒 0）：单例维不贡献地址且位置不限，稠密维 z3 经输出 stride 反解坐标——
+// 不再触发 rank mismatch 断言（P3 精确分类的落地）。
+TEST(IndirectLoadApiCallTest, GenerateSimtIndexLoadTrailingSingletonAxesAligned) {
+  SimtCodegenContext context;
+  ILTestGraph g("simt_trailing_singleton");
+  BuildSimtGraph(g);
+  const auto idx_load = g.graph.FindNode("idx_load");
+  ASSERT_NE(idx_load, nullptr);
+  idx_load->outputs[0].attr.axis = {g.z2.id, g.z3.id, g.z0.id};
+  idx_load->outputs[0].attr.repeats = {af::sym::kSymbolOne, g.s3, af::sym::kSymbolOne};
+  idx_load->outputs[0].attr.strides = {af::Symbol(0), af::sym::kSymbolOne, af::Symbol(5)};
+  AnnotateSimtTemplate(g.graph);
+  std::string def;
+  GenerateSimtFuncDefinitionFromGraph(g, def);
+
+  EXPECT_NE(def.find("index_coord_0"), std::string::npos);
+  EXPECT_NE(def.find("context.gm_5[index_coord_0"), std::string::npos);
+}
+
+// [稠密维在前导轴·不被取模窃占] [1,s2,1]/[0,s3,0]（稠密维 z2=输出 dim0、stride 为行
+// 宽 s3 非 1）：简单取模被结构性拒绝（unit-stride + 尾侧块 + tier 校验三重门，否则
+// % s2 静默错址——P2），轴对齐分解按输出 stride 反解（output_index / s3 取 s2 坐标
+// 后乘行宽）。
+TEST(IndirectLoadApiCallTest, GenerateSimtIndexLoadLeadingDenseNotStolenByModulo) {
+  SimtCodegenContext context;
+  ILTestGraph g("simt_leading_dense");
+  BuildSimtGraph(g);
+  const auto idx_load = g.graph.FindNode("idx_load");
+  ASSERT_NE(idx_load, nullptr);
+  idx_load->outputs[0].attr.axis = {g.z0.id, g.z2.id, g.z3.id};
+  idx_load->outputs[0].attr.repeats = {af::sym::kSymbolOne, g.s2, af::sym::kSymbolOne};
+  idx_load->outputs[0].attr.strides = {af::Symbol(0), g.s3, af::Symbol(0)};
+  AnnotateSimtTemplate(g.graph);
+  std::string def;
+  GenerateSimtFuncDefinitionFromGraph(g, def);
+
+  EXPECT_NE(def.find("index_coord_0"), std::string::npos);
+  EXPECT_NE(def.find("context.gm_5[index_coord_0"), std::string::npos);
+  EXPECT_EQ(def.find("index_offset]"), std::string::npos);
+}
+
+// [双稠密维 + 尾侧退化维·dense 等价快路径] [s2,s3,1]/[s3,1,0]：尾维 size==1 且
+// stride==0 为退化维，IsDenseEquivalentView 丢弃后 total s2*s3 == 输出 total——
+// dense 等价成立，地址 = i*s3 + j = output_index，线性 index_offset 是正确快路径
+// （与 GenerateSimtIndexLoadKeepsLinearOffsetForDenseEquivalentView 同机制），不进
+// 轴对齐分解。
+TEST(IndirectLoadApiCallTest, GenerateSimtIndexLoadTwoDenseDimsTrailingDegenerateKeepsLinearOffset) {
+  SimtCodegenContext context;
+  ILTestGraph g("simt_two_dense_trailing_degenerate");
+  BuildSimtGraph(g);
+  const auto idx_load = g.graph.FindNode("idx_load");
+  ASSERT_NE(idx_load, nullptr);
+  idx_load->outputs[0].attr.axis = {g.z2.id, g.z3.id, g.z0.id};
+  idx_load->outputs[0].attr.repeats = {g.s2, g.s3, af::sym::kSymbolOne};
+  idx_load->outputs[0].attr.strides = {g.s3, af::sym::kSymbolOne, af::Symbol(0)};
+  AnnotateSimtTemplate(g.graph);
+  std::string def;
+  GenerateSimtFuncDefinitionFromGraph(g, def);
+
+  EXPECT_NE(def.find("context.gm_5[index_offset]"), std::string::npos);
+  EXPECT_EQ(def.find("index_coord_0"), std::string::npos);
+}
+
+// [rank 相等·前导零贡献] [1,s3]/[1,1]（rank 2==2，前导 size==1 维、无零 stride——
+// 含零 stride 的 [0,1] 形态会被 ApplySimtIndexPhysicalStrides 嵌入物理步长走 kStrided
+// 线性快路径，见 KeepsLinearOffsetWhenPolicyEmbedsStrides）：不进 rank 失配分支，
+// 坐标循环原生跳过零贡献维并按输出 stride 反解——锁定该形态经坐标循环正确处理。
+TEST(IndirectLoadApiCallTest, GenerateSimtIndexLoadRankEqualLeadingBroadcastUsesCoordinateLoop) {
+  SimtCodegenContext context;
+  ILTestGraph g("simt_rank_equal_leading_bcast");
+  BuildSimtGraph(g);
+  const auto idx_load = g.graph.FindNode("idx_load");
+  ASSERT_NE(idx_load, nullptr);
+  idx_load->outputs[0].attr.axis = {g.z2.id, g.z3.id};
+  idx_load->outputs[0].attr.repeats = {af::sym::kSymbolOne, g.s3};
+  idx_load->outputs[0].attr.strides = {af::sym::kSymbolOne, af::sym::kSymbolOne};
+  AnnotateSimtTemplate(g.graph);
+  std::string def;
+  GenerateSimtFuncDefinitionFromGraph(g, def);
+
+  EXPECT_NE(def.find("index_coord_0"), std::string::npos);
+  EXPECT_NE(def.find("context.gm_5[index_coord_0"), std::string::npos);
+  EXPECT_EQ(def.find("context.gm_5[index_offset]"), std::string::npos);
+}
+
 void InsertSimtIdentityBroadcast(ILTestGraph &g, const char *name, const char *producer_name, const char *consumer_name,
                                  int32_t input_index, ascir::TensorId tensor_id) {
   const auto producer = g.graph.FindNode(producer_name);
