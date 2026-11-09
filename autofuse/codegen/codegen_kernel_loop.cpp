@@ -1719,7 +1719,21 @@ bool ApiCall::WaitInputVector(const TPipe &tpipe, const ApiTensor *in, const Ten
   } else if (t.position == af::Position::kPositionVecCalc && IsFirstRead(*this, *in)) {
     ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
   } else if (t.position == af::Position::kPositionVecOut && IsUnitFirstRead(*this, *in)) {
-    ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
+    if (this->type == IndirectLoad::Type) {
+      // IndirectLoad SIMD 以标量循环（S 管道）读取 index，VecOut 生产者为向量写入时构成
+      // 跨执行单元 V→S 读取，程序序不可见，PIPE_V 屏障不覆盖 S 单元。3510/9201/9202 上
+      // 队列机制独占固定事件号，运行时申请事件号与固定号冲突时硬件以 set/wait 失配报核
+      // 错误，故排空全部流水线；其余架构沿用 PIPE_V 屏障。
+      ss << "#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || "
+            "(__NPU_ARCH__ == 9202))"
+         << std::endl;
+      ss << "  AscendC::PipeBarrier<PIPE_ALL>();" << std::endl;
+      ss << "#else" << std::endl;
+      ss << "  AscendC::PipeBarrier<PIPE_V>();" << std::endl;
+      ss << "#endif" << std::endl;
+    } else {
+      ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
+    }
   }
   return true;
 }

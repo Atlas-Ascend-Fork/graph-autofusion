@@ -8084,3 +8084,73 @@ TEST(CodegenKernel, QueueLoadIsNotHoisted) {
   EXPECT_EQ(result.find("SetFlag<HardEvent::MTE2_V>"), std::string::npos);
   delete call;
 }
+
+namespace {
+// 构造挂在 TPipe 上的 VecOut 张量与单输入消费调用，复现向量写（如 cast）产出、
+// IndirectLoad SIMD 标量读消费的等待形态。
+codegen::ApiCall MakeVecOutConsumerCall(codegen::TPipe &tpipe, const std::string &type) {
+  af::AscGraph graph("vecout_consumer_ut");
+  af::ascir_op::Data x("x", graph);
+  auto node = graph.FindNode("x");
+  af::AscTensor tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_FLOAT;
+  std::string dtype_name;
+  codegen::Tensor::DtypeName(tensor.attr.dtype, dtype_name);
+  codegen::Tensor t(tensor, dtype_name, "t");
+  t.id = 7L;
+  t.position = af::Position::kPositionVecOut;
+  t.que_id = 0;
+  EXPECT_EQ(tpipe.AddTensor(t), 0);
+  auto call = codegen::ApiCall("indirect_load_consumer");
+  call.type = type;
+  call.unit = af::ComputeUnit::kUnitVector;
+  return call;
+}
+}  // namespace
+
+TEST(CodegenKernelWaitInputsTest, IndirectLoadVecOutInputEmitsArchSplitPipeAllBarrier) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(s0);
+  tiler.AddSizeVar(s1);
+  codegen::TPipe tpipe("tpipe", tiler);
+  auto call = MakeVecOutConsumerCall(tpipe, af::ascir_op::IndirectLoad::Type);
+  codegen::ApiTensor in;
+  in.id = 7L;
+  in.reads.push_back(&call);
+  call.inputs.push_back(&in);
+
+  std::stringstream ss;
+  ASSERT_TRUE(call.WaitInputs(tpipe, ss));
+  const std::string result = ss.str();
+  // IndirectLoad 以标量循环读 index，V 写到 S 读跨执行单元：3510/9201/9202 排空全部
+  // 流水线，其余架构保持 PIPE_V。
+  EXPECT_NE(result.find("#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || "
+                        "(__NPU_ARCH__ == 9202))"),
+            std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_ALL>();"), std::string::npos);
+  EXPECT_NE(result.find("#else"), std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_V>();"), std::string::npos);
+  EXPECT_NE(result.find("#endif"), std::string::npos);
+}
+
+TEST(CodegenKernelWaitInputsTest, NonIndirectLoadVecOutInputKeepsPipeVBarrier) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(s0);
+  tiler.AddSizeVar(s1);
+  codegen::TPipe tpipe("tpipe", tiler);
+  auto call = MakeVecOutConsumerCall(tpipe, "SomeVectorOp");
+  codegen::ApiTensor in;
+  in.id = 7L;
+  in.reads.push_back(&call);
+  call.inputs.push_back(&in);
+
+  std::stringstream ss;
+  ASSERT_TRUE(call.WaitInputs(tpipe, ss));
+  const std::string result = ss.str();
+  EXPECT_EQ(result.find("PIPE_ALL"), std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_V>();"), std::string::npos);
+}
