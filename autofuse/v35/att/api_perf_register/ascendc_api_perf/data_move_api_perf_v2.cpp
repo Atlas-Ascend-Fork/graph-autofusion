@@ -9,8 +9,8 @@
  */
 
 #include <algorithm>
+#include <limits>
 #include <string>
-#include <numeric>
 #include "common/checker.h"
 #include "v35/att/api_perf_register/perf_param_v2.h"
 #include "api_perf_register/ascendc_api_perf.h"
@@ -53,6 +53,80 @@ af::Status InitBlockLenExpandParams(const NodeDetail &node_info, const std::vect
   return af::SUCCESS;
 }
 
+// 在编译期计算一组维度的乘积字节数。IsConstExpr 只对常量原子为真，常量之间的乘法
+// 仍是 kExprOperation，不能直接 GetConstValue；这里逐个求整数常量并在溢出时退回符号表达式。
+// 返回空表达式表示维度不可用。
+Expr GetStaticBytes(const std::vector<Expr> &dims, const Expr &dtype_size) {
+  if (dims.empty()) {
+    return Expr();
+  }
+  int64_t total_bytes = 1;
+  bool is_static = true;
+  int64_t size_value = 0;
+  if (!dtype_size.GetConstValue(size_value) || size_value <= 0) {
+    is_static = false;
+  } else {
+    total_bytes = size_value;
+  }
+  for (const auto &dim : dims) {
+    int64_t dim_value = 0;
+    if (!is_static || !dim.GetConstValue(dim_value) || dim_value < 0 ||
+        (dim_value != 0 && total_bytes > std::numeric_limits<int64_t>::max() / dim_value)) {
+      is_static = false;
+      break;
+    }
+    total_bytes *= dim_value;
+  }
+  if (is_static) {
+    return CreateExpr(total_bytes);
+  }
+  Expr symbolic_bytes = CreateExpr(1);
+  for (const auto &dim : dims) {
+    symbolic_bytes = af::sym::Mul(symbolic_bytes, dim);
+  }
+  return af::sym::Mul(symbolic_bytes, dtype_size);
+}
+
+// 一个 tile 内的总字节数（合轴后各维乘积 * dtype 字节数）。它表达"单个 tile 至少覆盖一条 cache line"，
+// 是 develop 版本一直使用的判据；tile 变大时该式自然变大，因此对大张量几乎不构成约束。
+Expr GetWholeTileBytes(const NodeDetail &node_info, const Expr &dtype_size) {
+  return GetStaticBytes(node_info.input_dims, dtype_size);
+}
+
+// 整张张量字节数：取未经过 tail 切分的原始 shape，保证门控结果不随候选 tiling 变化。
+// 返回空表达式表示原始 shape 不可用，此时求解器退回 develop 判据。
+Expr GetWholeTensorBytes(const NodeDetail &node_info, const Expr &dtype_size) {
+  return GetStaticBytes(node_info.origin_repeats, dtype_size);
+}
+
+// 单次 burst 字节：只有 tile 内层轴放大后，单次 burst 才可能覆盖一个 cache line。
+// 这是运行期 DataCopyPad blockLen 的同义量，也是"多核在同一 cache line 上争抢"最直接的判据。
+// 当 codegen 尾轴是编译期常量时，burst 不随分块变化（例如 Reduce 输出合轴为 {blockCount, 1}，
+// 每条 burst 恒为 1 个元素）：此时该判据对分块没有任何约束力，恒真则无需约束，
+// 恒假则求解器无可行解，而直接省略又等价于关闭 cache line 约束，会让分块退化为"核数用满"的极值解。
+// 这类场景回退为块内总字节数，继续表达"单个 tile 至少搬运一个 cache line"。
+void FillSolverCacheLineExprs(const NodeDetail &node_info, const Expr &burst_bytes, const Expr &dtype_size,
+                              CacheLineConfig &cfg) {
+  Expr whole_tile_bytes = GetWholeTileBytes(node_info, dtype_size);
+  if (!whole_tile_bytes.IsConstExpr()) {
+    cfg.fallback_cache_line_expr = whole_tile_bytes;
+  }
+  cfg.whole_tensor_bytes = GetWholeTensorBytes(node_info, dtype_size);
+  if (!burst_bytes.IsConstExpr()) {
+    cfg.solver_cache_line_expr = burst_bytes;
+    cfg.solver_uses_burst = true;
+    return;
+  }
+  int64_t burst_value = 0;
+  if (!burst_bytes.GetConstValue(burst_value) || burst_value >= static_cast<int64_t>(GetCacheLineSize())) {
+    // burst 是常量且已覆盖整条 cache line，判据恒真，无需约束。
+    return;
+  }
+  // burst 恒定小于 cache line，对分块没有约束力，两种判据等价为块内总字节数。
+  cfg.solver_cache_line_expr = cfg.fallback_cache_line_expr;
+  cfg.fallback_cache_line_expr = Expr();
+}
+
 af::Status AppendCacheLineConfig(const NodeDetail &node_info, CacheLineDirection direction,
                                  vector<CacheLineConfig> *cache_line_config) {
   if (cache_line_config != nullptr) {
@@ -61,15 +135,15 @@ af::Status AppendCacheLineConfig(const NodeDetail &node_info, CacheLineDirection
     auto data_type_size = kDataTypeSizeMap.find(node_info.input_dtype[0]);
     GE_ASSERT_TRUE(data_type_size != kDataTypeSizeMap.end(), "Check data type size failed, node[%s]",
                    node_info.ToString().c_str());
-    const Expr &transfer_len = node_info.repeats.empty() ? node_info.input_dims.back() : node_info.repeats.back();
+    // codegen 的 DataCopyPad 一次调用 = blockCount 个 blockLen 的 burst；blockLen 取 codegen 实际尾轴
+    // （与 GetLoadCase/InitBlockLenExpandParams 等一致），而不是合轴前的 repeats 尾轴
+    // （后者可能已把 blockCount 合进尾轴，得到整块字节数）。
+    // 求解器判据必须与运行期冲突检测同义：都按单次连续 burst 的字节数比较 cache line，
+    // 否则判据对整块恒真，等价于关闭 cache line 约束，求解器会退化成"核数用满、tile 贴地"的极值解。
+    const Expr &transfer_len = GetCodegenTailAxis(node_info, node_info.input_dims);
     Expr cache_line_expr = af::sym::Mul(transfer_len, data_type_size->second);
     CacheLineConfig cfg{node_info.name, cache_line_expr, GetCacheLineSize(), direction};
-    Expr dim_product = accumulate(node_info.input_dims.begin(), node_info.input_dims.end(), CreateExpr(1),
-                                  [](const Expr &a, const Expr &b) { return a * b; });
-    Expr total_bytes = af::sym::Mul(dim_product, data_type_size->second);
-    if (!total_bytes.IsConstExpr()) {
-      cfg.solver_cache_line_expr = std::move(total_bytes);
-    }
+    FillSolverCacheLineExprs(node_info, cache_line_expr, data_type_size->second, cfg);
     cache_line_config->push_back(std::move(cfg));
   }
   return af::SUCCESS;

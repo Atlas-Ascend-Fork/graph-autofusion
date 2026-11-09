@@ -158,6 +158,12 @@ class AxesReorderSolverGen : public SolverGen,
   void SetCacheLineConfig(const vector<CacheLineConfig> *cache_line_config) {
     cache_line_config_ = cache_line_config;
   }
+  // 核预算（平台 AIV 核数），用于判断"整张量是否可能让多个核共享同一条 cache line"。
+  // 必须取编译期常量：求解器自动调优时 input_.core_num 会被改写为正在试探的档位，
+  // 若门控依赖它会随档位翻转，破坏各候选档位的可比性。
+  void SetCoreNumBudget(uint32_t core_num_budget) {
+    core_num_budget_ = core_num_budget;
+  }
   void SetEnableParallel(bool enable_parallel) {
     enable_group_parallel_ = enable_parallel;
   }
@@ -191,6 +197,11 @@ class AxesReorderSolverGen : public SolverGen,
   std::string GenGetTilingDataBlockDimStatic(Expr &corenum_cons);
   std::string GenUBThresholdFunc();
   std::string GenUBSizeCacheLineFunc();
+  // 静态 shape：在编译期直接判定 "whole_tensor_bytes < k * core_budget * cache_line"，
+  // 使门控折叠为常量判据，运行期不引入分支。无法求值（动态 shape 或缺核预算）时返回 false。
+  bool TryEvalConflictPossible(const Expr &whole_tensor_bytes, uint32_t cache_line_size, bool &conflict_possible) const;
+  // 生成门控条件文本（只依赖 shape 输入变量，不含 input_.core_num）。不可用时返回空串。
+  std::string GenConflictPossibleCond(const Expr &whole_tensor_bytes, uint32_t cache_line_size) const;
   std::string GenCoreNumFunc();
   std::pair<std::vector<Expr>, std::vector<Expr>> SortConsArgs(const Expr &expr, bool &is_mc_mixed);
   std::string ObtainRelatedVars(Expr &expr);
@@ -265,6 +276,7 @@ class AxesReorderSolverGen : public SolverGen,
   TilingScheduleConfig tiling_schedule_config_;  // Model 级别的 Tiling 调度配置
   std::vector<RuntimeReorderRule> runtime_reorder_rules_;
   const vector<CacheLineConfig> *cache_line_config_{nullptr};
+  uint32_t core_num_budget_{0U};
   bool enable_group_parallel_{false};
   size_t group_num_{1UL};
   TilingCaseIdent tiling_case_ident_{ScheduleGroupIdent{}, 0U, ""};

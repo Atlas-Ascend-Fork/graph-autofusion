@@ -955,8 +955,132 @@ TEST_F(UTestAscirPerfV2, TestStoreApiCacheLineExprUsesSingleTransferLen) {
 
   EXPECT_EQ(result, af::SUCCESS);
   ASSERT_EQ(config.size(), 1U);
-  EXPECT_TRUE(config[0].cache_line_expr == inner_bytes);
+  // 该 shape 在 GM/UB 上都完全连续，合轴后只剩一维，DataCopyPad 的 blockCount=1、
+  // blockLen 为整块，因此单次 burst 就是整块字节数。
+  const Expr whole_block_bytes = s18 * s1 * s20 * CreateExpr(4);
+  EXPECT_TRUE(config[0].cache_line_expr == whole_block_bytes);
+  EXPECT_TRUE(config[0].cache_line_expr != inner_bytes);
   EXPECT_EQ(config[0].direction, CacheLineDirection::kUbToGm);
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreApiSolverCacheLineExprUsesSingleBurstBytes) {
+  // reduce 主 store 的实际 DMA 是 DataCopyPad(blockCount=30, blockLen=a0t)：
+  // GM 外轴 stride 138 与内轴 a0t 不等，合轴后保留 {blockCount, blockLen} 两维。
+  // 本用例锁定求解器判据取单次 burst 字节；若退回整块总字节，则判据恒大于 cache line，
+  // 约束等于失效。repeats 尾轴与 input_dims 尾轴的差异由上一个用例覆盖（合轴为单轴后
+  // repeats.back() 是内轴，而实际 burst 是整块）。
+  constexpr int32_t kFp16Bytes = 2;
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr block_count = CreateExpr(30);
+  Expr block_len = CreateExpr("a0t_size");
+  Expr burst_bytes = block_len * CreateExpr(kFp16Bytes);
+  Expr whole_block_bytes = block_count * burst_bytes;
+
+  input_shapes[0].data_type = "float16";
+  input_shapes[0].dims = {block_count, block_len};
+  input_shapes[0].repeats = {block_count, block_len};
+  input_shapes[0].strides = {block_len, af::sym::kSymbolOne};
+  input_shapes[0].gm_strides = {CreateExpr(138), af::sym::kSymbolOne};
+  // 原始 shape 为整张量 30 * 138；a0t 只影响单个 tile 的 burst 大小，不改变整张量规模。
+  input_shapes[0].origin_repeats = {block_count, CreateExpr(138)};
+  output_shapes[0] = input_shapes[0];
+  input_shapes[0].data_type_size = kFp16Bytes;
+  output_shapes[0].data_type_size = kFp16Bytes;
+
+  PerfOutputInfo perf_res;
+  std::vector<CacheLineConfig> config;
+  perf_res.cache_line_config = &config;
+  auto store_v2 = ApiPerfFactory::Instance().Create("StoreV2");
+  ASSERT_NE(store_v2, nullptr);
+  auto perf = store_v2->GetPerfFunc();
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Store", 1, 1);
+  EXPECT_EQ(perf(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+
+  ASSERT_EQ(config.size(), 1U);
+  EXPECT_TRUE(config[0].cache_line_expr == burst_bytes);
+  EXPECT_TRUE(config[0].solver_cache_line_expr == burst_bytes);
+  EXPECT_TRUE(config[0].solver_cache_line_expr != whole_block_bytes);
+  // 单次 burst 判据只有在整张量可能发生多核 cache line 争抢时才启用，
+  // 因此配置必须同时携带该节点整张张量的字节数，供求解器门控判断。
+  // 这里必须取未切分原始 shape 的乘积，a0t 变化不能改变门控结果。
+  EXPECT_TRUE(config[0].solver_uses_burst);
+  int64_t whole_tensor_bytes = 0;
+  ASSERT_TRUE(config[0].whole_tensor_bytes.GetConstValue(whole_tensor_bytes));
+  EXPECT_EQ(whole_tensor_bytes, 30 * 138 * kFp16Bytes);
+  EXPECT_TRUE(config[0].whole_tensor_bytes != whole_block_bytes);
+}
+
+TEST_F(UTestAscirPerfV2, TestLoadApiCacheLineUsesCodegenTailAxisAfterPadding) {
+  // codegen 对非连续尾轴补 repeat=1 时，实际 blockLen 是 1 个元素；ATT 侧
+  // LoadV2 的 cache line 判据必须随之取 codegen 尾轴，而不是补轴前的内层维。
+  TensorShapeInfo shape;
+  const Expr z0z1t_size = CreateExpr("z0z1t_size");
+  shape.data_type = "float16";
+  shape.dims = {CreateExpr(128) * z0z1t_size};
+  shape.repeats = {z0z1t_size, CreateExpr(128)};
+  shape.strides = {CreateExpr(128), CreateExpr(1)};
+  shape.gm_strides = {CreateExpr(384), CreateExpr(3)};
+  shape.data_type_size = 2;
+
+  std::vector<TensorShapeInfo> input_shapes{shape};
+  std::vector<TensorShapeInfo> output_shapes{shape};
+  PerfOutputInfo perf_res;
+  std::vector<CacheLineConfig> config;
+  perf_res.cache_line_config = &config;
+  auto load_v2 = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load_v2, nullptr);
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+  EXPECT_EQ(load_v2->GetPerfFunc()(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+
+  ASSERT_EQ(config.size(), 1U);
+  // 补轴后 blockLen=1、dtype 为 FP16，单次 burst 即 2B。
+  EXPECT_TRUE(config[0].cache_line_expr == CreateExpr(2));
+  EXPECT_EQ(config[0].direction, CacheLineDirection::kGmToUb);
+  // burst 是常量且小于 cache line 时，若直接跳过约束就等于关闭 cache line 判据，
+  // 求解器会退化为"核数用满"的极值解；此时回退为块内总字节数继续约束分块。
+  const Expr whole_block_bytes = CreateExpr(128) * z0z1t_size * CreateExpr(2);
+  EXPECT_TRUE(config[0].solver_cache_line_expr == whole_block_bytes);
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreApiSolverCacheLineFallsBackWhenTailAxisIsConstantOne) {
+  // Reduce 类输出合轴后为 {s1t_size, 1}：codegen 的 blockLen 恒为 1 个元素（4B burst），
+  // 单次 burst 不随分块变化。此时求解器判据必须回退为块内总字节数，否则这条约束会被
+  // 整条跳过，cache line 判据对分块失效，求解器回到"核数用满"的解。
+  constexpr int32_t kFp32Bytes = 4;
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr outer = CreateExpr("s1t_size");
+  Expr degenerate_tail = CreateExpr(1);
+  Expr block_bytes = outer * degenerate_tail * CreateExpr(kFp32Bytes);
+
+  input_shapes[0].data_type = "float32";
+  input_shapes[0].dims = {outer, degenerate_tail};
+  input_shapes[0].repeats = {outer, degenerate_tail};
+  input_shapes[0].strides = {degenerate_tail, af::sym::kSymbolZero};
+  input_shapes[0].gm_strides = {degenerate_tail, af::sym::kSymbolZero};
+  output_shapes[0] = input_shapes[0];
+  input_shapes[0].data_type_size = kFp32Bytes;
+  output_shapes[0].data_type_size = kFp32Bytes;
+
+  PerfOutputInfo perf_res;
+  std::vector<CacheLineConfig> config;
+  perf_res.cache_line_config = &config;
+  auto store_v2 = ApiPerfFactory::Instance().Create("StoreV2");
+  ASSERT_NE(store_v2, nullptr);
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Store", 1, 1);
+  EXPECT_EQ(store_v2->GetPerfFunc()(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+
+  ASSERT_EQ(config.size(), 1U);
+  // 运行期冲突检测仍看单次 burst（常量 4B）。
+  EXPECT_TRUE(config[0].cache_line_expr == CreateExpr(kFp32Bytes));
+  // 求解器判据回退为块内总字节，仍随外层 tile 变化。
+  EXPECT_TRUE(IsValid(config[0].solver_cache_line_expr));
+  EXPECT_TRUE(config[0].solver_cache_line_expr == block_bytes);
+  EXPECT_FALSE(config[0].solver_cache_line_expr.IsConstExpr());
 }
 
 TEST_F(UTestAscirPerfV2, TestStoreApiForSmallStride) {

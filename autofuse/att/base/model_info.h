@@ -215,13 +215,26 @@ struct CacheLineConfig {
         solver_cache_line_expr(solver_expr) {}
 
   std::string node_name;
-  // Single transfer bytes (repeats.back() * data_type_size), used by conflict detection
+  // Single burst bytes (DMA blockLen * data_type_size), used by conflict detection
   Expr cache_line_expr;
   uint32_t cache_line_size;
   CacheLineDirection direction{CacheLineDirection::kUnknown};
-  // Total block bytes (accumulate(input_dims) * data_type_size), used by solver UB constraint.
-  // Empty when total bytes is a compile-time constant (solver should skip).
+  // Single burst bytes used by solver UB constraint, same semantic as cache_line_expr.
+  // When the burst is a compile-time constant below one cache line it cannot constrain tiling at all,
+  // so this falls back to the whole-tile bytes; empty means the constraint is either trivial or unusable.
   Expr solver_cache_line_expr;
+  // Whole-tile bytes (product of merged input dims * dtype size). This is the criterion used when the
+  // tensor is large enough that every core owns whole cache lines, i.e. when burst alignment cannot help.
+  // Empty means the expression is constant (no constraint needed) or unavailable.
+  Expr fallback_cache_line_expr;
+  // Whole-tensor bytes (product of the original graph shape * dtype size). It is invariant across tiling
+  // candidates and is used to decide whether several cores can share one cache line.
+  // Empty means the expression is unavailable.
+  Expr whole_tensor_bytes;
+  // Whether solver_cache_line_expr is a genuine single-burst criterion that changes with tiling.
+  // When the burst is a compile-time constant below one cache line it cannot constrain tiling,
+  // solver_cache_line_expr is overwritten with the develop criterion and this flag stays false.
+  bool solver_uses_burst{false};
   std::string ToString() const {
     return "node: " + node_name + ", expr: " + Str(cache_line_expr) + ", size: " + std::to_string(cache_line_size);
   }

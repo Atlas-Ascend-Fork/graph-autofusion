@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "solver_pass_manager.h"
+#include "common/platform_context.h"
 #include "graph/symbolizer/symbolic.h"
 #include "graph/symbolizer/symbolic_utils.h"
 
@@ -266,6 +267,14 @@ void SolverPassManager::InitSolverGen(AxesReorderSolverGen &solver_gen) {
   solver_gen.SetTilingScheduleConfig(args_manager_.GetModelInfo().tiling_schedule_config);
   solver_gen.SetRuntimeReorderRules(args_manager_.GetModelInfo().runtime_reorder_rules);
   solver_gen.SetCacheLineConfig(&args_manager_.GetModelInfo().cache_line_config);
+  // 门控输入：核预算取平台 AIV 核数（编译期常量）。整张张量字节数由每个 CacheLineConfig 自带，
+  // 避免把全图 size 变量乘积误当成单节点张量规模。核预算不可用时置 0，生成器退回 develop 判据。
+  ge::PlatformInfo platform_info;
+  uint32_t core_num_budget = 0U;
+  if (ge::PlatformContext::GetInstance().TryGetInitializedPlatformInfo(platform_info) && platform_info.aiv_num > 0) {
+    core_num_budget = static_cast<uint32_t>(platform_info.aiv_num);
+  }
+  solver_gen.SetCoreNumBudget(core_num_budget);
   solver_gen.SetEnableParallel(args_manager_.GetModelInfo().enable_group_parallel);
   solver_gen.SetGroupNum(group_num_);
   solver_gen.SetTilingCaseIdent({args_manager_.GetModelInfo().schedule_group_ident,

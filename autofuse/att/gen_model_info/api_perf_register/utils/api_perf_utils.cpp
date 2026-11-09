@@ -514,6 +514,7 @@ af::Status GetDMAActualPerf(const NodeDetail &node_info, const Expr &swap_outer_
   cur_node.ub_stride = node_info.ub_stride;
   cur_node.block_count_idx = node_info.block_count_idx;
   cur_node.repeats = node_info.repeats;
+  cur_node.origin_repeats = node_info.origin_repeats;
   cur_node.vectorized_shape = node_info.vectorized_shape;
   cur_node.ternary_ops = node_info.ternary_ops;
   cur_node.nddma_descriptor = node_info.nddma_descriptor;
@@ -872,6 +873,7 @@ af::Status SetNodeDetail(const std::vector<TensorShapeInfo> &input_shapes,
 af::Status SetDims(const TensorShapeInfo &tensor_shape_info, NodeDetail &node_info) {
   GE_ASSERT_SUCCESS(SetDims(tensor_shape_info.dims, node_info));
   node_info.repeats = tensor_shape_info.repeats;
+  node_info.origin_repeats = tensor_shape_info.origin_repeats;
   SetLoadVectorizedShape(tensor_shape_info, node_info);
   return af::SUCCESS;
 }
