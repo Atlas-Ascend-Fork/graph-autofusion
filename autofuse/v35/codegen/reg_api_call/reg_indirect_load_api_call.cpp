@@ -2817,19 +2817,14 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
       ss << "  fctx.policy" << k << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << k
          << ">::MakePolicy(fctx.params" << k << ");\n";
     }
-    // Phase 3：FusedBody。线程档上限 = 位宽感知压力模型档位（schedule 侧按成员元数据
-    // offset_width 推得——全 uint32 用 32 位细化常数）与 offset 位宽门槛（64 位封顶
-    // 1024，对齐单 gather IndirectLoadUse2048Threads）取小（模型规格见设计文档
-    // 「寄存器压力模型」）。
+    // Phase 3：FusedBody。线程档上限 = schedule 侧发射计划的单一真值源结果
+    // （merge_info.max_thread_tier，模型与 demand 见 PlanSimtEmission）与 offset 位宽
+    // 门槛（64 位封顶 1024，对齐单 gather IndirectLoadUse2048Threads）取小。
+    // [单一真值源] 此处仅做平台上限裁剪，禁止重算 demand——重算（尤其用旧 sum 公式）
+    // 会把峰值模型提升的档位静默压回。
     uint32_t max_thread_tier = merge_info.max_thread_tier;
     if (!all_offset_uint32) {
       max_thread_tier = std::min(max_thread_tier, 1024U);
-      // [位宽漂移防护] 调度期门控按成员 lowering 元数据的 offset_width 判定位宽，codegen
-      // 侧按当前图重建的策略为权威——两侧图副本位宽漂移（调度计 32 位、codegen 计 64 位）
-      // 时按 64 位基准重算档位取小，避免档位超出实际可容纳范围。
-      const uint64_t register_demand_64 = ascgen_utils::indirect_load::SimtFusedRegisterDemand(
-          false, merge_info.member_count, merge_info.side_load_count, merge_info.chain_node_count);
-      max_thread_tier = std::min(max_thread_tier, ascgen_utils::indirect_load::SimtFusedThreadTier(register_demand_64));
     }
     ss << "  struct FusedBody {\n";
     ss << "    using OffsetType = " << fused_offset_type << ";\n";

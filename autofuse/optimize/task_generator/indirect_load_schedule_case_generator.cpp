@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <limits>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -2179,8 +2180,8 @@ af::Status CompletePreservedVectorizedViews(const af::AscGraph &graph) {
       // 递推【从后往前】（stride[last_nonzero]==1，stride[i]==stride[i+1]*size[i+1]，
       // 中间零贡献轴不占物理空间直接跳过）——如 [8,2048,*]/[2048,1,0]：
       // a1.stride==1，a0.stride==1*2048，判定成立。
-      // （历史缺陷：递推曾从前往后，expected 初值 1 使 a0.stride=2048≠1 误判
-      // 非稠密——标记从未写入，兜底恒不命中，生产 load3 反复报 rank mismatch。）
+      // （递推方向不可倒置：从前往后时 expected 初值 1 会使 a0.stride=2048≠1 误判
+      // 非稠密，标记从未写入，兜底恒不命中，生产 load3 反复报 rank mismatch。）
       const bool tail_zero =
           !mark_sizes.empty() && mark_sizes.size() == mark_strides.size() &&
           af::SymbolicUtils::StaticCheckEq(mark_strides.back(), af::sym::kSymbolZero) == af::TriBool::kTrue;
@@ -2235,7 +2236,7 @@ af::Status CompletePreservedVectorizedViews(const af::AscGraph &graph) {
 // 子序列。合法形态（如带 post-Reduce 的单 gather SIMD/SIMT）IL 输出 vectorized 可
 // 非空（inner 轴族）；但轴必须仍存在于视图——生成期任何路径把已失效（被 tensor
 // merge 折叠掉）或外来轴写进 vectorized，调度期会在 GetVectorRepeats/
-// InitTensorMemInfo 或 SelectLoopAxis 以无关断言隐蔽失败。候选产出后前置拦截，
+// InitTensorMemInfo 或 SelectLoopAxis 以无关断言隐蔽失败。候选产出后即刻校验，
 // 把违约暴露在生成侧。
 af::Status ValidateIndirectLoadOutputVectorizedAxes(const ascir::ImplGraph &graph) {
   for (const af::AscNodePtr &node : ascgen_utils::indirect_load::GetAllIndirectLoadNodes(graph)) {
@@ -3770,6 +3771,11 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
 }
 
 // 多 gather 组员（SIMT）扇出标注：组员计划不含主输出链（selected 仅含全组 IL 节点作
+// [仅 mixed 路径引用·mixed 已下线] 本函数与 AnnotateSimtSideInputClosure 在组 SIMT
+// 路径已无调用（组链无角色，VF/normal 由分区器裁决）；当前唯一调用方是
+// ApplyGraphPassMixed（kEnableMixedGroupCandidate=false 编译期关闭）。保留供 mixed
+// 重启用（需先落地 mixed 链 MVP——见含 Reduce 文档 11 节），单 gather 扇出路径使用
+// 独立的 AnnotateSimtFanoutBranches，不受影响。
 // 排除集），IL 输出的全部消费者（归并 ele/输出链）均为 normal schedule 扇出分支——
 // 标注 kSimtFanoutBranch 使调度侧按既有语义处理 SIMT 输出到普通向量代码的边界；
 // side input 闭包随分支标注，全组 IL 排除避免改写他组成员的 kSimtOp 角色。
@@ -3957,55 +3963,95 @@ af::Status PlanSimtFusedEmission(const af::AscGraph &graph, const std::vector<af
     all_emittable = false;
     break;
   }
-  // [位宽感知门控后置] 寄存器压力模型的位宽（全成员 offset_width）来自 lowering 元数据
-  // （与 codegen 选 fused OffsetType 的判定同源），元数据在融合发射标记之前构建——门控
-  // 与线程档由调用方（ApplyGraphPassGroup）在 FinalizeLoweringMetadata 之后执行。此处
-  // 仅收集结构与 R_est 组件计数（stash 进 merge_info），并做结构性的 L2/L3 判定。
+  // [发射计划组件收集] 压力无关的结构组件与计数：形态/压力/线程档由 PlanSimtEmission
+  // 在 lowering 元数据之后落定（单一真值源）——本函数只收集不决策。链发射者不再由
+  // 本处判定：L3/L4 链无角色，VF/normal 由分区器按簇形态自然裁决。
   merge_info.member_count = static_cast<uint32_t>(members.size());
   merge_info.side_load_count = static_cast<uint32_t>(side_loads.size());
   merge_info.chain_node_count = static_cast<uint32_t>(side_chain_nodes.size());
-  merge_info.register_merge = all_emittable && !has_reduce_terminal && !has_unsupported_side_input &&
-                              !store_terminals.empty() && !forward_nodes.empty();
-  if (!merge_info.register_merge) {
+  merge_info.forward_node_count = static_cast<uint32_t>(forward_nodes.size());
+  merge_info.l2_structural = all_emittable && !has_reduce_terminal && !has_unsupported_side_input &&
+                             !store_terminals.empty() && !forward_nodes.empty();
+  merge_info.forward_chain_width =
+      static_cast<uint32_t>(ascgen_utils::indirect_load::ComputeMergeChainWidth(graph, forward_nodes, members));
+  if (!merge_info.l2_structural) {
     GELOGI(
         "[IndirectLoad] Fused merge falls back to UB merge (reduce_terminal[%d], unsupported_side_input[%d], "
         "all_emittable[%d], stores[%zu], side_loads[%zu]).",
         has_reduce_terminal ? 1 : 0, has_unsupported_side_input ? 1 : 0, all_emittable ? 1 : 0, store_terminals.size(),
         side_loads.size());
-    return af::SUCCESS;
   }
-  // side load 角色标注：kSimtDirectGmBoundary——evaluator 直读 GM，向量 codegen 跳过其
-  // 独立发射（与单 gather index 区域 load 的角色语义一致；其向量化视图由
-  // CompletePreservedVectorizedViews 的全图遍历统一播种，行广播标记同理）。
-  for (const af::AscNodePtr &side_load : side_loads) {
-    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
-        side_load, ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary));
-  }
-  // Store 终端角色标注 + 终端名：evaluator 的归并结果经 OutputTargets 直写 Store 的 GM
-  // 目标（codegen 按 merge_store_names 在当前图重解析输出链 tensor id——跨图副本防漂移），
-  // Store 自身必须跳过独立发射，否则普通发射会与直写冲突（重复写/读未产出的张量）——
-  // 与单 gather output_store 的 kSimtDirectGmBoundary 语义一致（skips_api_emit；skipped
-  // Store 的 GM 输出 tensor 由 codegen 的 tpipe 收集兜底注册，供下游 Output 绑定）。
-  // 仅 L2（寄存器归并）进入本分支；L3/L4（UB 归并/V2）归并链为扇出分支、值由 VF 子图
-  // 产出后 Store 正常发射读取，不做此标注。
-  for (const af::AscNodePtr &store : store_terminals) {
-    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
-        store, ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary));
-    merge_info.merge_store_names.emplace_back(store->GetName());
-  }
-  // 按 GetAllNodes 顺序重建归并树节点名（含 ③ side 链节点——同标 kSimtInlineTransform，
-  // 由 evaluator 发射；确定性 + 拓扑序，与 CollectSimtGroupIndexRegion 约定一致）。
+  // 归并树闭包节点名（GetAllNodes 拓扑序，含 ③ side 链节点）：L2 由 evaluator 按拓扑序
+  // 发射（kSimtInlineTransform 注解在 PlanSimtEmission 之后按计划写入）；L3/L4 不消费。
   for (const af::AscNodePtr &graph_node : graph.GetAllNodes()) {
     if (graph_node != nullptr &&
         (forward.count(graph_node.get()) != 0UL || side_chain_set.count(graph_node.get()) != 0UL)) {
       merge_info.merge_node_names.emplace_back(graph_node->GetName());
     }
   }
+  // Store 终端名：仅 L2 消费（evaluator 直写 GM，角色注解在计划之后按 kEvaluator 写入）；
+  // L3/L4 由向量侧正常发射读取，不做标注。
+  for (const af::AscNodePtr &store : store_terminals) {
+    merge_info.merge_store_names.emplace_back(store->GetName());
+  }
+  // side GM load 节点名：仅 L2 消费（evaluator 直读 GM，kSimtDirectGmBoundary 注解在
+  // 计划之后按 kEvaluator 写入）；L3/L4 由向量侧正常发射读取。
+  for (const af::AscNodePtr &side_load : side_loads) {
+    merge_info.side_load_names.emplace_back(side_load->GetName());
+  }
   GELOGI(
-      "[IndirectLoad] Fused register merge: %zu merge nodes, %zu output chains, %zu side loads, %zu side chain "
-      "nodes (N=%zu).",
+      "[IndirectLoad] Fused merge components: %zu merge nodes, %zu stores, %zu side loads, %zu side chain nodes, "
+      "width[%u] (N=%zu, l2_structural[%d]).",
       merge_info.merge_node_names.size(), merge_info.merge_store_names.size(), side_loads.size(),
-      side_chain_nodes.size(), members.size());
+      side_chain_nodes.size(), static_cast<unsigned int>(merge_info.forward_chain_width), members.size(),
+      merge_info.l2_structural ? 1 : 0);
+  return af::SUCCESS;
+}
+
+// [SIMT 融合发射计划] 形态（L2/L3/L4）+ 寄存器压力 + 线程档的单一真值源。
+// 时序：本函数在 lowering 元数据（位宽源，依赖模板轴归一化）之后落定最终形态；结构性
+// L2 候选先按 L2 预注解，若因压力降级（L3/L4），调用方按本计划复位角色（角色与形态
+// 必须一致）。模型由 kUsePeakModel 决定（peak 默认；sum 仅现场应急回退与 CI 对拍，
+// 回退沿用旧公式与旧降级行为——单 demand、超限直接 L4）。可行性判定带 5% 安全边际
+// （防低估 spill），线程档用未上浮的 demand（防无谓降档）。
+// 链发射者不由本计划决定：L3/L4 的链不注解任何角色，VF/normal 由分区器按簇形态
+// 自然裁决（多节点簇→VF；单节点簇不建子图→normal 主循环兜底）——不依赖任何预测。
+struct SimtEmissionPlan {
+  bool use_fused = false;       // L2/L3（seq-V1 融合发射）；false=L4（V2 逐成员 invocation）
+  bool register_merge = false;  // true=L2（evaluator 内折叠整链）；仅 use_fused 有效
+  uint64_t demand = 0U;
+  uint32_t max_thread_tier = 2048U;
+};
+
+af::Status PlanSimtEmission(const ascgen_utils::indirect_load::SimtFusedMergeInfo &merge_info,
+                            const bool all_offset_uint32, SimtEmissionPlan &plan) {
+  uint64_t demand = 0U;
+  if (ascgen_utils::indirect_load::kUsePeakModel) {
+    // 峰值模型：L2 结构合法且峰值可行 → 寄存器归并；否则 L3 峰值可行 → UB 归并
+    // （L2→L3 压力降级，保住 1 次 invocation + 1 次 barrier）；否则 L4（压力兜底，
+    // 真实触发仅 base+3N 超 quota 的超大组）。可行性统一走 SimtFusedQuotaFeasible
+    // （唯一判据，与生成期预检 IsGroupSimtL4UbDoomed 共用）。
+    const uint64_t l2_demand = ascgen_utils::indirect_load::SimtPeakRegisterDemand(
+        all_offset_uint32, merge_info.member_count, merge_info.side_load_count, merge_info.chain_node_count,
+        merge_info.forward_chain_width);
+    if (merge_info.l2_structural && ascgen_utils::indirect_load::SimtFusedQuotaFeasible(l2_demand)) {
+      demand = l2_demand;
+      plan.use_fused = true;
+      plan.register_merge = true;
+    } else {
+      demand = ascgen_utils::indirect_load::SimtPeakRegisterDemandL3(all_offset_uint32, merge_info.member_count);
+      plan.use_fused = ascgen_utils::indirect_load::SimtFusedQuotaFeasible(demand);
+    }
+  } else {
+    // sum 回退：旧压力公式与旧降级行为（单 demand，超限直接 L4，无 L2→L3 压力降级）；
+    // 角色一致性修复（降级重注解）对两模型同时生效。
+    demand = ascgen_utils::indirect_load::SimtFusedRegisterDemand(
+        all_offset_uint32, merge_info.member_count, merge_info.side_load_count, merge_info.chain_node_count);
+    plan.use_fused = demand <= ascgen_utils::indirect_load::kSimtFusedMinTierQuota;
+    plan.register_merge = plan.use_fused && merge_info.l2_structural;
+  }
+  plan.demand = demand;
+  plan.max_thread_tier = ascgen_utils::indirect_load::SimtFusedThreadTier(demand);
   return af::SUCCESS;
 }
 
@@ -4014,6 +4060,7 @@ af::Status PlanSimtFusedEmission(const af::AscGraph &graph, const std::vector<af
 // G≥R、复合 Norm 等输出侧校验对组内各路判定必然一致（axis 相同、输出边界相同），逐 IL 执行
 // 以完整复用既有校验实现。SIMT 档位采用组员形态：各路 evaluator 仅含本路 index 链与 input
 // 读取，value 写 UB 局部目标；共享归并/输出链作为普通向量代码在全部 invocation 之后执行。
+bool IsGroupSimtNValueTileUbDoomed(const std::vector<af::AscNodePtr> &members);
 af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &group, ascir::TemplateId template_id,
                                bool &is_candidate_legal) {
   is_candidate_legal = true;
@@ -4186,9 +4233,22 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
       GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtGroupMember(member));
     }
     GE_ASSERT_SUCCESS(PlanSimtFusedEmission(graph, members, merge_info));
-    if (merge_info.register_merge) {
-      // L2 寄存器归并：归并树整链标 kSimtInlineTransform——在 fused evaluator 的 FusedEval
-      // 内按拓扑序发射（N 种子 + 表达式折叠），向量 codegen 跳过其发射。
+    // [链发射者（结构预期）+ 按结构注解] 结构性 L2 候选按 L2 注解（evaluator 折叠
+    // 整链 + side load/Store 直读直写边界），压力判定落定后若降级（L3/L4）复位为
+    // 无角色。非结构性候选（L3/L4）的归并链/侧链/side load/Store **不注解任何
+    // IndirectLoad 角色**：无 skip → 进 tiling group、有 tiling/block split、UB 生命
+    // 周期与主循环发射全套恢复——发射者由分区器决定（VF 能收就收，收不了 normal
+    // 兜底），彻底消除"节点数预测 VF 成图"的错配窗口（铁律：不依赖预测；改
+    // kSimtFanoutBranch 行为会波及单 gather 扇出路径，故组链一律无角色）。链的
+    // [k,R] 视图由 TileSplit 的标准推导路径（非 preserves 分支的
+    // DeriveNodeVectorizedAxes——链节点入组后 ApplyTiling 已切出 TileInner，求交
+    // 自然保 k）获得，无需成员专用的显式写入扩展。
+    GELOGI("[IndirectLoad] Gather group chain plan: nodes[%u] width[%u] (emitter decided by partitioner).",
+           static_cast<unsigned int>(merge_info.forward_node_count),
+           static_cast<unsigned int>(merge_info.forward_chain_width));
+    if (merge_info.l2_structural) {
+      // L2 寄存器归并（结构判定）：归并树整链标 kSimtInlineTransform——在 fused evaluator
+      // 的 FusedEval 内按拓扑序发射（N 种子 + 表达式折叠），向量 codegen 跳过其发射。
       for (const std::string &merge_node_name : merge_info.merge_node_names) {
         const af::AscNodePtr merge_node = graph.FindNode(merge_node_name.c_str());
         GE_ASSERT_NOTNULL(merge_node, "Fused merge node[%s] is missing.", merge_node_name.c_str());
@@ -4197,20 +4257,45 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
         GELOGD("[IndirectLoad] Register merge: node[%s] marked kSimtInlineTransform (in-evaluator merge).",
                merge_node->GetNamePtr());
       }
-    } else {
-      // L3 UB 归并 / L4 V2 多 evaluator：归并/输出链标为 normal schedule 扇出分支（复用单
-      // gather 的 kSimtFanoutBranch 语义），全组 IL 作为排除集避免改写他组成员角色。
-      GE_ASSERT_SUCCESS(AnnotateSimtGroupFanoutBranches(members));
+      // side load：kSimtDirectGmBoundary——evaluator 直读 GM，向量 codegen 跳过其独立
+      // 发射（与单 gather index 区域 load 的角色语义一致；其向量化视图由
+      // CompletePreservedVectorizedViews 的全图遍历统一播种，行广播标记同理）。
+      for (const std::string &side_load_name : merge_info.side_load_names) {
+        const af::AscNodePtr side_load = graph.FindNode(side_load_name.c_str());
+        GE_ASSERT_NOTNULL(side_load, "Fused merge side load[%s] is missing.", side_load_name.c_str());
+        GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
+            side_load, ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary));
+      }
+      // Store 终端：evaluator 的归并结果经 OutputTargets 直写 Store 的 GM 目标（codegen
+      // 按 merge_store_names 在当前图重解析输出链 tensor id），Store 自身跳过独立发射，
+      // 否则普通发射会与直写冲突——与单 gather output_store 的 kSimtDirectGmBoundary
+      // 语义一致。仅 L2 进入本分支；L3/L4 归并链由 VF/normal 产出后 Store 正常发射读取。
+      for (const std::string &store_name : merge_info.merge_store_names) {
+        const af::AscNodePtr store = graph.FindNode(store_name.c_str());
+        GE_ASSERT_NOTNULL(store, "Fused merge store terminal[%s] is missing.", store_name.c_str());
+        GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
+            store, ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary));
+      }
     }
-    // [组共享轴等价化] 在模板轴归一化之前：各成员输出视图中"同索引空间、仅 id 不同"
-    // 的轴（Broadcast 副本轴/split 兄弟轴/前端重复建轴）归一到新建组共享轴——归一后
-    // primary 的输出轴即组共享轴，NormalizeSimtAxesForGroupTemplate 从 primary 建出的
-    // merged 轴的 from 包含组轴，其它成员天然覆盖，消除 sched_has_all_members 的误杀。
-    // 非等价（size/stride 不同）时拒绝当前候选，不影响其它候选与原图回退。
+    // 非 L2（L3/L4）：链/侧链/side load/Store 无角色（见上方注释）——普通调度节点，
+    // SIMT 写成员 value UB 与其读取之间由标准 loop 同步衔接。
+    // [组共享轴等价化 + 传递归一化] 在模板轴归一化之前：各成员输出视图中"同索引空间、
+    // 仅 id 不同"的轴归一到新建组共享轴（非等价时拒绝当前候选，不影响其它候选与原图
+    // 回退）；替换映射沿成员前向闭包传递到链/Store/Reduce（真新维度拒绝、广播轴豁免、
+    // 原子 + 幂等）——链节点进 tiling group 前必须完成，否则 GetLoopAxis 把旧 id 并进
+    // y_group（GenTilingCase 枚举变大、MergeAxesGroup 可能失败、[k,R] 窗口两套）。
     {
       bool axes_normalized = true;
-      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::NormalizeMemberAxes(graph, members, axes_normalized));
+      std::unordered_map<ascir::AxisId, ascir::AxisId> old_to_group;
+      GE_ASSERT_SUCCESS(
+          ascgen_utils::indirect_load::NormalizeMemberAxes(graph, members, axes_normalized, &old_to_group));
       if (!axes_normalized) {
+        is_candidate_legal = false;
+        return af::SUCCESS;
+      }
+      bool axes_propagated = true;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::PropagateGroupAxes(graph, members, old_to_group, axes_propagated));
+      if (!axes_propagated) {
         is_candidate_legal = false;
         return af::SUCCESS;
       }
@@ -4256,15 +4341,25 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     // [per-IL index 内轴 hint] 已下沉至 NormalizeSimdAxesForTemplate（primary）与
     // NormalizeSimdAxesForMember（非 primary 成员），组路径与混模板路径共用同一设置点。
   }
-  for (const af::AscNodePtr &member : members) {
-    GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
-    GE_ASSERT_SUCCESS(FinalizeTemplate(member, template_id));
+  if (!is_simt) {
+    for (const af::AscNodePtr &member : members) {
+      GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
+      GE_ASSERT_SUCCESS(FinalizeTemplate(member, template_id));
+    }
+  } else {
+    // [播种后置于角色终态] SIMT 路径把 CompletePreservedVectorizedViews 移到发射计划
+    // 落定与降级重注解之后：结构性 L2 候选降级时，side load/Store 先复位为 kNone、链
+    // 重注解为扇出/无角色，再播种——重注解后的 preserves_vectorized_axis 语义与原生
+    // L3 一致（kNone 不播种、扇出播种），两条路径产物同源；播种先行会残留 L2 期结果，
+    // 与原生 L3 分叉（视图/后续 DeriveNodeVectorizedAxes 求交可能不同）。FinalizeTemplate
+    // 仅写模板 id/dcache，不读写向量化视图，拆出环路不改变内容。
+    for (const af::AscNodePtr &member : members) {
+      GE_ASSERT_SUCCESS(FinalizeTemplate(member, template_id));
+    }
   }
-  // [位宽感知门控后置] lowering 元数据先于融合发射标记构建（BuildSimtLoweringMetadata 仅
-  // 依赖 simt_group_member 标记的组员分支，与融合标记无关——构建顺序调换不改变内容）。
-  // 门控从各成员元数据读 offset_width（与 codegen 选 fused OffsetType 的判定同源）：
-  // 全成员 uint32 用 32 位细化常数（fused 成员上限与线程档均放宽），否则 64 位基准
-  // （既有行为不变）。
+  // [位宽感知门控后置] lowering 元数据先于融合发射标记构建（FinalizeLoweringMetadata
+  // 读模板轴与归一化产物，不可前移到角色注解之前）；门控从成员元数据读 offset_width
+  // （与 codegen 选 fused OffsetType 的判定同源）。SIMD/SIMT 同环路构建（既有行为）。
   for (const af::AscNodePtr &indirect_load : members) {
     bool metadata_supported = false;
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
@@ -4285,20 +4380,72 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
         break;
       }
     }
-    const uint64_t register_demand = ascgen_utils::indirect_load::SimtFusedRegisterDemand(
-        all_offset_uint32, merge_info.member_count, merge_info.side_load_count, merge_info.chain_node_count);
-    use_fused_emission = register_demand <= ascgen_utils::indirect_load::kSimtFusedMinTierQuota;
-    if (!use_fused_emission) {
+    // [发射计划落定] 形态/压力/线程档一次性判定（单一真值源，见 PlanSimtEmission）。
+    SimtEmissionPlan emission_plan;
+    GE_ASSERT_SUCCESS(PlanSimtEmission(merge_info, all_offset_uint32, emission_plan));
+    use_fused_emission = emission_plan.use_fused;
+    merge_info.register_merge = emission_plan.register_merge;
+    merge_info.max_thread_tier = emission_plan.max_thread_tier;
+    merge_info.demand = emission_plan.demand;
+    merge_info.peak_model = ascgen_utils::indirect_load::kUsePeakModel;
+    // [降级复位] 结构性 L2 候选压力超限降级（L3/L4）时，链/side load/Store 的角色必须
+    // 与最终形态一致：早期按 L2 注解的 InlineTransform/DirectGmBoundary 复位（kNone =
+    // 恢复未注解状态，L3/L4 链无角色——见 is_simt 分支注释），并清空 merge_info 的
+    // L2 专用残留（归并树/side load/Store 终端名列表，codegen 仅在 register_merge=true
+    // 时消费）——杜绝"L2 注解 + L3/L4 发射"的形态-角色错配（错配形态下 tensor 无
+    // 写者无注册）。复位幂等：kNone 复位与列表清空重复执行无副作用。
+    if (merge_info.l2_structural && !emission_plan.register_merge) {
+      const auto reset_role = [&graph](const std::vector<std::string> &names) -> af::Status {
+        for (const std::string &name : names) {
+          const af::AscNodePtr node = graph.FindNode(name.c_str());
+          GE_ASSERT_NOTNULL(node, "Fused merge role reset target[%s] is missing.", name.c_str());
+          GE_ASSERT_SUCCESS(
+              ascgen_utils::indirect_load::SetTemplateRole(node, ascgen_utils::indirect_load::TemplateRole::kNone));
+        }
+        return af::SUCCESS;
+      };
+      GE_ASSERT_SUCCESS(reset_role(merge_info.merge_node_names));
+      GE_ASSERT_SUCCESS(reset_role(merge_info.side_load_names));
+      GE_ASSERT_SUCCESS(reset_role(merge_info.merge_store_names));
+      merge_info.merge_node_names.clear();
+      merge_info.side_load_names.clear();
+      merge_info.merge_store_names.clear();
       GELOGI(
-          "[IndirectLoad] Fused register demand[%llu] (uint32[%d]) exceeds min tier quota[%llu], fall back to "
-          "V2 (N=%zu, S=%zu, E=%zu).",
-          static_cast<unsigned long long>(register_demand), all_offset_uint32 ? 1 : 0,
+          "[IndirectLoad] Fused register merge degrades to UB merge on register demand[%llu] (model[%s], "
+          "quota[%llu], N=%zu, S=%zu, E=%zu, W=%u).",
+          static_cast<unsigned long long>(merge_info.demand), merge_info.peak_model ? "peak" : "sum",
           static_cast<unsigned long long>(ascgen_utils::indirect_load::kSimtFusedMinTierQuota),
           static_cast<size_t>(merge_info.member_count), static_cast<size_t>(merge_info.side_load_count),
-          static_cast<size_t>(merge_info.chain_node_count));
+          static_cast<size_t>(merge_info.chain_node_count), static_cast<unsigned int>(merge_info.forward_chain_width));
+    }
+    // [非 L2 落地 UB 硬检查] 形态 2（共享 Reduce 终端）的 N 块 value tile 下界已由生成
+    // 期 IsGroupSimtL4UbDoomed 预检（该检查仅在生成期知道形态 2 才生效）；L2 压力降级
+    // 到 L3、以及 L4（成员仍为组员形态——输出链为空、local_target=true、value 写 N 块
+    // UB）同样需要 N 块成员 value tile 驻留——此处按最终形态统一补检（唯一豁免是
+    // register_merge=true 的 L2：value 不落 UB）。静态尾轴可算时判定，超限即拒绝候选
+    // 由 SK/回退承接，避免产出必然 tiling 失败的候选。
+    if (!emission_plan.register_merge && IsGroupSimtNValueTileUbDoomed(members)) {
+      is_candidate_legal = false;
+      GELOGW("[IndirectLoad] Reject gather group candidate: N value tiles exceed platform UB (N=%zu).", members.size());
       return af::SUCCESS;
     }
-    merge_info.max_thread_tier = ascgen_utils::indirect_load::SimtFusedThreadTier(register_demand);
+    if (!use_fused_emission) {
+      // L4（V2 压力兜底）：形态与角色已按计划注解/重注解，仅跳过融合发射标记——各成员
+      // 走标准单 gather invocation。播种保持既有 L4 时序（原 FinalizeTemplate 环路内）。
+      GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
+      GELOGI(
+          "[IndirectLoad] Fused register demand[%llu] (model[%s]) exceeds min tier quota[%llu], fall back to V2 "
+          "(N=%zu, S=%zu, E=%zu, W=%u).",
+          static_cast<unsigned long long>(merge_info.demand), merge_info.peak_model ? "peak" : "sum",
+          static_cast<unsigned long long>(ascgen_utils::indirect_load::kSimtFusedMinTierQuota),
+          static_cast<size_t>(merge_info.member_count), static_cast<size_t>(merge_info.side_load_count),
+          static_cast<size_t>(merge_info.chain_node_count), static_cast<unsigned int>(merge_info.forward_chain_width));
+      return af::SUCCESS;
+    }
+    // 角色终态后统一播种（L2 的 InlineTransform/side load/Store 与 L3 的扇出链均
+    // preserves_vectorized_axis=true → 播种；kNormal 链无角色 → 不播种，由调度器
+    // 标准机制接管——与两条原生路径产物一致）。
+    GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
   }
   if (is_simt && use_fused_emission) {
     // seq-V1 融合发射标记（L2/L3）：primary 携带全组成员名与归并信息，codegen 生成单个
@@ -4551,6 +4698,10 @@ bool LowersToStridedSimdFacade(const af::AscNodePtr &candidate_node) {
   return metadata.simd.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided;
 }
 
+// 单 gather 打分：候选序（SIMD 先）即平局兜底语义——与组打分的 tie-break（见
+// GenerateGroupScoreFunc 的平局规则）有意不对称：平局规则 ②（静态小 payload → SIMT）
+// 仅在组路径生效（组候选同场竞标的可观测场景）；单 gather 无同场竞标（每模板独立
+// 候选，平局由序裁决 → SIMD），动态 shape 下两者结论一致（均 SIMD），无行为分叉。
 std::string GenerateScoreFunc(const TemplateCase &template_case,
                               const ascgen_utils::indirect_load::IndirectLoadAccessInfo &access_info,
                               const af::AscNodePtr &candidate_node, bool simd_lowers_to_strided) {
@@ -4735,10 +4886,32 @@ std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const Template
       score += 1;
     }
   }
+  // [平局规则] 基分 ×4 + 平局加分（0/1）：非平局保持序（基分差 ≥1 → 差 ≥4 > 加分），
+  // 平局（动态 shape 一律平局；静态 shape 偏好占比 ∈ (1/3, 2/3)；双方均不 capable 的
+  // 0:0）由加分裁决——静态：平均 payload（slice_bytes_sum/N）≥ 2048 → SIMD，否则
+  // SIMT；动态：SIMD（embedding 业务默认，lookup 少而 payload 大，G/R 融合优于
+  // SIMT 逐元素间接寻址，UB 风险由下限硬门与运行期 solver 兜底）；0:0 兜底双方加分
+  // 均为 0，由候选序（SIMD 先）裁决 → SIMD。SK 恒 0 且枚举序最后——任一候选为 SK
+  // 时平局天然选另一个。
+  int32_t tie_bonus = 0;
+  if (form == GroupCandidateForm::kSimd || form == GroupCandidateForm::kSimt) {
+    if (!stats.all_static) {
+      tie_bonus = form == GroupCandidateForm::kSimd ? 1 : 0;
+    } else {
+      const int64_t avg_payload =
+          stats.member_count == 0UL ? 0L : stats.slice_bytes_sum / static_cast<int64_t>(stats.member_count);
+      if (form == GroupCandidateForm::kSimd) {
+        tie_bonus = avg_payload >= kEmbeddingSimdPayloadBytesThreshold ? 1 : 0;
+      } else {
+        tie_bonus = avg_payload < kEmbeddingSimdPayloadBytesThreshold ? 1 : 0;
+      }
+    }
+  }
+  const int32_t final_score = score * 4 + tie_bonus;
   return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
          "  (void)tiling_data;\n"
          "  return " +
-         std::to_string(score) +
+         std::to_string(final_score) +
          ";\n"
          "}\n";
 }
@@ -4781,18 +4954,14 @@ bool IsGroupSimdUbDoomed(const std::vector<af::AscNodePtr> &members) {
   return slice_floor_sum + kIndirectLoadUbReservedBytes > ub_size;
 }
 
-// 组 SIMT 候选的生成期 UB 预估（编译期优化，非正确性依赖）：仅当两种位宽基准下均不可
-// 融合（32 位细化需求超最低档配额，形态必然为 L4/V2——N 份 value tile 驻留 UB 的下界
-// = N×R + 预留）且该下界超平台 UB 时，跳过 SIMT 候选的生成与求解。生成期不持有位宽
-// 信息，触发条件取"两基准均超限"以避免跳过可融合形态（如全成员 uint32 的 L2/L3——
-// 其融合可行性由候选内部分析阶段的位宽感知门控判定）；未跳过的候选由 tiling 期资源
-// 校验淘汰，SK 兜底候选接管。
-bool IsGroupSimtL4UbDoomed(const std::vector<af::AscNodePtr> &members) {
-  if (ascgen_utils::indirect_load::kSimtFusedRegisterBase32 +
-          ascgen_utils::indirect_load::kSimtFusedRegisterPerMember32 * static_cast<uint64_t>(members.size()) <=
-      ascgen_utils::indirect_load::kSimtFusedMinTierQuota) {
-    return false;
-  }
+// [组 SIMT N 块 value tile UB 下界·唯一实现] 成员 value 写 UB 的形态（L3/L4）共用：
+// 静态尾轴可算时下界 = N × r_bytes + 预留，超平台 UB 即放不下。平台信息不可得或
+// 动态 R（尾轴非常量）保守放行（交由 tiling 期资源校验淘汰、SK 兜底接管）。
+// 调用方一（生成期预检 IsGroupSimtL4UbDoomed）：形态 2 必然 L3/L4，直接判；
+// 调用方二（ApplyGraphPassGroup 计划落定后）：非 L2（!register_merge）统一判——
+// 覆盖形态 1 压力降级 L3 与 L4（组员形态 value 仍写 N 块 UB）。两处禁止各持副本，
+// 常量/判据变更必须同步。
+bool IsGroupSimtNValueTileUbDoomed(const std::vector<af::AscNodePtr> &members) {
   int64_t ub_size = 0L;
   if (!TryGetIndirectLoadPlatformUbSize(ub_size)) {
     return false;
@@ -4807,6 +4976,30 @@ bool IsGroupSimtL4UbDoomed(const std::vector<af::AscNodePtr> &members) {
   }
   const int64_t r_bytes = tail * static_cast<int64_t>(af::GetSizeByDataType(outputs[0]->attr.dtype));
   return static_cast<int64_t>(members.size()) * r_bytes + kIndirectLoadUbReservedBytes > ub_size;
+}
+
+// [组 SIMT UB 预检·形态化] 与寄存器常数解耦：按"是否需要落 N 块 UB"判——共享
+// post-Reduce 终端（形态 2）必然 L3/L4（成员 N 份 value tile 驻留下界 = N×R + 预留），
+// 该下界超平台 UB 即跳过 SIMT 候选；无共享 Reduce（形态 1）L2 可能成立（无 N 块
+// 需求），预检放行，L2→L3 压力降级的 UB 可行性由计划落定后的统一补检与 tiling 期
+// 资源校验淘汰、SK 兜底接管。
+bool IsGroupSimtL4UbDoomed(const std::vector<af::AscNodePtr> &members) {
+  if (ascgen_utils::indirect_load::GetPostReduceConsumer(members.front()) == nullptr) {
+    return false;  // 形态 1：L2 无 N 块 UB 需求，不在预检跳过
+  }
+  return IsGroupSimtNValueTileUbDoomed(members);
+}
+
+// [编译期 UB 绝对下限硬门] 平台常量级问题（与 shape 无关）：任何形态都放不下
+// N×32B 最小行 + 32KB 预留即拒绝组融合候选（SIMD/SIMT 一并跳过，SK 兜底按其自身
+// 窗口可行性另行判定）——避免产出必然 tiling 失败的候选。ub_size 不可得（0/未知）
+// 时不判，交给运行期 solver。
+bool IsGroupUbAbsoluteDoomed(const std::vector<af::AscNodePtr> &members) {
+  int64_t ub_size = 0L;
+  if (!TryGetIndirectLoadPlatformUbSize(ub_size) || ub_size <= 0L) {
+    return false;
+  }
+  return kIndirectLoadUbReservedBytes + static_cast<int64_t>(members.size()) * 32L > ub_size;
 }
 
 // SK 前置检查：图含 Transpose 时 SK 必非法（ApplySkGraphPass 的逐成员全图扫描结论
@@ -4912,12 +5105,20 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
   }
   GELOGI("[IndirectLoad] Generate gather group schedule candidates for graph[%s], primary[%s] with %zu members.",
          graph.GetName().c_str(), group.primary->GetNamePtr(), members.size());
-  // [调度期 UB 预估]（编译期优化，非正确性依赖）：仅对两种位宽基准下均无融合可能的
-  // 形态做资源下界校验（SIMD 共循环流水要求全组切片同时驻留，硬下界 = Σ 切片 + 预留；
-  // SIMT 的 L4 形态需要 N 份 value tile 驻留），下界超平台 UB 即跳过该候选的生成与
-  // 求解，由其余候选（含 SK 兜底）接管——未跳过的候选仍由 tiling 期资源校验把关。
-  const bool simd_ub_doomed = IsGroupSimdUbDoomed(members);
-  const bool simt_ub_doomed = IsGroupSimtL4UbDoomed(members);
+  // [调度期 UB 预估]（编译期优化，非正确性依赖）：绝对下限硬门（与 shape 无关——
+  // N×32B 最小行 + 32KB 预留超平台 UB 即任何形态都放不下）+ 形态化下界（SIMD 共循环
+  // 流水要求全组切片同时驻留，硬下界 = Σ 切片 + 预留；SIMT 形态 2 需 N 份 value tile
+  // 驻留），下界超平台 UB 即跳过该候选的生成与求解，由其余候选（含 SK 兜底）接管——
+  // 未跳过的候选仍由 tiling 期资源校验把关。
+  const bool ub_absolute_doomed = IsGroupUbAbsoluteDoomed(members);
+  if (ub_absolute_doomed) {
+    GELOGW(
+        "[IndirectLoad] Skip gather group SIMD/SIMT candidates for primary[%s]: absolute UB lower bound "
+        "(reserve + N*32B) exceeds platform capacity.",
+        group.primary->GetNamePtr());
+  }
+  const bool simd_ub_doomed = ub_absolute_doomed || IsGroupSimdUbDoomed(members);
+  const bool simt_ub_doomed = ub_absolute_doomed || IsGroupSimtL4UbDoomed(members);
   // [SK 前置检查] 图含 Transpose 时 SK 必非法，组级一次判定（消除逐成员重复扫描）。
   const bool sk_blocked = HasTransposeNode(graph);
   // [R-before-gather-axis 门控] 与单 gather 路径（Generate 的候选循环）同口径：归约轴位于
@@ -5017,14 +5218,15 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
            static_cast<int32_t>(template_id), static_cast<int32_t>(template_case.implementation),
            candidate_group.primary->GetNamePtr(), members.size());
   }
-  // [L5 混模板候选]（并存，不再以共模板全部被否决为门槛）：逐成员探测（SIMD 优先 / SIMT
-  // 兜底；dense 双合法默认 SIMT——生存导向，见探测处注释），异构选择时各成员以各自
-  // 模板标注于同一 kernel，归并/输出链（含 Reduce）统一作为扇出分支向量代码；同构
-  // 选择跳过（与共模板候选重复）。统一打分按成员偏好满足模型：满足率恒为 1（各得其
-  // 所）——仅 embedding 形态（偏好有据，2 分与共模板同场竞标）；dense 组（含结构强制
-  // 异构）无偏好依据 0 分，按候选序兜底（共模板之后、SK 之前）。少数派占比 < 1/3 时
-  // 扣分（整合开销不划算）。
-  {
+  // [L5 混模板候选·本期下线]（开关控制，不删代码）：mixed 的成员输出轴空间不做归一
+  // （轴一致性仅隐式假设，无法保证链的轴空间一致 → 链无角色进组存在切错轴风险），
+  // 完整 MVP/归一化留作后续独立需求。下线后异构组回落到共模板候选（全 SIMD/全
+  // SIMT）或逐算子调度——编译失败风险优先于融合机会。
+  constexpr bool kEnableMixedGroupCandidate = false;  // 本期下线（重启用需先落地 mixed 链 MVP）
+  if (!kEnableMixedGroupCandidate) {
+    GELOGI("[IndirectLoad] mixed disabled: group[%s] members[%zu] dropped (no homogeneous template covers all).",
+           graph.GetName().c_str(), members.size());
+  } else {
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
     GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
     IndirectLoadGroup candidate_group;

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include "ascir.h"
@@ -200,6 +201,14 @@ constexpr uint64_t kSimtFusedRegisterPerSideLoad32 = 4U;
 // 最低档配额：超过即 fused 发射不可行（降级 L4/V2）。
 constexpr uint64_t kSimtFusedMinTierQuota = 127U;
 
+// [配额可行性·唯一判据] 带 5% 安全边际（防低估 spill；方向向上，禁止折算系数——见
+// 设计文档标定策略）。调度期门控（PlanSimtEmission）与生成期预检
+// （IsGroupSimtL4UbDoomed）必须共用本判据，禁止各自取整/位宽基准漂移——判据分裂会
+// 产生"预检放行、计划拒绝"的错配窗口（候选生成后才在 tiling 期被淘汰）。
+constexpr bool SimtFusedQuotaFeasible(const uint64_t demand) {
+  return demand * 105U <= kSimtFusedMinTierQuota * 100U;
+}
+
 // 位宽感知寄存器需求：all_offset_uint32 用 32 位细化常数，否则 64 位基准。
 inline uint64_t SimtFusedRegisterDemand(const bool all_offset_uint32, const uint64_t member_count,
                                         const uint64_t side_load_count, const uint64_t chain_node_count) {
@@ -210,6 +219,52 @@ inline uint64_t SimtFusedRegisterDemand(const bool all_offset_uint32, const uint
   return kSimtFusedRegisterBase64 + kSimtFusedRegisterPerMember64 * member_count +
          kSimtFusedRegisterPerSideLoad64 * side_load_count + kSimtFusedRegisterPerChainNode * chain_node_count;
 }
+
+// [SIMT 融合峰值寄存器压力模型] 唯一决定源开关：默认 peak（按 liveness 峰值计，消除
+// "每成员瞬态按 N 线性累加"的虚高）；sum 模型仅作现场应急回退与 CI 对拍（回退只切本
+// 常量，决策流程不变）。禁止 gate 用 sum、tier 用 peak 之类的混用（详见设计文档
+// 「寄存器压力模型」单一真值源一节）。
+constexpr bool kUsePeakModel = true;
+
+// 峰值模型常数（估计值，以 UT 锁相对关系、ST/性能用例反标绝对值）：
+// - P_member×N：发射顺序产物（Eval 以 N 元组 OutputPack 整体返回，进链前 N 路全活），
+//   其中仅 value 硬常驻，基址/policy 引用为循环不变量——3N 是上界非物理下界；
+// - 瞬时项（单成员寻址 / 链内活跃临时）互斥取大：寻址峰值与链求值不同时达到。
+constexpr uint64_t kSimtPeakBase64 = 24U;  // FusedCtx 局部体 + magic/shift + OutputPack 固定开销
+constexpr uint64_t kSimtPeakBase32 = 23U;
+constexpr uint64_t kSimtPeakPerMemberPersist = 3U;  // value + 成员基址/policy 引用
+constexpr uint64_t kSimtPeakPerSideLoad = 2U;       // side GM 指针（循环不变量）
+constexpr uint64_t kSimtPeakMemberAddr64 = 6U;      // 单成员 addr/idx/offset/索引表达式临时
+constexpr uint64_t kSimtPeakMemberAddr32 = 5U;
+constexpr uint64_t kSimtPeakPerChainNode = 3U;  // 链内每个活跃临时（2 入 1 出）
+
+// L2（寄存器归并）峰值：常驻相加 + 瞬时取大。E_side 为 side 闭包节点数（就地求值、与
+// 主干链临时重叠，相加），W_forward 为归并链 DAG 宽度（链内同时活跃临时数，不含成员
+// value——已在 3N 常驻项内，重复计入会双重计算）。
+inline uint64_t SimtPeakRegisterDemand(const bool all_offset_uint32, const uint64_t member_count,
+                                       const uint64_t side_load_count, const uint64_t side_chain_count,
+                                       const uint64_t forward_chain_width) {
+  const uint64_t base = all_offset_uint32 ? kSimtPeakBase32 : kSimtPeakBase64;
+  const uint64_t member_addr = all_offset_uint32 ? kSimtPeakMemberAddr32 : kSimtPeakMemberAddr64;
+  const uint64_t transient = std::max(member_addr, kSimtPeakPerChainNode * (side_chain_count + forward_chain_width));
+  return base + kSimtPeakPerMemberPersist * member_count + kSimtPeakPerSideLoad * side_load_count + transient;
+}
+
+// L3（UB 归并）峰值：evaluator 只算裸 load，side 与归并链由 VF/normal 消费，不计——
+// 仅常驻项 + 单成员寻址瞬态。
+inline uint64_t SimtPeakRegisterDemandL3(const bool all_offset_uint32, const uint64_t member_count) {
+  const uint64_t base = all_offset_uint32 ? kSimtPeakBase32 : kSimtPeakBase64;
+  const uint64_t member_addr = all_offset_uint32 ? kSimtPeakMemberAddr32 : kSimtPeakMemberAddr64;
+  return base + kSimtPeakPerMemberPersist * member_count + member_addr;
+}
+
+// [归并链 DAG 宽度] 链求值任意瞬间一个线程必须同时持有的链内新产生临时数（forward
+// 节点输出；不含成员 value 与 side 输入）。生命周期 = 算出至最后一个 forward 内消费者，
+// 消费即释放；无 forward 消费者（终端 Store/Reduce/域外消费）活到链尾。位置序取图拓扑
+// 序（保证哈希序不参与计算，宽度可复现）；同一位置先释放后生产（事件净和体现）。
+// 语义示意与算例见设计文档「DAG 宽度 W 的计算」：链形恒为 1、成对树 N/2。
+uint64_t ComputeMergeChainWidth(const af::AscGraph &graph, const std::vector<af::AscNodePtr> &forward_nodes,
+                                const std::vector<af::AscNodePtr> &members);
 
 // 线程档映射：需求可容纳的最高档。
 inline uint32_t SimtFusedThreadTier(const uint64_t register_demand) {
@@ -472,8 +527,19 @@ struct SimtFusedMergeInfo {
   uint32_t member_count = 0U;
   uint32_t side_load_count = 0U;
   uint32_t chain_node_count = 0U;
+  // [发射计划组件] 形态判定输入与单一真值源输出：l2_structural 为压力无关的结构性
+  // L2 资格（终端/可发射性/side 约束）；forward_node_count 为归并链节点数（观测/
+  // 日志）；forward_chain_width 为链 DAG 宽度（峰值模型 L2 瞬时项）；demand 为
+  // 选定形态的寄存器需求、peak_model 记录生效模型（观测/对拍用，禁止消费方重算）。
+  // 链发射者不由本结构决定：L3/L4 链无角色，VF/normal 由分区器自然裁决。
+  bool l2_structural = false;
+  uint32_t forward_node_count = 0U;
+  uint32_t forward_chain_width = 0U;
+  uint64_t demand = 0U;
+  bool peak_model = true;
   std::vector<std::string> merge_node_names;   // 归并树闭包节点名（拓扑序，不含成员 IL 与 Store）
   std::vector<std::string> merge_store_names;  // Store 终端节点名（codegen 按名重解析输出链 tensor id）
+  std::vector<std::string> side_load_names;    // side GM load 节点名（仅 L2 消费：evaluator 直读）
 };
 af::Status SetSimtFusedMergeInfo(const af::AscNodePtr &node, const SimtFusedMergeInfo &info);
 SimtFusedMergeInfo GetSimtFusedMergeInfo(const af::AscNodePtr &node);
@@ -521,7 +587,22 @@ bool AreAxesEquivalentInView(af::AscGraph &graph, const af::AscNodePtr &a, ascir
                              const af::AscNodePtr &b, ascir::AxisId axis_b);
 
 // 主入口：逐 dim 分等价类，同类但 id 不同时新建组共享轴并替换；不等价时 is_legal=false。
-af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal);
+// old_to_group（可选输出）：被替换的旧轴 id → 组共享轴 id 的映射，供调用方做前向闭包的
+// 传递式归一化（链/Store/Reduce 视图同步迁移）。
+af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal,
+                               std::unordered_map<ascir::AxisId, ascir::AxisId> *old_to_group = nullptr);
+
+// [传递式轴归一化] 把 NormalizeMemberAxes 的替换映射沿成员前向闭包（链/Store/Reduce）
+// 传递到全部消费节点：闭包节点视图中的轴 ∈ 映射（或与成员轴同维等价——同 size/repeats/
+// strides）→ 计划替换为组共享轴/成员轴；∈ 成员归一化后轴集合 → 保持；size=1 或该维
+// stride=0 的广播轴 → 豁免；其余（真新维度）→ is_legal=false 拒绝候选。硬规则：只按
+// 精确 id 命中（不按位置猜——Reduce 输出轴集合比输入少 R）；原子性（先算计划 + 全量
+// 校验，再统一替换，失败不改图）；幂等（旧 id 全消后二跑 no-op）；vectorized_axis 必须
+// 另行替换（TryApplyAxisReplace 只覆盖 sched.axis 与输出视图轴）。链节点进 tiling group
+// 前必须完成本归一化——否则 GetLoopAxis 把旧 id 并进 y_group（GenTilingCase 枚举变大、
+// MergeAxesGroup 可能失败、[k,R] 窗口出现两套）。
+af::Status PropagateGroupAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                              const std::unordered_map<ascir::AxisId, ascir::AxisId> &old_to_group, bool &is_legal);
 }  // namespace ascgen_utils::indirect_load
 
 #endif  // __INDIRECT_LOAD_UTILS_H__

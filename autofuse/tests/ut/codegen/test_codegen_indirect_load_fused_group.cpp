@@ -108,7 +108,9 @@ class AscBackendGraph {
 // 双 gather 共享 index 形态：两路独立值表 + 共享 index Load，IL_0/IL_1 → Add → Store。
 // 静态 shape + int32 index → uint32 offset → fused 发射档位。with_post_reduce 时归并后
 // 接尾轴 Sum 共享 AR 后置 Reduce（L3 UB 归并 + 逐 tile 调用形态）。
-std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_post_reduce = false) {
+std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_post_reduce = false,
+                                                              const bool single_node_chain = false,
+                                                              const bool long_broadcast_chain = false) {
   auto graph = std::make_shared<af::AscGraph>("fused_group_codegen_ut_graph");
   const af::Expression rows = graph->CreateSizeVar(8L);
   const af::Expression width = graph->CreateSizeVar(16L);
@@ -205,27 +207,63 @@ std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_po
   scale.y.dtype = ge::DT_FLOAT16;
 
   af::ascir_op::Broadcast scale_broadcast("scale_broadcast");
-  graph->AddNode(scale_broadcast);
-  scale_broadcast.x = scale.y;
-  scale_broadcast.y.dtype = ge::DT_FLOAT16;
-  scale_broadcast.attr.sched.axis = axes;
-  *scale_broadcast.y.axis = axes;
-  *scale_broadcast.y.repeats = output;
-  *scale_broadcast.y.strides = output_strides;
-
   af::ascir_op::Mul scale_mul("scale_mul");
-  graph->AddNode(scale_mul);
-  scale_mul.x1 = indirect_load0.y;
-  scale_mul.x2 = scale_broadcast.y;
-  scale_mul.y.dtype = ge::DT_FLOAT16;
-  scale_mul.attr.sched.axis = axes;
-  *scale_mul.y.axis = axes;
-  *scale_mul.y.repeats = output;
-  *scale_mul.y.strides = output_strides;
+  if (long_broadcast_chain) {
+    // [形态 1·全管线用例] 38 节点 Broadcast 链：完整优化栈下 RedundantBroadcast
+    // EliminatePass 会折叠视图一致的 Broadcast(Broadcast)（仅标量头受保护存活），
+    // E 收缩 → L2 峰值可行 → 候选保持寄存器归并（全管线真实归宿，见 Form1 用例
+    // 注释）。L2→L3 压力降级的产物级覆盖在生成侧直测（不经优化栈）。
+    graph->AddNode(scale_broadcast);
+    scale_broadcast.x = scale.y;
+    scale_broadcast.y.dtype = ge::DT_FLOAT16;
+    scale_broadcast.attr.sched.axis = axes;
+    *scale_broadcast.y.axis = axes;
+    *scale_broadcast.y.repeats = output;
+    *scale_broadcast.y.strides = output_strides;
+    af::AscNodePtr chain_tail = graph->FindNode("scale_broadcast");
+    for (size_t index = 1UL; index < 38UL; ++index) {
+      const std::string name = "scale_brc" + std::to_string(index);
+      af::ascir_op::Broadcast chain_broadcast(name.c_str());
+      af::Operator tail_op = af::OpDescUtils::CreateOperatorFromNode(chain_tail);
+      chain_broadcast.x = af::AscOpOutput(&tail_op, 0U);
+      chain_broadcast.y.dtype = ge::DT_FLOAT16;
+      chain_broadcast.attr.sched.axis = axes;
+      *chain_broadcast.y.axis = axes;
+      *chain_broadcast.y.repeats = output;
+      *chain_broadcast.y.strides = output_strides;
+      chain_tail = graph->FindNode(name.c_str());
+    }
+    graph->AddNode(scale_mul);
+    scale_mul.x1 = indirect_load0.y;
+    af::Operator tail_op = af::OpDescUtils::CreateOperatorFromNode(chain_tail);
+    scale_mul.x2 = af::AscOpOutput(&tail_op, 0U);
+    scale_mul.y.dtype = ge::DT_FLOAT16;
+    scale_mul.attr.sched.axis = axes;
+    *scale_mul.y.axis = axes;
+    *scale_mul.y.repeats = output;
+    *scale_mul.y.strides = output_strides;
+  } else if (!single_node_chain) {
+    graph->AddNode(scale_broadcast);
+    scale_broadcast.x = scale.y;
+    scale_broadcast.y.dtype = ge::DT_FLOAT16;
+    scale_broadcast.attr.sched.axis = axes;
+    *scale_broadcast.y.axis = axes;
+    *scale_broadcast.y.repeats = output;
+    *scale_broadcast.y.strides = output_strides;
+
+    graph->AddNode(scale_mul);
+    scale_mul.x1 = indirect_load0.y;
+    scale_mul.x2 = scale_broadcast.y;
+    scale_mul.y.dtype = ge::DT_FLOAT16;
+    scale_mul.attr.sched.axis = axes;
+    *scale_mul.y.axis = axes;
+    *scale_mul.y.repeats = output;
+    *scale_mul.y.strides = output_strides;
+  }
 
   af::ascir_op::Add add("add");
   graph->AddNode(add);
-  add.x1 = scale_mul.y;
+  add.x1 = (single_node_chain && !long_broadcast_chain) ? indirect_load0.y : scale_mul.y;
   add.x2 = indirect_load1.y;
   add.y.dtype = ge::DT_FLOAT16;
   add.attr.sched.axis = axes;
@@ -270,7 +308,7 @@ std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_po
 TEST(IndirectLoadCodegenFusedGroupTest, GeneratesFusedSimtGroupKernel) {
   // fused 组 SIMT 的 codegen 级端到端（生产同款管线）：Optimizer::Optimize（候选
   // 生成 → 调度 → 内存计划/张量 id 分配 → IO 收集）→ Codegen::Generate。该链路此前
-  // 无任何测试覆盖，fused 路径的成员输入解析与 UB 局部目标采集缺陷均由此暴露。
+  // 无任何测试覆盖，fused 路径的成员输入解析与 UB 局部目标采集问题均由此暴露。
   PlatformContextReset platform_reset;
   ge::PlatformContext::GetInstance().Reset();
   ge::PlatformInfo platform_info;
@@ -344,6 +382,170 @@ TEST(IndirectLoadCodegenFusedGroupTest, PostReduceFusedSimtGroupUsesPerTileInvoc
       << "post-reduce fused group must use per-tile element count, not whole-core loop size.";
   EXPECT_NE(call_text.find(")) * "), std::string::npos)
       << "per-tile offset must be (block_dim_offset + Tb) * tile element count.";
+}
+
+TEST(IndirectLoadCodegenFusedGroupTest, PostReduceSingleChainNodeStaysRolelessThroughFullPipeline) {
+  // [链发射者·无角色·全管线] 共享 post-Reduce 的单节点归并链（Add 直连两路 IL，无
+  // scale 链）：链不注解任何 IndirectLoad 角色（恢复 tpipe/BufQue/主循环发射全套机制），
+  // 发射者由分区器按簇形态裁决——单节点链可与相邻 vector 节点同簇成 VF 子图（簇节点数
+  // ≥ kMinVfNodesNum 即建子图），亦可 normal 兜底，不预测具体形态（铁律：不依赖预测；
+  // 原断言"单节点链必不成 VF 子图"即属错误预测——Add 与 sum/store 同簇成 VF 合法）。
+  // 回归锚点：codegen 全程 SUCCESS（不出现调度期元数据幽灵 id / Codegen tensor[N] not
+  // found 族失败）、fused SIMT 发射与逐 tile 形态保持、register_merge=false（链不在
+  // fused evaluator 内折叠）。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+
+  AscBackendGraph backend("fused_group_single_chain_codegen_ut_host", {ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_INT32},
+                          {ge::DT_FLOAT16});
+  const auto graph = backend.Finalize(BuildSharedIndexDualGatherGraph(true, true));
+  ASSERT_NE(graph, nullptr);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
+  ascir::FusedScheduledResult scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);
+
+  const af::AscNodePtr fused_primary = [](ascir::FusedScheduledResult &result) {
+    for (const auto &candidates : result.node_idx_to_scheduled_results) {
+      for (const auto &candidate : candidates) {
+        for (const auto &group : candidate.schedule_groups) {
+          for (const auto &impl_graph : group.impl_graphs) {
+            const auto indirect_load = ascgen_utils::indirect_load::FindIndirectLoadNode(impl_graph);
+            if (indirect_load != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(indirect_load)) {
+              return indirect_load;
+            }
+          }
+        }
+      }
+    }
+    return static_cast<af::AscNodePtr>(nullptr);
+  }(scheduled_result);
+  ASSERT_NE(fused_primary, nullptr) << "post-reduce single-chain candidate should stay fused (L3).";
+  const auto merge_info = ascgen_utils::indirect_load::GetSimtFusedMergeInfo(fused_primary);
+  EXPECT_FALSE(merge_info.register_merge) << "post-Reduce form-2 candidate is a native L3 (UB merge).";
+
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
+  ASSERT_NE(result.kernel.find("// IndirectLoad SIMT Fused"), std::string::npos);
+  const auto call_pos = result.kernel.find("AscendC::IndirectLoadSimtFused<FusedBody>(ftgt, fctx");
+  ASSERT_NE(call_pos, std::string::npos);
+  const auto call_end = result.kernel.find(");", call_pos);
+  ASSERT_NE(call_end, std::string::npos);
+  const std::string call_text = result.kernel.substr(call_pos, call_end - call_pos);
+  EXPECT_EQ(call_text.find("_loop_size"), std::string::npos)
+      << "post-reduce fused group must use per-tile element count, not whole-core loop size.";
+  EXPECT_NE(call_text.find(")) * "), std::string::npos)
+      << "per-tile offset must be (block_dim_offset + Tb) * tile element count.";
+}
+
+TEST(IndirectLoadCodegenFusedGroupTest, FusedThreadTierComesFromSingleSourcePlan) {
+  // [单一真值源·线程档] 生成代码的 kMaxThreadTier 与 schedule 侧发射计划写入的
+  // merge_info.max_thread_tier 完全一致（== SimtFusedThreadTier(merge_info.demand)，
+  // demand 为选定形态的峰值模型结果）——codegen 只做平台上限裁剪、不重算（旧 sum
+  // 公式重算会把峰值模型提升的档位静默压回，见 TierNotClampedByLegacyModel）。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+
+  AscBackendGraph backend("fused_group_tier_source_codegen_ut_host", {ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_INT32},
+                          {ge::DT_FLOAT16});
+  const auto graph = backend.Finalize(BuildSharedIndexDualGatherGraph());
+  ASSERT_NE(graph, nullptr);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
+  ascir::FusedScheduledResult scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);
+
+  const af::AscNodePtr fused_primary = [](ascir::FusedScheduledResult &result) {
+    for (const auto &candidates : result.node_idx_to_scheduled_results) {
+      for (const auto &candidate : candidates) {
+        for (const auto &group : candidate.schedule_groups) {
+          for (const auto &impl_graph : group.impl_graphs) {
+            const auto indirect_load = ascgen_utils::indirect_load::FindIndirectLoadNode(impl_graph);
+            if (indirect_load != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(indirect_load)) {
+              return indirect_load;
+            }
+          }
+        }
+      }
+    }
+    return static_cast<af::AscNodePtr>(nullptr);
+  }(scheduled_result);
+  ASSERT_NE(fused_primary, nullptr) << "bare dual gather should keep the fused SIMT candidate.";
+  const auto merge_info = ascgen_utils::indirect_load::GetSimtFusedMergeInfo(fused_primary);
+  EXPECT_TRUE(merge_info.peak_model);
+  EXPECT_EQ(merge_info.max_thread_tier, ascgen_utils::indirect_load::SimtFusedThreadTier(merge_info.demand));
+
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
+  ASSERT_NE(result.kernel.find("// IndirectLoad SIMT Fused"), std::string::npos);
+  const std::string tier_text = "kMaxThreadTier = " + std::to_string(merge_info.max_thread_tier) + "U";
+  EXPECT_NE(result.kernel.find(tier_text), std::string::npos)
+      << "generated kMaxThreadTier must equal the schedule-side plan (single source of truth).";
+}
+
+TEST(IndirectLoadCodegenFusedGroupTest, Form1LongBroadcastChainFoldsToRegisterMergeThroughFullPipeline) {
+  // [形态 1·全管线真实归宿] 无 Reduce + 38 节点 Broadcast 长链经完整优化栈：
+  // RedundantBroadcastEliminatePass 折叠视图一致的 Broadcast(Broadcast)（标量头受
+  // IsScalarLikeProducer 保护存活），E 收缩 → L2 峰值可行 → 候选保持寄存器归并
+  // （register_merge=true，链在 fused evaluator 内以标量表达式折叠发射），全管线
+  // Optimizer::Optimize → Codegen::Generate SUCCESS。L2→L3 压力降级（E=38 → L2=147
+  // 超配额）的产物级覆盖在生成侧直测（DualGatherL2DegradesToL3AndResetsChainRoles /
+  // SimtSeedingAfterPlanMatchesRoleFinalState，不经优化栈）——全管线下无法用合成链
+  // 稳定驱动降级：冗余 Broadcast 链被 pass 折叠，不可折叠的真实计算长链（Abs/Neg
+  // 交替，E=38）进入调度后融合候选被静默淘汰（无告警无错误，由 SK/SIMD 兜底承接），
+  // 两者均为管线对合成图的合法行为；生产降级由真实长链触发。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+
+  AscBackendGraph backend("fused_group_form1_full_pipeline_codegen_ut_host",
+                          {ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_INT32}, {ge::DT_FLOAT16});
+  const auto graph = backend.Finalize(BuildSharedIndexDualGatherGraph(false, false, true));
+  ASSERT_NE(graph, nullptr);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
+  ascir::FusedScheduledResult scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);
+
+  const af::AscNodePtr fused_primary = [](ascir::FusedScheduledResult &result) {
+    for (const auto &candidates : result.node_idx_to_scheduled_results) {
+      for (const auto &candidate : candidates) {
+        for (const auto &group : candidate.schedule_groups) {
+          for (const auto &impl_graph : group.impl_graphs) {
+            const auto indirect_load = ascgen_utils::indirect_load::FindIndirectLoadNode(impl_graph);
+            if (indirect_load != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(indirect_load)) {
+              return indirect_load;
+            }
+          }
+        }
+      }
+    }
+    return static_cast<af::AscNodePtr>(nullptr);
+  }(scheduled_result);
+  ASSERT_NE(fused_primary, nullptr) << "form-1 fused candidate should survive the full optimize stack.";
+  const auto merge_info = ascgen_utils::indirect_load::GetSimtFusedMergeInfo(fused_primary);
+  EXPECT_TRUE(merge_info.l2_structural);
+  EXPECT_TRUE(merge_info.register_merge) << "folded chain (E=1) keeps L2 register merge feasible.";
+
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
+  ASSERT_NE(result.kernel.find("// IndirectLoad SIMT Fused"), std::string::npos);
+  EXPECT_NE(result.kernel.find("register merge"), std::string::npos)
+      << "L2 candidate must emit the register-merge fused kernel marker.";
 }
 
 }  // namespace
