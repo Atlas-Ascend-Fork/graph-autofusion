@@ -11,6 +11,8 @@
 #include "bridge/CodegenOrchestration/CodegenOrchestration.h"
 #include "bridge/ScheduleToAfir/ScheduleToAfir.h"
 #include "optimize/optimize.h"
+#include "common/autofuse_config/auto_fuse_config.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "test/Support/ReduceGraphBuilder.h"
 
 #include <cctype>
@@ -776,7 +778,7 @@ TEST(CodegenOrchestrationTest, DynamicShapeKeepsEveryCandidate) {
 }
 
 // Even this fixed-size graph has solver-bound ATT costs (for example block_dim).
-TEST(CodegenOrchestrationTest, StaticShapeWithUnresolvedCostsKeepsEveryCandidate) {
+TEST(CodegenOrchestrationTest, StaticShapeKeepsBothPlansForRuntimeTiling) {
   mlir::test::ScopedEnvVar scoped_mlir_env("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;");
   auto fused_schedule_result = BuildFusedScheduleResultWithTwoValidPlans(true);
   codegen::CodegenResult result;
@@ -785,6 +787,12 @@ TEST(CodegenOrchestrationTest, StaticShapeWithUnresolvedCostsKeepsEveryCandidate
   ASSERT_EQ(status, mlir::bridge::MlirCodegenStatus::kSucceeded);
   EXPECT_NE(result.tiling.find("graph0_result0_g0_tiling_data"), std::string::npos);
   EXPECT_NE(result.tiling.find("graph0_result1_g0_tiling_data"), std::string::npos);
+  EXPECT_NE(result.kernel.find("subgraph0_plan0"), std::string::npos);
+  EXPECT_NE(result.kernel.find("subgraph0_plan1"), std::string::npos);
+  EXPECT_NE(result.tiling.find("optiling::GetTiling(*tiling"), std::string::npos);
+  // Runtime ATT sources use the normal split-file compilation contract.
+  EXPECT_NE(result.tiling.find("AUTOFUSE_SPLIT_FILE_BEGIN"), std::string::npos);
+  EXPECT_NE(result.tiling_data.find("graph0_tiling_key"), std::string::npos);
   EXPECT_EQ(fused_schedule_result.node_idx_to_scheduled_results[0].size(), 2U);
 }
 
@@ -797,6 +805,43 @@ TEST(CodegenOrchestrationTest, EmptyExtensionHeadersAreEmptyCollections) {
   const auto prelude = mlir::ascendc::DataCopyBlkAlignedOp::getExtensionPreludeHeaders();
   ASSERT_EQ(prelude.size(), 1U);
   EXPECT_EQ(prelude.front(), "utils.h");
+}
+
+TEST(CodegenOrchestrationTest, StaticCodegenDoesNotInvokeHostCompiler) {
+  mlir::test::ScopedEnvVar compiler("CXX", "/nonexistent/autofuse-test-cxx");
+  const auto schedule = BuildFusedScheduleResultWithTwoValidPlans(true);
+  for (const char *mode : {"mlir", "fallback"}) {
+    mlir::test::ScopedEnvVar config("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=" + std::string(mode) + ";");
+    codegen::CodegenResult result;
+    const auto status =
+        mlir::bridge::RunMlirCodegen(schedule, mlir::bridge::MlirCallerScene::kInductor, "Ascend910B1", result);
+    EXPECT_EQ(status, mlir::bridge::MlirCodegenStatus::kSucceeded);
+    EXPECT_FALSE(result.kernel.empty());
+    EXPECT_FALSE(result.tiling.empty());
+    EXPECT_FALSE(result.tiling_data.empty());
+  }
+}
+
+TEST(CodegenOrchestrationTest, StaticPgoRequestRetainsRuntimeTiling) {
+  auto &pgo = att::AutoFuseConfig::MutablePgoStrategyConfig();
+  const auto previous = pgo;
+  auto restore = llvm::make_scope_exit([&] { pgo = previous; });
+  pgo.is_first_init = false;
+  pgo.set_env_enable_autofuse_pgo = true;
+  pgo.enable_autofuse_pgo = "true";
+  const auto schedule = BuildFusedScheduleResultWithTwoValidPlans(true);
+  for (const char *mode : {"mlir", "fallback"}) {
+    mlir::test::ScopedEnvVar config("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=" + std::string(mode) + ";");
+    codegen::CodegenResult result;
+    testing::internal::CaptureStderr();
+    const auto status =
+        mlir::bridge::RunMlirCodegen(schedule, mlir::bridge::MlirCallerScene::kInductor, "Ascend910B1", result);
+    const auto diagnostic = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(status, mlir::bridge::MlirCodegenStatus::kSucceeded) << diagnostic;
+    EXPECT_NE(result.tiling.find("optiling::GetTiling(*tiling"), std::string::npos);
+    EXPECT_NE(result.kernel.find("subgraph0_plan0"), std::string::npos);
+    EXPECT_NE(result.kernel.find("subgraph0_plan1"), std::string::npos);
+  }
 }
 
 TEST(CodegenOrchestrationTest, DeclaredExtensionHeadersResolveInTheRegistry) {

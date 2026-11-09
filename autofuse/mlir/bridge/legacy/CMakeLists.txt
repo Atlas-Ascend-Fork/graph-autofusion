@@ -44,7 +44,6 @@ add_library(AutofuseMlirScheduleBridge STATIC
   ${MLIR_CODE_ROOT_DIR}/bridge/AttSchemaAdapter/AttSchemaAdapter.cpp
   ${MLIR_CODE_ROOT_DIR}/bridge/PlanSelector/PlanSelection.cpp
   ${MLIR_CODE_ROOT_DIR}/bridge/PlanSelector/PlanSelector.cpp
-  ${MLIR_CODE_ROOT_DIR}/bridge/PlanSelector/AttCostEvaluator.cpp
 )
 
 target_include_directories(AutofuseMlirScheduleBridge PUBLIC

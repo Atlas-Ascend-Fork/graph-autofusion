@@ -141,14 +141,6 @@ void ReportStrictDiagnostic(const MlirCodegenOptions &options, llvm::StringRef d
   llvm::errs() << "error: " << diagnostic << "\n";
 }
 
-// A static schedule has no frontend symbols to substitute. SelectStaticWinner
-// accepts an empty shape map and can still retain all candidates when ATT
-// costs depend on values resolved later by tiling.
-mlir::bridge::ConcreteShape BuildConcreteShape(const ascir::FusedScheduledResult &fused_schedule_result) {
-  (void)fused_schedule_result;
-  return {};
-}
-
 mlir::FailureOr<mlir::ascend::kernel::AFIRToAscendCPipelineSession> BuildPipelineSession(mlir::MLIRContext &context,
                                                                                          const std::string &soc_version,
                                                                                          std::string &diagnostic) {
@@ -244,15 +236,6 @@ struct PlanLoweringSession {
   const mlir::ascend::kernel::AFIRToAscendCPipelineSession &session;
 };
 
-// Outputs of PrepareMlirCandidates, grouped into one return value.
-struct MlirCandidatePreparation {
-  // AFIR and ATT use the same narrowed schedule and contiguous candidate IDs.
-  ascir::FusedScheduledResult narrowed_result;
-  std::vector<mlir::bridge::PlanSelection> selections;
-  std::string op_name;
-  mlir::bridge::TilingCodeBundle bundle;
-};
-
 // Outputs of BuildCandidateAfirModules: `owned` keeps each module alive; the
 // corresponding entries in `views` are the non-owning views passed to the
 // aggregate stage.
@@ -282,49 +265,35 @@ mlir::LogicalResult SetTargetAttr(mlir::ModuleOp module, const mlir::ascend::Tar
   return mlir::success();
 }
 
-// Selects the winning/candidate plans, narrows the schedule and generates ATT tiling.
-mlir::FailureOr<MlirCandidatePreparation> PrepareMlirCandidates(
-    const ascir::FusedScheduledResult &fused_schedule_result, MlirCallerScene scene, std::string &diagnostic,
-    bool &unsupported) {
-  std::vector<mlir::bridge::PlanSelection> selections;
-  const bool selected =
-      ascgen_utils::IsStaticSchedResult(fused_schedule_result)
-          ? mlir::bridge::SelectStaticWinner(fused_schedule_result, BuildConcreteShape(fused_schedule_result), {},
-                                             selections, &diagnostic, &unsupported)
-          : mlir::bridge::SelectDynamicCandidates(fused_schedule_result, selections, &diagnostic, &unsupported);
-  if (!selected) {
+mlir::FailureOr<common::ResourceBudget> ReadResourceBudget(const mlir::ascend::TargetProfile &profile) {
+  auto ub = profile.getMemorySpec(mlir::ascend::MemorySpace::UB);
+  if (mlir::failed(ub) || !ub->capacityBytes) {
     return mlir::failure();
   }
+  // One target profile drives ATT, AFIR and the emitted runtime resource limit.
+  return common::ResourceBudget{static_cast<uint64_t>(profile.getCoreTopology().vectorCoreCount),
+                                static_cast<uint64_t>(*ub->capacityBytes)};
+}
 
-  if (!mlir::bridge::FilterSelectionsForLowering(fused_schedule_result, selections, &diagnostic)) {
-    return mlir::failure();
-  }
-
-  MlirCandidatePreparation prep;
-  if (!NarrowFusedResultToSelections(fused_schedule_result, selections, prep.narrowed_result, prep.selections,
-                                     &diagnostic)) {
-    return mlir::failure();
-  }
-  prep.op_name = prep.narrowed_result.fused_graph_name.GetString();
-
-  mlir::common::TilingFieldSchema schema;
-  if (!mlir::common::BuildTilingFieldSchema(prep.narrowed_result, schema, &diagnostic)) {
-    return mlir::failure();
-  }
-
+mlir::FailureOr<PlanGenerationResult> PrepareCodegenPlans(const ascir::FusedScheduledResult &schedule,
+                                                          MlirCallerScene scene,
+                                                          const common::ResourceBudget &resources,
+                                                          std::string &diagnostic, bool &unsupported) {
+  const auto mode =
+      ascgen_utils::IsStaticSchedResult(schedule) ? PlanGenerationMode::Static : PlanGenerationMode::Dynamic;
+  // Static schedules embed concrete dimensions, but retain all candidates.
+  // The emitted host tiling program solves tile sizes and core partitioning.
   AttOptions att_options;
-  att_options.emplace("tiling_data_type_name", "AutofuseTilingData");
-  // The native Inductor ABI uses modeled tiling; legacy PGO helpers must not
-  // be enabled implicitly by an environment flag without their host protocol.
+  // The native Inductor ABI uses modeled tiling, without the legacy PGO host protocol.
   if (scene == MlirCallerScene::kInductor) {
     att_options.emplace(att::kInternalEnableAutofusePgo, "false");
   }
-  const mlir::bridge::AttRequest att_request{prep.op_name, prep.narrowed_result, prep.selections,
-                                             schema,       att_options,          scene == MlirCallerScene::kInductor};
-  if (mlir::bridge::RunAttForCandidates(att_request, prep.bundle, &diagnostic, &unsupported) != af::SUCCESS) {
+  PlanGenerationResult preparation;
+  if (!PreparePlanGeneration({schedule, mode, resources, scene == MlirCallerScene::kInductor, {}, att_options},
+                             preparation, &diagnostic, &unsupported)) {
     return mlir::failure();
   }
-  return prep;
+  return preparation;
 }
 
 // Lower every scheduled plan. A failure rejects the complete MLIR result.
@@ -337,8 +306,9 @@ mlir::FailureOr<BuiltPlanModules> BuildCandidateAfirModules(const PlanLoweringSe
   for (const auto &selection : selections) {
     const auto &scheduled_result =
         fused_schedule_result.node_idx_to_scheduled_results[selection.subgraph_id][selection.plan_id];
-    mlir::OwningOpRef<mlir::ModuleOp> module = mlir::afir::bridge::PlanToAfir(
-        lowering.context, fused_schedule_result, scheduled_result, selection.subgraph_id, selection.plan_id);
+    mlir::OwningOpRef<mlir::ModuleOp> module =
+        mlir::afir::bridge::PlanToAfir(lowering.context, fused_schedule_result, scheduled_result, selection.subgraph_id,
+                                       selection.plan_id, selection.template_ids_per_stage);
     if (!module) {
       return mlir::failure();
     }
@@ -370,23 +340,27 @@ mlir::FailureOr<BuiltPlanModules> BuildCandidateAfirModules(const PlanLoweringSe
 }
 
 mlir::FailureOr<std::string> GenerateTiling(llvm::ArrayRef<mlir::ModuleOp> plan_modules,
-                                            const mlir::bridge::TilingCodeBundle &bundle, MlirCallerScene scene) {
-  if (scene == MlirCallerScene::kInductor) {
+                                            const mlir::bridge::TilingArtifact &tiling, MlirCallerScene scene) {
+  if (scene == MlirCallerScene::kInductor || std::holds_alternative<StaticTilingData>(tiling)) {
     auto spec = buildAggregateTilingProgramSpec(plan_modules);
     if (failed(spec)) {
       return mlir::failure();
     }
-    return emitInductorTilingFunc(*spec, bundle);
+    if (const auto *solved = std::get_if<StaticTilingData>(&tiling)) {
+      return emitStaticTilingFunc(*spec, *solved);
+    }
+    return emitInductorTilingFunc(*spec, std::get<TilingCodeBundle>(tiling));
   }
-  return assembleTilingSources(bundle);
+  return assembleTilingSources(std::get<TilingCodeBundle>(tiling));
 }
 
 // Runs the aggregate + AutofuseLaunch driver over `plan_modules` and copies
 // its artifacts, plus the per-candidate ATT tiling functions in `bundle`,
 // into `result`.
 bool FinalizeMlirCodegenResult(llvm::ArrayRef<mlir::ModuleOp> plan_modules, const std::string &op_name,
-                               const mlir::bridge::TilingCodeBundle &bundle, MlirCallerScene scene,
+                               const mlir::bridge::TilingArtifact &artifact, MlirCallerScene scene,
                                codegen::CodegenResult &result) {
+  codegen::CodegenResult generated;
   std::string diagnostic;
   auto artifacts = mlir::ascend::kernel::runAggregateLaunchDriver(plan_modules, op_name, &diagnostic);
   if (mlir::failed(artifacts)) {
@@ -402,19 +376,20 @@ bool FinalizeMlirCodegenResult(llvm::ArrayRef<mlir::ModuleOp> plan_modules, cons
   const auto provide_api_extension = [](llvm::StringRef header) -> llvm::StringRef {
     return codegen::AscendCApiRegistry::GetInstance().GetFileContent(header.str());
   };
-  result.kernel = mlir::ascend::kernel::inlineApiExtensionHeaders(artifacts->kernel_body, provide_api_extension) +
-                  artifacts->autofuse_launch;
-  auto tiling = GenerateTiling(plan_modules, bundle, scene);
+  generated.kernel = mlir::ascend::kernel::inlineApiExtensionHeaders(artifacts->kernel_body, provide_api_extension) +
+                     artifacts->autofuse_launch;
+  auto tiling = GenerateTiling(plan_modules, artifact, scene);
   if (failed(tiling)) {
     GELOGW("MLIR codegen: failed to generate tiling sources");
     return false;
   }
-  result.tiling = std::move(*tiling);
+  generated.tiling = std::move(*tiling);
   if (scene == MlirCallerScene::kInductor) {
-    result.tiling += "\n// AUTOFUSE_SPLIT_FILE_BEGIN: TilingDataRepr\n" + artifacts->tiling_data_repr +
-                     "// AUTOFUSE_SPLIT_FILE_END: TilingDataRepr\n";
+    generated.tiling += "\n// AUTOFUSE_SPLIT_FILE_BEGIN: TilingDataRepr\n" + artifacts->tiling_data_repr +
+                        "// AUTOFUSE_SPLIT_FILE_END: TilingDataRepr\n";
   }
-  result.tiling_data = artifacts->tiling_data;
+  generated.tiling_data = artifacts->tiling_data;
+  result = std::move(generated);
   return true;
 }
 
@@ -491,15 +466,18 @@ MlirCodegenStatus RunMlirCodegen(const ascir::FusedScheduledResult &fused_schedu
       GELOGW("MLIR codegen: failed to resolve SoC version: %s", diagnostic.c_str());
       return classify(MlirCodegenGate::kSocVersion, "soc_resolution");
     }
-    // 候选准备里只有一类失败是「能力不足」：某个 stage 的每一个模板都被三条判据里的某一条
-    // 拒了（`PlanSelection.h` 的 `unsupported`）。标记在这里发而不在那一层发，是因为判据只有
-    // 一个——`Diagnostic` 上的 metadata——而那一层没有 MLIR context，发不出带标记的诊断。
-    //
-    // **剩下的失败一律不标**，尤其是 ATT 生成的 tiling_func 引用了 `TilingFieldSchema` 里没有
-    // 的字段那一支（`AttSchemaAdapter.cpp:130`，reg 侧 16 格 / mem 侧 11 格）：两侧字段拼法对
-    // 不上是缺陷，不是能力边界，标成能力不足就把它静默回落掉了。
+    std::string session_diagnostic;
+    auto session = BuildPipelineSession(context, valid_soc_version, session_diagnostic);
+    if (mlir::failed(session)) {
+      GELOGW("MLIR codegen: pipeline session build failed: %s", session_diagnostic.c_str());
+      return classify(MlirCodegenGate::kPipelineSession, "pipeline_session");
+    }
+    auto resources = ReadResourceBudget(*session->targetProfile);
+    if (mlir::failed(resources)) {
+      return classify(MlirCodegenGate::kPipelineSession, "missing_ub_capacity");
+    }
     bool unsupported = false;
-    auto preparation = PrepareMlirCandidates(fused_schedule_result, scene, diagnostic, unsupported);
+    auto preparation = PrepareCodegenPlans(fused_schedule_result, scene, *resources, diagnostic, unsupported);
     if (mlir::failed(preparation)) {
       GELOGW("MLIR codegen: candidate preparation failed: %s", diagnostic.c_str());
       ReportStrictDiagnostic(options, diagnostic);
@@ -509,23 +487,16 @@ MlirCodegenStatus RunMlirCodegen(const ascir::FusedScheduledResult &fused_schedu
       return classify(MlirCodegenGate::kCandidatePreparation, "candidate_preparation");
     }
 
-    std::string session_diagnostic;
-    auto session = BuildPipelineSession(context, valid_soc_version, session_diagnostic);
-    if (mlir::failed(session)) {
-      GELOGW("MLIR codegen: pipeline session build failed: %s", session_diagnostic.c_str());
-      return classify(MlirCodegenGate::kPipelineSession, "pipeline_session");
-    }
-
-    auto plan_modules = BuildCandidateAfirModules(PlanLoweringSession{context, *session}, preparation->narrowed_result,
+    auto plan_modules = BuildCandidateAfirModules(PlanLoweringSession{context, *session}, fused_schedule_result,
                                                   preparation->selections, options);
     if (mlir::failed(plan_modules)) {
       return classify(MlirCodegenGate::kLowering, "candidate_lowering");
     }
 
-    // 产物装配阶段**不走 classify**：这里没有任何能力判断，失败一律是坏了。而且它会先写
-    // `result.kernel` 再生成 tiling，中途失败时 `result` 已经被动过——回落让 legacy 再写
-    // 一遍是未定义的，宁可大声失败。
-    if (!FinalizeMlirCodegenResult(plan_modules->views, preparation->op_name, preparation->bundle, scene, result)) {
+    // Assembly errors retain their category; the outer mode chooses failure or
+    // legacy fallback. Finalization commits all artifacts together on success.
+    if (!FinalizeMlirCodegenResult(plan_modules->views, fused_schedule_result.fused_graph_name.GetString(),
+                                   preparation->tiling, scene, result)) {
       ReportStrictVerdict(options, fused_schedule_result, MlirCodegenGate::kArtifactAssembly, observer.sawShortfall());
       return finish(MlirCodegenStatus::kFailed, "artifact_generation");
     }

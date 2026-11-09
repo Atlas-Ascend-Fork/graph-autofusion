@@ -263,16 +263,9 @@ af::Status RunAttForCandidates(const AttRequest &request, TilingCodeBundle &out,
   }
 
   std::map<std::string, std::string> generated;
-  // ATT 的入口按非 const 引用收 options（可能就地改写），这里照旧给它一份可改的副本——
-  // 原先的按值形参也是这个语义。
+  // ATT may update its options. Both static and dynamic paths generate the same
+  // complete candidate program; only explicit ATT refusal marks a shortfall.
   AttOptions options = request.options;
-  // **ATT 自己的生成器拒收是能力边界，不是 MLIR 坏了。** 它内部还要过一遍代价模型
-  // （`gen_tiling_impl.cpp` 的 `GetModelInfoMap`），而那套 perf 公式按 dtype 逐张表查，表里
-  // 没有那一位就整图生成不出代价式。`SelectStaticWinner` 里那条同根因的出口已经这么标了；
-  // 到得了这里的是「每个子图只有唯一候选」从而早退过代价模型的那些图（2026-10-26 探针 reg
-  // 侧 2 格，末端同为 `BrcbToOneBlockPerf: Data type [bfloat16] unsatisfied`）。
-  //
-  // **这一位与下面的字段拼法判据刻意不同向**，理由见头文件上那段。
   if (!att::GenTilingImplAutoFuseV3(request.op_name, request.fused_result, options, generated,
                                     request.is_inductor_scene)) {
     SetDiagnostic(diagnostic, "ATT tiling generation failed");

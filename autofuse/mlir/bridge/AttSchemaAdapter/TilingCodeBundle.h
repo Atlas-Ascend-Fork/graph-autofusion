@@ -10,10 +10,25 @@
 #ifndef AUTOFUSE_MLIR_BRIDGE_ATTSCHEMAADAPTER_TILINGCODEBUNDLE_H
 #define AUTOFUSE_MLIR_BRIDGE_ATTSCHEMAADAPTER_TILINGCODEBUNDLE_H
 
+#include <cstdint>
+#include <variant>
+#include "common/tiling_schema/resource_budget.h"
+#include <vector>
 #include <map>
 #include <string>
 
 namespace mlir::bridge {
+
+using AttOptions = std::map<std::string, std::string>;
+
+// Concrete ATT values keyed by original group and field names. Mapping by name
+// preserves the solved parameters while the emitted ABI drops unused groups.
+struct StaticTilingData {
+  common::ResourceBudget resources;
+  bool flat_schedule{false};
+  uint64_t workspace_size{0};
+  std::map<std::string, std::map<std::string, std::vector<uint8_t>>> fields;
+};
 
 // Schedule-neutral ATT output consumed by host tiling source assembly.
 struct TilingCodeBundle {
@@ -21,6 +36,9 @@ struct TilingCodeBundle {
   std::string schema_version;
   bool schema_validated{false};
 };
+
+// Exactly one delivery mode: runtime source or frozen ATT values.
+using TilingArtifact = std::variant<TilingCodeBundle, StaticTilingData>;
 
 }  // namespace mlir::bridge
 

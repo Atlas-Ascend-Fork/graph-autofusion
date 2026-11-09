@@ -30,6 +30,9 @@ inline ascir::ScheduledResult MakeScheduledResult(size_t template_count = 1U, bo
       group.impl_graphs.emplace_back(("test_graph_" + std::to_string(template_id)).c_str());
       if (add_size_var) {
         group.impl_graphs.back().CreateSizeVar("s0");
+      } else {
+        // Initialize graph attributes, including ATT's unset tiling key (-1).
+        group.impl_graphs.back().CreateSizeVar(1);
       }
     }
   }

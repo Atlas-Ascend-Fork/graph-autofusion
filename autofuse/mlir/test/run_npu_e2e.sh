@@ -145,7 +145,7 @@ install_autofuse_runtime() {
 
   if [[ ! -f "${install_stamp}" || "$(cat "${install_stamp}")" != "${install_fingerprint}" ]]; then
     rm -rf "${INSTALL_DIR}"
-    cmake --install "${AUTOFUSE_BUILD_PATH}" --prefix "${INSTALL_DIR}"
+    cmake --install "${AUTOFUSE_BUILD_PATH}" --prefix "${INSTALL_DIR}" --component graph-autofusion
     printf '%s\n' "${install_fingerprint}" > "${install_stamp}"
   else
     echo "Autofuse install tree is up to date; skip cmake --install."

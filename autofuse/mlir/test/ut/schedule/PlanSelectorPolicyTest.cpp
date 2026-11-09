@@ -18,24 +18,13 @@
 #include "bridge/AttSchemaAdapter/AttSchemaAdapter.h"
 #include "test/ut/schedule/ScheduleTestUtils.h"
 #include "framework/easy_asc_graph/asc_graph_builder.h"
-#include "gen_model_info/gen_model_info.h"
 #include "gen_tiling_impl.h"
 
 namespace {
 
-// This executable supplies its own ATT model-generation symbol. Keep it out
-// of ScheduleSpaceBridgeTest so those tests continue linking against real ATT.
-struct ModelGenerationStub {
-  size_t calls{0U};
-  af::Status status{af::SUCCESS};
-  att::FusedParsedScheduleResult models;
-  mlir::bridge::AttOptions options;
-  const ascir::FusedScheduledResult *input{nullptr};
-};
-
-ModelGenerationStub *active_stub = nullptr;
-
+// Isolate ATT generation from the real ATT integration tests.
 struct TilingGenerationStub {
+  bool is_inductor_scene{false};
   bool succeed{true};
   std::map<std::string, std::string> generated;
   size_t calls{0U};
@@ -46,35 +35,14 @@ TilingGenerationStub *active_tiling_stub = nullptr;
 class PlanSelectorPolicyTest : public testing::Test {
  protected:
   void SetUp() override {
-    active_stub = &stub;
+    active_tiling_stub = &tiling_stub;
+    tiling_stub.generated = {{"tiling_func", "// ATT program stub"}};
   }
   void TearDown() override {
-    active_stub = nullptr;
+    active_tiling_stub = nullptr;
   }
-  ModelGenerationStub stub;
+  TilingGenerationStub tiling_stub;
 };
-
-att::ParsedScheduleResult PlanWithTemplateCosts(std::initializer_list<int64_t> costs) {
-  att::ParsedScheduleResult plan;
-  for (int64_t cost : costs) {
-    att::ModelInfo model{};
-    model.head_cost = att::CreateExpr(cost);
-    plan.groups_tiling_model_info[0].push_back(model);
-  }
-  return plan;
-}
-
-// 代价里带一个**不是 shape 符号**的量。真实模型里这种量是 ATT 求解器自己的（分核数
-// `block_dim`、逐轴切分尺寸），要等 tiling 解完才有值，而计划选择跑在 tiling 之前。
-att::ParsedScheduleResult PlanWithSolverBoundCosts(size_t template_count) {
-  att::ParsedScheduleResult plan;
-  for (size_t index = 0U; index < template_count; ++index) {
-    att::ModelInfo model{};
-    model.head_cost = af::Symbol("block_dim") + att::CreateExpr(static_cast<int64_t>(index));
-    plan.groups_tiling_model_info[0].push_back(model);
-  }
-  return plan;
-}
 
 af::AscGraph MakeTransferGraph(const std::string &name) {
   using af::testing::AscGraphBuilder;
@@ -200,10 +168,7 @@ void UseQueueView(af::AscGraph &graph, const std::string &nodeName, int64_t oute
   attr.vectorized_strides = {af::Symbol(1)};
 }
 
-// 改变队列视图的实际步长，让它与同一个 que id / reuse id 上的另一份不相等。
-// `InputBroadcastsToOutput` 只看 elementwise 输入输出视图，所以这个反例只违反队列资源判据。
-//
-// 外轴步长 2 == 内轴 repeat 2 × 内轴步长 1，所以它照旧收成一段，data-movement 判据也不碰。
+// Construct different vectorized layouts sharing the same queue identity.
 void UseDifferentVectorizedView(af::AscGraph &graph, const std::string &nodeName) {
   auto node = graph.FindNode(nodeName.c_str());
   if (!node || node->outputs().empty()) {
@@ -216,44 +181,19 @@ void UseDifferentVectorizedView(af::AscGraph &graph, const std::string &nodeName
   attr.vectorized_strides = {af::Symbol(2), af::Symbol(1)};
 }
 
-// 构造一个错误的向量化轴引用，让 `TemplateSupportsMlirDataMovement` 拒掉这个模板——用来造
-// 「一个模板同时违反两条判据」的场合。
-void SplitLocalTileIntoTwoSegments(af::AscGraph &graph, const std::string &nodeName) {
-  auto node = graph.FindNode(nodeName.c_str());
-  if (!node || node->outputs().empty()) {
-    ADD_FAILURE() << "test graph has no " << nodeName << " output";
-    return;
-  }
-  auto &attr = node->outputs()[0]->attr;
-  attr.vectorized_axis = {0, 2};
-  attr.vectorized_strides = {af::Symbol(5), af::Symbol(1)};
-}
-
 }  // namespace
 
 namespace att {
 
-af::Status GetModelInfoMap(const ascir::FusedScheduledResult &input, const std::map<std::string, std::string> &options,
-                           FusedParsedScheduleResult &models) {
-  if (active_stub == nullptr) {
-    ADD_FAILURE() << "ATT model generation called outside its test fixture";
-    return af::FAILED;
-  }
-  ++active_stub->calls;
-  active_stub->input = &input;
-  active_stub->options = options;
-  models = active_stub->models;
-  return active_stub->status;
-}
-
 extern "C" bool GenTilingImplAutoFuseV3(const std::string &, const ascir::FusedScheduledResult &,
                                         std::map<std::string, std::string> &,
-                                        std::map<std::string, std::string> &tiling_func, bool) {
+                                        std::map<std::string, std::string> &tiling_func, bool is_inductor_scene) {
   if (active_tiling_stub == nullptr) {
     ADD_FAILURE() << "ATT tiling generation called outside its test fixture";
     return false;
   }
   ++active_tiling_stub->calls;
+  active_tiling_stub->is_inductor_scene = is_inductor_scene;
   tiling_func = active_tiling_stub->generated;
   return active_tiling_stub->succeed;
 }
@@ -262,96 +202,17 @@ extern "C" bool GenTilingImplAutoFuseV3(const std::string &, const ascir::FusedS
 
 namespace {
 
-TEST_F(PlanSelectorPolicyTest, UniqueCandidatesNeverGenerateAttModels) {
-  auto input = mlir::test::MakeMultiStageFusedResult(1U, 3U);
-  input.node_idx_to_scheduled_results.push_back({mlir::test::MakeMultiStageScheduledResult(2U)});
-  stub.status = af::FAILED;
-  std::vector<mlir::bridge::PlanSelection> selections;
-  ASSERT_TRUE(mlir::bridge::SelectStaticWinner(input, {}, {}, selections));
-  EXPECT_EQ(stub.calls, 0U);
-  EXPECT_EQ(selections,
-            (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U}, {0U}, {0U}}}, {1U, 0U, {{0U}, {0U}}}}));
-}
-
 TEST_F(PlanSelectorPolicyTest, DynamicCandidatesNeverGenerateAttModels) {
   const auto input = mlir::test::MakeMultiStageFusedResult(3U, 2U, 3U);
   std::vector<mlir::bridge::PlanSelection> selections;
   ASSERT_TRUE(mlir::bridge::SelectDynamicCandidates(input, selections));
-  EXPECT_EQ(stub.calls, 0U);
+  EXPECT_EQ(tiling_stub.calls, 0U);
   ASSERT_EQ(selections.size(), 3U);
   EXPECT_EQ(selections[2].template_ids_per_stage, (std::vector<std::vector<size_t>>{{0U, 1U, 2U}, {0U, 1U, 2U}}));
 }
 
-TEST_F(PlanSelectorPolicyTest, MultiplePlansGenerateModelsOnceAndRetainOriginalWinnerId) {
-  const auto input = mlir::test::MakeMultiSubgraphFusedResult({2U, 1U});
-  stub.models[0][0] = PlanWithTemplateCosts({20});
-  stub.models[0][1] = PlanWithTemplateCosts({3});
-  stub.models[1][0] = PlanWithTemplateCosts({5});
-  const mlir::bridge::AttOptions options{{"test_option", "test_value"}};
-  std::vector<mlir::bridge::PlanSelection> selections;
-  ASSERT_TRUE(mlir::bridge::SelectStaticWinner(input, {}, options, selections));
-  EXPECT_EQ(stub.calls, 1U);
-  EXPECT_EQ(stub.input, &input);
-  EXPECT_EQ(stub.options, options);
-  EXPECT_EQ(selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 1U, {{0U}}}, {1U, 0U, {{0U}}}}));
-}
-
-// 这条同时是回落的反向断言：**能代出常数就必须还在编译期定下来**，
-// 选出来的只有一个模板，回落不许把这条路吃掉。
-TEST_F(PlanSelectorPolicyTest, MultipleTemplatesRequireModelsEvenWithOnePlan) {
-  const auto input = mlir::test::MakeFusedResult(1U, 2U);
-  stub.models[0][0] = PlanWithTemplateCosts({20, 3});
-  std::vector<mlir::bridge::PlanSelection> selections;
-  ASSERT_TRUE(mlir::bridge::SelectStaticWinner(input, {}, {}, selections));
-  EXPECT_EQ(stub.calls, 1U);
-  EXPECT_EQ(selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{1U}}}}));
-}
-
 // 代价模型代不出常数时**保留全部候选**，把选择交给生成的 tiling 在运行期做，而不是报失败。
 // 拿掉 `PlanSelector.cpp` 里那段回落，这条与下一条都红。
-TEST_F(PlanSelectorPolicyTest, SolverBoundCostsDeferSelectionToRuntime) {
-  const auto input = mlir::test::MakeFusedResult(1U, 2U);
-  stub.models[0][0] = PlanWithSolverBoundCosts(2U);
-  std::vector<mlir::bridge::PlanSelection> selections;
-  std::string diagnostic;
-  ASSERT_TRUE(mlir::bridge::SelectStaticWinner(input, {}, {}, selections, &diagnostic));
-  EXPECT_EQ(stub.calls, 1U);
-  // 两个模板一个都没丢——与 `SelectDynamicCandidates` 在同一张图上的产出一致。
-  EXPECT_EQ(selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U, 1U}}}}));
-  // 诊断留着，记的是"为什么没在编译期定下来"。
-  EXPECT_EQ(diagnostic, "ATT did not provide a complete, constant-cost plan for subgraph 0");
-}
-
-// 多个 plan 时同理：plan 与模板都不丢，交给运行期。
-TEST_F(PlanSelectorPolicyTest, SolverBoundCostsRetainEveryPlan) {
-  const auto input = mlir::test::MakeFusedResult(2U);
-  stub.models[0][0] = PlanWithSolverBoundCosts(1U);
-  stub.models[0][1] = PlanWithSolverBoundCosts(1U);
-  std::vector<mlir::bridge::PlanSelection> selections;
-  ASSERT_TRUE(mlir::bridge::SelectStaticWinner(input, {}, {}, selections));
-  EXPECT_EQ(selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U}}}, {0U, 1U, {{0U}}}}));
-}
-
-TEST_F(PlanSelectorPolicyTest, AttFailureDoesNotReturnUnscoredCandidates) {
-  const auto input = mlir::test::MakeFusedResult(2U);
-  stub.status = af::FAILED;
-  std::vector<mlir::bridge::PlanSelection> selections{{0U, 0U, {{0U}}}};
-  std::string diagnostic;
-  EXPECT_FALSE(mlir::bridge::SelectStaticWinner(input, {}, {}, selections, &diagnostic));
-  EXPECT_EQ(stub.calls, 1U);
-  EXPECT_EQ(diagnostic, "ATT model information generation failed");
-  EXPECT_TRUE(selections.empty());
-}
-
-TEST_F(PlanSelectorPolicyTest, AttModelGenerationFailureIsCapabilityShortfallNotBreakage) {
-  const auto input = mlir::test::MakeFusedResult(2U);
-  stub.status = af::FAILED;
-  std::vector<mlir::bridge::PlanSelection> selections;
-  std::string diagnostic;
-  bool unsupported = false;
-  EXPECT_FALSE(mlir::bridge::SelectStaticWinner(input, {}, {}, selections, &diagnostic, &unsupported));
-  EXPECT_TRUE(unsupported) << diagnostic;
-}
 
 class AttDeclineClassificationTest : public testing::Test {
  protected:
@@ -440,93 +301,28 @@ TEST_F(PlanSelectorPolicyTest, AllUnsupportedPlansArePreserved) {
   auto input = mlir::test::MakeFusedResult(2U);
   input.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0] = MakeMalformedDataMovementGraph();
   input.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0] = MakeMalformedDataMovementGraph();
-  std::vector<mlir::bridge::PlanSelection> selections{{0U, 0U, {{0U}}}};
-  std::string diagnostic;
-  EXPECT_FALSE(mlir::bridge::BuildAllCandidateSelections(input, selections, &diagnostic));
-  // 诊断要带拒收归属：是哪一条判据拒的、拒了几个模板。整片 `candidate-preparation` 在接管表
-  // 里没有首因就是因为这句话只说「没有支持的模板」（2026-10-26 全量表 55 格无诊断）。
-  EXPECT_EQ(diagnostic,
-            "subgraph 0 contains no plan with an MLIR-supported template "
-            "(plan 0 stage 0: 1 template(s), all rejected by: data-movement 1)");
+  std::vector<mlir::bridge::PlanSelection> selections;
+  ASSERT_TRUE(mlir::bridge::SelectDynamicCandidates(input, selections));
+  EXPECT_EQ(selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U}}}, {0U, 1U, {{0U}}}}));
+}
+
+TEST_F(PlanSelectorPolicyTest, DynamicCandidatesDoNotPrejudgeBackendCapabilities) {
+  auto input = mlir::test::MakeFusedResult(1U);
+  auto queue = MakeQueueGraph("different_views");
+  UseQueueView(queue, "load0", 2);
+  UseQueueView(queue, "load1", 2);
+  UseDifferentVectorizedView(queue, "load1");
+  input.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs = {
+      MakeUnsupportedDataMovementGraph(), MakeUnsupportedElementwiseBroadcastGraph(), queue};
+  std::vector<mlir::bridge::PlanSelection> selections;
+  ASSERT_TRUE(mlir::bridge::SelectDynamicCandidates(input, selections));
+  EXPECT_EQ(selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U, 1U, 2U}}}}));
+  input.node_idx_to_scheduled_results[0][0].schedule_groups.clear();
+  EXPECT_FALSE(mlir::bridge::SelectDynamicCandidates(input, selections));
   EXPECT_TRUE(selections.empty());
 }
 
-// 「能力不足」这一位只在模板判据那一条路上置真。另一侧（调度结构坏了）必须留 false——它一旦
-// 被标成能力不足就会静默回落给 legacy，再也没人发现。
-TEST_F(PlanSelectorPolicyTest, OnlyUnsupportedTemplatesReportCapabilityShortfall) {
-  auto allTemplatesRejected = mlir::test::MakeFusedResult(2U);
-  allTemplatesRejected.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0] =
-      MakeUnsupportedDataMovementGraph();
-  allTemplatesRejected.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0] =
-      MakeUnsupportedDataMovementGraph();
-  std::vector<mlir::bridge::PlanSelection> selections;
-  std::string diagnostic;
-  bool unsupported = false;
-  EXPECT_FALSE(mlir::bridge::BuildAllCandidateSelections(allTemplatesRejected, selections, &diagnostic, &unsupported));
-  EXPECT_TRUE(unsupported) << diagnostic;
-
-  auto brokenStructure = mlir::test::MakeFusedResult(1U);
-  brokenStructure.node_idx_to_scheduled_results[0][0].schedule_groups.clear();
-  selections.clear();
-  diagnostic.clear();
-  bool brokenUnsupported = false;
-  EXPECT_FALSE(mlir::bridge::BuildAllCandidateSelections(brokenStructure, selections, &diagnostic, &brokenUnsupported));
-  EXPECT_FALSE(brokenUnsupported) << diagnostic;
-}
-
-// 两个模板各被不同的一条判据拒掉时，覆盖是一个组合，没有单一首因。这一格会红的变异是退回挑
-// 一条报（无论挑哪条都在把组合谎称成单条）。`af-capability-probe` 的 T3 两格就是这个形状。
-TEST_F(PlanSelectorPolicyTest, RejectionAttributionSaysSoWhenNoSinglePredicateRejectsAll) {
-  auto input = mlir::test::MakeFusedResult(1U);
-  auto queueOnly = MakeQueueGraph("queue_conflict_only");
-  UseQueueView(queueOnly, "load0", 2);
-  UseQueueView(queueOnly, "load1", 2);
-  UseDifferentVectorizedView(queueOnly, "load1");
-
-  auto &stage = input.node_idx_to_scheduled_results[0][0].schedule_groups[0];
-  stage.impl_graphs.clear();
-  stage.impl_graphs.push_back(MakeUnsupportedDataMovementGraph());
-  stage.impl_graphs.push_back(std::move(queueOnly));
-
-  std::vector<mlir::bridge::PlanSelection> selections;
-  std::string diagnostic;
-  EXPECT_FALSE(mlir::bridge::BuildAllCandidateSelections(input, selections, &diagnostic));
-  EXPECT_EQ(diagnostic,
-            "subgraph 0 contains no plan with an MLIR-supported template "
-            "(plan 0 stage 0: 2 template(s), no single predicate rejects all; "
-            "counts: data-movement 1, elementwise-broadcast 1, queue-resources 1)");
-}
-
-// 首因必须是「拒掉全部模板」的那一条。这一格会红的变异是把归属改成按判据顺序报第一条非零的：
-// 那样这里会答成 data-movement，而换掉 data-movement 那个模板这个 stage 仍然进不来——真正挡住
-// 它的是 queue-resources。实测有 3 格栽在这个区别上（见 PlanSelection.cpp 的 `Str()`）。
-TEST_F(PlanSelectorPolicyTest, RejectionAttributionNamesThePredicateRejectingEveryTemplate) {
-  auto input = mlir::test::MakeFusedResult(1U);
-  auto queueOnly = MakeQueueGraph("queue_conflict_only");
-  UseQueueView(queueOnly, "load0", 2);
-  UseQueueView(queueOnly, "load1", 2);
-  UseDifferentVectorizedView(queueOnly, "load1");
-  auto queueAndDataMovement = MakeQueueGraph("queue_conflict_and_multi_segment");
-  UseQueueView(queueAndDataMovement, "load0", 2);
-  UseQueueView(queueAndDataMovement, "load1", 2);
-  UseDifferentVectorizedView(queueAndDataMovement, "load1");
-  SplitLocalTileIntoTwoSegments(queueAndDataMovement, "load0");
-
-  auto &stage = input.node_idx_to_scheduled_results[0][0].schedule_groups[0];
-  stage.impl_graphs.clear();
-  stage.impl_graphs.push_back(std::move(queueOnly));
-  stage.impl_graphs.push_back(std::move(queueAndDataMovement));
-
-  std::vector<mlir::bridge::PlanSelection> selections;
-  std::string diagnostic;
-  EXPECT_FALSE(mlir::bridge::BuildAllCandidateSelections(input, selections, &diagnostic));
-  EXPECT_EQ(diagnostic,
-            "subgraph 0 contains no plan with an MLIR-supported template "
-            "(plan 0 stage 0: 2 template(s), all rejected by: elementwise-broadcast 2, queue-resources 2; "
-            "partially: data-movement 1)");
-}
-
-TEST_F(PlanSelectorPolicyTest, PlanWithOneUnsupportedStageIsSkipped) {
+TEST_F(PlanSelectorPolicyTest, PlanWithOneUnsupportedStageIsPreserved) {
   auto input = mlir::test::MakeMultiStageFusedResult(2U, 2U);
   input.node_idx_to_scheduled_results[0][0].schedule_groups[1].impl_graphs[0] = MakeMalformedDataMovementGraph();
   std::vector<mlir::bridge::PlanSelection> selections;
@@ -556,6 +352,17 @@ TEST_F(PlanSelectorPolicyTest, ByValueScalarDoesNotRequireTensorBroadcastCompati
   std::string diagnostic;
   ASSERT_TRUE(mlir::bridge::BuildAllCandidateSelections(input, selections, &diagnostic)) << diagnostic;
   EXPECT_EQ(selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U}}}}));
+}
+
+TEST_F(PlanSelectorPolicyTest, CompatibleBroadcastViewsEmitNoRejection) {
+  auto input = mlir::test::MakeFusedResult();
+  input.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0] = MakeElementwiseGraph("compatible");
+  std::vector<mlir::bridge::PlanSelection> selections;
+  testing::internal::CaptureStderr();
+  const bool result = mlir::bridge::BuildAllCandidateSelections(input, selections);
+  const std::string log = testing::internal::GetCapturedStderr();
+  EXPECT_TRUE(result);
+  EXPECT_EQ(log.find("AF_MLIR_BROADCAST_REJECT"), std::string::npos);
 }
 
 TEST_F(PlanSelectorPolicyTest, UnsupportedElementwiseBroadcastTemplateIsPreserved) {
@@ -614,12 +421,81 @@ TEST_F(PlanSelectorPolicyTest, ConflictingQueueResourceTemplateIsPreserved) {
 }
 
 TEST_F(PlanSelectorPolicyTest, InvalidStructureAndShapeFailBeforeModelGeneration) {
-  std::vector<mlir::bridge::PlanSelection> selections;
+  mlir::bridge::PlanGenerationResult result;
   const auto no_stage = mlir::test::MakeMultiStageFusedResult(1U, 0U);
-  EXPECT_FALSE(mlir::bridge::SelectStaticWinner(no_stage, {}, {}, selections));
-  const auto multiple_plans = mlir::test::MakeFusedResult(2U);
-  EXPECT_FALSE(mlir::bridge::SelectStaticWinner(multiple_plans, {{"s-0", 1}}, {}, selections));
-  EXPECT_EQ(stub.calls, 0U);
+  EXPECT_FALSE(mlir::bridge::PreparePlanGeneration(
+      {no_stage, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {}, {}}, result));
+  const auto input = mlir::test::MakeFusedResult(2U);
+  EXPECT_FALSE(mlir::bridge::PreparePlanGeneration(
+      {input, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {{"s-0", 1}}, {}}, result));
+  EXPECT_EQ(tiling_stub.calls, 0U);
 }
 
 }  // namespace
+
+TEST_F(PlanSelectorPolicyTest, LogicalSingletonBroadcastReachesImplementationSelection) {
+  auto graph = MakeElementwiseGraph("singleton_broadcast");
+  auto &source = graph.FindNode("abs")->inputs()[0]->attr;
+  auto &output = graph.FindNode("abs")->outputs()[0]->attr;
+  source.axis = output.axis = {0};
+  source.repeats = {af::Symbol(1)};
+  source.strides = source.vectorized_strides = {af::Symbol(0)};
+  output.repeats = {af::Symbol(32)};
+  output.strides = output.vectorized_strides = {af::Symbol(1)};
+  source.vectorized_axis = output.vectorized_axis = {0};
+  auto input = mlir::test::MakeFusedResult();
+  input.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs = {graph};
+  std::vector<mlir::bridge::PlanSelection> selections;
+  EXPECT_TRUE(mlir::bridge::BuildAllCandidateSelections(input, selections));
+  ASSERT_EQ(selections.size(), 1U);
+}
+
+TEST_F(PlanSelectorPolicyTest, StaticPreparationKeepsEveryPlanStageAndTemplateWithoutExecutingSolver) {
+  const auto input = mlir::test::MakeMultiStageFusedResult(3U, 2U, 3U);
+  mlir::bridge::PlanGenerationResult result;
+  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration(
+      {input, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {}, {}}, result));
+  EXPECT_EQ(tiling_stub.calls, 1U);
+  EXPECT_TRUE(tiling_stub.is_inductor_scene);
+  std::vector<mlir::bridge::PlanSelection> expected;
+  ASSERT_TRUE(mlir::bridge::BuildAllCandidateSelections(input, expected));
+  EXPECT_EQ(result.selections, expected);
+  ASSERT_TRUE(std::holds_alternative<mlir::bridge::TilingCodeBundle>(result.tiling));
+  EXPECT_EQ(std::get<mlir::bridge::TilingCodeBundle>(result.tiling).tiling_functions, tiling_stub.generated);
+}
+
+TEST_F(PlanSelectorPolicyTest, UniqueCandidateDefersTilingToRuntime) {
+  const auto input = mlir::test::MakeFusedResult();
+  mlir::bridge::PlanGenerationResult result;
+  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration(
+      {input, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {}, {}}, result));
+  EXPECT_EQ(tiling_stub.calls, 1U);
+  EXPECT_EQ(result.selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U}}}}));
+  EXPECT_TRUE(std::holds_alternative<mlir::bridge::TilingCodeBundle>(result.tiling));
+}
+
+TEST_F(PlanSelectorPolicyTest, DynamicPreparationGeneratesOnceAndDoesNotExecuteSolver) {
+  const auto input = mlir::test::MakeMultiStageFusedResult(3U, 2U, 3U);
+  mlir::bridge::PlanGenerationResult result;
+  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration(
+      {input, mlir::bridge::PlanGenerationMode::Dynamic, {32, 196608}, false, {}, {}}, result));
+  EXPECT_EQ(tiling_stub.calls, 1U);
+  EXPECT_FALSE(tiling_stub.is_inductor_scene);
+  ASSERT_EQ(result.selections.size(), 3U);
+  EXPECT_EQ(result.selections[2].template_ids_per_stage, (std::vector<std::vector<size_t>>{{0, 1, 2}, {0, 1, 2}}));
+  EXPECT_TRUE(std::holds_alternative<mlir::bridge::TilingCodeBundle>(result.tiling));
+}
+TEST_F(PlanSelectorPolicyTest, InvalidResourceBudgetsNeverReachAtt) {
+  const auto input = mlir::test::MakeFusedResult();
+  for (const auto budget : {mlir::common::ResourceBudget{0, 196608},
+                            {32, 256},
+                            {32, 0},
+                            {uint64_t(UINT32_MAX) + 1, 196608},
+                            {32, uint64_t(UINT32_MAX) + 1}}) {
+    mlir::bridge::PlanGenerationResult result;
+    EXPECT_FALSE(mlir::bridge::PreparePlanGeneration(
+        {input, mlir::bridge::PlanGenerationMode::Static, budget, true, {}, {}}, result));
+  }
+  EXPECT_EQ(tiling_stub.calls, 0U);
+  EXPECT_EQ((mlir::common::ResourceBudget{1, 257}).availableUb(), 1U);
+}

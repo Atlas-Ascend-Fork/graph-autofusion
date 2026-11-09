@@ -41,6 +41,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "conversion/AFIRToAscendC/Implementations/TernaryElementwise.h"
+#include "conversion/AFIRToAscendC/Implementations/ElementwiseTransferPlan.h"
+#include "conversion/AFIRToAscendC/Implementations/Synchronization.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
 #include "dialect/AFIR/Analysis/TransferPlan.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
@@ -80,6 +82,9 @@ using elementwise::kI16;
 using elementwise::kI32;
 using elementwise::kUI16;
 using elementwise::kUI8;
+
+constexpr unsigned kSource0InputIndex = 1;
+constexpr unsigned kSource1InputIndex = 2;
 
 struct TernaryElementwiseMapping {
   ApiFamily family = ApiFamily::MemBased;
@@ -128,8 +133,8 @@ FailureOr<TernaryTensorTypes> getTensorTypes(Operation *op, bool scalarInputs) {
   }
   TernaryTensorTypes types;
   types.condition = dyn_cast<ascendc::LocalTensorType>(partition->inputs(op)[0].getType());
-  const Type source0Type = partition->inputs(op)[1].getType();
-  const Type source1Type = partition->inputs(op)[2].getType();
+  const Type source0Type = partition->inputs(op)[kSource0InputIndex].getType();
+  const Type source1Type = partition->inputs(op)[kSource1InputIndex].getType();
   types.source0 = dyn_cast<ascendc::LocalTensorType>(source0Type);
   types.source1 = dyn_cast<ascendc::LocalTensorType>(source1Type);
   types.source0Element = types.source0 ? types.source0.getElementType() : source0Type;
@@ -137,6 +142,14 @@ FailureOr<TernaryTensorTypes> getTensorTypes(Operation *op, bool scalarInputs) {
   types.destination = dyn_cast<ascendc::LocalTensorType>(partition->destinations(op)[0].getType());
   if (!types.condition || !types.destination) {
     return failure();
+  }
+  if (scalarInputs) {
+    if (elementwise::isSingletonTensorInput(op, kSource0InputIndex)) {
+      types.source0 = {};
+    }
+    if (elementwise::isSingletonTensorInput(op, kSource1InputIndex)) {
+      types.source1 = {};
+    }
   }
   const bool bothAreTiles = types.source0 && types.source1;
   if (scalarInputs ? bothAreTiles : !bothAreTiles) {
@@ -151,6 +164,42 @@ bool hasRankOneTernaryTiles(const TernaryTensorTypes &types) {
          isRankOne(types.source1) && types.destination.hasRank() && types.destination.getRank() == 1;
 }
 
+bool hasMissingScalarInputInformation(Operation *operation) {
+  for (unsigned index : {kSource0InputIndex, kSource1InputIndex}) {
+    if (elementwise::isSingletonTensorInput(operation, index) &&
+        (!scalarReadEvent(operation, operation->getOperand(index)) || !findFunctionPipe(operation))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasUnsupportedTernaryElementTypes(const TernaryElementwiseMapping &mapping, const TernaryTensorTypes &types) {
+  // 选择族的条件是一个字节的真值，另外两个输入与结果同 dtype。两条分开查：只查
+  // 「三者相同」会把条件也拖成数据类型，只查「条件是 ui8」会放过 f16 select f32。
+  if (mapping.conditionIsMask && !types.condition.getElementType().isUnsignedInteger(8)) {
+    return true;
+  }
+  // 元素类型对标量取它自己，对 tile 取元素类型——`getTensorTypes` 已经归一化过。
+  const Type elementType = types.source0Element;
+  if (types.source1Element != elementType || types.destination.getElementType() != elementType ||
+      !elementwise::isSupportedElementType(mapping.elementTypes, elementType)) {
+    return true;
+  }
+  // clip 族的第一个操作数是 x，不是掩码——「ui8」那一条对它不成立，换成与另外两个同
+  // dtype。legacy 在 codegen 里用 `GE_ASSERT_TRUE(x1_dtype_name == x2_dtype_name)`
+  // 兜的就是这一条。
+  return !mapping.conditionIsMask && types.condition.getElementType() != elementType;
+}
+
+bool hasUnsupportedTernaryShapes(const TernaryTensorTypes &types) {
+  // 形状按**目的地**比，不按 `source0` 比：标量形态下 `source0` 可能就是标量，没有形状。
+  // 目的地恒是 tile，而且 `verifyBufferizedElementwise` 已经把「结果 == 目的地」钉死了。
+  return types.condition.getShape() != types.destination.getShape() ||
+         (types.source0 && types.source0.getShape() != types.destination.getShape()) ||
+         (types.source1 && types.source1.getShape() != types.destination.getShape());
+}
+
 class TernaryElementwiseCapabilityProvider final : public ascend::instruction::CapabilityProvider {
  public:
   explicit TernaryElementwiseCapabilityProvider(std::shared_ptr<const TernaryElementwiseMapping> mapping)
@@ -161,7 +210,11 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
-    FailureOr<TransferPlan> plan = buildTransferPlan(operation);
+    auto destination = elementwise::getDestinationDescriptor(operation);
+    if (failed(destination)) {
+      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+    }
+    FailureOr<TransferPlan> plan = buildTransferPlanForDescriptor(operation, *destination);
     if (failed(plan)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
@@ -188,32 +241,17 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
     if (failed(types)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
+    if (mapping_->scalarInputs && hasMissingScalarInputInformation(operation)) {
+      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+    }
     // Rank applies to tiles only; scalar inputs have no rank.
     if (planKind == TransferPlanKind::Identity && !hasRankOneTernaryTiles(*types)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
-    // 选择族的条件是一个字节的真值，另外两个输入与结果同 dtype。两条分开查：只查
-    // 「三者相同」会把条件也拖成数据类型，只查「条件是 ui8」会放过 f16 select f32。
-    if (mapping_->conditionIsMask && !types->condition.getElementType().isUnsignedInteger(8)) {
+    if (hasUnsupportedTernaryElementTypes(*mapping_, *types)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
-    // 元素类型对标量取它自己，对 tile 取元素类型——`getTensorTypes` 已经归一化过。
-    const Type elementType = types->source0Element;
-    if (types->source1Element != elementType || types->destination.getElementType() != elementType ||
-        !elementwise::isSupportedElementType(mapping_->elementTypes, elementType)) {
-      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
-    }
-    // clip 族的第一个操作数是 x，不是掩码——「ui8」那一条对它不成立，换成与另外两个同
-    // dtype。legacy 在 codegen 里用 `GE_ASSERT_TRUE(x1_dtype_name == x2_dtype_name)`
-    // 兜的就是这一条。
-    if (!mapping_->conditionIsMask && types->condition.getElementType() != elementType) {
-      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
-    }
-    // 形状按**目的地**比，不按 `source0` 比：标量形态下 `source0` 可能就是标量，没有形状。
-    // 目的地恒是 tile，而且 `verifyBufferizedElementwise` 已经把「结果 == 目的地」钉死了。
-    if (types->condition.getShape() != types->destination.getShape() ||
-        (types->source0 && types->source0.getShape() != types->destination.getShape()) ||
-        (types->source1 && types->source1.getShape() != types->destination.getShape())) {
+    if (hasUnsupportedTernaryShapes(*types)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     return CapabilitySupport::supported();
@@ -234,6 +272,9 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
     }
     if (query.accessMode != ascend::instruction::AliasAccessMode::ReadWriteInput) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    if (mapping_->scalarInputs && elementwise::isSingletonTensorInput(operation, query.inputOperandIndex)) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     CapabilitySupport lowering = queryLowering(operation, context);
     if (lowering.getState() != ascend::instruction::SupportState::Supported) {
@@ -275,15 +316,78 @@ struct TernaryOperandTiles {
   Value count;
 };
 
+template <typename SourceOp>
+FailureOr<SmallVector<unsigned>> materializeScalarInputs(SourceOp op, TernaryOperandTiles &tiles,
+                                                         ConversionPatternRewriter &rewriter) {
+  SmallVector<unsigned> scalarIndices;
+  Value *const sources[] = {&tiles.condition, &tiles.source0, &tiles.source1};
+  for (unsigned index : {kSource0InputIndex, kSource1InputIndex}) {
+    if (!elementwise::isSingletonTensorInput(op, index)) {
+      continue;
+    }
+    auto scalar = materializeScalarRead(op, *sources[index], scalarReadEvent(op, op->getOperand(index)), rewriter);
+    if (failed(scalar)) {
+      return failure();
+    }
+    *sources[index] = *scalar;
+    scalarIndices.push_back(index);
+  }
+  return scalarIndices;
+}
+
+void removeScalarInputSegments(afir::VectorPlan &segments, ArrayRef<unsigned> scalarIndices) {
+  for (unsigned i = segments.tensors.size(); i > 0; --i) {
+    const auto &tensor = segments.tensors[i - 1];
+    if (tensor.side != afir::VectorTensor::Side::Operand || !llvm::is_contained(scalarIndices, tensor.index)) {
+      continue;
+    }
+    segments.tensors.erase(segments.tensors.begin() + i - 1);
+    for (auto &segment : segments.segments) {
+      segment.strides.erase(segment.strides.begin() + i - 1);
+    }
+  }
+}
+
+FailureOr<Value> applyVectorizedWindow(TernaryOperandTiles &tiles, const afir::VectorPlan &segments,
+                                       const VectorizedWindow &window) {
+  if (window.tiles.size() != segments.tensors.size() || window.extents.size() != 1) {
+    return failure();
+  }
+  Value *const byIndex[] = {&tiles.condition, &tiles.source0, &tiles.source1};
+  for (auto [tensor, tile] : llvm::zip(segments.tensors, window.tiles)) {
+    if (tensor.side == afir::VectorTensor::Side::Destination) {
+      tiles.destination = tile;
+      continue;
+    }
+    if (tensor.index >= std::size(byIndex)) {
+      return failure();
+    }
+    *byIndex[tensor.index] = tile;
+  }
+  return window.extents.front();
+}
+
 template <typename SourceOp, typename OpAdaptor>
 FailureOr<TernaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adaptor,
-                                                       ConversionPatternRewriter &rewriter) {
+                                                       ConversionPatternRewriter &rewriter, bool scalarInputs) {
   TernaryOperandTiles tiles;
   tiles.condition = adaptor.getCondition();
   tiles.source0 = adaptor.getInput1();
   tiles.source1 = adaptor.getInput2();
   tiles.destination = adaptor.getDestination();
-  FailureOr<TransferPlan> plan = buildTransferPlan(op);
+  SmallVector<unsigned> scalarIndices;
+  if (scalarInputs) {
+    FailureOr<SmallVector<unsigned>> materialized = materializeScalarInputs(op, tiles, rewriter);
+    if (failed(materialized)) {
+      return failure();
+    }
+    scalarIndices = *materialized;
+  }
+  auto descriptor = elementwise::getDestinationDescriptor(op);
+  if (failed(descriptor)) {
+    return failure();
+  }
+  FailureOr<TransferPlan> plan = buildTransferPlanForDescriptor(op, *descriptor);
   if (failed(plan)) {
     return failure();
   }
@@ -304,6 +408,7 @@ FailureOr<TernaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ad
   if (failed(segments)) {
     return failure();
   }
+  removeScalarInputSegments(*segments, scalarIndices);
   FailureOr<SmallVector<Value>> ordered =
       orderTilesForPlan(*segments, {tiles.condition, tiles.source0, tiles.source1}, tiles.destination);
   if (failed(ordered)) {
@@ -311,21 +416,14 @@ FailureOr<TernaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ad
   }
   FailureOr<VectorizedWindow> window =
       materializeVectorizedSegments(op, rewriter, *segments, *plan, *ordered, /*apiWindowSize=*/1);
-  if (failed(window) || window->tiles.size() != segments->tensors.size() || window->extents.size() != 1) {
+  if (failed(window)) {
     return failure();
   }
-  Value *const byIndex[] = {&tiles.condition, &tiles.source0, &tiles.source1};
-  for (auto [tensor, tile] : llvm::zip(segments->tensors, window->tiles)) {
-    if (tensor.side == afir::VectorTensor::Side::Destination) {
-      tiles.destination = tile;
-      continue;
-    }
-    if (tensor.index >= std::size(byIndex)) {
-      return failure();
-    }
-    *byIndex[tensor.index] = tile;
+  FailureOr<Value> count = applyVectorizedWindow(tiles, *segments, *window);
+  if (failed(count)) {
+    return failure();
   }
-  tiles.count = window->extents.front();
+  tiles.count = *count;
   return tiles;
 }
 
@@ -347,7 +445,7 @@ class TernaryElementwiseConversionPattern final : public OpConversionPattern<Sou
       return rewriter.notifyMatchFailure(op, "buffer-form ternary elementwise op requires a destination");
     }
 
-    FailureOr<TernaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter);
+    FailureOr<TernaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, rewriter, mapping_->scalarInputs);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }

@@ -69,12 +69,18 @@ std::string AppendE2eTilingEntry(const std::string &tiling, const std::string &t
   if (config.set_force_schedule_result && config.force_schedule_result >= 0) {
     const auto plan = std::to_string(config.force_schedule_result);
     const bool hasGraphTilingKey = tilingData.find("graph0_tiling_key") != std::string::npos;
-    const std::string tilingKeyAccessor = hasGraphTilingKey ? "get_graph0_tiling_key()" : "get_tiling_key()";
-    selectionCheck = "  if (status == 0 && tiling->" + tilingKeyAccessor + " != " + plan + ") return -1;\n";
-    selectionCheck += "  std::printf(\"ATT_SELECTED plan=%u\\n\", tiling->" + tilingKeyAccessor + ");\n";
+    if (hasGraphTilingKey) {
+      selectionCheck = "  if (status == 0 && tiling->get_graph0_tiling_key() != " + plan + ") return -1;\n";
+      selectionCheck += "  std::printf(\"ATT_SELECTED plan=%u\\n\", tiling->get_graph0_tiling_key());\n";
+    } else {
+      // Flat ATT data has one implicit plan (0); its root tiling_key selects a template.
+      selectionCheck = "  if (status == 0 && " + plan + " != 0) return -1;\n";
+      selectionCheck += "  std::printf(\"ATT_SELECTED plan=0\\n\");\n";
+    }
     if (config.set_force_tiling_case && !config.force_tiling_case.empty() &&
         config.force_tiling_case.find_first_not_of("0123456789") == std::string::npos) {
-      const auto field = "tiling->graph0_result" + plan + "_g0_tiling_data.get_tiling_key()";
+      const auto field = hasGraphTilingKey ? "tiling->graph0_result" + plan + "_g0_tiling_data.get_tiling_key()"
+                                           : "tiling->get_tiling_key()";
       selectionCheck += "  if (status == 0 && " + field + " != " + config.force_tiling_case + ") return -1;\n";
       selectionCheck += "  std::printf(\"ATT_SELECTED case=%u\\n\", " + field + ");\n";
     }

@@ -112,7 +112,7 @@ using PrintableOpTypes = std::tuple<
     // （`MaskRegOp` 是上游 Basic 的 op，上游的 printer 表里没有它，见 VecCmpsel.h）。
     ascendc::CompareRegOp, ascendc::MaskRegOp,
     // Vector broadcast operations (custom emitter -- see VecBroadcast.cpp)
-    ascendc::BroadcastL2Op, ascendc::BroadcastDim3Op, ascendc::BroadcastExtendRegBaseOp,
+    ascendc::BroadcastL2Op, ascendc::DuplicateU8Op, ascendc::BroadcastDim3Op, ascendc::BroadcastExtendRegBaseOp,
     // Vector layout operations (custom emitters -- see VecRemovePad.cpp / Transpose.cpp / Pad.cpp)
     ascendc::RemovePadExtendOp, ascendc::TransposeExtendRegBaseOp, ascendc::ConfusionTransposeOp,
     ascendc::PadOp, ascendc::DataCopyBlkAlignedOp,

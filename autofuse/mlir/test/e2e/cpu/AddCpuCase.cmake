@@ -339,15 +339,21 @@ function(add_mlir_e2e_cpu_case name)
         target_link_libraries(${target} PRIVATE ${host_tiling_libs})
     endif()
 
+    # Match runtime simulator libraries to the same target used for compilation
+    # and linking. An inherited simulator path otherwise overrides RUNPATH and
+    # can mix one platform's libpem_davinci with another platform's libcpudebug.
+    set(case_runtime_library_path
+        "$<JOIN:$<TARGET_PROPERTY:${case_tikicpulib},INTERFACE_LINK_DIRECTORIES>,:>:${AF_AUTOFUSE_MLIR_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
+
     add_test(NAME ${target} COMMAND ${target})
     set_tests_properties(${target} PROPERTIES
         LABELS "mlir_e2e;mlir_e2e_cpu"
         WORKING_DIRECTORY "${generated_dir}"
-        ENVIRONMENT "LD_LIBRARY_PATH=${AF_AUTOFUSE_MLIR_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}"
+        ENVIRONMENT "LD_LIBRARY_PATH=${case_runtime_library_path}"
     )
     add_custom_target(check-e2e-cpu-${name}
         COMMAND ${CMAKE_COMMAND} -E env
-            "LD_LIBRARY_PATH=${AF_AUTOFUSE_MLIR_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}"
+            "LD_LIBRARY_PATH=${case_runtime_library_path}"
             $<TARGET_FILE:${target}>
         DEPENDS ${target}
         COMMENT "Running MLIR CPU E2E case: ${name}"

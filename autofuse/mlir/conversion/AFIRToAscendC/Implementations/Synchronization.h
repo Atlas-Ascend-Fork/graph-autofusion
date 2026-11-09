@@ -12,6 +12,9 @@
 #define AUTOFUSE_MLIR_CONVERSION_AFIRTOASCENDC_IMPLEMENTATIONS_SYNCHRONIZATION_H
 
 #include "mlir/IR/Value.h"
+#include "ascir/Dialect/Asc/IR/Asc.h"
+#include "mlir/IR/PatternMatch.h"
+#include <optional>
 #include "mlir/Support/LogicalResult.h"
 
 namespace mlir::ascend::instruction {
@@ -27,6 +30,10 @@ namespace mlir::ascend::kernel {
 /// 它。**不要就地再建一个**：两个 `TPipe` 在生成的 C++ 里是两份声明，而槽位是按 pipe
 /// 对象分配的。今天的取用点有两处——本文件的事件下降，和 `Broadcast.cpp` 的标量读同步。
 Value findFunctionPipe(Operation *anchor);
+/// Resolve the writer before this use; shared queue position alone is insufficient.
+std::optional<ascendc::HardEvent> scalarReadEvent(Operation *anchor, Value source);
+FailureOr<Value> materializeScalarRead(Operation *anchor, Value source, std::optional<ascendc::HardEvent> event,
+                                       RewriterBase &rewriter);
 
 LogicalResult registerSynchronizationImplementations(ascend::instruction::ImplementationRegistry &registry,
                                                      ascend::instruction::SelectionPolicyRegistry *policies = nullptr);

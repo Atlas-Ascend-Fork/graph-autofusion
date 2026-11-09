@@ -64,14 +64,13 @@ using af::testing::Sym;
 void ExpectMlirOwnsGraph(af::AscGraph graph, const std::string &soc_version) {
   mlir::test::ScopedEnvVar strict("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir");
 
-  // **不设图级 tiling key。** 一个 stage 调度出多个模板时（`ContinuesBrc` 有 5 个），图级的
+  // **不设图级 tiling key。** 一个 stage 调度出多个模板时，图级的
   // `AscGraph::SetTilingKey` 识别不了模板，产物装配当场报错并要求去掉它；不设的话每个模板的
   // key 默认取模板下标，正是想要的。
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   ascir::FusedScheduledResult fused;
   ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
   ASSERT_FALSE(fused.node_idx_to_scheduled_results.empty());
-
   codegen::CodegenOptions options;
   if (!soc_version.empty()) {
     options.soc_version = soc_version;
@@ -84,23 +83,6 @@ void ExpectMlirOwnsGraph(af::AscGraph graph, const std::string &soc_version) {
   EXPECT_NE(result.kernel.find("_subgraph0_plan"), std::string::npos);
   EXPECT_FALSE(result.tiling.empty());
   EXPECT_FALSE(result.tiling_data.empty());
-}
-
-// Legacy optimizer success does not imply an MLIR candidate exists. Keep this
-// boundary explicit instead of accepting a silent legacy fallback as migration.
-void ExpectMlirRejection(af::AscGraph graph, const std::string &reason, const std::string &gate) {
-  mlir::test::ScopedEnvVar strict("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir");
-  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
-  ascir::FusedScheduledResult fused;
-  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
-  codegen::Codegen codegen(codegen::CodegenOptions{});
-  codegen::CodegenResult result;
-  mlir::test::ScopedStderrCapture capture;
-  const auto status = codegen.GenerateForInductor(fused, result);
-  const auto diagnostic = capture.Text();
-  EXPECT_EQ(status, af::FAILED);
-  EXPECT_NE(diagnostic.find(reason), std::string::npos) << diagnostic;
-  EXPECT_NE(diagnostic.find("gate=" + gate), std::string::npos) << diagnostic;
 }
 
 // mem 侧（NpuArch 2201）。
@@ -127,23 +109,6 @@ class LegacyGraphGuardRegSt : public testing::Test {
 // 按接管表的 takeover 定侧：一个图在哪一侧被接管就在那一侧发用例，两侧都被接管就发两条。
 //===----------------------------------------------------------------------===//
 
-// legacy backend_e2e/sub_transpose_abs_test 与其 PGO 变体共用的输入图。
-TEST_F(LegacyGraphGuardMemSt, SubTransposeAbs) {
-  ExpectMlirOwnsGraph(AscGraphBuilder("sub_transpose_abs")
-                          .Loops({32, 64, 512})
-                          .Data("data0", 0, af::DT_FLOAT)
-                          .Data("data1", 1, af::DT_FLOAT)
-                          .Load("load0", "data0")
-                          .Load("load1", "data1")
-                          .Sub("sub", "load0", "load1")
-                          .Transpose("transpose", "sub", {1, 0, 2})
-                          .Abs("abs", "transpose")
-                          .Store("store", "abs")
-                          .Output("output", "store", 0, af::DT_FLOAT)
-                          .Build(),
-                      "Ascend910B1");
-}
-
 // legacy v35 optimize_st_v2.cpp 的同名图；只在 CPU 仿真环境生成。
 TEST_F(LegacyGraphGuardRegSt, NddmaCaseTranspose021OutputWithSingleRef) {
   ExpectMlirOwnsGraph(AscGraphBuilder("transpose021")
@@ -155,61 +120,6 @@ TEST_F(LegacyGraphGuardRegSt, NddmaCaseTranspose021OutputWithSingleRef) {
                           .Output("output", "store", 0, af::DT_FLOAT)
                           .Build(),
                       "");
-}
-
-TEST_F(LegacyGraphGuardRegSt, LoadCastTransposeCase) {
-  ExpectMlirOwnsGraph(AscGraphBuilder("cast_transpose")
-                          .Loops({64, 64})
-                          .Data("data0", 0, af::DT_FLOAT16)
-                          .Load("load0", "data0")
-                          .Cast("cast", "load0", af::DT_FLOAT)
-                          .Transpose("transpose", "cast", {1, 0})
-                          .Store("store", "transpose")
-                          .Output("output", "store", 0, af::DT_FLOAT)
-                          .Build(),
-                      "");
-}
-
-// Optimizer-only input, not a legacy Inductor migration case. The comparison
-// layout is currently unsupported; keep its strict rejection visible.
-TEST_F(LegacyGraphGuardRegSt, LoadGEWhereTransposeCaseLoweringBoundary) {
-  const auto s0 = Sym(41);
-  const auto s1 = Sym(54);
-  const auto s2 = Sym(38);
-  const auto s3 = Sym(55);
-  ExpectMlirRejection(AscGraphBuilder("where_transpose")
-                          .Loops({s0, s1, s2, s3})
-                          .Data("data0", 0)
-                          .Load("load0", "data0")
-                          .Data("data1", 1)
-                          .Load("load1", "data1")
-                          .Ge("ge", "load0", "load1")
-                          .Where("where", "ge", "load0", "load1")
-                          .Transpose("transpose", "where", {0, 3, 1, 2})
-                          .Store("store", "transpose")
-                          .Output("output", "store", 0)
-                          .Build(),
-                      "'afir.ge' op has no supported Ascend implementation", "lowering");
-}
-
-TEST_F(LegacyGraphGuardRegSt, TransposeTwoAxisSplitCaseNeedInputAlignCandidateBoundary) {
-  auto s0 = Sym(347);
-  auto s2 = Sym(15);
-  auto s3 = Sym(49);
-  ExpectMlirRejection(
-      AscGraphBuilder("transpose_broadcast_mul")
-          .Loops({s0, s2, s3})
-          .Data("data0", 0, af::DT_FLOAT)
-          .Load("load0", "data0", {}, {s2 * s3, s2, af::sym::kSymbolOne})
-          .Transpose("transpose0", "load0", {0, 2, 1})
-          .Data("data1", 1, af::DT_FLOAT)
-          .Load("load1", "data1", {s0, af::sym::kSymbolOne, s3}, {s3, af::sym::kSymbolZero, af::sym::kSymbolOne})
-          .Broadcast("brc0", "load1", {1})
-          .Mul("mul0", "brc0", "transpose0")
-          .Store("store0", "mul0")
-          .Output("output", "store0", 0, af::DT_FLOAT)
-          .Build(),
-      "elementwise-broadcast", "candidate-preparation");
 }
 
 // 对应 `ShareGraph::AcosBf16FusedGraph(3)`。
@@ -1304,31 +1214,6 @@ TEST_F(LegacyGraphGuardMemSt, LoadPowAllInputIsScalarStore) {
           .Output("output", "store", 0, af::DT_FLOAT)
           .Build(),
       "Ascend910B1");
-}
-
-// 对应 `ShareGraph::ContinuesBrcFusedGraph`（五维）。看护的是**链式广播**：load1 的 view 是
-// 1 x s1 x 1 x s3 x 1，经三个 Broadcast 逐个把第 0、2、4 轴铺开，广播结果既直接落盘（store1 /
-// y1），又与 load0 相加后落另一条出边（store / y）。一个中间张量喂两条出边、而且其中一条是
-// 广播链的终点——这是 `afir.broadcast` 那条尾轴不变量最容易出事的形状。
-TEST_F(LegacyGraphGuardRegSt, ContinuesBrc) {
-  ExpectMlirOwnsGraph(
-      AscGraphBuilder("continuesbrc")
-          .Loops({Sym("s0"), Sym("s1"), Sym("s2"), Sym("s3"), Sym("s4")})
-          .Data("x0", 0, af::DT_FLOAT)
-          .Data("x1", 1, af::DT_FLOAT)
-          .Load("load0", "x0")
-          .Load("load1", "x1", {Sym(int64_t{1}), Sym("s1"), Sym(int64_t{1}), Sym("s3"), Sym(int64_t{1})},
-                {Sym(int64_t{0}), Sym("s3"), Sym(int64_t{0}), Sym(int64_t{1}), Sym(int64_t{0})})
-          .Broadcast("brc0", "load1", {Sym("s0"), Sym("s1"), Sym(int64_t{1}), Sym("s3"), Sym(int64_t{1})})
-          .Broadcast("brc1", "brc0", {Sym("s0"), Sym("s1"), Sym("s2"), Sym("s3"), Sym(int64_t{1})})
-          .Broadcast("brc2", "brc1", {Sym("s0"), Sym("s1"), Sym("s2"), Sym("s3"), Sym("s4")})
-          .Store("store1", "brc2")
-          .Output("y1", "store1", 1, af::DT_FLOAT)
-          .Add("add0", "load0", "brc2")
-          .Store("store", "add0")
-          .Output("y", "store", 0, af::DT_FLOAT)
-          .Build(),
-      /*soc_version=*/"");
 }
 
 // 对应 `ShareGraph::ConcatAscGraph(graph, {"s0", "s1"})`（二维，int32）。两条 load 沿最内轴

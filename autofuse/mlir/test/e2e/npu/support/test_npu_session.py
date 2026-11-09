@@ -9,6 +9,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -27,6 +28,34 @@ client, worker = load("npu"), load("npu_worker")
 
 
 class SessionTest(unittest.TestCase):
+    def test_device_env_loads_outside_case_directory(self):
+        # -I excludes PYTHONPATH and the cwd, as in an incoming/ worker launch.
+        script = """
+import importlib.util
+import pathlib
+import sys
+worker_path, repo = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('worker', worker_path)
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+env = worker.load_device_env(repo)
+expected = pathlib.Path(repo) / 'autofuse/mlir/test/e2e/npu/support'
+assert pathlib.Path(env.__file__).resolve() == expected / 'device_env.py'
+assert pathlib.Path(env.att_selection.__file__).resolve() == expected / 'att_selection.py'
+"""
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                script,
+                str(SCRIPTS / "npu_worker.py"),
+                str(SCRIPTS.parents[2]),
+            ],
+            cwd=self.root,
+            check=True,
+        )
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

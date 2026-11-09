@@ -41,6 +41,54 @@ import run as entry  # noqa: E402
 from support import case_status, device_env  # noqa: E402
 
 
+def test_mlir_flags_preserve_overlay_and_build_paths():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        build = root / "build"
+        build.mkdir()
+        (build / "libtest.so").touch()
+        overlay = root / "overlay"
+        with patch.dict(
+            os.environ,
+            {
+                "PYTHONPATH": "/installed/python",
+                "LD_LIBRARY_PATH": "/installed/lib",
+                "AUTOFUSE_DFX_FLAGS": "--force_schedule_result=2",
+            },
+            clear=True,
+        ):
+            for enabled in (True, False):
+                env = device_env.environ_for_run(root, build, overlay, enabled)
+                assert env["PYTHONPATH"].split(":")[0] == str(
+                    overlay / "python/site-packages"
+                )
+                assert env["LD_LIBRARY_PATH"].split(":")[0] == str(build.resolve())
+                assert "--force_schedule_result=2" in env["AUTOFUSE_DFX_FLAGS"]
+                assert (
+                    "--mlir_codegen_config=" + ("mlir" if enabled else "none")
+                    in env["AUTOFUSE_DFX_FLAGS"]
+                )
+
+
+def test_installed_runtime_paths_take_priority():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        install = root / "dev-install"
+        lib = install / "aarch64-linux/lib64"
+        lib.mkdir(parents=True)
+        (lib / "libaihac_codegen.so").touch()
+        with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/cann/lib64"}, clear=True):
+            env = device_env.environ_for_run(
+                root, root / "build", install, installed=True
+            )
+        paths = env["LD_LIBRARY_PATH"].split(":")
+        assert paths.index(str(lib)) < paths.index("/cann/lib64")
+        assert str(root / "build") not in paths
+        assert env["PYTHONPATH"].split(":")[0] == str(install / "python/site-packages")
+        args = entry.parse_args(["--install-dir", str(install)])
+        assert args.install_dir == str(install)
+
+
 def test_manifest_matches_torch_e2e_scope():
     root = HERE.parent
     registered = {case.script for case in case_manifest.CASES}
@@ -498,6 +546,35 @@ def test_parallel_workers_hold_device_until_case_finishes():
         )
     assert [outcome.case.id for outcome in outcomes] == [case.id for case in cases]
     assert assignments["0"] != assignments["2"]
+
+
+def test_backend_route_preserves_explicit_fallback():
+    from types import SimpleNamespace
+    from support.npu_runner import NpuRunner
+    from support import att_selection
+
+    with tempfile.TemporaryDirectory() as directory:
+        runner = NpuRunner(work_dir=directory, profile_steps=0)
+        runner.torch = SimpleNamespace(
+            _dynamo=SimpleNamespace(config=SimpleNamespace(debug_dir_root=directory))
+        )
+        for config in ("mlir", "fallback"):
+            flags = "--mlir_codegen_config=" + config + ";--force_schedule_result=0"
+            with patch.dict(os.environ, {"AUTOFUSE_DFX_FLAGS": flags}):
+                for route, expected in (("mlir", config), ("legacy", "none")):
+                    with runner.use_backend_route(route):
+                        options = att_selection.flags(os.environ)
+                        assert options["--mlir_codegen_config"] == expected
+                        assert options["--force_schedule_result"] == "0"
+                    assert os.environ["AUTOFUSE_DFX_FLAGS"] == flags
+
+
+def test_fallback_baselines_enable_fallback():
+    for case in case_manifest.CASES:
+        if case_status.PASS_FALLBACK in case.expect.values():
+            assert "--mlir_codegen_config=fallback" in case.env.get(
+                "AUTOFUSE_DFX_FLAGS", ""
+            ), case.id
 
 
 def main() -> int:

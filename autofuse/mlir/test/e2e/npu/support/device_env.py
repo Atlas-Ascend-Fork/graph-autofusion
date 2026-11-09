@@ -224,6 +224,7 @@ def environ_for_run(
     overlay: Path,
     mlir_codegen: bool = True,
     extra: Optional[Dict[str, str]] = None,
+    installed: bool = False,
 ) -> Dict[str, str]:
     """跑一个用例脚本用的环境。
 
@@ -231,8 +232,8 @@ def environ_for_run(
     `NpuRunner.configure_work_dir` 按 `--work-dir` 设，一份实验一个目录。在这里再设一遍
     只会和它打架，而且会让「不同 route 不共用 cache」这条取决于谁最后赋值。
     """
-    env = att_selection.environment_for_mlir_config("mlir" if mlir_codegen else "none")
-    libs = library_path_entries(build)
+    env = dict(os.environ)
+    libs = library_path_entries(overlay) if installed else library_path_entries(build)
     old_libs = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = ":".join(libs + ([old_libs] if old_libs else []))
 
@@ -243,6 +244,9 @@ def environ_for_run(
     # 子进程的 cwd 是各实验的 work-dir（§2.4.1：产物不落源码目录），不能靠 cwd 兜。
     env["PYTHONPATH"] = ":".join([env["PYTHONPATH"], str(cases_dir(repo))])
 
+    env["AUTOFUSE_DFX_FLAGS"] = (
+        att_selection.environment_for_mlir_config("mlir" if mlir_codegen else "none")
+    )["AUTOFUSE_DFX_FLAGS"]
     # 默认沿用当前解释器的标准库前缀；显式选择其他解释器时可通过 AF_NPU_PYTHONHOME 覆盖。
     env.setdefault("PYTHONHOME", os.environ.get("AF_NPU_PYTHONHOME", sys.base_prefix))
     if extra:

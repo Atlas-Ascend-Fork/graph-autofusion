@@ -503,6 +503,7 @@ class FunctionPipelineSynchronizer {
   struct SyncState {
     llvm::DenseMap<std::pair<Value, Value>, Value> syncedQueues;
     llvm::DenseSet<Operation *> barrierInserted;
+    llvm::DenseSet<Operation *> completedTransferIns;
     llvm::DenseSet<Value> dualEndQueues;
     llvm::DenseSet<std::pair<Operation *, Operation *>> explicitPairs;
     // 已为某个 load 建过 transfer_in→transfer_out 显式对（load 另有矢量读者时用）。
@@ -614,7 +615,20 @@ class FunctionPipelineSynchronizer {
     Operation *consumer = transition.consumer;
     Value operandValue = transition.operandValue;
     if (producerPipeline == Pipeline::MTE2 && consumerPipeline == Pipeline::Vector) {
-      return insertQueueSync(consumer, operandValue, producerPipeline, state.syncedQueues);
+      BufferOrigin origin = findBufferOrigin(operandValue);
+      if (origin.queue && origin.rawTensor) {
+        return insertQueueSync(consumer, operandValue, producerPipeline, state.syncedQueues);
+      }
+      // TBuf has no implicit queue synchronization. Complete the transfer at its
+      // definition so a hoisted load is waited once, not once per loop iteration.
+      if (state.completedTransferIns.insert(transition.producer).second) {
+        OpBuilder builder(transition.producer);
+        builder.setInsertionPointAfter(transition.producer);
+        auto tokenType = afir::TokenType::get(context, afir::Pipe::TransferIn, afir::Pipe::Vector);
+        Value token = afir::EventRecordOp::create(builder, transition.producer->getLoc(), tokenType).getToken();
+        afir::EventWaitOp::create(builder, transition.producer->getLoc(), token);
+      }
+      return success();
     }
     if (producerPipeline == Pipeline::Vector && consumerPipeline == Pipeline::MTE3) {
       BufferOrigin origin = findBufferOrigin(operandValue);

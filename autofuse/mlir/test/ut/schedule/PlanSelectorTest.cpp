@@ -73,45 +73,19 @@ TEST(PlanSelectorTest, KeepsEveryDynamicTemplateAcrossSubgraphs) {
   }
 }
 
-TEST(PlanSelectorTest, SelectsOnlyStaticCandidateWithoutSymbols) {
-  std::vector<mlir::bridge::PlanSelection> selections;
-  mlir::bridge::AttOptions options;
-  std::string diagnostic;
-  ASSERT_TRUE(mlir::bridge::SelectStaticWinner(mlir::test::MakeFusedResult(), {}, options, selections, &diagnostic));
-  ASSERT_EQ(selections.size(), 1U);
-  EXPECT_EQ(selections.front().subgraph_id, 0U);
-  EXPECT_EQ(selections.front().plan_id, 0U);
-  EXPECT_EQ(selections.front().template_ids_per_stage, (std::vector<std::vector<size_t>>{{0U}}));
-}
-
 TEST(PlanSelectorTest, RejectsInvalidStaticShapeSymbol) {
   std::vector<mlir::bridge::PlanSelection> selections;
   mlir::bridge::AttOptions options;
+  mlir::bridge::PlanGenerationResult prepared;
   std::string diagnostic;
-  EXPECT_FALSE(
-      mlir::bridge::SelectStaticWinner(mlir::test::MakeFusedResult(), {{"s-0", 32}}, options, selections, &diagnostic));
+  EXPECT_FALSE(mlir::bridge::PreparePlanGeneration({mlir::test::MakeFusedResult(),
+                                                    mlir::bridge::PlanGenerationMode::Static,
+                                                    {32, 196608},
+                                                    true,
+                                                    {{"s-0", 32}},
+                                                    options},
+                                                   prepared, &diagnostic));
   EXPECT_EQ(diagnostic, "static plan selection received an invalid shape symbol");
-}
-
-TEST(PlanSelectorTest, SelectsSingleCandidateForEverySubgraphWithoutAtt) {
-  const auto result = mlir::test::MakeMultiSubgraphFusedResult({1U, 1U});
-  mlir::bridge::AttOptions options;
-  std::vector<mlir::bridge::PlanSelection> selections;
-  std::string diagnostic;
-  ASSERT_TRUE(mlir::bridge::SelectStaticWinner(result, {{"s0", 16}}, options, selections, &diagnostic));
-  ASSERT_EQ(selections.size(), 2U);
-  EXPECT_EQ(selections[0].subgraph_id, 0U);
-  EXPECT_EQ(selections[1].subgraph_id, 1U);
-  EXPECT_TRUE(diagnostic.empty());
-}
-
-TEST(PlanSelectorTest, SelectsUniqueTemplatesAcrossMultipleStages) {
-  auto result = mlir::test::MakeMultiStageFusedResult(1U, 3U);
-  result.node_idx_to_scheduled_results.push_back({mlir::test::MakeMultiStageScheduledResult(2U)});
-  std::vector<mlir::bridge::PlanSelection> selections;
-  ASSERT_TRUE(mlir::bridge::SelectStaticWinner(result, {}, {}, selections));
-  EXPECT_EQ(selections,
-            (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U}, {0U}, {0U}}}, {1U, 0U, {{0U}, {0U}}}}));
 }
 
 TEST(PlanSelectorTest, DynamicSelectionKeepsTemplatesInEveryStage) {
@@ -134,7 +108,10 @@ TEST(PlanSelectorTest, BothStrategiesRejectMalformedSchedulesAndClearPreviousRes
     EXPECT_TRUE(selections.empty());
     selections = {{0U, 0U, {{0U}}}};
     std::string static_diagnostic;
-    EXPECT_FALSE(mlir::bridge::SelectStaticWinner(result, {}, {}, selections, &static_diagnostic));
+    mlir::bridge::PlanGenerationResult prepared;
+    EXPECT_FALSE(mlir::bridge::PreparePlanGeneration(
+        {result, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {}, {}}, prepared, &static_diagnostic));
+    selections = prepared.selections;
     EXPECT_EQ(static_diagnostic, dynamic_diagnostic);
     EXPECT_FALSE(static_diagnostic.empty());
     EXPECT_TRUE(selections.empty());

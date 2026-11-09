@@ -27,16 +27,20 @@ python3 autofuse/mlir/scripts/npu.py --host <SSH别名> --root /mnt/workspace/af
 ```
 
 - 通过 Git bundle 同步指定 commit，无需 push；不包含未提交修改。LFS 文件保留指针。
-- 设备固定使用 `source/`、`build/`、`overlay/`，日志存入 `runs/<commit>-<run-id>/`。
+- 设备固定使用 `source/`、`build/`，运行产物安装到 `build/dev-install/`，日志存入 `runs/<commit>-<run-id>/`。
 - 任务在后台执行，SSH 断开不影响运行；同一工作区一次只允许一个任务。
 - 默认增量构建 `pyautofuse -j 8`；构建配置变化时自动清理，也可指定 `--clean-build`。
-- 每轮重建 overlay 并校验模块来源、动态库和设备可用性，失败则不运行用例。
+- 每轮按 `test/run_npu_e2e.sh` 的方式执行 `cmake --install`，重建 `build/dev-install/`；
+  校验 Python 模块来源、动态库路径与构建哈希及设备可用性，失败则不运行用例。
 - Python 默认 `/usr/bin/python3.12`，标准库前缀默认 `/usr`，分别用 `--python`、
   `--python-home` 修改。
 
 默认串行运行全量 MLIR 清单，可用 `--group reduce` 或 `--id load_store_direct` 缩小范围。
 提交成功仅表示任务已启动；**`status.json` 中 `phase=complete` 且 `returncode=0` 才表示通过**。
 详细日志见运行目录中的 `build.log`、`test.log` 和 `cases/`。
+
+已按项目脚本安装运行产物时，可用 `run.py --install-dir <build/dev-install> --build-dir <build/autofuse>`
+运行完整清单；该模式不创建 overlay，并优先使用安装目录的 Python 包和动态库。
 
 ## 在设备上运行清单
 
@@ -205,7 +209,7 @@ python3 autofuse/mlir/test/e2e/npu/mixed_consumption.py --work-dir /tmp/mlir-mix
 | `reduce_template_matrix.py` | 调度模板 × 归约形态的固定矩阵 |
 | `reduce_all.py` | 全轴归约（all-reduce），秩 × keepdim 铺开 |
 | `reduce_rarr.py` | 保留轴**不在末位**的多轴归约（`(8,8,128,128)` 归约 `(0,2,3)`） |
-| `reduce_fusion_matrix.py` | 归约**带邻居**的图（喂入 / 消费 / fork / 一图两归约），测切图与 workspace |
+| `reduce_fusion_matrix.py` | 归约融合基本门槛：10 种拓扑各跑 tail，fork_mul / multi_two_sums 额外跑 large，共 12 格 |
 
 ## 成败词汇（全部用例共用）
 
@@ -238,3 +242,15 @@ CPU 测试会断言实际执行的 plan/case，再比较数值。
 ATT 在进程内缓存 DFX 配置。
 `run.py` 对整张清单贯彻同一条约束：每条用例一个子进程，否则第二条钉的还是第一条那个 plan。
 指定无解或不存在的候选会失败；检查生成的 tiling 和实际结果，不应只看环境变量。
+
+## 广播候选拒收诊断
+
+`AF_MLIR_BROADCAST_REJECT` 在 stderr 中逐条记录被拒收的输入边，包含
+`subgraph / plan / stage / template` 的原始编号、图名、节点、生产者、输入序号、
+`reason`、`axis_index`，以及输入输出的 axis、repeats、strides、vectorized_axis 和
+vectorized_strides。`comparisons` 保留符号比较的 `true / false / unknown`；
+外层 stride 校验失败时还输出 `expected_output_stride`。
+
+每条边只记录首个失败分支；结构不合法时 `axis_index=-1`。同一模板中各输入边分别记录，
+即使其他模板可用也保留诊断。它不改变模板选择或表示整个 case 已失败；日志条数是输入边数，
+不能直接当作 case 数。原有 stage 短路仍保留，未访问的后续 stage 不在诊断范围内。

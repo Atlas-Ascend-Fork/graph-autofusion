@@ -24,6 +24,7 @@ namespace mlir::bridge {
 struct TilingTemplateSpec {
   int64_t template_id = -1;
   afir::ExprAttr workspace_size;
+  int64_t tiling_key = -1;
 };
 
 struct TilingStageSpec {
@@ -39,6 +40,8 @@ struct TilingPlanSpec {
   int64_t subgraph_id = -1;
   int64_t plan_id = -1;
   std::vector<TilingStageSpec> stages;
+  // Fusion-owned offsets copied into stage structs by the aggregate kernel entry.
+  std::vector<int64_t> workspace_tensor_ids;
 };
 
 struct TilingProgramSpec {

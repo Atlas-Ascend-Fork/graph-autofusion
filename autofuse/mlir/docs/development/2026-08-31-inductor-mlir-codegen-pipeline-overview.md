@@ -14,19 +14,16 @@
 
 ```mermaid
 flowchart TD
-    A["FusedScheduledResult<br/>（legacy schedule 产出）"] --> B{"RunMlirCodegen 入口守卫<br/>AF_ENABLE_MLIR_CODEGEN=1？<br/>非 Cube 融合场景？"}
-    B -- "否 → kNotSupported" --> Z["调用方回退 legacy 路径<br/>GenerateKernel/GenerateTiling..."]
-    B -- "是" --> C["① PrepareMlirCandidates"]
-
-    subgraph C1["① 候选选优 + ATT tiling（均依赖 legacy ATT）"]
-        C1a["StaticPlanSelector::SelectStaticWinner<br/>/ SelectDynamicCandidates<br/>⚠️ 内部调用 att::GetModelInfoMap 读取 legacy ATT 模型信息"] --> C1b["NarrowFusedResultToSelections<br/>只保留选中的模板"]
-        C1b --> C1c["common::BuildTilingFieldSchema"]
-        C1c --> C1d["AttSchemaAdapter::RunAttForCandidates<br/>⚠️ 调用 legacy ATT C++ 生成器<br/>→ TilingCodeBundle"]
+    A["FusedScheduledResult"] --> B{"mlir_codegen_config 启用？<br/>非 Cube 融合？"}
+    B -- "否" --> Z["调用方执行 legacy 路径"]
+    B -- "是" --> D["BuildPipelineSession<br/>同一 TargetProfile 确定资源预算"]
+    D --> C["PreparePlanGeneration"]
+    subgraph C1["完整候选与 ATT 准备"]
+        C1a["枚举候选 → schema"] --> C1b["RunAttForCandidates<br/>生成完整 ATT 程序"]
+        C1b --> C1e["静态 / 动态：全部候选与运行时 ATT 源码"]
     end
     C --> C1
-
-    C1 --> D["② BuildPipelineSession<br/>soc_version → TargetProfile<br/>→ AFIRToAscendCPipelineSession<br/>（每次调用只构造一次，跨候选复用）"]
-    D --> E["③ BuildCandidateAfirModules"]
+    C1 --> E["BuildCandidateAfirModules"]
 
     subgraph E1["③ 逐候选 AFIR 转换 + 四段 Pass"]
         E1a["ScheduleToAfir::PlanToAfir<br/>ScheduledResult → AFIR ModuleOp"] --> E1b["addPlanCandidateLoweringPipeline"]
@@ -35,7 +32,7 @@ flowchart TD
         E1b2 --> E1c["GenTilingData → GenKernelEntry<br/>（单候选 tiling schema + 单候选 dispatcher）"]
     end
     E --> E1
-    E1 -->|"每子图一个已完成 Pass 的候选模块"| F["④ FinalizeMlirCodegenResult<br/>runAggregateLaunchDriver"]
+    E1 -->|"每个选定完整方案一个已完成 Pass 的模块"| F["④ FinalizeMlirCodegenResult<br/>runAggregateLaunchDriver"]
 
     subgraph F1["④ 多子图聚合 + 文本发射"]
         F1a["runGenAggregateTilingData<br/>聚合 PyStructType"] --> F1b["validateAggregateContract"]
@@ -65,65 +62,49 @@ MlirCodegenStatus RunMlirCodegen(const ascir::FusedScheduledResult &fused_schedu
                                  const std::string &soc_version, codegen::CodegenResult &result);
 ```
 
-- `kNotSupported`：环境变量 `AF_ENABLE_MLIR_CODEGEN` 未设为 `"1"`，或命中 Cube 融合场景。调用方继续执行
-  原有 legacy 流程，等价于本次未调用过这条新路径。
-- `kFailed` / `kSucceeded`：调用方直接以对应 `af::Status`（`af::FAILED`/`af::SUCCESS`）返回，**不**回退
-  legacy——一旦真正尝试过 MLIR 路径，其失败被视为真实错误而非"本次不适用"。
-- 内部任意阶段抛出异常均被 `catch (...)` 兜底为 `kFailed`，不会穿透到调用方。
+- `kNotSupported`：关闭 MLIR、命中 Cube 范围排除，或外层 `fallback` 配置将失败转为 legacy 回退。
+- `kFailed`：严格 `mlir` 模式下失败，或配置非法；调用方直接返回失败。
+- `kSucceeded`：完整产物生成成功；失败不交付部分 kernel/tiling。
+- 内部异常也经过同一外层策略，PlanSelector 不自行决定是否回退。
 
 ## 各阶段详细说明
 
-### 阶段 0：入口守卫（`RunMlirCodegen` 开头两行判断）
+### 阶段 0：入口守卫（`RunMlirCodegen`）
 
-- 读取进程环境变量 `AF_ENABLE_MLIR_CODEGEN`（非 `"1"` 即关闭，默认关闭，零行为变化）。
+- 读取 `AUTOFUSE_DFX_FLAGS` 的 `--mlir_codegen_config=none|mlir|fallback`，默认 `none`。
 - 调用 `ascgen_utils::IsCubeFusedScheduled` 排除 Cube/CV 融合场景（现有 `GenAggregate*`/四段 Pass 均未
   支持该场景）。
 - 两者任一命中即返回 `kNotSupported`，不进入下面任何阶段。
 
-### 阶段 ①：`PrepareMlirCandidates`（候选选优 + ATT tiling）
+### 候选与 ATT 准备：`PreparePlanGeneration`
 
-输入：`FusedScheduledResult`（每子图含若干候选 `ScheduledResult`）、`MlirCallerScene`。
+输入：完整 schedule、静态/动态模式、caller scene、同一 TargetProfile 的物理核数和 UB 容量。
 
-1. `SelectStaticWinner`（静态 shape）尝试按 ATT 代价模型选出每子图的 winner；无法确定完整
-   winner 时保留全部候选。`SelectDynamicCandidates`（动态 shape）直接保留全部候选，产出
-   `PlanSelection` 列表。静态尺寸已是常量，传入空的 `ConcreteShape`，不把常量文本当作符号名。
-   ⚠️ **依赖 legacy ATT**：多候选静态择优通过 `att::GetModelInfoMap` 获取代价模型；唯一候选
-   无需生成模型。结构非法、ATT 模型生成失败仍然报错，不等同于“无法确定 winner”。
-2. `NarrowFusedResultToSelections`：把 `FusedScheduledResult` 收窄为只含已选中的 plan/template，并把
-   `plan_id`、`template_ids_per_stage` 重新从 0 连续编号。**这一步是后续所有阶段共享的基准**——ATT
-   tiling 生成与 AFIR 转换看到的都是这份收窄+重编号后的结果，不是原始的 `fused_schedule_result`。
-3. `common::BuildTilingFieldSchema`：从收窄结果构造 `TilingFieldSchema`（字段列表 + version）。
-4. `AttSchemaAdapter::RunAttForCandidates`：调用既有 ATT C++ 生成器，为每个候选批量产出 tiling 计算
-   函数源码，装进 `TilingCodeBundle{ tiling_functions, selections, schema_version, schema_validated }`。
-   ⚠️ 同样**依赖 legacy ATT**（ATT 移到 MLIR 后应替换为 MLIR-native 的 tiling/schema 契约）。
+1. 统一枚举候选、建立 schema、生成一次完整 ATT 程序。ATT 与 AFIR 使用同一资源预算，256 字节 UB 预留只扣一次。
+2. 静态和动态 shape 都保留全部候选及 ATT 源码；codegen 不启动 host 编译器、不执行独立 solver，单候选也不提前求解。
+3. lowering 全部候选，不重编号，不因静态 shape 添加 `afplan.static_selection`。保留原始 plan/template ID、tiling key 及模板语义信息。
+4. 生成 host tiling 和 device 源码，供调用方编译。Inductor 可并行编译 host、device 和 wrapper；调用 `AutofuseTiling` 时通过 `optiling::GetTiling` 求解，并计算所选方案的 workspace。
 
-阶段①因此整体是一个 legacy-ATT 依赖环节：候选打分（步骤1）和 tiling 代码生成（步骤4）分别调用了
-ATT 的两套不同 API（`att::GetModelInfoMap` 与 ATT C++ 生成器），迁移完成前这两处都不能删除。
+输出：`PlanGenerationResult{selections, tiling}`，生产调用链的 `tiling` 为 `TilingCodeBundle`，候选与源码成功时一起交付。独立静态 solver 及冻结产物接口仍有单独测试，但不再由 `PreparePlanGeneration` 调用。
 
-输出：`MlirCandidatePreparation{ narrowed_result, selections, op_name, bundle }`。任一步失败即返回
-`mlir::failure()`，`RunMlirCodegen` 记录 warning 日志后返回 `kFailed`。
+这一步只推迟求解，不保证每个 kernel 编译更快：保留更多候选可能增加 device 源码和编译量。具体并行度仍由调用方编译器控制。
 
-#### 当前候选策略（2026-10-20 确认）
+#### 当前候选策略（2026-11-03 更新）
 
 - **不按 MLIR 能力预筛选模板。** 已删除的搬运连续性、逐元素广播和 queue/reuse 视图筛选，
   是为了规避当时后端无法处理的场景，不是性能择优。选择层不再复制这些支持条件，不因它们
   删除模板或整个 plan；对应的合法性和能力判断由 bridge、资源校验及 lowering 负责。
-- **保留代价择优。** 静态能够选出 winner 时通过 Narrow 收窄；静态无法选出 winner 或动态
-  shape 时保留全部模板，交给生成的 ATT tiling 在运行时选择。两条路径都经过 Narrow，
-  ATT 和 AFIR 使用相同的候选集合及重编号结果。
-- **保留旧执行顺序。** Prepare 内完成选择、Narrow 和 ATT 生成，随后 lowering。ATT 是 legacy
-  与 MLIR 共用的能力；ATT 失败按错误处理。ATT 成功后，lowering 的能力不足诊断才触发统一
-  legacy 回落，其他错误仍返回失败。候选 lowering 失败时不删除该候选后重试。
+- **静态与动态均保留全部。** ATT 在生成的 host tiling 中求解，不做提前冻结。
+- **保持失败归因。** ATT 源码生成或 lowering 的能力不足仍按外层配置处理；host 编译及 tiling 执行失败由调用方报告。不会删除无法 lowering 的候选并重新择优。
 - **接受完整候选集的覆盖要求。** 保留多个候选时，其中一个无法下降就不能产出成功的 MLIR
-  结果；不以剩余候选成功掩盖覆盖缺口。静态已选出 winner 时只要求选中的候选能够下降。
+  结果；不以剩余候选成功掩盖覆盖缺口。
 - **测试区分层次。** 改写节点类型的合成输入只验证 bridge 能力诊断；端到端回落使用真实
   ArgMax 图经 optimizer 生成的合法 schedule，验证 ATT 成功后返回 `kNotSupported`。
   保留 legacy ATT 模板选择测试能力，不恢复 MLIR 专用 pinning。
 
-验证：桥接 110 项、schedule 51 项、选择策略 19 项单测通过；此前静态择优恢复后的 29 项
-CPU 回归通过。此次策略确认不新增 NPU 验证，不改动 legacy 实现或 AGENTS.md。
+历史验证（提前静态择优版本）：桥接 110 项、schedule 51 项、选择策略 19 项及 29 项 CPU 回归通过。此记录不代表推迟求解后的验证结果。
 
-### 阶段 ②：`BuildPipelineSession`（TargetProfile + Pass Session 构造）
+### 准备前置：`BuildPipelineSession`（TargetProfile + Pass Session 构造）
 
 输入：`soc_version`（如 `"Ascend910B2"`，来自 `Codegen` 的 `soc_version_` 成员，由 `CodegenOptions`
 构造时传入）。
@@ -154,9 +135,9 @@ CPU 回归通过。此次策略确认不新增 NPU 验证，不改动 legacy 实
      - `ConvertAFIRToAscendC`：把已选定实现的 AFIR 算子转换为 AscendC/EmitAsc dialect。
    - `GenTilingData`：把规范 `TilingData` 重命名为该候选的 per-stage schema。
    - `GenKernelEntry`：为该候选合成 plan 级 dispatcher。
-3. 任一子步骤失败：记录 `subgraph_id`/`plan_id` 的 warning 日志，整体返回 `kFailed`。
+3. 任一子步骤失败：记录 `subgraph_id`/`plan_id` 的诊断，交给外层严格/fallback 策略处理。
 
-输出：每子图一个已完成上述全部 Pass 的候选 `ModuleOp`（`BuiltPlanModules`，`owned` 持有生命周期，
+输出：每个选定完整方案一个已完成上述全部 Pass 的 `ModuleOp`（`BuiltPlanModules`，`owned` 持有生命周期，
 `views` 是传给下一阶段的非拥有视图）。
 
 ### 阶段 ④：`FinalizeMlirCodegenResult`（多子图聚合 + 文本发射）

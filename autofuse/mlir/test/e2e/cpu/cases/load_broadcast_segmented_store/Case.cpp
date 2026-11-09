@@ -52,19 +52,11 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace config = load_broadcast_segmented_store;
   EXPECT_NE(kernel.find(std::string(config::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // 这张图的 stage 有两个模板（广播轴在 tile 内 / 排到 tile 外），计划选择代不出常数，
-  // 两个都留给运行期选（见 `SelectStaticWinner` 的回落）。两份都要在 kernel 里。
-  EXPECT_NE(kernel.find("stage0_template0"), std::string::npos);
-  EXPECT_NE(kernel.find("stage0_template1"), std::string::npos);
-  // 缓存守卫：广播轴排在 tile 内的那个模板上，上游给 `load0` / `brc` 标了
-  // `exec_condition = cache_block_split_fused_brc_axis`，生成侧要把这两个算子包进一个
-  // `if`。谓词的形状是两个 bool 相或（本核第一趟 ‖ 复用周期起点），整份 kernel 里只有它
-  // 长这样——改动前这个文件里一处都没有。
-  //
-  // **结构由 `test/lit/conversion/afir-exec-condition-cache-guard.mlir` 钉**。这里钉的是
-  // 这条真实路径上确实生成了守卫，以及跳过那些迭代之后算出来还是对的。
-  const size_t predicate = kernel.find(" | v");
-  ASSERT_NE(predicate, std::string::npos);
-  EXPECT_LT(kernel.find("if (", predicate), kernel.find("Broadcast(", predicate));
+  // Keep both candidates; the directed registrations verify their actual execution.
+  // Cache guard containment and synchronization are covered by
+  // lit/conversion/afir-exec-condition-cache-guard.mlir.
+  const auto prefix = std::string(config::kKernelName) + "_subgraph0_plan0_stage0_template";
+  EXPECT_NE(kernel.find(prefix + "0("), std::string::npos);
+  EXPECT_NE(kernel.find(prefix + "1("), std::string::npos);
 }
 }  // namespace mlir::afir

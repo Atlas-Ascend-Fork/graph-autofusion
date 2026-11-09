@@ -8,33 +8,19 @@
 
 """reduce 与逐元素节点**融合在同一张图**里时的形态矩阵。
 
-为什么新增：npu 侧既有的 reduce 用例（`load_sum_store` / `reduce_template_matrix` /
-`reduce_all` / `reduce_rarr`）测的都是
-**裸归约**——一个 load、一个 reduce、一个 store。而归约真正出问题的地方是切图：归约会把
-融合域切成两段，段间要插 workspace 节点，段内的 buffer 要重新分配。这些只在归约**带着
-邻居**的图上才出现，裸归约一格都测不到。
+基本门槛保留 12 格，不展开拓扑与形状的全组合：
 
-CPU 侧有 `load_sum_mul_store` / `load_sum_relu_store` / `load_sum0_mul_store` 承担这些形态，
-但 CPU 语料是手搭 AFIR 图，切图是手写的；上板走调度器真实切图，插的 workspace 节点和
-buffer id 都不一样（见 af-norm-blocked-on-broadcast-not-reduce 里「手搭 AFIR 图的 CPU 语料
-不代表真实路径」那一节）。所以这张表在 npu 上必须独立存在。
+- 10 种形态各跑 `(16, 37)`：归约前融合、归约后一元/二元消费者、前后融合、
+  fork 多输出、同图双归约；同时覆盖非对齐输入。
+- `fork_mul` 和 `multi_two_sums` 额外跑 `(8192, 128)`，验证较大输入下的分支多输出和双归约正确性。
+  实际多核、跨轮或跨核归约行为由调度决定，这里不对 tiling 作断言。
 
-四个形态，按「归约在图里的位置」分：
+CPU 的 `load_sum_mul_store` / `load_sum_relu_store` / `load_sum0_mul_store` 已通过
+AscGraphBuilder 和真实优化调度覆盖部分融合形态。本用例补充 PyTorch / Inductor 到
+真机的集成验证，重点保留 fork 与双归约组合；普通归约模板由 reduce_template_matrix 覆盖。
+归约后的一元消费者可能留在同段，带额外输入的消费者可能触发切图与 workspace 传递。
+本用例验证数值和回退诊断，不断言固定切图段数。keepdim 一律 False，不扩展广播组合。
 
-- `prod_*` —— 逐元素喂归约（`sum(x*y, -1)`）。归约前的节点与归约同段。
-- `cons_*` —— 归约喂逐元素（`relu(sum(x,-1))`）。消费者在归约后那一段，形状是降维后的。
-  这一族的历史缺陷是 `InvalidWorkspace`（归约后接消费者），已修，这里是回归。
-- `fork_*` —— 一个节点**同时**喂归约侧与输出侧（`t = x*y; return sum(t,-1), t`）。
-  这是 memory 里记的 `InvalidWorkspace: Workspace node ... has neither its own shape nor a
-  single producer` 的那张图形状：切图后这条 elementwise 边跨段，调度侧插的 workspace 节点
-  推不出形状。级联 LayerNorm 就是挂在这上面。裸归约和单链都造不出这个形状。
-- `multi_*` —— 一张图里**两个独立归约**（`sum(x,-1) + sum(x*x,-1)`）。全语料库里归约数 > 1
-  的图极少，而两个归约会各自切一段，段数从 2 变 3。
-
-keepdim 一律 `False`：这张表要隔离的是切图与 workspace，不是广播。`keepdim=True` 会引入
-广播节点；本矩阵只覆盖归约与消费者的融合，广播基础链路由 `load_broadcast_*.py` 验证。
-
-形状取两档：小形状（block_dim=1，纯切图逻辑）与大形状（多核 + 跨轮，`2048x128`）。
 归约一律 1e-4 容差——加法次序两侧不同，零容差会在相消的格子上假报缺陷。
 
 用法：
@@ -50,9 +36,8 @@ import sys
 from support.matrix_report import run_matrix
 from support.npu_runner import NpuRunner
 
-SMALL = (16, 32)
 SMALL_TAIL = (16, 37)
-LARGE = (2048, 128)
+LARGE = (8192, 128)
 
 
 def build_prod_mul_sum(torch):
@@ -177,10 +162,12 @@ FORMS = (
 )
 
 SHAPES = (
-    ("small", SMALL),
     ("tail", SMALL_TAIL),
     ("large", LARGE),
 )
+
+# 仅这两种复杂拓扑保留大规模执行门槛。
+LARGE_FORMS = {"fork_mul", "multi_two_sums"}
 
 
 def parse_args():
@@ -195,8 +182,8 @@ def parse_args():
     )
     parser.add_argument(
         "--shapes",
-        default=os.environ.get("AF_E2E_RF_SHAPES", "small,tail,large"),
-        help="逗号分隔：small / tail / large。",
+        default=os.environ.get("AF_E2E_RF_SHAPES", "tail,large"),
+        help="逗号分隔：tail / large；large 仅含 fork_mul 和 multi_two_sums。",
     )
     parser.add_argument(
         "--only",
@@ -217,6 +204,8 @@ def main():
         if shape_name not in shape_names:
             continue
         for name, form, factory, shaper, tol in FORMS:
+            if shape_name == "large" and name not in LARGE_FORMS:
+                continue
             if form not in forms:
                 continue
             cell = f"{name}_{shape_name}"

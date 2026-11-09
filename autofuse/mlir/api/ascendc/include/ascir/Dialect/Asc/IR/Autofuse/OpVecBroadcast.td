@@ -75,6 +75,15 @@ def AscendC_BroadcastDim3Op
         # SrcTensorsFromSrc<>.decl;
 }
 
+// Match legacy's uint8 scalar broadcast overload, not AscendC::Duplicate<uint8_t>.
+def AscendC_DuplicateU8Op
+    : VectorOp<"duplicate_u8", "Duplicate", [ApiExtensionOpInterface, OpWithDstInterface]> {
+    let description = "Fill a uint8 tile through the Autofuse Duplicate wrapper";
+    let arguments = (ins AscendC_LocalTensor:$dst, UI8:$scalar, AnyType:$count);
+    let extraClassDeclaration = extraClassDeclarationBase
+        # ApiExtensionHeader<["duplicate.h"], ["utils.h"]>.decl;
+}
+
 // `BroadcastExtend<T, rank>(dst, src, dst_shape, src_shape)`——reg 侧那张供给表上的广播
 // （`v35/ascendc/api_regbase/broadcast.h:17`），legacy 的 `BroadcastRegApiCall` 逐字发的
 // 就是它（`v35/codegen/reg_api_call/reg_broadcast_api_call.cpp:120`）。

@@ -396,9 +396,12 @@ class NpuRunner:
         )
         self.work_dir = route_work_dir.resolve()
         self.configure_work_dir(self.work_dir)
+        mlir_config = "mlir"
+        if att_selection.flags(os.environ).get("--mlir_codegen_config") == "fallback":
+            mlir_config = "fallback"
         os.environ.update(
             att_selection.environment_for_mlir_config(
-                "mlir" if route == "mlir" else "none"
+                mlir_config if route == "mlir" else "none"
             )
         )
         os.chdir(self.work_dir)

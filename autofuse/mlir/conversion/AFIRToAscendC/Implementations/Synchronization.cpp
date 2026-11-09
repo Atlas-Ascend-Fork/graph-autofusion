@@ -9,6 +9,7 @@
  */
 
 #include "conversion/AFIRToAscendC/Implementations/Synchronization.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 
 #include "dialect/AFIR/IR/AFIR.h"
 #include "target/Ascend/Capability/CapabilityProvider.h"
@@ -290,6 +291,120 @@ class LowerSyncAllOp final : public OpConversionPattern<SyncAllOp> {
 
 // 事件槽的持有者是 `TPipe`。资源物化阶段已经建了唯一的一个（`CanonicalResources.cpp`
 // 的 `ascendc.pipe`），复用它而不是再建一个——理由见头文件。
+// Query the last writer at the use, not the queue position: vector operations may
+// reuse VECIN queue storage. Keep member subindices distinct when matching views.
+namespace {
+
+Value getStorageRoot(Value value) {
+  while (Operation *def = value.getDefiningOp()) {
+    if (auto cast = dyn_cast<ascendc::LocalTensorReinterpretCastOp>(def)) {
+      value = cast.getIn();
+    } else if (isa<afir::AFIRDestinationStyleInterface>(def)) {
+      auto partition = afir::getOperandPartition(def);
+      if (failed(partition) || partition->destinationCount != 1) {
+        break;
+      }
+      value = partition->destinations(def)[0];
+    } else {
+      break;
+    }
+  }
+  return value;
+}
+
+struct WriterEventLookup {
+  bool matched = false;
+  std::optional<ascendc::HardEvent> event;
+};
+
+WriterEventLookup findWriterEvent(Operation *anchor, Value target) {
+  for (Operation *writer = anchor->getPrevNode(); writer; writer = writer->getPrevNode()) {
+    if (!isa<afir::AFIRDestinationStyleInterface>(writer)) {
+      continue;
+    }
+    auto partition = afir::getOperandPartition(writer);
+    if (failed(partition)) {
+      continue;
+    }
+    for (Value destination : partition->destinations(writer)) {
+      if (getStorageRoot(destination) != target) {
+        continue;
+      }
+      if (writer->hasTrait<OpTrait::AFIRTransferIn>()) {
+        return {true, ascendc::HardEvent::MTE2_S};
+      }
+      if (writer->hasTrait<OpTrait::AFIRTransferOut>()) {
+        return {true, std::nullopt};
+      }
+      return {true, ascendc::HardEvent::V_S};
+    }
+  }
+  return {};
+}
+
+std::optional<ascendc::HardEvent> findProducerEvent(Value source) {
+  Value current = source;
+  while (Operation *producer = current.getDefiningOp()) {
+    if (auto cast = dyn_cast<ascendc::LocalTensorReinterpretCastOp>(producer)) {
+      current = cast.getIn();
+    } else if (auto view = dyn_cast<ascendc::LocalTensorSubIndexOp>(producer)) {
+      current = view.getTensor();
+    } else if (producer->getName().getDialectNamespace() == "afir") {
+      auto partition = afir::getOperandPartition(producer);
+      if (failed(partition) || partition->destinationCount != 1) {
+        return std::nullopt;
+      }
+      current = partition->destinations(producer)[0];
+    } else {
+      break;
+    }
+  }
+  if (auto deque = current.getDefiningOp<ascendc::TQueBindDequeTensorOp>()) {
+    if (auto queue = dyn_cast<ascendc::QueueType>(deque.getQueue().getType())) {
+      if (queue.getPosition() == ascendc::TPosition::VECIN) {
+        return ascendc::HardEvent::MTE2_S;
+      }
+      return std::nullopt;
+    }
+    if (auto queBind = dyn_cast<ascendc::QueBindType>(deque.getQueue().getType())) {
+      if (queBind.getSrcPosition() == ascendc::TPosition::VECIN) {
+        return ascendc::HardEvent::MTE2_S;
+      }
+    }
+    return std::nullopt;
+  }
+  if (current.getDefiningOp<ascendc::TBufGetTensorOp>()) {
+    return ascendc::HardEvent::V_S;
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
+std::optional<ascendc::HardEvent> scalarReadEvent(Operation *anchor, Value source) {
+  Value target = getStorageRoot(source);
+  WriterEventLookup writer = findWriterEvent(anchor, target);
+  if (writer.matched) {
+    return writer.event;
+  }
+  return findProducerEvent(source);
+}
+
+FailureOr<Value> materializeScalarRead(Operation *anchor, Value source, std::optional<ascendc::HardEvent> event,
+                                       RewriterBase &rewriter) {
+  auto type = dyn_cast<ascendc::LocalTensorType>(source.getType());
+  Value pipe = findFunctionPipe(anchor);
+  if (!type || !event || !pipe) {
+    return failure();
+  }
+  Value id = rewriter.create<ascendc::TPipeFetchEventIDOp>(anchor->getLoc(), rewriter.getIntegerType(8), pipe, *event);
+  rewriter.create<ascendc::SetFlagOp>(anchor->getLoc(), *event, id);
+  rewriter.create<ascendc::WaitFlagOp>(anchor->getLoc(), *event, id);
+  Value zero = rewriter.create<arith::ConstantIndexOp>(anchor->getLoc(), 0);
+  return rewriter.create<ascendc::LocalTensorGetValueOp>(anchor->getLoc(), type.getElementType(), source, zero)
+      .getResult();
+}
+
 Value findFunctionPipe(Operation *anchor) {
   auto func = anchor->getParentOfType<func::FuncOp>();
   if (!func) {

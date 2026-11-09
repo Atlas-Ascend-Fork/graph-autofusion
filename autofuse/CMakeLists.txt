@@ -210,9 +210,29 @@ if(ENABLE_AUTOFUSE_MLIR)
     # direct shared-library closure on LLD as well: a final LLD link rejects
     # symbol-version metadata that GNU ld can emit for the intermediate DSOs.
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-        find_program(AUTOFUSE_LLD_EXECUTABLE
-            NAMES ld.lld lld
-        )
+        # Override CANN's LLD when needed (e.g. slow links with LLD 15).
+        # Use a private ld.lld symlink so GCC and Clang both select the exact
+        # executable, including versioned names such as ld.lld-14.
+        set(AUTOFUSE_LLD_BIN_DIR "")
+        if(NOT "$ENV{LLD_BIN}" STREQUAL "")
+            # Re-resolve on every configure; changing LLD_BIN must not reuse
+            # a cached selection or affect the default lookup below.
+            unset(AUTOFUSE_LLD_OVERRIDE CACHE)
+            unset(AUTOFUSE_LLD_OVERRIDE)
+            find_program(AUTOFUSE_LLD_OVERRIDE NAMES "$ENV{LLD_BIN}")
+            if(NOT AUTOFUSE_LLD_OVERRIDE)
+                message(FATAL_ERROR "Cannot find linker specified by LLD_BIN: $ENV{LLD_BIN}")
+            endif()
+            set(AUTOFUSE_LLD_EXECUTABLE "${AUTOFUSE_LLD_OVERRIDE}")
+            set(AUTOFUSE_LLD_BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/mlir-linker")
+            file(MAKE_DIRECTORY "${AUTOFUSE_LLD_BIN_DIR}")
+            file(CREATE_LINK "${AUTOFUSE_LLD_EXECUTABLE}"
+                "${AUTOFUSE_LLD_BIN_DIR}/ld.lld" SYMBOLIC)
+        else()
+            find_program(AUTOFUSE_LLD_EXECUTABLE
+                NAMES ld.lld lld
+            )
+        endif()
         if(NOT AUTOFUSE_LLD_EXECUTABLE)
             message(FATAL_ERROR
                 "Autofuse MLIR on AArch64 requires LLD, but ld.lld was not found.")
@@ -225,6 +245,9 @@ if(ENABLE_AUTOFUSE_MLIR)
                 aihac_ir
                 aihac_ir_register
                 aihac_symbolizer_af)
+            if(AUTOFUSE_LLD_BIN_DIR)
+                target_link_options(${lld_target} PRIVATE "-B${AUTOFUSE_LLD_BIN_DIR}")
+            endif()
             target_link_options(${lld_target} PRIVATE -fuse-ld=lld)
         endforeach()
     endif()

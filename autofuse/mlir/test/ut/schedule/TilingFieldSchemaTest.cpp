@@ -72,6 +72,17 @@ TEST(TilingSchemaTest, MultiStageSameSizeVarNameStaysIsolatedPerStage) {
   mlir::common::TilingFieldSchema schema;
   ASSERT_TRUE(mlir::common::BuildTilingFieldSchema(scheduled, 0U, 0U, schema));
 
+  for (const char *name : {"block_dim", "corenum", "ub_size", "hbm_size"}) {
+    std::set<std::string> scopes;
+    for (const auto &field : schema.fields) {
+      if (field.name == name) {
+        scopes.insert(field.path);
+      }
+    }
+    // Hardware resource fields belong to the fusion; stage-local size variables remain isolated below.
+    EXPECT_EQ(scopes, (std::set<std::string>{"fusion"})) << name;
+  }
+
   size_t s0_count = 0U;
   std::set<std::string> s0_paths;
   for (const auto &field : schema.fields) {
