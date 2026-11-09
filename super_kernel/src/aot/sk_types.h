@@ -25,6 +25,7 @@
 #include "acl/acl.h"
 #include "sk_common.h"
 #include "sk_log.h"
+#include "sk_task_ir.h"
 #include "aprof_pub.h"
 
 constexpr uint32_t K_TYPE_AICORE = 1;
@@ -48,31 +49,6 @@ constexpr uint16_t INVALID_SCOPE_ID = std::numeric_limits<uint16_t>::max();
 constexpr uint32_t INVALID_STREAM_ID = std::numeric_limits<uint32_t>::max();
 constexpr uint64_t INVALID_TASK_ID = std::numeric_limits<uint64_t>::max();
 constexpr char UNKNOWN_MODEL_ID[] = "model_unknown";
-
-enum class SkQueueType : uint8_t {
-  AIC,
-  AIV,
-  MIX_1_1,
-  MIX_1_2,
-  UNKNOWN,
-};
-
-inline const char *to_string(SkQueueType type) {
-  switch (type) {
-    case SkQueueType::AIC:
-      return "AIC";
-    case SkQueueType::AIV:
-      return "AIV";
-    case SkQueueType::MIX_1_1:
-      return "MIX_1_1";
-    case SkQueueType::MIX_1_2:
-      return "MIX_1_2";
-    case SkQueueType::UNKNOWN:
-      return "UNKNOWN";
-    default:
-      return "UNKNOWN";
-  }
-}
 
 class TaskQuePtr {
   std::unique_ptr<uint8_t[]> data_;

@@ -18,7 +18,6 @@
 #define protected public
 #include "sk_graph.h"
 #include "sk_optimizer.h"
-#include "sk_queue_type_resolver.h"
 #include "sk_options_manager.h"
 #include "sk_node.h"
 #include "sk_candidate_heap.h"
@@ -252,95 +251,6 @@ TEST_F(SkOptimizerTaskReorderTest, ExtractIntraStreamDependencies_ConnectsAdjace
   EXPECT_EQ(stream1First->sendToNodeId.count(204), 1);
   EXPECT_EQ(stream1Second->receiveNodeId.count(202), 1);
   EXPECT_EQ(stream0First->sendToNodeId.count(202), 0);
-}
-
-TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_AssignsKernelAndEventQueues) {
-  auto *kernel = CreateKernelNode(211, 0);
-  auto *notify = CreateNotifyNode(212, 0);
-  kernel->SetNextNodeId(212);
-  notify->SetPreNodeId(211);
-
-  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({kernel, notify}));
-  EXPECT_EQ(kernel->GetExecutionQueueType(), SkQueueType::AIC);
-  EXPECT_EQ(notify->GetExecutionQueueType(), SkQueueType::AIC);
-}
-
-TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_PreservesMixWaitDependencyBehavior) {
-  auto *previous = CreateKernelNode(221, 0, SkKernelType::AIC_ONLY);
-  auto *wait = CreateWaitNode(222, 1);
-  auto *mix = CreateKernelNode(223, 1, SkKernelType::MIX_AIC_1_1);
-  wait->SetNextNodeId(223);
-  previous->sendToNodeId.insert(223);
-  mix->receiveNodeId.insert(221);
-
-  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({previous, wait, mix}));
-  EXPECT_EQ(previous->GetExecutionQueueType(), SkQueueType::AIC);
-  EXPECT_EQ(wait->GetExecutionQueueType(), SkQueueType::AIC);
-  EXPECT_EQ(mix->GetExecutionQueueType(), SkQueueType::MIX_1_1);
-}
-
-TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_SameStreamMixWaitUsesPreviousQueue) {
-  auto *previous = CreateKernelNode(231, 0, SkKernelType::AIC_ONLY);
-  auto *wait = CreateWaitNode(232, 0);
-  auto *mix = CreateKernelNode(233, 0, SkKernelType::MIX_AIC_1_1);
-  wait->SetNextNodeId(233);
-
-  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({previous, wait, mix}));
-  EXPECT_EQ(wait->GetExecutionQueueType(), SkQueueType::AIC);
-}
-
-TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_SearchBeyond100HopsUsesFallback) {
-  auto *fallbackKernel = CreateKernelNode(300, 0, SkKernelType::AIC_ONLY);
-  auto *distantKernel = CreateKernelNode(301, 1, SkKernelType::AIV_ONLY);
-  uint64_t predecessor = distantKernel->GetNodeId();
-  for (uint64_t id = 400; id < 501; ++id) {
-    auto *reset = CreateResetNode(id, 1);
-    reset->SetPreNodeId(predecessor);
-    predecessor = id;
-  }
-  auto *notify = CreateNotifyNode(600, 1);
-  notify->SetPreNodeId(predecessor);
-
-  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({fallbackKernel, notify, distantKernel}));
-  EXPECT_EQ(notify->GetExecutionQueueType(), SkQueueType::AIC);
-}
-
-TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_ReusesKernelSearchCacheWithin100Hops) {
-  auto *fallbackKernel = CreateKernelNode(700, 0, SkKernelType::AIC_ONLY);
-  auto *distantKernel = CreateKernelNode(701, 1, SkKernelType::AIV_ONLY);
-  uint64_t predecessor = distantKernel->GetNodeId();
-  std::vector<SuperKernelBaseNode *> chain;
-  for (uint64_t id = 1000; id < 1180; ++id) {
-    auto *reset = CreateResetNode(id, 1);
-    reset->SetPreNodeId(predecessor);
-    predecessor = id;
-    chain.push_back(reset);
-  }
-  auto *nearNotify = CreateNotifyNode(800, 1);
-  nearNotify->SetPreNodeId(1079);
-  auto *farNotify = CreateNotifyNode(801, 1);
-  farNotify->SetPreNodeId(1178);
-
-  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve({fallbackKernel, nearNotify, farNotify, distantKernel}));
-  EXPECT_EQ(nearNotify->GetExecutionQueueType(), SkQueueType::AIV);
-  EXPECT_EQ(farNotify->GetExecutionQueueType(), SkQueueType::AIV);
-}
-
-TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_RejectsNullTask) {
-  EXPECT_FALSE(SkQueueTypeResolver(*graph).Resolve({nullptr}));
-}
-
-TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_RejectsEventWithoutKernelFallback) {
-  auto *notify = CreateNotifyNode(1201, 0);
-  EXPECT_FALSE(SkQueueTypeResolver(*graph).Resolve({notify}));
-}
-
-TEST_F(SkOptimizerTaskReorderTest, QueueTypeResolver_RejectsUnsupportedNodeType) {
-  auto *kernel = CreateKernelNode(1202, 0);
-  auto *defaultNode = CreateKernelNode(1203, 0);
-  defaultNode->SetNodeType(SkNodeType::NODE_DEFAULT);
-
-  EXPECT_FALSE(SkQueueTypeResolver(*graph).Resolve({kernel, defaultNode}));
 }
 
 /**

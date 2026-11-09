@@ -32,6 +32,9 @@ add_executable(super_kernel_aot_utest
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_dfx_exception_handler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_scope_postprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_resource_manager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_queue_type_resolver.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_task_ir.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_task_lowering.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_task_builder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_optimizer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_profiling.cpp
@@ -54,6 +57,7 @@ add_executable(super_kernel_aot_utest
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_node.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_optimizer.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_queue_type_resolver.cpp
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_task_lowering.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_task_builder.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_candidate_heap.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_log.cpp

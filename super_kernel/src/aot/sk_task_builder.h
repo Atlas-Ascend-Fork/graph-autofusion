@@ -11,93 +11,56 @@
 #ifndef __SK_TASK_BUILDER_H__
 #define __SK_TASK_BUILDER_H__
 
-#include "sk_node.h"
-#include "sk_options_manager.h"
-#include "sk_scope_info.h"
+#include <map>
+#include <optional>
+#include <unordered_map>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "sk_task_ir.h"
 #include "sk_types.h"
 
-#include <vector>
-#include <map>
-#include <string>
-#include <unordered_map>
+using Json = nlohmann::ordered_json;
 
-// Forward declaration
-class SuperKernelGraph;
-
-// ========== Node-oriented sync metadata (aligned with Python behavior) ==========
-
-// Sync direction type (corresponds to Python labels such as "cub:vec", "vec:cub")
 enum class SyncDirection : uint8_t {
-  NONE = 0,    // No sync
-  CUB_TO_CUB,  // AIC -> AIC
-  VEC_TO_VEC,  // AIV -> AIV
-  CUB_TO_VEC,  // AIC -> AIV
-  VEC_TO_CUB,  // AIV -> AIC
-  MIX_TO_MIX,  // Bidirectional sync (MIX -> MIX)
-  ALL_SYNC,    // Full-core sync
+  NONE = 0,
+  CUB_TO_CUB,
+  VEC_TO_VEC,
+  CUB_TO_VEC,
+  VEC_TO_CUB,
+  MIX_TO_MIX,
+  ALL_SYNC,
 };
-
-inline const char *to_string(SyncDirection dir) {
-  switch (dir) {
-    case SyncDirection::NONE:
-      return "NONE";
-    case SyncDirection::CUB_TO_CUB:
-      return "CUB_TO_CUB";
-    case SyncDirection::VEC_TO_VEC:
-      return "VEC_TO_VEC";
-    case SyncDirection::CUB_TO_VEC:
-      return "CUB_TO_VEC";
-    case SyncDirection::VEC_TO_CUB:
-      return "VEC_TO_CUB";
-    case SyncDirection::MIX_TO_MIX:
-      return "MIX_TO_MIX";
-    case SyncDirection::ALL_SYNC:
-      return "ALL_SYNC";
-    default:
-      return "UNKNOWN";
-  }
-}
 
 struct EarlyStartInfo {
-  uint32_t funcEarlyStartConfig = 0U;
-  SuperKernelBaseNode *relatedSetNode = nullptr;
-  SuperKernelBaseNode *relatedWaitNode = nullptr;
-  SuperKernelBaseNode *nextAicRelatedNode = nullptr;
-  SuperKernelBaseNode *nextAivRelatedNode = nullptr;
-  uint32_t syncEarlyStartConfig = 0U;
+  uint32_t funcConfig = 0;
+  uint32_t syncConfig = 0;
+  std::optional<size_t> relatedSetTask;
+  std::optional<size_t> relatedWaitTask;
+  std::optional<size_t> nextAicRelatedTask;
+  std::optional<size_t> nextAivRelatedTask;
+
   void ApplyFuncMask(SkEarlyStartMask mask) {
-    funcEarlyStartConfig |= static_cast<uint32_t>(mask);
-  }
-  bool CheckFuncMask(SkEarlyStartMask mask) const {
-    return (funcEarlyStartConfig & static_cast<uint32_t>(mask)) != 0;
+    funcConfig |= static_cast<uint32_t>(mask);
   }
   void ApplySyncMask(SkEarlyStartMask mask) {
-    syncEarlyStartConfig |= static_cast<uint32_t>(mask);
+    syncConfig |= static_cast<uint32_t>(mask);
   }
   bool CheckSyncMask(SkEarlyStartMask mask) const {
-    return (syncEarlyStartConfig & static_cast<uint32_t>(mask)) != 0;
+    return (syncConfig & static_cast<uint32_t>(mask)) != 0;
   }
 };
 
-// Per-task sync metadata
 struct TaskSyncInfo {
-  SkQueueType queueType;  // Task execution queue: AIC/AIV/MIX
-
-  // AIC queue sync metadata (cub_op_list)
-  std::map<size_t, SyncDirection> cubSendInfo;  // Target tasks receiving sync from this task
-  std::map<size_t, SyncDirection> cubRecvInfo;  // Source tasks sending sync to this task
-
-  // AIV queue sync metadata (vec_op_list)
-  std::map<size_t, SyncDirection> vecSendInfo;  // Target tasks receiving sync from this task
-  std::map<size_t, SyncDirection> vecRecvInfo;  // Source tasks sending sync to this task
-
-  // Cross-core sync direction: 0=CUBE(CUB_TO_CUB), 1=VEC(VEC_TO_VEC)
+  std::map<size_t, SyncDirection> cubSendInfo;
+  std::map<size_t, SyncDirection> cubRecvInfo;
+  std::map<size_t, SyncDirection> vecSendInfo;
+  std::map<size_t, SyncDirection> vecRecvInfo;
   std::map<size_t, SyncDirection> crossSyncInfo;
-  EarlyStartInfo earlyStartInfo{};
-  TaskSyncInfo() : queueType(SkQueueType::UNKNOWN) {}
+  EarlyStartInfo earlyStartInfo;
 };
 
-// SkBuildResult - contains both launch info and task queue JSON
 struct SkBuildResult {
   SkLaunchInfo launchInfo;
   Json taskQueueJson;
@@ -105,113 +68,71 @@ struct SkBuildResult {
 
 class SkTaskBuilder {
  public:
-  SkTaskBuilder(SuperKernelOptionsManager &opts, const SuperKernelGraph &graph) : opts(opts), graph_(graph) {}
-
-  SkBuildResult Build(std::string skFuncName, const std::vector<SuperKernelBaseNode *> &tasks, uint16_t scopeId,
-                      const ScopeCoreInfo &scopeCoreInfo);
+  SkBuildResult Build(const SkTaskIR &input) const;
 
  private:
-  SuperKernelOptionsManager &opts;
-  const SuperKernelGraph &graph_;  // Graph reference
+  struct SkTaskContext {
+    std::vector<TaskSyncInfo> syncInfos;
+    std::unordered_map<uint64_t, size_t> nodeIdToIndex;
+    std::vector<uint64_t> indexToNodeId;
+  };
 
-  // Sync metadata storage: each task maintains its own send/recv maps
-  std::vector<TaskSyncInfo> taskSyncInfos_;
-  std::unordered_map<uint64_t, size_t> nodeIdToIndex_;
-  std::unordered_map<size_t, uint64_t> indexToNodeId_;
-  bool aicAvailable_ = false;
-  bool aivAvailable_ = false;
+  // Synchronization analysis uses a context local to each Build call.
+  bool InitTaskSyncInfos(const std::vector<SkTaskDesc> &tasks, SkTaskContext &context) const;
+  bool ValidateGraphRelations(const std::vector<SkTaskDesc> &tasks, const SkTaskContext &context,
+                              bool allowExternalDependencies) const;
+  bool ExtractSyncRelationsFromGraph(const std::vector<SkTaskDesc> &tasks, SkTaskContext &context,
+                                     bool allowExternalDependencies) const;
+  bool PrecomputeSyncRelationsFromGraph(const std::vector<SkTaskDesc> &tasks, const SkTaskConfig &config,
+                                        SkTaskContext &context, bool allowExternalDependencies) const;
+  bool PrecomputeSyncRelationsByMixGroups(const std::vector<SkTaskDesc> &tasks, const SkTaskConfig &config,
+                                          SkTaskContext &context, bool allowExternalDependencies) const;
+  bool IsMixKernelTask(const SkTaskDesc &task) const;
+  bool RebaseTaskSyncInfo(TaskSyncInfo &info, size_t offset) const;
+  void InsertSyncEvent(const std::vector<SkTaskDesc> &tasks, SkTaskContext &context, size_t previousIndex,
+                       size_t currentIndex) const;
 
-  // Task insertion helpers, separated by task type
-  std::pair<int, int> GetPreFetchCnt(const ResolvedFunctionInfo &resolved) const;
-  bool AddSyncTask(SkTask &skTask, size_t nodeIndex, SkCoreSyncType syncType, uint8_t earlyStartConfig = 0U,
-                   uint32_t skipCoreCount = 0U, SkKernelType relatedType = SkKernelType::DEFAULT);
-  bool AddEventTask(SkTask &skTask, SuperKernelBaseNode *node, size_t nodeIndex, SkTaskType taskType);
-  bool AddFuncTask(SkTask &skTask, SuperKernelBaseNode *node, SkDfxInfo *dfxInfo, size_t nodeIndex, int addrIndex,
-                   int binCount, SkTaskType taskType, uint32_t numBlocks);
+  void OptimizeSyncRelations(const std::vector<SkTaskDesc> &tasks, SkTaskContext &context) const;
+  void PrintSyncInfo(const char *stage, const std::vector<SkTaskDesc> &tasks, const SkTaskContext &context) const;
+  bool JudgeRemoveCrossSync(const SkTaskContext &context, size_t sender, size_t receiver, bool cubToVec) const;
+  void RemoveSyncInfo(SkTaskContext &context, size_t owner, size_t peer, bool receive, SyncDirection direction) const;
+  void RemoveCrossedLineSync(SkTaskContext &context) const;
+  void RemoveMultiSendSync(SkTaskContext &context) const;
+  void RemoveMultiRecvSync(SkTaskContext &context) const;
+  void RemoveRedundantCrossSync(const std::vector<SkTaskDesc> &tasks, SkTaskContext &context) const;
+  bool ApplyEarlyStartForQueue(const std::vector<SkTaskDesc> &tasks, SkTaskContext &context, size_t current,
+                               size_t &last, SkQueueType targetQueue) const;
+  bool ApplyEarlyStartSyncPass(const std::vector<SkTaskDesc> &tasks, const SkTaskConfig &config,
+                               SkTaskContext &context) const;
 
-  bool DispatchFuncTask(SkTask &skTaskCube, SkTask &skTaskVec, SuperKernelBaseNode *node, SkDfxInfo *dfxInfo,
-                        size_t nodeIndex, int binCount, SkTaskType taskType, SkQueueType queueType,
-                        const ScopeCoreInfo &scopeCoreInfo);
-  bool DispatchEventTask(SkTask &skTaskCube, SkTask &skTaskVec, SuperKernelBaseNode *node, size_t nodeIndex,
-                         SkTaskType taskType, SkQueueType queueType);
+  // Task insertion and dispatch consume only lowered descriptions.
+  bool AddSyncTask(SkTask &task, const SkTaskConfig &config, size_t taskIndex, SkCoreSyncType syncType,
+                   uint8_t earlyStartConfig = 0, uint32_t activeCoreCount = 0,
+                   SkKernelType relatedType = SkKernelType::DEFAULT) const;
+  bool AddEventTask(SkTask &task, const SkEventDesc &event, size_t taskIndex, SkTaskType type) const;
+  bool AddFuncTask(SkTask &task, const SkKernelDesc &kernel, const EarlyStartInfo &early, SkDfxInfo *dfx,
+                   size_t taskIndex, int addressIndex, uint32_t binaryCount, SkTaskType type, uint32_t numBlocks) const;
+  bool DispatchFuncTask(SkTask &aicTask, SkTask &aivTask, const SkTaskIR &input, const SkTaskContext &context,
+                        size_t taskIndex, SkDfxInfo *dfx, SkTaskType type) const;
+  bool DispatchEventTask(SkTask &aicTask, SkTask &aivTask, const SkTaskDesc &task, size_t taskIndex,
+                         SkTaskType type) const;
+  bool DispatchSyncTasks(SkTask &aicTask, SkTask &aivTask, const SkTaskIR &input, const SkTaskContext &context,
+                         size_t taskIndex, const std::map<size_t, SyncDirection> &relations, bool send) const;
+  bool DispatchSyncTasks(SkTask &aicTask, SkTask &aivTask, const SkTaskIR &input, const EarlyStartInfo &early,
+                         size_t taskIndex, bool send) const;
 
-  bool DispatchSyncTasks(SkTask &skTaskCube, SkTask &skTaskVec, size_t nodeIndex,
-                         const std::map<size_t, SyncDirection> &syncInfo, bool isSend, SkQueueType queueType);
-  bool DispatchSyncTasks(SkTask &skTaskCube, SkTask &skTaskVec, size_t nodeIndex, const EarlyStartInfo &earlyStartInfo,
-                         bool isSend, SkQueueType queueType, const ScopeCoreInfo &scopeCoreInfo);
+  SkHostEntryInfo GenEntryInfo(SkTask &aicTask, SkTask &aivTask, const SkTaskIR &input, bool simtEntry) const;
+  DeviceArgsPtr GenEntryArgs(const SkTask &aicTask, const SkTask &aivTask, const SkTaskIR &input,
+                             const SkDfxInfo *dfxInfos) const;
+  bool CalculateSkScheMode(const SkTaskIR &input, const SkTask &aicTask, const SkTask &aivTask) const;
+  bool CalculateSimtDcacheSize(const SkTaskIR &input, bool &useSimtEntry, size_t &maxDcacheSize) const;
+  bool ValidateInput(const SkTaskIR &input) const;
 
-  // ========== Graph-topology-based sync extraction ==========
-
-  // Initialize taskSyncInfos_
-  bool InitTaskSyncInfos(const std::vector<SuperKernelBaseNode *> &tasks);
-
-  // Build a stable node-id/index mapping for the current task order.
-  bool BuildTaskIndex(const std::vector<SuperKernelBaseNode *> &tasks);
-
-  // Validate graph edges against the current task order.  MIX sub-groups may
-  // contain edges whose endpoints belong to another sub-group; those edges
-  // are handled by the group boundary synchronization.
-  bool ValidateGraphRelations(const std::vector<SuperKernelBaseNode *> &tasks, bool allowExternalDependencies = false);
-
-  // Extract synchronization from graph edges for every node type, not only
-  // kernel nodes.  The optional external-dependency mode is used while
-  // processing an individual MIX sub-group.
-  bool ExtractSyncRelationsFromGraph(const std::vector<SuperKernelBaseNode *> &tasks,
-                                     bool allowExternalDependencies = false);
-
-  // Precompute sync relations (based on graph topology)
-  bool PrecomputeSyncRelationsFromGraph(const std::vector<SuperKernelBaseNode *> &tasks);
-
-  // Precompute sync relations by splitting MIX kernels into standalone groups.
-  bool PrecomputeSyncRelationsByMixGroups(const std::vector<SuperKernelBaseNode *> &tasks);
-  bool SplitTasksByMixGroups(const std::vector<SuperKernelBaseNode *> &tasks,
-                             std::vector<std::vector<SuperKernelBaseNode *>> &splitTasks, bool &hasMixKernel) const;
-  bool InitSyncInfoSnapshotForMixGroups(const std::vector<SuperKernelBaseNode *> &tasks,
-                                        std::vector<TaskSyncInfo> &taskSyncInfosOrigin);
-  bool ProcessSyncRelationSplitGroup(const std::vector<SuperKernelBaseNode *> &curSplitTasks, size_t groupIndex,
-                                     size_t groupOffset, bool hasNextGroup,
-                                     const std::vector<TaskSyncInfo> &taskSyncInfosOrigin,
-                                     std::vector<TaskSyncInfo> &mergedTaskSyncInfos);
-  bool RebaseTaskSyncInfo(TaskSyncInfo &syncInfo, size_t offset) const;
-  void AddBoundaryAllSync(const std::vector<SuperKernelBaseNode *> &curSplitTasks, size_t groupIndex,
-                          size_t groupOffset);
-  bool IsMixKernelTask(const SuperKernelBaseNode *task) const;
-
-  // ========== Core sync insertion (aligned with Python insert_sync_event) ==========
-
-  // Insert sync event: preOp -> currOp
-  void InsertSyncEvent(size_t preIdx, size_t currIdx);
-
-  // ========== Optimization methods ==========
-  void OptimizeSyncRelations(const std::vector<SuperKernelBaseNode *> &tasks);
-  void RemoveCrossedLineSync();
-  void RemoveMultiSendSync();
-  void RemoveMultiRecvSync();
-  void RemoveRedundantCrossSync(const std::vector<SuperKernelBaseNode *> &tasks);
-  // ========== Early-start-specific sync methods ==========
-  bool ApplyEarlyStartSyncPass(const std::vector<SuperKernelBaseNode *> &tasks);
-
-  // Helper: determine whether crossed sync can be removed
-  bool JudgeRemoveCrossSync(size_t sendIdx, size_t recvIdx, bool isCubToVec);
-
-  // Helper: remove sync metadata
-  void RemoveSyncInfo(size_t sendIdx, size_t recvIdx, bool isRemoveRecv, SyncDirection dirToRemove);
-
-  // Print sync metadata (debug only)
-  void PrintSyncInfo(const char *stage) const;
-
-  SkHostEntryInfo GenEntryInfo(SkTask &skTaskCube, SkTask &skTaskVec, const ScopeCoreInfo &scopeCoreInfo,
-                               bool useSimtEntry = false);
-  bool CalculateSkScheMode(const std::vector<SuperKernelBaseNode *> &tasks, const SkTask &aicTask,
-                           const SkTask &aivTask) const;
-  DeviceArgsPtr GenEntryArgs(const SkTask &skTaskCube, const SkTask &skTaskVec, const SkDfxInfo *dfxInfos,
-                             uint32_t dfxCount, const SkEventConfig *eventConfig = nullptr);
-
-  // DFX info update helpers
-  bool UpdateDfxInfo(SkDfxInfo *dfxInfo, const KernelInfos &kernelInfo, const ResolvedFunctionInfo &resolved,
-                     int binIndex, int addrIndex);
-  // Helper to process core function size (AIC/AIV)
+  bool UpdateDfxInfo(SkDfxInfo *dfxInfo, const SkKernelDesc &kernelInfo, const SkResolvedFunctionDesc &resolved,
+                     int binIndex, int addrIndex) const;
   bool ProcessCoreFuncSize(SkDfxInfo *dfxInfo, aclrtBinHandle binHdl, const void *binHostAddr, uint32_t binHostSize,
-                           const ResolvedFunctionInfo &resolved, int coreIndex, int binIndex, const char *coreName);
+                           const SkResolvedFunctionDesc &resolved, int coreIndex, int binIndex,
+                           const char *coreName) const;
 };
+
 #endif  // __SK_TASK_BUILDER_H__
