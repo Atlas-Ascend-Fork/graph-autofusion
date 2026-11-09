@@ -256,6 +256,9 @@ struct ShareGraph {
   static af::ComputeGraphPtr TruncToIntBf16ToInt32FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr VfScalarFusionComprehensiveFusedGraph();
   static af::ComputeGraphPtr RemainderBf16FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RemainderFp16FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RemainderF32FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RemainderInt32FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ArgMaxFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr FusedBackendElewiseGraph(size_t dims_size);
 };

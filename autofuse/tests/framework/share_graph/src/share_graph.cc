@@ -14503,7 +14503,7 @@ af::ComputeGraphPtr ShareGraph::VfScalarFusionComprehensiveFusedGraph() {
   return compute_graph;
 }
 
-static void CreateRemainderBf16AscGraph(af::AscGraph &graph, size_t dims_size, ge::DataType dtype) {
+static void CreateRemainderAscGraph(af::AscGraph &graph, size_t dims_size, ge::DataType dtype) {
   // Data 节点
   af::ascir_op::Data x1("data0", graph);
   x1.ir_attr.SetIndex(0);
@@ -14543,8 +14543,10 @@ static void CreateRemainderBf16AscGraph(af::AscGraph &graph, size_t dims_size, g
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
 
-af::ComputeGraphPtr ShareGraph::RemainderBf16FusedGraph(size_t dims_size) {
-  auto builder = GraphBuilder("remainder_bf16_test");
+// dtype 参数化的 Remainder E2E 图：Data->Load->Remainder->Store->Output
+static af::ComputeGraphPtr RemainderFusedGraphByDtype(size_t dims_size, ge::DataType dtype,
+                                                      const std::string &test_name) {
+  auto builder = GraphBuilder(test_name);
 
   // 创建 data 节点
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
@@ -14569,14 +14571,30 @@ af::ComputeGraphPtr ShareGraph::RemainderBf16FusedGraph(size_t dims_size) {
 
   // 创建并序列化子图
   auto ascbc_node = compute_graph->FindNode("ascbc");
-  af::AscGraph sub_graph("remainder_bf16");
-  CreateRemainderBf16AscGraph(sub_graph, dims_size, af::DataType::DT_BF16);
+  af::AscGraph sub_graph(test_name.c_str());
+  CreateRemainderAscGraph(sub_graph, dims_size, dtype);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
   af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
 
   return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::RemainderBf16FusedGraph(size_t dims_size) {
+  return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_BF16, "remainder_bf16_test");
+}
+
+af::ComputeGraphPtr ShareGraph::RemainderFp16FusedGraph(size_t dims_size) {
+  return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_FLOAT16, "remainder_fp16_test");
+}
+
+af::ComputeGraphPtr ShareGraph::RemainderF32FusedGraph(size_t dims_size) {
+  return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_FLOAT, "remainder_f32_test");
+}
+
+af::ComputeGraphPtr ShareGraph::RemainderInt32FusedGraph(size_t dims_size) {
+  return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_INT32, "remainder_int32_test");
 }
 
 static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
