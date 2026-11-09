@@ -1917,7 +1917,7 @@ Status ApiCall::AllocOutputs(const TPipe &tpipe, std::stringstream &ss) const {
 }
 
 bool ApiCall::SyncOutputs(const TPipe &tpipe, std::stringstream &ss) const {
-  for (auto out : this->outputs) {
+  for (auto &out : this->outputs) {
     auto tensor_ptr = tpipe.GetTensor(out.id);
     GE_CHK_BOOL_EXEC(tensor_ptr != nullptr, return false, "tensor_ptr nullptr");
     auto t = *tensor_ptr;
@@ -1929,8 +1929,15 @@ bool ApiCall::SyncOutputs(const TPipe &tpipe, std::stringstream &ss) const {
           ss << t_que->EnqueBuf();
         }
       }
+    } else if (t.alloc_type == af::AllocType::kAllocTypeBuffer && this->unit == af::ComputeUnit::kUnitMTE2) {
+      // TBuf输出的MTE2搬运（如HoistInvariantLoads外提的Load）无队列同步语义，
+      // 需显式MTE2->V事件同步，保证后续Vector消费在搬运完成后进行
+      ss << tpipe.SyncMte2ToVec(t);
+    } else {
+      // do nothing
     }
   }
+
   return true;
 }
 

@@ -22,6 +22,7 @@
 #include "platform/platform_factory.h"
 #include "mem_reuse_manager.h"
 #include "v35/optimize/partition/vector_func_partitioner.h"
+#include "ascir_utils.h"
 
 using namespace af::ascir_op;
 using namespace af::ops;
@@ -72,6 +73,19 @@ bool IsSupportInplace(const af::AscNodePtr &node) {
     }
   }
   return true;
+}
+
+// 从节点调度轴中取最外层BlockOuter轴id：外提Load标记为该轴（语义：block层级一次执行/每核一次），
+// ATT的ParserSchedInfo据此将BlockOuter轴归入block_dim、其后轴不计入loop_axes，exe_time为空积=1。
+// 无BlockOuter轴（理论上被图级门控与调度不变量排除）时返回kIdNone，保守不外提。
+int64_t FindBlockOuterAxis(af::AscGraph &graph, const af::AscNodePtr &node) {
+  for (const auto &axis_id : node->attr.sched.axis) {
+    const auto &axis = graph.FindAxis(axis_id);
+    if (axis != nullptr && axis->type == af::Axis::kAxisTypeBlockOuter) {
+      return axis_id;
+    }
+  }
+  return af::kIdNone;
 }
 }  // namespace
 
@@ -181,11 +195,177 @@ Status BufQueAllocator::PrepareImplGraphMemoryPlan(::ascir::FusedScheduledResult
         for (auto &impl_graph : schedule_group.impl_graphs) {
           GE_CHK_STATUS_RET(
               ProcessSingleImplGraph(impl_graph, *platform, config.max_que_num, scheduled_result.is_reduce_mem_reuse));
+          GE_CHK_STATUS_RET(HoistInvariantLoads(impl_graph), "HoistInvariantLoads failed");
         }
       }
     }
   }
   return ge::GRAPH_SUCCESS;
+}
+
+// brc缓存Load可外提的条件判定（HoistInvariantLoads调用，外提资格与TBuf转换等价）：
+// 1. 普通Load且为brc缓存节点；
+// 2. 输出的直接消费者中无Store（保护load->store TQueBind直连MTE2->MTE3路径）；
+// 3. 输出队列为单缓冲（无双缓冲流水可破坏）；
+// 4. Load的GM地址在整个循环嵌套内恒定（外提前导仅能表达静态offset与BlockOuter贡献）；
+// 5. Load使用的que不存在复用或共用（que上无其它tensor，转换后share/reuse链无残留交互）；
+// 6. 输出tensor元素个数大于1（各repeats因子均静态≤1即为单元素/标量，拷贝代价极低且走
+//    ub_scalar/Duplicate特殊路径，外提无收益；动态shape无法判定时放行）。
+bool BufQueAllocator::CanHoist(const af::AscGraph &graph, const af::AscNodePtr &node) {
+  if (!IsOps<Load>(node)) {
+    return false;
+  }
+  if (!ascgen_utils::IsNodeCacheable(node)) {
+    return false;
+  }
+  if (node->outputs().empty()) {
+    return false;
+  }
+  // 元素个数>1判定：所有repeats因子均可静态判定为≤1（含空repeats，即单元素/标量tensor）时拒绝——
+  // 拷贝代价极低且走ub_scalar/Duplicate特殊路径，外提无收益；存在>1或无法判定的因子则放行
+  bool all_elem_le_one = true;
+  for (const auto &repeat : node->outputs[0].attr.repeats) {
+    if (af::SymbolicUtils::StaticCheckLe(repeat, af::sym::kSymbolOne) != af::TriBool::kTrue) {
+      all_elem_le_one = false;
+      break;
+    }
+  }
+  if (all_elem_le_one) {
+    return false;
+  }
+  for (const auto &peer_anchor : node->outputs[0].anchor.GetPeerInDataAnchorsPtr()) {
+    GE_ASSERT_NOTNULL(peer_anchor);
+    const auto peer_node = std::dynamic_pointer_cast<af::AscNode>(peer_anchor->GetOwnerNode());
+    GE_ASSERT_NOTNULL(peer_node);
+    if (IsOps<Store>(peer_node)) {
+      return false;
+    }
+  }
+  if (node->outputs[0].attr.que.buf_num != 1) {
+    return false;
+  }
+  if (!IsQueExclusive(graph, &node->outputs[0])) {
+    return false;
+  }
+  return IsLoadAddressLoopInvariant(&node->outputs[0]);
+}
+
+// que独占判定：同que_id且Queue类型的tensor仅output自身才允许转换。
+// que_id+reuse_id表达que的复用/共用语义（同que同reuse_id为共用、同que异reuse_id为复用），
+// 统一以"que上存在其它tensor"排除，避免转换后与share/reuse链（share_offset、IsLastShare、
+// reuse_from/next等）交互。
+bool BufQueAllocator::IsQueExclusive(const af::AscGraph &graph, const af::AscTensor *output) {
+  for (const auto &node : graph.GetAllNodes()) {
+    GE_ASSERT_NOTNULL(node);
+    for (const auto &out_tensor : node->outputs()) {
+      if (out_tensor->attr.mem.alloc_type != af::AllocType::kAllocTypeQueue ||
+          out_tensor->attr.que.id != output->attr.que.id ||
+          out_tensor->attr.mem.tensor_id == output->attr.mem.tensor_id) {
+        continue;
+      }
+      GELOGD("Que[%ld] is shared or reused by tensor[%ld], cannot convert tensor[%ld] to TBuf.", output->attr.que.id,
+             out_tensor->attr.mem.tensor_id, output->attr.mem.tensor_id);
+      return false;
+    }
+  }
+  return true;
+}
+
+// 地址恒定判定
+bool BufQueAllocator::IsLoadAddressLoopInvariant(const af::AscTensor *output) {
+  const auto &axis_list = output->attr.axis;
+  const auto &strides = output->attr.strides;
+  if (axis_list.size() != strides.size()) {
+    return false;
+  }
+  const auto &vectorized_axis = output->attr.vectorized_axis;
+  for (size_t i = 0UL; i < axis_list.size(); ++i) {
+    bool is_vectorized = false;
+    for (const auto vectorized_id : vectorized_axis) {
+      if (vectorized_id == axis_list[i]) {
+        is_vectorized = true;
+        break;
+      }
+    }
+    if (is_vectorized) {
+      continue;  // 已折叠进连续搬运段（block_len），不参与GM offset表达式
+    }
+    if (af::SymbolicUtils::StaticCheckEq(strides[i], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      continue;  // stride为0，不参与GM offset表达式
+    }
+    return false;
+  }
+  return true;
+}
+
+// 当前图的TBuf id最大值：tensor的buf.id与tmp_buffers的id共用MemReuseManager的buf_id_计数器，
+// 新TBuf取max+1避免与ques/bufs冲突（各impl graph独立成kernel，id按图独立）。
+int64_t BufQueAllocator::GetMaxBufId(const af::AscGraph &graph) {
+  int64_t max_buf_id = -1;
+  for (const auto &node : graph.GetAllNodes()) {
+    GE_ASSERT_NOTNULL(node);
+    for (const auto &output : node->outputs()) {
+      max_buf_id = std::max(max_buf_id, output->attr.buf.id);
+    }
+    for (const auto &tmp_buffer : node->attr.tmp_buffers) {
+      max_buf_id = std::max(max_buf_id, tmp_buffer.id);
+    }
+  }
+  return max_buf_id;
+}
+
+Status BufQueAllocator::HoistInvariantLoads(af::AscGraph &graph) {
+  // 原图（外提标记前）全图有效loop_axis种类数需<=1：外提仅面向单一计算循环轴的简单场景，
+  // 多循环轴图与外提前置/loop-grouping交互复杂，不外提（提前判定，CanHoist无需逐节点重复计算）
+  const size_t unique_loop_axis_cnt = ScheduleUtils::GetUniqueLoopAxisCnt(graph);
+  if (unique_loop_axis_cnt > 1U) {
+    GELOGI("Graph [%s] has [%zu] unique loop axes, skip hoist.", graph.GetName().c_str(), unique_loop_axis_cnt);
+    return af::SUCCESS;
+  }
+  std::vector<std::pair<af::AscNodePtr, int64_t>> hoistable_nodes;
+  for (const auto &node : graph.GetAllNodes()) {
+    GE_ASSERT_NOTNULL(node);
+    // 图中包含 IndirectLoad（GM地址数据相关，天然循环变化）或 kComputeCube
+    // （CV/Cube 管线）节点时，不做外提，直接返回
+    if (IsOps<IndirectLoad>(node) || node->attr.api.compute_type == af::ComputeType::kComputeCube) {
+      GELOGI("Graph[%s] contains IndirectLoad/Cube node[%s], skip hoist.", graph.GetName().c_str(), node->GetNamePtr());
+      return af::SUCCESS;
+    }
+    if (!CanHoist(graph, node)) {
+      continue;
+    }
+    const auto block_outer_axis = FindBlockOuterAxis(graph, node);
+    if (block_outer_axis != af::kIdNone) {
+      hoistable_nodes.emplace_back(node, block_outer_axis);
+    }
+  }
+  if (hoistable_nodes.empty()) {
+    return af::SUCCESS;
+  }
+  // 改图前落盘现场图，便于比对外提前后的Load/mem属性变化（AUTOFUSE_DFX_FLAGS控制落盘）
+  ascir::utils::DumpGraph(graph, "BeforeHoistInvariantLoads");
+  int64_t next_buf_id = GetMaxBufId(graph) + 1;
+  for (const auto &hoistable_node : hoistable_nodes) {
+    const auto &node = hoistable_node.first;
+    node->attr.sched.loop_axis = hoistable_node.second;
+    node->attr.sched.exec_condition = af::ExecuteCondition::kNoCache;
+    auto &output_attr = node->outputs[0].attr;
+    output_attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+    output_attr.mem.position = af::Position::kPositionVecCalc;
+    output_attr.mem.reuse_id = af::kIdNone;
+    output_attr.buf.id = next_buf_id++;
+    output_attr.que.id = af::kIdNone;
+    output_attr.que.depth = af::kIdNone;
+    output_attr.que.buf_num = af::kIdNone;
+    GELOGI(
+        "Hoist invariant Load[%s]: mark loop_axis BlockOuter[%ld] and convert output tensor[%ld] to TBuf, "
+        "buf_id = %ld.",
+        node->GetNamePtr(), hoistable_node.second, output_attr.mem.tensor_id, output_attr.buf.id);
+  }
+  // 外提Load前置排序（见ScheduleUtils::SortHoistedLoadsFirst）：保证codegen循环树构建时
+  // 外提call先于兄弟深层Loop加入body
+  ScheduleUtils::SortHoistedLoadsFirst(graph);
+  return af::SUCCESS;
 }
 
 Status BufQueAllocator::CollectFusedIoNodes(::ascir::FusedScheduledResult &fused_scheduled_result) {
