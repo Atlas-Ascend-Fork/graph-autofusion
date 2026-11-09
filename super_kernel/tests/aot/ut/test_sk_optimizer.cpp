@@ -19,6 +19,7 @@
 #include "sk_graph.h"
 #include "sk_optimizer.h"
 #include "sk_task_builder.h"
+#include "sk_event_recorder.h"
 #include "sk_queue_type_resolver.h"
 #include "sk_options_manager.h"
 #include "sk_node.h"
@@ -278,6 +279,49 @@ TEST_F(SkOptimizerTaskReorderTest, SynthesizedBackNotify_IsPlacedBeforeUnrelated
   EXPECT_EQ(stream2Notify->receiveNodeId.count(stream2Kernel->GetNodeId()), 1U);
   EXPECT_EQ(stream2Notify->GetPreNodeId(), stream2Kernel->GetNodeId());
   EXPECT_EQ(stream3Tail->sendToNodeId.count(stream2Notify->GetNodeId()), 0U);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, ScheduleMapsProfilingByFinalTaskIndexAfterEarlyEvents) {
+  const std::string modelId = "model_early_event_profiling";
+  graph->modelId = modelId;
+  auto *owner = CreateKernelNode(3001, 0, SkKernelType::AIV_ONLY);
+  auto *later = CreateKernelNode(3002, 1, SkKernelType::AIV_ONLY);
+  owner->nodeInfos.kernelInfos.funcName = "owner_kernel";
+  later->nodeInfos.kernelInfos.funcName = "later_kernel";
+  owner->nodeInfos.kernelInfos.numBlocks = 1;
+  later->nodeInfos.kernelInfos.numBlocks = 1;
+  auto *reset = CreateResetNode(3003, 0);
+  auto *notify = CreateNotifyNode(3004, 0);
+
+  SuperKernelScopeInfo scopeInfo;
+  scopeInfo.SetScopeCoreInfo({SkKernelType::AIV_ONLY, 1});
+  scopeInfo.MutableExtInfo().filteredNodes = {owner, later};
+  scopeInfo.MutableExtInfo().eventNodes.push_back(std::move(graph->graphMap[reset->GetNodeId()]));
+  scopeInfo.MutableExtInfo().eventNodes.push_back(std::move(graph->graphMap[notify->GetNodeId()]));
+
+  auto &recorder = SkEventRecorder::Instance();
+  const auto modelCount = recorder.modelIdIndexMap.size();
+  recorder.enabled = true;
+  recorder.deviceCtxs.active = 1;
+  SkTaskBuilder builder(*opts, *graph);
+  (void)optimizer->Schedule(scopeInfo, *graph, builder);
+  const auto laterIndex = builder.nodeIdToIndex_.find(later->GetNodeId());
+  EXPECT_NE(laterIndex, builder.nodeIdToIndex_.end());
+  if (laterIndex != builder.nodeIdToIndex_.end()) {
+    EXPECT_EQ(laterIndex->second, 3U);
+    EXPECT_EQ(recorder.GetNodeInfo(modelId, scopeInfo.GetScopeId(), laterIndex->second).nodeName, "later_kernel");
+  }
+  EXPECT_EQ(recorder.GetNodeInfo(modelId, scopeInfo.GetScopeId(), 0).nodeName, "owner_kernel");
+  EXPECT_TRUE(recorder.GetNodeInfo(modelId, scopeInfo.GetScopeId(), 1).nodeName.empty());
+  EXPECT_TRUE(recorder.GetNodeInfo(modelId, scopeInfo.GetScopeId(), 2).nodeName.empty());
+  recorder.enabled = false;
+  recorder.deviceCtxs.active = 0;
+  recorder.nodeInfoMap.erase(modelId);
+  recorder.skNameMap.erase(modelId);
+  if (recorder.modelIdIndexMap.size() > modelCount && recorder.modelIdIndexMap.back() == modelId) {
+    recorder.modelIdIndexMap.pop_back();
+    recorder.modelIdToIndexMap.erase(modelId);
+  }
 }
 
 TEST_F(SkOptimizerTaskReorderTest, EmptyEventNodes_KeepTaskOrderAndDependencies) {
