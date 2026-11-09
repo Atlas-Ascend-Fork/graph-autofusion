@@ -3095,6 +3095,23 @@ struct DualGatherGraphOptions {
   // Data/Load 节点（dual_shared_index_load），index 视图均为 [s2, s3]（组配对要求
   // index 逻辑 shape 逐维符号相等）
   bool shared_index_with_mask = false;
+  // true: 第二路 output 轴使用独立副本轴（同形不同 id——Broadcast 产物），验证组共享轴
+  // 等价化后仍可融合
+  bool second_output_axis_alias = false;
+  // true: 第二路 output 轴尺寸与第一路不同（不同索引空间，应被等价化拒绝）
+  bool second_output_axis_size_mismatch = false;
+  // true: 第二路 output dim0 stride 与第一路不同（配合 second_output_axis_alias 使用；
+  // 同 id 维不进等价判定，须副本轴 + stride 不等才触达等价化的 stride 拒绝分支）
+  bool second_output_axis_stride_mismatch = false;
+  // true: 第二路 output 副本轴尺寸用独立新建的同名 SizeVar（模拟前端两个子图各自建符，
+  // 同名不同对象——符号引擎按名判等，等价化不受影响；动态 shape 契约）
+  bool second_output_axis_alias_independent_sizevar = false;
+  // true: 第二路 output dim0 副本轴携带分 tile 类型（防御用例：成员侧 split 轴携带切分
+  // 语义不可归一，应拒绝候选而非静默替换）
+  bool second_output_axis_split_typed = false;
+  // true: 第一路 output dim0 轴携带分 tile 类型（防御用例：primary 侧 split 轴与成员侧
+  // 同口径拒绝，不再静默跳过留给模板吞并切分轴）
+  bool first_output_axis_split_typed = false;
 };
 
 af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = {}) {
@@ -3257,7 +3274,15 @@ af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = 
   }
   indirect_load0.x2 = options.shared_index_with_mask ? shared_mul.y : index_load0.y;
   indirect_load0.ir_attr.SetAxis(1);
-  SetNodeView(indirect_load0, value0_dtype, output_axes, output_repeats, output_strides);
+  {
+    // [split 防御用例] 可选的第一路 dim0 分 tile 类型轴（primary 侧同口径拒绝的锁定）。
+    std::vector<af::AxisId> il0_output_axes = output_axes;
+    if (options.first_output_axis_split_typed) {
+      const auto z2_tile0 = graph.CreateAxis("z2_tile0", af::Axis::kAxisTypeTileOuter, s2, {}, af::kIdNone);
+      il0_output_axes = {z2_tile0.id, z3.id};
+    }
+    SetNodeView(indirect_load0, value0_dtype, il0_output_axes, output_repeats, output_strides);
+  }
 
   af::ascir_op::IndirectLoad indirect_load1("dual_indirect_load1");
   if (options.with_input_pre) {
@@ -3271,7 +3296,31 @@ af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = 
   }
   indirect_load1.x2 = options.shared_index_with_mask ? shared_broadcast.y : index_load1.y;
   indirect_load1.ir_attr.SetAxis(options.axis_mismatch ? 0 : 1);
-  SetNodeView(indirect_load1, value1_dtype, output_axes, output_repeats, output_strides);
+  {
+    // [组共享轴等价化] 可选的第二路 output 副本轴（Broadcast 产物：同形不同 id）、
+    // 尺寸不匹配（不同索引空间，应被等价化拒绝）或 stride 不匹配（须配合副本轴，
+    // 否则同 id 维不进等价判定）。
+    std::vector<af::AxisId> il1_output_axes = output_axes;
+    std::vector<af::Expression> il1_output_strides = output_strides;
+    if (options.second_output_axis_alias) {
+      const af::Expression z2_copy_size =
+          options.second_output_axis_alias_independent_sizevar ? graph.CreateSizeVar("s2") : s2;
+      const auto z2_copy = graph.CreateAxis("z2_copy", z2_copy_size);
+      il1_output_axes = {z2_copy.id, z3.id};
+    }
+    if (options.second_output_axis_size_mismatch) {
+      const auto z2_big = graph.CreateAxis("z2_big", make_size("z2_big_val", 64));
+      il1_output_axes = {z2_big.id, z3.id};
+    }
+    if (options.second_output_axis_stride_mismatch) {
+      il1_output_strides = {s3b, af::sym::kSymbolOne};
+    }
+    if (options.second_output_axis_split_typed) {
+      const auto z2_tile = graph.CreateAxis("z2_tile", af::Axis::kAxisTypeTileOuter, s2, {}, af::kIdNone);
+      il1_output_axes = {z2_tile.id, z3.id};
+    }
+    SetNodeView(indirect_load1, value1_dtype, il1_output_axes, output_repeats, il1_output_strides);
+  }
 
   // 混模板场景（成员 dtype 不同）：第二路 IL 输出经 Cast 对齐归并链 dtype（模拟
   // DtypeConsistency 在归并树前插的 cast；IL 自身 input/output 保持 1 字节 dtype，
@@ -3391,6 +3440,106 @@ af::AscGraph BuildDualIndirectLoadGraph(const DualGatherGraphOptions &options = 
   output.x = store.y;
   output.ir_attr.SetIndex(0);
   SetNodeView(output, value0_dtype, output_axes, terminal_repeats, terminal_strides);
+  return graph;
+}
+
+// [组共享 post-Softmax] 双 gather 经 ele 归并（Add）后接尾轴 Softmax pattern 的融合图：
+// 两路独立值表 + 共享 index，merge_add 输出即 pattern 回流点（回溯链穿过归并 Add 到达
+// primary 输出——组候选内规范化可命中）。具体尺寸与单 gather 的 softmax 图约定一致。
+af::AscGraph BuildDualIndirectLoadSoftmaxPostGraph() {
+  af::AscGraph graph("dual_indirect_load_softmax_post_ut_graph");
+  const af::Expression s0 = graph.CreateSizeVar(2);
+  const af::Expression s1 = graph.CreateSizeVar(3);
+  const af::Expression s2 = graph.CreateSizeVar(5);
+  const af::Expression in0 = graph.CreateSizeVar(2);
+  const af::Expression in1 = graph.CreateSizeVar(4);
+  const af::Expression in2 = graph.CreateSizeVar(5);
+  const auto y0 = graph.CreateAxis("y0", s0);
+  const auto y1 = graph.CreateAxis("y1", s1);
+  const auto y2 = graph.CreateAxis("y2", s2);
+  const auto x0 = graph.CreateAxis("x0", in0);
+  const auto x1 = graph.CreateAxis("x1", in1);
+  const auto x2 = graph.CreateAxis("x2", in2);
+  const std::vector<af::AxisId> output_axes = {y0.id, y1.id, y2.id};
+  const std::vector<af::Expression> output_repeats = {s0, s1, s2};
+  const std::vector<af::Expression> output_strides = {s1 * s2, s2, af::sym::kSymbolOne};
+  const std::vector<af::AxisId> input_axes = {x0.id, x1.id, x2.id};
+  const std::vector<af::Expression> input_repeats = {in0, in1, in2};
+  const std::vector<af::Expression> input_strides = {in1 * in2, in2, af::sym::kSymbolOne};
+  const std::vector<af::Expression> reduce_repeats = {s0, s1, af::sym::kSymbolOne};
+  const std::vector<af::Expression> reduce_strides = {s1 * s2, s2, af::sym::kSymbolZero};
+
+  af::ascir_op::Data input0_data("dual_input0_data", graph);
+  input0_data.ir_attr.SetIndex(0);
+  SetNodeView(input0_data, af::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  af::ascir_op::Load input0_load("dual_input0_load");
+  input0_load.x = input0_data.y;
+  SetNodeView(input0_load, af::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  af::ascir_op::Data input1_data("dual_input1_data", graph);
+  input1_data.ir_attr.SetIndex(1);
+  SetNodeView(input1_data, af::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  af::ascir_op::Load input1_load("dual_input1_load");
+  input1_load.x = input1_data.y;
+  SetNodeView(input1_load, af::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  af::ascir_op::Data index_data("dual_index_data", graph);
+  index_data.ir_attr.SetIndex(2);
+  SetNodeView(index_data, af::DT_INT32, output_axes, output_repeats, output_strides);
+  af::ascir_op::Load index_load("dual_index_load");
+  index_load.x = index_data.y;
+  SetNodeView(index_load, af::DT_INT32, output_axes, output_repeats, output_strides);
+
+  af::ascir_op::IndirectLoad indirect_load0("dual_indirect_load0");
+  indirect_load0.x1 = input0_load.y;
+  indirect_load0.x2 = index_load.y;
+  indirect_load0.ir_attr.SetAxis(2);
+  SetNodeView(indirect_load0, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+  af::ascir_op::IndirectLoad indirect_load1("dual_indirect_load1");
+  indirect_load1.x1 = input1_load.y;
+  indirect_load1.x2 = index_load.y;
+  indirect_load1.ir_attr.SetAxis(2);
+  SetNodeView(indirect_load1, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+
+  af::ascir_op::Add merge_add("dual_merge_add");
+  merge_add.x1 = indirect_load0.y;
+  merge_add.x2 = indirect_load1.y;
+  SetVectorApi(merge_add);
+  SetNodeView(merge_add, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+
+  af::ascir_op::Max max_op("max");
+  max_op.x = merge_add.y;
+  max_op.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  SetNodeView(max_op, af::DT_FLOAT16, output_axes, reduce_repeats, reduce_strides);
+  af::ascir_op::Broadcast max_broadcast("max_broadcast");
+  max_broadcast.x = max_op.y;
+  SetNodeView(max_broadcast, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+  af::ascir_op::Sub sub_op("sub");
+  sub_op.x1 = merge_add.y;
+  sub_op.x2 = max_broadcast.y;
+  SetVectorApi(sub_op);
+  SetNodeView(sub_op, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+  af::ascir_op::Exp exp_op("exp");
+  exp_op.x = sub_op.y;
+  SetVectorApi(exp_op);
+  SetNodeView(exp_op, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+  af::ascir_op::Sum sum_op("sum");
+  sum_op.x = exp_op.y;
+  sum_op.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  SetNodeView(sum_op, af::DT_FLOAT16, output_axes, reduce_repeats, reduce_strides);
+  af::ascir_op::Broadcast sum_broadcast("sum_broadcast");
+  sum_broadcast.x = sum_op.y;
+  SetNodeView(sum_broadcast, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+  af::ascir_op::TrueDiv true_div("true_div");
+  true_div.x1 = exp_op.y;
+  true_div.x2 = sum_broadcast.y;
+  SetVectorApi(true_div);
+  SetNodeView(true_div, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+  af::ascir_op::Store store("store");
+  store.x = true_div.y;
+  SetNodeView(store, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
+  af::ascir_op::Output output("dual_output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  SetNodeView(output, af::DT_FLOAT16, output_axes, output_repeats, output_strides);
   return graph;
 }
 
@@ -3555,6 +3704,268 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherFusesSharedPostReduce) {
       EXPECT_NE(ascgen_utils::indirect_load::GetTemplateRole(store),
                 ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary);
     }
+  }
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSharedPostReduceUsesReduceSegmentAxesAndSeededViews) {
+  // [组路径 post-Reduce 轴结构 + 视图播种] 共享 Reduce 终端的 SIMT 组候选：boundary 覆写为
+  // first_reduce（outer=行 z2、inner=归约段 z3，行不被 BlockSplit 劈开）；成员 value tensor
+  // 的向量化视图按模板 vectorized 轴播种（actual_size 的来源——CalcVectorizedElementCount
+  // 读该视图，为空则恒为 1）；共享 Reduce 输入同样播种（SIMT 组分支此前缺失，扇出链视图与
+  // 模板轴系失配）。无共享 Reduce 的组保持 boundary=rank、成员视图为空（codegen 整核调用
+  // 形态），由本用例后半段锁定。graphs 取非 const（FindAxis 为非 const 成员，const vector
+  // 的 find_if 返回 const_iterator 会使 ->FindAxis 丢失限定符）。
+  DualGatherGraphOptions options;
+  options.with_post_reduce = true;
+  auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 4UL);
+  const auto simt_graph = std::find_if(graphs.begin(), graphs.end(), [](const af::AscGraph &candidate) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    return il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt;
+  });
+  ASSERT_NE(simt_graph, graphs.end());
+  const auto il0 = simt_graph->FindNode("dual_indirect_load0");
+  const auto il1 = simt_graph->FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  // boundary=first_reduce：inner=归约段轴（z3）。该图归约段后无 Retained 轴（AR 形态），
+  // solve_tile_size=true → 不预建固定 tile 轴（与单 gather AR 用例一致）。
+  ascgen_utils::indirect_load::TemplateAxes axes;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il0, axes), af::SUCCESS);
+  ASSERT_NE(axes.inner_axis, af::kIdNone);
+  ASSERT_NE(simt_graph->FindAxis(axes.inner_axis), nullptr);
+  EXPECT_EQ(simt_graph->FindAxis(axes.inner_axis)->name, "z3");
+  EXPECT_EQ(axes.tile_outer_axis, af::kIdNone);
+  EXPECT_EQ(axes.tile_inner_axis, af::kIdNone);
+  ASSERT_FALSE(axes.vectorized_axes.empty());
+  // 成员 value tensor 视图播种：vectorized 轴与模板一致（归约段成员轴）。
+  for (const af::AscNodePtr &member : {il0, il1}) {
+    const auto &value = member->outputs()[0]->attr;
+    EXPECT_EQ(value.vectorized_axis, axes.vectorized_axes);
+    ASSERT_EQ(value.vectorized_axis.size(), value.vectorized_strides.size());
+  }
+  // 共享 Reduce 输入（归并链输出）同样按模板 vectorized 轴播种。
+  const auto sum = simt_graph->FindNode("dual_sum");
+  ASSERT_NE(sum, nullptr);
+  EXPECT_EQ(sum->inputs[0].attr.vectorized_axis, axes.vectorized_axes);
+
+  // 无共享 Reduce 的组（默认形态）：boundary=rank（inner 为空）、成员 value 视图保持空
+  // （整核调用形态不依赖向量化视图）。
+  const auto bare_graphs = GenerateDualGatherCases();
+  ASSERT_EQ(bare_graphs.size(), 4UL);
+  const auto bare_simt = std::find_if(bare_graphs.begin(), bare_graphs.end(), [](const af::AscGraph &candidate) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    return il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt;
+  });
+  ASSERT_NE(bare_simt, bare_graphs.end());
+  const auto bare_il0 = bare_simt->FindNode("dual_indirect_load0");
+  ASSERT_NE(bare_il0, nullptr);
+  ascgen_utils::indirect_load::TemplateAxes bare_axes;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(bare_il0, bare_axes), af::SUCCESS);
+  EXPECT_EQ(bare_axes.inner_axis, af::kIdNone);
+  EXPECT_TRUE(bare_il0->outputs()[0]->attr.vectorized_axis.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherNormalizesAliasAxesForGroupFusion) {
+  // [组共享轴等价化] 第二路 output 使用独立副本轴（Broadcast 产物，同形不同 id）：
+  // 等价化归一到组共享轴后融合候选正常产出。归一后 primary 走模板轴合并
+  // （NormalizeSimtAxesForTemplate 的 BuildAxisViewByBoundary），非 primary 持有
+  // 组共享轴——两路输出视图轴 id 不同是设计预期（模板轴的 from 含组轴即覆盖）。
+  DualGatherGraphOptions options;
+  options.second_output_axis_alias = true;
+  // graphs 取非 const（FindAxis 为非 const 成员，const vector 的 find_if 返回
+  // const_iterator 会使 ->FindAxis 丢失限定符）。
+  auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 4UL);
+  const auto simt_graph = std::find_if(graphs.begin(), graphs.end(), [](const af::AscGraph &candidate) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    return il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt;
+  });
+  ASSERT_NE(simt_graph, graphs.end());
+  // 归一化后 il1 的 sched.axis 与 output view 均不再引用原始 z2_copy 轴——轴已被
+  // TryApplyAxisReplace 替换为组共享轴（sched.axis 与 output 同步改写）。
+  const auto il1 = simt_graph->FindNode("dual_indirect_load1");
+  ASSERT_NE(il1, nullptr);
+  const auto &il1_sched = il1->attr.sched.axis;
+  const auto &il1_output = il1->outputs()[0]->attr.axis;
+  for (const auto axis_id : il1_sched) {
+    const auto *axis = simt_graph->FindAxis(axis_id);
+    ASSERT_NE(axis, nullptr);
+    EXPECT_NE(axis->name, "z2_copy") << "sched.axis still references pre-normalization alias axis.";
+  }
+  for (const auto axis_id : il1_output) {
+    const auto *axis = simt_graph->FindAxis(axis_id);
+    ASSERT_NE(axis, nullptr);
+    EXPECT_NE(axis->name, "z2_copy") << "output view still references pre-normalization alias axis.";
+  }
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, NormalizeMemberAxesReplacesAliasAxis) {
+  // [组共享轴等价化] 直测 NormalizeMemberAxes：第二路 dim0 为同形副本轴（z2_copy）时，
+  // 两路 dim0 应被替换为同一根新建组共享轴（sched.axis 与 output 视图同步改写），
+  // 同 id 维（dim1 的 z3）不建组轴、保持原轴。锁死"split 判据恒真导致归一化空跑"回归。
+  DualGatherGraphOptions options;
+  options.second_output_axis_alias = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  const auto il0 = graph.FindNode("dual_indirect_load0");
+  const auto il1 = graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  const auto il0_dim0_before = il0->outputs()[0]->attr.axis[0];
+  const auto il1_dim0_before = il1->outputs()[0]->attr.axis[0];
+  const auto il1_dim1_before = il1->outputs()[0]->attr.axis[1];
+  ASSERT_NE(il0_dim0_before, il1_dim0_before);
+  bool is_legal = false;
+  ASSERT_EQ(ascgen_utils::indirect_load::NormalizeMemberAxes(graph, {il0, il1}, is_legal), af::SUCCESS);
+  EXPECT_TRUE(is_legal);
+  const auto il0_dim0_after = il0->outputs()[0]->attr.axis[0];
+  const auto il1_dim0_after = il1->outputs()[0]->attr.axis[0];
+  EXPECT_EQ(il0_dim0_after, il1_dim0_after) << "both members should share the new group axis at dim0.";
+  EXPECT_NE(il0_dim0_after, il0_dim0_before) << "primary dim0 should be replaced by the group axis.";
+  EXPECT_NE(il1_dim0_after, il1_dim0_before) << "member dim0 should be replaced by the group axis.";
+  const auto *group_axis = graph.FindAxis(il1_dim0_after);
+  ASSERT_NE(group_axis, nullptr);
+  EXPECT_NE(group_axis->name, "z2_copy");
+  EXPECT_NE(group_axis->name, "z2");
+  EXPECT_EQ(il1->outputs()[0]->attr.axis[1], il1_dim1_before) << "same-id dim should keep its original axis.";
+  EXPECT_EQ(il1->attr.sched.axis[0], il1_dim0_after) << "sched.axis should be rewritten in sync.";
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, NormalizeMemberAxesRejectsStrideMismatch) {
+  // [组共享轴等价化] 直测拒绝路径：第二路 dim0 为副本轴且 stride 不同（s3b vs s3）——
+  // 视图步长不等价，归一化拒绝（is_legal=false），两路视图保持原状。
+  DualGatherGraphOptions options;
+  options.second_output_axis_alias = true;
+  options.second_output_axis_stride_mismatch = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  const auto il0 = graph.FindNode("dual_indirect_load0");
+  const auto il1 = graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  const auto il0_dim0_before = il0->outputs()[0]->attr.axis[0];
+  const auto il1_dim0_before = il1->outputs()[0]->attr.axis[0];
+  bool is_legal = true;
+  ASSERT_EQ(ascgen_utils::indirect_load::NormalizeMemberAxes(graph, {il0, il1}, is_legal), af::SUCCESS);
+  EXPECT_FALSE(is_legal);
+  EXPECT_EQ(il0->outputs()[0]->attr.axis[0], il0_dim0_before) << "rejected pass must not touch member views.";
+  EXPECT_EQ(il1->outputs()[0]->attr.axis[0], il1_dim0_before) << "rejected pass must not touch member views.";
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, NormalizeMemberAxesTreatsSameNamedSizeVarsEquivalent) {
+  // [组共享轴等价化·动态 shape] 副本轴尺寸用独立新建的同名 SizeVar（模拟前端两个子图
+  // 各自建符——同名不同对象）：符号引擎按名判等（StaticCheckEq kTrue），等价化照常把
+  // 两路 dim0 替换为同一根组共享轴——同名不同对象不得误判不等价而拒绝候选。
+  DualGatherGraphOptions options;
+  options.second_output_axis_alias = true;
+  options.second_output_axis_alias_independent_sizevar = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  const auto il0 = graph.FindNode("dual_indirect_load0");
+  const auto il1 = graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  const auto il1_dim0_before = il1->outputs()[0]->attr.axis[0];
+  bool is_legal = false;
+  ASSERT_EQ(ascgen_utils::indirect_load::NormalizeMemberAxes(graph, {il0, il1}, is_legal), af::SUCCESS);
+  EXPECT_TRUE(is_legal);
+  const auto il1_dim0_after = il1->outputs()[0]->attr.axis[0];
+  EXPECT_EQ(il0->outputs()[0]->attr.axis[0], il1_dim0_after) << "same-named SizeVars must normalize to one group axis.";
+  EXPECT_NE(il1_dim0_after, il1_dim0_before) << "alias axis should be replaced by the group axis.";
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, NormalizeMemberAxesRejectsSplitTypedMemberAxis) {
+  // [组共享轴等价化·成员侧 split 防御] 第二路 dim0 副本轴携带分 tile 类型（尺寸/步长
+  // 等价）：成员侧 split 轴携带切分语义，不可替换为普通组共享轴——归一化拒绝候选
+  // （is_legal=false）。拒绝为原子操作（逐成员预检先于任何替换），两路视图保持原状。
+  DualGatherGraphOptions options;
+  options.second_output_axis_split_typed = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  const auto il0 = graph.FindNode("dual_indirect_load0");
+  const auto il1 = graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  const auto il0_dim0_before = il0->outputs()[0]->attr.axis[0];
+  const auto il1_dim0_before = il1->outputs()[0]->attr.axis[0];
+  ASSERT_NE(il0_dim0_before, il1_dim0_before);
+  bool is_legal = true;
+  ASSERT_EQ(ascgen_utils::indirect_load::NormalizeMemberAxes(graph, {il0, il1}, is_legal), af::SUCCESS);
+  EXPECT_FALSE(is_legal);
+  EXPECT_EQ(il0->outputs()[0]->attr.axis[0], il0_dim0_before) << "rejected pass must not touch member views.";
+  EXPECT_EQ(il1->outputs()[0]->attr.axis[0], il1_dim0_before) << "rejected pass must not touch member views.";
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, NormalizeMemberAxesRejectsSplitTypedPrimaryAxis) {
+  // [组共享轴等价化·split 双侧统一] 第一路 dim0 轴携带分 tile 类型（成员为普通轴）：
+  // primary 侧 split 与成员侧同口径拒绝候选——不再静默跳过（跳过会把切分轴留给模板
+  // 轴合并吞并）。拒绝为原子操作，两路视图保持原状。
+  DualGatherGraphOptions options;
+  options.first_output_axis_split_typed = true;
+  auto graph = BuildDualIndirectLoadGraph(options);
+  const auto il0 = graph.FindNode("dual_indirect_load0");
+  const auto il1 = graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  const auto il0_dim0_before = il0->outputs()[0]->attr.axis[0];
+  const auto il1_dim0_before = il1->outputs()[0]->attr.axis[0];
+  ASSERT_NE(il0_dim0_before, il1_dim0_before);
+  bool is_legal = true;
+  ASSERT_EQ(ascgen_utils::indirect_load::NormalizeMemberAxes(graph, {il0, il1}, is_legal), af::SUCCESS);
+  EXPECT_FALSE(is_legal);
+  EXPECT_EQ(il0->outputs()[0]->attr.axis[0], il0_dim0_before) << "rejected pass must not touch member views.";
+  EXPECT_EQ(il1->outputs()[0]->attr.axis[0], il1_dim0_before) << "rejected pass must not touch member views.";
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSoftmaxPostGroupAppliesDedicatedSoftmax) {
+  // [组共享 post-Softmax 特判] 双 gather 经 ele 归并后接尾轴 Softmax pattern：候选内
+  // pattern 规范化命中（回溯链穿过归并 Add 到达 primary 输出），组 SIMT 走 Softmax 特判
+  // ——boundary 覆写为 softmax 输入 rank-1（outer=保留轴/inner=尾轴 R），tile 行数交调度
+  // 期求解（不预建固定 pair），Softmax 输入与全组成员 value tensor 视图按模板内轴播种。
+  auto graph = BuildDualIndirectLoadSoftmaxPostGraph();
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> candidates;
+  std::vector<std::string> score_functions;
+  EXPECT_EQ(generator.Generate(graph, candidates, score_functions), af::SUCCESS);
+  const auto simt_graph = std::find_if(candidates.begin(), candidates.end(), [](const af::AscGraph &candidate) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    return il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt;
+  });
+  ASSERT_NE(simt_graph, candidates.end());
+  const auto softmax = simt_graph->FindNode("true_div_softmax");
+  ASSERT_NE(softmax, nullptr);
+  EXPECT_EQ(simt_graph->FindNode("true_div"), nullptr) << "original softmax pattern chain must be replaced.";
+  const auto il0 = simt_graph->FindNode("dual_indirect_load0");
+  const auto il1 = simt_graph->FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  ascgen_utils::indirect_load::TemplateAxes axes;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(il0, axes), af::SUCCESS);
+  // boundary = softmax 输入 rank-1：outer=[y0,y1] 合并、inner=y2（尾轴 R）单轴。
+  const auto *inner = simt_graph->FindAxis(axes.inner_axis);
+  ASSERT_NE(inner, nullptr);
+  EXPECT_EQ(inner->name, "y2");
+  EXPECT_EQ(axes.vectorized_axes, std::vector<af::AxisId>({axes.inner_axis}));
+  // Softmax 特判开多行求解：tile pair 不预建。
+  EXPECT_EQ(axes.tile_outer_axis, af::kIdNone);
+  EXPECT_EQ(axes.tile_inner_axis, af::kIdNone);
+  // Softmax 输入（归并 Add 输出视图）与两路成员 value 视图按模板内轴播种。
+  EXPECT_EQ(softmax->inputs()[0]->attr.vectorized_axis, axes.vectorized_axes);
+  EXPECT_EQ(il0->outputs()[0]->attr.vectorized_axis, axes.vectorized_axes);
+  EXPECT_EQ(il1->outputs()[0]->attr.vectorized_axis, axes.vectorized_axes);
+  EXPECT_FALSE(il1->outputs()[0]->attr.vectorized_strides.empty());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherRejectsSizeMismatchAxes) {
+  // [组共享轴等价化] 第二路 output 轴尺寸与第一路不同（不同索引空间）：
+  // 等价化正确拒绝。锁定拒绝路径：候选少于 4 个 + 所有产出的候选均非 SIMD/SIMT。
+  DualGatherGraphOptions options;
+  options.second_output_axis_size_mismatch = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  EXPECT_LT(graphs.size(), 4UL) << "size mismatch should reduce candidate count.";
+  for (const auto &candidate : graphs) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    ASSERT_NE(il0, nullptr);
+    const auto template_id = ascir::GetTemplateIdOrDefault(*il0);
+    EXPECT_NE(template_id, ascir::TemplateId::kIndirectLoadSimt) << "SIMT candidate should be rejected.";
+    EXPECT_NE(template_id, ascir::TemplateId::kIndirectLoadSimd) << "SIMD candidate should be rejected.";
   }
 }
 
@@ -3982,6 +4393,28 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSkBridgeFallbackSegmentsM
     const bool has_il1 = segment.FindNode("dual_indirect_load1") != nullptr;
     EXPECT_FALSE(has_il0 && has_il1);
   }
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherReduceBeforeGatherAxisSkipsNonSkCandidates) {
+  // [R-before-gather-axis 门控] 共享 post Reduce 归约外轴（R>G 布局）且 index 链干净
+  // （无非法外部消费者——区别于 MultiGatherSkBridgeFallbackSegmentsMembers 的否决路径）：
+  // 与单 gather 路径同口径，SIMD/SIMT 组候选在候选循环直接跳过——SIMT 组路径的
+  // boundary/窗口语义对"归约段位于 gather 轴之前"不可用（组员计划收窄使 post_reduce
+  // 置空，codegen 期 GetPostReduceConsumer 在当前图重判为有——两侧判定分裂会使 fused
+  // 表达式分支按 post-Reduce 形态取成员 value tensor 而硬失败）。仅 SK 分段桥接候选产出；
+  // 混模板候选因 SIMD 逐成员布局必拒、全组退化为同构 SIMT 而自然跳过。
+  DualGatherGraphOptions options;
+  options.with_post_reduce = true;
+  options.reduce_outer = true;
+  const auto graphs = GenerateDualGatherCases(options);
+  ASSERT_EQ(graphs.size(), 1UL);
+  const auto &sk_graph = graphs[0];
+  const auto il0 = sk_graph.FindNode("dual_indirect_load0");
+  const auto il1 = sk_graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(il0, nullptr);
+  ASSERT_NE(il1, nullptr);
+  EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il0), ascir::TemplateId::kIndirectLoadSK);
+  EXPECT_EQ(ascir::GetTemplateIdOrDefault(*il1), ascir::TemplateId::kIndirectLoadSK);
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSkBridgeRejectsOneByteValueMembers) {

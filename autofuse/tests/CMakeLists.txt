@@ -567,3 +567,6 @@ endforeach()
 if (IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/v35")
     add_subdirectory(v35)
 endif()
+
+include(${CODE_ROOT_DIR}/att/cmake/axes_solver_resources.cmake)
+target_link_libraries(att PRIVATE att_axes_solver_resources)

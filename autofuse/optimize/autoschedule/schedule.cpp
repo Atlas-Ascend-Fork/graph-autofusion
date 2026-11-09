@@ -771,26 +771,10 @@ Status Scheduler::ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &sk
       // 等节点可能持有独立副本轴（如 z*_index，仅与输出轴同形不同 id），部分匹配时
       // ApplySchedAxisMerge 的连续性断言会失败。此时保持节点原视图（与主线路径行为
       // 一致：这些节点不参与模板轴折叠，由消费者侧 BroadcastBackward 等统一处理）。
-      const auto sched_has_all_members = [&graph = this->graph_](const af::AscNodePtr &n,
-                                                                 const ascir::AxisId merged_axis_id) {
-        if (merged_axis_id == af::kIdNone) {
-          return true;
-        }
-        const auto merged_axis = graph.FindAxis(merged_axis_id);
-        if (merged_axis == nullptr || merged_axis->from.empty()) {
-          return true;
-        }
-        for (const auto member : merged_axis->from) {
-          if (std::find(n->attr.sched.axis.begin(), n->attr.sched.axis.end(), member) == n->attr.sched.axis.end()) {
-            return false;
-          }
-        }
-        return true;
-      };
-      if (sched_has_all_members(node, indirect_load_info_.axes.outer_axis)) {
+      if (ascgen_utils::indirect_load::GroupAxesCoverable(graph_, node, indirect_load_info_.axes.outer_axis)) {
         GE_ASSERT_SUCCESS(ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.outer_axis, true));
       }
-      if (sched_has_all_members(node, indirect_load_info_.axes.inner_axis)) {
+      if (ascgen_utils::indirect_load::GroupAxesCoverable(graph_, node, indirect_load_info_.axes.inner_axis)) {
         GE_ASSERT_SUCCESS(ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.inner_axis, false));
       }
       // SIMT 节点跳过主 tiling，其 tensor view 的 split 同步与 vectorized_axis 重映射
@@ -811,6 +795,71 @@ Status Scheduler::ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &sk
   // 将保留的 batch 轴强制置 1 会使输入/输出视图不一致，Mean 据此误把 batch 计入归约除数。
   return af::SUCCESS;
 }
+
+// [节点级向量化视图推导] candidate = node_vectorized_axes 与本节点输出 attr.axis
+// 的交集（保持 node_vectorized_axes 相对序）；结果为空且视图非空时按视图重播种（单位
+// stride 轴优先，否则最后的非零 stride 轴）；仍为空（全零 stride 的全广播视图）时取
+// 尾轴兜底——保持"非空视图 ⇒ 非空 vectorized"不变量（下游 ReduceAlignmentInferFunc
+// 首句断言非空），尾轴 stride=0 会被其判为 kNotAligned，语义明确。空视图（输出本身
+// 标量/无轴）仍返回空。不过滤归约轴（stride=0/repeat=1）——reduce 输出上的归约轴是
+// 合法视图（ReduceAlignmentInferFunc 用 .back() 的 stride 判定对齐类型），过滤会改变
+// 下游对齐语义。组员 value tensor 的补写同用此推导。
+namespace {
+std::vector<ascir::AxisId> DeriveNodeVectorizedAxes(const af::AscTensorAttr &attr,
+                                                    const std::vector<ascir::AxisId> &node_vectorized_axes) {
+  std::vector<ascir::AxisId> derived;
+  derived.reserve(node_vectorized_axes.size());
+  for (const auto axis_id : node_vectorized_axes) {
+    if (std::find(attr.axis.begin(), attr.axis.end(), axis_id) == attr.axis.end()) {
+      continue;  // 陈旧轴（已被 merge/reduce 收缩）——求交过滤
+    }
+    derived.emplace_back(axis_id);
+  }
+  if (derived.empty() && !attr.axis.empty()) {
+    for (size_t pos = 0UL; pos < attr.axis.size(); ++pos) {
+      if (pos < attr.strides.size() &&
+          af::SymbolicUtils::StaticCheckEq(attr.strides[pos], af::sym::kSymbolOne) == af::TriBool::kTrue) {
+        derived.emplace_back(attr.axis[pos]);
+      }
+    }
+    if (derived.empty()) {
+      for (size_t pos = attr.axis.size(); pos > 0UL; --pos) {
+        const size_t dim = pos - 1UL;
+        if (dim >= attr.strides.size() ||
+            af::SymbolicUtils::StaticCheckEq(attr.strides[dim], af::sym::kSymbolZero) != af::TriBool::kTrue) {
+          derived.emplace_back(attr.axis[dim]);
+          break;
+        }
+      }
+    }
+    if (derived.empty()) {
+      // 全零 stride（全广播视图）兜底取尾轴：非空视图 ⇒ 非空 vectorized，尾轴 stride=0
+      // 由 ReduceAlignmentInferFunc 判为 kNotAligned（保守标量路径），语义明确不崩溃。
+      derived.emplace_back(attr.axis.back());
+      GELOGW("[TileSplit] Node output view has no vectorizable axis (all zero strides), fallback to tail axis[%ld].",
+             attr.axis.back());
+    }
+  }
+  return derived;
+}
+
+std::vector<af::Expression> CollectVectorizedStrides(const af::AscTensorAttr &attr) {
+  std::vector<af::Expression> strides;
+  if (attr.axis.size() != attr.strides.size()) {
+    return strides;
+  }
+  strides.reserve(attr.vectorized_axis.size());
+  for (const auto axis_id : attr.vectorized_axis) {
+    const auto iter = std::find(attr.axis.begin(), attr.axis.end(), axis_id);
+    if (iter == attr.axis.end()) {
+      continue;
+    }
+    strides.emplace_back(attr.strides[static_cast<size_t>(std::distance(attr.axis.begin(), iter))]);
+  }
+  return strides;
+}
+
+}  // namespace
 
 std::vector<ascir::AxisId> Scheduler::GetSortedNodeVectorizedAxes(Scheduler &scheduler) {
   std::vector<ascir::AxisId> vectorized_axes;
@@ -883,14 +932,38 @@ Status Scheduler::TileSplit() {
       }
     }
 
-    // 非reduce场景应该将向量化轴调整为tensor中的相对顺序, 带reduce场景由于tiling策略已经做了特别的reorder,需要跳过
-    // tiling策略暂时无法支持具有reduce和transpose融合的场景
+    // [节点级向量化视图推导] 任何节点输出的 vectorized_axis 必须是该节点自身 attr.axis 的
+    // 子集、由该节点自己的视图语义决定——全图级列表（含模板轴/求解 TileInner）直接整块回
+    // 写会把已被 merge/reduce 收缩掉的陈旧轴 id 写进输出视图（ReduceAlignmentInferFunc 取
+    // .back() 后 find 不到即硬断言），同时冲掉 MergeContinuousAxis 已完成的节点级重映射。
+    // 推导规则：求交保序（仅去陈旧轴，不过滤归约轴——reduce 输出的归约轴 stride=0 是合法
+    // 视图，ReduceAlignmentInferFunc 用 .back() 的 stride 判定对齐类型，过滤会改变下游语义）；
+    // 空则按视图重播种（单位 stride 轴优先，否则最后的非零 stride 轴）。排序条件保持图级
+    // has_reduce（既有行为不变）。
     for (auto &output : node->outputs()) {
       if (indirect_load_info_.active &&
           ascgen_utils::indirect_load::GetTemplateBehavior(node).preserves_vectorized_axis) {
+        // [组成员 value tensor 的 k×R 窗口] 单 gather 的 IL 输出经输出重定向绑定为普通节点
+        // 的输出 tensor（redirected id），全局写入把 [k, R]（含求解 TileInner）写进该 tensor
+        // 视图、actual_size = k × R；多 gather 组员无此绑定（自身输出即 value tensor，被
+        // preserves 跳过）——有共享 Reduce 终端的组员在此显式补写（镜像重定向效果）。无
+        // Reduce 的组员保持空视图（codegen 整核调用形态不依赖向量化视图）。
+        // 无条件覆盖（不做 already_written 判定）：任务生成期的 SeedGroupMemberValue
+        // VectorizedViews 已写入 R 轴，这些轴在全局列表中会导致守卫恒 true，但调度期
+        // 求解出的 TileInner（k）尚未在视图内——必须覆盖写入才能使 actual_size = k×R。
+        // 覆盖值与 value 视图 attr.axis 求交（DeriveNodeVectorizedAxes）：过滤已被
+        // merge/reduce 收缩的陈旧轴、保持全局相对序，保证 vectorized ⊆ axis 且
+        // strides 与 vectorized_axis 一一对应；ApplyTiling 已先于本分支对该节点执行过
+        // ApplySplit，TileInner 必在 value 视图内，求交不会丢 k。
+        if (ascgen_utils::indirect_load::IsSimtGroupMember(node) &&
+            ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr && !node_vectorized_axes.empty()) {
+          auto &value = output->attr;
+          value.vectorized_axis = DeriveNodeVectorizedAxes(value, node_vectorized_axes);
+          value.vectorized_strides = CollectVectorizedStrides(value);
+        }
         continue;
       }
-      output->attr.vectorized_axis = node_vectorized_axes;
+      output->attr.vectorized_axis = DeriveNodeVectorizedAxes(output->attr, node_vectorized_axes);
       if (!has_reduce) {
         auto tensor_axis = output->attr.axis;
         std::sort(output->attr.vectorized_axis.begin(), output->attr.vectorized_axis.end(),

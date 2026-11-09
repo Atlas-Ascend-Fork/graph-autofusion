@@ -149,8 +149,8 @@ REG_ASC_IR(Broadcast)
     .ComputeType(ComputeType::kComputeBroadcast)
     .Impl(v1_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::BroadcastAscIrAttImpl>(),
                             af::ascir::AscIrImplCreator<af::ascir::BroadcastAscIrCodegenImpl>(),
-                            {{"T", TensorType{DT_UINT8, DT_INT16, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_INT8, DT_UINT16,
-                                              DT_UINT32, DT_UINT64, DT_INT64}}}});
+                            {{"T", TensorType{DT_UINT8, DT_INT16, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_INT8,
+                                              DT_UINT16, DT_UINT32, DT_UINT64, DT_INT64}}}});
 
 REG_ASC_IR(RemovePad)
     .Input("x", "T")
@@ -184,15 +184,44 @@ REG_ASC_IR(Nop)
  * T2:DT_FLOAT, DT_UINT8, DT_FLOAT16, DT_UINT64,
  */
 constexpr std::pair<ge::DataType, ge::DataType> kCastTypePairs[] = {
-    {DT_FLOAT, DT_FLOAT},   {DT_FLOAT, DT_FLOAT16}, {DT_FLOAT, DT_INT64},   {DT_FLOAT, DT_INT32},
-    {DT_FLOAT, DT_INT16},   {DT_FLOAT, DT_BF16},    {DT_FLOAT16, DT_FLOAT}, {DT_FLOAT16, DT_INT32},
-    {DT_FLOAT16, DT_INT16}, {DT_FLOAT16, DT_INT8},  {DT_FLOAT16, DT_UINT8}, {DT_FLOAT16, DT_INT4},
-    {DT_FLOAT16, DT_INT64}, {DT_INT4, DT_FLOAT16},  {DT_UINT8, DT_FLOAT16}, {DT_UINT8, DT_FLOAT},
-    {DT_UINT8, DT_INT32},   {DT_UINT8, DT_INT16},   {DT_UINT8, DT_INT8},    {DT_UINT8, DT_INT4},
-    {DT_INT8, DT_FLOAT16},  {DT_INT8, DT_UINT8},    {DT_INT16, DT_FLOAT16}, {DT_INT16, DT_FLOAT},
-    {DT_INT16, DT_UINT16},  {DT_INT32, DT_FLOAT},   {DT_INT32, DT_INT64},   {DT_INT32, DT_INT16},
-    {DT_INT32, DT_FLOAT16}, {DT_INT32, DT_UINT32},  {DT_INT64, DT_INT32},   {DT_BF16, DT_FLOAT},
-    {DT_BF16, DT_INT32},    {DT_UINT32, DT_INT32},  {DT_UINT16, DT_INT16},  {DT_UINT64, DT_INT64},
+    {DT_FLOAT, DT_FLOAT},
+    {DT_FLOAT, DT_FLOAT16},
+    {DT_FLOAT, DT_INT64},
+    {DT_FLOAT, DT_INT32},
+    {DT_FLOAT, DT_INT16},
+    {DT_FLOAT, DT_BF16},
+    {DT_FLOAT16, DT_FLOAT},
+    {DT_FLOAT16, DT_INT32},
+    {DT_FLOAT16, DT_INT16},
+    {DT_FLOAT16, DT_INT8},
+    {DT_FLOAT16, DT_UINT8},
+    {DT_FLOAT16, DT_INT4},
+    {DT_FLOAT16, DT_INT64},
+    {DT_INT4, DT_FLOAT16},
+    {DT_UINT8, DT_FLOAT16},
+    {DT_UINT8, DT_FLOAT},
+    {DT_UINT8, DT_INT32},
+    {DT_UINT8, DT_INT16},
+    {DT_UINT8, DT_INT8},
+    {DT_UINT8, DT_INT4},
+    // uint8 -> int64 由 AscendC CastExtend 通过 half、float 两个中间类型实现。
+    {DT_UINT8, DT_INT64},
+    {DT_INT8, DT_FLOAT16},
+    {DT_INT8, DT_UINT8},
+    {DT_INT16, DT_FLOAT16},
+    {DT_INT16, DT_FLOAT},
+    {DT_INT16, DT_UINT16},
+    {DT_INT32, DT_FLOAT},
+    {DT_INT32, DT_INT64},
+    {DT_INT32, DT_INT16},
+    {DT_INT32, DT_FLOAT16},
+    {DT_INT32, DT_UINT32},
+    {DT_INT64, DT_INT32},
+    {DT_BF16, DT_FLOAT},
+    {DT_BF16, DT_INT32},
+    {DT_UINT32, DT_INT32},
+    {DT_UINT16, DT_INT16},
+    {DT_UINT64, DT_INT64},
 };
 REG_ASC_IR(Cast)
     .Input("x", "T1")
@@ -496,26 +525,26 @@ REG_ASC_IR(Remainder)
                             af::ascir::AscIrImplCreator<af::ascir::RemainderAscIrCodegenImpl>(),
                             {{"T", TensorType{DT_FLOAT, DT_INT32}}}});
 // todo:LogicalOr DT_INT64 后面根据需要放开
+// int64 输入由底层 Duplicate/逻辑运算实现支持后，开放对应的 AscIR 类型白名单。
 REG_ASC_IR(LogicalOr)
     .Input("x1", "T1")
     .Input("x2", "T1")
     .Output("y", "T2")
     .ComputeType(ComputeType::kComputeElewise)
-    .Impl(v1_soc_versions,
-          {af::ascir::AscIrImplCreator<af::ascir::LogicalOrAscIrAttImpl>(),
-           af::ascir::AscIrImplCreator<af::ascir::LogicalOrAscIrCodegenImpl>(),
-           {{"T1", TensorType{DT_INT16, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_UINT8}}, {"T2", TensorType{DT_UINT8}}}});
+    .Impl(v1_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::LogicalOrAscIrAttImpl>(),
+                            af::ascir::AscIrImplCreator<af::ascir::LogicalOrAscIrCodegenImpl>(),
+                            {{"T1", TensorType{DT_INT16, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_UINT8, DT_INT64}},
+                             {"T2", TensorType{DT_UINT8}}}});
 
-// todo:LogicalAnd DT_INT64 后面根据需要放开
 REG_ASC_IR(LogicalAnd)
     .Input("x1", "T1")
     .Input("x2", "T1")
     .Output("y", "T2")
     .ComputeType(ComputeType::kComputeElewise)
-    .Impl(v1_soc_versions,
-          {af::ascir::AscIrImplCreator<af::ascir::LogicalAndAscIrAttImpl>(),
-           af::ascir::AscIrImplCreator<af::ascir::LogicalAndAscIrCodegenImpl>(),
-           {{"T1", TensorType{DT_INT16, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_UINT8}}, {"T2", TensorType{DT_UINT8}}}});
+    .Impl(v1_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::LogicalAndAscIrAttImpl>(),
+                            af::ascir::AscIrImplCreator<af::ascir::LogicalAndAscIrCodegenImpl>(),
+                            {{"T1", TensorType{DT_INT16, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_UINT8, DT_INT64}},
+                             {"T2", TensorType{DT_UINT8}}}});
 
 REG_ASC_IR(Pow)
     .Input("x1", "T")

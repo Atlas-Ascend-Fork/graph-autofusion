@@ -448,13 +448,41 @@ inline __aicore__ void BroadcastInt64LastDim(const LocalTensor<int32_t> &dst_int
   }
 }
 
+// 当内轴长度不是一个完整数据块时，按标量逐个复制 int64 行。
+// CopyRepeatParams 只能表达完整数据块的步长，直接使用会漏掉尾部元素，
+// 或者把地址推进到错误的行。
+template <typename T>
+inline __aicore__ void BroadcastInt64MiddleDimUnaligned(const LocalTensor<T> &dst, const LocalTensor<T> &src,
+                                                        const uint32_t src_m, const uint32_t src_z,
+                                                        const uint32_t dst_k, const uint32_t dst_z) {
+  // 标量读写与向量流水线之间需要同步，保证前序向量操作已经完成。
+  auto event_id_v_to_s = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+  auto event_id_s_to_v = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+  AscendC::SetFlag<HardEvent::V_S>(event_id_v_to_s);
+  AscendC::WaitFlag<HardEvent::V_S>(event_id_v_to_s);
+  for (uint32_t i = 0; i < src_m; ++i) {
+    const uint32_t src_row_offset = i * src_z;
+    const uint32_t dst_base_offset = i * dst_k * dst_z;
+    for (uint32_t j = 0; j < dst_k; ++j) {
+      for (uint32_t k = 0; k < src_z; ++k) {
+        dst.SetValue(dst_base_offset + j * dst_z + k, src.GetValue(src_row_offset + k));
+      }
+    }
+  }
+  AscendC::SetFlag<HardEvent::S_V>(event_id_s_to_v);
+  AscendC::WaitFlag<HardEvent::S_V>(event_id_s_to_v);
+}
+
 template <typename T>
 inline __aicore__ void BroadcastInt64(const LocalTensor<T> &dst, const LocalTensor<T> &src, const uint32_t src_m,
                                       const uint32_t src_k, const uint32_t src_z, const uint32_t dst_m,
                                       const uint32_t dst_k, const uint32_t dst_z, LocalTensor<uint8_t> &tmp_buf,
                                       const uint32_t last_dim_stride = 1) {
   if (src_z != dst_z) {
-    ASSERT(false && "Broadcast inner_axis mismatch is not supported.");
+    // ASSERT 在 release 下为空宏，这里补一条错误日志避免静默不写数据
+    KERNEL_LOG(KERNEL_ERROR, "BroadcastInt64 inner_axis mismatch is not supported, src_z %u, dst_z %u.", src_z, dst_z);
+    ASSERT(false);
+    return;
   }
   LocalTensor<int32_t> dst_int32 = dst.template ReinterpretCast<int32_t>();
   LocalTensor<int32_t> src_int32 = src.template ReinterpretCast<int32_t>();
@@ -485,16 +513,18 @@ inline __aicore__ void BroadcastInt64(const LocalTensor<T> &dst, const LocalTens
       }
       AscendC::SetMaskNorm();
       AscendC::ResetMask();
-    } else {  // (A,1,C) -> (A,B,C)
-      uint32_t dst_offset = 0;
-      uint32_t src_offset = 0;
-      const uint32_t src_inner_offset = inner_offset * kRatio;
-      for (int i = 0; i < src_m; i++) {
-        const uint32_t dst_shape[2]{dst_k, dst_z * kRatio};
-        const uint32_t src_shape[2]{src_k, src_z * kRatio};
-        AscendC::Broadcast<int32_t, 2, 0>(dst_int32[dst_offset], src_int32[src_offset], dst_shape, src_shape, tmp_buf);
-        dst_offset += dst_inner_offset;
-        src_offset += src_inner_offset;
+    } else {  // (A,1,C) -> (A,B,C)：按 int32 视图逐行复制，与 BroadcastCommon 保持相同布局
+      const uint32_t src_inner_offset = src_z * kRatio;
+      constexpr uint32_t one_blk_num = ONE_BLK_SIZE / sizeof(int32_t);
+      if (src_inner_offset % one_blk_num == 0) {
+        // 内轴已按块对齐，可以使用高效的向量广播实现。
+        for (uint32_t i = 0; i < src_m; i++) {
+          BroadcastMiddleDim(dst_int32[i * dst_inner_offset], src_int32[i * src_inner_offset], src_k, src_inner_offset,
+                             0, dst_k, src_inner_offset, 0, tmp_buf);
+        }
+      } else {
+        // 内轴未对齐时改用标量路径，确保尾部元素和行步长都正确。
+        BroadcastInt64MiddleDimUnaligned(dst, src, src_m, src_z, dst_k, dst_z);
       }
     }
   } else if (src_k == 1 && src_m == 1 && src_z == 0 && dst_z == 0) {  // (1,1) -> (A,B)
@@ -504,7 +534,9 @@ inline __aicore__ void BroadcastInt64(const LocalTensor<T> &dst, const LocalTens
     AscendC::WaitFlag<HardEvent::S_V>(event_id);
     Duplicate(dst, scalarVlue, dst_m * dst_k, tmp_buf);
   } else {
-    ASSERT(false && "Broadcast size is not supported.");
+    KERNEL_LOG(KERNEL_ERROR, "BroadcastInt64 size is not supported, src %ux%ux%u -> dst %ux%ux%u.", src_m, src_k, src_z,
+               dst_m, dst_k, dst_z);
+    ASSERT(false);
   }
 }
 
@@ -517,10 +549,11 @@ inline __aicore__ void Broadcast(const LocalTensor<T> &dst, const LocalTensor<T>
     BroadcastInt64(dst, src, src_m, src_k, src_z, dst_m, dst_k, dst_z, tmp_buf, last_dim_stride);
   } else if constexpr (AscendC::SupportType<T, uint8_t, int8_t>()) {
     BroadcastWithCast(dst, src, src_m, src_k, src_z, dst_m, dst_k, dst_z, tmp_buf, last_dim_stride);
-  } else if constexpr (AscendC::SupportType<T, int16_t, uint16_t, half, float, int32_t, uint32_t>()) {
+  } else if constexpr (AscendC::SupportType<T, int16_t, uint16_t, half, float, bfloat16_t, int32_t, uint32_t>()) {
     BroadcastCommon(dst, src, src_m, src_k, src_z, dst_m, dst_k, dst_z, tmp_buf, last_dim_stride);
   } else {
-    ASSERT(false && "Broadcast type is not supported.");
+    KERNEL_LOG(KERNEL_ERROR, "Broadcast type is not supported.");
+    ASSERT(false);
   }
 }
 
@@ -546,7 +579,8 @@ inline __aicore__ void Broadcast(const LocalTensor<T> &dst, const LocalTensor<T>
     // (A, 1, AB) -> (A, B, AB)
     Broadcast(dst, inter_buf, src_m, 1, dst_k * dst_z, dst_m, dst_n, dst_k * dst_z, left_buf);
   } else {
-    ASSERT(false && "Broadcast type is not supported.");
+    KERNEL_LOG(KERNEL_ERROR, "Broadcast type is not supported.");
+    ASSERT(false);
   }
 }
 

@@ -24,6 +24,7 @@
 #include "gtest/gtest.h"
 #include "base/base_types.h"
 #include "generator/solver_pass/axes_reorder_solver_code.h"
+#include "axes_solver_resources.h"
 #define private public
 #include "generator/solver_pass_gen/axes_reorder_solver/axes_reorder_solver_gen.h"
 #include "test_common_utils.h"
@@ -97,7 +98,7 @@ bool RunCommand(const std::vector<std::string> &args, uint32_t timeout_seconds) 
   }
 }
 
-std::string MakeGeneratedSolverSource(bool enable_equal_order) {
+std::string MakeGeneratedSolverSource(bool enable_equal_order, bool ordinary_source) {
   std::ostringstream source;
   source << R"cpp(#include <algorithm>
 #include <cmath>
@@ -108,6 +109,7 @@ std::string MakeGeneratedSolverSource(bool enable_equal_order) {
 #include <map>
 #include <sstream>
 #include <vector>
+#include <type_traits>
 
 #include "op_log.h"
 
@@ -126,16 +128,6 @@ std::string MakeGeneratedSolverSource(bool enable_equal_order) {
                   TilingVariable *g_var_a = nullptr;
                   TilingVariable *g_var_b = nullptr;
 
-                  inline int64_t CeilDiv(int64_t value, int64_t align) {
-                    return (value + align - 1) / align;
-                  }
-                  inline int64_t Ceiling(double value) {
-                    return static_cast<int64_t>(value) + (value > static_cast<int64_t>(value));
-                  }
-                  inline int64_t Mod(int64_t value, int64_t align) {
-                    return value % align;
-                  }
-
                   inline int64_t Pr1807Ub();
                   inline bool LocalSatisfied();
                   inline int64_t LocalEval(TilingVariable **, Variable **, int64_t);
@@ -145,7 +137,19 @@ std::string MakeGeneratedSolverSource(bool enable_equal_order) {
 
 #define private public
   )cpp";
-  source << GetAxesSolverSolverHead(enable_equal_order);
+  if (ordinary_source) {
+    source << "#include \"" << TOP_DIR << "/autofuse/att/core/scalar/expression_helpers.inc\"\n";
+    source << "#include \"" << TOP_DIR << "/autofuse/att/core/scalar/scalar_helpers.inc\"\n";
+    source << "#include \"" << TOP_DIR << "/autofuse/att/core/scalar/axes_ceil_div.inc\"\n";
+  } else {
+    source << axes_resource::kExpressionHelpers << axes_resource::kScalarHelpers << axes_resource::kAxesCeilDiv;
+  }
+  if (ordinary_source) {
+    source << "#define AF_AXES_EQUAL_ORDER " << (enable_equal_order ? 1 : 0) << "\n";
+    source << "#include \"" << TOP_DIR << "/autofuse/att/core/axes_reorder/axes_reorder_head.inc\"\n";
+  } else {
+    source << GetAxesSolverSolverHead(enable_equal_order);
+  }
   source << R"cpp(#undef private
 
                   namespace {
@@ -206,7 +210,11 @@ std::string MakeGeneratedSolverSource(bool enable_equal_order) {
                     }
                   };
   )cpp";
-  source << GetAxesSolverSolverFunc(enable_equal_order);
+  if (ordinary_source) {
+    source << "#include \"" << TOP_DIR << "/autofuse/att/core/axes_reorder/axes_reorder_body.inc\"\n";
+  } else {
+    source << GetAxesSolverSolverFunc(enable_equal_order);
+  }
   source << R"cpp(
     int main(int argc, char **argv) {
       if (argc != 2) {
@@ -356,19 +364,22 @@ std::string MakeGeneratedSolverSource(bool enable_equal_order) {
   return source.str();
 }
 
-std::filesystem::path CompileGeneratedSolver(bool enable_equal_order) {
-  static std::map<bool, std::filesystem::path> binaries;
-  const auto iter = binaries.find(enable_equal_order);
+std::filesystem::path CompileGeneratedSolver(bool enable_equal_order, bool ordinary_source) {
+  static std::map<std::pair<bool, bool>, std::filesystem::path> binaries;
+  const auto key = std::make_pair(enable_equal_order, ordinary_source);
+  const auto iter = binaries.find(key);
   if (iter != binaries.end()) {
     return iter->second;
   }
 
   const auto source_path = TestAxesReorderSolverGen::test_work_dir_ /
-                           ("tiling_func_main_equal_priority_ub_" + std::to_string(enable_equal_order) + ".cpp");
+                           ("tiling_func_main_equal_priority_ub_" + std::to_string(enable_equal_order) + "_" +
+                            std::to_string(ordinary_source) + ".cpp");
   const auto binary_path = TestAxesReorderSolverGen::test_work_dir_ /
-                           ("tiling_func_main_equal_priority_ub_" + std::to_string(enable_equal_order));
+                           ("tiling_func_main_equal_priority_ub_" + std::to_string(enable_equal_order) + "_" +
+                            std::to_string(ordinary_source));
   std::ofstream source_file(source_path);
-  source_file << MakeGeneratedSolverSource(enable_equal_order);
+  source_file << MakeGeneratedSolverSource(enable_equal_order, ordinary_source);
   source_file.close();
   if (!source_file.good()) {
     ADD_FAILURE() << "Failed to write generated solver source";
@@ -389,13 +400,16 @@ std::filesystem::path CompileGeneratedSolver(bool enable_equal_order) {
     ADD_FAILURE() << "Generated solver compilation failed";
     return {};
   }
-  return binaries.emplace(enable_equal_order, binary_path).first->second;
+  return binaries.emplace(key, binary_path).first->second;
 }
 
 void RunGeneratedSolver(bool enable_equal_order, const std::string &scenario) {
-  const auto &binary = CompileGeneratedSolver(enable_equal_order);
-  ASSERT_FALSE(binary.empty());
-  ASSERT_TRUE(RunCommand({binary.string(), scenario}, 30)) << "Generated solver scenario " << scenario;
+  for (const bool ordinary_source : {false, true}) {
+    const auto &binary = CompileGeneratedSolver(enable_equal_order, ordinary_source);
+    ASSERT_FALSE(binary.empty());
+    ASSERT_TRUE(RunCommand({binary.string(), scenario}, 30))
+        << "Solver scenario " << scenario << ", ordinary_source=" << ordinary_source;
+  }
 }
 }  // namespace
 

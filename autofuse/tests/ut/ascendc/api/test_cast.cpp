@@ -424,3 +424,38 @@ INSTANTIATE_TEST_SUITE_P(DiffLength, TestApiCastS642U64,
                              ((MAX_REPEAT_NUM - 1) * ONE_REPEAT_BYTE_SIZE + (ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) +
                               (ONE_BLK_SIZE - sizeof(int64_t))) /
                                  sizeof(int64_t)));
+
+constexpr uint8_t CastGenU82S64(const int index) {
+  return static_cast<uint8_t>(index);
+}
+
+constexpr bool CastCompareU82S64(const int64_t a, const int64_t b) {
+  return (a == b);
+}
+
+constexpr int64_t ExpectGenU82S64(const int index, const uint8_t x) {
+  return static_cast<int64_t>(static_cast<uint8_t>(index));
+}
+
+class TestApiCastU82S64 : public ::testing::Test, public testing::WithParamInterface<size_t> {};
+
+TEST_P(TestApiCastU82S64, Calc) {
+  const int size = this->GetParam();
+  CastExtendTest<uint8_t, int64_t>(size, ExpectGenU82S64, CastGenU82S64, CastCompareU82S64);
+}
+
+// size 以 dst(int64) 为单位：CastExtendTest 会申请 sizeof(int64_t) * size 的输出 UB，若按 src(uint8)
+// 口径取 max repeat(65280) 会使输出 buffer 溢出 UB。以 int64 为口径时最大 size(8160) 仍大于
+// CastWithTwoTransfer 的不重叠 chunk（考虑中间缓冲 32B 对齐后为 1360），可覆盖多轮 calc_loop + 尾块。
+INSTANTIATE_TEST_SUITE_P(DiffLength, TestApiCastU82S64,
+                         ::testing::Values(
+                             /* 1 block */ ONE_BLK_SIZE / sizeof(int64_t),
+                             /* 1 repeat */ ONE_REPEAT_BYTE_SIZE / sizeof(int64_t),
+                             /* max repeat */ MAX_REPEAT_NUM *ONE_REPEAT_BYTE_SIZE / sizeof(int64_t),
+                             /* less than 1 block */ (ONE_BLK_SIZE - sizeof(int64_t)) / sizeof(int64_t),
+                             /* less than 1 repeat */ (ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) / sizeof(int64_t),
+                             /* less than max repeat */ (MAX_REPEAT_NUM - 1) * ONE_REPEAT_BYTE_SIZE / sizeof(int64_t),
+                             /* mix block, repeat, max repeat*/
+                             ((MAX_REPEAT_NUM - 1) * ONE_REPEAT_BYTE_SIZE + (ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) +
+                              (ONE_BLK_SIZE - sizeof(int64_t))) /
+                                 sizeof(int64_t)));

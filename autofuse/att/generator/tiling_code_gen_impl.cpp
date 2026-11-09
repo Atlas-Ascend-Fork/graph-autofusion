@@ -9,6 +9,7 @@
  */
 
 #include "tiling_code_gen_impl.h"
+#include "axes_solver_resources.h"
 #include "final_tiling_log_gen.h"
 #include <fstream>
 #include <algorithm>
@@ -2008,27 +2009,10 @@ af::Status TilingCodeGenImpl::GenExternFuncDef() {
 }
 
 af::Status TilingCodeGenImpl::GenExpressionMacro() {
-  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver,
-                      "template <typename T, typename U> inline auto Max(T a, U b) { return static_cast<double>(a) > "
-                      "static_cast<double>(b) ? a : b; }");
-  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver,
-                      "template <typename T, typename U> inline auto Min(T a, U b) { return static_cast<double>(a) < "
-                      "static_cast<double>(b) ? a : b; }");
-  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver,
-                      "template <typename T> inline auto Abs(T a) { return static_cast<double>(a) >= 0 ? a : -a; }");
-  const std::array<std::string, 11U> macros = {"#define Log(a) (log((double)(a)))",
-                                               "#define Pow(a, b) pow(a, b)",
-                                               "#define Rational(a, b) ((double)(a) / (double)(b))",
-                                               "#define ExpectEq(a, b) ((a) == (b))",
-                                               "#define ExpectNe(a, b) ((a) != (b))",
-                                               "#define ExpectLe(a, b) ((a) <= (b))",
-                                               "#define ExpectLt(a, b) ((a) < (b))",
-                                               "#define LogicAnd(a, b) ((a) && (b))",
-                                               "#define LogicOr(a, b) ((a) || (b))",
-                                               "#define True true",
-                                               "#define False false"};
-  for (const auto &macro : macros) {
-    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver, macro);
+  std::istringstream source(axes_resource::kExpressionHelpers);
+  std::string line;
+  while (std::getline(source, line)) {
+    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver, line);
   }
   return af::SUCCESS;
 }
@@ -2088,48 +2072,8 @@ af::Status TilingCodeGenImpl::GenToolFuncs() {
   for (const auto &header : {"cmath", "cstdint", "type_traits"}) {
     autofuse::RequireSystemHeader(solver_dependencies, header);
   }
-  ge::CodePrinter solver_header;
-  solver_header.AddLine("inline bool IsEqual(double a, double b)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    const double epsilon = 1e-8;");
-  solver_header.AddLine("    double abs = (a > b) ? (a - b) : (b - a);");
-  solver_header.AddLine("    return abs < epsilon;");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T1, typename T2>");
-  solver_header.AddLine("inline double TernaryOp(bool cond, T1 a, T2 b)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    return static_cast<double>(cond ? a : b);");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T>");
-  solver_header.AddLine("inline T Ceiling(T a)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    T value = static_cast<T>(static_cast<int64_t>(a));");
-  solver_header.AddLine("    return (IsEqual(value, a)) ? value : (value + 1);");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T>");
-  solver_header.AddLine("inline T Floor(T a)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    return static_cast<T>(static_cast<int64_t>(a));");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T1, typename T2>");
-  solver_header.AddLine("inline auto Mod(T1 a, T2 b)->decltype(a % b)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    return a % b;");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T1, typename T2>");
-  solver_header.AddLine(
-      "inline auto Mod(T1 a, T2 b)->typename std::enable_if<std::is_floating_point<T1>::value || "
-      "std::is_floating_point<T2>::value, decltype(std::fmod(a, b))>::type");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    return std::fmod(a, b);");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename TI, typename TO>");
-  solver_header.AddLine("inline TO &RefToRef(TI &ptr) {");
-  solver_header.AddLine("  return *(reinterpret_cast<TO *>(reinterpret_cast<void *>(&ptr)));");
-  solver_header.AddLine("}");
-  solver_header.AddLine("");
-  AppendAtomicHeaderBody(autofuse::GeneratedHeaderId::kSolver, solver_header.GetOutputStr());
-  tiling_head_.AddLine(solver_header.GetOutputStr());
+  AppendAtomicHeaderBody(autofuse::GeneratedHeaderId::kSolver, axes_resource::kScalarHelpers);
+  tiling_head_.AddLine(axes_resource::kScalarHelpers);
   return af::SUCCESS;
 }
 

@@ -638,7 +638,10 @@ bool IsGroupMemberLegal(const af::AscNodePtr &primary, const af::AscNodePtr &mem
     return report_illegal("output count mismatch");
   }
   if (primary_outputs[0] == nullptr || member_outputs[0] == nullptr ||
-      primary_outputs[0]->attr.axis != member_outputs[0]->attr.axis) {
+      primary_outputs[0]->attr.axis.size() != member_outputs[0]->attr.axis.size()) {
+    // [组共享轴等价化] 放宽 axis id 逐元素相等为 rank 相等：同索引空间、仅 id 不同
+    // 的成员（Broadcast 副本轴/split 兄弟轴）在 ApplyGraphPassGroup 的
+    // NormalizeMemberAxes 中归一到组共享轴后天然对齐；size 不等价由该步拒绝。
     return report_illegal("output axis space mismatch");
   }
   const auto primary_inputs = primary->inputs();
@@ -1775,6 +1778,56 @@ af::Status SeedPostReduceInputVectorizedView(const af::AscNodePtr &indirect_load
   return af::SUCCESS;
 }
 
+// [组成员 value tensor 视图播种] 单 gather post-Reduce 的 IL 输出经输出重定向与 reduce 输入
+// 为同一 tensor，SeedPostReduceInputVectorizedView 一步完成向量化视图播种；组路径无此 id
+// 绑定——成员各自持有 value tensor，且 kSimtOp（preserves_vectorized_axis）使调度期
+// TileSplit 的全局向量化写入跳过它们（视图保持任务生成期状态）。actual_size 经
+// CalcVectorizedElementCount 读该视图，为空则恒为 1（即使逐行 tile，每次调用也
+// 只写 1 个元素而非整行）。此处按共享模板的 vectorized 轴（boundary=first_reduce 时为
+// inner 归约段的成员轴，仍在组员原轴空间内——组配对约束保证全组输出轴空间一致）为每个
+// 成员的 value tensor 播种向量化视图，使 actual_size = 每行元素数；调度期 tensor merge
+// 对播种轴的重映射与单 gather 同构（inner 成员轴重映射为 merged inner，不触碰 outer 的
+// SelectLoopAxis 判定）。视图缺轴/视图非法是候选形态问题而非程序错误——NormalizeMemberAxes
+// 跳过复合轴（from 非空）与分核/分 tile 轴的维（不归一到组共享轴）时，模板 vectorized 轴
+// （merged inner 的 from 含成员轴）可能不在某成员视图内，is_candidate_legal=false 拒绝当前
+// 候选（候选图为独立副本，丢弃无害），由其余候选/回退承接。
+af::Status SeedGroupMemberValueVectorizedViews(const std::vector<af::AscNodePtr> &members, bool &is_candidate_legal) {
+  ascgen_utils::indirect_load::TemplateAxes axes;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(members.front(), axes));
+  if (axes.vectorized_axes.empty()) {
+    is_candidate_legal = false;
+    GELOGI("[IndirectLoad] Reject gather group candidate: shared template vectorized axes are empty.");
+    return af::SUCCESS;
+  }
+  for (const af::AscNodePtr &member : members) {
+    GE_ASSERT_TRUE(!member->outputs().empty() && member->outputs()[0] != nullptr,
+                   "IndirectLoad gather group member[%s] has no value output.", member->GetNamePtr());
+    auto &value = member->outputs()[0]->attr;
+    if (value.axis.size() != value.strides.size()) {
+      is_candidate_legal = false;
+      GELOGI("[IndirectLoad] Reject gather group candidate: member[%s] value view is invalid.", member->GetNamePtr());
+      return af::SUCCESS;
+    }
+    for (const auto axis : axes.vectorized_axes) {
+      if (std::find(value.axis.begin(), value.axis.end(), axis) == value.axis.end()) {
+        is_candidate_legal = false;
+        GELOGI("[IndirectLoad] Reject gather group candidate: member[%s] value view lacks vectorized axis[%ld].",
+               member->GetNamePtr(), axis);
+        return af::SUCCESS;
+      }
+    }
+    value.vectorized_axis = axes.vectorized_axes;
+    value.vectorized_strides.clear();
+    value.vectorized_strides.reserve(value.vectorized_axis.size());
+    for (const auto axis : value.vectorized_axis) {
+      const auto axis_it = std::find(value.axis.begin(), value.axis.end(), axis);
+      value.vectorized_strides.emplace_back(
+          value.strides[static_cast<size_t>(std::distance(value.axis.begin(), axis_it))]);
+    }
+  }
+  return af::SUCCESS;
+}
+
 af::Status NormalizeSimtAxesForTemplate(af::AscGraph &graph, const af::AscNodePtr &indirect_load, size_t boundary,
                                         bool solve_tile_size);
 af::Status RestoreSkTemplateAxes(std::vector<ascir::ImplGraph> &grouped_graphs) {
@@ -2042,14 +2095,52 @@ bool CollectSimtGroupIndexRegion(const af::AscGraph &graph, const af::AscNodePtr
   return !index_region.empty();
 }
 
-// 多 gather 组员（SIMT）共享轴归一化：primary 完整归一一次（boundary = 输出 rank，组内
-// 一致；无 post-Reduce 固定单行 tile 语义），其余成员复用 primary 的 TemplateAxes——
-// 输出轴空间与 boundary 全组相同，轴结构一致；SIMT 归一不触碰区域节点轴，拷贝语义等价，
-// 且避免 BuildAxisViewByBoundary/CreateFixedTileSplit 按成员重复建轴。
-af::Status NormalizeSimtAxesForGroupTemplate(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members) {
+// 多 gather 组员（SIMT）共享轴归一化：primary 完整归一一次，其余成员复用 primary 的
+// TemplateAxes——输出轴空间与 boundary 全组相同，轴结构一致；SIMT 归一不触碰区域节点轴，
+// 拷贝语义等价，且避免 BuildAxisViewByBoundary/CreateFixedTileSplit 按成员重复建轴。
+// boundary 语义（与单 gather 同构，按归约形态分档）：
+// - 无共享 Reduce 的组（L2 寄存器归并 / 非归约触发的 L3）：boundary=输出 rank——整空间合并
+//   轴，固定 tile inner=1 + codegen 整核调用形态；
+// - 有共享 Reduce 的组（归约触发的 L3）：boundary=first_reduce——outer=行/批（G）、
+//   inner=归约段（R），行不被 BlockSplit 劈开。solve_tile 与单 gather 同款判定：AR 形态
+//   （归约段后无 Retained 轴，含尾轴整体归约的 Sum）与形状保持 Norm 开多行求解（k 行
+//   tile，一次调用覆盖 k 行）；非 AR 形态（归约段后有 Retained 后缀）固定单行——多行窗口
+//   会把多组 RA 段并进同一 Reduce 窗口，归约语义错误，k=1 是正确性约束。
+af::Status NormalizeSimtAxesForGroupTemplate(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                                             const af::AscNodePtr &group_post_reduce, bool &is_candidate_legal) {
   GE_ASSERT_TRUE(!members.empty(), "IndirectLoad gather group members must be non-empty.");
-  const size_t boundary = members.front()->outputs()[0]->attr.axis.size();
-  GE_ASSERT_SUCCESS(NormalizeSimtAxesForTemplate(graph, members.front(), boundary, /*solve_tile_size=*/false));
+  size_t boundary = members.front()->outputs()[0]->attr.axis.size();
+  bool solve_tile_size = false;
+  if (group_post_reduce != nullptr) {
+    // 形状保持的专用 Norm 节点（Softmax）：归约发生在算子内部、BuildPostReduceLayout
+    // 识别不出归约轴（first_reduce == rank），ValidateSimtPostReduceLayout 会判非法。
+    // 与单 gather 的 ValidateTemplate Softmax 分流同口径：跳过该断言，boundary 覆写为
+    // softmax 输入 rank-1（R=尾轴，SoftmaxAR 多行 tile 的正确语义）。
+    if (IsShapePreservingTailAxisNorm(group_post_reduce)) {
+      const auto norm_inputs = group_post_reduce->inputs();
+      GE_ASSERT_TRUE(!norm_inputs.empty() && norm_inputs[0] != nullptr,
+                     "IndirectLoad group Softmax node[%s] has no input.", group_post_reduce->GetNamePtr());
+      const size_t softmax_input_rank = norm_inputs[0]->attr.axis.size();
+      GE_ASSERT_TRUE(softmax_input_rank > 0UL, "IndirectLoad group Softmax input rank is invalid.");
+      boundary = softmax_input_rank - 1UL;
+      solve_tile_size = true;
+    } else {
+      // 布局合法性已在 ApplyGraphPassGroup 调用前校验（同口径拒绝），此处仅取 boundary 覆写。
+      // 中间仅隔 NormalizeMemberAxes（改 IL 输出轴，理论不动 reduce strides），但仍以防御口径
+      // 处理"校验后布局变化"——拒绝候选而非硬断言（候选竞标语义：drop 本候选，不 abort）。
+      bool group_reduce_legal = true;
+      GE_ASSERT_SUCCESS(ValidateSimtPostReduceLayout(group_post_reduce, boundary, group_reduce_legal));
+      if (!group_reduce_legal) {
+        is_candidate_legal = false;
+        GELOGI(
+            "[IndirectLoad] Reject gather group SIMT candidate: shared post Reduce layout became illegal "
+            "during normalization.");
+        return af::SUCCESS;
+      }
+      GE_ASSERT_SUCCESS(IsSimtArPostReduce(group_post_reduce, solve_tile_size));
+    }
+  }
+  GE_ASSERT_SUCCESS(NormalizeSimtAxesForTemplate(graph, members.front(), boundary, solve_tile_size));
   ascgen_utils::indirect_load::TemplateAxes shared_axes;
   GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(members.front(), shared_axes));
   for (size_t index = 1UL; index < members.size(); ++index) {
@@ -4015,6 +4106,36 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
       return af::SUCCESS;
     }
   }
+  // [组路径 post-Reduce 轴结构] 共享 Reduce 终端的组（发散检查已保证各路 post_reduce 为同一
+  // 节点）：boundary 镜像单 gather post-Reduce 语义覆写为 first_reduce——outer=行/批（G）、
+  // inner=归约段（R），BlockSplit 只作用于 G 的 tile-outer，行不被劈到多核（共享 Reduce 的
+  // 扇出向量代码按核执行，行劈开只得部分和）。布局非法（非支持的归约后缀，如中维归约且
+  // 其后仍有保留轴）时与单 gather 同口径拒绝本候选，由其余候选/回退承接。post_reduce 在
+  // 下方组员计划收窄处置空，故先保存。
+  af::AscNodePtr group_post_reduce = nullptr;
+  if (is_simt) {
+    group_post_reduce = analyses.front().post_reduce;
+    if (group_post_reduce != nullptr) {
+      // 形状保持的专用 Norm 节点（Softmax）：归约发生在算子内部、输出沿归约轴仍为满
+      // stride，BuildPostReduceLayout 识别不出归约轴（first_reduce == rank），须与
+      // 单 gather 的 ValidateTemplate Softmax 分流同口径——特判放行，不经过
+      // ValidateSimtPostReduceLayout 的 first_reduce 校验。boundary 覆写取 softmax
+      // 输入 rank-1，与单 gather 的 boundary 覆写语义一致（边界在
+      // NormalizeSimtAxesForGroupTemplate 内由 ValidateSimtPostReduceLayout 走不到时
+      // 保持 rank，此处不额外覆写——Softmax 的 solve_tile_size 在
+      // NormalizeSimtAxesForGroupTemplate 中由 IsShapePreservingTailAxisNorm 开启）。
+      if (!IsShapePreservingTailAxisNorm(group_post_reduce)) {
+        size_t group_reduce_boundary = 0UL;
+        bool group_reduce_legal = true;
+        GE_ASSERT_SUCCESS(ValidateSimtPostReduceLayout(group_post_reduce, group_reduce_boundary, group_reduce_legal));
+        if (!group_reduce_legal) {
+          is_candidate_legal = false;
+          GELOGI("[IndirectLoad] Reject gather group SIMT candidate: shared post Reduce layout is unsupported.");
+          return af::SUCCESS;
+        }
+      }
+    }
+  }
   if (is_simt) {
     // 组员 SIMT 计划收窄：SIMT 区域重收集为仅本路 index 链；共享归并/post-Reduce 链不进入
     // 任何组员的 SIMT 计划（普通向量代码），post_reduce 置空使 ValidateTemplate 的 boundary
@@ -4081,8 +4202,45 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
       // gather 的 kSimtFanoutBranch 语义），全组 IL 作为排除集避免改写他组成员角色。
       GE_ASSERT_SUCCESS(AnnotateSimtGroupFanoutBranches(members));
     }
-    GE_ASSERT_SUCCESS(NormalizeSimtAxesForGroupTemplate(graph, members));
+    // [组共享轴等价化] 在模板轴归一化之前：各成员输出视图中"同索引空间、仅 id 不同"
+    // 的轴（Broadcast 副本轴/split 兄弟轴/前端重复建轴）归一到新建组共享轴——归一后
+    // primary 的输出轴即组共享轴，NormalizeSimtAxesForGroupTemplate 从 primary 建出的
+    // merged 轴的 from 包含组轴，其它成员天然覆盖，消除 sched_has_all_members 的误杀。
+    // 非等价（size/stride 不同）时拒绝当前候选，不影响其它候选与原图回退。
+    {
+      bool axes_normalized = true;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::NormalizeMemberAxes(graph, members, axes_normalized));
+      if (!axes_normalized) {
+        is_candidate_legal = false;
+        return af::SUCCESS;
+      }
+    }
+    GE_ASSERT_SUCCESS(NormalizeSimtAxesForGroupTemplate(graph, members, group_post_reduce, is_candidate_legal));
+    if (!is_candidate_legal) {
+      return af::SUCCESS;
+    }
+    // [组路径 post-Reduce 视图播种] 与单 gather（AnnotateTemplate 尾部）及 SIMD 组分支同构：
+    // 共享 Reduce 的输入视图按模板 vectorized 轴播种——SIMT 组路径此前缺失该播种，扇出链
+    // 下游视图与模板轴系失配（Reduce 对齐推断读到不在本张量轴列表里的轴 id）。成员 value
+    // tensor 的视图播种（actual_size 的直接来源）同位补齐——单 gather 靠输出重定向的 id
+    // 绑定隐式完成，组路径必须显式播种。无共享 Reduce 的组保持原行为。
+    if (group_post_reduce != nullptr) {
+      GE_ASSERT_SUCCESS(SeedPostReduceInputVectorizedView(members.front(), group_post_reduce));
+      GE_ASSERT_SUCCESS(SeedGroupMemberValueVectorizedViews(members, is_candidate_legal));
+      if (!is_candidate_legal) {
+        return af::SUCCESS;
+      }
+    }
   } else {
+    // [组共享轴等价化] 与 SIMT 路径同构：模板轴归一化之前先做成员轴等价化。
+    {
+      bool axes_normalized = true;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::NormalizeMemberAxes(graph, members, axes_normalized));
+      if (!axes_normalized) {
+        is_candidate_legal = false;
+        return af::SUCCESS;
+      }
+    }
     GE_ASSERT_SUCCESS(NormalizeSimdAxesForGroupTemplate(graph, members, analyses));
     // 与单 gather NormalizeTemplateAxes 的 SIMD 分支保持一致：post Reduce（含复合区域）输入
     // 的向量化视图按模板轴播种；组内 vectorized_axes 相同，以 primary 播种一次即对全组生效。
@@ -4762,6 +4920,14 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
   const bool simt_ub_doomed = IsGroupSimtL4UbDoomed(members);
   // [SK 前置检查] 图含 Transpose 时 SK 必非法，组级一次判定（消除逐成员重复扫描）。
   const bool sk_blocked = HasTransposeNode(graph);
+  // [R-before-gather-axis 门控] 与单 gather 路径（Generate 的候选循环）同口径：归约轴位于
+  // gather 轴之前时，SIMD/SIMT 的 post-Reduce 行/窗口语义不可用（归约段横跨 gather 轴外的
+  // 行维，actual_size=k×R 与边界覆盖假定失效），仅 SK 分段桥接可行——组路径同样跳过非 SK
+  // 共模板候选。布局以 primary 的共享 Reduce 终端判定（组配对已保证输出链一致）；无共享
+  // Reduce（返回 false）与 Softmax（内部尾轴归约，BuildPostReduceLayout 识别不出归约轴）
+  // 均不受影响。混模板候选无需显式门控：该布局下 SIMD 逐成员探测必拒、全组退化为同构
+  // SIMT，与共模板候选重复而自然跳过。
+  const bool reduce_before_gather_axis = HasReduceBeforeGatherAxis(group.primary);
   const TemplateCase cases[] = {
       {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kDefault},
       {ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kGatherApi},
@@ -4771,6 +4937,13 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
   bool simd_lowers_to_strided = false;
   for (const TemplateCase &template_case : cases) {
     const ascir::TemplateId template_id = template_case.template_id;
+    if (reduce_before_gather_axis && template_id != ascir::TemplateId::kIndirectLoadSK) {
+      GELOGI(
+          "[IndirectLoad] Skip non-SK gather group candidate[%d] for R-before-gather-axis post-Reduce layout, "
+          "primary[%s].",
+          static_cast<int32_t>(template_id), group.primary->GetNamePtr());
+      continue;
+    }
     if (template_id == ascir::TemplateId::kIndirectLoadSimd && simd_ub_doomed) {
       GELOGI(
           "[IndirectLoad] Skip gather group SIMD candidate for primary[%s]: UB hard lower bound exceeds platform "

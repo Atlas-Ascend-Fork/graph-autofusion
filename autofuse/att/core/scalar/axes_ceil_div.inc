@@ -8,21 +8,11 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef AXES_REORDER_SOLVER_COMMON_H_
-#define AXES_REORDER_SOLVER_COMMON_H_
-
-#include "axes_reorder_solver_code.h"
-#include "util/base_types_printer.h"
-
-#include <string>
-#include <sstream>
-#include <map>
-#include <vector>
-#include <algorithm>
-#include <cmath>
-#include <limits>
-#include <functional>
-
-namespace att {
-
-#endif  // AXES_REORDER_SOLVER_COMMON_H_
+// Included inside the owning solver namespace; dependencies are supplied by its translation unit.
+// AF_AXES_RESOURCE_BEGIN
+inline int64_t CeilDiv(int64_t a, int64_t b)
+{
+    int64_t res = a / b;
+    return (res * b == a) ? res : (res + 1);
+}
+// AF_AXES_RESOURCE_END

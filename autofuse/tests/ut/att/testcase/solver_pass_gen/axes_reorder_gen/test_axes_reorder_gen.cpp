@@ -18,6 +18,21 @@
 #include "gen_model_info/api_perf_register/v1/perf_param_v1.h"
 using namespace att;
 
+std::string SolverMethod(const std::string &name, bool equal_order = true) {
+  const auto source = GetAxesSolverSolverFunc(equal_order);
+  const auto start = source.find("AxesReorderSolver::" + name + "(");
+  if (start == std::string::npos) {
+    ADD_FAILURE() << "Missing solver method: " << name;
+    return {};
+  }
+  const auto end = source.find("\n}\n", start);
+  if (end == std::string::npos) {
+    ADD_FAILURE() << "Missing solver method boundary: " << name;
+    return {};
+  }
+  return source.substr(start, end + 3U - start);
+}
+
 size_t CountSubstr(const std::string &text, const std::string &pattern) {
   size_t count = 0U;
   size_t pos = text.find(pattern);
@@ -376,28 +391,28 @@ TEST_F(TestAxesReorderSolverGen, GenPGOSolverAppliesRuntimeOrderBeforeSolverCons
 }
 
 TEST_F(TestAxesReorderSolverGen, GenLocalBufferSolversUseOrderedAxesWithCanonicalIndices) {
-  const std::string naive_code = GenNaiveLocalBufTiling(true);
+  const std::string naive_code = SolverMethod("NaiveLocalBufTiling", true);
   EXPECT_NE(naive_code.find("input_.ordered_local_buffer_vars[ordered_idx]"), std::string::npos);
   EXPECT_NE(naive_code.find("input_.ordered_to_canonical[ordered_idx]"), std::string::npos);
   EXPECT_NE(naive_code.find("solved_axes[canonical_idx]"), std::string::npos);
   EXPECT_NE(naive_code.find("ProcessSingleAxisNaive(var, canonical_idx"), std::string::npos);
 
-  const std::string binary_code = GenBinaryLocalBufTilingCore();
+  const std::string binary_code = SolverMethod("BinaryLocalBufTilingCore");
   EXPECT_NE(binary_code.find("input_.ordered_local_buffer_vars[ordered_idx]"), std::string::npos);
   EXPECT_NE(binary_code.find("input_.ordered_to_canonical[ordered_idx]"), std::string::npos);
   EXPECT_NE(binary_code.find("solved_axes[canonical_idx]"), std::string::npos);
 }
 
 TEST_F(TestAxesReorderSolverGen, GenWorkloadBalanceUsesOrderedAxes) {
-  const std::string code = GenWorkloadBalancePrepare();
+  const std::string code = SolverMethod("WorkloadBalance");
   EXPECT_NE(code.find("auto *vars = input_.ordered_local_buffer_vars"), std::string::npos);
 }
 
 TEST_F(TestAxesReorderSolverGen, GenEqualOrderAndAxisOrderRemainCanonical) {
-  const std::string equal_order_code = GenNaiveLocalBufTiling(true);
+  const std::string equal_order_code = SolverMethod("NaiveLocalBufTiling", true);
   EXPECT_NE(equal_order_code.find("IdentifyEqualPriorityAxes"), std::string::npos);
   EXPECT_NE(equal_order_code.find("solved_axes[canonical_idx]"), std::string::npos);
-  const std::string identify_code = GenIdentifyEqualPriorityAxes();
+  const std::string identify_code = SolverMethod("IdentifyEqualPriorityAxes");
   EXPECT_NE(identify_code.find("if (pair.second.size() < kSupportMaxEqualPriorityAxes)"), std::string::npos);
 
   Expr axis0 = CreateExpr("axis0");
@@ -411,7 +426,7 @@ TEST_F(TestAxesReorderSolverGen, GenEqualOrderAndAxisOrderRemainCanonical) {
 }
 
 TEST_F(TestAxesReorderSolverGen, EqualPriorityUbBinarySearchCommitsResultBeforeReturn) {
-  const std::string code = GenBinarySearchWithAlignment();
+  const std::string code = SolverMethod("BinarySearchWithAlignment");
   const size_t commit_pos = code.find("vars[i]->SetValue(result);");
   const size_t return_pos = code.find("return result != -1;");
   ASSERT_NE(commit_pos, std::string::npos) << code;
@@ -420,7 +435,7 @@ TEST_F(TestAxesReorderSolverGen, EqualPriorityUbBinarySearchCommitsResultBeforeR
 }
 
 TEST_F(TestAxesReorderSolverGen, EqualPriorityUbMainSearchRestoresBothAxesBeforeBSearch) {
-  const std::string code = GenBinarySearchEqualPriorityAxesWithDualThreshold();
+  const std::string code = SolverMethod("BinarySearchEqualPriorityAxesWithDualThreshold");
   const size_t failed_pos = code.find("if (result == -1) {");
   const size_t restore_a_pos = code.find("vars[0]->SetValue(result);");
   const size_t restore_b_pos = code.find("vars[1]->SetValue(result);");
@@ -435,20 +450,20 @@ TEST_F(TestAxesReorderSolverGen, EqualPriorityUbMainSearchRestoresBothAxesBefore
 }
 
 TEST_F(TestAxesReorderSolverGen, EqualPriorityUbLocalBufTilingGeneratesFinalChecks) {
-  const std::string naive_equal_code = GenNaiveLocalBufTiling(true);
+  const std::string naive_equal_code = SolverMethod("NaiveLocalBufTiling", true);
   EXPECT_NE(naive_equal_code.find("if (!SatisfyCons(ConstraintType::LOCAL_BUFFER)) {\n"
                                   "    return enable_equal_order && NaiveLocalBufTiling(false);"),
             std::string::npos);
 
-  const std::string naive_normal_code = GenNaiveLocalBufTiling(false);
+  const std::string naive_normal_code = SolverMethod("NaiveLocalBufTiling", false);
   EXPECT_NE(naive_normal_code.find("return SatisfyCons(ConstraintType::LOCAL_BUFFER) && "
                                    "SatisfyCons(ConstraintType::LB_MIXED);"),
             std::string::npos);
 
-  const std::string binary_equal_code = GenBinaryLocalBufTiling(true);
+  const std::string binary_equal_code = SolverMethod("BinaryLocalBufTiling", true);
   EXPECT_NE(binary_equal_code.find("return enable_equal_order && BinaryLocalBufTiling(false);"), std::string::npos);
 
-  const std::string binary_normal_code = GenBinaryLocalBufTiling(false);
+  const std::string binary_normal_code = SolverMethod("BinaryLocalBufTiling", false);
   EXPECT_NE(binary_normal_code.find("if (!SatisfyCons(ConstraintType::LOCAL_BUFFER)) {\n"
                                     "    return false;\n"
                                     "  }"),

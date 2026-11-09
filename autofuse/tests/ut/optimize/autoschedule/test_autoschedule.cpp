@@ -2081,6 +2081,97 @@ static af::AscGraph BuildIndirectLoadAutoScheduleGraph(int64_t axis, bool with_i
   return graph;
 }
 
+// [组共享轴等价化 + 0020 回归图] 双 gather 组图：两路独立值表 + 共享 index，经 Add 归并，
+// 可选尾轴 Sum 后置归约（共享 AR 形态）。second_output_axis_alias 时第二路 dim0 用同形
+// 副本轴（组路径的 NormalizeMemberAxes 归一触发点）。全用具体尺寸（归约布局静态可解）。
+static af::AscGraph BuildDualGatherAutoScheduleGraph(const bool second_output_axis_alias, const bool with_post_reduce) {
+  af::AscGraph graph("dual_gather_autoschedule_ut");
+  const auto rows = graph.CreateSizeVar(8);
+  const auto width = graph.CreateSizeVar(16);
+  const auto in_rows = graph.CreateSizeVar(32);
+  const auto in_width = graph.CreateSizeVar(16);
+  const auto z0 = graph.CreateAxis("z0", in_rows);
+  const auto z1 = graph.CreateAxis("z1", in_width);
+  const auto z2 = graph.CreateAxis("z2", rows);
+  const auto z3 = graph.CreateAxis("z3", width);
+  const std::vector<af::AxisId> input_axes = {z0.id, z1.id};
+  const std::vector<af::AxisId> output_axes = {z2.id, z3.id};
+  const std::vector<af::Expression> input_repeats = {in_rows, in_width};
+  const std::vector<af::Expression> input_strides = {in_width, One};
+  const std::vector<af::Expression> output_repeats = {rows, width};
+  const std::vector<af::Expression> output_strides = {width, One};
+
+  Data x0("dual_x0", graph);
+  x0.ir_attr.SetIndex(0);
+  x0.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  x0.attr.api.type = af::ApiType::kAPITypeBuffer;
+  SetIndirectLoadView(x0, ge::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  Load input0_load("dual_input_load0");
+  input0_load.x = x0.y;
+  SetIndirectLoadView(input0_load, ge::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  Data x1("dual_x1", graph);
+  x1.ir_attr.SetIndex(1);
+  x1.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  x1.attr.api.type = af::ApiType::kAPITypeBuffer;
+  SetIndirectLoadView(x1, ge::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  Load input1_load("dual_input_load1");
+  input1_load.x = x1.y;
+  SetIndirectLoadView(input1_load, ge::DT_FLOAT16, input_axes, input_repeats, input_strides);
+  Data index("dual_index", graph);
+  index.ir_attr.SetIndex(2);
+  index.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  index.attr.api.type = af::ApiType::kAPITypeBuffer;
+  SetIndirectLoadView(index, ge::DT_INT32, output_axes, output_repeats, output_strides);
+  Load index_load("dual_index_load");
+  index_load.x = index.y;
+  SetIndirectLoadView(index_load, ge::DT_INT32, output_axes, output_repeats, output_strides);
+
+  IndirectLoad indirect_load0("dual_indirect_load0");
+  indirect_load0.x1 = input0_load.y;
+  indirect_load0.x2 = index_load.y;
+  indirect_load0.ir_attr.SetAxis(1);
+  SetIndirectLoadView(indirect_load0, ge::DT_FLOAT16, output_axes, output_repeats, output_strides);
+
+  IndirectLoad indirect_load1("dual_indirect_load1");
+  indirect_load1.x1 = input1_load.y;
+  indirect_load1.x2 = index_load.y;
+  indirect_load1.ir_attr.SetAxis(1);
+  std::vector<af::AxisId> il1_output_axes = output_axes;
+  if (second_output_axis_alias) {
+    const auto z2_copy = graph.CreateAxis("z2_copy", rows);
+    il1_output_axes = {z2_copy.id, z3.id};
+  }
+  SetIndirectLoadView(indirect_load1, ge::DT_FLOAT16, il1_output_axes, output_repeats, output_strides);
+
+  Add merge_add("dual_merge_add");
+  merge_add.x1 = indirect_load0.y;
+  merge_add.x2 = indirect_load1.y;
+  SetIndirectLoadView(merge_add, ge::DT_FLOAT16, output_axes, output_repeats, output_strides);
+
+  Store store("dual_store");
+  std::vector<af::Expression> terminal_repeats = output_repeats;
+  std::vector<af::Expression> terminal_strides = output_strides;
+  if (with_post_reduce) {
+    Sum reduce("dual_sum");
+    reduce.x = merge_add.y;
+    reduce.attr.api.compute_type = af::ComputeType::kComputeReduce;
+    terminal_repeats = {rows, One};
+    terminal_strides = {One, Zero};
+    SetIndirectLoadView(reduce, ge::DT_FLOAT16, output_axes, terminal_repeats, terminal_strides);
+    store.x = reduce.y;
+  } else {
+    store.x = merge_add.y;
+  }
+  SetIndirectLoadView(store, ge::DT_FLOAT16, output_axes, terminal_repeats, terminal_strides);
+  Output output("dual_output");
+  output.ir_attr.SetIndex(0);
+  output.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  output.attr.api.type = af::ApiType::kAPITypeBuffer;
+  output.x = store.y;
+  SetIndirectLoadView(output, ge::DT_FLOAT16, output_axes, terminal_repeats, terminal_strides);
+  return graph;
+}
+
 static bool InsertStridedIndexElement(af::AscGraph &graph) {
   const auto index = graph.FindNode("index");
   const auto index_load = graph.FindNode("index_load");
@@ -2231,6 +2322,32 @@ TEST_F(AutoSchedulerUT, IndirectLoadStridedIndexPathIsAlignedDuringSchedule) {
   ASSERT_NE(scheduled_index_abs, nullptr);
   ASSERT_EQ(scheduled_index_abs->outputs().size(), 1UL);
   EXPECT_FALSE(scheduled_index_abs->outputs()[0]->attr.vectorized_strides.empty());
+}
+
+TEST_F(AutoSchedulerUT, DualGatherAliasPostReduceGroupSimtSchedulesWithoutVectorizedAxisCrash) {
+  // [0020 回归] 副本轴 + 共享 AR 后置 Reduce 的组 SIMT 候选：成员轴归一化替换为组共享
+  // 轴后，完整调度（TileSplit 成员 value 视图按节点级派生 + Reduce 对齐推断）不再触发
+  // "Cannot find vectorized axis" 硬崩溃，且成员 value 视图向量化非空。
+  auto graph = BuildDualGatherAutoScheduleGraph(true, true);
+  IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> candidates;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, candidates, score_functions), af::SUCCESS);
+  const auto simt = std::find_if(candidates.begin(), candidates.end(), [](const af::AscGraph &candidate) {
+    const auto il0 = candidate.FindNode("dual_indirect_load0");
+    return il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt;
+  });
+  ASSERT_NE(simt, candidates.end());
+
+  std::vector<autoschedule::AutoScheduleOutput> results;
+  AutoSchedule autoschedule(*simt, results);
+  ASSERT_EQ(autoschedule.DoAutoSchedule(), af::SUCCESS);
+  ASSERT_EQ(results.size(), 1UL);
+  const auto scheduled_il1 = results[0].scheduled_graph.FindNode("dual_indirect_load1");
+  ASSERT_NE(scheduled_il1, nullptr);
+  ASSERT_EQ(scheduled_il1->outputs().size(), 1UL);
+  EXPECT_FALSE(scheduled_il1->outputs()[0]->attr.vectorized_axis.empty())
+      << "member value view must carry a derived vectorized axis after TileSplit.";
 }
 
 TEST_F(AutoSchedulerUT, IndirectLoadSolvedTileTilingGeneratesOnlyTemplateOuterCase) {

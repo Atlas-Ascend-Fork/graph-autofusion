@@ -25,6 +25,7 @@
 #include "v35/optimize/graph_pass/same_source_broadcast_cse_pass.h"
 #include "v35/optimize/graph_pass/gather_to_load.h"
 #include "v35/optimize/graph_pass/split_concat_optimization_pass.h"
+#include "v35/optimize/graph_pass/swap_cast_broadcast_pass.h"
 
 namespace optimize {
 class PassRunnerV2 final : public BasePassRunner {
@@ -37,6 +38,7 @@ class PassRunnerV2 final : public BasePassRunner {
     this->RegisterPass<DuplicateElewiseCsePass>();
     this->RegisterPass<RedundantBroadcastEliminatePass>();
     this->RegisterPass<BroadcastBackwardPass>();
+    this->RegisterPass<SwapCastBroadcastPass>();
     this->RegisterPass<ScalarBroadcastOptimizationPass>();
     this->RegisterPass<MaskedFillInputReorderPass>();
     this->RegisterPass<ExpandDimsForAllReducePass>();

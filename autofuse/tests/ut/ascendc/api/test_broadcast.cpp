@@ -697,62 +697,176 @@ TEST(TestApiBroadcast, Test_a1_to_ab_int64) {
   AscendC::GmFree(y);
 }
 
-// TEST(TestApiBroadcast, Test_a1c_to_abc_int64) {
-//   // 构造测试输入和预期结果
-//   int a = 16, b = 32, c = 32;
-//   auto *x = (int64_t*)AscendC::GmAlloc(sizeof(int64_t) * a * 1 * c);
-//   auto *y = (int64_t*)AscendC::GmAlloc(sizeof(int64_t) * a * b * c);
-//   int64_t expect[a][b][c];
+TEST(TestApiBroadcast, Test_a1c_to_abc_int64) {
+  // 构造测试输入和预期结果
+  int a = 16, b = 32, c = 32;
+  auto *x = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * a * 1 * c);
+  auto *y = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * a * b * c);
+  int64_t expect[a][b][c];
 
-//   for (uint32_t i = 0; i < a; i++) {
-//     for (uint32_t k = 0; k < c; k++) {
-//       x[i * c + k] = i * c + k;
-//       for (uint32_t j = 0; j < b; j++) {
-//         expect[i][j][k] = i * c + k;
-//       }
-//     }
-//   }
+  for (uint32_t i = 0; i < a; i++) {
+    for (uint32_t k = 0; k < c; k++) {
+      x[i * c + k] = i * c + k;
+      for (uint32_t j = 0; j < b; j++) {
+        expect[i][j][k] = i * c + k;
+      }
+    }
+  }
 
-//   // 构造Api调用函数
-//   auto kernel = [](int a, int b, int c, int64_t *x, int64_t *y) {
-//     // 1. 分配内存
-//     TPipe tpipe;
-//     TBuf<TPosition::VECCALC> xbuf, ybuf, tmp;
-//     tpipe.InitBuffer(xbuf, sizeof(int64_t) * a * 1 * c);
-//     tpipe.InitBuffer(ybuf, sizeof(int64_t) * a * b * c);
-//     tpipe.InitBuffer(tmp, 8 * 1024);
+  // 构造Api调用函数
+  auto kernel = [](int a, int b, int c, int64_t *x, int64_t *y) {
+    // 1. 分配内存
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> xbuf, ybuf, tmp;
+    tpipe.InitBuffer(xbuf, sizeof(int64_t) * a * 1 * c);
+    tpipe.InitBuffer(ybuf, sizeof(int64_t) * a * b * c);
+    tpipe.InitBuffer(tmp, 8 * 1024);
 
-//     auto l_x = xbuf.Get<int64_t>();
-//     auto l_y = ybuf.Get<int64_t>();
-//     auto l_tmp = tmp.Get<uint8_t>();
+    auto l_x = xbuf.Get<int64_t>();
+    auto l_y = ybuf.Get<int64_t>();
+    auto l_tmp = tmp.Get<uint8_t>();
 
-//     GmToUb(l_x, x, a * c);
-//     GmToUb(l_y, y, a * b * c);
+    GmToUb(l_x, x, a * c);
+    GmToUb(l_y, y, a * b * c);
 
-//     Broadcast(l_y, l_x, a, 1, c, a, b, c, l_tmp);
+    Broadcast(l_y, l_x, a, 1, c, a, b, c, l_tmp);
 
-//     UbToGm(y, l_y, a * b * c);
-//   };
+    UbToGm(y, l_y, a * b * c);
+  };
 
-//   // 调用kernel
-//   AscendC::SetKernelMode(KernelMode::AIV_MODE);
-//   ICPU_RUN_KF(kernel, 1, a, b, c, x, y);
+  // 调用kernel
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1, a, b, c, x, y);
 
-//   // 验证结果
-//   int diff_count = 0;
-//   for (int i = 0; i < a; i++) {
-//     for (int j = 0; j < b; j++) {
-//       for (int k = 0; k < c; k++) {
-//         auto diff = (int64_t)(y[i * b * c + j * c + k] - expect[i][j][k]);
-//         if (diff < -1e-5 || diff > 1e-5) {
-//           diff_count++;
-//         }
-//       }
-//     }
-//   }
+  // 验证结果
+  int diff_count = 0;
+  for (int i = 0; i < a; i++) {
+    for (int j = 0; j < b; j++) {
+      for (int k = 0; k < c; k++) {
+        auto diff = (int64_t)(y[i * b * c + j * c + k] - expect[i][j][k]);
+        if (diff < -1e-5 || diff > 1e-5) {
+          diff_count++;
+        }
+      }
+    }
+  }
 
-//   EXPECT_EQ(diff_count, 0);
-// }
+  EXPECT_EQ(diff_count, 0);
+}
+
+TEST(TestApiBroadcast, Test_a1c_to_abc_int64_unaligned_c5) {
+  // 构造测试输入和预期结果
+  int a = 2, b = 3, c = 5;
+  auto *x = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * a * 1 * c);
+  auto *y = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * a * b * c);
+  int64_t expect[a][b][c];
+
+  for (uint32_t i = 0; i < a; i++) {
+    for (uint32_t k = 0; k < c; k++) {
+      x[i * c + k] = i * c + k;
+      for (uint32_t j = 0; j < b; j++) {
+        expect[i][j][k] = i * c + k;
+      }
+    }
+  }
+
+  // 构造Api调用函数
+  auto kernel = [](int a, int b, int c, int64_t *x, int64_t *y) {
+    // 1. 分配内存
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> xbuf, ybuf, tmp;
+    tpipe.InitBuffer(xbuf, sizeof(int64_t) * a * 1 * c);
+    tpipe.InitBuffer(ybuf, sizeof(int64_t) * a * b * c);
+    tpipe.InitBuffer(tmp, 8 * 1024);
+
+    auto l_x = xbuf.Get<int64_t>();
+    auto l_y = ybuf.Get<int64_t>();
+    auto l_tmp = tmp.Get<uint8_t>();
+
+    GmToUb(l_x, x, a * c);
+    GmToUb(l_y, y, a * b * c);
+
+    Broadcast(l_y, l_x, a, 1, c, a, b, c, l_tmp);
+
+    UbToGm(y, l_y, a * b * c);
+  };
+
+  // 调用kernel
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1, a, b, c, x, y);
+
+  // 验证结果
+  int diff_count = 0;
+  for (int i = 0; i < a; i++) {
+    for (int j = 0; j < b; j++) {
+      for (int k = 0; k < c; k++) {
+        auto diff = (int64_t)(y[i * b * c + j * c + k] - expect[i][j][k]);
+        if (diff < -1e-5 || diff > 1e-5) {
+          diff_count++;
+        }
+      }
+    }
+  }
+
+  EXPECT_EQ(diff_count, 0);
+}
+
+TEST(TestApiBroadcast, Test_a1c_to_abc_int64_small_c3) {
+  // 构造测试输入和预期结果
+  int a = 2, b = 3, c = 3;
+  auto *x = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * a * 1 * c);
+  auto *y = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * a * b * c);
+  int64_t expect[a][b][c];
+
+  for (uint32_t i = 0; i < a; i++) {
+    for (uint32_t k = 0; k < c; k++) {
+      x[i * c + k] = i * c + k;
+      for (uint32_t j = 0; j < b; j++) {
+        expect[i][j][k] = i * c + k;
+      }
+    }
+  }
+
+  // 构造Api调用函数
+  auto kernel = [](int a, int b, int c, int64_t *x, int64_t *y) {
+    // 1. 分配内存
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> xbuf, ybuf, tmp;
+    tpipe.InitBuffer(xbuf, sizeof(int64_t) * a * 1 * c);
+    tpipe.InitBuffer(ybuf, sizeof(int64_t) * a * b * c);
+    tpipe.InitBuffer(tmp, 8 * 1024);
+
+    auto l_x = xbuf.Get<int64_t>();
+    auto l_y = ybuf.Get<int64_t>();
+    auto l_tmp = tmp.Get<uint8_t>();
+
+    GmToUb(l_x, x, a * c);
+    GmToUb(l_y, y, a * b * c);
+
+    Broadcast(l_y, l_x, a, 1, c, a, b, c, l_tmp);
+
+    UbToGm(y, l_y, a * b * c);
+  };
+
+  // 调用kernel
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1, a, b, c, x, y);
+
+  // 验证结果
+  int diff_count = 0;
+  for (int i = 0; i < a; i++) {
+    for (int j = 0; j < b; j++) {
+      for (int k = 0; k < c; k++) {
+        auto diff = (int64_t)(y[i * b * c + j * c + k] - expect[i][j][k]);
+        if (diff < -1e-5 || diff > 1e-5) {
+          diff_count++;
+        }
+      }
+    }
+  }
+
+  EXPECT_EQ(diff_count, 0);
+}
 
 TEST(TestApiBroadcast, Test_11_to_ab_int64) {
   // 构造测试输入和预期结果
@@ -923,62 +1037,62 @@ TEST(TestApiBroadcast, Test_a1_to_ab_uint64) {
   AscendC::GmFree(y);
 }
 
-// TEST(TestApiBroadcast, Test_a1c_to_abc_uint64) {
-//   // 构造测试输入和预期结果
-//   int a = 16, b = 32, c = 32;
-//   auto *x = (uint64_t*)AscendC::GmAlloc(sizeof(uint64_t) * a * 1 * c);
-//   auto *y = (uint64_t*)AscendC::GmAlloc(sizeof(uint64_t) * a * b * c);
-//   uint64_t expect[a][b][c];
+TEST(TestApiBroadcast, Test_a1c_to_abc_uint64) {
+  // 构造测试输入和预期结果
+  int a = 16, b = 32, c = 32;
+  auto *x = (uint64_t *)AscendC::GmAlloc(sizeof(uint64_t) * a * 1 * c);
+  auto *y = (uint64_t *)AscendC::GmAlloc(sizeof(uint64_t) * a * b * c);
+  uint64_t expect[a][b][c];
 
-//   for (uint32_t i = 0; i < a; i++) {
-//     for (uint32_t k = 0; k < c; k++) {
-//       x[i * c + k] = i * c + k;
-//       for (uint32_t j = 0; j < b; j++) {
-//         expect[i][j][k] = i * c + k;
-//       }
-//     }
-//   }
+  for (uint32_t i = 0; i < a; i++) {
+    for (uint32_t k = 0; k < c; k++) {
+      x[i * c + k] = i * c + k;
+      for (uint32_t j = 0; j < b; j++) {
+        expect[i][j][k] = i * c + k;
+      }
+    }
+  }
 
-//   // 构造Api调用函数
-//   auto kernel = [](int a, int b, int c, uint64_t *x, uint64_t *y) {
-//     // 1. 分配内存
-//     TPipe tpipe;
-//     TBuf<TPosition::VECCALC> xbuf, ybuf, tmp;
-//     tpipe.InitBuffer(xbuf, sizeof(uint64_t) * a * 1 * c);
-//     tpipe.InitBuffer(ybuf, sizeof(uint64_t) * a * b * c);
-//     tpipe.InitBuffer(tmp, 8 * 1024);
+  // 构造Api调用函数
+  auto kernel = [](int a, int b, int c, uint64_t *x, uint64_t *y) {
+    // 1. 分配内存
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> xbuf, ybuf, tmp;
+    tpipe.InitBuffer(xbuf, sizeof(uint64_t) * a * 1 * c);
+    tpipe.InitBuffer(ybuf, sizeof(uint64_t) * a * b * c);
+    tpipe.InitBuffer(tmp, 8 * 1024);
 
-//     auto l_x = xbuf.Get<uint64_t>();
-//     auto l_y = ybuf.Get<uint64_t>();
-//     auto l_tmp = tmp.Get<uint8_t>();
+    auto l_x = xbuf.Get<uint64_t>();
+    auto l_y = ybuf.Get<uint64_t>();
+    auto l_tmp = tmp.Get<uint8_t>();
 
-//     GmToUb(l_x, x, a * c);
-//     GmToUb(l_y, y, a * b * c);
+    GmToUb(l_x, x, a * c);
+    GmToUb(l_y, y, a * b * c);
 
-//     Broadcast(l_y, l_x, a, 1, c, a, b, c, l_tmp);
+    Broadcast(l_y, l_x, a, 1, c, a, b, c, l_tmp);
 
-//     UbToGm(y, l_y, a * b * c);
-//   };
+    UbToGm(y, l_y, a * b * c);
+  };
 
-//   // 调用kernel
-//   AscendC::SetKernelMode(KernelMode::AIV_MODE);
-//   ICPU_RUN_KF(kernel, 1, a, b, c, x, y);
+  // 调用kernel
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1, a, b, c, x, y);
 
-//   // 验证结果
-//   int diff_count = 0;
-//   for (int i = 0; i < a; i++) {
-//     for (int j = 0; j < b; j++) {
-//       for (int k = 0; k < c; k++) {
-//         auto diff = (uint64_t)(y[i * b * c + j * c + k] - expect[i][j][k]);
-//         if (diff < -1e-5 || diff > 1e-5) {
-//           diff_count++;
-//         }
-//       }
-//     }
-//   }
+  // 验证结果
+  int diff_count = 0;
+  for (int i = 0; i < a; i++) {
+    for (int j = 0; j < b; j++) {
+      for (int k = 0; k < c; k++) {
+        auto diff = (uint64_t)(y[i * b * c + j * c + k] - expect[i][j][k]);
+        if (diff < -1e-5 || diff > 1e-5) {
+          diff_count++;
+        }
+      }
+    }
+  }
 
-//   EXPECT_EQ(diff_count, 0);
-// }
+  EXPECT_EQ(diff_count, 0);
+}
 
 TEST(TestApiBroadcast, Test_11_to_ab_uint64) {
   // 构造测试输入和预期结果
@@ -2298,3 +2412,56 @@ TEST(TestApiBroadcast, Test_1a1_to_bab_half) {
 
 //   EXPECT_EQ(diff_count, 0);
 // }
+
+TEST(TestApiBroadcast, Test_1b_to_ab_bf16) {
+  // 构造测试输入和预期结果
+  int a = 16, b = 32;
+  auto *x = (bfloat16_t *)AscendC::GmAlloc(sizeof(bfloat16_t) * 1 * b);
+  auto *y = (bfloat16_t *)AscendC::GmAlloc(sizeof(bfloat16_t) * a * b);
+  bfloat16_t expect[a][b];
+
+  for (uint32_t j = 0; j < b; j++) {
+    x[j] = static_cast<float>(j);
+    for (uint32_t i = 0; i < a; i++) {
+      expect[i][j] = static_cast<float>(j);
+    }
+  }
+
+  // 构造Api调用函数
+  auto kernel = [](int a, int b, bfloat16_t *x, bfloat16_t *y) {
+    // 1. 分配内存
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> xbuf, ybuf, tmp;
+    tpipe.InitBuffer(xbuf, sizeof(bfloat16_t) * 1 * b);
+    tpipe.InitBuffer(ybuf, sizeof(bfloat16_t) * a * b);
+    tpipe.InitBuffer(tmp, 8 * 1024);
+
+    auto l_x = xbuf.Get<bfloat16_t>();
+    auto l_y = ybuf.Get<bfloat16_t>();
+    auto l_tmp = tmp.Get<uint8_t>();
+
+    GmToUb(l_x, x, b);
+    GmToUb(l_y, y, a * b);
+
+    Broadcast(l_y, l_x, 1, b, 0, a, b, 0, l_tmp);
+
+    UbToGm(y, l_y, a * b);
+  };
+
+  // 调用kernel
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1, a, b, x, y);
+
+  // 验证结果
+  int diff_count = 0;
+  for (int i = 0; i < a; i++) {
+    for (int j = 0; j < b; j++) {
+      auto diff = static_cast<float>(y[i * b + j]) - static_cast<float>(expect[i][j]);
+      if (diff < -1e-5 || diff > 1e-5) {
+        diff_count++;
+      }
+    }
+  }
+
+  EXPECT_EQ(diff_count, 0);
+}

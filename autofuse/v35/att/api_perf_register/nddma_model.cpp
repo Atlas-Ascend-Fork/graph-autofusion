@@ -22,6 +22,7 @@ constexpr size_t kMinNddmaRank = 1U;
 constexpr size_t kMaxNddmaRank = 5U;
 constexpr uint64_t kLowCoreUpperBound = 2U;
 constexpr uint64_t kInputStrideUpperBound = 128U;
+constexpr uint64_t kCalibratedNg2InnerBytesThreshold = 128U;
 
 struct Nddma1DParams {
   double t1;
@@ -532,14 +533,16 @@ af::Status BuildCalibratedNg2High(const NddmaNormalizedDesc &normalized, const N
   const Expr large = CreateExpr(q[0]) + CreateExpr(q[1]) * b_large + CreateExpr(q[2]) * shared * b_large +
                      CreateExpr(q[3]) * shared * b_large * gap;
   const Expr inner_bytes = n * CreateExpr(dtype_size);
-  if (af::SymbolicUtils::StaticCheckLt(inner_bytes, CreateExpr(128)) == af::TriBool::kTrue) {
+  if (af::SymbolicUtils::StaticCheckLt(inner_bytes, CreateExpr(kCalibratedNg2InnerBytesThreshold)) ==
+      af::TriBool::kTrue) {
     high_core = small;
-  } else if (af::SymbolicUtils::StaticCheckGe(inner_bytes, CreateExpr(128)) == af::TriBool::kTrue) {
+  } else if (af::SymbolicUtils::StaticCheckGe(inner_bytes, CreateExpr(kCalibratedNg2InnerBytesThreshold)) ==
+             af::TriBool::kTrue) {
     high_core = large;
   } else {
     GetPerfVar("nddma_ng2_inner", high_core, result.ternary_ops);
-    TernaryOp ternary(CondType::K_LT, inner_bytes, CreateExpr(128), std::make_shared<IfCase>(small),
-                      std::make_shared<IfCase>(large));
+    TernaryOp ternary(CondType::K_LT, inner_bytes, CreateExpr(kCalibratedNg2InnerBytesThreshold),
+                      std::make_shared<IfCase>(small), std::make_shared<IfCase>(large));
     ternary.SetVariable(high_core);
     result.ternary_ops[high_core] = std::move(ternary);
   }

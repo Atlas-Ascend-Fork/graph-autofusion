@@ -11,6 +11,7 @@
 #ifndef __INDIRECT_LOAD_UTILS_H__
 #define __INDIRECT_LOAD_UTILS_H__
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -92,6 +93,37 @@ struct IndirectLoadTensorLayout : LogicalTensorView {
   IndirectLoadLayoutKind kind = IndirectLoadLayoutKind::kUnsupported;
   std::vector<af::Expression> physical_repeats;
 };
+
+// 判定向量化视图是否可能带行间物理 padding：物理跨度（Σ(size-1)*stride+1）无法静态证明
+// 等于逻辑元素积（Πsize）即视为存在。通用对齐把尾轴 pad 到对齐块时跨度含取整结构，动态
+// shape 下通常不可证明相等；变位宽生产者（如 cast）的输出缓冲同样会被 pad。保守误判只会
+// 把 SIMD 降级到布局参数完备的 strided facade 或改按物理步长寻址，漏判则使 dense 消费者按
+// 紧凑布局读写带 padding 的缓冲产生越界。视图信息缺失、视图轴不在张量轴列表或仅单轴
+// （无行间 padding 可言）时不判，维持既有行为。
+template <typename AxisIdRange, typename SizeRange, typename StrideRange>
+inline bool MayHaveVectorizedPadding(const AxisIdRange &axis, const SizeRange &sizes,
+                                     const AxisIdRange &vectorized_axis, const StrideRange &vectorized_strides) {
+  if (axis.size() != sizes.size() || vectorized_axis.size() != vectorized_strides.size() ||
+      vectorized_axis.size() <= 1UL) {
+    return false;
+  }
+  af::Expression span = af::sym::kSymbolOne;
+  af::Expression product = af::sym::kSymbolOne;
+  for (size_t dim = 0UL; dim < vectorized_axis.size(); ++dim) {
+    const auto axis_it = std::find(axis.begin(), axis.end(), vectorized_axis[dim]);
+    if (axis_it == axis.end()) {
+      return false;
+    }
+    const size_t axis_pos = static_cast<size_t>(std::distance(axis.begin(), axis_it));
+    const auto &stride = vectorized_strides[dim];
+    if (af::SymbolicUtils::StaticCheckEq(stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      continue;
+    }
+    span = span + (sizes[axis_pos] - af::sym::kSymbolOne) * stride;
+    product = product * sizes[axis_pos];
+  }
+  return af::SymbolicUtils::StaticCheckEq(span, product) != af::TriBool::kTrue;
+}
 
 struct TemplateLogicalView {
   IndirectLoadTensorLayout input;
@@ -473,6 +505,23 @@ af::AscNodePtr FindIndirectLoadNode(const af::AscGraph &graph);
 af::Status ValidateSingleIndirectLoadNode(const af::AscGraph &graph, af::AscNodePtr &node);
 bool GetPrebuiltYTilingCase(const af::AscGraph &graph, af::AxisId &tile_id,
                             std::pair<af::AxisPtr, af::AxisPtr> &tiling);
+// [组共享轴等价化] 多 gather 融合组成员输出视图中"同索引空间、仅 axis id 不同"的轴
+// （Broadcast 副本轴、split 兄弟轴、前端重复建轴）归一到新建的组共享轴，消除
+// sched_has_all_members 的覆盖误杀。判定规则（等价类）：
+//   同视图位置 + 轴 size 符号相等 + 视图 repeats/strides 相等 + 被改写节点输出是新分配
+//   buffer（IL 输出天然满足）。stride 不等（含 0 vs 1）或 size 不等 → 拒绝候选。
+// 仅在 candidate_graph 副本上执行；不触碰 split/concat/Store 目标节点。
+
+// 覆盖检查（从 schedule.cpp 的 sched_has_all_members 抽出，调度器与候选生成期共用）：
+// 节点的 sched.axis 需包含 merged_axis.from 的全部成员轴，否则模板轴折叠不适用。
+bool GroupAxesCoverable(af::AscGraph &graph, const af::AscNodePtr &node, ascir::AxisId merged_axis_id);
+
+// 等价判定：两个成员输出视图在同一 dim 上的轴是否等价（可归一）。
+bool AreAxesEquivalentInView(af::AscGraph &graph, const af::AscNodePtr &a, ascir::AxisId axis_a,
+                             const af::AscNodePtr &b, ascir::AxisId axis_b);
+
+// 主入口：逐 dim 分等价类，同类但 id 不同时新建组共享轴并替换；不等价时 is_legal=false。
+af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal);
 }  // namespace ascgen_utils::indirect_load
 
 #endif  // __INDIRECT_LOAD_UTILS_H__

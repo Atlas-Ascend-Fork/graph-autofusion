@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include "api_call/utils/api_call_factory.h"
@@ -265,6 +266,28 @@ bool TensorViewSpansRows(const TPipe &tpipe, const Tensor &tensor,
   return false;
 }
 
+// 取 layout 轴在张量物理视图中的步长，查找顺序与输出侧一致：向量化视图轴 → 张量物理
+// 轴步长 → 派生后代轴（多行 tile 分裂形态，如 a0 -> a0t）的向量化步长；均未命中返回
+// 空，调用方按自身语义兜底。
+std::optional<ascir::SizeExpr> FindTensorPhysicalStride(const TPipe &tpipe, const Tensor &tensor,
+                                                        const ascir::AxisId &axis_id) {
+  const auto it = std::find(tensor.vectorized_axis.begin(), tensor.vectorized_axis.end(), axis_id);
+  if (it != tensor.vectorized_axis.end()) {
+    return tensor.vectorized_strides[static_cast<size_t>(std::distance(tensor.vectorized_axis.begin(), it))];
+  }
+  const auto axis_it = std::find(tensor.axis.begin(), tensor.axis.end(), axis_id);
+  if (axis_it != tensor.axis.end()) {
+    return tensor.axis_strides[static_cast<size_t>(std::distance(tensor.axis.begin(), axis_it))];
+  }
+  std::optional<ascir::SizeExpr> result;
+  for (size_t vec_pos = 0UL; vec_pos < tensor.vectorized_axis.size(); ++vec_pos) {
+    if (IsAxisDerivedFrom(tpipe, tensor.vectorized_axis[vec_pos], axis_id)) {
+      result = tensor.vectorized_strides[vec_pos];
+    }
+  }
+  return result;
+}
+
 af::Status BuildTensorWindowInfo(const TPipe &tpipe,
                                  const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout,
                                  const Tensor &tensor, size_t axis_pos, LogicalTensorInfo &info) {
@@ -279,6 +302,23 @@ af::Status BuildTensorWindowInfo(const TPipe &tpipe,
   // view, preserve zero-stride axes but derive non-zero window strides from the physical vectorized tensor view;
   // bitwidth-changing producers can introduce padding between logical elements.
   if (layout.kind == ascgen_utils::indirect_load::IndirectLoadLayoutKind::kDense) {
+    // 变位宽生产者（cast）的通用对齐会在行间引入物理 padding（如 int64 cast 输出行步长
+    // 4*Ceil(ks1/4)）：dense 逻辑视图的紧凑步长不体现该 padding，消费者按逻辑步长寻址
+    // 会漂移进 padding 区。物理跨度无法静态证明等于逻辑元素积时按物理向量化步长替换
+    // 窗口步长；轴的物理步长查找与输出侧 GetSimdOutputStrides 共用同一套兜底顺序
+    // （向量化视图 → 张量物理步长 → 派生后代轴），避免两处语义分叉。
+    if (ascgen_utils::indirect_load::MayHaveVectorizedPadding(tensor.axis, tensor.axis_size, tensor.vectorized_axis,
+                                                              tensor.vectorized_strides)) {
+      for (size_t dim = 0UL; dim < info.strides.size(); ++dim) {
+        if (af::SymbolicUtils::StaticCheckEq(layout.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+          continue;
+        }
+        const auto physical_stride = FindTensorPhysicalStride(tpipe, tensor, layout.axis_ids[dim]);
+        if (physical_stride.has_value()) {
+          info.strides[dim] = *physical_stride;
+        }
+      }
+    }
     return af::SUCCESS;
   }
   af::Expression compact_stride = af::sym::kSymbolOne;
@@ -1488,24 +1528,7 @@ std::vector<ascir::SizeExpr> GetSimdOutputStrides(const TPipe &tpipe, const Tens
                                                   const ascgen_utils::indirect_load::LogicalTensorView &layout) {
   std::vector<ascir::SizeExpr> strides(layout.axis_ids.size(), af::sym::kSymbolOne);
   for (size_t dim = 0; dim < layout.axis_ids.size(); ++dim) {
-    const auto it = std::find(tensor.vectorized_axis.begin(), tensor.vectorized_axis.end(), layout.axis_ids[dim]);
-    if (it != tensor.vectorized_axis.end()) {
-      strides[dim] = tensor.vectorized_strides[static_cast<size_t>(std::distance(tensor.vectorized_axis.begin(), it))];
-      continue;
-    }
-    const auto axis_it = std::find(tensor.axis.begin(), tensor.axis.end(), layout.axis_ids[dim]);
-    if (axis_it != tensor.axis.end()) {
-      strides[dim] = tensor.axis_strides[static_cast<size_t>(std::distance(tensor.axis.begin(), axis_it))];
-      continue;
-    }
-    // 可求解多行 tile：逻辑视图轴在张量中被分裂为 TileInner 后代轴（如 a0 -> a0t），
-    // 该维输出步长取后代轴在紧凑 tile 视图中的向量化步长（多行窗口的行步长）。
-    for (size_t vec_pos = 0UL; vec_pos < tensor.vectorized_axis.size(); ++vec_pos) {
-      if (IsAxisDerivedFrom(tpipe, tensor.vectorized_axis[vec_pos], layout.axis_ids[dim])) {
-        strides[dim] = tensor.vectorized_strides[vec_pos];
-        break;
-      }
-    }
+    strides[dim] = FindTensorPhysicalStride(tpipe, tensor, layout.axis_ids[dim]).value_or(af::sym::kSymbolOne);
   }
   return strides;
 }
@@ -2060,43 +2083,26 @@ Status IndirectLoadRegApiCall::GenerateSimd(const TPipe &tpipe, const std::vecto
     GE_ASSERT_TRUE(tmp_iter != tmp_buf_id.end(), "IndirectLoad SIMD requires an API-level tmp buffer.");
   }
   // [padded 视图兜底降级] codegen 期为最终视图（通用对齐已完成），不依赖 lowering
-  // metadata 序列化时的视图时机：输出 tensor 的向量化跨度（与 Tiler::TensorActualSize
-  // 同源）大于逻辑元素积（Π尾轴前有效宽）即视图被 pad——dense facade（RegGather
-  // RunReuse）线性稠密写出与 padded 视图布局冲突（index 按窗口线性读越过真实数据
-  // → 越界读表 AIC 341；strided 解释稠密数据 → 数值错乱），强制降级 strided facade
-  // （按视图 strides 逐行写，行内 pad 由 ReduceInit OptImpl 清中性值）。SIMD 模板
-  // 的 tmp 恒分配（CalcTmpBufSize 只判模板），降级无 tmp 缺口。
+  // metadata 序列化时的视图时机：输出或索引 tensor 的向量化跨度（与 Tiler::TensorActualSize
+  // 同源）无法静态证明等于逻辑元素积（Π尾轴前有效宽）即视图可能被 pad——dense facade
+  // （RegGather RunReuse）线性稠密读写与 padded 视图布局冲突（index 按窗口线性读越过
+  // 真实数据 → 越界读表 AIC 341；strided 解释稠密数据 → 数值错乱），强制降级 strided
+  // facade（按视图 strides 逐行寻址，行内 pad 由 ReduceInit OptImpl 清中性值）。SIMD
+  // 模板的 tmp 恒分配（CalcTmpBufSize 只判模板），降级无 tmp 缺口。
   {
     // codegen::Tensor 直接持有 axis/axis_size/axis_strides 与向量化视图字段，
-    // axis_size 即视图轴宽（Tiler::TensorActualSize 同源）。
-    af::Expression y_span = af::sym::kSymbolOne;
-    af::Expression y_product = af::sym::kSymbolOne;
-    bool y_view_ok = output.vectorized_axis.size() == output.vectorized_strides.size() &&
-                     !output.vectorized_axis.empty() && output.axis.size() == output.axis_size.size();
-    if (y_view_ok) {
-      for (size_t dim = 0UL; dim < output.vectorized_axis.size(); ++dim) {
-        const auto axis_it = std::find(output.axis.begin(), output.axis.end(), output.vectorized_axis[dim]);
-        if (axis_it == output.axis.end()) {
-          y_view_ok = false;
-          break;
-        }
-        const size_t axis_pos_y = static_cast<size_t>(std::distance(output.axis.begin(), axis_it));
-        const auto &y_stride = output.vectorized_strides[dim];
-        if (af::SymbolicUtils::StaticCheckEq(y_stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
-          continue;
-        }
-        y_span = y_span + (output.axis_size[axis_pos_y] - af::sym::kSymbolOne) * y_stride;
-        y_product = y_product * output.axis_size[axis_pos_y];
-      }
-    }
-    const bool y_padded = y_view_ok && output.vectorized_axis.size() > 1UL &&
-                          af::SymbolicUtils::StaticCheckGt(y_span, y_product) == af::TriBool::kTrue;
-    GELOGI("[IndirectLoad] SIMD fallback check: node[%s] span[%s] product[%s] padded[%d] fallback[%d].",
-           node_name.c_str(), y_span.Str().get(), y_product.Str().get(), static_cast<int>(y_padded),
+    // axis_size 即视图轴宽（Tiler::TensorActualSize 同源）。判定与 lowering 期同向
+    // 保守（物理跨度无法静态证明等于逻辑元素积即视为 padded），并覆盖索引视图。
+    const bool y_padded = ascgen_utils::indirect_load::MayHaveVectorizedPadding(
+        output.axis, output.axis_size, output.vectorized_axis, output.vectorized_strides);
+    const bool idx_padded = ascgen_utils::indirect_load::MayHaveVectorizedPadding(
+        index.axis, index.axis_size, index.vectorized_axis, index.vectorized_strides);
+    GELOGI("[IndirectLoad] SIMD fallback check: node[%s] out_padded[%d] index_padded[%d] fallback[%d].",
+           node_name.c_str(), static_cast<int>(y_padded), static_cast<int>(idx_padded),
            static_cast<int>(simd_metadata_.fallback));
-    if (y_padded && simd_metadata_.fallback != ascgen_utils::indirect_load::SimdFallback::kStrided) {
-      GELOGW("[IndirectLoad] SIMD dense fallback downgraded to strided: node[%s] padded view span[%s] > product[%s].",
-             node_name.c_str(), y_span.Str().get(), y_product.Str().get());
+    if ((y_padded || idx_padded) && simd_metadata_.fallback != ascgen_utils::indirect_load::SimdFallback::kStrided) {
+      GELOGW("[IndirectLoad] SIMD dense fallback downgraded to strided: node[%s] out_padded[%d] index_padded[%d].",
+             node_name.c_str(), static_cast<int>(y_padded), static_cast<int>(idx_padded));
       simd_metadata_.fallback = ascgen_utils::indirect_load::SimdFallback::kStrided;
       if (tmp_iter == tmp_buf_id.end()) {
         GE_ASSERT_TRUE(false, "IndirectLoad SIMD strided downgrade requires an API-level tmp buffer, node[%s].",
@@ -2175,11 +2181,41 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
       ss << local_target_alloc;
     }
     af::Expression local_element_count;
-    GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
-    actual_size_expr = tpipe.tiler.ActualSize(local_element_count);
-    const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
-    output_offset_expr = "(static_cast<" + offset_type + ">(block_dim_offset) + static_cast<" + offset_type + ">(" +
-                         outer_tb_var + ")) * " + PromoteSizeExpr(local_tile_size_expr, offset_type);
+    // [组员调用形态与表达式同分支绑定] 判据与 codegen_kernel_loop 的提升判据同源
+    // （GetPostReduceConsumer，仅当前图）：无共享 Reduce 的组员（组路径 boundary=rank、
+    // 整空间合并轴）被提升为一次调用覆盖整核——对齐裸 gather 形态（block_dim_offset
+    // 单位=元素、actual_size=块元素数）；有共享 Reduce 的组员（boundary=first_reduce、
+    // outer=G/inner=R）不被提升、逐 tile 调用——(block_dim_offset + Tb) 单位=行，×tile
+    // 元素数为元素偏移。不叠加 metadata 的 has_post_reduce_（调度期快照，组员恒 false，
+    // 两份图副本存在漂移可能——以当前图的 GetPostReduceConsumer 为唯一权威判据，与
+    // codegen_kernel_loop:908-922 的提升条件、fused 分支的判定保持一致）。
+    const bool has_post_reduce_consumer =
+        node != nullptr && ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr;
+    // [判据漂移检测] 当前图的 GetPostReduceConsumer 是唯一权威判据，调度期 metadata 的
+    // has_post_reduce_ 理论上应与之同值（调度器与 codegen 看同一张结构图——分区
+    // (PartitionSkGraph 含 SK 段 SIMT 化) 与 workspace 化均发生在调度前，调度后仅
+    // ChangeStartingOutputToWorkspace 改图且不影响 IL→Reduce 可达性）。若不一致说明
+    // 上述前提被破坏（图副本结构漂移），打 WARNING 供排查，不改变行为。多 gather 组员
+    // 例外：成员计划收窄使 metadata.has_post_reduce_ 恒为 false（共享归并/输出链不进
+    // 组员 SIMT 计划，见 BuildSimtLoweringMetadata），与当前图判据必然不等——组员不参与
+    // 比较（形态判定本就以当前图判据为唯一权威），否则该 WARN 对全部共享 Reduce 组
+    // 必然误报，淹没真实漂移信号。
+    if (!ascgen_utils::indirect_load::IsSimtGroupMember(node) && has_post_reduce_ != has_post_reduce_consumer) {
+      GELOGW(
+          "[IndirectLoad] Post-reduce judgement drift between schedule and codegen, node[%s]: "
+          "metadata[%d] vs current graph[%d].",
+          node_name.c_str(), has_post_reduce_ ? 1 : 0, has_post_reduce_consumer ? 1 : 0);
+    }
+    if (!has_post_reduce_consumer) {
+      actual_size_expr = outer_tb_var + "_loop_size";
+      output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
+    } else {
+      GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
+      actual_size_expr = tpipe.tiler.ActualSize(local_element_count);
+      const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
+      output_offset_expr = "(static_cast<" + offset_type + ">(block_dim_offset) + static_cast<" + offset_type + ">(" +
+                           outer_tb_var + ")) * " + PromoteSizeExpr(local_tile_size_expr, offset_type);
+    }
     if (prepass_plan != nullptr) {
       // [SIMT index 闭包预计算] 行/槽寻址参数与 Store 行布局一致；scratch 槽宽与
       // CalcTmpBufSize 的申请同源（Align(inner*4,32B)/4 == Align(inner,8)）。
@@ -2949,7 +2985,24 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
     ss << "};\n";
     std::string fused_actual_size_expr;
     std::string fused_output_offset_expr;
-    if (merge_info.register_merge) {
+    // [L3 调用形态与表达式同分支绑定] 判据与 codegen_kernel_loop 的提升判据同源
+    // （GetPostReduceConsumer）：无共享 Reduce 的 L3（组路径 boundary=rank、整空间合并轴、
+    // 恒提升）——一次调用覆盖整核，与 L2 同形态（block_dim_offset 单位=元素、actual_size=
+    // 块元素数，提升作用域内 <Tb>_loop_size 与 block_dim_offset 均已声明）；有共享 Reduce 的
+    // L3（boundary=first_reduce、outer=G/inner=R）不被提升、逐 tile 调用——
+    // (block_dim_offset + Tb) 单位=行，×tile 元素数（成员 value tensor 的向量化元素数）为
+    // 元素偏移，与单 gather post-Reduce 的 local-target 形态同构。
+    const bool fused_has_post_reduce_consumer =
+        node != nullptr && ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr;
+    // 与单路调用的漂移检测同口径：组员（含 fused primary）的 metadata.has_post_reduce_
+    // 被成员计划收窄恒置 false，不参与比较（见 GenerateSimtInvocation 处注释）。
+    if (!ascgen_utils::indirect_load::IsSimtGroupMember(node) && has_post_reduce_ != fused_has_post_reduce_consumer) {
+      GELOGW(
+          "[IndirectLoad] Fused post-reduce judgement drift between schedule and codegen, node[%s]: "
+          "metadata[%d] vs current graph[%d].",
+          node_name.c_str(), has_post_reduce_ ? 1 : 0, fused_has_post_reduce_consumer ? 1 : 0);
+    }
+    if (merge_info.register_merge || !fused_has_post_reduce_consumer) {
       fused_actual_size_expr = outer_tb_var + "_loop_size";
       fused_output_offset_expr = "static_cast<" + fused_offset_type + ">(block_dim_offset)";
     } else {

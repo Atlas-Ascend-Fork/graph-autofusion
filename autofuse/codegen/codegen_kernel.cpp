@@ -44,6 +44,36 @@ constexpr uint32_t kFuncIdBegin = 20000000U;
 constexpr int kTensorApiLevel = 2;
 constexpr const char kInputTensorDescName[] = "input_tensor_desc";
 constexpr const char kOutputTensorDescName[] = "output_tensor_desc";
+// int64/uint64 的 Duplicate 需要额外的临时空间，统一使用这个生成的张量名。
+constexpr const char kInt64DupScratchTensor[] = "int64_dup_scratch_tensor";
+
+// 只有 64 位整数 Duplicate 路径需要传入额外的临时缓冲区。
+bool NeedInt64DupScratch(ge::DataType dtype) {
+  return dtype == ge::DT_INT64 || dtype == ge::DT_UINT64;
+}
+
+// 根据数据类型生成可选的 Duplicate 临时缓冲区参数；其他类型保持原有调用形式。
+std::string Int64DupScratchArg(ge::DataType dtype) {
+  return NeedInt64DupScratch(dtype) ? std::string(", ") + kInt64DupScratchTensor : "";
+}
+
+// 检查当前内核是否真的会生成 64 位整数 Duplicate，避免无用地申请片上内存。
+bool NeedInt64DupScratchAlloc(const TPipe &tpipe) {
+  for (const auto &id : tpipe.need_gen_blk_tensors) {
+    const Tensor *tensor = tpipe.GetTensor(id);
+    if (tensor != nullptr && NeedInt64DupScratch(tensor->dtype)) {
+      return true;
+    }
+  }
+  for (const auto &pair : tpipe.tensors) {
+    const Tensor &tensor = pair.second;
+    if (tensor.need_gen_get_value_of_ub_scalar && tensor.need_duplicate_value_of_ub_scalar &&
+        NeedInt64DupScratch(tensor.dtype)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 struct QueCollection {
   std::unordered_map<ascir::QueId, af::Position> que_id_to_src_position;
@@ -885,8 +915,8 @@ Status Tensor::GenDuplicateValueOfUbScalar(std::string &result) const {
 
   std::string event_id = this->name + "_event_id";
   ss << "AscendC::PipeBarrier<PIPE_ALL>();" << std::endl;
-  ss << "Duplicate(" << this->name << "[0], " << ub_scalar_name << ", " << "32/sizeof(" << dtype_name << "));"
-     << std::endl;
+  ss << "Duplicate(" << this->name << "[0], " << ub_scalar_name << ", " << "32/sizeof(" << dtype_name << ")"
+     << Int64DupScratchArg(this->dtype) << ");" << std::endl;
   ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
   result = ss.str();
   return af::SUCCESS;
@@ -2179,11 +2209,29 @@ Status TPipe::BlkTensorAllocAndInit(std::string &result) const {
         tensor_ptr->const_value.empty() ? tiler.Size(tensor_ptr->const_value_expr, true) : tensor_ptr->const_value;
     ss << "Duplicate(" << scalar_local_blk_tensor_name << "[0], static_cast<" << tensor_ptr->type << ">(" << const_value
        << "), static_cast<uint64_t>(32/"
-       << "sizeof(" << tensor_ptr->type << ")));" << std::endl;
+       << "sizeof(" << tensor_ptr->type << "))" << Int64DupScratchArg(tensor_ptr->dtype) << ");" << std::endl;
     ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
   }
   result = ss.str();
   return af::SUCCESS;
+}
+
+std::string TPipe::Int64DupScratchAlloc() const {
+  if (!NeedInt64DupScratchAlloc(*this)) {
+    return "";
+  }
+  std::stringstream ss;
+  // 申请 512 字节临时空间，供 int64/uint64 Duplicate 的向量实现使用。
+  ss << "TBuf<TPosition::VECCALC> " << kInt64DupScratchTensor << "_buffer;" << std::endl;
+  if (using_global_tpipe_) {
+    ss << "GetTPipePtr()->InitBuffer(" << kInt64DupScratchTensor << "_buffer, 16 * 16 * sizeof(uint16_t));"
+       << std::endl;
+  } else {
+    ss << "tpipe.InitBuffer(" << kInt64DupScratchTensor << "_buffer, 16 * 16 * sizeof(uint16_t));" << std::endl;
+  }
+  ss << "LocalTensor<uint8_t> " << kInt64DupScratchTensor << " = " << kInt64DupScratchTensor
+     << "_buffer.Get<uint8_t>();" << std::endl;
+  return ss.str();
 }
 
 std::string TPipe::GenDuplicateBufAlloc(
@@ -2817,6 +2865,7 @@ Status Kernel::LocalTensorQueBufAlloc(std::string &result, const ascir::ImplGrap
   std::string tmp;
 
   ss << this->tpipe.Define() << std::endl;
+  ss << this->tpipe.Int64DupScratchAlloc();
 
   if (!this->pre_api_extract_dup.empty()) {
     ss << this->tpipe.GenDuplicateBufAlloc(this->pre_api_extract_dup) << std::endl;
@@ -4591,6 +4640,13 @@ Status Kernel::GenerateKernelByNode(const ascir::ImplGraph &graph, stringstream 
           "__NPU_ARCH__ == 9202))"
        << std::endl;
   }
+  const bool need_int64_dup_scratch = NeedInt64DupScratchAlloc(this->tpipe);
+  if (need_int64_dup_scratch) {
+    // duplicate.h 会使用向量 Duplicate/Transpose 接口。先输出接口声明，
+    // 再输出各个算子的 API 内容，避免某个节点提前插入 duplicate.h 后出现声明顺序问题。
+    ss << "#include \"basic_api/kernel_operator_vec_duplicate_intf.h\"" << std::endl;
+    ss << "#include \"basic_api/kernel_operator_vec_transpose_intf.h\"" << std::endl;
+  }
   const std::string kMatMulTilingKeyDynamic = "mat_mul_tiling_key_dynamic.h";
   const std::string kBatchMatMulV3TilingKeyDynamic = "batch_mat_mul_v3_tiling_key_dynamic.h";
   for (const auto &node : graph.GetAllNodes()) {
@@ -4617,6 +4673,13 @@ Status Kernel::GenerateKernelByNode(const ascir::ImplGraph &graph, stringstream 
         ss << "#undef AF_UNDEF_ASCENDC_TPL_KERNEL" << std::endl;
         ss << "#endif" << std::endl;
       }
+    }
+  }
+  if (need_int64_dup_scratch) {
+    const auto &file = AscendCApiRegistry::GetInstance().GetFileContent("duplicate.h");
+    if (!file.empty() && kernel_file_ptr.find(&(file)) == kernel_file_ptr.end()) {
+      kernel_file_ptr.insert(&(file));
+      ss << file;
     }
   }
   if (need_marco) {
@@ -4908,7 +4971,7 @@ Status TPipe::BlkTensorAssign(std::string &result) const {
 
     ss << "Duplicate(" << scalar_local_blk_tensor_name << "[0], static_cast<" << tensor_ptr->type << ">("
        << tensor_ptr->const_value << "), static_cast<uint64_t>(32/"
-       << "sizeof(" << tensor_ptr->type << ")));" << std::endl;
+       << "sizeof(" << tensor_ptr->type << "))" << Int64DupScratchArg(tensor_ptr->dtype) << ");" << std::endl;
     ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
   }
   ss << std::endl;
@@ -5172,6 +5235,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
   GE_CHK_STATUS_RET(this->tpipe.LocalTBufAllocLoopTwice(tmp, false), "Local tbuf define failed");
   result << tmp;
 
+  result << this->tpipe.Int64DupScratchAlloc();
   if (!this->pre_api_extract_dup.empty()) {
     result << this->tpipe.GenDuplicateBufAssign(this->pre_api_extract_dup) << std::endl;
   }

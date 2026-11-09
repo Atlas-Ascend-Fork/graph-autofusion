@@ -974,7 +974,8 @@ build_backend() {
                     compare_x2_tensor_test_e2e \
                     compare_x2_tensor_int32_test_e2e \
                     load_to_store_and_abs_test_e2e \
-                    scalar_cast_add_test_e2e \
+                    scalar_cast_add_test_e2e  \
+                    cast_uint8_to_int64_test_e2e \
                     concat_all_aligned_test_e2e \
                     concat_to_stores_test_e2e \
                     load_unalign_pad_test_e2e \
@@ -1118,12 +1119,14 @@ build_backend() {
                       ceil2int_bf16_test_e2e_v2 \
                       bool_mask_flow_test_e2e_v2 \
                       transpose_bool_test_e2e_v2 \
+                      transpose_int8_test_e2e_v2 \
                       select_bool_test_e2e_v2 \
                       copysign_bf16_test_e2e_v2 \
                       erfcx_test_e2e_v2 \
                       expm1_test_e2e_v2 \
                       rand_store_test_e2e_v2 \
-                      randn_store_test_e2e_v2"
+                      randn_store_test_e2e_v2 \
+                      load_cast_brc_realign_test_e2e_v2"
   fi
   MAKE_TARGET_LIST_CODEGEN=$(echo "${MAKE_TARGET_LIST}" | sed 's/e2e/codegen/g')
   CTEST_BACKEND_TEST1_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST_CODEGEN})

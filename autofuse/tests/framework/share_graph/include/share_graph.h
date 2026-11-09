@@ -71,6 +71,8 @@ struct ShareGraph {
   static af::ComputeGraphPtr ScalarBrcFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadBrcFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr CastCastFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
+  // uint8 -> int64 一维 Cast（A3/2201 需经 half -> float 两跳），用于覆盖 CastExtend 两跳分支
+  static af::ComputeGraphPtr CastUint8ToInt64FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ScalarCastAddFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   static af::ComputeGraphPtr CastCastNanFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   static af::ComputeGraphPtr CastCastIsFiniteFusedGraph(size_t dims_size, af::DataType in_dtype,
@@ -181,6 +183,8 @@ struct ShareGraph {
   static af::ComputeGraphPtr TruedivAbsFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr BF16AddFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr BF16NddmaAddFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr LoadCastBrcRealignConstFusedGraph();
+  static af::ComputeGraphPtr LoadCastBrcRealignDynamicFusedGraph();
   static af::ComputeGraphPtr AbsBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr AbsUint8FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ErfBf16FusedGraph(size_t dims_size);
@@ -205,6 +209,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr LoadCompareWhereFusedGraph();
   static af::ComputeGraphPtr BoolMaskFlowFusedGraph();
   static af::ComputeGraphPtr TransposeBoolFusedGraph();
+  static af::ComputeGraphPtr TransposeInt8FusedGraph();
   static af::ComputeGraphPtr SelectBoolFusedGraph();
   static af::ComputeGraphPtr BinaryApiScalarFusedGraph();
   static af::ComputeGraphPtr FloorToIntFloatFusedGraph(size_t dims_size);

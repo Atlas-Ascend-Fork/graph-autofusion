@@ -9,6 +9,7 @@
  */
 
 #include "axes_reorder_tiling_code_gen_impl.h"
+#include "axes_solver_resources.h"
 #include "args_manager.h"
 #include "solver_pass_manager.h"
 #include "common/checker.h"
@@ -139,11 +140,11 @@ af::Status AxesReorderTilingCodeGenImpl::GenDoTiling(const ModelInfo &model_info
 
 af::Status AxesReorderTilingCodeGenImpl::GenToolFuncs() {
   GE_ASSERT_SUCCESS(TilingCodeGenImpl::GenToolFuncs(), "GenToolFuncs failed!");
-  tiling_func_.AddLine("inline int64_t CeilDiv(int64_t a, int64_t b)");
-  tiling_func_.AddLine("{");
-  tiling_func_.AddLine("    int64_t res = a / b;");
-  tiling_func_.AddLine("    return (res * b == a) ? res : (res + 1);");
-  tiling_func_.AddLine("}");
+  std::istringstream source(axes_resource::kAxesCeilDiv);
+  std::string line;
+  while (std::getline(source, line)) {
+    tiling_func_.AddLine(line);
+  }
   GE_ASSERT_SUCCESS(TilingCodeGenImpl::GenStructCopyDef(), "Generate struct copy.");
   GE_ASSERT_SUCCESS(TilingCodeGenImpl::GenCacheHashMapDef(), "Generate cache hash map.");
   return af::SUCCESS;

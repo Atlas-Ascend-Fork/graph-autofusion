@@ -417,6 +417,56 @@ af::ComputeGraphPtr ShareGraph::TransposeBoolFusedGraph() {
   af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
   return compute_graph;
 }
+
+static void CreateTransposeInt8AscGraph(af::AscGraph &graph) {
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Transpose transpose("transpose");
+  transpose.x = load.y;
+  transpose.y.dtype = af::DT_INT8;
+  transpose.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  af::ascir_op::Store store("store");
+  store.x = transpose.y;
+  store.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.y.dtype = af::DT_INT8;
+  output.ir_attr.SetIndex(0);
+
+  ConstructVVAscGraphAxisInfo(graph, 3, {1, 0, 2});
+}
+
+af::ComputeGraphPtr ShareGraph::TransposeInt8FusedGraph() {
+  auto builder = GraphBuilder("transpose_int8_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("transpose_int8");
+  CreateTransposeInt8AscGraph(sub_graph);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
 static void CreateBF16AddAscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Data x1("data0", graph);
   x1.ir_attr.SetIndex(0);
@@ -1556,6 +1606,220 @@ af::ComputeGraphPtr ShareGraph::BF16NddmaAddFusedGraph(size_t dims_size) {
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("bf16_nddma_add");
   CreateBF16NddmaAddAscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
+ *      output
+ *         |
+ *       store
+ *         |
+ *        brc(fp32, 尾轴广播 1->s1)
+ *         |
+ *       cast(fp16->fp32)
+ *         |
+ *       load(fp16)
+ *         |
+ *       data(fp16)
+ * 常量shape、稀疏store(GM stride 16)场景: 预处理SwapCastBroadcastPass将链交换为
+ * load(fp16)->brc(fp16)->cast, 调度期对齐按brc实际输出dtype(fp16)原生生成向量化stride。
+ */
+static void CreateLoadCastBrcRealignConstAscGraph(af::AscGraph &graph) {
+  const auto s0 = Symbol(50);
+  const auto s1 = Symbol(4096);
+  const auto One = Symbol(1);
+  const auto Zero = Symbol(0);
+  const auto Sparse = Symbol(16);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data", graph);
+  x.attr.api.compute_type = ComputeType::kComputeInvalid;
+  x.attr.api.type = af::ApiType::kAPITypeBuffer;
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = af::DT_FLOAT16;
+
+  af::ascir_op::Load xLocal("load");
+  xLocal.x = x.y;
+  xLocal.attr.api.compute_type = ComputeType::kComputeLoad;
+  xLocal.attr.api.type = af::ApiType::kAPITypeCompute;
+  xLocal.attr.sched.axis = {z0.id, z1.id};
+  *xLocal.y.axis = {z0.id, z1.id};
+  *xLocal.y.repeats = {s0, One};
+  *xLocal.y.strides = {s1 * Sparse, Zero};
+  xLocal.y.dtype = af::DT_FLOAT16;
+  xLocal.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Cast cast0("cast");
+  cast0.x = xLocal.y;
+  cast0.attr.api.compute_type = ComputeType::kComputeElewise;
+  cast0.attr.api.type = af::ApiType::kAPITypeCompute;
+  cast0.attr.sched.axis = {z0.id, z1.id};
+  *cast0.y.axis = {z0.id, z1.id};
+  *cast0.y.repeats = {s0, One};
+  *cast0.y.strides = {s1 * Sparse, Zero};
+  cast0.y.dtype = af::DT_FLOAT;
+  cast0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Broadcast brc0("brc");
+  brc0.x = cast0.y;
+  brc0.attr.api.compute_type = ComputeType::kComputeBroadcast;
+  brc0.attr.api.type = af::ApiType::kAPITypeCompute;
+  brc0.attr.sched.axis = {z0.id, z1.id};
+  *brc0.y.axis = {z0.id, z1.id};
+  *brc0.y.repeats = {s0, s1};
+  *brc0.y.strides = {s1 * Sparse, Sparse};
+  brc0.y.dtype = af::DT_FLOAT;
+  brc0.attr.api.unit = ComputeUnit::kUnitVector;
+  brc0.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  af::ascir_op::Store x_out("store");
+  x_out.x = brc0.y;
+  x_out.attr.api.compute_type = ComputeType::kComputeStore;
+  x_out.attr.api.type = af::ApiType::kAPITypeCompute;
+  x_out.attr.sched.axis = {z0.id, z1.id};
+  *x_out.y.axis = {z0.id, z1.id};
+  *x_out.y.repeats = {s0, s1};
+  *x_out.y.strides = {s1 * Sparse, Sparse};
+  x_out.y.dtype = af::DT_FLOAT;
+  x_out.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Output y("output");
+  y.x = x_out.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = af::DT_FLOAT;
+  y.ir_attr.SetIndex(0);
+}
+
+/**
+ *      output
+ *         |
+ *       store
+ *         |
+ *        brc(fp32, 次尾轴广播 1->s1)
+ *         |
+ *       cast(fp16->fp32)
+ *         |
+ *       load(fp16, 尾轴s2为动态size var)
+ *         |
+ *       data(fp16)
+ * 动态shape场景: brc次尾轴向量化stride为非常量表达式, 交换后由调度期按实际dtype对齐。
+ */
+static void CreateLoadCastBrcRealignDynamicAscGraph(af::AscGraph &graph) {
+  const auto s0 = graph.CreateSizeVar("s0");
+  const auto s1 = graph.CreateSizeVar("s1");
+  const auto s2 = graph.CreateSizeVar("s2");
+  const auto One = Symbol(1);
+  const auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+
+  af::ascir_op::Data x("data", graph);
+  x.attr.api.compute_type = ComputeType::kComputeInvalid;
+  x.attr.api.type = af::ApiType::kAPITypeBuffer;
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = af::DT_FLOAT16;
+
+  af::ascir_op::Load xLocal("load");
+  xLocal.x = x.y;
+  xLocal.attr.api.compute_type = ComputeType::kComputeLoad;
+  xLocal.attr.api.type = af::ApiType::kAPITypeCompute;
+  xLocal.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *xLocal.y.axis = {z0.id, z1.id, z2.id};
+  *xLocal.y.repeats = {s0, One, s2};
+  *xLocal.y.strides = {s2, Zero, One};
+  xLocal.y.dtype = af::DT_FLOAT16;
+  xLocal.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Cast cast0("cast");
+  cast0.x = xLocal.y;
+  cast0.attr.api.compute_type = ComputeType::kComputeElewise;
+  cast0.attr.api.type = af::ApiType::kAPITypeCompute;
+  cast0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *cast0.y.axis = {z0.id, z1.id, z2.id};
+  *cast0.y.repeats = {s0, One, s2};
+  *cast0.y.strides = {s2, Zero, One};
+  cast0.y.dtype = af::DT_FLOAT;
+  cast0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Broadcast brc0("brc");
+  brc0.x = cast0.y;
+  brc0.attr.api.compute_type = ComputeType::kComputeBroadcast;
+  brc0.attr.api.type = af::ApiType::kAPITypeCompute;
+  brc0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *brc0.y.axis = {z0.id, z1.id, z2.id};
+  *brc0.y.repeats = {s0, s1, s2};
+  *brc0.y.strides = {s1 * s2, s2, One};
+  brc0.y.dtype = af::DT_FLOAT;
+  brc0.attr.api.unit = ComputeUnit::kUnitVector;
+  brc0.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  af::ascir_op::Store x_out("store");
+  x_out.x = brc0.y;
+  x_out.attr.api.compute_type = ComputeType::kComputeStore;
+  x_out.attr.api.type = af::ApiType::kAPITypeCompute;
+  x_out.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *x_out.y.axis = {z0.id, z1.id, z2.id};
+  *x_out.y.repeats = {s0, s1, s2};
+  *x_out.y.strides = {s1 * s2, s2, One};
+  x_out.y.dtype = af::DT_FLOAT;
+  x_out.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Output y("output");
+  y.x = x_out.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = af::DT_FLOAT;
+  y.ir_attr.SetIndex(0);
+}
+
+af::ComputeGraphPtr ShareGraph::LoadCastBrcRealignConstFusedGraph() {
+  auto builder = GraphBuilder("load_cast_brc_realign_const_test");
+  auto data = builder.AddNode("data", "Data", 0, 1);
+  af::AttrUtils::SetInt(data->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_cast_brc_realign_const");
+  CreateLoadCastBrcRealignConstAscGraph(sub_graph);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadCastBrcRealignDynamicFusedGraph() {
+  auto builder = GraphBuilder("load_cast_brc_realign_dynamic_test");
+  auto data = builder.AddNode("data", "Data", 0, 1);
+  af::AttrUtils::SetInt(data->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_cast_brc_realign_dynamic");
+  CreateLoadCastBrcRealignDynamicAscGraph(sub_graph);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
@@ -2813,6 +3077,73 @@ af::ComputeGraphPtr ShareGraph::CastCastFusedGraph(size_t dims_size, af::DataTyp
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("cast_abs");
   CreateCastAbsAscGraph(sub_graph, dims_size, in_dtype, out_dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
+ *      output
+ *         |
+ *       store
+ *         |
+ *        cast(uint8 -> int64)
+ *         |
+ *        load
+ *         |
+ *       data0(uint8)
+ */
+static void CreateCastUint8ToInt64AscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data data0("data0", graph);
+  data0.ir_attr.SetIndex(0);
+  data0.y.dtype = af::DT_UINT8;
+
+  af::ascir_op::Load load("load");
+  load.x = data0.y;
+  load.y.dtype = af::DT_UINT8;
+
+  af::ascir_op::Cast cast("cast");
+  cast.x = load.y;
+  cast.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Store store("store");
+  store.x = cast.y;
+  store.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  output.y.dtype = af::DT_INT64;
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+}
+
+/**
+ *       data0
+ *         |
+ *       AscBc
+ *        |
+ *     NetOutput
+ */
+af::ComputeGraphPtr ShareGraph::CastUint8ToInt64FusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("cast_uint8_to_int64_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("cast_uint8_to_int64");
+  CreateCastUint8ToInt64AscGraph(sub_graph, dims_size);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);

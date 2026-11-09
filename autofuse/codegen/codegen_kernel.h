@@ -387,6 +387,7 @@ class TPipe : public Variable {
     return std::find(need_gen_blk_tensors.begin(), need_gen_blk_tensors.end(), tensorid) != need_gen_blk_tensors.end();
   }
   Status BlkTensorAllocAndInit(std::string &result) const;
+  std::string Int64DupScratchAlloc() const;
   void SetUsingAttCalcQBTSizeConfig(bool using_att_calc_qbt_size);
   void SetUsingGlobalTpipe(bool using_global_tpipe);
   Status GetCVFusionCubeOutputUBTensorIdAndQueId(const ascir::ImplGraph &graph);
