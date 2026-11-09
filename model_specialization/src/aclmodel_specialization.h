@@ -46,7 +46,7 @@ struct aclmdlRISpecSKFeature {
 };
 
 struct aclmdlRISpecOptions {
-  uint64_t jobs;  // Accepted but not yet honoured: kernels are always compiled serially.
+  uint64_t jobs;  // Parallel compile workers; 0 keeps the default of one (serial).
   uint64_t specCompileOptionCount;
   aclmdlRISpecCompileOption *specCompileOptions;
   bool enableSK;

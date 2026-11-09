@@ -81,6 +81,9 @@ class SpecOutputDirectory final {
   SpecOutputDirectory &operator=(const SpecOutputDirectory &) = delete;
 
   aclError Create(uint32_t modelId);
+  void PreserveOnCleanup() noexcept {
+    preserve_ = true;
+  }
   const std::string &Path() const {
     return path_;
   }
@@ -88,12 +91,13 @@ class SpecOutputDirectory final {
  private:
   std::string path_;
   bool created_ = false;
+  bool preserve_ = false;
 };
 
 class AclSpecOptimizer final {
  public:
   aclError Init(aclmdlRI model);
-  aclError Optimize(aclmdlRI model, const model_spec::FeatureManager &featureManager) const;
+  aclError Optimize(aclmdlRI model, const model_spec::FeatureManager &featureManager);
 
  private:
   // Keep the identity bound to its task so candidate construction never re-queries it.
@@ -111,7 +115,8 @@ class AclSpecOptimizer final {
   bool TryBuildRequest(const aclmdlRITaskParams &originalParams, std::string_view kernelEntry,
                        const model_spec::FeatureManager &featureManager, std::string_view outputDirectory,
                        KernelSpecRequest &request) const;
-  void SpecializeKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
+  void SpecializeKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests, uint64_t jobs);
+  void RunSerialSpecialization(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
   aclError LoadKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
   aclError UpdateTasks(aclmdlRI model, const std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
                        const std::vector<ScopeTaskRecord> &markersToDisable) const;

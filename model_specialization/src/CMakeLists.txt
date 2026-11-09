@@ -9,6 +9,43 @@
 # ----------------------------------------------------------------------------------------------------------
 
 add_cann_third_party(boost)
+add_cann_third_party(openssl)
+find_package(Threads REQUIRED)
+
+set(MODEL_SPEC_COMPILE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile_protocol.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile_protocol.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile_artifact.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile_artifact.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile_process_pool.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile_process_pool.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/aclrtc_compile_worker.cpp
+)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${MODEL_SPEC_COMPILE_SOURCES})
+set(MODEL_SPEC_BUILD_CONTENT "${CMAKE_BUILD_TYPE};${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION}")
+foreach(MODEL_SPEC_SOURCE IN LISTS MODEL_SPEC_COMPILE_SOURCES)
+    file(SHA256 ${MODEL_SPEC_SOURCE} MODEL_SPEC_SOURCE_HASH)
+    string(APPEND MODEL_SPEC_BUILD_CONTENT ";${MODEL_SPEC_SOURCE_HASH}")
+endforeach()
+string(SHA256 MODEL_SPEC_WORKER_BUILD_ID "${MODEL_SPEC_BUILD_CONTENT}")
+
+add_library(model_spec_compile_common STATIC compile_protocol.cpp compile_artifact.cpp)
+set_target_properties(model_spec_compile_common PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(model_spec_compile_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(model_spec_compile_common PUBLIC
+    _GLIBCXX_USE_CXX11_ABI=0
+    MODEL_SPEC_WORKER_BUILD_ID="${MODEL_SPEC_WORKER_BUILD_ID}"
+)
+target_compile_options(model_spec_compile_common PRIVATE
+    -Wall -Wextra -Werror -fvisibility=hidden -fstack-protector-strong
+)
+target_link_libraries(model_spec_compile_common PUBLIC OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
+
+add_executable(aclrtc_compile_worker aclrtc_compile_worker.cpp)
+target_link_libraries(aclrtc_compile_worker PRIVATE model_spec_compile_common acl_rtc)
+target_compile_options(aclrtc_compile_worker PRIVATE -Wall -Wextra -Werror -fstack-protector-strong)
+target_link_options(aclrtc_compile_worker PRIVATE -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
+set_target_properties(aclrtc_compile_worker PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 set(SPEC_SCOPE_TARGETS)
 foreach(SPEC_KERNEL_ARCH IN ITEMS dav-2201 dav-3510)
@@ -27,6 +64,7 @@ add_library(model_specialization SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/feature_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel_compile_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/acl_spec_optimizer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/compile_process_pool.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/aclmodel_specialization.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/spec_scope_launch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../super_kernel/src/aot/common/pattern_common.cpp
@@ -66,6 +104,8 @@ target_include_directories(model_specialization
 target_link_libraries(model_specialization
     PRIVATE
         ${SPEC_SCOPE_TARGETS}
+        model_spec_compile_common
+        ${CMAKE_DL_LIBS}
         ascendc_runtime
         profapi
         Boost::filesystem
@@ -85,4 +125,15 @@ target_link_options(model_specialization PRIVATE
     -Wl,-z,now
     -Wl,-z,noexecstack
     $<$<CONFIG:Release>:-s>
+)
+
+add_dependencies(model_specialization aclrtc_compile_worker)
+
+install(TARGETS model_specialization aclrtc_compile_worker
+    LIBRARY DESTINATION ${CMAKE_SYSTEM_PROCESSOR}-linux/lib64 COMPONENT graph-autofusion
+    RUNTIME DESTINATION ${CMAKE_SYSTEM_PROCESSOR}-linux/lib64 COMPONENT graph-autofusion
+)
+install(FILES aclmodel_specialization.h
+    DESTINATION ${CMAKE_SYSTEM_PROCESSOR}-linux/include/model_specialization
+    COMPONENT graph-autofusion
 )

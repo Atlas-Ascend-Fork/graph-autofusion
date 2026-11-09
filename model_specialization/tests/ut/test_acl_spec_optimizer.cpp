@@ -1397,7 +1397,7 @@ TEST_P(AclSpecOptimizerCandidateTest, KeepsSkippedTasksAndCleansMarkersAfterComp
   }
   const auto logs = ut_log::LogBuffer::Instance().GetContent();
   const char *apiName = std::get<0>(GetParam()) ? "aclmdlRISpecOptimizeByFlag" : "aclmdlRISpecOptimize";
-  const std::string warning = "[WARN] [SK][SpecializeKernels] aclmdlRISpecOptimize specialized none";
+  const std::string warning = "[WARN] [SK][RunSerialSpecialization] aclmdlRISpecOptimize specialized none";
   EXPECT_NE(logs.find(std::string(apiName) + " started:"), std::string::npos);
   if (expected.taskCount == expected.unsupportedCount) {
     EXPECT_NE(logs.find("[WARN] [SK][Optimize] " + std::string(apiName) + " has no candidate kernels"),
@@ -1767,6 +1767,33 @@ TEST_F(AclSpecOptimizerCollectionTest, OptimizerCompilesInOrderAndCommitsOnlySuc
   EXPECT_EQ(secondTask.params.kernelTaskParams.funcHandle, &staticFunctionToken);
   EXPECT_EQ(secondTask.params.kernelTaskParams.args, original.kernelTaskParams.args);
   EXPECT_EQ(secondTask.params.kernelTaskParams.numBlocks, original.kernelTaskParams.numBlocks);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, ParallelJobsCompileOutsideParentAndKeepOriginalOrder) {
+  CollectorTask secondTask = task;
+  stream.tasks = {&task, &secondTask};
+  aclmdlRISpecOptions options{};
+  options.jobs = 2;
+  ASSERT_TRUE(manager.Init(&options));
+  EXPECT_EQ(collector.Optimize(&model, manager), ACL_SUCCESS);
+  EXPECT_TRUE(specializationPaths.empty());
+  EXPECT_EQ(loadCalls, 2U);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task, &secondTask}));
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, ParallelCompileFailureKeepsOtherSuccessfulKernel) {
+  KernelState failedKernel = kernel;
+  failedKernel.name = "compile_fail";
+  CollectorTask failedTask = task;
+  failedTask.params.kernelTaskParams.funcHandle = &failedKernel;
+  stream.tasks = {&failedTask, &task};
+  aclmdlRISpecOptions options{};
+  options.jobs = 2;
+  ASSERT_TRUE(manager.Init(&options));
+  EXPECT_EQ(collector.Optimize(&model, manager), ACL_SUCCESS);
+  EXPECT_TRUE(specializationPaths.empty());
+  EXPECT_EQ(loadCalls, 1U);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
 }
 
 // A kernel ACLRTC declines to specialize is skipped and reported as success; a binary that cannot

@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <elf.h>
+#include <dlfcn.h>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -35,6 +36,7 @@
 #include <boost/system/error_code.hpp>
 
 #include "feature_manager.h"
+#include "compile_process_pool.h"
 #include "spec_scope_launch.h"
 #include "runtime/rt_external_kernel.h"
 #include "securec.h"
@@ -53,6 +55,41 @@ void BindOptionPointers(const std::vector<std::string> &storage, std::vector<con
   for (const auto &option : storage) {
     pointers.push_back(option.c_str());
   }
+}
+
+void CompileWorkerLocationAnchor() {}
+
+std::string CompileWorkerPath() {
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<const void *>(&CompileWorkerLocationAnchor), &info) == 0 || info.dli_fname == nullptr) {
+    return {};
+  }
+  boost::system::error_code error;
+  const auto libraryPath = fs::canonical(info.dli_fname, error);
+  return error ? std::string{} : (libraryPath.parent_path() / "aclrtc_compile_worker").string();
+}
+
+std::vector<compile::CompileJob> BuildCompileJobs(const std::vector<std::unique_ptr<KernelSpecRequest>> &requests) {
+  std::vector<compile::CompileJob> jobs;
+  jobs.reserve(requests.size());
+  for (size_t index = 0; index < requests.size(); ++index) {
+    const auto &request = *requests[index];
+    compile::CompileJob job;
+    job.jobId = index;
+    job.resourceId = request.resourceId;
+    job.kernelEntry = request.kernelEntry;
+    job.argumentBytes = request.argumentBytes;
+    job.basicOptions = request.basicOptionStorage;
+    job.skOptions = request.skOptionStorage;
+    job.outputElfPath = request.outputElfPath;
+    job.arguments.reserve(request.argumentBytes.size());
+    for (size_t argument = 0; argument < request.argumentBytes.size(); ++argument) {
+      const auto *bytes = static_cast<const unsigned char *>(request.argumentAddresses[argument]);
+      job.arguments.emplace_back(bytes, bytes + request.argumentBytes[argument]);
+    }
+    jobs.push_back(std::move(job));
+  }
+  return jobs;
 }
 
 inline aclError RetainBinaries(aclmdlRI model, const std::vector<std::unique_ptr<KernelSpecRequest>> &requests) {
@@ -268,7 +305,7 @@ aclError AclSpecOptimizer::Init(aclmdlRI model) {
   return ACL_SUCCESS;
 }
 
-aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featureManager) const {
+aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featureManager) {
   const char *apiName =
       featureManager.Get<Feature::IS_SCOPE_JIT>() ? "aclmdlRISpecOptimizeByFlag" : "aclmdlRISpecOptimize";
   SK_DLOGI("%s started: model=%p", apiName, model);
@@ -283,7 +320,7 @@ aclError AclSpecOptimizer::Optimize(aclmdlRI model, const FeatureManager &featur
     return scopeMarkers.empty() ? ACL_SUCCESS : UpdateTasks(model, requests, scopeMarkers);
   }
   const size_t candidateCount = requests.size();
-  SpecializeKernels(requests);
+  SpecializeKernels(requests, featureManager.Get<Feature::COMPILE_JOBS>());
   result = LoadKernels(requests);
   if (result != ACL_SUCCESS) {
     return result;
@@ -576,7 +613,57 @@ bool AclSpecOptimizer::TryBuildRequest(const aclmdlRITaskParams &originalParams,
   return true;
 }
 
-void AclSpecOptimizer::SpecializeKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const {
+void AclSpecOptimizer::SpecializeKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests, uint64_t jobs) {
+  if (requests.empty()) {
+    return;
+  }
+  if (jobs <= 1) {
+    RunSerialSpecialization(requests);
+    return;
+  }
+  const auto compileJobs = BuildCompileJobs(requests);
+  compile::PoolConfig config;
+  config.workerCount = std::min<uint64_t>(jobs, requests.size());
+  config.workerPath = CompileWorkerPath();
+  config.outputDirectory = outputDirectory_.Path();
+  compile::CompileProcessPool pool(std::move(config));
+  compile::PoolRunResult results;
+  try {
+    results = pool.Run(compileJobs);
+  } catch (...) {
+    // Preserve the directory even if cleanup itself cannot allocate a diagnostic.
+    outputDirectory_.PreserveOnCleanup();
+    pool.CloseAndReap();
+    throw;
+  }
+  if (results.preserveOutputDirectory) {
+    outputDirectory_.PreserveOnCleanup();
+  }
+  if (results.disposition == compile::PoolDisposition::RetrySerialBeforeDispatch) {
+    SK_DLOGW("aclmdlRISpecOptimize worker startup failed before dispatch; using serial compilation");
+    RunSerialSpecialization(requests);
+    return;
+  }
+  std::vector<std::unique_ptr<KernelSpecRequest>> specialized;
+  specialized.reserve(requests.size());
+  for (size_t index = 0; index < requests.size(); ++index) {
+    const auto &result = results.jobs[index];
+    const auto &request = *requests[index];
+    if (result.outcome != compile::CompileOutcome::Success) {
+      SK_DLOGW("aclmdlRISpecOptimize parallel specialization skipped: jobId=%zu streamId=%d taskId=%" PRId64
+               " kernel=%s outcome=%d ret=%d reason=%s",
+               index, request.streamId, request.taskId, request.kernelEntry.c_str(), static_cast<int>(result.outcome),
+               result.aclrtcCode.value_or(0), result.detail.c_str());
+      continue;
+    }
+    specialized.push_back(std::move(requests[index]));
+  }
+  SK_DLOGI("aclmdlRISpecOptimize parallel compilation finished: candidates=%zu succeeded=%zu jobs=%" PRIu64,
+           requests.size(), specialized.size(), jobs);
+  requests.swap(specialized);
+}
+
+void AclSpecOptimizer::RunSerialSpecialization(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const {
   std::vector<std::unique_ptr<KernelSpecRequest>> specialized;
   specialized.reserve(requests.size());
   for (auto &request : requests) {
@@ -804,6 +891,10 @@ aclError SpecOutputDirectory::Create(uint32_t modelId) {
 
 SpecOutputDirectory::~SpecOutputDirectory() {
   if (!created_) {
+    return;
+  }
+  if (preserve_) {
+    SK_DLOGW("aclmdlRISpecOptimize preserved output directory: path=%s", path_.c_str());
     return;
   }
   try {
