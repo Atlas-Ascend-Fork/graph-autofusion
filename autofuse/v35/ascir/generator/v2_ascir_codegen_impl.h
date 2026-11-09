@@ -520,7 +520,11 @@ class CastAscIrCodegenImplV2 : public AscIrCodegenV2 {
         {DT_INT32, DT_INT64},   {DT_INT32, DT_INT16},   {DT_INT32, DT_FLOAT16}, {DT_INT32, DT_UINT32},
         {DT_INT64, DT_INT32},   {DT_INT64, DT_FLOAT},   {DT_INT64, DT_UINT8},   {DT_INT64, DT_UINT64},
         {DT_INT64, DT_FLOAT16}, {DT_INT64, DT_BF16},    {DT_BF16, DT_FLOAT},    {DT_BF16, DT_INT32},
-        {DT_FLOAT, DT_BOOL},
+        {DT_FLOAT, DT_BOOL},    {DT_INT8, DT_INT32},    {DT_INT16, DT_INT32},   {DT_INT8, DT_INT64},
+        {DT_INT16, DT_INT64},   {DT_UINT8, DT_BOOL},    {DT_UINT16, DT_BOOL},   {DT_UINT32, DT_BOOL},
+        {DT_UINT64, DT_BOOL},   {DT_INT32, DT_UINT8},   {DT_INT32, DT_INT8},    {DT_INT64, DT_INT16},
+        {DT_INT64, DT_INT8},    {DT_UINT16, DT_FLOAT},  {DT_UINT32, DT_FLOAT},  {DT_UINT64, DT_FLOAT},
+        {DT_FLOAT, DT_UINT8},   {DT_FLOAT, DT_UINT16},
     };
     const std::pair<ge::DataType, ge::DataType> pair{GetSimtInputDtype(node), GetSimtOutputDtype(node)};
     return std::find(std::begin(kSupportedPairs), std::end(kSupportedPairs), pair) != std::end(kSupportedPairs);
@@ -3555,7 +3559,9 @@ class WhereAscIrCodegenImplV2 : public AscIrCodegenV2 {
     bool value_dtype_supported = output_dtype != DT_BOOL && GetSimtDtypeName(output_dtype) != nullptr;
     if (node.GetType() == "Select") {
       value_dtype_supported = output_dtype == DT_FLOAT16 || output_dtype == DT_FLOAT || output_dtype == DT_BF16 ||
-                              output_dtype == DT_INT16 || output_dtype == DT_INT32 || output_dtype == DT_INT64;
+                              output_dtype == DT_INT16 || output_dtype == DT_INT32 || output_dtype == DT_INT64 ||
+                              output_dtype == DT_INT8 || output_dtype == DT_UINT8 || output_dtype == DT_UINT16 ||
+                              output_dtype == DT_UINT32 || output_dtype == DT_UINT64;
     }
     return (mask_dtype == DT_BOOL || mask_dtype == DT_UINT8) && mutable_node.inputs[1].attr.dtype == output_dtype &&
            mutable_node.inputs[2].attr.dtype == output_dtype && value_dtype_supported;

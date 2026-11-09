@@ -48,9 +48,8 @@ class TestApiCast : public testing::Test {
   template <typename InT, typename OutT, uint8_t dim>
   static void CreateTensorInput(TensorCastInputParam<InT, OutT, dim> &param) {
     // 构造测试输入和预期结果
-    uint32_t max_T = std::max(sizeof(InT), sizeof(OutT));
-    param.y = static_cast<OutT *>(AscendC::GmAlloc(sizeof(max_T) * param.size));
-    param.exp = static_cast<OutT *>(AscendC::GmAlloc(sizeof(max_T) * param.size));
+    param.y = static_cast<OutT *>(AscendC::GmAlloc(sizeof(OutT) * param.size));
+    param.exp = static_cast<OutT *>(AscendC::GmAlloc(sizeof(OutT) * param.size));
     param.src0 = static_cast<InT *>(AscendC::GmAlloc(sizeof(InT) * param.size));
     int input_range = 10;
 
@@ -117,12 +116,49 @@ class TestApiCast : public testing::Test {
       param.input_stride[i] = input_stride[i];
     }
 
-    param.y = static_cast<OutT *>(AscendC::GmAlloc(sizeof(InT) * param.size));
-    param.exp = static_cast<OutT *>(AscendC::GmAlloc(sizeof(InT) * param.size));
+    param.y = static_cast<OutT *>(AscendC::GmAlloc(sizeof(OutT) * param.size));
+    param.exp = static_cast<OutT *>(AscendC::GmAlloc(sizeof(OutT) * param.size));
     param.src0 = static_cast<InT *>(AscendC::GmAlloc(sizeof(InT) * param.size));
     for (uint32_t i = 0; i < param.size; i++) {
       param.src0[i] = values[i];
       param.exp[i] = static_cast<OutT>(param.src0[i]);
+    }
+
+    // 构造Api调用函数
+    auto kernel = [&param] { InvokeKernelWithTwoTensorInput(param); };
+
+    // 调用kernel
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+    ICPU_RUN_KF(kernel, 1);
+
+    // 验证结果
+    uint32_t diff_count = Valid<InT, OutT, dim>(param.y, param.exp, param.size, output_dims);
+    EXPECT_EQ(diff_count, 0);
+    AscendC::GmFree(param.y);
+    AscendC::GmFree(param.exp);
+    AscendC::GmFree(param.src0);
+  }
+
+  // 期望值显式传入：超范围浮点、NaN、±inf 在 x86 上是 UB，static_cast 生成的期望与设备行为不一致
+  template <typename InT, typename OutT, uint8_t dim>
+  static void CastTestWithExpected(const InT *values, const OutT *expected, uint32_t value_count,
+                                   const uint32_t (&output_dims)[dim], const uint32_t (&output_stride)[dim],
+                                   const uint32_t (&input_stride)[dim]) {
+    TensorCastInputParam<InT, OutT, dim> param{};
+    static_assert(dim == 2, "dim must be 2, if dim < 2, set stride as {0, 1}");
+    param.size = value_count;
+    for (int i = 0; i < 2; ++i) {
+      param.output_dims[i] = output_dims[i];
+      param.output_stride[i] = output_stride[i];
+      param.input_stride[i] = input_stride[i];
+    }
+
+    param.y = static_cast<OutT *>(AscendC::GmAlloc(sizeof(OutT) * param.size));
+    param.exp = static_cast<OutT *>(AscendC::GmAlloc(sizeof(OutT) * param.size));
+    param.src0 = static_cast<InT *>(AscendC::GmAlloc(sizeof(InT) * param.size));
+    for (uint32_t i = 0; i < param.size; i++) {
+      param.src0[i] = values[i];
+      param.exp[i] = expected[i];
     }
 
     // 构造Api调用函数
@@ -248,4 +284,167 @@ TEST_F(TestApiCast, Cast_Test_Int64_Bool_MultiRepeat) {
     inputs[i] = patterns[i % 8];
   }
   CastTestWithValues<int64_t, bool, 2>(inputs, 128U, {1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int8_Int32) {
+  CastTest<int8_t, int32_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int16_Int32) {
+  CastTest<int16_t, int32_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int8_Int64) {
+  CastTest<int8_t, int64_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int16_Int64) {
+  CastTest<int16_t, int64_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int8_Int64_SignExtend) {
+  const int8_t patterns[] = {0, 1, -1, 127, -128, 100, -100, 42};
+  int8_t inputs[64];
+  for (uint32_t i = 0; i < 64; i++) {
+    inputs[i] = patterns[i % 8];
+  }
+  CastTestWithValues<int8_t, int64_t, 2>(inputs, 64U, {1, 64}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint8_Bool) {
+  CastTest<uint8_t, bool, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint16_Bool) {
+  CastTest<uint16_t, bool, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint32_Bool) {
+  CastTest<uint32_t, bool, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint64_Bool) {
+  CastTest<uint64_t, bool, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint64_Bool_HighBits) {
+  const uint64_t patterns[] = {0,
+                               1,
+                               0xFFFFFFFFFFFFFFFFull,
+                               0x100ull,
+                               0x100000000ull,
+                               0xFFFFFFFF00000000ull,
+                               0x1000000000000ull,
+                               0x7FFFFFFFFFFFFFFFull};
+  uint64_t inputs[32];
+  for (uint32_t i = 0; i < 32; i++) {
+    inputs[i] = patterns[i % 8];
+  }
+  CastTestWithValues<uint64_t, bool, 2>(inputs, 32U, {1, 32}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int32_Uint8) {
+  CastTest<int32_t, uint8_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int32_Int8) {
+  CastTest<int32_t, int8_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int64_Int16) {
+  CastTest<int64_t, int16_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int64_Int8) {
+  CastTest<int64_t, int8_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int32_Uint8_TruncValues) {
+  const int32_t patterns[] = {0, 1, 300, -1, 44, 0x7FFFFFFF, -2147483648, 256};
+  int32_t inputs[64];
+  for (uint32_t i = 0; i < 64; i++) {
+    inputs[i] = patterns[i % 8];
+  }
+  CastTestWithValues<int32_t, uint8_t, 2>(inputs, 64U, {1, 64}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Int64_Int16_TruncValues) {
+  const int64_t patterns[] = {
+      0,         1,   -1, 0x123456789ABCDEFLL, 0x7FFFFFFFFFFFFFFFLL, static_cast<int64_t>(0x8000000000000000ull),
+      0x12345LL, -300};
+  int64_t inputs[64];
+  for (uint32_t i = 0; i < 64; i++) {
+    inputs[i] = patterns[i % 8];
+  }
+  CastTestWithValues<int64_t, int16_t, 2>(inputs, 64U, {1, 64}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint16_Float) {
+  CastTest<uint16_t, float, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint32_Float) {
+  CastTest<uint32_t, float, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint64_Float) {
+  CastTest<uint64_t, float, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Uint64_Float_Boundaries) {
+  const uint64_t patterns[] = {
+      0, 1, 1ull << 24, 1ull << 32, 1ull << 53, 1ull << 62, 0x7FFFFFFFFFFFFFFFull, 1ull << 63, 0xFFFFFFFFFFFFFFFFull};
+  uint64_t inputs[64];
+  for (uint32_t i = 0; i < 64; i++) {
+    inputs[i] = patterns[i % 9];
+  }
+  CastTestWithValues<uint64_t, float, 2>(inputs, 64U, {1, 64}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Float_Uint8) {
+  CastTest<float, uint8_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Float_Uint16) {
+  CastTest<float, uint16_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Float_Uint32) {
+  CastTest<float, uint32_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Float_Uint64) {
+  CastTest<float, uint64_t, 2>({1, 128}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Float_Uint8_ExtremeValues) {
+  const float values[] = {0.0f, 0.5f, -0.5f, 1.5f, 254.7f, 255.7f, -1.0f, 1e10f};
+  const uint8_t expected[] = {0, 0, 0, 1, 254, 255, 255, 255};
+  CastTestWithExpected<float, uint8_t, 2>(values, expected, 8U, {1, 8}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Float_Uint16_ExtremeValues) {
+  const float values[] = {0.0f, 0.5f, -0.5f, 65534.9f, 65535.9f, -1.0f, 1e10f};
+  const uint16_t expected[] = {0, 0, 0, 65534, 65535, 65535, 65535};
+  CastTestWithExpected<float, uint16_t, 2>(values, expected, 7U, {1, 7}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Float_Uint32_ExtremeValues) {
+  const float values[] = {0.0f, 0.5f, -0.5f, 4294967040.0f, -1.0f, 1e10f, 2e19f, INFINITY, -INFINITY, NAN};
+  const uint32_t expected[] = {0, 0, 0, 4294967040u, 0xFFFFFFFFu, 1410065408u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0u, 0u};
+  CastTestWithExpected<float, uint32_t, 2>(values, expected, 10U, {1, 10}, {0, 1}, {0, 1});
+}
+
+TEST_F(TestApiCast, Cast_Test_Float_Uint64_ExtremeValues) {
+  const float values[] = {0.0f, 0.5f, -0.5f, -1.0f, 1e10f, 2e19f, INFINITY, -INFINITY, NAN};
+  const uint64_t expected[] = {0,
+                               0,
+                               0,
+                               0xFFFFFFFFFFFFFFFFull,
+                               10000000000ull,
+                               9223372036854775807ull,
+                               9223372036854775807ull,
+                               9223372036854775808ull,
+                               0};
+  CastTestWithExpected<float, uint64_t, 2>(values, expected, 9U, {1, 9}, {0, 1}, {0, 1});
 }

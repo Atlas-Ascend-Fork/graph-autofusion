@@ -524,6 +524,96 @@ TEST_F(UTestAscirPerfV2, CastSameBitCallCountUsesOuterDim) {
   EXPECT_EQ(Str(perf.pipe_res[PipeType::AIV_VEC]).find("cast_call_count"), std::string::npos);
   EXPECT_NE(Str(perf.pipe_res[PipeType::AIV_VEC]).find("cast_outer"), std::string::npos);
 }
+
+std::string GetFloatToUintCastPerfExpr(const std::string &output_dtype) {
+  NodeDetail node_detail = MakeCastNodeDetail(kFloat32, output_dtype);
+  PerfOutputInfo perf;
+  EXPECT_EQ(att::ascendcperf_v2::CastPerf(node_detail, perf), af::SUCCESS);
+  return Str(perf.pipe_res[PipeType::AIV_VEC]);
+}
+
+TEST_F(UTestAscirPerfV2, CastFloatToUint8PerfExpr) {
+  EXPECT_EQ(GetFloatToUintCastPerfExpr(kUInt8), "(((15 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastFloatToUint16PerfExpr) {
+  EXPECT_EQ(GetFloatToUintCastPerfExpr(kUInt16), "(((15 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastFloatToUint32PerfExpr) {
+  EXPECT_EQ(GetFloatToUintCastPerfExpr(kUInt32), "(((6 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastFloatToUint64PerfExpr) {
+  EXPECT_EQ(GetFloatToUintCastPerfExpr(kUInt64), "(((5 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+std::string GetCastV2PerfExpr(const std::string &input_dtype, const std::string &output_dtype) {
+  NodeDetail node_detail = MakeCastNodeDetail(input_dtype, output_dtype);
+  PerfOutputInfo perf;
+  EXPECT_EQ(att::ascendcperf_v2::CastPerf(node_detail, perf), af::SUCCESS);
+  return Str(perf.pipe_res[PipeType::AIV_VEC]);
+}
+
+TEST_F(UTestAscirPerfV2, CastInt8ToInt32PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt8, kInt32), "(((3 * cast_repeat_time) + 25) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt16ToInt32PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt16, kInt32), "(((3 * cast_repeat_time) + 25) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt8ToInt64PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt8, kInt64), "(((5 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt16ToInt64PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt16, kInt64), "(((5 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint8ToBoolPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt8, kBool), "(((4 * cast_repeat_time) + 30) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint16ToBoolPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt16, kBool), "(((4 * cast_repeat_time) + 30) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint32ToBoolPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt32, kBool), "(((4 * cast_repeat_time) + 30) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint64ToBoolPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt64, kBool), "(((26 * cast_repeat_time) + 37) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt32ToUint8PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt32, kUInt8), "(((3 * cast_repeat_time) + 25) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt32ToInt8PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt32, kInt8), "(((4 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt64ToInt16PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt64, kInt16), "(((5 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt64ToInt8PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt64, kInt8), "(((6 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint16ToFloatPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt16, kFloat32), "(((4 * cast_repeat_time) + 25) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint32ToFloatPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt32, kFloat32), "(((6 * cast_repeat_time) + 29) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint64ToFloatPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt64, kFloat32), "(((9 * cast_repeat_time) + 31) * cast_call_count)");
+}
 TEST_F(UTestAscirPerfV2, FillSpecificParamsStoresSharedReduceParamsOnAscNode) {
   using ascir_reduce_test_helpers::BuildReduceNodeInfo;
   using ascir_reduce_test_helpers::ReduceTestEnv;
@@ -3024,7 +3114,7 @@ TEST_F(UTestAscirPerfV2, TestCeil2IntV2ReusesCastV2Formula) {
     EXPECT_EQ(ceil2int_expr, GetCastPerfExpr("CastV2", input_dtype, "int32", cast_params));
     EXPECT_NE(ceil2int_expr, "0");
   }
-  EXPECT_EQ(GetCastPerfExpr("Ceil2IntV2", "float32", "int32", cast_params), "34");
+  EXPECT_EQ(GetCastPerfExpr("Ceil2IntV2", "float32", "int32", cast_params), "64");
 }
 
 TEST_F(UTestAscirPerfV2, TestSumV2) {

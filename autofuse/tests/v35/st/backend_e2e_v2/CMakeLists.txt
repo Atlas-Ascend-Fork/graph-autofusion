@@ -223,5 +223,6 @@ add_subdirectory(remainder_bf16_test)
 add_subdirectory(remainder_fp16_test)
 add_subdirectory(rand_store_test)
 add_subdirectory(randn_store_test)
+add_subdirectory(cast_float_uint64_test)
 # Temporarily disabled: the test references the removed workspace3 field.
 # add_subdirectory(fused_backend_elewise_test)

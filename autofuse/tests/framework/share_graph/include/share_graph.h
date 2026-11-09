@@ -74,6 +74,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr CastCastFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   // uint8 -> int64 一维 Cast（A3/2201 需经 half -> float 两跳），用于覆盖 CastExtend 两跳分支
   static af::ComputeGraphPtr CastUint8ToInt64FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr CastOnlyFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   static af::ComputeGraphPtr ScalarCastAddFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   static af::ComputeGraphPtr CastCastNanFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   static af::ComputeGraphPtr CastCastIsFiniteFusedGraph(size_t dims_size, af::DataType in_dtype,

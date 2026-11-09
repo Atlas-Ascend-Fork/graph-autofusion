@@ -28,7 +28,7 @@ __simd_callee__ inline constexpr AscendC::RoundMode GetCastRoundMode() {
     if constexpr (AscendC::IsSameType<OutT, half>::value) {
       return AscendC::RoundMode::CAST_RINT;
     }
-    if constexpr (AscendC::SupportType<OutT, int64_t, int32_t, int16_t>()) {
+    if constexpr (AscendC::SupportType<OutT, int64_t, int32_t, int16_t, uint8_t, uint16_t, uint32_t, uint64_t>()) {
       return AscendC::RoundMode::CAST_TRUNC;
     }
   }
@@ -79,6 +79,27 @@ __simd_callee__ inline void GenStoreInstr(__ubuf__ OutT *dstAddr, AscendC::Reg::
   }
 }
 
+template <AscendC::RoundMode roundMode>
+__simd_callee__ inline void CastFloatToInt32WithSaturation(AscendC::Reg::RegTensor<int32_t> &dstVreg,
+                                                           AscendC::Reg::RegTensor<float> &srcVreg,
+                                                           AscendC::Reg::MaskReg &exMaskReg) {
+  static constexpr AscendC::Reg::CastTrait castTrait = {AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT,
+                                                        AscendC::Reg::MaskMergeMode::ZEROING, roundMode};
+  // CAST_TRUNC does not saturate finite float32 overflow. Apply deterministic saturation explicitly.
+  AscendC::Reg::MaskReg upperOverflowMask, lowerOverflowMask, nanMask;
+  AscendC::Reg::RegTensor<int32_t> upperLimitReg, lowerLimitReg, zeroReg;
+  AscendC::Reg::Compares<float, AscendC::CMPMODE::GE>(upperOverflowMask, srcVreg, 2147483648.0f, exMaskReg);
+  AscendC::Reg::Compares<float, AscendC::CMPMODE::LT>(lowerOverflowMask, srcVreg, -2147483648.0f, exMaskReg);
+  AscendC::Reg::Compare<float, AscendC::CMPMODE::NE>(nanMask, srcVreg, srcVreg, exMaskReg);
+  AscendC::Reg::Cast<int32_t, float, castTrait>(dstVreg, srcVreg, exMaskReg);
+  AscendC::Reg::Duplicate(upperLimitReg, static_cast<int32_t>(2147483647), exMaskReg);
+  AscendC::Reg::Duplicate(lowerLimitReg, static_cast<int32_t>(-2147483647 - 1), exMaskReg);
+  AscendC::Reg::Duplicate(zeroReg, static_cast<int32_t>(0), exMaskReg);
+  AscendC::Reg::Select(dstVreg, upperLimitReg, dstVreg, upperOverflowMask);
+  AscendC::Reg::Select(dstVreg, lowerLimitReg, dstVreg, lowerOverflowMask);
+  AscendC::Reg::Select(dstVreg, zeroReg, dstVreg, nanMask);
+}
+
 template <typename InT, typename OutT, AscendC::RoundMode roundMode>
 inline __simd_vf__ void CastExtendCommon(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
                                          uint32_t repeatTimes, uint32_t innerLoopStride) {
@@ -110,19 +131,7 @@ inline __simd_vf__ void CastExtendCommon(__ubuf__ OutT *dstUb, __ubuf__ InT *src
     } else if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, float>) {
       AscendC::Reg::Truncate<InT, roundMode>(dstVreg, srcVreg, exMaskReg);
     } else if constexpr (std::is_same_v<InT, float> && std::is_same_v<OutT, int32_t>) {
-      // CAST_TRUNC does not saturate finite float32 overflow. Apply deterministic saturation explicitly.
-      AscendC::Reg::MaskReg upperOverflowMask, lowerOverflowMask, nanMask;
-      AscendC::Reg::RegTensor<int32_t> upperLimitReg, lowerLimitReg, zeroReg;
-      AscendC::Reg::Compares<float, AscendC::CMPMODE::GE>(upperOverflowMask, srcVreg, 2147483648.0f, exMaskReg);
-      AscendC::Reg::Compares<float, AscendC::CMPMODE::LT>(lowerOverflowMask, srcVreg, -2147483648.0f, exMaskReg);
-      AscendC::Reg::Compare<float, AscendC::CMPMODE::NE>(nanMask, srcVreg, srcVreg, exMaskReg);
-      AscendC::Reg::Cast<OutT, InT, castTrait0>(dstVreg, srcVreg, exMaskReg);
-      AscendC::Reg::Duplicate(upperLimitReg, static_cast<int32_t>(2147483647), exMaskReg);
-      AscendC::Reg::Duplicate(lowerLimitReg, static_cast<int32_t>(-2147483647 - 1), exMaskReg);
-      AscendC::Reg::Duplicate(zeroReg, static_cast<int32_t>(0), exMaskReg);
-      AscendC::Reg::Select(dstVreg, upperLimitReg, dstVreg, upperOverflowMask);
-      AscendC::Reg::Select(dstVreg, lowerLimitReg, dstVreg, lowerOverflowMask);
-      AscendC::Reg::Select(dstVreg, zeroReg, dstVreg, nanMask);
+      CastFloatToInt32WithSaturation<roundMode>(dstVreg, srcVreg, exMaskReg);
     } else if constexpr (std::is_same_v<InT, bfloat16_t> && std::is_same_v<OutT, float>) {
       AscendC::Reg::Cast<OutT, InT, castTrait1>(dstVreg, srcVreg, exMaskReg);
     } else {
@@ -361,7 +370,7 @@ inline __simd_vf__ void CastExtendFloatBool(__ubuf__ OutT *dstUb, __ubuf__ InT *
 template <typename InT, typename OutT, AscendC::RoundMode roundMode>
 inline __simd_vf__ void CastExtendInt64Bool(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
                                             uint32_t repeatTimes, uint32_t innerLoopStride) {
-  AscendC::Reg::RegTensor<int64_t> oneReg, zeroReg;
+  AscendC::Reg::RegTensor<InT> oneReg, zeroReg;
   AscendC::Reg::MaskReg b64MaskReg, b32MaskReg, allMaskReg, cmpMaskReg;
   AscendC::Reg::RegTensor<InT> srcReg, tmpReg;
   AscendC::Reg::RegTensor<uint32_t> dstReg;
@@ -389,7 +398,7 @@ template <typename InT, typename OutT, AscendC::RoundMode roundMode>
 inline __simd_vf__ void CastExtendInt32Bool(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
                                             uint32_t repeatTimes, uint32_t innerLoopStride) {
   uint32_t sreg = static_cast<uint32_t>(count);
-  AscendC::Reg::RegTensor<int32_t> oneReg, zeroReg;
+  AscendC::Reg::RegTensor<InT> oneReg, zeroReg;
   AscendC::Reg::MaskReg stMaskReg, allMaskReg, cmpMaskReg;
   AscendC::Reg::RegTensor<InT> srcReg;
   AscendC::Reg::RegTensor<InT> dstReg;
@@ -601,6 +610,164 @@ __simd_vf__ inline void CastExtendS64U8(__ubuf__ OutT *dstUb, __ubuf__ InT *srcU
 }
 
 template <typename InT, typename OutT, AscendC::RoundMode roundMode>
+inline __simd_vf__ void CastExtendIntNarrow(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
+                                            uint32_t repeatTimes, uint32_t innerLoopStride) {
+  AscendC::Reg::RegTensor<InT> srcVreg;
+  AscendC::Reg::RegTensor<uint16_t> tmp16Vreg;
+  AscendC::Reg::MaskReg stMaskReg;
+
+  for (uint32_t i = 0; i < repeatTimes; i++) {
+    uint32_t blockCount = static_cast<uint32_t>(count) - i * innerLoopStride;
+    blockCount = blockCount < innerLoopStride ? blockCount : innerLoopStride;
+    stMaskReg = AscendC::Reg::UpdateMask<OutT>(blockCount);
+    AscendC::Reg::DataCopy(srcVreg, srcUb + innerLoopStride * i);
+    if constexpr (sizeof(InT) == sizeof(int64_t)) {
+      AscendC::Reg::RegTensor<uint32_t> tmp32Vreg;
+      AscendC::Reg::Pack<uint32_t, InT, AscendC::Reg::HighLowPart::LOWEST>(tmp32Vreg, srcVreg);
+      AscendC::Reg::Pack<uint16_t, uint32_t, AscendC::Reg::HighLowPart::LOWEST>(tmp16Vreg, tmp32Vreg);
+    } else {
+      AscendC::Reg::Pack<uint16_t, InT, AscendC::Reg::HighLowPart::LOWEST>(tmp16Vreg, srcVreg);
+    }
+    if constexpr (sizeof(OutT) == sizeof(int8_t)) {
+      AscendC::Reg::RegTensor<uint8_t> dstVreg;
+      AscendC::Reg::Pack<uint8_t, uint16_t, AscendC::Reg::HighLowPart::LOWEST>(dstVreg, tmp16Vreg);
+      AscendC::Reg::DataCopy(dstUb + innerLoopStride * i, (AscendC::Reg::RegTensor<OutT> &)dstVreg, stMaskReg);
+    } else {
+      AscendC::Reg::DataCopy(dstUb + innerLoopStride * i, (AscendC::Reg::RegTensor<OutT> &)tmp16Vreg, stMaskReg);
+    }
+  }
+}
+
+template <typename InT, typename OutT, AscendC::RoundMode roundMode>
+inline __simd_vf__ void CastExtendIntNTo64(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
+                                           uint32_t repeatTimes, uint32_t innerLoopStride) {
+  static constexpr AscendC::Reg::CastTrait castTrait = {AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT,
+                                                        AscendC::Reg::MaskMergeMode::ZEROING, roundMode};
+  uint32_t sreg = static_cast<uint32_t>(count);
+  AscendC::Reg::RegTensor<InT> srcVreg;
+  AscendC::Reg::RegTensor<int32_t> midVreg;
+  AscendC::Reg::RegTensor<OutT> dstVreg;
+  AscendC::Reg::MaskReg stMaskReg;
+  AscendC::Reg::MaskReg exMaskReg = AscendC::Reg::CreateMask<int32_t, AscendC::Reg::MaskPattern::ALL>();
+
+  for (uint32_t i = 0; i < repeatTimes; i++) {
+    stMaskReg = AscendC::Reg::UpdateMask<int64_t>(sreg);
+    // Load with the int32 layout required by the intermediate cast.
+    GenLoadInstr<InT, int32_t>(srcVreg, srcUb + innerLoopStride * i);
+    AscendC::Reg::Cast<int32_t, InT, castTrait>(midVreg, srcVreg, exMaskReg);
+    // Signed UnPack expands the lower half of midVreg into int64 elements.
+    AscendC::Reg::UnPack<int64_t, int32_t>(dstVreg, midVreg);
+    AscendC::Reg::DataCopy(dstUb + innerLoopStride * i, dstVreg, stMaskReg);
+  }
+}
+
+template <typename InT, typename OutT, AscendC::RoundMode roundMode>
+inline __simd_vf__ void CastExtendFloatToUint(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
+                                              uint32_t repeatTimes, uint32_t innerLoopStride) {
+  // Fixed SAT matches the b64Cast branch's effective f32->int64 saturation after the dispatch clears
+  // CTRL[60]. The NO_SAT narrowing keeps in-range uint32 values intact across the 64-to-32 cut.
+  static constexpr AscendC::Reg::CastTrait floatToInt64Trait = {
+      AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::SAT, AscendC::Reg::MaskMergeMode::ZEROING,
+      AscendC::RoundMode::CAST_TRUNC};
+  static constexpr AscendC::Reg::CastTrait narrowTrait = {AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT,
+                                                          AscendC::Reg::MaskMergeMode::ZEROING,
+                                                          AscendC::RoundMode::UNKNOWN};
+  AscendC::Reg::RegTensor<InT> srcVreg;
+  AscendC::Reg::RegTensor<OutT> dstVreg;
+  AscendC::Reg::MaskReg exMaskReg, stMaskReg;
+  exMaskReg = AscendC::Reg::CreateMask<uint32_t, AscendC::Reg::MaskPattern::ALL>();
+
+  for (uint32_t i = 0; i < repeatTimes; i++) {
+    uint32_t blockCount = static_cast<uint32_t>(count) - i * innerLoopStride;
+    blockCount = blockCount < innerLoopStride ? blockCount : innerLoopStride;
+    if constexpr (sizeof(OutT) == sizeof(uint64_t)) {
+      stMaskReg = AscendC::Reg::UpdateMask<OutT>(blockCount);
+    } else {
+      stMaskReg = AscendC::Reg::UpdateMask<InT>(blockCount);
+    }
+    if constexpr (sizeof(OutT) <= sizeof(uint16_t)) {
+      AscendC::Reg::RegTensor<int32_t> midVreg;
+      AscendC::Reg::DataCopy(srcVreg, srcUb + innerLoopStride * i);
+      CastFloatToInt32WithSaturation<roundMode>(midVreg, srcVreg, exMaskReg);
+      AscendC::Reg::Cast<OutT, int32_t, narrowTrait>(dstVreg, midVreg, exMaskReg);
+      GenStoreInstr<InT, OutT>(dstUb + innerLoopStride * i, dstVreg, stMaskReg);
+    } else {
+      AscendC::Reg::DataCopy<InT, AscendC::Reg::LoadDist::DIST_UNPACK_B32>(srcVreg, srcUb + innerLoopStride * i);
+      if constexpr (sizeof(OutT) == sizeof(uint32_t)) {
+        AscendC::Reg::RegTensor<int64_t> midVreg;
+        AscendC::Reg::Cast<int64_t, InT, floatToInt64Trait>(midVreg, srcVreg, exMaskReg);
+        AscendC::Reg::Pack<OutT, int64_t>(dstVreg, midVreg);
+      } else {
+        AscendC::Reg::Cast<int64_t, InT, floatToInt64Trait>((AscendC::Reg::RegTensor<int64_t> &)dstVreg, srcVreg,
+                                                            exMaskReg);
+      }
+      AscendC::Reg::DataCopy(dstUb + innerLoopStride * i, dstVreg, stMaskReg);
+    }
+  }
+}
+
+template <typename InT, typename OutT, AscendC::RoundMode roundMode>
+inline __simd_vf__ void CastExtendUintToFloat(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
+                                              uint32_t repeatTimes, uint32_t innerLoopStride) {
+  static constexpr AscendC::Reg::CastTrait castTrait = {AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN,
+                                                        AscendC::Reg::MaskMergeMode::ZEROING, roundMode};
+  AscendC::Reg::RegTensor<InT> srcVreg;
+  AscendC::Reg::RegTensor<OutT> dstVreg;
+  AscendC::Reg::MaskReg stMaskReg, exMaskReg;
+  if constexpr (sizeof(InT) == sizeof(uint16_t)) {
+    exMaskReg = AscendC::Reg::CreateMask<int32_t, AscendC::Reg::MaskPattern::ALL>();
+  } else {
+    exMaskReg = AscendC::Reg::CreateMask<int64_t, AscendC::Reg::MaskPattern::ALL>();
+  }
+
+  for (uint32_t i = 0; i < repeatTimes; i++) {
+    uint32_t blockCount = static_cast<uint32_t>(count) - i * innerLoopStride;
+    blockCount = blockCount < innerLoopStride ? blockCount : innerLoopStride;
+    stMaskReg = AscendC::Reg::UpdateMask<OutT>(blockCount);
+    if constexpr (sizeof(InT) == sizeof(uint16_t)) {
+      GenLoadInstr<InT, OutT>(srcVreg, srcUb + innerLoopStride * i);
+      AscendC::Reg::Cast<OutT, int32_t, castTrait>(dstVreg, (AscendC::Reg::RegTensor<int32_t> &)srcVreg, exMaskReg);
+    } else {
+      AscendC::Reg::RegTensor<OutT> tmpVreg;
+      AscendC::Reg::DataCopy<InT, AscendC::Reg::LoadDist::DIST_UNPACK_B32>(srcVreg, srcUb + innerLoopStride * i);
+      AscendC::Reg::Cast<OutT, int64_t, castTrait>(tmpVreg, (AscendC::Reg::RegTensor<int64_t> &)srcVreg, exMaskReg);
+      AscendC::Reg::Pack<uint32_t, int64_t>((AscendC::Reg::RegTensor<uint32_t> &)dstVreg,
+                                            (AscendC::Reg::RegTensor<int64_t> &)tmpVreg);
+    }
+    AscendC::Reg::DataCopy(dstUb + innerLoopStride * i, dstVreg, stMaskReg);
+  }
+}
+
+template <typename InT, typename OutT, AscendC::RoundMode roundMode>
+inline __simd_vf__ void CastExtendUint64ToFloat(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
+                                                uint32_t repeatTimes, uint32_t innerLoopStride) {
+  static constexpr AscendC::Reg::CastTrait castTrait = {AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN,
+                                                        AscendC::Reg::MaskMergeMode::ZEROING, roundMode};
+  AscendC::Reg::RegTensor<InT> srcVreg;
+  AscendC::Reg::RegTensor<OutT> tmpVreg, dstVreg, correctionVreg, zeroVreg, offsetVreg;
+  AscendC::Reg::MaskReg stMaskReg, negativeMaskReg;
+  AscendC::Reg::MaskReg b64MaskReg = AscendC::Reg::CreateMask<int64_t, AscendC::Reg::MaskPattern::ALL>();
+  AscendC::Reg::MaskReg b32MaskReg = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
+  AscendC::Reg::Duplicate(zeroVreg, 0.0f, b32MaskReg);
+  AscendC::Reg::Duplicate(offsetVreg, 18446744073709551616.0f, b32MaskReg);
+
+  for (uint32_t i = 0; i < repeatTimes; i++) {
+    uint32_t blockCount = static_cast<uint32_t>(count) - i * innerLoopStride;
+    blockCount = blockCount < innerLoopStride ? blockCount : innerLoopStride;
+    stMaskReg = AscendC::Reg::UpdateMask<OutT>(blockCount);
+    AscendC::Reg::DataCopy(srcVreg, srcUb + innerLoopStride * i);
+    AscendC::Reg::Cast<OutT, int64_t, castTrait>(tmpVreg, (AscendC::Reg::RegTensor<int64_t> &)srcVreg, b64MaskReg);
+    AscendC::Reg::Pack<uint32_t, int64_t>((AscendC::Reg::RegTensor<uint32_t> &)dstVreg,
+                                          (AscendC::Reg::RegTensor<int64_t> &)tmpVreg);
+    // Rebuild the predicate after packing, so its lanes match the compact float layout.
+    AscendC::Reg::Compares<OutT, AscendC::CMPMODE::LT>(negativeMaskReg, dstVreg, 0.0f, stMaskReg);
+    AscendC::Reg::Select(correctionVreg, offsetVreg, zeroVreg, negativeMaskReg);
+    AscendC::Reg::Add(dstVreg, dstVreg, correctionVreg, stMaskReg);
+    AscendC::Reg::DataCopy(dstUb + innerLoopStride * i, dstVreg, stMaskReg);
+  }
+}
+
+template <typename InT, typename OutT, AscendC::RoundMode roundMode>
 inline __simd_vf__ void CastExtendU8S64(__ubuf__ OutT *dstUb, __ubuf__ InT *srcUb, const int64_t count,
                                         uint32_t repeatTimes, uint32_t innerLoopStride) {
   uint32_t sreg = static_cast<uint32_t>(count);
@@ -716,14 +883,18 @@ __aicore__ inline void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
   constexpr uint32_t repeatStrideSrc = static_cast<uint32_t>(GetVecLen() / sizeof(InT));
   constexpr uint32_t repeatStrideDst = static_cast<uint32_t>(GetVecLen() / sizeof(OutT));
   uint32_t innerLoopStride = repeatStrideSrc > repeatStrideDst ? repeatStrideDst : repeatStrideSrc;
+  if constexpr (SupportType<Tuple<OutT, InT>, Tuple<float, uint32_t>, Tuple<uint32_t, float>>()) {
+    innerLoopStride = static_cast<uint32_t>(GetVecLen() / sizeof(int64_t));
+  }
   uint32_t repeatTimes = static_cast<uint32_t>((count + innerLoopStride - 1) / innerLoopStride);
 
   constexpr bool b4Cast = SupportType<Tuple<OutT, InT>, Tuple<half, int4x2_t>, Tuple<int4x2_t, half>>();
 
   constexpr bool floatBoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, float>>();
-  constexpr bool int64BoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int64_t>>();
-  constexpr bool int32BoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int32_t>>();
-  constexpr bool smallIntBoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int16_t>, Tuple<bool, int8_t>>();
+  constexpr bool int64BoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int64_t>, Tuple<bool, uint64_t>>();
+  constexpr bool int32BoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int32_t>, Tuple<bool, uint32_t>>();
+  constexpr bool smallIntBoolCast = SupportType<Tuple<OutT, InT>, Tuple<bool, int16_t>, Tuple<bool, uint16_t>,
+                                                Tuple<bool, int8_t>, Tuple<bool, uint8_t>>();
 
   constexpr bool b8Cast =
       AscendC::IsSameType<InT, uint8_t>::value && AscendC::SupportType<OutT, float, int32_t, int16_t, int4x2_t>();
@@ -791,6 +962,11 @@ __aicore__ inline void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
     constexpr auto func = CastExtendInT<InT, OutT, roundMode>;
     CastExtendImplOptimize<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride,
                                                             output_dims, output_stride, input_stride);
+  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<int8_t, int32_t>, Tuple<int16_t, int64_t>,
+                                   Tuple<int8_t, int64_t>>()) {
+    constexpr auto func = CastExtendIntNarrow<InT, OutT, roundMode>;
+    CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
+                                                    output_stride, input_stride);
   } else if constexpr (s64U8Cast) {
     constexpr auto func = CastExtendS64U8<InT, OutT, roundMode>;
     CastExtendImplOptimizeS64U8<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, innerLoopStride, output_dims,
@@ -799,7 +975,7 @@ __aicore__ inline void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
     constexpr auto func = CastExtendInt8ToFloat<InT, OutT, roundMode>;
     CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
                                                     output_stride, input_stride);
-  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<int8_t, float>, Tuple<uint8_t, float>>()) {
+  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<int8_t, float>>()) {
     constexpr auto func = CastExtendFloatToInt8<InT, OutT, roundMode>;
     CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
                                                     output_stride, input_stride);
@@ -817,6 +993,28 @@ __aicore__ inline void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
     AscendC::SetCtrlSpr<60, 60>(0);
 #endif
     constexpr auto func = CastExtendInt16ToUint8<InT, OutT, roundMode>;
+    CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
+                                                    output_stride, input_stride);
+  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<int64_t, int8_t>, Tuple<int64_t, int16_t>>()) {
+    constexpr auto func = CastExtendIntNTo64<InT, OutT, roundMode>;
+    CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
+                                                    output_stride, input_stride);
+  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<uint8_t, float>, Tuple<uint16_t, float>,
+                                   Tuple<uint32_t, float>, Tuple<uint64_t, float>>()) {
+    // Same single-instruction switch as the default branch; no runtime CTRL probing.
+#if defined(__NPU_ARCH__) && \
+    ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 5102) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+    AscendC::SetCtrlSpr<60, 60>(0);
+#endif
+    constexpr auto func = CastExtendFloatToUint<InT, OutT, roundMode>;
+    CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
+                                                    output_stride, input_stride);
+  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<float, uint16_t>, Tuple<float, uint32_t>>()) {
+    constexpr auto func = CastExtendUintToFloat<InT, OutT, roundMode>;
+    CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
+                                                    output_stride, input_stride);
+  } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<float, uint64_t>>()) {
+    constexpr auto func = CastExtendUint64ToFloat<InT, OutT, roundMode>;
     CastExtendImpl<func, InT, OutT, roundMode, dim>(dstUb, srcUb, count, repeatTimes, innerLoopStride, output_dims,
                                                     output_stride, input_stride);
   } else if constexpr (SupportType<Tuple<OutT, InT>, Tuple<int64_t, uint8_t>>()) {
