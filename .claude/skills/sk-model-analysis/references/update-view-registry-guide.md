@@ -1,3 +1,7 @@
+# 历史日志适配参考
+
+本文描述旧信息库，用于维护 Log Parser 的输入适配；新 Graph View 使用 `graph_report` 标准模型。旧 scope/task 页面及“log 主、JSON shadow”描述不再是公共运行合同。当前合同见 [artifact-contract.md](artifact-contract.md)。
+
 # Update View 信息库构建指导
 
 ## 当前结论
