@@ -55,11 +55,11 @@ def _strip_backend_dfx_section(lines):
 
 
 def _drop_trailing_blank_lines(lines):
-    """Ignore trailing blank lines and whitespace within other blank lines.
+    """Ignore trailing blank lines and indentation on whitespace-only lines.
 
     Golden sources cannot keep them because the pre-commit hooks strip them,
-    while the generated kernel source ends with a blank line. Formatting can
-    also remove spaces from blank lines within generated code.
+    while the generated kernel source ends with a blank line. The hooks also
+    strip indentation from blank lines within golden sources.
     """
     end = len(lines)
     while end > 0 and not lines[end - 1].strip():

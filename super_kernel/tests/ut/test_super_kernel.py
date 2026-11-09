@@ -86,9 +86,8 @@ class TestSuperKernel:
     def test_compare_files_ignores_whitespace_only_lines(tmp_path):
         expected = tmp_path / "expected.cc"
         generated = tmp_path / "generated.cc"
-        expected.write_text("first\n \nlast\n")
+        expected.write_text("first\n    \nlast\n")
         generated.write_text("first\n\nlast\n")
-
         assert compare_files(expected, generated)
 
         generated.write_text("first \n\nlast\n")
