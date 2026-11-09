@@ -49,6 +49,10 @@ Status ArangeApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
   slice.vectorized_strides.clear();
   af::Expression stride = af::Symbol(1);
   bool has_fixed_axis = false;
+  // 物化物理步长：连续布局（vectorized_strides==1）时为 1；对齐策略标记为
+  // kDiscontinuous 时尾轴 vectorized_strides 不为 1（如 int64 下 32B 对齐=4），
+  // 物化需按该步长跳格写入，与消费方（Store/DataCopy）的非连续布局保持一致。
+  af::Expression phys_stride = af::sym::kSymbolOne;
   std::vector<std::pair<std::string, std::string>> broadcast_frames;
   GE_ASSERT_TRUE(output.vectorized_axis.size() == output.vectorized_axis_pos.size() &&
                      output.vectorized_axis.size() == output.vectorized_strides.size(),
@@ -66,10 +70,8 @@ Status ArangeApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
       continue;
     }
     const auto &axis = tpipe.tiler.GetAxis(id);
-    GE_CHK_BOOL_RET_STATUS(
-        af::SymbolicUtils::StaticCheckEq(output.axis_size[pos], axis.size) == af::TriBool::kTrue &&
-            af::SymbolicUtils::StaticCheckEq(output.vectorized_strides[index], stride) == af::TriBool::kTrue,
-        af::FAILED, "Arange ApiCall requires a bounded contiguous vectorized layout");
+    GE_CHK_BOOL_RET_STATUS(af::SymbolicUtils::StaticCheckEq(output.axis_size[pos], axis.size) == af::TriBool::kTrue,
+                           af::FAILED, "Arange ApiCall requires a bounded vectorized layout");
     const bool fixed = std::find(current_axis.begin(), current_axis.end(), id) != current_axis.end();
     for (const auto current : current_axis) {
       GE_CHK_BOOL_RET_STATUS(current == id || !tpipe.tiler.IsFrom(current, id), af::FAILED,
@@ -100,13 +102,50 @@ Status ArangeApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
       GE_CHK_BOOL_RET_STATUS(
           slice.vectorized_axis.empty() || !tpipe.tiler.GetAxis(slice.vectorized_axis.front()).IsInner(), af::FAILED,
           "Arange ApiCall cannot flatten a multi-axis inner tail");
+      // 从尾向前遍历（vectorized_axis 末位是最内层），首次进入本分支的是最内层轴，
+      // 其 vectorized_strides 即物化时的物理步长。最内层允许连续（1）或对齐策略
+      // 产生的 kDiscontinuous 布局（32B 对齐因子 = 32/dtype_size，如 int64 下为 4）；
+      // 更外层后缀轴必须物理紧凑（vectorized_strides == stride），否则带空洞的
+      // 视图（外层 pad/空洞）会静默错位。
+      const bool is_inner_most = slice.vectorized_axis.empty();
       slice.vectorized_axis.insert(slice.vectorized_axis.begin(), id);
       slice.vectorized_axis_pos.insert(slice.vectorized_axis_pos.begin(), pos);
       slice.vectorized_strides.insert(slice.vectorized_strides.begin(), output.vectorized_strides[index]);
+      if (is_inner_most) {
+        phys_stride = output.vectorized_strides[index];
+        const int64_t dtype_size = af::GetSizeByDataType(output.dtype);
+        GE_ASSERT_TRUE(dtype_size > 0, "Arange output dtype size is invalid, dtype:%d",
+                       static_cast<int32_t>(output.dtype));
+        const int64_t align_factor = 32 / dtype_size;
+        GE_CHK_BOOL_RET_STATUS(
+            af::SymbolicUtils::StaticCheckEq(phys_stride, af::sym::kSymbolOne) == af::TriBool::kTrue ||
+                af::SymbolicUtils::StaticCheckEq(phys_stride, af::Symbol(align_factor)) == af::TriBool::kTrue,
+            af::FAILED, "Arange ApiCall supports only contiguous or 32B-aligned discontinuous layout, phys_stride:%s",
+            phys_stride.Str().get());
+      } else {
+        GE_CHK_BOOL_RET_STATUS(
+            af::SymbolicUtils::StaticCheckEq(output.vectorized_strides[index], stride) == af::TriBool::kTrue,
+            af::FAILED, "Arange ApiCall requires a compact physical suffix, vectorized_stride:%s",
+            output.vectorized_strides[index].Str().get());
+      }
     }
     stride = af::sym::Mul(stride, output.axis_size[pos]);
   }
-  const auto count = has_fixed_axis ? tpipe.tiler.TensorActualSize(slice) : output.actual_size.Str();
+  // 物化上界：连续布局下物理跨度即有效元素数，保持原有取值（TensorActualSize /
+  // actual_size）；kDiscontinuous 布局下物理跨度是有效元素数的数倍，必须用后缀
+  // 有效元素数（各后缀轴 size 乘积）作为循环上界，否则按 phys_stride 跳格写入会越界。
+  std::string count;
+  if (af::SymbolicUtils::StaticCheckEq(phys_stride, af::sym::kSymbolOne) != af::TriBool::kTrue) {
+    af::Expression effective_count = af::sym::kSymbolOne;
+    for (size_t k = 0; k < slice.vectorized_axis.size(); ++k) {
+      const auto pos = slice.vectorized_axis_pos[k];
+      GE_ASSERT_TRUE(pos < slice.axis_size.size(), "Arange slice axis position out of range");
+      effective_count = af::sym::Mul(effective_count, slice.axis_size[pos]);
+    }
+    count = effective_count.Str().get();
+  } else {
+    count = has_fixed_axis ? tpipe.tiler.TensorActualSize(slice) : output.actual_size.Str();
+  }
 
   std::stringstream ss;
   std::string write_addr = write_offset;
@@ -135,9 +174,16 @@ Status ArangeApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
        << dtype_name << ">((" << base << ") + (" << logical_offset << ") * (" << step << ")));" << std::endl;
     ss << "  }" << std::endl;
   } else {
+    // 连续布局（phys_stride=1）保持原物化格式；kDiscontinuous 布局按
+    // vectorized_strides 跳格写入。
+    std::string arange_index = "arange_i";
+    if (af::SymbolicUtils::StaticCheckEq(phys_stride, af::sym::kSymbolOne) != af::TriBool::kTrue) {
+      arange_index = "arange_i * (" + tpipe.tiler.Size(phys_stride) + ")";
+    }
     ss << "for (int64_t arange_i = 0; arange_i < " << count << "; ++arange_i) {" << std::endl;
-    ss << "  " << output << ".SetValue(static_cast<uint32_t>(" << write_addr << " + arange_i), static_cast<"
-       << dtype_name << ">((" << base << ") + (" << logical_offset << " + arange_i) * (" << step << ")));" << std::endl;
+    ss << "  " << output << ".SetValue(static_cast<uint32_t>(" << write_addr << " + " << arange_index
+       << "), static_cast<" << dtype_name << ">((" << base << ") + (" << logical_offset << " + arange_i) * (" << step
+       << ")));" << std::endl;
     ss << "}" << std::endl;
   }
   for (size_t frame = 0UL; frame < broadcast_frames.size(); ++frame) {
