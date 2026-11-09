@@ -605,13 +605,13 @@ TEST_P(SuperKernelHeadTailTaskTest, KeepsTailEventWhenTaskSlotsWouldBecomeInsuff
   auto *main0 = CreateKernelNode(1, 0);
   auto *main1 = CreateKernelNode(2, 0);
   auto *kernel = CreateKernelNode(3, 1);
-  auto *notify = EventNotify(4, 1);
-  EventWait(5, 2);
-  Pair(4, {5});
+  auto *wait = EventWait(4, 1);
+  EventNotify(5, 2);
+  Pair(5, {4});
   SetupStreams({{0, 1, 2}, {3, 4}, {5}});
 
-  EXPECT_FALSE(RemoveEvents({main0, main1, kernel, notify}));
-  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_FALSE(RemoveEvents({main0, main1, kernel, wait}));
+  EXPECT_TRUE(wait->IsFusible());
   EXPECT_TRUE(outside->IsFusible());
 }
 
@@ -620,12 +620,12 @@ TEST_P(SuperKernelHeadTailTaskTest, RemovesOnlyOneTailEventWhenTaskSlotsAreLimit
   auto *main0 = CreateKernelNode(1, 0);
   auto *main1 = CreateKernelNode(2, 0);
   auto *kernel = CreateKernelNode(3, 1);
-  auto *inner = EventNotify(4, 1);
-  auto *outer = EventNotify(5, 1);
-  EventWait(6, 2);
-  EventWait(7, 2);
-  Pair(4, {6});
-  Pair(5, {7});
+  auto *inner = EventWait(4, 1);
+  auto *outer = EventWait(5, 1);
+  EventNotify(6, 2);
+  EventNotify(7, 2);
+  Pair(6, {4});
+  Pair(7, {5});
   SetupStreams({{0, 1, 2}, {3, 4, 5}, {6, 7}});
 
   EXPECT_TRUE(RemoveEvents({main0, main1, kernel, inner, outer}));
@@ -699,19 +699,19 @@ TEST_P(SuperKernelHeadTailTaskTest, DifferentStreamsShareTaskSlotBudget) {
   CreateResetNode(0, 0, 100);
   auto *kernel0 = CreateKernelNode(1, 0);
   auto *kernel1 = CreateKernelNode(2, 0);
-  auto *notify0 = EventNotify(3, 0);
+  auto *wait0 = EventWait(3, 0);
   CreateResetNode(4, 1, 101);
   auto *kernel2 = CreateKernelNode(5, 1);
   auto *kernel3 = CreateKernelNode(6, 1);
-  auto *notify1 = EventNotify(7, 1);
-  EventWait(8, 2);
-  EventWait(9, 2);
-  Pair(3, {8});
-  Pair(7, {9});
+  auto *wait1 = EventWait(7, 1);
+  EventNotify(8, 2);
+  EventNotify(9, 2);
+  Pair(8, {3});
+  Pair(9, {7});
   SetupStreams({{0, 1, 2, 3}, {4, 5, 6, 7}, {8, 9}});
 
-  EXPECT_TRUE(RemoveEvents({kernel0, kernel1, kernel2, kernel3, notify0, notify1}));
-  EXPECT_NE(notify0->IsFusible(), notify1->IsFusible());
+  EXPECT_TRUE(RemoveEvents({kernel0, kernel1, kernel2, kernel3, wait0, wait1}));
+  EXPECT_NE(wait0->IsFusible(), wait1->IsFusible());
 }
 
 TEST_P(SuperKernelHeadTailTaskTest, KeepsScopeUnchangedWhenOriginalTaskSlotsAreInsufficient) {
@@ -790,19 +790,39 @@ TEST_P(SuperKernelHeadTailTaskTest, RemovesHeadWaitWithKnownExternalNotify) {
   EXPECT_TRUE(notify->IsFusible());
 }
 
-TEST_P(SuperKernelHeadTailTaskTest, TailNotifyMovesWhenAllWaitsAreExternal) {
-  auto *kernel = CreateKernelNode(1, 0);
-  auto *notify = EventNotify(2, 0);
-  EventWait(3, 1);
-  EventWait(4, 2);
-  Pair(2, {3, 4});
-  SetupStreams({{1, 2}, {3}, {4}});
+TEST_P(SuperKernelHeadTailTaskTest, KeepsTailNotifyThatWouldIntroduceBackBlock) {
+  auto *mainKernel = CreateKernelNode(1, 0);
+  auto *subKernel0 = CreateKernelNode(2, 1);
+  auto *subKernel1 = CreateKernelNode(3, 1);
+  auto *innerWait = EventWait(4, 1);
+  auto *notify = EventNotify(5, 1);
+  EventNotify(6, 2);
+  EventWait(7, 2);
+  Pair(6, {4});
+  Pair(5, {7});
+  SetupStreams({{1}, {2, 3, 4, 5}, {6, 7}});
 
-  EXPECT_TRUE(RemoveEvents({kernel, notify}));
-  EXPECT_FALSE(notify->IsFusible());
-  EXPECT_TRUE(kernel->IsFusible());
-  EXPECT_TRUE(graph->GetNodeById(3)->IsFusible());
-  EXPECT_TRUE(graph->GetNodeById(4)->IsFusible());
+  EXPECT_FALSE(RemoveEvents({mainKernel, subKernel0, subKernel1, innerWait, notify}));
+  EXPECT_TRUE(notify->IsFusible());
+  EXPECT_TRUE(innerWait->IsFusible());
+}
+
+TEST_P(SuperKernelHeadTailTaskTest, RemovesTailWaitButKeepsNotifyWhenBackBlockAlreadyNeeded) {
+  auto *mainKernel = CreateKernelNode(1, 0);
+  auto *subKernel0 = CreateKernelNode(2, 1);
+  auto *subKernel1 = CreateKernelNode(3, 1);
+  auto *notify = EventNotify(4, 1);
+  auto *tailWait = EventWait(5, 1);
+  CreateResetNode(6, 1, 100);
+  EventNotify(7, 2);
+  EventWait(8, 2);
+  Pair(7, {5});
+  Pair(4, {8});
+  SetupStreams({{1}, {2, 3, 4, 5, 6}, {7, 8}});
+
+  EXPECT_TRUE(RemoveEvents({mainKernel, subKernel0, subKernel1, notify, tailWait}));
+  EXPECT_FALSE(tailWait->IsFusible());
+  EXPECT_TRUE(notify->IsFusible());
 }
 
 TEST_F(SuperKernelHeadTailEventTest, TailFanoutWaitsMustAllLeave) {
