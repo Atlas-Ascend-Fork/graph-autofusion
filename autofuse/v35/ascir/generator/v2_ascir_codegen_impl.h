@@ -4915,6 +4915,7 @@ class FloorDivAscIrCodegenImplV2 : public AscIrCodegenV2 {
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "basic_api/reg_compute/kernel_reg_compute_intf.h",
+        "simt_api/cpp/kernel_simt_intf.h",
     };
   }
   [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {

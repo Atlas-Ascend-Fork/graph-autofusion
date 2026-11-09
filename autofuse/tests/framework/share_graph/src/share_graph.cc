@@ -8246,35 +8246,35 @@ af::ComputeGraphPtr ShareGraph::RemainderInt32StoreFusedGraph(size_t dims_size) 
  *      |
  *   output0
  */
-static void CreateFloorDivInt32StoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+static void CreateFloorDivStoreAscGraph(af::AscGraph &graph, size_t dims_size, af::DataType dtype) {
   af::ascir_op::Data floor_div_x1("data0", graph);
   floor_div_x1.ir_attr.SetIndex(0);
-  floor_div_x1.y.dtype = af::DT_INT32;
+  floor_div_x1.y.dtype = dtype;
 
   af::ascir_op::Data floor_div_x2("data1", graph);
   floor_div_x2.ir_attr.SetIndex(1);
-  floor_div_x2.y.dtype = af::DT_INT32;
+  floor_div_x2.y.dtype = dtype;
 
   af::ascir_op::Load floor_div_load_x1("load0");
   floor_div_load_x1.x = floor_div_x1.y;
-  floor_div_load_x1.y.dtype = af::DT_INT32;
+  floor_div_load_x1.y.dtype = dtype;
 
   af::ascir_op::Load floor_div_load_x2("load1");
   floor_div_load_x2.x = floor_div_x2.y;
-  floor_div_load_x2.y.dtype = af::DT_INT32;
+  floor_div_load_x2.y.dtype = dtype;
 
   af::ascir_op::FloorDiv floor_div_op("floor_div");
   floor_div_op.x1 = floor_div_load_x1.y;
   floor_div_op.x2 = floor_div_load_x2.y;
-  floor_div_op.y.dtype = af::DT_INT32;
+  floor_div_op.y.dtype = dtype;
 
   af::ascir_op::Store floor_div_store("store");
   floor_div_store.x = floor_div_op.y;
-  floor_div_store.y.dtype = af::DT_INT32;
+  floor_div_store.y.dtype = dtype;
 
   af::ascir_op::Output floor_div_output("output");
   floor_div_output.x = floor_div_store.y;
-  floor_div_output.y.dtype = af::DT_INT32;
+  floor_div_output.y.dtype = dtype;
 
   floor_div_output.ir_attr.SetIndex(0);
 
@@ -8282,8 +8282,15 @@ static void CreateFloorDivInt32StoreAscGraph(af::AscGraph &graph, size_t dims_si
 }
 
 af::ComputeGraphPtr ShareGraph::FloorDivInt32StoreFusedGraph(size_t dims_size) {
-  return CreateTwoInputAscGraphComputeGraph("floor_div_int32_store_test", "floor_div_int32_store", dims_size,
-                                            CreateFloorDivInt32StoreAscGraph);
+  return CreateTwoInputAscGraphComputeGraph(
+      "floor_div_int32_store_test", "floor_div_int32_store", dims_size,
+      [](af::AscGraph &graph, size_t dims) { CreateFloorDivStoreAscGraph(graph, dims, af::DT_INT32); });
+}
+
+af::ComputeGraphPtr ShareGraph::FloorDivInt64StoreFusedGraph(size_t dims_size) {
+  return CreateTwoInputAscGraphComputeGraph(
+      "floor_div_int64_store_test", "floor_div_int64_store", dims_size,
+      [](af::AscGraph &graph, size_t dims) { CreateFloorDivStoreAscGraph(graph, dims, af::DT_INT64); });
 }
 
 static void CreateSinBf16AscGraph(af::AscGraph &graph, size_t dims_size) {

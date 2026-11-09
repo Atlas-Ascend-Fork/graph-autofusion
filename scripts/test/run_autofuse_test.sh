@@ -818,6 +818,7 @@ codegen_e2e_st() {
                         div_abs_test_e2e_v2 \
                         erfc_bf16_test_e2e_v2 \
                         floor_div_int32_store_test_e2e_v2 \
+                        floor_div_int64_store_test_e2e_v2 \
                         floordiv_abs_test_e2e_v2 \
                         frexp_store_test_e2e_v2 \
                         hermite_polynomial_h_store_test_e2e_v2 \

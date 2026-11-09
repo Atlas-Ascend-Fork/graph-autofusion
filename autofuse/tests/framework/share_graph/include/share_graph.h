@@ -130,6 +130,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr HermitePolynomialHeStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RemainderInt32StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr FloorDivInt32StoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr FloorDivInt64StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadTanhBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RandStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RandnStoreFusedGraph(size_t dims_size);
