@@ -1412,11 +1412,32 @@ void LockDetector::ResetNotifyExpandNumForScope(SuperKernelScopeInfo &scope) {
 }
 
 // ScopeDeadlockDetector: enumerate concurrent scope combinations and check their Wait resource branches.
+std::string ScopeDeadlockDetector::FormatScopeIds(const std::vector<const SuperKernelScopeInfo *> &combination) {
+  std::vector<uint16_t> ids;
+  ids.reserve(combination.size());
+  for (const auto *scope : combination) {
+    ids.push_back(scope->GetScopeId());
+  }
+  std::sort(ids.begin(), ids.end());
+  std::string result;
+  for (const auto id : ids) {
+    if (!result.empty()) {
+      result += ",";
+    }
+    result += std::to_string(id);
+  }
+  return "[" + result + "]";
+}
+
 const SuperKernelScopeInfo *ScopeDeadlockDetector::CheckParallelScopeResources(
-    const std::vector<SuperKernelScopeInfo> &scopes, uint64_t &riskWaitId, ResourceConflictInfo *conflictInfo) {
+    const std::vector<SuperKernelScopeInfo> &scopes, uint64_t &riskWaitId, ResourceConflictInfo *conflictInfo,
+    std::vector<uint16_t> *overCapacityScopeIds) {
   riskWaitId = INVALID_TASK_ID;
   if (conflictInfo != nullptr) {
     *conflictInfo = {};
+  }
+  if (overCapacityScopeIds != nullptr) {
+    overCapacityScopeIds->clear();
   }
   const SuperKernelScopeInfo *riskScope = nullptr;
   scopeInfos_.clear();
@@ -1428,34 +1449,59 @@ const SuperKernelScopeInfo *ScopeDeadlockDetector::CheckParallelScopeResources(
   const auto candidates = CollectWaitScopeCandidates(scopes);
   const auto ranges = BuildScopeConcurrentRanges(scopes);
   std::vector<const SuperKernelScopeInfo *> selected;
+  SK_LOGI("[ParallelResource] Initial candidate scope combination: %s", FormatScopeIds(candidates).c_str());
+  // Defer scope mutations until enumeration ends; marked scopes are excluded from later combinations.
+  std::unordered_set<uint16_t> pendingSplitScopeIds;
   WaitResourceDependencyAnalyzer::CoreDemand selectedDemand;
   std::function<bool(size_t)> check = [&](size_t index) {
     if (index == candidates.size()) {
+      if (selected.size() >= 2) {
+        SK_LOGI("[ParallelResource] Checking scope combination: %s", FormatScopeIds(selected).c_str());
+      }
       return CheckSelectedScopeResourceBranches(selected, ranges, riskWaitId, riskScope, conflictInfo);
     }
     if (!check(index + 1)) {
       return false;
     }
     const auto *candidate = candidates[index];
+    if (pendingSplitScopeIds.count(candidate->GetScopeId()) != 0) {
+      return true;
+    }
     for (const auto *scope : selected) {
       if (!concurrentRanges_.CanRunTogether(scope->GetScopeId(), candidate->GetScopeId(), ranges)) {
+        SK_LOGI("[ParallelResource] Skip scope %u with combination %s: cannot run with scope %u",
+                candidate->GetScopeId(), FormatScopeIds(selected).c_str(), scope->GetScopeId());
         return true;
       }
     }
     const uint64_t candidateCube = selectedDemand.cubeCoreNum + candidate->GetScopeCoreInfo().GetCubeNum();
     const uint64_t candidateVec = selectedDemand.vectorCoreNum + candidate->GetScopeCoreInfo().GetVectorNum();
     if (!waitResources_.HasEnoughDeviceCores(candidateCube, candidateVec, 0, 0)) {
+      if (!selected.empty() && overCapacityScopeIds != nullptr) {
+        pendingSplitScopeIds.insert(candidate->GetScopeId());
+        SK_LOGI(
+            "[ParallelResource] Over-capacity combination: added scope %u, cube=%lu/%ld, vec=%lu/%ld; "
+            "mark scope for Wait split",
+            candidate->GetScopeId(), candidateCube, LockDetector::GetDeviceCubeNum(), candidateVec,
+            LockDetector::GetDeviceVecNum());
+      }
       return true;
     }
     const auto previousDemand = selectedDemand;
     selectedDemand = {candidateCube, candidateVec};
     selected.push_back(candidate);
+    SK_LOGI("[ParallelResource] Add scope %u to combination %s: cube=%lu, vec=%lu", candidate->GetScopeId(),
+            FormatScopeIds(selected).c_str(), candidateCube, candidateVec);
     const bool safe = check(index + 1);
     selected.pop_back();
     selectedDemand = previousDemand;
     return safe;
   };
   (void)check(0);
+  if (overCapacityScopeIds != nullptr) {
+    overCapacityScopeIds->assign(pendingSplitScopeIds.begin(), pendingSplitScopeIds.end());
+    std::sort(overCapacityScopeIds->begin(), overCapacityScopeIds->end());
+  }
   return riskScope;
 }
 
@@ -1488,8 +1534,20 @@ ScopeDeadlockDetector::ScopeConcurrentRanges ScopeDeadlockDetector::BuildScopeCo
     const bool hasWait = std::any_of(scope.GetNodes().begin(), scope.GetNodes().end(),
                                      [](const auto *node) { return node->GetNodeType() == SkNodeType::NODE_WAIT; });
     if (scope.GetScopeCoreInfo().IsValid() && hasWait) {
-      ranges.emplace(scope.GetScopeId(),
-                     concurrentRanges_.CalculateScopeConcurrentRanges(scope.GetNodes(), scope.GetScopeId()));
+      auto scopeRanges = concurrentRanges_.CalculateScopeConcurrentRanges(scope.GetNodes(), scope.GetScopeId());
+      std::vector<uint32_t> streamIds;
+      streamIds.reserve(scopeRanges.size());
+      for (const auto &[streamId, range] : scopeRanges) {
+        (void)range;
+        streamIds.push_back(streamId);
+      }
+      std::sort(streamIds.begin(), streamIds.end());
+      for (const auto streamId : streamIds) {
+        const auto &range = scopeRanges.at(streamId);
+        SK_LOGI("[ParallelResource] Scope %u lifecycle: stream=%u, firstNode=%lu, lastNode=%lu", scope.GetScopeId(),
+                streamId, range.firstNodeId, range.lastNodeId);
+      }
+      ranges.emplace(scope.GetScopeId(), std::move(scopeRanges));
     }
   }
   return ranges;
@@ -1510,8 +1568,12 @@ bool ScopeDeadlockDetector::CheckSelectedScopeResourceBranches(
     const WaitResourceDependencyAnalyzer::CoreDemand rootDemand{scope->GetScopeCoreInfo().GetCubeNum(),
                                                                 scope->GetScopeCoreInfo().GetVectorNum()};
     for (const auto *node : scope->GetNodes()) {
-      if (node->GetNodeType() == SkNodeType::NODE_WAIT && !waitResources_.ShouldBypassValueWaitDeadlock(*node) &&
-          !waitResources_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents, &ranges,
+      if (node->GetNodeType() != SkNodeType::NODE_WAIT || waitResources_.ShouldBypassValueWaitDeadlock(*node)) {
+        continue;
+      }
+      SK_LOGI("[ParallelResource] Checking scope combination %s: scope=%u, wait=%lu", FormatScopeIds(selected).c_str(),
+              scopeId, node->GetNodeId());
+      if (!waitResources_.CheckWaitResourceBranches(*node, scopeId, rootDemand, scope->GetNodes(), residents, &ranges,
                                                     conflictInfo)) {
         riskWaitId = node->GetNodeId();
         riskScope = scope;

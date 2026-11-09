@@ -2940,6 +2940,54 @@ TEST_F(TestLockDetector, ParallelResourceSplitKeepsLaterWaitNotifiedByPrefix) {
   EXPECT_TRUE(laterWait->IsFusible());
 }
 
+TEST_F(TestLockDetector, ParallelResourceOverCapacitySplitsEveryWaitInAddedScope) {
+  CreateGraphFromStreams({{1, 2, 3, 4, 5}, {8}, {10, 11, 12}, {20}}, {{20, {2, 11}}, {8, {4}}});
+  for (const auto nodeId : {1U, 3U, 5U, 10U, 12U}) {
+    auto *node = graph->GetNodeById(nodeId);
+    node->nodeInfos.kernelInfos.numBlocks = 20;
+    node->nodeInfos.kernelInfos.cubeNum = 20;
+  }
+  std::vector<SuperKernelScopeInfo> scopes(2);
+  SetScopeMembers(scopes[0], {10, 11, 12});
+  SetScopeMembers(scopes[1], {1, 2, 3, 8, 4, 5});
+  const auto savedCores = LockDetector::deviceRealCubeNum;
+  LockDetector::deviceRealCubeNum = 32;
+
+  ParallelScopeDeadlockRefinePass pass(*graph, *opts);
+  const bool result = pass.Run(scopes);
+  LockDetector::deviceRealCubeNum = savedCores;
+
+  ASSERT_TRUE(result);
+  EXPECT_FALSE(graph->GetNodeById(2)->IsFusible());
+  EXPECT_FALSE(graph->GetNodeById(4)->IsFusible());
+  EXPECT_TRUE(graph->GetNodeById(11)->IsFusible());
+}
+
+TEST_F(TestLockDetector, ParallelResourceOverCapacityContinuesOtherCombinations) {
+  CreateGraphFromStreams({{1, 2, 3}, {11, 12, 13}, {21, 22, 23}, {31, 32, 33}, {100}, {101}, {102}, {103}},
+                         {{100, {2}}, {101, {12}}, {102, {22}}, {103, {32}}});
+  std::vector<SuperKernelScopeInfo> scopes(4);
+  const std::vector<std::vector<uint64_t>> members = {{1, 2, 3}, {11, 12, 13}, {21, 22, 23}, {31, 32, 33}};
+  const std::vector<uint32_t> coreCounts = {20, 5, 20, 20};
+  for (size_t i = 0; i < scopes.size(); ++i) {
+    SetScopeMembers(scopes[i], members[i]);
+    scopes[i].SetScopeCoreInfo({SkKernelType::AIC_ONLY, coreCounts[i]});
+    for (const auto kernelId : {members[i].front(), members[i].back()}) {
+      graph->GetNodeById(kernelId)->nodeInfos.kernelInfos.cubeNum = coreCounts[i];
+    }
+  }
+  const auto savedCores = LockDetector::deviceRealCubeNum;
+  LockDetector::deviceRealCubeNum = 32;
+  uint64_t riskWaitId = INVALID_TASK_ID;
+  std::vector<uint16_t> pendingScopeIds;
+
+  scopeDetector->CheckParallelScopeResources(scopes, riskWaitId, nullptr, &pendingScopeIds);
+  LockDetector::deviceRealCubeNum = savedCores;
+
+  EXPECT_EQ(riskWaitId, INVALID_TASK_ID);
+  EXPECT_EQ(pendingScopeIds, (std::vector<uint16_t>{scopes[2].GetScopeId(), scopes[3].GetScopeId()}));
+}
+
 TEST_F(TestLockDetector, ParallelResourceSplitCutsLaterWaitNotifiedAfterRiskWait) {
   CreateGraphFromStreams({{1, 2, 3, 4, 5}, {8}, {30}}, {{8, {4}}, {30, {2}}});
   SuperKernelScopeInfo scope;

@@ -1293,8 +1293,10 @@ static ScopeBreakInfo BuildSingleScopeDeadlockBreakInfo(const SuperKernelBaseNod
 }
 
 static ScopeBreakInfo BuildParallelScopeDeadlockBreakInfo(const SuperKernelBaseNode &waitNode,
-                                                          const ResourceConflictInfo &conflictInfo) {
-  std::string detail = "Parallel resource deadlock at Wait node " + std::to_string(waitNode.GetNodeId());
+                                                          const ResourceConflictInfo &conflictInfo, bool overCapacity) {
+  std::string detail = (overCapacity ? "Parallel scope core demand exceeds device at Wait node "
+                                     : "Parallel resource deadlock at Wait node ") +
+                       std::to_string(waitNode.GetNodeId());
   const auto resourceConflictDetail = conflictInfo.Format();
   if (!resourceConflictDetail.empty()) {
     detail += ", " + resourceConflictDetail;
@@ -1505,7 +1507,8 @@ bool SingleScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scope
 
 void ParallelScopeDeadlockRefinePass::SplitScopeAtRiskWait(SuperKernelScopeInfo &scope, SuperKernelBaseNode &waitNode,
                                                            std::vector<SuperKernelScopeInfo> &splitScopes,
-                                                           const ResourceConflictInfo &conflictInfo) {
+                                                           const ResourceConflictInfo &conflictInfo,
+                                                           bool splitAllWaits) {
   const auto &nodes = scope.GetNodes();
   const auto originalBreakInfo = scope.GetBreakInfo();
   scope.ClearNodeScopeIds();
@@ -1525,7 +1528,8 @@ void ParallelScopeDeadlockRefinePass::SplitScopeAtRiskWait(SuperKernelScopeInfo 
   std::vector<SuperKernelBaseNode *> currentSegment;
   for (auto it = std::next(riskWaitIt); it != nodes.end(); ++it) {
     auto *node = *it;
-    if (node->GetNodeType() == SkNodeType::NODE_WAIT && !IsWaitNotifyInScope(*node, scopeBeforeNodeIds)) {
+    if (node->GetNodeType() == SkNodeType::NODE_WAIT &&
+        (splitAllWaits || !IsWaitNotifyInScope(*node, scopeBeforeNodeIds))) {
       node->SetIsFusible(false);
       node->SetFusionFailReason(FusionFailReason::EXIST_DEADLOCK);
       if (!currentSegment.empty()) {
@@ -1547,7 +1551,7 @@ void ParallelScopeDeadlockRefinePass::SplitScopeAtRiskWait(SuperKernelScopeInfo 
     }
     RebuildStreamInfos(splitScope);
     if (index == 0 && hasPrefix) {
-      splitScope.SetBreakInfo(BuildParallelScopeDeadlockBreakInfo(waitNode, conflictInfo));
+      splitScope.SetBreakInfo(BuildParallelScopeDeadlockBreakInfo(waitNode, conflictInfo, splitAllWaits));
     } else {
       splitScope.SetBreakInfo(originalBreakInfo);
     }
@@ -1557,6 +1561,7 @@ void ParallelScopeDeadlockRefinePass::SplitScopeAtRiskWait(SuperKernelScopeInfo 
 
 bool ParallelScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   if (scopes.size() < 2) {
+    PrintScopeResults(scopes, graph_, GetName().c_str());
     return true;
   }
   int64_t maxCubeNum = 0;
@@ -1582,7 +1587,36 @@ bool ParallelScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &sco
     }
     uint64_t riskWaitId = INVALID_TASK_ID;
     ResourceConflictInfo conflictInfo;
-    const auto *riskScope = scopeLockDetector_.CheckParallelScopeResources(scopes, riskWaitId, &conflictInfo);
+    std::vector<uint16_t> overCapacityScopeIds;
+    const auto *riskScope =
+        scopeLockDetector_.CheckParallelScopeResources(scopes, riskWaitId, &conflictInfo, &overCapacityScopeIds);
+    if (!overCapacityScopeIds.empty()) {
+      for (const auto scopeId : overCapacityScopeIds) {
+        const auto scopeIt = std::find_if(scopes.begin(), scopes.end(),
+                                          [scopeId](const auto &scope) { return scope.GetScopeId() == scopeId; });
+        if (scopeIt == scopes.end()) {
+          SK_LOGE("[ParallelResource] Over-capacity scope %u not found", scopeId);
+          return false;
+        }
+        const auto waitIt = std::find_if(scopeIt->GetNodes().begin(), scopeIt->GetNodes().end(),
+                                         [](const auto *node) { return node->GetNodeType() == SkNodeType::NODE_WAIT; });
+        if (waitIt == scopeIt->GetNodes().end()) {
+          SK_LOGE("[ParallelResource] Over-capacity scope %u has no Wait node", scopeId);
+          return false;
+        }
+        {
+          SK_LOG_CONTEXT_SIMPLE("sk_scope_split.log");
+          SK_LOGI("[ParallelResource] Split over-capacity scope %u at Wait %lu", scopeId, (*waitIt)->GetNodeId());
+        }
+        const auto scopeIndex = static_cast<size_t>(scopeIt - scopes.begin());
+        std::vector<SuperKernelScopeInfo> splitScopes;
+        SplitScopeAtRiskWait(scopes[scopeIndex], **waitIt, splitScopes, {}, true);
+        scopes.erase(scopes.begin() + scopeIndex);
+        scopes.insert(scopes.begin() + scopeIndex, std::make_move_iterator(splitScopes.begin()),
+                      std::make_move_iterator(splitScopes.end()));
+      }
+      continue;
+    }
     if (riskScope == nullptr) {
       break;
     }
@@ -1595,6 +1629,10 @@ bool ParallelScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &sco
       SK_LOGE("[ParallelResource] Failed to split at risk Wait %lu, fusible=%d", riskWaitId, waitNode->IsFusible());
       return false;
     }
+    {
+      SK_LOG_CONTEXT_SIMPLE("sk_scope_split.log");
+      SK_LOGI("[ParallelResource] Split scope %u at risk Wait %lu", riskScope->GetScopeId(), riskWaitId);
+    }
     const auto scopeIndex = static_cast<size_t>(riskScope - scopes.data());
     std::vector<SuperKernelScopeInfo> splitScopes;
     SplitScopeAtRiskWait(scopes[scopeIndex], *waitNode, splitScopes, conflictInfo);
@@ -1602,6 +1640,7 @@ bool ParallelScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &sco
     scopes.insert(scopes.begin() + scopeIndex, std::make_move_iterator(splitScopes.begin()),
                   std::make_move_iterator(splitScopes.end()));
   }
+  PrintScopeResults(scopes, graph_, GetName().c_str());
   return true;
 }
 
