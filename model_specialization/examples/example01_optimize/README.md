@@ -116,4 +116,4 @@ Example passed
 grep -E "specialization completed|specialization failed|HandleTaskUpdate: update task finish|Mismatch|Numerical check passed|Example passed" build/host/specialization.log
 ```
 
-先检查日志中 AddCustom 二进制的加载路径，确认来自 `../build/opp/vendors/customize`。再查看目标 Kernel 的 `specialization completed` 和对应任务的 `HandleTaskUpdate: update task finish`，分别确认特化编译完成和任务更新完成。
+先检查日志中 AddCustom 二进制的加载路径，确认来自 `../build/opp/vendors/customize`。再查看目标 Kernel 的 `specialization completed` 和对应任务的 `HandleTaskUpdate: update task finish`，分别确认常量化编译完成和任务更新完成。

@@ -120,6 +120,6 @@ grep -E "specialization completed|specialization failed|HandleTaskUpdate: update
 grep -F "[IN_SCOPE]" build/host/specialization.log
 ```
 
-先检查日志中 AddCustom 二进制的加载路径，确认来自 `../build/opp/vendors/customize`。再查看目标 Kernel 的 `specialization completed` 和对应任务的 `HandleTaskUpdate: update task finish`，分别确认特化编译完成和任务更新完成。
+先检查日志中 AddCustom 二进制的加载路径，确认来自 `../build/opp/vendors/customize`。再查看目标 Kernel 的 `specialization completed` 和对应任务的 `HandleTaskUpdate: update task finish`，分别确认常量化编译完成和任务更新完成。
 
 通过 `[IN_SCOPE]` 日志确认只选中了第二个 AddCustom，并检查只有该 Kernel 任务被更新。两次调用的 Kernel 名称相同，请按任务 ID 区分。
