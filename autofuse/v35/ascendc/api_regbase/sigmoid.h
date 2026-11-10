@@ -25,6 +25,10 @@ constexpr Reg::CastTrait CAST_F32_TO_B16 = {
 };
 constexpr uint32_t SIGMOID_FLOAT_NAN = 0x7fc00000;
 constexpr uint32_t SIGMOID_FLOAT_POS_INF = 0x7f800000;
+// 正侧饱和阈值：x ≥ 20 时 1/(1+e^-20) 在 fp32/half/bfloat16 下均舍入为 1.0，饱和无精度损失。
+// 同时绕开 Reg::Exp 在 e^-x 落入 fp32 次正规区间（x ≳ 87，--cce-ftz=false）时误返回 ~1、
+// 致 sigmoid(x)=1/(1+1)=0.5 的错误路径；负侧 exp(-x) 为正规大数或 inf，不在饱和范围。
+constexpr float SIGMOID_SATURATION_THRESHOLD = 20.0f;
 // Keep the sigmoid sequence aligned with the register-level VF implementation:
 // x -> -x -> exp(-x) -> 1 + exp(-x) -> 1 / (1 + exp(-x)).
 template <typename T>
@@ -43,6 +47,7 @@ __simd_vf__ inline void SigmoidCompute(__ubuf__ T *dstUb, __ubuf__ T *srcUb, uin
   Reg::MaskReg nanMask;
   Reg::MaskReg posInfMask;
   Reg::MaskReg negInfMask;
+  Reg::MaskReg satMask;
 
   for (uint16_t i = 0; i < repeatTimes; ++i) {
     preg = Reg::UpdateMask<float>(sreg);
@@ -58,6 +63,8 @@ __simd_vf__ inline void SigmoidCompute(__ubuf__ T *dstUb, __ubuf__ T *srcUb, uin
     Reg::Compare<float, CMPMODE::EQ>(posInfMask, castReg, specialReg, preg);
     Reg::Neg(specialReg, specialReg, preg);
     Reg::Compare<float, CMPMODE::EQ>(negInfMask, castReg, specialReg, preg);
+    // 大正 x 饱和：NaN 与阈值比较恒为 false ⇒ 走通用路径，不影响 NaN 传播。
+    Reg::CompareScalar<float, CMPMODE::GE>(satMask, castReg, SIGMOID_SATURATION_THRESHOLD, preg);
 
     Reg::Muls(tmpReg, castReg, -1.0f, preg);
     Reg::Exp(tmpReg, tmpReg, preg);
@@ -69,6 +76,7 @@ __simd_vf__ inline void SigmoidCompute(__ubuf__ T *dstUb, __ubuf__ T *srcUb, uin
     Reg::Select(dstReg, nanReg, dstReg, nanMask);
     Reg::Duplicate(oneReg, 1.0f, preg);
     Reg::Select(dstReg, oneReg, dstReg, posInfMask);
+    Reg::Select(dstReg, oneReg, dstReg, satMask);
     Reg::Duplicate(zeroReg, 0.0f, preg);
     Reg::Select(dstReg, zeroReg, dstReg, negInfMask);
 

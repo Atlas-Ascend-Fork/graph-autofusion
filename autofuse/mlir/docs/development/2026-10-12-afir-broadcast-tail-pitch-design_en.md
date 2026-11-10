@@ -27,6 +27,18 @@ this summary does not change their versions or supported configurations.
 
 Do not modify the already-supported reg-based path or broaden the separately rejected innermost-broadcast form. Keep FAILED and DRIFT outcomes visible rather than reclassifying them.
 
+## Current implementation update
+
+Queue members belonging to different tensor IDs are now packed using their own
+aligned physical sizes, so they may use different layouts. The bridge no longer
+requires independent members to expose identical complete tensor views. Resource
+attribute conflicts, invalid member descriptors and incompatible duplicate views
+of the same tensor remain rejected.
+
+The historical rejection notes in the Chinese record describe the behavior before
+this fix. Removing that restriction does not enable inline broadcast inside a tile
+and does not guarantee that every candidate in a graph will pass lowering.
+
 ## Requirements and Design
 
 ### Overall Approach and Functional Requirements

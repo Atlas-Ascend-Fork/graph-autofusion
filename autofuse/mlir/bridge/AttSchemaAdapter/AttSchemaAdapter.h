@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "bridge/AttSchemaAdapter/TilingCodeBundle.h"
-#include "bridge/PlanSelector/PlanSelector.h"
+#include "bridge/PlanSelector/PlanSelection.h"
 #include "common/tiling_schema/tiling_field_schema.h"
 
 namespace mlir::bridge {
@@ -27,8 +27,8 @@ namespace mlir::bridge {
 
 // Generate the host tiling program through the existing ATT entry point and
 // attach the candidate/schema contract consumed by the later MLIR pipeline.
-// No runtime tiling result is stored here; that remains owned by
-// AutofuseTiling/AutofuseLaunch.
+// This adapter generates source only. Static execution returns a separate frozen
+// artifact; dynamic compilation delivers this source bundle.
 //
 // AttRequest 的引用成员只在调用点存活：一律就地构造实参，不要先存成具名变量再隔开使用。
 struct AttRequest {
@@ -40,7 +40,7 @@ struct AttRequest {
   bool is_inductor_scene;
 };
 
-// `unsupported` 的语义与 `PlanSelection.h` 的那一位逐字相同。这里只有一条失败路径置它：
+// 这里只有一条失败路径置 `unsupported`：
 // **ATT 自己的 tiling 生成器返回 false**。判据是「ATT 拒收」与「MLIR 自己的产物和 ATT 的
 // 期望不一致」之分，不是「失败发生在 ATT 里」——所以紧挨着的字段拼法不符那一支**不置**它
 // （那里是 MLIR 的 `TilingFieldSchema` 发错了名字，标成能力不足就把缺陷静默回落掉了）。

@@ -96,18 +96,10 @@ using elementwise::kI32;
 using elementwise::kUI16;
 using elementwise::kUI8;
 
-// 收哪几种的判据是**「legacy 那句不带限定的 `Duplicate` 到底绑到谁」**，不是供给表的
-// dtype 列：`BroadcastScalar` 发的是 `Duplicate(dst, v, n)`，而 `duplicate.h` 在全局
-// 作用域给 int8 / uint8 / int64 / uint64 各摆了一条非模板重载，这四种绑的是那条包装
-// （8 位那两条会先 `ReinterpretCast<uint16_t>`，64 位那两条还要 tmp buffer），其余的
-// 靠 ADL 绑到 `AscendC::Duplicate`——正是这条路发的 `DuplicateL2Op`。
-//
-// 所以 AFIR 这六位里，`ui8` 是唯一一个「legacy 收、这条路发不了」的：它要的是包装调用，
-// 得另起一个带扩展头的 implementation。这一处已知窄差记在
-// `test/ut/conversion/ElementTypeMatrixTest.cpp` 的快照表里，不是漏抄。
-// ODS 的 `AFIR_BroadcastElementTypes` 比这里宽是对的——那是 op 收什么，不是这个
-// implementation 发什么。
+// Native Duplicate types. Mem-based ui8 additionally uses the legacy duplicate.h
+// wrapper; keep it separate from the stock API and the reg-based registration.
 constexpr uint32_t kDuplicateElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16;
+constexpr unsigned kUInt8BitWidth = 8;
 
 // 这个 op 上有两档 implementation，判据互斥（见 `analyzeSegmentedBroadcast`），
 // 但前面那一长串 feature / 供给表 / dtype / tmp buffer 的检查两档逐字相同。
@@ -173,46 +165,6 @@ afir::TensorDescAttr firstDescriptor(Operation *op, llvm::StringRef name) {
   return dyn_cast<afir::TensorDescAttr>(descriptors[0]);
 }
 
-// 源 tile 所在的存储是谁写的——`GetValue` 是一次**标量**读（S 管线），而队列的
-// DeQue 只给 MTE2→V，覆不到 S。legacy 按 `in.position` 分流，这里按同一件事的
-// 目标方言形态分流：队列 / TBuf 的**类型**上带着 TPosition。
-//
-//   - `vecin` 队列：MTE2 写的 → `MTE2_S`；
-//   - `veccalc` 的 TBuf：V 写的 → `V_S`。
-//
-// `vecout` 不在这里答：legacy 那一支一条同步都不发（`BroadcastScalar` 的 if / else if
-// 没有 else），而「一个值同时喂 Store 和 Broadcast」这个形态没核过，所以返回 nullopt
-// 让 capability 报 unsupported，而不是照着一个没核过的先例发或不发。
-//
-// 双端队列（`TQueBind`）按**源侧** position 答案：它由「load 直连 store 且无矢量消费
-// 者」物化而来，源侧恒为 VECIN，与单端 vecin 队列同一个写者（MTE2），答案同为 `MTE2_S`。
-// 共享队列（广播源 tile 与直连 load tile 同一 buffer_id）落进这个形态时，广播的 deque
-// 挂的就是 `que_bind` 类型——按 `QueueType` 一个分支认会把整图错杀成 unsupported。
-std::optional<ascendc::HardEvent> scalarReadEvent(Value source) {
-  Value current = source;
-  while (auto cast = current.getDefiningOp<ascendc::LocalTensorReinterpretCastOp>()) {
-    current = cast.getIn();
-  }
-  if (auto deque = current.getDefiningOp<ascendc::TQueBindDequeTensorOp>()) {
-    if (auto queue = dyn_cast<ascendc::QueueType>(deque.getQueue().getType())) {
-      if (queue.getPosition() == ascendc::TPosition::VECIN) {
-        return ascendc::HardEvent::MTE2_S;
-      }
-      return std::nullopt;
-    }
-    if (auto queBind = dyn_cast<ascendc::QueBindType>(deque.getQueue().getType())) {
-      if (queBind.getSrcPosition() == ascendc::TPosition::VECIN) {
-        return ascendc::HardEvent::MTE2_S;
-      }
-    }
-    return std::nullopt;
-  }
-  if (current.getDefiningOp<ascendc::TBufGetTensorOp>()) {
-    return ascendc::HardEvent::V_S;
-  }
-  return std::nullopt;
-}
-
 //===----------------------------------------------------------------------===//
 // 分段广播（功能需求 3 / 4）
 //===----------------------------------------------------------------------===//
@@ -225,9 +177,6 @@ std::optional<ascendc::HardEvent> scalarReadEvent(Value source) {
 // 只差在 AFIR 这一层的编号上：i8 / i64 / ui64 / ui32 在 `ElementTypes` 里没有位
 // （`elementTypeBit` 答 0），够不着也就谈不上收。
 //
-// **与 `kDuplicateElementTypes` 只差一个 `ui8`，而那个差是真的**：`Duplicate` 那一档发的
-// 是标准 `AscendC::Duplicate`，ui8 在 legacy 绑的是 `duplicate.h` 的包装重载，不是同一个
-// 调用；这一档没有这个问题，两边都是那条包装。
 constexpr uint32_t kSegmentedElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16;
 
 // `expression` 可证等于 `literal` 吗。证不了返回 false（保守方向：报不支持，不是算错）。
@@ -850,7 +799,7 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
       if (!isConstantOnVectorizedAxes(firstDescriptor(operation, afir::kOperandDescsAttrName))) {
         return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
       }
-      if (!scalarReadEvent(source)) {
+      if (!scalarReadEvent(operation, source)) {
         return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
       }
       // 这一档发的是一次覆盖整块 tile 的填充，长度取 `materializeScheduledLocalSpan`，
@@ -942,29 +891,16 @@ class BroadcastDuplicateConversionPattern final : public OpConversionPattern<afi
     if (!sourceType) {
       return rewriter.notifyMatchFailure(op, "source is not a target-dialect tile");
     }
-    // 标量读的同步：源所在存储的写者到 S 管线。capability 已经问过一次，这里再问一次
-    // 而不是缓存——两处问的是同一个值上的同一件事，缓存反而多一条要对齐的路。
-    std::optional<ascendc::HardEvent> event = scalarReadEvent(adaptor.getInput());
-    if (!event) {
-      return rewriter.notifyMatchFailure(op, "cannot tell which pipe wrote the broadcast source");
+    auto scalar = materializeScalarRead(op, source, scalarReadEvent(op, op->getOperand(0)), rewriter);
+    if (failed(scalar)) {
+      return rewriter.notifyMatchFailure(op, "cannot synchronize scalar tensor read");
     }
-    Value pipe = findFunctionPipe(op);
-    if (!pipe) {
-      return rewriter.notifyMatchFailure(
-          op, "AscendC event slots are owned by the function's TPipe, which resource materialization did not create");
+    Operation *targetOp;
+    if (sourceType.getElementType().isUnsignedInteger(kUInt8BitWidth)) {
+      targetOp = rewriter.create<ascendc::DuplicateU8Op>(op.getLoc(), destination, *scalar, count);
+    } else {
+      targetOp = rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), destination, *scalar, count);
     }
-    // legacy 只在读之前发一对，读之后不发（`BroadcastScalar`）：`Duplicate` 从标量
-    // 寄存器取这个值，不再回 UB 读。
-    Value eventId =
-        rewriter.create<ascendc::TPipeFetchEventIDOp>(op.getLoc(), rewriter.getIntegerType(8), pipe, *event);
-    rewriter.create<ascendc::SetFlagOp>(op.getLoc(), *event, eventId);
-    rewriter.create<ascendc::WaitFlagOp>(op.getLoc(), *event, eventId);
-
-    Value zeroIndex = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 0);
-    Value scalar =
-        rewriter.create<ascendc::LocalTensorGetValueOp>(op.getLoc(), sourceType.getElementType(), source, zeroIndex);
-
-    Operation *targetOp = rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), destination, scalar, count);
     if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
       return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
     }
@@ -1164,10 +1100,17 @@ LogicalResult registerDuplicate(ImplementationRegistry &registry, llvm::StringRe
   if (failed(elementwise::checkFamilyMatchesHeader<ascendc::DuplicateL2Op>(family))) {
     return failure();
   }
-  elementwise::recordRegisteredFamily(afir::BroadcastOp::getOperationName(), id, family, kDuplicateElementTypes);
+  uint32_t elementTypes = kDuplicateElementTypes;
+  if (family == ApiFamily::MemBased) {
+    if (failed(elementwise::checkFamilyMatchesHeader<ascendc::DuplicateU8Op>(family))) {
+      return failure();
+    }
+    elementTypes |= kUI8;
+  }
+  elementwise::recordRegisteredFamily(afir::BroadcastOp::getOperationName(), id, family, elementTypes);
   return registry.registerImplementation<afir::BroadcastOp, BroadcastMapping, BroadcastCapabilityProvider>(
       ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
-      BroadcastMapping{family, BroadcastTier::Duplicate, kDuplicateElementTypes, needsTmpBuffer},
+      BroadcastMapping{family, BroadcastTier::Duplicate, elementTypes, needsTmpBuffer},
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const BroadcastMapping> mapping) {
         patterns.add<BroadcastDuplicateConversionPattern>(context.typeConverter, patterns.getContext(), key,
@@ -1179,8 +1122,8 @@ LogicalResult registerDuplicate(ImplementationRegistry &registry, llvm::StringRe
 
 LogicalResult registerBroadcastImplementations(ImplementationRegistry &registry,
                                                ascend::instruction::SelectionPolicyRegistry *) {
-  // 两侧发的是同一个 `AscendC::Duplicate`，分成两个 implementation 只因为调度给的
-  // tmp buffer 块数不同（文件头）。id 说的是供给表，不是芯片。
+  // Native types use AscendC::Duplicate on both sides; mem-based ui8 uses the
+  // legacy wrapper. Keep the existing family ids and their tmp-buffer contracts.
   if (failed(registerDuplicate(registry, "broadcast.tensor.duplicate", ApiFamily::MemBased,
                                /*needsTmpBuffer=*/true))) {
     return failure();

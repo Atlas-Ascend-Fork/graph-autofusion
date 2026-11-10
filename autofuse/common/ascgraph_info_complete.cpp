@@ -99,6 +99,10 @@ void CompleteElewiseApiInfo(af::AscNodePtr &node) {
   if (af::ops::IsOps<Remainder>(node) || af::ops::IsOps<Fmod>(node) || af::ops::IsOps<Mod>(node)) {
     (void)::ascir::SetDcacheSize(node, kSimtDcacheSize);
   }
+  // FloorDiv 仅 int64 走 SIMT 实现，只为该 dtype 预留 dcache
+  if (af::ops::IsOps<FloorDiv>(node) && node->inputs[0].attr.dtype == af::DT_INT64) {
+    (void)::ascir::SetDcacheSize(node, kSimtDcacheSize);
+  }
 }
 
 void CompleteBroadcastApiInfo(af::AscNodePtr &node) {

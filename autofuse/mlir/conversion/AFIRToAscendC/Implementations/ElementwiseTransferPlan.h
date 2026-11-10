@@ -33,6 +33,9 @@ FailureOr<afir::TensorDescAttr> getDestinationDescriptor(Operation *op, unsigned
 // 要求不同，而这个区分只有计划知道。
 LocalViewCompatibility checkLocalViewCompatibility(Operation *op, ArrayRef<afir::TensorDescAttr> descriptors,
                                                    afir::TransferPlanKind *kind = nullptr);
+// A logical singleton that must be widened to the destination domain.
+bool isSingletonTensorInput(Operation *op, unsigned index);
+
 // 参与比较的是这个算子**有形状的那些输入**加上 destination，由操作数类型现场认出来，
 // 不由调用方声明形态。声明形态在 `ScalarOperand::Any` 上认不出谁是 tile（标量可以落在
 // 第一个操作数上），而形态与实际操作数对不对得上是 `getTensorTypes` / `emissionOrder`

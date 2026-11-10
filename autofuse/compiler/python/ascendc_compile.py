@@ -543,10 +543,20 @@ def contains_cv_tiling_data(source_file):
 
 
 def is_cv_fusion_compile(args: argparse.Namespace):
-    return any(
+    # 首选编译调用自带的 tiling 定义内容（execute_compile 挂载，host/device/link
+    # 全阶段可用）；link 阶段不重写源文件、args.host_files/device_files 未设置，
+    # 依赖它保证单 bin 导出名（GetKernelBinAic vs GetKernelBin）的 CV 判定不退化。
+    if "CVAutofuseTilingData" in getattr(args, "tiling_def_content", ""):
+        return True
+    if any(
         contains_cv_tiling_data(source_file)
         for source_file in iter_compile_source_files(args)
+    ):
+        return True
+    tiling_file = os.path.join(
+        getattr(args, "temp_dir", ""), "device", "autofuse_tiling_data.h"
     )
+    return contains_cv_tiling_data(tiling_file)
 
 
 def get_host_abi_compile_options(args: argparse.Namespace):
@@ -792,7 +802,12 @@ def host_compile_batch(args):
 
 
 def build_host_compile_cmd(
-    args: argparse.Namespace, temp_dir, source_file, obj_file, pch_path=None
+    args: argparse.Namespace,
+    temp_dir,
+    source_file,
+    obj_file,
+    pch_path=None,
+    extra_flags=None,
 ):
     compile_options, host_abi_option = get_host_abi_compile_options(args)
     cmd = [
@@ -804,6 +819,8 @@ def build_host_compile_cmd(
     ]
     if pch_path:
         cmd += ["-include-pch", pch_path]
+    if extra_flags:
+        cmd += extra_flags
     cmd += build_host_output_options(source_file, obj_file)
     cmd += get_compile_diagnostic_flags(obj_file)
     return cmd
@@ -814,7 +831,7 @@ def get_host_obj_path(source_file, temp_dir):
 
 
 def compile_host_obj_file(
-    args: argparse.Namespace, temp_dir, source_file, pch_state=None
+    args: argparse.Namespace, temp_dir, source_file, pch_state=None, extra_flags=None
 ):
     obj_file = get_host_obj_path(source_file, temp_dir)
     if pch_state:
@@ -823,7 +840,7 @@ def compile_host_obj_file(
     else:
         pch_path = None
     host_compile_cmd = build_host_compile_cmd(
-        args, temp_dir, source_file, obj_file, pch_path
+        args, temp_dir, source_file, obj_file, pch_path, extra_flags
     )
     try:
         run_compile_command(host_compile_cmd, "Host")
@@ -896,6 +913,28 @@ def compile_host_obj(args: argparse.Namespace, temp_dir):
 @inductor_compile_duration("CompileDeviceObj")
 def compile_device_obj(args: argparse.Namespace, temp_dir):
     base_device_file = os.path.basename(args.device_files)
+    device_compile_cmd = build_device_compile_command(args, temp_dir, base_device_file)
+    run_compile_command(device_compile_cmd, "Device")
+    return f"{temp_dir}/device/{base_device_file}.o"
+
+
+def device_source_has_rt_launch_markers(temp_dir, base_device_file):
+    """device 源是否为 rtLaunch 分派入口形态（含 #ifndef AF_*_UNIT 死分支裁剪标记）。
+
+    标记仅 codegen_bin 入口（不走 <<<）产出的源存在，legacy 源逐字节不含——宏注入由
+    源内容推导，与源形态天然绑定，不依赖环境变量或前端传参（漏注入最坏是死分支未裁、
+    产物偏大，不影响正确性）。
+    """
+    source_path = os.path.join(temp_dir, "device", base_device_file)
+    try:
+        with open(source_path, "r") as f:
+            content = f.read()
+    except OSError:
+        return False
+    return "AF_AIV_UNIT" in content or "AF_MIX_UNIT" in content
+
+
+def build_device_compile_command(args: argparse.Namespace, temp_dir, base_device_file):
     soc_version = get_soc_type(args)
     device_compile_cmd = [
         f"{ASCEND_PATH}/tools/bisheng_compiler/bin/bisheng",
@@ -932,6 +971,19 @@ def compile_device_obj(args: argparse.Namespace, temp_dir):
         "HAVE_TILING",
         "-D",
         "AUTO_FUSE_DEVICE=1",
+    ]
+    # rtLaunch 编译单元死路径裁剪宏（与 codegen 的 #ifndef 标记配对，legacy 源无标记
+    # 不注入）：AIV 单元（*_op_kernel_aiv.cpp 精确后缀匹配）注入 -D AF_AIV_UNIT 裁核内
+    # fusion if 的 UB 分支体；主单元注入 -D AF_MIX_UNIT 裁核内 safety 的 mix==2 分支。
+    # 不得用子串匹配：graph 名内嵌 _aiv 时主单元会被误注入 AF_AIV_UNIT → 静默算错。
+    if device_source_has_rt_launch_markers(temp_dir, base_device_file):
+        unit_macro = (
+            "AF_AIV_UNIT"
+            if base_device_file.endswith("_op_kernel_aiv.cpp")
+            else "AF_MIX_UNIT"
+        )
+        device_compile_cmd += ["-D", unit_macro]
+    device_compile_cmd += [
         f"--npu-arch={soc_version}",
         "-o",
         f"{temp_dir}/device/{base_device_file}.o",
@@ -941,32 +993,197 @@ def compile_device_obj(args: argparse.Namespace, temp_dir):
         f"{temp_dir}/device/{base_device_file}",
         *get_compile_diagnostic_flags(f"{temp_dir}/device/{base_device_file}.o"),
     ]
-    run_compile_command(device_compile_cmd, "Device")
-    return f"{temp_dir}/device/{base_device_file}.o"
+    return device_compile_cmd
 
 
-def generate_get_kernel_obj(args: argparse.Namespace, temp_dir, kernel_obj_path):
-    """从 device .o 抽出 aicore 二进制并生成导出 GetKernelBin 的 host 对象。
+def find_aiv_device_source(args: argparse.Namespace, temp_dir):
+    """定位 AIV 分派入口编译单元源文件（主 device 源同名加 _aiv 后缀）。
 
-    device .o 内嵌 .aicore_binary section（真正的 aicore 二进制），同时定义 legacy 的
-    AutofuseLaunch host 下发符号。rtLaunch 旧交付件不再链接 device .o（即去掉
-    AutofuseLaunch），改为抽出二进制、由 GetKernelBin 导出，供旧前端 wrapper 经
-    dlsym("GetKernelBin") + aclrtBinaryLoadFromData 加载。
+    rtLaunch 分派入口（后端 codegen_bin 入口产出）的 device 源由 compile_adapter
+    拆分为主/AIV 两个并列编译单元；legacy 形态或非 CV 场景无 AIV 文件，返回 None。
     """
-    bin_file = os.path.join(temp_dir, "kernel.aicore_binary_elf_v1")
+    if getattr(args, "device_files_aiv", None):
+        return args.device_files_aiv
+    device_files = getattr(args, "device_files", None)
+    if not device_files:
+        return None
+    base_device_file = os.path.basename(device_files)
+    if not base_device_file.endswith(".cpp"):
+        return None
+    aiv_source = os.path.join(
+        os.path.dirname(device_files), f"{base_device_file[:-4]}_aiv.cpp"
+    )
+    if os.path.isfile(aiv_source):
+        return aiv_source
+    return None
+
+
+def get_static_mix_mode(temp_dir):
+    """静态收敛单 bin 判定：读烧录后的 device tiling 头，解析 kConstTilingData 的 mix_mode。
+
+    bake 命中后 tiling 头含 INDUCTOR_CONST_TILING_DATA + constexpr kConstTilingData 完整
+    初始化文本（GenConstTilingData 烧录），mix_mode 是 CVTilingData 六元组
+    （fusion, ub, aic, aiv, vec_wss, mix）的最后一个。动态头两者皆无。
+    返回 None 表示动态或解析失败——保守视为动态（保持双单元，不改变现状行为）。
+    """
+    tiling_data = os.path.join(temp_dir, "device", "autofuse_tiling_data.h")
+    if not os.path.isfile(tiling_data):
+        return None
+    try:
+        with open(tiling_data, "r") as file:
+            content = file.read()
+    except OSError:
+        return None
+    if "#define INDUCTOR_CONST_TILING_DATA" not in content:
+        return None
+    anchor = content.find("kConstTilingData")
+    if anchor < 0:
+        return None
+    # 初始化文本片段内第一个"纯数字花括号组"即 CVTilingData 六元组（空组 {} 与含
+    # 标识符的外层不匹配；bytes 数组在六元组之后）。
+    match = re.search(r"\{[\d\s,]+\}", content[anchor : anchor + 1024])
+    if match is None:
+        return None
+    fields = [f.strip() for f in match.group(0)[1:-1].split(",")]
+    if len(fields) < 6:
+        return None
+    try:
+        return int(fields[5])
+    except ValueError:
+        return None
+
+
+def compile_dual_device_objs(args: argparse.Namespace, temp_dir):
+    """编译主/AIV 双 device 编译单元（rtLaunch 分派入口），返回 (主obj, AIV obj|None)。
+
+    双单元并行编译（wall time 增量收敛为两单元差值）。AIV 编译由"源存在"驱动
+    （不依赖 bin_mode）；静态收敛跳过与 mtime 复用在 compile_aiv_device_obj 内。
+    """
+    if find_aiv_device_source(args, temp_dir) is None:
+        return compile_device_obj(args, temp_dir), None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        main_future = pool.submit(compile_device_obj, args, temp_dir)
+        aiv_future = pool.submit(compile_aiv_device_obj, args, temp_dir)
+        return main_future.result(), aiv_future.result()
+
+
+@inductor_compile_duration("CompileDeviceObjAiv")
+def compile_aiv_device_obj(args: argparse.Namespace, temp_dir):
+    """编译 AIV 分派入口编译单元（bin_aiv 的 .aicore_binary 来源）。
+
+    与主单元串行编译——实机实测双 bisheng 进程并行产生资源争用（内存带宽/页交换/
+    CPU 切片），单进程降速超过并行收益，总编译时间反而变长（与 AGENTS.md"Autofuse
+    编译需限制并行度防 OOM"的既有约束一致）。
+
+    产物复用：obj 已存在且新于源（device_obj 阶段已编过）时直接返回——torchair 并行
+    链路的 device_obj 阶段不传 bin_mode，AIV 编译由"AIV 源存在"驱动提前完成，link
+    阶段兜底进来时零成本复用，避免同单元重复编译（此前 link 兜底现编是 BuildKernelSo
+    阶段 ~200s 的主体）。静态改写会更新源文件 mtime，产物过期自动重编。
+
+    静态收敛单 bin：bake 烧录后 mix_mode 编译期已知——mix != 2 时 AIV 入口运行时
+    不可达（前端仅 mix==2 选 aiv_handle），AIV 编译单元整个跳过（link 走单 bin 分支
+    仅导出 GetKernelBinAic，静态 shape 用例省去整个 AIV 单元编译）。mix==2 保持双
+    单元（对称收敛涉及主 obj 必填链路与前端契约，暂不做）。动态或解析失败保守保持
+    双单元（行为与现状一致）。
+    """
+    aiv_source = find_aiv_device_source(args, temp_dir)
+    if aiv_source is None:
+        return None
+    static_mix_mode = get_static_mix_mode(temp_dir)
+    if static_mix_mode is not None and static_mix_mode != 2:
+        logger.info(
+            "[DeviceAiv] static mix_mode=%d (!=2), skip AIV compile unit (single bin)",
+            static_mix_mode,
+        )
+        return None
+    base_aiv_file = os.path.basename(aiv_source)
+    obj_file = f"{temp_dir}/device/{base_aiv_file}.o"
+    if os.path.isfile(obj_file) and os.path.getmtime(obj_file) >= os.path.getmtime(
+        aiv_source
+    ):
+        logger.info("[DeviceAiv] reuse existing object: %s", obj_file)
+        return obj_file
+    os.makedirs(f"{temp_dir}/device", exist_ok=True)
+    device_compile_cmd = build_device_compile_command(args, temp_dir, base_aiv_file)
+    run_compile_command(device_compile_cmd, "DeviceAiv")
+    return obj_file
+
+
+def generate_get_kernel_obj(
+    args: argparse.Namespace, temp_dir, kernel_obj_path, export_name="GetKernelBin"
+):
+    """从 device .o 抽出 aicore 二进制，生成导出 GetKernelBin 的 host 对象列表。
+
+    bin → 数据 obj 用 llvm-objcopy -I binary 直转（毫秒级），函数 obj 仅几行源码；
+    返回 [函数obj, 数据obj] 一起参与链接。
+
+    device .o 内嵌 .aicore_binary section，同时定义 legacy 的 AutofuseLaunch host 下发
+    符号。rtLaunch 链路不再链接 device .o，改为抽出二进制、由 GetKernelBin 导出，供
+    wrapper 经 rtRegisterAllKernel 注册后用 rtKernelLaunchWithHandleV2 下发。CV 双 bin
+    场景 export_name 参数化为 GetKernelBinAic/GetKernelBinAiv。
+    """
+    bin_file = os.path.join(
+        temp_dir, f"kernel_{export_name.lower()}.aicore_binary_elf_v1"
+    )
     extract_aicore_binary(kernel_obj_path, bin_file)
 
-    from autofuse.pyautofuse import CodeGen
-
-    get_kernel_src = CodeGen().get_kernel_and_json_generator(bin_file, "")
-    if not get_kernel_src:
-        raise CompileError("get_kernel_and_json_generator returned empty source")
     host_dir = os.path.join(temp_dir, "host")
     os.makedirs(host_dir, exist_ok=True)
-    get_kernel_cpp = os.path.join(host_dir, "autofuse_get_kernel.cpp")
+
+    # 1) bin → 数据 obj：-I binary 直转。符号名规则 = "_binary_" + 文件名（非字母数字
+    # 全部转 _）+ "_start"/"_end"（GNU/llvm objcopy 一致），与函数 obj 的 extern 声明对应。
+    objcopy = shutil.which("llvm-objcopy")
+    if objcopy is None:
+        objcopy = os.path.join(
+            ASCEND_PATH, "tools", "bisheng_compiler", "bin", "llvm-objcopy"
+        )
+    if platform.machine() in ("x86_64", "AMD64"):
+        elf_target, bin_arch = "elf64-x86-64", "x86-64"
+    else:
+        elf_target, bin_arch = "elf64-littleaarch64", "aarch64"
+    data_obj = os.path.join(host_dir, f"{export_name.lower()}_bin_data.o")
+    run_compile_command(
+        [
+            objcopy,
+            "-I",
+            "binary",
+            "-O",
+            elf_target,
+            "--binary-architecture",
+            bin_arch,
+            bin_file,
+            data_obj,
+        ],
+        "BinToObj",
+    )
+
+    # 2) 函数 obj：几行源码（resize + memcpy），亚秒级编译。符号名 = "_binary_" +
+    # objcopy 收到的完整输入路径（非字母数字全部转 _，含目录分隔符）+ "_start"/"_end"
+    # ——必须与传给 objcopy 的 bin_file 字符串逐字符一致（同一变量，保证匹配）。
+    sym_base = "_binary_" + re.sub(r"[^0-9a-zA-Z]", "_", bin_file)
+    get_kernel_cpp = os.path.join(
+        host_dir, f"autofuse_get_kernel_{export_name.lower()}.cpp"
+    )
+    get_kernel_src = (
+        "#include <cstddef>\n"
+        "#include <cstring>\n"
+        "#include <vector>\n"
+        f'extern "C" const unsigned char {sym_base}_start[];\n'
+        f'extern "C" const unsigned char {sym_base}_end[];\n'
+        f'extern "C" void {export_name}(std::vector<char> &kernel_bin) {{\n'
+        f"  const std::size_t size = static_cast<std::size_t>({sym_base}_end - {sym_base}_start);\n"
+        "  kernel_bin.resize(size);\n"
+        "  if (size != 0U) {\n"
+        f"    std::memcpy(kernel_bin.data(), {sym_base}_start, size);\n"
+        "  }\n"
+        "}\n"
+    )
     with open(get_kernel_cpp, "w", encoding="utf-8") as source_file:
         source_file.write(get_kernel_src)
-    return compile_host_obj_file(args, temp_dir, get_kernel_cpp)
+    func_obj = compile_host_obj_file(
+        args, temp_dir, get_kernel_cpp, extra_flags=["-O0", "-w"]
+    )
+    return [func_obj, data_obj]
 
 
 def publish_kernel_bin(kernel_obj_path, bin_dest):
@@ -984,7 +1201,11 @@ def publish_kernel_bin(kernel_obj_path, bin_dest):
 
 @inductor_compile_duration("LinkKernelSo")
 def link_kernel_so(
-    args: argparse.Namespace, tiling_obj_paths, temp_dir, kernel_obj_path
+    args: argparse.Namespace,
+    tiling_obj_paths,
+    temp_dir,
+    kernel_obj_path,
+    aiv_kernel_obj_path=None,
 ):
     if not kernel_obj_path:
         raise ValueError("kernel_obj_path is required for linking")
@@ -1009,8 +1230,29 @@ def link_kernel_so(
             return None
         obj_files = list(tiling_obj_paths)
     elif getattr(args, "bin_mode", False):
-        kernel_obj_path = generate_get_kernel_obj(args, temp_dir, kernel_obj_path)
-        obj_files = [kernel_obj_path]
+        # rtLaunch 链路：把 device .o 换成导出 GetKernelBin 的 host .o。
+        # generate_get_kernel_obj 返回 [函数obj, 数据obj]。
+        if aiv_kernel_obj_path:
+            # CV rtLaunch 双 bin：主（MIX 入口）与 AIV 编译单元各自抽 bin，以
+            # GetKernelBinAic/GetKernelBinAiv 双导出编入同一 kernel.so。
+            obj_files = [
+                *generate_get_kernel_obj(
+                    args, temp_dir, kernel_obj_path, "GetKernelBinAic"
+                ),
+                *generate_get_kernel_obj(
+                    args, temp_dir, aiv_kernel_obj_path, "GetKernelBinAiv"
+                ),
+            ]
+        else:
+            # 单 bin：VV 场景导出 GetKernelBin（VV 契约）；CV 静态收敛场景（bake 后
+            # mix != 2，AIV 单元跳过）导出 GetKernelBinAic——torchair CV wrapper 按此名
+            # dlsym，其 init 对 AIV 符号缺失容错（mix!=2 恒走 aic handle）。
+            single_bin_export = (
+                "GetKernelBinAic" if is_cv_fusion_compile(args) else "GetKernelBin"
+            )
+            obj_files = generate_get_kernel_obj(
+                args, temp_dir, kernel_obj_path, single_bin_export
+            )
         if tiling_obj_paths:
             obj_files = tiling_obj_paths + obj_files
     else:
@@ -1095,9 +1337,13 @@ def should_select_inductor_const_tiling_branch(
     return getattr(args, "stage", None) != "device" and is_cv_fusion_compile(args)
 
 
-def prepare_static_shape_kernel(args: argparse.Namespace, temp_dir, tiling_repr=None):
-    base_device_files = os.path.basename(args.device_files)
-    kernel_file = os.path.join(temp_dir, "device", base_device_files)
+def prepare_static_shape_kernel(
+    args: argparse.Namespace, temp_dir, tiling_repr=None, kernel_file=None
+):
+    """读取单个 device 源并展开 const tiling 分支（kernel_file 缺省为主编译单元）。"""
+    if kernel_file is None:
+        base_device_files = os.path.basename(args.device_files)
+        kernel_file = os.path.join(temp_dir, "device", base_device_files)
     with open(kernel_file, "r") as f:
         lines = f.readlines()
     has_inductor_const_tiling = any(
@@ -1111,6 +1357,20 @@ def prepare_static_shape_kernel(args: argparse.Namespace, temp_dir, tiling_repr=
 def write_kernel_lines(kernel_file, lines):
     with open(kernel_file, "w") as f:
         f.writelines(lines)
+
+
+def rewrite_one_static_shape_kernel(args, temp_dir, tiling_repr, kernel_file):
+    kernel_file, lines = prepare_static_shape_kernel(
+        args, temp_dir, tiling_repr, kernel_file
+    )
+    patterns = build_static_shape_patterns()
+    definition_result, rewritten_kernels = rewrite_static_shape_kernel_definitions(
+        lines, patterns[0], patterns[1], tiling_repr
+    )
+    result = rewrite_static_shape_kernel_launches(
+        definition_result, rewritten_kernels, patterns[2], patterns[3]
+    )
+    write_kernel_lines(kernel_file, result)
 
 
 def build_static_shape_patterns():
@@ -1175,19 +1435,21 @@ def rewrite_static_shape_kernel_launches(
 def static_shape_kernel_proc(args: argparse.Namespace, temp_dir, tiling_repr=None):
     with InductorCompileDuration(args, "RewriteDeviceKernelForStaticTiling"):
         clean_before_modify(temp_dir)
-        kernel_file, lines = prepare_static_shape_kernel(args, temp_dir, tiling_repr)
+        # rtLaunch 双编译单元：主源与 AIV 源执行同一套静态改写（const 分支展开、
+        # kernel 定义/launch 的 tiling 形参裁剪），两份源共享同一 tiling 头。
+        device_sources = [None]
+        aiv_source = find_aiv_device_source(args, temp_dir)
+        if aiv_source is not None:
+            device_sources.append(aiv_source)
         if tiling_repr is None and getattr(args, "stage", None) == "device":
-            write_kernel_lines(kernel_file, lines)
+            for kernel_file in device_sources:
+                kernel_file, lines = prepare_static_shape_kernel(
+                    args, temp_dir, tiling_repr, kernel_file
+                )
+                write_kernel_lines(kernel_file, lines)
             return
-
-        patterns = build_static_shape_patterns()
-        definition_result, rewritten_kernels = rewrite_static_shape_kernel_definitions(
-            lines, patterns[0], patterns[1], tiling_repr
-        )
-        result = rewrite_static_shape_kernel_launches(
-            definition_result, rewritten_kernels, patterns[2], patterns[3]
-        )
-        write_kernel_lines(kernel_file, result)
+        for kernel_file in device_sources:
+            rewrite_one_static_shape_kernel(args, temp_dir, tiling_repr, kernel_file)
 
 
 def expand_inductor_const_tiling_data(
@@ -1361,8 +1623,11 @@ def build_kernel_target(args, tiling_obj_paths, temp_dir):
     const_tiling_baked = bake_const_tiling_before_device_compile(
         args, tiling_obj_paths, temp_dir
     )
-    kernel_obj_path = compile_device_obj(args, temp_dir)
-    so_file = link_kernel_so(args, tiling_obj_paths, temp_dir, kernel_obj_path)
+    # 主/AIV 双单元编译；AIV 由"源存在"驱动，产物复用使静态重编等场景无重复编译。
+    kernel_obj_path, aiv_kernel_obj_path = compile_dual_device_objs(args, temp_dir)
+    so_file = link_kernel_so(
+        args, tiling_obj_paths, temp_dir, kernel_obj_path, aiv_kernel_obj_path
+    )
     if (
         const_tiling_baked
         or args.stage == "device"
@@ -1371,8 +1636,11 @@ def build_kernel_target(args, tiling_obj_paths, temp_dir):
         return so_file
 
     # 静态 shape 重编译后，重新生成 device.o 并链接最终产物。
-    kernel_obj_path = compile_device_obj(args, temp_dir)
-    return link_kernel_so(args, tiling_obj_paths, temp_dir, kernel_obj_path)
+    # 主/AIV 双单元编译；AIV 由"源存在"驱动，产物复用使静态重编等场景无重复编译。
+    kernel_obj_path, aiv_kernel_obj_path = compile_dual_device_objs(args, temp_dir)
+    return link_kernel_so(
+        args, tiling_obj_paths, temp_dir, kernel_obj_path, aiv_kernel_obj_path
+    )
 
 
 def is_device_const_tiling_baked(temp_dir):
@@ -1396,7 +1664,14 @@ def build_kernel_target_from_objects(args, tiling_obj_paths, kernel_obj_path, te
     if not kernel_obj_path:
         raise ValueError("device object path is required")
 
-    so_file = link_kernel_so(args, tiling_obj_paths, temp_dir, kernel_obj_path)
+    aiv_kernel_obj_path = getattr(args, "kernel_obj_path_aiv", None) or None
+    if not aiv_kernel_obj_path and getattr(args, "bin_mode", False):
+        # torchair 并行链路未透传 --kernel_obj_path_aiv 时，按命名规则现场编译
+        # AIV 编译单元（前端适配前的兜底，源文件与主 device 源同目录）。
+        aiv_kernel_obj_path = compile_aiv_device_obj(args, temp_dir)
+    so_file = link_kernel_so(
+        args, tiling_obj_paths, temp_dir, kernel_obj_path, aiv_kernel_obj_path
+    )
     const_tiling_baked = getattr(args, "const_tiling_baked", False)
     if not const_tiling_baked and is_device_const_tiling_baked(temp_dir):
         # 上层未透传 --const_tiling_baked，但 device tiling 头已是 const：
@@ -1413,8 +1688,11 @@ def build_kernel_target_from_objects(args, tiling_obj_paths, kernel_obj_path, te
         return so_file
 
     # 静态 shape 重编译会修改 device 源码，需生成新的 device.o。
-    kernel_obj_path = compile_device_obj(args, temp_dir)
-    return link_kernel_so(args, tiling_obj_paths, temp_dir, kernel_obj_path)
+    # 主/AIV 双单元编译；AIV 由"源存在"驱动，产物复用使静态重编等场景无重复编译。
+    kernel_obj_path, aiv_kernel_obj_path = compile_dual_device_objs(args, temp_dir)
+    return link_kernel_so(
+        args, tiling_obj_paths, temp_dir, kernel_obj_path, aiv_kernel_obj_path
+    )
 
 
 def remove_group_other_write(path):
@@ -1545,11 +1823,16 @@ def main(args):
             baked = bake_const_tiling_before_device_compile(
                 args, tiling_obj_paths, args.temp_dir
             )
-            kernel_obj_path = compile_device_obj(args, args.temp_dir)
+            # 主/AIV 双单元编译；AIV 由"源存在"驱动（torchair device_obj 阶段不传
+            # bin_mode 也能编好，link 兜底进来时零成本复用）。
+            kernel_obj_path, kernel_obj_path_aiv = compile_dual_device_objs(
+                args, args.temp_dir
+            )
             return {
                 "version": 1,
                 "stage": "device_obj",
                 "kernel_obj_path": kernel_obj_path,
+                "kernel_obj_path_aiv": kernel_obj_path_aiv,
                 "kernel_source_path": args.device_files,
                 "baked": baked,
             }

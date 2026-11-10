@@ -48,7 +48,8 @@ struct ArangeGraph {
   ascir::AxisId axis_id{af::kIdNone};
 
   ArangeGraph(const af::Expression &base, const af::Expression &step, ge::DataType dtype,
-              bool nonvectorized_outer_axis = false, bool vectorized_outer_axis = false) {
+              bool nonvectorized_outer_axis = false, bool vectorized_outer_axis = false,
+              const af::Expression &vec_stride = af::ops::One) {
     const auto size = graph.CreateSizeVar("size");
     const auto axis = graph.CreateAxis("axis", size);
     axis_id = axis.id;
@@ -74,7 +75,7 @@ struct ArangeGraph {
     auto &out = node->outputs[0].attr;
     out.dtype = dtype;
     out.vectorized_axis = {axis.id};
-    out.vectorized_strides = {af::ops::One};
+    out.vectorized_strides = {vec_stride};
     if (vectorized_outer_axis) {
       out.vectorized_axis = *op.y.axis;
       out.vectorized_strides = *op.y.strides;
@@ -137,6 +138,58 @@ TEST_F(ArangeApiCallTest, GeneratesInt32LoopWithDynamicBaseAndStep) {
           output->Str() +
           ".SetValue(static_cast<uint32_t>(0 + arange_i), static_cast<int32_t>((base) + (0 + arange_i) * (step)));"),
       std::string::npos);
+}
+
+// 对齐策略标记为 kDiscontinuous（如 concat 拆列场景 int64 32B 对齐步长=4）时，
+// ArangeApiCall 应按 vectorized_strides 跳格物化，而非要求连续布局。
+TEST_F(ArangeApiCallTest, GeneratesDiscontinuousVectorizedStrideLoop) {
+  ArangeGraph g(af::Expression::Parse("0"), af::Expression::Parse("12"), ge::DT_INT64, false, false, af::Symbol(4));
+  ASSERT_NE(g.node, nullptr);
+  auto call = MakeInitedArangeCall(g);
+  ASSERT_NE(call, nullptr);
+
+  std::string result;
+  ASSERT_EQ(call->Generate(g.tpipe, {}, result), af::SUCCESS);
+  RecordProperty("generated_code", result);
+  // 跳格物化：写地址按物理步长 4 推进
+  EXPECT_NE(
+      result.find(
+          ".SetValue(static_cast<uint32_t>(0 + arange_i * (4)), static_cast<int64_t>((0) + (0 + arange_i) * (12)));"),
+      std::string::npos);
+  // 循环上界必须是有效元素数（size），而非物理跨度 (size-1)*4+1
+  EXPECT_NE(result.find("for (int64_t arange_i = 0; arange_i < size; ++arange_i) {"), std::string::npos);
+  EXPECT_EQ(result.find("(size - 1) * 4 + 1"), std::string::npos);
+}
+
+// 多轴布局：最内层 kDiscontinuous（stride=4）、外层物理紧凑（stride=size）时，
+// phys_stride 应取最内层步长，循环上界为两轴有效元素数乘积。
+TEST_F(ArangeApiCallTest, GeneratesDiscontinuousInnerWithCompactOuterAxis) {
+  ArangeGraph g(af::Expression::Parse("0"), af::Expression::Parse("1"), ge::DT_INT64, false, true);
+  ASSERT_NE(g.node, nullptr);
+  ASSERT_EQ(g.tpipe.tensors.size(), 1UL);
+  g.tpipe.tensors.at(0).vectorized_strides = {af::Symbol("size"), af::Symbol(4)};
+  auto call = MakeInitedArangeCall(g);
+  ASSERT_NE(call, nullptr);
+
+  std::string result;
+  ASSERT_EQ(call->Generate(g.tpipe, {}, result), af::SUCCESS);
+  RecordProperty("generated_code", result);
+  EXPECT_NE(result.find("arange_i * (4)"), std::string::npos);
+  EXPECT_NE(result.find("for (int64_t arange_i = 0; arange_i < (2 * size); ++arange_i) {"), std::string::npos);
+}
+
+// 多轴布局：外层带空洞（stride 非紧凑）时，物化会静默错位，必须拒绝。
+TEST_F(ArangeApiCallTest, RejectsDiscontinuousOuterHoleWithCompactInner) {
+  ArangeGraph g(af::Expression::Parse("0"), af::Expression::Parse("1"), ge::DT_INT64, false, true);
+  ASSERT_NE(g.node, nullptr);
+  ASSERT_EQ(g.tpipe.tensors.size(), 1UL);
+  g.tpipe.tensors.at(0).vectorized_strides = {af::Expression::Parse("size * 4"), af::Symbol(4)};
+  auto call = MakeInitedArangeCall(g);
+  ASSERT_NE(call, nullptr);
+
+  std::string result;
+  EXPECT_EQ(call->Generate(g.tpipe, {}, result), af::FAILED);
+  EXPECT_TRUE(result.empty());
 }
 
 TEST_F(ArangeApiCallTest, GeneratesInt64LoopWithNegativeBaseAndStep) {

@@ -16,6 +16,7 @@
 #include <vector>
 #include <regex>
 #include <climits>
+#include <cstdlib>
 #include "ascir_ops.h"
 #include "ascir.h"
 #include "ascir_utils.h"
@@ -1730,6 +1731,47 @@ af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result,
     }
   }
   return af::FAILED;
+}
+
+bool IsLaunchDecoupleCvVariantEnabled(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch,
+                                      bool launch_decouple) {
+  is_batch = false;
+  if (!launch_decouple) {
+    return false;
+  }
+  if (!IsCubeFusedScheduled(fused_schedule_result) || IsConv2DFusedScheduled(fused_schedule_result)) {
+    return false;
+  }
+  bool is_conv = false;
+  std::string input_type;
+  std::string output_type;
+  is_batch = false;
+  if (GetCubeInfo(fused_schedule_result, is_batch, is_conv, input_type, output_type) != af::SUCCESS) {
+    return false;
+  }
+  return true;
+}
+
+int64_t CalcDynamicUbSize(const ascir::FusedScheduledResult &fused_schedule_result) {
+  ge::PlatformInfo platform_info;
+  GE_ASSERT_SUCCESS(ge::PlatformContext::GetInstance().GetPlatformInfo(platform_info),
+                    "Failed to get platform info for dynamic ub size.");
+  const int64_t ub_size = platform_info.ub_size;
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      for (const auto &schedule_group : scheduled_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          for (const auto &node : impl_graph.GetAllNodes()) {
+            const int64_t simt_dcache_size = ::ascir::GetDcacheSize(*node);
+            if (simt_dcache_size > 0) {
+              return ub_size - simt_dcache_size;
+            }
+          }
+        }
+      }
+    }
+  }
+  return -1;
 }
 
 af::Status FilterCVFusionCommonResult(ascir::FusedScheduledResult &common_schedule_result) {

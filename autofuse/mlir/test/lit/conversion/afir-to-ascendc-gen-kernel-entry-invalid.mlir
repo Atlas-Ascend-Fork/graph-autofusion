@@ -126,7 +126,7 @@ module @plan0 attributes {
   // expected-error @+1 {{GenKernelEntry: invalid template coordinates}}
   func.func private @stage0_template1(
       %tiling: !emitasc.py_struct<"AscGraph0ScheduleResult0G0TilingData", [ui32], ["tiling_key"]>)
-      attributes {afplan.variant = #afplan.variant<stage = 0, template = 1>} {
+      attributes {afplan.variant = #afplan.variant<stage = 1, template = 1>} {
     return
   }
 }

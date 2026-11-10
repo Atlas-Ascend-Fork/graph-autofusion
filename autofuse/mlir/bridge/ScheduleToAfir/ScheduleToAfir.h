@@ -86,7 +86,8 @@ std::optional<std::string> MakeSizeBytesExpr(llvm::ArrayRef<std::string> repeats
 mlir::OwningOpRef<mlir::ModuleOp> PlanToAfir(mlir::MLIRContext &context,
                                              const ascir::FusedScheduledResult &fused_result,
                                              const ascir::ScheduledResult &scheduled_result, size_t subgraph_id,
-                                             size_t plan_id);
+                                             size_t plan_id,
+                                             llvm::ArrayRef<std::vector<size_t>> selected_templates = {});
 
 // If the shared DFX dump configuration is enabled, serialize an already-built AFIR module
 // (as returned by PlanToAfir) to a file under that directory. The file name is

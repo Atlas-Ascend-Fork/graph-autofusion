@@ -21,6 +21,7 @@ namespace ascendc {
 //===----------------------------------------------------------------------===//
 
 LogicalResult printOperation(CodeEmitter& emitter, ascendc::BroadcastL2Op op);
+LogicalResult printOperation(CodeEmitter& emitter, ascendc::DuplicateU8Op op);
 
 // Emits the Autofuse wrapper `Broadcast(dst, src, src_m, src_k, src_z, dst_m, dst_k, dst_z, tmp)`.
 //

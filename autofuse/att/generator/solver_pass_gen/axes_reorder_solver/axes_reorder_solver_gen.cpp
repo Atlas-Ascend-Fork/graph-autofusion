@@ -738,6 +738,38 @@ std::string AxesReorderSolverGen::GenUBThresholdFunc() {
   return codes;
 }
 
+namespace {
+// 判定"多核是否可能争抢同一条 cache line"时，允许每核平均占有的 cache line 条数。
+// 1 条是理论下界（平均每核不足 1 条线，分核必然共享）；实测表明 1~2 条线区间内抬升 burst
+// 仍然明显收益，超过该区间后继续抬升 burst 只会压低核数、放大 per-block 开销。
+constexpr uint32_t kConflictCacheLinesPerCore = 2U;
+}  // namespace
+
+bool AxesReorderSolverGen::TryEvalConflictPossible(const Expr &whole_tensor_bytes, uint32_t cache_line_size,
+                                                   bool &conflict_possible) const {
+  int64_t bytes = 0;
+  if (!whole_tensor_bytes.GetConstValue(bytes)) {
+    return false;
+  }
+  if (core_num_budget_ == 0U || cache_line_size == 0U) {
+    return false;
+  }
+  const int64_t threshold = static_cast<int64_t>(kConflictCacheLinesPerCore) * static_cast<int64_t>(core_num_budget_) *
+                            static_cast<int64_t>(cache_line_size);
+  conflict_possible = bytes < threshold;
+  return true;
+}
+
+std::string AxesReorderSolverGen::GenConflictPossibleCond(const Expr &whole_tensor_bytes,
+                                                          uint32_t cache_line_size) const {
+  if (core_num_budget_ == 0U || cache_line_size == 0U || !IsValid(whole_tensor_bytes)) {
+    return "";
+  }
+  const int64_t lines = static_cast<int64_t>(kConflictCacheLinesPerCore) * static_cast<int64_t>(core_num_budget_);
+  const int64_t threshold = lines * static_cast<int64_t>(cache_line_size);
+  return Str(whole_tensor_bytes) + " < " + std::to_string(threshold);
+}
+
 std::string AxesReorderSolverGen::GenUBSizeCacheLineFunc() {
   std::string codes;
   codes += "bool AxesReorderSolver" + tiling_case_id_ + "::SatisfyUBSizeCacheLine(uint32_t idx) {\n";
@@ -764,14 +796,45 @@ std::string AxesReorderSolverGen::GenUBSizeCacheLineFunc() {
   codes += "  *sizes[idx] = static_cast<double>(input_.local_buffer_vars[idx]->value);\n\n";
   if (cache_line_config_ != nullptr) {
     for (const auto &c : *cache_line_config_) {
-      if (c.cache_line_size > 0 && IsValid(c.solver_cache_line_expr)) {
-        GELOGD("GetCacheLineCont for %s", c.ToString().c_str());
-        codes += "  // check node " + c.node_name + "\n";
-        codes += "  if (" + Str(c.solver_cache_line_expr) + " < " + std::to_string(c.cache_line_size) + ") {\n";
-        codes += "      OP_LOGD(OP_NAME, \"" + c.node_name + " condition does not satisfy UB size cache line\");\n";
-        codes += "      return false;\n";
-        codes += "  }\n";
+      if (c.cache_line_size <= 0 || !IsValid(c.solver_cache_line_expr)) {
+        continue;
       }
+      GELOGD("GetCacheLineCont for %s", c.ToString().c_str());
+      codes += "  // check node " + c.node_name + "\n";
+      const std::string fail_message =
+          "      OP_LOGD(OP_NAME, \"" + c.node_name + " condition does not satisfy UB size cache line\");\n";
+      const std::string burst_cond = Str(c.solver_cache_line_expr) + " < " + std::to_string(c.cache_line_size);
+      const bool has_whole_tile_cond = IsValid(c.fallback_cache_line_expr);
+      const std::string whole_tile_cond =
+          has_whole_tile_cond ? Str(c.fallback_cache_line_expr) + " < " + std::to_string(c.cache_line_size) : "";
+      // develop 判据（块内总字节）：无法判断多核冲突时使用，行为与 develop 完全一致。
+      const bool gate_available =
+          c.solver_uses_burst && IsValid(c.whole_tensor_bytes) && core_num_budget_ > 0U && c.cache_line_size > 0U;
+      if (!gate_available) {
+        const std::string criterion = c.solver_uses_burst ? whole_tile_cond : burst_cond;
+        if (!criterion.empty()) {
+          codes += "  if (" + criterion + ") {\n" + fail_message + "      return false;\n  }\n";
+        }
+        continue;
+      }
+      const std::string conflict_cond = GenConflictPossibleCond(c.whole_tensor_bytes, c.cache_line_size);
+      bool conflict_possible = false;
+      if (c.whole_tensor_bytes.IsConstExpr() &&
+          TryEvalConflictPossible(c.whole_tensor_bytes, c.cache_line_size, conflict_possible)) {
+        // 静态 shape：门控在编译期折叠为常量，运行期不带门控分支。
+        const std::string criterion = conflict_possible ? burst_cond : whole_tile_cond;
+        if (!criterion.empty()) {
+          codes += "  if (" + criterion + ") {\n" + fail_message + "      return false;\n  }\n";
+        }
+        continue;
+      }
+      // 动态 shape：门控只依赖 shape 输入变量，不含 input_.core_num，自动调优各档位看到同一可行域。
+      codes += "  if (" + conflict_cond + ") {\n";
+      codes += "    if (" + burst_cond + ") {\n" + fail_message + "      return false;\n    }\n";
+      if (has_whole_tile_cond) {
+        codes += "  } else if (" + whole_tile_cond + ") {\n" + fail_message + "      return false;\n";
+      }
+      codes += "  }\n";
     }
   }
 

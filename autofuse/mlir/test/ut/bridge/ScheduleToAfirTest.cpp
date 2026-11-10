@@ -673,6 +673,63 @@ TEST(ScheduleToAfirTest, TilingSpecTracksDerivedShapeVariablesIndividually) {
   EXPECT_NE(source->find("limit->ub_size <= 256"), std::string::npos);
 }
 
+TEST(ScheduleToAfirTest, FrozenTilingRejectsResourceMismatchAndMissingStageFields) {
+  mlir::MLIRContext context;
+  llvm::SmallVector<llvm::StringRef> fields = {"tiling_key", "s0", "workspace2"};
+  auto module = MakeTilingContractModule(context, 0, 2, {fields}, {});
+  module->getOperation()->setAttr(mlir::afir::kWorkspaceTensorIdsAttrName, mlir::DenseI64ArrayAttr::get(&context, {2}));
+  llvm::SmallVector<mlir::ModuleOp> modules = {*module};
+  auto spec = mlir::bridge::buildAggregateTilingProgramSpec(modules);
+  ASSERT_TRUE(mlir::succeeded(spec));
+  mlir::bridge::StaticTilingData solved;
+  solved.resources = {static_cast<uint64_t>(spec->target.getAivNum()), static_cast<uint64_t>(spec->target.getUbSize())};
+  for (const char *name : {"block_dim", "corenum", "ub_size", "hbm_size", "tiling_key", "s0"}) {
+    solved.fields["fusion"][name] = {1, 0, 0, 0};
+  }
+  solved.fields["fusion"]["workspace2"] = {64, 0, 0, 0, 0, 0, 0, 0};
+  solved.workspace_size = 512;
+  // Nested schedules must not silently obtain a missing stage's fields from fusion scope.
+  EXPECT_TRUE(mlir::failed(mlir::bridge::emitStaticTilingFunc(*spec, solved)));
+  for (const auto &plan : spec->plans) {
+    for (const auto &stage : plan.stages) {
+      for (const auto &field : stage.fields) {
+        if (field == "workspace2") {
+          continue;
+        }
+        solved.fields[stage.tiling_field_name][field] = {1, 0, 0, 0};
+      }
+    }
+  }
+  auto source = mlir::bridge::emitStaticTilingFunc(*spec, solved);
+  ASSERT_TRUE(mlir::succeeded(source));
+  EXPECT_NE(source->find("set_graph0_tiling_key(2U)"), std::string::npos);
+  EXPECT_NE(source->find("std::memcpy(&t.workspace2"), std::string::npos);
+  EXPECT_NE(source->find("workspace_size = 512ULL"), std::string::npos);
+  EXPECT_EQ(source->find("std::memcpy(&t.graph0_result2_g0_tiling_data.workspace2"), std::string::npos);
+  solved.resources.ub_size += 256;
+  EXPECT_TRUE(mlir::failed(mlir::bridge::emitStaticTilingFunc(*spec, solved)));
+}
+
+TEST(ScheduleToAfirTest, FrozenAggregateKeepsNonzeroPlanIdentity) {
+  mlir::MLIRContext context;
+  llvm::SmallVector<llvm::StringRef> fields = {"tiling_key"};
+  auto module = MakeTilingContractModule(context, 0, 2, {fields}, {});
+  module->getOperation()->setAttr(mlir::afir::kModuleKindAttrName,
+                                  mlir::StringAttr::get(&context, mlir::afir::kPlanModuleKind));
+  llvm::SmallVector<mlir::ModuleOp> modules = {*module};
+  EXPECT_TRUE(failed(mlir::ascend::kernel::runGenAggregateTilingData(modules)));
+  module->getOperation()->setAttr(mlir::afplan::kStaticSelectionAttrName, mlir::UnitAttr::get(&context));
+  auto entry = mlir::ascend::kernel::runGenAggregateTilingData(modules);
+  ASSERT_TRUE(succeeded(entry));
+  auto schemaAttr = (*entry)->getOperation()->getAttrOfType<mlir::TypeAttr>("ascendc.tiling_schema");
+  ASSERT_TRUE(schemaAttr);
+  auto schema = mlir::cast<mlir::emitasc::PyStructType>(schemaAttr.getValue());
+  EXPECT_TRUE(HasStructField(schema, "graph0_result2_g0_tiling_data"));
+  EXPECT_FALSE(HasStructField(schema, "graph0_result0_g0_tiling_data"));
+  modules.push_back(*module);
+  EXPECT_TRUE(failed(mlir::ascend::kernel::runGenAggregateTilingData(modules)));
+}
+
 TEST(ScheduleToAfirTest, TilingFuncEmitterKeepsApiHeaderWithoutStateHeader) {
   mlir::MLIRContext context;
   llvm::SmallVector<llvm::StringRef> fields = {"tiling_key", "s0"};
@@ -1971,29 +2028,16 @@ TEST(ScheduleToAfirTest, SharesOneQueueAcrossDtypesButRejectsIncompatibleDescrip
   EXPECT_FALSE(
       mlir::afir::bridge::PlanToAfir(context, conflicting, conflicting.node_idx_to_scheduled_results[0][0], 0, 0));
   EXPECT_NE(message.find("BindingConflict"), std::string::npos) << message;
-  auto sameDtypeBadPitch = buildResult(af::DT_FLOAT16, 1, 32);
+  auto sameDtypeDifferentPitch = buildResult(af::DT_FLOAT16, 1, 32);
   message.clear();
-  EXPECT_FALSE(mlir::afir::bridge::PlanToAfir(context, sameDtypeBadPitch,
-                                              sameDtypeBadPitch.node_idx_to_scheduled_results[0][0], 0, 0));
-  EXPECT_NE(message.find("BindingConflict"), std::string::npos) << message;
-  EXPECT_NE(message.find("incompatible tensor layout"), std::string::npos) << message;
+  EXPECT_TRUE(mlir::afir::bridge::PlanToAfir(context, sameDtypeDifferentPitch,
+                                             sameDtypeDifferentPitch.node_idx_to_scheduled_results[0][0], 0, 0));
+  EXPECT_TRUE(message.empty()) << message;
 }
 
-// 同一条队列上「广播来的 tile」与「整形状 tile」并存：收不了，但那是**能力不足**，
-// 不是调度坏了。
-//
-// 上面那条用例拿 `queue_depth` 做判据，差的是资源字段；这一条差的是**张量视图**
-// （`repeats` / `strides`），而视图对不上此前一律判成 `BindingConflict` 硬失败。
-// 判据的前提是「同一条队列上的张量今天必然是同一个 tile」，而广播让它不成立：
-// stride 为 0 的那根轴上，广播那一侧的 Load 不前进，tile 就比整形状那一侧小。
-// 实测 `add(brc(x), y)` 在 `[1,8] -> [128,8]` 上就是这个形状（探针 T3，2026-10-12），
-// 而硬失败不会回落 legacy，整条编译就断在这里。
-//
-// 两条断言成对：差别能由 stride 0 解释 → `UnsupportedOperation` 且带能力不足标记；
-// 解释不了（这里把广播那一侧的 stride 改成非 0，于是两张视图是真的对不上）→ 仍旧
-// `BindingConflict`。少了后一条，这条判据就退化成「视图对不上一律回落」，真 bug 会被藏起来。
-TEST(ScheduleToAfirTest, BroadcastTileSharingOneQueueIsCapabilityShortfallNotConflict) {
-  auto buildResult = [](int64_t broadcastStride) {
+// Independent queue members may have different logical shapes and GM strides.
+TEST(ScheduleToAfirTest, IndependentQueueMembersMayHaveDifferentViews) {
+  auto buildResult = [](int64_t broadcastStride, bool malformed = false, bool sameTensor = false) {
     auto graph = af::testing::AscGraphBuilder("shared_queue_broadcast_tile")
                      .Loops({af::testing::Sym(8), af::testing::Sym(8)})
                      .Data("x", 0, af::DT_FLOAT16)
@@ -2007,7 +2051,16 @@ TEST(ScheduleToAfirTest, BroadcastTileSharingOneQueueIsCapabilityShortfallNotCon
                      .Build();
     AssignTensorIds(graph);
     graph.SetTilingKey(0);
+    const auto firstTensorId = graph.FindNode("load_x")->outputs()[0]->attr.mem.tensor_id;
     for (const auto &node : graph.GetAllNodes()) {
+      // Keep the second input and its output consistent with its smaller Load.
+      // The old rejection-only fixture never reached the Load/Store verifiers.
+      if (node->GetName() == "b" || node->GetName() == "store_b" || node->GetName() == "y1") {
+        for (const auto &output : node->outputs()) {
+          output->attr.repeats[0] = af::Symbol(1);
+          output->attr.strides[0] = af::Symbol(broadcastStride);
+        }
+      }
       const bool second = node->GetName() == "load_b";
       if (node->GetName() != "load_x" && !second) {
         continue;
@@ -2023,8 +2076,14 @@ TEST(ScheduleToAfirTest, BroadcastTileSharingOneQueueIsCapabilityShortfallNotCon
         if (!second) {
           continue;
         }
-        // 第二个成员的最外轴收成一格：repeats 1、stride 取参数。stride 为 0 时这就是
-        // 广播来的 tile，非 0 时就只是一张对不上的视图。
+        if (sameTensor) {
+          attr.mem.tensor_id = firstTensorId;
+        }
+        if (malformed) {
+          attr.vectorized_axis = {0};
+          attr.vectorized_strides.clear();
+        }
+        // This member has its own logical shape and addressing.
         if (!attr.repeats.empty()) {
           attr.repeats[0] = af::Symbol(1);
         }
@@ -2058,21 +2117,24 @@ TEST(ScheduleToAfirTest, BroadcastTileSharingOneQueueIsCapabilityShortfallNotCon
     return built;
   };
 
-  // stride 0：广播能解释，报能力不足、带标记，于是上层回落 legacy。
-  auto broadcastTile = buildResult(0);
-  std::string broadcastMessage;
-  bool broadcastShortfall = false;
-  EXPECT_FALSE(run(broadcastTile, broadcastMessage, broadcastShortfall));
-  EXPECT_TRUE(broadcastShortfall) << broadcastMessage;
-  EXPECT_NE(broadcastMessage.find("broadcast tile and a full-shape tile"), std::string::npos) << broadcastMessage;
+  for (int64_t stride : {0, 3}) {
+    auto result = buildResult(stride);
+    std::string message;
+    bool shortfall = false;
+    EXPECT_TRUE(run(result, message, shortfall)) << message;
+    EXPECT_FALSE(shortfall) << message;
+  }
+  auto malformed = buildResult(0, true);
+  std::string message;
+  bool shortfall = false;
+  EXPECT_FALSE(run(malformed, message, shortfall));
+  EXPECT_NE(message.find("InvalidDescriptor"), std::string::npos) << message;
+  EXPECT_FALSE(shortfall);
 
-  // stride 非 0：解释不了，仍旧是硬失败，且**不带**能力不足标记。
-  auto mismatchedTile = buildResult(3);
-  std::string mismatchedMessage;
-  bool mismatchedShortfall = false;
-  EXPECT_FALSE(run(mismatchedTile, mismatchedMessage, mismatchedShortfall));
-  EXPECT_FALSE(mismatchedShortfall) << mismatchedMessage;
-  EXPECT_NE(mismatchedMessage.find("BindingConflict"), std::string::npos) << mismatchedMessage;
+  auto alias = buildResult(3, false, true);
+  message.clear();
+  EXPECT_FALSE(run(alias, message, shortfall));
+  EXPECT_NE(message.find("BindingConflict"), std::string::npos) << message;
 }
 
 // 非队列 buffer 上「广播 tile + full-shape tile」是时间复用，不是资源冲突。

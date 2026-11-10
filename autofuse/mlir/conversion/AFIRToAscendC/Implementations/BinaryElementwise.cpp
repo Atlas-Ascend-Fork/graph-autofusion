@@ -37,6 +37,8 @@
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseApiFamily.h"
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseStockCalls.h"
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseTransferPlan.h"
+#include "conversion/AFIRToAscendC/Implementations/Synchronization.h"
+#include "dialect/AFIR/Support/SymbolicExpression.h"
 #include "dialect/AFIR/IR/AFIR.h"
 #include "dialect/AFIR/IR/AFIRElementwiseSupport.h"
 #include "target/Ascend/Capability/CapabilityProvider.h"
@@ -85,6 +87,8 @@ using elementwise::kI16;
 using elementwise::kI32;
 using elementwise::kUI16;
 using elementwise::kUI8;
+
+constexpr unsigned kBinaryInputCount = 2;
 
 // add / mul / maximum / minimum 收的那一组。它是唯一一个真的重复出现、也真的有个名字
 // 的集合，所以留一个常量；其余的在注册处写全。
@@ -214,20 +218,70 @@ std::optional<BinaryOperandOrder> emissionOrder(ScalarOperand form, bool lhsIsTi
   return std::nullopt;
 }
 
+// A scalar API may consume a one-element UB tensor, but never a row/vector
+// broadcast. Prove the logical extent from descriptors, not padded allocation size.
+std::optional<unsigned> scalarTensorInput(Operation *op, ScalarOperand form) {
+  if (form == ScalarOperand::None) {
+    return std::nullopt;
+  }
+  auto partition = afir::getOperandPartition(op);
+  if (failed(partition) || partition->inputCount != kBinaryInputCount || partition->destinationCount != 1) {
+    return std::nullopt;
+  }
+  auto inputs = partition->inputs(op);
+  if (!isa<ascendc::LocalTensorType>(inputs[0].getType()) || !isa<ascendc::LocalTensorType>(inputs[1].getType())) {
+    return std::nullopt;
+  }
+  for (unsigned i = 0; i < kBinaryInputCount; ++i) {
+    if ((form == ScalarOperand::Rhs && i == 0) || !elementwise::isSingletonTensorInput(op, i)) {
+      continue;
+    }
+    return i;
+  }
+  return std::nullopt;
+}
+
+std::optional<BinaryOperandOrder> binaryOperandOrder(Operation *op, ScalarOperand form) {
+  auto partition = afir::getOperandPartition(op);
+  if (failed(partition) || partition->inputCount != kBinaryInputCount) {
+    return std::nullopt;
+  }
+  auto inputs = partition->inputs(op);
+  auto scalar = scalarTensorInput(op, form);
+  return emissionOrder(form, isa<ascendc::LocalTensorType>(inputs[0].getType()) && scalar != 0U,
+                       isa<ascendc::LocalTensorType>(inputs[1].getType()) && scalar != 1U);
+}
+
+elementwise::LocalViewCompatibility checkBinaryLocalViews(Operation *op, ScalarOperand form,
+                                                          TransferPlanKind *kind = nullptr) {
+  auto scalar = scalarTensorInput(op, form);
+  if (!scalar) {
+    return elementwise::checkElementwiseLocalViews(op, kind);
+  }
+  auto partition = afir::getOperandPartition(op);
+  if (!scalarReadEvent(op, partition->inputs(op)[*scalar]) || !findFunctionPipe(op)) {
+    return elementwise::LocalViewCompatibility::MissingInformation;
+  }
+  auto tensor = elementwise::getOperandDescriptor(op, 1U - *scalar);
+  auto destination = elementwise::getDestinationDescriptor(op);
+  if (failed(tensor) || failed(destination)) {
+    return elementwise::LocalViewCompatibility::MissingInformation;
+  }
+  return elementwise::checkLocalViewCompatibility(op, {*tensor, *destination}, kind);
+}
+
 // 结果类型不在这里比：`verifyBufferizedElementwise` 已经强制「结果类型 == 目的地类型」，
 // 而目的地在下面逐条比过了。
 FailureOr<BinaryTensorTypes> getTensorTypes(Operation *op, ScalarOperand scalarOperand) {
   FailureOr<afir::OperandPartition> partition = afir::getOperandPartition(op);
-  if (failed(partition) || partition->inputCount != 2 || partition->destinationCount != 1) {
+  if (failed(partition) || partition->inputCount != kBinaryInputCount || partition->destinationCount != 1) {
     return failure();
   }
   OperandRange inputs = partition->inputs(op);
   // 形态与实际操作数必须对上，三种走法一次挡掉（见 `emissionOrder`）：tensor 形态的
   // implementation 收到标量会建出一个参数对不上的 `Add`，标量形态收到 tile 会把整块当成
   // 一个值，而「两个都是标量」连一块 tile 都没有。
-  const std::optional<BinaryOperandOrder> order =
-      emissionOrder(scalarOperand, isa<ascendc::LocalTensorType>(inputs[0].getType()),
-                    isa<ascendc::LocalTensorType>(inputs[1].getType()));
+  const std::optional<BinaryOperandOrder> order = binaryOperandOrder(op, scalarOperand);
   if (!order) {
     return failure();
   }
@@ -241,6 +295,9 @@ FailureOr<BinaryTensorTypes> getTensorTypes(Operation *op, ScalarOperand scalarO
   types.lhs = lhs;
   types.rhs = dyn_cast<ascendc::LocalTensorType>(rhsType);
   types.rhsElement = types.rhs ? types.rhs.getElementType() : rhsType;
+  if (scalarTensorInput(op, scalarOperand)) {
+    types.rhs = {};
+  }
   types.destination = destination;
   return types;
 }
@@ -265,7 +322,7 @@ bool areElementTypesSupported(ResultElementRule relation, uint32_t allowed, Type
 // a size-one dimension on a vectorized axis is not safe to widen there either.
 bool shapesAreCompatibleForOuterBroadcast(Operation *op) {
   FailureOr<afir::OperandPartition> partition = afir::getOperandPartition(op);
-  if (failed(partition) || partition->inputCount != 2 || partition->destinationCount != 1) {
+  if (failed(partition) || partition->inputCount != kBinaryInputCount || partition->destinationCount != 1) {
     return false;
   }
   OperandRange inputs = partition->inputs(op);
@@ -287,7 +344,7 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     // 秩的门禁下面要按计划种类分流，而种类只有计划知道，所以这里顺带把它取出来。
     TransferPlanKind planKind = TransferPlanKind::Identity;
     const elementwise::LocalViewCompatibility compatibility =
-        elementwise::checkElementwiseLocalViews(operation, &planKind);
+        checkBinaryLocalViews(operation, mapping_->scalarOperand, &planKind);
     if (compatibility == elementwise::LocalViewCompatibility::UnsupportedShape) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
@@ -345,7 +402,7 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
     FailureOr<afir::OperandPartition> partition = afir::getOperandPartition(operation);
-    if (failed(partition) || partition->inputCount != 2 || partition->destinationCount != 1) {
+    if (failed(partition) || partition->inputCount != kBinaryInputCount || partition->destinationCount != 1) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
     // 只有输入可以与结果重叠。目的地本来就是结果，拿它来问是问错了问题。
@@ -356,6 +413,9 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     // `AliasConstraint{1, 0}`——声称一个编译期常量可以被写进去。
     if (!isa<ascendc::LocalTensorType>(partition->inputs(operation)[query.inputOperandIndex].getType())) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    if (scalarTensorInput(operation, mapping_->scalarOperand) == query.inputOperandIndex) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     if (query.accessMode != ascend::instruction::AliasAccessMode::ReadWriteInput) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
@@ -396,27 +456,87 @@ struct BinaryOperandTiles {
 };
 
 template <typename SourceOp>
-LogicalResult checkConversionLocalViews(SourceOp op) {
-  const elementwise::LocalViewCompatibility compatibility = elementwise::checkElementwiseLocalViews(op);
+LogicalResult checkConversionLocalViews(SourceOp op, ScalarOperand form) {
+  const elementwise::LocalViewCompatibility compatibility = checkBinaryLocalViews(op, form);
   if (compatibility != elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
   return success();
 }
 
+template <typename SourceOp>
+FailureOr<std::optional<unsigned>> materializeScalarOperand(SourceOp op, Value (&operands)[kBinaryInputCount],
+                                                            ConversionPatternRewriter &rewriter, ScalarOperand form) {
+  auto scalarIndex = scalarTensorInput(op, form);
+  if (!scalarIndex) {
+    return scalarIndex;
+  }
+  auto scalar =
+      materializeScalarRead(op, operands[*scalarIndex], scalarReadEvent(op, op->getOperand(*scalarIndex)), rewriter);
+  if (failed(scalar)) {
+    return failure();
+  }
+  operands[*scalarIndex] = *scalar;
+  return scalarIndex;
+}
+
+void removeScalarInputSegment(afir::VectorPlan &segments, std::optional<unsigned> scalarIndex) {
+  if (!scalarIndex) {
+    return;
+  }
+  for (unsigned i = 0; i < segments.tensors.size(); ++i) {
+    const auto &tensor = segments.tensors[i];
+    if (tensor.side != afir::VectorTensor::Side::Operand || tensor.index != *scalarIndex) {
+      continue;
+    }
+    segments.tensors.erase(segments.tensors.begin() + i);
+    for (auto &segment : segments.segments) {
+      segment.strides.erase(segment.strides.begin() + i);
+    }
+    return;
+  }
+}
+
+FailureOr<Value> applyBinaryVectorizedWindow(BinaryOperandTiles &tiles, const afir::VectorPlan &segments,
+                                             const VectorizedWindow &window, BinaryOperandOrder order) {
+  if (window.tiles.size() != segments.tensors.size() || window.extents.size() != 1) {
+    return failure();
+  }
+  for (auto [tensor, tile] : llvm::zip(segments.tensors, window.tiles)) {
+    if (tensor.side == afir::VectorTensor::Side::Destination) {
+      tiles.destination = tile;
+      continue;
+    }
+    // 原始下标对回重排后的位置。
+    if (tensor.index == order.tile) {
+      tiles.lhs = tile;
+    } else if (tensor.index == order.other) {
+      tiles.rhs = tile;
+    } else {
+      return failure();
+    }
+  }
+  return window.extents.front();
+}
+
 // `order` 是 `emissionOrder` 算出来的那一份，由调用方传进来——pattern 已经为了校验形态
 // 算过一次，这里再算一遍就是第二份编码。
 template <typename SourceOp, typename OpAdaptor>
 FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adaptor, BinaryOperandOrder order,
-                                                      ConversionPatternRewriter &rewriter, bool compactTail) {
-  const Value operands[] = {adaptor.getLhs(), adaptor.getRhs()};
+                                                      ConversionPatternRewriter &rewriter, ScalarOperand form,
+                                                      bool compactTail) {
+  Value operands[kBinaryInputCount] = {adaptor.getLhs(), adaptor.getRhs()};
+  FailureOr<std::optional<unsigned>> scalarIndex = materializeScalarOperand(op, operands, rewriter, form);
+  if (failed(scalarIndex)) {
+    return failure();
+  }
   BinaryOperandTiles tiles;
   tiles.lhs = operands[order.tile];
   tiles.rhs = operands[order.other];
   tiles.destination = adaptor.getDestination();
-  // Scalar operands may precede the tile. Use the same operand order as API
-  // emission instead of implicitly selecting descriptor zero.
-  FailureOr<TensorDescAttr> descriptor = elementwise::getOperandDescriptor(op, order.tile);
+  // The destination defines the computation domain, independently of which
+  // input becomes a scalar and of the API operand order.
+  FailureOr<TensorDescAttr> descriptor = elementwise::getDestinationDescriptor(op);
   if (failed(descriptor)) {
     return failure();
   }
@@ -444,34 +564,24 @@ FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ada
   if (failed(segments)) {
     return failure();
   }
+  removeScalarInputSegment(*segments, *scalarIndex);
   // `order` 重排的是**发射次序**，而 `plan.tensors` 的下标说的是 `afir.operand_descs`
   // 里的位置，两者不是一回事。所以这里按 adaptor 的原始次序给值，重排后的 `tiles.lhs` /
   // `tiles.rhs` 再各自从结果里认回去。
-  FailureOr<SmallVector<Value>> ordered =
-      orderTilesForPlan(*segments, {adaptor.getLhs(), adaptor.getRhs()}, tiles.destination);
+  FailureOr<SmallVector<Value>> ordered = orderTilesForPlan(*segments, operands, tiles.destination);
   if (failed(ordered)) {
     return failure();
   }
   FailureOr<VectorizedWindow> window =
       materializeVectorizedSegments(op, rewriter, *segments, *plan, *ordered, /*apiWindowSize=*/1);
-  if (failed(window) || window->tiles.size() != segments->tensors.size() || window->extents.size() != 1) {
+  if (failed(window)) {
     return failure();
   }
-  for (auto [tensor, tile] : llvm::zip(segments->tensors, window->tiles)) {
-    if (tensor.side == afir::VectorTensor::Side::Destination) {
-      tiles.destination = tile;
-      continue;
-    }
-    // 原始下标对回重排后的位置。
-    if (tensor.index == order.tile) {
-      tiles.lhs = tile;
-    } else if (tensor.index == order.other) {
-      tiles.rhs = tile;
-    } else {
-      return failure();
-    }
+  FailureOr<Value> count = applyBinaryVectorizedWindow(tiles, *segments, *window, order);
+  if (failed(count)) {
+    return failure();
   }
-  tiles.count = window->extents.front();
+  tiles.count = *count;
   return tiles;
 }
 
@@ -499,17 +609,16 @@ class BinaryElementwiseConversionPattern final : public OpConversionPattern<Sour
     // capability 那边走的是 `getTensorTypes`，它查的是同一个 `emissionOrder`。走到这里
     // 对不上说明注册写反了：`Scalar` 与建 op 的实参类型不像 `Tmp` 那样由编译器兜住，
     // 两个输入都是一个 `Value`。
-    const std::optional<BinaryOperandOrder> order =
-        emissionOrder(Scalar, isa<ascendc::LocalTensorType>(adaptor.getLhs().getType()),
-                      isa<ascendc::LocalTensorType>(adaptor.getRhs().getType()));
+    const std::optional<BinaryOperandOrder> order = binaryOperandOrder(op, Scalar);
     if (!order) {
       return rewriter.notifyMatchFailure(op, "the selected implementation expects a different operand form");
     }
-    if (failed(checkConversionLocalViews(op))) {
+    if (failed(checkConversionLocalViews(op, mapping_->scalarOperand))) {
       return rewriter.notifyMatchFailure(op, "incompatible elementwise local views");
     }
 
-    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter, compactTail_);
+    FailureOr<BinaryOperandTiles> tiles =
+        materializeOperandTiles(op, adaptor, *order, rewriter, mapping_->scalarOperand, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -531,7 +640,7 @@ class BinaryElementwiseConversionPattern final : public OpConversionPattern<Sour
     if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
       return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
     }
-    rewriter.replaceOp(op, tiles->destination);
+    rewriter.replaceOp(op, adaptor.getDestination());
     return success();
   }
 
@@ -571,14 +680,13 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
     if (!adaptor.getDestination()) {
       return rewriter.notifyMatchFailure(op, "buffer-form binary elementwise op requires a destination");
     }
-    const std::optional<BinaryOperandOrder> order =
-        emissionOrder(ScalarOperand::Any, isa<ascendc::LocalTensorType>(adaptor.getLhs().getType()),
-                      isa<ascendc::LocalTensorType>(adaptor.getRhs().getType()));
+    const std::optional<BinaryOperandOrder> order = binaryOperandOrder(op, ScalarOperand::Any);
     if (!order) {
       return rewriter.notifyMatchFailure(op, "the selected implementation expects one tile and one scalar");
     }
 
-    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter, compactTail_);
+    FailureOr<BinaryOperandTiles> tiles =
+        materializeOperandTiles(op, adaptor, *order, rewriter, mapping_->scalarOperand, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -601,7 +709,7 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
     if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
       return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
     }
-    rewriter.replaceOp(op, tiles->destination);
+    rewriter.replaceOp(op, adaptor.getDestination());
     return success();
   }
 
@@ -642,14 +750,13 @@ class BinaryScalarInPlaceConversionPattern final : public OpConversionPattern<So
     if (!adaptor.getDestination()) {
       return rewriter.notifyMatchFailure(op, "buffer-form binary elementwise op requires a destination");
     }
-    if (!emissionOrder(ScalarOperand::Any, isa<ascendc::LocalTensorType>(adaptor.getLhs().getType()),
-                       isa<ascendc::LocalTensorType>(adaptor.getRhs().getType()))) {
+    if (!binaryOperandOrder(op, ScalarOperand::Any)) {
       return rewriter.notifyMatchFailure(op, "the selected implementation expects one tile and one scalar");
     }
 
     // **发射次序是 AFIR 的原次序**，不是 `emissionOrder` 算出来的那一份。
-    FailureOr<BinaryOperandTiles> tiles =
-        materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter, compactTail_);
+    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter,
+                                                                  mapping_->scalarOperand, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -668,7 +775,7 @@ class BinaryScalarInPlaceConversionPattern final : public OpConversionPattern<So
     if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
       return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
     }
-    rewriter.replaceOp(op, tiles->destination);
+    rewriter.replaceOp(op, adaptor.getDestination());
     return success();
   }
 
@@ -720,8 +827,8 @@ class BinaryScalarAttrConversionPattern final : public OpConversionPattern<Sourc
 
     // Axpy 两个输入都是 tile，没有标量形态（`scalarOperand` 是 `"none"`）——发射顺序
     // 恒是 `{0, 1}`。
-    FailureOr<BinaryOperandTiles> tiles =
-        materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter, compactTail_);
+    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter,
+                                                                  mapping_->scalarOperand, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -732,7 +839,7 @@ class BinaryScalarAttrConversionPattern final : public OpConversionPattern<Sourc
     if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
       return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
     }
-    rewriter.replaceOp(op, tiles->destination);
+    rewriter.replaceOp(op, adaptor.getDestination());
     return success();
   }
 
@@ -775,9 +882,7 @@ class CompareConversionPattern final : public OpConversionPattern<SourceOp> {
     // 与通用 pattern 同一条判据、同一个 `emissionOrder`。`eq` / `ne` 走 `Any`，标量在
     // 哪一边都发同一个 `CompareExtend`——`EQ` / `NE` 可交换；`lt` / `le` / `gt` / `ge`
     // 注册的是 `Rhs`，标量在左这里就不成立。
-    const std::optional<BinaryOperandOrder> order =
-        emissionOrder(Scalar, isa<ascendc::LocalTensorType>(adaptor.getLhs().getType()),
-                      isa<ascendc::LocalTensorType>(adaptor.getRhs().getType()));
+    const std::optional<BinaryOperandOrder> order = binaryOperandOrder(op, Scalar);
     if (!order) {
       return rewriter.notifyMatchFailure(op, "the selected implementation expects a different operand form");
     }
@@ -787,7 +892,8 @@ class CompareConversionPattern final : public OpConversionPattern<SourceOp> {
       }
     }
 
-    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, *order, rewriter, compactTail_);
+    FailureOr<BinaryOperandTiles> tiles =
+        materializeOperandTiles(op, adaptor, *order, rewriter, mapping_->scalarOperand, compactTail_);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -802,7 +908,7 @@ class CompareConversionPattern final : public OpConversionPattern<SourceOp> {
     if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
       return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
     }
-    rewriter.replaceOp(op, tiles->destination);
+    rewriter.replaceOp(op, adaptor.getDestination());
     return success();
   }
 

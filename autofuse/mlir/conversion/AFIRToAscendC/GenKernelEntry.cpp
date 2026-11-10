@@ -124,8 +124,7 @@ LogicalResult validateTemplateAttributes(func::FuncOp templateFunc, ArrayRef<int
   // 非负性由 `#afplan.variant` 的 verifier 保证；这里只剩「坐标落在本 plan 的分派表内」
   // 这条跨属性约束。
   afplan::VariantAttr variant = afplan::getVariant(templateFunc);
-  if (!variant || variant.getStage() >= static_cast<int64_t>(templateCountsPerStage.size()) ||
-      variant.getTemplateId() >= templateCountsPerStage[variant.getStage()]) {
+  if (!variant || variant.getStage() >= static_cast<int64_t>(templateCountsPerStage.size())) {
     return templateFunc.emitError("GenKernelEntry: invalid template coordinates");
   }
   if (Attribute syncAttr = templateFunc->getAttr(mlir::ascend::kernel::kAscendCNeedSyncAllAttrName);
@@ -243,7 +242,16 @@ FailureOr<SmallVector<func::FuncOp>> collectStageTemplates(
     StageRef stageRef, mlir::ascend::kernel::TilingSchema stageType, MainSignature &signature,
     SmallVector<SmallVector<TemplateArgumentSource>> &argumentMappings) {
   SmallVector<func::FuncOp> templates;
-  for (int64_t templateId = 0; templateId < stageRef.templateCount; ++templateId) {
+  SmallVector<int64_t> ids;
+  for (auto function : stageRef.module.getOps<func::FuncOp>()) {
+    auto variant = afplan::getVariant(function);
+    if (variant && variant.getStage() == static_cast<int64_t>(stageRef.stage)) ids.push_back(variant.getTemplateId());
+  }
+  llvm::sort(ids);
+  if (static_cast<int64_t>(ids.size()) != stageRef.templateCount) {
+    return stageRef.module.emitError("GenKernelEntry: template count does not match retained variants");
+  }
+  for (int64_t templateId : ids) {
     auto function = collectTemplate(stageRef.module, stageRef.stage, templateId);
     SmallVector<TemplateArgumentSource> mapping;
     if (failed(function) || failed(collectTemplateAbi(*function, stageType, signature, mapping))) {

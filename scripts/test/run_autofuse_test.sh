@@ -22,7 +22,6 @@ PYTHON_LIB_PATH=${AUTOFUSE_BUILD_PATH}/tests/
 PYTHON_MODULE_PATH=${AUTOFUSE_PATH}/compiler/python/
 TESTS_ST_PATH="${AUTOFUSE_PATH}/tests/st/"
 LOCAL_RUNTIME_LIB_PATH="${AUTOFUSE_BUILD_PATH}/ascir/generator:${AUTOFUSE_BUILD_PATH}/ascir/meta:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/ascendc_ir/generator:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/ascendc_ir:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/expression:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph:${AUTOFUSE_BUILD_PATH}/tests:${AUTOFUSE_BUILD_PATH}/tests/depends/trace:${AUTOFUSE_BUILD_PATH}/tests/depends/runtime"
-RUN_V35_TESTS="off"
 select_compilers() {
   local selected_cc="${CC:-}"
   local selected_cxx="${CXX:-}"
@@ -160,9 +159,6 @@ checkopts() {
     ENABLE_PKG="$ENABLE_PKG"
   else
     ENABLE_PKG="off"
-  fi
-  if [ -d "${AUTOFUSE_PATH}/v35" ]; then
-    RUN_V35_TESTS="on"
   fi
 
   # Process the options
@@ -707,6 +703,9 @@ codegen_e2e_st() {
   cd "${BUILD_PATH}"
   g++ -v
 
+  local v35_mode="${1:-}"
+  local v35_shard="${2:-}"
+
   ASCEND_INSTALL_LIB_PATH=${ASCEND_INSTALL_PATH}/$(uname -m)-linux/lib64/
   CMAKE_ARGS="-D CMAKE_C_COMPILER=${C_COMPILER} \
             -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
@@ -769,18 +768,6 @@ codegen_e2e_st() {
                     load_rsum_invalid_axis_store_e2e \
                     load_gather_first_axis_split_b_t_abs_store_e2e \
                     load_logicalnot_store_e2e"
-  if [[ "X$RUN_V35_TESTS" = "Xon" ]]; then
-    MAKE_TARGET_LIST="${MAKE_TARGET_LIST} \
-                      load_abs_store_expect_code_e2e_v2 \
-                      load_scalar_abs_brc_store_expect_code_e2e_v2 \
-                      load_scalar_brc_store_2d_expect_code_e2e_v2 \
-                      load_scalar_clip_store_expect_code_e2e_v2 \
-                      load_div_store_expect_code_e2e_v2 \
-                      load_scalar_sub_store_expect_code_e2e_v2 \
-                      load_scalar_div_store_expect_code_e2e_v2 \
-                      load_switch_scalar_sub_store_expect_code_e2e_v2 \
-                      load_nan_out_for_store_expect_code_e2e_v2"
-  fi
   # 从 build_backend 移入的 >10s 长尾用例（含 inductor/pgo split_compile 链），与 ascendc_api 门禁并行。
   # ctest 仍按 build_backend_test1/2 标签 + 用例名正则选择（见下方 moved 两次 ctest 调用）。
   BACKEND_MOVED_TARGET_LIST="add_rsqrt_test_e2e \
@@ -791,9 +778,18 @@ codegen_e2e_st() {
                       load_logical_not_store_test_e2e \
                       pgo_add_abs_inductor_concat_test_e2e \
                       pgo_add_abs_inductor_test_e2e"
-  BACKEND_MOVED_TARGET_LIST_V35=""
-  if [[ "X$RUN_V35_TESTS" = "Xon" ]]; then
-    BACKEND_MOVED_TARGET_LIST_V35="acos_bf16_test_e2e_v2 \
+  if [[ "X${v35_mode}" = "Xv35" ]]; then
+    # v35 专属用例（原先与主列表混编），拆分至 ST_Test_autofuse_v35_1/2/3 分片任务与主架构 ST 并行执行
+    MAKE_TARGET_LIST="load_abs_store_expect_code_e2e_v2 \
+                      load_scalar_abs_brc_store_expect_code_e2e_v2 \
+                      load_scalar_brc_store_2d_expect_code_e2e_v2 \
+                      load_scalar_clip_store_expect_code_e2e_v2 \
+                      load_div_store_expect_code_e2e_v2 \
+                      load_scalar_sub_store_expect_code_e2e_v2 \
+                      load_scalar_div_store_expect_code_e2e_v2 \
+                      load_switch_scalar_sub_store_expect_code_e2e_v2 \
+                      load_nan_out_for_store_expect_code_e2e_v2"
+    BACKEND_MOVED_TARGET_LIST="acos_bf16_test_e2e_v2 \
                         add_abs_test_e2e_v2 \
                         add_exp2_test_e2e_v2 \
                         add_exp_bf16_test_e2e_v2 \
@@ -818,6 +814,7 @@ codegen_e2e_st() {
                         div_abs_test_e2e_v2 \
                         erfc_bf16_test_e2e_v2 \
                         floor_div_int32_store_test_e2e_v2 \
+                        floor_div_int64_store_test_e2e_v2 \
                         floordiv_abs_test_e2e_v2 \
                         frexp_store_test_e2e_v2 \
                         hermite_polynomial_h_store_test_e2e_v2 \
@@ -868,11 +865,19 @@ codegen_e2e_st() {
                         spherical_bessel_j0_store_test_e2e_v2 \
                         zeta_store_test_e2e_v2"
   fi
-  MAKE_TARGET_LIST="${MAKE_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST_V35}"
-  BACKEND_MOVED_CODEGEN_LIST=$(echo "${BACKEND_MOVED_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST_V35}" | sed 's/e2e/codegen/g')
+  if [[ "X${v35_mode}" = "Xv35" && -n "${v35_shard}" ]]; then
+    MAKE_TARGET_LIST=$(shard_target_list "${MAKE_TARGET_LIST}" "${v35_shard}")
+    BACKEND_MOVED_TARGET_LIST=$(shard_target_list "${BACKEND_MOVED_TARGET_LIST}" "${v35_shard}")
+  fi
+  MAKE_TARGET_LIST="${MAKE_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST}"
+  BACKEND_MOVED_CODEGEN_LIST=$(echo "${BACKEND_MOVED_TARGET_LIST}" | sed 's/e2e/codegen/g')
   BACKEND_MOVED_TEST1_REGEX=$(build_backend_test_regex ${BACKEND_MOVED_CODEGEN_LIST})
-  BACKEND_MOVED_TEST2_REGEX=$(build_backend_test_regex ${BACKEND_MOVED_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST_V35})
+  BACKEND_MOVED_TEST2_REGEX=$(build_backend_test_regex ${BACKEND_MOVED_TARGET_LIST})
   MAKE_TARGET_LIST_CODEGEN=$(echo "${MAKE_TARGET_LIST}" | sed 's/e2e/codegen/g')
+  # label 过滤会列出该 label 下全部用例(含未编译目标), 必须叠加目标名正则,
+  # 主任务与 v35 任务各自只跑本模式编译过的目标
+  CTEST_E2E_TEST1_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST_CODEGEN})
+  CTEST_E2E_TEST2_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST})
   echo "MAKE_TARGET_LIST_CODEGEN"
   echo $MAKE_TARGET_LIST_CODEGEN
   make -j${THREAD_NUM} $MAKE_TARGET_LIST_CODEGEN
@@ -884,7 +889,7 @@ codegen_e2e_st() {
   echo "$(date '+%F %T') make codegen_e2e_st_test1 end"
 
   (cd "${AUTOFUSE_BUILD_PATH}/tests" && \
-    ctest --output-on-failure -j${THREAD_NUM} -L st -L codegen_e2e_st_test1 --no-tests=error \
+    ctest --output-on-failure -j${THREAD_NUM} -L st -L codegen_e2e_st_test1 -R "${CTEST_E2E_TEST1_REGEX}" --no-tests=error \
           -O ${BUILD_PATH}/ctest_codegen_e2e_st_test1.log)
   if [ $? -ne 0 ]; then
     echo "execute command: run codegen_e2e_st_test1 failed."
@@ -908,7 +913,7 @@ codegen_e2e_st() {
   echo "$(date '+%F %T') make codegen_e2e_st_test2 end"
 
   (cd "${AUTOFUSE_BUILD_PATH}/tests" && \
-    ctest --output-on-failure -j${THREAD_NUM} -L st -L codegen_e2e_st_test2 --no-tests=error \
+    ctest --output-on-failure -j${THREAD_NUM} -L st -L codegen_e2e_st_test2 -R "${CTEST_E2E_TEST2_REGEX}" --no-tests=error \
           -O ${BUILD_PATH}/ctest_codegen_e2e_st_test2.log)
   if [ $? -ne 0 ]; then
     echo "execute command: run codegen_e2e_st_test2 failed."
@@ -937,11 +942,31 @@ build_backend_test_regex() {
   echo "^(${test_regex})$"
 }
 
+# 按 "shard_idx/total" 对空格分隔的目标列表取模分片, shard_idx 从 1 开始
+shard_target_list() {
+  local list="$1"
+  local idx="${2%%/*}"
+  local total="${2##*/}"
+  local out=""
+  local i=0
+  local target
+  for target in ${list}; do
+    if [ $((i % total)) -eq $((idx % total)) ]; then
+      out="${out} ${target}"
+    fi
+    i=$((i + 1))
+  done
+  echo "${out# }"
+}
+
 build_backend() {
   echo "$(date '+%F %T') create build directory and build build_backend";
   mk_dir "${BUILD_PATH}"
   cd "${BUILD_PATH}"
   g++ -v
+
+  local v35_mode="${1:-}"
+  local v35_shard="${2:-}"
 
   ASCEND_INSTALL_LIB_PATH=${ASCEND_INSTALL_PATH}/$(uname -m)-linux/lib64/
   CMAKE_ARGS="-D CMAKE_C_COMPILER=${C_COMPILER} \
@@ -994,9 +1019,9 @@ build_backend() {
                     inductor_matmul_elemwise_test_e2e \
                     workspace_uint64_multi_reduce_test_e2e \
                     workspace_uint64_tiling_test_e2e"
-  if [[ "X$RUN_V35_TESTS" = "Xon" ]]; then
-    MAKE_TARGET_LIST="${MAKE_TARGET_LIST} \
-                      load_loop_mode_test_e2e_v2 \
+  if [[ "X${v35_mode}" = "Xv35" ]]; then
+    # v35 专属用例（原先与主列表混编），拆分至 ST_Test_autofuse_v35_1/2/3 分片任务与主架构 ST 并行执行
+    MAKE_TARGET_LIST="load_loop_mode_test_e2e_v2 \
                       concat_test_e2e_v2 \
                       scalar_brc_test_e2e_v2 \
                       brc_reduce_test_e2e_v2 \
@@ -1127,6 +1152,9 @@ build_backend() {
                       rand_store_test_e2e_v2 \
                       randn_store_test_e2e_v2 \
                       load_cast_brc_realign_test_e2e_v2"
+  fi
+  if [[ "X${v35_mode}" = "Xv35" && -n "${v35_shard}" ]]; then
+    MAKE_TARGET_LIST=$(shard_target_list "${MAKE_TARGET_LIST}" "${v35_shard}")
   fi
   MAKE_TARGET_LIST_CODEGEN=$(echo "${MAKE_TARGET_LIST}" | sed 's/e2e/codegen/g')
   CTEST_BACKEND_TEST1_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST_CODEGEN})
@@ -1372,10 +1400,20 @@ build_st() {
     "backend")
       build_backend || { echo "run backend st failed."; exit 1; }
       ;;
+    "v35_1"|"v35_2"|"v35_3")
+      # 显式指定 v35 分片说明调用方(CI job)明确要求执行 v35 用例, 源码树缺失属于
+      # 配置错误, 必须失败告警, 禁止静默跳过产生零用例绿灯与覆盖率缺失
+      if [ ! -d "${AUTOFUSE_PATH}/v35" ]; then
+        echo "v35 source tree not found, cannot run v35 st: ${MODEL_NAME}" >&2
+        exit 1
+      fi
+      local v35_shard_spec="${MODEL_NAME#v35_}/3"
+      build_backend v35 "${v35_shard_spec}" || { echo "run v35 backend st failed."; exit 1; }
+      codegen_e2e_st v35 "${v35_shard_spec}" || { echo "run v35 e2e st failed."; exit 1; }
+      ;;
     "e2e")
       codegen_e2e_st || { echo "test build e2e st code generator failed."; exit 1; }
       build_codegen_e2e_ut || { echo "test codegen e2e ut failed."; exit 1; }
-      run_mlir_targets check-e2e || { echo "MLIR CPU E2E tests failed."; exit 1; }
       ;;
     "ascendc_api")
       build_test_ascir_st || { echo "run ascir st failed."; exit 1; }
@@ -1388,7 +1426,7 @@ build_st() {
       build_st_common || { echo "run common st failed."; exit 1; }
       build_st_optimize || { echo "run optimize st failed."; exit 1; }
       py_module_st || { echo "run py module st failed."; exit 1; }
-      run_mlir_targets check-st || { echo "MLIR ST tests failed."; exit 1; }
+      run_mlir_targets check-st check-e2e || { echo "MLIR ST/e2e tests failed."; exit 1; }
       ;;
     "all")
       build_st_att || { echo "failed to build and run att st."; exit 1; }
@@ -1398,11 +1436,19 @@ build_st() {
       build_st_optimize || { echo "run optimize st failed."; exit 1; }
       build_backend || { echo "run backend st failed."; exit 1; }
       codegen_e2e_st || { echo "test build e2e st code generator failed."; exit 1; }
+      # 全量模式必须覆盖 v35 用例, 否则拆分后 all 语义缺失 v35 覆盖;
+      # v35 源码树缺失时提示跳过(可选组件), 不使 all 整体失败
+      if [ -d "${AUTOFUSE_PATH}/v35" ]; then
+        build_backend v35 || { echo "run v35 backend st failed."; exit 1; }
+        codegen_e2e_st v35 || { echo "run v35 e2e st failed."; exit 1; }
+      else
+        echo "v35 source tree not found, skip v35 st in all mode."
+      fi
       build_kernel_tool || { echo "test kernel tool failed."; exit 1; }
       py_module_st || { echo "run py module st failed."; exit 1; }
       ;;
     *)
-      echo "输入无效，输入范围att/ascir/autofuse/common/optimize/codegen/all."
+      echo "输入无效，输入范围att/ascir/optimize/common/codegen/tools/backend/v35_1/v35_2/v35_3/e2e/ascendc_api/framework/all."
       ;;
   esac
 }

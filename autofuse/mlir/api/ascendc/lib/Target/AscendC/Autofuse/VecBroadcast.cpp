@@ -114,3 +114,11 @@ LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::Broad
 
     return success();
 }
+
+LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::DuplicateU8Op op)
+{
+    emitter.ostream() << op.getAPIName() << "(" << emitter.getOrCreateName(op.getDst()) << ", "
+                      << emitter.getOrCreateName(op.getScalar()) << ", static_cast<uint32_t>("
+                      << emitter.getOrCreateName(op.getCount()) << "))";
+    return success();
+}

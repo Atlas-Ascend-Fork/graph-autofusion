@@ -49,8 +49,8 @@ struct ArtifactVersionSet {
   std::string entry_abi_version;
   // Whether this artifact targets the dynamic-shape dispatch-by-tiling_key
   // path or one concrete (static) shape (see FR4/3.2.5 in the design doc:
-  // SelectDynamicCandidates keeps every candidate, SelectStaticWinner keeps
-  // only the winner). A dynamic-mode and a static-mode artifact are never
+  // dynamic generation keeps every candidate, static generation keeps
+  // only the ATT winner). A dynamic-mode and a static-mode artifact are never
   // interchangeable even for the same schedule structure, so this must be
   // part of the versioned key, not left to be inferred from the structural
   // fingerprint alone.

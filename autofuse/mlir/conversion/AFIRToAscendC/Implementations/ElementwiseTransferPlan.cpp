@@ -22,6 +22,24 @@ using namespace mlir::afir;
 
 namespace mlir::ascend::kernel::elementwise {
 
+bool isSingletonTensorInput(Operation *op, unsigned index) {
+  auto partition = afir::getOperandPartition(op);
+  if (failed(partition) || index >= partition->inputCount ||
+      !isa<ascendc::LocalTensorType>(partition->inputs(op)[index].getType())) {
+    return false;
+  }
+  auto descriptor = getOperandDescriptor(op, index);
+  auto destination = getDestinationDescriptor(op);
+  if (failed(descriptor) || failed(destination) || descriptor->getAxis() != destination->getAxis() ||
+      descriptor->getVectorizedAxis().empty() || descriptor->getVectorizedAxis() != destination->getVectorizedAxis() ||
+      descriptor->getRepeats().empty() || descriptor->getRepeats().size() != descriptor->getAxis().size() ||
+      descriptor->getRepeats() == destination->getRepeats()) {
+    return false;
+  }
+  return llvm::all_of(descriptor->getRepeats(),
+                      [](afir::ExprAttr expr) { return afir::ProveExpressionsEqual(expr.getValue().getValue(), "1"); });
+}
+
 FailureOr<TensorDescAttr> getOperandDescriptor(Operation *op, unsigned index) {
   auto descriptors = op->getAttrOfType<ArrayAttr>(kOperandDescsAttrName);
   if (!descriptors || index >= descriptors.size()) {

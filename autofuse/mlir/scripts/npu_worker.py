@@ -16,6 +16,18 @@ import sys
 import time
 
 
+def load_device_env(repo):
+    # The worker runs from incoming/, outside the selected commit's test package.
+    case_dir = Path(repo) / "autofuse/mlir/test/e2e/npu"
+    sys.path.insert(0, str(case_dir))
+    spec = importlib.util.spec_from_file_location(
+        "npu_device_env", case_dir / "support/device_env.py"
+    )
+    device_env = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(device_env)
+    return device_env
+
+
 def digest(path):
     h = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -206,27 +218,52 @@ def execute(request, root, output, state, save):
     state.update(phase="preflight", build=build_state)
     save()
     # Use the selected commit's existing environment/preflight implementation.
-    spec = importlib.util.spec_from_file_location(
-        "npu_device_env", repo / "autofuse/mlir/test/e2e/npu/support/device_env.py"
-    )
-    device_env = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(device_env)
+    device_env = load_device_env(repo)
     os.environ.clear()
     os.environ.update(env)
-    device_env.ensure_overlay(repo, build / "autofuse", overlay, rebuild=True)
-    test_env = device_env.environ_for_run(repo, build / "autofuse", overlay)
+    overlay = build / "dev-install"
+    if overlay.exists():
+        shutil.rmtree(overlay)
+    with (output / "install.log").open("w") as log:
+        subprocess.run(
+            [
+                "cmake",
+                "--install",
+                str(build / "autofuse"),
+                "--prefix",
+                str(overlay),
+                "--component",
+                "graph-autofusion",
+            ],
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=True,
+        )
+    test_env = device_env.environ_for_run(
+        repo, build / "autofuse", overlay, installed=True
+    )
     origins = device_env.preflight(test_env, overlay, request["python"])
     resolved = command(
         ["ldd", overlay / "python/site-packages/autofuse/pyautofuse.so"], env=test_env
     )
     (output / "preflight.json").write_text(json.dumps(origins, indent=2) + "\n")
     (output / "libraries.log").write_text(resolved + "\n")
-    if "libaihac_codegen.so => " + str(library) + " " not in resolved:
-        raise RuntimeError("Codegen library resolved outside the managed build")
-    if digest(overlay / "python/site-packages/autofuse/pyautofuse.so") != digest(
-        module
-    ):
-        raise RuntimeError("Overlay extension does not match build")
+    installed_library = overlay / (
+        os.uname().machine + "-linux/lib64/libaihac_codegen.so"
+    )
+    if "libaihac_codegen.so => " + str(installed_library) + " " not in resolved:
+        raise RuntimeError("Codegen library resolved outside the managed installation")
+    # CMake rewrites ELF RPATH during installation, so installed bytes may differ
+    # from build bytes. Record both; provenance comes from this locked install.
+    state["installed_binaries"] = {
+        str(p): digest(p)
+        for p in (
+            installed_library,
+            overlay / "python/site-packages/autofuse/pyautofuse.so",
+        )
+    }
+    save()
     probe_runtime(request["python"], test_env, output)
     if command(["git", "-C", repo, "rev-parse", "HEAD"]) != request["commit"]:
         raise RuntimeError("Source commit changed during build")
@@ -244,7 +281,7 @@ def execute(request, root, output, state, save):
         "1",
         "--build-dir",
         str(build / "autofuse"),
-        "--overlay",
+        "--install-dir",
         str(overlay),
         "--work-dir",
         str(output / "cases"),

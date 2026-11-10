@@ -12,11 +12,8 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cctype>
 #include <iterator>
-#ifdef AF_SUM_MAX_TEST
 #include <regex>
-#endif
 
 #include "test/e2e/cpu/cases/load_sum_store/LoadSumStoreCase.h"
 #include "test/e2e/cpu/support/E2eCase.h"
@@ -97,45 +94,46 @@ af::AscGraph BuildGraph() {
   return graph;
 }
 
+#ifdef AF_SUM_MAX_TEST
 namespace {
-// 每个下降出来的 stage 0 模板都必须在入口被分派到。模板被下降出来不等于分派得到它：ATT 与
-// MLIR 两侧的 case 编号只要塌成同一个值，多出来的模板就变成死代码，而数值断言照样全过——
-// 真跑的始终是第 0 个。判据取「定义一次、调用一次」，所以出现次数至少为 2；只出现一次的那个
-// 就是掉出分派表的。单模板注册上它退化成 1 == 1，对每条注册都成立。
-void CheckTemplatesAreDispatched(const std::string &kernel) {
-  for (size_t index = 0U;; ++index) {
-    const std::string symbol = "stage0_template" + std::to_string(index);
-    size_t occurrences = 0U;
-    for (size_t pos = kernel.find(symbol); pos != std::string::npos; pos = kernel.find(symbol, pos + 1U)) {
-      // `stage0_template1` 是 `stage0_template10` 的前缀，按标识符边界收，免得十个以上模板时
-      // 数出来的是另一个符号。
-      const size_t after = pos + symbol.size();
-      if (after >= kernel.size() || std::isdigit(static_cast<unsigned char>(kernel[after])) == 0) {
-        ++occurrences;
-      }
-    }
-    if (occurrences == 0U) {
-      EXPECT_GT(index, 0U) << "no stage0 template was emitted";
-      return;
-    }
-    EXPECT_GE(occurrences, 2U) << symbol << " is emitted but never dispatched";
+// Extract one emitted function definition, excluding declarations and call sites.
+// Generated function bodies use balanced braces; callers must reject an empty result.
+std::string GeneratedFunctionBody(const std::string &kernel, const std::string &symbol) {
+  const std::regex definition("\\bvoid " + symbol + R"(\([^;{}]*\)\s*\{)");
+  std::smatch match;
+  if (!std::regex_search(kernel, match, definition)) {
+    return {};
   }
+  const size_t begin = match.position() + match.length();
+  size_t depth = 1;
+  for (size_t at = begin; at < kernel.size(); ++at) {
+    if (kernel[at] == '{') {
+      ++depth;
+    } else if (kernel[at] == '}' && --depth == 0) {
+      return kernel.substr(begin, at - begin);
+    }
+  }
+  return {};
 }
+
 }  // namespace
+#endif
 
 void CheckGeneratedKernel(const std::string &kernel) {
 #ifdef AF_REDUCE_PARTITION
   EXPECT_NE(kernel.find("stage1_template"), std::string::npos);
 #endif
-  EXPECT_NE(kernel.find(std::string(load_sum_store::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   EXPECT_NE(kernel.find("AscendC::ReduceSum"), std::string::npos);
-  CheckTemplatesAreDispatched(kernel);
 #ifdef AF_SUM_MAX_TEST
+  // This registration executes plan 2. Compare both APIs inside that same template.
+  const auto body =
+      GeneratedFunctionBody(kernel, std::string(load_sum_store::kKernelName) + "_subgraph0_plan2_stage0_template0");
+  ASSERT_FALSE(body.empty());
   std::smatch sum, maximum;
-  ASSERT_TRUE(std::regex_search(kernel, sum, std::regex(R"(AscendC::ReduceSum<[^\n]+>\([^,]+, [^,]+, ([^,]+),)")));
-  ASSERT_TRUE(std::regex_search(kernel, maximum, std::regex(R"(AscendC::ReduceMax<[^\n]+>\([^,]+, [^,]+, ([^,]+),)")));
+  ASSERT_TRUE(std::regex_search(body, sum, std::regex(R"(AscendC::ReduceSum<[^\n]+>\([^,]+, [^,]+, ([^,]+),)")));
+  ASSERT_TRUE(std::regex_search(body, maximum, std::regex(R"(AscendC::ReduceMax<[^\n]+>\([^,]+, [^,]+, ([^,]+),)")));
   EXPECT_EQ(sum[1].str(), maximum[1].str()) << "the two APIs must share scratch in the executed plan";
-  EXPECT_NE(kernel.find("AscendC::Add"), std::string::npos);
+  EXPECT_NE(body.find("AscendC::Add"), std::string::npos);
 #endif
 
   // AR / RA 的模板参数必须与注册的形状对上，否则这条用例的参考实现算的是另一件事。

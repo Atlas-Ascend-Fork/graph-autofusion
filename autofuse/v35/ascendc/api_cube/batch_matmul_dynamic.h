@@ -7,8 +7,8 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#include "arch35/batch_mat_mul_v3_iterbatch.h"
 
+#include "arch35/batch_mat_mul_v3_iterbatch.h"
 #ifndef INDUCTOR_CV_FUSION
 #include "autofuse_cube_tiling_data.h"
 #endif

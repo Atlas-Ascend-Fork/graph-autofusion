@@ -2348,6 +2348,24 @@ TEST_F(AutoSchedulerUT, DualGatherAliasPostReduceGroupSimtSchedulesWithoutVector
   ASSERT_EQ(scheduled_il1->outputs().size(), 1UL);
   EXPECT_FALSE(scheduled_il1->outputs()[0]->attr.vectorized_axis.empty())
       << "member value view must carry a derived vectorized axis after TileSplit.";
+  // [k,R] 保 k 证据（链节点免显式写入扩展的等价性验证）：链节点（dual_merge_add，
+  // 无角色 → 走 TileSplit 非 preserves 分支的标准推导）的 vectorized_axis 必须含
+  // TileInner 轴（k）——DeriveNodeVectorizedAxes 与全局列表（含 prepend 的 solved
+  // tile-inner）求交，k 天然保留。
+  const auto scheduled_chain = results[0].scheduled_graph.FindNode("dual_merge_add");
+  ASSERT_NE(scheduled_chain, nullptr);
+  const auto &chain_view = scheduled_chain->outputs()[0]->attr;
+  ASSERT_FALSE(chain_view.vectorized_axis.empty()) << "chain node must get vectorized view from the standard path.";
+  bool chain_view_has_tile_inner = false;
+  for (const auto axis_id : chain_view.vectorized_axis) {
+    const auto *axis = results[0].scheduled_graph.FindAxis(axis_id);
+    if (axis != nullptr && axis->type == af::Axis::kAxisTypeTileInner) {
+      chain_view_has_tile_inner = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(chain_view_has_tile_inner) << "chain vectorized view must carry the tile-inner axis (k).";
+  ASSERT_EQ(chain_view.vectorized_axis.size(), chain_view.vectorized_strides.size());
 }
 
 TEST_F(AutoSchedulerUT, IndirectLoadSolvedTileTilingGeneratesOnlyTemplateOuterCase) {

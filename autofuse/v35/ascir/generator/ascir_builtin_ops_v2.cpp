@@ -595,7 +595,11 @@ constexpr std::pair<ge::DataType, ge::DataType> kCastTypePairs[] = {
     {DT_INT32, DT_BOOL},    {DT_INT64, DT_INT32},   {DT_INT64, DT_FLOAT},   {DT_INT64, DT_UINT8},
     {DT_INT64, DT_UINT64},  {DT_INT64, DT_FLOAT16}, {DT_INT64, DT_BF16},    {DT_INT64, DT_BOOL},
     {DT_INT8, DT_BOOL},     {DT_INT16, DT_BOOL},    {DT_BF16, DT_FLOAT},    {DT_BF16, DT_INT32},
-    {DT_FLOAT, DT_BOOL}};
+    {DT_FLOAT, DT_BOOL},    {DT_INT8, DT_INT32},    {DT_INT16, DT_INT32},   {DT_INT8, DT_INT64},
+    {DT_INT16, DT_INT64},   {DT_UINT8, DT_BOOL},    {DT_UINT16, DT_BOOL},   {DT_UINT32, DT_BOOL},
+    {DT_UINT64, DT_BOOL},   {DT_INT32, DT_UINT8},   {DT_INT32, DT_INT8},    {DT_INT64, DT_INT16},
+    {DT_INT64, DT_INT8},    {DT_UINT16, DT_FLOAT},  {DT_UINT32, DT_FLOAT},  {DT_UINT64, DT_FLOAT},
+    {DT_FLOAT, DT_UINT8},   {DT_FLOAT, DT_UINT16},  {DT_FLOAT, DT_UINT32},  {DT_FLOAT, DT_UINT64}};
 REG_ASC_IR(Cast).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::CastAscIrAttImplV2>(),
                                         af::ascir::AscIrImplCreator<af::ascir::CastAscIrCodegenImplV2>(),
                                         {{"T1", MakeT1List(kCastTypePairs)}, {"T2", MakeT2List(kCastTypePairs)}}});
@@ -906,7 +910,8 @@ REG_ASC_IR(Split)
 REG_ASC_IR(Select).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::SelectAscIrAttImplV2>(),
                                           af::ascir::AscIrImplCreator<af::ascir::WhereAscIrCodegenImplV2>(),
                                           {{"T1", TensorType{DT_UINT8, DT_BOOL}},
-                                           {"T2", TensorType{DT_FLOAT16, DT_FLOAT, DT_INT16, DT_INT32, DT_INT64}}}});
+                                           {"T2", TensorType{DT_FLOAT16, DT_FLOAT, DT_INT16, DT_INT32, DT_INT64,
+                                                             DT_INT8, DT_UINT8, DT_UINT16, DT_UINT32, DT_UINT64}}}});
 
 REG_ASC_IR(Where).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::WhereAscIrAttImplV2>(),
                                          af::ascir::AscIrImplCreator<af::ascir::WhereAscIrCodegenImplV2>(),
@@ -1068,10 +1073,11 @@ REG_ASC_IR(IndirectLoad)
                                                DT_INT64, DT_UINT64, DT_FLOAT16, DT_BF16, DT_FLOAT}},
                              {"T2", TensorType{DT_INT32, DT_INT64}}}});
 
-REG_ASC_IR(Transpose).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::TransposeAscIrAttImplV2>(),
-                                             af::ascir::AscIrImplCreator<af::ascir::TransposeAscIrCodegenImplV2>(),
-                                             {{"T", TensorType{DT_INT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32,
-                                                               DT_FLOAT16, DT_FLOAT, DT_BF16, DT_BOOL, DT_INT64}}}});
+REG_ASC_IR(Transpose).Impl(v2_soc_versions,
+                           {af::ascir::AscIrImplCreator<af::ascir::TransposeAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::TransposeAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_FLOAT16,
+                                              DT_FLOAT, DT_BF16, DT_BOOL, DT_INT64, DT_UINT64}}}});
 // todo:目前前端dt构图用到了FlashSoftmax，暂时无法删除
 REG_ASC_IR(FlashSoftmax)
     .Impl({}, {af::ascir::AscIrImplCreator<af::ascir::AbsAscIrAttImplV2>(),

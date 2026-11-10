@@ -5,7 +5,6 @@ add_afir_gtest(ScheduleSpaceBridgeTest
     ${MLIR_CODE_ROOT_DIR}/test/ut/schedule/TilingFieldSchemaTest.cpp
     ${MLIR_CODE_ROOT_DIR}/test/ut/schedule/PlanSelectorTest.cpp
     ${MLIR_CODE_ROOT_DIR}/test/ut/schedule/PlanSelectionTest.cpp
-    ${MLIR_CODE_ROOT_DIR}/test/ut/schedule/AttCostEvaluatorTest.cpp
     ${MLIR_CODE_ROOT_DIR}/test/ut/schedule/AttSchemaAdapterTest.cpp
   LIBS
     AutofuseMlirScheduleBridge
@@ -25,7 +24,7 @@ target_include_directories(ScheduleSpaceBridgeTest PRIVATE
   ${CODE_ROOT_DIR}/att/gen_model_info
 )
 
-# Isolate the ATT model-generation stub from tests that link against real ATT.
+# Isolate ATT generation stubs from tests that use real ATT.
 add_afir_gtest(PlanSelectorPolicyTest
   SOURCES
     ${MLIR_CODE_ROOT_DIR}/test/ut/schedule/PlanSelectorPolicyTest.cpp

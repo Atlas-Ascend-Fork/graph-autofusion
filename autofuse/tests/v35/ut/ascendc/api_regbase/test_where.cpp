@@ -523,4 +523,17 @@ TEST_F(TestRegbaseApiWhereUT, Where_uint64_normal) {
   WhereNormalTest<uint64_t, 2>(71, (ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) / sizeof(uint64_t));
 }
 
+// 场景10b: uint64 双标量广播（场景4）
+TEST_F(TestRegbaseApiWhereUT, Where_X2S_X3S_uint64_count) {
+  WhereNormalTest<uint64_t, 1>(1, ONE_BLK_SIZE / sizeof(uint64_t), 1, 1);
+  WhereNormalTest<uint64_t, 1>(1, ONE_REPEAT_BYTE_SIZE / sizeof(uint64_t), 1, 1);
+  WhereNormalTest<uint64_t, 1>(1, (ONE_BLK_SIZE - sizeof(uint64_t)) / sizeof(uint64_t), 1, 1);
+}
+
+TEST_F(TestRegbaseApiWhereUT, Where_X2S_X3S_uint64_normal) {
+  WhereNormalTest<uint64_t, 2>(3, ONE_BLK_SIZE / sizeof(uint64_t), 1, 1);
+  WhereNormalTest<uint64_t, 2>(4, ONE_REPEAT_BYTE_SIZE / sizeof(uint64_t), 1, 1);
+  WhereNormalTest<uint64_t, 2>(18, (ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) / sizeof(uint64_t), 1, 1);
+}
+
 }  // namespace af

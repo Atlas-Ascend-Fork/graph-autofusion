@@ -7715,6 +7715,75 @@ TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_ShouldGenerateMatMulTemplate_W
   EXPECT_EQ(declare.find("WeightTiling"), std::string::npos);
 }
 
+TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_InductorLegacyKeepsElevenParamsAndGlobal) {
+  af::AscGraph graph("matmul_graph");
+  codegen::Kernel kernel("matmul_kernel");
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString("matmul_fusion");
+  ::ascir::ScheduledResult scheduled_result;
+  scheduled_result.cube_type = ::ascir::CubeTemplateType::kUBFuse;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back({scheduled_result});
+
+  std::string declare = kernel.KernelFuncDeclare("matmul_graph", fused_schedule_result, false, true, false, false);
+
+  // legacy（is_inductor=true, launch_decouple=false）：11 参数模板 + __global__ + 值参。
+  EXPECT_NE(declare.find("typename TILING_DATA_T"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t FUSION_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t UB_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t MIX_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("__global__"), std::string::npos);
+  EXPECT_NE(declare.find("TILING_DATA_T t"), std::string::npos);
+}
+
+TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_LaunchDecoupleDropsModeTemplateParams) {
+  af::AscGraph graph("matmul_graph");
+  codegen::Kernel kernel("matmul_kernel");
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString("matmul_fusion");
+  ::ascir::ScheduledResult scheduled_result;
+  scheduled_result.cube_type = ::ascir::CubeTemplateType::kUBFuse;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back({scheduled_result});
+
+  std::string declare = kernel.KernelFuncDeclare("matmul_graph", fused_schedule_result, false, true, false, true);
+
+  // rtLaunch（launch_decouple=true）：7 参数模板（mode 三元组与 TILING_DATA_T 退出），
+  // 去 __global__（普通 __aicore__ 函数，由 extern "C" 分派入口调用），tiling 形参统一
+  // 为非模板 CVAutofuseTilingData 引用。
+  EXPECT_NE(declare.find("template <int8_t API_LEVEL, int8_t A_TRANS, int8_t B_TRANS, int8_t BATCH_MODEL, "
+                         "int8_t MODEL, int8_t FULL_LOAD, int8_t L0C2OUT_MODEL>"),
+            std::string::npos);
+  EXPECT_EQ(declare.find("typename TILING_DATA_T"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t FUSION_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t UB_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t MIX_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("__global__"), std::string::npos);
+  EXPECT_NE(declare.find("__aicore__ inline __attribute__((always_inline)) void"), std::string::npos);
+  EXPECT_NE(declare.find("const CVAutofuseTilingData &t"), std::string::npos);
+  EXPECT_EQ(declare.find("TILING_DATA_T t"), std::string::npos);
+}
+
+TEST_F(CodegenKernelConv2DTest, GenCubeCommonTiling_TilingTypeArgFollowsLaunchDecouple) {
+  codegen::Kernel kernel("matmul_kernel");
+  kernel.tpipe.is_inductor = true;
+
+  {
+    std::stringstream ss;
+    EXPECT_EQ(kernel.GenCubeCommonTiling(ss, false, false, true, false, "", false), af::SUCCESS);
+    const std::string result = ss.str();
+    EXPECT_NE(result.find("mat_mul_v3_fusion<TILING_DATA_T, "), std::string::npos);
+    EXPECT_EQ(result.find("CVAutofuseTilingData"), std::string::npos);
+  }
+  {
+    std::stringstream ss;
+    EXPECT_EQ(kernel.GenCubeCommonTiling(ss, false, false, true, false, "", true), af::SUCCESS);
+    const std::string result = ss.str();
+    EXPECT_NE(result.find("mat_mul_v3_fusion<CVAutofuseTilingData, "), std::string::npos);
+    EXPECT_EQ(result.find("TILING_DATA_T"), std::string::npos);
+  }
+}
+
 TEST_F(CodegenKernelConv2DTest, GenCubeCommonTiling_ShouldGenerateConv2DAPI_WhenIsConv2dTrue) {
   codegen::Kernel kernel("conv2d_kernel");
 
@@ -7862,4 +7931,226 @@ TEST(CodegenKernel, CacheRecordResetKeepsOtherStages) {
   EXPECT_EQ(params->cache_executions[0].stage, static_cast<uint32_t>(codegen::ComputeStage::kCVFuseStage1));
   ASSERT_EQ(loop.Generate(tiler, tpipe, source, codegen::ComputeStage::kCVFuseStage2), af::SUCCESS);
   EXPECT_EQ(params->cache_executions.size(), 2U);
+}
+
+namespace {
+// 构造带 BlockSplit 的 Load 图并模拟 TBuf 转换后的输出属性（Buffer/VecCalc）
+af::AscGraph MakeHoistLoadGraph(const std::string &name, bool tbuf_output) {
+  af::AscGraph graph(name.c_str());
+  const auto s0 = graph.CreateSizeVar("s0");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto split_pair = graph.BlockSplit(z0.id);
+  auto z0t = std::get<1>(split_pair);
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT16;
+  *data.y.axis = {z0.id};
+  *data.y.repeats = {s0};
+  *data.y.strides = {af::ops::One};
+
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load.y.dtype = ge::DT_FLOAT16;
+  *load.y.axis = {z0.id, z0t->id};
+  *load.y.repeats = {std::get<0>(split_pair)->size, z0t->size};
+  *load.y.strides = {z0t->size, af::ops::One};
+  *load.y.vectorized_axis = {z0t->id};
+  *load.y.vectorized_strides = {af::ops::One};
+  load.attr.sched.axis = {std::get<0>(split_pair)->id, z0.id, z0t->id};
+  load.y.mem->tensor_id = 1;
+  // 模拟调度后状态：tbuf分支对应 HoistInvariantLoads 通过判定后的标记
+  // （loop_axis=BlockOuter轴，kernel入口一次加载）；queue分支对应未通过判定的普通Load，
+  // loop_axis 保持 SelectLoopAxis 赋予的真实循环轴（BlockInner），不外提。
+  load.attr.sched.loop_axis = tbuf_output ? std::get<0>(split_pair)->id : z0t->id;
+  if (tbuf_output) {
+    load.y.mem->alloc_type = af::AllocType::kAllocTypeBuffer;
+    load.y.mem->position = af::Position::kPositionVecCalc;
+    load.y.mem->reuse_id = af::kIdNone;
+    load.y.buf->id = 0;
+    load.y.que->id = af::kIdNone;
+    load.y.que->depth = af::kIdNone;
+    load.y.que->buf_num = af::kIdNone;
+  } else {
+    load.y.mem->alloc_type = af::AllocType::kAllocTypeQueue;
+    load.y.mem->position = af::Position::kPositionVecIn;
+    load.y.mem->reuse_id = 0;
+    load.y.buf->id = af::kIdNone;
+    load.y.que->id = 0;
+    load.y.que->depth = 2;
+    load.y.que->buf_num = 1;
+  }
+  return graph;
+}
+}  // namespace
+
+TEST(CodegenKernel, HoistedTBufLoadEmittedBeforeLoopWithMte2Sync) {
+  auto graph = MakeHoistLoadGraph("hoist_tbuf_load_graph", true);
+  auto load_node = graph.FindNode("load");
+  auto data_node = graph.FindNode("data");
+  ASSERT_NE(load_node, nullptr);
+
+  codegen::Tiler tiler;
+  ascir::AxisId block_outer_id = af::kIdNone;
+  ascir::AxisId block_inner_id = af::kIdNone;
+  const auto &axis_list = graph.GetAllAxis();
+  for (const auto &axis : axis_list) {
+    if (axis->type == ascir::Axis::Type::kAxisTypeOriginal) {
+      tiler.AddSizeVar(af::SizeVar(axis->size));
+    } else if (axis->type == ascir::Axis::Type::kAxisTypeBlockOuter) {
+      block_outer_id = axis->id;
+    } else if (axis->type == ascir::Axis::Type::kAxisTypeBlockInner) {
+      block_inner_id = axis->id;
+    }
+    EXPECT_EQ(tiler.AddAxis(*graph.FindAxis(axis->id)), af::SUCCESS);
+  }
+  codegen::TPipe tpipe("tpipe", tiler);
+  EXPECT_EQ(tpipe.CollectQues(graph), af::SUCCESS);
+  EXPECT_EQ(tpipe.AddTensor(data_node->outputs[0]), 0);
+  EXPECT_EQ(tpipe.AddTensor(load_node->outputs[0]), 0);
+
+  auto *call = CreateApiCallObject(load_node);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->Init(load_node), 0);
+  codegen::ApiTensor gm_input;
+  gm_input.id = data_node->outputs[0].attr.mem.tensor_id;
+  call->inputs.push_back(&gm_input);
+
+  codegen::Loop inner_loop(block_inner_id);
+  codegen::Loop outer_loop(block_outer_id);
+  // loop_axis=BlockOuter 的外提Load由MoveToNodeLoop放置在BlockOuter层级，
+  // 自然发射：DataCopy位于内层循环之前、每核一次，并带MTE2_V事件同步
+  outer_loop.AddCall(call);
+  outer_loop.AddLoop(&inner_loop);
+
+  std::string result;
+  EXPECT_EQ(outer_loop.Generate(tiler, tpipe, result), af::SUCCESS);
+  const auto copy_pos = result.find("DataCopyPadExtend(local_1");
+  const auto for_pos = result.find("for (");
+  EXPECT_NE(copy_pos, std::string::npos);
+  EXPECT_NE(for_pos, std::string::npos);
+  EXPECT_LT(copy_pos, for_pos);
+  EXPECT_NE(result.find("SetFlag<HardEvent::MTE2_V>"), std::string::npos);
+  EXPECT_NE(result.find("WaitFlag<HardEvent::MTE2_V>"), std::string::npos);
+  EXPECT_EQ(result.find("DataCopyPadExtend", copy_pos + 1), std::string::npos);
+  delete call;
+}
+
+TEST(CodegenKernel, QueueLoadIsNotHoisted) {
+  auto graph = MakeHoistLoadGraph("queue_load_graph", false);
+  auto load_node = graph.FindNode("load");
+  auto data_node = graph.FindNode("data");
+  ASSERT_NE(load_node, nullptr);
+
+  codegen::Tiler tiler;
+  ascir::AxisId block_outer_id = af::kIdNone;
+  ascir::AxisId block_inner_id = af::kIdNone;
+  const auto &axis_list = graph.GetAllAxis();
+  for (const auto &axis : axis_list) {
+    if (axis->type == ascir::Axis::Type::kAxisTypeOriginal) {
+      tiler.AddSizeVar(af::SizeVar(axis->size));
+    } else if (axis->type == ascir::Axis::Type::kAxisTypeBlockOuter) {
+      block_outer_id = axis->id;
+    } else if (axis->type == ascir::Axis::Type::kAxisTypeBlockInner) {
+      block_inner_id = axis->id;
+    }
+    EXPECT_EQ(tiler.AddAxis(*graph.FindAxis(axis->id)), af::SUCCESS);
+  }
+  codegen::TPipe tpipe("tpipe", tiler);
+  EXPECT_EQ(tpipe.CollectQues(graph), af::SUCCESS);
+  EXPECT_EQ(tpipe.AddTensor(data_node->outputs[0]), 0);
+  EXPECT_EQ(tpipe.AddTensor(load_node->outputs[0]), 0);
+
+  auto *call = CreateApiCallObject(load_node);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->Init(load_node), 0);
+  codegen::ApiTensor gm_input;
+  gm_input.id = data_node->outputs[0].attr.mem.tensor_id;
+  call->inputs.push_back(&gm_input);
+
+  codegen::Loop inner_loop(block_inner_id);
+  inner_loop.AddCall(call);
+  codegen::Loop outer_loop(block_outer_id);
+  outer_loop.AddLoop(&inner_loop);
+
+  std::string result;
+  EXPECT_EQ(outer_loop.Generate(tiler, tpipe, result), af::SUCCESS);
+  const auto copy_pos = result.find("DataCopyPadExtend(local_1");
+  const auto for_pos = result.find("for (");
+  EXPECT_NE(copy_pos, std::string::npos);
+  EXPECT_NE(for_pos, std::string::npos);
+  EXPECT_GT(copy_pos, for_pos);
+  EXPECT_EQ(result.find("SetFlag<HardEvent::MTE2_V>"), std::string::npos);
+  delete call;
+}
+
+namespace {
+// 构造挂在 TPipe 上的 VecOut 张量与单输入消费调用，复现向量写（如 cast）产出、
+// IndirectLoad SIMD 标量读消费的等待形态。
+codegen::ApiCall MakeVecOutConsumerCall(codegen::TPipe &tpipe, const std::string &type) {
+  af::AscGraph graph("vecout_consumer_ut");
+  af::ascir_op::Data x("x", graph);
+  auto node = graph.FindNode("x");
+  af::AscTensor tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_FLOAT;
+  std::string dtype_name;
+  codegen::Tensor::DtypeName(tensor.attr.dtype, dtype_name);
+  codegen::Tensor t(tensor, dtype_name, "t");
+  t.id = 7L;
+  t.position = af::Position::kPositionVecOut;
+  t.que_id = 0;
+  EXPECT_EQ(tpipe.AddTensor(t), 0);
+  auto call = codegen::ApiCall("indirect_load_consumer");
+  call.type = type;
+  call.unit = af::ComputeUnit::kUnitVector;
+  return call;
+}
+}  // namespace
+
+TEST(CodegenKernelWaitInputsTest, IndirectLoadVecOutInputEmitsArchSplitPipeAllBarrier) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(s0);
+  tiler.AddSizeVar(s1);
+  codegen::TPipe tpipe("tpipe", tiler);
+  auto call = MakeVecOutConsumerCall(tpipe, af::ascir_op::IndirectLoad::Type);
+  codegen::ApiTensor in;
+  in.id = 7L;
+  in.reads.push_back(&call);
+  call.inputs.push_back(&in);
+
+  std::stringstream ss;
+  ASSERT_TRUE(call.WaitInputs(tpipe, ss));
+  const std::string result = ss.str();
+  // IndirectLoad 以标量循环读 index，V 写到 S 读跨执行单元：3510/9201/9202 排空全部
+  // 流水线，其余架构保持 PIPE_V。
+  EXPECT_NE(result.find("#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || "
+                        "(__NPU_ARCH__ == 9202))"),
+            std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_ALL>();"), std::string::npos);
+  EXPECT_NE(result.find("#else"), std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_V>();"), std::string::npos);
+  EXPECT_NE(result.find("#endif"), std::string::npos);
+}
+
+TEST(CodegenKernelWaitInputsTest, NonIndirectLoadVecOutInputKeepsPipeVBarrier) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(s0);
+  tiler.AddSizeVar(s1);
+  codegen::TPipe tpipe("tpipe", tiler);
+  auto call = MakeVecOutConsumerCall(tpipe, "SomeVectorOp");
+  codegen::ApiTensor in;
+  in.id = 7L;
+  in.reads.push_back(&call);
+  call.inputs.push_back(&in);
+
+  std::stringstream ss;
+  ASSERT_TRUE(call.WaitInputs(tpipe, ss));
+  const std::string result = ss.str();
+  EXPECT_EQ(result.find("PIPE_ALL"), std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_V>();"), std::string::npos);
 }

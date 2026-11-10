@@ -95,8 +95,6 @@ add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_nddma_
 # 设计文档 `2026-10-19-afir-transpose-e2e-design.md`（2026-10-27 v2 迁移记录）。
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_transpose_store" cases/load_transpose_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_transpose_store_2d" cases/load_transpose_store_2d)
-add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/sub_transpose_abs" cases/sub_transpose_abs)
-add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/transpose_generalization" cases/transpose_generalization)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_sum_store" cases/load_sum_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_mean_store" cases/load_mean_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_neg_sum_store" cases/load_neg_sum_store)

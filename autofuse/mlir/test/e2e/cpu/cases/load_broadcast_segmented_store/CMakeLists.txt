@@ -6,8 +6,8 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-# 形态 B（`[normal][brc]`，广播轴是内轴）的分段广播。这张图的 stage 有两个模板，计划选择
-# 代不出常数，两个都留给运行期选；其中「广播轴排到 tile 外」那一份的搬运偏移要按非向量化
+# 形态 B（`[normal][brc]`，广播轴是内轴）的分段广播。这张图的 stage 有两个模板，
+# 两个都生成并留给运行期 ATT 选择；其中「广播轴排到 tile 外」那一份的搬运偏移要按非向量化
 # 轴逐轴算出来（`TransferPlan.cpp` 的 `materializeTensorOffset`），算错是静默的。
 #
 # 两个形状都要：`[8,1]` 的 `size(z1T) > 1`，`[1024,1]` 的等于 1——后者会让「偏移 = 线性序号 ×
@@ -74,3 +74,12 @@ add_mlir_e2e_cpu_case(load_broadcast_segmented_store_2x3x5x7x1
     OUTPUT_SHAPE "[2, 3, 5, 7, 11]"
     INPUT_SHAPES "[2, 3, 5, 7, 1]"
 )
+
+# Keep default selection above, and execute both strategies on the same shape.
+foreach(template_id 0 1)
+    add_mlir_e2e_cpu_case(load_broadcast_segmented_store_8x1_template${template_id}
+        OUTPUT_SHAPE "[8, 128]"
+        INPUT_SHAPES "[8, 1]"
+        ENVIRONMENT "AUTOFUSE_DFX_FLAGS=--force_schedule_result=0;--force_tiling_case=${template_id}"
+    )
+endforeach()

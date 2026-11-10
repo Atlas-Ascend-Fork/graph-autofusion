@@ -403,6 +403,15 @@ af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result,
                        std::string &input_type, std::string &output_type);
 af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
                        std::string &input_type, std::string &output_type, MatMulAttr &matmul_attr);
+
+// Inductor CV rtLaunch 分派入口开关：launch_decouple 为 pyautofuse codegen_bin 入口的
+// 前端决策，本谓词限定 Inductor CV 场景（排除 conv2d 且 GetCubeInfo 可解析）；关闭时
+// 生成物与 legacy 完全一致。is_batch 供分派入口区分两套位域解码。
+bool IsLaunchDecoupleCvVariantEnabled(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch,
+                                      bool launch_decouple);
+
+// SIMT dcache 保留区扣除后的动态 UB（无保留区返回 -1，消费方跳过设置）。
+int64_t CalcDynamicUbSize(const ascir::FusedScheduledResult &fused_schedule_result);
 }  // namespace ascgen_utils
 
 #endif

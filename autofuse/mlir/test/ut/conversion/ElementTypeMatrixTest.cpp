@@ -201,9 +201,7 @@ constexpr KnownNarrowerRow kKnownNarrower[] = {
     // 这六位里落在那四条上的只有 `ui8`：它绑的是包装（先 `ReinterpretCast<uint16_t>`
     // 再发一条半宽的 `Duplicate`），不是这条路发的 `AscendC::Duplicate`。把 `ui8` 也
     // 注册上，发出去的就是一条 legacy 从来没发过的调用——比答 unsupported 更坏。
-    // 要收 `ui8`，得另起一个带 `duplicate.h` 扩展头、发包装调用的 implementation。
-    {"broadcast.tensor.duplicate", kF16 | kF32 | kI16 | kI32 | kUI16, kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16,
-     "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
+    // mem 侧已用 DuplicateU8Op 接入包装；reg 侧仍只发标准调用。
     {"broadcast.tensor.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16, kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16,
      "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
     // mem 档**有意**摘除 i32（连带无位的 ui32 同摘）：v1 布局对非 float 的 transpose 只给

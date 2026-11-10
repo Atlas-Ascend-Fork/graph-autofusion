@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -2606,6 +2607,117 @@ af::Status BuildSimtIndexPrepassPlan(const af::AscNode &indirect_load, SimtIndex
   return af::SUCCESS;
 }
 
+// [归并链 DAG 宽度] 链求值任意瞬间一个线程必须同时持有的链内新产生临时数（forward
+// 节点的输出值）。硬约束：不含成员 value（已在峰值模型 3N 常驻项内，重复计入会
+// 双重计算，链形会误得 W=N）；不用最长路径当宽度（那是延迟，链形最长路径=N 而 W=1）；
+// 位置序不信任图插入序（GetAllNodes 无拓扑保证——消费者先于生产者插入会使事件错位、
+// 宽度被低估，恰为 spill 风险方向），改对前向闭包子图做 Kahn 拓扑排序，就绪集按
+// GetAllNodes 序取最小（确定性，宽度可复现）。生命周期 = 节点算出至其最后一个前向
+// 闭包内消费者，消费即释放；域外消费者（Store/Reduce/终端）不缩短生命周期（活到
+// 链尾）；同一位置先释放后生产（事件净和体现）。事件按输出数计（每个输出张量一个
+// 活跃值——上界语义；forward 闭包为 elementwise 单输出，计数与单值一致）。
+uint64_t ComputeMergeChainWidth(const af::AscGraph &graph, const std::vector<af::AscNodePtr> &forward_nodes,
+                                const std::vector<af::AscNodePtr> &members) {
+  std::unordered_set<const af::AscNode *> member_set;
+  for (const af::AscNodePtr &member : members) {
+    member_set.emplace(member.get());
+  }
+  std::unordered_set<const af::AscNode *> forward_set;
+  for (const af::AscNodePtr &node : forward_nodes) {
+    forward_set.emplace(node.get());
+  }
+  if (forward_set.empty()) {
+    return 0UL;
+  }
+  // 图内稳定序（仅作 Kahn 就绪集的确定性 tie-break，不承担拓扑保证）。
+  std::unordered_map<const af::AscNode *, size_t> graph_order;
+  size_t order_index = 0UL;
+  for (const auto &graph_node : graph.GetAllNodes()) {
+    if (graph_node != nullptr) {
+      graph_order.emplace(graph_node.get(), order_index++);
+    }
+  }
+  const auto order_of = [&graph_order](const af::AscNode *node) {
+    const auto iter = graph_order.find(node);
+    return iter != graph_order.end() ? iter->second : SIZE_MAX;
+  };
+  // 前向内部邻接与入度（成员/域外输入为边界源，不计入度）。
+  std::unordered_map<const af::AscNode *, std::vector<const af::AscNode *>> consumers;
+  std::unordered_map<const af::AscNode *, size_t> in_degree;
+  for (const af::AscNodePtr &node : forward_nodes) {
+    in_degree.emplace(node.get(), 0UL);
+  }
+  for (const af::AscNodePtr &node : forward_nodes) {
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer == nullptr || forward_set.count(consumer.get()) == 0UL) {
+        continue;
+      }
+      consumers[node.get()].emplace_back(consumer.get());
+      ++in_degree[consumer.get()];
+    }
+  }
+  // Kahn：就绪集按 (graph_order, 节点指针) 有序，弹出最小——拓扑序确定可复现。
+  std::set<std::pair<size_t, const af::AscNode *>> ready;
+  for (const af::AscNodePtr &node : forward_nodes) {
+    if (in_degree[node.get()] == 0UL) {
+      ready.emplace(order_of(node.get()), node.get());
+    }
+  }
+  std::vector<af::AscNode *> ordered;
+  ordered.reserve(forward_nodes.size());
+  std::unordered_map<const af::AscNode *, size_t> pos;
+  while (!ready.empty()) {
+    af::AscNode *current = const_cast<af::AscNode *>(ready.begin()->second);
+    ready.erase(ready.begin());
+    pos.emplace(current, ordered.size());
+    ordered.emplace_back(current);
+    const auto consumer_iter = consumers.find(current);
+    if (consumer_iter == consumers.end()) {
+      continue;
+    }
+    for (const af::AscNode *consumer : consumer_iter->second) {
+      if (--in_degree[consumer] == 0UL) {
+        ready.emplace(order_of(consumer), consumer);
+      }
+    }
+  }
+  const size_t node_count = ordered.size();
+  // 前向闭包为无环子图（成员输出的前向 DAG），全部节点必被排序；防御性校验。
+  if (node_count != forward_set.size()) {
+    return static_cast<uint64_t>(forward_set.size());
+  }
+  std::vector<int64_t> events(node_count + 1U, 0);
+  for (size_t index = 0UL; index < node_count; ++index) {
+    af::AscNode *node = ordered[index];
+    const size_t output_count = node->outputs().size();
+    size_t last = node_count;  // 无前向闭包内消费者：活到链尾
+    bool has_forward_consumer = false;
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer == nullptr || member_set.count(consumer.get()) != 0UL || pos.find(consumer.get()) == pos.end()) {
+        continue;
+      }
+      const size_t consumer_pos = pos.at(consumer.get());
+      if (!has_forward_consumer) {
+        last = consumer_pos;
+        has_forward_consumer = true;
+      } else {
+        last = std::max(last, consumer_pos);
+      }
+    }
+    events[index] += static_cast<int64_t>(output_count);
+    events[last] -= static_cast<int64_t>(output_count);
+  }
+  int64_t live = 0;
+  int64_t width = 0;
+  for (size_t index = 0UL; index < node_count; ++index) {
+    live += events[index];
+    width = std::max(width, live);
+  }
+  return static_cast<uint64_t>(width);
+}
+
 // [组共享轴等价化] 覆盖检查：从 schedule.cpp 的 sched_has_all_members 抽出，调度器与
 // 候选生成期共用同一判据，避免两处独立实现漂移。节点的 sched.axis 需包含 merged_axis.from
 // 的全部成员轴，否则模板轴折叠（ApplySchedAxisMerge 的连续性断言）不适用于该节点。
@@ -2704,7 +2816,8 @@ bool IsSplitTypeAxis(const af::Axis &axis) {
 // repeats/strides，id 替换即归一化；成员视图需以组共享轴接入模板 from 覆盖链——成员
 // 不参与模板轴构建，与 primary 是角色差异而非判据单侧）。split 类型轴（分核/分 tile）
 // 双侧统一拒绝：携带切分语义，替换丢语义、跳过会把切分轴留给模板轴合并吞并。
-af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal) {
+af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal,
+                               std::unordered_map<ascir::AxisId, ascir::AxisId> *old_to_group) {
   is_legal = true;
   if (members.size() < 2UL) {
     return af::SUCCESS;
@@ -2764,7 +2877,7 @@ af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNod
       continue;  // 复合轴：合法前端结构，由 NormalizeSimtAxesForGroupTemplate 统一构建
     }
     // [原子性预检] 等价判定（上方）与逐成员存在性/split 类型核验全部通过后才进入替换：
-    // 拒绝路径不触碰任何成员视图（候选图为独立副本，原子拒绝便于调试与复用）。
+    // 拒绝路径不触碰任何成员视图（候选图为独立副本，原子拒绝保证结果可复现）。
     for (size_t index = 0UL; index < members.size(); ++index) {
       const auto *member_axis = graph.FindAxis(dim_axes[index]);
       if (member_axis == nullptr) {
@@ -2792,6 +2905,9 @@ af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNod
             members[index]->GetNamePtr(), dim, dim_axes[index]);
         return af::SUCCESS;
       }
+      if (old_to_group != nullptr) {
+        (*old_to_group)[dim_axes[index]] = group_axis.id;
+      }
     }
     GELOGI("[IndirectLoad] Normalized group axis[%ld, name=%s] at dim[%zu] (was %ld..%ld).", group_axis.id,
            group_name.c_str(), dim, dim_axes[0], dim_axes.back());
@@ -2803,6 +2919,168 @@ af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNod
   // input ⊆ output 前置检查——归一化时点消费者的输出视图尚未被模板轴合并改写，
   // 检查必然失败（组轴 ∈ 输入视图但 ∉ 原始输出视图）。不变量由 codegen 的
   // ValidateShapeConsistencyWithSingleOutput 在模板轴合并完成后校验。
+  return af::SUCCESS;
+}
+
+af::Status PropagateGroupAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                              const std::unordered_map<ascir::AxisId, ascir::AxisId> &old_to_group, bool &is_legal) {
+  is_legal = true;
+  if (old_to_group.empty() || members.empty()) {
+    return af::SUCCESS;
+  }
+  // 成员归一化后的合法轴集合（组共享轴 + 未替换的共享轴）。
+  std::unordered_set<ascir::AxisId> member_axis_ids;
+  for (const af::AscNodePtr &member : members) {
+    for (const auto *tensor : member->outputs()) {
+      if (tensor != nullptr) {
+        member_axis_ids.insert(tensor->attr.axis.begin(), tensor->attr.axis.end());
+      }
+    }
+  }
+  // 成员前向闭包（BFS：链/Store/Reduce 终端，成员为边界不重入）。
+  std::vector<af::AscNodePtr> closure;
+  std::unordered_set<const af::AscNode *> visited;
+  for (const af::AscNodePtr &member : members) {
+    (void)visited.emplace(member.get());
+  }
+  for (const af::AscNodePtr &member : members) {
+    for (const auto &out_node : member->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer != nullptr && visited.emplace(consumer.get()).second) {
+        closure.emplace_back(consumer);
+      }
+    }
+  }
+  for (size_t cursor = 0UL; cursor < closure.size(); ++cursor) {
+    for (const auto &out_node : closure[cursor]->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer != nullptr && visited.emplace(consumer.get()).second) {
+        closure.emplace_back(consumer);
+      }
+    }
+  }
+  // [输入侧闭包] 链的生产者不在前向闭包内（side 链/side load 是链的输入而非消费者），
+  // 但链节点进 tiling group 后它们的旧轴 id 同样会并进 y_group——从链节点（含终端）
+  // 的输入向后追溯：遇成员/数据源（Data/常量 Scalar）为边界，其余生产者（side load、
+  // side 链节点）纳入同一套"映射 → 等价归并 → 广播豁免 → 真新维度拒绝"。
+  const auto is_backward_boundary = [&members](const af::AscNodePtr &node) {
+    if (node == nullptr || af::ops::IsOps<af::ascir_op::Data>(node) || af::ops::IsOps<af::ascir_op::Scalar>(node) ||
+        af::ops::IsOps<af::ascir_op::ScalarData>(node) || af::ops::IsOps<af::ascir_op::Arange>(node)) {
+      return true;
+    }
+    return std::any_of(members.begin(), members.end(),
+                       [&node](const af::AscNodePtr &member) { return node.get() == member.get(); });
+  };
+  for (size_t cursor = 0UL; cursor < closure.size(); ++cursor) {
+    for (const auto &in_node : closure[cursor]->GetInDataNodes()) {
+      const auto producer = std::dynamic_pointer_cast<af::AscNode>(in_node);
+      if (producer == nullptr || is_backward_boundary(producer)) {
+        continue;
+      }
+      if (visited.emplace(producer.get()).second) {
+        closure.emplace_back(producer);
+      }
+    }
+  }
+  // 核心闭包边界：成员前向 + 输入侧追溯到此为止——之后的节点属扩展区（见下方）。
+  const size_t core_closure_size = closure.size();
+  // [输入侧闭包的下游完备性] 被迁移的生产者（side 链/side load）可能同时被闭包外的
+  // 节点消费：其输入视图（非拥有引用）自动跟随生产者输出视图的新轴，但其自身输出
+  // 视图仍持旧 id → 同节点 input ⊄ output（ValidateInputTensorLoopAxis 失败）。从
+  // 全部闭包节点再做一轮前向扩展（含 backward 节点的组外消费者，传递至终端），
+  // 对扩展节点同样迁移被映射/等价的轴——其私有轴空间（非成员、非映射、非等价、
+  // 非广播）不拒绝：组外流自有轴系不在本组一致性管辖内，仅保证与被迁移张量的
+  // 视图衔接一致。
+  for (size_t cursor = 0UL; cursor < closure.size(); ++cursor) {
+    for (const auto &out_node : closure[cursor]->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer != nullptr && visited.emplace(consumer.get()).second) {
+        closure.emplace_back(consumer);
+      }
+    }
+  }
+  // [计划 + 全量校验]（原子性：任一真新维度即拒绝且不改图）。核心闭包（成员前向 +
+  // 输入侧追溯）执行全量规则；扩展区（输入侧节点的组外下游）仅迁移被映射/等价的轴，
+  // 其私有轴空间不拒绝——组外流自有轴系不在本组一致性管辖内，仅保证与被迁移张量的
+  // 视图衔接一致（input ⊆ output 不变量）。
+  struct ReplacePlan {
+    af::AscNodePtr node;
+    ascir::AxisId from;
+    ascir::AxisId to;
+  };
+  std::vector<ReplacePlan> plan;
+  const auto &primary_attr = members.front()->outputs()[0]->attr;
+  for (size_t cursor = 0UL; cursor < closure.size(); ++cursor) {
+    const af::AscNodePtr &node = closure[cursor];
+    const bool expansion_zone = cursor >= core_closure_size;
+    for (const auto *tensor : node->outputs()) {
+      if (tensor == nullptr) {
+        continue;
+      }
+      const auto &attr = tensor->attr;
+      for (size_t dim = 0UL; dim < attr.axis.size(); ++dim) {
+        const ascir::AxisId axis_id = attr.axis[dim];
+        const auto mapped = old_to_group.find(axis_id);
+        if (mapped != old_to_group.end()) {
+          plan.push_back({node, axis_id, mapped->second});
+          continue;
+        }
+        if (member_axis_ids.count(axis_id) != 0UL) {
+          continue;
+        }
+        // 广播轴豁免：size=1 或该维 stride=0（不参与切分与一致性检查）。
+        const auto *axis = graph.FindAxis(axis_id);
+        const bool size_one =
+            axis != nullptr && af::SymbolicUtils::StaticCheckEq(axis->size, af::sym::kSymbolOne) == af::TriBool::kTrue;
+        const bool stride_zero =
+            dim < attr.strides.size() &&
+            af::SymbolicUtils::StaticCheckEq(attr.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue;
+        if (size_one || stride_zero) {
+          continue;
+        }
+        // 等价轴归并：与成员同维轴同 size 且视图 repeats/strides 等价 → 替换为成员轴。
+        if (dim < primary_attr.axis.size() && dim < primary_attr.repeats.size() && dim < primary_attr.strides.size() &&
+            dim < attr.repeats.size() && dim < attr.strides.size()) {
+          const auto *member_axis = graph.FindAxis(primary_attr.axis[dim]);
+          if (axis != nullptr && member_axis != nullptr && AreExpressionsEquivalent(axis->size, member_axis->size) &&
+              AreExpressionsEquivalent(attr.repeats[dim], primary_attr.repeats[dim]) &&
+              AreExpressionsEquivalent(attr.strides[dim], primary_attr.strides[dim])) {
+            plan.push_back({node, axis_id, primary_attr.axis[dim]});
+            continue;
+          }
+        }
+        // 扩展区私有轴：保留不迁移、不拒绝（见上方注释）。
+        if (expansion_zone) {
+          continue;
+        }
+        // 真新维度：不在映射/成员集合/广播豁免/等价归并内——拒绝候选（链上加维会改
+        // 变 y_group 枚举，[k,R] 窗口失配；rank 级加维已被 BuildPostReduceLayout 的
+        // rank 断言在 tiling 前拦下）。
+        is_legal = false;
+        GELOGI("[IndirectLoad] Reject: closure node[%s] carries true new axis[%ld] at dim[%zu].", node->GetNamePtr(),
+               axis_id, dim);
+        return af::SUCCESS;
+      }
+    }
+  }
+  // 统一执行：TryApplyAxisReplace 覆盖 sched.axis + 输出视图轴；vectorized_axis 另行
+  // 替换（其元素是轴 id 列表，TryApplyAxisReplace 不触碰）。幂等：重复执行时旧 id 已
+  // 消失，计划为空即 no-op。轴存在性在计划阶段已被创建方保证（组轴由 CreateAxis 新建、
+  // 成员轴来自成员视图），此处缺轴属不可达的图状态破坏——硬断言而非拒绝，保住"失败
+  // 不改图"的原子性承诺（执行中途拒绝会留下半改写图）。
+  for (const ReplacePlan &entry : plan) {
+    const auto *from_axis = graph.FindAxis(entry.from);
+    const auto *to_axis = graph.FindAxis(entry.to);
+    GE_ASSERT_TRUE(from_axis != nullptr && to_axis != nullptr, "IndirectLoad propagate axis[%ld->%ld] not found.",
+                   entry.from, entry.to);
+    (void)graph.TryApplyAxisReplace(entry.node, *from_axis, *to_axis);
+    for (auto *tensor : entry.node->outputs()) {
+      if (tensor != nullptr) {
+        std::replace(tensor->attr.vectorized_axis.begin(), tensor->attr.vectorized_axis.end(), entry.from, entry.to);
+      }
+    }
+  }
+  GELOGI("[IndirectLoad] Propagated group axes to %zu closure nodes (%zu replacements).", closure.size(), plan.size());
   return af::SUCCESS;
 }
 

@@ -7172,6 +7172,66 @@ TEST_F(TestCodegenTiling, CodegenGenerateForInductorCvFusionShouldFallbackToSafe
   EXPECT_NE(ub_case1_fail_body.find("return 0;"), std::string::npos);
 }
 
+TEST_F(TestCodegenTiling, CodegenGenerateForInductorCvFusionLaunchDecoupleControlsKernelForm) {
+  auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused_schedule_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), af::SUCCESS);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+
+  // 缺省（launch_decouple=false）：legacy 形态——<<< 启动点在，无分派入口/AIV split
+  // 标记/死分支裁剪宏标记/GetDynamicUbSize 导出（与老前端 codegen() 入口生成物一致）。
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), af::SUCCESS);
+  EXPECT_NE(result.kernel.find("<<<"), std::string::npos);
+  EXPECT_EQ(result.kernel.find("#ifndef AF_AIV_UNIT"), std::string::npos);
+  EXPECT_EQ(result.kernel.find("_op_kernel_aiv.cpp"), std::string::npos);
+  EXPECT_EQ(result.tiling.find("GetDynamicUbSize"), std::string::npos);
+
+  // launch_decouple=true：rtLaunch 形态——<<< 退出，extern "C" 分派入口 + AIV split
+  // 标记 + 裁剪宏标记 + GetDynamicUbSize 导出（codegen_bin 入口契约）。
+  codegen::CodegenResult rt_result;
+  ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, rt_result, true), af::SUCCESS);
+  EXPECT_EQ(rt_result.kernel.find("<<<"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("#ifndef AF_AIV_UNIT"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("_op_kernel_aiv.cpp"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("extern \"C\" __global__ __aicore__ void"), std::string::npos);
+  EXPECT_NE(rt_result.tiling.find("GetDynamicUbSize"), std::string::npos);
+
+  // mode 运行时化（GenCubeTilingFuncCall/InitCVFusionAddr/GenCubeCommonTiling 的 flag 形参）：
+  // legacy 为 constexpr 模板形态 + TILING_DATA_T 类型实参；rtLaunch 为运行时 if 读 tiling
+  // 字段 + CVAutofuseTilingData 统一类型实参。
+  EXPECT_NE(result.kernel.find("if constexpr (UB_MODE == 0)"), std::string::npos);
+  EXPECT_EQ(result.kernel.find("if (t.cv_tiling_data.ub_mode == 0)"), std::string::npos);
+  EXPECT_NE(result.kernel.find("mat_mul_v3_fusion<TILING_DATA_T"), std::string::npos);
+  EXPECT_EQ(result.kernel.find("mat_mul_v3_fusion<CVAutofuseTilingData"), std::string::npos);
+
+  EXPECT_NE(rt_result.kernel.find("if (t.cv_tiling_data.ub_mode == 0)"), std::string::npos);
+  EXPECT_EQ(rt_result.kernel.find("if constexpr (UB_MODE == 0)"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("mat_mul_v3_fusion<CVAutofuseTilingData"), std::string::npos);
+  EXPECT_EQ(rt_result.kernel.find("mat_mul_v3_fusion<TILING_DATA_T"), std::string::npos);
+
+  // 强回归守卫：rtLaunch（7 参模板）作用域内不存在 TILING_DATA_T 这个名字——任何
+  // 残留发射点（如 kCommon 兜底组 cube 调用的静态形态 mat_mul_v3<TILING_DATA_T）都会
+  // 在真机编译期报 use of undeclared identifier 'TILING_DATA_T'。宏名
+  // INDUCTOR_TILING_DATA 不含该子串（DATA 后无 _T），断言无误伤。
+  EXPECT_EQ(rt_result.kernel.find("TILING_DATA_T"), std::string::npos);
+  // kCommon 兜底组（CV 必有）的 cube 调用同样统一 CVAutofuseTilingData 类型实参。
+  EXPECT_NE(rt_result.kernel.find("mat_mul_v3<CVAutofuseTilingData"), std::string::npos);
+
+  // 模板参数运行时化：legacy 11 参（TILING_DATA_T + FUSION_MODE/UB_MODE/MIX_MODE），
+  // rtLaunch 7 参（mode 三元组与类型参数全部退出）。
+  EXPECT_NE(result.kernel.find("typename TILING_DATA_T"), std::string::npos);
+  EXPECT_NE(result.kernel.find("int8_t FUSION_MODE"), std::string::npos);
+  EXPECT_NE(result.kernel.find("int8_t UB_MODE"), std::string::npos);
+  EXPECT_NE(result.kernel.find("int8_t MIX_MODE"), std::string::npos);
+  EXPECT_EQ(rt_result.kernel.find("typename TILING_DATA_T"), std::string::npos);
+  EXPECT_EQ(rt_result.kernel.find("int8_t FUSION_MODE"), std::string::npos);
+  EXPECT_EQ(rt_result.kernel.find("int8_t UB_MODE"), std::string::npos);
+  EXPECT_EQ(rt_result.kernel.find("int8_t MIX_MODE"), std::string::npos);
+}
+
 TEST_F(TestCodegenTiling, CodegenGenerateShouldNotEmitSplitMarkers) {
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")});
   codegen::Codegen codegen(codegen::CodegenOptions{});

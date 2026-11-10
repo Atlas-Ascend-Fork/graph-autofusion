@@ -97,6 +97,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="实验根目录。默认 $AF_NPU_AGENT_DIR/npu-e2e-<sha>-<时间戳>（§2.4.1）。",
     )
     parser.add_argument("--build-dir", default="", help="autofuse 的 build 目录。")
+    parser.add_argument(
+        "--install-dir",
+        default="",
+        help="使用 cmake --install 生成的运行目录，不创建 overlay。",
+    )
     parser.add_argument("--overlay", default="", help="overlay 落点。")
     parser.add_argument(
         "--rebuild-overlay",
@@ -189,7 +194,13 @@ def run_one(
     if args.jobs > 1:
         # 两颗芯各跑一股。`ASCEND_RT_VISIBLE_DEVICES` 决定进程能看见哪颗。
         extra["ASCEND_RT_VISIBLE_DEVICES"] = str(device_index)
-    env = device_env.environ_for_run(repo, build, overlay, extra=extra)
+    env = device_env.environ_for_run(
+        repo,
+        build,
+        overlay,
+        extra=extra,
+        installed=bool(getattr(args, "install_dir", "")),
+    )
 
     argv = [device_env.python_bin(), str(device_env.cases_dir(repo) / case.script)]
     argv.extend(case.argv)
@@ -416,8 +427,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     repo = device_env.repo_root()
     try:
         build = device_env.build_dir(repo, args.build_dir or None)
-        overlay = device_env.overlay_dir(repo, args.overlay or None)
-        device_env.ensure_overlay(repo, build, overlay, rebuild=args.rebuild_overlay)
+        if args.install_dir:
+            if args.overlay or args.rebuild_overlay:
+                raise device_env.DeviceEnvError(
+                    "--install-dir 不能与 overlay 参数同时使用"
+                )
+            overlay = Path(args.install_dir).resolve()
+        else:
+            overlay = device_env.overlay_dir(repo, args.overlay or None)
+            device_env.ensure_overlay(
+                repo, build, overlay, rebuild=args.rebuild_overlay
+            )
     except device_env.DeviceEnvError as error:
         print("环境没搭起来，一条用例都没跑：\n{}".format(error), file=sys.stderr)
         return 2
@@ -432,14 +452,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print("仓     : {}".format(repo))
     print("build  : {}".format(build))
-    print("overlay: {}".format(overlay))
+    print("runtime: {}".format(overlay))
     print("产物   : {}".format(work_root))
     print("用例   : {} 条，并发 {}".format(len(chosen), args.jobs))
 
     if not args.skip_preflight:
         try:
             origins = device_env.preflight(
-                device_env.environ_for_run(repo, build, overlay), overlay
+                device_env.environ_for_run(
+                    repo, build, overlay, installed=bool(args.install_dir)
+                ),
+                overlay,
             )
         except device_env.DeviceEnvError as error:
             print("\n前置检查没过，一条用例都没跑：\n{}".format(error), file=sys.stderr)

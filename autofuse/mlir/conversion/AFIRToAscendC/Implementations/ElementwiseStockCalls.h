@@ -89,7 +89,8 @@ AFIR_ELEMENTWISE_STOCK_CALL(ErfcOp);
 AFIR_ELEMENTWISE_STOCK_CALL(TruncOp);
 AFIR_ELEMENTWISE_STOCK_CALL(SubL2Op);
 AFIR_ELEMENTWISE_STOCK_CALL(DivL2Op);
-// `afir.broadcast` 的常量源一档两侧都发它。legacy 的 `duplicate.h` 里确实有 `Duplicate`
+// `afir.broadcast` 的原生类型两侧都发它；mem 侧 ui8 单独发 DuplicateU8Op。
+// legacy 的 `duplicate.h` 里确实有 `Duplicate`
 // 的包装重载，但只覆盖 int64 / uint64 / int8 / uint8——那几种不在该 implementation 收的
 // 集合里，发出去的就是标准调用（见 Broadcast.cpp 的 `kDuplicateElementTypes`）。
 AFIR_ELEMENTWISE_STOCK_CALL(DuplicateL2Op);

@@ -241,7 +241,9 @@ LogicalResult AppendTemplateSpecs(ModuleOp module, const PlanModuleMetadata &met
         return failure();
       }
     }
-    stage->templates.push_back({variant.getTemplateId(), workspace});
+    auto graph = function->getAttrOfType<afir::AscGraphAttrGroupsAttr>(afir::kAscGraphAttrName);
+    stage->templates.push_back(
+        {variant.getTemplateId(), workspace, graph ? graph.getTilingKey() : variant.getTemplateId()});
   }
   for (TilingStageSpec &stage : stages) {
     llvm::sort(stage.templates, [](const TilingTemplateSpec &lhs, const TilingTemplateSpec &rhs) {
@@ -269,7 +271,11 @@ FailureOr<TilingPlanSpec> BuildPlanSpec(ModuleOp module, const PlanModuleMetadat
       failed(AppendTemplateSpecs(module, metadata, *stages))) {
     return failure();
   }
-  return TilingPlanSpec{metadata.subgraph_id, metadata.plan_id, std::move(*stages)};
+  TilingPlanSpec plan{metadata.subgraph_id, metadata.plan_id, std::move(*stages), {}};
+  if (auto ids = module->getAttrOfType<DenseI64ArrayAttr>(afir::kWorkspaceTensorIdsAttrName)) {
+    plan.workspace_tensor_ids.assign(ids.asArrayRef().begin(), ids.asArrayRef().end());
+  }
+  return plan;
 }
 
 }  // namespace

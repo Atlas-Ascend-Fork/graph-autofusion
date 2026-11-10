@@ -14,6 +14,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "common/tiling_schema/resource_budget.h"
 #include "dialect/AFIR/IR/AFIR.h"
 #include "common/tiling_schema/canonical_resource_names.h"
 #include "dialect/AFIR/IR/AFIRElementwiseSupport.h"
@@ -870,7 +871,7 @@ mlir::LogicalResult mlir::afir::KernelArgAttr::verify(llvm::function_ref<mlir::I
 mlir::LogicalResult mlir::afir::TargetAttr::verify(llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
                                                    mlir::StringAttr soc, int64_t aivNum, int64_t ubSize) {
   constexpr int64_t kUint32Max = std::numeric_limits<uint32_t>::max();
-  constexpr int64_t kUbSizeReservedBytes = 256;
+  constexpr int64_t kUbSizeReservedBytes = common::kTilingReservedUbBytes;
   if (!soc || soc.getValue().empty()) {
     return emitError() << kInvalidDescriptorDiagnostic << ": target soc must not be empty";
   }

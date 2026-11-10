@@ -63,7 +63,7 @@ else
   PYTHON_CMD="python3"
 fi
 
-SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e")
+SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e" "autofuse_v35_1" "autofuse_v35_2" "autofuse_v35_3")
 declare -A MODULE_ACTION_HANDLERS=(
   ["multistream:py_ut"]="multistream_py_ut"
   ["multistream:py_st"]="multistream_py_st"
@@ -76,6 +76,9 @@ declare -A MODULE_ACTION_HANDLERS=(
   ["autofuse_ascendc_api:all_ut"]="autofuse_module_test_suite"
   ["autofuse_ascendc_api:all_st"]="autofuse_module_test_suite"
   ["autofuse_e2e:all_st"]="autofuse_module_test_suite"
+  ["autofuse_v35_1:all_st"]="autofuse_module_test_suite"
+  ["autofuse_v35_2:all_st"]="autofuse_module_test_suite"
+  ["autofuse_v35_3:all_st"]="autofuse_module_test_suite"
 )
 
 # print usage message
@@ -692,6 +695,7 @@ autofuse_module_test_suite() {
     autofuse_framework) test_module="framework" ;;
     autofuse_ascendc_api) test_module="ascendc_api" ;;
     autofuse_e2e) test_module="e2e" ;;
+    autofuse_v35_1|autofuse_v35_2|autofuse_v35_3) test_module="${module#autofuse_}" ;;
     *)
       echo "ERROR: Unsupported autofuse test module: ${module}."
       return 1

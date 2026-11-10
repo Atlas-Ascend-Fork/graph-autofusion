@@ -10,6 +10,7 @@
 
 //===- ScheduleToAfir.cpp - ScheduledResult → AFIR (in-process) -*- C++ -*-===//
 
+#include "common/tiling_schema/template_keys.h"
 #include "bridge/ScheduleToAfir/ScheduleToAfir.h"
 #include "support/AfirElementTypes.h"
 #include "support/CapabilityShortfall.h"
@@ -808,6 +809,12 @@ mlir::LogicalResult CheckResourceCompatibility(const TensorValueDTO &first, llvm
     return mlir::failure();
   }
 
+  // Distinct queue members are packed into disjoint byte ranges by MemoryAllocate.
+  // Their GM and UB views need not agree; repeated views of one tensor still do.
+  if (first.schedule.domain == BindingDomain::Queue && first.schedule.tensorId != second.schedule.tensorId) {
+    return mlir::success();
+  }
+
   const bool sameTensorView =
       first.tensor.shape == second.tensor.shape && first.tensor.shape_exprs == second.tensor.shape_exprs &&
       first.tensor.repeats == second.tensor.repeats && first.tensor.axis == second.tensor.axis &&
@@ -818,7 +825,7 @@ mlir::LogicalResult CheckResourceCompatibility(const TensorValueDTO &first, llvm
     return mlir::success();
   }
 
-  // 两种视图差异都只发生在非队列 buffer：队列 slot 只有一张 tile，混排是能力不足。非队列
+  // 以下检查处理同一 queue 成员的重复视图或非队列 buffer 的时间复用。非队列
   // `reuse_id = -1` 表示时间复用，成员偏移都是 0；资源容量由 ATT 的 `b<id>_size` 聚合，
   // 广播视图还必须能通过下降侧的外层行距判据。
   const bool isNonQueue = first.schedule.domain == BindingDomain::Buffer;
@@ -841,47 +848,60 @@ mlir::LogicalResult CheckResourceCompatibility(const TensorValueDTO &first, llvm
   return mlir::failure();
 }
 
-mlir::LogicalResult ValidateTemplateResources(const TemplateInfo &tmpl, mlir::Location loc) {
+struct TemplateResourceState {
   // 记下先占位的那个是谁：冲突诊断要同时点名两边，只说后来者等于让读的人自己去猜前一个。
   std::map<ResourceKey, std::pair<std::string, const TensorValueDTO *>> resources;
-  auto checkValue = [&](const TensorValueDTO &value, const std::string &owner) -> mlir::LogicalResult {
-    if (mlir::failed(ValidateScheduleBinding(value.schedule, loc)) || mlir::failed(ValidateTensorFacts(value, loc))) {
-      return mlir::failure();
-    }
-    if (value.buffer.bufferId == -1) {
-      return mlir::success();
-    }
-    ResourceKey key{value.schedule.domain, value.buffer.space, value.buffer.bufferId, value.buffer.reuseId};
-    auto [it, inserted] = resources.emplace(key, std::make_pair(owner, &value));
-    if (!inserted) {
-      return CheckResourceCompatibility(*it->second.second, it->second.first, value, owner, loc);
-    }
-    return mlir::success();
-  };
+  std::map<std::pair<ResourceKey, int64_t>, std::pair<std::string, const TensorValueDTO *>> queueMembers;
+};
 
+mlir::LogicalResult ValidateTensorResource(const TensorValueDTO &value, const std::string &owner,
+                                           TemplateResourceState &state, mlir::Location loc) {
+  if (mlir::failed(ValidateScheduleBinding(value.schedule, loc)) || mlir::failed(ValidateTensorFacts(value, loc))) {
+    return mlir::failure();
+  }
+  if (value.buffer.bufferId == -1) {
+    return mlir::success();
+  }
+  ResourceKey key{value.schedule.domain, value.buffer.space, value.buffer.bufferId, value.buffer.reuseId};
+  auto [it, inserted] = state.resources.emplace(key, std::make_pair(owner, &value));
+  if (!inserted && mlir::failed(CheckResourceCompatibility(*it->second.second, it->second.first, value, owner, loc))) {
+    return mlir::failure();
+  }
+  if (value.schedule.domain == BindingDomain::Queue) {
+    auto [member, newMember] =
+        state.queueMembers.emplace(std::make_pair(key, value.schedule.tensorId), std::make_pair(owner, &value));
+    if (!newMember) {
+      return CheckResourceCompatibility(*member->second.second, member->second.first, value, owner, loc);
+    }
+  }
+  return mlir::success();
+}
+
+mlir::LogicalResult ValidateTemplateResources(const TemplateInfo &tmpl, mlir::Location loc) {
+  TemplateResourceState state;
   for (const auto &input : tmpl.inputs) {
-    if (mlir::failed(checkValue(input.info, "template input '" + input.name + "'"))) {
+    if (mlir::failed(ValidateTensorResource(input.info, "template input '" + input.name + "'", state, loc))) {
       return mlir::failure();
     }
   }
   for (const auto &output : tmpl.outputs) {
-    if (mlir::failed(checkValue(output.info, "template output '" + output.name + "'"))) {
+    if (mlir::failed(ValidateTensorResource(output.info, "template output '" + output.name + "'", state, loc))) {
       return mlir::failure();
     }
   }
   for (const auto &node : tmpl.nodes) {
     for (const auto &input : node.inputs) {
-      if (mlir::failed(checkValue(input, "node '" + node.name + "' operand"))) {
+      if (mlir::failed(ValidateTensorResource(input, "node '" + node.name + "' operand", state, loc))) {
         return mlir::failure();
       }
     }
     if (!node.outputs.empty()) {
       for (const auto &output : node.outputs) {
-        if (mlir::failed(checkValue(output, "node '" + node.name + "' result"))) {
+        if (mlir::failed(ValidateTensorResource(output, "node '" + node.name + "' result", state, loc))) {
           return mlir::failure();
         }
       }
-    } else if (mlir::failed(checkValue(node.output, "node '" + node.name + "' result"))) {
+    } else if (mlir::failed(ValidateTensorResource(node.output, "node '" + node.name + "' result", state, loc))) {
       return mlir::failure();
     }
   }
@@ -960,24 +980,7 @@ TemplateInfo InitializeTemplateInfo(const GraphT &graph, const ascir::ScheduleGr
   TemplateInfo info;
   info.name = TemplateFuncName(stageId, templateId);
   info.original_name = graph.GetName();
-  // **这条规则必须与 ATT 的一致**，因为它是 host 与 device 的约定：host tiling 把
-  // `ModelInfo::tiling_case_id` 写进 `tiling_data.tiling_key`，device 的 kernel entry 拿它选模板
-  // （`GenKernelEntry` 的 `collectStageTilingKeys`）。ATT 那边是
-  // （`att/gen_model_info/gen_model_info.cpp` 的 `GenerateModelInfoWithContext`）：
-  //
-  //     uint32_t tiling_key = 0;
-  //     for (auto &graph : graph_list) {        // graph_list 就是一个 stage 的 impl_graphs
-  //       tiling_key = graph.GetTilingKey() >= 0 ? graph.GetTilingKey() : tiling_key;
-  //       model_info.tiling_case_id = tiling_key;
-  //       ...
-  //       tiling_key++;
-  //     }
-  //
-  // 图上没设 key 时那个计数器就是 stage 内的模板序号，所以这里取 `templateId` 与它等价；
-  // 设了 key 就两边都用它。`CheckKeyValid` 要求一个 stage 内全设或全不设，所以「前一个设了、
-  // 后一个没设」那种会让计数器与 `templateId` 分叉的组合进不来。
-  const int64_t graph_tiling_key = graph.GetTilingKey();
-  info.tiling_key = graph_tiling_key >= 0 ? graph_tiling_key : static_cast<int64_t>(templateId);
+  info.tiling_key = common::TemplateKey(graph, templateId);
   info.stage_id = static_cast<int64_t>(stageId);
   info.template_id = static_cast<int64_t>(templateId);
   info.double_buffer = group.double_buffer;
@@ -1626,7 +1629,7 @@ void AppendShapeEnvInfo(PlanInfo &info) {
 
 mlir::FailureOr<PlanInfo> ToPlanInfo(const ascir::FusedScheduledResult &fusedResult,
                                      const ascir::ScheduledResult &scheduledResult, size_t subgraphId, size_t planId,
-                                     mlir::Location loc) {
+                                     mlir::Location loc, llvm::ArrayRef<std::vector<size_t>> selectedTemplates) {
   PlanInfo info;
   info.name = ModuleName(fusedResult, subgraphId, planId);
   info.subgraph_id = static_cast<int64_t>(subgraphId);
@@ -1658,26 +1661,17 @@ mlir::FailureOr<PlanInfo> ToPlanInfo(const ascir::FusedScheduledResult &fusedRes
   }
 
   for (auto [stageId, group] : llvm::enumerate(scheduledResult.schedule_groups)) {
-    info.template_counts_per_stage.push_back(static_cast<int64_t>(group.impl_graphs.size()));
-    // 一个 stage 内 `tiling_key` 必须互不相同——它是 host 选中哪个模板的唯一凭据。
-    //
-    // 会撞的只有一种输入：**调用方在图上设了 `AscGraph::SetTilingKey`，而调度给这个 stage 出了
-    // 多个模板**。图级 key 被每个 impl_graph 继承，于是所有模板拿到同一个值。
-    // **host 侧同样分不开**：ATT 用的是同一条规则（见 `InitializeTemplateInfo`），它也会给这几个
-    // 模板写同一个 `tiling_case_id`，而 ATT 自己只查「全设或全不设」（`CheckKeyValid`），不查重。
-    // 所以这里报错、并把成因说出来，而不是等它到 `GenKernelEntry` 才以「key 重复」的形式冒出来
-    // ——那条诊断看不出该改哪儿。
-    llvm::SmallDenseSet<int64_t> stageTilingKeys;
+    info.template_counts_per_stage.push_back(
+        static_cast<int64_t>(selectedTemplates.empty() ? group.impl_graphs.size() : selectedTemplates[stageId].size()));
+    std::string keyDiagnostic;
+    if (!common::ValidateTemplateKeys(group, &keyDiagnostic)) {
+      mlir::emitError(loc) << "stage " << stageId << ": " << keyDiagnostic;
+      return mlir::failure();
+    }
     for (auto [templateId, graph] : llvm::enumerate(group.impl_graphs)) {
+      if (!selectedTemplates.empty() && !llvm::is_contained(selectedTemplates[stageId], templateId)) continue;
       mlir::FailureOr<TemplateInfo> templateInfo = ToTemplateInfo(graph, group, stageId, templateId, loc);
       if (mlir::failed(templateInfo)) {
-        return mlir::failure();
-      }
-      if (!stageTilingKeys.insert(templateInfo->tiling_key).second) {
-        mlir::emitError(loc) << "stage " << stageId << " has " << group.impl_graphs.size()
-                             << " templates sharing tiling_key " << templateInfo->tiling_key
-                             << "; a graph-level AscGraph::SetTilingKey cannot identify a template, drop it and let "
-                                "the per-template key default to the template index";
         return mlir::failure();
       }
       info.templates.push_back(std::move(*templateInfo));
@@ -1690,7 +1684,11 @@ mlir::FailureOr<PlanInfo> ToPlanInfo(const ascir::FusedScheduledResult &fusedRes
 
 mlir::OwningOpRef<mlir::ModuleOp> PlanToAfir(mlir::MLIRContext &context, const ascir::FusedScheduledResult &fusedResult,
                                              const ascir::ScheduledResult &scheduledResult, size_t subgraphId,
-                                             size_t planId) {
+                                             size_t planId, llvm::ArrayRef<std::vector<size_t>> selectedTemplates) {
+  if (!selectedTemplates.empty() && selectedTemplates.size() != scheduledResult.schedule_groups.size()) {
+    mlir::emitError(mlir::UnknownLoc::get(&context)) << "Plan selection does not cover its stages";
+    return nullptr;
+  }
   if (scheduledResult.schedule_groups.empty()) {
     mlir::emitError(mlir::UnknownLoc::get(&context)) << "Plan has no stage";
     return nullptr;
@@ -1702,7 +1700,7 @@ mlir::OwningOpRef<mlir::ModuleOp> PlanToAfir(mlir::MLIRContext &context, const a
     }
   }
   mlir::Location loc = mlir::UnknownLoc::get(&context);
-  mlir::FailureOr<PlanInfo> info = ToPlanInfo(fusedResult, scheduledResult, subgraphId, planId, loc);
+  mlir::FailureOr<PlanInfo> info = ToPlanInfo(fusedResult, scheduledResult, subgraphId, planId, loc, selectedTemplates);
   if (mlir::failed(info)) {
     return nullptr;
   }

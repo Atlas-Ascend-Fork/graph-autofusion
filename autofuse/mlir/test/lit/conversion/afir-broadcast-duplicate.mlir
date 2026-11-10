@@ -36,6 +36,20 @@
 // RUN: not af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %t.strided.mlir 2>&1 | FileCheck %s --check-prefix=STRIDED
 // STRIDED: 'afir.broadcast' op has no supported Ascend implementation
 
+// ui8 uses legacy's wrapper and preserves the scalar-read synchronization.
+// RUN: sed 's/f32/ui8/g' %s > %t.ui8.mlir
+// RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %t.ui8.mlir -o %t.ui8.lowered.mlir
+// RUN: FileCheck %s --check-prefix=UI8-IR < %t.ui8.lowered.mlir
+// RUN: af-opt --afir-aggregate-launch --afir-aggregate-launch-graph-name=broadcast_duplicate_ui8 %t.ui8.lowered.mlir | FileCheck %s --check-prefix=UI8-CPP
+// UI8-IR: ascendc.wait_flag {{.*}}mte2_s
+// UI8-IR: ascendc.local_tensor.get_value
+// UI8-IR: ascendc.duplicate_u8
+// UI8-IR-NOT: ascendc.duplicate_l2
+// UI8-CPP: duplicate.h
+// UI8-CPP: .GetValue(
+// UI8-CPP-NOT: AscendC::Duplicate(
+// UI8-CPP: Duplicate({{.*}}static_cast<uint32_t>(
+
 #gm_in = #afir.tensor_desc<axis = [0], repeats = [#afir.expr<"1">], strides = [#afir.expr<"0">], role = <input>>
 #gm_out = #afir.tensor_desc<axis = [0], repeats = [#afir.expr<"128">], strides = [#afir.expr<"1">], role = <output>>
 // 源 tile：向量化轴（2 号，TileInner）上 repeat 1、stride 0——「每个迭代读同一份」，

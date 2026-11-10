@@ -60,11 +60,11 @@ void AppendField(SchemaSink sink, std::string name, const std::string &path,
   }
 }
 
-void AppendCommonFusionFields(SchemaSink sink) {
-  AppendField(sink, "block_dim", "fusion");
-  AppendField(sink, "corenum", "fusion");
-  AppendField(sink, "ub_size", "fusion");
-  AppendField(sink, "hbm_size", "fusion");
+void AppendCommonFields(SchemaSink sink, const std::string &path) {
+  AppendField(sink, "block_dim", path);
+  AppendField(sink, "corenum", path);
+  AppendField(sink, "ub_size", path);
+  AppendField(sink, "hbm_size", path);
 }
 
 // Mirrors codegen::TilingData::AddApiTilingData: nodes such as Transpose/Pad
@@ -121,7 +121,7 @@ void AppendTemplateFields(const af::AscGraph &graph, const std::string &field_sc
 
 // path for the nested (ProcessMultiGroup-equivalent) scope of one
 // (subgraph, plan, stage) triple.  Empty string means "no nesting" (the
-// ProcessSingleGroup-equivalent flat case), matching AppendCommonFusionFields'
+// ProcessSingleGroup-equivalent flat case), matching the common fields'
 // "fusion" scope and never colliding with it.
 // 决定一个 plan 的字段怎么命名、怎么嵌套：plan 的坐标，加上两个全局形态开关。
 struct PlanFieldNaming {
@@ -206,7 +206,7 @@ bool BuildTilingFieldSchema(const ascir::FusedScheduledResult &fused_result, Til
 
   std::set<std::string> seen;
   SchemaSink sink{schema, seen};
-  AppendCommonFusionFields(sink);
+  AppendCommonFields(sink, "fusion");
 
   for (const auto &workspace : fused_result.workspace_nodes) {
     if (workspace == nullptr || workspace->outputs().empty() || workspace->outputs().front() == nullptr) {
@@ -241,7 +241,7 @@ bool BuildTilingFieldSchema(const ascir::ScheduledResult &scheduled_result, size
   schema.fields.clear();
   std::set<std::string> seen;
   SchemaSink sink{schema, seen};
-  AppendCommonFusionFields(sink);
+  AppendCommonFields(sink, "fusion");
   const bool is_flat = scheduled_result.schedule_groups.size() == 1U;
   const PlanFieldNaming naming{subgraph_id, plan_id, /*use_simple_tiling_key=*/true, is_flat};
   if (!AppendPlanFields(scheduled_result, naming, sink, diagnostic)) {

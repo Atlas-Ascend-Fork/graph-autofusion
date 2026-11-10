@@ -482,5 +482,46 @@ TEST(BinaryElementwiseL2CapabilityTest, ProductRegistrationRejectsMutationAfterF
   EXPECT_TRUE(failed(registerAscendCImplementations(registry)));
 }
 
+TEST(BinaryElementwiseL2CapabilityTest, SingletonScalarCannotAliasOutput) {
+  MLIRContext context;
+  LoadDialects(context);
+  auto registry = CreateRegistry(context);
+  ASSERT_TRUE(registry);
+  ascend::instruction::CapabilityQuery query(*registry);
+  ascend::TargetProfile target = CreateTargetProfile();
+  for (unsigned scalarIndex : {0U, 1U}) {
+    std::string ir = R"mlir(
+#one = #afir.tensor_desc<axis = [0], repeats = [#afir.expr<"1">], strides = [#afir.expr<"0">], vectorized_axis = [0], vectorized_strides = [#afir.expr<"0">], role = <compute>>
+#full = #afir.tensor_desc<axis = [0], repeats = [#afir.expr<"32">], strides = [#afir.expr<"1">], vectorized_axis = [0], vectorized_strides = [#afir.expr<"1">], role = <compute>>
+func.func @test(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_tensor<32xf32>) {
+  %pipe = ascendc.pipe
+  %buf = ascendc.tbuf : <veccalc>
+  %one = ascendc.tbuf.get_tensor %buf : !ascendc.tbuf<veccalc>, !ascendc.local_tensor<1xf32>
+)mlir";
+    bool left = scalarIndex == 0;
+    ir += left ? "  %r = afir.add %one, %input" : "  %r = afir.add %input, %one";
+    ir += " outs(%dst) {afir.operand_descs = ";
+    ir += left ? "[#one, #full]" : "[#full, #one]";
+    ir += ", afir.destination_descs = [#full], afir.result_descs = [#full]} : (";
+    ir += left ? "!ascendc.local_tensor<1xf32>, !ascendc.local_tensor<32xf32>"
+               : "!ascendc.local_tensor<32xf32>, !ascendc.local_tensor<1xf32>";
+    ir += "), !ascendc.local_tensor<32xf32> -> !ascendc.local_tensor<32xf32>\n return\n}";
+    auto module = parseSourceString<ModuleOp>(ir, &context);
+    ASSERT_TRUE(module);
+    auto *operation = FindOperation(*module, "afir.add");
+    for (unsigned aliasIndex : {0U, 1U}) {
+      auto result = query.queryCapability(
+          {ascend::instruction::CapabilityKind::Inplace, operation, std::nullopt,
+           ascend::instruction::InplaceQuery{aliasIndex, 0, ascend::instruction::AliasAccessMode::ReadWriteInput}},
+          ascend::instruction::QueryContext{target});
+      ASSERT_TRUE(succeeded(result));
+      EXPECT_EQ(result->getSupported().size(), aliasIndex == scalarIndex ? 0U : 1U);
+      if (aliasIndex != scalarIndex) {
+        EXPECT_EQ(result->getSupported().front().key.id.value, "add.tensor_scalar");
+      }
+    }
+  }
+}
+
 }  // namespace
 }  // namespace mlir::afir

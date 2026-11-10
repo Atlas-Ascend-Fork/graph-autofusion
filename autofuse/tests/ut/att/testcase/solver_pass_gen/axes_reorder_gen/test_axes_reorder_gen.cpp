@@ -580,6 +580,148 @@ TEST_F(TestAxesReorderSolverGen, TEST_GEN_SOLVER_ub_cache_code) {
   EXPECT_TRUE(impl_code.find("// check node ") != std::string::npos);
 }
 
+namespace {
+constexpr uint32_t kUtCoreBudget = 56U;
+constexpr uint32_t kUtCacheLine = 128U;
+
+std::string GenCacheLineGuardCode(const CacheLineConfig &cfg, uint32_t core_num_budget) {
+  Expr x0 = CreateExpr("x0");
+  Expr x1 = CreateExpr("block_dim");
+  Expr x2 = CreateExpr("x2");
+  std::vector<Expr> cut_cons{x0 - x1};
+  std::vector<Expr> input_args{x1};
+  std::vector<Expr> search_args{x2};
+  std::map<HardwareDef, Expr> hardware_cons;
+  std::map<Expr, Expr, ExprCmp> arg_align_map;
+  std::map<Expr, uint32_t, ExprCmp> const_args;
+  std::map<Expr, uint32_t, ExprCmp> axis_priority;
+  std::map<Expr, std::vector<Expr>, ExprCmp> from_axes_map;
+  arg_align_map[x0] = af::Symbol(16);
+  hardware_cons[HardwareDef::L2] = x2;
+  hardware_cons[HardwareDef::CORENUM] = x0 + x1;
+  from_axes_map[x0] = {x1};
+  from_axes_map[x2] = {x0};
+  axis_priority[x0] = 2;
+  axis_priority[x1] = 1;
+  std::vector<CacheLineConfig> config{cfg};
+
+  AxesReorderSolverGen solver_gen("case_test", "TilingData");
+  solver_gen.SetArgAlignMap(arg_align_map);
+  solver_gen.SetTotalCutCons(cut_cons);
+  solver_gen.SetBufferUseAlg(hardware_cons);
+  solver_gen.SetConstArgs(const_args);
+  solver_gen.SetInputArgs(input_args);
+  solver_gen.SetSearchArgs(search_args);
+  solver_gen.SetFromAxesMap(from_axes_map);
+  solver_gen.SetVarPriority(axis_priority);
+  solver_gen.SetCacheLineConfig(&config);
+  solver_gen.SetCoreNumBudget(core_num_budget);
+  solver_gen.Arrange();
+  return solver_gen.GenSolverClassImpl();
+}
+
+std::string ExtractCacheLineFunc(const std::string &code) {
+  const std::string signature = "::SatisfyUBSizeCacheLine(uint32_t idx) {";
+  const size_t begin = code.find(signature);
+  if (begin == std::string::npos) {
+    return "";
+  }
+  const size_t end = code.find("\n}\n", begin);
+  return code.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+}
+
+CacheLineConfig MakeBurstCfg(const Expr &burst_bytes, const Expr &whole_tile_bytes, const Expr &whole_tensor_bytes) {
+  CacheLineConfig cfg{"test_node", burst_bytes, kUtCacheLine};
+  cfg.solver_cache_line_expr = burst_bytes;
+  cfg.solver_uses_burst = true;
+  cfg.fallback_cache_line_expr = whole_tile_bytes;
+  cfg.whole_tensor_bytes = whole_tensor_bytes;
+  return cfg;
+}
+}  // namespace
+
+// 静态 shape 且整张量小于门槛：门控在编译期折叠为真，使用单次 burst 判据，运行期不出现门槛常量。
+TEST_F(TestAxesReorderSolverGen, CacheLineGateStaticConflictUsesBurstCriterion) {
+  const Expr burst = CreateExpr("burst_size");
+  const Expr tile = CreateExpr("tile_size");
+  const Expr tensor_bytes = CreateExpr(8280);  // 目标用例 30x6x23 float32，小于 2*56*128=14336
+  const std::string code = GenCacheLineGuardCode(MakeBurstCfg(burst, tile, tensor_bytes), kUtCoreBudget);
+  const std::string func = ExtractCacheLineFunc(code);
+  ASSERT_FALSE(func.empty());
+  EXPECT_NE(func.find("if (burst_size < 128)"), std::string::npos);
+  EXPECT_EQ(func.find("tile_size"), std::string::npos);
+  EXPECT_EQ(func.find("14336"), std::string::npos);
+}
+
+// 静态 shape 且整张量大于门槛：每核独占整条 cache line，退回 develop 的块内字节判据。
+TEST_F(TestAxesReorderSolverGen, CacheLineGateStaticNoConflictUsesDevelopCriterion) {
+  const Expr burst = CreateExpr("burst_size");
+  const Expr tile = CreateExpr("tile_size");
+  const Expr tensor_bytes = CreateExpr(98304);
+  const std::string code = GenCacheLineGuardCode(MakeBurstCfg(burst, tile, tensor_bytes), kUtCoreBudget);
+  const std::string func = ExtractCacheLineFunc(code);
+  ASSERT_FALSE(func.empty());
+  EXPECT_NE(func.find("if (tile_size < 128)"), std::string::npos);
+  EXPECT_EQ(func.find("burst_size"), std::string::npos);
+  EXPECT_EQ(func.find("14336"), std::string::npos);
+}
+
+// 门槛边界使用严格小于：恰好等于 2*core*cache_line 时视为无冲突，与 develop 判据一致。
+TEST_F(TestAxesReorderSolverGen, CacheLineGateBoundaryUsesDevelopCriterion) {
+  const Expr burst = CreateExpr("burst_size");
+  const Expr tile = CreateExpr("tile_size");
+  const Expr tensor_bytes = CreateExpr(14336);
+  const std::string code = GenCacheLineGuardCode(MakeBurstCfg(burst, tile, tensor_bytes), kUtCoreBudget);
+  const std::string func = ExtractCacheLineFunc(code);
+  ASSERT_FALSE(func.empty());
+  EXPECT_NE(func.find("if (tile_size < 128)"), std::string::npos);
+  EXPECT_EQ(func.find("burst_size"), std::string::npos);
+}
+
+// 动态 shape：生成运行期门控，且门控只能依赖 shape 输入，不能依赖会被自动调优改写的 core_num。
+TEST_F(TestAxesReorderSolverGen, CacheLineGateDynamicUsesShapeOnlyCondition) {
+  const Expr burst = CreateExpr("burst_size");
+  const Expr tile = CreateExpr("tile_size");
+  const Expr total_elems = CreateExpr("total_elems");
+  const Expr tensor_bytes = total_elems * CreateExpr(4);
+  const std::string code = GenCacheLineGuardCode(MakeBurstCfg(burst, tile, tensor_bytes), kUtCoreBudget);
+  const std::string func = ExtractCacheLineFunc(code);
+  ASSERT_FALSE(func.empty());
+  EXPECT_NE(func.find("14336"), std::string::npos);
+  EXPECT_NE(func.find("if (burst_size < 128)"), std::string::npos);
+  EXPECT_NE(func.find("if (tile_size < 128)"), std::string::npos);
+  EXPECT_EQ(func.find("core_num"), std::string::npos);
+}
+
+// 核预算不可用：无法判断冲突，必须退回 develop 判据，保证行为与 develop 一致。
+TEST_F(TestAxesReorderSolverGen, CacheLineGateWithoutCoreBudgetKeepsDevelopCriterion) {
+  const Expr burst = CreateExpr("burst_size");
+  const Expr tile = CreateExpr("tile_size");
+  const Expr tensor_bytes = CreateExpr(8280);
+  const std::string code = GenCacheLineGuardCode(MakeBurstCfg(burst, tile, tensor_bytes), 0U);
+  const std::string func = ExtractCacheLineFunc(code);
+  ASSERT_FALSE(func.empty());
+  EXPECT_NE(func.find("if (tile_size < 128)"), std::string::npos);
+  EXPECT_EQ(func.find("burst_size"), std::string::npos);
+  EXPECT_EQ(func.find("14336"), std::string::npos);
+}
+
+// 求解器判据本身就是 develop 判据（常量 burst 回退）：门控不得改变既有行为。
+TEST_F(TestAxesReorderSolverGen, CacheLineGateSkippedWhenSolverAlreadyUsesDevelopCriterion) {
+  const Expr burst = CreateExpr("burst_size");
+  const Expr tile = CreateExpr("tile_size");
+  CacheLineConfig cfg{"test_node", burst, kUtCacheLine};
+  cfg.solver_cache_line_expr = tile;
+  cfg.solver_uses_burst = false;
+  cfg.whole_tensor_bytes = CreateExpr(8280);
+  const std::string code = GenCacheLineGuardCode(cfg, kUtCoreBudget);
+  const std::string func = ExtractCacheLineFunc(code);
+  ASSERT_FALSE(func.empty());
+  EXPECT_NE(func.find("if (tile_size < 128)"), std::string::npos);
+  EXPECT_EQ(func.find("burst_size"), std::string::npos);
+  EXPECT_EQ(func.find("14336"), std::string::npos);
+}
+
 TEST_F(TestAxesReorderSolverGen, GenUpperBoundFunc_ConstExpr) {
   Expr var = CreateExpr("var");
   AxesReorderSolverGen solver_gen("case_test", "TilingData");
