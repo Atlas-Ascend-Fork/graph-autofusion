@@ -473,5 +473,57 @@ TEST_F(CalcGatherTmpSizeV2Test, CalcGatherTmpSize_ShouldReturnCorrectSize_WhenNo
   ASSERT_EQ(result[0]->size, af::Symbol(32));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
 }
+
+TEST_F(CalcGatherTmpSizeV2Test, CalcGatherTmpSize_ShouldReturnCorrectSize_WhenValueIsInt64AndParamIsSmall) {
+  af::AscGraph graph("test");
+  CreateGraphStaticOneAxis<af::DT_INT64, af::DT_INT32>(graph, 2, 3, 9);
+  auto node = graph.FindNode("gather");
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcGatherTmpSizeV2(*node);
+  ASSERT_EQ(result.size(), 1);
+  ASSERT_EQ(result[0]->size, af::Symbol(1041));
+  ASSERT_EQ(result[0]->life_time_axis_id, -1);
+}
+
+TEST_F(CalcGatherTmpSizeV2Test, CalcGatherTmpSize_ShouldReturnCorrectSize_WhenValueIsInt64AndParamIsLarge) {
+  af::AscGraph graph("test");
+  CreateGraphStaticOneAxis<af::DT_INT64, af::DT_INT32>(graph, 30000, 100, 100);
+  auto node = graph.FindNode("gather");
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcGatherTmpSizeV2(*node);
+  ASSERT_EQ(result.size(), 1);
+  ASSERT_EQ(result[0]->size, af::Symbol(32));
+  ASSERT_EQ(result[0]->life_time_axis_id, -1);
+}
+
+TEST_F(CalcGatherTmpSizeV2Test, Int64ValuesAndIndicesDoNotReserveAnUndersizedFullLoadBuffer) {
+  for (int32_t param_size : {27540, 28160, 28200, 30000}) {
+    SCOPED_TRACE(param_size);
+    af::AscGraph graph("test");
+    CreateGraphStaticOneAxis<af::DT_INT64, af::DT_INT64>(graph, param_size, 100, 100);
+    auto node = graph.FindNode("gather");
+    const auto result = CalcGatherTmpSizeV2(*node);
+    ASSERT_EQ(result.size(), 1);
+    // SIMT gathers directly from GM and needs no full params copy in UB.
+    EXPECT_EQ(result[0]->size, af::Symbol(32));
+  }
+}
+
+TEST_F(CalcGatherTmpSizeV2Test, Int64ValuesAndIndicesKeepFullLoadWhenWorkspaceFits) {
+  af::AscGraph graph("test");
+  CreateGraphStaticOneAxis<af::DT_INT64, af::DT_INT64>(graph, 27520, 100, 100);
+  auto node = graph.FindNode("gather");
+  const auto result = CalcGatherTmpSizeV2(*node);
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0]->size, af::Symbol(27520 * 8 + 1024));
+}
+
+TEST_F(CalcGatherTmpSizeV2Test, CalcGatherTmpSize_ShouldReturnCorrectSize_WhenValueIsInt64AndGatherMiddleAxis) {
+  af::AscGraph graph("test");
+  CreateGraphStaticMiddleAxis<af::DT_INT64, af::DT_INT64>(graph, 200, 100, 750, 1);
+  auto node = graph.FindNode("gather");
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcGatherTmpSizeV2(*node);
+  ASSERT_EQ(result.size(), 1);
+  ASSERT_EQ(result[0]->size, af::Symbol(8 * 20000));
+  ASSERT_EQ(result[0]->life_time_axis_id, -1);
+}
 }  // namespace ascir
 }  // namespace af

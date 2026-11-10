@@ -1052,11 +1052,11 @@ REG_ASC_IR(Ceil2Int)
                             af::ascir::AscIrImplCreator<af::ascir::Ceil2IntAscIrCodegenImplV2>(),
                             {{"T1", TensorType{DT_FLOAT, DT_FLOAT16, DT_BF16}}, {"T2", TensorType{DT_INT32}}}});
 
-REG_ASC_IR(Gather).Impl(v2_soc_versions,
-                        {af::ascir::AscIrImplCreator<af::ascir::GatherAscIrAttImplV2>(),
-                         af::ascir::AscIrImplCreator<af::ascir::GatherAscIrCodegenImplV2>(),
-                         {{"T1", TensorType{DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_FLOAT16, DT_BF16, DT_FLOAT}},
-                          {"T2", TensorType{DT_INT32, DT_INT64}}}});
+REG_ASC_IR(Gather).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::GatherAscIrAttImplV2>(),
+                                          af::ascir::AscIrImplCreator<af::ascir::GatherAscIrCodegenImplV2>(),
+                                          {{"T1", TensorType{DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_INT64,
+                                                             DT_FLOAT16, DT_BF16, DT_FLOAT}},
+                                           {"T2", TensorType{DT_INT32, DT_INT64}}}});
 
 REG_ASC_IR(IndirectLoad)
     .Input("x1", "T1")
