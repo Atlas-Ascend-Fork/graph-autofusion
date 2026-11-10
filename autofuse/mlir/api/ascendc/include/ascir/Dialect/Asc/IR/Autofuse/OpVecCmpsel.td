@@ -54,9 +54,9 @@ include "mlir/IR/OpBase.td"
 // 它们用 `KernelUtils::` 与 `MAX_REPEAT_TIME`，只有 `utils.h` 声明这些，所以都要声明
 // `utils.h` 前导。漏掉不会在 MLIR 这一层报任何错——一路到 device 编译器才炸，报的还是
 // 内联进来那段头文本的行号。reg 侧两个都自足，不声明前导。
-// **后两个输入是 `AnyType` 而不是 `AscendC_LocalTensor`**：两族的包装都有标量重载
+// **后两个输入是 `AnyType` 而不是 `AscendC_LocalTensor`**：两类的包装都有标量重载
 // （`where.h` 的场景 1/2/3、`clipbyvalue.h` / `clipbyvalue_reg_base.h` 的场景 2/3/4），
-// 同名、实参位置相同，标量在哪个位置由 C++ 重载决议挑。发射侧打的是同一个位置上的
+// 同名、实参位置相同，标量在哪个位置由 C++ 重载决议挑。生成侧打的是同一个位置上的
 // SSA 值，tile 与标量没有区别，所以标量形态**不新建 def**，放宽这两位就够了。
 // 第一个输入（mask / x）不放宽：那个重载两份头里都没有。
 //
@@ -86,8 +86,8 @@ def AscendC_WhereContiguousRegBaseOp
 //   mem:  ClipByValue(dst, x, min, max, calCount, tmpBuffer)   clipbyvalue.h
 //   reg:  ClipByValue(dst, x, min, max, calCount)              clipbyvalue_reg_base.h
 //
-// mem 侧 `clipbyvalue.h` 里原有的那个重载是 `(..., tmp_buf, calCount)`，与这一族其余包装
-// （`where.h` / `true_div.h` 等）的顺序相反。那个重载没有动——legacy 仍按原顺序发；
+// mem 侧 `clipbyvalue.h` 里原有的那个重载是 `(..., tmp_buf, calCount)`，与这一类其余包装
+// （`where.h` / `true_div.h` 等）的顺序相反。那个重载没有动——legacy 仍按原顺序生成；
 // 头里另外补了一个 `(..., calCount, tmp_buf)` 的转发重载，让这条路上只有一种顺序，
 // emitter 才能与选择族逐字共用。
 def AscendC_ClipByValueContiguousOp : VectorOp<"clipbyvalue_contiguous", "ClipByValue", [ApiExtensionOpInterface]> {
@@ -114,7 +114,7 @@ def AscendC_ClipByValueContiguousRegBaseOp
 //===----------------------------------------------------------------------===//
 //
 // `Fma(dst, src0, src1, src2, sharedTmpBuffer, count)`（CANN 的 `adv_api/math/fma.h`，
-// tmp 在 count **之前**）。放在这个文件里是因为三元那一族的 def 都在这里，而它与上面四个
+// tmp 在 count **之前**）。放在这个文件里是因为三元那一类的 def 都在这里，而它与上面四个
 // 共用 `TernaryElementwiseConversionPattern`——不是因为它属于 cmpsel。
 //
 // 与上面四个的差别只有一条：**它是标准调用**，没有包装头，所以不声明
@@ -147,13 +147,13 @@ def AscendC_FmaL2Op : VectorOp<"fma_l2", "Fma"> {
 // 的下降放进别人开好的 `__VEC_SCOPE__` 里。
 //
 // **结果是 `MaskReg` 而不是 `RegTensor`**：比较在寄存器形态下产出的是一条**谓词**，
-// 一位一个 lane，不是一段按元素类型排布的值。这就是它不能放进 `BinaryRegOp` 那一族的
-// 原因——那一族的 `dstReg` 是 `RegTensor`。谓词要变回值（legacy 在消费者不是 Select 时
+// 一位一个 lane，不是一段按元素类型排布的值。这就是它不能放进 `BinaryRegOp` 那一类的
+// 原因——那一类的 `dstReg` 是 `RegTensor`。谓词要变回值（legacy 在消费者不是 Select 时
 // 补一条 `Reg::Duplicate(dst, 1, mask)`）是另一件事，今天不建模。
 //
 // 没有扩展头：`Reg::Compare` 是这一档 CANN 自带的寄存器 API，不是 Autofuse 的包装。
 //
-// 副作用与 `BinaryRegOp` 一族同理（目的地是操作数、没有结果，不声明就被 DCE），
+// 副作用与 `BinaryRegOp` 一类同理（目的地是操作数、没有结果，不声明就被 DCE），
 // 见 `Base.td` 里那一段。
 def AscendC_CompareRegOp : APIOp<"compare_reg", "Compare"> {
   let description = "`AscendC::Reg::Compare` on two vector registers, producing a predicate register";

@@ -14,27 +14,21 @@
 #include <string>
 #include <string_view>
 
-// 队列 / 缓冲尺寸字段的规范名。
+// 队列和缓冲尺寸字段的规范名。
 //
-// `q{id}_size` / `b{id}_size` 既是 host 侧 TilingData 的字段名，也是 kernel 侧
-// `#afir.buffer_desc` 的 `size_bytes_expr` 里那个符号名，还是 `afir.tiling_param`
-// 取值用的名字。**三者必须逐字相同**：对不上的症状是
-// `TilingData is missing canonical size expression field 'qN_size'`，或者更糟——host
-// 填了一个 kernel 不读的字段，谁也不报错。
+// q{id}_size / b{id}_size 同时用于 host TilingData 字段、kernel buffer_desc 的
+// size_bytes_expr 符号以及 tiling_param 查询，三处必须一致。名称不一致可能导致
+// "TilingData is missing canonical size expression field 'qN_size'"，也可能使 host
+// 填写的字段未被 kernel 读取而没有诊断。
 //
-// 这条规则此前在 MLIR 侧有三份独立实现（bridge 建 descriptor、GenTilingData 建 stage
-// schema、tiling_field_schema 建给 legacy Codegen 的字段表）。本头文件是 MLIR 侧唯一
-// 的那一份。
+// bridge descriptor、GenTilingData stage schema 和供 legacy Codegen 使用的
+// tiling_field_schema 共用此处命名，避免 MLIR 侧重复实现。
+// ATT 侧对应逻辑位于 att/gen_model_info/parser/ascend_graph_parser.cpp 和
+// common/ub_expr/asc_graph_ub_expr_builder.cpp；que.name / buf.name 非空时还支持自定义名。
+// MLIR descriptor 只传递 id，不携带自定义名。目前没有 que.name 赋值路径；若要统一
+// 自定义命名，需要在 ATT 迁移时同时传递名称，不能只修改此处规则。
 //
-// **另一半在 ATT**（`att/gen_model_info/parser/ascend_graph_parser.cpp` 与
-// `common/ub_expr/asc_graph_ub_expr_builder.cpp`），名字的产地就在那边，且那边还多一条
-// 分支：`que.name` / `buf.name` 非空时用用户指定的名字。MLIR 侧走不到那条分支——从
-// IR 到这里只剩下一个 id，名字本身没跟着进来。今天没有任何地方给 `que.name` 赋值，
-// 所以两边不会分叉；彻底合并需要让名字随 descriptor 进 IR，那是 ATT 迁移的工作。
-// 在那之前，把 MLIR 侧的三份收成一份仍然是划算的。
-//
-// 头文件只依赖 `<string>`：它要同时被 bridge（有全量 autofuse 头）与 conversion
-// （只有 MLIR 那一小段 include 路径）包含，多一个依赖就把后者的包含面撑开了。
+// 只依赖标准库头，供 bridge 和 include 路径受限的 conversion 共用。
 namespace mlir::common {
 
 inline std::string MakeQueueSizeName(int64_t id) {
@@ -45,16 +39,12 @@ inline std::string MakeBufferSizeName(int64_t id) {
   return "b" + std::to_string(id) + "_size";
 }
 
-// 这个名字是不是上面两个函数造出来的。
-//
-// 有了它，「片上资源的大小」就只剩一种写法：`#afir.buffer_desc` 上的
-// `size_from_resource` 标记。把同一个名字塞进 `size_bytes_expr` 当表达式的旧写法由
-// `BufferDescAttr` 的 verifier 拦掉——那种写法允许 `buffer_id = 2` 配 `"q7_size"`，
-// descriptor 自相矛盾而无人发现。
-//
-// 这段命名空间因此是保留的：shape 变量不得叫 `q<数字>_size` / `b<数字>_size`，
-// `AFIRKernelBodySignature` 撞名时会报 "canonical resource size field conflicts with
-// a shape field"。
+// 判断名称是否符合 q<数字>_size 或 b<数字>_size。
+// 片上资源大小使用 buffer_desc 的 size_from_resource 标记，不再把规范名写进
+// size_bytes_expr。BufferDescAttr verifier 会拒绝旧写法，以免 buffer_id = 2
+// 却引用 q7_size 这类相互矛盾的 descriptor 通过校验。
+// 这些名称保留给资源字段；shape 变量重名时 AFIRKernelBodySignature 会报告
+// "canonical resource size field conflicts with a shape field"。
 inline bool IsCanonicalResourceSizeName(std::string_view name) {
   constexpr std::string_view kSuffix = "_size";
   if (name.size() <= 1 + kSuffix.size() || (name.front() != 'q' && name.front() != 'b')) {

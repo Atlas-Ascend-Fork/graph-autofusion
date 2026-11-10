@@ -47,12 +47,10 @@ add_public_tablegen_target(AFIROpsIncGen)
 add_dependencies(AFIROpsIncGen AFIRDialectIncGen AFIRAttrsIncGen AFIREnumsIncGen AFIRTypesIncGen)
 
 # --- Op reference 文档 ------------------------------------------------------
-# 对外公开的 Op reference 必须生成而非手写，否则在 P0 期间必然漂移；见设计文档
-# docs/design/2026-09-09-afir-public-dsl-architecture-design.md 5.5。
-# 产出 ${MLIR_BINARY_DIR}/docs/Dialects/AFIR.md，构建方式：
-#     cmake --build build --target AFIRDocGen
-# 内容来自各 Op 的 ODS summary / description；stable 档缺失即 PR 拦截，检查脚本见
-# tools/af-mlir-tools/check_afir_ods_docs.py。
+# 从 ODS summary / description 生成公开 Op reference，避免手写文档与定义不同步
+# （设计文档 5.5）。输出为 ${MLIR_BINARY_DIR}/docs/Dialects/AFIR.md。
+# 构建：cmake --build build --target AFIRDocGen
+# 公开档位的文档完整性由 tools/af-mlir-tools/check_afir_ods_docs.py 检查。
 add_mlir_doc(AFIROps AFIR Dialects/ -gen-dialect-doc -dialect afir)
 add_dependencies(AFIRDocGen AFIRDialectIncGen AFIRAttrsIncGen AFIREnumsIncGen AFIRTypesIncGen AFIRInterfacesIncGen)
 

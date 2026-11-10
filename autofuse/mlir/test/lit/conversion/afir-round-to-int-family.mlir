@@ -11,20 +11,20 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// step 2a 接通的两个：`ceil2int` 与 `floor_to_int`。两个的**结果 dtype 规则相同**
-// （`ResultElementRule::Int32`，输出恒 i32 与输入无关）而**供给不同**，这一份要钉的就是
+// step 2a 接通的两个：`ceil2int` 与 `floor_to_int`。两个的结果 dtype 规则相同
+// （`ResultElementRule::Int32`，输出恒 i32 与输入无关）而可用实现不同，这一份要钉的就是
 // 这两件事各自对了。
 //
-// 供给那一半最容易挑错，而且挑错不会在这一层报错：
+// 可用实现那一半最容易挑错，而且挑错不会在这一层报错：
 //
-//   - 对照表的 `reg_api_name` 列对这一族给的是 legacy 的 `GetApiName()`，**不是发出去的
-//     函数名**。CANN 全树里没有 `AscendC::FloorToInt`——照那个名字建一个 op 会发出一个
+//   - 对照表的 `reg_api_name` 列对这一类给的是 legacy 的 `GetApiName()`，**不是生成的
+//     函数名**。CANN 全树里没有 `AscendC::FloorToInt`——照那个名字建一个 op 会生成一个
 //     不存在的调用，要到设备编译器才报。`CPP-NOT: FloorToInt(` 盯这一条。
 //   - `ceil2int` 反过来：它有包装（`Ceil2IntExtend`，在 fork 的 `cast.h` 里转发给
 //     `CastExtend<..., CAST_CEIL>`），**不能**退化成标准 `AscendC::Cast`，否则 RoundMode
 //     就没人写了。`CPP-NOT: AscendC::Cast` 在那一格盯这一条。
 //
-// 结果 dtype 那一半由 `IR` 组的 `i32` 落点钉：输入 f32、目的地 i32，而这一族的 ODS
+// 结果 dtype 那一半由 `IR` 组的 `i32` 落点钉：输入 f32、目的地 i32，而这一类的 ODS
 // `resultRule` 要是写成缺省的 `Same`，op 在 verifier 上就过不去。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

@@ -39,7 +39,7 @@ TEST(MlirE2eCpu, LoadScalarPowStoreCalculatesCorrectResult) {
   ASSERT_NE(output, nullptr);
 
   // 指数取 [-3, 3] 的整数：正负与 0 都在里面，「结果恒为 1」和「取倒数」两行都覆上。
-  // 这七个点上 `2 ^ x` 与 `x ^ 2` 只有 x = 2 相同，所以底数与指数发反了当场红。
+  // 这七个点上 `2 ^ x` 与 `x ^ 2` 只有 x = 2 相同，所以底数与指数传反了当场红。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = static_cast<float>(static_cast<int32_t>(index % 7U) - 3);
   }
@@ -59,8 +59,8 @@ TEST(MlirE2eCpu, LoadScalarPowStoreCalculatesCorrectResult) {
               reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(workspace), tilingData);
 
   for (uint32_t index = 0; index < output_element_count; ++index) {
-    // **`2 ^ x`，不是 `x ^ 2`**。设备上算的是 `exp(x * ln 2)`，与 `std::pow` 差的是相对
-    // 误差，所以比相对量，口径与 `load_pow_store` 一致。
+    // `2 ^ x`，不是 `x ^ 2`。设备上算的是 `exp(x * ln 2)`，与 `std::pow` 差的是相对
+    // 误差，所以比相对量，比较方式与 `load_pow_store` 一致。
     const float expected = std::pow(kBase, input0[index]);
     EXPECT_NEAR(output[index], expected, 1e-3F * std::fabs(expected)) << "element " << index;
   }

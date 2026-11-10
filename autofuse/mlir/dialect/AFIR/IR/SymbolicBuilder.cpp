@@ -47,7 +47,7 @@ FailureOr<ExprAttr> alignUpExpr(MLIRContext *context, ExprAttr extent, int64_t a
   if (alignNum == 1) {
     return extent;
   }
-  // 模板按 `alignNum` 现场拼出来，但拼进去的只有**字面量**，符号位仍是占位符——这与
+  // 模板按 `alignNum` 现场拼出来，但拼进去的只有字面量，符号位仍是占位符——这与
   // 「拼字符串造表达式」不同：`Rational(1 , N)` 与 `N * ...` 是序列化器对这个式子的原样
   // 输出，所以模板本身是规范的，Parse 不会把它判成非规范。
   const std::string pattern =
@@ -218,7 +218,7 @@ FailureOr<Value> materializeSizeAt(OpBuilder &builder, Block &entry, Location lo
     if (failed(symbolAttr)) {
       return failure();
     }
-    // **用调用方的 builder 建，不自己开一个。** 新建的那条 `afir.tiling_param` 落在入口块
+    // 用调用方的 builder 建，不自己开一个。 新建的那条 `afir.tiling_param` 落在入口块
     // 顶部（插入点由 `getOrCreateTilingParam` 自己挪、用完还原），但建它的是同一个
     // `ConversionPatternRewriter`，所以它进得了 dialect conversion 的建档：要么被
     // legalize，要么随 pattern 回滚。自己开一个 `OpBuilder` 建出来的那条谁都看不见，

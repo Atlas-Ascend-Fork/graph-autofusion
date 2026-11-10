@@ -12,7 +12,7 @@
 // space 完全空着（问题 D8）。本文件锁住迁移后的编码：**同一个 SSA 值的地址空间写在
 // 它的类型上**，`#afir.space<*>` 直接作为 memref 的 memory space 属性。
 //
-// 按 5.3 的硬纪律，这个文件先于生产代码落地：它在 `AfirBuilder` 还没开始产出带 space
+// 按 5.3 的硬纪律，这个文件先于生产代码实现：它在 `AfirBuilder` 还没开始产出带 space
 // 的 memref 时就已经把目标编码钉死，之后生产代码的每一步只能向它靠拢，不能改它。
 //
 // 锁三件事：
@@ -63,7 +63,7 @@ module {
   //
   // 这不是目标形态，而是 I4 待清理的现状：`AFIRKernelBodySignature` 会把 kernel 参数
   // 的地址空间直接换成 AscendC 的 CCE-C 魔数（22 = `ascendc::AddressSpace::gm`），而它
-  // 在生产流水线 `addPlanCandidateLoweringPipeline` 里排在 AFIR op 全部消失**之前**，
+  // 在生产流水线 `addPlanCandidateLoweringPipeline` 里排在 AFIR op 全部消失之前，
   // 所以这种形态会真实出现在还带着 descriptor 的 AFIR op 上。
   //
   // I4 把该映射收为单点、AFIR 侧全程用 `#afir.space` 之后，这条用例应改为 negative。

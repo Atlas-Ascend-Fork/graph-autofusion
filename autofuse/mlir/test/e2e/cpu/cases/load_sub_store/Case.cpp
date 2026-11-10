@@ -10,16 +10,16 @@
 
 //===- Case.cpp - load x2 -> sub -> store CPU case --------------*- C++ -*-===//
 //
-// **这份用例存在的理由不是「减法算得对」，是钉住 `TmpBufferUse::Unused`。**
+// 这份用例存在的理由不是「减法算得对」，是钉住 `TmpBufferUse::Unused`。
 //
-// harness 把 soc 钉在 Ascend910B1，走 mem-based 一侧。那一侧发的是标准的
+// harness 把 soc 钉在 Ascend910B1，走 mem-based 一侧。那一侧生成的是标准的
 // `AscendC::Sub(dst, x1, x2, size)`——四个实参，没有 tmp 的位置——而 legacy 的
 // `SubAscIrCodegenImpl::CalcTmpBufSize` 照样给这个节点分了一块（`CalcBinaryApiTmpSize`
 // 的 tensor 一支，32 字节）。那块是给标量形态的 `Subs` 用的，tensor-tensor 这条路只是
 // 收下它。
 //
-// 所以下面两条断言是成对的，缺一条就说明不了问题：kernel 里**既有** TBuf（调度真的分了
-// 一块），那行调用**又只有四个实参**（这条路真的没往下传）。
+// 所以下面两条断言是成对的，缺一条就说明不了问题：kernel 里既有 TBuf（调度真的分了
+// 一块），那行调用又只有四个实参（这条路真的没往下传）。
 //
 // reg 侧的 `SubExtend` 在这里到不了，由 afir-sub-div-reg-base-extension-api.mlir 钉。
 //

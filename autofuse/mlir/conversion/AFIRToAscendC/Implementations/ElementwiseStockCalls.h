@@ -10,12 +10,12 @@
 
 //===- ElementwiseStockCalls.h - which target ops are stock calls -*- C++ -*-===//
 //
-// **一句话：这张表是「我真的是标准调用」这句话的唯一说法，说错了整张注册表建不起来。**
+// 一句话：这张表是「我真的是标准调用」这句话的唯一说法，说错了整张注册表建不起来。
 //
 // 为什么非要说：`ApiExtensionHeaderOf` 对没声明 `ApiExtensionOpInterface` 的 op 走的是
 // 主模板，返回空头名列表。而「这个 op 本来就是标准调用」与「ODS 忘了声明
 // `ApiExtensionOpInterface`」在那里长得一模一样——两者都是空列表。于是家族判据照过，
-// `AddKernelIncludes` 一个 include 都不发，最后炸在设备编译器上。
+// `AddKernelIncludes` 一个 include 都不生成，最后炸在设备编译器上。
 //
 // 注册表原有的「对不上就建不起来」只查了另一个方向（声明了、但写反了族），对这个方向是
 // 聋的。补上的就是这一句：注册期要求 `headers.empty() == kIsStockCall<TargetOp>`。
@@ -27,7 +27,7 @@
 //   - 表上的 op 哪天在 ODS 里加了扩展头——头名非空，注册同样失败。
 //
 // 表分成两段，判据对两段完全一样，分段只是为了读的人知道它们为什么是标准调用：
-// `Any` 那段是两张供给表给同一个 `AscendC::` 调用，另一段是某一侧走包装、另一侧直接用
+// `Any` 那段是两张支持表给同一个 `AscendC::` 调用，另一段是某一侧走包装、另一侧直接用
 // 标准调用。
 //
 //===----------------------------------------------------------------------===//
@@ -45,7 +45,7 @@ namespace mlir::ascend::kernel::elementwise {
   template <>                                 \
   inline constexpr bool kIsStockCall<::mlir::ascendc::TargetOp> = true
 
-// 家族恒为 `Any` 的一段：两张供给表给的是同一个 `AscendC::` 调用。
+// 家族恒为 `Any` 的一段：两张支持表给的是同一个 `AscendC::` 调用。
 AFIR_ELEMENTWISE_STOCK_CALL(ExpL2Op);
 AFIR_ELEMENTWISE_STOCK_CALL(LnL2Op);
 AFIR_ELEMENTWISE_STOCK_CALL(ReluL2Op);
@@ -72,18 +72,16 @@ AFIR_ELEMENTWISE_STOCK_CALL(RsqrtL2Op);
 AFIR_ELEMENTWISE_STOCK_CALL(BitwiseAndL2Op);
 AFIR_ELEMENTWISE_STOCK_CALL(TanhOp);
 AFIR_ELEMENTWISE_STOCK_CALL(ErfOp);
-// 第 6 批。`log2` / `floor` / `lgamma` 只有 reg 侧，而那一侧走的是 CANN 自己的
-// `AscendC::Log2` / `Floor` / `Lgamma`（`Adv/Math.td` 里的 `UnaryMathOp`），一个包装都
-// 没有。漏加这三行的后果不是少一条覆盖：`checkFamilyMatchesHeader` 会判
-// `stockCall != kIsStockCall` 而让**整张注册表建不起来**，于是 session 创建静默失败,
-// 报出来的是 `AFIRToAscendCPipelineTest` 一片红，离这里隔着好几层。
+// log2 / floor / lgamma 的 reg 侧使用 CANN 标准 Log2 / Floor / Lgamma，
+// 不是扩展包装，必须登记为 stock call。否则 checkFamilyMatchesHeader 拒绝注册表，
+// 使 session 创建失败，影响所有依赖该表的 pipeline 测试。
 AFIR_ELEMENTWISE_STOCK_CALL(Log2Op);
 AFIR_ELEMENTWISE_STOCK_CALL(FloorOp);
 AFIR_ELEMENTWISE_STOCK_CALL(LgammaOp);
 // 第 7 批。`digamma` / `erfc` / `trunc` 与上面三个同一种情况：legacy 一个包装头都不给
 // （`LoadApiHeaderFiles` 没有重载），走的是 `AscendC::Digamma` / `Erfc` / `Trunc`。
 // 这一批另外 19 个在 `Adv/Math.td` 也有同名的 `UnaryMathOp`，但它们走 fork 的包装，
-// **不在这张表里**——照名字往这里加会让那 19 个的 family 判据答反。
+// 不在这张表里——照名字往这里加会让那 19 个的 family 判据答反。
 AFIR_ELEMENTWISE_STOCK_CALL(DigammaOp);
 AFIR_ELEMENTWISE_STOCK_CALL(ErfcOp);
 AFIR_ELEMENTWISE_STOCK_CALL(TruncOp);
@@ -92,7 +90,7 @@ AFIR_ELEMENTWISE_STOCK_CALL(DivL2Op);
 // `afir.broadcast` 的原生类型两侧都发它；mem 侧 ui8 单独发 DuplicateU8Op。
 // legacy 的 `duplicate.h` 里确实有 `Duplicate`
 // 的包装重载，但只覆盖 int64 / uint64 / int8 / uint8——那几种不在该 implementation 收的
-// 集合里，发出去的就是标准调用（见 Broadcast.cpp 的 `kDuplicateElementTypes`）。
+// 集合里，生成的就是标准调用（见 Broadcast.cpp 的 `kDuplicateElementTypes`）。
 AFIR_ELEMENTWISE_STOCK_CALL(DuplicateL2Op);
 // 第 8 批。`log10` / `hypot` 与第 6、7 批那六个（log2 / floor / lgamma / digamma /
 // erfc / trunc）同一种情况：legacy 一个包装头都不给，走的是 `AscendC::Log10` /
@@ -100,9 +98,9 @@ AFIR_ELEMENTWISE_STOCK_CALL(DuplicateL2Op);
 // 那边的 `ApiExtensionOpInterface`（没声明）是同一件事的两面。
 AFIR_ELEMENTWISE_STOCK_CALL(Log10L2Op);
 AFIR_ELEMENTWISE_STOCK_CALL(HypotL2Op);
-// step 2a。`CastL2Op` 发的是标准的 `AscendC::Cast`，不引扩展头——取整到整数那一族
+// step 2a。`CastL2Op` 生成的是标准的 `AscendC::Cast`，不引扩展头——取整到整数那一类
 // （`floor_to_int` 以及 2b 的 `round_to_int` / `trunc_to_int`）都以它为目标，只把 RoundMode
-// 固定住。漏这一行的后果正是这张表上面那段说的：**整张注册表建不起来**，而报出来的是
+// 固定住。漏这一行的后果正是这张表上面那段说的：整张注册表建不起来，而报出来的是
 // `failed to build the frozen AscendC implementation registry`，离这里隔着好几层。
 //
 // 注意同目录的 `CastExtendContiguousOp` / `CastExtendContiguousRegBaseOp` / 本批新增的

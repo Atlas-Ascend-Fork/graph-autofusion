@@ -20,7 +20,7 @@
 // 挑整数目的地而不是 f16，是因为 GM 上比整数不用管 half 在主机侧怎么表示；
 // `CAST_TRUNC` 又正好让「截断」与「四舍五入」在 ±0.5 上分得开。
 //
-// **这是本切片里唯一输入与结果必须不同 dtype 的端到端用例。** 谓词族（isnan 等）也
+// 这是本切片里唯一输入与结果必须不同 dtype 的端到端用例。 谓词族（isnan 等）也
 // 输出另一个 dtype，但那是恒定的 ui8；cast 的输出 dtype 是调用方给的，一路上从
 // AscGraph 的 `cast_op.y.dtype` 到 destination 的 memref、到 `CastExtend<float>` 的
 // `OutT` 推导，每一段都得把它带对。
@@ -55,10 +55,10 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(std::string(load_cast_store::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   // 包装，不是标准调用：没有 `AscendC::` 限定，也没有 `RoundMode` 实参。模板实参取的是
-  // **源**的 float，`OutT` 由 dst 推出来——按目的地取会实例化出一个参数对不上的重载。
+  // 源的 float，`OutT` 由 dst 推出来——按目的地取会实例化出一个参数对不上的重载。
   EXPECT_NE(kernel.find("CastExtend<float>("), std::string::npos);
   EXPECT_EQ(kernel.find("CastExtend<int32_t>("), std::string::npos);
-  // **「没走标准调用」这件事在这里钉不了，一个写法都没有。** `cast.h` 的正文里
+  // 「没走标准调用」这件事在这里钉不了，一个写法都没有。 `cast.h` 的正文里
   // `AscendC::Cast(...)` 与 `AscendC::Cast<OutT, InT, false>(...)` 两种拼写都有
   // （包装最后转发的就是它），而整段头文本是被内联进 kernel 的——两条负例断言都当场
   // 红，试过了。这件事由 lit 那两份钉（IR 里建的是哪个 op、选中的是哪个 id），

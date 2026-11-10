@@ -10,9 +10,9 @@
 
 //===- Case.cpp - load -> reciprocal -> store CPU case ----------*- C++ -*-===//
 //
-// 这个用例存在的理由只有一个：**证明内联进 kernel 的扩展头文本编译得过**。
+// 这个用例存在的理由只有一个：证明内联进 kernel 的扩展头文本编译得过。
 //
-// LIT 只看 emitter 打印出来的调用文本，UT 只看头文件名在供给表里取得到——两层都不会
+// LIT 只看 emitter 打印出来的调用文本，UT 只看头文件名在支持表里取得到——两层都不会
 // 编译内联进来的那段头。`reciprocal.h` 是第一个不自足的扩展头：它用不带 `AscendC::`
 // 限定的 `LocalTensor` / `BinaryRepeatParams` / `ONE_REPEAT_BYTE_SIZE`，还用了只在
 // `utils.h` 里的 `KernelUtils` / `MAX_REPEAT_TIME`。在 op 声明前导头之前，这些名字一个

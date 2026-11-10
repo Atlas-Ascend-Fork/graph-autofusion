@@ -9,22 +9,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 #
-# Platform differences belong in lowering, not above it: AFIR is the union of
-# what the platforms can express, the bridge builds it without knowing the
-# target, and the artifact layer assembles text a decision further down already
-# made. Only conversion/ and target/ may name a chip.
-#
-# Concretely this rejects, inside dialect/AFIR/, bridge/ and artifact/:
-#   - SoC names, in any case  (Ascend910B1, ascend910b1, ...) -- legacy spells
-#     soc_version lowercase, so a case-sensitive pattern would miss the most
-#     likely way this gets reintroduced
-#   - NpuArch enumerators, qualified or bare (NpuArch::V3510, V3510)
-#   - the NpuArch numbers, quoted or bare (2201, 3510, 5102, 9202)
-#
-# Passing a soc_version through as data -- reading it from the caller, handing
-# it to TargetSelection -- stays allowed; it is the literal that is banned.
-# Extend `pattern` below rather than adding a per-file exemption: an exemption
-# is how this check stops meaning anything.
+# Keep platform-specific decisions in conversion/ and target/.
+# AFIR describes the union of supported semantics; bridge constructs it and artifact
+# assembles already-selected output without choosing a platform.
+# Reject SoC names case-insensitively, NpuArch enumerators and architecture numbers
+# in dialect/AFIR/, bridge/ and artifact/. soc_version values may pass through as data.
+# Extend pattern for new literals; do not add per-file exemptions.
 
 set -euo pipefail
 

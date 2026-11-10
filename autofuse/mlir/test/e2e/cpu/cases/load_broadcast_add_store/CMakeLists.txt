@@ -6,14 +6,13 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-# 级联拓扑 T3（`add(load(full), brc(load(small)))`）。选定探针实测 ok 的形态 B：
+# 覆盖 T3：add(load(full), brc(load(small)))，注册已验证的内轴广播形态。
 #
 #   `[8,1] + [8,128] -> [8,128]`   最内轴是广播轴。`INPUT_SHAPES` 第一个是广播源、
 #                                  第二个与输出同形，次序与 `Data` 的 index 对应，调换会让
 #                                  `BindBroadcast` 把广播轴定反。
 #
-# 当前 T3 拓扑表为 6 ok / 2 FAILED / 2 unsupported；详见 Case.cpp 文件头，不要把未过格
-# 写成本用例的通过前提。
+# 本注册只覆盖所列形状；其他 T3 形状的历史探针结果不作为其通过前提。
 add_mlir_e2e_cpu_case(load_broadcast_add_store_8x1
     OUTPUT_SHAPE "[8, 128]"
     INPUT_SHAPES "[8, 1]" "[8, 128]"

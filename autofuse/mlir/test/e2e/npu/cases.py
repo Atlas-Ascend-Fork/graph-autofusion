@@ -323,7 +323,7 @@ CASES = (
     # ------------------------------------------------- 归约：模板 × 形态（钉 plan）
     #
     # 形态与 `--force_schedule_result` 的对应抄自 `reduce_template_matrix.py` 的用法说明，
-    # 编号以最终生成的 ATT schedule key 为准。**同一个 form 配不同的 plan 是两个用例**：
+    # 编号以最终生成的 ATT schedule key 为准。同一个 form 配不同的 plan 是两个用例：
     # `(ar, 0)` 测 RCommon，`(ar, 2)` 测 AllLoad，走的是不同的模板。
     Case(
         id="template_rcommon_ar",

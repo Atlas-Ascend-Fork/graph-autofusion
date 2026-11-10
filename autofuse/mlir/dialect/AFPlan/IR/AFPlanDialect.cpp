@@ -70,9 +70,8 @@ mlir::LogicalResult mlir::afplan::AFPlanDialect::verifyOperationAttribute(mlir::
   return mlir::success();
 }
 
-// 候选编号是数组下标语义，负数没有对应的候选。此前这条校验散在
-// `PlanMetadata::validatePlanMetadata`、`TilingProgramSpec`、`GenAggregate*` 各处，
-// 每个读点自己判一次；现在在属性构造时一次判掉。
+// 候选编号用作数组下标，必须非负。在属性构造时统一校验，
+// 避免 PlanMetadata、TilingProgramSpec 和 GenAggregate 各消费点重复检查。
 mlir::LogicalResult mlir::afplan::CandidateAttr::verify(llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
                                                         int64_t subgraph, int64_t plan) {
   if (subgraph < 0) {

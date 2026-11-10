@@ -13,7 +13,7 @@
 // multi-reduce 分支）：每个 z1T 轮次一次 `ReduceInit`、一次 `ReduceSum`、两个 `PipeBarrier`，
 // 再按「是不是第一轮」拷贝或累加。
 
-// 两个目标各发一遍（950 无 E2E，只能比对文本）：reduce 的下降没有任何目标相关分支，
+// 两个目标各生成一遍（950 无 E2E，只能比对文本）：reduce 的下降没有任何目标相关分支，
 // 两份输出**逐字节相同**，所以共用同一组 CHECK。这是
 // `2026-09-20-two-dim-transfer-addressing-design.md` 8.5 六组合验收项的 lit 一侧。
 // RUN: af-opt --afir-kernel-body-signature --afir-to-ascendc-pipeline --target=Ascend910B1 %s | FileCheck %s
@@ -72,7 +72,7 @@ module @reduce_sum_lowering attributes {afir.cube_type = -1 : i64, afir.enable_g
 // 对齐补出来的位置先填成 0，否则它们会被一起加进和里。`reduceType = 2` 是
 // `reduce_init.h` 的 `kReduceOpSum`。填的是**输入**那块 tile，不是归约的落点。
 //
-// 第 4 个参数（`dim_r_current`）是段长**对齐之后**的值，第 5 个（`inner_r`）是原始段长：
+// 第 4 个参数（`dim_r_current`）是段长对齐之后的值，第 5 个（`inner_r`）是原始段长：
 // helper 用前者作整块填充的起点（必须 32B 对齐），用后者算每行最后一个 32B 块里的掩码。
 // 传同一个值进去会让整块填充从一个不对齐的偏移开始，`Duplicate` 的地址检查当场 abort。
 // 对齐两次：`%[[R]]` 是 tile 大小对齐后的 R（循环无关，也是 UB 里的行距），

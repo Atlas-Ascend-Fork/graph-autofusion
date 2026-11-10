@@ -70,7 +70,7 @@ def AscendC_NegExtendRegBaseOp : AscendC_NegExtendOpBase<"neg_extend_reg_base", 
 // `utils.h`。
 //
 // 注意 `Adv/Math.td` 里那个 `def SignOp : UnaryMathOp<"sign", "Sign">` **不是**这里要的
-// 供给：它发的是 `AscendC::Sign`、不带 tmp，而且属于 `MathLibraryOp` 一族，被偏差 6 的
+// 可用实现：它生成的是 `AscendC::Sign`、不带 tmp，而且属于 `MathLibraryOp` 一类，被偏差 6 的
 // `isReuseSource` 挡着。名字沾边，函数不是同一个。
 // 两侧都要 `utils.h` 前导：两份 `sign.h` 都用了 `MAX_REPEAT_TIME`，`cast.h` 还用了
 // `Rational`，两个都只有 `utils.h` 声明。**reg 侧要的也是这份 mem 的 `utils.h`**——
@@ -109,15 +109,15 @@ def AscendC_SignExtendRegBaseOp
 //
 // reg 侧那块 tmp 的尺寸是 0（`CalcVoidTmpSizeV2`），与 `RemainderExtendRegBaseOp` 同一
 // 种情况：形参在，所以照收不误。
-// `headers` 是**列表**而不是单个头：这一族里有的包装要调另一个包装头里的东西，必须让它先
+// `headers` 是**列表**而不是单个头：这一类里有的包装要调另一个包装头里的东西，必须让它先
 // 内联（`I0eExtend` 用 `modified_bessel_i0.h` 的 `I0_A` / `I0_B`）。**顺序就是内联顺序**，
 // 照抄 legacy `LoadApiHeaderFiles` 的顺序。与 `AscendC_SignExtendOpBase` 的
-// `["cast.h", "sign.h"]` 同一个办法。发射层按声明的相邻先后拓扑排
-// （`Emit/ApiExtensionOrder.h`），所以**声明成什么顺序就发什么顺序**，字典序反过来也行
+// `["cast.h", "sign.h"]` 同一个办法。生成层按声明的相邻先后拓扑排
+// （`Emit/ApiExtensionOrder.h`），所以**声明成什么顺序就生成什么顺序**，字典序反过来也行
 // （`i0e_reg_base.h` 的字典序排在 `modified_bessel_i0_reg_base.h` 之前）。
 //
 // `preludes` 收那些**必须排在所有扩展头之前**的 utils 头。它表达的是比两两先后更强的约束：
-// 排在**所有**扩展头前面。这一族里 utils 常被多个算子头共用（`modified_bessel_utils` 之于
+// 排在**所有**扩展头前面。这一类里 utils 常被多个算子头共用（`modified_bessel_utils` 之于
 // `i0` / `i0e` / `k0`），写进 `preludes` 就不必在每个 op 的 `headers` 里重复一遍先后。
 class AscendC_UnaryTmpExtendRegBaseOpBase<string mnemonic, string apiName, list<string> headers,
                                           list<string> preludes = []>
@@ -139,10 +139,10 @@ def AscendC_ErfExtendRegBaseOp
 //
 // 头名写的是**生成名** `ndtr_reg_base.h`，不是源文件名 `ndtr.h`——源在
 // `autofuse/v35/ascendc/api_regbase/ndtr.h`，构建时生成到 `..._reg_base.h`，而
-// `AddKernelIncludes` 发的是生成名。写成 `ndtr.h` 在这一层不会红，内联那一步才解析不到。
+// `AddKernelIncludes` 生成的是生成名。写成 `ndtr.h` 在这一层不会红，内联那一步才解析不到。
 def AscendC_NdtrExtendRegBaseOp
     : AscendC_UnaryTmpExtendRegBaseOpBase<"ndtr_extend_reg_base", "NdtrExtend", ["ndtr_reg_base.h"]>;
-// 同族其余三个（第 2 批）。`AiryAiExtend` 是本族第一个要两个头的：legacy 的
+// 同族其余三个（第 2 批）。`AiryAiExtend` 是本类第一个要两个头的：legacy 的
 // `LoadApiHeaderFiles` 给的就是 utils 在前、自己在后。
 def AscendC_NdtriExtendRegBaseOp
     : AscendC_UnaryTmpExtendRegBaseOpBase<"ndtri_extend_reg_base", "NdtriExtend", ["ndtri_reg_base.h"]>;
@@ -165,12 +165,12 @@ def AscendC_BesselJ1ExtendRegBaseOp
     : AscendC_UnaryTmpExtendRegBaseOpBase<"bessel_j1_extend_reg_base", "BesselJ1Extend", ["bessel_j1_reg_base.h"],
                                           ["bessel_j_utils_reg_base.h",
                                            "trigonometric_function_utils_reg_base.h"]>;
-// 第 4 批。本族第一个真的要**两个扩展头**的：`i0e.h` 用的常量表 `I0_A` / `I0_B` 只有
+// 第 4 批。本类第一个真的要**两个扩展头**的：`i0e.h` 用的常量表 `I0_A` / `I0_B` 只有
 // `modified_bessel_i0.h` 定义，所以后者必须先内联；`ModifiedBesselImportData` /
 // `ModifiedBesselExportData` 在 `modified_bessel_utils.h` 里，那个走前导头。
 //
 // 注意依赖序与字典序**相反**（`i0e_reg_base.h` < `modified_bessel_i0_reg_base.h`），这一格
-// 到 2026-10-21 发射层改成拓扑排（f6f12395）之前是发不出来的；前导头那一格也表达不了它，
+// 到 2026-10-21 生成层改成拓扑排（f6f12395）之前是生成不出来的；前导头那一格也表达不了它，
 // 前导说的是「排在所有扩展头之前」，不是两个扩展头**之间**的先后。
 def AscendC_I0eExtendRegBaseOp
     : AscendC_UnaryTmpExtendRegBaseOpBase<"i0e_extend_reg_base", "I0eExtend",
@@ -180,7 +180,7 @@ def AscendC_I1eExtendRegBaseOp
     : AscendC_UnaryTmpExtendRegBaseOpBase<"i1e_extend_reg_base", "I1eExtend",
                                           ["modified_bessel_i1_reg_base.h", "i1e_reg_base.h"],
                                           ["modified_bessel_utils_reg_base.h"]>;
-// 第 5 批。同一族的另外四个，前导头都是 `modified_bessel_utils_reg_base.h`（`ImportData` /
+// 第 5 批。同类的另外四个，前导头都是 `modified_bessel_utils_reg_base.h`（`ImportData` /
 // `ExportData` 在里面）。`K0` / `K1` 的包装调 `ModifiedBesselI0Extend` /
 // `ModifiedBesselI1Extend`，所以各自要带上 `i0` / `i1` 那个头——与 `I0e` 同一种依赖，只是
 // 这两对的依赖序**正好与字典序一致**（`modified_bessel_i0` < `modified_bessel_k0`）。
@@ -248,7 +248,7 @@ class AscendC_UnaryConstBlockExtendOpBase<string mnemonic, string apiName, list<
 def AscendC_RsqrtExtendOp
     : AscendC_UnaryConstBlockExtendOpBase<"rsqrt_extend", "RsqrtExtend", ["rsqrt.h"]>;
 // apiName 是裸名 `LogicalNot`，与 `AscendC::LogicalNot` 同名而不是同一个函数——包装是
-// 全局的，发出去的调用不带 `AscendC::` 限定，所以两者不会撞。mnemonic 带 `_extend`
+// 全局的，生成的调用不带 `AscendC::` 限定，所以两者不会撞。mnemonic 带 `_extend`
 // 后缀是为了与下面 reg 侧那个 `LogicalNotExtend` 分开。
 def AscendC_LogicalNotExtendOp
     : AscendC_UnaryConstBlockExtendOpBase<"logical_not_extend", "LogicalNot", ["logical_not.h"]>;
@@ -348,8 +348,8 @@ def AscendC_BesselY1ExtendRegBaseOp
                                            "trigonometric_function_utils_reg_base.h"]>;
 // `SphericalBesselJ0Extend` 只用 trig utils 的 `AutofuseSin`，**不调 `BesselJ0Extend`**
 // （名字像而已），所以扩展头只有自己一个。前导两个照抄 legacy 的
-// `LoadApiHeaderFiles`——`bessel_j_utils` 这一个它用不到，但多发一个 include 不改语义，
-// 而少发会让「与 legacy 逐字同形」那条口径多一个例外。
+// `LoadApiHeaderFiles`——`bessel_j_utils` 这一个它用不到，但多生成一个 include 不改语义，
+// 而少生成会让「与 legacy 逐字同形」那条约束多一个例外。
 def AscendC_SphericalBesselJ0ExtendRegBaseOp
     : AscendC_UnaryTmpExtendRegBaseOpBase<"spherical_bessel_j0_extend_reg_base", "SphericalBesselJ0Extend",
                                           ["spherical_bessel_j0_reg_base.h"],
@@ -390,12 +390,12 @@ def AscendC_IsnanExtendOp : AscendC_PredicateExtendOpBase<"isnan_extend", "Isnan
 def AscendC_IsFiniteExtendOp : AscendC_PredicateExtendOpBase<"isfinite_extend", "IsFiniteExtend", ["isfinite.h"]>;
 def AscendC_IsInfExtendOp : AscendC_PredicateExtendOpBase<"isinf_extend", "IsInfExtend", ["is_inf.h"]>;
 
-// 标准侧。只要 L2 一档——L0 / L1 的 mask+repeat 形态这一族用不到。
+// 标准侧。只要 L2 一档——L0 / L1 的 mask+repeat 形态这一类用不到。
 //
 // 这三个声明在 CANN 的 `adv_api/math/is_{nan,inf,finite}.h` 里，不在 basic api 里，
 // 所以值得写一句它们怎么到 kernel 的：`kernel_operator.h` →
 // `interface/kernel_operator_intf.h` →（除 5101/5161/5165/5163 外无条件）
-// `adv_api/kernel_api.h` → `math/is_nan.h`。V3510 不在排除名单里，所以 kernel 里只发
+// `adv_api/kernel_api.h` → `math/is_nan.h`。V3510 不在排除名单里，所以 kernel 里只生成
 // `kernel_operator.h` 就够，不需要像 legacy 的 `IncludeApiHeaderFiles()` 那样再点名。
 // `AscendC::Sigmoid` 走的是同一条链。
 def AscendC_IsNanL2Op : UnaryL2Op<"is_nan_l2", "IsNan">;

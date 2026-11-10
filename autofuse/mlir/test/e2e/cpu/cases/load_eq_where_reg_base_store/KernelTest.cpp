@@ -44,8 +44,8 @@ TEST(MlirE2eCpu, LoadEqWhereRegBaseStoreCalculatesCorrectResult) {
   // 条件两边都要被取到：按下标每三个相等一次，所以 `eq` 的真值在一趟 lane 里既有 1 也有
   // 0——恒真或恒假的取法会把「两路接反」整个放过去。
   //
-  // 两路候选值**处处不等**（一个正、一个负），而且都不取 0：取到哪一路只能由条件决定，
-  // 「没算」也分得出来。取值都在 float 里精确可表示，所以数值判据是**相等**，不是近似。
+  // 两路候选值处处不等（一个正、一个负），而且都不取 0：取到哪一路只能由条件决定，
+  // 「没算」也分得出来。取值都在 float 里精确可表示，所以数值判据是相等，不是近似。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = static_cast<float>(index % 3U);
     input1[index] = 0.0F;

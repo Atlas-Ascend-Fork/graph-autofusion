@@ -22,7 +22,7 @@ using mlir::afir::load_broadcast_bf16_reg_base_store::GetShapeConfig;
 using mlir::afir::load_broadcast_bf16_reg_base_store::kInputShapes;
 using mlir::afir::load_broadcast_bf16_reg_base_store::kOutputShapes;
 
-// **宿主侧按 `uint16_t` 摆这块内存，比的是位。**
+// 宿主侧按 `uint16_t` 摆这块内存，比的是位。
 //
 // 广播是纯搬运，不做任何算术，所以逐位相等是比「近似相等」更紧的判据——近似比对会把
 // 「少搬了一个元素」之外的那一类错（写进去的是转过一次 f32 的值）放过去。而按位比不需要
@@ -51,13 +51,13 @@ TEST(MlirE2eCpu, LoadBroadcastBf16RegBaseStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // **一半取负、一个都不取 0。** 全正的话「搬错了符号位」看不出来；取 0 的话输出哨兵与
+  // 一半取负、一个都不取 0。 全正的话「搬错了符号位」看不出来；取 0 的话输出哨兵与
   // 「真的搬进来一个 0」在那几个下标上分不开。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     const float magnitude = static_cast<float>(index % 13U) + 0.5F;
     input0[index] = Bf16Bits((index % 2U == 0U) ? magnitude : -magnitude);
   }
-  // **哨兵，不是 0。** 这一档的 bf16 位是刚开的，「kernel 一个字都没写」正是要防的失效
+  // 哨兵，不是 0。 这一档的 bf16 位是刚开的，「kernel 一个字都没写」正是要防的失效
   // 方式——填 0 的话，一个没写过的下标与一个搬进来的 0 长得一样。
   const uint16_t sentinel = Bf16Bits(-12345.0F);
   for (uint32_t index = 0; index < output_element_count; ++index) {

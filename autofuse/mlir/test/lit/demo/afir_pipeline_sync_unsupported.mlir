@@ -3,14 +3,14 @@
 // the CANN Open Software License Agreement Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-// **`Load → Store` 直连（`MTE2 → MTE3`），缓冲不是队列：报错，不做 barrier 回落。**
+// `Load → Store` 直连（`MTE2 → MTE3`），缓冲不是队列：报错，不做 barrier 回落。
 //
 // 顺序只能由队列的 enque / deque 给——`PipeBarrier` 只在同一条流水内排序，MTE2 与 MTE3
 // 之间没有 barrier 可用。这里的缓冲没有 `slot_count` / `queue_depth`（是 TBuf 不是队列），
 // 所以报错而不是静默放过：放过去就是 Store 可能读到还没搬完的 UB。
 //
 // 这条交接此前整档不支持（本文件原先钉的就是那句
-// `unsupported pipeline synchronization from MTE2 to MTE3`）。队列那一档现在发得出来，
+// `unsupported pipeline synchronization from MTE2 to MTE3`）。队列那一档现在能生成，
 // 正例见 `conversion/afir-transfer-load-store-mte2-mte3.mlir`——那一份是广播图
 // `[1,8] → [128,8]` 的 `B0Y1` 模板的真实 dump（`brc` 被删之后就是这个形状）。
 

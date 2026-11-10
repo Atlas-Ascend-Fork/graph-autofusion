@@ -8,16 +8,16 @@
 
 // RUN: not af-opt --afir-vector-func-to-reg-base --split-input-file %s 2>&1 | FileCheck %s
 
-// 这一期（M2）收不了的几种 `afir.vector_func`。**一格只违反一条**：一格同时违反两条时，
+// 这一期（M2）收不了的几种 `afir.vector_func`。一格只违反一条：一格同时违反两条时，
 // 两条判据互相遮蔽——去掉其中一条也仍然红，变异验证就失去意义。做不到分开的那一格要把
 // 「为什么分不开」写在格子上（第五格）。
 //
-// 这几条全部报在**能力层**（`emitCapabilityShortfall`），不是 verifier。两者的区别不是
+// 这几条全部报在能力层（`emitCapabilityShortfall`），不是 verifier。两者的区别不是
 // 措辞：能力不足会被 `RunMlirCodegen` 判成 `kNotSupported` 并整图干净回落给 legacy，而
 // verifier 失败是硬失败。所以「这一期还收不了」只能走这条路——写成 verifier 的话，
 // 今天能跑的图会当场红。
 //
-// 验收的另一半不在这里：**真的回落了**由 legacy 接管表看（`strict` 档的
+// 验收的另一半不在这里：真的回落了由 legacy 接管表看（`strict` 档的
 // `shortfall=yes`），这里只钉「拒收的理由说得对、而且指得到那个算子」。
 
 #in = #afir.tensor_desc<axis = [0], role = <input>>
@@ -26,13 +26,13 @@
 // 一、region 里的算子没有寄存器形态。挑 `afir.sub`：`Reg::Sub` 本身是有的
 // （`Basic/OpReg.td:33`），所以这一格钉的是「表外就是能力不足」，不是「这个 API 不存在」。
 //
-// **这一格换过两次**：原先是 `afir.neg`，M2 之后那一行按「加一行要带一格用例」补上了
+// 这一格换过两次：原先是 `afir.neg`，M2 之后那一行按「加一行要带一格用例」补上了
 // （`load_abs_neg_reg_base_store`）；接着换成 `afir.mul`，M4 又把它补上了
 // （`load_mul_abs_reg_base_store`）。所以这一格每次都换成下一个还没进表的。
 //
-// 与前两次不同的是：**`afir.sub` 不是实测命中的**。HEAD 的 reg 侧接管表（200 格）里，
+// 与前两次不同的是：`afir.sub` 不是实测命中的。HEAD 的 reg 侧接管表（200 格）里，
 // 首因落在这一层的只有 `afir.eq`（M3 收了）与 `afir.mul`（M4 收了），没有第三个。所以
-// 这一格今天是**手写判据**，与第三格（cast trait 表外）同一性质——它是判据，不是已命中
+// 这一格今天是手写判据，与第三格（cast trait 表外）同一性质——它是判据，不是已命中
 // 的桶。
 // CHECK: UnsupportedOperation: 'afir.sub' has no register-form lowering
 func.func @no_register_form(%a: !ascendc.local_tensor<?xf32>, %b: !ascendc.local_tensor<?xf32>,
@@ -54,8 +54,8 @@ func.func @no_register_form(%a: !ascendc.local_tensor<?xf32>, %b: !ascendc.local
 #in = #afir.tensor_desc<axis = [0], role = <input>>
 #out = #afir.tensor_desc<axis = [0], role = <compute>>
 
-// 二、多输出。可表达（算子收 variadic dsts），但这一期的下降只发一条 `StoreAlign`，
-// 所以在能力层拒掉——**不在 verifier 里拒**：多输出是 M4 的事，不是非法 IR。
+// 二、多输出。可表达（算子收 variadic dsts），但这一期的下降只生成一条 `StoreAlign`，
+// 所以在能力层拒掉——不在 verifier 里拒：多输出是 M4 的事，不是非法 IR。
 // CHECK: UnsupportedOperation: afir.vector_func with 2 destinations has no register-form lowering yet
 func.func @two_destinations(%a: !ascendc.local_tensor<?xf32>, %y0: !ascendc.local_tensor<?xf32>,
                             %y1: !ascendc.local_tensor<?xf32>) {
@@ -81,7 +81,7 @@ func.func @two_destinations(%a: !ascendc.local_tensor<?xf32>, %y0: !ascendc.loca
 // `micro_cast_api_call.cpp:18`。表外的对**不回落到缺省 trait**：legacy 查不到时用
 // `cast_trait_none`，而那条路上「没列过」与「列过且是 none」分不开，这里宁可干净回落。
 //
-// f16 -> i32 **在 AFIR 的 reg 侧对表里**（`Ops/Cast.cpp` 的 `getRegBasedCastPairs`），
+// f16 -> i32 在 AFIR 的 reg 侧对表里（`Ops/Cast.cpp` 的 `getRegBasedCastPairs`），
 // 所以 verifier 放它过去；trait 那张表里没有这一行，于是拒在能力层。两张表不是同一件事：
 // 前者说「这一对转得出来」，后者说「这一对该怎么舍入」。
 //
@@ -135,9 +135,9 @@ func.func @compute_narrower_than_lanes(%a: !ascendc.local_tensor<?xf16>, %y: !as
 // `Reg::UnPack`（`micro_load_api_call.cpp:57` 那个 while），那要多两个 op 与一个临时
 // 寄存器，归后续。
 //
-// **这一格必然同时违反取与存两条**：lane 宽度 8 字节要由 region 内某个结果带出来，而
+// 这一格必然同时违反取与存两条：lane 宽度 8 字节要由 region 内某个结果带出来，而
 // `afir.vector_func` 的边界 dtype 域里根本没有 8 字节的那一位
-// （`VectorFunc.td:50`），所以两侧边界都只能是窄的——分不开。能钉的是**报哪一条**：
+// （`VectorFunc.td:50`），所以两侧边界都只能是窄的——分不开。能钉的是报哪一条：
 // 判据的顺序决定诊断说的是取而不是存。
 // CHECK: UnsupportedOperation: afir.vector_func loads 'f32' into 'i64' lanes
 func.func @unpack_sequence_needed(%a: !ascendc.local_tensor<?xf32>, %y: !ascendc.local_tensor<?xi32>) {

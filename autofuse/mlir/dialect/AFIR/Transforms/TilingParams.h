@@ -18,26 +18,15 @@
 
 namespace mlir::afir {
 
-// 单个符号的物化在 `dialect/AFIR/IR/SymbolicBuilder.h`
-// （`getOrCreateTilingParam` / `materializeRuntimeSize`）：它不需要 Func 方言，住在
-// 方言层，bridge 与 conversion 都用得上。本文件只管「一个函数的全部符号」这一步。
+// 此接口按函数收集尺寸符号。单符号物化使用 SymbolicBuilder.h 的
+// getOrCreateTilingParam / materializeRuntimeSize；它们不依赖 Func 方言，供 bridge 和 conversion 共用。
 
-// 把函数里所有运行期尺寸符号一次性物化成 `afir.tiling_param`。
+// 将运行期尺寸符号预先物化为 afir.tiling_param，固定序言顺序并集中诊断无效表达式。
+// 此步骤可选；循环生成和资源物化也能通过 getOrCreateTilingParam 补建参数，
+// afir_memory_allocate_buffer_form.mlir 覆盖省略本步骤的路径。
 //
-// **这一步是可选的，不是后面几步的前置。** `getOrCreateTilingParam` 是 get-or-create，
-// 循环生成与资源物化在缺的时候会自己建（`test/lit/demo/afir_memory_allocate_buffer_form.mlir`
-// 的 RUN 行就不跑这一步，照样 CHECK 得出 `afir.tiling_param`）。也就是说同一个 op 有两个
-// 活的产生点，两个都被用例走到。
-//
-// 提前跑它买到的是两件事，都不是「让后面能跑」：尺寸序言的顺序与「谁先问」无关地固定
-// 下来；坏的尺寸表达式在一处一次性报出来，而不是等某个消费者恰好第一个碰到它。
-//
-// 符号来源两处，与资源物化阶段收集的是同一个集合：`#afir.asc_graph` 的 `size_var`
-// （轴尺寸），以及每一个 `#afir.buffer_desc` 的 `size_bytes_expr` 的自由符号
-// （缓冲字节数，典型值是 `q0_size` / `b5_size`）。
-//
-// 不校验名字在目标 ABI 里存在——AFIR 层不知道也不该知道 TilingData 的字段表，那是
-// 下降阶段的事（见 `afir.tiling_param` 的 ODS description）。
+// 收集 asc_graph 的 size_var，以及 buffer_desc 的 size_bytes_expr 自由符号，
+// 例如 q0_size、b5_size。目标 TilingData 字段是否存在由下降阶段校验，AFIR 层不依赖目标 ABI。
 LogicalResult materializeTilingParams(func::FuncOp func);
 
 }  // namespace mlir::afir

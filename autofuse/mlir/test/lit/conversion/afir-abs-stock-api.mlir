@@ -11,11 +11,8 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// The other half of afir-abs-extension-api.mlir: the same `afir.abs`, on a
-// target that does ship the stock `AscendC::Abs`. No tmp buffer, no
-// extension header, and a qualified call -- and none of that is spelled out in
-// the AFIR, which is identical apart from the operand the schedule did or did
-// not allocate.
+// Check stock AscendC::Abs: no scratch, no extension header, and a qualified call.
+// The companion extension test uses the same AFIR op with its scheduled scratch operand.
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

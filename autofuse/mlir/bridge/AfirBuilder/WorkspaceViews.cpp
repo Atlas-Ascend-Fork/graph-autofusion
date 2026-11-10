@@ -18,9 +18,9 @@
 
 namespace mlir::afir::bridge {
 namespace {
-// Scheduled repeats describe the full GM domain, not just a UB tile. Collapse
-// only a proven dense GM stride chain; vectorized_strides belong to UB and are
-// deliberately not used. Tile symbols must cancel before crossing stages.
+// Scheduled repeats cover the full GM domain. Collapse only proven dense GM
+// strides, not UB vectorized_strides. Cancel stage-local tile symbols before
+// using the view in another stage.
 FailureOr<std::string> denseExtent(const TensorDescDTO &view, const TemplateInfo &tmpl) {
   if (view.repeats.empty() || view.repeats.size() != view.strides.size()) {
     return failure();

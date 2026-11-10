@@ -8,10 +8,9 @@
 
 // `AxisAttr.from` 的来源轴引用必须指向本图里存在的轴。
 //
-// `from` 是 split / merge 的来源轴引用，`AxisAttr` 自己不校验它。`LoopGenerate` 两处
-// 会拿它去 `graphAxesById.lookup` 后直接读 `getAxisType()`——查不到就是对空属性解引用；
-// 它同时还喂给 `#afir.axis_binding` 的构造函数，负值只会撞在 assert 上（而 assert 是否
-// 编进来取决于构建选项，不能当成闸门）。校验因此放在 `collectGraphAxes`，与「轴 id 非负」
+// from 引用 split / merge 的来源轴，由 LoopGenerate 校验其存在性。
+// 查询后必须取得有效 AxisAttr，避免对空属性读取 getAxisType()。
+// 编进来取决于构建选项，不能当成门禁）。校验因此放在 `collectGraphAxes`，与「轴 id 非负」
 // 「轴 id 不重复」同一处。
 
 // RUN: af-opt --afir-kernel-body-signature --afir-loop-generate --split-input-file --verify-diagnostics %s

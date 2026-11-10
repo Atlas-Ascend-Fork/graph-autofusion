@@ -10,11 +10,11 @@
 // RUN: af-opt --verify-diagnostics --split-input-file --afir-select-implementation --target=Ascend950DT_950x %s
 
 // ODS 的 `scalarOperand` 说哪个操作数可以是标量（`"none"` / `"rhs"` / `"any"`），被指名
-// 的位置约束从「一块 tile」变成「一块 tile 或者一个标量」。这份文件按**谁拦住的**分组：
+// 的位置约束从「一块 tile」变成「一块 tile 或者一个标量」。这份文件按谁拦住的分组：
 // ODS、verifier、capability 各有。
 //
 // 分清楚是必要的：`afir-scalar-binary-api.mlir` 里那几个 op 的 `sameElementType` 恒开，
-// 于是「标量类型与 tile 元素类型不符」这一条**在它们身上到不了 capability**——ODS 先
+// 于是「标量类型与 tile 元素类型不符」这一条在它们身上到不了 capability——ODS 先
 // 报了。真正驱动那条 capability 判据的是下面第三条：一个既不是 local tensor、也不是
 // 标量的右操作数。
 
@@ -69,7 +69,7 @@ func.func @add_scalar_destination_shape_mismatch(%input: !ascendc.local_tensor<4
 // 三：右操作数既不是 local tensor、也不是标量。
 //
 // `getTensorTypes` 按「rhs 能不能 dyn_cast 成 LocalTensorType」二分，于是这种值会被归到
-// **标量**那一边，再由「标量类型 == tile 元素类型」拒掉——`!ascendc.global_tensor<?xf16>`
+// 标量那一边，再由「标量类型 == tile 元素类型」拒掉——`!ascendc.global_tensor<?xf16>`
 // 不等于 `f16`。这条就是那句判据唯一到得了的入口：上面第一条被 ODS 先拦了，而
 // `sameElementType` 恒开的情况下真标量走不到这里。删掉那一行，这份 IR 就会被当成一个
 // 合法的 `Adds`，把一块 GM 张量当成一个标量值传下去。
@@ -91,15 +91,15 @@ func.func @add_global_tensor_rhs(%lhs: !ascendc.local_tensor<?xf16> {afir.buffer
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
 
-// 四：**两个操作数不能都是标量**。`scalarOperand = "any"` 的 op 两个位置各自都可以是
+// 四：两个操作数不能都是标量。`scalarOperand = "any"` 的 op 两个位置各自都可以是
 // 标量，而 ODS 的类型约束是逐个操作数的，说不出「至多一个」——所以这一条是 **verifier
 // 负例**，不是 ODS 负例。
 //
 // 挡住的不是一个假想形态：两个都是 `f16` 时上面那两条 ODS 约束全过
 // （`AllElementTypesMatch` 只看元素类型，而标量的元素类型就是它自己），而
-// `inferElementwiseShape` 会答「没有形状」，目的地的形状无从校验，发出去的调用把两个
+// `inferElementwiseShape` 会答「没有形状」，目的地的形状无从校验，生成的调用把两个
 // 值当成两块 tile。legacy 那边这个形态是另一条路（`binary_api_call.cpp` 里
-// `x1.IsAnyScalar() && x2.IsAnyScalar()` 发的是 `Adds(y, (T)v1, (T)v2)`，连 tile 都没有），
+// `x1.IsAnyScalar() && x2.IsAnyScalar()` 生成的是 `Adds(y, (T)v1, (T)v2)`，连 tile 都没有），
 // 这一层没有接。
 func.func @add_both_operands_scalar(%destination: !ascendc.local_tensor<?xf16>) {
   %lhs = arith.constant 2.000000e+00 : f16
@@ -118,11 +118,11 @@ func.func @add_both_operands_scalar(%destination: !ascendc.local_tensor<?xf16>) 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
 
-// 五：**不可交换的那四个比较 op，标量仍然只能在右。** `lt` / `le` / `gt` / `ge` 的
+// 五：不可交换的那四个比较 op，标量仍然只能在右。 `lt` / `le` / `gt` / `ge` 的
 // `scalarOperand` 是 `"rhs"`，交换过来 ODS 直接拒收——左操作数还钉在 shaped type 上。
 //
 // 这一条与 afir-scalar-binary-swapped-api.mlir 成对：那一份是 8 个可交换 op 的交换方向
-// 都能下降，这一份是「可交换」这个前提**没有被顺手放宽成全部**。legacy 也只给 Eq / Ne
+// 都能下降，这一份是「可交换」这个前提没有被顺手放宽成全部。legacy 也只给 Eq / Ne
 // 覆写了 `IsScalarInputSupportedIfExchangeInputs`，四个不等号一个都没有。
 func.func @lt_scalar_first_operand(%input: !ascendc.local_tensor<?xf16>,
                                    %destination: !ascendc.local_tensor<?xui8>,

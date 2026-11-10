@@ -43,9 +43,8 @@ TEST(MlirE2eCpu, LoadSelectStoreCalculatesCorrectResult) {
   ASSERT_NE(input2, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 掩码由 `Isnan(input0)` 现算，所以 input0 要 NaN 与非 NaN 混着来；两个取值都出现，
-  // 否则「恒取 src0」或「恒取 src1」也能过。两路的值域不重叠（正 / 负），把两路接反
-  // 立刻看得出来。
+  // 条件由 Isnan(input0) 生成，input0 同时包含 NaN 和非 NaN，覆盖选择的两个分支。
+  // 候选值使用不重叠的正、负区间，以发现恒取一路或两路交换。
   for (uint32_t index = 0; index < probe_count; ++index) {
     input0[index] = index % 3 == 0 ? std::numeric_limits<float>::quiet_NaN() : 0.0F;
     input1[index] = static_cast<float>(index) + 1.0F;

@@ -19,9 +19,8 @@
 // CHECK-SAME: afplan.candidate = #afplan.candidate<subgraph = 0, plan = 0>
 // CHECK-SAME: afplan.stages = #afplan.stages<template_counts = [2, 1]>
 
-// 值的规划结果挂在值的定义点，一个值一份（设计文档 5.1 步 8）：kernel 参数与函数结果
-// 在各自的 arg / result attr 上，Op 的结果在 Op 自己身上。此前它是 4 个与操作数按下标
-// 对齐的数组属性，同一个值在每个使用点各存一份。
+// 值的规划信息只保存在定义点：函数参数和结果使用 arg/result attr，op 结果存于 op。
+// 不再在各使用点维护按下标对齐的描述符副本（设计文档 5.1 步 8）。
 // CHECK: func.func private @stage0_template0
 // CHECK-SAME: afir.buffer_desc = #afir.buffer_desc<space = <gm>, buffer_id = 0, size_bytes_expr = <"(16 * s0)">, life_time_axis_id = -1>
 // CHECK-SAME: afir.buffer_desc = #afir.buffer_desc<space = <gm>, buffer_id = 1, size_bytes_expr = <"16">, life_time_axis_id = -1>

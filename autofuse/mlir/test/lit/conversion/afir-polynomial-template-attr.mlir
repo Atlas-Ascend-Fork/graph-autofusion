@@ -11,7 +11,7 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// 第 9 批接通的八个多项式族。**这一份真正要钉的是 `n` 落在哪个位置**——模板实参位，
+// 第 9 批接通的八个多项式族。这一份真正要钉的是 `n` 落在哪个位置——模板实参位，
 // 不是实参位：
 //
 //     ChebyshevPolynomialTExtend<float, 3>(y, x, tmp, size)
@@ -23,7 +23,7 @@
 //     `<float, N>` 的字面量一起挡它。
 //   - 把 n 丢掉 → 模板位只有 dtype，包装那边 `N` 推不出来。CPP 的 `, N>` 挡它。
 //
-// 八个各取一个**不同的 n**，而且刻意覆盖包装里那几条 `if constexpr` 的边界
+// 八个各取一个不同的 n，而且刻意覆盖包装里那几条 `if constexpr` 的边界
 // （`N < 0` / `N == 0` / `N == 1` / 其余走 `VF_CALL`）：抄同一个 n 八遍的话，
 // 「n 是不是真的逐 op 读出来的」这件事钉不住——八条 CHECK 会互相替对方过。
 // 其中 `shifted_chebyshev_polynomial_v` 取 -1，那是包装里 `Duplicate(dst, 0)` 那一支。
@@ -140,7 +140,7 @@ module {
   }
 }
 
-// 建出来的 AscendC op 带四个实参加一个 `n` 属性；**没有** `arith.constant`。
+// 建出来的 AscendC op 带四个实参加一个 `n` 属性；没有 `arith.constant`。
 // IR-LABEL: func.func @chebyshev_polynomial_t_f32
 // IR: ascendc.chebyshev_polynomial_t_extend_reg_base %arg1, %arg0, %arg2
 // IR-SAME: n = 3

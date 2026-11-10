@@ -366,7 +366,7 @@ module {
 
 // -----
 
-// 大小的两个来源互斥：都写等于同一个事实编码两遍，而且没人会去核对它们一致。
+// 尺寸的两个来源互斥，避免同时声明后出现不一致。
 module {
   func.func @size_source_conflict() attributes {
     // expected-error @+1 {{InvalidBinding: size_from_resource and size_bytes_expr are mutually exclusive}}
@@ -405,8 +405,8 @@ module {
 
 // -----
 
-// 旧写法：把 canonical 尺寸字段名塞进表达式。它允许 `buffer_id = 2` 配 `"q7_size"`，
-// descriptor 自指错资源而无人发现，所以现在在属性构造时就拒掉。
+// 拒绝在 size_bytes_expr 中手写 canonical 资源名，避免 buffer_id=2 却引用 q7_size。
+// 资源尺寸应通过 descriptor 自身身份引用，在属性构造时检查。
 module {
   func.func @resource_size_name_as_expression() attributes {
     // expected-error @+1 {{InvalidBinding: 'q7_size' names a canonical resource size field; use size_from_resource instead}}
@@ -419,12 +419,11 @@ module {
 
 // -----
 
-// workspace 是 host 分配、按参数传进来的 GM 暂存。ATT 建 workspace 张量时就把 position
-// 钉成 GM 并清掉 `buf.id` / `que.id`，所以片上空间的条目产不出来；片上的临时量是一块
-// 带 descriptor 的 `memref.alloc`，不走这张表。此前这里不拦，`collectCanonicalResourceIds` 反倒会为这种条目
-// 发一个片上资源 id、在 TilingData 里建出 `b2_size`——一个不存在的资源的字段。
+// workspace 是 host 分配并传入的 GM 临时存储；ATT 为其设置 GM 并清除 buf/que id。
+// 片上临时量应使用带 descriptor 的 memref.alloc，不属于 workspace 表。
+// 拒绝片上空间条目，避免为不存在的资源生成 b2_size 等 TilingData 字段。
 module {
-  // 这条由 func.func 的属性 verifier 发，所以诊断挂在 Op 上而不是属性上。
+  // 这条由 func.func 的属性 verifier 输出，所以诊断挂在 Op 上而不是属性上。
   // expected-error @+1 {{InvalidDescriptor: 'afir.workspace_plan' element 0 requires gm storage, got ub}}
   func.func @workspace_plan_requires_gm() attributes {
     afir.workspace_plan = [#afir.buffer_desc<space = #afir.space<ub>, buffer_id = 2,

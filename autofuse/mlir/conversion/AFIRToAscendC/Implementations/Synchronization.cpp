@@ -60,7 +60,7 @@ ascendc::Pipe toAscendCPipe(afir::Pipe pipe) {
 //
 // 写成一张按 `(from, to)` 索引的表而不是一串 `if`：七台引擎有 42 个有序对，`HardEvent`
 // 里存在的是其中 33 个，剩下 9 个硬件没有对应事件。用 `if` 链表达这件事，读的人无法
-// 一眼看出哪些缺、缺的是不是写漏了。表里的 `kNone` 是**硬件没有**，不是没写。
+// 一眼看出哪些缺、缺的是不是写漏了。表里的 `kNone` 是硬件没有，不是没写。
 //
 // `from == to` 不在表里——同 pipe 内程序序即执行序，那条边由 `TokenType` 的 verifier
 // 在解析期就拒掉了，对角线永远取不到。
@@ -191,7 +191,7 @@ class LowerEventWaitOp final : public OpConversionPattern<EventWaitOp> {
     if (failed(selected) || *selected != key_) {
       return rewriter.notifyMatchFailure(op, "another Ascend implementation was selected");
     }
-    // pipe 对读的是**原 Op** 上的 token 类型：转换后的操作数已经是事件号，方向信息只在
+    // pipe 对读的是原 Op 上的 token 类型：转换后的操作数已经是事件号，方向信息只在
     // 原类型上。这也是 ADR-19 把 pipe 对放进类型、而不是放进一个旁路属性的原因。
     std::optional<ascendc::HardEvent> event = tokenHardEvent(op.getToken().getType());
     if (!event) {
@@ -257,16 +257,11 @@ class LowerBarrierAllOp final : public OpConversionPattern<BarrierAllOp> {
   std::shared_ptr<const SynchronizationMapping> mapping_;
 };
 
-// 跨核栅栏（hard 变体）：显式置 `isAIVOnly`（IR 层意图声明，与 `GenKernelEntry` 的
-// 既有写法一致）。MLIR codegen 只覆盖非 cube 图（`CodegenOrchestration.cpp` 对
-// `IsCubeFusedScheduled` 直接回落 legacy），参与同步的全是 AIV 核，AIV-only 协议
-// （缺省 `isAIVOnly = true`，打印为 `AscendC::SyncAll()`）才是「同组全部核互等」；
-// `<false>` 是 AIC+AIV 混模协议——AIV 侧要等一个只有 AIC 会置位的
-// `SYNC_AIC_AIV_FLAG`，纯 AIV 发射下死锁（910B3 实测）。legacy 也只在混模上下文或
-// 按 `mix_mode` 分支时才用它（`codegen_kernel.cpp` 的 `GenCubeCommonFunc*`）。将来若
-// 引入混模，须按发射模式取值并同时引入能表达该模板实参的打印，不能靠 `UnitAttr`
-// 缺省（不写 = false = 封死侧）。soft 变体带 workspace/核数参数，为 superkernel
-// feed-sync 语义，后续扩展时再登记实现。
+// hard 跨核栅栏显式设置 isAIVOnly，与 GenKernelEntry 一致。
+// 当前 MLIR codegen 排除 Cube 融合，只有 AIV 核参与，应使用 AIV-only SyncAll 协议。
+// false 对应 AIC+AIV 混模，会等待仅由 AIC 设置的 SYNC_AIC_AIV_FLAG；纯 AIV 路径会死锁。
+// 将来支持混模时，需按生成模式选择并打印对应模板实参，不能依赖缺省 UnitAttr。
+// soft 变体带 workspace / 核数参数，用于 superkernel feed-sync，暂不注册。
 class LowerSyncAllOp final : public OpConversionPattern<SyncAllOp> {
  public:
   LowerSyncAllOp(TypeConverter &converter, MLIRContext *context, ImplementationKey key,

@@ -8,20 +8,20 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- VfEmissionFormProbe.cpp - VF 的两种发射形态哪种收得下 ----------------===//
+//===- VfEmissionFormProbe.cpp - VF 的两种生成形态哪种收得下 ----------------===//
 //
-// **这不是测试，是一台量具**（与同目录的 `CapabilityBoundaryProbe.cpp` /
+// 这不是测试，是一个测量工具（与同目录的 `CapabilityBoundaryProbe.cpp` /
 // `legacy_takeover_table.sh` 同一性质）。它不接任何 `check-*` 目标，要量就手动跑：
 //
 //     bash autofuse/mlir/test/probe/vf_emission_form/run.sh
 //
 // 要回答的问题来自 `docs/development/2026-10-18-afir-vector-func-implementation-design.md`
-// 的「假设和依赖关系」第 1 条：VF 那一段代码有两种发射形态，**选哪一种决定了实现的代价**。
+// 的「假设和依赖关系」第 1 条：VF 那一段代码有两种输出形态，选哪一种决定了实现的代价。
 //
-//   形态一 B2  legacy 今天的做法：外联一个 `inline __simd_vf__` 函数，kernel 发调用。
-//              要多一个外联 pass、一条 dims/strides 参数表、一个架构 `#if` 的发射点
+//   形态一 B2  legacy 当前的做法：外联一个 `inline __simd_vf__` 函数，kernel 生成调用。
+//              要多一个外联 pass、一条 dims/strides 参数表、一个架构 `#if` 的生成点
 //              （而架构门的字面量不许写在 artifact 层，见 check_platform_agnostic_layers.sh）。
-//   形态二 B1  PyAsc 上游的做法（`emitasc.vec_scope` / `vf_for` 已经建模且已能发射）：
+//   形态二 B1  PyAsc 上游的做法（`emitasc.vec_scope` / `vf_for` 已经建模且已能生成）：
 //              就地 `__VEC_SCOPE__ { for (...) { ... } }`，直接用 kernel 自己的 SSA 值，
 //              上面三件一件都不要。
 //
@@ -34,20 +34,20 @@
 //
 //   `run.sh`           CPU 模拟器（`g++` + tikicpulib）跑数值 —— 形态**算得对不对**；
 //   `run.sh --device`  真实 NPU 编译器（`ccec --cce-aicore-arch=dav-c310`）只编不跑
-//                      —— 形态**编得过吗、编出来的是不是向量指令**。
+//                      —— 形态编得过吗、编出来的是不是向量指令。
 //
 // 第二档是必须的：模拟器那一份是 `g++` 编的，它收得下不等于 ccec 收得下。设备侧这一档
 // 用 `-DVF_PROBE_DEVICE_ONLY` 把 host 侧的 `main` 与 tikicpulib 关掉（ccec 编不了它们）。
 //
 // 2026-10-18 实测（CANN 9.2.0）：
 //   - 模拟器：两种形态都 `mismatches=0`；
-//   - ccec（dav-c310）：两种形态都编得过，而且**反汇编出来是同一段向量代码**——
+//   - ccec（dav-c310）：两种形态都编得过，而且反汇编出来是同一段向量代码——
 //     `__VEC_SCOPE__` 被编译器外联成一个 `.vector.thread` 函数，指令直方图与 `__simd_vf__`
-//     那一份**逐项相同**（`VAG_V310` 1 / `VLOOPV2_V310` 1 / `VLD` 2 / `PLT.b32` 1 /
-//     `VADD.f32` 1 / `VABS.f32` 1 / `VST` 1 / `SEND` 1），标量侧各发一条 `VF` 去启动它。
-//     **也就是说两种形态的差别只在源码层，不在指令层。**
+//     那一份逐项相同（`VAG_V310` 1 / `VLOOPV2_V310` 1 / `VLD` 2 / `PLT.b32` 1 /
+//     `VADD.f32` 1 / `VABS.f32` 1 / `VST` 1 / `SEND` 1），标量侧各生成一条 `VF` 去启动它。
+//     也就是说两种形态的差别只在源码层，不在指令层。
 //
-// **这台量具仍然答不了的**：上板实测（功耗、真实时序），以及形态二在更复杂的子图
+// 这个测量工具仍然答不了的：上板实测（功耗、真实时序），以及形态二在更复杂的子图
 // （多输出、跨 dtype、谓词进 Select）上是否还等价——那要靠 E2E 一格一格验。
 //
 //===----------------------------------------------------------------------===//

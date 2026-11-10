@@ -8,15 +8,12 @@
 
 // `#afir.axis` 可缺省尾部的 negative 用例。
 //
-// 尾部改由 custom 指令逐项识别关键字之后，「哪些写法应当被拒」不再由 ODS 生成的
-// 解析器兜底，必须自己钉住。三种形态都会让下游读到一份与作者意图不同的轴：
-// 拼错的关键字、颠倒的顺序、重复的项。放过任何一种，错的那一项会被当成「没写」，
-// 而「没写」是合法的——所以失败是静默的。
+// custom 解析器必须拒绝未知关键字、字段乱序和重复字段，不能将其当成缺省项。
+// 缺省本身合法，忽略这些错误会使实际轴属性偏离输入意图。
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 
-// 关键字写错（这里是写成了全称 alignment）。错的那一项会被当成「没写」，而「没写」是合法的——
-// 放过它，失败就是静默的。
+// 拒绝拼错的 alignment 关键字，不能将该字段视为未指定。
 #bad_keyword = #afir.asc_graph<
   axes = [<id = 0, name = "z", axis_type = Original, size = #afir.expr<"s0">,
   // expected-error @below {{expected 'align', 'from' or 'split_pair_other_id'}}
@@ -26,7 +23,7 @@
 
 // -----
 
-// 顺序颠倒。尾部是有序的：允许乱序等于同一份轴有多种拼写，文本 diff 会失去意义。
+// 可选尾字段有固定顺序，乱序输入必须拒绝，保持序列化形式确定。
 #wrong_order = #afir.asc_graph<
   axes = [<id = 0, name = "z", axis_type = Original, size = #afir.expr<"s0">, from = [0],
   // expected-error @below {{expected 'align', 'from' or 'split_pair_other_id'}}
@@ -36,7 +33,7 @@
 
 // -----
 
-// 同一项写两遍。后一份会覆盖前一份，作者看到的与生效的不是同一个值。
+// 拒绝重复字段，不能由后一项静默覆盖前一项。
 #duplicate = #afir.asc_graph<
   axes = [<id = 0, name = "z", axis_type = Original, size = #afir.expr<"s0">, from = [0],
   // expected-error @below {{expected 'align', 'from' or 'split_pair_other_id'}}

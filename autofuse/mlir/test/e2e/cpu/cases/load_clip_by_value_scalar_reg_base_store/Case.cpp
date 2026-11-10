@@ -13,13 +13,13 @@
 // reg-base 一侧的三元标量形态（非掩码那一支）：`clip(x, -1, 1)`。与
 // `load_clip_by_value_scalar_store`（mem 侧）同一张图、同一份数值断言，差别只有 soc。
 //
-// 两份 `clipbyvalue.h` 的 include guard **撞名**（都是 `__ASCENDC_API_CLIPBYVALUE_H__`），
+// 两份 `clipbyvalue.h` 的 include guard 撞名（都是 `__ASCENDC_API_CLIPBYVALUE_H__`），
 // 与 `pow` 一样，所以钉的是各自独有的名字：reg 那份用 `Clamp`，mem 那份用
 // `AscendC::ClampMax` / `ClampMin` / `Maxs` / `Mins`。
 //
-// 实参序也不同：mem 侧是 `(dst, x, min, max, calCount, tmp_buf)`，reg 侧**没有 tmp**，
+// 实参序也不同：mem 侧是 `(dst, x, min, max, calCount, tmp_buf)`，reg 侧没有 tmp，
 // count 就是最后一个。上一轮给 mem 侧补三个转发重载的那件事（六份 lit 全绿而 device
-// 编译器报 `no matching function`）说明这一族的重载表就是要靠 E2E 兜——reg 侧此前
+// 编译器报 `no matching function`）说明这一类的重载表就是要靠 E2E 兜——reg 侧此前
 // 一条都没有。
 //
 //===----------------------------------------------------------------------===//
@@ -53,17 +53,17 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_clip_by_value_scalar_reg_base_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // 两个常量各自按元素类型建出来，**字面量写全**。
+  // 两个常量各自按元素类型建出来，字面量写全。
   EXPECT_NE(kernel.find("constexpr float cm1_f32 = (float)-1.000000000e+00;"), std::string::npos);
   EXPECT_NE(kernel.find("constexpr float c1_f32 = (float)1.000000000e+00;"), std::string::npos);
   // 与 tensor 形态同名的裸调用；两个标量落在 min / max 的位置上，**count 是最后一个
-  // 实参**——reg 侧这一族不收 tmp。
+  // 实参**——reg 侧这一类不收 tmp。
   EXPECT_NE(kernel.find(", cm1_f32, c1_f32, static_cast<uint32_t>("), std::string::npos);
   // 内联进来的是 reg 那一份。guard 撞名，所以钉两侧各自独有的名字。
   EXPECT_NE(kernel.find("__ASCENDC_API_CLIPBYVALUE_H__"), std::string::npos);
   EXPECT_NE(kernel.find("Clamp("), std::string::npos);
   EXPECT_EQ(kernel.find("AscendC::ClampMax("), std::string::npos);
-  // reg 侧不要 tmp buffer——**与 mem 侧相反**。TBuf 只会因为 tmp buffer 出现。
+  // reg 侧不要 tmp buffer——与 mem 侧相反。TBuf 只会因为 tmp buffer 出现。
   EXPECT_EQ(kernel.find("AscendC::TBuf<"), std::string::npos);
 }
 }  // namespace mlir::afir

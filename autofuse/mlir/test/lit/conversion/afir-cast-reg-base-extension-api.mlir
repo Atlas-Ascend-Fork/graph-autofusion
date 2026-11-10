@@ -11,16 +11,16 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-cast-extension-api.mlir 的另一半：`cast_reg_base.h`，**不要 tmp buffer**，
+// afir-cast-extension-api.mlir 的另一半：`cast_reg_base.h`，不要 tmp buffer，
 // 三个实参是 brace-init 数组。
 //
-// **这是这条路上第一个 brace-init 数组形态的调用。** 包装收的是三个
+// 这是这条路上第一个 brace-init 数组形态的调用。 包装收的是三个
 // `const uint32_t (&)[dim]`（输出各维长度、输出各维 stride、输入各维 stride），`dim` 由
 // brace-init 的长度推出来——打一个元素就是在说连续形态。两个 stride 恒为 1，出自这个
 // ascendc op 的助记符（`..._contiguous_...`）本身，不是从 IR 里读的。
 //
-// **i16 -> i8 只有这一侧有**：mem 侧 legacy 的 `kCastTypePairs` 里没有这一行（它的
-// i8 一族只到 `f16 -> i8` / `ui8 -> i8`）。所以 `WRONGTARGET` 那条同时钉住 mem 侧
+// i16 -> i8 只有这一侧有：mem 侧 legacy 的 `kCastTypePairs` 里没有这一行（它的
+// i8 一类只到 `f16 -> i8` / `ui8 -> i8`）。所以 `WRONGTARGET` 那条同时钉住 mem 侧
 // 选不出实现。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

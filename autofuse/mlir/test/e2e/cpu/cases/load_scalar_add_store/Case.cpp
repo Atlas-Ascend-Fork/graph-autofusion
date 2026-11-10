@@ -10,10 +10,10 @@
 
 //===- Case.cpp - scalar + load -> store CPU case ---------------*- C++ -*-===//
 //
-// **标量在第一个操作数**（L-4 的 `swap(2nd)` 那半张格子）。与
-// `load_add_scalar_store` 成对：两份图只差操作数次序，发出来的 kernel 必须逐字相同。
+// 标量在第一个操作数（L-4 的 `swap(2nd)` 那半张格子）。与
+// `load_add_scalar_store` 成对：两份图只差操作数次序，生成的 kernel 必须逐字相同。
 //
-// legacy 那边这半张格子是靠**改图**支持的——`ScalarBroadcastOptimizationPass` 的
+// legacy 那边这半张格子是靠改图支持的——`ScalarBroadcastOptimizationPass` 的
 // step7 `SwapInputIndex` 把两个输入换过来，`binary_api_call.cpp` 再按 `switch_scalar`
 // 换一次。但那个 pass 只对 `Broadcast` 节点触发，直接建一个 `Scalar` 节点的图（就是
 // 这一份）它不管，于是图原样到 MLIR。L-4 之前 ODS 当场拒收
@@ -21,7 +21,7 @@
 // 掉、回落 legacy。
 //
 // 判据是数值加「与不交换那份同一个调用」：`ScalarOperand::Any` 只把有形状的操作数挪到
-// 第一个实参上，不换调用形状。发射顺序要是没换过来，`Adds` 的第二个实参会是一个标量
+// 第一个实参上，不换调用形状。生成顺序要是没换过来，`Adds` 的第二个实参会是一个标量
 // ——那时 device 编译器直接报错，红得比数值断言还早。
 //
 //===----------------------------------------------------------------------===//

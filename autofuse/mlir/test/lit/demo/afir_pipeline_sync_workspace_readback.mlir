@@ -230,8 +230,8 @@ module {
 // MULTI-LABEL: func.func private @multi_writer_readback
 // 同一 workspace 根上两个 store（多 stage 各写一次的形态）后一次回读：GM 写者全在
 // MTE3，末写者的 record 按程序序覆盖前一个 store——只有一条事件对，且 record 紧跟
-// **第二个** store。两条 NEXT 断言把归并钉死：首个 store 之后**直接**是 reloaded
-// load（store1 与它之间没有 record），末个 store 之后**直接**是唯一的 record；
+// 第二个 store。两条 NEXT 断言把归并钉死：首个 store 之后直接是 reloaded
+// load（store1 与它之间没有 record），末个 store 之后直接是唯一的 record；
 // 逐写者建对的旧形态会在 store1 后插一条 record，第一条 NEXT 即失败。
 // MULTI: afir.store
 // MULTI-NEXT: afir.load

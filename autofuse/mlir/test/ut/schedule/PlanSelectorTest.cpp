@@ -39,11 +39,9 @@ TEST(PlanSelectorTest, RejectsDynamicEmptyStageAndMissingPlan) {
   EXPECT_EQ(diagnostic, "subgraph 0 contains no candidate plan");
 }
 
-// Regression: a subgraph with zero plans must fail the whole selection, not be
-// silently skipped while other subgraphs still produce selections. Only
-// checking selections.empty() after the loop would miss this -- subgraph 0
-// contributing plans is enough to make that check pass even though subgraph 1
-// contributed nothing, leaving the aggregate entry with no plan for subgraph 1.
+// Reject the complete selection if any subgraph has no plans. A nonempty result
+// from another subgraph does not prove coverage of every subgraph; accepting it
+// would leave the aggregate entry without a plan for the empty subgraph.
 TEST(PlanSelectorTest, RejectsSubgraphWithNoPlansAmongOthersWithPlans) {
   const auto result = mlir::test::MakeMultiSubgraphFusedResult({1U, 0U});
   std::vector<mlir::bridge::PlanSelection> selections;
@@ -53,9 +51,8 @@ TEST(PlanSelectorTest, RejectsSubgraphWithNoPlansAmongOthersWithPlans) {
   EXPECT_TRUE(selections.empty());
 }
 
-// Regression guard: PlanSelection::subgraph_id defaults to 0U, so a loop body
-// that forgets to assign it would silently mislabel every subgraph past the
-// first as subgraph 0 instead of failing loudly.
+// Check explicit subgraph IDs: the default 0U could otherwise label all later
+// subgraphs as subgraph 0 when an assignment is omitted.
 TEST(PlanSelectorTest, KeepsEveryDynamicTemplateAcrossSubgraphs) {
   const auto result = mlir::test::MakeMultiSubgraphFusedResult({2U, 1U}, 3U);
   std::vector<mlir::bridge::PlanSelection> selections;

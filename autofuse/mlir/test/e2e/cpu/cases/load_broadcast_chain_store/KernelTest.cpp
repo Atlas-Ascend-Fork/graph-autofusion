@@ -74,7 +74,7 @@ TEST(MlirE2eCpu, LoadBroadcastChainCalculatesCorrectResult) {
   for (uint32_t index = 0; index < outputCount; ++index) {
     const uint32_t source =
         BroadcastSourceIndex(GetShapeConfig(kOutputShapes, 0).shape, GetShapeConfig(kInputShapes, 0).shape, index);
-    // 期望值按**一次**广播算：两趟拆开之后必须和它逐元素相等。
+    // 期望值按一次广播算：两趟拆开之后必须和它逐元素相等。
     EXPECT_FLOAT_EQ(output[index], input0[source]) << "index=" << index;
   }
 

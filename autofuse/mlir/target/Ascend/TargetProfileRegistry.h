@@ -10,11 +10,8 @@
 
 //===- TargetProfileRegistry.h - Shared selected target profile -*- C++ -*-===//
 //
-// One resolution point for "which target did this process select, and what is
-// its profile". Everything that needs the selected profile goes through here
-// instead of reading the shared cl::opt values itself, so the command-line
-// dependency stays inside this layer, and the profile is parsed once per
-// selection instead of once per consumer.
+// Resolve the selected target through this registry, keeping command-line option
+// access in the target layer and parsing each selection's profile once.
 //
 //===----------------------------------------------------------------------===//
 
@@ -32,10 +29,9 @@ class raw_ostream;
 
 namespace mlir::ascend {
 
-// Resolve the process-selected target and return its profile, loading it at
-// most once per distinct selection. TargetProfile is immutable plain data with
-// no MLIRContext ties, so one instance is safely shared across contexts,
-// passes and threads.
+// Return the selected target's profile, loading it once per distinct selection.
+// TargetProfile is immutable and independent of MLIRContext, so contexts, passes
+// and threads can share the same instance.
 //
 // `requirement` mirrors resolveTargetSelection: Required reports an error when
 // no target was selected, Optional returns a null profile in that case.

@@ -16,7 +16,7 @@
 //     手写的对照表——只验 `logical_and` 的话，把两行的 `TargetOp` 互换，整套还是全绿。
 //   - 输入取 `DT_INT32` 而不是 `DT_FLOAT`。`logical.h` 里 int32 走的是
 //     `Int64LogicalCommon`（先 `Cast` 到 float 再到 half，tmp buffer 要切两段），
-//     f32 走的是 `OtherTypeLogicalCommon`——**两条不同的分支**。两份用例各走一条，
+//     f32 走的是 `OtherTypeLogicalCommon`——两条不同的分支。两份用例各走一条，
 //     tmp buffer 分得不够大的话这一条先炸。
 //
 // 其余（`utils.h` 前导、输入与输出不同 dtype）与那份一样，理由见那边的文件头。

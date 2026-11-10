@@ -4,7 +4,7 @@
 // RUN: af-opt --afir-kernel-body-signature --afir-loop-generate --afir-memory-allocate %s | FileCheck %s
 
 // 一条队列上的两个张量各说自己要几格（`slot_count`），队列本身的格数是这些数的
-// **最大值**——legacy 也是这么聚合的（`codegen_kernel.cpp` 对 `que_buf_num_value` 取
+// 最大值——legacy 也是这么聚合的（`codegen_kernel.cpp` 对 `que_buf_num_value` 取
 // max）。两个计算节点串联时这种情况就会出现：中间张量只要 1 格，搬入那块要 2 格。
 //
 // 此前这里要求两者相等，合法的调度会被判成 "conflicting descriptors"。判据落在

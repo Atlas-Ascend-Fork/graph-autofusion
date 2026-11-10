@@ -21,7 +21,7 @@ using mlir::afir::load_logical_and_scalar_reg_base_store::GetShapeConfig;
 using mlir::afir::load_logical_and_scalar_reg_base_store::kInputShapes;
 using mlir::afir::load_logical_and_scalar_reg_base_store::kOutputShapes;
 
-// 与建图时给的 Scalar 节点一致。**只能取 0 或 1**，理由见下面喂值那一段。
+// 与建图时给的 Scalar 节点一致。只能取 0 或 1，理由见下面喂值那一段。
 constexpr float kMask = 1.0F;
 }  // namespace
 
@@ -38,7 +38,7 @@ TEST(MlirE2eCpu, LoadLogicalAndScalarRegBaseStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // **只喂 0 / 1**，与 `load_logical_and_store` 同一个契约：包装把两个输入 `Cast` 成
+  // 只喂 0 / 1，与 `load_logical_and_store` 同一个契约：包装把两个输入 `Cast` 成
   // half 后直接取乘积再 `Cast` 回 `uint8`，它假定输入已经是真值。喂 4 进去出来的是 4。
   //
   // 标量那一侧同样只能取 0 / 1，这里取 1：取 0 的话结果恒为 0，「标量被当成 0 了」与

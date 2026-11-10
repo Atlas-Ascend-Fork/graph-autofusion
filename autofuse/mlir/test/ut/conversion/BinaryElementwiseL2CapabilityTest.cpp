@@ -87,10 +87,8 @@ Operation *FindOperation(ModuleOp module, llvm::StringRef operationName) {
   return found;
 }
 
-// 一个 AFIR 二元 op 现在有两个 implementation：tensor-tensor 与 tensor-scalar。查询
-// 返回的候选集里两个都在，各自答各自的。下面每条用例问的都是「这个操作数形态对应的
-// 那一个怎么答」，所以按 stable id 取——取 `front()` 会在注册顺序变一下的时候悄悄换成
-// 另一个，而两个的答案本来就该不同。
+// 按 stable id 查询 tensor-tensor 和 tensor-scalar 实现，分别检查其支持条件。
+// 不能取候选 front()，否则注册顺序变化会使测试查询另一个不同形态的实现。
 template <typename ResultT>
 const auto *FindCandidate(const ResultT &result, llvm::StringRef stableId) {
   for (const auto &candidate : result.getAll()) {
@@ -199,12 +197,9 @@ TEST(BinaryElementwiseL2CapabilityTest, RejectsUnsupportedRankAndMismatchedShape
   }
 }
 
-// 这里原本有一条 `RejectsMismatchedElementTypes`：造一个 lhs/rhs dtype 不同的
-// `afir.add`，断言 capability 查询以 `UnsupportedType` 拒绝。它已经删掉——这条判据
-// 整体上移到了 verifier：`AllElementTypesMatch<[lhs, rhs, result]>` 管输入与结果，
-// 「buffer result and destination must have the same type」管 destination，于是这个
-// 输入根本构造不出来，测试断言的是一段不可达代码的行为。负例现在在
-// test/lit/smoke/afir_tmp_buffer_invalid.mlir。
+// 输入与结果的 dtype 一致性由 AllElementTypesMatch 校验，destination 类型也须与结果一致。
+// 这种无效 IR 无法进入 capability 查询，负例由 smoke/afir_tmp_buffer_invalid.mlir 覆盖，
+// 此处不重复测试不可达的 capability 分支。
 
 TEST(BinaryElementwiseL2CapabilityTest, RejectsTargetWithoutVectorCores) {
   MLIRContext context;

@@ -3,10 +3,8 @@
 // the CANN Open Software License Agreement Version 2.0.
 // RUN: not af-opt --afir-memory-allocate %s 2>&1 | FileCheck %s
 
-// 函数形态取「循环已经生成、但签名不是 canonical AscendC ABI」。循环生成过的证据是
-// 轴被物化成标量值并带上 `#afir.axis_binding`（判据见
-// dialect/AFIR/Transforms/LoopGenerate.h）——此前这里写的是 `afir.loop_generated`
-// 属性，那是同一事实的第二份编码，已随设计文档验收 8 删除。
+// 输入已有 axis_binding，表示循环已生成，但函数签名不满足 canonical AscendC ABI。
+// 阶段判据来自轴绑定结构，见 LoopGenerate.h，不依赖已删除的 loop_generated 属性。
 module {
   func.func private @malformed_abi() attributes {
     afir.arg_descs = [],

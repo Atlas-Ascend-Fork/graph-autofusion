@@ -68,10 +68,8 @@ def reachable_from(root: Path) -> set[str]:
 def main() -> int:
     root = Path.cwd() / DIALECT_DIR
     if not root.is_dir():
-        # **不能静默放行。** 这个脚本靠「从仓库根跑」找目录（pre-commit 保证这一点）。
-        # 换个地方调用就找不到目录，而门禁的意义正是「不该存在的东西没人发现」——这里
-        # 返回 0 等于把它自己也变成那样一个不会报警的东西，和它文档里批评的
-        # 「`files:` 被 exclude 过滤成空之后静默跳过」是同一种失败。
+        # 目录缺失时必须失败。本脚本按 pre-commit 约定从仓库根运行；
+        # 错误工作目录不应让检查静默跳过，类似 files 被 exclude 过滤为空的情况。
         print(
             f"[td-reachable] 找不到方言目录 {DIALECT_DIR}。本脚本必须从仓库根目录运行，"
             f"当前工作目录是 {Path.cwd()}。",
@@ -94,7 +92,7 @@ def main() -> int:
             "KNOWN_UNREACHABLE 并写明理由。"
         )
 
-    # 豁免表自己也要是真的：文件被接进来了却忘了从表里删，这条门禁就白设了。
+    # 检查豁免仍适用：文件接入 include 图后应移出豁免表。
     stale = sorted(name for name in KNOWN_UNREACHABLE if name in reachable)
     if stale:
         failures.append(

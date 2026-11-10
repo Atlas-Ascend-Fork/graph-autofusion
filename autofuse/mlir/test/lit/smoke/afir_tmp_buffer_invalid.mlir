@@ -7,15 +7,15 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 // RUN: af-opt --verify-diagnostics --split-input-file %s
 
-// 操作数分 inputs | destinations | tmpBuffers 三段。把 tmp buffer 当成一个输入是这一族最
-// 容易犯的错，而且它的表现是**静默错位**而不是崩溃：descriptor 少一条、tie 指向
+// 操作数分 inputs | destinations | tmpBuffers 三段。把 tmp buffer 当成一个输入是这一类最
+// 容易犯的错，而且它的表现是静默错位而不是崩溃：descriptor 少一条、tie 指向
 // tmp buffer、竞争检查把 destination 当成读。所以每一段的段长都要有一条负例钉住。
 
 #compute = #afir.tensor_desc<axis = [0], role = <compute>>
 #tile = #afir.buffer_desc<space = <ub>, buffer_id = 2, slot_count = 2, queue_depth = 2,>
 #tmp_buffer = #afir.buffer_desc<space = <ub>, buffer_id = 7, size_from_resource = true, alignment_bytes = 32,>
 
-// 按旧口径把 tmp buffer 数成输入：三条 operand_descs。
+// 按旧规则把 tmp buffer 数成输入：三条 operand_descs。
 func.func @tmp_buffer_counted_as_input(
     %lhs: memref<16xf16, #afir.space<ub>> {afir.buffer_desc = #tile},
     %rhs: memref<16xf16, #afir.space<ub>> {afir.buffer_desc = #tile},

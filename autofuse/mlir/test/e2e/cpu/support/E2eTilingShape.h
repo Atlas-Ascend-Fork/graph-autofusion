@@ -104,7 +104,7 @@ inline testing::AssertionResult CoversTailTile(const TilingShape &shape) {
         (element_count)                                                                                               \
   }
 #else
-// 没声明访问器的注册：切分形状**观测不到**，于是 `tile` 与 `block_inner` 留 0。这不是
+// 没声明访问器的注册：切分形状观测不到，于是 `tile` 与 `block_inner` 留 0。这不是
 // 「取默认值」，是照实说不知道——`TileCount` / `TailElements` 在 `tile == 0` 上本来就答 0，
 // 打印出来的 round 与 tail_select 因此是 `NO`，不会把未知冒充成已覆盖。COVERS 这时也提不了：
 // `AddCpuCase.cmake` 要求声明 COVERS 必须同时给 TILE_ACCESSOR，所以三条断言一条都不会读它们。

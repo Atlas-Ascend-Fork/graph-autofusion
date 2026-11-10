@@ -12,7 +12,7 @@
 //
 // 三件事在这里交汇，缺一个都跑不到最后：
 //   1. `%9`（sum 的结果）在 z1T 循环里产生，`afir.store` 在外层 z0Tb 消费——跨作用域累加；
-//   2. `afir.load` 的 `loop_axis` 是 z1T，即搬运第一次落在**第二层**循环里，且 tile 有两根
+//   2. `afir.load` 的 `loop_axis` 是 z1T，即搬运第一次落在第二层循环里，且 tile 有两根
 //      向量化轴（z0t、z1t），是二维搬运；
 //   3. UB 侧的 stride `(8 * Ceiling((Rational(1 , 8) * z1t_size)))` 带 `Rational` 因子。
 
@@ -53,16 +53,16 @@ module @reduce_sum_s0 attributes {afir.cube_type = -1 : i64, afir.enable_group_p
 // CHECK: scf.for
 // CHECK: %[[LOADED:[a-zA-Z0-9_]+]] = afir.load
 // CHECK: %[[SUM:.*]] = afir.sum %[[LOADED]] outs(%[[DST:[a-zA-Z0-9_]+]]) scratch(%{{[a-zA-Z0-9_]+}}, %{{[a-zA-Z0-9_]+}})
-// 被归约的 tile 循环在这里闭合——`afir.store` 落在它**外面**。
+// 被归约的 tile 循环在这里闭合——`afir.store` 落在它外面。
 // CHECK: } {afir.axis_binding = #afir.axis_binding<axis = 4, role = loop>}
-// 消费者用的是 sum 的 **destination**，不是 sum 的结果：`%[[SUM]]` 只在循环体内有定义，
+// 消费者用的是 sum 的 destination，不是 sum 的结果：`%[[SUM]]` 只在循环体内有定义，
 // 跨出去就违反支配关系。顺序不靠这条 SSA 边——`afir.sum` 对 destination 既读又写。
 // CHECK: afir.store %[[DST]]
 // 携带方案（初稿的备选 B）会在这里留下 `iter_args`，实施中已推翻，最终 IR 里一个都没有。
 // CHECK-NOT: iter_args
 
 // ALLOC-LABEL: func.func private @reduce_sum_common
-// 两块 scratch 都是**普通**缓冲（`buffer_desc` 没有 `slot_count`/`queue_depth`），各自一个
+// 两块 scratch 都是普通缓冲（`buffer_desc` 没有 `slot_count`/`queue_depth`），各自一个
 // TBuf，尺寸各自来自一个 tiling 字段。合并成一块、或把尺寸配反，ReduceSum 的临时区就会和
 // 段结果互相覆盖——UB 是紧排的，越界落在邻居身上，未必当场报错。
 // ALLOC: %[[B0:[a-zA-Z0-9_]+]] = afir.tiling_param "b0_size"
@@ -76,7 +76,7 @@ module @reduce_sum_s0 attributes {afir.cube_type = -1 : i64, afir.enable_group_p
 // ALLOC: %[[TAPI:[a-zA-Z0-9_]+]] = ascendc.tbuf : <veccalc>
 // ALLOC: ascendc.pipe.init_buffer %{{[a-zA-Z0-9_]+}}, %[[TAPI]], %[[B1]]
 // `(8 * Ceiling((Rational(1 , 8) * z1t_size)))`：sympy 把字面分数折进 `Rational`，
-// index 侧下降必须认这个形状，否则不收敛——而且是**不收敛**，不是报错：下降器先建了算子
+// index 侧下降必须认这个形状，否则不收敛——而且是不收敛，不是报错：下降器先建了算子
 // 再返回失败，贪婪重写驱动于是反复振荡。
 // ALLOC-DAG: arith.ceildivsi
 // ALLOC-DAG: arith.mulsi_extended
@@ -88,7 +88,7 @@ module @reduce_sum_s0 attributes {afir.cube_type = -1 : i64, afir.enable_group_p
 // ALLOC-DAG: %[[SEG:[a-zA-Z0-9_]+]] = ascendc.tbuf.get_tensor %[[TSEG]]
 // z0Tb 循环。
 // ALLOC: scf.for
-// 累加器的队列槽位锚在 z1T 循环**之前**：sum 在循环内写它，store 在循环外读它。
+// 累加器的队列槽位锚在 z1T 循环之前：sum 在循环内写它，store 在循环外读它。
 // 锚点若取「第一个成员的 sourceOwner」会落到 store 上，分配就排在循环之后，use 早于 def。
 // ALLOC: %[[SLOT:[a-zA-Z0-9_]+]] = ascendc.que_bind.alloc_tensor %[[QOUT]]
 // ALLOC: %[[ACC:[a-zA-Z0-9_]+]] = ascendc.reinterpret_cast %[[SLOT]]
@@ -103,14 +103,14 @@ module @reduce_sum_s0 attributes {afir.cube_type = -1 : i64, afir.enable_group_p
 
 // SELECT-LABEL: func.func private @reduce_sum_common
 // 搬运选得出实现。这一行钉住两件事：`TransferPlan` 接受了两根向量化轴（二维 tile）、
-// 它能在**第二层**循环里定位 tile。任何一条不成立，这里都会变成「找不到实现」。
+// 它能在第二层循环里定位 tile。任何一条不成立，这里都会变成「找不到实现」。
 //
 // 实现 id 只有 `load.gm_ub` 一个：`DataCopyPadExtend` 从前是一档 target feature、选不中
-// 时回落裸 `DataCopy`，现在一律发前者（与 legacy 的 `load_api_call.cpp` 一致），那一档
+// 时回落裸 `DataCopy`，现在一律生成前者（与 legacy 的 `load_api_call.cpp` 一致），那一档
 // 连同它的第二个 implementation 一并没有了。
 // SELECT: afir.load
 // SELECT-SAME: id = "load.gm_ub"
-// 归约本身选到二维的 AR/RA 实现。发射出来的形状由
+// 归约本身选到二维的 AR/RA 实现。生成的形状由
 // `../conversion/afir-to-ascendc-reduce-sum.mlir` 钉住，这里只钉「选得出来」。
 // SELECT: afir.sum
 // SELECT-SAME: id = "reduce_sum.tensor_ar_ra"

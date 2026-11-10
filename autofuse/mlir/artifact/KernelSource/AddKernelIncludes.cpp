@@ -34,14 +34,10 @@ constexpr llvm::StringLiteral kTiling = "autofuse_tiling_data.h";
 constexpr llvm::StringLiteral kCstdint = "cstdint";
 constexpr llvm::StringLiteral kListTensor = "kernel_operator_list_tensor_intf.h";
 constexpr llvm::StringLiteral kMatmul = "lib/matmul_intf.h";
-// Autofuse 的扩展头不是自足的翻译单元：它们照着 legacy 的 kernel 前导写，名字可以不带
-// `AscendC::` 限定（`LocalTensor` / `BinaryRepeatParams` / `ONE_REPEAT_BYTE_SIZE`）。
-// legacy 无条件把这条 using-directive 写进每个 kernel（`codegen_kernel.cpp` 的
-// `IncludeAndDefines`），这里只在真的有扩展头时写。
-//
-// 在此之前没人发现这一层缺了它：先接通的 `abs.h` / `neg.h` 恰好把名字都写全了。缺的
-// 表现也不在这一层——include 照发、文本照内联，最后炸在 device 编译器上，报的是内联
-// 进来的那段头文本的行号。
+// Autofuse 扩展头沿用 legacy kernel 前导，可直接使用 LocalTensor、BinaryRepeatParams
+// 和 ONE_REPEAT_BYTE_SIZE 等 AscendC 名称，因此内联前需要 using namespace AscendC。
+// legacy 的 IncludeAndDefines 无条件写入此声明，这里只在使用扩展头时写入。
+// abs.h / neg.h 自带完整限定名，不能覆盖缺少声明的情况；其他扩展头会在 device 编译时报错。
 constexpr llvm::StringLiteral kAscendCUsingDirective = "using namespace AscendC;";
 
 struct IncludeSpec {
@@ -91,10 +87,8 @@ void CollectRequirements(mlir::ModuleOp module, Requirements &requirements) {
   });
 }
 
-// An include is this pass's to rewrite when it is one of the fixed entries or
-// an extension header the module currently asks for. Extension includes left
-// over from a header no operation declares any more are deliberately not
-// touched: they were not put there by this pass.
+// Rewrite fixed includes and extension headers currently declared by the module.
+// Leave undeclared extension includes untouched; this pass does not own them.
 bool IsManaged(mlir::emitc::IncludeOp include, const Requirements &requirements) {
   llvm::StringRef path = include.getInclude();
   return path == kKernel || path == kTiling || path == kCstdint || path == kListTensor || path == kMatmul ||

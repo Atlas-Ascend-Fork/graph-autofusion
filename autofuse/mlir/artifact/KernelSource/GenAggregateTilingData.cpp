@@ -116,7 +116,7 @@ OwningOpRef<ModuleOp> createEntryModule(MLIRContext *context) {
 
 // 非扁平形态下 ATT 的 host tiling 在根上直接读写这四个量，再拷进各 group 的结构体
 // （`graph0_result0_g0_tiling_data.set_ub_size(tiling_data.get_ub_size())`），legacy 的根
-// 结构体也自带它们。扁平形态下**不能**加：那时根上这几个名字是转发到唯一 stage 结构体的
+// 结构体也自带它们。扁平形态下不能加：那时根上这几个名字是转发到唯一 stage 结构体的
 // 访问器（`TilingDataHeaderEmitter` 的 `emitRootForwardingAccessors`），根一旦自带同名
 // 实字段，ATT 写的是根、device 读的是 stage 的那一份，两边静默对不上。
 void addCommonScalarFields(OpBuilder &builder, ArrayRef<AggregatePlanInfo> infos, SmallVector<Attribute> &types,
@@ -197,7 +197,7 @@ void attachPlanContracts(OpBuilder &builder, ModuleOp entry, ArrayRef<AggregateP
     // 候选身份在这里与挂在 plan module 上的是同一个属性，而不是把两个整数拆键复述一遍
     // ——后者是「第三份编码」，读回时还得靠 `readPlanEntryMetadata` 补上非负校验。
     //
-    // tiling 字段是**一 stage 一个**、按 stage 次序排的一张表，而不是单个 plan 级字段名：
+    // tiling 字段是一 stage 一个、按 stage 次序排的一张表，而不是单个 plan 级字段名：
     // 根上没有 plan 这一层，`_main` 也一 stage 收一个 tiling 形参。
     contracts.push_back(builder.getDictionaryAttr(
         {builder.getNamedAttr(mlir::afplan::kCandidateAttrName, info.candidate),

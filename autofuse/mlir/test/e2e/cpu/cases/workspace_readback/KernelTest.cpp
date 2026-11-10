@@ -78,9 +78,8 @@ TEST(MlirE2eCpu, WorkspaceReadbackRoundTripsThroughGm) {
               reinterpret_cast<uint8_t *>(output), reinterpret_cast<uint8_t *>(output2),
               reinterpret_cast<uint8_t *>(workspace), tilingData);
 
-  // 第一路：store 写下 2x 落到 output；第二路：读回 2x 再翻倍到 output2 = 4x。
-  // 回读时序错误（读到未写完的值）会表现为 output2 整片塌成初值或错值——正是本用例
-  // 要拦的。
+  // 第一路写出 2x，第二路读回并翻倍得到 4x。
+  // 检查第二路结果，以发现回读早于写入完成导致的初始值或错误数据。
   for (uint32_t index = 0; index < output_element_count; ++index) {
     EXPECT_FLOAT_EQ(output[index], 2.0F * input0[index]) << "index=" << index;
     EXPECT_FLOAT_EQ(output2[index], 4.0F * input0[index]) << "index=" << index;

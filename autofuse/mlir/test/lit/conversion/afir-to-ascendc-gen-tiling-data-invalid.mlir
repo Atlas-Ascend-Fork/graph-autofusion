@@ -30,11 +30,9 @@ module @cube_plan attributes {
 
 // -----
 
-// 迁移到 `#afplan.variant` 之前，这里覆盖的是「只写了 stage_id、漏了 template_id」。
-// 坐标合成一个属性之后，半个坐标的状态在 IR 里无从表达（写错类型会被
-// AFPlanDialect::verifyOperationAttribute 在解析后直接拦掉，见
-// smoke/afplan_attrs_invalid.mlir），剩下的失败形态只有「没有任何 template」——
-// 一个不带 `#afplan.variant` 的函数就不是 template。
+// stage/template 坐标合并为 afplan.variant 后，不存在只提供半个坐标的形态；
+// 类型错误由方言校验，见 smoke/afplan_attrs_invalid.mlir。
+// 本用例检查没有任何 template 的 plan：未声明 variant 的函数不计为 template。
 // expected-error @+1 {{GenTilingData: Plan has no templates}}
 module @no_templates attributes {
   afir.module_kind = "plan"
@@ -84,9 +82,8 @@ module @conflicting_api_tiling_fields attributes {
 
 // -----
 
-// 没有候选身份就没有 (子图, plan) 坐标，stage 结构体的类型名与它在最外层 TilingData 里的
-// 成员名都拼不出来。这里必须报错，而不是退化成一个 ATT 不认识的名字——后者要到真机 host
-// 编译期才以 incomplete type 的形式暴露。
+// 缺少候选身份时无法生成与 ATT 一致的 stage 类型名和成员名，必须提前报错。
+// 不能使用默认名称，否则会延迟到 host 编译时出现 incomplete type 错误。
 // expected-error @+1 {{GenTilingData: missing afplan.candidate}}
 module @missing_candidate attributes {
   afir.module_kind = "plan"

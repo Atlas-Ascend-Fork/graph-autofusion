@@ -13,7 +13,7 @@
 using namespace mlir;
 using namespace mlir::ascendc;
 
-// 两条都打成 `AscendC::Reg::` 限定。legacy 发的是 `AscendC::MicroAPI::`，而
+// 两条都打成 `AscendC::Reg::` 限定。legacy 生成的是 `AscendC::MicroAPI::`，而
 // `namespace MicroAPI = Reg`（`asc/impl/basic_api/kernel_macros.h`）——同一个函数，这里取
 // 真名。元素类型是显式模板实参，与 `LoadAlign` 的签名
 // `LoadAlign<T, LoadDist>(U& dstReg, __ubuf__ T* srcAddr)` 对齐：缺省模板实参下 `T` 由

@@ -59,8 +59,7 @@ void EmitError(llvm::raw_ostream &diagnostic, llvm::StringRef identifier, const 
   diagnostic << ": " << message << '\n';
 }
 
-// 一次 INI 解析里固定不变的诊断上下文：出错要报的 buffer 标识、诊断流，以及随解析推进的
-// 当前行号。逐行的解析函数只带这一个上下文，不必各自重列标识与流。
+// INI 解析上下文：buffer 标识、诊断流和当前行号，由逐行解析函数共用。
 struct IniParseContext {
   llvm::StringRef identifier;
   llvm::raw_ostream &diagnostic;
@@ -162,9 +161,7 @@ std::optional<llvm::StringRef> Lookup(const FieldMap &fields, llvm::StringRef ke
   return iterator->second;
 }
 
-// 读取一份 profile 时固定不变的三样东西：解析出的字段表，以及出错要报的来源标识与诊断流。
-// 此前每个 Read*/Build* 都把这三项逐个列进签名，调用点也要逐次重复
-// `buffer.getBufferIdentifier(), diagnostic`。
+// profile 读取上下文：字段表、来源标识和诊断流，供各 Read* / Build* 函数共用。
 struct ProfileSource {
   const FieldMap &fields;
   llvm::StringRef identifier;

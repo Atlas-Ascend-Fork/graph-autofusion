@@ -12,21 +12,21 @@
 //
 // 这里放三元 elementwise 的两个族：选择族（`afir.select` / `afir.where`）和 clip 族
 // （`afir.clip_by_value`）。结构与一元、二元两条路一致：
-// 一个 implementation 由「建哪个 AscendC op」「属于哪张扩展 API 供给表」「要不要
+// 一个 implementation 由「建哪个 AscendC op」「属于哪张扩展 API 支持表」「要不要
 // tmp buffer」三件独立的事确定，判据写在 `ElementwiseApiFamily.h`，三条路共用一份。
 //
 // 和二元路径真正的差别有两条，都不只是「多一个输入」：
 //
-//   1. **第一个输入的元素类型不一定和另外两个相同。** 选择族的它是 ui8 掩码，clip 族
+//   1. 第一个输入的元素类型不一定和另外两个相同。 选择族的它是 ui8 掩码，clip 族
 //      的它是 x，与另外两个同 dtype。如果一律要求三个输入元素类型相同，选择族就只剩
 //      ui8 能过；如果一律不要求，又会放过 `f16 select f32`。所以这里用
 //      `conditionIsMask` 分两种情形，而不是写一条固定判据。
-//   2. **两侧发的都是 Autofuse 的包装，不存在「标准调用 vs 扩展调用」的分法。**
+//   2. 两侧生成的都是 Autofuse 的包装，不存在「标准调用 vs 扩展调用」的分法。
 //      mem 侧的 `Where` / `ClipByValue` 要调用方给 tmp buffer，reg 侧自己开寄存器、
 //      不要。两个 implementation 的 `ApiFamily` 因此分别是 MemBased 和 RegBased，
 //      没有 `Any` 这一档。
 //
-// 这条路只发连续 tile 形态：`Where(dst, cond, src0, src1, calCount[, tmp])` 和
+// 这条路只生成连续 tile 形态：`Where(dst, cond, src0, src1, calCount[, tmp])` 和
 // `ClipByValue(dst, x, min, max, calCount[, tmp])` 形状一致，共用一个 emitter。
 // 选择族两侧其实还有另一套调用形态，带 firstAxis / lastAxis 和 second-to-last stride
 // 的循环（legacy 的 `GenerateNormalCase` 等，以及上游那个 12 操作数的
@@ -95,14 +95,14 @@ struct TernaryElementwiseMapping {
   // 同 dtype。这与 ODS 上 `AllElementTypesMatch` 绑不绑第一个操作数是同一件事的两处
   // 表述：`AFIR_BufferizableTernaryElementwiseOp` 不绑、`...HomoElementwiseOp` 绑。
   bool conditionIsMask = true;
-  // 后两个输入是不是标量形态。三元这一族只需要一位（不像二元那边三档）：两族的第一个
-  // 操作数恒是 tile，后两个各自可以是标量、位置不能换——供给是同名重载，标量在哪个位置
-  // 由 C++ 重载决议挑。`false` 要求三个输入都是 tile，`true` 要求后两个里**至少一个**
+  // 后两个输入是不是标量形态。三元这一类只需要一位（不像二元那边三档）：两类的第一个
+  // 操作数恒是 tile，后两个各自可以是标量、位置不能换——可用实现是同名重载，标量在哪个位置
+  // 由 C++ 重载决议挑。`false` 要求三个输入都是 tile，`true` 要求后两个里至少一个
   // 是标量。理由与出处见 `Elementwise.td` 的 `scalarInputs`。
   bool scalarInputs = false;
   // 数据输入收哪几种元素类型。原先这条是本文件里一个写死的
   // `isSupportedElementType(Type)`，三条路里只有三元这样——集合写死在函数体里，注册处
-  // 看不见，也就没法与 legacy 的 `REG_ASC_IR` 对账。改成与一元、二元同一个形状：集合
+  // 看不见，也就没法与 legacy 的 `REG_ASC_IR` 比对。改成与一元、二元同一个形状：集合
   // 写在注册处，判据用共用的那个带掩码的重载。取值与原先那个函数逐字等价。
   uint32_t elementTypes = kF16 | kF32;
   ascend::ExecutionSpec executionSpec{ascend::ProcessorType::AICore, ascend::AICoreUnit::Vector,
@@ -288,8 +288,8 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
 
   CapabilitySupport queryScalarInput(Operation *, const ascend::instruction::ScalarInputQuery &,
                                      const ascend::instruction::QueryContext &) const override {
-    // 标量形态是**另一组 implementation**（`<op>.tensor_scalar.*`），不是这个查询的答案
-    // ——与二元那条路逐字相同的口径。
+    // 标量形态是另一组 implementation（`<op>.tensor_scalar.*`），不是这个查询的答案
+    // ——与二元那条路逐字相同的规则。
     //
     // **原先这里写着「那走的是另一套调用形态（`Where<true, true>` 加 second-to-last
     // stride）」，那是错的**：`where.h` 的三个标量重载（场景 1/2/3）就是
@@ -397,12 +397,12 @@ FailureOr<TernaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ad
   }
 
   // 向量化轴的分段（阶段 2 合轴）。最内一段交给 API，其余段变循环；今天所有图都只有
-  // 一段，走的是「不建循环、偏移恒为常量 0」那条分支，发出来的 Op 与此前逐字相同。
+  // 一段，走的是「不建循环、偏移恒为常量 0」那条分支，生成的 Op 与此前逐字相同。
   //
   // 本地侧偏移恒为 0 的理由（队列按 slot 自己轮转；TBuf 按 ATT 的 `b{id}_size` 语义只装
   // 一个 tile，块内每个迭代整块重写）在单段时仍然成立。调度偏移只落在 GM 侧。
   //
-  // **标量不必在这里判**：它没有向量化轴，`collapseVectorizedAxes` 不会把它收进来，
+  // 标量不必在这里判：它没有向量化轴，`collapseVectorizedAxes` 不会把它收进来，
   // 于是它拿不到 subindex——与此前按 `isa<LocalTensorType>` 分流的结论相同。
   FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op);
   if (failed(segments)) {
@@ -531,7 +531,7 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
   // 与 `WhereAscIrCodegenImpl` 逐字相同，只有 tmp 尺寸函数换了个名字而两者互相调用),
   // 差别只在 legacy 的 `IsScalarInputSupported` 允许哪个输入是标量，而两者允许的位置相同
   // （后两个），所以两者在 AFIR 这一层完全一样——标量形态也一样，各自多两个 implementation。
-  // **两者的集合不一样**：legacy 的 mem 侧相同，reg 侧只有 `Where` 多收 ui8 / ui16。
+  // 两者的集合不一样：legacy 的 mem 侧相同，reg 侧只有 `Where` 多收 ui8 / ui16。
   // i16 原先两个都漏了——ODS 有、legacy 两侧也有，只有注册处没写。
   constexpr uint32_t kSelectionElementTypes = kF16 | kF32 | kI16 | kI32;
   constexpr uint32_t kWhereRegElementTypes = kSelectionElementTypes | kUI8 | kUI16 | kBF16;
@@ -540,7 +540,7 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
     return failure();
   }
 
-  // **选择族只有这两个，没有 `masked_fill`。** 理由见 `Ops/Condition.td` 上那段：
+  // 选择族只有这两个，没有 `masked_fill`。 理由见 `Ops/Condition.td` 上那段：
   // `MaskedFillInputReorderPass` 在调度之前就把 `MaskedFill` 改写成了 `Select`，这条路
   // 上看不到那个节点类型。曾经注册过一个只有 mem 侧的 `masked_fill.tensor.extend`，没有
   // 任何用例走得到，已删。
@@ -581,9 +581,9 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
   // step 3。`fma` 与 clip 族同形——三个输入同 dtype，所以 `conditionIsMask` 是 false
   // （躯干那一位在这个 op 上读作 x1，不是掩码）——差别有两条，都不在这条 pattern 上：
   //
-  //   1. **供给是标准调用** `AscendC::Fma`，所以 target op 是 `FmaL2Op`（不声明
+  //   1. 可用实现是标准调用 `AscendC::Fma`，所以 target op 是 `FmaL2Op`（不声明
   //      `ApiExtensionOpInterface`、进 `kIsStockCall`），与 `hypot` 同一种情况；
-  //   2. **tmp 在 count 之前**。这条 pattern 建的是 `(dst, 三个源, count, tmp)`，而
+  //   2. tmp 在 count 之前。这条 pattern 建的是 `(dst, 三个源, count, tmp)`，而
   //      `FmaL2Op` 的 `arguments` 正是按它声明的，真实次序由 emitter 打
   //      （`Autofuse/VecTernary.h`）。所以这里不需要新 pattern。
   //

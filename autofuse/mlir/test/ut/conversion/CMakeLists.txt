@@ -34,8 +34,8 @@ add_afir_gtest(AFIRToAscendCTest
   COMMENT "Running AFIR to AscendC conversion unit tests"
 )
 
-# `ElementTypeMatrixTest` 拿注册处的元素类型集合与 legacy 抽出来的对照表对账，所以要知道
-# 那张表在哪。路径从 CMake 传进去，不在用例里按相对路径猜——用例的工作目录是构建目录。
+# 将 legacy 对照表路径传给 ElementTypeMatrixTest，用于核对注册的元素类型。
+# 测试运行于构建目录，不按当前工作目录猜测数据路径。
 target_compile_definitions(AFIRToAscendCTest PRIVATE
   AF_MLIR_OP_LOWERING_MATRIX_CSV="${MLIR_CODE_ROOT_DIR}/docs/guides/ascir_op_lowering_matrix.csv"
 )

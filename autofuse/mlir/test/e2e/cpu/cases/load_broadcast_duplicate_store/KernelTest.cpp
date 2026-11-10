@@ -68,7 +68,7 @@ TEST(MlirE2eCpu, LoadBroadcastDuplicateStoreCalculatesCorrectResult) {
   ICPU_RUN_KF(AF_MLIR_E2E_CPU_KERNEL_SYMBOL, blockDim, reinterpret_cast<uint8_t *>(input0),
               reinterpret_cast<uint8_t *>(output), reinterpret_cast<uint8_t *>(workspace), tilingData);
 
-  // 源只有一个元素：输出每一位都是它。初值 0 与期望值不同，所以「一个元素都没搬」会红。
+  // 源仅有一个元素，所有输出均应等于它；初始值 0 与期望值不同，可发现遗漏搬运。
   for (uint32_t index = 0; index < output_element_count; ++index) {
     EXPECT_FLOAT_EQ(output[index], input0[0]) << "index=" << index;
   }

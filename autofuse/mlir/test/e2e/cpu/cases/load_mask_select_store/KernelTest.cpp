@@ -30,7 +30,7 @@ extern "C" int64_t AutofuseE2eInitTiling(AutofuseTilingData *tiling, uint64_t *w
 TEST(MlirE2eCpu, LoadMaskSelectStoreCalculatesCorrectResult) {
   const uint32_t input_element_count = GetShapeConfig(kInputShapes, 0).element_count;
   const uint32_t output_element_count = GetShapeConfig(kOutputShapes, 0).element_count;
-  // 掩码一个字节、两个值各四个字节，三块都从 GM 搬进同一条队列——这个用例存在的理由。
+  // 同一队列接收字节掩码和两个四字节数据输入，验证不同元素宽度的搬运。
   auto *mask = static_cast<uint8_t *>(AscendC::GmAlloc(input_element_count * sizeof(uint8_t)));
   auto *onTrue = static_cast<float *>(AscendC::GmAlloc(input_element_count * sizeof(float)));
   auto *onFalse = static_cast<float *>(AscendC::GmAlloc(input_element_count * sizeof(float)));
@@ -39,8 +39,7 @@ TEST(MlirE2eCpu, LoadMaskSelectStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 真值与假值两段都出现，而且不是整段连续的 0 / 1——按 slot 错位搬运会把它们挪到
-  // 别的位置上，逐元素比对才看得见。
+  // 交错生成真假掩码，避免按 slot 错位搬运在连续 0/1 数据中不易察觉。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     mask[index] = static_cast<uint8_t>(((index / 3U) % 2U) == 0U ? 1 : 0);
     onTrue[index] = 100.0F + static_cast<float>(index);

@@ -33,8 +33,8 @@ add_mlir_e2e_cpu_case(load_broadcast_segmented_store_1x8
 # 多广播段：四段 `[brc][normal][brc][normal]`，两个广播段不相邻。分解成「每个广播段一趟、
 # 由内而外」，趟与趟之间一条 `PipeBarrier<PIPE_V>`——覆盖面严格超过 legacy 的四轴形态。
 #
-# 形状里的 `[2, 8]` 是**上限**，不是随手取的：外层那一趟整块复制的块是内侧三段之积
-# （`2 × 4 × 8 = 64` 个 f32），而 `BroadcastFirstDim` 在这一趟上按 counter 模式发 `Copy`，
+# 形状里的 `[2, 8]` 是上限，不是随手取的：外层那一趟整块复制的块是内侧三段之积
+# （`2 × 4 × 8 = 64` 个 f32），而 `BroadcastFirstDim` 在这一趟上按 counter 模式生成 `Copy`，
 # 一次 repeat 只覆盖 64 个 f32（8 block × 8）。再大一格（内侧 128 个）包装就自己按 2 次
 # repeat 走地址，CPU 模拟器当场报 `dstLocal size in Copy when in counter mode`——那是
 # `autofuse/ascendc/api/broadcast.h` 的遗留缺口，见设计文档「整块复制那一趟的上限」。
@@ -54,7 +54,7 @@ add_mlir_e2e_cpu_case(load_broadcast_segmented_store_1x5
 
 # 形态 B（`[normal][brc]`，最内轴是广播轴）**带填充**。这两格 2026-10-26 之前整个被
 # `classifySegments` 拒掉（探针 mem 侧 42 格命中那一条），因为形态 A 的收法是「行距两边
-# 一起换」，而形态 B 的源那一位恒是字面量 1、只换得了目的地一边。放开之后发的是
+# 一起换」，而形态 B 的源那一位恒是字面量 1、只换得了目的地一边。放开之后生成的是
 # `Broadcast(dst, src, M, 1, 0, M, pitch, 0, tmp)` → 原生 `AscendC::Broadcast<T,2,1>`，
 # 32B 对齐由「行距恒是一整档」天然满足。
 #

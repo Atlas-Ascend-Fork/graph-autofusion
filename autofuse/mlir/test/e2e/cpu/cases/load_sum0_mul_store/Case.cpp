@@ -7,29 +7,9 @@
  * See the License for the specific language governing permissions and limitations under the License.
  */
 
-//===- Case.cpp - load -> sum(dim 0) -> mul(scalar) -> store CPU case -*- C++ -*-===//
-//
-// 与 `load_sum_mul_store` 只差一处：归约的是**首轴**（RA 布局）而不是末轴。
-//
-// 分开一条而不是给那份加一组形状：真机上这两支的结果不同——末轴那支全绿，首轴那支在
-// `[512, 512]` 上**算错值**（`sum(x, 0) * 2` 与 `mean(x, 0)` 的误差逐位相同，所以不是 mean
-// 的问题），而 `[256, 512]`、`[64, 64]` 又是对的。首轴归约**不切图**（`relu(sum(x, 0))`）
-// 也是对的，所以被测的是「首轴 + 切图」这个组合。
-//
-// 归约**之后**再接一个带外部输入的节点。这一类此前没有用例，而它走的是一条与
-// `load_neg_sum_store`（归约之前融合）完全不同的路：
-//
-// `ReducePartitionPostFusion` 的 `IsNotPartitionReduce` 一旦发现归约的后继链上某个节点还
-// 有一个**不属于后继链**的输入（这里是 `Scalar`），就判「要切图」，于是
-// `PartitionReduceNode` 把图切成 `... -> Sum -> Store -> Workspace` 与
-// `Workspace -> Load -> Mul -> Store -> ...` 两张。节点数那条阈值（4）在这里没起作用——
-// 两个节点也照样切。
-//
-// 这正是 `torch.mean` 走的路：inductor 不发 Mean 节点，它拆成 `Sum` + `Broadcast(Scalar)`
-// + `TrueDiv`，那个 `Scalar` 就是外部输入。所以这条用例钉的是 mean 这一大类，而不是一个
-// 边角形状。
-//
-//===----------------------------------------------------------------------===//
+// IsNotPartitionReduce 检测到归约后继节点还使用链外 Scalar 输入，因此触发切图。
+// 两段分别为 Sum -> Store -> Workspace 和 Workspace -> Load -> Mul -> Store。
+// 此处由链外输入判据触发，与节点数阈值 4 无关。
 
 #include <gtest/gtest.h>
 
@@ -96,7 +76,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find("AscendC::ReduceSum"), std::string::npos);
   // 切图之后乘法落在第二张图里，读的是 workspace。
   EXPECT_NE(kernel.find("Muls<float, 1>("), std::string::npos);
-  // 这张图有两块 workspace，而 Plan 主函数读的是**每个 stage 自己那份** TilingData 上的
+  // 这张图有两块 workspace，而 Plan 主函数读的是每个 stage 自己那份 TilingData 上的
   // `workspace<ID>`；ATT 只往根上写偏移（schema 把 workspace 声明在 `"fusion"` 作用域），
   // 所以聚合入口必须逐个拷下去。少了这一步两块 workspace 会同用 0 号基址、互相覆盖，而且
   // 不报任何错——这条断言就是钉住那次拷贝。

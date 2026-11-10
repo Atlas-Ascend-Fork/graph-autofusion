@@ -11,13 +11,13 @@
 // 队列资源按 `(space, queue, buffer_id)` 共享：广播源 tile 与直连 store 的 load tile 写
 // 同一个 `buffer_id = 0`，就落在同一条 vecin 队列上。直连链（load → store，无矢量消费
 // 者）把这条队列物化成 `TQueBind<VECIN, VECOUT>`，而广播的标量读走的是同一条队列的
-// deque——`scalarReadEvent` 按**队列类型**答「源在哪条管线上被写」，双端队列的类型是
+// deque——`scalarReadEvent` 按队列类型答「源在哪条管线上被写」，双端队列的类型是
 // `que_bind`，不带 `queue` 的 position。认不出类型就答不了 MTE2_S，capability 层整图
 // 报不支持、回落 legacy。
 //
-// 这一条钉的是：双端队列的**源侧**（`getSrcPosition`）是 VECIN 时，标量读事件的答案与
+// 这一条钉的是：双端队列的源侧（`getSrcPosition`）是 VECIN 时，标量读事件的答案与
 // 单端 vecin 队列相同——MTE2_S。三个 RUN 分别钉 pass 产物（双端队列确实物化）、
-// conversion 产物（事件对发在标量读之前）、能力层选择（这一档选 duplicate 实现）。
+// conversion 产物（事件对生成于标量读之前）、能力层选择（这一档选 duplicate 实现）。
 
 // RUN: af-opt --target=Ascend910B1 --afir-kernel-body-signature --afir-materialize-tiling-params \
 // RUN:   --afir-loop-generate --afir-memory-allocate --afir-pipeline-sync %s | FileCheck %s --check-prefix=SYNC
@@ -139,7 +139,7 @@ module @plan0 attributes {
 // SYNC: !ascendc.que_bind<vecin, vecout
 // SYNC: !ascendc.queue<vecout
 
-// 事件对在标量读**之前**：双端队列的源侧是 VECIN（MTE2 写入），标量读的同步答案与
+// 事件对在标量读之前：双端队列的源侧是 VECIN（MTE2 写入），标量读的同步答案与
 // 单端 vecin 队列相同。
 // IR: func.func private @stage0_template0
 // IR: scf.for

@@ -8,12 +8,10 @@
 
 // `afplan` 属性的 negative 用例（设计文档 5.1 步 7、5.3）。
 //
-// 迁移前，「候选编号必须非负」这条校验散在 PlanMetadata::validatePlanMetadata、
-// TilingProgramSpec、GenAggregate* 各处，每个读点自己判一遍；而「名字写对了没有」
-// 根本没人判——discardable 属性拼错只会被无声忽略，失败形态是候选分派走错分支。
+// 统一在属性层校验候选编号非负，在方言层校验属性名称与类型。
+// 不能把拼错名称的候选字段作为 discardable 属性忽略，否则分派可能使用错误身份。
 //
-// 收敛后两者都由方言一次钉死：值域在 Attr 的 verifier，名字与类型在
-// AFPlanDialect::verifyOperationAttribute。
+// 值域由 Attr verifier 检查；名字和类型由 AFPlanDialect::verifyOperationAttribute 检查。
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 
@@ -47,9 +45,8 @@ module {
 
 // -----
 
-// 空分派表没有任何 stage 可分派；entry 生成器按它铺开 (stage, template) 表。
-// 文本形态下 ODS 生成的解析器就要求列表至少有一个元素，轮不到 verifier；verifier 里
-// 的同名检查仍然守着程序化构造（`StagesAttr::get`）这条路径。
+// 每个分派表至少有一个 stage。文本解析器先拒绝空列表，
+// Attr verifier 的对应分支由 StagesAttr 的程序化构造测试覆盖。
 module attributes {afplan.stages = #afplan.stages<template_counts = []>} {
   // expected-error@-1 {{expected integer value}}
   // expected-error@-2 {{failed to parse StagesAttr parameter 'template_counts'}}
@@ -64,7 +61,7 @@ module attributes {afplan.stages = #afplan.stages<template_counts = [2, 0]>} {
 
 // -----
 
-// 名字写错：迁移前这条会被无声忽略，现在在方言闸门上判错。
+// 名字写错：迁移前这条会被无声忽略，现在在方言门禁上判错。
 // expected-error@+1 {{unknown afplan attribute 'afplan.candidates'}}
 module attributes {afplan.candidates = #afplan.candidate<subgraph = 0, plan = 0>} {
 }

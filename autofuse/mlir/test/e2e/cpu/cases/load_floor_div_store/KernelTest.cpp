@@ -47,9 +47,8 @@ TEST(MlirE2eCpu, LoadFloorDivStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 被除数正负都要有：floor 不是截断，`floor(-7/2) == -4` 而 `trunc(-7/2) == -3`。
-  // 只喂正数的话，包装里那一步 `Truncate<CAST_FLOOR>` 写成截断也照样过。
-  // 除数避开 0，也避开 ±1（那两个值下 floor 与截断一致，同样分不开）。
+  // 输入含正负被除数，以区分向下取整与向零截断：floor(-7/2)=-4，trunc(-7/2)=-3。
+  // 除数排除 0 和 ±1，避免异常或两种舍入结果相同。
   for (uint32_t index = 0; index < input0_element_count; ++index) {
     input0[index] = static_cast<float>(static_cast<int32_t>(index) - 64) * 1.5F;
   }

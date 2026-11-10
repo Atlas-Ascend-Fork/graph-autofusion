@@ -245,12 +245,10 @@ struct AFIRKernelBodySignaturePass : public PassWrapper<AFIRKernelBodySignatureP
     return success();
   }
 
-  // 本函数体真正绑定了哪几块 workspace，按 buffer id 升序。
-  //
-  // 判据是「GM 的 `buffer_desc` 且 `buffer_id` 在 module 的 `afir.workspace_tensor_ids` 里」。
-  // 不能只看那张表非空就给每个 plan 都追形参：它是 **fused 级**的，对一个根本用不到
-  // workspace 的 plan（今天全部 RCommon 语料）照样非空，见 RA 设计文档 3.8 第 2 条。
-  // 按「谁真的绑定了」驱动，既有 kernel 的签名才逐字节不变。
+  // 收集本函数实际绑定的 GM workspace，并按 buffer id 升序排列。
+  // 判据为 GM buffer_desc 的 buffer_id 出现在模块的 afir.workspace_tensor_ids 中。
+  // 该列表是 fused 级信息，非空不代表每个 plan 都使用 workspace，例如 RCommon plan。
+  // 只为实际绑定的 workspace 增加形参，避免改变无关 kernel 的签名（RA 设计 3.8）。
   static SmallVector<int64_t> collectBoundWorkspaceIds(func::FuncOp func) {
     auto module = func->getParentOfType<ModuleOp>();
     auto declared =
@@ -286,19 +284,16 @@ struct AFIRKernelBodySignaturePass : public PassWrapper<AFIRKernelBodySignatureP
       }
       outputArguments.push_back(func.getArgument(argumentIndex));
     }
-    // ABI 追加出来的两个参数在参数自己的定义点上声明身份，而不是留给消费端按「倒数
-    // 第二个且类型等于 workspace 类型」「倒数第一个且结构体名字是 TilingData」去反推
-    // （设计文档 3.6）。位置约定本身仍在——AscendC 生成的 C++ 签名要求这个顺序——但
-    // 它现在是被检查的约定，不是被依赖的推断依据。
+    // 在参数定义点声明追加的 workspace 和 tiling 身份，消费方不按类型或倒数位置推断。
+    // AscendC C++ ABI 仍要求固定顺序，但该顺序由校验保证（设计文档 3.6）。
     unsigned workspaceIndex = func.getNumArguments();
     if (failed(func.insertArgument(workspaceIndex, getAscendCWorkspaceType(context), emptyAttrs, func.getLoc()))) {
       return func.emitError("failed to append workspace argument");
     }
     afir::setKernelArgAttr(func, workspaceIndex, afir::KernelArgRole::Workspace);
-    // 每块被本函数体绑定的 workspace 再追一个字节偏移形参，夹在 workspace 与 tiling 之间
-    // ——与 legacy 的 `(..., GM_ADDR workspace, uint64_t workspace<ID>..., const T *t)`
-    // 同形（`codegen_kernel.cpp:1935`）。偏移由 entry 从 tiling 上读出来再传进来，理由见
-    // `AFIREnums.td` 的 `WorkspaceOffset`。
+    // 为实际绑定的每块 workspace 增加字节偏移参数，位于 workspace 基址与 tiling 之间，
+    // 与 legacy 的 (..., GM_ADDR workspace, uint64_t workspace<ID>..., const T *t) 一致。
+    // entry 从 tiling 读取偏移后传入，语义见 AFIREnums.td 的 WorkspaceOffset。
     for (int64_t bufferId : collectBoundWorkspaceIds(func)) {
       unsigned offsetIndex = func.getNumArguments();
       if (failed(func.insertArgument(offsetIndex, getAscendCWorkspaceOffsetType(context), emptyAttrs, func.getLoc()))) {
@@ -368,14 +363,11 @@ struct AFIRKernelBodySignaturePass : public PassWrapper<AFIRKernelBodySignatureP
     return markNeedSyncAll(func, role);
   }
 
-  // 这个 stage 跑完之后要不要全核同步，判据与 legacy 同源（`codegen_kernel.cpp:2748`）：
-  //
-  //     need_sync_all = kernel.has_workspace_node && j != schedule_groups.size() - 1
-  //
-  // `has_workspace_node` 即本函数体绑定了 workspace，与偏移形参共用
-  // `collectBoundWorkspaceIds`；`j` 取自 `#afplan.variant`，总数取自 `afplan.stages`。
-  // 这两个属性缺失时报错而不是跳过：漏掉同步，phase 2 会读到别的核没写完的 workspace，
-  // 结果每次不同，而且单核上必然看不出来。
+  // 按 legacy codegen_kernel.cpp 的规则设置跨 stage 全核同步：
+  // need_sync_all = kernel.has_workspace_node && j != schedule_groups.size() - 1
+  // workspace 使用情况来自 collectBoundWorkspaceIds，j 来自 #afplan.variant，
+  // stage 总数来自 afplan.stages。元数据缺失时报错，不能跳过同步，否则下一阶段可能读取
+  // 其他核尚未写完的 workspace；单核测试无法覆盖此问题。
   static LogicalResult markNeedSyncAll(func::FuncOp func, afir::FunctionRole role) {
     if (role != afir::FunctionRole::KernelBody || collectBoundWorkspaceIds(func).empty()) {
       return success();
@@ -407,10 +399,9 @@ struct AFIRKernelBodySignaturePass : public PassWrapper<AFIRKernelBodySignatureP
     SmallVector<Type> argumentTypes;
     argumentTypes.reserve(dataArgumentCount);
     for (Type type : func.getArgumentTypes()) {
-      // 按值标量形参（`ScalarData`）没有地址空间可换，原样穿过。`verifyCanonicalKernelArguments`
-      // 已经把「角色是 scalar_input ⟺ 类型非 shaped」判成一条双向不变量，所以这里按类型
-      // 分流与按角色分流等价；用 `dyn_cast` 而不是 `cast` 还顺带把原先那个 assert 失败
-      // 换成了正常控制流。
+      // ScalarData 按值传递，不含需要改写的地址空间，保持原类型。
+      // verifyCanonicalKernelArguments 已校验 scalar_input 与非 shaped 类型对应，因此可按类型分流。
+      // 使用 dyn_cast 处理非 memref 参数，避免 cast 触发断言。
       auto memref = dyn_cast<MemRefType>(type);
       if (!memref) {
         argumentTypes.push_back(type);
@@ -445,14 +436,10 @@ struct AFIRKernelBodySignaturePass : public PassWrapper<AFIRKernelBodySignatureP
     SmallVector<DictionaryAttr> resultAttrs;
     func.getAllResultAttrs(resultAttrs);
 
-    // 输出从函数结果变成函数参数，描述它们的 `afir.result_descs` 也要跟着搬进
-    // `afir.arg_descs`。不搬有两个后果：
-    //   1. 函数结果已被 `eraseResults` 清空，而 `afir.result_descs` 仍按结果个数校验
-    //      （AFIRDialect.cpp 的 `getExpectedDescriptorCount`），于是物化后的 tensor
-    //      形态直接通不过方言 verifier——这是一个此前没有用例走到的既有缺陷；
-    //   2. `afir.arg_descs` 的含义会随来源形态而变（buffer 形态覆盖全部数据参数、
-    //      tensor 形态只覆盖输入），下游就无法用一条规则算出它该有多长，
-    //      「描述符与参数表对不上」也就无从检查（见 getCanonicalDataArgumentCount）。
+    // 输出改为函数参数时，将 afir.result_descs 同步移入 afir.arg_descs。
+    // eraseResults 后继续保留 result_descs 会违反 getExpectedDescriptorCount 校验；
+    // arg_descs 也必须统一覆盖全部数据参数，不能因原来是 tensor 或 buffer 形态而改变含义。
+    // 这样 getCanonicalDataArgumentCount 才能按同一规则校验描述符与参数表。
     if (!resultMemrefTypes.empty()) {
       auto argDescs = func->getAttrOfType<ArrayAttr>(afir::kArgDescsAttrName);
       auto resultDescs = func->getAttrOfType<ArrayAttr>(afir::kResultDescsAttrName);

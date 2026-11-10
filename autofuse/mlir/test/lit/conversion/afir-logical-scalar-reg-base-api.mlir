@@ -10,7 +10,7 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
-// reg 侧的标量形态。**只有 `logical_and` 有**——`logical_or` 在这一侧一个标量都不收，
+// reg 侧的标量形态。只有 `logical_and` 有——`logical_or` 在这一侧一个标量都不收，
 // 见 afir-logical-scalar-reg-base-unsupported.mlir。
 //
 // 调用是 `LogicalAndExtends`，四个实参、没有 tmp：与 mem 侧那份五参的

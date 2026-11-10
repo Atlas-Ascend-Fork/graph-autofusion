@@ -68,7 +68,7 @@ LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::Broad
 {
     auto& os = emitter.ostream();
 
-    // 六个尺寸按 C++ 形参表的次序发，每个都 `static_cast<uint32_t>`：包装的形参是
+    // 六个尺寸按 C++ 形参表的次序生成，每个都 `static_cast<uint32_t>`：包装的形参是
     // `const uint32_t`，而这里的值来自 `index` / `i32` 的 SSA 值。
     const Value sizes[] = {op.getSrcM(), op.getSrcK(), op.getSrcZ(),
                            op.getDstM(), op.getDstK(), op.getDstZ()};

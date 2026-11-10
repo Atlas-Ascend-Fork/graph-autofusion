@@ -7,7 +7,7 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // `#afir.axis` 三个可缺省字段的 round-trip：align / from / split_pair_other_id 的
-// 每一种在场组合都必须**打印得出、读得回**。
+// 每一种在场组合都必须打印得出、读得回。
 //
 // 起因是一个真实缺口：三项在文本里都以同一个 `,` 开头，而 ODS 的可选组按组内首个
 // 字面量判断该组是否出现，于是解析器一见到逗号就锁定 `align`。带 `from`、不带
@@ -40,7 +40,7 @@ module {
       type = Compute>
   }
 
-  // 只有 from——**这就是此前打印得出、读不回的那一种**。切分产出的轴就是这个形态：
+  // 只有 from——这就是此前打印得出、读不回的那一种。切分产出的轴就是这个形态：
   // `AscGraphImpl::DoSplit` 只写 from 与 split_pair_other_id，不写 align。
   // CHECK-LABEL: func.func private @from_only
   // CHECK-SAME: <id = 1, name = "zT", axis_type = TileOuter, size = <"s1">, from = [0]>

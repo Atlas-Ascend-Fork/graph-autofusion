@@ -6,15 +6,15 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 跨轮累加的 `afir.mean`：求和照 Sum 的样子逐轮累加，**末轮**再整体乘一次 `1 / N`。
+// 跨轮累加的 `afir.mean`：求和照 Sum 的样子逐轮累加，末轮再整体乘一次 `1 / N`。
 //
 // 输入与 `afir-to-ascendc-reduce-sum.mlir` 是同一份真实调度，唯一的差别是算子换成
 // `afir.mean`。这份调度把归约轴切成了 tile（`afir.sched` 的 `loop_axis = 4`，z1T 是累加
 // 轴），于是 `ReducePlan::isAccumulating()` 成立；本用例钉的就是这个形态下「除几次、除
 // 多少」两件事。
 //
-// 本文件此前钉的是**拒绝**。拒绝的两条理由都已经不成立：
-//   - 「legacy 多轮分支不发均值缩放」是错的——legacy 在循环**外**发
+// 本文件此前钉的是拒绝。拒绝的两条理由都已经不成立：
+//   - 「legacy 多轮分支不生成均值缩放」是错的——legacy 在循环外生成
 //     （`codegen/codegen_kernel_loop.cpp:891`），分母同样是原始轴尺寸之积；
 //   - 「总 R 只能从调度前的原始轴尺寸算」是对的，而那正是现在的做法
 //     （`afir::MeanReductionDomain`），不是障碍。
@@ -38,7 +38,7 @@
 // CHECK: %[[REMAIN:.*]] = arith.subi %{{.*}}, %[[IV]] : index
 // CHECK: %[[LAST:.*]] = arith.cmpi sle, %[[REMAIN]], %{{.*}} : index
 
-// 分母是**完整逻辑归约域**：z1 这根 Original 轴的 size 是 32，与 z1t_size 切成几轮无关。
+// 分母是完整逻辑归约域：z1 这根 Original 轴的 size 是 32，与 z1t_size 切成几轮无关。
 // 取某一轮的 actual 会得到「均值的均值」，取 nominal 会把 32B 对齐的填充算进元素数。
 // `index -> i64 -> f32`，中间不经 i32。
 // CHECK: %[[N:.*]] = arith.constant 32 : index

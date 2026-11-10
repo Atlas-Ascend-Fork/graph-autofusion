@@ -13,8 +13,8 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// 浮点谓词族的 mem-based 一侧：输入 f16/f32，结果 ui8。这一族是 elementwise 里第一个
-// **结果 dtype 与输入不同**的，所以 ODS 的 `AllElementTypesMatch` 对它们是关掉的，
+// 浮点谓词族的 mem-based 一侧：输入 f16/f32，结果 ui8。这一类是 elementwise 里第一个
+// 结果 dtype 与输入不同的，所以 ODS 的 `AllElementTypesMatch` 对它们是关掉的，
 // capability 里那条「输入与目的地同元素类型」也换成了「输入浮点、结果一个字节」。
 // 少掉这两处中的任何一处，下面这三个函数都建不出来。
 

@@ -8,12 +8,12 @@
 
 // RUN: af-opt --afir-kernel-body-signature --afir-loop-generate --afir-memory-allocate %s | FileCheck %s
 
-// 一条队列上先后落下的若干块，复用**同一次** AllocTensor，不是各要一格。legacy 的
+// 一条队列上先后落下的若干块，复用同一次 AllocTensor，不是各要一格。legacy 的
 // reuse_from 链就是这个：`codegen_kernel_loop.cpp::AllocOutputs` 里 VecCalc 输出
-// （以及 `HandleVecOutAlloc` 的 VecOut 输出）只要前一个队列成员不是 VecOut，就只发
+// （以及 `HandleVecOutAlloc` 的 VecOut 输出）只要前一个队列成员不是 VecOut，就只生成
 // 一条 `PipeBarrier<PIPE_V>`，不再 `AllocBuf`；整条队列自始至终只有一个 `q<N>_buf`。
 //
-// 各要一格会在运行期炸：`init_queue` 的格数是各成员 `slot_count` 的**最大值**（见
+// 各要一格会在运行期炸：`init_queue` 的格数是各成员 `slot_count` 的最大值（见
 // afir_memory_allocate_queue_slot_count_max.mlir），三个计算节点串在一条队列上就是
 // 3 > 2，AscendC 报 "size is 3, which exceed limits 2"。
 //

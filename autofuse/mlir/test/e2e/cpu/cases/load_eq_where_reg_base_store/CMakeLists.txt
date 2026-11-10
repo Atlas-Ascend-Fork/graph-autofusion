@@ -6,9 +6,8 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-# 形状与 `load_add_abs_reg_base_store` 同取 `[256, 128]`：尾轴 128 × 4B = 512B 是 32B 的
-# 整数倍，所以这一格不掺进对齐那一维的判据；32768 个元素够跑多趟 lane 循环，只跑一趟的
-# 形状会把「lane 宽度取错」这类错放过去（M2 实测过）。
+# 使用 [256, 128]：尾轴 512B 按 32B 对齐，不混入非对齐路径。
+# 32768 个元素覆盖多轮 lane 循环，用于发现 lane 宽度错误。
 add_mlir_e2e_cpu_case(load_eq_where_reg_base_store_256x128
     PLATFORM reg_base
     OUTPUT_SHAPE "[256, 128]"

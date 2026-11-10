@@ -17,7 +17,7 @@
 //   tile    基块在最后两维上的长度，单位是元素
 // 四种 (outer, tiling) 组合与昇腾两字母格式名一一对应，见下方各 case 的注释。
 //
-// 布局只作用于**最后两维**：@stage_zn 的第 0 维是双缓冲的 stage 维，原样透传。
+// 布局只作用于最后两维：@stage_zn 的第 0 维是双缓冲的 stage 维，原样透传。
 
 // RUN: af-opt %s | af-opt | FileCheck %s
 

@@ -7,7 +7,7 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 // RUN: af-opt --verify-diagnostics --split-input-file %s
 
-// 三元 elementwise 分两族，**只差「第一个操作数进不进类型绑定」这一条**：
+// 三元 elementwise 分两类，只差「第一个操作数进不进类型绑定」这一条：
 //
 //   选择族 select / where：第一个是 ui8 真值掩码，不进绑定
 //     (`AFIR_BufferizableTernaryElementwiseOp`)
@@ -18,7 +18,7 @@
 // 用例变红——而合并的两种方向都有真实后果：都绑，选择族整条链只剩 ui8 能过；都不绑，
 // `clip_by_value` 的 dtype 不一致要走到 device 编译器上才报，报的是模板推导冲突。
 
-// 正例：选择族的条件是 ui8，另外两个是 f32。这一条钉的是「condition **不**在绑定里」。
+// 正例：选择族的条件是 ui8，另外两个是 f32。这一条钉的是「condition 不在绑定里」。
 func.func @select_mask_is_not_bound(%condition: tensor<16xui8>, %lhs: tensor<16xf32>, %rhs: tensor<16xf32>) {
   %result = afir.select %condition, %lhs, %rhs
       : (tensor<16xui8>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>

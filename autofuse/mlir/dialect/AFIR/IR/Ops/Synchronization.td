@@ -21,10 +21,8 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 // Cross-pipe ordering: record / wait
 //===----------------------------------------------------------------------===//
 //
-// AFIR 放弃 AscendC 的 `TQue` 自动同步（ADR-12：存储归 memref，同步归 token/event），
-// 因此正确性改由 AFIR 自己保证。这两个 Op 就是 AFIR 层表达顺序的唯一手段：本层此前
-// 完全没有同步的表示形式——顺序是 `AFIRPipelineSync` 在 lowering 之后用 `TQue` 的
-// enque/deque 补上的，那已经是 AscendC 的 IR（设计文档 3.2 / 5.1 步 8b 注记）。
+// AFIR 用 token/event 显式表达跨 pipe 顺序，存储由 memref 表示（ADR-12）。
+// 不能依赖下降后的 TQue enque/deque 补充本层不可见的同步；同步边必须在 AFIR 中可分析。
 //
 // 二者以一个 `!afir.token` 相连，边的两端由 token 的 `from` / `to` 说明。事件槽分配
 // （DAG coloring、profile 槽位上限、超限诊断）属于 lowering，见 3.6「同步的算法要点」。

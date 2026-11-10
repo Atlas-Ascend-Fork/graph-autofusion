@@ -10,8 +10,7 @@
 
 //===- AFPlanAttrs.td - afplan attribute definitions -------*- tablegen -*-===//
 //
-// 命名避免 stutter（设计文档 2.3）：方言名已经说了 "plan"，属性名不再重复它。
-// 因此是 `#afplan.candidate<>` 而不是 `#afplan.plan_candidate<>`。
+// 方言名已包含 plan，属性名不重复该词，使用 afplan.candidate 而非 plan_candidate（设计文档 2.3）。
 //
 //===----------------------------------------------------------------------===//
 

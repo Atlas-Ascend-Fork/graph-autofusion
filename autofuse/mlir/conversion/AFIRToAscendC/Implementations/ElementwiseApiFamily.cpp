@@ -34,8 +34,7 @@ bool hasCanonicalDescriptors(Operation *op) {
 
 namespace {
 
-// 侧表本体。进程级，因为注册函数是自由函数、没有别的地方挂得住；理由与代价见头文件
-// `registeredFamilies()` 的注释。
+// 进程级 API 家族侧表。注册入口为自由函数；生命周期和限制见 registeredFamilies()。
 std::vector<RegisteredFamily> &familyTable() {
   static std::vector<RegisteredFamily> table;
   return table;
@@ -58,9 +57,8 @@ llvm::ArrayRef<RegisteredFamily> registeredFamilies() {
 }
 
 std::optional<CapabilitySupport> checkApiFamily(ApiFamily family, const instruction::QueryContext &context) {
-  // `Any`（两侧同一个标准调用）与 `Shared`（两侧同一个扩展包装）都没有可选项，也就
-  // 没有要问的 feature。两者在这里同一个答案，但在 `headersMatchFamily` 那边不是——
-  // 所以它们是两档，不是一档。
+  // Any 使用两侧共有的标准调用，Shared 使用两侧共有的扩展包装，均无需查询家族 feature。
+  // 两者的头文件校验不同，headersMatchFamily 仍需分别处理。
   if (family == ApiFamily::Any || family == ApiFamily::Shared) {
     return std::nullopt;
   }
@@ -77,10 +75,8 @@ std::optional<CapabilitySupport> checkApiFamily(ApiFamily family, const instruct
 
 std::optional<CapabilitySupport> checkTmpBuffer(Operation *op, bool needsTmpBuffer) {
   auto destinationStyle = dyn_cast<afir::AFIRDestinationStyleInterface>(op);
-  // 接口的空判是必需的（下一行要调它）。目的地计数这一条是冗余的——两条调用路径随后
-  // 都会用 `getOperandPartition()` 再查一次 `destinationCount != 1`，结论和 reason 都
-  // 相同。留着是因为这里是唯一拿得到 destination-style 接口的地方，删掉之后这个不变量
-  // 就只剩在调用方那边各写一遍。
+  // 调用接口前必须检查其存在，并在此统一验证 destination 数量。
+  // 调用方的 getOperandPartition 也校验该数量，保留此处检查以明确接口自身的不变量。
   if (!destinationStyle || destinationStyle.getNumDestinations() != 1) {
     return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
   }

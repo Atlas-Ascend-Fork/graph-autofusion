@@ -7,11 +7,11 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // `afir.broadcast` 的**常量源**一档，mem 侧。源在它唯一那根向量化轴上 repeat 是 1，
-// legacy 这时发的不是 `Broadcast` 而是 `Duplicate`（`broadcast_api_call.cpp` 的
+// legacy 这时生成的不是 `Broadcast` 而是 `Duplicate`（`broadcast_api_call.cpp` 的
 // `IsBroadcastConstantTensor` → `BroadcastScalar`）。
 //
-// **输入写成 memref 形态、跑整条流水**，不是 `!ascendc.local_tensor` 的简写形态：
-// 这一档要发一对标量读事件，而事件号的持有者是资源物化阶段建的那个 `ascendc.pipe`，
+// 输入写成 memref 形态、跑整条流水，不是 `!ascendc.local_tensor` 的简写形态：
+// 这一档要生成一对标量读事件，而事件号的持有者是资源物化阶段建的那个 `ascendc.pipe`，
 // 源在哪条管线上也要看它落在队列还是 TBuf 上——两样都只有跑过 `--afir-memory-allocate`
 // 才存在。写成简写形态的话这条用例根本走不到要钉的那段。
 
@@ -136,7 +136,7 @@ module @plan0 attributes {
 }
 
 // IR-LABEL: func.func private @stage0_template0
-// 铺满的元素数是**目的地**那一段的长度（带尾块修正），不是源那一侧的。
+// 铺满的元素数是目的地那一段的长度（带尾块修正），不是源那一侧的。
 // 源在向量化轴上 stride 为 0，按源取会铺成 1 个元素、静默少写一整块——这个 op 有两个
 // 张量，分段结果是共享的，认错列不会报错、只会少写。
 // 先锚到 tile 循环上：循环之前还有几条形状相同的三元式（block 维的尾块）。
@@ -144,13 +144,13 @@ module @plan0 attributes {
 // IR: %[[ACTUAL:.*]] = arith.select {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 2, role = actual_size>}
 // IR: %[[REMAINDER:.*]] = arith.subi %[[ACTUAL]], %{{.*}} : index
 // IR: %[[COUNT:.*]] = arith.addi %{{.*}}, %{{.*}} : index
-// 事件对在标量读**之前**：`Duplicate` 从 S 管线取这个值，而队列的 DeQue 只给 MTE2→V。
+// 事件对在标量读之前：`Duplicate` 从 S 管线取这个值，而队列的 DeQue 只给 MTE2→V。
 // IR: ascendc.pipe.fetch_event_id {{.*}}mte2_s
 // IR: ascendc.set_flag {{.*}}mte2_s
 // IR: ascendc.wait_flag {{.*}}mte2_s
 // IR: ascendc.local_tensor.get_value
 // IR: ascendc.duplicate_l2 %{{.*}}, %{{.*}}, %[[COUNT]]
-// 三轴 / 四轴那两条分支这一档接不了，发出来就是判据放宽了。
+// 三轴 / 四轴那两条分支这一档接不了，生成就是判据放宽了。
 // IR-NOT: ascendc.broadcast_l2
 // IR-NOT: afir.broadcast
 

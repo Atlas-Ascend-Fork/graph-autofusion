@@ -51,7 +51,7 @@ class AFIR_ElementwiseShapeMethods {
 // carries the destination-style interface, the optional tmp buffer, and the
 // broadcast-compatible result contract, so an operation added here inherits
 // the whole set rather than re-deriving it.
-// 刻意**不含** `SameOperandsAndResultType`：这一族的结果形状约定是「各输入形状的广播」
+// 刻意不含 `SameOperandsAndResultType`：这一类的结果形状约定是「各输入形状的广播」
 // 而不是「与输入逐字相同」，形状那一半由 `verifyLogicalForm` / `verifyBufferForm` 里的
 // 广播检查管，dtype 那一半由下面的 `resultRule` 管。代价是无秩与动态形状之间比
 // `SameOperandsAndResultType` 松（`tensor<4xf32> -> tensor<?xf32>` 现在合法）。
@@ -62,10 +62,10 @@ defvar AFIR_BufferizableDestinationStyleTraits =
      DeclareOpInterfaceMethods<AFIRDestinationStyleInterface>];
 
 // 结果类型能从操作数推出来的那些，再加上 `InferTypeOpInterface`。
-// **`afir.cast` 不在内**：它的结果元素类型既不是输入的，也不是一个常量，
+// `afir.cast` 不在内：它的结果元素类型既不是输入的，也不是一个常量，
 // 而是调用方写在 op 上的那一个——`inferReturnTypes` 只拿得到操作数，推不出来。
 // 声明了却推不准比不声明更坏：`verifyInferredResultTypes` 用的是
-// `isCompatibleReturnTypes`，而这一族的那个只比形状，于是一个错的元素类型会被
+// `isCompatibleReturnTypes`，而这一类的那个只比形状，于是一个错的元素类型会被
 // 静默放行。见 Cast.td。
 defvar AFIR_BufferizableElementwiseTraits =
     AFIR_BufferizableDestinationStyleTraits # [DeclareOpInterfaceMethods<InferTypeOpInterface>];
@@ -79,12 +79,12 @@ defvar AFIR_BufferizableElementwiseTraits =
 // destination。传空表示「取第一个输入的元素类型」，结果 dtype 与输入不同的族（谓词、
 // 比较、cast）在这里说出它到底是什么。
 //
-// **拆成三段**，因为 `afir.cast` 要的不是全套：
+// 拆成三段，因为 `afir.cast` 要的不是全套：
 //
 //   - `...VerifyMethodDef`：共享的形态检查。cast 在它之外还要查一张 (输入, 输出) 对表，
 //     所以它自己拼一个 `verify()`，不用这一段。
 //   - `...CommonMethodDef`：另外四个方法，每个 op 逐字相同。
-//   - `...InferMethodDef`：`inferReturnTypes`。**cast 不取**——它的结果元素类型推不出来，
+//   - `...InferMethodDef`：`inferReturnTypes`。cast 不取——它的结果元素类型推不出来，
 //     见上面 `AFIR_BufferizableElementwiseTraits` 那段。
 //
 // `bufferizableElementwiseMethodDef` 是三段拼起来的，原来的调用处一个字不用改。
@@ -144,7 +144,7 @@ class AFIR_BufferizableElementwiseMethods<code inputs, code adaptorInputs,
 // `f16 -> f32`, which no elementwise operation means. `resultRule` puts
 // the equality back; an operation whose result dtype genuinely differs from its
 // inputs (comparison, cast) passes `resultTypes` and clears this bit.
-// 把 `resultRule` 变成 `inferReturnTypes` 里那一句。**规则只写在一个地方**
+// 把 `resultRule` 变成 `inferReturnTypes` 里那一句。规则只写在一个地方
 // （`AFIRElementwiseSupport.h` 的 `ResultElementRule`），ODS 与 conversion 都读它：
 // 原先 ODS 这一处是逐 op 手写的代码块、conversion 那一处是各自的枚举，两份编码分开写
 // 就会分开错，而错法是静默的——一边推出 f32、另一边只认「目的地与输入同 dtype」，
@@ -176,42 +176,42 @@ class AFIR_BufferizableUnaryElementwiseOp<string mnemonic,
 }
 
 // `scalarOperand` 说**哪个操作数可以是标量**，取值三种：`"none"`（都不可以）、
-// `"rhs"`（只有右边）、`"any"`（哪一边都可以，但不能两边都是）。它不新开一族 op：
+// `"rhs"`（只有右边）、`"any"`（哪一边都可以，但不能两边都是）。它不新开一类 op：
 // `afir.add %tile, %tile`、`afir.add %tile, %scalar`、`afir.add %scalar, %tile` 是同一个
 // op 的三种操作数形态，由两个 implementation 接住（`add.tensor_tensor` /
-// `add.tensor_scalar`）——后两种共用一个，因为这一族全是可交换的，见下。
+// `add.tensor_scalar`）——后两种共用一个，因为这一类全是可交换的，见下。
 //
-// **`"any"` 不等于「可交换」，它只说「两边都可以是标量」。** 两类 op 都用它，区别在
+// `"any"` 不等于「可交换」，它只说「两边都可以是标量」。 两类 op 都用它，区别在
 // lowering 那一侧：
 //
-//   - **可交换的 8 个**（add / mul / maximum / minimum / eq / ne / logical_and /
-//     logical_or，矩阵上写 `2nd+swap(2nd)`）：`binary_api_call.cpp` 对它们发的是不带模板
-//     实参的 `Adds(y, x1, (T)scalar, count)`，交换与不交换**逐字相同**。lowering 只需要把
+//   - 可交换的 8 个（add / mul / maximum / minimum / eq / ne / logical_and /
+//     logical_or，矩阵上写 `2nd+swap(2nd)`）：`binary_api_call.cpp` 对它们生成的是不带模板
+//     实参的 `Adds(y, x1, (T)scalar, count)`，交换与不交换逐字相同。lowering 只需要把
 //     有形状的那个操作数放到第一个实参上。
-//   - **不可交换的 3 个**（sub / div / truediv）：legacy 把方向编码成一个 bool 模板实参
+//   - 不可交换的 3 个（sub / div / truediv）：legacy 把方向编码成一个 bool 模板实参
 //     `IS_SCALAR_LATTER`（`Subs<T, false>` = 标量在左），所以 lowering 要把「有没有交换」
-//     这件事发出去，而不是发完就忘。
+//     这件事生成，而不是生成完就忘。
 //
-// 两类都由 `ScalarOperand` 那一根轴的 `Any` 表达，因为 ODS 这一层管的只是**类型约束**
-// （哪个操作数允许是标量）；「交换之后发什么」是发射侧的事，`emissionOrder` 算出来的
+// 两类都由 `ScalarOperand` 那一根轴的 `Any` 表达，因为 ODS 这一层管的只是类型约束
+// （哪个操作数允许是标量）；「交换之后生成什么」是生成侧的事，`emissionOrder` 算出来的
 // `tile` 下标同时服务两类——第一类丢掉它，第二类拿它当模板实参。
 //
 // lt / le / gt / ge 留 `"rhs"`：legacy 没给它们写
 // `IsScalarInputSupportedIfExchangeInputs`，标量只能在右。
 //
-// **「两边都是标量」挡在 verifier 里**，不在这里：ODS 的类型约束是逐个操作数的，
+// 「两边都是标量」挡在 verifier 里，不在这里：ODS 的类型约束是逐个操作数的，
 // 说不出「至多一个」。见 `verifyBufferizedElementwise`。
 //
 // `AllElementTypesMatch` 对标量仍然成立：它比的是 `getElementTypeOrSelf`，标量的
 // 「元素类型」就是它自己。所以放宽这一位不会顺手放掉 `f16 + f32`。
-// **非 `Same` 规则在二元这里清掉的不是整组绑定，只是 `result` 那一项。** 一元的
+// 非 `Same` 规则在二元这里清掉的不是整组绑定，只是 `result` 那一项。 一元的
 // 谓词族清掉它就没有绑定可留（只有一个输入），二元不一样：`logical_and` / `logical_or`
 // 的结果是 `ui8`、与输入无关，但两个输入之间仍然必须同 dtype——legacy 两侧的
 // `REG_ASC_IR` 把它们绑在同一个 `T1` 上。整组一起丢的话 `afir.logical_and %a: f16,
 // %b: i32` 就能过 ODS，一路走到 device 编译器才因为模板实参推导冲突报错。
 //
 // 所以这一位是在两组绑定之间选，不是「绑 / 不绑」：三元族那边的
-// `elementTypeBinding` 传的是 trait 列表，理由是两族绑的名字各不相同；二元只有这两种
+// `elementTypeBinding` 传的是 trait 列表，理由是两类绑的名字各不相同；二元只有这两种
 // 可能，用一位说得清，而且现有调用处一个都不用改。
 class AFIR_BufferizableBinaryElementwiseOp<string mnemonic,
                                            list<Type> elementTypes,
@@ -243,19 +243,19 @@ class AFIR_BufferizableBinaryElementwiseOp<string mnemonic,
   let extraClassDefinition = baseMethods # elementwiseShapeMethodDef # bufferizableElementwiseMethodDef;
 }
 
-// 三元 elementwise 的共享躯干。两个三元族（选择族与 clip 族）之间**只有一处**不同：
+// 三元 elementwise 的共享躯干。两个三元族（选择族与 clip 族）之间只有一处不同：
 // 哪些操作数的元素类型被绑在一起。其余（形状契约、目的地风格接口、六个生成方法、
 // 两行 `let`）逐字相同，所以在这里写一份，下面两个族各自只剩一个类头。
 //
 // `elementTypeBinding` 传的是 trait 列表而不是一位开关：绑定关系是「一组名字」，
-// 用位表示就得在这里再写一次那组名字，而两族绑的名字本来就不一样。
+// 用位表示就得在这里再写一次那组名字，而两类绑的名字本来就不一样。
 //
-// `scalarInputs` 说**后两个输入可不可以是标量**。三元这一族只需要一位，不像二元那边要三档：
-// 两族的第一个操作数都恒是 tile（选择族的 mask、clip 族的 x），后两个各自可以是标量，而且
-// 位置不能换——两侧的供给都是**同名重载**（`Where` 的场景 1/2/3、`ClipByValue` 的场景 2/3/4），
+// `scalarInputs` 说**后两个输入可不可以是标量**。三元这一类只需要一位，不像二元那边要三档：
+// 两类的第一个操作数都恒是 tile（选择族的 mask、clip 族的 x），后两个各自可以是标量，而且
+// 位置不能换——两侧的可用实现都是同名重载（`Where` 的场景 1/2/3、`ClipByValue` 的场景 2/3/4），
 // 标量在哪个位置由 C++ 重载决议挑，没有模板实参承载方向。
 //
-// **为什么第一个操作数不给这一位**：两份头里都没有那个重载。`where.h` 的三个标量重载
+// 为什么第一个操作数不给这一位：两份头里都没有那个重载。`where.h` 的三个标量重载
 // `mask` 都是 `LocalTensor<uint8_t>`；`clipbyvalue.h` 只有「三个全是标量」那一个重载收标量
 // 的 `src_x`，而那个重载没有 count / tmp 形参，`verifyBufferizedElementwise` 的「至少一个
 // 输入有形状」本来就挡掉了全标量。所以放开它只会建出一个编不过的调用。
@@ -301,7 +301,7 @@ class AFIR_BufferizableTernaryElementwiseOp<string mnemonic,
 // 兜这一条）。
 //
 // 躯干的操作数名是照选择族起的：clip 的 `condition` / `input1` / `input2` 读作
-// **x / min / max**。改名要连 `arguments` 与 assemblyFormat 一起重写，等于把躯干复制
+// x / min / max。改名要连 `arguments` 与 assemblyFormat 一起重写，等于把躯干复制
 // 一份，不值当——这里用注释说清。
 class AFIR_BufferizableTernaryHomoElementwiseOp<string mnemonic, list<Type> elementTypes,
                                                bit scalarInputs = 0> :
@@ -372,8 +372,8 @@ def AFIR_SqrtOp : AFIR_BufferizableUnaryElementwiseOp<"sqrt", [F16, F32, BF16]> 
     单实现（`sqrt.tensor`）、`compute` pipe。
   }];
 }
-// **原先它是 `AFIR_UnaryMathOp`（tensor-only，没有 buffer 形态）**，与 `gelu` / `sign` /
-// `truediv` / `pow` 同一类：那一族的 op 都没有 implementation，写的是什么谁也没对过。
+// 原先它是 `AFIR_UnaryMathOp`（tensor-only，没有 buffer 形态），与 `gelu` / `sign` /
+// `truediv` / `pow` 同一类：那一类的 op 都没有 implementation，写的是什么谁也没对过。
 // 换基类的先例是 `4b2f2588`；手写的 `verify()` 一并删掉（见 `Ops/Elementwise.cpp`）。
 def AFIR_RsqrtOp : AFIR_BufferizableUnaryElementwiseOp<"rsqrt", [F16, F32, BF16]> {
   let afirStability = AFIR_Experimental;
@@ -411,7 +411,7 @@ def AFIR_ReciprocalOp : AFIR_BufferizableUnaryElementwiseOp<"reciprocal", [F16, 
     本 Op 在 `compute` pipe 上执行。
   }];
 }
-// `afir.erf` / `afir.tanh` 是 **`MathLibraryOp` 一族的头两个**。它们与 `afir.sigmoid`
+// `afir.erf` / `afir.tanh` 是 **`MathLibraryOp` 一类的头两个**。它们与 `afir.sigmoid`
 // 同形（两侧都要 tmp buffer，一侧标准调用、一侧包装），只有一处不同：**标准调用在 mem
 // 侧**，reg 侧才是包装（`ErfExtend` / `TanhExtend`）。`abs` / `reciprocal` / 谓词族都是
 // 反过来的，别照着它们的方向猜。
@@ -451,10 +451,10 @@ def AFIR_TanhOp : AFIR_BufferizableUnaryElementwiseOp<"tanh", [F16, F32, BF16]> 
 // `ascir_builtin_ops_v1.cpp`（mem 侧）那 89 个注册里没有它，对照表
 // `ascir_op_lowering_matrix.csv` 记的是 `mem_present=0` / 分档 D3。
 //
-// 所以它与 `afir.erf` 的差别**不是「mem 侧还没接」而是「mem 侧没有这个算子」**：
+// 所以它与 `afir.erf` 的差别不是「mem 侧还没接」而是「mem 侧没有这个算子」：
 // `BridgeOperationRegistryTest.EveryElementwiseOpCoversBothApiFamilies` 那条「两侧都要
 // 有」的断言对它不成立，按那条用例自己写的办法走——加一张显式的「缺哪一侧 + 为什么」
-// 表并配反向断言，**不放宽那个循环**。
+// 表并配反向断言，不放宽那个循环。
 def AFIR_NdtrOp : AFIR_BufferizableUnaryElementwiseOp<"ndtr", [F32]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise standard normal CDF of a tile";
@@ -474,7 +474,7 @@ def AFIR_NdtrOp : AFIR_BufferizableUnaryElementwiseOp<"ndtr", [F32]> {
   }];
 }
 
-// 同族其余三个（第 2 批）。四个 op 在这一层**逐项相同**——1 入 1 出、同形同 dtype、只收
+// 同族其余三个（第 2 批）。四个 op 在这一层逐项相同——1 入 1 出、同形同 dtype、只收
 // f32、destination-style、tmp 形参在而尺寸为 0、只有 reg 侧一个 implementation——区别只有
 // 包装的函数名与扩展头。所以这里不重复 `afir.ndtr` 那段说明，各自只记自己的那一行事实。
 def AFIR_NdtriOp : AFIR_BufferizableUnaryElementwiseOp<"ndtri", [F32]> {
@@ -534,7 +534,7 @@ def AFIR_BesselJ1Op : AFIR_BufferizableUnaryElementwiseOp<"bessel_j1", [F32]> {
   }];
 }
 
-// 第 4 批。与同族前几个同形，差别只在包装要**两个**扩展头且依赖序与字典序相反，
+// 第 4 批。与同族前几个同形，差别只在包装要两个扩展头且依赖序与字典序相反，
 // 那一层在 `OpVecUnary.td` 的 `AscendC_I0eExtendRegBaseOp` 上说明。
 def AFIR_I0eOp : AFIR_BufferizableUnaryElementwiseOp<"i0e", [F32]> {
   let afirStability = AFIR_Experimental;
@@ -599,11 +599,11 @@ def AFIR_ModifiedBesselK1Op : AFIR_BufferizableUnaryElementwiseOp<"modified_bess
 }
 
 // 第 6 批（一元）。这一批七个在 legacy 的 mem 侧（`ascir_builtin_ops_v1.cpp`）都没注册，
-// 全是 reg-only，与 ndtr 那一族同款——`EveryElementwiseOpCoversBothApiFamilies` 那条「两侧
+// 全是 reg-only，与 ndtr 那一类同款——`EveryElementwiseOpCoversBothApiFamilies` 那条「两侧
 // 都要有」的断言靠 `kRegOnlyElementwiseOps` 那张显式表放行。
 //
 // dtype 只声明 `kF16 | kF32`（位运算那几个是 `kUI8 | kI16 | kUI16 | kI32`）。legacy 的域里
-// 还有 bf16 / i8 / i64 / ui32：i8 / i64 / ui32 不在 AFIR 供给表里，bf16 在表里但留给专门
+// 还有 bf16 / i8 / i64 / ui32：i8 / i64 / ui32 不在 AFIR 支持表里，bf16 在表里但留给专门
 // 一批连数值验证一起放——这里多声明一位的后果是把那些格子从干净回落变成硬失败。
 def AFIR_ErfinvOp : AFIR_BufferizableUnaryElementwiseOp<"erfinv", [F32]> {
   let afirStability = AFIR_Experimental;
@@ -893,7 +893,7 @@ def AFIR_Log1pOp : AFIR_BufferizableUnaryElementwiseOp<"log1p", [F16, F32, BF16]
 // 不要 tmp」的组合一个实例都没有——`UnaryElementwiseConversionPattern` 的
 // `static_assert` 挡的正是 `MaterializesReuseSource && !TakesTmpBuffer`。
 //
-// 解法不是放开那个 `static_assert`，而是别让它成为 `MathLibraryOp`：那一族的
+// 解法不是放开那个 `static_assert`，而是别让它成为 `MathLibraryOp`：那一类的
 // `isReuseSource` 是**必填**操作数，才逼出「要物化一个模板实参」这件事。`Log10` 在
 // `Adv/Math.td` 里本来就没有同名的 `UnaryMathOp`（那个文件与上游逐字相同，不动），
 // 所以在 Autofuse 子树里按 `UnaryL2Op` 建一个就够——与 `BitwiseAndL2Op` 同款，
@@ -909,14 +909,14 @@ def AFIR_Log10Op : AFIR_BufferizableUnaryElementwiseOp<"log10", [F16, F32, BF16]
   }];
 }
 
-// 第 9 批（一元 8 个，多项式族）。**这一批引入的是「属性落在模板实参位」这根轴**，不是
+// 第 9 批（一元 8 个，多项式族）。这一批引入的是「属性落在模板实参位」这根轴，不是
 // 八个新算子——八个的形状逐项相同，legacy 的八个 codegen impl 也只差一个名字：
 //
 //   ChebyshevPolynomialTExtend<float, 3>(y[off], x[off], tmp_0, size);
 //
 // `n` 是节点自有的 `ir_attr`（`REG_ASC_IR(...).Attr<int64_t>("n")`），**不是操作数**：
 // 不进三段划分、不占缓冲。它与 `afir.leaky_relu` 的 `negative_slop` 是同一类东西，
-// 差别在落点——那个落在**实参**位上，这八个落在**模板实参**位上。模板位要的是编译期
+// 差别在落点——那个落在实参位上，这八个落在模板实参位上。模板位要的是编译期
 // 常量，所以这一支不能复用 `UnaryScalarAttrConversionPattern`：建常量在那里是对的，
 // 在这里会把一个 `arith.constant` 打到 `<>` 里去。
 //
@@ -995,20 +995,20 @@ def AFIR_ShiftedChebyshevPolynomialWOp : AFIR_PolynomialOp<"shifted_chebyshev_po
   }];
 }
 
-// step 2a（一元 2 个，取整到 i32）。**这一批引入的是 `ResultElementRule::Int32`**——结果
+// step 2a（一元 2 个，取整到 i32）。这一批引入的是 `ResultElementRule::Int32`——结果
 // 恒为 signless i32、与输入 dtype 无关，与谓词族那条 `Uint8` 逐项同形。
 //
 // 两个的输入域都是 legacy 自己的 `{f32, f16, bf16}`、输出都写死 `DT_INT32`
 // （`REG_ASC_IR(...)` 的 `{{"T1", ...}, {"T2", TensorType{DT_INT32}}}`）。
 //
-// **供给两个不一样，而且对照表那一列会骗人**：它的 `reg_api_name` 是 legacy 的
-// `GetApiName()`，对这一族**不是发出去的函数名**——CANN 全树里没有 `AscendC::FloorToInt`。
-// 实际发的是：
+// 可用实现不一样，而且对照表那一列会骗人：它的 `reg_api_name` 是 legacy 的
+// `GetApiName()`，对这一类**不是生成的函数名**——CANN 全树里没有 `AscendC::FloorToInt`。
+// 实际生成的是：
 //
 //   ceil2int      Ceil2IntExtend(dst, src, {count}, {1U}, {1U})        fork 的 cast.h
 //   floor_to_int  AscendC::Cast(dst, src, RoundMode::CAST_FLOOR, count) 标准调用
 //
-// `round_to_int` / `trunc_to_int` 与 `floor_to_int` 同一种供给（只换 RoundMode），但它们的
+// `round_to_int` / `trunc_to_int` 与 `floor_to_int` 同一种可用实现（只换 RoundMode），但它们的
 // 合法组合是一张逐对对表，不在这一批，见剩余工作总表里 step 2b 那一节。
 def AFIR_Ceil2IntOp : AFIR_BufferizableUnaryElementwiseOp<"ceil2int", [F16, F32, BF16], [I32],
                                                           /*resultRule=*/"Int32"> {
@@ -1042,9 +1042,9 @@ def AFIR_ReluOp : AFIR_BufferizableUnaryElementwiseOp<"relu", [I32, F16, F32]> {
 }
 // 两套 API 家族都只有 `NegExtend` 包装，签名也一样，只有头文件不同（`neg.h` /
 // `neg_reg_base.h`）。所以它既不是 D0（有平台差异）也不像 `afir.abs`（差异在标准
-// 与扩展之间）：差异只在扩展头来自哪张供给表。两侧都不要 tmp buffer。
+// 与扩展之间）：差异只在扩展头来自哪张支持表。两侧都不要 tmp buffer。
 // dtype 表去掉了 I16：`NegExtend` 的 `@tparam` 只声称 int32_t / float / half，两张
-// 供给表的包装都是这一份。ODS 收下 I16 而 lowering 接不住，表现是 bridge 建得出来、
+// 支持表的包装都是这一份。ODS 收下 I16 而 lowering 接不住，表现是 bridge 建得出来、
 // 走到 SelectImplementation 才报「没有可用实现」——比在这里就拒掉晚，也更难看懂。
 def AFIR_NegOp : AFIR_BufferizableUnaryElementwiseOp<"neg", [I16, I32, F16, F32, BF16]> {
   let afirStability = AFIR_Experimental;
@@ -1075,7 +1075,7 @@ def AFIR_SigmoidOp : AFIR_BufferizableUnaryElementwiseOp<"sigmoid", [F16, F32, B
   }];
 }
 
-// **`gelu` / `sign` 原先写在二元那一段，是 `AFIR_BinaryMathOp`。** 两个都是一元：
+// `gelu` / `sign` 原先写在二元那一段，是 `AFIR_BinaryMathOp`。 两个都是一元：
 // legacy 两侧的 `REG_ASC_IR` 都只有一个 `.Input("x", "T")`，矩阵两侧也都是
 // `UnaryApiTmpCall`。写错了没被发现，是因为它们此前一个 implementation 都没有——与
 // `floor_div` 的元素类型集合同一类：ODS 上没有实例的那一行，谁也没对过。
@@ -1183,7 +1183,7 @@ def AFIR_BitwiseNotOp : AFIR_BufferizableUnaryElementwiseOp<"bitwise_not", [UI8,
   }];
 }
 
-// 浮点谓词族：输入浮点、结果一个字节的真值——这一族是非 `Same` 规则
+// 浮点谓词族：输入浮点、结果一个字节的真值——这一类是非 `Same` 规则
 // 第一次被清掉的地方。`AllElementTypesMatch` 一开就会把 `f32 -> ui8` 判死，而这正是
 // 它们要表达的东西；同形仍然要求，只是不再要求同 dtype。
 class AFIR_PredicateElementwiseOp<string mnemonic> :
@@ -1220,7 +1220,7 @@ def AFIR_IsInfOp : AFIR_PredicateElementwiseOp<"isinf"> {
   }];
 }
 
-// `negative_slop` 是这一族里第一个「ODS 属性变成 API 实参」的 op：发出去的调用是
+// `negative_slop` 是这一类里第一个「ODS 属性变成 API 实参」的 op：生成的调用是
 // `AscendC::LeakyRelu(dst, src, slope, calCount)`，slope 不是操作数而是属性，conversion
 // 里现建一个与 tile 元素类型同型的常量。legacy 也是这么打的（`leaky_relu_api_call.cpp`
 // 把 `(dtype)` 强转写进调用文本）。
@@ -1277,7 +1277,7 @@ def AFIR_SubOp : AFIR_BufferizableBinaryElementwiseOp<"sub", [F16, F32, I16, I32
   }];
 }
 // Mul / Maximum / Minimum 的 tensor-tensor 形态在两套家族上是同一个 `AscendC::` 调用，
-// 都不要 tmp buffer。对照表把它们列成 D1 是因为**标量变体**两侧共用一个扩展头
+// 都不要 tmp buffer。对照表把它们列成 D1 是因为标量变体两侧共用一个扩展头
 // （`scalar_mul.h` / `scalar_maximum.h` / `scalar_minimum.h`），那条路在 E3。
 def AFIR_MulOp : AFIR_BufferizableBinaryElementwiseOp<"mul", [F16, F32, I16, I32, BF16], [F16, F32, I16, I32, BF16],
                                                       /*resultRule=*/"Same", /*scalarOperand=*/"any"> {
@@ -1316,20 +1316,20 @@ def AFIR_MaximumOp : AFIR_BufferizableBinaryElementwiseOp<"maximum", [I16, I32, 
     逐元素取较大值。其余与 `afir.mul` 相同；单实现 `maximum.tensor_tensor`。
   }];
 }
-// 真除。**二元一族里第一个结果 dtype 是「一张 (输入, 输出) 对表」的 op**——逻辑族那种
+// 真除。二元一类里第一个结果 dtype 是「一张 (输入, 输出) 对表」的 op——逻辑族那种
 // 「结果恒为 ui8」是它的特例，这里是逐行的：mem 侧 `kTrueDivTypePairs` 写的是
 // `{f16->f16, f32->f32, i32->f32}`，两个浮点跟着输入、i32 的商是 f32。
 //
 // 于是规则不能是 `Same`（i32 输入配 f32 结果过不了 `AllElementTypesMatch`），
-// 而 `elementTypes` / `resultTypes` 是并集写法，与逻辑族同一个口径：这一层只说
+// 而 `elementTypes` / `resultTypes` 是并集写法，与逻辑族采用同一规则：这一层只说
 // 「输入收哪些、结果可以是哪些」，逐行那张表由 lowering 的 `ResultElementType` 说。
 // 两个输入之间仍然绑死同 dtype——legacy 两侧都把它们绑在同一个 `T1` 上。
 //
 // `logicalResultElementType` 这里不能传空：传空是「取第一个输入的元素类型」，i32 输入
 // 会推出 i32 结果，而 `resultTypes` 里没有 i32。
 //
-// **原先它是 `AFIR_BinaryMathOp`（tensor-only，没有 buffer 形态）**，与 `gelu` / `sign`
-// 同一类：那一族的 op 都没有 implementation，写的是什么谁也没对过。换基类的先例是
+// 原先它是 `AFIR_BinaryMathOp`（tensor-only，没有 buffer 形态），与 `gelu` / `sign`
+// 同一类：那一类的 op 都没有 implementation，写的是什么谁也没对过。换基类的先例是
 // `4b2f2588`。注意助记符是 `truediv`，没有下划线，与 `floor_div` 不同。
 def AFIR_TrueDivOp : AFIR_BufferizableBinaryElementwiseOp<"truediv", [F16, F32, I32, BF16], [F16, F32, BF16],
                                                           /*resultRule=*/"SameOrF32ForI32",
@@ -1356,7 +1356,7 @@ def AFIR_TrueDivOp : AFIR_BufferizableBinaryElementwiseOp<"truediv", [F16, F32, 
     的 swap 方向，这一轮只接 tensor-tensor。本 Op 在 `compute` pipe 上执行。
   }];
 }
-// **原先它是 `AFIR_BinaryMathOp`（tensor-only，没有 buffer 形态）**，与 `truediv` /
+// 原先它是 `AFIR_BinaryMathOp`（tensor-only，没有 buffer 形态），与 `truediv` /
 // `gelu` / `sign` 同一类。换基类的先例是 `4b2f2588`；手写的 `verify()` 与
 // `AFIR_INFER_BROADCAST(PowOp)` 两处一起删（见 `Ops/Elementwise.cpp`）。
 def AFIR_PowOp : AFIR_BufferizableBinaryElementwiseOp<"pow", [F16, F32, I16, I32, UI8, UI16, BF16],
@@ -1401,7 +1401,7 @@ def AFIR_BitwiseAndOp : AFIR_BufferizableBinaryElementwiseOp<"bitwise_and", AFIR
 }
 
 // step 4。`bitwise_or` / `bitwise_xor` 与 `bitwise_and` 同一张元素类型集合，但只有
-// reg 一侧（legacy 的 mem 侧 `ascir_builtin_ops_v1.cpp` 没注册这两个），而且 reg 侧发的
+// reg 一侧（legacy 的 mem 侧 `ascir_builtin_ops_v1.cpp` 没注册这两个），而且 reg 侧生成的
 // 不是标准调用——legacy 的 `BitwiseOrAscIrCodegenImplV2` / `BitwiseXorAscIrCodegenImplV2`
 // 走的是 fork 的包装 `BitwiseOrExtend` / `BitwiseXorExtend`
 // （`api_regbase/bitwise_or.h` / `bitwise_xor.h`），不带 tmp。与 `bitwise_not` 同一种情况。
@@ -1432,7 +1432,7 @@ def AFIR_BitwiseXorOp : AFIR_BufferizableBinaryElementwiseOp<"bitwise_xor", AFIR
     implementation `bitwise_xor.tensor`。
   }];
 }
-// **没有 BF16，而且与 `afir.sub` 在这一位上不一样**：`ascir_op_lowering_matrix.csv` 里
+// 没有 BF16，而且与 `afir.sub` 在这一位上不一样：`ascir_op_lowering_matrix.csv` 里
 // `Sub` 的 `reg_dtypes` 有 bf16，`FloorDiv` 的没有。两者 reg 侧共用
 // `kArithmeticRegElementTypes` 那个常量，2026-10-20 往那个常量上加 `| kBF16` 时把这里一起
 // 放宽了；常量已改回不带 bf16，bf16 写在 `sub` 自己的注册处。
@@ -1555,13 +1555,13 @@ def AFIR_IgammacOp : AFIR_BufferizableBinaryElementwiseOp<"igammac", [F32]> {
 }
 
 // 第 8 批（二元 1 个）。`hypot` 与第 7 批的 `zeta` / `igamma` 同形——reg-only、两输入
-// 同 dtype、要一块 tmp——只有一处不同：**它走标准调用**。legacy 的
-// `HypotAscIrCodegenImplV2` 不重写 `LoadApiHeaderFiles`，发的是 `AscendC::Hypot`
+// 同 dtype、要一块 tmp——只有一处不同：它走标准调用。legacy 的
+// `HypotAscIrCodegenImplV2` 不重写 `LoadApiHeaderFiles`，生成的是 `AscendC::Hypot`
 // （`adv_api/math/hypot.h`），所以没有扩展头、要进 `kIsStockCall`。
 //
 // fork 里确实有一份 `v35/ascendc/api_regbase/hypot.h`（里面是 `HypotExtend`），但
-// **legacy 一处都不加载它**——照着文件名挑就会挑错供给，发出一个 legacy 从不发的调用。
-// 这与第 7 批那 19 个「`Adv/Math.td` 有同名 `UnaryMathOp` 但不是供给」是反向的同一种坑。
+// legacy 一处都不加载它——照着文件名挑就会选错可用实现，生成一个 legacy 从不生成的调用。
+// 这与第 7 批那 19 个「`Adv/Math.td` 有同名 `UnaryMathOp` 但不是可用实现」是反向的同一种坑。
 def AFIR_HypotOp : AFIR_BufferizableBinaryElementwiseOp<"hypot", [F16, F32, BF16]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise Euclidean norm of two tiles";
@@ -1591,19 +1591,19 @@ def AFIR_RemainderOp : AFIR_BufferizableBinaryElementwiseOp<"remainder", [F16, F
     没有标量形态：mem 侧的 `IsNodeValid` 明写拒绝标量输入。
   }];
 }
-// 逻辑与 / 逻辑或。**二元一族里第一对结果 dtype 与输入无关的 op**——一元那边的谓词族
+// 逻辑与 / 逻辑或。二元一类里第一对结果 dtype 与输入无关的 op——一元那边的谓词族
 // （isnan / isfinite / isinf）已经是这个形状，二元这里到这一对才第一次出现，所以
 // 「非 `Same` 规则」在二元的语义也是到这里才定下来（见类定义处）。
 //
 // 结果恒为 `ui8`：两侧的 `REG_ASC_IR` 都写 `.Output("y", "T2")` 而 `T2` 只有 `uint8`
 // （reg 侧还收 `bool`，AFIR 不建模）。四个包装的 `dst` 也都写死 `LocalTensor<uint8_t>`。
 //
-// 输入集合是两侧的交集口径：mem 侧 `REG_ASC_IR` 给的就是这五个，reg 侧更宽
+// 输入集合是两侧的交集规则：mem 侧 `REG_ASC_IR` 给的就是这五个，reg 侧更宽
 // （bf16 / i8 / i64 / ui32 / ui16 / ui64 / bool），AFIR 建模不出来。分档是 lowering 的事，
 // 各 implementation 各说各的一半。
 //
-// 有标量形态，**哪一边都可以**（矩阵 mem 侧两个都是 `2nd+swap(2nd)`，两个 op 都可
-// 交换）。但**不是四个 implementation 都有**：reg 侧的 `logical_or` 一个标量都不收。
+// 有标量形态，哪一边都可以（矩阵 mem 侧两个都是 `2nd+swap(2nd)`，两个 op 都可
+// 交换）。但不是四个 implementation 都有：reg 侧的 `logical_or` 一个标量都不收。
 // 理由与名字都在 `BinaryElementwise.cpp` 注册处——ODS 写的是两侧的并集。
 class AFIR_LogicalBinaryOp<string mnemonic> :
     AFIR_BufferizableBinaryElementwiseOp<mnemonic, [UI8, UI16, I16, I32, F16, F32, BF16], [UI8],
@@ -1647,8 +1647,8 @@ def AFIR_LogicalXorOp : AFIR_LogicalBinaryOp<"logical_xor"> {
   }];
 }
 
-// `alpha` 是二元这一族里第一个「ODS 属性变成 API 实参」的 op，与 `afir.leaky_relu`
-// 同类但**常量的建法相反**：`AxpyExtend` 的形参是 `const float alpha`，不跟 `T` 走，
+// `alpha` 是二元这一类里第一个「ODS 属性变成 API 实参」的 op，与 `afir.leaky_relu`
+// 同类但常量的建法相反：`AxpyExtend` 的形参是 `const float alpha`，不跟 `T` 走，
 // 所以那个常量恒建 f32；`LeakyRelu` 的是 `const T&`，得跟着 tile 的元素类型建。
 // 照抄另一个就会在 f16 上错——一边让 `T` 推不出来，一边多一次舍入。
 def AFIR_AxpyOp : AFIR_BufferizableBinaryElementwiseOp<"axpy", [F16, F32, BF16], [F16, F32, BF16],
@@ -1677,19 +1677,19 @@ def AFIR_AxpyOp : AFIR_BufferizableBinaryElementwiseOp<"axpy", [F16, F32, BF16],
 // Compare Operations
 //===----------------------------------------------------------------------===//
 
-// 比较族。**六个 op 的 ODS 一字不差**——差别只有 `CMPMODE`，而那不是 AFIR 这一层的
+// 比较族。六个 op 的 ODS 一字不差——差别只有 `CMPMODE`，而那不是 AFIR 这一层的
 // 东西：它由「是哪个 op」定死，在 lowering 注册处说出来。所以这里是一个类加六行。
 //
 // 结果恒为 `ui8`，与输入无关（两侧的 `REG_ASC_IR` 都是 `.Output("y","T2")` 而 `T2`
 // 在 mem 侧只有 `uint8`，reg 侧是 `{uint8, bool}`，AFIR 不建模 bool），与
 // `AFIR_LogicalBinaryOp` 逐字同形；两个输入之间仍然绑在一起（`T1`）。
-// 与 `afir.cast` / `afir.logical_not` 不同，这一族的结果类型**推得出来**——它是个常量，
+// 与 `afir.cast` / `afir.logical_not` 不同，这一类的结果类型推得出来——它是个常量，
 // 所以照常留在 `AFIR_BufferizableBinaryElementwiseOp` 上，不用另起基类。
 //
-// **原先这六行是 `AFIR_BinaryHomoMathOp`（tensor-only），而且六行里有四行是错的**:
+// 原先这六行是 `AFIR_BinaryHomoMathOp`（tensor-only），而且六行里有四行是错的:
 // 三个写了 `F64`、四个写了 `I64`、`lt` 少了 `I32`。两侧的 legacy 注册里从来没有
 // `float64`；`int64` 两侧都有，但 AFIR 这一层的 `ElementTypes` 位掩码拼不出它，
-// 于是与 `pow` / `logical_not` 同一个口径——ODS 写「两侧并集里建模得出来的那些」。
+// 于是与 `pow` / `logical_not` 采用同一规则——ODS 写「两侧并集里建模得出来的那些」。
 // 六行各写各的没有被发现，是因为这个 op 当时没有任何 implementation
 // （与 `floor_div` / `cast` 那两轮同一种）。
 //
@@ -1698,7 +1698,7 @@ def AFIR_AxpyOp : AFIR_BufferizableBinaryElementwiseOp<"axpy", [F16, F32, BF16],
 // = 下面这六个。分档是 lowering 的事，两个 implementation 各说各的一半。
 //
 // 有标量形态，两侧六个 op 全都有——`OnlySecondInputSupportScalar`。
-// **swap 方向只有 Eq / Ne 有**（它们可交换，`lt` / `le` / `gt` / `ge` 不可），所以
+// swap 方向只有 Eq / Ne 有（它们可交换，`lt` / `le` / `gt` / `ge` 不可），所以
 // `scalarOperand` 由实例传：那两个是 `"any"`，其余四个留默认 `"rhs"`。这与 legacy 的
 // `IsScalarInputSupportedIfExchangeInputs` 只覆写在 Eq / Ne 上是同一条判据。
 class AFIR_CompareOp<string mnemonic, string scalarOperand = "rhs"> :
@@ -1733,7 +1733,7 @@ def AFIR_GeOp : AFIR_CompareOp<"ge">;
 //===----------------------------------------------------------------------===//
 // `clip_by_value(x, min, max)`：逐元素夹到 [min, max]。三个输入与结果同 dtype，所以走
 // homo 那一档——三元躯干的操作数名 `condition` / `input1` / `input2` 在这个 op 上读作
-// **x / min / max**。
+// x / min / max。
 // mem 侧 legacy 只收 f16 / f32，reg 侧到 ui16。ODS 取并集，两侧各自收哪些写在注册处。
 def AFIR_ClipByValueOp :
     AFIR_BufferizableTernaryHomoElementwiseOp<"clip_by_value", [F16, F32, I16, I32, UI8, UI16, BF16],
@@ -1741,15 +1741,15 @@ def AFIR_ClipByValueOp :
 
 // step 3。`fma(x1, x2, x3) = x1 * x2 + x3`。三个输入与结果同 dtype，所以与
 // `clip_by_value` 同走 homo 那一档——躯干的 `condition` / `input1` / `input2` 在这个 op 上
-// 读作 **x1 / x2 / x3**，三个源是对称的，没有「条件」那层语义。
+// 读作 x1 / x2 / x3，三个源是对称的，没有「条件」那层语义。
 //
 // `scalarInputs` 不给：legacy 的 `FmaAscIrCodegenImplV2::IsNodeValid` 用
 // `!IsNodeHasScalarInput(node)` 明确拒标量，`adv_api/math/fma.h` 里也没有标量重载。
 //
 // 元素类型取 legacy `REG_ASC_IR(Fma)` 的 `T` 去掉 i8（AFIR 的那张表里没有这一位）。
 // 其中 bf16 / i16 / ui8 在 legacy 侧会被 `dtype_consistency` 按
-// `GetConversionDtype` 先换成 f32 / f16 再发 `Fma`，但「这个节点类型收哪几种」是注册处
-// 与对照表对账的那一列，照 `REG_ASC_IR` 写——比 legacy 窄才是真损失。
+// `GetConversionDtype` 先换成 f32 / f16 再生成 `Fma`，但「这个节点类型收哪几种」是注册处
+// 与对照表比对的那一列，照 `REG_ASC_IR` 写——比 legacy 窄才是真损失。
 def AFIR_FmaOp : AFIR_BufferizableTernaryHomoElementwiseOp<"fma", [F16, F32, I16, UI8, BF16]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise fused multiply-add of three tiles";

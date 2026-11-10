@@ -11,15 +11,15 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 
 // `afir.tanh` / `afir.erf` 的 mem 侧：标准的 `AscendC::Tanh` / `AscendC::Erf`，要 tmp
-// buffer，**一个扩展头都不引**。
+// buffer，一个扩展头都不引。
 //
-// 这份用例要钉的是 `isReuseSource`。这一族的 ascendc op 带一个必填的 `isReuseSource`
-// 操作数，被 emitter 当**模板实参**打印；lowering 物化一个 `arith.constant false`，
+// 这份用例要钉的是 `isReuseSource`。这一类的 ascendc op 带一个必填的 `isReuseSource`
+// 操作数，被 emitter 当模板实参打印；lowering 物化一个 `arith.constant false`，
 // 它经 `printConstantOp` 打成 `constexpr bool c0_i1 = false;`，再被填进
 // `<float, c0_i1>` 那一位。下面 CPP 那两条 check 写全了模板实参，就是为了「常量没被
 // 物化」或者「模板实参位空了」当场红——只写 `AscendC::Tanh(` 的话两种都照样绿。
 //
-// 它证不了的是那份 C++ 真的编得过（lit 不编译发出来的文本），那一条由 CPU E2E 的
+// 它证不了的是那份 C++ 真的编得过（lit 不编译生成的文本），那一条由 CPU E2E 的
 // `load_tanh_store` 钉。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
@@ -61,11 +61,11 @@ module {
 // IR-NOT: ascendc.erf_extend_reg_base
 // IR-NOT: afir.erf
 
-// 模板实参写全，而且**与上一行那个常量同名**：`[[FLAG]]` 绑的就是 `constexpr bool` 那
+// 模板实参写全，而且与上一行那个常量同名：`[[FLAG]]` 绑的就是 `constexpr bool` 那
 // 个名字，常量没物化、或者名字没被填进模板实参位，这两行都不匹配。
 //
-// 最后一个实参是 `v4` 本身，**不带 `static_cast<uint32_t>`**——那个强转出自
-// `printApiExtensionUnary`（包装那条路），Math 一族的打印器不加，直接把
+// 最后一个实参是 `v4` 本身，不带 `static_cast<uint32_t>`——那个强转出自
+// `printApiExtensionUnary`（包装那条路），Math 一类的打印器不加，直接把
 // `local_tensor.get_size` 的 `int32_t` 传给形参 `const uint32_t calCount`。
 // 隐式转换，编得过（由 load_tanh_store 证），别照抄 sign / remainder 那几份的形状。
 // CPP-LABEL: void tanh_stock_f32(

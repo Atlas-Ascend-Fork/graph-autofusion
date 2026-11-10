@@ -22,13 +22,13 @@ LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::Remov
     auto& os = emitter.ostream();
 
     // 显式模板实参取**源**的元素类型，与 `printApiExtensionUnary` 同一条。这个包装两端同
-    // 类型，所以取哪一端都一样；取源是为了与那一族的写法一致，别在这里开第二种口径。
+    // 类型，所以取哪一端都一样；取源是为了与那一类的写法一致，别在这里开第二种规则。
     auto tensorType = dyn_cast<LocalTensorType>(op.getSrc().getType());
     if (!tensorType) {
         return op->emitOpError(op.getAPIName()) << " requires a local tensor source";
     }
 
-    // 三个尺寸按 C++ 形参表的次序发，每个都 `static_cast<uint64_t>`：包装的形参是
+    // 三个尺寸按 C++ 形参表的次序生成，每个都 `static_cast<uint64_t>`：包装的形参是
     // `const uint64_t`，而这里的值来自 `index` 的 SSA 值。
     const Value sizes[] = {op.getLastAxisActualSize(), op.getLastAxisSize(), op.getNonLastAxisMerge()};
 

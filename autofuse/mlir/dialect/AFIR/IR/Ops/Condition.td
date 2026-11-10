@@ -20,18 +20,12 @@ include "Ops/Elementwise.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/CommonTypeConstraints.td"
 
-// 选择族：`condition` 是 ui8 真值，后两个输入与结果同 dtype。三个 op 的 AscendC 供给
-// 是同一个包装（mem 侧 `Where`、reg 侧 `WhereExtend`），差别只在 tmp buffer 需求和
-// 哪个操作数允许是标量，所以 ODS 上它们逐字相同。
-// **select 与 where 的元素类型并集不一样，所以是两张表。** 两者的 mem 侧相同，但 reg 侧
-// legacy 给 `Where` 多收了 ui8 / ui16（`Select` 没有）。共用一张表就会把 select 也放宽到
-// 它那一侧根本供不出来的类型上。
-// **没有 BF16，而且不是漏的。** `ascir_op_lowering_matrix.csv` 里 Select 的 `mem_dtypes`
-// 与 `reg_dtypes` 两列都不供 bf16（`where` 两侧也不供），所以 ODS 写上它就是句假话——
-// 症状是图建得出来、选不出 implementation、白回落，一条诊断都没有。
-// 2026-10-20 一度加过，由 `ElementTypeMatrixTest.OdsElementTypesAgreeWithRegistrationsAndLegacy`
-// 的判据二照出来并删掉。计算族里 bf16 是 reg 侧独有的那一批（add / mul / exp…）与这里不同，
-// 别照着它们往这里加。
+// 选择条件为 ui8，两个候选值与结果同 dtype。mem 侧使用 Where，reg 侧使用 WhereExtend，
+// 具体实现区分 scratch 需求和标量位置。
+// select 与 where 的类型集合分开：mem 侧相同，但 reg 侧 Where 额外接受 ui8 / ui16。
+// 不能因共享包装而同时放宽 Select。
+// 两侧 legacy 可用实现均未声明 bf16，因此不在 ODS 中开放；ElementTypeMatrixTest
+// 检查 ODS、注册实现与 legacy 的一致性。计算族的 bf16 支持不能直接推广到选择族。
 defvar AFIR_SelectElementTypes = [I16, I32, I64, F16, F32];
 defvar AFIR_WhereElementTypes = [UI8, UI16, I16, I32, I64, F16, F32, BF16];
 
@@ -44,7 +38,7 @@ class AFIR_TernaryConditionOp<string mnemonic, list<Type> conditionTypes, list<T
 def AFIR_SelectOp : AFIR_TernaryConditionOp<"select", [UI8], AFIR_SelectElementTypes>;
 def AFIR_WhereOp : AFIR_TernaryConditionOp<"where", [UI8], AFIR_WhereElementTypes>;
 
-// **这一族没有 `masked_fill`，是有意的。** `MaskedFillInputReorderPass`
+// 这一类没有 `masked_fill`，是有意的。 `MaskedFillInputReorderPass`
 // （`optimize/graph_pass/masked_fill_input_reorder_pass.cpp`）无条件把每个 `MaskedFill`
 // 节点改写成 `Select`，而它挂在 `Optimizer::GraphPass` 上、跑在调度之前；bridge 消费的是
 // 调度结果，所以这条路上永远看不到 `MaskedFill`。

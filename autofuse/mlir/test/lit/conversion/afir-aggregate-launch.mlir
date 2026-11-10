@@ -8,14 +8,9 @@
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s -o %t.lowered.mlir
 // RUN: af-opt --afir-aggregate-launch --afir-aggregate-launch-graph-name=fused_graph %t.lowered.mlir | FileCheck %s
 
-// This fixture chains addPlanCandidateLoweringPipeline's per-candidate lowering
-// (same single-candidate load -> add -> store plan as
-// afir-plan-candidate-lowering-pipeline.mlir, plus afir.subgraph_id which
-// GenAggregateTilingData's Plan contract requires) with
-// runAggregateLaunchDriver's aggregate + AutofuseLaunch text emission, driven
-// entirely through af-opt so the whole per-candidate-lowering ->
-// aggregate-launch path has ST coverage independent of the C++ codegen
-// orchestration entry point.
+// Exercise per-candidate lowering followed by aggregate-launch emission through af-opt,
+// independently of C++ codegen orchestration. The fixture uses the load -> add -> store
+// plan from afir-plan-candidate-lowering-pipeline.mlir plus the aggregate plan metadata.
 
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
@@ -75,9 +70,8 @@ module @plan0 attributes {
 // CHECK: __aicore__ void plan0_main
 // CHECK: extern "C"  __global__ __aicore__ void fused_graph
 // CHECK: // -----TILING_DATA-----
-// 只发两个结构体：这个 schedule group 自己的，和最外层的。plan 级的那张 schema 只是
-// 载体（`GenTilingData`），它不是根的字段，因此不进发射递归——ATT 的最外层布局里也没有
-// plan 这一层。
+// 只生成 schedule group 与顶层两个结构体。plan schema 仅承载 stage 字段，
+// 不是根字段，不参与生成递归，与 ATT 无 plan 嵌套层的布局一致。
 // CHECK: struct AscGraph0ScheduleResult0G0TilingData
 // CHECK-NOT: struct plan0TilingData
 // CHECK: struct AutofuseTilingData

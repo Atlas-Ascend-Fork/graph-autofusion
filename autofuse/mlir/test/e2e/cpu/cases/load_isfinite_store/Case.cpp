@@ -8,14 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> isfinite -> store CPU case ------------*- C++ -*-===//
-//
-// 谓词族的三个 op 共用一条 lowering 路径，但**内联进 kernel 的是三份互不相同的头文
-// 本**。`load_isnan_store` 编的是 `isnan.h`，`isfinite.h` 里的代码在它那里一行都没被
-// 编译器看过——头自身的语法、它依赖而前导没给够的名字、它和别的扩展头拼在同一个 TU
-// 里时的重名，都只有把这一份也编出来才会暴露。
-//
-//===----------------------------------------------------------------------===//
+// 谓词族共用 lowering，但每个 op 内联不同扩展头。此用例编译 isfinite.h，
+// 检查该头自身的语法、前导依赖及与其他头合并后的重名问题；isnan.h 的用例不能替代。
 
 #include <gtest/gtest.h>
 

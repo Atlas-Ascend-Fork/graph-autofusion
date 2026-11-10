@@ -28,8 +28,8 @@ inline std::optional<TmpBufferDTO> normalizeLegacyReduceScratch(int64_t id, int6
   }
   return std::nullopt;
 }
-// Every bridge consumer (including shared-buffer lifetime collection) uses the
-// same normalization, so legacy role tags cannot leak back into storage metadata.
+// All bridge consumers, including shared-buffer lifetime collection, normalize
+// these role tags before writing storage metadata.
 inline std::optional<TmpBufferDTO> translateSchedulerTmpBuffer(llvm::StringRef nodeType, int64_t id,
                                                                int64_t legacyLifetime) {
   if (id < 0 || legacyLifetime < -1) {

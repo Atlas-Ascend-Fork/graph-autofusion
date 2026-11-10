@@ -8,18 +8,11 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- AFPlan.h - afplan dialect public header -------------------*- C++ -*-===//
-//
-// `afplan` 承载候选身份与候选间分派（设计文档 2.2 / 2.3 / ADR-5）：**这是哪个候选、
-// 凭什么选它、运行时如何在候选间分派**。它是仅属性方言，没有 Op 也没有 Type。
-//
-// 归属判别：当候选集中只有一个候选，这条信息还影响生成的 kernel 代码吗？是则属
-// `afir`（公开面），否则属 `afplan`（内部）。因此 `tiling_key` 留在 `afir`
-// （它仍决定 TilingData 结构与 entry 分派），而 (subgraph, plan) 归 `afplan`。
-//
-// 依赖方向单向：`afplan` 的属性挂在 `afir` 的容器上，但 `afir` 的语义不依赖它。
-//
-//===----------------------------------------------------------------------===//
+// afplan 是仅属性方言，描述候选身份、选择依据和运行期候选分派，无 Op 或 Type
+// （设计文档 2.2、2.3、ADR-5）。
+// 只有一个候选时仍影响 kernel 的信息属于 afir 公开语义；仅用于区分或选择候选的信息
+// 属于 afplan。因此 tiling_key 留在 afir，subgraph / plan 身份由 afplan 管理。
+// afplan 属性可挂在 afir 容器上，但 afir 不依赖 afplan。
 
 #ifndef AUTOFUSE_MLIR_DIALECT_AFPLAN_IR_AFPLAN_H
 #define AUTOFUSE_MLIR_DIALECT_AFPLAN_IR_AFPLAN_H

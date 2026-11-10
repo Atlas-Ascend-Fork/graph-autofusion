@@ -20,8 +20,8 @@ class SelectionPolicyRegistry;
 
 namespace mlir::ascend::kernel {
 
-// 注册 `afir.nddma` 的 implementation。**只有 reg 侧一个**——它发的那个包装
-// （`DataCopyNddma`）只在 reg-base 那张供给表上。收不了的形态报 unsupported、整张图回落
+// 注册 `afir.nddma` 的 implementation。只有 reg 侧一个——它生成的那个包装
+// （`DataCopyNddma`）只在 reg-base 那张支持表上。收不了的形态报 unsupported、整张图回落
 // legacy。边界与理由见 Nddma.cpp 的文件头注释。
 LogicalResult registerNddmaImplementations(ascend::instruction::ImplementationRegistry &registry,
                                            ascend::instruction::SelectionPolicyRegistry *policies = nullptr);

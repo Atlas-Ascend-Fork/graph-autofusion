@@ -124,10 +124,10 @@ TEST(TilingSchemaTest, MultiPlanFieldsStayIsolatedPerPlan) {
   EXPECT_EQ(s0_count, 2U);
   EXPECT_EQ(s0_paths.size(), 2U);
 
-  // 两个 plan，于是不是单组那一支。真源是 `codegen_tiling_data.cpp` 的
-  // `GetCommonTilingField`，它发两处键，这里都要对上：
+  // 两个 plan，于是不是单组那一支。权威定义是 `codegen_tiling_data.cpp` 的
+  // `GetCommonTilingField`，它写入两处键，这里都要对上：
   //
-  //   外层（"fusion" 作用域）  `graph<i>_tiling_key`，**每个子图一个**——不带 `result<M>`，
+  //   外层（"fusion" 作用域）  `graph<i>_tiling_key`，每个子图一个——不带 `result<M>`，
   //                            也不是每个 plan 一个；
   //   组内（嵌套 stage 作用域）每个 stage 结构体里一个裸 `tiling_key`。
   //

@@ -25,18 +25,10 @@
 namespace mlir::ascend::kernel {
 namespace {
 
-// 设计文档 5.2：`af-opt --afir-verify-kernel-complete`，每条判据一组正负向 LIT，作为
-// PR gate。
-//
-// **默认只跑 C3**，其余三条要显式点名。这不是把门槛放低，而是如实反映现状：C1 的所有权
-// 一半、C2 的同步族 lowering、C4 的实现覆盖面都还没落地（5.2 的「当前」列分别是「部分」
-// 「未满足」「覆盖面窄」）。把四条一起设成默认等于让这个 pass 在今天的每个生产 kernel
-// 上都失败——那样它会立刻被加进忽略名单，然后再也没人看。
-//
-// 判据逐条可选，于是每条都能独立地从红转绿，而转绿的那一刻是可见的：把它加进默认集合
-// 是一次显式的提交。
-//
-// `--target=` 是必需的：C4 要查实现注册表，注册表是按目标构建的。
+// 按设计文档 5.2 提供逐判据正负向 LIT 检查。
+// 默认只启用 C3；C1 所有权检查、C2 同步 lowering 和 C4 实现覆盖尚不完整，需显式启用。
+// 各判据满足生产要求后再通过独立变更加入默认集合，避免默认检查拒绝所有现有 kernel。
+// 目标由 --target 指定，C4 使用对应目标的实现注册表。
 struct AFIRVerifyKernelCompletePass : public AFIRSessionScopedPass<AFIRVerifyKernelCompletePass> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AFIRVerifyKernelCompletePass)
 

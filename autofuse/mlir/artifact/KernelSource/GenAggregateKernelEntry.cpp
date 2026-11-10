@@ -67,10 +67,9 @@ struct DeclarationCollection {
   SmallVector<Type> argumentTypes;
 };
 
-// `_main` 的 tiling 形参一 stage 一个，按 stage 次序紧挨在参数表尾部，每个都把自己的 stage
-// 写在 `#afir.kernel_arg` 的 `index` 上。「是不是 tiling」「是第几个 stage」都问参数自己的
-// 声明，不按类型相等或参数位置反推——按类型找等于把「有几个 stage」这件事再推导一遍。
-// 返回第一个 tiling 形参的下标，stage `i` 即 `返回值 + i`。
+// _main 每个 stage 对应一个 tiling 参数，按 stage 顺序连续排列在参数表末尾。
+// 参数的 #afir.kernel_arg 声明 tiling 角色和 stage index，不按类型或位置推断身份。
+// 返回首个 tiling 参数下标，stage i 对应返回值加 i。
 FailureOr<size_t> findTilingArguments(func::FuncOp function, size_t stageCount) {
   SmallVector<size_t> tilingArguments;
   for (unsigned index = 0; index < function.getNumArguments(); ++index) {
@@ -93,11 +92,10 @@ FailureOr<size_t> findTilingArguments(func::FuncOp function, size_t stageCount) 
   return tilingArguments.front();
 }
 
-// 每个 stage 的 TilingData 结构体上**也**有一份 `workspace<ID>`（`GenTilingData` 的
-// `collectStageFields` 加的），Plan 主函数读的就是那一份。而 ATT 只往**顶层**那一份写偏移：
-// MLIR 交给它的 `TilingFieldSchema` 把 workspace 声明在 `"fusion"` 作用域上，stage 那层一条
-// 也没有（`tiling_field_schema.cpp` 的 `BuildTilingFieldSchema`）。少了这一次拷贝，stage
-// 读到的就永远是零初始化的 0——**多块 workspace 会全部落在同一个基址上**，互相覆盖。
+// GenTilingData.cpp 的 collectStageFields 为各 stage 添加 workspace<ID> 字段，Plan 主函数
+// 从该字段读取偏移。但 ATT 仅写顶层 fusion 作用域中的 workspace 字段
+// （见 tiling_field_schema.cpp）。必须将顶层偏移复制到 stage，否则 stage 保持初始值 0，
+// 多块 workspace 将使用同一基址并相互覆盖。
 void copyWorkspaceOffsets(OpBuilder &builder, Location loc, Value aggregateTiling, Value stageTiling,
                           ArrayRef<int64_t> workspaceIds) {
   for (int64_t tensorId : workspaceIds) {
@@ -191,8 +189,8 @@ struct AggregateInputs {
 
 FailureOr<SmallVector<int64_t>> collectPlanWorkspaceIds(ModuleOp planModule, func::FuncOp planMain,
                                                         AggregateInputs inputs, ArrayRef<StringAttr> tilingFields) {
-  // `copyWorkspaceOffsets` 要读顶层、写每个 stage，两边都得真的有这个字段。缺哪一边都在这里
-  // 报出来：静默跳过等于让 stage 继续用 0 号基址，而那正是这次要修掉的东西。
+  // copyWorkspaceOffsets 依赖顶层和各 stage 的 workspace 字段，两侧都必须校验。
+  // 字段缺失时报错，不能跳过复制并让 stage 使用零偏移。
   SmallVector<int64_t> workspaceIds;
   if (auto ids = planModule->getAttrOfType<DenseI64ArrayAttr>(mlir::afir::kWorkspaceTensorIdsAttrName)) {
     for (int64_t tensorId : ids.asArrayRef()) {
@@ -256,8 +254,7 @@ FailureOr<PlanDeclaration> createPlanDeclaration(OpBuilder &builder, Location lo
       !planMain) {
     return failure();
   }
-  // 每个 stage 的成员名都要真的在聚合 schema 里；名字对不上时这里就报，而不是把一个空类型
-  // 带到发射期。
+  // 检查每个 stage 的成员名都存在于聚合 schema 中，避免将空类型传入生成阶段。
   SmallVector<StringAttr> tilingFields;
   for (Attribute attr : tilingFieldsAttr) {
     auto field = dyn_cast<StringAttr>(attr);
@@ -362,8 +359,8 @@ func::FuncOp createAggregateMain(OpBuilder &builder, ModuleOp entryModule, Funct
       case KernelArgumentKind::Input:
         mlir::afir::setKernelArgAttr(main, index, mlir::afir::KernelArgRole::Input, argument.index);
         break;
-      // 不能折成 `Input`：折了之后聚合 main 上这个参数就自称是 GM 张量，
-      // `verifyCanonicalKernelArguments` 的反向判据会当场报错——那是设计好的。
+      // 标量必须保留 ScalarInput 角色；改为 Input 会声明成 GM 张量，
+      // 不满足 verifyCanonicalKernelArguments 的角色与类型校验。
       case KernelArgumentKind::ScalarInput:
         mlir::afir::setKernelArgAttr(main, index, mlir::afir::KernelArgRole::ScalarInput, argument.index);
         break;
@@ -414,11 +411,9 @@ LogicalResult buildGraphDispatch(OpBuilder &builder, const AggregateMain &main, 
   }
   auto dispatch = builder.create<scf::IndexSwitchOp>(loc, TypeRange{}, selector, cases, cases.size());
   dispatch.getDefaultRegion().emplaceBlock();
-  // 缺省分支陷入，不静默返回。`graph<N>_tiling_key` 由 host 侧的 tiling 写，取值本应落在
-  // 已下降的候选编号内；落不进来说明 host 与 kernel 对候选集的认知已经不一致（例如某个候选
-  // 没进这个 kernel，而 host 仍然选了它）。空 `scf.yield` 会让 kernel 什么都不做直接返回，
-  // 输出保持未初始化——数值错且没有任何报错，是这条链路上唯一会静默出错的地方。
-  // `AscendC::Trap` 在 NPU 上中断 AI Core，在 CPU 模式下等价于 assert，两种 e2e 都能观测到。
+  // host tiling 写入的 graph<N>_tiling_key 必须对应已下降的候选编号。
+  // 不匹配表示 host 与 kernel 的候选集不一致，例如 host 选中了未编入 kernel 的候选。
+  // 默认分支触发 trap；仅 yield 会静默跳过计算，并让 host 读取未写入的输出。
   OpBuilder defaultBuilder = OpBuilder::atBlockEnd(&dispatch.getDefaultRegion().front());
   defaultBuilder.create<ascendc::TrapOp>(loc);
   defaultBuilder.create<scf::YieldOp>(loc);

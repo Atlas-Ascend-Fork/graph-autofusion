@@ -19,9 +19,8 @@ class ModuleOp;
 
 namespace mlir::ascend::kernel {
 
-// The pass wrapper around this is declared in Passes.h; the free function is
-// exposed separately because ConvertAFIRToAscendCPass runs it inline as a
-// lowering precondition rather than as a pipeline stage.
+// The pass wrapper is declared in Passes.h. ConvertAFIRToAscendCPass also calls
+// this function directly to satisfy a lowering precondition.
 LogicalResult synchronizeAFIRPipeline(ModuleOp module);
 
 }  // namespace mlir::ascend::kernel

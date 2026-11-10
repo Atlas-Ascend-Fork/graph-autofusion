@@ -195,17 +195,14 @@ FailureOr<std::string> EmitFoldedWorkspaceCall(const afir::detail::ExpressionNod
   return result;
 }
 
-// 表达式里的算子有两类写法，不能一视同仁：
-//
-// - `Max` / `Min` / `Abs` / `Ceiling` / `Floor` / `Mod` 是 ATT 发在 `namespace optiling` 里的
-//   **函数模板**，必须带 `optiling::` 限定——`CalculateWorkspaceSize` 发在全局作用域（ATT 在
-//   全局预先声明了 `GetWorkspaceSize`，见生成物里 `namespace optiling {` 之前那一行，所以这两个
-//   函数不能挪进 `optiling`），不限定就是 `'Max' was not declared in this scope`。
-// - `Pow` / `Rational` / `Log` / `Expect*` / `Logic*` 是**宏**，与命名空间无关，加了限定反而
-//   会把 `optiling::` 拼到宏展开体前面。
-//
-// 这条只在「workspace 大小是个真表达式」时才走到：单核 RCommon 的 workspace 表达式折叠成常量
-// 0，整条链路一个算子都不发，所以此前一直没暴露。
+// workspace 表达式中的函数模板和宏需要不同的限定方式：
+// - Max / Min / Abs / Ceiling / Floor / Mod 是 ATT 定义在 optiling 中的函数模板，
+//   调用时须加 optiling::。CalculateWorkspaceSize 和 GetWorkspaceSize 保持在全局作用域，
+//   与 ATT 的全局前置声明一致，不能通过移动函数作用域省略限定。
+// - Pow / Rational / Log / Expect* / Logic* 是宏，不能加命名空间限定，
+//   否则 optiling:: 会被拼接到宏展开体之前。
+// 仅含常量的表达式不经过算子生成，例如单核 RCommon 的 workspace 大小为 0，
+// 因此测试还需覆盖非平凡 workspace 表达式。
 constexpr llvm::StringLiteral kOptilingScope = "optiling::";
 
 FailureOr<std::string> EmitWorkspaceFunction(const afir::detail::ExpressionNode &node, const TilingStageSpec &stage) {

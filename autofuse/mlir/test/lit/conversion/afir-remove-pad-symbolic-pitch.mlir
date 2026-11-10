@@ -6,16 +6,16 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **32 B 整除判据的符号支**：行距是 `af::sym::Align(z_size, 8)` 时判据必须成立。
+// 32 B 整除判据的符号支：行距是 `af::sym::Align(z_size, 8)` 时判据必须成立。
 //
 // 调度算出来的行距就是这个形状（`base_alignment_strategy.cpp:705` 的
 // `af::sym::Align(repeat, align_factor)`，而 `Align(x, a) = Mul(Ceiling(Div(x, a)), a)`），
 // 规范形式是 `(8 * Ceiling((Rational(1 , 8) * z_size)))`。动态 shape 下这是常态，不是边角。
 //
-// 判据走的是**表达式树的结构**（`Mul` 里有一个字面量因子 8，其余因子取值为整数），不是算术
+// 判据走的是表达式树的结构（`Mul` 里有一个字面量因子 8，其余因子取值为整数），不是算术
 // 证明：后者要证 `P == 8 * Ceiling(P / 8)`，代进 `P = 8 * Ceiling(z_size / 8)` 之后左右差一层
 // `Ceiling(Ceiling(...))`，而 SymEngine 的规范化只在实参是 `Number` 时求值，不折它。
-// **这一条红了说明结构判据没命中**，那时要改的是 `isProvablyMultipleOf` 而不是本用例。
+// 这一条红了说明结构判据没命中，那时要改的是 `isProvablyMultipleOf` 而不是本用例。
 //
 // 只跑到 `--afir-select-implementation` 为止：符号行距物化出来是一条 `afir.tiling_param`，
 // 而带它的函数必须有 workspace / TilingData 形参（`AscendCKernelABI` 的那条检查）——那要

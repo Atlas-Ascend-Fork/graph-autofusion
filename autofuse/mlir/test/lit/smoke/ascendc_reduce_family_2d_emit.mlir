@@ -7,13 +7,13 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // `ascendc.reduce_{max,min,prod,any,all}_2d_l2` 与 `ascendc.reduce_init` 新增的三个
-// `reduceType` 发射到 C++ 文本这一层。
+// `reduceType` 写入 C++ 文本这一层。
 //
-// 这一层是这一族**唯一**会出错的地方，理由与 `ascendc_reduce_sum_2d_emit.mlir` 那份逐字相同
+// 这一层是这一类唯一会出错的地方，理由与 `ascendc_reduce_sum_2d_emit.mlir` 那份逐字相同
 // （`srcShape` 的 `static_cast<uint32_t>` 窄化），而且只有真机编 kernel 时才会撞上：主机侧
 // 编译不碰 device 代码，CPU E2E 也不走这个重载。六个 op 共用同一个 printer 模板，所以窄化
-// 那一条不会逐 op 各错一次；这份用例盯的是**函数名有没有跟着 op 换**——printer 取的是
-// `getAPIName()`，接错了会把 `ReduceMin` 发成 `ReduceSum`，编得过、算错值。
+// 那一条不会逐 op 各错一次；这份用例盯的是函数名有没有跟着 op 换——printer 取的是
+// `getAPIName()`，接错了会把 `ReduceMin` 生成 `ReduceSum`，编得过、算错值。
 //
 // `reduce_init` 的三个新枚举同理：`kReduceOpAny` / `kReduceOpAll` / `kReduceOpMean` 是
 // `ascendc/api/reduce_init.h` 里的全局常量，switch 里少一个分支或接错一个常量，填的就是

@@ -15,9 +15,8 @@
 //   afir.stage_count                             -> 删除（恒等于上一行的长度，全仓无读点）
 //   afir.score_func                              -> afplan.score_func（名字迁移，仍是字符串）
 //
-// 两件事一起锁住：
-//   1) 三个属性能原样解析并打印回来——候选身份的序列化形态是稳定契约；
-//   2) `afir` 命名空间里不再出现这些字段（NOAFIR 前缀）——公开面不该看到内部编号。
+// 检查候选身份属性可往返解析与打印，并且旧字段不再写入 afir 命名空间。
+// NOAFIR 前缀用于验证公开 AFIR 不再携带内部候选编号。
 
 // RUN: af-opt %s | af-opt | FileCheck %s
 // RUN: af-opt %s | FileCheck %s --check-prefix=NOAFIR

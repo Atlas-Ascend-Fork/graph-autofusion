@@ -24,12 +24,12 @@ module @plan0 attributes {
   ascendc.tiling_schema = !emitasc.py_struct<"Plan0TilingData", [
       !emitasc.py_struct<"AscGraph0ScheduleResult0G0TilingData", [ui32], ["tiling_key"]>], ["graph0_result0_g0_tiling_data"]>
 } {
-  // 两个参数都自称「第 0 个输入」。这条现在在**解析期**就被方言 verifier 挡住，不再
-  // 走到 GenKernelEntry 的同名检查——闸门前移了，诊断也更靠近错误本身。
+  // 两个参数都自称「第 0 个输入」。这条现在在解析期就被方言 verifier 挡住，不再
+  // 走到 GenKernelEntry 的同名检查——门禁前移了，诊断也更靠近错误本身。
   //
-  // GenKernelEntry 里那条判重**保留**：按 5.3 的注记，`genVerifyDecl` 不是全路径闸门，
+  // GenKernelEntry 里那条判重保留：按 5.3 的注记，`genVerifyDecl` 不是全路径门禁，
   // 程序化构造（`Attr::get` + `setArgAttr`）绕不过这里、却绕得过属性 verifier。两道
-  // 闸门分管文本与构造两条路径。
+  // 门禁分管文本与构造两条路径。
   // expected-error @+1 {{duplicate kernel_arg role 'input' at argument 1; argument 0 already declares it}}
   func.func private @stage0_template0(
       %input0: memref<1xf16> {afir.kernel_arg = #afir.kernel_arg<role = input, index = 0>},

@@ -42,7 +42,7 @@ TEST(MlirE2eCpu, LoadLogicalNotStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 三档轮着喂：0、正数、负数。**零与非零都要有**——全非零的话「结果恒为 0」也能过，
+  // 三档轮着喂：0、正数、负数。零与非零都要有——全非零的话「结果恒为 0」也能过，
   // 而那正是「常量 block 没被 Duplicate 成 1」的一种表现；负数那一档钉的是包装开头
   // 那个 `Abs`。
   //

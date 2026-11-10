@@ -46,12 +46,12 @@ TEST(MlirE2eCpu, LoadSubStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 两边都取得有正有负，而且**两个输入不相等**：相减以后全 0 的话，一份把 `Sub` 写成
+  // 两边都取得有正有负，而且两个输入不相等：相减以后全 0 的话，一份把 `Sub` 写成
   // `Add` 的实现也可能凑巧过——差值恒不为零才分得开。
   for (uint32_t index = 0; index < input0_element_count; ++index) {
     input0[index] = static_cast<float>(static_cast<int32_t>(index % 9U) - 4) * 1.5F;
   }
-  // 减数**跳过 0**：下面那条「不等于 a + b」的判据在 b == 0 的位置恒不成立
+  // 减数跳过 0：下面那条「不等于 a + b」的判据在 b == 0 的位置恒不成立
   // （`a - 0` 与 `a + 0` 本来就相等），留着 0 就是给自己造一个假红。
   // 取值落在 {-3, -2, -1, 1, 2} * 0.25。
   for (uint32_t index = 0; index < input1_element_count; ++index) {

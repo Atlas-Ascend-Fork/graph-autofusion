@@ -41,7 +41,7 @@
 namespace mlir::ascend::kernel::detail {
 
 // 数据结构与绑定收集住在 AFIR 层（判据全部来自 descriptor 契约，与后端无关）。
-// 本头文件只剩物化器那一半——它发 `ascendc` 算子，所以留在 conversion。
+// 本头文件只剩物化器那一半——它生成 `ascendc` 算子，所以留在 conversion。
 using afir::CanonicalBindings;
 using afir::CanonicalGroupKey;
 using afir::CanonicalResourceKey;
@@ -127,10 +127,9 @@ class CanonicalFunctionMemoryAllocator {
   LogicalResult collectMaterializationGroup(CanonicalValueInfo &info,
                                             std::map<CanonicalGroupKey, SmallVector<CanonicalValueInfo *>> &groups);
 
-  // 一条队列上先后复用同一次 AllocTensor 的若干组。legacy 的 reuse_from 链就是这个：
-  // 队列上紧跟着一个纯计算成员（VecCalc——不入队、不归还）的下一组不再 alloc，直接
-  // 写同一块（`codegen_kernel_loop.cpp::AllocOutputs` 的 VecCalc / HandleVecOutAlloc
-  // 两个分支，那里只发一条 `PipeBarrier<PIPE_V>`）。整条链一次 alloc、一次归还。
+  // 同一队列中复用一次 AllocTensor 的资源组，对应 legacy reuse_from 链。
+  // 当前组是无需入队和归还的 VecCalc 时，下一组直接使用同一块存储，只需 PIPE_V 屏障。
+  // 整条链只分配和归还一次，见 AllocOutputs 的 VecCalc / HandleVecOutAlloc 分支。
   struct QueueEpoch {
     Value raw;
     Operation *anchor = nullptr;
@@ -144,7 +143,7 @@ class CanonicalFunctionMemoryAllocator {
                                   Operation *anchor, ascendc::LocalTensorType rawType,
                                   const SmallVector<CanonicalValueInfo *> &members);
 
-  // 走查这一组落到的**所有**绑定，别名一并算进来——`outs` 与它 tie 的结果是同一块
+  // 走查这一组落到的所有绑定，别名一并算进来——`outs` 与它 tie 的结果是同一块
   // 存储，而搬运方向、末次读都记在结果那一侧。下面两个判据共用这一条闭包。
   void forEachGroupValue(const SmallVector<CanonicalValueInfo *> &members,
                          llvm::function_ref<void(const CanonicalValueInfo &)> callback) const;
@@ -152,10 +151,10 @@ class CanonicalFunctionMemoryAllocator {
   // 这一组会被搬运（EnQue / DeQue）吗。
   bool isTransferGroup(const SmallVector<CanonicalValueInfo *> &members) const;
 
-  // 归还这条链：在它全部成员的末次使用之后发一条 free_tensor。
+  // 归还这条链：在它全部成员的末次使用之后生成一条 free_tensor。
   LogicalResult closeQueueEpoch(const CanonicalResourceKey &key, QueueEpoch &epoch);
 
-  // 带溢出断言的加法 / 乘法：除结果外还发一条 `cf.assert`，把「进位为零」「高位为零」
+  // 带溢出断言的加法 / 乘法：除结果外还生成一条 `cf.assert`，把「进位为零」「高位为零」
   // 钉在 IR 里，而不是留给运行期悄悄回绕。
   FailureOr<Value> materializeCheckedAdd(Value lhs, Value rhs, StringRef message, Location loc);
   FailureOr<Value> materializeCheckedMul(Value lhs, Value rhs, StringRef message, Location loc);
@@ -210,7 +209,7 @@ class CanonicalFunctionMemoryAllocator {
   MLIRContext *context;
   std::unique_ptr<OpBuilder> resourceBuilder;
   // 绑定由 AFIR 层收集好之后交进来（dialect/AFIR/Analysis/CanonicalBindings.h）。
-  // 本类只做物化：读这张表，发 `ascendc` 算子，把 `alias` / `materialized` 回填进去。
+  // 本类只做物化：读这张表，生成 `ascendc` 算子，把 `alias` / `materialized` 回填进去。
   llvm::DenseMap<Value, CanonicalValueInfo> values;
   SmallVector<Value> valueOrder;
   std::map<CanonicalResourceKey, CanonicalResourceInfo> resources;

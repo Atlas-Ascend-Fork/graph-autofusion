@@ -11,10 +11,10 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-logical-not-extension-api.mlir 的另一半。**这一侧与那一侧的差别不止扩展头**：
+// afir-logical-not-extension-api.mlir 的另一半。这一侧与那一侧的差别不止扩展头：
 //
 //   - 名字不同：这边叫 `LogicalNotExtend`，mem 侧是裸名 `LogicalNot`；
-//   - **结果 dtype 不同**：包装的形参写死 `LocalTensor<uint8_t>`，所以结果恒为 ui8，
+//   - 结果 dtype 不同：包装的形参写死 `LocalTensor<uint8_t>`，所以结果恒为 ui8，
 //     而 mem 侧两端同 dtype。一元里第一个两侧关系不同的 op（二元那边是 `truediv`）；
 //   - 既不要 tmp buffer，也不要那块预先填好 1 的常量——mem 侧两样都要。
 //

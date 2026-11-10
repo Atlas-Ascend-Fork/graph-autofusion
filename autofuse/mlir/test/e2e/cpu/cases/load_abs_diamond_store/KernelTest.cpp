@@ -35,7 +35,7 @@ TEST(MlirE2eCpu, LoadAbsDiamondStoreCalculatesCorrectResult) {
     const uint32_t count = GetShapeConfig(kInputShapes, slot).element_count;
     inputs[slot] = static_cast<float *>(AscendC::GmAlloc(count * sizeof(float)));
     ASSERT_NE(inputs[slot], nullptr) << "input allocation failed: slot=" << slot;
-    // 分叉点的那一路（slot 0）正负都有：`Abs` 要是没被发出来，只有负数那一半分得开。
+    // slot 0 同时包含正负值，负输入用于发现遗漏 Abs。
     for (uint32_t index = 0; index < count; ++index) {
       inputs[slot][index] = static_cast<float>(index) * 0.25F - static_cast<float>(slot) - 3.0F;
     }

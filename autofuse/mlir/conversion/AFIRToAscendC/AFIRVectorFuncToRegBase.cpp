@@ -8,30 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- AFIRVectorFuncToRegBase.cpp - afir.vector_func 下降到寄存器形态 ------===//
-//
-// 相位 C.5：把 `afir.vector_func` 展开成
-//
-//     emitasc.vec_scope { emitasc.vf_for { load_align_reg / <op>_reg / store_align_reg } }
-//
-// 也就是 `__VEC_SCOPE__ { for (...) { AscendC::Reg::... } }`。**中间结果不落 UB**：它们是
-// `ascendc.reg_tensor` 产出的向量寄存器，在 region 内按算子顺序串起来。这正是 VF 的收益，
-// 也是展平路线（把子图摊成普通 tile 级算子）做不到的——那条路每个中间结果都要一块 UB，
-// 而 UB 预算由 legacy 的 buffer 分配与 ATT 定，MLIR 只读 tiling 里的 `q*_size`。
-//
-// 设计见 docs/development/2026-10-18-afir-vector-func-implementation-design.md 的功能需求 3。
-// **与设计文档的一处偏差**：那里写的是「换成 `ascvf.vf_group` 再跑移植来的 `LowerToReg`」。
-// 实测对不上——上游 `LowerToReg` 的 pattern 匹配的是 `ascendc::*L2Op` 那一族 stock 算子，
-// 而我们这条路下降出来的是 Autofuse 的包装算子（`ascendc.sub_extend_reg_base` 之类），
-// **一条都匹配不到**；而且它发的 `Reg::DataCopy` 在这一档 CANN 的 reg 搬运头里不存在
-// （那里是 `LoadAlign` / `StoreAlign` 一族）。所以这一步改成直接在**我们自己的算子集**上
-// 下降，上游那份留作结构参照。
-//
-// 能力判定在**这个 pass 的入口**，不在 pattern 里：pattern 失败是硬失败（而且报在 root op
-// 上，看不出是哪一条），而「这一期收不了这种 VF」必须是能力不足、干净回落给 legacy。
-// 判据见 `checkSupported`。
-//
-//===----------------------------------------------------------------------===//
+// 实现与设计文档功能需求 3 的 LowerToReg 方案不同：上游 pattern 只匹配 stock
+// ascendc::*L2Op，无法匹配 Autofuse 的 sub_extend_reg_base 等包装算子；
+// 其 Reg::DataCopy 也不适用于当前使用 LoadAlign / StoreAlign 的 CANN 头。
+// 因此直接下降 Autofuse 算子集，上游代码仅作结构参考。
 
 #include "conversion/AFIRToAscendC/AFIRToAscendCPasses.h"
 
@@ -57,10 +37,10 @@
 namespace mlir::ascend::kernel {
 namespace {
 
-// AFIR 算子 -> 寄存器形态算子。**这张表就是「有没有寄存器形态」的真源**：能力判定查它，
-// 下降也查它，不存在「查了一张表、按另一张表发」的可能。
+// AFIR 算子 -> 寄存器形态算子。这张表是判断「是否有寄存器形态」的唯一依据：能力判定查它，
+// 下降也查它，不存在「查了一张表、按另一张表生成」的可能。
 //
-// **加一行要带一格用例。** 一行声明的是「这个 AscendC::Reg API 与这个 AFIR 算子同义」，
+// 加一行要带一格用例。 一行声明的是「这个 AscendC::Reg API 与这个 AFIR 算子同义」，
 // 而同义是个会错的判断（mask 语义、饱和模式、以及 bf16 这类要模板实参的 dtype）。M1 收
 // 两格 E2E 真正走到的那三个（`add` / `div` / `abs`）；M2 加 `cast` / `exp` / `relu`，
 // 随后补 `neg`（带 `load_abs_neg_reg_base_store` 那一格 E2E，探针上 T5c 那 10 格也是它）；
@@ -69,16 +49,16 @@ namespace {
 // 其余按后续分期加，每期一条判据。
 enum class RegOpArity : uint8_t { kUnary, kBinary, kTernary };
 
-// 这个算子在寄存器形态下**会不会换元素类型**。只有 `cast` 会。这一位不是装饰：它决定
+// 这个算子在寄存器形态下会不会换元素类型。只有 `cast` 会。这一位不是装饰：它决定
 // 能力层查的是「操作数与结果同类型」还是「这一对 dtype 有没有 trait」，也决定建 op 时要
 // 不要带那个 `trait` 实参。
 enum class RegOpElementTypes : uint8_t { kUniform, kConverting };
 
 // M3：这个算子在寄存器形态下产出的是什么。
 //
-// **`kPredicate` 不是「结果是 ui8」的另一种写法。** 比较在寄存器形态下产出的是一条
-// **谓词**——`MaskReg`，一位一个 lane，没有元素类型；AFIR 那一侧把它写成 `ui8` 的张量
-// 只是因为 AFIR 没有谓词类型。两者的区别是可观测的：谓词进不了 `Reg::Add` 这一族，
+// `kPredicate` 不是「结果是 ui8」的另一种写法。 比较在寄存器形态下产出的是一条
+// 谓词——`MaskReg`，一位一个 lane，没有元素类型；AFIR 那一侧把它写成 `ui8` 的张量
+// 只是因为 AFIR 没有谓词类型。两者的区别是可观测的：谓词进不了 `Reg::Add` 这一类，
 // 也存不回 UB；要把它变回一段值，legacy 会补一条 `Reg::Duplicate(dst, 1, mask)`
 // （`micro_compare_api_call.cpp:48`），那条今天不建模。
 //
@@ -120,7 +100,7 @@ Operation *buildBinaryRegOp(OpBuilder &builder, Location loc, const RegOpOperand
 }
 
 // M3：比较。目的地是一条谓词（`MaskReg`），`maskReg` 仍是那张 lane 活性掩码。
-// 比较模式由**行**定死——它是 AFIR 算子名的一部分（`afir.eq` 就是 `CMPMODE::EQ`），
+// 比较模式由行定死——它是 AFIR 算子名的一部分（`afir.eq` 就是 `CMPMODE::EQ`），
 // 不是运行期的选择，所以写成模板实参而不是 `RegOpOperands` 的一个字段：表里只能有一个
 // 签名，否则「加一行只动这张表」就不成立了。
 template <ascendc::CMPMODE mode>
@@ -134,8 +114,8 @@ Operation *buildCompareRegOp(OpBuilder &builder, Location loc, const RegOpOperan
 // ——与 legacy 的 `micro_where_api_call.cpp:45`（`Select(out, T1, T2, mask)`，mask 来自
 // 比较）逐字同序。
 //
-// **这里传的 mask 是谓词，不是 lane 活性掩码**，与这张表其余各行都不同。那是对的：
-// legacy 也这么发，活着的 lane 由存回去那一步的 `StoreAlign` 挡。
+// 这里传的 mask 是谓词，不是 lane 活性掩码，与这张表其余各行都不同。那是对的：
+// legacy 也这么生成，活着的 lane 由存回去那一步的 `StoreAlign` 挡。
 Operation *buildSelectRegOp(OpBuilder &builder, Location loc, const RegOpOperands &operands) {
   return builder.create<ascendc::SelectRegOp>(loc, operands.dstReg, operands.srcRegs[1], operands.srcRegs[2],
                                               operands.srcRegs[0]);
@@ -152,10 +132,8 @@ llvm::ArrayRef<RegOpMapping> regOpMappings() {
        kNoPredicateOperand, buildBinaryRegOp<ascendc::AddRegOp>},
       {afir::DivOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
        kNoPredicateOperand, buildBinaryRegOp<ascendc::DivRegOp>},
-      // `truediv` 在 reg 侧与 `div` 发同一个调用，**这不是偷懒**：legacy 的
-      // `ascir_op_lowering_matrix.csv` 里 `TrueDiv` 的 `reg_api_name` 就是 `DivExtend`
-      // （mem 侧才是 `TrueDivExtend` 加 tmp buffer，那是另一条路）。所以这一行与 legacy
-      // 逐字一致，不是我们这一侧选了个近似。
+      // reg 侧 truediv 与 div 均使用 DivExtend，与 legacy reg_api_name 一致。
+      // mem 侧使用带 tmp buffer 的 TrueDivExtend，不适用此映射。
       {afir::TrueDivOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
        kNoPredicateOperand, buildBinaryRegOp<ascendc::DivRegOp>},
       {afir::AbsOp::getOperationName(), RegOpArity::kUnary, RegOpElementTypes::kUniform, RegOpResult::kValue,
@@ -174,7 +152,7 @@ llvm::ArrayRef<RegOpMapping> regOpMappings() {
       {afir::MulOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
        kNoPredicateOperand, buildBinaryRegOp<ascendc::MulRegOp>},
       // M3：谓词这一对。两行一起加、一格 E2E（`load_eq_where_reg_base_store`）同时走到
-      // ——单独加任一行都没有用：比较产出的谓词今天只有 `where` 消费得了，而 `where` 的
+      // ——单独加任一行都没有用：比较产出的谓词目前只有 `where` 消费得了，而 `where` 的
       // 条件今天只能由比较产出（从 UB 取一段 ui8 当条件要补一条 `CompareScalar ... NE 0`，
       // 那是 legacy 的另一条路，不在本期）。
       {afir::EqOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kPredicate,
@@ -217,33 +195,15 @@ std::string listRegOpMappings() {
   return names;
 }
 
-//===----------------------------------------------------------------------===//
-// M2：跨 dtype 的那三件事
-//===----------------------------------------------------------------------===//
-//
-// 一个 VF 里可以中途换 dtype（`afir.cast`）。换 dtype 不是「多发一条指令」那么简单，因为
-// **向量寄存器是定宽的**：`RegTensor<float>` 一段装 `VL/4` 个元素，`RegTensor<half>` 装
-// `VL/2` 个。要把 half 转成 float，那些 half 必须先被放进 **4 字节间隔的 lane 槽位**里，
-// 否则转出来的是另一组元素。所以跨 dtype 的 VF 有三件事要定：
-//
-//   1. **lane 的宽度**由这个 VF 里**最宽**的元素类型定（下面的 `widestElementType`）：
-//      一段 lane 装 `GetVecLen() / sizeof(max)` 个元素，`UpdateMask<max>` 也按它算。
-//      与 legacy 的 `max_dtype_size_` 同一个取法（`vec_func_call.cpp:342`）。
-//   2. **窄边界的搬运要带 dist**：取进来用 `DIST_UNPACK_*`（撑进宽槽位）、存回去用
-//      `DIST_PACK_*`（压回窄 dtype）。不带就是 `DIST_NORM`——编得过、算得出，**静默算错**。
-//   3. **`Reg::Cast` 的 `trait`**：那是个 `const CastTrait&` 模板实参，只能指一个具名的
-//      `constexpr`，而挑哪一个取决于 (输入, 输出) 这一对（主要是 RoundMode 与 SatMode）。
+// 跨 dtype 的 VF 按最宽元素类型确定 lane 宽度：每轮处理 GetVecLen()/sizeof(max)
+// 个元素，UpdateMask 使用相同宽度，与 legacy max_dtype_size_ 一致。
+// 窄类型加载到宽 lane 时使用 DIST_UNPACK_*，写回时使用 DIST_PACK_*；DIST_NORM
+// 不适用于此布局，例如 half -> float 需要将 half 放在 4 字节间隔的槽位。
 
-// (输入, 输出) -> `api_regbase/utils.h` 里那个具名 `constexpr CastTrait`。
-//
-// **这张表抄自 legacy 的 `v35/codegen/micro_api_call/micro_cast_api_call.cpp:18`**，一行不改、
-// 一行不加——它是「哪一对 dtype 该用哪种舍入/饱和」这件事的既有答案，而那是个会错的判断，
-// 不该在这条路上重新发明一遍。常量的**定义**仍然只有一份（`utils_reg_base.h` 被
-// `ascendc.cast_reg` 声明为扩展头内联进 kernel），这里复制的只是「挑哪一个」。
-//
-// **表外的 dtype 对报能力不足，不回落到缺省 trait。** legacy 在查不到时用
-// `cast_trait_none`，而那条路上「没列过」与「列过且是 none」分不开；这里宁可干净回落给
-// legacy——放开一道闸门要能验数值，而没验过的 dtype 对给不出数值依据。
+// Reg::Cast 的 trait 是引用具名 constexpr 的模板实参，按输入、输出 dtype 选择
+// RoundMode / SatMode。映射沿用 legacy micro_cast_api_call.cpp，常量定义仍来自
+// 内联的 utils_reg_base.h，此处不重新定义。
+// 表外 dtype 对报告能力不足，不使用缺省 cast_trait_none；未验证的转换交给 legacy。
 struct CastTraitMapping {
   // 两侧都用 `ge::DataType` 的那套名字（与被抄的那张表逐行对得上），MLIR 类型先归一成
   // 这个标签再查，避免「f16 与 half 是不是一回事」这种问题散在查表处。
@@ -326,11 +286,11 @@ Type computeElementType(Operation *inner, const RegOpMapping &mapping) {
   return {};
 }
 
-// 这个 VF 里最宽的元素类型。数的是**边界加 region 内每个结果**，与 legacy 一致——legacy 的
+// 这个 VF 里最宽的元素类型。数的是边界加 region 内每个结果，与 legacy 一致——legacy 的
 // 子图里 `Load` / `Store` 也是节点，它们的输出 dtype 就是边界 dtype，所以两边数的是同一个
 // 集合。
 //
-// **谓词的那个 `ui8` 也数进去，这与 legacy 一致**（`vec_func_call.cpp:342` 的
+// 谓词的那个 `ui8` 也数进去，这与 legacy 一致（`vec_func_call.cpp:342` 的
 // `max_dtype_size` 把比较输出一起数了）。它永远不会成为最宽的那一个——1 字节是这张表里
 // 最窄的一档——所以数不数都是同一个答案，留着是为了与被抄的那一侧逐字对得上。
 Type widestElementType(afir::VectorFuncOp op) {
@@ -353,11 +313,11 @@ Type widestElementType(afir::VectorFuncOp op) {
 
 // 一个窄边界要用哪种 `LoadDist` 才能把元素撑进 `widest` 的 lane 槽位。等宽返回「不带 dist」
 // （`std::nullopt` 包着的空 optional 在这里不好读，所以分两层：外层 `failed` 表示这一对
-// 宽度**这一期撑不出来**，内层空表示不需要 dist）。
+// 宽度这一期撑不出来，内层空表示不需要 dist）。
 //
 // 判据抄自 legacy 的 `DetermineLoadDistAndUnPackSequence`（`micro_load_api_call.cpp:29`），
-// **但只收一步到位的那几种**：legacy 在一条 dist 不够时会再补一串 `Reg::UnPack`，那要多两个
-// op（`unpack_reg` / `pack_reg`）与一个临时寄存器，归后续。今天「一步不够」只发生在最宽是
+// 但只收一步到位的那几种：legacy 在一条 dist 不够时会再补一串 `Reg::UnPack`，那要多两个
+// op（`unpack_reg` / `pack_reg`）与一个临时寄存器，归后续。今天「一步不够」只生成生在最宽是
 // 8 字节的 VF 上，那一类整图干净回落。
 FailureOr<std::optional<ascendc::LoadDist>> loadDistFor(Type boundary, Type widest) {
   const uint32_t from = ascendc::getTypeSize(boundary);
@@ -397,10 +357,10 @@ FailureOr<std::optional<ascendc::StoreDist>> storeDistFor(Type boundary, Type wi
   return failure();
 }
 
-// 本阶段（M2）收哪些 VF。不满足的**全部报能力不足**，整图干净回落给 legacy——这些都是
+// 本阶段（M2）收哪些 VF。不满足的全部报能力不足，整图干净回落给 legacy——这些都是
 // 「还没做」而不是「坏了」。每一条都对应分期表上的一项，见设计文档功能需求 5。
 //
-// **判据的顺序就是诊断说哪一条的顺序**，而一张图可能同时违反几条（最宽 8 字节那一类必然
+// 判据的顺序就是诊断说哪一条的顺序，而一张图可能同时违反几条（最宽 8 字节那一类必然
 // 同时违反取与存两条，因为 8 字节不在 `afir.vector_func` 的边界 dtype 域里）。要改顺序就
 // 要同时改 `test/lit/conversion/afir-vector-func-unsupported.mlir` 的预期。
 WalkResult checkRegisterElementTypes(Operation *inner, const RegOpMapping *mapping, Type widest) {
@@ -415,8 +375,8 @@ WalkResult checkRegisterElementTypes(Operation *inner, const RegOpMapping *mappi
     }
     return WalkResult::advance();
   }
-  // 换 dtype 的只有 `cast`，其余算子的操作数与结果必须是同一个元素类型——`Reg::` 那一族
-  // 二元/一元 API 只有一个元素类型。**谓词那一位不在其中**：它没有元素类型。
+  // 换 dtype 的只有 `cast`，其余算子的操作数与结果必须是同一个元素类型——`Reg::` 那一类
+  // 二元/一元 API 只有一个元素类型。谓词那一位不在其中：它没有元素类型。
   for (auto [index, operand] : llvm::enumerate(inner->getOperands())) {
     if (static_cast<int64_t>(index) == mapping->predicateOperand) {
       continue;
@@ -428,7 +388,7 @@ WalkResult checkRegisterElementTypes(Operation *inner, const RegOpMapping *mappi
       return WalkResult::interrupt();
     }
   }
-  // **算的那一步只在最宽的那个 dtype 上做。** 窄 dtype 的算子不收：它的寄存器里元素是按
+  // 算的那一步只在最宽的那个 dtype 上做。 窄 dtype 的算子不收：它的寄存器里元素是按
   // 宽槽位排的（窄边界被 `DIST_UNPACK_*` 撑开过），而 `Reg::Abs(RegTensor<half>&, mask)`
   // 读的是 `VL/2` 个 half，与 `UpdateMask<float>` 给的那张 mask 对不上几个 lane 活着
   // ——这件事只能在设备上量，量不出来就不该在能力层答「支持」。今天 17 格里跨 dtype 的
@@ -493,7 +453,7 @@ LogicalResult checkSupported(afir::VectorFuncOp op) {
     //     （`micro_compare_api_call.cpp:48`），本期不建模——包括「VF 直接把比较结果存
     //     回 UB」那一种（`afir.vector_func_yield` 不是谓词消费者，所以也落在这里）。
     //     判据与 legacy 的 `ShouldInitAsMaskReg`（`vec_func_call.cpp:264`）同一条：
-    //     **所有**消费者都得是 Select 的 mask 那一位，有一个不是就不能当谓词用。
+    //     所有消费者都得是 Select 的 mask 那一位，有一个不是就不能当谓词用。
     if (mapping->result == RegOpResult::kPredicate) {
       for (OpOperand &use : inner->getResult(0).getUses()) {
         const RegOpMapping *consumer = findRegOpMapping(use.getOwner());
@@ -560,7 +520,7 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
 
   // 作用域外：首地址、lane 一段多少个元素、循环次数、以及给 `UpdateMask` 用的那个计数器。
   //
-  // **首地址按各自的边界 dtype 取**，不按 lane 的宽度：`LoadAlign<T>` 的 `T` 就是 UB 里
+  // 首地址按各自的边界 dtype 取，不按 lane 的宽度：`LoadAlign<T>` 的 `T` 就是 UB 里
   // 那块的元素类型，撑不撑进宽槽位是 `dist` 的事。
   SmallVector<Value> sourceAddresses;
   sourceAddresses.reserve(op.getSrcs().size());
@@ -583,10 +543,10 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   // 一段 lane 装多少个元素 = GetVecLen() / sizeof(最宽的那个)。与 legacy 的
   // `ELEMENT_PER_VECTOR_LENGTH`（`SIZE_OF_DTYPE = sizeof(max_dtype)`）逐字同义。
   Value elementsPerVector = builder.create<arith::DivUIOp>(loc, vectorLength, elementBytes).getResult();
-  // 向上取整而不是截断：尾段那一趟由 mask 挡住多出来的 lane，不发就会漏算尾巴。
+  // 向上取整而不是截断：尾段那一趟由 mask 挡住多出来的 lane，不生成就会漏算尾巴。
   //
-  // 写成 `(count + elems - 1) / elems` 而不是一条 ceildiv，理由是发射器：
-  // `arith.ceildivui` 没有打印（走到发射那一步才报 unable to find printer），
+  // 写成 `(count + elems - 1) / elems` 而不是一条 ceildiv，理由是生成器：
+  // `arith.ceildivui` 没有打印（走到生成那一步才报 unable to find printer），
   // 而 `index.ceildivu` 有打印但 `ascir-translate` 没注册 `index` 方言，lit 里解析不了。
   // 这个写法与 legacy 的 `(element_count + ELEMENT_PER_VECTOR_LENGTH - 1) /
   // ELEMENT_PER_VECTOR_LENGTH` 逐字同形。
@@ -597,9 +557,9 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
 
   // `UpdateMask` 吃的是一个**可变计数器的引用**（`UpdateMask(uint32_t&)`），每调一次它自己
   // 减一段。所以这里建的是变量而不是值——legacy 那边是 `uint32_t sreg_0 = element_count;`。
-  // 变量的元素类型写 `ui32`、初值直接给那个 index 值：发射出来是
+  // 变量的元素类型写 `ui32`、初值直接给那个 index 值：生成的是
   // `uint32_t v[1]{<count>}`，而 `UpdateMask(uint32_t&)` 收的正是 `*v`。
-  // **不插 `arith.index_castui`**：那个算子的结果必须是 signless，给不出 `ui32`。
+  // 不插 `arith.index_castui`：那个算子的结果必须是 signless，给不出 `ui32`。
   auto counterType = MemRefType::get({1}, builder.getIntegerType(32U, false));
   Value counter = builder.create<emitasc::VariableOp>(loc, counterType, TypedAttr{}, elementCount).getResult();
 
@@ -611,7 +571,7 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   // 寄存器声明放在 `__VEC_SCOPE__` 里、循环外——与 legacy 的产物同形（循环里重复声明同一个
   // 寄存器在 C++ 上也合法，但那样每趟都多一条声明，产物与 legacy 对不起来）。
   //
-  // **每个值按自己的元素类型声明**，不按 lane 的宽度：`RegTensor<half>` 与
+  // 每个值按自己的元素类型声明，不按 lane 的宽度：`RegTensor<half>` 与
   // `RegTensor<float>` 是同一个物理寄存器的两种读法，而 `Reg::Cast<OutT, InT, ...>` 要的正是
   // 两个类型各自对得上的那两个引用。
   const auto regTensorFor = [&](Type elementType) { return ascendc::RegTensorType::get(ctx, elementType); };
@@ -716,8 +676,8 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   return success();
 }
 
-// 模块级而不是函数级：流水线的这一相位是挂在模块上的 pass manager 上（与
-// `ConvertAFIRToAscendC` 同一相位），函数级 pass 加进去会在运行时报
+// 模块级而不是函数级：流水线的这一阶段是挂在模块上的 pass manager 上（与
+// `ConvertAFIRToAscendC` 同一阶段），函数级 pass 加进去会在运行时报
 // 「trying to schedule a pass on an unsupported operation」。
 struct AFIRVectorFuncToRegBasePass : public PassWrapper<AFIRVectorFuncToRegBasePass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AFIRVectorFuncToRegBasePass)

@@ -39,8 +39,8 @@ TEST(MlirE2eCpu, LoadCastAbsCastRegBaseStoreCalculatesCorrectResult) {
   // f32 不引入误差，下面可以逐元素比相等而不是比近似——近似比对会把「少转了一次」这种错
   // 放过去。
   //
-  // **一半取负**：`abs` 在全正的输入上退化成恒等变换，那样漏发 `Abs` 看不出来。
-  // **不取 0**：输出哨兵与「算出 0」要分得开。
+  // 一半取负：`abs` 在全正的输入上退化成恒等变换，那样漏生成 `Abs` 看不出来。
+  // 不取 0：输出哨兵与「算出 0」要分得开。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     const float magnitude = static_cast<float>(index % 13U) + 0.5F;
     input0[index] = half((index % 2U == 0U) ? magnitude : -magnitude);

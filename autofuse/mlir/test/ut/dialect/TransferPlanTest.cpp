@@ -11,7 +11,7 @@
 // `buildTransferPlan` 的覆盖。此前这个文件不存在——搬运算子唯一会算错地址的分析，零
 // 单元测试。
 //
-// **为什么不是 LIT**：这里要钉的两条判据，失败形态都是「IR 完全合法、产出也合法，只是
+// 为什么不是 LIT：这里要钉的两条判据，失败形态都是「IR 完全合法、产出也合法，只是
 // 搬的不是该搬的东西」：
 //
 //   - 向量化轴不止一根时取 `front()`：产出一个结构正确的一维搬运计划，把多维 tile 当成
@@ -63,7 +63,7 @@ struct DescriptorShape {
   // 局部侧 descriptor 的 `vectorized_axis` / `vectorized_strides`。轴数是本期最重要的
   // 判据，所以它是第一个可调的旋钮。
   //
-  // 两者置空表示**整个字段不出现**——`vectorized_axis` 是 optional 参数，写
+  // 两者置空表示整个字段不出现——`vectorized_axis` 是 optional 参数，写
   // `vectorized_axis = []` 反而解析不过（"expected integer value"）。
   std::string vectorizedAxis = "[2]";
   std::string vectorizedStrides = R"AF(#afir.expr<"1">)AF";
@@ -80,7 +80,7 @@ struct DescriptorShape {
   // `ParseStore` 专用：GM 侧（`destination_descs`）的轴表 / 范围表 / 步长表。默认都取
   // 哨兵值，表示「与局部侧逐字相同」——只有钉「GM 偏移读的是哪一侧」的用例才调开。
   //
-  // Store 的两侧本来就可能不同：局部侧是**生产者**那块 UB 张量的布局，GM 侧是落点的
+  // Store 的两侧本来就可能不同：局部侧是生产者那块 UB 张量的布局，GM 侧是落点的
   // 布局。归约把一根轴压掉时，前者在那根轴上是 0，后者不是。轴表则在落点没被调度过时
   // （搬出到 kernel 输出）整个换成原始轴。
   std::string destinationAxis = kSameAsLocalStrides;
@@ -93,7 +93,7 @@ struct DescriptorShape {
   // 出现」——搬出到 kernel 输出（换轴基）与写已调度的 workspace（同轴基）这两种形态各占
   // 一头，默认覆盖得到。
   //
-  // 但两者不是非此即彼：RCore 一阶段写 workspace 时落点**既**被调度过（有
+  // 但两者不是非此即彼：RCore 一阶段写 workspace 时落点既被调度过（有
   // `vectorized_axis`）**又**比局部侧多几根轴（归约方向的块号），那一档要把它单独打开。
   std::string destinationVectorizedAxis = kSameAsLocalStrides;
   std::string destinationVectorizedStrides;
@@ -110,7 +110,7 @@ struct DescriptorShape {
   std::string indexingMaps = "affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1, d2)>";
   // 只对 `ParseLowered` 有意义：插在循环体里、`afir.load` 之前的额外 IR。多根向量化轴的
   // 用例要为每根会缩水的 tile 内轴补一份 `actual_size` 绑定——真实 IR 里这些由
-  // `LoopGenerate::generatePairedInnerActualSize` 发出，这里手写。
+  // `LoopGenerate::generatePairedInnerActualSize` 生成，这里手写。
   std::string loopBodyPrologue;
 };
 
@@ -208,7 +208,7 @@ module {
   }
 
   // 搬出方向。与 `Parse` 唯一的实质差别是 op 没有结果，于是局部侧落在 `operand_descs`
-  // 上——而 Store 的 `operand_descs` 描述的是**生产者**那块 UB 张量，不是落点。
+  // 上——而 Store 的 `operand_descs` 描述的是生产者那块 UB 张量，不是落点。
   //
   // 为什么要单独一个函数而不是给 `Parse` 加开关：`Parse` 的 `afir.load` 两侧 descriptor
   // 逐字相同，读错一侧看不出来（`PlanSideSelectsWhichDescriptorIsLocal` 只能靠调开
@@ -305,10 +305,10 @@ module {
     return parseSourceString<ModuleOp>(source, &context);
   }
 
-  // 循环生成**之后**的形态：轴已经散成 `scf.for` 与打了 `#afir.axis_binding` 的标量值。
-  // 偏移发射只在这种 IR 上才有意义——它要把轴认回来。
+  // 循环生成之后的形态：轴已经散成 `scf.for` 与打了 `#afir.axis_binding` 的标量值。
+  // 偏移计算只在这种 IR 上才有意义——它要把轴认回来。
   //
-  // 与 `Parse` 共用 `DescriptorShape`：轴表与两张步长表是旋钮（多根向量化轴的发射用例要
+  // 与 `Parse` 共用 `DescriptorShape`：轴表与两张步长表是旋钮（多根向量化轴的生成用例要
   // 调它们），而绑定与调度循环的嵌套是手写的定值——这里钉的是「序号从哪儿取」。
   OwningOpRef<ModuleOp> ParseLowered(const DescriptorShape &shape) {
     const std::string source = R"mlir(
@@ -543,13 +543,13 @@ TEST_F(TransferPlanTest, SingleVectorizedAxisBuildsScheduledPlan) {
   // 一维 tile：有效视图归约成一项，extent 就是那根向量化轴的范围。
   ASSERT_EQ(plan->dims.size(), 1U);
   EXPECT_EQ(plan->dims.front().extent.getValue().getValue(), "zt_size");
-  // 顺序跟 `axis` 表（外 -> 内），不是跟轴 id 排序：偏移求和本身与顺序无关，但发射出来的
+  // 顺序跟 `axis` 表（外 -> 内），不是跟轴 id 排序：偏移求和本身与顺序无关，但生成的
   // 加法链顺序要可预期，lit 才钉得住。
   EXPECT_EQ(OuterAxesOf(*plan),
             (std::vector<std::pair<int64_t, std::string>>{{3, "(zTb_size * zt_size)"}, {4, "zt_size"}}));
 }
 
-// 向量化轴是**被排除**的那一批，不是被漏掉的。两根向量化轴时集合差只剩一项——这条同时
+// 向量化轴是被排除的那一批，不是被漏掉的。两根向量化轴时集合差只剩一项——这条同时
 // 说明集合差的结果随 `vectorized_axis` 变，而不是固定取前两根。
 //
 // （两根向量化轴当前被能力门禁拒在前面，所以这里直接查 `buildScheduledPlan` 的下游结果
@@ -569,7 +569,7 @@ TEST_F(TransferPlanTest, VectorizedAxisIsExcludedFromOuterAxes) {
 }
 
 // 合并块轴。RCore 把 A 与 R 的两根 TileOuter 先合成一根再做 block 切分，合并出来的轴
-// **没有配对 inner**（`split_pair_other_id` 缺省为 -1）。
+// 没有配对 inner（`split_pair_other_id` 缺省为 -1）。
 //
 // 此前的 `splitPairOtherId == loop_axis` 反查在这种轴上直接落空，`buildScheduledPlan`
 // 返回 failure，整条搬运退回 identity——搬整块。集合差不查配对：这根轴在 `axis` 里、不在
@@ -588,16 +588,16 @@ TEST_F(TransferPlanTest, MergedBlockAxisContributesAnOffsetTerm) {
             (std::vector<std::pair<int64_t, std::string>>{{3, "(zTb_size * zt_size)"}, {4, "zt_size"}}));
 }
 
-// GM 偏移的步长必须取自 **GM 侧**（`destination_descs`）的步长表，而不是局部侧的。
+// GM 偏移的步长必须取自 GM 侧（`destination_descs`）的步长表，而不是局部侧的。
 //
-// Store 的局部侧是 `operand_descs`，它描述的是**生产者**那块 UB 张量。归约把一根轴压掉
+// Store 的局部侧是 `operand_descs`，它描述的是生产者那块 UB 张量。归约把一根轴压掉
 // 之后，生产者在那根轴上的步长是 0（每一轮写的是同一个累加器），而落点在那根轴上有真实
 // 的步长（每一轮写落点的不同一格）。两者不是同一件事。
 //
 // 这正是 RCore 两段式 reduce 的形态：phase 1 每个核把自己那一段的 partial sum 写进
 // workspace 的不同格，workspace 的大小也是按这个二维布局分配的。用局部侧的步长算 GM
 // 地址，这一项会因为「步长为 0」被整项跳过，于是所有核写同一个地址、互相覆盖——IR 合法、
-// 产出合法，只是算错。真机上 `nA == corenum` 时这一维恰好只有一格，所以**看不出来**。
+// 产出合法，只是算错。真机上 `nA == corenum` 时这一维恰好只有一格，所以看不出来。
 TEST_F(TransferPlanTest, StoreOuterStrideComesFromTheGlobalSideDescriptor) {
   DescriptorShape shape;
   // 局部侧（生产者 UB 张量）在块轴 3 上被压平。
@@ -617,7 +617,7 @@ TEST_F(TransferPlanTest, StoreOuterStrideComesFromTheGlobalSideDescriptor) {
       << "块轴在落点上有步长，不能因为它在生产者那块 UB 张量上被压平就整项消失";
 }
 
-// 成对的反例：步长为 0 的轴仍然要剔掉，判据只是换成看 **GM 侧**那张表。
+// 成对的反例：步长为 0 的轴仍然要剔掉，判据只是换成看 GM 侧那张表。
 //
 // 只写上一条的话，实现改成「无脑读 destination_descs 且不再剔零」也能全绿，而那会把
 // `ZeroStrideTermIsDropped` 钉住的那条规则弄丢。两条合起来才说明：剔零还在，只是剔的
@@ -642,7 +642,7 @@ TEST_F(TransferPlanTest, StoreZeroStrideIsJudgedOnTheGlobalSideDescriptor) {
 //
 // `destination_descs` 是 Store 节点自己的 `.y`，而 `.y` 落在哪个轴基上取决于它是什么：
 // 写 workspace 时它被调度过，轴表与局部侧一致（上面两条）；写 kernel 输出时它是图的
-// 出口，轴表是**原始轴**。搬出到输出参数是最常见的形态，CPU E2E 的每个用例都走它——
+// 出口，轴表是原始轴。搬出到输出参数是最常见的形态，CPU E2E 的每个用例都走它——
 // 不区分轴基就会在那里报 `'afir.store' op has no supported Ascend implementation`。
 TEST_F(TransferPlanTest, StoreWithADifferentDestinationAxisBasisKeepsTheLocalStrides) {
   DescriptorShape shape;
@@ -703,7 +703,7 @@ TEST_F(TransferPlanTest, StoreWithExtraScheduledDestinationAxesTakesTheGlobalAxi
   // 落点在局部侧的 `zTB, zTb, zt` 之间插进 `yT`（id 6），当行号用，步长是一整行的长度。
   shape.destinationAxis = "3, 6, 4, 2";
   // 行号那一维在张量类型上是 1：每个核只写一行，`foldBlockScatteredDestination` 把它的
-  // 范围折成 1 而**保留步长**。搬运两端的静态元素数因此仍然相等。
+  // 范围折成 1 而保留步长。搬运两端的静态元素数因此仍然相等。
   shape.destinationMemref = "memref<2x1x8x16xf16>";
   shape.destinationRepeats =
       R"AF(#afir.expr<"Ceiling((Ceiling((s0 / (zt_size))) / (zTb_size)))">, #afir.expr<"1">, #afir.expr<"zTb_size">, #afir.expr<"zt_size">)AF";
@@ -749,7 +749,7 @@ TEST_F(TransferPlanTest, TileCoveringEveryAxisFallsBackToIdentityPlan) {
 }
 
 // `axis` / `repeats` / `strides` 是按下标对齐的几张表，长度不等时「第 i 根轴的 stride」
-// 没有意义。`reduceEffectiveView` 在取下标前有一道长度校验，但**它从 IR 走不到**：
+// 没有意义。`reduceEffectiveView` 在取下标前有一道长度校验，但它从 IR 走不到：
 // `TensorDescAttr` 的 verifier 已经把三条长度关系全挡在解析期（归属见
 // `test/lit/smoke/afir_attrs_invalid.mlir`）。
 //
@@ -764,7 +764,7 @@ TEST_F(TransferPlanTest, MismatchedDescriptorTablesAreRejectedBeforeThePlanBuild
 }
 
 // 两根不连续的向量化轴恰好归约成两项——最内两项直接进 `DataCopyPadExtend`，一层循环都不
-// 发。这是搬运能力的基线形态；多于两项由 `ThreeExtentsEmitOneOuterLoop` 那一组覆盖。
+// 生成。这是搬运能力的基线形态；多于两项由 `ThreeExtentsEmitOneOuterLoop` 那一组覆盖。
 TEST_F(TransferPlanTest, TwoEffectiveExtentsAreSupported) {
   OwningOpRef<ModuleOp> module = Parse(TwoAxisShape(/*innerAxis=*/7, "y1t_size", "s1", "y1t_size"));
   ASSERT_TRUE(module);
@@ -795,7 +795,7 @@ TEST_F(TransferPlanTest, MissingVectorizedAxisFallsBackToIdentityPlan) {
 // 放行的后果不是报错，是物化时凭空造一个没人赋值的 `afir.tiling_param`，运行期读未初始化
 // 内存当地址用。
 //
-// 这条同时钉住**不回落 identity**。S4 把项数上限删掉之后，这道闭合门禁是调度路径上仅剩的
+// 这条同时钉住不回落 identity。S4 把项数上限删掉之后，这道闭合门禁是调度路径上仅剩的
 // 一处「明确拒绝」，而本夹具两张 `indexing_maps` 默认都是 identity——回落会把一次明确拒绝
 // 换成一个搬整块的 identity 计划，正是这套改动要消除的那类静默错误。
 TEST_F(TransferPlanTest, StrideSymbolOutsideSizeVarIsRejected) {
@@ -811,7 +811,7 @@ TEST_F(TransferPlanTest, StrideSymbolOutsideSizeVarIsRejected) {
 
 // 正例侧。没有它，门禁写成「一律拒绝」也能让上一条通过。
 //
-// 同时钉住闭合的成立形式：`size_var` 只列每次切分的 **inner** 尺寸，outer 是派生的
+// 同时钉住闭合的成立形式：`size_var` 只列每次切分的 inner 尺寸，outer 是派生的
 // `Ceiling(parent / inner)`，所以步长里出现的符号恰好落在 `size_var` 内。
 TEST_F(TransferPlanTest, StrideSymbolsWithinSizeVarAreAccepted) {
   DescriptorShape shape;
@@ -838,7 +838,7 @@ TEST_F(TransferPlanTest, ConstantStridesNeedNoSizeVariables) {
   EXPECT_TRUE(succeeded(buildTransferPlan(load)));
 }
 
-// `emitScheduledTransfer` 是发射器，没有返回值可看。这个夹具把回调收到的那一份
+// `emitScheduledTransfer` 是生成器，没有返回值可看。这个夹具把回调收到的那一份
 // `ScheduledTileIndices` 抓出来——只在「不会建外层循环」（有效视图 <= 2 项）的用例上
 // 这样用才安全：真有循环时这些值落在循环体内，出了回调就不再支配任何使用点。
 FailureOr<ScheduledTileIndices> CaptureTileIndices(Operation *op, OpBuilder &builder, const TransferPlan &plan) {
@@ -867,7 +867,7 @@ Value FindBoundValue(func::FuncOp func, int64_t axis, AxisValueRole role) {
 // block-inner 轴有循环，序号取归纳变量。
 //
 // 取错的后果全是静默错值：把循环轴的序号也当成 `axis_index` 去查，在真实 IR 里会命中
-// **源轴**（被 block 切开的那根 TileOuter）的标记，两者差一个整块偏移。
+// 源轴（被 block 切开的那根 TileOuter）的标记，两者差一个整块偏移。
 TEST_F(TransferPlanTest, OffsetSumsBlockIndexAndLoopInduction) {
   OwningOpRef<ModuleOp> module = ParseLowered(DescriptorShape{});
   ASSERT_TRUE(module);
@@ -981,7 +981,7 @@ TEST_F(TransferPlanTest, MissingActualSizeBindingFailsInsteadOfGuessing) {
 }
 
 //===----------------------------------------------------------------------===//
-// 有效视图的四条归约规则。每条都成对：正例说明规则会触发，反例说明它**不会**乱触发。
+// 有效视图的四条归约规则。每条都成对：正例说明规则会触发，反例说明它不会乱触发。
 //
 // 只有正例时，把规则写成「无条件执行」也能全绿，而那正是危险的方向——多剔一根轴就是少
 // 搬一维，多合一次就是把不连续的两段当成连续的。
@@ -1044,7 +1044,7 @@ TEST_F(TransferPlanTest, NonUnitExtentAxisIsKept) {
 // 规则 2 正例：两侧 stride 都为 0 且前序轴的 UB stride 为 1 时剔除。
 //
 // 归约算子的 destination 在被归约轴上两侧 stride 都是 0——那一维在输出张量里不存在。
-// 这是**单张量**事实，调度器的 graph-wide `RemoveAllZeroStrideLoopAxis` 看不见（输入
+// 这是单张量事实，调度器的 graph-wide `RemoveAllZeroStrideLoopAxis` 看不见（输入
 // 张量在同一根轴上 stride 不是 0）。
 TEST_F(TransferPlanTest, ZeroStrideAxisIsDropped) {
   // 内层 yo 两侧都是 0；外层 z0t 的 UB stride 是 1，满足 legacy 的剔除条件。
@@ -1060,7 +1060,7 @@ TEST_F(TransferPlanTest, ZeroStrideAxisIsDropped) {
 }
 
 // 规则 2 反例：同样是两侧 stride 都为 0，但前序轴的 UB stride 既不是 1 也不是 0，这根轴
-// 必须**保留**。
+// 必须保留。
 //
 // 这正是 `ShouldIgnoreDataCopyZeroAxis` 存在的理由，legacy 的注释写着「如果前序轴的
 // stride 不为 1，则保留当前轴」。写成无条件跳过会让那一维的重复次数整个丢掉——DMA 少搬
@@ -1077,7 +1077,7 @@ TEST_F(TransferPlanTest, ZeroStrideAxisIsKeptWhenPreviousLocalStrideIsNotUnit) {
   EXPECT_EQ(DimsOf(*plan), (std::vector<DimTriple>{{"zt_size", "s1", "(3 * s1)"}, {"s1", "0", "0"}}));
 }
 
-// 规则 3 正例：两侧都连续时合并成一项，extent 取乘积、stride 取**最内**那根的。
+// 规则 3 正例：两侧都连续时合并成一项，extent 取乘积、stride 取最内那根的。
 //
 // 内层 yo：extent=s1，两侧 stride 都是 1。外层 z0t 的两侧 stride 都恰好是 `1 × s1`，
 // 于是这两维在两个空间里都是一整块连续内存。
@@ -1093,7 +1093,7 @@ TEST_F(TransferPlanTest, ContiguousAxesAreMerged) {
   EXPECT_EQ(DimsOf(*plan), (std::vector<DimTriple>{{"(s1 * zt_size)", "1", "1"}}));
 }
 
-// 规则 3 反例之一：GM 连续但 UB 不连续。**两侧都要连续才能合并**。
+// 规则 3 反例之一：GM 连续但 UB 不连续。两侧都要连续才能合并。
 //
 // 只看一侧的后果很具体：UB 里两行之间隔着对齐填充，合并之后 DMA 会把填充区也当成数据
 // 连着写，下一行的开头被覆盖。
@@ -1111,7 +1111,7 @@ TEST_F(TransferPlanTest, AxesContiguousOnlyInGlobalSpaceAreNotMerged) {
 
 // 规则 3 反例之二：证不出相等就不合并。
 //
-// 判据是**三值**的：`s1` 与 `y1t_size` 是两个独立符号，运行期可能相等也可能不等，符号层
+// 判据是三值的：`s1` 与 `y1t_size` 是两个独立符号，运行期可能相等也可能不等，符号层
 // 给出的是 `Unknown`。安全方向是不合并——合错是静默搬错地址，不合只是多一维。字符串比较
 // 在这里会给出同样的答案，但在 `(s1 * zt_size)` 与 `(zt_size * s1)` 上会给错，所以判据
 // 必须走符号层。
@@ -1127,7 +1127,7 @@ TEST_F(TransferPlanTest, UnprovableContiguityDoesNotMerge) {
   EXPECT_EQ(DimsOf(*plan), (std::vector<DimTriple>{{"zt_size", "s1", "s1"}, {"y1t_size", "1", "1"}}));
 }
 
-// 规则 4：内侧紧邻的是 TileInner 时不合并，**哪怕两侧都连续**。
+// 规则 4：内侧紧邻的是 TileInner 时不合并，哪怕两侧都连续。
 //
 // 与 `ContiguousAxesAreMerged` 只差内层轴的类型：那里是 `yo`（Original，id 8），这里是
 // `yt`（TileInner，id 7），两侧 stride 与 extent 的形状完全对应。
@@ -1148,16 +1148,16 @@ TEST_F(TransferPlanTest, MergeDoesNotCrossTileInnerBoundary) {
 }
 
 //===----------------------------------------------------------------------===//
-// 外层循环：有效视图多于两项时，超出的每一项在 DMA 外面发一层 `scf.for`。
+// 外层循环：有效视图多于两项时，超出的每一项在 DMA 外面生成一层 `scf.for`。
 //
-// 三条用例是一组：两项（不发循环）是**反例**。没有它，实现写成「一律发一层循环」也能让
+// 三条用例是一组：两项（不生成循环）是反例。没有它，实现写成「一律生成一层循环」也能让
 // 三项、四项两条通过，而那会让一维与二维搬运平白多一层只跑一轮的循环。
 //===----------------------------------------------------------------------===//
 
 // N 根向量化轴、且四条归约规则一条都不触发的降级后形态。两侧 stride 一律取互不相同的
-// 符号——这里要钉的是发射，归约有它自己的成对用例。
+// 符号——这里要钉的是生成，归约有它自己的成对用例。
 //
-// 每根会缩水的 tile 内轴都要一份 `actual_size` 绑定（真实 IR 里由 `LoopGenerate` 发出），
+// 每根会缩水的 tile 内轴都要一份 `actual_size` 绑定（真实 IR 里由 `LoopGenerate` 生成），
 // 所以 `yt`（id 7）那一份写在循环体序言里。
 DescriptorShape OuterLoopShape(size_t vectorizedAxisCount) {
   DescriptorShape shape;
@@ -1198,8 +1198,8 @@ DescriptorShape OuterLoopShape(size_t vectorizedAxisCount) {
       shape.strides =
           outerStrides + R"AF(#afir.expr<"s0">, #afir.expr<"s1">, #afir.expr<"zTb_size">, #afir.expr<"1">)AF";
       shape.vectorizedAxis = "[2, 7, 8, 9]";
-      // 两侧的步长**逐层都不一样**，而且顺序对不上（GM 是 s0/s1/zTb_size，UB 是
-      // y1t_size/zt_size/s1）。这正是 4.2.6 说的常态：UB 的轴序与 GM 的排布不一致。发射
+      // 两侧的步长逐层都不一样，而且顺序对不上（GM 是 s0/s1/zTb_size，UB 是
+      // y1t_size/zt_size/s1）。这正是 4.2.6 说的常态：UB 的轴序与 GM 的排布不一致。生成
       // 不受它影响是因为每一项自带两侧步长，循环拿归纳变量分别去乘——只要有一处串了空间，
       // 下面比对两侧步长的断言就会相等。
       shape.vectorizedStrides =
@@ -1212,15 +1212,15 @@ DescriptorShape OuterLoopShape(size_t vectorizedAxisCount) {
   return shape;
 }
 
-// 一次发射的观测结果：回调收到的四参与两侧偏移，加上回调**落在哪一层循环体里**。
+// 一次生成过程的观测结果：回调收到的四参与两侧偏移，加上回调落在哪一层循环体里。
 struct EmittedTransfer {
   ScheduledTileIndices indices;
-  // 最内那层由发射器建出来的 `scf.for`；没有外层循环时是空的。
+  // 最内那层由生成器建出来的 `scf.for`；没有外层循环时是空的。
   SmallVector<scf::ForOp, 2> loops;
 };
 
 // 从回调所在的块一路往外数，直到撞见夹具自己那层调度循环（绑定了 `role = loop`）。
-// 数出来的就是发射器新建的层数——这正是「层数必须是 N − 2」要钉的量。
+// 数出来的就是生成器新建的层数——这正是「层数必须是 N − 2」要钉的量。
 FailureOr<EmittedTransfer> EmitAndObserve(Operation *op, OpBuilder &builder, const TransferPlan &plan) {
   EmittedTransfer observed;
   if (failed(emitScheduledTransfer(op, builder, plan, [&](OpBuilder &body, const ScheduledTileIndices &indices) {
@@ -1242,9 +1242,9 @@ FailureOr<EmittedTransfer> EmitAndObserve(Operation *op, OpBuilder &builder, con
   return observed;
 }
 
-// 反例。两项进 `DataCopyPadExtend` 的 blockCount / blockLen，一层循环都不该发。
+// 反例。两项进 `DataCopyPadExtend` 的 blockCount / blockLen，一层循环都不该生成。
 //
-// 没有这条，「一律发一层」会让一维与二维搬运各多一层只跑一轮的循环——数值仍然对，产物
+// 没有这条，「一律生成一层」会让一维与二维搬运各多一层只跑一轮的循环——数值仍然对，产物
 // 平白多一层嵌套，而上面两条正例发现不了。
 TEST_F(TransferPlanTest, TwoExtentsEmitNoOuterLoop) {
   OwningOpRef<ModuleOp> module = ParseLowered(OuterLoopShape(2));
@@ -1287,7 +1287,7 @@ TEST_F(TransferPlanTest, ThreeExtentsEmitOneOuterLoop) {
   ASSERT_EQ(emitted->loops.size(), 1U);
   Value inductionVar = emitted->loops.front().getInductionVar();
 
-  // 上界是最外那一项的**实际**范围，不是标称尺寸：尾块那一轮少几行。
+  // 上界是最外那一项的实际范围，不是标称尺寸：尾块那一轮少几行。
   EXPECT_EQ(emitted->loops.front().getUpperBound(), FindBoundValue(func, 2, AxisValueRole::ActualSize));
   // GM 侧的行内偏移叠在 tile 起点之上，UB 侧从 0 起算。
   auto globalSum = emitted->indices.globalOffset.getDefiningOp<arith::AddIOp>();
@@ -1360,7 +1360,7 @@ TEST_F(TransferPlanTest, FourExtentsEmitTwoOuterLoops) {
   EXPECT_NE(innerGlobal.getRhs(), innerLocal.getRhs());
 }
 
-// `materializeScheduledLocalSpan` 发的是一条**左结合**的加法链：`1` 起头，每一项加一个
+// `materializeScheduledLocalSpan` 生成的是一条**左结合**的加法链：`1` 起头，每一项加一个
 // `(actual - 1) * stride`。拆回去按 `plan.dims` 的顺序给出每项的两个因子，断言才能逐项
 // 说「这一项的 extent 取的是 actual、stride 取的是 nominal」，而不是只数一数有几个乘法。
 struct LocalSpanTerm {
@@ -1406,7 +1406,7 @@ FailureOr<SmallVector<LocalSpanTerm, 4>> MaterializeAndDecompose(Operation *load
 }
 
 // 一维退化：跨度就是最内那一项的 actual extent（`1 + (actual - 1) * 1`）。这条同时说明
-// 公式没有为一维走另一条分支——一维与多维是同一串发射。
+// 公式没有为一维走另一条分支——一维与多维是同一条生成路径。
 TEST_F(TransferPlanTest, LocalSpanOfOneExtentIsTheInnermostActualExtent) {
   OwningOpRef<ModuleOp> module = ParseLowered(DescriptorShape{});
   ASSERT_TRUE(module);
@@ -1425,8 +1425,8 @@ TEST_F(TransferPlanTest, LocalSpanOfOneExtentIsTheInnermostActualExtent) {
   EXPECT_TRUE(matchPattern((*terms)[0].stride, m_One()));
 }
 
-// 多维局部视图的物理跨度：每一项的 extent 取**运行期 actual**，stride 取**标称** tiling
-// 参数。尾块只缩行数，不缩 UB 的行距——两者取同一个口径的话，尾块那一轮算出来的跨度会比
+// 多维局部视图的物理跨度：每一项的 extent 取运行期 actual，stride 取标称 tiling
+// 参数。尾块只缩行数，不缩 UB 的行距——两者取同一个公式的话，尾块那一轮算出来的跨度会比
 // 真实布局短，最后几行算不到，且不报错。
 TEST_F(TransferPlanTest, LocalSpanUsesActualExtentAndNominalStride) {
   OwningOpRef<ModuleOp> module = ParseLowered(OuterLoopShape(3));
@@ -1472,8 +1472,8 @@ TEST_F(TransferPlanTest, LocalSpanOfMergedAxesHasOneTerm) {
   EXPECT_TRUE(matchPattern((*terms)[0].stride, m_One()));
 }
 
-// 保留下来的 zero-stride 项对跨度贡献 0：它在 UB 里原地重复，不往后走。项**照发**，因为
-// 按项数发射与按项数拆解是同一条规则，特判掉反而会让调用方数不准自己有几项。
+// 保留下来的 zero-stride 项对跨度贡献 0：它在 UB 里原地重复，不往后走。项照常生成，因为
+// 按项数生成与按项数分解是同一条规则，特判掉反而会让调用方数不准自己有几项。
 TEST_F(TransferPlanTest, LocalSpanOfZeroStrideExtentContributesNothing) {
   OwningOpRef<ModuleOp> module = ParseLowered(TwoAxisShape(/*innerAxis=*/8, "s1", "s1", "(3 * s1)", "0", "0"));
   ASSERT_TRUE(module);
@@ -1492,7 +1492,7 @@ TEST_F(TransferPlanTest, LocalSpanOfZeroStrideExtentContributesNothing) {
 // identity 计划没有有效视图可折算，必须失败而不是给一个兜底长度：兜底出来的长度算多算少
 // 都不报错。
 TEST_F(TransferPlanTest, LocalSpanOfIdentityPlanFails) {
-  // 用 `Parse`：`ParseLowered` 无条件发 `vectorized_axis = `，空表解析不过；而这条判据在
+  // 用 `Parse`：`ParseLowered` 无条件生成 `vectorized_axis = `，空表解析不过；而这条判据在
   // 取任何绑定之前就返回，用不上循环生成之后的形态。
   DescriptorShape shape;
   shape.vectorizedAxis = "";

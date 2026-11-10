@@ -24,7 +24,7 @@ using mlir::afir::load_mean_store::kInputShapes;
 using mlir::afir::load_mean_store::kOutputShapes;
 
 // 参考值用 `double` 累加再除，与被测 kernel 的 f32 累加次序无关。两边都对的时候差的只是
-// f32 的舍入；而本用例要区分的三类错（漏除、重复除、分母错）都是**量级**上的差别，不是
+// f32 的舍入；而本用例要区分的三类错（漏除、重复除、分母错）都是量级上的差别，不是
 // 舍入量级的差别，所以这个容差既足够松、又足够区分。
 //
 // 为什么不用 `EXPECT_FLOAT_EQ`（和那边的求和用例一样）：求和那边输入取的是小整数，每个
@@ -102,7 +102,7 @@ TEST(MlirE2eCpu, LoadMeanStoreCalculatesCorrectResult) {
   const uint32_t columns = static_cast<uint32_t>(input_shape[1]);
   ASSERT_EQ(rows * columns, input_element_count);
 
-  // 分母恒为**完整**归约域的元素数：AR 下是列数、RA 下是行数。它与 tile 怎么切、切出几轮、
+  // 分母恒为完整归约域的元素数：AR 下是列数、RA 下是行数。它与 tile 怎么切、切出几轮、
   // 尾块多长都无关——这正是本组用例要钉的东西。
   if (reduces_leading_axis) {
     // RA：`[R, A]`，沿列求均值。

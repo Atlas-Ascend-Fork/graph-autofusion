@@ -8,23 +8,9 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> mul -> abs -> store CPU case (reg-base) -*- C++ -*-===//
-//
-// **M4 的 `afir.mul` 那一行**。reg 侧接管表上 `load_brc_test` 此前报的就是
-// `'afir.mul' has no register-form lowering`，整图回落。算子表加一行要带一格用例，
-// 这是那一格。
-//
-// 图取 `mul` 在前、`abs` 在后，与 `load_abs_neg_reg_base_store` 同一个考虑：这样两个算子
-// 与它们的顺序都可观测。乘积会跨过 0（一个输入按下标变号），于是
-// —— 漏发 `mul` 得到 `|x|`、漏发 `abs` 得到 `x*y`、顺序写反（`abs` 在前）得到 `|x|*y`
-// —— 三种都在乘积为负的元素上错。
-//
-// **这一行的判据只能是数值**：表里填错一个 API（比如填 `Reg::Add`）在 IR 与 C++ 文本上
-// 都看不出不对。
-//
-// 设计见 docs/development/2026-10-18-afir-vector-func-implementation-design.md 的 M4。
-//
-//===----------------------------------------------------------------------===//
+// 验证 VF 内 afir.mul 对应寄存器乘法。采用 mul -> abs，并让乘积同时出现正负值，
+// 以发现遗漏 Mul、遗漏 Abs 或顺序交换；仅检查 IR 和 C++ 调用文本无法证明数值映射。
+// 设计依据见 2026-10-18-afir-vector-func-implementation-design.md 的 M4。
 
 #include <gtest/gtest.h>
 
@@ -58,9 +44,9 @@ af::AscGraph BuildGraph() {
 
 void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(std::string(load_mul_abs_reg_base_store::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // 产物必须是**寄存器形态**：一个向量作用域、一层 lane 循环，中间结果不落 UB。
+  // 产物必须是寄存器形态：一个向量作用域、一层 lane 循环，中间结果不落 UB。
   EXPECT_NE(kernel.find("__VEC_SCOPE__"), std::string::npos);
-  // 两个输入各取一次、结果存一次。**计数式而不是「存在一条」**：少发一条 Load 也能编过、
+  // 两个输入各取一次、结果存一次。计数式而不是「存在一条」：少生成一条 Load 也能编过、
   // 也能算对（上一个 lane 的寄存器还在）。
   EXPECT_EQ(CountOccurrences(kernel, "LoadAlign"), 2U);
   EXPECT_EQ(CountOccurrences(kernel, "StoreAlign"), 1U);

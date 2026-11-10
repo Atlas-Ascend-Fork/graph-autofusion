@@ -102,20 +102,20 @@ module @reduce_escape attributes {afir.cube_type = -1 : i64, afir.enable_group_p
 }
 
 
-// 本用例的意义是**归因不被合并**：循环生成这一阶段能区分的两种语义真因必须各报一句，而不是
+// 本用例的意义是归因不被合并：循环生成这一阶段能区分的两种语义真因必须各报一句，而不是
 // 像从前那样合成同一句话。第三块那种真因已不属于这一阶段，分工见它自己那段注释。
 // CHECK: InvalidSchedule{{.*}}result escapes loop axis 7 that it does not reduce
 // CHECK: tensor SSA value crosses sibling/outer schedule scopes: 'afir.sum' accumulates along no scheduled axis
-// **第三块与第二块同句，这是刻意的分工，不是本用例失效。**
+// 第三块与第二块同句，这是刻意的分工，不是本用例失效。
 //
 // 它的真因是「所有向量化轴都是归约维，没有保留侧」，而那条判据属于二维 AR/RA 分组——是
-// **当前高阶 API** 的实现限制，不是调度语义。循环生成改为只依赖归约语义之后（设计文档
+// 当前高阶 API 的实现限制，不是调度语义。循环生成改为只依赖归约语义之后（设计文档
 // `2026-10-13-reduce-micro-refactor-design.md` 功能需求 2），它按定义就看不到这条原因：
 // 按完整 `strides`，轴 4 不是归约维，所以累加轴为空，走的是「不该跨出作用域」那一支。
 //
-// **那条根因改由 UT 钉住**：`ReducePlanTest.RejectsATileWhoseVectorizedAxesAreAllReduced`
+// 那条根因改由 UT 钉住：`ReducePlanTest.RejectsATileWhoseVectorizedAxesAreAllReduced`
 // 断言 `buildReducePlan` 失败且原因里含 `no kept axis`。分工因此是——
-//   本用例：循环生成**这一阶段**对逃逸值的归因（两种语义真因，各一句）；
+//   本用例：循环生成这一阶段对逃逸值的归因（两种语义真因，各一句）；
 //   UT：完整计划对实现限制的归因（含措辞）。
 // 这比把两类判断都压在一个 lit 里更贴合改完之后的依赖方向。
 //

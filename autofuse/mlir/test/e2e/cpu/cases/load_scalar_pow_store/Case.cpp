@@ -10,16 +10,16 @@
 
 //===- Case.cpp - load -> pow(scalar, tile) -> store CPU case ----*- C++ -*-===//
 //
-// **位置原样保留那一族（规则三）里二元的那一个**：`y = 2.0 ^ x`，标量在**左**。
+// 位置原样保留那一类（规则三）里二元的那一个：`y = 2.0 ^ x`，标量在左。
 // 三元那一侧是 `load_clip_by_value_scalar_store`。
 //
-// 这一族没有承载方向的模板实参：`pow.h` 有四个**同名重载**，(t,t) / (t,s) / (s,t) /
-// (s,s)，标量在哪一位由 C++ 重载决议挑。所以这条用例钉的是**实参位置**，而位置错了
+// 这一类没有承载方向的模板实参：`pow.h` 有四个同名重载，(t,t) / (t,s) / (s,t) /
+// (s,s)，标量在哪一位由 C++ 重载决议挑。所以这条用例钉的是实参位置，而位置错了
 // 没有任何编译期后果——`Pow(dst, tile, 标量, tmp, cnt)` 与 `Pow(dst, 标量, tile, tmp, cnt)`
 // 都是合法调用，都编得过，只是算的不是同一个函数。
 //
-// **数值断言是这条用例的全部理由**：标量在左发成标量在右，算的就是 `x ^ 2` 而不是
-// `2 ^ x`。规则一（可交换的八个）那一族交换完发的调用逐字相同，所以那边没有这个风险；
+// 数值断言是这条用例的全部理由：标量在左生成标量在右，算的就是 `x ^ 2` 而不是
+// `2 ^ x`。规则一（可交换的八个）那一类交换完生成的调用逐字相同，所以那边没有这个风险；
 // `pow` 不可交换，而它又不像 `sub` / `div` 那样有一位 bool 可以钉——生成的文本在
 // lit 那一层看起来完全正常。
 //
@@ -27,7 +27,7 @@
 // 与 `load_pow_store` 走的第一个重载不是同一个 `Power` 形态。
 //
 // 底数固定 2.0、指数取 [-3, 3] 的整数：`2 ^ x` 与 `x ^ 2` 在这七个点上只有 x = 2 相同。
-// 设备上算的是 `exp(x * ln 2)`，所以比的是相对量，与 `load_pow_store` 同一个口径。
+// 设备上算的是 `exp(x * ln 2)`，所以比的是相对量，与 `load_pow_store` 同一种比较方式。
 //
 //===----------------------------------------------------------------------===//
 
@@ -62,12 +62,12 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_scalar_pow_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // **字面量写全**：emitter 打的是定长科学计数。
+  // 字面量写全：emitter 打的是定长科学计数。
   EXPECT_NE(kernel.find("constexpr float c2_f32 = (float)2.000000000e+00;"), std::string::npos);
-  // **标量在第二个实参位**，也就是 AFIR 上的原次序。`Pow(` 后面第一个逗号之后必须就是
+  // 标量在第二个实参位，也就是 AFIR 上的原次序。`Pow(` 后面第一个逗号之后必须就是
   // 它——这是「没有把 tile 挪到第一位」唯一看得见的地方。
   //
-  // 从**最后一处** `Pow(` 起算：`pow.h` 整段内联进 kernel，前面四处是那四个重载的定义
+  // 从最后一处 `Pow(` 起算：`pow.h` 整段内联进 kernel，前面四处是那四个重载的定义
   // （`Pow(const AscendC::LocalTensor<T> &dst, ...`），调用点在 kernel 体里、排在它们
   // 之后。内部转发的是 `Power(`，不含 `Pow(`，所以数不进来。
   const size_t call = kernel.rfind("Pow(");

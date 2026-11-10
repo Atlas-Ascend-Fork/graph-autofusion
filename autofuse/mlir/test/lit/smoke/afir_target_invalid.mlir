@@ -8,14 +8,12 @@
 
 // `#afir.target` 的 negative 用例。
 //
-// 资源上限的这几条此前写在消费端（`artifact/TilingSource/TilingProgramSpec.cpp`）：
-// 两个字段各判一段，而且只有走到生成 host tiling 那一步才会发现。现在值域在 Attr 的
-// verifier，容器与类型在 AFIRDialect::verifyOperationAttribute——与 `afplan` 同一套分工。
+// 资源值域由 TargetAttr verifier 检查，容器和属性类型由 AFIRDialect 检查。
+// 不能延迟到 TilingProgramSpec 生成 host tiling 时才验证。
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 
-// soc 为空。它今天只写不读（dump 的目标标识），正因为没有读点，空串不会在任何下游被
-// 发现——只写字段的唯一门禁就是产出时的这一道。
+// soc 标识即使没有下游读取，也必须在属性构造时拒绝空值，避免无效目标信息进入 dump。
 module attributes {afir.target = #afir.target<soc = "", aiv_num = 48, ub_size = 196608>} {
   // expected-error@-1 {{target soc must not be empty}}
 }
@@ -36,7 +34,7 @@ module attributes {afir.target = #afir.target<soc = "Ascend910B1", aiv_num = 429
 
 // -----
 
-// UB 容量不超过 256：发射端写的是 `set_ub_size(limit->ub_size - 256U)`，256 字节留给
+// UB 容量不超过 256：生成端写的是 `set_ub_size(limit->ub_size - 256U)`，256 字节留给
 // tiling 自身，容量不超过它就没有可分配的空间。
 module attributes {afir.target = #afir.target<soc = "Ascend910B1", aiv_num = 48, ub_size = 256>} {
   // expected-error@-1 {{target ub_size expected a value in [257, 4294967295]}}
@@ -45,7 +43,7 @@ module attributes {afir.target = #afir.target<soc = "Ascend910B1", aiv_num = 48,
 // -----
 
 // 挂错容器：消费者只在 plan module 上找它，挂在别处等于没挂。三类容器由三道各自的
-// 闸门拦——func.func 是 `isKnownFunctionAttribute` 白名单，AFIR 自己的算子是
+// 门禁拦——func.func 是 `isKnownFunctionAttribute` 白名单，AFIR 自己的算子是
 // `AFIRRejectUnknownAttributes` trait，其余落到 verifyOperationAttribute 的容器检查。
 module {
   func.func @wrong_container() {

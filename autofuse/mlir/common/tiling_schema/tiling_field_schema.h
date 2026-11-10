@@ -33,15 +33,10 @@ enum class TilingFieldType { kUInt32, kUInt64, kOpaqueStruct };
 
 struct TilingField {
   std::string name;
-  // Scope this field was generated in, e.g. "fusion" for fusion-level common
-  // fields, "" for the flat single-(subgraph,plan,stage) case, or
-  // "graph<subgraph>_result<plan>_g<stage>_tiling_data" for the nested
-  // multi-group case — which is also that group's member name in the outermost
-  // TilingData, see schedule_group_names.h.  This is not just diagnostic metadata: it is the
-  // dedup scope key (see BuildTilingFieldSchema) and the struct-nesting key
-  // used by EmitTilingDataStructCpp, mirroring legacy ProcessSingleGroup
-  // (one flat scope) vs. ProcessMultiGroup (one isolated scope per
-  // (subgraph, plan, stage)).
+  // Field scope: "fusion" for shared fields, "" for a flat single-group schema,
+  // or "graph<subgraph>_result<plan>_g<stage>_tiling_data" for a nested group
+  // (see schedule_group_names.h). Used both for deduplication and struct nesting,
+  // matching legacy ProcessSingleGroup and ProcessMultiGroup.
   std::string path;
   TilingFieldType type{TilingFieldType::kUInt32};
   // Populated only for kOpaqueStruct fields that come from an API-tiling

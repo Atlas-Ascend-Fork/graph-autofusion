@@ -11,9 +11,8 @@ add_mlir_e2e_cpu_case(load_add_scalar_store_202x40
     INPUT_SHAPES "[202, 40]"
 )
 
-# **一趟调用要算超过一个 repeat**，见 Case.cpp 文件头的 L-2 一节。`[128]` 那一份切完
-# 每趟的 count 不超过 64（f32 的一个 repeat），而 `Adds` 的 count 形态在 count ≤ 一个
-# repeat 时，isSetMask 取 true 还是 false 结果相同——小形状对这条判据全盲。
+# 每次 API 调用需处理超过一个 repeat（f32 为 64 个元素），见 Case.cpp 的 L-2。
+# count 不超过一个 repeat 时，Adds 的 isSetMask 为 true 或 false 结果相同，无法检出错误。
 add_mlir_e2e_cpu_case(load_add_scalar_store_128x23x5
     OUTPUT_SHAPE "[128, 23, 5]"
     INPUT_SHAPES "[128, 23, 5]"

@@ -14,14 +14,14 @@
 // 起点算一次、其余迭代直接读上一次留在 UB 里的结果。这个 pass 把那句话变成循环体里的一个
 // `scf.if`，谓词由 `materializeExecConditionGuard` 按轴关系建。
 //
-// **为什么不在循环生成里一起做**：那时算子之间还是 SSA 相连的（`afir.broadcast` 直接吃
+// 为什么不在循环生成里一起做：那时算子之间还是 SSA 相连的（`afir.broadcast` 直接吃
 // `afir.load` 的结果），把生产者挪进一个 region 就要靠 `scf.if` 的返回值把它带出来，而
 // 目的地形态下那个值本来就等于 `outs` 操作数——多一层 yield 是纯噪声。资源物化
 // （`afir-memory-allocate`）之后，队列成员之间已经由 `EnQue` / `DeQue` 断开，剩下的结果
 // 要么没人用、要么可以直接换成它 tie 的那个 destination。
 //
-// **为什么排在同步之后**：被跳过的只有算子本身，`AllocTensor` / `EnQue` / `DeQue` /
-// `FreeTensor` 与流水屏障每趟照发——缓冲是单 slot（可缓存的张量上游给的是 `buf_num = 1`），
+// 为什么排在同步之后：被跳过的只有算子本身，`AllocTensor` / `EnQue` / `DeQue` /
+// `FreeTensor` 与流水屏障每趟照常生成——缓冲是单 slot（可缓存的张量上游给的是 `buf_num = 1`），
 // 地址每趟相同，所以跳过一趟写入之后读到的正是上一趟的结果。这与 legacy 的
 // `Loop::GenerateBody` 逐字一致：那边的 `if` 也只包住 `call->Generate`，生命周期与同步都在
 // 外面。把守卫加在同步之前会让同步算法看到一条有条件的边，那是另一件事。
@@ -53,8 +53,8 @@ ExecCondition getExecCondition(Operation *op) {
   return sched ? sched.getExecCondition() : ExecCondition::NoCache;
 }
 
-// 守卫谓词发在循环体开头，一个 (循环, 取值) 只发一份——legacy 那边也是每个循环一个
-// `bool`，而这个 pass 之后没有 CSE，逐个算子各发一份就会在生成的 kernel 里留下重复的标量
+// 守卫谓词放在循环体开头，一个 (循环, 取值) 只生成一份——legacy 那边也是每个循环一个
+// `bool`，而这个 pass 之后没有 CSE，逐个算子各生成一份就会在生成的 kernel 里留下重复的标量
 // 算术。
 class GuardCache {
  public:
@@ -90,7 +90,7 @@ LogicalResult detachResults(Operation *op) {
     }
     Value destination = getTiedDestination(result);
     if (!destination) {
-      // 这一条**不是能力不足**：目的地形态下结果与 destination 是同一块存储，tie 不上又
+      // 这一条不是能力不足：目的地形态下结果与 destination 是同一块存储，tie 不上又
       // 有使用者说明两者已经漂移，回落会把它藏起来。标签按此订正（原先写的是
       // `UnsupportedOperation`，那会让人以为换张图就行）。
       return op->emitError(
@@ -143,9 +143,9 @@ LogicalResult runOnFunction(func::FuncOp func) {
     if (!isAfirOperation(op)) {
       return;
     }
-    // **region 内不插缓存守卫。** `afir.vector_func` 的 region 是一段在寄存器里算完的
+    // region 内不插缓存守卫。 `afir.vector_func` 的 region 是一段在寄存器里算完的
     // 数据流，守卫要包的是整段（算子自己带着它从子图首节点继承来的 `exec_condition`），
-    // 往里插等于在 `__VEC_SCOPE__` 里发 tile 级的守卫算子。
+    // 往里插等于在 `__VEC_SCOPE__` 里生成 tile 级的守卫算子。
     if (isInsideVectorFunc(op)) {
       return;
     }

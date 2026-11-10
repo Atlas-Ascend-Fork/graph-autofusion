@@ -46,7 +46,7 @@ TEST(MlirE2eCpu, LoadAxpyHalfStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // **取值全部在 half 里精确可表示，中间结果和期望值也是**，所以下面可以逐元素比相等
+  // 取值全部在 half 里精确可表示，中间结果和期望值也是，所以下面可以逐元素比相等
   // 而不是比容差。这一条是有意的：f16 分支把 tmp 切两段做 `Cast` 往返，切错段或者 tmp
   // 不够大时结果会偏一点点——容差一放宽，那种错就正好漏过去。
   //

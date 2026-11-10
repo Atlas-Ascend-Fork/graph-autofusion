@@ -41,7 +41,7 @@ using MemoryEffect = SideEffects::EffectInstance<MemoryEffects::Effect>;
 // 多输入的 `inferReturnType*` 都走它，于是「被校验的形状」与「被推出的形状」不会
 // 分叉。一元 Op 的结果形状就是输入形状，`inferReturnTypes` 直接取，不绕这一圈。
 // 某个操作数无秩时 `hasRankedShape` 置假，此时不写 `newShape`。
-// 标量操作数不参与形状：它没有 tile，广播到哪个形状都是它自己。**跳过**和**退回无秩**
+// 标量操作数不参与形状：它没有 tile，广播到哪个形状都是它自己。跳过和退回无秩
 // 在这里是两件相反的事——一个无秩的 shaped 操作数说明「结果的形状不知道」，一个标量
 // 操作数什么都没说。混为一谈的后果是 `afir.add %tile, %scalar` 的 buffer 形态
 // verifier 直接报「形状对不上」，而它其实完全合法。
@@ -134,7 +134,7 @@ LogicalResult verifyBufferizedElementwise(Operation *op, ValueRange inputs, Valu
   // 至少一个输入要有形状。ODS 的类型约束是逐个操作数的，说不出「至多一个标量」——
   // `scalarOperand = "any"` 的 op 两个操作数各自都可以是标量，两个一起是标量就得在这里
   // 挡。挡住的不是一个假想形态：`afir.add %a, %b` 两个都是 `f32` 时 ODS 全过，而
-  // `inferElementwiseShape` 会答「没有形状」，目的地的形状无从校验，发出去的调用把
+  // `inferElementwiseShape` 会答「没有形状」，目的地的形状无从校验，生成的调用把
   // 两个值当成两块 tile。
   if (!inputs.empty() && llvm::none_of(inputs, [](Value input) { return contributesShape(input.getType()); })) {
     return op->emitOpError(
@@ -392,9 +392,9 @@ LogicalResult mlir::afir::elementwise::inferLogicalReturnType(ValueRange inputs,
   if (failed(inferElementwiseShape(inputs, newShape, hasRankedShape))) {
     return failure();
   }
-  // **不能假定第一个输入有形状**：`scalarOperand = "any"` 的 op 两边都可以是标量
+  // 不能假定第一个输入有形状：`scalarOperand = "any"` 的 op 两边都可以是标量
   // （`afir.add %scalar, %tile`），取 `inputs.front()` 会在那个方向上直接 `failure()`。
-  // 结果的元素类型与秩由**有形状的那一个**给；「一个都没有」由
+  // 结果的元素类型与秩由有形状的那一个给；「一个都没有」由
   // `verifyBufferizedElementwise` 挡，这里只需要退出。
   ShapedType inputType;
   for (Value input : inputs) {
@@ -454,17 +454,7 @@ LogicalResult mlir::afir::elementwise::verifyLogicalNotPair(Operation *op, Type 
          << resultElement << " for input " << inputElement;
 }
 
-//===----------------------------------------------------------------------===//
-// 手写的 verifier 与 inferReturnTypeComponents
-//===----------------------------------------------------------------------===//
-
-// **这一节现在是空的。** 两个宏在这里各生成过一批 `inferReturnTypeComponents`:
-// `AFIR_INFER_BROADCAST`（元素类型跟着第一个输入走，最后一个实例是 `pow`）与
-// `AFIR_INFER_BROADCAST_LOGICAL`（元素类型恒为 `ui8`，最后一批实例是比较族六个）。
-// 两批都换成了 `AFIR_BufferizableBinaryElementwiseOp`，结果类型由 ODS 生成的
-// `inferReturnTypes` 给（`InferTypeOpInterface`），`ui8` 那一档由
-// `logicalResultElementType` 说出来。手写的六个 `verify()` 同时删掉——共享那一份
-// （`verifyLogicalForm` / `verifyBufferForm`）已经覆盖了它们查的东西。
-//
-// 留这一节的标题是为了记住这条：**换基类要连带删两处手写代码**，只改 td 那一行的话
-// 生成的声明与这里的定义对不上，当场编不过（这是它唯一会报的地方）。
+// 二元 elementwise 已使用 AFIR_BufferizableBinaryElementwiseOp，返回类型由 ODS
+// InferTypeOpInterface 生成，逻辑结果的 ui8 类型由 logicalResultElementType 提供。
+// 共享 verifyLogicalForm / verifyBufferForm 已覆盖原手写校验。
+// 更换基类时需同步移除对应的手写类型推导和 verify 定义，保持生成声明与实现一致。

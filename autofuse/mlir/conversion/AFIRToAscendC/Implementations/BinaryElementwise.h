@@ -20,9 +20,9 @@ class SelectionPolicyRegistry;
 
 namespace mlir::ascend::kernel {
 
-// Register AFIR binary elementwise implementations here. Individual API levels keep separate typed mappings,
-// providers, and patterns inside this module instead of creating per-op modules. `policies` is accepted (and
-// currently unused) so this registrar matches the signature every other capability module uses.
+// Registers binary elementwise implementations, with per-API typed mappings,
+// providers and patterns kept in this module. The unused policies parameter keeps
+// the registrar signature consistent with other capability modules.
 LogicalResult registerBinaryElementwiseImplementations(
     ascend::instruction::ImplementationRegistry &registry,
     ascend::instruction::SelectionPolicyRegistry *policies = nullptr);

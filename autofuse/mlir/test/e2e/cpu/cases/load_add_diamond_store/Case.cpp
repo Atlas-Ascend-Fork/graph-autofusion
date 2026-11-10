@@ -35,8 +35,8 @@ af::AscGraph BuildGraph() {
       .Load("load2", "input2", input2_shape, {})
       .Load("load3", "input3", input3_shape, {});
 
-  // 菱形：add0 的结果同时喂 add1 和 add2，所以它在 add2 结束前一直活着。链式级联里
-  // 「队列上的下一块复用上一块」在这里不成立——判据是数值。
+  // add0 的结果由 add1 和 add2 共同消费，必须保留到 add2 完成。
+  // 不能按线性链的下一队列成员复用前一成员；通过数值结果验证存活范围。
   auto graph = builder.Add("add0", "load0", "load1")
                    .Add("add1", "add0", "load2")
                    .Add("add2", "add0", "load3")

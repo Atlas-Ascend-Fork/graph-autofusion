@@ -8,23 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - add(load(full), brc(load(small))) -------------*- C++ -*-===//
-//
-// 级联拓扑 T3：**广播作二元算子的一个 operand**，另一个 operand 是整形状的 Load。
-//
-// 这是真实模型里最常见的广播形态（偏置相加、按行缩放都长这样），而既有用例一个都没有：
-// 广播此前只出现在「自己写回 GM」那种图里。它动到的那件事是 T1 结构上碰不到的——
-// **一个算子身上同时挂着两张来路不同的片上张量**：一张来自广播（源在广播轴上 stride 为 0），
-// 一张来自普通搬入。`classifySegments` 的「源与目的地各恰好一个」正是按 T1 那种形状写的。
-//
-// 形状取自 `test/probe/CapabilityBoundaryProbe.cpp` 的拓扑切片里**报 ok 的格**
-// （2026-10-15 在 `9660fef8` 实测）。T3 的 10 格拓扑表中，当前为 6 格 ok、2 格
-// FAILED（f32 `[1,8] -> [128,8]` 与 `[1,1,8] -> [4,4,8]`，未捕获首条 error）、
-// 2 格 unsupported（f32/f16 `[2,3,5,1] -> [2,3,5,7]`，报
-// `afir.broadcast has no supported Ascend implementation`）；T3c 对照在 10 格全过。
-// 因此本用例只声明选定格，不用其他格的旧诊断反推当前边界。
-//
-//===----------------------------------------------------------------------===//
+// 验证广播结果与完整形状的 Load 结果共同参与 Add，例如偏置相加。
+// 两份输入的来源和局部视图不同，广播源在广播轴上的 stride 为 0，不能沿用仅有一份
+// 源和一份 destination 的分段假设。
+// 用例只声明所注册形状的覆盖，不用其他形状的历史探针结果推断当前支持范围。
 
 #include <cstdint>
 #include <vector>
@@ -58,7 +45,7 @@ af::AscGraph BuildGraph() {
 
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace config = load_broadcast_add_store;
-  // 走的是 MLIR 那条路而不是回落 legacy。**少了这一条，整个用例在回落之后照样全绿。**
+  // 走的是 MLIR 那条路而不是回落 legacy。少了这一条，整个用例在回落之后照样全绿。
   EXPECT_NE(kernel.find(std::string(config::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   // 广播在加法之前。两条搬入与一条广播都在，次序由这一条钉住。
   const size_t broadcast = kernel.find("Broadcast(");

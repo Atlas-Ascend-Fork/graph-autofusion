@@ -22,30 +22,30 @@ include "mlir/IR/OpBase.td"
 // 二次融合：一段在寄存器里逐 lane 算完的子图
 //===----------------------------------------------------------------------===//
 //
-// **这是 AFIR 的第一个带 region 的算子。** 它的来源是 A5 调度在 buffer 分配阶段做的二次
+// 这是 AFIR 的第一个带 region 的算子。 它的来源是 A5 调度在 buffer 分配阶段做的二次
 // 融合（`v35/optimize/partition/vector_func_partitioner.cpp`，门槛 `kMinVfNodesNum = 2`）：
 // 相邻且都支持寄存器形态的节点被聚成一个 `VectorFunc` 节点，节点体是一张嵌套 AscGraph。
 // 设计见 docs/development/2026-10-18-afir-vector-func-implementation-design.md。
 //
-// **为什么 region 内必须是 tensor 形态（值语义）而不是 buffer 形态**：VF 的中间结果留在
-// 向量寄存器里，**一块 UB 都没有分配**——UB 的队列容量由 legacy 的 buffer 分配与 ATT 定，
+// 为什么 region 内必须是 tensor 形态（值语义）而不是 buffer 形态：VF 的中间结果留在
+// 向量寄存器里，一块 UB 都没有分配——UB 的队列容量由 legacy 的 buffer 分配与 ATT 定，
 // MLIR 只读 tiling 里的 `q*_size`。buffer 形态是 destination-style，每个中间结果都要一个
 // `outs` 指向的存储，那等于要求 MLIR 自己变出没人分配过的 UB。tensor 形态（`outs` 不给，
 // 见 `Elementwise.td` 顶部那段）正好表达「有数据流、没有存储」。
 //
-// 边界则相反，是**真的 UB 张量**：`srcs` / `dsts` 是调度分配好的队列张量，所以它们是
+// 边界则相反，是真的 UB 张量：`srcs` / `dsts` 是调度分配好的队列张量，所以它们是
 // shaped（LocalTensor / memref）。于是这个算子的语义正是两者的接缝：
 //
 //     对这块 tile 的每一段 lane：从 srcs 取一段进寄存器 -> 跑一遍 region -> 把 yield
 //     出来的结果写回 dsts 的同一段
 //
-// lane 这一维在 AFIR 里**不出现**：一段有多长（`GetVecLen() / sizeof(T)`）是目标属性，
+// lane 这一维在 AFIR 里不出现：一段有多长（`GetVecLen() / sizeof(T)`）是目标属性，
 // 由下降那一侧算，AFIR 这层只说「逐 lane」。
 //
 //===----------------------------------------------------------------------===//
 
 // 元素类型域取 AFIR 今天建模的那 6 位（`Implementations/ElementwiseApiFamily.h`）。
-// **这里不收窄**：这个算子是个容器，收不收某个 dtype 由 region 内算子自己的 ODS 说，
+// 这里不收窄：这个算子是个容器，收不收某个 dtype 由 region 内算子自己的 ODS 说，
 // 而「这一侧有没有寄存器形态的实现」由能力层说（见 AFIRVectorFuncToRegBase）。
 defvar AFIR_VectorFuncElementTypes = [UI8, UI16, I16, I32, F16, F32, BF16];
 
@@ -90,11 +90,11 @@ def AFIR_VectorFuncOp : AFIR_Op<"vector_func", [
   // 认一个算子是不是 buffer 形态的（`AFIRPipelineSync.cpp` 的 `isBufferizedOperation`），
   // 认不出来就不会给这段插 enque / deque——产物在 CPU 模拟器上照样算对，到真机上才是
   // 偶发错数据。
-  // **副作用显式声明，不用 `RecursiveMemoryEffects`。** region 里是 tensor 形态的算子，
+  // 副作用显式声明，不用 `RecursiveMemoryEffects`。 region 里是 tensor 形态的算子，
   // 它们是纯的，于是「递归推导」推出来的是「整个算子无副作用」；而这个算子的全部作用正是
   // 把结果写进 `dsts` 那块 UB。无副作用的后果是：destination-style 的结果一旦被折叠成
   // destination，这个算子就没有使用者了，随后被当成死代码回收——**产物里只剩搬运、
-  // 计算整段消失，而且照样编得过**。实测在资源物化那一相位踩过一次。
+  // 计算整段消失，而且照样编得过**。实测在资源物化那一阶段踩过一次。
   let arguments = !con((ins
     Arg<Variadic<AFIR_BufferizableShapedType<AFIR_VectorFuncElementTypes>>, "", [MemRead]>:$srcs,
     Arg<Variadic<AFIR_BufferizableShapedType<AFIR_VectorFuncElementTypes>>, "", [MemWrite]>:$dsts
@@ -118,7 +118,7 @@ def AFIR_VectorFuncOp : AFIR_Op<"vector_func", [
 
     //=== AFIRDestinationStyleInterface ===//
     // 每个 `dsts` 就是一个 destination，并且与同下标的结果绑定（`verify` 查这一条）。
-    // tmp buffer 恒为 0：寄存器形态的 API 不要 tmp（`MicroAPI` 那一族自足）。
+    // tmp buffer 恒为 0：寄存器形态的 API 不要 tmp（`MicroAPI` 那一类自足）。
     unsigned getNumDestinations() { return static_cast<unsigned>(getDsts().size()); }
     ::mlir::FailureOr<unsigned> getTiedResultIndex(unsigned destinationIndex) {
       if (destinationIndex >= getDsts().size()) {

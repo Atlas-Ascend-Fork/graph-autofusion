@@ -3,16 +3,16 @@
 // the CANN Open Software License Version 2.0.
 // RUN: af-opt --afir-kernel-body-signature --afir-loop-generate --afir-memory-allocate %s | FileCheck %s
 
-// 非队列资源上的两个成员**不并排**：各自从自己的 `view.offset` 起算，都是 0。
+// 非队列资源上的两个成员不并排：各自从自己的 `view.offset` 起算，都是 0。
 //
 // 「一个 buffer 一份存储，成员大小与资源大小是同一个数」是 `materializeLocalMemberSize`
 // 非队列分支本来就写着的意思；`reuse_id = -1` 的两个成员偏移都是 0，说的是「在时间上
-// 复用这块存储」，legacy 对 `add(x, y) -> 其中一个的 buffer` 这种形状发的就是一次原地计算。
+// 复用这块存储」，legacy 对 `add(x, y) -> 其中一个的 buffer` 这种形状生成的就是一次原地计算。
 //
 // 此前 `materializeLocalMember` 对两种资源一视同仁地累加偏移。队列上是对的（累加就是摆
 // slot），非队列上则要求 `b<id>_size` 是成员字节数之和，而那个数是 ATT 按
 // `max(同 id 的每个张量) ⊔ Σ(同 reuse 组)` 给的，于是第二个成员一定指到资源外面。
-// **失败方式不是报错**，是运行期 `LocalTensor::operator[]` abort——CPU 模拟器上的原话是
+// 失败方式不是报错，是运行期 `LocalTensor::operator[]` abort——CPU 模拟器上的原话是
 // 「offset is 32, which can not be larger than data len 32」，而且输出一个字节都没写。
 // 所以这一格钉的是偏移，不是「能不能编过」：编得过而偏移错的那一版，这份 lit 照样绿不了，
 // 但任何只看 `init_buffer` 的断言都抓不住它。
@@ -20,7 +20,7 @@
 // 真实场景是广播作分叉点（探针 T5，E2E `load_broadcast_diamond_store`）：分叉点的结果与
 // `add` 的结果都落到同一个非队列 `b<id>` 且都不带 reuse_id。
 //
-// 钉法：两个成员的 `reinterpret_cast` 吃的是**同一个** `tbuf.get_tensor` 结果。偏移 0 的
+// 钉法：两个成员的 `reinterpret_cast` 吃的是同一个 `tbuf.get_tensor` 结果。偏移 0 的
 // `sub_index` 会被折叠掉，所以正确的那一版看不到 `sub_index`；累加的那一版第二个成员是
 // `reinterpret_cast` 一个 `sub_index %raw, %c32`，捕获变量对不上就红。
 // 同时钉 `init_buffer` 的字节数是 32（一份存储），不是两个成员之和。

@@ -30,14 +30,14 @@ inline std::vector<af::Expression> ToExpressions(std::initializer_list<int64_t> 
   return expressions;
 }
 
-// 生成出来的 kernel 里 `call` 那一处调用有几个顶层实参。
+// 生成的 kernel 里 `call` 那一处调用有几个顶层实参。
 //
 // 用它而不是按名字断言：kernel 里的实参是 SSA 编号（`v93` 之类），随调度顺序漂移；
 // 而「几个实参」恰好就是同名重载之间唯一分得开的那件事——`AscendC::Sub` 的四参形态与
 // 带 tmp buffer 的五参形态就是这么区分的。
 //
-// **只看第一处出现。** 所以别拿它去数走包装的调用：包装的头会被内联进 kernel，
-// 第一处出现的是那份**定义**（形参个数与调用点可以不同），不是调用点。标准
+// 只看第一处出现。 所以别拿它去数走包装的调用：包装的头会被内联进 kernel，
+// 第一处出现的是那份定义（形参个数与调用点可以不同），不是调用点。标准
 // `AscendC::` 调用没有这个问题——那些头不内联，kernel 里只有调用点。
 //
 // 找不到 `call` 返回 0，调用方那条 `EXPECT_EQ` 会自己报出来。
@@ -67,7 +67,7 @@ inline size_t CountCallArguments(const std::string &kernel, const std::string &c
 // 广播轴与 Load 的 stride。广播轴由「输入该维是 1、输出不是」定出来；广播轴上 Load 的
 // stride 取 0，其余维按输入自己的行主序算——与 legacy 的 nddma 用例（`optimize_st_v2.cpp`
 // 的 `NddmaCase*`）同一写法，也与 `test/probe/CapabilityBoundaryProbe.cpp` 的 `BindBroadcast`
-// 逐字同一条约定（量具与用例建的必须是同一张图，否则探针报 ok 的格在这里不成立）。
+// 逐字同一条约定（测量工具与用例建的必须是同一张图，否则探针报 ok 的格在这里不成立）。
 //
 // 数值侧的另一面是 `E2eCaseConfig.h` 的 `BroadcastSourceIndex`。
 struct BroadcastBinding {
@@ -112,7 +112,7 @@ inline size_t CountOccurrences(const std::string &haystack, const std::string &n
   return count;
 }
 
-// 动态形状用例的运行期尺寸，按**图上登记 size var 的顺序**排。
+// 动态形状用例的运行期尺寸，按图上登记 size var 的顺序排。
 //
 // 静态形状的用例（今天绝大多数）留空即可：它们的 `AutofuseTiling` 没有这些形参。图上有
 // 运行期 size var 时，生成的 `AutofuseTiling` 会在 `tiling` 之前多出同样多个 `uint32_t`

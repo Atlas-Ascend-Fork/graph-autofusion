@@ -22,7 +22,7 @@ from support.npu_runner import NpuRunner
 #   - nA = Ceiling(A/a0t) > corenum  =>  ATT 的求解器解不出 tiling（`load_sum_store_large`
 #     那批大 A 的 shape 就落在这里，那是 RCore 不该被选用的区间，不在本用例范围内）；
 #   - nA == corenum                  =>  A 轴单独就喂满核，Ceiling(nR/a1Tt) 恒为 1，
-#     **R 根本没有跨核切分**，phase 2 只合并一份 partial sum——两段式的管道走通了，
+#     R 根本没有跨核切分，phase 2 只合并一份 partial sum——两段式的管道走通了，
 #     合并逻辑却一次都没被触发；
 #   - nA < corenum                   =>  核数必须从 R 方向补，跨核归约才真正启用。
 #

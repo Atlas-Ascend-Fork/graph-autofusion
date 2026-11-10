@@ -11,12 +11,12 @@
 
 // `afir.vector_func` 的下降（M1）。它钉三件事：
 //
-//   1. **边界语义**：region 内只有计算，UB <-> 寄存器的搬运是下降**生成**的，不是从子图
+//   1. 边界语义：region 内只有计算，UB <-> 寄存器的搬运是下降生成的，不是从子图
 //      翻过来的。所以产物里 `LoadAlign` 恰好等于 src 数、`StoreAlign` 恰好等于 dst 数——
-//      **计数式而不是「存在一条」**：少发一条 Load 也能编过、也能算对（上一趟的寄存器还在），
+//      计数式而不是「存在一条」：少生成一条 Load 也能编过、也能算对（上一趟的寄存器还在），
 //      要到别的形状上才暴露。
-//   2. **产物形状**：一个 `__VEC_SCOPE__`、里面恰好一层 lane 循环，寄存器声明在循环外。
-//   3. **算子顺序**：`add` 在 `abs` 之前。顺序错了结果就是另一个函数，而两种都编得过。
+//   2. 产物形状：一个 `__VEC_SCOPE__`、里面恰好一层 lane 循环，寄存器声明在循环外。
+//   3. 算子顺序：`add` 在 `abs` 之前。顺序错了结果就是另一个函数，而两种都编得过。
 //
 // 不在这里钉的：形状相关的判据（lane 一段多少个元素由目标的 `GetVecLen()` 定，这里是
 // 符号尺寸）、以及能力不足的四条（它们要看诊断，在 `afir-vector-func-unsupported.mlir`）。
@@ -59,7 +59,7 @@ module {
 // IR-NOT: ascendc.reg_tensor
 
 // 恰好一层 lane 循环。两层意味着有人把 tile 循环也生成进了 region，而那样每个元素会被
-// 算两遍——**结果仍然对**（幂等的那几个 op 上尤其），所以只能靠计数钉住。
+// 算两遍——结果仍然对（幂等的那几个 op 上尤其），所以只能靠计数钉住。
 // IR-COUNT-1: emitasc.vf_for
 // IR-NOT: emitasc.vf_for
 
@@ -78,7 +78,7 @@ module {
 // IR-NOT: afir.load
 // IR-NOT: afir.store
 
-// 发射出来是 `__VEC_SCOPE__` 加一层 `for`，调的是 `AscendC::Reg::` 那一族（legacy 写
+// 生成的是 `__VEC_SCOPE__` 加一层 `for`，调的是 `AscendC::Reg::` 那一类（legacy 写
 // `MicroAPI::`，`namespace MicroAPI = Reg`，同一个函数）。
 // CPP-LABEL: void vector_func_add_abs(
 // CPP: __VEC_SCOPE__

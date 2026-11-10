@@ -10,7 +10,7 @@
 
 // `ReducePlan` 的覆盖（reduce 跨作用域累加设计 3.2.1、7.2）。
 //
-// **为什么不是 LIT**：`buildReducePlan` 不改 IR，它的输出是一组推论——累加轴、AR/RA、
+// 为什么不是 LIT：`buildReducePlan` 不改 IR，它的输出是一组推论——累加轴、AR/RA、
 // 两块 scratch 谁是谁。这些在任何 pass 的输出文本里都没有形状，LIT 只能间接地从「最终
 // 生成了什么」倒推。而这里正反两侧都要钉：既要钉住 S0 推出 `[z1T]`，也要钉住 elementwise
 // 推不出任何累加轴——后者一旦失守，LoopGenerate 会把普通算子的跨作用域结果也放行，
@@ -198,9 +198,9 @@ TEST_F(ReducePlanTest, S0IsArWithKeptAxisFirst) {
   EXPECT_TRUE(plan->tailLast);
 }
 
-// 全轴归约：保留轴是调度器造出来的长度 1 退化轴，它在**两侧**的 vectorized stride 都是 0。
+// 全轴归约：保留轴是调度器造出来的长度 1 退化轴，它在两侧的 vectorized stride 都是 0。
 //
-// A/R 分类必须两侧一起看——落点侧 stride 为 0 **且**输入侧不为 0 才是归约维，两侧都为 0 是
+// A/R 分类必须两侧一起看——落点侧 stride 为 0 且输入侧不为 0 才是归约维，两侧都为 0 是
 // 退化/广播维。只看落点侧会把这根退化的保留轴也判成归约维，`plan.first.axes` 于是为空，
 // `buildReducePlan` 整个失败；调用点 `redirectAccumulatedOperand` 把这个失败报成一句与真因
 // 无关的「tensor SSA value crosses sibling/outer schedule scopes」，全轴归约在真机上就是这样
@@ -231,10 +231,10 @@ TEST_F(ReducePlanTest, AllReduceKeepsTheDegenerateAxisAsTheKeptSide) {
   EXPECT_EQ(plan->last.axes.front(), 5);
 }
 
-// 成对的反例：两根向量化轴**都真的**是归约维（落点 0、输入非 0）时仍然拒绝。
+// 成对的反例：两根向量化轴都真的是归约维（落点 0、输入非 0）时仍然拒绝。
 //
 // 只写上一条的话，把 `plan.first.axes.empty()` 那道门删掉也能全绿，而那会让一个没有 A 侧的
-// tile 被当成二维 AR 发出去——高阶 API 的两个维度有一个是空的，算出来的是错值。
+// tile 被当成二维 AR 生成——高阶 API 的两个维度有一个是空的，算出来的是错值。
 TEST_F(ReducePlanTest, RejectsATileWhoseVectorizedAxesAreAllReduced) {
   std::string body = kS0Body.str();
   const std::string axes = "vectorized_axis = [3, 5], vectorized_strides = [<\"1\">, <\"0\">]";
@@ -279,7 +279,7 @@ TEST_F(ReducePlanTest, MultipleContiguousAxesMergeIntoAr) {
   EXPECT_FALSE(plan->tailLast);
 }
 
-// RA 且 R 组有两根轴。计划**建得出来**——分析层对轴数没有意见，A/R 两段仍然各自连续。
+// RA 且 R 组有两根轴。计划建得出来——分析层对轴数没有意见，A/R 两段仍然各自连续。
 // 拒绝它的是下降侧的 `isSupportedReduceLayout`（`Reduce.cpp`），理由是 `srcShape` 的外维
 // 是一个扁平行数，多根外维轴时中间可能隔着尾块留下的空行。这条用例的作用是把两件事分开：
 // lit 里那条 `afir-to-ascendc-reduce-sum-ra-rejected.mlir` 报的是「轴数不支持」，不是
@@ -307,16 +307,16 @@ TEST_F(ReducePlanTest, RaWithMultipleReducedAxesStillBuildsAPlan) {
   EXPECT_EQ(plan->first.axes, (llvm::SmallVector<int64_t, 2>{4, 5}));
 }
 
-// AR 且 R 组有**三根**轴。与上面那条 RA 用例同一个分工：分析层照样建得出计划——A/R 两段
+// AR 且 R 组有三根轴。与上面那条 RA 用例同一个分工：分析层照样建得出计划——A/R 两段
 // 各自连续，轴数不是它的判据——拒绝它的是下降侧的 `isSupportedReduceLayout`。
 //
 // 这条用例存在的理由和 RA 那条一样：把「计划建不出来」和「轴数不支持」分开。两者在能力
 // 查询处都映射成 `UnsupportedShape`，光看诊断分不出是哪一种。
 //
 // 为什么三根就不行（两根可以）：`ReduceInit` 按行填 `[dim_r_current, dim_r)`，是每行的一段
-// **后缀**。两根轴时后缀恰好就是「整行 i₀ ∈ [A₀, N₀)」，行内尾巴由 `inner_r` 掩码补上，两支
+// 后缀。两根轴时后缀恰好就是「整行 i₀ ∈ [A₀, N₀)」，行内尾巴由 `inner_r` 掩码补上，两支
 // 盖满。三根起，`dim_r_current = align(N₂)·A₀·A₁` 不再是任何一条轴边界的后缀：中间那根轴
-// 取尾块时，既有垃圾行落在填充区**之前**没被填到，也有有效数据落在填充区**之内**被清零。
+// 取尾块时，既有垃圾行落在填充区之前没被填到，也有有效数据落在填充区之内被清零。
 TEST_F(ReducePlanTest, ArWithThreeReducedAxesStillBuildsAPlan) {
   std::string body = kS0Body.str();
   const std::string inputAxes = "vectorized_axis = [3, 5], vectorized_strides = [<\"8\">, <\"1\">]";
@@ -341,7 +341,7 @@ TEST_F(ReducePlanTest, ArWithThreeReducedAxesStillBuildsAPlan) {
   EXPECT_FALSE(plan->tailLast);
 }
 
-// RCore phase 2 的 descriptor。这条不是从调度器跑出来抓的，而是**照着构造它的那段代码**
+// RCore phase 2 的 descriptor。这条不是从调度器跑出来抓的，而是照着构造它的那段代码
 // 抄的：`optimize/task_generator/reduce_schedule_case_generator.cpp` 的
 // `RMulticorePhase2Graph::CreateVarAxis` 建两根轴 `Rm`(id 0)、`A`(id 1)，
 // `CompleteNodeAttr` 把 reduce 前的张量写成 `strides = {A_org_size, 1}`、
@@ -352,9 +352,9 @@ TEST_F(ReducePlanTest, ArWithThreeReducedAxesStillBuildsAPlan) {
 // 「R 组单轴」范围内（见设计文档 3.3）。这正是 RA 作为 RCore 前置能力的那一句证明。
 //
 // `vectorized_*` 在 phase 2 构造完成时还不存在——它由后续 tiling 产生。这里按未切分的
-// 二维 UB 张量补成两根轴全向量化，是**重建**不是抓取；能抓取的真实 `[R, A]` 调度产物在
+// 二维 UB 张量补成两根轴全向量化，是重建不是抓取；能抓取的真实 `[R, A]` 调度产物在
 // `test/lit/conversion/afir-to-ascendc-reduce-sum-ra.mlir`，下降侧的 `layout = RA`、
-// 不发 `ReduceInit` 由那条用例钉。为什么本环境拿不到 phase 2 自己的下降产物，见设计
+// 不生成 `ReduceInit` 由那条用例钉。为什么本环境拿不到 phase 2 自己的下降产物，见设计
 // 文档 6.7。
 constexpr llvm::StringLiteral kPhase2Body = R"mlir(
     %in = memref.alloc() {afir.buffer_desc = #ub0} : memref<8x16xf32>
@@ -536,7 +536,7 @@ TEST_F(ReducePlanTest, RejectsAccumulationWithoutItsOwnScratch) {
   EXPECT_NE(reason.find("round_result"), std::string::npos) << reason;
 }
 
-// 以下两个用例钉的是**依赖方向**，不是某个具体推论：一个归约沿哪些轴累加，与「调度器给了
+// 以下两个用例钉的是依赖方向，不是某个具体推论：一个归约沿哪些轴累加，与「调度器给了
 // 几块 scratch」和「这块布局能不能表示成二维 AR/RA」都无关。两者此前压在同一个
 // `FailureOr` 里，后果是 scratch 少给一块时 `LoopGenerate` 报 `InvalidSchedule`——把资源
 // 问题归因成调度标注破了。
@@ -597,7 +597,7 @@ TEST_F(ReducePlanTest, AccumulationAnalysisIgnoresScratchCount) {
   }
 }
 
-// A/R 交替超过一次：语义上完全清楚（归约维就是那两根 stride 为 0 的），只是**当前**高阶
+// A/R 交替超过一次：语义上完全清楚（归约维就是那两根 stride 为 0 的），只是当前高阶
 // API 的二维 AR/RA 表示不了。这类限制不该让循环生成拿不到累加轴。
 TEST_F(ReducePlanTest, AccumulationAnalysisIgnoresTwoDimensionalExpressibility) {
   std::string body = kS0Body.str();
@@ -740,7 +740,7 @@ TEST_F(ReducePlanTest, ElementwiseHasNoReductionAxis) {
 // Mean 的完整逻辑归约域
 //===----------------------------------------------------------------------===//
 
-// kS0Body 的归约维是 z1T(4) 与 z1t(5)，两根都是 z1 切出来的。域必须收敛成**一根** z1，
+// kS0Body 的归约维是 z1T(4) 与 z1t(5)，两根都是 z1 切出来的。域必须收敛成一根 z1，
 // 尺寸取它的 `size`——而不是两根分别的尺寸、更不是它们的乘积。
 //
 // 这条是整个 Mean 修正的地基：切分出来的 inner/outer 指向同一个来源，重复计数会让分母变成
@@ -779,7 +779,7 @@ TEST_F(ReducePlanTest, MeanDomainKeepsEveryIndependentReducedAxisInDescriptorOrd
   EXPECT_EQ(domain->sizes[1].getValue().getValue(), "8");
 }
 
-// 符号尺寸照样是合法的域：`N` 在运行期才知道值，但它是**调度输入**的符号，不随 tile 变。
+// 符号尺寸照样是合法的域：`N` 在运行期才知道值，但它是调度输入的符号，不随 tile 变。
 TEST_F(ReducePlanTest, MeanDomainAcceptsASymbolicOriginalSize) {
   auto module = Parse(kS0Body, R"mlir(#afir.asc_graph<tiling_key = 0,axes = [
       <id = 1, name = "z1", axis_type = Original, size = <"R_org_size">, align = <"-1">>,
@@ -793,7 +793,7 @@ TEST_F(ReducePlanTest, MeanDomainAcceptsASymbolicOriginalSize) {
   EXPECT_EQ(domain->sizes.front().getValue().getValue(), "R_org_size");
 }
 
-// 来源丢失：`z1t` 既不是 Original、`from` 又为空。必须**失败**，不能退回它自己的尺寸——
+// 来源丢失：`z1t` 既不是 Original、`from` 又为空。必须失败，不能退回它自己的尺寸——
 // 退回去就是拿一轮的元素数当总数。
 TEST_F(ReducePlanTest, MeanDomainRejectsLostProvenance) {
   auto module = Parse(kS0Body, R"mlir(#afir.asc_graph<tiling_key = 0,axes = [
@@ -818,7 +818,7 @@ TEST_F(ReducePlanTest, MeanDomainRejectsAnUndeclaredReducedAxis) {
   EXPECT_NE(reason.find("not declared in the asc_graph axis list"), std::string::npos) << reason;
 }
 
-// 字面量尺寸非正：失败。这一档必须在**本函数**里失败，而不是留给下降侧的物化去挡——
+// 字面量尺寸非正：失败。这一档必须在本函数里失败，而不是留给下降侧的物化去挡——
 // 能力查询只调本函数，两处判据不一致就会出现「能力说支持、下降才失败」，候选被丢掉而
 // 诊断停在「下降失败」这一层，查的人看不到真因。
 TEST_F(ReducePlanTest, MeanDomainRejectsANonPositiveLiteralSize) {
@@ -842,7 +842,7 @@ TEST_F(ReducePlanTest, MeanDomainRejectsAMissingAxisList) {
   EXPECT_NE(reason.find("no asc_graph axis list"), std::string::npos) << reason;
 }
 
-// 域分析与**累加语义**是两件事，不能互相牵连：这份输入跨轮累加（`isAccumulating()` 为真），
+// 域分析与累加语义是两件事，不能互相牵连：这份输入跨轮累加（`isAccumulating()` 为真），
 // 而域照样求得出来。反过来 AllLoad 不累加，域也一样求得出来——分母与「分几轮算」无关，
 // 这正是本次修正的核心。
 TEST_F(ReducePlanTest, MeanDomainIsIndependentOfAccumulation) {
@@ -866,11 +866,11 @@ TEST_F(ReducePlanTest, MeanDomainIsIndependentOfAccumulation) {
 // 归约域的来源证明：属性的写（annotate）与读（getProven）
 //===----------------------------------------------------------------------===//
 
-// 本节的 IR 是 **bridge 产物形态**：reduce 的输入是上一个算子的 **SSA 结果**。这一点是整件
+// 本节的 IR 是 bridge 产物形态：reduce 的输入是上一个算子的 SSA 结果。这一点是整件
 // 事的前提——`AFIRMemoryAllocate` 之后消费者改读 destination，SSA 边断掉，来源就再也查不出
 // 来了，所以证明必须在这个形态上做一次、写进 IR。
 //
-// 下面每一条都只换 mean 的**输入来源**，mean 自己（描述子、轴图）逐字相同。这样「有没有写
+// 下面每一条都只换 mean 的输入来源，mean 自己（描述子、轴图）逐字相同。这样「有没有写
 // 属性」的差别只可能来自来源，不会与「描述子是不是齐全」混在一起。
 
 // 归约域：z1(32) 被切成 z1T/z1t。与上一节同一张轴图。
@@ -991,11 +991,11 @@ TEST_F(ReducePlanTest, ReductionDomainIsProvenForANonReducedInput) {
   EXPECT_EQ(domain->sizes.front().getValue().getValue(), "32");
 }
 
-// 上游是用户图里**已经算完**的另一次归约（`x -> Sum(dim=C) -> Mean(dim=B)`）：必须**放行**，
+// 上游是用户图里已经算完的另一次归约（`x -> Sum(dim=C) -> Mean(dim=B)`）：必须放行，
 // 而且分母是 mean 自己的域，不是上游那次的。
 //
 // 这一条守的是「判据不是算子类别」。同一个 func 内轴图的 `from` 链原封不动，mean 的归约轴顺
-// 着它走到的就是前端图里真正的 Original 轴；核内跨轮累加在单个 reduce 算子**内部**完成，
+// 着它走到的就是前端图里真正的 Original 轴；核内跨轮累加在单个 reduce 算子内部完成，
 // 不是两个算子之间，所以上游有没有归约过都不影响这张轴图的结论。
 //
 // 本次改动之前这种图是支持的（旧判据只看阶段号）。按算子类别判会把它判成未证明——那是一次
@@ -1017,7 +1017,7 @@ TEST_F(ReducePlanTest, ReductionDomainIsProvenAfterACompletedUpstreamReduction) 
   EXPECT_EQ(domain->sizes.front().getValue().getValue(), "32");
 }
 
-// 输入是一次 **elementwise** 的中间结果：来源里没有归约，必须照样算证明得出。
+// 输入是一次 elementwise 的中间结果：来源里没有归约，必须照样算证明得出。
 // 这一条守的是方案点名不要的那种保守——「中间结果一律拒」会把合法形态一起挡掉。
 TEST_F(ReducePlanTest, ReductionDomainIsProvenThroughAnElementwiseProducer) {
   std::string body = R"mlir(
@@ -1033,16 +1033,16 @@ TEST_F(ReducePlanTest, ReductionDomainIsProvenThroughAnElementwiseProducer) {
   EXPECT_TRUE(mean->hasAttr(kReductionDomainAttrName));
 }
 
-// **跨阶段**：partial 不经 SSA、经一块 GM workspace 传给下一个 func，两端之间只有 buffer id
+// 跨阶段：partial 不经 SSA、经一块 GM workspace 传给下一个 func，两端之间只有 buffer id
 // 这一个共同身份。写那块 workspace 的算子在另一个 func 里，所以这件事只有在 module 这一层
 // 才看得见。
 //
-// 与上一条对照着看：同样是「上游有一次归约」，在**同一个 func** 内放行，跨 workspace 则拒。
+// 与上一条对照着看：同样是「上游有一次归约」，在同一个 func 内放行，跨 workspace 则拒。
 // 差别不在算子类别，在于跨过去之后轴图是分期改写新合成的，`from` 链不再指回前端图。
 //
-// 跨阶段这一侧的判据**是**保守的：写进 workspace 的只要经过归约就拒，不区分「算完的结果」
+// 跨阶段这一侧的判据是保守的：写进 workspace 的只要经过归约就拒，不区分「算完的结果」
 // 与「等待合并的 partial」。要分开这两者，判据得来自分期改写自己的语义身份，不能由这里从算子
-// 类别反猜；今天唯一的分期形态是 RCore，其第二阶段是 `Sum`，所以这一档不丢现有能力。
+// 类别反猜；目前唯一的分期形态是 RCore，其第二阶段是 `Sum`，所以这一档不丢现有能力。
 TEST_F(ReducePlanTest, ReductionDomainIsNotProvenAcrossAWorkspaceHoldingAPartial) {
   std::string producer = UpstreamReduce("%partial", kFiveDimReduced) +
                          R"mlir(
@@ -1080,7 +1080,7 @@ module {
   EXPECT_FALSE(mean->hasAttr(kReductionDomainAttrName));
 }
 
-// 同一个形状的对照：workspace 里装的是 **elementwise** 的结果而不是 partial。判据是「写它的
+// 同一个形状的对照：workspace 里装的是 elementwise 的结果而不是 partial。判据是「写它的
 // 是什么」，不是「它在不在 GM」——否则合法的 `Mean(workspace tensor)` 会被误拒。
 TEST_F(ReducePlanTest, ReductionDomainIsProvenAcrossAWorkspaceHoldingANonPartial) {
   std::string producer = R"mlir(
@@ -1134,7 +1134,7 @@ TEST_F(ReducePlanTest, AnnotatingTwiceIsIdempotent) {
   EXPECT_EQ(first, mean->getAttr(kReductionDomainAttrName));
 }
 
-// 读侧：属性**缺席即未证明**。不得退回 `analyzeLogicalReductionDomain`——那条路在跨阶段图上
+// 读侧：属性缺席即未证明。不得退回 `analyzeLogicalReductionDomain`——那条路在跨阶段图上
 // 给的正是错分母。
 TEST_F(ReducePlanTest, ProvenDomainRejectsAMeanWithoutTheAttribute) {
   std::string body = R"mlir(
@@ -1148,7 +1148,7 @@ TEST_F(ReducePlanTest, ProvenDomainRejectsAMeanWithoutTheAttribute) {
   EXPECT_NE(reason.find("afir.reduction_domain"), std::string::npos) << reason;
 }
 
-// 读侧：属性与轴图**都**答得出来而彼此不一致，说明中间有一方被改写过而另一方没跟上。
+// 读侧：属性与轴图都答得出来而彼此不一致，说明中间有一方被改写过而另一方没跟上。
 // 此时拒绝，不挑一个信。
 TEST_F(ReducePlanTest, ProvenDomainRejectsADriftedAttribute) {
   std::string body = R"mlir(
@@ -1166,7 +1166,7 @@ TEST_F(ReducePlanTest, ProvenDomainRejectsADriftedAttribute) {
   EXPECT_NE(reason.find("no longer agrees"), std::string::npos) << reason;
 }
 
-// 读侧：轴图答不出来**不是**错误——属性正是为那种图存在的（跨阶段的合成图里，完整域的那几
+// 读侧：轴图答不出来不是错误——属性正是为那种图存在的（跨阶段的合成图里，完整域的那几
 // 根轴压根不在本函数的轴图里）。这一条钉的是「校验绑定」不等于「要求轴图也能算出来」。
 TEST_F(ReducePlanTest, ProvenDomainAcceptsADomainTheAxisGraphCannotConfirm) {
   std::string body = R"mlir(

@@ -871,7 +871,7 @@ bool ProveExpressionsEqual(std::string_view lhs, std::string_view rhs) {
   if (leftText == rightText) {
     return true;
   }
-  // 化简后仍不同名的，再交给证明器。**注意 `Parse` 要求规范形式**：当两侧恰好相等时
+  // 化简后仍不同名的，再交给证明器。注意 `Parse` 要求规范形式：当两侧恰好相等时
   // `ExpectEq(a, a)` 的规范形式是 `True`，拼出来的串会被 Parse 拒掉——所以上面那一步
   // 不是优化，是这条路的必要补充。
   Result<Expression> predicate = Expression::Parse("ExpectEq(" + leftText + ", " + rightText + ")");

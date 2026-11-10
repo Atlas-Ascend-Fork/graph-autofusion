@@ -7,16 +7,16 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // `afir.broadcast` 的**常量源**一档，reg 侧。与同目录的 `afir-broadcast-duplicate.mlir`
-// 是同一个 op、同一个判据、**同一个调用**——reg 侧的 `BroadcastRegApiCall::Generate` 在
+// 是同一个 op、同一个判据、同一个调用——reg 侧的 `BroadcastRegApiCall::Generate` 在
 // `IsBroadcastConstantTensor` 为真时同样调 `BroadcastScalar`。
 //
-// **两份用例唯一的差别是那块 tmp buffer**：mem 侧的调度给一块
+// 两份用例唯一的差别是那块 tmp buffer：mem 侧的调度给一块
 // （`BroadcastAscIrCodegenImpl::CalcTmpBufSize`），reg 侧不给（`...ImplV2` 没有这个覆写），
 // 而 `checkTmpBuffer` 拿块数严格对等。这就是同一个调用要分成两个 implementation 的
 // 全部理由，与芯片无关。下面那条 WRONGSIDE 反过来钉住这件事。
 //
-// **输入写成 memref 形态、跑整条流水**，不是 `!ascendc.local_tensor` 的简写形态：
-// 这一档要发一对标量读事件，而事件号的持有者是资源物化阶段建的那个 `ascendc.pipe`，
+// 输入写成 memref 形态、跑整条流水，不是 `!ascendc.local_tensor` 的简写形态：
+// 这一档要生成一对标量读事件，而事件号的持有者是资源物化阶段建的那个 `ascendc.pipe`，
 // 源在哪条管线上也要看它落在队列还是 TBuf 上——两样都只有跑过 `--afir-memory-allocate`
 // 才存在。写成简写形态的话这条用例根本走不到要钉的那段。
 
@@ -114,13 +114,13 @@ module @plan0 attributes {
 }
 
 // IR-LABEL: func.func private @stage0_template0
-// 事件对在标量读**之前**：`Duplicate` 从 S 管线取这个值，而队列的 DeQue 只给 MTE2→V。
+// 事件对在标量读之前：`Duplicate` 从 S 管线取这个值，而队列的 DeQue 只给 MTE2→V。
 // IR: ascendc.pipe.fetch_event_id {{.*}}mte2_s
 // IR: ascendc.set_flag {{.*}}mte2_s
 // IR: ascendc.wait_flag {{.*}}mte2_s
 // IR: ascendc.local_tensor.get_value
 // IR: ascendc.duplicate_l2
-// 三轴 / 四轴那两条分支这一档接不了，发出来就是判据放宽了。
+// 三轴 / 四轴那两条分支这一档接不了，生成就是判据放宽了。
 // IR-NOT: ascendc.broadcast_l2
 // IR-NOT: afir.broadcast
 

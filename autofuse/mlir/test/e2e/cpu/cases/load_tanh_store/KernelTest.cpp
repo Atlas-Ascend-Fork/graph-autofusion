@@ -42,8 +42,7 @@ TEST(MlirE2eCpu, LoadTanhStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 取值铺开到 ±4：tanh 在 0 附近近似线性、两端饱和到 ±1，一份只在中间对的实现
-  // （比如原样输出）在两端就分得出来了。
+  // 输入覆盖 [-4, 4]，兼顾近零线性区和两端饱和区，以发现 identity 等错误实现。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input[index] = (static_cast<float>(index % 17U) - 8.0F) * 0.5F;
   }
@@ -76,8 +75,8 @@ TEST(MlirE2eCpu, LoadTanhStoreCalculatesCorrectResult) {
 
   for (uint32_t index = 0; index < output_element_count; ++index) {
     const float x = input[index];
-    // 设备上那一份是分段补偿近似（`TanhAlgo::SUBSECTION_COMPENSATION` 那一族），
-    // 与精确式在 |x| < 4 上差不到 1e-3;1e-2 的容差容得下近似，容不下「算成了别的函数」。
+    // 设备使用 SUBSECTION_COMPENSATION 分段近似，按 1e-2 容差比较。
+    // 另外检查输出位于 (-1, 1) 且与输入同号，区分 identity / relu / sigmoid。
     EXPECT_NEAR(output[index], std::tanh(x), 1e-2F) << "index=" << index;
     // tanh 恒被夹在 (-1, 1) 里，且与输入同号。写成 identity / relu / sigmoid 都会破这条。
     EXPECT_LT(std::fabs(output[index]), 1.0F + 1e-4F) << "index=" << index;

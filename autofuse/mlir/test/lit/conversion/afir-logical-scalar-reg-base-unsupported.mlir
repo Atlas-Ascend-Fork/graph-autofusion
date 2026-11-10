@@ -8,7 +8,7 @@
 
 // RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %s 2>&1 | FileCheck %s
 
-// **reg 侧的 `logical_or` 不收标量右操作数。** 四个 impl 类里只有它没覆写
+// reg 侧的 `logical_or` 不收标量右操作数。 四个 impl 类里只有它没覆写
 // `IsScalarInputSupported`，基类返回 `false`；矩阵上那一格写的就是 `no`。
 //
 // 这一条单独一份用例，因为它是整批里唯一一处「同一个 op、同一侧、tensor 形态能选中而

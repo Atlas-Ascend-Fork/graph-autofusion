@@ -10,7 +10,7 @@
 
 //===- Case.cpp - load x3 -> clip_by_value -> store CPU case ----*- C++ -*-===//
 //
-// **第一个走完整条流水的三元节点。** 选择族（E5）只有 lit 与 bridge UT 覆盖：它的三个
+// 第一个走完整条流水的三元节点。 选择族（E5）只有 lit 与 bridge UT 覆盖：它的三个
 // 输入里第一个是 ui8 掩码，而这条 CPU E2E 的 harness 一路都是 f32 张量。clip 的三个输入
 // 同 dtype，能原样跑完，所以「三个输入 + 一块 tmp buffer」这个操作数形态到这里才第一次
 // 被端到端验过——三段划分（inputs | destinations | tmpBuffers）在 arity 3 上是否还对，

@@ -31,8 +31,7 @@ func.func @kernel_entry(%lhs: tensor<4xf16>, %rhs: tensor<4xf16>) -> tensor<4xf1
 
 // ABI-LABEL: func.func private @kernel_body
 // ABI-SAME: memref<4xf16, 22 : i32>
-// ABI 追加出来的两个参数自己声明身份，不再靠「倒数第二个且类型相符」「结构体名字叫
-// TilingData」反推（设计文档 3.6）。
+// workspace 与 tiling 参数显式声明身份，不按倒数位置、类型或结构体名称推断（设计文档 3.6）。
 // ABI-SAME: memref<ui8, 22 : i32> {afir.kernel_arg = #afir.kernel_arg<role = workspace>}
 // ABI-SAME: !emitasc.py_struct<"TilingData", [i64, i64], ["tile_len", "total"]> {afir.kernel_arg = #afir.kernel_arg<role = tiling>}
 // ABI-SAME: ascendc.aicore

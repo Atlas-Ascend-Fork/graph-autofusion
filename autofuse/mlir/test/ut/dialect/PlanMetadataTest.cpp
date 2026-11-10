@@ -18,9 +18,8 @@ using namespace mlir;
 
 namespace {
 
-// 候选身份（subgraph / plan）已随设计文档 5.1 步 7 迁到 `afplan`，其读取与校验在
-// AFPlanAttrsTest。这里只剩 module kind——单候选时它仍决定生成哪种 module，按 2.3 的
-// 判别留在 `afir`。
+// 候选身份 subgraph / plan 由 afplan 管理，读取和校验见 AFPlanAttrsTest。
+// 本文件只测试单候选时仍影响模块形态的 afir module kind（设计文档 2.3）。
 TEST(PlanMetadataTest, RecognizesPlanModule) {
   MLIRContext context;
   OpBuilder builder(&context);

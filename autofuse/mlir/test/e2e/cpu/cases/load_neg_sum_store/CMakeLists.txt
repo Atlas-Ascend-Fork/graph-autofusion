@@ -20,8 +20,8 @@ add_mlir_e2e_cpu_case(load_neg_sum_store_16x37
     TEST_SOURCES ${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_neg_sum_store/KernelTest.cpp
 )
 
-# 同一张 ARAR 图加一个 Neg：候选 3 的搬运有效视图是两项，elementwise 必须按整块局部跨度
-# 调一次一维 API，再交给 AR 归约。全部 schedule 模板原样保留，ATT 直接选择 case 3。
+# ARAR 图在归约前加入 Neg。候选 3 的搬运有效视图有两项，elementwise
+# 应按整块局部跨度调用一维 API，再执行 AR 归约。保留全部模板，由 ATT 选择 case 3。
 add_mlir_e2e_cpu_case(load_neg_sum_store_arar_case3
     ENVIRONMENT "AUTOFUSE_DFX_FLAGS=--force_schedule_result=0;--force_tiling_case=3"
     TILE_ACCESSOR graph0_result0_g0_tiling_data.get_z2t_size

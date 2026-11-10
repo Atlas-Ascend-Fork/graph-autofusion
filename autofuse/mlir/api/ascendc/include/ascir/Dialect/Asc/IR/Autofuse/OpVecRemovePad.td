@@ -23,7 +23,7 @@ include "mlir/IR/OpBase.td"
 
 // `RemovePadExtend(dst, src, last_axis_actual_size, last_axis_size, non_last_axis_merge)`
 // ——Autofuse 自己的包装（`autofuse/ascendc/api/removepad.h:14`），legacy 两侧的
-// `RemovePadApiCall` 逐字发的就是它（`codegen/api_call/elewise/remove_pad_api_call.cpp:86`）。
+// `RemovePadApiCall` 逐字生成的就是它（`codegen/api_call/elewise/remove_pad_api_call.cpp:86`）。
 // **两侧共用这一个包装**（矩阵 tier D1，`api_regbase/` 下没有对应文件），所以这里只有一个 def，
 // 由 `ApiFamily::Shared` 在注册处说出「两侧都用它」。
 //
@@ -36,16 +36,16 @@ include "mlir/IR/OpBase.td"
 // **dst 侧一个跨度参数都没有**：`GatherMask` 的写是连续的。目的地必须在整串向量化段上稠密，
 // 这一条由下降侧的判据保证（`Implementations/RemovePad.cpp`）。
 //
-// 三个尺寸都留着、按 C++ 形参表的次序发，不在 emitter 里补算式：`last_axis_size` 在
-// legacy 那边是 `SizeAlign(行长, 32/sizeof(T))` 现算的，这里发的是 descriptor 里那条真实行距
-// ——**两者在对齐的调度下相等，而发真实行距的那一份同时把「布局真的是这样」查了一遍**。
+// 三个尺寸都留着、按 C++ 形参表的次序生成，不在 emitter 里补算式：`last_axis_size` 在
+// legacy 那边是 `SizeAlign(行长, 32/sizeof(T))` 现算的，这里生成的是 descriptor 里那条真实行距
+// ——**两者在对齐的调度下相等，而生成真实行距的那一份同时把「布局真的是这样」查了一遍**。
 // 那条整除前提也因此变成一条可判的判据，而不是一个假设。
 //
 // 扩展头只写 `["removepad.h"]`，**无前置头**：包装里的名字是 `AscendC::GatherMask` 与
 // `AscendC::GatherMaskParams`，都是限定名，不靠 `utils.h` 的 `KernelUtils` / `MAX_REPEAT_TIME`。
 // 与 legacy 两侧的 `LoadApiHeaderFiles` 逐字一致（各返回 `{"removepad.h"}`）。
 //
-// 不带 `AscFunc`：自动发射器会把它打成 `AscendC::RemovePadExtend`，而包装住在全局作用域。
+// 不带 `AscFunc`：自动生成器会把它打成 `AscendC::RemovePadExtend`，而包装住在全局作用域。
 def AscendC_RemovePadExtendOp
     : VectorOp<"remove_pad_extend", "RemovePadExtend",
                [ApiExtensionOpInterface, OpWithDstInterface, OpWithSrcInterface]> {

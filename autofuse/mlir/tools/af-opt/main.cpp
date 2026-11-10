@@ -66,16 +66,10 @@ void PrintAutofuseMlirVersion(llvm::raw_ostream &os) {
   os << "  Autofuse MLIR version " << kAutofuseMlirVersion << "\n";
 }
 
-// Diagnoses af-opt's own --target/--target-profile flags (conflicting flags,
-// an unknown builtin platform, an invalid platform name, or an unreadable
-// profile file) up front, independent of whether any AFIR pipeline pass is
-// actually requested on this invocation. Every AFIRSessionScopedPass resolves
-// and loads its own profile again from these same flags once it initializes
-// (see resolveSessionTargetProfile in AFIRSessionScopedPass.cpp) since that is
-// where the real mlir::ascend::TargetProfile is needed; this check exists
-// only so a bare `af-opt --target=...` invocation, with no pass pipeline
-// pass to surface the diagnostic, still reports these errors before parsing
-// the input file, matching every other af-opt CLI flag.
+// Validate --target/--target-profile before parsing input, even when no pipeline is requested.
+// Report conflicting options, unknown or invalid platform names, and unreadable profiles here.
+// Session-scoped passes obtain the actual TargetProfile during initialization through
+// resolveSessionTargetProfile; this early check also covers bare af-opt invocations.
 mlir::LogicalResult ValidateTargetSelectionOptions() {
   std::string diagnostic;
   llvm::raw_string_ostream diagnosticStream(diagnostic);
@@ -107,19 +101,15 @@ void RegisterDialectsAndPasses(mlir::DialectRegistry &registry) {
   mlir::afir::registerAFIRScopeReduceScratchPass();
   mlir::afir::registerAFIRMaterializeTilingParamsPass();
 
-  // 设计文档 3.4 计划把 Schedule 迁移为 transform.afir.*，3.0 把「transform dialect
-  // 在当前 LLVM 基线可用且可扩展」列为实施前必须验证的待确认项。注册上游方言与
-  // --transform-interpreter，使该结论可以在本仓构建里由 LIT 直接验证，而不是靠
-  // 读上游文档推断；transform_dialect_baseline.mlir 即该验证用例。
-  // 目前尚无自定义 transform.afir.* Op，接入的只是上游方言本身。
+  // 注册上游 transform 方言与 interpreter，用 transform_dialect_baseline.mlir
+  // 验证当前 LLVM 基线可用且可扩展，为设计文档 3.4 的 Schedule 迁移提供基线证据。
+  // 当前不注册自定义 transform.afir.* op。
   mlir::transform::registerTransformPasses();
 }
 
-// Parses `inputFilename` as a ModuleOp container and returns the direct child
-// ModuleOps. Lit-test fixtures place each lowered plan candidate as a sibling
-// top-level `module @planN { ... }`; parseSourceFile<ModuleOp> auto-wraps
-// those siblings in one outer ModuleOp, whose direct children are exactly the
-// per-candidate modules runAggregateLaunchDriver expects.
+// Parse the input as a ModuleOp container and return its direct child modules.
+// parseSourceFile wraps sibling module @planN fixtures in one outer module, so the
+// children match the per-candidate inputs expected by runAggregateLaunchDriver.
 mlir::FailureOr<llvm::SmallVector<mlir::ModuleOp>> ParsePlanModules(llvm::StringRef inputFilename,
                                                                     mlir::MLIRContext &context,
                                                                     mlir::OwningOpRef<mlir::ModuleOp> &outerModule) {
@@ -146,9 +136,8 @@ mlir::FailureOr<llvm::SmallVector<mlir::ModuleOp>> ParsePlanModules(llvm::String
   return planModules;
 }
 
-// Prints the three text artifacts an aggregate-launch run produces, each under
-// a distinct marker line so a lit test's FileCheck directives can target one
-// section without matching content spilling over from another.
+// Print each aggregate-launch artifact under a distinct marker so FileCheck can
+// match one section without consuming text from another.
 void PrintAggregateLaunchArtifacts(const mlir::ascend::kernel::AggregateLaunchArtifacts &artifacts,
                                    llvm::raw_ostream &os) {
   os << "// -----KERNEL_BODY-----\n" << artifacts.kernel_body;

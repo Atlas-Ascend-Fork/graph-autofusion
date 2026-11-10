@@ -12,20 +12,20 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: af-opt --afir-select-implementation --target=Ascend950PR_9599 %s | FileCheck %s --check-prefix=SELECT-REG
 
-// **`afir.pow` 的标量形态：按 AFIR 原次序发射。**
+// `afir.pow` 的标量形态：按 AFIR 原次序生成。
 //
-// 这是标量形态的第三种发射规则，前两种在 `afir-scalar-binary-api.mlir`（可交换的 8 个，
+// 这是标量形态的第三种生成规则，前两种在 `afir-scalar-binary-api.mlir`（可交换的 8 个，
 // tile 恒在第一个输入位）与 `afir-scalar-binary-direction-api.mlir`（`sub` / `div` /
 // `truediv`，方向落在 bool 模板实参上）。`pow` 两者都不是：`pow.h` 与 `pow_reg_base.h`
-// 各有四个**同名重载**，(t,t) / (t,s) / (s,t) / (s,s)，标量在哪个位置由 C++ 重载决议挑，
+// 各有四个同名重载，(t,t) / (t,s) / (s,t) / (s,s)，标量在哪个位置由 C++ 重载决议挑，
 // 所以 legacy 的 `PowApiCall` 逐个位置原样打印、一次都不交换。
 //
-// **这份用例钉的就是「没有交换」**：`pow_scalar_lhs` 那条的实参序必须是
-// `Pow(dst, 标量, tile, tmp, count)`。要是照 `Subs` 那一族把 tile 挪到第一位，发出来的是
+// 这份用例钉的就是「没有交换」：`pow_scalar_lhs` 那条的实参序必须是
+// `Pow(dst, 标量, tile, tmp, count)`。要是照 `Subs` 那一类把 tile 挪到第一位，生成的是
 // `tile ^ 标量`——两个都是合法的 C++、都编得过，只是算的不是同一个东西。
 //
 // 两侧共用一份输入：`pow` 两侧都要 tmp buffer（`CalcPowTmpSize` / `CalcPowTmpSizeV2`），
-// 所以图一样。CPP 那一条也两侧通用——发出来的调用文本逐字相同，差别只在内联进来的头
+// 所以图一样。CPP 那一条也两侧通用——生成的调用文本逐字相同，差别只在内联进来的头
 // （`pow.h` vs `pow_reg_base.h`），所以 mem / reg 由两条 SELECT 分。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
@@ -62,7 +62,7 @@ func.func @pow_scalar_lhs(%input: !ascendc.local_tensor<?xf32>,
 // IR: %[[RHS_S:.*]] = arith.constant 2.000000e+00 : f32
 // IR: ascendc.pow %arg1, %arg0, %[[RHS_S]], %arg2
 
-// **标量在左：操作数序是标量在前。** 这一条是本用例的全部理由——换成 `%arg0, %[[LHS_S]]`
+// 标量在左：操作数序是标量在前。 这一条是本用例的全部理由——换成 `%arg0, %[[LHS_S]]`
 // 就是把 `s ^ x` 算成了 `x ^ s`。
 // IR-LABEL: func.func @pow_scalar_lhs
 // IR: %[[LHS_S:.*]] = arith.constant 3.000000e+00 : f32

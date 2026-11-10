@@ -10,12 +10,12 @@
 
 // 向量化轴合并（阶段 2 合轴）的覆盖。
 //
-// **为什么是 UT 而不是 LIT**：`collapseVectorizedAxes` 的产物是一个结构体，不是 IR。
+// 为什么是 UT 而不是 LIT：`collapseVectorizedAxes` 的产物是一个结构体，不是 IR。
 // LIT 只能隔着下降结果间接看它——段数变了会表现成循环层数变了，但「段的 stride 取的是
 // 最内轴还是最外轴」「extent 是推出来的还是挑出来的」这类判据在输出文本里没有形状。
 // 这里逐条构造判据的正反两侧。
 //
-// **载体用真的 AFIR op**：`afir.operand_descs` / `afir.destination_descs` 的长度由
+// 载体用真的 AFIR op：`afir.operand_descs` / `afir.destination_descs` 的长度由
 // `AFIRDialect.cpp:533` `getExpectedDescriptorCount` 按 `getOperandPartition` 的
 // `inputCount` / `destinationCount` 校验，所以这两个属性挂不到任意 op 上。
 // 一元用 `afir.abs`（1 进 1 目的），二元用 `afir.add`，另一侧角色不是 `compute` 的形态
@@ -159,11 +159,11 @@ TEST_F(VectorSegmentationTest, MergesContiguousAxes) {
   ASSERT_EQ(plan->segments.size(), 1U);
   EXPECT_EQ(plan->segments[0].axes, (SmallVector<int64_t>{0, 1}));
   EXPECT_EQ(Text(plan->segments[0].extent), "128");
-  // 段的 stride 取**最内**轴的，不是最外轴的。取错会变成 32。
+  // 段的 stride 取最内轴的，不是最外轴的。取错会变成 32。
   EXPECT_EQ(Text(plan->segments[0].strides[0]), "1");
 }
 
-// 核心判据：只要**一个** operand 否决就封段。
+// 核心判据：只要一个 operand 否决就封段。
 //
 // 这就是 `afir-broadcast-multi-axis-unsupported.mlir` 里那对 descriptor：dst 侧
 // `8 == 1 × 8` 成立，src 侧 `0 == 1 × 8` 不成立，所以不能合。少了「所有张量都要同意」
@@ -242,7 +242,7 @@ TEST_F(VectorSegmentationTest, MergesAdjacentBroadcastAxes) {
   EXPECT_EQ(plan->segments[1].axes, SmallVector<int64_t>{2});
 }
 
-// extent 为 1 的轴整根丢掉，**而且丢轴发生在逐对比较之前**——否则它会把两侧本来连续的
+// extent 为 1 的轴整根丢掉，而且丢轴发生在逐对比较之前——否则它会把两侧本来连续的
 // 两根轴割开。这里外轴与内轴本来可合，中间插一根 extent 为 1 的轴。
 TEST_F(VectorSegmentationTest, DropsUnitAxisWithoutSplittingItsNeighbours) {
   auto plan = Collapse(R"mlir(
@@ -354,7 +354,7 @@ TEST_F(VectorSegmentationTest, IgnoresNonComputeDescriptors) {
   EXPECT_EQ(plan->segments[0].strides.size(), 1U);
 }
 
-// 标量操作数：角色是 `compute` 但一个向量化轴都没有，**跳过**而不是报失败。
+// 标量操作数：角色是 `compute` 但一个向量化轴都没有，跳过而不是报失败。
 //
 // 调度给标量的 descriptor 就是这个形态（`repeats = [1, 1], strides = [0, 0]`，无
 // `vectorized_axis`）。把它算进来会让「各张量同一串向量化轴」那条立刻不成立，
@@ -387,7 +387,7 @@ TEST_F(VectorSegmentationTest, FailsWithoutComputeDescriptors) {
   EXPECT_TRUE(failed(plan));
 }
 
-// 张量出处要带上：下降侧按段的 stride 给对应那个 operand 发偏移，按数组下标硬对是错的。
+// 张量出处要带上：下降侧按段的 stride 给对应那个 operand 生成偏移，按数组下标硬对是错的。
 TEST_F(VectorSegmentationTest, RecordsTensorProvenance) {
   auto plan = Collapse(R"mlir(
 #gm = #afir.tensor_desc<axis = [0], repeats = [#afir.expr<"128">], strides = [#afir.expr<"1">],

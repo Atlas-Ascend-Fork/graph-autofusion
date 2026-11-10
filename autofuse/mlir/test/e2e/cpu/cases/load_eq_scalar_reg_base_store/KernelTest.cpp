@@ -38,7 +38,7 @@ TEST(MlirE2eCpu, LoadEqScalarRegBaseStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 取 [-2, 2] 的整数，**两侧都有**：只有大于 2.0 或只有小于 2.0 的话，`EQ` 与 `GE` /
+  // 取 [-2, 2] 的整数，两侧都有：只有大于 2.0 或只有小于 2.0 的话，`EQ` 与 `GE` /
   // `LE` 分不开。相等的那一档占五分之一，两种结果都出现。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = static_cast<float>(static_cast<int32_t>(index % 5U) - 2);

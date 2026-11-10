@@ -169,13 +169,13 @@ af::AscGraph MakeScalarDataGraph(int64_t scalarIndex) {
   return graph;
 }
 
-// 含一个 `IndexExpr` 节点的图。它是这一族的第三种标量源：`Scalar` 是编译期字面量、
+// 含一个 `IndexExpr` 节点的图。它是这一类的第三种标量源：`Scalar` 是编译期字面量、
 // `ScalarData` 是 kernel 形参、`IndexExpr` 是一条按 size var 写的表达式，在 kernel 顶部
-// 算成常量。**表达式带不带自由符号，走的是两条不同的路**，由参数决定。
+// 算成常量。表达式带不带自由符号，走的是两条不同的路，由参数决定。
 af::AscGraph MakeIndexExprGraph(const char *expression, bool dynamicShape = false) {
   af::testing::AscGraphBuilder builder("elewise_index_expr");
-  // 带自由符号的表达式要引用一个**真的** size var：名字不在图上登记的话，legacy 渲染时
-  // 替换不掉它，发出来的 C++ 会引用一个不存在的变量。
+  // 带自由符号的表达式要引用一个真的 size var：名字不在图上登记的话，legacy 渲染时
+  // 替换不掉它，生成的 C++ 会引用一个不存在的变量。
   const auto extent = dynamicShape ? builder.SizeVar("s0") : af::testing::Sym(8);
   auto graph = builder.Loops({extent, af::testing::Sym(8)})
                    .Data("x", 0, af::DT_FLOAT16)
@@ -355,14 +355,14 @@ TEST(ScheduleToAfirTest, RejectsUnsupportedDtype) {
   EXPECT_FALSE(mlir::afir::bridge::detail::DTypeStr(ge::DT_UNDEFINED).has_value());
 }
 
-// 暂缓名单上的每一行都必须还是供给表上的一位，而且必须真的还被挡着。
+// 暂缓名单上的每一行都必须还是支持表上的一位，而且必须真的还被挡着。
 //
 // 两个方向都要查，而且两个方向漏掉的后果都是静默的：
 //
-//   - 名单上写了一位，供给表里却没有它：这一行是句死话。它读起来像「这一位我们建模了、
-//     只是先不放」，实际是「根本没建模」——排期的人会去找一个不存在的闸门。
-//   - 供给表加了一位、名单上那一行忘了删：那一位永远进不来，而 lit 与 UT 全绿，因为它们
-//     走的是 ODS 和 implementation，一条都不经过这道闸。bf16 就是这么被挡了一期：闸门一
+//   - 名单上写了一位，支持表里却没有它：这一行是句死话。它读起来像「这一位我们建模了、
+//     只是先不放」，实际是「根本没建模」——排期的人会去找一个不存在的门禁。
+//   - 支持表加了一位、名单上那一行忘了删：那一位永远进不来，而 lit 与 UT 全绿，因为它们
+//     走的是 ODS 和 implementation，一条都不经过这道闸。bf16 就是这么被挡了一期：门禁一
 //     开，reg 侧接管表上 28 格里 18 格是接管，而那期间 lit 与 UT 一直全绿。
 TEST(ScheduleToAfirTest, HeldBackDtypesAreRealSupplyTablePositions) {
   const uint32_t supplied = mlir::afir::afirAllElementTypeBits();
@@ -372,7 +372,7 @@ TEST(ScheduleToAfirTest, HeldBackDtypesAreRealSupplyTablePositions) {
   }
 }
 
-// 反向：供给表上被挡着的那几位，`IsAfirModeledDType` 必须答「不收」；没被挡的必须答「收」。
+// 反向：支持表上被挡着的那几位，`IsAfirModeledDType` 必须答「不收」；没被挡的必须答「收」。
 // 这条把那个函数与两张表钉在一起，所以「头文件说开了、函数返回 false」那种自相矛盾再也
 // 写不出来。
 TEST(ScheduleToAfirTest, ModeledDtypeGateFollowsTheSupplyTableMinusHeldBack) {
@@ -434,12 +434,12 @@ TEST(ScheduleToAfirTest, ParsesNumericRepeatsAndRejectsInvalidNumbers) {
   EXPECT_FALSE(mlir::afir::bridge::detail::MakeSizeBytesExpr({""}, 1).has_value());
 }
 
-// **这条断言换过一次说法。** 原先它靠一个反例立住：表里有一行是 `Tensor` 形态
+// 这条断言换过一次说法。 原先它靠一个反例立住：表里有一行是 `Tensor` 形态
 // （最后是 `Cast`），于是「白名单是显式的」可以写成「这一行没有 buffer 形态」。
 // `Cast` 接通之后反例没有了——今天 40 行全是 `Both`，再挑哪一行写 `EXPECT_FALSE` 都是
 // 假的。
 //
-// 换成钉住**这张表本身是判据**：白名单只认表里写下的名字，一个拼错的、一个 legacy 有
+// 换成钉住这张表本身是判据：白名单只认表里写下的名字，一个拼错的、一个 legacy 有
 // 而这里没登记的，都必须答 false。这条挡的是同一件事——「没登记过的节点被默许建出
 // buffer 形态」——而且不依赖表里恰好有一行是 `Tensor`。
 //
@@ -474,19 +474,19 @@ TEST(ScheduleToAfirTest, KeepsBufferFormAllowlistExplicit) {
   EXPECT_TRUE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("Round"));
   EXPECT_TRUE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("Igamma"));
   // 第 8 批。两个都走标准调用，而 `Log10` 还有一个同名的 `ascendc.log10` RegOp
-  // （`Basic/OpReg.td` 的 `UnaryRegOp`，作用在 `RegTensor` 上）——那是 VF 那条路的供给，
-  // 不是这里的；挑错了编得过而发出去的调用形参类型不对。
+  // （`Basic/OpReg.td` 的 `UnaryRegOp`，作用在 `RegTensor` 上）——那是 VF 那条路的可用实现，
+  // 不是这里的；挑错了编得过而生成的调用形参类型不对。
   EXPECT_TRUE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("Log10"));
   EXPECT_TRUE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("Hypot"));
 
-  // 第 9 批。挑 `ChebyshevPolynomialU` 与 `ShiftedChebyshevPolynomialT` 两个：**两族各
+  // 第 9 批。挑 `ChebyshevPolynomialU` 与 `ShiftedChebyshevPolynomialT` 两个：**两类各
   // 一个**，因为它们的前导头是两个不同的 utils，而那两个键是手工写的。
   EXPECT_TRUE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("ChebyshevPolynomialU"));
   EXPECT_TRUE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("ShiftedChebyshevPolynomialT"));
 
-  // step 2a。挑 `FloorToInt` 是因为它**没有同名的 AscendC API**——CANN 全树里没有
-  // `AscendC::FloorToInt`，legacy 的 `GetApiName()` 给的那个名字不是发出去的函数名。
-  // 照那个名字去找供给会找不到，而照它去建一个新 op 则会发出一个不存在的调用。
+  // step 2a。挑 `FloorToInt` 是因为它没有同名的 AscendC API——CANN 全树里没有
+  // `AscendC::FloorToInt`，legacy 的 `GetApiName()` 给的那个名字不是生成的函数名。
+  // 按那个名字找可用实现会找不到，而照它去建一个新 op 则会生成一个不存在的调用。
   EXPECT_TRUE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("Ceil2Int"));
   EXPECT_TRUE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("FloorToInt"));
 
@@ -494,7 +494,7 @@ TEST(ScheduleToAfirTest, KeepsBufferFormAllowlistExplicit) {
   EXPECT_FALSE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("cast"));
   // legacy 里真有这个节点类型（`ascir_builtin_ops_v2.cpp` 的 `REG_ASC_IR(Frexp)`，reg 侧
   // 独有），这一层还没接：没登记就是不支持，不是「像是 elementwise 就放行」。
-  // **挑它不是随手挑的**：`Frexp` 与刚接通的 `hypot` 同一族供给——都在
+  // 挑它不是随手挑的：`Frexp` 与刚接通的 `hypot` 可用实现来源相同——都在
   // `v35/ascendc/api_regbase/` 下、都走 `CalcVoidTmpSizeV2` 要一块尺寸为 0 的 tmp，
   // 站在这里的名字越像已接的那些，这条断言挡的东西才越实。接通它的时候这一行要换成别的
   // 还没接的名字——原先站这个位置的是 `Log10`（2026-10-27 接通），再之前是 `LogicalXor`、
@@ -504,7 +504,7 @@ TEST(ScheduleToAfirTest, KeepsBufferFormAllowlistExplicit) {
   // 不同**（`.Output("mantissa", "T")` 是 f32、`.Output("exponent", "U")` 是 i32，
   // `FrexpAscIrCodegenImplV2::IsNodeValid` 还明写 `outputs().size() == 2`），调用形态是
   // `UnaryDoubleOutputApiTmpCall`。而这条路上从 `AFIR_BufferizableUnaryElementwiseOp` 到
-  // 三段划分到 `ResultElementRule` 全部假定**一个**结果。接它不是加一行注册，是先开出
+  // 三段划分到 `ResultElementRule` 全部假定一个结果。接它不是加一行注册，是先开出
   // 「多输出」这根轴。
   EXPECT_FALSE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("Frexp"));
   EXPECT_FALSE(mlir::afir::bridge::isAFIRBufferFormOperationSupported("NoSuchScheduleNode"));
@@ -854,8 +854,8 @@ TEST(ScheduleToAfirTest, TilingSpecEmitsNestedWorkspaceExpression) {
   bundle.tiling_functions["TilingHead"] = "// generated ATT declarations\n";
   auto source = mlir::bridge::emitInductorTilingFunc(*spec, bundle);
   ASSERT_TRUE(succeeded(source));
-  // `Max` / `Min` 是 ATT 发在 `namespace optiling` 里的函数模板，而
-  // `CalculateWorkspaceSize` 发在全局作用域，所以调用点必须带限定。
+  // `Max` / `Min` 是 ATT 定义在 `namespace optiling` 里的函数模板，而
+  // `CalculateWorkspaceSize` 定义在全局作用域，所以调用点必须带限定。
   EXPECT_NE(source->find("optiling::Max("), std::string::npos);
   EXPECT_NE(source->find("optiling::Min("), std::string::npos);
   EXPECT_NE(source->find("64 * static_cast<uint64_t>(t.graph0_result0_g0_tiling_data.s0)"), std::string::npos);
@@ -896,7 +896,7 @@ TEST(ScheduleToAfirTest, TilingSpecRejectsUnknownRelationDestination) {
   EXPECT_NE(diagnostic.find("destination 'missing' is not a field of stage 0"), std::string::npos);
 }
 
-// 动态维能从同轴的输入直接问出来时，就发 `memref.dim`，不走符号序言。
+// 动态维能从同轴的输入直接问出来时，就生成 `memref.dim`，不走符号序言。
 //
 // 这条用例此前断言 `dimCount == 0`，而它的 walk 体里那两句（源是 kernel 参数、结果有使用
 // 者）在计数为 0 时一次都执行不到——写它的人预期的是有 `DimOp`，那个 0 是后来按当时的
@@ -905,7 +905,7 @@ TEST(ScheduleToAfirTest, TilingSpecRejectsUnknownRelationDestination) {
 // 失败（设计文档 8.3.1，S5 债务）。改用 `ParseRelaxed` 之后快路径才真正命中。
 //
 // 数值不受影响——动态维只是 `memref` 类型上的尺寸，两条路给出的是同一个值；差别是符号
-// 序言那一段算术还发不发。
+// 序言那一段算术还是否生成。
 TEST(ScheduleToAfirTest, MaterializesDynamicDimFromTheMatchingInput) {
   auto makeTensor = [](mlir::afir::Space space, int64_t bufferId) {
     mlir::afir::bridge::TensorValueDTO value;
@@ -983,7 +983,7 @@ TEST(ScheduleToAfirTest, MaterializesDynamicDimFromTheMatchingInput) {
   ASSERT_TRUE(module);
 
   // 每个 `memref.dim` 都必须问到 kernel 参数（那是唯一能在运行期给出真实尺寸的源），
-  // 并且被真正用上；发一个没人用的 dim 与不发是一回事。
+  // 并且被真正用上；生成一个没人用的 dim 与不生成是一回事。
   unsigned dimCount = 0;
   module->walk([&](mlir::memref::DimOp dim) {
     ++dimCount;
@@ -992,17 +992,17 @@ TEST(ScheduleToAfirTest, MaterializesDynamicDimFromTheMatchingInput) {
   });
   // 本夹具里有两处动态维的表达式与某个输入同轴，因此两处都走快路径。数字本身不是判据，
   // 判据是「大于零」加上面两条——但写成精确值，快路径被改回去时这里会直接失败而不是
-  // 悄悄少发几个。
+  // 悄悄少生成几个。
   EXPECT_EQ(dimCount, 2U);
 }
 
-// 整数 `ir_attr` 走完 `BuildAfirModule` 之后建出来的属性，**类型要和 ODS 的约束对得上**。
+// 整数 `ir_attr` 走完 `BuildAfirModule` 之后建出来的属性，类型要和 ODS 的约束对得上。
 //
 // 这条是补的，而且是被咬了一次才补的：第 9 批（多项式族）第一版 ODS 写的是 `SI64Attr`
 // （有符号 `si64`），而 `buildBufferNodeOp` 建的是 `getI64IntegerAttr`（无符号性 `i64`），
-// 两者不是同一个类型，verifier 当场拒收——八格从干净回落变成**硬失败**。
+// 两者不是同一个类型，verifier 当场拒收——八格从干净回落变成硬失败。
 //
-// **lit 按原理抓不到它**：lit 从「IR 里属性已经写好了」开始，手写的是 `n = 3 : i64`，
+// lit 按原理抓不到它：lit 从「IR 里属性已经写好了」开始，手写的是 `n = 3 : i64`，
 // 走的是正确的那一种，bridge 的构造路径一行都没走到。能抓到的只有这条 UT 和接管表，
 // 而接管表要二十分钟、还得占着那台 aarch64。
 //
@@ -1101,7 +1101,7 @@ TEST(ScheduleToAfirTest, BuildsIntIrAttrWithTheTypeOdsRequires) {
 // 这条只有 UT 能验。LIT 从「IR 里已经有一个标量 SSA 值」开始，走不到 bridge；而 CPU
 // E2E 走不通——legacy 的 ATT tiling 对含 `Scalar` 节点的图直接返回失败，在 MLIR 这一
 // 半跑起来之前（见方案 E3 段）。
-// 从**真实的 AscGraph** 出发走完 ScheduleToAfir，不是手填 `NodeInfo`。
+// 从真实的 AscGraph 出发走完 ScheduleToAfir，不是手填 `NodeInfo`。
 //
 // `FoldsScalarNodeIntoATypedConstant` 钉的是 `AfirBuilder` 那一半；ScheduleToAfir 这一半
 // （`ReadScalarValue` 把字面量取出来、`AppendTemplateNode` 让 `Scalar` 绕开 buffer 形态
@@ -1144,7 +1144,7 @@ TEST(ScheduleToAfirTest, BridgesAGraphContainingAScalarNode) {
 // `ScalarData` 与 `Scalar` 只差一个字，落到 AFIR 上却是两样东西：`Scalar` 折成一个
 // `arith.constant`，`ScalarData` 变成一个**按值传的 kernel 形参**。
 //
-// 这条钉的是 bridge 这一半——CPU E2E 只看得见最后发出来的 C++，中间这一步错了要到最后
+// 这条钉的是 bridge 这一半——CPU E2E 只看得见最后生成的 C++，中间这一步错了要到最后
 // 才看得出来，而且看到的是别的症状（形参类型序列不对、或者干脆链不上）。
 TEST(ScheduleToAfirTest, BridgesAGraphContainingAScalarDataNode) {
   mlir::MLIRContext context;
@@ -1171,7 +1171,7 @@ TEST(ScheduleToAfirTest, BridgesAGraphContainingAScalarDataNode) {
   // buffer 形态下参数是 [输入…, 输出…]：x、k、y。
   ASSERT_EQ(kernel.getNumArguments(), 3U);
 
-  // **标量形参的类型是元素类型本身，不是 memref。** 建成 memref 的话它就成了一块 GM
+  // 标量形参的类型是元素类型本身，不是 memref。 建成 memref 的话它就成了一块 GM
   // 存储，主机要传地址而不是值——签名与 legacy 对不上。
   EXPECT_TRUE(kernel.getArgument(1).getType().isF16());
   EXPECT_TRUE(mlir::isa<mlir::MemRefType>(kernel.getArgument(0).getType()));
@@ -1192,7 +1192,7 @@ TEST(ScheduleToAfirTest, BridgesAGraphContainingAScalarDataNode) {
   EXPECT_TRUE(kernel.getArgAttr(0, mlir::afir::kBufferDescAttrName));
   EXPECT_TRUE(kernel.getArgAttr(2, mlir::afir::kBufferDescAttrName));
 
-  // **`afir.arg_descs` 仍然覆盖每一个数据参数**：标量那一格是退化视图——无轴、只留角色。
+  // `afir.arg_descs` 仍然覆盖每一个数据参数：标量那一格是退化视图——无轴、只留角色。
   // 少一格的话描述子下标就跟参数下标错开，错开之后每条检查都还在跑，只是查的是别的参数。
   auto argDescs = kernel->getAttrOfType<mlir::ArrayAttr>(mlir::afir::kArgDescsAttrName);
   ASSERT_TRUE(argDescs);
@@ -1231,7 +1231,7 @@ TEST(ScheduleToAfirTest, RejectsScalarDataSharingAnIndexWithAData) {
 
 // `IndexExpr` 与 `Scalar` 落在同一处——一个有类型的常量，不产生 kernel 形参。
 //
-// **它不需要归纳变量。** legacy 把两者一起收进 `kernel.constant_tensors`，由
+// 它不需要归纳变量。 legacy 把两者一起收进 `kernel.constant_tensors`，由
 // `AppendConstTensorInit` 在 kernel 顶部物化，而那一处跑在 `root_loop.Generate` 之前。
 TEST(ScheduleToAfirTest, FoldsAConstantIndexExprIntoATypedConstant) {
   mlir::MLIRContext context;
@@ -1255,7 +1255,7 @@ TEST(ScheduleToAfirTest, FoldsAConstantIndexExprIntoATypedConstant) {
   }
   ASSERT_TRUE(kernel);
 
-  // **它不占形参**：只有 x 和 y。`ScalarData` 那条恰好相反，那边标量占一格。
+  // 它不占形参：只有 x 和 y。`ScalarData` 那条恰好相反，那边标量占一格。
   EXPECT_EQ(kernel.getNumArguments(), 2U);
 
   unsigned constantCount = 0;
@@ -1309,7 +1309,7 @@ TEST(ScheduleToAfirTest, MaterializesASymbolicIndexExprInTheSizePrologue) {
   module->walk([&](mlir::afir::SymbolicEvalOp) { ++evals; });
   EXPECT_GE(evals, 1U);
 
-  // **它们必须在入口块的序言里**：块首那一段连续的 tiling_param / symbolic_eval。落到
+  // 它们必须在入口块的序言里：块首那一段连续的 tiling_param / symbolic_eval。落到
   // 循环体里的话支配不了后面的消费者，而那是一次静默的 IR 破坏。
   mlir::func::FuncOp kernel;
   for (mlir::func::FuncOp function : module->getOps<mlir::func::FuncOp>()) {
@@ -1334,7 +1334,7 @@ TEST(ScheduleToAfirTest, MaterializesASymbolicIndexExprInTheSizePrologue) {
   });
 }
 
-// 字面量解析。这一族的失败方式全是**静默给出另一个值**，所以每一条都得单独钉。
+// 字面量解析。这一类的失败方式全是静默给出另一个值，所以每一条都得单独钉。
 //
 // 反面教材是 `StringRef::getAsInteger(unsigned, APInt&)`：无符号重载 + 「按字符串估出
 // 来的最小位宽」，"8" 会变成 4 位的 `0b1000`，sext 到 i32 就是 -8；负号它根本不收，
@@ -1692,7 +1692,7 @@ TEST(ScheduleToAfirTest, AcceptsSchedulerTiledTransferWithDifferentLogicalAndLoc
 // `exec_condition` 从 DTO 到 `afir.sched` 的那一段。三格：认得的拼写落到属性上、认不得的
 // 拼写报错、没有 `sched_axis` 时报错。
 //
-// **不认得的拼写必须报错**，因为 `no_cache` 是缺省值：静默落回缺省的表现是每个迭代都重算
+// 不认得的拼写必须报错，因为 `no_cache` 是缺省值：静默落回缺省的表现是每个迭代都重算
 // ——不错，但上游那次决策在 IR 里一点痕迹都不剩，往后既没有诊断也没有性能数字能发现它。
 // 第三格同理：没有 `sched_axis` 就不会建 `afir.sched`，这个条件没有地方可挂。
 TEST(ScheduleToAfirTest, CarriesExecConditionOntoTheScheduleAttribute) {
@@ -1951,7 +1951,7 @@ TEST(ScheduleToAfirTest, RejectsDuplicateOutputIoIndex) {
   EXPECT_NE(message.find("duplicate output index"), std::string::npos);
 }
 
-// 一条队列上的两个成员：**元素类型不同是合法调度，descriptor 字段不一致才拒收。**
+// 一条队列上的两个成员：元素类型不同是合法调度，descriptor 字段不一致才拒收。
 //
 // 前一半是「一条队列上不能混 dtype」那条限制的去处。队列就是一块字节，legacy 的
 // `oneBufSize` 取成员的 max，而片上资源的字节数由 ATT 填进 `q<id>_size`
@@ -2462,12 +2462,12 @@ TEST(ScheduleToAfirTest, DifferentLogicalTileWithDifferentVectorizedPitchIsConfl
 
 // RCore 的 `Workspace` 节点在一张图里出现的方向有两种，两条用例分别钉住：
 //
-// - phase 2 当**源**（`workspace -> Load -> Sum`），自身带完整 axis / repeats / strides；
-// - phase 1 当**汇**（`Sum -> Store -> workspace`），自身退化到只剩 `mem`，形状要从写它的
+// - phase 2 当源（`workspace -> Load -> Sum`），自身带完整 axis / repeats / strides；
+// - phase 1 当汇（`Sum -> Store -> workspace`），自身退化到只剩 `mem`，形状要从写它的
 //   Store 上取。
 //
-// 两边共同的判据是同一条：它变成函数**体内**一块带 GM `buffer_desc` 的存储，`buffer_id`
-// 等于 tensor id，且**不占 kernel 形参**。最后这条是与「映射成 `Data`」方案的分水岭——
+// 两边共同的判据是同一条：它变成函数体内一块带 GM `buffer_desc` 的存储，`buffer_id`
+// 等于 tensor id，且不占 kernel 形参。最后这条是与「映射成 `Data`」方案的分水岭——
 // 按 `Data` 走会凭空多一个入参并打乱既有入参编号。
 namespace {
 mlir::afir::bridge::TensorValueDTO MakeWorkspaceTestTensor(mlir::afir::Space space, int64_t bufferId) {
@@ -2515,7 +2515,7 @@ TEST(ScheduleToAfirTest, StoreElementTypeMismatchIsCapabilityShortfallNotHardFai
                    .Cast("up", "load_x", af::DT_FLOAT)
                    .Cast("down", "up", af::DT_BF16)
                    .Store("store_y", "down")
-                   // **故意写错**：Store 的源（`down`）是 bf16，这里的 GM 签名是 f32——
+                   // 故意写错：Store 的源（`down`）是 bf16，这里的 GM 签名是 f32——
                    // 与 `abs_fma_bf16_test` 实测的那张调度图（`%output: f32` 配
                    // `Store(Cast(Fma) -> bf16)`）逐字同形。
                    .Output("y", "store_y", 0, af::DT_FLOAT)
@@ -2685,7 +2685,7 @@ TEST(ScheduleToAfirTest, WorkspaceSinkTakesItsShapeFromTheStoreThatWritesIt) {
 // 上一条的两侧轴表相同，折叠按下标配对也能过。但归约轴分布在保留轴两侧时（`[R, A, R]`
 // 归约 {0, 2}），调度器会把不相邻的那两根归约轴融成一根再拿去分核：目的建立在融合后的块轴
 // 上，源还留在原始轴上，两张轴表既不同序也不同集合。按下标比会拿源的 `aT`（切块个数）去比
-// 目的的 `at`（块内长度），报出一条两个数都不该放在一起的错——实测 `(8,8,128,128)` 归约
+// destination 的 `at`（块内长度），报出一条两个数都不该放在一起的错——实测 `(8,8,128,128)` 归约
 // {0,2,3} 就死在这里，而同一形状只归约 {0} / {2,3} / {0,1} 都能过。
 TEST(ScheduleToAfirTest, WorkspaceStoreFoldsBlockScatterWhenAxisListsDiverge) {
   mlir::MLIRContext context;
@@ -2777,16 +2777,16 @@ TEST(ScheduleToAfirTest, WorkspaceStoreFoldsBlockScatterWhenAxisListsDiverge) {
   EXPECT_EQ(destination.getRepeats()[0].getValue().getValue(), "4");
   EXPECT_EQ(destination.getRepeats()[1].getValue().getValue(), "2");
   EXPECT_EQ(destination.getRepeats()[2].getValue().getValue(), "1");
-  // 块轴的 stride 保持目的的，它是块偏移。
+  // 块轴的 stride 保持destination 的，它是块偏移。
   EXPECT_EQ(destination.getStrides()[2].getValue().getValue(), "8");
 }
 
-// 多核 reduce 里，写 workspace 的那条 Store 两侧口径不同：源是本核归约出来的一片（块轴
+// 多核 reduce 里，写 workspace 的那条 Store 两侧规则不同：源是本核归约出来的一片（块轴
 // repeat 为 1），目的却是整块 workspace（块轴 repeat 为块数）。`afir.store` 的契约要求两侧
 // 元素数相等，表达不了这种「按块索引散写」——块偏移由块号在下降时施加，不由描述子表达。
 //
-// 所以 destination 描述子要折一次：轴、步长、向量化保留目的的（那条块步长正是偏移所需），
-// repeats 取源的。这条钉住折叠**只动 repeat，不动 stride**——把 stride 一起折掉的话，
+// 所以 destination 描述子要折一次：轴、步长、向量化保留destination 的（那条块步长正是偏移所需），
+// repeats 取源的。这条钉住折叠只动 repeat，不动 stride——把 stride 一起折掉的话，
 // 每个核都会写到 workspace 的第 0 行。
 TEST(ScheduleToAfirTest, WorkspaceStoreFoldsBlockScatteredRepeatsButKeepsStrides) {
   mlir::MLIRContext context;
@@ -2801,7 +2801,7 @@ TEST(ScheduleToAfirTest, WorkspaceStoreFoldsBlockScatteredRepeatsButKeepsStrides
   tmpl.axes.push_back({1, "a", "original", "8"});
 
   // 本核归约出来的一片：块轴 repeat 为 1、stride 为 0。夹具里不真做归约（`Sum` 还要求
-  // scratch），直接让 Load 搬的就是这一片——关心的是 Store 两侧的口径差，不是谁产出它。
+  // scratch），直接让 Load 搬的就是这一片——关心的是 Store 两侧的规则差，不是谁产出它。
   auto reduced = MakeWorkspaceTestTensor(mlir::afir::Space::UB, 3);
   reduced.tensor.shape = {1, 8};
   reduced.tensor.shape_exprs = {"1", "8"};
@@ -2869,7 +2869,7 @@ TEST(ScheduleToAfirTest, WorkspaceStoreFoldsBlockScatteredRepeatsButKeepsStrides
   // repeat 折成源的 1，元素数与源相等，`afir.store` 的契约才成立。
   EXPECT_EQ(destination.getRepeats()[0].getValue().getValue(), "1");
   EXPECT_EQ(destination.getRepeats()[1].getValue().getValue(), "8");
-  // stride 保持目的的——它是块偏移，折掉就所有核写同一行。
+  // stride 保持destination 的——它是块偏移，折掉就所有核写同一行。
   EXPECT_EQ(destination.getStrides()[0].getValue().getValue(), "8");
   EXPECT_EQ(destination.getStrides()[1].getValue().getValue(), "1");
 

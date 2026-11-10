@@ -65,8 +65,8 @@ enum class TruthValue {
   Unknown,
 };
 
-// Internal symbolic support interface. It intentionally stays outside the public
-// Expression API so SymEngine tree traversal does not spread to ordinary users.
+// Internal symbolic interface, kept outside the public Expression API to avoid
+// exposing SymEngine tree traversal to ordinary callers.
 class ExpressionAccess {
  public:
   static Result<ExpressionNode> GetTree(const Expression &expression);

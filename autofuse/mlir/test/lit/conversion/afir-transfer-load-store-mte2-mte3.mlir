@@ -6,20 +6,20 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **`Load → Store` 直连：`MTE2 → MTE3` 的流水线同步，以及 Store 的 GM 偏移。**
+// `Load → Store` 直连：`MTE2 → MTE3` 的流水线同步，以及 Store 的 GM 偏移。
 //
-// 这一份是**真实 dump**：`[1,8] → [128,8]` 广播图的 `B0Y1` 模板。广播轴 `z0` 排到 tile 外，
+// 这一份是真实 dump：`[1,8] → [128,8]` 广播图的 `B0Y1` 模板。广播轴 `z0` 排到 tile 外，
 // `RemoveRedundantBroadcastNode` 把 `brc` 整个删掉，图退化成 `Load → Store`——中间没有 V 计算。
 // descriptor 一个字没改，只把 template 序号与 tiling_key 归 0。
 //
 // 钉两件事：
 //
-// 1. **同步**。`AFIRPipelineSync` 此前只认 `MTE2 → Vector`、`Vector → MTE3`、`Vector → Vector`，
+// 1. 同步。`AFIRPipelineSync` 此前只认 `MTE2 → Vector`、`Vector → MTE3`、`Vector → Vector`，
 //    这条直连交接报 `unsupported pipeline synchronization from MTE2 to MTE3`。顺序只能由队列的
 //    enque / deque 给——`PipeBarrier` 只在同一条流水内排序，MTE2 与 MTE3 之间没有 barrier 可用。
 //    所以这一档不做 barrier 回落：拿不到队列就报错，不静默放过。
 //
-// 2. **Store 的 GM 偏移**。Store 的**局部** descriptor 在 `z0` 上 stride 是 0（那是被删掉的广播
+// 2. Store 的 GM 偏移。Store 的局部 descriptor 在 `z0` 上 stride 是 0（那是被删掉的广播
 //    语义，每趟重读同一块 UB），而 GM 目的地 `strides = [8, 1]` 每趟前进 8。只看局部会漏掉
 //    `z0` 那一项，输出只有第一行对。所以偏移的权威是 GM 侧 descriptor
 //    （`materializeTensorOffset` 的 `OffsetContext::strideOf`，GM 优先）。

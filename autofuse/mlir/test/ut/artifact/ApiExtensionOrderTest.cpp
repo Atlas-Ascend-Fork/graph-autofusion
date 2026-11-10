@@ -73,15 +73,15 @@ TEST_F(ApiExtensionOrderTest, MatchesDictionaryOrderWhenEveryEdgeRunsForward) {
                                       "scalar_div.h", "sign.h", "true_div.h", "where.h"}));
 }
 
-// 反字典序的那条边要照声明发。`i0e.h` 用的 `I0_A` / `I0_B` 只有 `modified_bessel_i0.h` 定义，
-// 而 `i0e_reg_base.h` 的字典序在它**前面**——按字典序发出去就是一份编不过的 kernel。
+// 反字典序的那条边要按声明顺序生成。`i0e.h` 用的 `I0_A` / `I0_B` 只有 `modified_bessel_i0.h` 定义，
+// 而 `i0e_reg_base.h` 的字典序在它前面——按字典序生成的是一份编不过的 kernel。
 TEST_F(ApiExtensionOrderTest, HonorsAnEdgeThatRunsAgainstDictionaryOrder) {
   ApiExtensionOrder order;
   order.declare(op(), {"modified_bessel_i0_reg_base.h", "i0e_reg_base.h"});
   EXPECT_EQ(resolve(order), (std::vector<std::string>{"modified_bessel_i0_reg_base.h", "i0e_reg_base.h"}));
 }
 
-// 跨声明的约束，而且与声明次序无关。这一格是按首见次序发射（legacy 的做法）保不住的：
+// 跨声明的约束，而且与声明次序无关。这一格是按首见次序生成（legacy 的做法）保不住的：
 // `airy_ai` 把 `trigonometric_function_utils` 放在列表首项，`bessel_j0` 要 `bessel_j_utils`
 // 排在它前面，谁在前就取决于两个 op 哪个先被 walk 到，也就是取决于 plan。
 TEST_F(ApiExtensionOrderTest, HonorsCrossDeclarationConstraintsInEitherDeclarationSequence) {

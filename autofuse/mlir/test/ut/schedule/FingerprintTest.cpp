@@ -29,13 +29,9 @@ TEST(FingerprintTest, ChangesWhenScheduleStructureChanges) {
   EXPECT_NE(one_template, two_templates);
 }
 
-// Regression: constant size vars must not affect the fingerprint, matching
-// tiling_field_schema.cpp's AppendGraphFields, which also skips
-// IsConstExpr() size vars. Two schedules that differ only in which constant
-// value a compile-time-known size var happens to hold are the same schedule
-// structurally -- they must hash identically, otherwise every recompile of
-// the very same kernel with a different constant would needlessly miss the
-// artifact cache.
+// Constant size variables do not enter TilingData, so they must not affect the
+// structural fingerprint. Match AppendGraphFields' IsConstExpr() filtering to
+// avoid cache misses caused only by compile-time constant metadata.
 TEST(FingerprintTest, IsUnaffectedByConstantSizeVarValue) {
   const auto with_seven = mlir::common::ComputeScheduleFingerprint(mlir::test::MakeFusedResultWithConstSizeVar(7));
   const auto with_ninety_nine =
@@ -56,11 +52,8 @@ TEST(FingerprintTest, CacheKeyIncludesVersionsAndOptions) {
   EXPECT_NE(base, mlir::common::BuildArtifactCacheKey(fingerprint, versions, options));
 }
 
-// Regression: a dynamic-mode artifact and a static-mode one compiled for a
-// concrete shape must not share a cache key, and neither may two static
-// artifacts compiled for different concrete shapes -- both are represented
-// by ArtifactVersionSet fields the earlier version of this struct did not
-// have.
+// Cache keys must distinguish dynamic and static artifacts, and static artifacts
+// compiled for different concrete shapes. These inputs belong to ArtifactVersionSet.
 TEST(FingerprintTest, CacheKeyDistinguishesShapeModeAndStaticConstants) {
   const auto fingerprint = mlir::common::ComputeScheduleFingerprint(mlir::test::MakeFusedResult());
   mlir::common::CompileOptions options;

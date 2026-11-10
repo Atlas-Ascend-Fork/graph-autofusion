@@ -28,8 +28,8 @@ static_assert(kOutputShapes.size() == 1, "load_mean_store requires exactly one o
 // （`[M, 1]` 归约末维走 AR，`[1, N]` 归约首维走 RA）。
 //
 // 这组用例验的是 `Mean` 多出来的那一次缩放，判据有三条，缺一条就有一类错漏过去：
-//   - 分母是**完整**归约域的元素数，不是某一轮的；
-//   - 每个输出槽位**恰好**除一次，跨轮时不是每轮都除；
+//   - 分母是完整归约域的元素数，不是某一轮的；
+//   - 每个输出槽位恰好除一次，跨轮时不是每轮都除；
 //   - 32B 对齐补出来的位置不计入分母（`16x37` 那条的分母必须是 37，不是 40）。
 // 对应的三类错分别是「均值的均值」、「重复除成 1/N^rounds」和「分母偏大、结果偏小」。
 constexpr const char *kKernelName = AF_MLIR_E2E_CPU_STRINGIFY(AF_MLIR_E2E_CPU_KERNEL_SYMBOL);

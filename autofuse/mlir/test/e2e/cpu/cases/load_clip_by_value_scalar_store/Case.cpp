@@ -10,12 +10,12 @@
 
 //===- Case.cpp - load -> clip_by_value(tile, s, s) -> store -----*- C++ -*-===//
 //
-// **三元族标量形态的第一条 E2E**：`clip(x, -1, 1)`，上下界都是编译期常量。这是 clip 在真实
+// 三元族标量形态的第一条 E2E：`clip(x, -1, 1)`，上下界都是编译期常量。这是 clip 在真实
 // 图里最常见的形态。
 //
-// 与 M1 那一族（`Subs` 的 bool 模板实参）不同，三元这一族的标量形态**没有新的调用形状**：
+// 与 M1 那一类（`Subs` 的 bool 模板实参）不同，三元这一类的标量形态没有新的调用形状：
 // `clipbyvalue.h` 的场景 2 与 tensor 形态同名同位，只有那两个位置上的实参从 tile 变成标量。
-// 所以这条用例真正钉的是**位置**：
+// 所以这条用例真正钉的是位置：
 //
 //   - 上下界不对称（-1 / +1），而且输入两侧都超界。min 与 max 互换的话逐元素断言当场红
 //     ——`clip(x, 1, -1)` 在这份取值上处处不同。
@@ -56,7 +56,7 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_clip_by_value_scalar_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // 两个常量各自按元素类型建出来，**字面量写全**：emitter 打的是定长科学计数。
+  // 两个常量各自按元素类型建出来，字面量写全：emitter 打的是定长科学计数。
   EXPECT_NE(kernel.find("constexpr float cm1_f32 = (float)-1.000000000e+00;"), std::string::npos);
   EXPECT_NE(kernel.find("constexpr float c1_f32 = (float)1.000000000e+00;"), std::string::npos);
   // 与 tensor 形态同名的裸调用；两个标量落在 min / max 的位置上，次序就是 (x, min, max)。

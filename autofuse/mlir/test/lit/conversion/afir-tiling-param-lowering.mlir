@@ -16,7 +16,7 @@
 // 只出现 AFIR 与它复用的标准方言），循环生成之后仍然通过。此前循环生成当场建一个
 // `emitasc.member`，同一条命令会在那里失败。
 //
-// AscendC 端：同一个名字变回 `tiling.q2_size`。**host ABI 逐字节不变**——下面
+// AscendC 端：同一个名字变回 `tiling.q2_size`。host ABI 逐字节不变——下面
 // CHECK 的 schema 字段表与迁移前逐字相同，换的只是 kernel 侧谁在什么时候建这个访问。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

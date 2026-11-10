@@ -9,15 +9,15 @@
 // RUN: af-opt --afir-aggregate-launch --afir-aggregate-launch-graph-name=fused_graph %t.lowered.mlir | FileCheck %s
 
 // AscGraph 的 `ScalarData`：主机在运行期按值传进来的标量，在 kernel 边界上是一个
-// **非 memref 的形参**。与 `afir-scalar-binary-api.mlir` 的差别不在计算——发出来的调用
-// 是同一个 `Adds`——而在**参数表**：那份的标量是函数体里的 `arith.constant`，这份的标量
+// 非 memref 的形参。与 `afir-scalar-binary-api.mlir` 的差别不在计算——生成的调用
+// 是同一个 `Adds`——而在参数表：那份的标量是函数体里的 `arith.constant`，这份的标量
 // 是第 1 号 kernel 形参。
 //
 // 钉三件事，三件各自能单独错：
 //
 //   1. 签名物化不把它改成 memref。物化前这里是 `cast<MemRefType>`，遇到标量是 assert
 //      失败而不是诊断；
-//   2. **它按 index 排在两个指针形参中间，不是排到末尾。** `KernelArgumentKind::ScalarInput`
+//   2. 它按 index 排在两个指针形参中间，不是排到末尾。 `KernelArgumentKind::ScalarInput`
 //      的枚举值追加在末尾（ABI 兼容要求），所以排序不折秩的话它会落到 output / workspace
 //      之后；
 //   3. host 包装器两处都分流：签名里 `half input1` 而不是 `void* input1`，调用处传
@@ -37,7 +37,7 @@ module @plan0 attributes {
   afplan.candidate = #afplan.candidate<subgraph = 0, plan = 0>,
   afplan.stages = #afplan.stages<template_counts = [1]>
 } {
-  // 标量形参**不挂** `afir.buffer_desc`：它不是一块存储。`afir.arg_descs` 里它仍然占一格
+  // 标量形参不挂 `afir.buffer_desc`：它不是一块存储。`afir.arg_descs` 里它仍然占一格
   // （退化视图，只留角色），否则描述子下标就跟参数下标错开。
   func.func private @stage0_template0(
       %input: memref<16xf16> {afir.kernel_arg = #afir.kernel_arg<role = input, index = 0>, afir.buffer_desc = #gm_buffer},
@@ -80,7 +80,7 @@ module @plan0 attributes {
 // CHECK: // -----KERNEL_BODY-----
 // 1. kernel body 的标量形参仍是 `half`，没有被改成指针。
 // CHECK: __aicore__ void plan0_stage0_template0({{.*}}half {{v[0-9]+}}, __gm__ half*
-// 计算发的是标量形态的调用，与常量标量那条一模一样——conversion 层不区分标量从哪来。
+// 计算生成的是标量形态的调用，与常量标量那条一模一样——conversion 层不区分标量从哪来。
 // CHECK: AscendC::Adds
 // 2. 到了 kernel 入口，标量夹在两个 GM 指针中间：形参序是 input0、input1、output0。
 // CHECK: extern "C"  __global__ __aicore__ void fused_graph(__gm__ half* {{v[0-9]+}}, half {{v[0-9]+}}, __gm__ half* {{v[0-9]+}}, __gm__ uint8_t*

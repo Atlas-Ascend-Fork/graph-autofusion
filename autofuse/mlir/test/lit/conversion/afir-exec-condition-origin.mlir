@@ -11,7 +11,7 @@
 // `cache_block_split_origin_brc_axis`：TILE_OUT 及以外的原始轴全是广播轴，缓存值在整个
 // 分块循环里不变，只在本核第一趟算。谓词因此只有 `i == 0` 那一项，没有相位。
 //
-// **今天没有哪张图走到这一格**：`NodeCacheMarker::MarkNodeCacheable` 无条件写的是 fused
+// 目前没有哪张图走到这一格：`NodeCacheMarker::MarkNodeCacheable` 无条件写的是 fused
 // 那一个取值（注释说 origin 那支「由于引入精度问题，暂时关闭」）。留这一格是因为
 // `exec_condition` 是上游的枚举，bridge 翻译的是整个枚举而不是其中一个值——少一格的表现
 // 是把 origin 静默当成 fused，那会多算，也会在上游放开那一支时无声地错。

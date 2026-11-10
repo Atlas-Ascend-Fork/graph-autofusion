@@ -11,20 +11,20 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-truediv-extension-api.mlir 的另一半，而这一半**几乎不是 `truediv` 自己的东西**：
+// afir-truediv-extension-api.mlir 的另一半，而这一半几乎不是 `truediv` 自己的东西：
 // v2 的 `TrueDivAscIrCodegenImplV2` 写的 apiName 是 `DivExtend`、头是 `div_reg_base.h`，
 // 与 `DivAscIrCodegenImplV2` 逐字相同。所以这里建的 op 就是 `afir.div` 的 reg 实现今天
-// 已经在发的那个 `ascendc.div_extend_reg_base`，没有新建 def。
+// 已经在生成的那个 `ascendc.div_extend_reg_base`，没有新建 def。
 //
 // 于是两侧差的不只是头，还有两样：
 //
-//   - **tmp buffer**。mem 侧 `TrueDivExtend` 收一块，这一侧的 `BinaryApiCall` 签名里
+//   - tmp buffer。mem 侧 `TrueDivExtend` 收一块，这一侧的 `BinaryApiCall` 签名里
 //     没有，所以整个 module 一块 tmp 都不挂——`WRONGTARGET` 那条就是被这一点拒掉的
 //     （mem 侧的 implementation 要求有一块）。
-//   - **i32**。`kTrueDivTypePairs` 在 v2 是 {f16, f32, bf16}，i32 那一行只有 mem 侧有，
-//     bf16 那一行**现在建模了**（2026-10-20 进供给表），所以这个文件少一个 bf16 的函数
-//     是**待补**，不是「表达不出来」——补它要先确认 `DivExtend` 的 reg 包装在 bf16 上
-//     发什么。这里只有 f16 / f32 两个函数。
+//   - i32。`kTrueDivTypePairs` 在 v2 是 {f16, f32, bf16}，i32 那一行只有 mem 侧有，
+//     bf16 那一行现在建模了（2026-10-20 进支持表），所以这个文件少一个 bf16 的函数
+//     是待补，不是「表达不出来」——补它要先确认 `DivExtend` 的 reg 包装在 bf16 上
+//     生成什么。这里只有 f16 / f32 两个函数。
 //
 // 分得开两侧的只有 IR 上建的是哪个 op 与 SELECT 的 id：CPP 那一行与 `afir.div` 的
 // reg 侧逐字相同。

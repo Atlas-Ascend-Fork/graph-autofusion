@@ -9,10 +9,8 @@
 // `#afir.kernel_arg` 的 round-trip：四种角色、带与不带 index 的每一种形态都必须
 // 打印得出、读得回（设计文档 5.3 的字段迁移纪律）。
 //
-// 这条属性替代的是三套各管一段的旧机制——互斥的 `afir.input_index` /
-// `afir.output_index`、按类型相等认出的 workspace、按结构体名字认出的 TilingData。
-// 锁住文本形态，是为了让后续把生产者与消费者逐个切过来时，等价性有一个不依赖任何
-// pass 的参照。
+// kernel_arg 统一表达 input/output、workspace 和 tiling 身份，替代整数 input/output 索引
+// 及按类型或名称识别 ABI 参数的规则。round-trip 提供不依赖 pass 的序列化基线。
 
 // RUN: af-opt %s | FileCheck %s
 // RUN: af-opt %s | af-opt | FileCheck %s

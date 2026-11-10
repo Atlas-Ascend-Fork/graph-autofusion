@@ -37,7 +37,7 @@ TEST(MlirE2eCpu, LoadTrueDivScalarStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 取 [-9, 9] 里的整数，**除不尽的居多**：除得尽的话整条 `Cast` 到 f32 再除的路与「整数
+  // 取 [-9, 9] 里的整数，除不尽的居多：除得尽的话整条 `Cast` 到 f32 再除的路与「整数
   // 相除」出来的结果一样，`truediv` 与 `floor_div` 就分不开了。商是四分之一的整数倍，
   // 在 f32 里精确，所以逐元素比相等。
   for (uint32_t index = 0; index < input_element_count; ++index) {
@@ -59,7 +59,7 @@ TEST(MlirE2eCpu, LoadTrueDivScalarStoreCalculatesCorrectResult) {
               reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(workspace), tilingData);
 
   for (uint32_t index = 0; index < output_element_count; ++index) {
-    // **`x / 4`，不是 `4 / x`**。方向那一位写反的话这里逐元素红——两者相等要 |x| = 2，
+    // `x / 4`，不是 `4 / x`。方向那一位写反的话这里逐元素红——两者相等要 |x| = 2，
     // 而 19 个取值里只有 2 个是；x = 0 那一档更明显：0.0 对 inf。
     EXPECT_FLOAT_EQ(output[index], static_cast<float>(input0[index]) / static_cast<float>(kDivisor))
         << "element " << index;

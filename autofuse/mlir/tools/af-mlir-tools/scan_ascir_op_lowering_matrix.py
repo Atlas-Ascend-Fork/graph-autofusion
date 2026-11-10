@@ -195,7 +195,7 @@ PAIR_ARRAY_RE = re.compile(
 DTYPE_RE = re.compile(r"\bDT_([A-Z0-9_]+)\b")
 
 # `ge::DataType` 到本表里的拼写。AFIR 建模得出来的六种用与 `ElementTypes` 位一致的写法
-# （f16 / f32 / i16 / i32 / ui8 / ui16），其余按同样规则短写——**列在这里不代表 AFIR 收**，
+# （f16 / f32 / i16 / i32 / ui8 / ui16），其余按同样规则短写——列在这里不代表 AFIR 收，
 # 这一列记的是 legacy 收什么。
 DTYPE_SPELLING = {
     "FLOAT16": "f16",
@@ -516,7 +516,7 @@ class SideFacts:
     needs_tmp: bool = False
     tmp_func: str = ""
     scalar: str = "no"
-    # 这一侧的 `REG_ASC_IR` 收哪几种**输入** dtype。三种「没有值」是三件事，不能混：
+    # 这一侧的 `REG_ASC_IR` 收哪几种输入 dtype。三种「没有值」是三件事，不能混：
     # 空元组＝这个 op 在这一侧没注册；`("n/a",)`＝起始节点，本来就没有输入；
     # `("?",)`＝有输入但解析不出来，要人去看。
     dtypes: tuple[str, ...] = ()
@@ -892,8 +892,8 @@ def main(argv: list[str]) -> int:
                 current = handle.read()
         if current == text:
             return 0
-        # 这张表是 `ElementTypeMatrixTest` 对账时的那一侧真源。它一旦与 legacy 漂移，
-        # 那条断言就变成「把注册处钉在一份过期文件上」，看着绿其实什么都没查。
+        # ElementTypeMatrixTest 用此表与 legacy 注册信息对比。
+        # 检查模式必须报告快照漂移，否则测试可能只是在比对过期数据。
         print(
             f"{args.output} 与当前 legacy 的 REG_ASC_IR 对不上。重新生成：\n"
             f"  python3 {Path(__file__).name} --format {args.format} --output {args.output}",

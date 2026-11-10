@@ -66,7 +66,7 @@ mlir::OwningOpRef<mlir::ModuleOp> makeTwoStagePlan(mlir::MLIRContext &context) {
   llvm::SmallVector<mlir::Attribute> stageNames;
   for (int64_t stage = 0; stage < 2; ++stage) {
     // `workspace2` 不是凑数：生产路径上 `GenTilingData` 的 `collectStageFields` 会把模块上
-    // 声明的每个 workspace 号都加进**每个** stage 的结构体，聚合入口正是往这一份里写偏移。
+    // 声明的每个 workspace 号都加进每个 stage 的结构体，聚合入口正是往这一份里写偏移。
     auto stageType = mlir::emitasc::PyStructType::get(
         &context, builder.getStringAttr(mlir::common::MakeScheduleGroupTilingTypeName(0, 0, stage)),
         builder.getArrayAttr({mlir::TypeAttr::get(mlir::IntegerType::get(&context, 64, mlir::IntegerType::Unsigned)),
@@ -192,7 +192,7 @@ TEST(IsolatedPlanEntryTest, AggregatesSchemasAndEmitsOuterMain) {
   auto aggregateSchema = mlir::dyn_cast<mlir::emitasc::PyStructType>(schema.getValue());
   ASSERT_TRUE(aggregateSchema);
   // 两个子图各一个 plan，不是扁平形态：根上自带 ATT 要读写的四个公共标量，再是每个子图的
-  // plan 选择子，最后每个 schedule group 的结构体**平铺**在根上（没有 plan 那一层）。
+  // plan 选择子，最后每个 schedule group 的结构体平铺在根上（没有 plan 那一层）。
   ASSERT_EQ(aggregateSchema.getNamesAttr().size(), 8U);
   EXPECT_EQ(mlir::cast<mlir::StringAttr>(aggregateSchema.getNamesAttr()[0]).getValue(), "block_dim");
   EXPECT_EQ(mlir::cast<mlir::StringAttr>(aggregateSchema.getNamesAttr()[1]).getValue(), "corenum");
@@ -758,7 +758,7 @@ TEST(IsolatedPlanEntryTest, EmitsNestedTilingDataHeader) {
   EXPECT_NE(header.find("graph0_result0_g0_tiling_data"), std::string::npos);
   EXPECT_NE(header.find("struct plan0_StageData"), std::string::npos);
   EXPECT_NE(header.find("graph0_result0_g0_tiling_data.set_tiling_key(value)"), std::string::npos);
-  // plan 级 schema 只是载体，不是根的字段，所以不会被发成结构体。
+  // plan 级 schema 只是载体，不是根的字段，所以不会生成结构体。
   EXPECT_EQ(header.find("struct PlanData"), std::string::npos);
 }
 
@@ -812,7 +812,7 @@ TEST(IsolatedPlanEntryTest, SanitizesCxxIdentifiers) {
   EXPECT_NE(mlir::afir::makeCxxIdentifier("a.b"), mlir::afir::makeCxxIdentifier("a_x2eb"));
 }
 
-// RCore 的形状：一个 Plan 两个 stage。两个 group 的结构体必须**平铺**在最外层 TilingData 上
+// RCore 的形状：一个 Plan 两个 stage。两个 group 的结构体必须平铺在最外层 TilingData 上
 // （ATT 的 `ProcessMultiGroup` 就是这么访问的），`_main` 一 stage 收一个 tiling 形参、序号
 // 即 stage，聚合入口按成员名把两者对上。
 TEST(IsolatedPlanEntryTest, FlattensTwoStagePlanIntoAggregateRoot) {
@@ -871,7 +871,7 @@ TEST(IsolatedPlanEntryTest, FlattensTwoStagePlanIntoAggregateRoot) {
   ASSERT_TRUE(main);
   llvm::SmallVector<llvm::StringRef> members;
   main.walk([&](mlir::emitasc::MemberOp member) { members.push_back(member.getField()); });
-  // 每取一个 stage 的结构体，紧跟着从**根**上读一次 workspace 偏移写进去：Plan 主函数读的是
+  // 每取一个 stage 的结构体，紧跟着从根上读一次 workspace 偏移写进去：Plan 主函数读的是
   // stage 自己那一份，而 ATT 只往根上写（schema 把 workspace 声明在 `"fusion"` 作用域）。
   EXPECT_EQ(members, llvm::SmallVector<llvm::StringRef>({"graph0_result0_g0_tiling_data", "workspace2",
                                                          "graph0_result0_g1_tiling_data", "workspace2"}));

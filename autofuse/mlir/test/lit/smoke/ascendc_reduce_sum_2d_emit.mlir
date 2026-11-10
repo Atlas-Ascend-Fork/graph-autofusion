@@ -6,25 +6,16 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// `ascendc.reduce_sum_2d_l2` 发射到 C++ 文本这一层此前一条用例都没有，而它唯一会出错的
-// 地方恰恰只在这一层：
+// 检查 reduce_sum_2d_l2 生成的 C++，尤其是运行期 srcShape 数组的元素转换。
 //
-// `srcShape` 在 ODS 上是 `Variadic<I32>`，而 MLIR 的 `i32` 是 signless，
-// `CodeEmitter::shouldMapToUnsigned` 把 signless 与 signed 一并映射成**有符号**，所以这些
-// 值落到 C++ 里是 `int32_t`。数组却必须是 `uint32_t[]`——API 签名是
-// `const uint32_t srcShape[]`（`reduce.h:233`），改不了。往 `uint32_t[]` 的花括号初始化
-// 列表里塞 `int32_t` 是 C++11 起禁止的窄化转换（[dcl.init.list]/7：源类型的负值目标类型
-// 表示不了，且这些是运行期值、不是值域内的常量表达式），clang 系的 bisheng 默认把
-// `-Wc++11-narrowing` 报成 **error**。
+// srcShape 的 ODS 类型为 Variadic<I32>，signless i32 默认生成为 int32_t，
+// 但 Reduce API 要求 const uint32_t[]。初始化数组时必须显式转换每一项，
+// 否则 C++11 列表初始化将运行期 signed -> unsigned 视为窄化，bisheng 报错。
 //
-// 为什么非得钉在发射文本上：这条只有真机编 kernel 时才会撞上。主机侧编译不碰 device 代码，
-// CPU E2E 也不走这个重载，于是容器里 ctest / lit 全绿、仓库看着健康，别人一上设备就挂在
-// 一个他不知道要打补丁的地方。「跑得通」在这里不是判据。
+// 本用例直接检查生成的文本；主机编译和使用其他重载的 CPU E2E 不会覆盖该 device C++ 错误。
 //
-// 为什么是这个形态而不是接在 `conversion/afir-to-ascendc-reduce-sum.mlir` 后面：那份输入是
-// 真实的 plan 模块，跑完流水线的产物里有 `afplan.*` 属性和 `index.ceildivu`，而
-// `ascir-translate` 两个方言都不注册，翻译不了。发射器的判据不需要整条流水线，直接给它
-// `ascendc.*` 就够。
+// 直接输入 AscendC op，以隔离 printer 的契约。完整 plan 流水线还含 afplan 属性和
+// index.ceildivu，ascir-translate 未注册这两个方言，不能用于这个生成测试。
 
 // RUN: ascir-translate -mlir-to-ascendc %s | FileCheck %s
 

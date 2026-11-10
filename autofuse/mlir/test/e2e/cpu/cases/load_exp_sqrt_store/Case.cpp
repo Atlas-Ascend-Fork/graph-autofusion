@@ -8,16 +8,9 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> exp -> sqrt -> store CPU case ---------*- C++ -*-===//
-//
-// D0 波次的端到端用例，两件事：一条链上串两个 buffer 形态的 elementwise 节点（第二个
-// 节点读的必须是第一个的**结果值**，否则流水同步少一条边），以及 D0 走标准调用、不要
-// tmp buffer、不引扩展头。
-//
-// 「同一份 AFIR 在两套 profile 下走同一个 implementation」这一半在这里验不了——CPU
-// E2E 只按单个 soc 编译——那是 afir-unary-d0-both-targets.mlir 的事。
-//
-//===----------------------------------------------------------------------===//
+// 验证两个 buffer 形态的标准 elementwise 调用串联：Sqrt 必须读取 Exp 的结果，
+// 以保留流水同步依赖；两者不需要 tmp buffer 或扩展头。
+// CPU 用例仅编译一个目标，跨 profile 复用同一实现由 afir-unary-d0-both-targets.mlir 覆盖。
 
 #include <gtest/gtest.h>
 
@@ -49,8 +42,8 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 标准调用，两套家族同一个。计算侧没有扩展 wrapper，也没有它带进来的扩展头。
   EXPECT_NE(kernel.find("AscendC::Exp("), std::string::npos);
   EXPECT_NE(kernel.find("AscendC::Sqrt("), std::string::npos);
-  // **这两条原先是通查**（`Extend<` 与 `__ASCENDC_API_` 一个都不许有），2026-09-23 起不成立：
-  // Load / Store 一律发 `DataCopyPadExtend`，`datacopy.h` 因此恒被内联进来。改成数个数，
+  // 这两条原先是通查（`Extend<` 与 `__ASCENDC_API_` 一个都不许有），2026-09-23 起不成立：
+  // Load / Store 一律生成 `DataCopyPadExtend`，`datacopy.h` 因此恒被内联进来。改成数个数，
   // 强度不降——多出任何一个计算侧的 wrapper 或扩展头，这两条照样红。
   EXPECT_EQ(CountOccurrences(kernel, "Extend<"), 2U);  // load 一处、store 一处
   EXPECT_EQ(CountOccurrences(kernel, "#define __ASCENDC_API_"), 1U);

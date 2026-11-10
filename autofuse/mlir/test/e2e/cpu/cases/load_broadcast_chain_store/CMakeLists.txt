@@ -6,13 +6,12 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-# 级联拓扑 T4（`load -> brc -> brc -> store`）。**一格**，而且形状必须带两个 1：
+# 覆盖 T4：load -> brc -> brc -> store，源形状需含两根广播轴。
 #
-#   `[1,1,8] -> [4,4,8]`   两根广播轴，一趟一根。只有一根的话第二趟是空集、图退化成 T1，
-#                          这一格就什么都没多测。
+# [1,1,8] -> [4,4,8]：每次广播扩展一根轴，避免第二次广播退化为空操作。
 #
-# 探针在 f16 上报不支持（回落 legacy），所以这里只有 f32；五个形状格里只有这一格有两根
-# 广播轴，所以也只有这一格（2026-10-12 实测，见 Case.cpp 文件头）。
+# 采用探针已验证的 f32 双广播轴形状。2026-10-12 的 f16 探针为不支持，
+# 因此本注册不声明 f16 覆盖。
 add_mlir_e2e_cpu_case(load_broadcast_chain_store_1x1x8
     OUTPUT_SHAPE "[4, 4, 8]"
     INPUT_SHAPES "[1, 1, 8]"

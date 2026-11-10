@@ -10,7 +10,7 @@
 
 //===- Case.cpp - load x2 -> axpy(f16) -> store CPU case --------*- C++ -*-===//
 //
-// **这份用例存在的唯一理由：把 `AxpyExtend` 的 f16 分支真的跑一遍。**
+// 这份用例存在的唯一理由：把 `AxpyExtend` 的 f16 分支真的跑一遍。
 //
 // `load_axpy_store` 走 f32，而 `axpy.h` 里 f32 落在 `else` 那一支——它**一次都没用那块
 // tmp buffer**，形参在签名里只是占个位置。真正用它的是 f16 分支：把 tmp 切成两段，两个
@@ -19,7 +19,7 @@
 // `CalcAxpyTmpSize` 的 f16 那支算出来的尺寸。这一条是进度文档「已知覆盖空洞」第 3 条
 // （清单里的 L-10）。
 //
-// **也是整个 CPU E2E 套件里第一个 f16 用例**。在它之前所有用例都是
+// 也是整个 CPU E2E 套件里第一个 f16 用例。在它之前所有用例都是
 // f32 / i32 / i16 / ui8，半精度这条路（ATT tiling 的 dtype、GM 上的 2 字节步长、
 // `Cast` 往返）在这一层一次都没走过。
 //
@@ -68,7 +68,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 裸名，不带 `AscendC::` 限定——`axpy.h` 里的包装是全局函数。
   EXPECT_NE(kernel.find("AxpyExtend("), std::string::npos);
   EXPECT_NE(kernel.find("__ASCENDC_API_AXPY_H__"), std::string::npos);
-  // **alpha 仍然是 f32**：包装的形参是 `const float alpha`，不跟 tile 的元素类型走。
+  // alpha 仍然是 f32：包装的形参是 `const float alpha`，不跟 tile 的元素类型走。
   // 这一条只有 f16 的用例拦得住——f32 那份里两者恰好一致，写反了看不出来。
   EXPECT_NE(kernel.find("constexpr float"), std::string::npos);
   EXPECT_NE(kernel.find("(float)5.000000000e-01"), std::string::npos);

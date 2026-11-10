@@ -10,7 +10,7 @@
 
 //===- Case.cpp - load x3(ui8+f32) -> select -> store CPU case --*- C++ -*-===//
 //
-// **一条队列上混 dtype。** 三块搬入——一个 ui8 掩码加两块 f32——被调度到同一条
+// 一条队列上混 dtype。 三块搬入——一个 ui8 掩码加两块 f32——被调度到同一条
 // `TQue<VECIN>` 上，此前 bridge 的 `CheckResourceCompatibility` 要求同一个
 // `(domain, buffer_id, reuse_id)` 下的成员 dtype 逐字相同，这张图当场
 // `BindingConflict`、整条 MLIR codegen bail 掉。
@@ -68,8 +68,8 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(std::string(load_mask_select_store::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   EXPECT_NE(kernel.find("Where("), std::string::npos);
-  // **三块搬入共用一条队列**：`TQue<VECIN>` 只有一个。这是这个用例存在的理由——判据
-  // 要是把 dtype 算回资源身份里，不是分成三条队列，而是整张图发不出来。
+  // 三块搬入共用一条队列：`TQue<VECIN>` 只有一个。这是这个用例存在的理由——判据
+  // 要是把 dtype 算回资源身份里，不是分成三条队列，而是整张图生成不出来。
   EXPECT_NE(kernel.find("AscendC::TQue<AscendC::TPosition::VECIN, 2>"), std::string::npos);
   EXPECT_EQ(kernel.find("AscendC::TQue<AscendC::TPosition::VECIN, 2>",
                         kernel.find("AscendC::TQue<AscendC::TPosition::VECIN, 2>") + 1),

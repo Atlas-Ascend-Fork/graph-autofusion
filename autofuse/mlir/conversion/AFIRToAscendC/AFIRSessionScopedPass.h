@@ -26,23 +26,14 @@ namespace mlir::ascend::kernel {
 // session-scoped pass shares one implementation and one diagnostic path.
 FailureOr<std::shared_ptr<const ascend::TargetProfile>> resolveSessionTargetProfile(MLIRContext &context);
 
-// Shared base for the AFIR-to-AscendC passes whose pipeline can only be
-// built once an AFIRToAscendCPipelineSession is available, i.e. once the
-// pass has an MLIRContext to build the ImplementationRegistry/
-// SelectionPolicyRegistry with (createAFIRToAscendCPipelineSession requires
-// MLIRContext&). That rules out the standard PassPipelineRegistration, whose
-// builder callback only ever receives an OpPassManager&, not a context.
+// Base for passes that build a pipeline from an AFIRToAscendCPipelineSession.
+// The session requires MLIRContext to create implementation and policy registries,
+// so it cannot be built by PassPipelineRegistration's context-free callback.
 //
-// initialize(MLIRContext*) is the correct upstream hook for this: it runs
-// once per pass instance, after dependent dialects are loaded, and is
-// documented as the place to resolve context-dependent state that
-// runOnOperation() then relies on (Pass.h's initialize() doc comment
-// explicitly warns getContext()/getOperation() must not be used here, so the
-// context has to come from the parameter, exactly as needed here).
-// runOnOperation() then drives the resolved session through a nested
-// OpPassManager via Pass::runPipeline(), the same pattern
-// CompositeFixedPointPass and SparsificationAndBufferizationPass use
-// upstream for a dynamically populated sub-pipeline.
+// initialize(MLIRContext*) runs once per pass instance after dependent dialects load.
+// Use its context parameter; getContext()/getOperation() are unavailable in this hook.
+// runOnOperation() then executes the resolved nested pipeline with Pass::runPipeline(),
+// following the upstream CompositeFixedPointPass and SparsificationAndBufferizationPass pattern.
 template <typename ConcretePass>
 class AFIRSessionScopedPass : public PassWrapper<ConcretePass, OperationPass<ModuleOp>> {
  public:
@@ -60,7 +51,7 @@ class AFIRSessionScopedPass : public PassWrapper<ConcretePass, OperationPass<Mod
     OpPassManager pipeline(ModuleOp::getOperationName());
     if (failed(static_cast<ConcretePass *>(this)->populatePipeline(pipeline, session_))) {
       // `add*Pipeline` 收的是 OpPassManager，拿不到 MLIRContext，所以它只能返回
-      // failure。诊断在这里发：这一层有 context，而一个不说原因的 pass 初始化失败在
+      // failure。诊断在这里输出：这一层有 context，而一个不说原因的 pass 初始化失败在
       // af-opt 上只会打出一句「failed to initialize」。
       emitError(UnknownLoc::get(context))
           << "failed to build the " << static_cast<ConcretePass *>(this)->getArgument()

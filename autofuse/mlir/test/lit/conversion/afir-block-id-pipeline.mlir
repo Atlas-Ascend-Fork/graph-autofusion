@@ -8,11 +8,9 @@
 // RUN: af-opt --afir-kernel-body-signature --afir-loop-generate %s | FileCheck %s --check-prefix=LOOP
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s | FileCheck %s
 
-// This fixture adds block partitioning to a single-candidate plan module from
-// ScheduleToAfir::PlanToAfir: one stage, one template, a canonical
-// load -> add -> store kernel body. It exercises the full per-candidate
-// lowering order (AFIRKernelBodySignature -> addAFIRToAscendCPipeline ->
-// GenTilingData -> GenKernelEntry) that addPlanCandidateLoweringPipeline composes.
+// Add block partitioning to the single-stage, single-template load -> add -> store plan.
+// Check addPlanCandidateLoweringPipeline's sequence: body signature, shared AFIR-to-AscendC
+// lowering, tiling-data generation, then kernel entry.
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #output_desc = #afir.tensor_desc<axis = [0], role = <output>>

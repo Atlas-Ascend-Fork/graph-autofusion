@@ -44,8 +44,8 @@ struct RelationTarget {
 };
 
 FailureOr<PlanModuleMetadata> ReadPlanModuleMetadata(ModuleOp module) {
-  // 「存在且非负」现在是 `#afplan.candidate` 的 verifier 保证的，不再需要在失败路径上
-  // 逐个字段回读来区分是哪一半缺失——取不到属性就是取不到候选身份。
+  // #afplan.candidate 的 verifier 已校验身份字段存在且非负。
+  // 此处只检查属性是否存在，不重复逐字段校验。
   mlir::afplan::CandidateAttr candidate = mlir::afplan::getCandidate(module);
   if (!candidate) {
     module.emitError("TilingProgramSpec: missing or invalid ") << mlir::afplan::kCandidateAttrName;
@@ -60,8 +60,7 @@ FailureOr<PlanModuleMetadata> ReadPlanModuleMetadata(ModuleOp module) {
         << candidate.getPlan();
     return failure();
   }
-  // 核数与 UB 容量的值域同样由 `#afir.target` 的 verifier 保证，这里只问「有没有」
-  // ——取到非空就不必再逐字段回读。
+  // #afir.target 的 verifier 已校验核数与 UB 容量的值域，此处只检查属性是否存在。
   mlir::afir::TargetAttr target = mlir::afir::getTargetAttr(module);
   if (!target) {
     module.emitError("TilingProgramSpec: missing or invalid ")
@@ -72,9 +71,8 @@ FailureOr<PlanModuleMetadata> ReadPlanModuleMetadata(ModuleOp module) {
   return PlanModuleMetadata{candidate.getSubgraph(), candidate.getPlan(), schema, target};
 }
 
-// 聚合出来的一份 host tiling 只发射一个 `ResLimit` 常量，所以参与聚合的候选必须是为
-// 同一个目标、按同一组资源上限切出来的。属性是 uniqued 的，三个字段的一致性因此是一次
-// 指针比较——此前是两段对称的比较与两段几乎一样的诊断。
+// 聚合 host tiling 只生成一个 ResLimit，因此各候选必须使用相同目标和资源上限。
+// 目标属性经过 uniquing，可直接比较属性，无需拆分字段逐项比较。
 LogicalResult MergeTargetMetadata(ModuleOp module, const PlanModuleMetadata &metadata, TilingProgramSpec &spec) {
   if (!spec.target) {
     spec.target = metadata.target;
@@ -154,8 +152,8 @@ FailureOr<std::vector<TilingStageSpec>> BuildStageSpecs(ModuleOp module, const P
           << metadata.subgraph_id << " plan " << metadata.plan_id;
       return failure();
     }
-    // 载体的字段按 stage 次序铺，所以 stage id 就是下标；名字则按同一条共享公式回算一遍做
-    // 校验——它同时是这个 stage 在聚合 TilingData 里的成员名，也就是下面的 `tiling_field_name`。
+    // 载体字段按 stage 排列，stage id 可直接用作下标。
+    // 按共享命名规则校验成员名，该名称也用于聚合 TilingData 的 tiling_field_name。
     const std::string expected =
         mlir::common::MakeScheduleGroupTilingFieldName(metadata.subgraph_id, metadata.plan_id, stageId);
     if (stageName.getValue() != expected) {

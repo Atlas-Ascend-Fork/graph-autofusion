@@ -13,10 +13,8 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
-// D0：两套 API 家族给的是同一个调用，都不要 tmp buffer。**同一份 IR、两个 --target、
-// 同一组 CHECK** 就是这一档的全部内容——这一点和 afir-abs-{stock,extension}-api.mlir
-// 那对文件正好相反：那两个 D2 的 op 各自只在一个 target 上成立，所以必须拆成两份并
-// 各带一条反向检查。这里如果哪天冒出平台分支，两条 RUN 中的一条就会红。
+// D0 的两类 API 家族共用无 scratch 的标准调用，两目标共用 IR 和检查。
+// 与 Abs 的 D2 双文件对照不同，此处任一目标出现不同的 API 路径都应使测试失败。
 //
 // 没有 tmp buffer 也是判据的一部分：capability 查询要求 tmp buffer 的有无与选中的 API 匹配，
 // 而这四个 op 只注册了 stock 一条路。

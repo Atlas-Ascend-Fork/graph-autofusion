@@ -42,7 +42,7 @@ TEST(MlirE2eCpu, LoadSignRegBaseStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 三种取值都要有，**尤其是 0**:sign(0) 必须是 0，而写成 `x > 0 ? 1 : -1` 的实现只在
+  // 三种取值都要有，尤其是 0:sign(0) 必须是 0，而写成 `x > 0 ? 1 : -1` 的实现只在
   // 这一点上错。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     const int32_t bucket = static_cast<int32_t>(index % 3U) - 1;

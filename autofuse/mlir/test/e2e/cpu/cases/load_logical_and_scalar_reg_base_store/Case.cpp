@@ -12,8 +12,8 @@
 //
 // 逻辑族标量形态在 reg 侧的唯一一条路：`y = and(x, 1)`，输入 f32、输出 ui8。
 //
-// **`logical_or` 在 reg 侧没有标量形态的 implementation**（`logical_and` 有，见
-// `BinaryElementwise.cpp` 的注册段），所以这一族在这边就这一个。两侧差的不只是头：
+// `logical_or` 在 reg 侧没有标量形态的 implementation（`logical_and` 有，见
+// `BinaryElementwise.cpp` 的注册段），所以这一类在这边就这一个。两侧差的不只是头：
 // mem 侧的 `LogicalAndScalarExtend` 要一块 tmp（把两个输入 `Cast` 成 half 落在里面），
 // reg 侧的 `LogicalAndExtends` 不要。
 //
@@ -55,16 +55,16 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_logical_and_scalar_reg_base_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // **字面量写全**：emitter 打的是定长科学计数。标量按 tile 的元素类型建（f32），
+  // 字面量写全：emitter 打的是定长科学计数。标量按 tile 的元素类型建（f32），
   // 不是按结果的 ui8。
   EXPECT_NE(kernel.find("constexpr float c1_f32 = (float)1.000000000e+00;"), std::string::npos);
-  // 包装是全局函数、没有模板实参；标量是第三个实参，count 跟在后面、**没有 tmp**。
+  // 包装是全局函数、没有模板实参；标量是第三个实参，count 跟在后面、没有 tmp。
   EXPECT_NE(kernel.find("LogicalAndExtends("), std::string::npos);
   EXPECT_NE(kernel.find(", c1_f32, static_cast<uint32_t>("), std::string::npos);
   // 内联进来的是 reg 那一份；mem 侧那个头不该在。
   EXPECT_NE(kernel.find("__ASCENDC_API_REGBASE_LOGICAL_H__"), std::string::npos);
   EXPECT_EQ(kernel.find("__ASCENDC_API_LOGICAL_H__"), std::string::npos);
-  // reg 侧这份包装不要 tmp buffer，也不声明前导头——**两条都与 mem 侧相反**
+  // reg 侧这份包装不要 tmp buffer，也不声明前导头——两条都与 mem 侧相反
   // （mem 侧的 `logical.h` 用了 `MAX_REPEAT_TIME`，非要 `utils.h` 不可）。
   EXPECT_EQ(kernel.find("AscendC::TBuf<"), std::string::npos);
   EXPECT_EQ(kernel.find("__ASCENDC_API_UTILS_H__"), std::string::npos);

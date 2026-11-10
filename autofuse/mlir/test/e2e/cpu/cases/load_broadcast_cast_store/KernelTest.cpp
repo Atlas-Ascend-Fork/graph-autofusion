@@ -42,7 +42,7 @@ TEST(MlirE2eCpu, LoadBroadcastCastCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // **取值全部在 half 里精确可表示**（[-3, 3] 的半整数，half 尾数 10 位），所以下面逐元素
+  // 取值全部在 half 里精确可表示（[-3, 3] 的半整数，half 尾数 10 位），所以下面逐元素
   // 比相等。不精确的话这份用例只能比容差，而容差比法会把「源下标取错一位」放过去。
   for (uint32_t index = 0; index < inputCount; ++index) {
     input0[index] = half(static_cast<float>(index % 13U) * 0.5F - 3.0F);

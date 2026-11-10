@@ -75,7 +75,7 @@ module {
 }
 
 // 生成文本里重复出现的 `constexpr uint32_t c0_idx = 0;` 是这条短 pipeline 没跑 CSE 的结果，
-// 不是本档多发的——偏移按张量各建一个常量，真实路径（`--afir-aggregate-launch`）上 CSE
+// 不是本档多生成的——偏移按张量各建一个常量，真实路径（`--afir-aggregate-launch`）上 CSE
 // 会把它们并掉，与 elementwise 接通那一步确认过的是同一件事。
 
 // IR-LABEL: func.func @broadcast_outer_dim
@@ -110,8 +110,8 @@ module {
 // 只有这一层循环。
 // IR-NOT: scf.for
 
-// 同一件事在 kernel 文本上。**第三个实参恒为 `1`（形态 A）或第五个恒为 `0`（形态 B）**——
-// 这是「发出的调用落不到 `BroadcastMiddleDim` 的 `Or`」在编译期唯一钉得住的形式。
+// 同一件事在 kernel 文本上。第三个实参恒为 `1`（形态 A）或第五个恒为 `0`（形态 B）——
+// 这是「生成的调用落不到 `BroadcastMiddleDim` 的 `Or`」在编译期唯一钉得住的形式。
 // CPP-LABEL: void broadcast_outer_dim(
 // CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
 

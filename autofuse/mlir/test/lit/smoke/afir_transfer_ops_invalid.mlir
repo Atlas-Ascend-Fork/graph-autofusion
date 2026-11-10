@@ -216,8 +216,8 @@ func.func @missing_canonical_buffer_descriptors(%input: memref<4xf16>, %output: 
 
 // -----
 
-// 规划结果只在值的定义点存一份，使用点不再带数组（设计文档 5.1 步 8）：定义点没有
-// 就是没有，报在使用点上。
+// 规划描述只存于值的定义点，使用点不维护数组副本（设计文档 5.1 步 8）。
+// 定义点缺失描述时，在消费该值的位置报告错误。
 func.func @operand_without_definition_buffer_descriptor(%input: memref<4xf16>, %output: memref<4xf16>) {
   // expected-error @+1 {{InvalidDescriptor: 'afir.operand_descs' element 0 has no 'afir.buffer_desc' at its definition}}
   %loaded = afir.load %input outs(%output) {

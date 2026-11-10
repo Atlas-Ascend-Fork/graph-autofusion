@@ -12,11 +12,11 @@
 //
 // `afplan` 是四层命名空间里的候选身份层（设计文档 2.2 / 2.3 / ADR-5）。
 //
-// 判别：**当候选集中只有一个候选，这条信息还影响生成的 kernel 代码吗？**
+// 判别：当候选集中只有一个候选，这条信息还影响生成的 kernel 代码吗？
 //   是 → `afir`（公开面）。例：`tiling_key` 仍决定 TilingData 结构与 entry 分派。
 //   否，只影响候选之间的区分与分派 → `afplan`（内部）。
 //
-// 它是**仅属性方言**：无 Op、无 Type。注册成本接近零，但把「这是哪个候选、凭什么选
+// 它是仅属性方言：无 Op、无 Type。注册成本接近零，但把「这是哪个候选、凭什么选
 // 它」从 `afir` 的公开面里物理隔离出来——对外公开时用户不应看到 `score_func` 这类
 // autofuse 内部字段。
 //
@@ -47,7 +47,7 @@ def AFPlan_Dialect : Dialect {
 
   let extraClassDeclaration = [{
     // `afplan.*` 是 discardable 属性：拼错名字不会报错，只会被无声忽略，失败形态是
-    // 候选分派静默走错分支。与 `afir` 的同名闸门一致，这里把未登记的 `afplan.` 前缀
+    // 候选分派静默走错分支。与 `afir` 的同名门禁一致，这里把未登记的 `afplan.` 前缀
     // 属性直接判错。
     LogicalResult verifyOperationAttribute(Operation *op, NamedAttribute attribute) override;
   }];

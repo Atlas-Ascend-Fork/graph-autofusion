@@ -14,7 +14,7 @@
 // afir-remainder-extension-api.mlir 的另一半：`remainder_reg_base.h`，同样收一块 tmp
 // buffer（尺寸 0，拿来挑 5 参重载的，见 OpVecBinary.td）。
 //
-// **f16 只有这一侧收**：mem 侧 legacy 的 `REG_ASC_IR(Remainder)` 只给了 f32 / i32。
+// f16 只有这一侧收：mem 侧 legacy 的 `REG_ASC_IR(Remainder)` 只给了 f32 / i32。
 // 所以整个 module 拿 f16 写，`WRONGTARGET` 那条同时钉住两件事——mem 侧选不出实现。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

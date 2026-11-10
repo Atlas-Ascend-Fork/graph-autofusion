@@ -158,7 +158,7 @@ FailureOr<int64_t> getReduceAlignNum(Operation *op) {
   return kBlockBytes / (destination->getElementType().getIntOrFloatBitWidth() / 8);
 }
 
-// Mean 读取 bridge 签发的 reduction_domain，并校验绑定。
+// Mean 读取 bridge 签生成的 reduction_domain，并校验绑定。
 // 内存物化后 SSA 来源已不完整，不能在此重新证明归约域。
 template <typename OpT>
 class ReduceCapabilityProvider final : public ascend::instruction::CapabilityProvider {
@@ -231,7 +231,7 @@ class ReduceCapabilityProvider final : public ascend::instruction::CapabilityPro
   std::shared_ptr<const ReduceMapping> mapping_;
 };
 
-// 七个归约 op 的下降形态只差 `ReduceTraits` 里那几项，所以共用这一个 pattern 模板。
+// 七个归约 op 通过 ReduceTraits 提供差异，共用同一 lowering pattern。
 template <typename OpT>
 class ReduceConversionPattern final : public OpConversionPattern<OpT> {
  public:
@@ -364,11 +364,10 @@ class ReduceConversionPattern final : public OpConversionPattern<OpT> {
       }
     }
 
-    // A use scope ends after hardware completion, not after issuing the API.
-    // In accumulating reductions this must follow the merge as well: the merge
-    // still reads round_result. This also closes the loop-backedge reuse hazard.
-    // View canonicalization may erase scope annotations; completion is an
-    // implementation contract for every bufferized Reduce, independent of them.
+    // End scratch use after hardware completion, including the merge that reads
+    // round_result in accumulating reductions. This also protects loop-backedge reuse.
+    // Apply this completion contract to every bufferized Reduce, even if view
+    // canonicalization removed its scope annotations.
     rewriter.create<ascendc::PipeBarrierOp>(location, ascendc::Pipe::PIPE_V);
     rewriter.replaceOp(op, destination);
     return success();

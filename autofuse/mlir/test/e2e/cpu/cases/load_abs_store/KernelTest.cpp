@@ -36,10 +36,8 @@ TEST(MlirE2eCpu, LoadAbsStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // Alternating signs so a lowering that dropped the sign handling entirely
-  // would still have to get half the elements wrong to pass. int32 `Abs` is
-  // synthesized by the wrapper out of Not/Adds/Max rather than issued as one
-  // instruction, so getting the negative half right is the whole point.
+  // Use alternating signs to detect missing sign handling. The int32 wrapper computes
+  // Abs with Not/Adds/Max rather than a single instruction, so negative inputs exercise that path.
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = (index % 2 == 0 ? 1 : -1) * static_cast<int32_t>(index % 97);
   }
@@ -52,9 +50,8 @@ TEST(MlirE2eCpu, LoadAbsStoreCalculatesCorrectResult) {
   uint32_t blockDim = 1;
   ASSERT_EQ(AutofuseE2eInitTiling(&tilingData, &workspaceSize, &blockDim), 0);
 
-  // Record which terms of the scheduled-transfer offset this run actually reaches.
-  // ATT picks the split at run time, so without this the case can keep passing while
-  // silently covering less than it was registered to cover.
+  // Check which scheduled-transfer offset terms this run exercises.
+  // ATT chooses the split at run time; correct output alone does not prove the registered coverage.
   const mlir::afir::TilingShape tiling_shape = AF_E2E_TILING_SHAPE(tilingData, blockDim, output_element_count);
   mlir::afir::ReportTilingShape(AF_MLIR_E2E_CPU_CASE_NAME, tiling_shape);
   AF_E2E_ASSERT_TILING_COVERAGE(tiling_shape);

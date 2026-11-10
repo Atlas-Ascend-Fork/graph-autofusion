@@ -12,8 +12,8 @@
 // RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
 // clip 族的 mem-based 一侧。与选择族(afir-select-extension-api.mlir)逐字同形——同一个
-// 连续 tile 形态、同一个 emitter——只差一条:**第一个操作数不是 ui8 掩码**,它是 x,
-// 与 min / max 和结果同 dtype。所以这一族在 ODS 上绑的是四个而不是后三个
+// 连续 tile 形态、同一个 emitter——只差一条:第一个操作数不是 ui8 掩码,它是 x,
+// 与 min / max 和结果同 dtype。所以这一类在 ODS 上绑的是四个而不是后三个
 // (`AFIR_BufferizableTernaryHomoElementwiseOp`),在 capability 上走的是
 // `conditionIsMask = false` 那一支。
 //
@@ -47,7 +47,7 @@ module {
 // IR-NOT: afir.clip_by_value
 
 // 包装是全局函数,不带 `AscendC::` 限定,也没有显式模板实参。`calCount` 排在 tmp buffer
-// **之前**:`clipbyvalue.h` 原有的那个重载是反过来的,头里另补了一个这个顺序的转发重载,
+// 之前:`clipbyvalue.h` 原有的那个重载是反过来的,头里另补了一个这个顺序的转发重载,
 // 好让这条路上只有一种顺序。把 emitter 改回「tmp 在前」这条会红。
 // CPP-LABEL: void clip_by_value_extend_f32(
 // CPP: {{^ *}}ClipByValue({{.*}}, static_cast<uint32_t>({{[^)]*}}), {{[^,]*}});

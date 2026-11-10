@@ -14,10 +14,9 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-predicate-extension-api.mlir 的另一半。除了「无 tmp buffer、标准调用」这组老差异，
-// 这一侧还多一件事：标准 `AscendC::IsNan` 写的是 `LocalTensor<bool>`，而 AFIR 这一层的
-// 结果是 ui8，所以调用处要就地 `ReinterpretCast<bool>()`。这一步只存在于标准那一侧，
-// 包装收的就是 ui8。
+// 标准 AscendC::IsNan 接收 LocalTensor<bool>，而 AFIR 结果为 ui8，
+// 因此调用处需要 ReinterpretCast<bool>()。扩展包装直接接收 ui8，不需此转换；
+// 标准调用也不需要 tmp buffer。
 //
 // 「三个包装一个都没出现」「没有 afir.is 残留」用 `--implicit-check-not` 写在 RUN 行
 // 上，因为 `CHECK-NOT` 只在相邻两条正向 CHECK 之间生效。

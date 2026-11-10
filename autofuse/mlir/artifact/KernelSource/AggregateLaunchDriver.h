@@ -32,20 +32,15 @@ struct AggregateLaunchArtifacts {
   std::string autofuse_launch;
 };
 
-// Aggregates `planModules` into one self-contained entry module: tiling data,
-// contract validation, kernel entry, kernel body, kernel includes. The returned
-// module owns clones of the plan bodies, so it stays valid after `planModules`
-// are gone. Exposed so the --afir-aggregate pass and runAggregateLaunchDriver
-// drive one implementation rather than two.
+// Build a self-contained entry module with aggregate tiling data, validated contract,
+// kernel entry, bodies and includes. It owns cloned plan bodies and outlives the inputs.
+// Shared by the --afir-aggregate pass and runAggregateLaunchDriver.
 FailureOr<std::pair<OwningOpRef<ModuleOp>, AggregateArgumentLayout>> buildAggregateEntryModule(
     ArrayRef<ModuleOp> planModules, StringRef fusedGraphName, std::string *diagnostic);
 
-// Drives the aggregate + AutofuseLaunch text emission stage shared by the
-// codegen orchestration path and the af-opt tool: aggregates `planModules`
-// (independent per-candidate AFIR/AscendC modules already lowered via
-// addPlanCandidateLoweringPipeline) into one entry module, translates it to
-// AscendC, and emits the tiling-data header and AutofuseLaunch host wrapper
-// for it. `fusedGraphName` names the aggregate kernel entry.
+// Aggregate lowered per-candidate planModules, translate to AscendC, and emit the
+// tiling header and AutofuseLaunch wrapper. Inputs come from addPlanCandidateLoweringPipeline;
+// fusedGraphName names the aggregate entry. Shared by codegen orchestration and af-opt.
 FailureOr<AggregateLaunchArtifacts> runAggregateLaunchDriver(ArrayRef<ModuleOp> planModules, StringRef fusedGraphName,
                                                              std::string *diagnostic);
 

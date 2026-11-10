@@ -11,7 +11,7 @@
 
 // `afir.truediv` 进 VF 的 region（2026-10-26 加的那一行算子表）。
 //
-// **这一格钉的是「发的是 `Div` 而不是别的」**：`truediv` 在 reg 侧与 `div` 发同一个调用
+// 这一格钉的是「生成的是 `Div` 而不是别的」：`truediv` 在 reg 侧与 `div` 生成同一个调用
 // ——legacy 的 `ascir_op_lowering_matrix.csv` 里 `TrueDiv` 的 `reg_api_name` 就是
 // `DivExtend`（mem 侧才是 `TrueDivExtend` 加 tmp buffer，那是另一条路）。所以这一行与
 // legacy 逐字一致，而不是我们这一侧挑了个近似；钉住 `Reg::Div` 就是钉住这件事。
@@ -53,7 +53,7 @@ module {
 // IR-NOT: afir.vector_func
 // IR-NOT: afir.truediv
 
-// 发射出来是 `Reg::Div`，**不是** `Reg::TrueDiv`（reg 侧没有那个函数）。
+// 生成的是 `Reg::Div`，不是 `Reg::TrueDiv`（reg 侧没有那个函数）。
 // CPP-LABEL: void vector_func_truediv(
 // CPP: AscendC::Reg::Div(
 // CPP-NOT: AscendC::Reg::TrueDiv(

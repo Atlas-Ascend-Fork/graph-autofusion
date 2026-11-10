@@ -42,7 +42,7 @@ TEST(AscendCAttributesTest, MapsEveryAFIRSpaceOntoTheTargetVocabulary) {
 }
 
 TEST(AscendCAttributesTest, ReadsMemorySpaceFromTheValueDefinition) {
-  // 空间是**值**的事实，问的是值本身，不再是「某个 Op 的某个数组的第 N 项」
+  // 空间是值的事实，问的是值本身，不再是「某个 Op 的某个数组的第 N 项」
   // （设计文档 D3 / 5.1 步 8）。值的定义点有两种形态：kernel 参数在 arg attr 上，
   // 局部值在定义 Op 上。
   MLIRContext context;

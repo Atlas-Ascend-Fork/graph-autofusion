@@ -23,7 +23,7 @@ namespace mlir::afir {
 namespace {
 // `AscGraphBuilder::Output` 只设 index 与 dtype，`Build()` 再把没设形状的输出兜底成循环范围——
 // 对逐元素图那正好是对的，但归约之后输出比循环范围小，兜底值就成了归约前的形状。这里按真实输出
-// 形状补上视图，步长与构图器的 `ComputeStrides` 同一口径：长度为 1 的维步长记 0。
+// 形状补上视图，步长与构图器的 `ComputeStrides` 同一规则：长度为 1 的维步长记 0。
 void SetOutputView(af::AscGraph &graph, const char *name, std::initializer_list<int64_t> shape) {
   const auto output = graph.FindNode(name);
   assert(output != nullptr && output->outputs().size() == 1U);
@@ -49,7 +49,7 @@ af::AscGraph BuildGraph() {
   const auto output_shape = GetShapeConfig(load_mean_store::kOutputShapes, 0).shape;
   std::vector<size_t> reduce_axes;
   if (input_shape.size() == 2U) {
-    // 二维用例按**输出形状**选归约轴，而不是再加一个注册参数：输出 `[M, 1]` 是末维被归约
+    // 二维用例按输出形状选归约轴，而不是再加一个注册参数：输出 `[M, 1]` 是末维被归约
     // （tile 布局 `[A, R]`，走 AR），输出 `[1, N]` 是首维被归约（布局 `[R, A]`，走 RA）。
     // 两者的输出形状本来就得分别登记给 harness 分配缓冲，让它同时当判据就不会各说各话。
     reduce_axes = {output_shape.begin()[0] == 1 ? 0U : 1U};
@@ -59,7 +59,7 @@ af::AscGraph BuildGraph() {
     // `IsLegacyFullLoadReduce` 要求 `in.repeats[0] == out.repeats[0]`，`IsTailReduceFullLoad`
     // 要求轴数 ≥ 3 且归约末轴，二维 RA 两条都不满足。而 ARA 的 `vectorized_axis` 实测是
     // `[R, A_inner, A_outer]`，首项被归约 -> 判成 RA，且 `first.axes` 有两根，于是第一次走到
-    // RA `srcShape` 公式里的 **A 组连乘**项。详见
+    // RA `srcShape` 公式里的 A 组连乘项。详见
     // `docs/design/2026-10-01-afir-reduce-allload-template-design.md` 2.2 与 2.3。
     reduce_axes = {1U};
   } else {
@@ -81,7 +81,7 @@ af::AscGraph BuildGraph() {
   // 输出形状取 harness 分配缓冲用的同一份 `kOutputShapes`，构图与分配不会各说各话；bridge 会
   // 核对它与 Store 实际写入的范围是否一致。
   SetOutputView(graph, "output", output_shape);
-  // 这里**不设** tiling key。ATT 的 `GenerateModelInfo` 用一个自增计数器给每个 impl graph 编
+  // 这里不设 tiling key。ATT 的 `GenerateModelInfo` 用一个自增计数器给每个 impl graph 编
   // `tiling_case_id`，但图上自带的 key 会把计数器顶掉（`graph.GetTilingKey() >= 0 ? ... : tiling_key`）。
   // 默认值是 -1，设成 0 就等于宣称「这几个模板都是第 0 号」——ATT 那边 4 份 `TilingCase0Impl`
   // 撞成重定义，MLIR 这边 `InitializeTemplateInfo` 同一处三元式也退不到 templateId，报
@@ -124,7 +124,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   CheckTemplatesAreDispatched(kernel);
 
   // AR / RA 的模板参数必须与注册的形状对上，否则这条用例的参考实现算的是另一件事。
-  // 二维按**输出形状**判（与 `BuildGraph` 同一条判据）；三维 ARA 恒为 RA——归约的 z1 在
+  // 二维按输出形状判（与 `BuildGraph` 同一条判据）；三维 ARA 恒为 RA——归约的 z1 在
   // `vectorized_axis` 里排首位（实测 `[R, A_inner, A_outer]`），与输出首维是不是 1 无关。
   const auto &checked_input_shape = GetShapeConfig(load_mean_store::kInputShapes, 0).shape;
   const bool reduces_leading_axis =

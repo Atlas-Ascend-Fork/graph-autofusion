@@ -134,7 +134,7 @@ class DataMovementCapabilityProvider final : public ascend::instruction::Capabil
 // 一次搬运的操作数。`Scheduled` 会把源与目的换成带运行期偏移的子视图，并填上 DMA 的四个
 // 参数；identity 只填 `blockLen`，其余保持一维的退化值。
 //
-// 缝隙按**空间**存（global / local），方向映射在 `emitTransfer` 里做。理由不只是
+// 缝隙按空间存（global / local），方向映射在 `emitTransfer` 里做。理由不只是
 // 「计划拿不到方向」：`DataCopyPadExtend` 的两个重载单位换算不同——GM 侧那个参数乘
 // `sizeof(T)`、UB 侧那个除 `align_num`（`autofuse/ascendc/api/datacopy.h`）——按 src/dst
 // 存等于把量纲一起交给猜测，接反了不只是位置错。
@@ -176,7 +176,7 @@ class DataMovementConversionPattern final : public OpConversionPattern<SourceOp>
     const TransferOperands buffers{
         adaptor.getOperands()[0], adaptor.getOperands()[1], Value(), Value(), Value(), Value()};
     if (plan->kind == TransferPlanKind::Scheduled) {
-      // 计划多于两项时发射器会先建外层 `scf.for`，回调在最内层执行——DMA 与它的两个子
+      // 计划多于两项时生成器会先建外层 `scf.for`，回调在最内层执行——DMA 与它的两个子
       // 视图因此都落在循环体里。
       LogicalResult emitted = emitScheduledTransfer(
           op, rewriter, *plan,
@@ -200,7 +200,7 @@ class DataMovementConversionPattern final : public OpConversionPattern<SourceOp>
     }
 
     if (mapping_->load) {
-      // 替换值是**整块**缓冲，不是循环体里那个带行内偏移的子视图：Load 的结果代表整个
+      // 替换值是整块缓冲，不是循环体里那个带行内偏移的子视图：Load 的结果代表整个
       // tile，而子视图只是本轮 DMA 的落点，它在循环里，外面的使用者够不着（直接违反支配
       // 关系）。两项及以内没有循环，两者取值相同——`LocalTensorSubIndexOp` 在下标为 0 时
       // 本来就折叠回张量自身。

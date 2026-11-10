@@ -29,7 +29,7 @@
                            role = <compute>>
 
 // 五段 `(M,1,N,1,K) -> (M,B1,N,B2,K)`，M=2 B1=3 N=4 B2=2 K=8。
-// **legacy 在这个形状上直接 `ASSERT(false)`**——它只有三轴与四轴两个重载。
+// legacy 在这个形状上直接 `ASSERT(false)`——它只有三轴与四轴两个重载。
 #e_src = #afir.tensor_desc<axis = [0, 1, 2, 3, 4],
                            repeats = [#afir.expr<"2">, #afir.expr<"1">, #afir.expr<"4">, #afir.expr<"1">,
                                       #afir.expr<"8">],
@@ -74,8 +74,8 @@ module {
 }
 
 // IR-LABEL: func.func @broadcast_two_brc
-// 四段 `[brc 3][normal 8][brc 3][normal 8]`：内侧那个广播段在循环体里发第 0 趟，
-// 循环之后一条 `PipeBarrier<PIPE_V>`，再发外侧那个广播段的整块复制。
+// 四段 `[brc 3][normal 8][brc 3][normal 8]`：内侧那个广播段在循环体里只在第 0 趟执行，
+// 循环之后一条 `PipeBarrier<PIPE_V>`，再生成外侧那个广播段的整块复制。
 // 四段的 extent 按外→内依次物化：A、B、A、B。中间那段普通轴（B）是唯一变循环的一段。
 // IR: %[[D_A0:.*]] = arith.constant 3 : index
 // IR: %[[D_B0:.*]] = arith.constant 8 : index
@@ -107,7 +107,7 @@ module {
 // IR:   scf.for %{{.*}} = %[[E_ZERO]] to %[[E_N]] step %[[E_ONE]]
 // IR:     ascendc.broadcast_dim3
 // IR:   }
-// barrier 与整块复制在**内层循环之后、外层循环之内**：内侧那一整块要等 N 跑完才算齐。
+// barrier 与整块复制在内层循环之后、外层循环之内：内侧那一整块要等 N 跑完才算齐。
 // IR:   ascendc.pipe_barrier pipe_v
 // IR:   %[[E_BLK:.*]] = arith.constant 64 : index
 // IR:   %[[E_RPT:.*]] = arith.subi %[[E_B1]], %[[E_ONE]] : index
@@ -115,7 +115,7 @@ module {
 // IR: }
 // IR-NOT: ascendc.broadcast_dim3
 
-// kernel 文本侧：**每一条调用的第三个实参都是 `1`**（两趟都落 `BroadcastFirstDim`），
+// kernel 文本侧：每一条调用的第三个实参都是 `1`（两趟都落 `BroadcastFirstDim`），
 // 所以整条路上没有 `Or`。
 // CPP-LABEL: void broadcast_two_brc(
 // CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c3_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});

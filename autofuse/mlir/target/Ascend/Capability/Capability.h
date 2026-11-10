@@ -103,8 +103,8 @@ struct RankConstraint {
 
 // Describes parameter-free pairwise shape relations.
 //
-// Parameterized or N-ary shape semantics are validated by the operation verifier or capability provider and use
-// dedicated typed constraints when they must be exposed to a consumer.
+// Parameterized or N-ary relations are checked by the verifier or capability provider.
+// Expose dedicated typed constraints when consumers need these relations.
 enum class ShapeRelation {
   Equal,
   BroadcastCompatible,

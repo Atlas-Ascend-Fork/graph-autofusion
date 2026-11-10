@@ -172,7 +172,7 @@ bool ValidateGeneratedFieldReferences(const std::map<std::string, std::string> &
                                       const common::TilingFieldSchema &schema, std::string *diagnostic) {
   std::set<std::string> known_names;
   // 嵌套作用域的 `path` 就是这个 schedule group 在最外层 TilingData 里的成员名
-  // （见 schedule_group_names.h），所以两半对账用的是同一张 schema。
+  // （见 schedule_group_names.h），所以两半比对用的是同一张 schema。
   std::set<std::string> known_group_members;
   for (const auto &field : schema.fields) {
     known_names.insert(field.name);
@@ -205,9 +205,9 @@ bool ValidateGeneratedFieldReferences(const std::map<std::string, std::string> &
   return true;
 }
 
-// ATT 引用的**嵌套结构体成员**名。上面那个只抓 `get_<f>()` / `set_<f>()` 这类标量访问器，
+// ATT 引用的嵌套结构体成员名。上面那个只抓 `get_<f>()` / `set_<f>()` 这类标量访问器，
 // 抓不到 `tiling_data.graph0_result0_g0_tiling_data`——多 group 时每个 schedule group 的
-// 结构体是按成员名直接访问的（取引用、整体赋值），不过访问器。少了这一半对账，命名不一致
+// 结构体是按成员名直接访问的（取引用、整体赋值），不过访问器。少了这一半比对，命名不一致
 // 要到真机 host 编译期才以 `member access into incomplete type` 的形式暴露。
 //
 // 只认 `<标识符>_tiling_data` 这一种拼法：它就是 `ScheduleGroupIdent::GetItemPrefix()`

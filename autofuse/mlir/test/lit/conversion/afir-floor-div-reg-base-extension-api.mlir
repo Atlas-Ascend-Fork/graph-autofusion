@@ -11,8 +11,9 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-floor-div-extension-api.mlir 的另一半：同一个包装名，`floor_div_reg_base.h`，
-// 不收 tmp buffer——reg 侧在寄存器里做完 `Div` + `Truncate`，没有中间商要落地。
+// 检查 reg-based floor_div_reg_base.h 包装，不接收 tmp buffer，
+// 因为 Div 和 Truncate 在寄存器中完成。整数支持仅在 reg 侧；mem 侧只注册 f16 / f32。
+// ODS 为两侧并集，i32 应仅选择 reg 侧实现。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
@@ -52,12 +53,12 @@ module {
 // IR-LABEL: func.func @floor_div_reg_base_i32
 // IR: ascendc.floor_div_extend_reg_base
 
-// 与 mem 侧逐字相同的一行——两侧本来就是同一个函数名。
+// 两侧包装函数名相同，差异在参数和扩展头。
 // CPP-LABEL: void floor_div_reg_base_f32(
 // CPP: {{^ *}}FloorDivExtend({{[^,]*}}, {{[^,]*}}, {{[^,]*}}, static_cast<uint32_t>(
 
-// 两个函数都选中同一个 implementation，整数那个也是——所以是 COUNT-2 而不是一条。
+// 浮点和整数函数都应选择该实现，因此检查两次选择结果。
 // SELECT-COUNT-2: ascend.implementation = {id = "floor_div.tensor.extend_reg_base", kind = "ascendc_api"}
 
-// mem 侧的包装要一块 tmp buffer，这段 IR 一块都没给；何况 i32 那一份 mem 侧根本不收。
+// 此 IR 未提供 mem 侧必需的 tmp buffer，且 mem 侧不支持 i32，因此不能选择 mem 实现。
 // WRONGTARGET: no supported

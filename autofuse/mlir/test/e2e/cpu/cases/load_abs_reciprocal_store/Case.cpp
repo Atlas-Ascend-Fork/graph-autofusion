@@ -8,27 +8,12 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> abs -> reciprocal -> store CPU case ---*- C++ -*-===//
-//
-// **两个都要 tmp buffer 的节点串在一条链上。** 在此之前没有任何用例是这个形状：带
-// tmp buffer 的 E2E 全是单计算节点，唯一的多节点用例（load_exp_sqrt_store）两个节点都是
-// D0、都不要 tmp buffer。这个洞藏着一个越界写，加这个用例时当场就炸出来了。
-//
-// 调度给两个节点的是**同一个** tmp buffer id——legacy 的 `mem_reuse_manager` 允许跨节点
-// 复用，而 ATT 的尺寸聚合正是跨节点取 max（`buf_occupy_expr.cpp`：各节点内 Σ，节点之间
-// max），也就是说 `b{id}_size` 只按一个节点的需要算过一次。MLIR 这边却把两块 alloc 当成
-// 同一块资源里**并排**的两个成员，依次累加偏移，于是第二块整个落在资源之外：
-// `InitBuffer(tbuf, b0_size)` 之后取 `tbuf.Get()[b0_size]`。没有任何断言拦得住——
-// 「resource member offset must not overflow」只查算术溢出，不查偏移小于尺寸。表现是
-// 结果全 0，不是报错。
-//
-// 修法在 `CanonicalGroupKey::exclusiveMemberOrdinal`：tmp buffer 各自成组，各自从 0 开始，
-// 与 legacy 的「先后复用同一块」逐字对上。下面 CheckGeneratedKernel 钉的就是这一条。
-//
-// 链选 abs -> reciprocal 是因为 mem-based 一侧两个都走包装、两个都要 tmp
-// （`CalcAbsTmpSize` 对所有 dtype 都给，`CalcDefaultTmpSize` 同）。
-//
-//===----------------------------------------------------------------------===//
+// 验证两个需要 tmp buffer 的节点顺序复用同一资源。
+// legacy mem_reuse_manager 可跨节点复用 id；ATT 在节点内求和、节点间取 max，
+// 因此 b{id}_size 只覆盖单节点需求，不能把两个 alloc 按累加偏移并排放入同一 TBuf。
+// CanonicalGroupKey::exclusiveMemberOrdinal 应使两者独立分组并从偏移 0 开始。
+// CheckGeneratedKernel 检查此约束，避免第二块从 tbuf.Get()[b0_size] 开始而越界。
+// 选择 abs -> reciprocal，使 mem-based 两节点都需要 scratch，并保留可检查的数值结果。
 
 #include <cstddef>
 #include <string>
@@ -90,7 +75,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 两个包装各自的头都内联进来了。
   EXPECT_NE(kernel.find("__ASCENDC_API_ABS_H__"), std::string::npos);
   EXPECT_NE(kernel.find("__ASCENDC_API_RECIPROCAL_H__"), std::string::npos);
-  // 前导只发一份。`reciprocal.h` 声明了 `utils.h`（`abs.h` 自足、不声明），而扩展头
+  // 前导只生成一份。`reciprocal.h` 声明了 `utils.h`（`abs.h` 自足、不声明），而扩展头
   // 与前导头都按名字去重——数 `#define` 那一行，因为 `#ifndef` / `#define` 一次内联
   // 就出现两次，找子串数不出重复内联。
   EXPECT_EQ(CountOccurrences(kernel, "#define __ASCENDC_API_UTILS_H__"), 1U);

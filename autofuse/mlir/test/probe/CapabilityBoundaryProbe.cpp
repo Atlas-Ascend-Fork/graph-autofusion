@@ -10,14 +10,14 @@
 
 //===- CapabilityBoundaryProbe.cpp - 哪条「报不支持」在真实图上命中 ---------===//
 //
-// **这不是测试，是一台量具。** 它不断言任何事，产物是一张表：形状 → 状态 → 第一条诊断。
+// 这不是测试，是一个测量工具。 它不断言任何事，产物是一张表：形状 → 状态 → 第一条诊断。
 // 所以它是一个独立可执行文件、不接任何 `check-*` 目标，要量就手动跑：
 //
 //   make -C build af-capability-probe -j 6
 //   AUTOFUSE_DFX_FLAGS="--mlir_codegen_config=mlir" LD_LIBRARY_PATH="<见下>" \
 //     build/autofuse/mlir/test/probe/af-capability-probe > table.txt
 //
-// **`LD_LIBRARY_PATH` 必须与 CPU E2E 用的那一份一致**，照抄
+// `LD_LIBRARY_PATH` 必须与 CPU E2E 用的那一份一致，照抄
 // `build/autofuse/mlir/test/e2e/cpu/cases/<case>/CTestTestfile.cmake` 里那一行即可
 // （含 CANN 的 `devlib` 与 metadef 的几个 build 目录）。**用别的路径时失败方式是段错误，
 // 不是报错**：调度在 `ScheduleUtils::ClearAllSizeVar` 里挂掉，而且第一张图就挂，看起来像
@@ -29,14 +29,14 @@
 // 的一个 `DISABLED_` 用例**：它不是测试，不该挂在 CI 的目标上。
 //
 // 要回答的问题来自 `docs/development/2026-09-28-afir-vectorized-axis-collapse-design.md`
-// 「下一步」第 3 条：那几条保守边界**各自对应什么真实场景**。今天它们都是「判据推得出来、
+// 「下一步」第 3 条：那几条保守边界各自对应什么真实场景。今天它们都是「判据推得出来、
 // 但没有用例，于是宁可拒收」，而收哪一条要先知道它对应的图长什么样——不知道就开工，是在
 // 给一个可能不存在的形状铺砖（2026-09-23 那轮已经栽过一次：`exec_condition` 被当成卡点，
 // 重测发现不是）。
 //
 // 每一行还带一列 `vf=<a>/<b>`：调度产物里带 `VectorFunc` 节点的 impl graph 数 / 总数。
-// 加它是因为**一格的第一条诊断不足以说明这一格修了就能进来**——VF 在 `Optimize` 里就已经
-// 融出来，bridge 拒不拒它是后面一道闸门的事，于是诊断可能记在别的 op 上而图里仍带着 VF。
+// 加它是因为一格的第一条诊断不足以说明这一格修了就能进来——VF 在 `Optimize` 里就已经
+// 融出来，bridge 拒不拒它是后面一道门禁的事，于是诊断可能记在别的 op 上而图里仍带着 VF。
 // 判法与 legacy 接管表那一侧同源，成因见 `CountVectorFuncGraphs` 上的说明。
 // 这一列只在 `--reg-base` 下会非 0：V1 平台不产生 `VectorFunc`，mem 侧是个自带的对照组。
 //
@@ -82,7 +82,7 @@ constexpr int kBucketColumnWidth = 56;
 constexpr int kTableSeparatorWidth = 120;
 constexpr int kBucketSeparatorWidth = 70;
 
-// 量哪一侧。reg 侧（950）**要同时改两处**才算真的换过去，少一处调度与 MLIR 两边对不上：
+// 量哪一侧。reg 侧（950）要同时改两处才算真的换过去，少一处调度与 MLIR 两边对不上：
 // `soc_version`（MLIR 按它查 TargetProfile、决定选哪一侧 implementation）与 **NpuArch**
 // （legacy 那一半全按它分流，`REG_ASC_IR(...).Impl` 注册的键就是它）。数值与
 // `test/e2e/cpu/AddCpuCase.cmake` 的 `reg_base` 那一支一致，那里抄的是
@@ -100,9 +100,9 @@ constexpr ProbeTarget kRegBased{"Ascend950PR_9599", "3510", 72, 253952, 13421772
 
 const ProbeTarget *g_target = &kMemBased;
 
-// 换平台走 `SetPlatformInfo`，**不是 `SetPlatform`**——后者只写 `soc_ver` 就把
+// 换平台走 `SetPlatformInfo`，不是 `SetPlatform`——后者只写 `soc_ver` 就把
 // `initialized_` 置了位，其余字段留 0，调度拿到的是一台没有 UB 的机器。
-// mem 侧**不调它**：那一侧由 runtime stub 懒初始化，手填只填得出四个字段，
+// mem 侧不调它：那一侧由 runtime stub 懒初始化，手填只填得出四个字段，
 // `PlatformInfo` 比这多（见 Generator.cpp 上那段）。
 void SelectTarget(const ProbeTarget &target) {
   g_target = &target;
@@ -122,7 +122,7 @@ struct ProbeOutcome {
   std::string status;
   std::string diagnostic;
   // 调度产物里有多少张 impl graph 带 `VectorFunc` 节点，以及一共多少张。
-  // **这一列不能由状态列推出来**，见 `CountVectorFuncGraphs` 上的说明。
+  // 这一列不能由状态列推出来，见 `CountVectorFuncGraphs` 上的说明。
   int vfGraphs = 0;
   int implGraphs = 0;
 };
@@ -130,7 +130,7 @@ struct ProbeOutcome {
 // MLIR 的诊断走默认 handler 打到 fd 2，而 `RunMlirCodegen` 自己建 MLIRContext，外面插不进
 // handler。所以这里按 fd 收。
 //
-// **只有量具才这么干。** 产品代码里要分类失败用的是诊断上的标记
+// 只有测量工具才这么干。 产品代码里要分类失败用的是诊断上的标记
 // （`support/CapabilityShortfall.h`），不是文本。
 class StderrCapture {
  public:
@@ -156,7 +156,7 @@ class StderrCapture {
   StderrCapture &operator=(const StderrCapture &) = delete;
 
   // 第一条 `error:` 行。后面那些通常是同一次失败的连带（`failed to legalize` 之后还会
-  // 跟一串），第一条才说明是哪道闸门拦下的。
+  // 跟一串），第一条才说明是哪道门禁拦下的。
   std::string FirstErrorLine() {
     if (file_ == nullptr) {
       return {};
@@ -206,8 +206,8 @@ std::string StatusText(mlir::bridge::MlirCodegenStatus status) {
   return "?";
 }
 
-// 诊断行归到哪一桶。桶按**是哪道闸门拦下的**分，不按 op 分——同一道闸门拦下不同 op 是一件
-// 事，不同闸门拦下同一个 op 是两件事。
+// 诊断行归到哪一桶。桶按是哪道门禁拦下的分，不按 op 分——同一道门禁拦下不同 op 是一件
+// 事，不同门禁拦下同一个 op 是两件事。
 std::string Bucket(const std::string &diagnostic) {
   if (diagnostic.empty()) {
     return "(none)";
@@ -223,7 +223,7 @@ std::string Bucket(const std::string &diagnostic) {
   if (diagnostic.find("broadcast tile and a full-shape tile") != std::string::npos) {
     return "capability: broadcast tile shares a resource";
   }
-  // 这一桶**应当恒为 0**：capability 说支持而 pattern 失败，就是两侧判据漂移
+  // 这一桶应当恒为 0：capability 说支持而 pattern 失败，就是两侧判据漂移
   // （`localTileIsSingleSegment` 那条修的正是它）。非 0 说明又漂了一处。
   if (diagnostic.find("failed to legalize") != std::string::npos) {
     return "DRIFT: capability said yes, pattern said no";
@@ -232,7 +232,7 @@ std::string Bucket(const std::string &diagnostic) {
     return "plan selection: no constant-cost plan";
   }
   // 二次融合（`afir.vector_func`）那一段收不了。与上面几桶一样是干净回落，分开一桶是因为
-  // 它问的是**另一张供给表**：「这个 op 有没有寄存器形态的下降」，与「平台供不供得起这个
+  // 它问的是另一张支持表：「这个 op 有没有寄存器形态的下降」，与「平台供不供得起这个
   // tile 级 API」是两件事。落进 "other" 的话，M1 之后那 20 格看起来像是没人管的杂项。
   if (diagnostic.find("has no register-form lowering") != std::string::npos ||
       diagnostic.find("afir.vector_func") != std::string::npos ||
@@ -244,16 +244,16 @@ std::string Bucket(const std::string &diagnostic) {
 
 // 调度产物里带 `VectorFunc` 节点的 impl graph 数 / impl graph 总数。
 //
-// **为什么要单列这一列，而不是从拒收原因里读**：VF 是 A5 调度在 buffer 分配阶段做的二次融合
+// 为什么要单列这一列，而不是从拒收原因里读：VF 是 A5 调度在 buffer 分配阶段做的二次融合
 // （`v35/optimize/partition/vector_func_partitioner.cpp`，门槛 `kMinVfNodesNum = 2`，调用点
 // `optimize/buffer_allocate/buf_que_allocator.cpp` 对每张 impl graph 无条件调用），它在
-// `Optimize` 里就已经发生；bridge 认不认识 `VectorFunc` 是后面一道闸门的事。于是**一格的
+// `Optimize` 里就已经发生；bridge 认不认识 `VectorFunc` 是后面一道门禁的事。于是**一格的
 // 第一条诊断完全可能记在别的 op 上，而图里仍然带着 VF**——那种格子把记下来那条原因修掉
 // 也进不来，因为 VF 还在后面等着。2026-10-17 的 legacy 接管表上这个差额是 93 格
 // （reg 侧 200 格里 110 格含 VF，只有 17 格把 VF 记成首因，见
 // `docs/development/2026-10-17-vf-node-census-reg.txt`）。
 //
-// 数的是 `node_idx_to_scheduled_results` 里**所有候选模板**，不是 plan selection 选中的那一个：
+// 数的是 `node_idx_to_scheduled_results` 里所有候选模板，不是 plan selection 选中的那一个：
 // VF 由调度产生、与选哪个模板无关，而选型发生在这之后。`a/b` 两个数都要：`a == b` 说明这一格
 // 没有不带 VF 的后路，`0 < a < b` 说明有。
 //
@@ -314,7 +314,7 @@ std::vector<af::Expression> ToExpressions(const std::vector<int64_t> &shape) {
   return expressions;
 }
 
-// 广播轴与 Load 的 stride，**八种拓扑共用这一份**。广播轴由 `in` 那一维是 1 而 `out` 不是
+// 广播轴与 Load 的 stride，八种拓扑共用这一份。广播轴由 `in` 那一维是 1 而 `out` 不是
 // 定出来；广播轴上 Load 的 stride 取 0，其余维按输入自己的行主序算。与
 // `test/e2e/cpu/cases/load_broadcast_segmented_store/Case.cpp` 同一写法。
 //
@@ -324,7 +324,7 @@ struct BroadcastBinding {
   std::vector<af::Expression> inputShape;
   std::vector<af::Expression> outputShape;
   std::vector<af::Expression> loadStrides;
-  // 广播轴，**内 → 外**（下面的遍历次序）。`Broadcast()` 只按下标改 repeats，与次序无关；
+  // 广播轴，内 → 外（下面的遍历次序）。`Broadcast()` 只按下标改 repeats，与次序无关；
   // T4 要按这个次序切两半，所以记下来方向。
   std::vector<int64_t> brcAxes;
 };
@@ -380,10 +380,10 @@ af::AscGraph BuildElementwiseGraph(const std::string &name, const std::vector<in
 // 级联拓扑（F8，设计见 `docs/development/2026-10-12-afir-elementwise-broadcast-
 // generalization-test-design.md` 的功能需求 1）
 //
-// 今天的 sweep 只有 T1（`load -> brc -> store`），也就是**广播的结果直接写回 GM**。真实
+// 当前的 sweep 只有 T1（`load -> brc -> store`），也就是广播的结果直接写回 GM。真实
 // 模型里广播几乎总是中间结果，而「广播之后还有人用它」会动到几件 T1 碰不到的事：
 // 下游算子与 brc 争 tmp buffer、一个 SSA 上的 descriptor 必须一致、段与段之间的流水同步、
-// 以及广播作为**某个二元算子的一个 operand**（`classifySegments` 的「源与目的地各恰好
+// 以及广播作为某个二元算子的一个 operand（`classifySegments` 的「源与目的地各恰好
 // 一个」正是按 T1 那种形状写的）。
 //
 // 每种拓扑只加一件事，不叠加——一格同时违反两条判据会互相遮蔽（前序文档的变异验证栽过
@@ -407,7 +407,7 @@ af::AscGraph BuildBroadcastThenComputeGraph(const std::string &name, const std::
 }
 
 // T3 `add(load(full), brc(load(small))) -> store`：广播作为二元算子的一个 operand。
-// **这是真实模型里最常见的那一种**，今天零覆盖。
+// 这是真实模型里最常见的那一种，今天零覆盖。
 af::AscGraph BuildBroadcastOperandGraph(const std::string &name, const std::vector<int64_t> &out,
                                         const std::vector<int64_t> &in, af::DataType dtype) {
   using af::testing::AscGraphBuilder;
@@ -425,7 +425,7 @@ af::AscGraph BuildBroadcastOperandGraph(const std::string &name, const std::vect
       .Build();
 }
 
-// T4 `load -> brc -> brc -> store`：两步广播，第二个 brc 的源是**片上**张量而不是 Load 的
+// T4 `load -> brc -> brc -> store`：两步广播，第二个 brc 的源是片上张量而不是 Load 的
 // 结果。要两个广播轴才造得出来（`ProbeTopologies` 里按 `needsTwoBroadcastAxes` 跳过）。
 af::AscGraph BuildChainedBroadcastGraph(const std::string &name, const std::vector<int64_t> &out,
                                         const std::vector<int64_t> &in, af::DataType dtype) {
@@ -471,7 +471,7 @@ af::AscGraph BuildBroadcastThenCastGraph(const std::string &name, const std::vec
                                          const std::vector<int64_t> &in, af::DataType dtype) {
   using af::testing::AscGraphBuilder;
   const BroadcastBinding binding = BindBroadcast(out, in);
-  // 目标 dtype 取与源不同、**且对表里真有这一对**的那一个。原先是 `f16 ? f32 : f16`，
+  // 目标 dtype 取与源不同、且对表里真有这一对的那一个。原先是 `f16 ? f32 : f16`，
   // 那是只有 f16 / f32 两种 dtype 时写的；bf16 进来会被折到 f16 上，而 `bf16 -> f16`
   // 没有任何一层供得起——不是对表漏了一行，是硬件没有这条转换
   // （`kernel_operator_vec_vconv_impl.h` 把合法组合列死：`src: bfloat16_t, dst: float /
@@ -493,7 +493,7 @@ af::AscGraph BuildBroadcastThenCastGraph(const std::string &name, const std::vec
       .Build();
 }
 
-// T3c 对照：与 T3 同形，但两个 operand 都是整形状的 Load——**不含广播**。
+// T3c 对照：与 T3 同形，但两个 operand 都是整形状的 Load——不含广播。
 // T3 的选定格（`[8,1] -> [8,128]`）当前是 ok；这格继续把「两输入二元算子本身」
 // 与「其中一个输入是广播轴 stride 为 0 的 Load」分开，防止二元算子成为新的能力边界。
 af::AscGraph BuildBinaryControlGraph(const std::string &name, const std::vector<int64_t> &out,
@@ -513,16 +513,16 @@ af::AscGraph BuildBinaryControlGraph(const std::string &name, const std::vector<
   return graph;
 }
 
-// T5c 对照：菱形，但分叉点是普通 elementwise 而不是广播——**不含广播**。
+// T5c 对照：菱形，但分叉点是普通 elementwise 而不是广播——不含广播。
 // T5 当时十格全是 `InvalidBinding: conflicting descriptors for one canonical resource`，
 // 而 `load_add_diamond_store` 那条既有 E2E（分叉点是 `Add`）是绿的。这一格把「菱形本身」
 // 与「分叉点是广播」分开，答案是前者无关、判据在「分叉点是不是单输入单输出」。
 //
 // 那一条已经修掉（`alignment_bytes` 不再是资源身份字段，见 `canonicalResourceFacts`），
-// T5c / T5e 现在十格全过，E2E 是 `load_abs_diamond_store`。**这是 mem 侧的事实**：
+// T5c / T5e 现在十格全过，E2E 是 `load_abs_diamond_store`。这是 mem 侧的事实：
 // `--reg-base` 下这四个菱形拓扑共 40 格全部被 `VectorFunc` 拦在 bridge
 // （`vf=a/a`，三个算子够 `kMinVfNodesNum`），所以 reg 侧今天量不到菱形自己的判据。
-// **这三格留着不是为了再修一次**，
+// 这三格留着不是为了再修一次，
 // 是因为「binary 分叉过、unary 分叉挂」这个对照本身是判据的证据，去掉之后下一次漂移就
 // 没有参照了。T5 则换了一条原因继续挂（非队列资源一组多于一个成员），今天报能力不足。
 af::AscGraph BuildDiamondControlGraph(const std::string &name, const std::vector<int64_t> &out,
@@ -543,7 +543,7 @@ af::AscGraph BuildDiamondControlGraph(const std::string &name, const std::vector
   return graph;
 }
 
-// T5d 对照：与既有 E2E `load_add_diamond_store/Case.cpp` **逐字同形**（四个 Load、分叉点是
+// T5d 对照：与既有 E2E `load_add_diamond_store/Case.cpp` 逐字同形（四个 Load、分叉点是
 // `Add`、两个消费者也是 `Add`）。那条 E2E 是绿的，所以这一格应当 ok——它验的是探针复现得出
 // 既有用例，不是在量新东西。它要是也挂，说明问题在探针建图而不在编译器。
 af::AscGraph BuildDiamondBinaryForkGraph(const std::string &name, const std::vector<int64_t> &out,
@@ -616,7 +616,7 @@ af::AscGraph BuildBroadcastMultiOutputGraph(const std::string &name, const std::
       .Build();
 }
 
-// 量哪些形状。**挑的不是随手挑的**，每一组各管一类：
+// 量哪些形状。挑的不是随手挑的，每一组各管一类：
 //   `[128]` / `[1024]`        —— 既有用例的形状，对照用（应当全 ok）
 //   `[8,128]` / `[128,8]`     —— 广播轴在外 / 在内，两种段方向
 //   `[33,5]` / `[2,3,5,7]`    —— 尾轴 ×4B 不是 32 的倍数（20B / 28B），带填充的 descriptor
@@ -632,7 +632,7 @@ const std::vector<std::vector<int64_t>> &ProbeOutputShapes() {
       {4, 8, 4, 8},
       {2, 3, 5, 7},
       {128, 128, 128},
-      // 2026-10-11 泛化：尾轴字节数跨过 32 的几档（dtype 一起扫，所以同一个形状在 f16 / ui8
+      // 2026-10-11 扩展：尾轴字节数跨过 32 的几档（dtype 一起扫，所以同一个形状在 f16 / ui8
       // 上尾轴字节数不同），以及一个秩 5。
       //   `[7,8]`      尾 32B（f32 刚好一档）
       //   `[64,4]`     尾 16B（f32 不足一档）
@@ -648,7 +648,7 @@ const std::vector<std::vector<int64_t>> &ProbeOutputShapes() {
   return shapes;
 }
 
-// 扫哪几种 dtype。**不是为了凑数**：32B 一档装多少个元素由它定，而「目的地在窗口里稠密」
+// 扫哪几种 dtype。不是为了凑数：32B 一档装多少个元素由它定，而「目的地在窗口里稠密」
 // 那条判据查的正是 `Align(Z, 32/sizeof(T))` 与 `Z` 相不相等——同一个形状换 dtype 会跨过那条
 // 边界。`ui8` 另有一层：分段两档收它，而常量源那一档的集合里没有它
 // （`kDuplicateElementTypes`），所以整张都是广播轴的那一格应当在 ui8 上被拒。
@@ -665,10 +665,10 @@ const std::vector<ProbeDataType> &ProbeDataTypes() {
       {"i32", af::DT_INT32, 4},
       {"ui8", af::DT_UINT8, 1},
       // bf16（2026-10-20 加）。2026-10-22 起 bridge 的暂缓名单空了，这一列量的是真实状态
-      // ——在那之前它整列都是「不在 AFIR 供给表里」，与这台量具自己无关。
+      // ——在那之前它整列都是「不在 AFIR 支持表里」，与这个测量工具自己无关。
       //
-      // 闸门关着时量过一次开闸后的样子：95 格里 17 格 ok、26 格能力不足、18 格硬失败
-      // （cast 对表 5、`DescriptorCountMismatch` 5、无诊断 8）。那组数**不含**接管表上
+      // 门禁关着时量过一次开闸后的样子：95 格里 17 格 ok、26 格能力不足、18 格硬失败
+      // （cast 对表 5、`DescriptorCountMismatch` 5、无诊断 8）。那组数不含接管表上
       // 那 12 格 store 两端 dtype 不一致（首因是 legacy 用例样板漏设 `Output` 的 dtype，
       // 已补，见 `ScheduleToAfir.cpp` 的 `AFIR_ELEMENT_TYPE_HELD_BACK` 那段）——两张表的
       // 行不是同一批图，别把两组数对齐着读。
@@ -693,7 +693,7 @@ void PrintTable(const std::vector<std::string> &rows, const std::map<std::string
 
 // 广播：每个 dtype × 每个输出形状 × 每个非空的广播轴子集。
 //
-// 行尾多打两列，是为了**按签名分簇而不是按形状猜**（2026-10-11 之前那张表就是按形状读出来的，
+// 行尾多打两列，是为了按签名分簇而不是按形状猜（2026-10-11 之前那张表就是按形状读出来的，
 // 结果把一簇归错了判据）：
 //
 //   `tail=<N>B`  尾轴字节数，`Align` 那条判据跨不跨边界全看它；
@@ -792,7 +792,7 @@ const std::vector<ProbeTopology> &ProbeTopologies() {
   return topologies;
 }
 
-// 拓扑切片用哪几格形状。**不与 380 格的形状 sweep 叉乘**：那一维量的是形状，这一维量的是
+// 拓扑切片用哪几格形状。不与 380 格的形状 sweep 叉乘：那一维量的是形状，这一维量的是
 // 拓扑，叉乘出来上万格而判据只有十几条。按「尾轴 32B 对齐 × 最内轴是否广播轴」四象限各取
 // 一格（那张签名表的四格），外加一格两个广播轴的给 T4。
 struct TopologyCell {
@@ -841,7 +841,7 @@ void ProbeTopologySlice() {
             << std::setw(kBroadcastColumnWidth) << (innerIsBroadcast ? "inner=brc" : "inner=normal")
             << " vf=" << std::setw(kVectorFuncColumnWidth) << VfText(outcome) << " " << outcome.diagnostic;
         rows.emplace_back(row.str());
-        // 桶按「拓扑 + 判决」分：这一维要答的是「换了拓扑结论变不变」，而不是「哪道闸门拦
+        // 桶按「拓扑 + 判决」分：这一维要答的是「换了拓扑结论变不变」，而不是「哪道门禁拦
         // 下的」（那个由形状 sweep 的桶答）。
         buckets[std::string(topology.name) + ": " + (outcome.status == "ok" ? "ok" : Bucket(outcome.diagnostic))] += 1;
       }

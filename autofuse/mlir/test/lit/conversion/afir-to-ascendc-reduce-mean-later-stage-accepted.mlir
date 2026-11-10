@@ -6,12 +6,12 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 携带了 `#afir.reduction_domain` 的 `afir.mean` 落在**后一个 plan 阶段**里也必须通过。
+// 携带了 `#afir.reduction_domain` 的 `afir.mean` 落在后一个 plan 阶段里也必须通过。
 //
-// 这一条钉的是判据本身：**来源，不是阶段号**。此前这里用的是「`afplan.variant` 的
+// 这一条钉的是判据本身：来源，不是阶段号。此前这里用的是「`afplan.variant` 的
 // `stage > 0` 一律拒」，它不丢现有能力（RCore 第二阶段由调度侧改写成 `Sum`，
 // `optimize/task_generator/reduce_schedule_case_generator.cpp:165`），但它是阶段限制而不是
-// 来源证明：一个合法的「对前一阶段写进 workspace 的**非归约**中间结果求均值」会被它误拒。
+// 来源证明：一个合法的「对前一阶段写进 workspace 的非归约中间结果求均值」会被它误拒。
 //
 // 这份输入与 `afir-to-ascendc-reduce-mean-accumulation.mlir` 逐字相同，只把 `afplan.variant`
 // 的 `stage` 从 0 改成 1；反面（去掉属性）见
@@ -21,7 +21,7 @@
 // RUN: af-opt --afir-kernel-body-signature --afir-to-ascendc-pipeline --target=Ascend910B1 %s \
 // RUN:   | FileCheck %s
 
-// 判据是**来源**而不是阶段号：属性在场，`stage = 1` 照样下降。
+// 判据是来源而不是阶段号：属性在场，`stage = 1` 照样下降。
 // CHECK: ascendc.reduce_sum_2d_l2
 // CHECK: %[[FIRST:.*]] = arith.cmpi eq, %[[IV:.*]], %{{.*}} : index
 // CHECK: scf.if %[[FIRST]] {

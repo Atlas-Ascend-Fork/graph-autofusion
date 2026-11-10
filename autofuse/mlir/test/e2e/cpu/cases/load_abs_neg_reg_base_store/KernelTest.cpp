@@ -35,10 +35,8 @@ TEST(MlirE2eCpu, LoadAbsNegRegBaseStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // **正负都要有、而且不取 0**，三件事各靠一半：
-  //   - 有负数，`abs` 才不是恒等变换（漏发它得到 `-x`，只在 x<0 上错）；
-  //   - 不取 0，`neg` 才可观测（`-|0|` 与 `|0|` 分不开），而且输出哨兵与「算出 0」分得开；
-  //   - 期望值恒为负，所以「两个算子顺序写反」（得到 `|x|`，恒为正）一个元素都躲不过。
+  // 输入同时包含正负非零值。负数用于发现遗漏 abs，非零值用于发现遗漏 neg，
+  // 且可区分输出哨兵与有效结果；期望值全为负数，可发现算子顺序交换。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     const float magnitude = (static_cast<float>(index % 23U) + 1.0F) * 0.5F;
     input0[index] = (index % 2U == 0U) ? magnitude : -magnitude;

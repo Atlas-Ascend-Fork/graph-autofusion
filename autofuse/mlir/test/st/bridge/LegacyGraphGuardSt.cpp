@@ -10,13 +10,13 @@
 
 //===- LegacyGraphGuardSt.cpp - legacy 输入图的功能看护 ---------*- C++ -*-===//
 //
-// **搬的是输入图与形状，不是用例本体。** legacy 自己的 e2e 用例在
+// 搬的是输入图与形状，不是用例本体。 legacy 自己的 e2e 用例在
 // `tests/st/backend_e2e`（mem）与 `tests/v35/st/backend_e2e_v2`（reg）里，一个用例三四个文件、
 // 带自己的数值参考；它们的图全部来自 `tests/framework/share_graph` 的
 // `ShareGraph::Xxx` 工厂。要的是那套覆盖面，所以这里只把**图和形状**按
 // `AscGraphBuilder` 重写一遍，一个图一条用例，跑的是我们自己的那条链。
 //
-// 范围按接管表定，不按名字猜：reg 侧 200 格里 63 格、mem 侧 38 格里 **13** 格是
+// 范围按接管表定，不按名字猜：reg 侧 200 格里 63 格、mem 侧 38 格里 13 格是
 // `takeover`（2026-10-26 两张表），映射到 **74 个去重后的输入图**。`fallback` 那些 MLIR 今天
 // 还收不了，放进来只会是红的，所以不放——它们是缺口清单，不是看护对象。
 //
@@ -28,11 +28,11 @@
 // **为什么用严格模式**：允许回落的那一档（`--mlir_codegen_config=fallback`）在 MLIR 收不了时回落给
 // legacy，`GenerateForInductor` 照样返回 SUCCESS——那样这条用例在「MLIR 不再接管这张图」时
 // 仍然是绿的，看护不到任何东西。严格模式把回落也判成失败，于是 ASSERT SUCCESS 的含义变成
-// 「这张图确实是 MLIR 发的」。
+// 「这张图确实是 MLIR 生成的」。
 //
-// **入口是 `GenerateForInductor`**，与接管表那边的 `Codegen::Generate`（kTensorFlow）不同：
-// 场景这一位会传进 ATT 的候选准备闸门，而设计范围里的生产入口是 inductor 那个。接管表自己
-// 记了这条口径限制，这里顺手把它对齐。
+// 入口是 `GenerateForInductor`，与接管表那边的 `Codegen::Generate`（kTensorFlow）不同：
+// 场景这一位会传进 ATT 的候选准备门禁，而设计范围里的生产入口是 inductor 那个。接管表自己
+// 记了这条适用范围限制，这里顺手把它对齐。
 //
 // 两侧的平台位走两条路，不要混：
 //   mem  `CodegenOptions{.soc_version = "Ascend910B1"}`；
@@ -48,7 +48,7 @@
 #include "codegen.h"
 #include "common/platform_context.h"
 #include "optimize.h"
-// **两份 `runtime_stub.h` 里取 `st/common` 那一份**：接管表量的 `backend_e2e_v2` 按 include
+// 两份 `runtime_stub.h` 里取 `st/common` 那一份：接管表量的 `backend_e2e_v2` 按 include
 // 路径解析到的就是它，而两份 `RuntimeStubV2` 分头演化过（补 `aclrtGetSocName` 那次只补了
 // `v35/st/optimize` 那份，表因此整片量在了错的平台上）。取另一份会让这里的平台位与表对不上。
 #include "st/common/runtime_stub.h"
@@ -106,7 +106,7 @@ class LegacyGraphGuardRegSt : public testing::Test {
 };
 
 //===----------------------------------------------------------------------===//
-// 按接管表的 takeover 定侧：一个图在哪一侧被接管就在那一侧发用例，两侧都被接管就发两条。
+// 按接管表的 takeover 定侧：一个图在哪一侧被接管就在那一侧生成用例，两侧都被接管就生成两条。
 //===----------------------------------------------------------------------===//
 
 // legacy v35 optimize_st_v2.cpp 的同名图；只在 CPU 仿真环境生成。
@@ -387,7 +387,7 @@ TEST_F(LegacyGraphGuardRegSt, BesselY1Store) {
 
 // 对应 `ShareGraph::CastCastNanFusedGraph(3, DT_FLOAT, DT_UINT8)`。
 //
-// **这个图的两个 dtype 是工厂的形参，不是图里的字面量**，所以要去调用点看：
+// 这个图的两个 dtype 是工厂的形参，不是图里的字面量，所以要去调用点看：
 // `cast_nan_test` 传的是 (f32 进, ui8 出)。`Isnan` 的输出恒为一个字节的真值，走建图器的专用
 // 方法而不是通用 `Op<>`——后者会把输出 dtype 从输入继承成 f32，报
 // "'afir.isnan' op operand #1 must be ... 8-bit unsigned integer"。
@@ -1103,7 +1103,7 @@ TEST_F(LegacyGraphGuardRegSt, CompareGtTensorInt32) {
 //===----------------------------------------------------------------------===//
 // Where 族：掩码是 ui8，x2 / x3 可以是张量也可以是 UB 上的 Scalar
 //
-// 走 `Op<>` 但 **follow_index 必须是 1**：输出 dtype 跟 x2 / x3，不跟 x1 那个 ui8 掩码。
+// 走 `Op<>` 但 follow_index 必须是 1：输出 dtype 跟 x2 / x3，不跟 x1 那个 ui8 掩码。
 //===----------------------------------------------------------------------===//
 
 // 对应 `ShareGraph::LoadWhereStoreFusedGraph(3)`——三个都是张量。
@@ -1132,7 +1132,7 @@ TEST_F(LegacyGraphGuardMemSt, LoadWhereX2IsUbscalarStore) {
                           .Scalar("scalar0", "100", af::DT_FLOAT)
                           .Load("load0", "data0")
                           .Load("load1", "data1")
-                          // **继承源必须是张量**：`follow_index` 同时决定 dtype 与轴，指向
+                          // 继承源必须是张量：`follow_index` 同时决定 dtype 与轴，指向
                           // Scalar 会让输出拿到空轴集，掩码就广播不到输出，候选枚举按
                           // elementwise-broadcast 判据拒收（实测）。这里指向 x3 的 `load1`。
                           .Op<af::ascir_op::Where>("where", {"load0", "scalar0", "load1"}, 2U)

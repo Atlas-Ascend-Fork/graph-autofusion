@@ -26,7 +26,7 @@ include "mlir/IR/OpBase.td"
 // `AscendC::Gelu(dst, src, tmp, count)`。与 `Sigmoid` 同形的 stock 调用——要一块调用方
 // 给的 tmp buffer，但不引任何扩展头。
 //
-// **两张供给表给的是同一个调用**（legacy 两侧的 impl 类都是 `UnaryApiTmpCall` +
+// **两张支持表给的是同一个调用**（legacy 两侧的 impl 类都是 `UnaryApiTmpCall` +
 // apiName `Gelu`，只在 `IncludeApiHeaderFiles` 里带一份 CANN 自己的
 // `adv_api/activation/gelu.h`），所以只有这一个 def，没有 `_reg_base` 的那一半。
 // 两侧 `CalcTmpBufSize` 给的尺寸不同（`GetInputDataSizeTmpBuffer` vs

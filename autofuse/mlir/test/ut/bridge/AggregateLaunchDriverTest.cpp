@@ -76,10 +76,9 @@ mlir::OwningOpRef<mlir::ModuleOp> makePlanWithRealMain(mlir::MLIRContext &contex
   auto schema = (*plan)->getAttrOfType<mlir::TypeAttr>("ascendc.tiling_schema");
   mlir::OpBuilder builder(plan->getBodyRegion());
   builder.setInsertionPointToEnd(plan->getBody());
-  // AutofuseLaunchEmitter requires exactly one Workspace-kind argument among
-  // the aggregate arguments, so "_main" needs a workspace argument alongside
-  // the tiling struct argument. 身份由参数自己声明——`getKernelArgumentIdentity`
-  // 不再按「类型恰好等于 workspace 类型」反推（设计文档 3.6）。
+  // The launch wrapper requires one workspace argument alongside tiling.
+  // Declare its identity with kernel_arg; getKernelArgumentIdentity must not infer
+  // workspace from a coincidentally matching type (design doc 3.6).
   mlir::Type workspaceType = mlir::ascend::kernel::getAscendCWorkspaceType(&context);
   auto observer = builder.create<mlir::func::FuncOp>(plan->getLoc(), plan->getSymName()->str() + "_observe",
                                                      mlir::FunctionType::get(&context, {builder.getI32Type()}, {}));

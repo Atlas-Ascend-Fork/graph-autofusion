@@ -9,13 +9,13 @@
 // RUN: af-opt --verify-diagnostics --split-input-file --afir-select-implementation --target=Ascend910B1 %s
 // RUN: af-opt --verify-diagnostics --split-input-file --afir-select-implementation --target=Ascend950DT_950x %s
 
-// 三元族标量形态的边界：**第一个操作数不能是标量**。
+// 三元族标量形态的边界：第一个操作数不能是标量。
 //
 // 选择族那一位是 mask（`where.h` 的三个标量重载都要 `LocalTensor<uint8_t>`），clip 族那一位
 // 是 x（只有「三个全是标量」那个重载收标量的 `src_x`，而它没有 count / tmp 形参）。放开它
 // 只会建出一个编不过的调用，所以 ODS 的 `scalarInputs` 只放宽后两位。
 //
-// 拦住这两条的是 **ODS 的类型约束**，不是 verifier、也不是 capability——`condition` 那一位
+// 拦住这两条的是 ODS 的类型约束，不是 verifier、也不是 capability——`condition` 那一位
 // 的类型仍然只有 `AFIR_BufferizableShapedType`。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

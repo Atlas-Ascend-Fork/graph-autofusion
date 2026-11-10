@@ -77,10 +77,9 @@ module {
 // FINAL-NOT: afir.load
 // FINAL-NOT: afir.add
 // FINAL-NOT: afir.store
-// Load 与 Store 都下降成 `data_copy_pad_extend`（`data_copy_l2` 那个 op 还在方言里、
-// `ascendc_vector_target.mlir` 仍在钉它，只是这条路不再产出它）：裸 `AscendC::DataCopy`
-// 要求 `count * sizeof(T)` 32B 对齐，而 tile 的元素个数是运行期值，尾块对不齐时 NPU 上
-// 不报错、按 32B 向下取整。
+// Load 和 Store 使用 data_copy_pad_extend：运行期 tile 可能包含非 32B 对齐尾部，
+// 裸 DataCopy 会按 32B 向下截断而不报错。
+// data_copy_l2 仍由 ascendc_vector_target.mlir 单独覆盖，但本路径不再生成它。
 // FINAL: ascendc.data_copy_pad_extend
 // FINAL: ascendc.add_l2
 // FINAL: ascendc.data_copy_pad_extend

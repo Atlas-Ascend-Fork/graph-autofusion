@@ -59,7 +59,7 @@ module @plan0 attributes {
 // CHECK: %[[V1:[A-Za-z0-9_]+]] = memref.cast %[[OUT]] : memref<*xf32, 22 : i32> to memref<1x4xf32, 22 : i32>
 // CHECK: func.call @stage0_template1(%[[V1]]
 
-// template 的签名一动不动——`afir.arg_descs` 把它的秩绑住了。单独一条 RUN 行查：两个 template 的
-// 定义排在 `_main` 之前，而 `CHECK-DAG` 不回退到已扫过的位置。
+// template 保持 arg_descs 要求的 ranked 签名，由独立 RUN 检查。
+// 其定义位于 _main 前，CHECK-DAG 不会回到已扫描的位置。
 // TEMPLATE-DAG: func.func private @stage0_template0(%{{[A-Za-z0-9_]+}}: memref<4xf32, 22 : i32>
 // TEMPLATE-DAG: func.func private @stage0_template1(%{{[A-Za-z0-9_]+}}: memref<1x4xf32, 22 : i32>

@@ -55,7 +55,7 @@ bool hasCanonicalDescriptors(Operation *operation) {
     auto array = operation->getAttrOfType<ArrayAttr>(name);
     return expected == 0 ? !array || array.empty() : array && array.size() == expected;
   };
-  // 判据只看**使用点**的 tensor descriptor。值的规划结果（`afir.buffer_desc`）在值的
+  // 判据只看使用点的 tensor descriptor。值的规划结果（`afir.buffer_desc`）在值的
   // 定义点，由真正用到它的消费端各自查、各自报缺失；放进这里会让一个 Op 能不能下降
   // 取决于别的 Op 有没有标注（设计文档 5.1 步 8）。
   return hasArray(kOperandDescsAttrName, inputCount) && hasArray(kDestinationDescsAttrName, destinationCount) &&
@@ -123,18 +123,16 @@ struct ConvertAFIRToAscendCPass : public PassWrapper<ConvertAFIRToAscendCPass, O
     TypeConverter typeConverter;
     typeConverter.addConversion([](Type type) { return type; });
     // `!afir.token` 下降成 AscendC 的事件号。方向（pipe 对）不进转换后的类型——它在
-    // AscendC 侧由 `HardEvent` 模板参数携带，由同步族的 pattern 从**原**类型读出来
+    // AscendC 侧由 `HardEvent` 模板参数携带，由同步族的 pattern 从原类型读出来
     // （ADR-19）。宽度与 `api/ascendc` 既有用法一致（i8）。
     typeConverter.addConversion([](afir::TokenType type) -> Type { return IntegerType::get(type.getContext(), 8); });
     RewritePatternSet patterns(context);
     ascend::instruction::PatternBuildContext patternContext{typeConverter, *target_};
     ascend::instruction::populateEnabledPatterns(patterns, *registry_, patternContext);
-    // **符号表达式的下降也要在这里备着一份。** 进这个 pass 之前 `afir.symbolic_eval` 已经
-    // 被 `AFIRMemoryAllocatePass` 清空了（它在末尾跑同一组 pattern），所以输入里没有；
-    // 但 pattern **自己会建**——`materializeSizeAt` 把 descriptor 里非字面量的 stride /
-    // extent 物化出来时发的就是它。少了这一份，那条 op 没人 legalize，dialect conversion
-    // 会把**整个** pattern 回滚，报的是 `failed to legalize operation 'afir.load'` 之类的
-    // 根算子，看起来像判据写错了——实际是新建的 op 落不了地。
+    // 此 pass 仍需注册符号表达式下降 pattern。AFIRMemoryAllocate 虽已清理输入中的
+    // symbolic_eval，但搬运 pattern 的 materializeSizeAt 会为非字面量 stride / extent
+    // 新建该算子。若不注册下降，dialect conversion 会回滚整个 pattern，并在 afir.load
+    // 等根算子上报告 legalize 失败，掩盖实际缺失的符号算子处理。
     afir::detail::populateSymbolicLoweringPatterns(patterns);
     populateReducePaddingPatterns(patterns);
 

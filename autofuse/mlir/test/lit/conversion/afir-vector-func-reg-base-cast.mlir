@@ -12,13 +12,13 @@
 // 中途换 dtype 的 `afir.vector_func`（M2）。同 dtype 那一格在
 // `afir-vector-func-reg-base.mlir`，这里只钉**跨 dtype 多出来的那三件事**：
 //
-//   1. **lane 的宽度由最宽的那个元素类型定**，不由边界定。这一格是 half 进、half 出、
+//   1. lane 的宽度由最宽的那个元素类型定，不由边界定。这一格是 half 进、half 出、
 //      中间走 float，所以 `UpdateMask` 是 `<float>` 而不是 `<half>`——写错的后果是每趟
-//      多算一倍的 lane，而尾段之外的元素**照样算对**，只有尾巴和越界会暴露。
-//   2. **窄边界的搬运带 dist**：取进来 `DIST_UNPACK_B16`（把 half 撑进 4 字节的 lane
+//      多算一倍的 lane，而尾段之外的元素照样算对，只有尾巴和越界会暴露。
+//   2. 窄边界的搬运带 dist：取进来 `DIST_UNPACK_B16`（把 half 撑进 4 字节的 lane
 //      槽位）、存回去 `DIST_PACK_B32`（压回 half）。不带就是 `DIST_NORM`——编得过、
-//      跑得完、**静默算错**（每个 lane 读的是相邻两个 half 而不是一个）。
-//   3. **`Reg::Cast` 的三个模板实参**：`<OutT, InT, trait>` 一个都不能省，而 `trait` 是
+//      跑得完、静默算错（每个 lane 读的是相邻两个 half 而不是一个）。
+//   3. `Reg::Cast` 的三个模板实参：`<OutT, InT, trait>` 一个都不能省，而 `trait` 是
 //      `api_regbase/utils.h` 里那个具名 `constexpr` 的名字，一来一回挑的是**不同**的两个
 //      （舍入方向不一样）。
 //
@@ -51,7 +51,7 @@ module {
 // IR-LABEL: func.func @vector_func_cast_abs_cast
 
 // 一个块参数加三个中间结果，恰好四条声明。
-// **类型钉在下面的 CPP 段**（`RegTensor<half>` / `RegTensor<float>`）：类型写错不会少一条
+// 类型钉在下面的 CPP 段（`RegTensor<half>` / `RegTensor<float>`）：类型写错不会少一条
 // 声明，所以条数与类型要分开钉，而 FileCheck 的一遍扫描里「数条数」与「逐条看类型」两个
 // 写法会互相吃掉匹配位置——数在 IR 这一遍，类型在 CPP 那一遍。
 // IR: emitasc.vec_scope
@@ -65,7 +65,7 @@ module {
 
 // 取一次、转一次、算一次、再转一次、存一次。
 //
-// 两条 `dist` 在 IR 里是**裸整数**：`AscendC_LoadDist` / `AscendC_StoreDist` 是
+// 两条 `dist` 在 IR 里是裸整数：`AscendC_LoadDist` / `AscendC_StoreDist` 是
 // `I32EnumAttr`，没有包成 `EnumAttr`，所以打印出来是枚举值而不是名字（既有的
 // `ascendc.data_copy_vld_reg` 也是这样）。14 是 `DIST_UNPACK_B16`、7 是 `DIST_PACK_B32`
 // ——名字那一侧由下面的 CPP 段钉，那也是真正会被编译器读到的那一份。
@@ -78,7 +78,7 @@ module {
 // IR-NOT: afir.vector_func
 // IR-NOT: afir.cast
 
-// 发射出来的 C++。`UpdateMask<float>`、两条 dist、两个方向各自的 trait。
+// 生成的 C++。`UpdateMask<float>`、两条 dist、两个方向各自的 trait。
 // CPP-LABEL: void vector_func_cast_abs_cast(
 // CPP: __VEC_SCOPE__
 // 四条声明，各按自己的 dtype：half 进、中间两步 float、half 出。

@@ -63,9 +63,9 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 生成侧要把这两个算子包进一个 `if`。谓词的形状是两个 bool 相或（本核第一趟 ‖ 复用周期
   // 起点），整份 kernel 里只有它长这样——改动前这个文件里一处都没有。
   //
-  // **结构由 `test/lit/conversion/afir-exec-condition-cache-guard.mlir` 钉**（哪些算子在
+  // 结构由 `test/lit/conversion/afir-exec-condition-cache-guard.mlir` 钉（哪些算子在
   // `if` 里、哪些在外面）。这里钉的是另外两件事：这条真实路径上确实生成了守卫，以及跳过
-  // 那些迭代之后**算出来还是对的**——后者是本用例的主断言，不在这段文本里。
+  // 那些迭代之后算出来还是对的——后者是本用例的主断言，不在这段文本里。
   const size_t predicate = kernel.find(" | v");
   ASSERT_NE(predicate, std::string::npos);
   EXPECT_LT(kernel.find("if (", predicate), kernel.find("AscendC::Duplicate(", predicate));

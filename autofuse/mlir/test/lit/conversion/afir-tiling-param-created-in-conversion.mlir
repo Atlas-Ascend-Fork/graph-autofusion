@@ -6,33 +6,33 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **conversion 阶段新建的 `afir.tiling_param` 也要落地。**
+// conversion 阶段新建的 `afir.tiling_param` 也要完成 lowering。
 //
-// 尺寸序言那一步（`--afir-materialize-tiling-params`，流水线相位 A）**不是后面几步的前置**：
+// 尺寸序言那一步（`--afir-materialize-tiling-params`，流水线阶段 A）不是后面几步的前置：
 // `getOrCreateTilingParam` 是 get-or-create，缺的时候消费者自己建。本用例就是不跑那一步的
 // 那条 RUN 行——它钉住两件事，少任何一件都会静默出错而不是报错：
 //
-//   1. 新建那一条要用**调用方的 `builder`**（`ConversionPatternRewriter`）。自己开一个
+//   1. 新建那一条要用调用方的 `builder`（`ConversionPatternRewriter`）。自己开一个
 //      `OpBuilder` 建出来的 Op 不进 dialect conversion 的建档，`applyFullConversion` 连它
 //      非法都不知道，会把 `afir.tiling_param` 原样留在下降完的函数里，一条诊断都没有；
-//   2. `LowerTilingParamOp` 要收**没有 `ascend.implementation` 属性**的那一条。实现选择
+//   2. `LowerTilingParamOp` 要收没有 `ascend.implementation` 属性的那一条。实现选择
 //      pass 跑在 conversion 之前，新建的这条拿不到那个属性；不收的话它没人 legalize，
 //      整个 pattern 回滚、报在 `afir.store` 上，看起来像搬运的判据写错了。
 //
-// 这张图里 `step_size` **只出现在 `#dst_tile` 循环轴那一项的 stride 上**（「每趟前进多少」），
-// 不在任何 `afir.buffer_desc` 里。相位 A 不跑时，第一个碰到它的就是 `afir.store` 的下降，
-// 于是那一条由 conversion 就地建出来。相位 A 跑的时候由谁收它、以及只出现在 descriptor 里
+// 这张图里 `step_size` 只出现在 `#dst_tile` 循环轴那一项的 stride 上（「每趟前进多少」），
+// 不在任何 `afir.buffer_desc` 里。阶段 A 不跑时，第一个碰到它的就是 `afir.store` 的下降，
+// 于是那一条由 conversion 就地建出来。阶段 A 跑的时候由谁收它、以及只出现在 descriptor 里
 // 的符号那一类，是 `afir-tiling-param-descriptor-symbol.mlir` 的事。
 //
 // 图取自 `afir-broadcast-two-segment.mlir`：UB 缓冲整块覆盖一个 block 的形状才会让局部
 // descriptor 的循环轴 stride 是个符号表达式，单 tile 的缓冲那一项是 0。广播本身与本用例
 // 无关，只有 `#dst_tile` 的那一项 stride 从 `(8 * zt_size)` 换成了 `(8 * step_size)`。
 
-// 相位 A 不跑：`step_size` 由 conversion 自己建，并且要下降成 `tiling.step_size`。
+// 阶段 A 不跑：`step_size` 由 conversion 自己建，并且要下降成 `tiling.step_size`。
 // RUN: af-opt --target=Ascend910B1 --afir-kernel-body-signature \
 // RUN:   --afir-loop-generate --afir-memory-allocate --afir-pipeline-sync --afir-select-implementation \
 // RUN:   --convert-afir-to-ascendc %s | FileCheck %s --implicit-check-not=afir.tiling_param
-// 相位 A 跑：同一个名字、同一处下降结果。两条 RUN 行的差别只有「谁建的那一条」。
+// 阶段 A 跑：同一个名字、同一处下降结果。两条 RUN 行的差别只有「谁建的那一条」。
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s \
 // RUN:   | FileCheck %s --check-prefix=PIPELINE --implicit-check-not=afir.tiling_param
 

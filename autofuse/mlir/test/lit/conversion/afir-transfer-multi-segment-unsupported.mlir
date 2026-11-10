@@ -50,8 +50,8 @@ func.func private @multi_segment_load(
   %block = afir.tiling_param "zTb_size" : index
   %outer = afir.symbolic_eval %block, %tile_size {expr = #afir.expr<"(128 / (__arg0 * __arg1))">}
       : (index, index) -> index
-  // 动态维：元素总数与 GM 侧一样是 128 × 8，只是三维由 tiling 填。写成静态小形状会先撞上
-  // `afir.load` 的「两侧静态元素数必须一致」，那条与本用例要钉的事无关。
+  // 使用动态维保持 GM 与局部侧元素总数均为 128×8，只让 tiling 决定三维布局。
+  // 静态不匹配会被 Load 的元素数校验提前拒绝，无法检验多段搬运能力。
   %dst = memref.alloc(%outer, %block, %tile_size) {
       afir.buffer_desc = #afir.buffer_desc<space = <ub>, buffer_id = 0, reuse_id = 0, slot_count = 1,
                                            queue_depth = 2, size_from_resource = true,

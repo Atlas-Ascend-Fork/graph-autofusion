@@ -8,28 +8,12 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> add(IndexExpr) -> store CPU case ------*- C++ -*-===//
-//
-// **`IndexExpr` 的第一个用例。** 与同目录的 `load_add_scalar_store` /
-// `load_add_scalar_data_store` 是同一族的第三种标量源：
-//
-//   | 节点 | 值从哪来 | 落到 kernel 上 |
-//   |---|---|---|
-//   | `Scalar` | 编译期字面量 | `constexpr float c2_5_f32` |
-//   | `ScalarData` | 主机运行期传入 | 一个按值传的 kernel 形参 |
-//   | `IndexExpr` | 由 size var 算出来的表达式 | **在 kernel 顶部算出来的常量** |
-//
-// 本用例钉的是第三行：`IndexExpr` **不产生 kernel 形参**，签名与不含它的图一模一样。
-//
-// **这条路上没有归纳变量。** legacy 把三者一起收进 `kernel.constant_tensors`，由
-// `AppendConstTensorInit` 在 kernel 顶部物化，而那一处跑在 `root_loop.Generate`
-// 之前；渲染只把 size var 换成 TilingData 字段，轴不在替换表里。
-//
-// **覆盖到哪为止**：这条用例是套件里唯一有 size var 的一条（其余用例的 `Loops` 收的是
-// 字面量，`AscGraphBuilder` 把它们建成 `Symbol(n)`，图上没有符号），所以带自由符号的
-// 表达式只在这里走得到 `materializeRuntimeSize`。见 L-9 的 `IndexExpr` 一节。
-//
-//===----------------------------------------------------------------------===//
+// 验证第三种标量来源 IndexExpr，与 Scalar 字面量和 ScalarData 按值参数对照。
+// IndexExpr 根据 size var 在 kernel 顶部计算，不增加 kernel 参数，也不引用归纳变量。
+// legacy 将它加入 constant_tensors，并在 root_loop.Generate 前物化；替换表仅包含
+// TilingData 的 size var，不包含轴变量。
+// 符号尺寸版本覆盖带自由符号表达式的 materializeRuntimeSize，固定尺寸版本用于对照。
+// 语义依据见 L-9 的 IndexExpr 说明。
 
 #include <string>
 #include <vector>
@@ -47,12 +31,12 @@ af::AscGraph BuildGraph() {
 
   const auto input_shape = cfg::GetShapeConfig(cfg::kInputShapes, 0).shape;
   AscGraphBuilder builder(cfg::kKernelName);
-  // 与 load_add_index_expr_store 的唯一差别：每一维都是**运行期尺寸**，不是字面量。
+  // 与 load_add_index_expr_store 的唯一差别：每一维都是运行期尺寸，不是字面量。
   // 于是 `s0` 起的每个符号各成为 TilingData 的一个字段，表达式 `2 * s0` 里的那个自由
   // 符号有了真来源。
   //
-  // **每根轴各登记一个符号，不是把元素总数塞进一个符号。** 后者会把这条用例退化成一轴，
-  // 而这一族真正要钉的是「轴不参与替换」——只有一根轴时它与「没有轴」看不出区别。
+  // 每根轴各登记一个符号，不是把元素总数塞进一个符号。 后者会把这条用例退化成一轴，
+  // 而这一类真正要钉的是「轴不参与替换」——只有一根轴时它与「没有轴」看不出区别。
   std::vector<af::Expression> extents;
   std::vector<uint32_t> runtimeExtents;
   extents.reserve(input_shape.size());
@@ -79,7 +63,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_add_index_expr_dynamic_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
 
-  // **主判据：表达式在运行期从 TilingData 读出来算，不是折成常量。** 折掉的话下面这条
+  // 主判据：表达式在运行期从 TilingData 读出来算，不是折成常量。 折掉的话下面这条
   // 读字段的语句就没有了，而结果照样"对"——因为这条用例的 s0 恰好只取一个值。所以
   // 两条判据一起上：既要有运行期读取，又不能出现把它烧死的常量。
   //
@@ -93,7 +77,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // index → i64 → float 两次转换。少一次或写反都还编得过，只是算出另一个数。
   EXPECT_NE(kernel.find("static_cast<float>("), std::string::npos);
 
-  // 它**不占 kernel 形参**——与 ScalarData 的分界。
+  // 它不占 kernel 形参——与 ScalarData 的分界。
   EXPECT_NE(kernel.find(std::string("__global__ __aicore__ void ") + cfg::kKernelName +
                         "(__gm__ float* v1, __gm__ float* v2, __gm__ uint8_t* v3, AutofuseTilingData v4)"),
             std::string::npos);

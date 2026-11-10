@@ -11,7 +11,7 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 
 // `afir.remainder` 两侧同名、都要 tmp buffer，只有扩展头不同——比 `afir.floor_div` 还
-// 整齐。所以两份用例分得开的**只有 IR 里建的是哪个 op**：CPP 那条 check 两边逐字一样，
+// 整齐。所以两份用例分得开的只有 IR 里建的是哪个 op：CPP 那条 check 两边逐字一样，
 // 「选对了没有」全靠 IR / SELECT 这两条。
 //
 // 这一份钉 mem 侧（`remainder.h`）。这里用 f32——mem 侧只收 f32 / i32。

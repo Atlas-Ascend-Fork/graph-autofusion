@@ -7,8 +7,7 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 // RUN: af-opt --afir-gen-kernel-entry --verify-diagnostics --split-input-file %s
 
-// tiling 上没有这块 workspace 的字段。这里必须报错而不是退化成偏移 0：退化会让两块
-// workspace 叠在同一个地址上写，是静默的数据损坏。
+// 缺少 workspace 偏移字段时必须报错，不能默认取 0，否则不同 workspace 会重叠写入。
 module @plan0 attributes {
   afir.module_kind = "plan",
   afir.workspace_tensor_ids = array<i64: 2>,

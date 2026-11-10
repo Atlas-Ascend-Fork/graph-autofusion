@@ -10,7 +10,7 @@
 
 //===- Case.cpp - 菱形，分叉点是 afir.broadcast ------------------*- C++ -*-===//
 //
-// 级联拓扑 T5：**广播的结果有两个消费者**，于是它要活到第二个消费者算完。
+// 级联拓扑 T5：广播的结果有两个消费者，于是它要活到第二个消费者算完。
 //
 // 它跟着 `load_abs_diamond_store` 一起解锁，原因与广播无关：`afir.broadcast` 也是单输入
 // 单输出那一档，调度把它的结果放进非队列的计算缓冲，与下游 unary 的 tmp buffer 共用一个
@@ -21,7 +21,7 @@
 // 它要两条改动才成立，两条都在 `MemoryAllocate`：
 //   1. `alignment_bytes` 退出资源身份字段（否则绑定层就报 InvalidBinding）；
 //   2. 非队列资源的成员不并排、各自从自己的 `view.offset` 起算（否则第二个成员越界，
-//      运行期 abort 且输出一字节不写——这一条在改之前**不报错**，所以这一格是它的
+//      运行期 abort 且输出一字节不写——这一条在改之前不报错，所以这一格是它的
 //      唯一数值证据）。
 //
 // 形状取探针报 ok 的两格（见 CMakeLists.txt）。其余格是 `afir.broadcast` 自己的能力
@@ -57,7 +57,7 @@ af::AscGraph BuildGraph() {
 
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace config = load_broadcast_diamond_store;
-  // 走的是 MLIR 那条路而不是回落 legacy。**少了这一条，整个用例在回落之后照样全绿**，
+  // 走的是 MLIR 那条路而不是回落 legacy。少了这一条，整个用例在回落之后照样全绿，
   // 而「回落」恰好就是改动前这张图的行为。
   EXPECT_NE(kernel.find(std::string(config::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   // 两个消费者都在广播之后：钉次序而不只是「都在」。

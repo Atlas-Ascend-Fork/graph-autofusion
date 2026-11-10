@@ -80,10 +80,10 @@ SmallVector<VectorTensor> collectTensors(Operation *op) {
       if (!descriptor || !descriptor.getRole() || descriptor.getRole().getValue() != Role::Compute) {
         continue;
       }
-      // 没有向量化轴的 compute 张量不参与：**标量就是这个形态**。调度给标量的
+      // 没有向量化轴的 compute 张量不参与：标量就是这个形态。调度给标量的
       // descriptor 是 `axis = [0, 1], repeats = [1, 1], strides = [0, 0], role = compute`，
       // 一个 `vectorized_axis` 都没有——它在整条循环里就是同一个值，既约束不了合轴，
-      // 也不需要偏移。跳过它，下降侧「标量不是 tile、不发 subindex」那条判断就不必再写一遍。
+      // 也不需要偏移。跳过它，下降侧「标量不是 tile、不生成 subindex」那条判断就不必再写一遍。
       if (descriptor.getVectorizedAxis().empty()) {
         continue;
       }
@@ -93,7 +93,7 @@ SmallVector<VectorTensor> collectTensors(Operation *op) {
   return tensors;
 }
 
-// descriptor 自身的长度约束。`TensorDescAttr::verify` 只在**两个数组都非空**时才比长度
+// descriptor 自身的长度约束。`TensorDescAttr::verify` 只在两个数组都非空时才比长度
 // （`AFIRDialect.cpp:727` / `:737`），所以「`axis` 非空而 `repeats` 为空」是合法属性——
 // 而下面要按 `axis` 的下标去 `repeats` 里取，那样会越界读。这道检查因此不是冗余的。
 bool hasConsistentLengths(TensorDescAttr descriptor) {

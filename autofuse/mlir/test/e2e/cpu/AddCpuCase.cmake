@@ -54,21 +54,14 @@ function(parse_mlir_e2e_cpu_shape shape_text shape_values_var element_count_var)
     set(${element_count_var} "${element_count}" PARENT_SCOPE)
 endfunction()
 
-# 用例默认跑在 `AF_MLIR_E2E_CPU_SOC_VERSION`（Ascend910B1）上，也就是 **mem-based 一侧**。
-# 给 `PLATFORM` 传一个名字就能换到别的平台；今天只认 `reg_base`。
-#
-# **换平台要同时改三处，少一处就不是真的换了**：
-#
-#   1. `soc_version`（进 `CodegenOptions`）——MLIR 侧按它查 TargetProfile，决定
-#      `RegBasedApiFamily` 是 Available 还是 Unavailable，也就是选哪一侧的 implementation；
-#   2. **NpuArch 字符串**——legacy 那一半（optimizer / ATT / AscIR 的 codegen impl）全部按它
-#      分流：`REG_ASC_IR(...).Impl(v1_soc_versions, ...)` 注册的键就是 `"2201"`，v2 那份是
-#      `"3510"`。只改第 1 处的话，调度算的还是 v1 的 tmp buffer 尺寸，而 MLIR 选的是 reg 侧
-#      的实现——两边对不上，`checkTmpBuffer` 当场判 unsupported；
-#   3. tikicpulib 目标——CPU 模拟器按芯片分库，链错了编得过但跑的是另一颗芯片。
-#
-# NpuArch 那一处走 `PlatformContext::SetPlatformInfo`（见 Generator.cpp），不改共用的
-# runtime stub：stub 是整个测试套件共用的，把它的返回值改成可配会牵连到所有用例。
+# 默认使用 AF_MLIR_E2E_CPU_SOC_VERSION（Ascend910B1）的 mem-based 平台。
+# PLATFORM reg_base 同时切换以下三项，必须保持一致：
+# 1. CodegenOptions::soc_version：MLIR 用它选择 TargetProfile 和 implementation 家族。
+# 2. legacy NpuArch：optimizer、ATT 和 AscIR codegen 按注册键 2201 / 3510 分流。
+#    只改 soc_version 会使 scratch 尺寸和 MLIR 实现不匹配，checkTmpBuffer 返回不支持。
+# 3. tikicpulib：CPU 模拟库必须与目标芯片对应，链接成功不代表目标正确。
+# NpuArch 通过 Generator.cpp 的 PlatformContext::SetPlatformInfo 设置，
+# 不改整套测试共享的 runtime stub，以免影响其他用例。
 function(add_mlir_e2e_cpu_case name)
     cmake_parse_arguments(PARSE_ARGV 1 CASE "REQUIRES_COMPACT_SDK" "PLATFORM;TILE_ACCESSOR;BLOCK_INNER_ACCESSOR;HOST_TILING_API"
         "GENERATOR_SOURCES;TEST_SOURCES;OUTPUT_SHAPE;INPUT_SHAPES;COVERS;ENVIRONMENT")
@@ -109,21 +102,11 @@ function(add_mlir_e2e_cpu_case name)
        NOT CASE_OUTPUT_SHAPE OR NOT CASE_INPUT_SHAPES)
         message(FATAL_ERROR "${name}: expected OUTPUT_SHAPE and INPUT_SHAPES")
     endif()
-    # The generated TilingData names its fields after the scheduled axes, so the
-    # names differ per registration even when several share one test source
-    # (z0t_size for [128] against z0z1z2t_size for [128, 23, 5]). Naming them here,
-    # next to the shape that produces them, is what lets the test assert which
-    # terms of the transfer offset it actually exercises instead of assuming.
-    # 覆盖断言是**选填**的：给了就在运行期断言，没给就不断言。
-    #
-    # 原先三个参数都是必填。那条契约在用例形状由本仓自己定的时候成立，之后不再成立——
-    # 形状被大量重塑（`load_abs_storex128 [128]` -> `load_abs_store_2x297x309x1`），而
-    # 字段名（`get_z0t_size` 对 `get_z0z1z2z3t_size`）和覆盖项都是跟着形状走的。必填只会
-    # 逼着新用例填一个没推导过的值，那比不填更糟：这套机制防的就是「声明与实际不符还能
-    # 通过」，用猜来的值填满它等于把它拆了。
-    #
-    # 所以判据从「必须声明」改成「声明了就必须对」。消费端 `E2eTilingShape.h` 本来就是
-    # `#if defined(...)` 保护的，不给宏自然降级成不断言。
+    # TilingData accessor names depend on scheduled axes and therefore on each shape:
+    # z0t_size for [128] may become z0z1z2t_size for [128, 23, 5]. Declare accessors next
+    # to their shape registration so runtime assertions check the actual offset coverage.
+    # 覆盖声明可选；提供后必须在运行期满足。形状变化时需重新推导字段名和覆盖项，不能猜测。
+    # 未提供时 E2eTilingShape.h 通过条件编译省略对应断言。
     if((CASE_TILE_ACCESSOR AND NOT CASE_BLOCK_INNER_ACCESSOR) OR
        (CASE_BLOCK_INNER_ACCESSOR AND NOT CASE_TILE_ACCESSOR))
         message(FATAL_ERROR "${name}: TILE_ACCESSOR and BLOCK_INNER_ACCESSOR name the generated TilingData "
@@ -134,13 +117,9 @@ function(add_mlir_e2e_cpu_case name)
         message(FATAL_ERROR "${name}: COVERS needs TILE_ACCESSOR and BLOCK_INNER_ACCESSOR to be asserted against")
     endif()
 
-    # COVERS states which terms of the scheduled-transfer offset
-    # `(blockIdx * block_inner + round) * tile` this registration's shape actually
-    # reaches, and the test asserts it at run time. ATT decides the split, so a case
-    # that only checks its output values can keep passing after it has stopped
-    # exercising the term it was registered for. `none` is a deliberate choice, not a
-    # default: it says the offset is identically zero here and the case is about
-    # something else.
+    # COVERS declares which terms of (blockIdx * block_inner + round) * tile the shape
+    # must exercise. Runtime assertions verify the declaration because ATT chooses the split.
+    # Use none explicitly when the offset is always zero and this case tests another behavior.
     set(known_coverage multi_block multi_round tail none)
     set(coverage_definitions "")
     foreach(coverage_token IN LISTS CASE_COVERS)

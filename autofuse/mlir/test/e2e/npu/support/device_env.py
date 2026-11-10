@@ -206,8 +206,7 @@ def ensure_overlay(
                 continue
             link.unlink()
         elif link.exists():
-            # overlay 根下出现同名真实目录，说明这个 overlay 不是本模块建的。
-            # 直接改它可能动到别人的东西，报错让人自己看一眼。
+            # overlay 下已有同名真实目录时拒绝修改，避免覆盖其他来源的内容。
             raise DeviceEnvError(
                 "overlay 根下 {} 是真实目录而不是符号链接：{}\n"
                 "    这个 overlay 不像是本模块建的，换一个 --overlay 落点。".format(

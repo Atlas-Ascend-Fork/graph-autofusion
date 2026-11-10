@@ -6,16 +6,16 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **尺寸序言要收 tensor descriptor 里的符号。**
+// 尺寸序言要收 tensor descriptor 里的符号。
 //
 // `AFIRMaterializeTilingParamsPass` 自述的是「把 kernel body 的**每一个**运行期尺寸符号提到
 // 尺寸序言里」，而它此前只走 `size_var` 与 `afir.buffer_desc` 两处。descriptor 的 `repeats` /
 // `strides` / `vectorized_strides` 同样会被物化成 `index` 值（`materializeExtentValue` /
 // `materializeStrideValue` → `materializeSizeAt`，自由符号绑到 `getOrCreateTilingParam`），
-// 漏收的后果不是报错而是**换个地方建**：下降时第一个碰到它的 pattern 就地建一条，那时实现
+// 漏收的后果不是报错而是换个地方建：下降时第一个碰到它的 pattern 就地建一条，那时实现
 // 选择已经跑过，诊断也早该在这里一次性报完了。
 //
-// 本用例的符号刻意**三处都不在**：`stride_only` 不在 `size_var`、不在任何 `afir.buffer_desc`、
+// 本用例的符号刻意三处都不在：`stride_only` 不在 `size_var`、不在任何 `afir.buffer_desc`、
 // 也没有哪条 `afir.tiling_param` 预先写在函数里。它只出现在 descriptor 上，所以这条 RUN 行
 // 只有 descriptor 那一遍扫描能让它变绿。
 //

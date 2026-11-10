@@ -71,7 +71,7 @@ Pipe getPipe(Operation *op) {
     return Pipe::TransferOut;
   }
   // 兜底是矢量，不是「某台计算引擎」：今天有注册实现的计算 Op 全在矢量上。Cube 与标量
-  // 各是一台独立引擎（`afir::Pipe` 里各有取值），它们的 Op 落地时要像搬运族那样带上
+  // 各是一台独立引擎（`afir::Pipe` 里各有取值），它们的 Op 生成时要像搬运族那样带上
   // 自己的 trait——否则会被这里当成矢量，而竞争检查器给出的就是一份漏了 Cube 那几条边
   // 的清单。
   return Pipe::Vector;
@@ -231,7 +231,7 @@ bool isInside(Operation *op, Operation *ancestor) {
 //
 //     %t0 = afir.event_record : !afir.token<from = transfer_out, to = transfer_in>
 //     scf.for %i = ... iter_args(%w = %t0) -> (!afir.token<...>) {
-//       afir.event_wait %w        // 等的是**上一次迭代**记下的那个事件
+//       afir.event_wait %w        // 等的是上一次迭代记下的那个事件
 //       ... 写 ...                //   ← 被这条边挡住
 //       ... 读 ...
 //       %next = afir.event_record // 本次迭代记下，给下一次迭代等
@@ -239,7 +239,7 @@ bool isInside(Operation *op, Operation *ancestor) {
 //     }
 //
 // 这不是「把同一块 IR 换个写法」：SSA 里 wait 消费的是块参数而不是 record 的结果，
-// 两者之间**没有**同迭代的 use-def 边——边跨的正好是一次迭代，由 iter_arg 的定义
+// 两者之间没有同迭代的 use-def 边——边跨的正好是一次迭代，由 iter_arg 的定义
 // 给出，不需要靠文本先后去猜。AscendC 用事件 ID 复用达到同一效果，代价是配对关系
 // 在 IR 上看不见。
 //
@@ -301,7 +301,7 @@ void RaceChecker::checkPair(const Access &earlier, const Access &later,
   if (!commonLoop) {
     return;
   }
-  // 距离是**这个**循环的迭代数。轮转下标必须由它的归纳变量驱动，模运算才对得上；
+  // 距离是这个循环的迭代数。轮转下标必须由它的归纳变量驱动，模运算才对得上；
   // 不是 `scf.for` 时拿不到归纳变量，别名判定随之退回保守侧。
   auto forOp = dyn_cast<scf::ForOp>(commonLoop);
   Value inductionVariable = forOp ? forOp.getInductionVar() : Value{};
@@ -311,7 +311,7 @@ void RaceChecker::checkPair(const Access &earlier, const Access &later,
   //   1. `earlier`@i 对 `later`@(i+d)。它被同迭代的顺序顺带覆盖：`earlier`@i 先于
   //      `earlier`@(i+d)（同一个 Op 的相继两次执行必然有序），后者又先于同迭代的
   //      `later`。所以只要同迭代有序，这条方向就不用报。
-  //   2. `later`@i 对 `earlier`@(i+d)。**这条没有任何东西覆盖**——值依赖不跨迭代，
+  //   2. `later`@i 对 `earlier`@(i+d)。这条没有任何东西覆盖——值依赖不跨迭代，
   //      唯一能覆盖它的是「两者同流」。这就是双缓冲 WAR 冒险的形式：消费者还在读第 i
   //      次的数据，生产者已经在写第 i+d 次的同一块存储。多缓冲把 d 推大，推不掉。
   if (!ordered) {

@@ -30,11 +30,10 @@ namespace {
 
 constexpr int64_t kUnknownSize = -1;
 
-// 轮转下标的识别范围刻意窄：`(iv + phase) mod modulus`，加法可缺省、取模走
-// `arith.remsi` / `arith.remui`，`iv` 是某个**步长为 1** 的 `scf.for` 的归纳变量。
-// 步长不是 1 时槽位每次迭代前进 step，撞上的条件变成 `d * step ≡ Δ (mod S)`，与这里
-// 的算术不是一回事；与其算错距离，不如退回 Unknown。识别不了的形式一律退回
-// Unknown——别名判定在 Unknown 上只会更保守，不会漏报。
+// 仅识别步长为 1 的 scf.for 归纳变量形成的 (iv + phase) mod modulus，
+// 允许省略加法，取模支持 arith.remsi / remui。
+// 非单位步长需要求解 d*step ≡ Δ (mod S)，不适用此处相位算法。
+// 无法识别时返回 Unknown，使别名判断保守处理，避免误判不重叠。
 std::optional<std::pair<Value, int64_t>> matchInductionVariablePlusConstant(Value value) {
   int64_t phase = 0;
   Value current = value;
@@ -141,13 +140,11 @@ bool isDisjointStaticRange(int64_t lhsOffset, int64_t lhsSize, int64_t rhsOffset
   return lhsOffset + lhsSize <= rhsOffset || rhsOffset + rhsSize <= lhsOffset;
 }
 
-// 轮转下标在迭代距离 d 上是否可能落到同一个槽。约定 lhs 在第 i 次迭代、rhs 在第 i + d
-// 次迭代：
-//   (i + lhsPhase) mod S == (i + d + rhsPhase) mod S  <=>  d ≡ lhsPhase - rhsPhase (mod S)
-//
-// 这个推导只有在三件事都成立时才有意义：两侧级数相同、两侧由**同一个**归纳变量驱动、
-// 而且这个归纳变量就是 `d` 所属的那个循环的。任何一条不成立，`i` 在两侧不是同一个量，
-// 相位差算出来的「不撞」是假的——一律按「可能撞」处理。
+// 判断 lhs 在第 i 轮、rhs 在第 i+d 轮是否可能使用同一槽位：
+// (i + lhsPhase) mod S == (i + d + rhsPhase) mod S
+// 等价于 d ≡ lhsPhase - rhsPhase (mod S)。
+// 仅当两侧级数相同，且由距离 d 所属循环的同一归纳变量驱动时，才可使用此相位关系。
+// 否则两侧 i 不在同一坐标系中，保守地按可能重叠处理。
 bool mayRotatingOffsetsCollide(const DimensionOffset &lhs, const DimensionOffset &rhs, int64_t iterationDistance,
                                Value loopInductionVariable) {
   if (lhs.modulus != rhs.modulus) {
@@ -295,7 +292,7 @@ std::optional<int64_t> firstAliasingIterationDistance(const BufferSlice &lhs, co
   // 同一次迭代内不重叠不代表跨迭代不重叠——轮转下标正是这种情况，所以从距离 1 起逐个
   // 试到一个周期为止。
   //
-  // 周期是各维级数的**最小公倍数**，不是最大值：两维分别 3 路和 4 路轮转时，两个访问
+  // 周期是各维级数的最小公倍数，不是最大值：两维分别 3 路和 4 路轮转时，两个访问
   // 要同时在两维上撞一次需要 d 同时满足两个同余式，最早可能出现在 d = 12。按最大值
   // 截断会在 d ≤ 4 里找不到解就收工，把真实的竞争报成「永不重叠」。
   int64_t period = 1;

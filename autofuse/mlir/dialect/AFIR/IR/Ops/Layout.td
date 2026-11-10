@@ -25,10 +25,10 @@ include "Ops/Elementwise.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/CommonTypeConstraints.td"
 
-// 元素类型取 legacy 两侧供给表的那一份，两侧逐字相同
+// 元素类型取 legacy 两侧支持表的那一份，两侧逐字相同
 // （`ascir_builtin_ops_v1.cpp:163` 与 `ascir_builtin_ops_v2.cpp:558` 共用同一个 `TensorType`）。
-// **`ui32` 与 `bf16` 在 lowering 那一层的 `ElementTypes` 里没有位**，所以 implementation 收不到
-// 它们；ODS 比 implementation 宽是对的——这里说的是 op 收什么，不是某个 implementation 发什么。
+// `ui32` 与 `bf16` 在 lowering 那一层的 `ElementTypes` 里没有位，所以 implementation 收不到
+// 它们；ODS 比 implementation 宽是对的——这里说的是 op 收什么，不是某个 implementation 生成什么。
 defvar AFIR_RemovePadElementTypes = [I16, UI16, I32, UI32, F16, F32, BF16];
 defvar AFIR_PadElementTypes = [I16, UI16, I32, UI32, F16, F32];
 
@@ -38,16 +38,10 @@ defvar AFIR_PadElementTypes = [I16, UI16, I32, UI32, F16, F32];
 // DT_BOOL 在 CPU 仿真上也是 `GTEST_SKIP`，接了验不了。
 defvar AFIR_TransposeElementTypes = [I16, UI16, I32, UI32, F16, F32, BF16];
 
-// **它在 `AFIR_BufferizableUnaryElementwiseOp` 上，但它不是 elementwise。**
-//
-// 复用的是那一族的**形状契约**——一元、两端同 dtype、两端同逻辑形状——以及它的 verifier、
-// 类型推导与 destination-style 那一套。这组契约与 elementwise 的逐字相同，不是近似：
-// `AddRemovePadAfter`（`optimize/schedule_utils.cpp:947`）把生产者的输出属性整份拷给新节点，
-// 所以两端的 `axis` / `repeats` 完全一致。
-//
-// 它与 elementwise 的差别全部落在 lowering，而那一层本来就是 per-implementation 的：
-// 发的不是逐元素 API 而是一条 `GatherMask` 包装，读的是**两侧不同**的
-// `vectorized_strides`（输入带填充、输出紧凑）——这个 op 存在的全部理由就是那个差。
+// RemovePad 复用一元 bufferizable op 的形状、类型推导、verifier 和 destination-style 契约，
+// 但不是逐元素计算。AddRemovePadAfter 拷贝生产者属性，因此两端逻辑 axis / repeats 相同。
+// lowering 通过 GatherMask 包装读取不同的 vectorized_strides，将带 padding 的输入压紧；
+// 物理布局差异由具体 implementation 处理。
 def AFIR_RemovePadOp : AFIR_BufferizableUnaryElementwiseOp<"remove_pad", AFIR_RemovePadElementTypes> {
   let afirStability = AFIR_Experimental;
   let summary = "Compact a padded on-chip tile by dropping the tail-axis padding";

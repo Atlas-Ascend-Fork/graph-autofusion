@@ -9,8 +9,8 @@
 // 同步族的 round-trip：`!afir.token` 与 `afir.event_record` / `afir.event_wait` /
 // `afir.pipe_barrier`（设计文档 3.6「流水与同步」、ADR-19）。
 //
-// `!afir.token` 是 AFIR 的第一个自有类型。payload 类型全部复用标准方言（约束 6），
-// 自有类型只用来表达标准方言表达不了的昇腾语义——跨 pipe 的顺序边就是这样一件事。
+// token 表示跨 pipe 顺序，是 AFIR 自有类型；payload 仍使用标准类型。
+// 自有类型仅用于标准方言无法直接表达的目标语义（约束 6）。
 //
 // 两条 RUN 缺一不可：第一条只验打印，第二条才是 round-trip。
 
@@ -37,8 +37,8 @@ module {
     return
   }
 
-  // Cube 路线的那条链：`GM -> L1` 之后是 `L1 -> L0A/L0B`（另一台搬运引擎），然后是
-  // 乘加，再是结果的后处理与搬出。四台引擎彼此异步，所以是四条边而不是一条。
+  // Cube 路径的搬运、乘加及结果搬出由不同引擎异步执行，
+  // GM->L1->L0A/L0B->计算->后处理/搬出之间需分别声明同步边。
   // CHECK-LABEL: func.func @cube_chain
   // CHECK: afir.event_record : <from = transfer_in, to = transfer_local>
   // CHECK: afir.event_record : <from = transfer_local, to = cube>
@@ -56,7 +56,7 @@ module {
     return
   }
 
-  // 标量引擎也是独立的一台：它算出的地址或标量参数，矢量要等。
+  // 标量引擎也是独立的一个：它算出的地址或标量参数，矢量要等。
   // CHECK-LABEL: func.func @scalar_to_vector
   // CHECK: afir.event_record : <from = scalar, to = vector>
   func.func @scalar_to_vector() {

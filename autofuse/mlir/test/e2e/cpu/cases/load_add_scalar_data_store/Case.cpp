@@ -10,11 +10,11 @@
 
 //===- Case.cpp - load -> add(ScalarData) -> store CPU case -----*- C++ -*-===//
 //
-// **`ScalarData` 的第一个用例**，也是 kernel 形参里第一个按值传的标量。与同目录的
+// `ScalarData` 的第一个用例，也是 kernel 形参里第一个按值传的标量。与同目录的
 // `load_add_scalar_store` 只差一处：那边是编译期常量 `Scalar`（烧成
 // `constexpr float c2_5_f32`），这边是运行期输入 `ScalarData`（排成一个 kernel 形参）。
 //
-// 它钉住的是**参数顺序**：`ScalarData` 与 `Data` 共用一个 index 序号空间，标量要按 index
+// 它钉住的是参数顺序：`ScalarData` 与 `Data` 共用一个 index 序号空间，标量要按 index
 // 交错排在指针形参中间，不是排到末尾。`KernelArgumentKind::ScalarInput` 的枚举值是 4
 // （追加在末尾，ABI 兼容要求），所以一旦 `getKernelArgumentPermutation` 不把它折成
 // `Input` 的秩，它会排到 output / workspace / tiling **之后**——下面那条参数类型序列
@@ -53,9 +53,9 @@ af::AscGraph BuildGraph() {
 }
 
 namespace {
-// 取 `extern "C"  __global__` 那个 kernel 入口的形参**类型**序列，丢掉形参名。
+// 取 `extern "C"  __global__` 那个 kernel 入口的形参类型序列，丢掉形参名。
 //
-// 丢名字是必须的：生成出来的是 SSA 编号（`v1` / `v2` …），随调度顺序漂移，钉不住。
+// 丢名字是必须的：生成的是 SSA 编号（`v1` / `v2` …），随调度顺序漂移，钉不住。
 // 而这条用例要钉的恰好只是类型序列——「第 2 个形参是按值的 float，不是指针」。
 std::vector<std::string> KernelEntryParameterTypes(const std::string &kernel, const std::string &kernelName) {
   const std::string marker = "__global__ __aicore__ void " + kernelName + "(";
@@ -89,20 +89,20 @@ void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_add_scalar_data_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
 
-  // **这条是本用例的主判据。** index 0 的 `Data` 与 index 1 的 `ScalarData` 共用一个序号
+  // 这条是本用例的主判据。 index 0 的 `Data` 与 index 1 的 `ScalarData` 共用一个序号
   // 空间，所以标量排在两个指针形参中间；排错了这里就不是这个序列。
   const std::vector<std::string> expected{"__gm__ float*", "float", "__gm__ float*", "__gm__ uint8_t*",
                                           "AutofuseTilingData"};
   EXPECT_EQ(KernelEntryParameterTypes(kernel, cfg::kKernelName), expected);
 
-  // 走的是 tensor_scalar 形态（`Adds`），与 `Scalar` 常量那条发的是同一个调用——标量来自
+  // 走的是 tensor_scalar 形态（`Adds`），与 `Scalar` 常量那条生成的是同一个调用——标量来自
   // 块参数还是 `arith.constant`，conversion 层并不区分。模板实参里的 `1` 是 `isSetMask`。
   EXPECT_NE(kernel.find("AscendC::Adds<float, 1>("), std::string::npos);
   EXPECT_EQ(kernel.find("AscendC::Add<"), std::string::npos);
   // 标量不该有 `constexpr` 常量定义——那是 `Scalar` 的形态，不是这条路。
   EXPECT_EQ(kernel.find("constexpr float"), std::string::npos);
 
-  // host 侧的 launch 包装器。**两处都要分流**：签名里标量是 `float input1` 而不是
+  // host 侧的 launch 包装器。两处都要分流：签名里标量是 `float input1` 而不是
   // `void* input1`，调用处传的是 `input1` 而不是 `(float)input1`。写法抄自 legacy 的
   // `GetScheduledResultInputOutput`——`AutofuseLaunchSignatureMatchesLegacy` 逐字比的
   // 就是下面这一行。

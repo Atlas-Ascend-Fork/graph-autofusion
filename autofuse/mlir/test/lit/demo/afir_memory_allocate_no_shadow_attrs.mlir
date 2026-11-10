@@ -8,20 +8,13 @@
 
 // AFIRMemoryAllocate 不再写出影子属性。
 //
-// MemoryAllocate 曾把资源身份与规格以扁平属性的形式回写到生成的 AscendC Op 上
-// （afir.que_id / afir.buf_id / afir.buffer_id / afir.queue_depth / afir.slot_count /
-// afir.alignment_bytes / afir.reuse_id / afir.life_time_axis_id）。它们在 MLIR 树内
-// 只有写点、没有读点，且每一条都是同一事实的第二份编码——设计文档 I2 / I3 / D4，
-// 5.1 步 2 予以删除。
+// 检查资源身份和规格不再复制到 AscendC op 的扁平影子属性。
+// 这些信息已由 SSA 资源、QueueType、操作数和强类型 buffer_desc 表达，
+// 无需再写入 que_id、buf_id、queue_depth 等重复属性（设计文档 I2/I3/D4）。
 //
-// 本用例覆盖两条资源路径（isQueueBinding 为真走 TQue、为假走 TBuf），并同时断言
-// 两件事：
-//   1) NOSHADOW 前缀——上述扁平属性一个都不再出现；
-//   1b) NOSTAGE 前缀——四个记录「哪个 pass 跑过」的阶段标记属性也不再出现
-//       （设计文档 D5 / 验收 8）。它们同样是第二份编码：每个阶段的产物就摆在 IR 里，
-//       判据见 dialect/AFIR/Transforms/LoopGenerate.h 与
-//       conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h；
-//   2) CHECK 部分——被它们复述的事实仍然结构性地存在于 IR 里，即删除是去重而非丢信息。
+// 同时覆盖 TQue 与 TBuf：NOSHADOW 检查影子属性已移除，NOSTAGE 检查阶段标记已移除；
+// 正向检查验证资源信息仍由 IR 结构保留，而非随属性删除丢失。
+// 阶段结构判据见 LoopGenerate.h 和 conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h。
 //
 // 事实的唯一落点对照：
 //   资源身份      ascendc.tbuf / ascendc.queue 的 SSA 值本身
@@ -79,12 +72,9 @@ module {
   }
 }
 
-// 一个资源一个 TilingData 字段。`%tmp`（buffer 2）既是 `afir.load` 的落点、又是
-// `afir.add` 的操作数，但队列身份只看 descriptor 的 `slot_count` / `queue_depth`
-// （`isCanonicalQueueResource`），与它在哪些使用点出现无关，所以它只出 `q2_size`，
-// 不会同时出 `b2_size`——后者会让 host 侧为同一块存储填两个字段，且与
-// `AFIRMemoryAllocate` 的 `isQueueBinding` 判定对不上。`%scratch`（buffer 5）没有
-// slot_count / queue_depth，出 `b5_size`。
+// 同一资源只对应一个 TilingData 尺寸字段。tmp 虽由 Load 写入并被 Add 使用，
+// 队列身份仍仅由 descriptor 的 slot_count / queue_depth 决定，应取 q2_size，不能另外生成 b2_size。
+// scratch 没有队列规格，使用 b5_size。host 字段收集与物化阶段必须采用同一身份规则。
 // CHECK-LABEL: func.func private @tbuf_path
 // CHECK-SAME: !emitasc.py_struct<"TilingData", [i64, i64, i64, i64, i64], ["block_dim", "s0", "q2_size", "q9_size", "b5_size"]> {afir.kernel_arg = #afir.kernel_arg<role = tiling>}
 

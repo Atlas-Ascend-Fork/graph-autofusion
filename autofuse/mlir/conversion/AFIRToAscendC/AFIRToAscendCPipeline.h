@@ -42,12 +42,9 @@ FailureOr<AFIRToAscendCPipelineSession> createAFIRToAscendCPipelineSession(
 
 LogicalResult addAFIRToAscendCPipeline(OpPassManager &passManager, const AFIRToAscendCPipelineSession &session);
 
-// Convenience pipeline for a single plan candidate module: prepares
-// the kernel body signature, runs the shared AFIR-to-AscendC lowering
-// pipeline while the canonical TilingData argument is still present, then
-// generates the per-candidate tiling schema and entry dispatcher. Exposed so
-// both the codegen orchestration path and the af-opt tool can drive the
-// exact same per-candidate lowering sequence.
+// Lower one plan candidate: prepare its body signature, run AFIR-to-AscendC while
+// the canonical TilingData argument is present, then generate tiling schema and entry dispatch.
+// Codegen orchestration and af-opt share this sequence.
 LogicalResult addPlanCandidateLoweringPipeline(OpPassManager &passManager, const AFIRToAscendCPipelineSession &session);
 
 }  // namespace mlir::ascend::kernel

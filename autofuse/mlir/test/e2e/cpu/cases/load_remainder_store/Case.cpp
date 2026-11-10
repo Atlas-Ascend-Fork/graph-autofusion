@@ -10,7 +10,7 @@
 
 //===- Case.cpp - load x2 -> remainder -> store CPU case --------*- C++ -*-===//
 //
-// **第一个 ODS 上原本没有、本切片现建的 op 的端到端用例。** 在此之前接通的每一个 op，
+// 第一个 ODS 上原本没有、本切片现建的 op 的端到端用例。 在此之前接通的每一个 op，
 // `afir.*` 的定义都已经在了，改的是「换个 base 类」；`afir.remainder` 是从零写的，所以
 // 从 pyasc 的 `Remainder` 节点一路到 kernel 里那行调用，中间每一段都是第一次走。
 //

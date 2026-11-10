@@ -1,6 +1,5 @@
-# af-afir-gen: standalone driver emitting AFIR from a built-in PlanInfo example.
-# Exercises the AfirBuilder bridge core with no real backend — a template for
-# adding hand-built cases.
+# af-afir-gen emits AFIR from a built-in PlanInfo example using AfirBuilder.
+# No production backend is required; add hand-built cases to this driver as needed.
 add_executable(af-afir-gen af-afir-gen.cpp)
 target_link_libraries(af-afir-gen PRIVATE
   AfirBuilder

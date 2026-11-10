@@ -11,13 +11,11 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-sign-extension-api.mlir 的另一半：同一个包装名 `SignExtend`、同样收 tmp buffer，
-// 只有扩展头不同（`cast.h` + `sign_reg_base.h`），所以 CPP 那条 check 与 mem 侧逐字一样，
-// 分得开两侧的是 IR 上建的是哪个 op。
+// SignExtend 两侧函数名和 scratch 参数相同，但 reg 侧使用 cast.h 和 sign_reg_base.h。
+// C++ 调用检查相同，IR 检查用于区分所选 AscendC op。
 //
-// ui8 只有 reg 侧收：mem 侧 legacy 的 `REG_ASC_IR(Sign)` 只注册了 f16 / f32 / i32。
-// 这一条是两个 implementation 落在不同元素类型集合的现场——ODS 写的是并集，
-// 在 910B1 上挑不出实现，由下面的 WRONGTARGET 钉住。
+// ui8 仅由 reg 侧支持；mem 侧 legacy 只注册 f16 / f32 / i32。
+// ODS 为并集，WRONGTARGET 验证 mem 侧不能选择该输入。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
@@ -46,5 +44,5 @@ module {
 
 // SELECT: ascend.implementation = {id = "sign.tensor.extend_reg_base", kind = "ascendc_api"}
 
-// mem 侧不收 ui8,所以同一段 IR 在那张供给表上选不出实现。
+// mem 侧不收 ui8,所以同一段 IR 在那张支持表上选不出实现。
 // WRONGTARGET: no supported

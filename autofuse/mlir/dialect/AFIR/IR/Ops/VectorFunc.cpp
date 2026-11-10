@@ -26,11 +26,11 @@ bool isInsideVectorFunc(Operation *op) {
   return op != nullptr && op->getParentOfType<VectorFuncOp>() != nullptr;
 }
 
-// 这个 verifier **只查结构**：边界与 region 两侧对不对得上。
+// 这个 verifier 只查结构：边界与 region 两侧对不对得上。
 //
 // 不查的东西要说清楚，否则下一个人会往里加：
 //   - 「这一期只支持一个输出」「只支持 f32/f16」「region 内这个 op 有没有寄存器形态」
-//     全是**能力**问题。verifier 拒收是硬失败，而能力不足必须干净回落给 legacy，
+//     全是能力问题。verifier 拒收是硬失败，而能力不足必须干净回落给 legacy，
 //     所以那些判据在能力层（`AFIRVectorFuncToRegBase`），不在这里。
 //   - 形状不查：lane 这一维在 AFIR 里不出现，region 内的 tensor 是「一段 lane」而不是
 //     整块 tile，两侧的 shape 本来就不该相等。能核的只有元素类型。
@@ -80,8 +80,8 @@ LogicalResult VectorFuncOp::verify() {
     }
   }
 
-  // 嵌套的 VF 今天的分区器不产（它在一张 impl graph 上跑一趟，子图不再进分区）。
-  // 判据仍然要在：**没有判据的「不会发生」会在它第一次发生时变成静默的错产物**，
+  // 嵌套的 VF 当前的分区器不产（它在一张 impl graph 上跑一趟，子图不再进分区）。
+  // 判据仍然要在：没有判据的「不会发生」会在它第一次发生时变成静默的错产物，
   // 而这一条在结构上就能拒，不必等到下降。
   WalkResult nested = body.walk([&](VectorFuncOp inner) { return WalkResult::interrupt(); });
   if (nested.wasInterrupted()) {

@@ -6,12 +6,11 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 步 3 的等价性闸门：space 在迁移期有两个载体（值的类型与 `#afir.buffer_desc` 的
+// 步 3 的等价性门禁：space 在迁移期有两个载体（值的类型与 `#afir.buffer_desc` 的
 // `space` 字段），两者必须逐点一致。
 //
-// 没有这道闸门，步 3 的每一次改写都可能让两份拷贝悄悄分叉：消费端读到哪一份取决于
-// 它手上恰好是值还是 descriptor，而 IR 本身完全合法、不报错。这正是设计文档 D2 说的
-// 「无单一事实源」的失效形态，也是 5.3 要求「先补 negative LIT 再改生产代码」的原因。
+// 分别读取类型和 descriptor 的消费者必须得到相同空间，不能依赖查询入口。
+// 负例在生产改写前固定一致性要求，避免双份编码分叉后仍通过 IR 校验（D2，设计文档 5.3）。
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 
@@ -53,9 +52,8 @@ func.func @destination_space_disagrees(%input: memref<4xf16, #afir.space<gm>> {a
 #desc_1d = #afir.tensor_desc<axis = [0], role = #afir.role<compute>>
 #gm = #afir.buffer_desc<space = #afir.space<gm>,>
 
-// 参数的规划结果挂在 arg attr 上，那就是这个值的定义点（设计文档 5.1 步 8）。被 AFIR Op
-// 用到的参数会在使用点先撞上；没有被任何 AFIR Op 用到的参数只剩 func 这一道闸门，漏掉
-// 它就等于只锁了 Op 层。`%unused` 正是这种情况——Op 自己的两个操作数都是一致的。
+// 参数描述挂在 arg attr。被 AFIR op 使用的参数可在使用处检查；unused 参数
+// 只能由函数属性检查发现。本例让 op 两端一致，单独验证 unused 参数的空间冲突。
 // expected-error @+1 {{InvalidDescriptor: 'afir.arg_descs' element 2 memref memory space #afir.space<ub> disagrees with descriptor space #afir.space<gm>}}
 func.func @argument_space_disagrees(%input: memref<4xf16, #afir.space<gm>> {afir.buffer_desc = #gm},
                                     %output: memref<4xf16, #afir.space<gm>> {afir.buffer_desc = #gm},

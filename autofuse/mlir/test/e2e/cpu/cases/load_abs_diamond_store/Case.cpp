@@ -8,22 +8,11 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - 菱形，分叉点是 unary --------------------------*- C++ -*-===//
-//
-// 与 `load_add_diamond_store/Case.cpp` **只差一件事**：分叉点是 `Abs`（单输入单输出）
-// 而不是 `Add`。那条用例是此前唯一的菱形 E2E，于是「分叉点是什么」这一维在用例集里
-// 是盲的——而它正是唯一起作用的那一维（探针 T5c / T5d / T5e，2026-10-12）。
-//
-// 分叉点是 unary 时，调度会把它的结果放进**非队列的计算缓冲**，而 unary 算子的
-// tmp buffer 也在同一个 id 空间里（`ScheduleToAfir` 里那段注释），于是两者可以落到
-// 同一个 `b<id>`。此前 `registerResource` 要求同一块存储上的 descriptor 逐字一致，
-// 两者只差 `alignment_bytes`（tmp buffer 固定 32、计算缓冲是 -1），整图就报
-// `InvalidBinding: conflicting descriptors for one canonical resource`。
-// 线性链上看不见：那里 unary 的结果直接进队列，非队列那一侧只有 tmp buffer 一家。
-//
-// 形状取自探针报 ok 的格。三个 Load 而不是四个：分叉点只吃一个输入。
-//
-//===----------------------------------------------------------------------===//
+// 覆盖以 Abs 为分叉点的菱形图，与 load_add_diamond_store 的 Add 分叉对照。
+// 调度将 unary 分叉结果放在非队列计算缓冲中，可能与 tmp buffer 共用同一 b<id>。
+// 两者 alignment_bytes 分别为 -1 和 32，资源合并应兼容这两种要求，而不是将其判为
+// conflicting descriptors。线性链的结果直接进队列，不能覆盖这种合并。
+// 分叉点只接收一个输入，因此使用三个 Load；形状采用 [128, 8]。
 
 #include <gtest/gtest.h>
 
@@ -63,14 +52,11 @@ af::AscGraph BuildGraph() {
 }
 
 void CheckGeneratedKernel(const std::string &kernel) {
-  // 走的是 MLIR 那条路而不是回落 legacy。**少了这一条，整个用例在回落之后照样全绿。**
-  // 改动前这张图是硬失败（不是回落），所以这一条更要钉住：真修好了与「悄悄交给 legacy」
-  // 在数值上一模一样。
+  // 检查 MLIR 确实接管此图。数值结果本身无法区分 MLIR 修复成功与回落 legacy。
   EXPECT_NE(kernel.find(std::string(load_abs_diamond_store::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   EXPECT_NE(kernel.find("AbsExtend<float>("), std::string::npos);
   EXPECT_NE(kernel.find("AscendC::Add"), std::string::npos);
-  // 分叉点的结果与 `Abs` 的 tmp buffer 共用一个 `b<id>`，所以这条路上必然有一块 TBuf。
-  // 改动前正是这两份 descriptor 对不上才整图硬失败，钉住它就钉住了「真的合到了一块」。
+  // 分叉结果与 Abs scratch 共用 b<id>，应生成 TBuf，验证两个 descriptor 已合并为同一资源。
   EXPECT_NE(kernel.find("AscendC::TBuf<"), std::string::npos);
 }
 }  // namespace mlir::afir

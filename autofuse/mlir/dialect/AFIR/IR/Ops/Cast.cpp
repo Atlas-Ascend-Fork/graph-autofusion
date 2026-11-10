@@ -10,12 +10,12 @@
 
 //===- Cast.cpp - AFIR cast op implementation -------------------*- C++ -*-===//
 //
-// (输入, 输出) 对表。**两张，不是一张**：mem 侧 legacy 的 `kCastTypePairs`
+// (输入, 输出) 对表。两张，不是一张：mem 侧 legacy 的 `kCastTypePairs`
 // （`ascir_builtin_ops_v1.cpp`）36 对，reg 侧那一版（`ascir_builtin_ops_v2.cpp`）43 对
-// ——两边互有对方没有的行，mem 独有 3 对（i4 那一族），reg 独有 10 对（i8 / i64 那两族
+// ——两边互有对方没有的行，mem 独有 3 对（i4 那一类），reg 独有 10 对（i8 / i64 那两类
 // 更全）。
 //
-// **三个读点共用这里的查表**：ODS 的 `verify()` 查并集（46 对），两个
+// 三个读点共用这里的查表：ODS 的 `verify()` 查并集（46 对），两个
 // implementation 的 capability 判据各查自己那一半（`UnaryElementwise.cpp` 的
 // `ResultElementType::CastPair`）。分开写就会分开错，而错法是静默的——一边建得出 op、
 // 另一边永远选不出 implementation。与 `trueDivResultElementType` 同一条。
@@ -115,8 +115,8 @@ const CastPairSet &getMemBasedCastPairs() {
 }
 
 // reg 侧：`ascir_builtin_ops_v2.cpp` 的同名表，44 对里的 43 对。
-// **少的那一对是 `{DT_FLOAT, DT_BOOL}`**——AFIR 不建模 bool（`ui8` 在这一层是一个字节的
-// 无符号整数，不是真值类型），把它写成 `f32 -> ui8` 会多说一件 reg 侧没有的供给。
+// 少的那一对是 `{DT_FLOAT, DT_BOOL}`——AFIR 不建模 bool（`ui8` 在这一层是一个字节的
+// 无符号整数，不是真值类型），把它写成 `f32 -> ui8` 会多说一件 reg 侧没有的可用实现。
 const CastPairSet &getRegBasedCastPairs() {
   using CT = CastTypeId;
   static const CastPairSet pairs = {

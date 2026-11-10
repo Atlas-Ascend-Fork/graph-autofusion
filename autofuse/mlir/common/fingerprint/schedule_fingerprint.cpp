@@ -46,13 +46,9 @@ class StableHasher {
     }
   }
 
-  // Every Add()/AddInteger() call must be self-delimiting so that two
-  // adjacent calls can never hash to the same byte stream as a differently
-  // split pair (e.g. AddInteger(1); AddInteger(23) must not collide with
-  // AddInteger(12); AddInteger(3)). A raw byte is enough: it can represent
-  // any length up to 255, far more than a size_t's decimal representation
-  // (<=20 digits) ever needs, and unlike recursing back into Add()/
-  // AddInteger() to hash the length itself, it terminates in one step.
+  // Prefix each Add()/AddInteger() payload with its length so adjacent values are unambiguous:
+  // (1, 23) must differ from (12, 3). One byte holds the decimal length of any size_t
+  // (up to 20 digits), without recursively encoding the length through AddInteger().
   void AddLengthPrefix(size_t length) {
     const unsigned char byte = static_cast<unsigned char>(length < 0xFFU ? length : 0xFFU);
     first_ = (first_ ^ byte) * kFnvPrime;
@@ -78,14 +74,9 @@ void AddAscendString(StableHasher &hasher, const char *value) {
 void AddTemplate(StableHasher &hasher, const af::AscGraph &graph) {
   hasher.Add(graph.GetName());
   const auto size_vars = graph.GetAllSizeVar();
-  // Skip constant-expression size vars, matching
-  // tiling_schema/tiling_field_schema.cpp's AppendTemplateFields. Constant size
-  // vars do not become TilingData fields and do not vary with the runtime
-  // shape, so including them here would make otherwise-identical schedules
-  // hash differently based only on how a constant happened to be spelled
-  // internally, and would make the fingerprint depend on information that
-  // BuildTilingFieldSchema deliberately discards -- the two are meant to
-  // agree on what counts as "part of the schedule's structure".
+  // Skip constant size variables, as AppendTemplateFields does in tiling_field_schema.cpp.
+  // They do not produce TilingData fields or vary at run time. Including their internal
+  // spelling would distinguish schedules with the same schema structure.
   std::vector<decltype(size_vars.front().get())> variable_size_vars;
   variable_size_vars.reserve(size_vars.size());
   for (const auto &size_var : size_vars) {

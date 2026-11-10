@@ -1,6 +1,6 @@
-# Reserved for backend-neutral schedule metadata.  The current schema and
-# fingerprint implementation still consumes legacy schedule types and is
-# compiled by AutofuseMlirScheduleLegacyAdapter instead.
+# Backend-neutral schedule metadata belongs here. The current schema and
+# fingerprint code still uses legacy schedule types, so it is built in
+# AutofuseMlirScheduleLegacyAdapter.
 add_library(AutofuseMlirScheduleCommon INTERFACE)
 
 target_include_directories(AutofuseMlirScheduleCommon INTERFACE

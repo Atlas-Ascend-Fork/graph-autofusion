@@ -14,18 +14,18 @@
 #include <cstdint>
 #include <string>
 
-// ATT ScheduleGroupIdent 的命名规则，供 MLIR 各层共享；对账测试防止两侧漂移。
+// ATT ScheduleGroupIdent 的命名规则，供 MLIR 各层共享；比对测试防止两侧漂移。
 // 身份为 (子图, plan, stage)，其中 plan 对应 ATT 的 impl_graph_id，不是 template ID。
 // 仅依赖标准库，避免 conversion/artifact 引入 ATT 依赖。
 namespace mlir::common {
 
-// 最外层 TilingData 里这个 group 的成员名。对应 ATT `GetItemPrefix() + "_tiling_data"`。
+// group 在顶层 TilingData 中的成员名，对应 ATT GetItemPrefix() + "_tiling_data"。
 inline std::string MakeScheduleGroupTilingFieldName(int64_t subgraphId, int64_t planId, int64_t stageId) {
   return "graph" + std::to_string(subgraphId) + "_result" + std::to_string(planId) + "_g" + std::to_string(stageId) +
          "_tiling_data";
 }
 
-// 这个 group 自己那个结构体的类型名。对应 ATT `GetGroupPrefix() + "TilingData"`。
+// group 结构体的类型名，对应 ATT GetGroupPrefix() + "TilingData"。
 inline std::string MakeScheduleGroupTilingTypeName(int64_t subgraphId, int64_t planId, int64_t stageId) {
   return "AscGraph" + std::to_string(subgraphId) + "ScheduleResult" + std::to_string(planId) + "G" +
          std::to_string(stageId) + "TilingData";

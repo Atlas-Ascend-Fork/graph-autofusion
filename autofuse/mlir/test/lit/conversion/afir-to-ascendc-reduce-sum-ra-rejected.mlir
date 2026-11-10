@@ -6,14 +6,14 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// R 组**多于一根轴**的 RA 必须被拒绝，而不是编译出一个会把垃圾行加进和里的 kernel。
+// R 组多于一根轴的 RA 必须被拒绝，而不是编译出一个会把垃圾行加进和里的 kernel。
 //
 // 输入与 `afir-to-ascendc-reduce-sum-ra.mlir` 是同一份真实调度，唯一的差别是向量化轴由
 // `[5, 3]` 扩成 `[4, 5, 3]`：轴 4（z0T）在 descriptor 的完整 `strides` 里本来就是 `"0"`，
-// 所以把它并进向量化轴是**自洽**的，不是硬凑——归约侧两根轴 stride 全 0，R 组因此有两根。
-// 那一份能跑完整条流水线，所以这里失败**只可能**来自 R 组的轴数。
+// 所以把它并进向量化轴是自洽的，不是硬凑——归约侧两根轴 stride 全 0，R 组因此有两根。
+// 那一份能跑完整条流水线，所以这里失败只可能来自 R 组的轴数。
 //
-// 为什么必须拒绝：`srcShape` 的外维是一个**扁平行数**，API 按固定行距逐行走。多根外维轴
+// 为什么必须拒绝：`srcShape` 的外维是一个扁平行数，API 按固定行距逐行走。多根外维轴
 // 时，只有除最外一根之外每一根都「actual == nominal」，这些行才真正连成一片；否则中间隔着
 // 尾块留下的空行，扁平行数会把空行也数成数据行。RA 的外维是 R，多数进去的那些行会被**加进
 // 有效和里**——不崩、不越界，数值悄悄是错的。

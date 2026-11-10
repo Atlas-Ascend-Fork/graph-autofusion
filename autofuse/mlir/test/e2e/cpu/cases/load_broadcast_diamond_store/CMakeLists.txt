@@ -6,16 +6,16 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-# 级联拓扑 T5（广播作分叉点）。两格，取探针报 ok 的两种形态（2026-10-12 实测）：
+# 覆盖以广播为分叉点的 T5，注册两种已验证形态（2026-10-12 探针）。
 #
-#   `[1,8] -> [128,8]`   形态 A：广播轴在外、最内轴不是广播轴，尾轴 32B 对齐。
-#   `[8,1] -> [8,128]`   形态 B：**最内轴就是广播轴**，走的是另一条分段判据。
+# [1,8] -> [128,8]：外轴广播，尾轴按 32B 对齐。
+# [8,1] -> [8,128]：最内轴广播，使用不同的分段条件。
 #
-# 两种形态都要：分叉点的结果与 `add` 的结果共用一个非队列 `b<id>`，而两种形态的 plan
-# 把广播排在不同位置（形态 A 的 B0Y2 把广播排在 `add` 之后），于是成员布局也不是同一张。
+# 两种形态的广播与 Add 调度位置不同，需分别检查共用 b<id> 的成员布局。
+# 形态 A 的 B0Y2 将广播排在 Add 之后。
 #
-# 其余形状（`[1,5] -> [33,5]`、`[2,3,5,1] -> [2,3,5,7]`，以及 f16 的尾轴不足 32B 的那几格）
-# 是 `afir.broadcast` 自己的能力缺口，报不支持、整图回落，写成 E2E 是假绿。
+# 历史探针中的其他形状（[1,5] -> [33,5]、[2,3,5,1] -> [2,3,5,7] 及部分
+# f16 短尾轴）不受支持；不能以回落 legacy 后数值正确作为 MLIR E2E 通过的证据。
 add_mlir_e2e_cpu_case(load_broadcast_diamond_store_1x8
     OUTPUT_SHAPE "[128, 8]"
     INPUT_SHAPES "[1, 8]"

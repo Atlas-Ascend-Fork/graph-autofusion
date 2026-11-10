@@ -78,9 +78,8 @@ void getBufferizedBroadcastEffects(BroadcastOp op, SmallVectorImpl<MemoryEffect>
   effects.emplace_back(MemoryEffects::Read::get(), &op.getInputMutable(), SideEffects::DefaultResource::get());
   effects.emplace_back(MemoryEffects::Write::get(), &op.getDestinationMutable()[0],
                        SideEffects::DefaultResource::get());
-  // The mem-based Broadcast API takes a caller-provided tmp buffer. Without
-  // a write effect on it, two broadcasts sharing one tmp buffer could be
-  // reordered against each other.
+  // The mem-based Broadcast API writes caller-provided scratch. Declare that
+  // write effect to prevent reordering broadcasts that share the buffer.
   if (op.getTmpBuffer()) {
     effects.emplace_back(MemoryEffects::Write::get(), &op.getTmpBufferMutable()[0],
                          SideEffects::DefaultResource::get());

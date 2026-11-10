@@ -64,9 +64,8 @@ TEST(MlirE2eCpu, LoadIsInfStoreCalculatesCorrectResult) {
   uint32_t blockDim = 1;
   ASSERT_EQ(AutofuseE2eInitTiling(&tilingData, &workspaceSize, &blockDim), 0);
 
-  // Record which terms of the scheduled-transfer offset this run actually reaches.
-  // ATT picks the split at run time, so without this the case can keep passing while
-  // silently covering less than it was registered to cover.
+  // Check which scheduled-transfer offset terms this run exercises.
+  // ATT chooses the split at run time; correct output alone does not prove the registered coverage.
   const mlir::afir::TilingShape tiling_shape = AF_E2E_TILING_SHAPE(tilingData, blockDim, output_element_count);
   mlir::afir::ReportTilingShape(AF_MLIR_E2E_CPU_CASE_NAME, tiling_shape);
   AF_E2E_ASSERT_TILING_COVERAGE(tiling_shape);

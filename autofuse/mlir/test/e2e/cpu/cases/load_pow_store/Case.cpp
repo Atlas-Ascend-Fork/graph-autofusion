@@ -8,22 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load x2 -> pow -> store CPU case --------------*- C++ -*-===//
-//
-// harness 把 soc 钉在 Ascend910B1（cpu/CMakeLists.txt），走 V1 也就是 mem-based 一侧：
-// `Pow(dst, x1, x2, tmp_buf, size)`，扩展头 `pow.h`，要 tmp buffer。reg 侧那份同名、
-// 同样收 tmp，只有头不同，在这里到不了，由 afir-pow-reg-base-extension-api.mlir 钉。
-//
-// 取 f32：mem 侧 legacy 的 `REG_ASC_IR(Pow)` 收 {i32, f16, f32}，ui8 / i16 / ui16
-// 只有 reg 侧收。
-//
-// **这个用例真正拦的是前导头 `utils.h`。** 两份 `pow.h` 都用了 `KernelUtils::BlkSize`,
-// reg 那份还用了 `KernelUtils::BlkAlign` 与 `IsIntegerWithinUint32Magnitude`——少声明
-// 一个前导，IR 照建、`ascir-translate` 照打那行调用，两份 lit 全绿，只有这里真去编
-// kernel 才炸。`where.h` / `sign.h` / `logical.h` / `floor_div.h` / `scalar_div.h`
-// 之后这已经是第六次。
-//
-//===----------------------------------------------------------------------===//
+// 验证 mem-based Pow(dst, x1, x2, tmp_buf, size)，使用该侧支持的 f32。
+// reg 侧也需要 scratch，但使用另一扩展头，由对应 LIT 检查。
+// 两侧 pow 头都依赖 utils.h 的 KernelUtils::BlkSize；reg 侧还依赖 BlkAlign 和
+// IsIntegerWithinUint32Magnitude。实际编译用于发现 LIT 调用文本检查无法覆盖的前导缺失。
 
 #include <string>
 

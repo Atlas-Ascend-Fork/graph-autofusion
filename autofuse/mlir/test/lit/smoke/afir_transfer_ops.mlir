@@ -162,9 +162,9 @@ func.func @load_add_store_pipeline(%lhs_gm: memref<4xf16> {afir.buffer_desc = #b
 // CHECK: afir.add
 // CHECK: afir.store
 
-// 被调度过的 GM -> UB 搬运，**两侧形状都静态且元素数不等**，仍然合法。
+// 被调度过的 GM -> UB 搬运，两侧形状都静态且元素数不等，仍然合法。
 //
-// GM 侧是整块张量的视图，kernel 实参上连形状都不发（`memref<f32>` 是个裸指针）；UB 侧是一块
+// GM 侧是整块张量的视图，kernel 实参上连形状都不生成（`memref<f32>` 是个裸指针）；UB 侧是一块
 // tile。两者元素数本来就不等，对得上的是 descriptor，不是 memref 的元素数。这一档过去被
 // 「元素数相等」那条规则误伤过：豁免只写在「有动态维」那一支里，于是归约轴不切分的候选
 // （整条 R 一次进 UB，UB 缓冲因此是静态的）在建模块时就被验证器拒掉，报成

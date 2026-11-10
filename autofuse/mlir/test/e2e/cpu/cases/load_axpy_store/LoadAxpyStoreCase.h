@@ -15,8 +15,8 @@
 
 AF_MLIR_E2E_CPU_CASE_BEGIN(load_axpy_store, 2, 1);
 
-// 系数。用 2 的负幂，f32 里精确可表示，`x1 + alpha * x2` 的期望值不引入舍入——
-// 与 `load_leaky_relu_store` 的斜率同一个理由。
+// 系数使用 2 的负幂，可被 f32 精确表示，避免 x1 + alpha*x2 的参考值引入额外舍入。
+// 与 load_leaky_relu_store 的斜率选择一致。
 constexpr float kAlpha = 0.5F;
 
 AF_MLIR_E2E_CPU_CASE_END(load_axpy_store)

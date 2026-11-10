@@ -26,9 +26,9 @@ namespace mlir::ascend::kernel {
 
 /// 函数里那个唯一的 `ascendc.pipe`（资源物化阶段建的），取不到时返回空值。
 ///
-/// 事件槽的持有者是 `TPipe`，所以凡是要发 `SetFlag` / `WaitFlag` 的下降点都得先找到
-/// 它。**不要就地再建一个**：两个 `TPipe` 在生成的 C++ 里是两份声明，而槽位是按 pipe
-/// 对象分配的。今天的取用点有两处——本文件的事件下降，和 `Broadcast.cpp` 的标量读同步。
+/// 事件槽的持有者是 `TPipe`，所以凡是要生成 `SetFlag` / `WaitFlag` 的下降点都得先找到
+/// 它。不要就地再建一个：两个 `TPipe` 在生成的 C++ 里是两份声明，而槽位是按 pipe
+/// 对象分配的。当前的取用点有两处——本文件的事件下降，和 `Broadcast.cpp` 的标量读同步。
 Value findFunctionPipe(Operation *anchor);
 /// Resolve the writer before this use; shared queue position alone is insufficient.
 std::optional<ascendc::HardEvent> scalarReadEvent(Operation *anchor, Value source);

@@ -11,7 +11,7 @@
 //===- TilingParam.cpp - afir.tiling_param -> AscendC TilingData member ---===//
 //
 // `afir.tiling_param "q0_size"` 降成 `tiling.q0_size`：一次 `emitasc.member` 加一次
-// index cast。**host ABI 逐字节不变**——字段名与 schema 都还是原来那一份，变的只是
+// index cast。host ABI 逐字节不变——字段名与 schema 都还是原来那一份，变的只是
 // 「谁在什么时候建这个访问」：此前是循环生成与资源物化各建一次，现在只在这里建。
 //
 // 名字在目标 schema 里不存在时由这里报错，而不是由 AFIR 层的 verifier：AFIR 只说
@@ -74,21 +74,9 @@ class LowerTilingParamOp final : public OpConversionPattern<TilingParamOp> {
       : OpConversionPattern(converter, context), key_(std::move(key)), mapping_(std::move(mapping)) {}
 
   LogicalResult matchAndRewrite(TilingParamOp op, OpAdaptor, ConversionPatternRewriter &rewriter) const override {
-    // **没有 `ascend.implementation` 属性时照样接。**
-    //
-    // 选择 pass 只 annotate 过它跑那一遍时图上的算子，而这一条可能是 conversion 阶段**新建**
-    // 的：descriptor 里非字面量的 stride / extent 由 `materializeSizeAt` 物化，它把自由符号
-    // 绑到 `getOrCreateTilingParam`，缺的时候就地建一条。缺的时候是真会发生的——
-    // `AFIRMaterializeTilingParamsPass` 收的是 `size_var` 与 `afir.buffer_desc` 的符号，
-    // descriptor 里的 stride / extent 不在其中。
-    //
-    // 放行不会选错：`afir.tiling_param` 全仓只有这一个 implementation（文件末尾那条注册是
-    // 唯一一条），所以「没人选过」与「选的是我」在这里是同一件事。真有了第二个，这里要改成
-    // 「没属性就去 registry 查这个 op 是不是只有一个候选」，而不是继续无条件放行。
-    //
-    // 少了这一条的后果与 `afir.symbolic_eval` 在 conversion 里没有 lowering 是同一类
-    // （d0b1971f 修的是那一半）：新建的 op 没人 legalize，dialect conversion 把**整个**
-    // pattern 回滚、报在根算子上，看起来像判据写错了。
+    // 实现选择只标注当时存在的算子。conversion 的 materializeSizeAt 仍可能为 descriptor
+    // 中的非字面量 stride / extent 创建 tiling_param，因此新算子也需要在此处理。
+    // 不能假设所有符号读取都已在选择阶段之前生成。
     if (op->hasAttr(ascend::instruction::kImplementationAttrName)) {
       auto selected = ascend::instruction::getSelectedImplementation(op);
       if (failed(selected) || *selected != key_) {

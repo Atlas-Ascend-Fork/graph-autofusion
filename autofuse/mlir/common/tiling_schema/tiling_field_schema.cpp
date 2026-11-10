@@ -34,19 +34,11 @@ std::string ExprText(const af::Expression &expression) {
   return text == nullptr ? std::string{} : std::string(text.get());
 }
 
-// Fields are deduplicated within one (subgraph, plan, stage) scope only.  A
-// scope is identified by `path`.  This mirrors legacy ProcessSingleGroup,
-// which shares one dedup set across all templates of a single stage, and
-// ProcessMultiGroup, which gives every (plan, stage) pair its OWN isolated
-// dedup set (and therefore its own nested C++ struct) — reusing a size-var or
-// queue/buffer id name across stages/plans must NOT collapse into one field,
-// because those ids are small sequential integers that are commonly reused
-// across independently-scheduled plans/stages for logically different
-// tensors. Keying the dedup set on (path, name) instead of name alone keeps
-// the flat single-scope behavior when path is shared (single-group case)
-// while isolating every nested scope from every other one.
-// 收集字段时的去向：字段表本身，加上已见过的 (path, name) 键集合。所有 Append* 都同时
-// 需要这两项，收成一个整体传递。
+// Deduplicate fields by (path, name), matching legacy ProcessSingleGroup and ProcessMultiGroup.
+// Templates in one stage share a scope; each (plan, stage) has a separate scope and nested struct.
+// Queue, buffer and size-variable names may repeat across independently scheduled scopes,
+// so deduplicating by name alone would drop distinct fields.
+// 收集上下文同时持有字段表和已见过的键，供各 Append* 共用。
 struct SchemaSink {
   TilingFieldSchema &schema;
   std::set<std::string> &seen;
@@ -195,11 +187,9 @@ bool BuildTilingFieldSchema(const ascir::FusedScheduledResult &fused_result, Til
     return false;
   }
 
-  // Matches legacy's single top-level `is_group` check (codegen_tiling_data.cpp,
-  // TilingData::Generate): exactly one subgraph, one plan, one stage. This is
-  // a single global decision, not something recomputed per subgraph/plan —
-  // recomputing it locally would let two different subgraphs each qualify for
-  // the unprefixed "tiling_key" name and collide.
+  // Use one global flat-layout decision: exactly one subgraph, plan and stage,
+  // matching TilingData::Generate in codegen_tiling_data.cpp. Deciding per subgraph
+  // could assign the unprefixed tiling_key name to multiple subgraphs.
   const bool is_flat = fused_result.node_idx_to_scheduled_results.size() == 1U &&
                        fused_result.node_idx_to_scheduled_results[0].size() == 1U &&
                        fused_result.node_idx_to_scheduled_results[0][0].schedule_groups.size() == 1U;
@@ -261,9 +251,8 @@ struct ScopedFields {
   std::vector<std::vector<const TilingField *>> scope_fields;
 };
 
-// 作用域顺序按首次出现，不按字典序——path 形如 "graph2..." / "graph10..."，字典序会把
-// 两者排反，发射出来的字段顺序就不再等于 BuildTilingFieldSchema 的遍历顺序（也就不再
-// 等于 legacy 的顺序）。
+// 按首次出现顺序输出作用域，保持 BuildTilingFieldSchema 和 legacy 的字段顺序。
+// 不能按字典序排列 path，否则 graph10 会排在 graph2 之前。
 ScopedFields GroupFieldsByScope(const TilingFieldSchema &schema) {
   constexpr std::string_view kFlatScopes[] = {"", "fusion"};
   auto is_flat_scope = [&](const std::string &path) {

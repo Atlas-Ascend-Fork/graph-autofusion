@@ -42,20 +42,20 @@ def AscendC_BroadcastL2Op : VectorOp<"broadcast_l2", "Broadcast", [AttrSizedOper
 
 
 // `Broadcast(dst, src, src_m, src_k, src_z, dst_m, dst_k, dst_z, tmp_buf)`——Autofuse 自己的
-// 包装（`autofuse/ascendc/api/broadcast.h:512`），legacy 的 `BroadcastOneAxis` 逐字发的就是它
+// 包装（`autofuse/ascendc/api/broadcast.h:512`），legacy 的 `BroadcastOneAxis` 逐字生成的就是它
 // （`codegen/api_call/broadcast/broadcast_api_call.cpp:189`）。
 //
-// **它不是上面那个 `BroadcastL2Op`。** 那个发的是原生 `AscendC::Broadcast<T, dim, axis>`：
+// **它不是上面那个 `BroadcastL2Op`。** 那个生成的是原生 `AscendC::Broadcast<T, dim, axis>`：
 // 吃 shape 数组、不吃 tmp buffer，而且它的手写 emitter 从**静态**张量 shape 反推 `axis`，
 // 这条路上的 tile 一律是 `!ascendc.local_tensor<?xf32>`，反推恒为 0。名字沾边，函数不是同一个。
 //
 // 包装按 dtype 分流到 `BroadcastInt64` / `BroadcastWithCast` / `BroadcastCommon`，再由
 // `BroadcastCommon` 按 `src_m` / `src_k` / `src_z` 的形态选 `BroadcastFirstDim`、原生
-// `Broadcast<T,2,1>` 或 `BroadcastMiddleDim`。**发什么形态是调用方的事**，op 只如实带上六个
+// `Broadcast<T,2,1>` 或 `BroadcastMiddleDim`。**生成什么形态是调用方的事**，op 只如实带上六个
 // 尺寸；`Or`-free 那条不变量（`src_m == 1` 或 `src_z == 0`）由下降侧保证、由 lit 钉住。
 //
 // 六个尺寸都留着而不是把恒为 0 的 `src_z` / `dst_z` 省掉：其余扩展 op 一律照抄 C++ 形参表，
-// 省掉一个就得在 emitter 里补一个字面量 0，把「发的是什么」拆到两个文件里去读。
+// 省掉一个就得在 emitter 里补一个字面量 0，把「生成的是什么」拆到两个文件里去读。
 //
 // 扩展头写 `["broadcast.h", "duplicate.h"]`：包装的 `(1,1) -> (A,B)` 那一支调 `Duplicate`。
 // 前导 `utils.h`：`BroadcastFirstDim` 用了 `KernelUtils::BlkSize` 与 `MAX_REPEAT_TIME`，
@@ -98,11 +98,11 @@ def AscendC_DuplicateU8Op
 // `static_assert` 把它钉在 1..9。两串 shape 等长由下降侧保证。
 //
 // 两串 shape 是 `Variadic`，因为 rank 由算子的分段结果决定；手写 emitter 把它们落成两个
-// 局部 `const uint32_t[]`，与 `BroadcastL2Op` 发数组的写法同一个（`VecBroadcast.cpp`）。
+// 局部 `const uint32_t[]`，与 `BroadcastL2Op` 生成数组的写法同一个（`VecBroadcast.cpp`）。
 //
 // 扩展头只写 `["broadcast_reg_base.h"]`。legacy 的 `BroadcastAscIrCodegenImplV2` 那一行还带
 // 一个 `duplicate.h`，那是给它同一个 node impl 里的 `BroadcastScalar` 分支用的——那条路在
-// 这里是另一个 implementation（`broadcast.tensor.duplicate_reg_base`），发标准
+// 这里是另一个 implementation（`broadcast.tensor.duplicate_reg_base`），生成标准
 // `AscendC::Duplicate`、一个扩展头都不引。这条包装自己够不着 `Duplicate`：它往下只调
 // `AscendC::BroadcastInternal::*`，那些是限定名，出自 CANN 自己的头。
 //

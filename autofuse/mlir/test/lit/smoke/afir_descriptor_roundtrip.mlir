@@ -8,12 +8,9 @@
 
 // descriptor 编码的等价性基线。
 //
-// 设计文档 5.3 定的硬纪律是「每个字段迁移必须先补 round-trip 与 negative LIT 锁住
-// 等价性，再改生产代码」，而 I7 记录的现状是 descriptor 编码没有等价性测试。本文件
-// 逐字段锁住 TensorDescAttr / BufferDescAttr / AxisAttr / AscGraphAttrGroupsAttr
-// 的打印与解析契约。BufferDescAttr 自步 8 起挂在值的定义点（这里是 kernel 参数的
-// arg attr），不再是与参数按下标对齐的数组属性，使 3.1（space/layout 进 Type）、3.3（属性收敛）的每一步改动都
-// 能被 diff 出来，而不是静默丢字段。
+// 逐字段检查 TensorDescAttr、BufferDescAttr、AxisAttr 和 AscGraphAttrGroupsAttr 的解析与打印，
+// 作为字段迁移的等价性基线（设计文档 5.3）。BufferDescAttr 挂在值的定义点，
+// 本例使用 kernel 参数 arg attr，不再使用按参数下标对齐的数组。
 //
 // 第二条 RUN 做二次 round-trip，确认打印形式是解析的不动点。
 
@@ -57,11 +54,9 @@ module {
   // 默认值消隐：显式写出的默认值在打印时会被丢掉，"显式 -1"与"字段缺席"在一次
   // round-trip 之后不可区分。
   //
-  // buffer_id / reuse_id / slot_count / queue_depth / alignment_bytes 的 ODS 默认值
-  // 是 -1，因此显式写 -1 会被消隐；life_time_axis_id 的默认值是 int64_t::min()，
-  // 因此 -1 会被保留。这个不对称是 3.3「消除重复编码」时最容易踩的坑：把扁平的
-  // afir.alignment_bytes / afir.life_time_axis_id 合入 BufferDescAttr 时，必须先确认
-  // 语义上"未指定"用的是哪个哨兵值，否则信息会静默丢失且不报错。
+  // buffer_id、reuse_id、slot_count、queue_depth、alignment_bytes 的默认值为 -1，打印时消隐。
+  // life_time_axis_id 的默认哨兵为 int64_t::min()，因此显式 -1 仍会打印。
+  // 迁移字段时需保持各自的未指定语义，不能统一按 -1 消隐。
   func.func private @desc_defaults_elided(%arg: tensor<8xf16> {afir.buffer_desc =
       #afir.buffer_desc<space = #afir.space<ub>, buffer_id = -1, reuse_id = -1,
       slot_count = -1, queue_depth = -1, alignment_bytes = -1, life_time_axis_id = -1>})

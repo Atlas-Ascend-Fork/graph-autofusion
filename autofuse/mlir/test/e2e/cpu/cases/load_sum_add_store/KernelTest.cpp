@@ -32,10 +32,10 @@ TEST(MlirE2eCpu, LoadSumAddStoreCalculatesCorrectResult) {
   const uint32_t input_element_count = input_config.element_count;
   const auto output_config = GetShapeConfig(kOutputShapes, 0);
   const uint32_t output_element_count = output_config.element_count;
-  // `ShapeConfig::shape` 是 `initializer_list`，没有下标运算符——先落成 vector 再按维取。
+  // ShapeConfig::shape 为 initializer_list，先转成 vector，再按维度下标访问。
   const std::vector<int64_t> input_shape(input_config.shape);
   ASSERT_EQ(input_shape.size(), 2U);
-  // 第二份输入是**归约后**形状 `[A, 1]`，元素数等于输出，不是等于输入。
+  // 第二份输入是归约后形状 `[A, 1]`，元素数等于输出，不是等于输入。
   ASSERT_EQ(GetShapeConfig(kInputShapes, 1).element_count, output_element_count);
 
   float *input0 = static_cast<float *>(AscendC::GmAlloc(input_element_count * sizeof(float)));
@@ -71,7 +71,7 @@ TEST(MlirE2eCpu, LoadSumAddStoreCalculatesCorrectResult) {
               reinterpret_cast<uint8_t *>(input1), reinterpret_cast<uint8_t *>(output),
               reinterpret_cast<uint8_t *>(workspace), tilingData);
 
-  // reference 是 `sum(x, dim=1) + bias`：ReduceSum 先按 AR 归约，Add 再落在**归约后**的
+  // reference 是 `sum(x, dim=1) + bias`：ReduceSum 先按 AR 归约，Add 再落在归约后的
   // tile 上。消费者读的是累加器那块 destination（`redirectAccumulatedOperand` 改接过去的），
   // 而不是本轮的段结果——接错的话跨轮累加的那几轮里只有最后一轮会被加上 bias。
   const uint32_t reduce_extent = static_cast<uint32_t>(input_shape[1]);

@@ -230,9 +230,8 @@ def run_one(
     results = case_status.parse_cases(text)
 
     if not results:
-        # 一行机读结果都没有：脚本在进到用例之前就死了（import 失败、参数不认、
-        # codegen abort 把进程带走）。这种情况必须自己造一格 ERROR——否则它在汇总里
-        # 是「0 格」，看起来像没选中，而不是失败。
+        # 未输出任何机读结果时也记录一条 ERROR，例如导入失败、参数错误或 codegen abort。
+        # 不能将进程启动失败统计成零格，否则会与未选中用例混淆。
         reason = "没有任何机读结果行；退出码 {}".format(returncode)
         tail = [line for line in text.strip().splitlines() if line.strip()][-1:]
         if tail:
@@ -352,8 +351,8 @@ def print_report(outcomes: Sequence[Outcome]) -> int:
             len(outcomes), cells, len(defects), len(regressed), len(improved)
         )
     )
-    # 退出码：真缺陷与「比预期差」非零。「比预期好」不红——支持面变宽不是回归，
-    # 但它必须被看见，所以单列一节提示去收紧清单。
+    # 真实缺陷或结果差于预期时返回非零。优于预期不视为回归，
+    # 但单独列出，提示更新支持范围清单。
     return 1 if (defects or regressed) else 0
 
 

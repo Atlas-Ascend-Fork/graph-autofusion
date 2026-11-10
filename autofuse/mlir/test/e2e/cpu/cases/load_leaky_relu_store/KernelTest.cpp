@@ -35,7 +35,7 @@ TEST(MlirE2eCpu, LoadLeakyReluStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 一半正一半负。只喂正数的话 leaky_relu 与 relu 无从分辨，斜率丢了也照样过。
+  // 输入同时包含正负值；负数用于区分 leaky_relu 与 relu，并检查斜率是否生效。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = (index % 2 == 0 ? 1.0F : -1.0F) * (static_cast<float>(index % 13) + 1.0F);
   }

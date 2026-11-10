@@ -35,7 +35,7 @@ module {
 
 // -----
 
-// 只违反“分子必须非负”这一格；overflow_checked 已提供，避免先被乘法溢出证明拦住。
+// 提供 overflow_checked 排除乘法溢出检查的影响，仅验证分子必须非负这一条件。
 module {
   func.func @unsafe_rational_scaling(%value: index) -> index {
     %result = afir.symbolic_eval %value {

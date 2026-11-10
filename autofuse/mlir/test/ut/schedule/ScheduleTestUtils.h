@@ -66,15 +66,10 @@ inline ascir::FusedScheduledResult MakeMultiSubgraphFusedResult(const std::vecto
   return result;
 }
 
-// Builds one plan with `stage_count` stages, each with `template_count`
-// templates. Every stage reuses the SAME size-var name ("s0") and, when
-// `reuse_queue_id` is true, the same Tque id 0 on every template's output --
-// this is deliberate: legacy ProcessMultiGroup isolates each stage's fields
-// into its own nested struct, so reusing small sequential queue/size-var
-// names across stages is the common case, not an edge case. A schema builder
-// that dedups by bare name instead of by (plan, stage) scope would collapse
-// stage 0's and stage 1's distinct fields into one, silently discarding
-// stage 1's tiling data.
+// Build stage_count stages with template_count templates each. Reuse the size
+// variable s0 and, if requested, output queue ID 0 across stages. Each stage has
+// an isolated nested schema, as in legacy ProcessMultiGroup; deduplication by
+// bare name would incorrectly merge their fields. Deduplicate within each scope.
 inline ascir::ScheduledResult MakeMultiStageScheduledResult(size_t stage_count, size_t template_count = 1U) {
   ascir::ScheduledResult result;
   for (size_t stage_id = 0U; stage_id < stage_count; ++stage_id) {
@@ -89,12 +84,9 @@ inline ascir::ScheduledResult MakeMultiStageScheduledResult(size_t stage_count, 
   return result;
 }
 
-// One plan, one stage, one template graph carrying a single CONSTANT size var
-// (via the af::AscGraph::CreateSizeVar(int64_t) overload). Used to verify
-// that constant size vars are excluded from both the tiling schema and the
-// schedule fingerprint -- they never become TilingData fields, so a
-// fingerprint that included them would depend on information that is not
-// actually part of the schedule's runtime-visible structure.
+// Build one plan/stage/template with a constant size variable via CreateSizeVar(int64_t).
+// It must be excluded from both schema and fingerprint, because it does not
+// become a runtime TilingData field.
 inline ascir::FusedScheduledResult MakeFusedResultWithConstSizeVar(int64_t const_value) {
   ascir::FusedScheduledResult result;
   ascir::ScheduledResult plan;

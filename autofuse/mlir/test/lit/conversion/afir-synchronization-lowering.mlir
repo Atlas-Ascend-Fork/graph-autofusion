@@ -8,9 +8,8 @@
 // RUN: af-opt --afir-kernel-body-signature --afir-loop-generate %s | FileCheck %s --check-prefix=LOOP
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s | FileCheck %s --implicit-check-not=afir.event_ --implicit-check-not=afir.pipe_barrier
 
-// 同步族（`!afir.token` / `event_record` / `event_wait` / `pipe_barrier`）到 AscendC 的
-// 下降。ADR-19 让 token 携带 pipe 对，兑现点就在这里：AscendC 的 `HardEvent` 本身就是一个
-// pipe 对枚举，映射是查表，下降期不需要重新推断方向。
+// 验证 token、event_record、event_wait 和 pipe_barrier 到 AscendC 的下降。
+// token 按 ADR-19 携带有向 pipe 对，可直接映射到 HardEvent，无需重新推断方向。
 //
 // 事件槽按 legacy 的纪律管理：record 侧 `AllocEventID` 占位、wait 侧 `WaitFlag` 后
 // `ReleaseEventID` 归还——交叠的同型对各自持有不同的槽，顺序的语义不会丢。
@@ -68,13 +67,12 @@ module @plan0 attributes {
     afir.pipe_barrier vector
     // 全序原语：全引擎屏障与跨核栅栏（hard 变体）。无操作数、无 token，落点由 Op 本身
     // 决定——PIPE_ALL 与 SyncAll<true>（非 cube 范围内参与的全是 AIV 核，AIC+AIV 混模
-    // 协议的 `<false>` 在纯 AIV 发射下死锁）。
+    // 协议的 `<false>` 在纯 AIV 生成路径下死锁）。
     afir.barrier_all
     afir.sync_all
-    // Cube 路线的那条链：`GM -> L1`(MTE2) -> `L1 -> L0A/L0B`(MTE1) -> MAD(M) ->
-    // `L0C` 搬出(FIX) -> `GM`(MTE3)。这里只有同步骨架没有 Cube 计算 Op（那属于 Op
-    // 补齐），但要钉住的正是骨架：手写一张带同步的 AFIR 图，四条跨引擎的边各自落到
-    // 正确的 `HardEvent`，而不是因为词表塌成一个 `compute` 而全落到 `PIPE_V`。
+    // 只检查 Cube 路径的同步骨架，不包含 Cube 计算：GM->L1（MTE2）、L1->L0A/L0B（MTE1）、
+    // MAD（M）、L0C 搬出（FIX）及 GM 搬出（MTE3）。四条跨引擎边必须分别映射到正确 HardEvent，
+    // 不能将各引擎合并视为 PIPE_V。
     %l1_token = afir.event_record : !afir.token<from = transfer_in, to = transfer_local>
     afir.event_wait %l1_token : !afir.token<from = transfer_in, to = transfer_local>
     %mad_token = afir.event_record : !afir.token<from = transfer_local, to = cube>
@@ -95,8 +93,7 @@ module @plan0 attributes {
 }
 
 // LOOP-LABEL: func.func private @stage0_template0
-// 同步原语没有 `afir.sched`，循环生成不能因此报错，也不能把它提到循环外——
-// 它与邻居的相对顺序就是它的全部语义。
+// 同步 op 虽不带 sched，循环生成仍须保留其与相邻算子的顺序，不能移到循环外。
 // LOOP: scf.for
 // LOOP: afir.add
 // LOOP: afir.event_record
@@ -118,14 +115,11 @@ module @plan0 attributes {
 // CHECK: ascendc.wait_flag v_mte3, %[[OUT]] : i8
 // CHECK: ascendc.pipe.release_event_id
 // CHECK: ascendc.pipe_barrier pipe_v
-// 全引擎屏障与跨核栅栏（hard 变体）。跨核栅栏下降显式携带 isAIVOnly（IR 层意图：
-// AIV-only 协议）。打印走 tablegen 自动 emitter 的 `AscendC::SyncAll()`——缺省即
-// true，恰是非 cube 范围唯一正确协议；需 AIC 参与的 `<false>` 在纯 AIV 发射下死锁。
+// 检查全引擎屏障与 hard 跨核栅栏。后者显式携带 isAIVOnly，自动 emitter 输出
+// 默认 true 的 SyncAll()。纯 AIV 范围不能使用等待 AIC 参与的 false 协议，否则会死锁。
 // CHECK: ascendc.pipe_barrier pipe_all
 // CHECK: ascendc.sync_all_hard {isAIVOnly}
-// Cube 那条链。四条边落在四个不同的 `HardEvent` 上——这是 pipe 词表按引擎拆开之后才
-// 表达得出来的，此前 `transfer_local` / `cube` / `fixpipe` 都只能写成 `compute`，
-// lowering 会把它们全映射成 `PIPE_V`，不报错但是错的。
+// 检查 Cube 同步链的四个 HardEvent，分别保留 transfer_local、cube、fixpipe 等引擎身份。
 // CHECK: %[[L1:.*]] = ascendc.pipe.alloc_event_id %{{.*}}, mte2_mte1 : i8
 // CHECK: ascendc.set_flag mte2_mte1, %[[L1]] : i8
 // CHECK: ascendc.wait_flag mte2_mte1, %[[L1]] : i8
@@ -142,5 +136,5 @@ module @plan0 attributes {
 // CHECK: ascendc.set_flag fix_mte3, %[[DRAIN]] : i8
 // CHECK: ascendc.wait_flag fix_mte3, %[[DRAIN]] : i8
 // CHECK: ascendc.pipe.release_event_id
-// `pipe_barrier` 也一样：词表塌着的时候它只会发 `PIPE_V`。
+// 各引擎的 pipe_barrier 也必须保留对应 pipe，不能统一生成为 PIPE_V。
 // CHECK: ascendc.pipe_barrier pipe_m

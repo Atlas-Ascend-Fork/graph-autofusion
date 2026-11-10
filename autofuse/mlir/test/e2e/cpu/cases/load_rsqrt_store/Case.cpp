@@ -14,7 +14,7 @@
 // `RsqrtExtend(dst, src, blk_tensor_with_value_1, tmp_buf, size)`，扩展头 `rsqrt.h`。
 // reg 侧是标准调用 `AscendC::Rsqrt`，在这里到不了，由 afir-rsqrt-stock-api.mlir 钉。
 //
-// **这个用例真正拦的是那块预先填好 1 的常量 block。** 它在 AFIR 上不存在——不是操作数、
+// 这个用例真正拦的是那块预先填好 1 的常量 block。 它在 AFIR 上不存在——不是操作数、
 // 不是 tmp buffer、调度也不知道有它——整块都是 lowering 在 kernel 序言里现造的
 // （`Implementations/ConstBlockTensor.cpp`）。三种错法只有真去编 kernel、真去算数才拦得住：
 //

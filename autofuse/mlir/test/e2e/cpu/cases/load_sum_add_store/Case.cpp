@@ -8,30 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> sum -> add(tensor) -> store CPU case ---*- C++ -*-===//
-//
-// 归约**之后**融合一个**二元**算子，第二个操作数是**归约后形状**的张量（`sum(x, 1) + bias`）。
-//
-// 与 `load_add_sum_store`（前融合二元）成镜像。它覆盖的是**切图后的消费者子图带一个真实的
-// 外部张量输入**这件事。
-//
-// 实测产物是**两个 stage**（stage 0 做 Sum 并 Store 进 workspace，stage 1 做 Load + Add +
-// Store），而 `load_add_sum_store` 只有一个。这不是偶然——`ReducePartitionPostFusion` 的
-// `IsNotPartitionReduce` 一旦发现后继链上某个节点有**不属于后继链**的输入就判要切图，而二元
-// 后融合的第二个操作数天然就不属于后继链。**所以二元后融合必然切图**，留在同一张图、走
-// `LoopGenerate` 的 `redirectAccumulatedOperand` 的只有一元那条（`load_sum_relu_store`）。
-//
-// 与带 `Scalar` 的 `load_sum_mul_store` 的区别就在这里：那条切出来的消费者子图只有 workspace
-// 一个 GM 输入，`Scalar` 在 kernel 顶部物化、不参与 tile 寻址；这条的消费者子图有**两个** GM
-// 输入——workspace 加上原图的 `input1`，后者要在归约后的 tile 上自己算一份局部跨度。
-//
-// `2026-09-19-ub-tile-addressing-model-design.md` 7.2 的探针表里 `load_sum_add_store` 一行记的
-// 就是它（当时的表现是 `failed to legalize 'afir.sum'`），从那以后一直没有注册。
-//
-// 形状取 `[16, 37]` + `[16, 1]`：R 轴 37 不是 32B 对齐，补出来的位置由 `ReduceInit` 填成 sum
-// 的单位元；bias 只有 A 这一维。与 `load_add_sum_store_16x37` 同一组形状，便于两支对账。
-//
-//===----------------------------------------------------------------------===//
+// 该图生成两个 stage：先 Sum 并写 workspace，再 Load、Add、Store。
+// IsNotPartitionReduce 发现后继链节点还有链外输入时触发切图，二元后融合的第二个输入
+// 满足此条件。前融合 load_add_sum_store 仍是一个 stage；一元后融合 load_sum_relu_store
+// 保留在同一图中，覆盖 redirectAccumulatedOperand。
 
 #include <gtest/gtest.h>
 
@@ -73,8 +53,8 @@ af::AscGraph BuildGraph() {
   namespace cfg = load_sum_add_store;
 
   const auto input0_shape = ToExpressions(cfg::GetShapeConfig(cfg::kInputShapes, 0).shape);
-  // 第二份输入是**归约后**形状 `[A, 1]`：被归约维 repeats 1 / stride 0，与 `SetOutputView`
-  // 给 `output` 写的同一口径。它不是 broadcast——Add 的两侧在同一个归约后的 tile 上。
+  // 第二份输入是归约后形状 `[A, 1]`：被归约维 repeats 1 / stride 0，与 `SetOutputView`
+  // 给 `output` 写的同一规则。它不是 broadcast——Add 的两侧在同一个归约后的 tile 上。
   const auto input1_shape = ToExpressions(cfg::GetShapeConfig(cfg::kInputShapes, 1).shape);
   const std::vector<af::Expression> input1_strides{af::Symbol(1), af::Symbol(0)};
   const auto input_shape = cfg::GetShapeConfig(cfg::kInputShapes, 0).shape;
@@ -92,7 +72,7 @@ af::AscGraph BuildGraph() {
   auto graph = builder.Store("store0", "add0").Output("output", "store0", 0, af::DT_FLOAT).Build();
   SetOutputView(graph, "output", cfg::GetShapeConfig(cfg::kOutputShapes, 0).shape);
   EXPECT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
-  // 与 `load_neg_sum_store` 同一口径：单 plan 单模板，自带 key 不会撞到自增计数器。
+  // 与 `load_neg_sum_store` 同一规则：单 plan 单模板，自带 key 不会撞到自增计数器。
   return graph;
 }
 
@@ -104,7 +84,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 两份张量输入都要真的进 UB 再相加：`AscendC::Add` 的三个操作数全是 LocalTensor。
   EXPECT_NE(kernel.find("AscendC::Add"), std::string::npos);
   EXPECT_NE(kernel.find("AscendC::ReduceSum"), std::string::npos);
-  // Add 必须排在 ReduceSum **之后**：顺序错了测的就是前融合。
+  // Add 必须排在 ReduceSum 之后：顺序错了测的就是前融合。
   EXPECT_LT(kernel.find("AscendC::ReduceSum"), kernel.rfind("AscendC::Add"));
   // 末维归约 -> AR；R 不对齐，补出来的位置必须被 ReduceInit 填成 0，否则会被加进和里。
   EXPECT_NE(kernel.find("AscendC::Pattern::Reduce::AR"), std::string::npos);

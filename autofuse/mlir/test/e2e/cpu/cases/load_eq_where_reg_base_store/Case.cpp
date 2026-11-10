@@ -10,7 +10,7 @@
 
 //===- Case.cpp - load -> eq -> where -> store CPU case (reg-base) -*- C++ -*-===//
 //
-// **M3 的那一格**：谓词寄存器作为值。`eq` 在寄存器形态下产出的不是一段 `ui8` 的值，
+// M3 的那一格：谓词寄存器作为值。`eq` 在寄存器形态下产出的不是一段 `ui8` 的值，
 // 而是一条 `MaskReg`——一位一个 lane；`where` 直接拿它当 `Reg::Select` 的 mask。中间那条
 // 谓词一次都不落 UB，也没有被物化成 0/1 的向量。
 //
@@ -18,10 +18,10 @@
 // 路、`where` 在后两路之间选），那一格此前报 `'afir.eq' has no register-form lowering`
 // 整图回落。
 //
-// **实现前它是红的**：`eq` 不在算子表里，VF 的能力层报能力不足，而 CPU E2E 的生成器直接
+// 实现前它是红的：`eq` 不在算子表里，VF 的能力层报能力不足，而 CPU E2E 的生成器直接
 // 调 `RunMlirCodegen`、不接 legacy 回落，所以红在生成那一步。
 //
-// 数值取法：`input0` / `input1` 按下标构造成**三分之一左右相等**，这样 `where` 两路都会
+// 数值取法：`input0` / `input1` 按下标构造成三分之一左右相等，这样 `where` 两路都会
 // 被取到——条件恒真或恒假的那种取法会让「两路接反」看不出来。两路候选值本身也必须处处
 // 不等（见 KernelTest.cpp）。
 //
@@ -68,16 +68,16 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(std::string(load_eq_where_reg_base_store::kKernelName) + "_subgraph0_plan0"),
             std::string::npos);
-  // 产物必须是**寄存器形态**：一个向量作用域、一层 lane 循环，中间结果不落 UB。
+  // 产物必须是寄存器形态：一个向量作用域、一层 lane 循环，中间结果不落 UB。
   EXPECT_NE(kernel.find("__VEC_SCOPE__"), std::string::npos);
-  // 四路各取一次、结果存一次。**计数式而不是「存在一条」**：少发一条 Load 也能编过、
+  // 四路各取一次、结果存一次。计数式而不是「存在一条」：少生成一条 Load 也能编过、
   // 也能算对（上一个 lane 的寄存器还在），错的是别的形状才会暴露。
   EXPECT_EQ(CountOccurrences(kernel, "LoadAlign"), 4U);
   EXPECT_EQ(CountOccurrences(kernel, "StoreAlign"), 1U);
   // 这一期新增的那一对，各一条。
   EXPECT_EQ(CountOccurrences(kernel, "AscendC::Reg::Compare<"), 1U);
   EXPECT_EQ(CountOccurrences(kernel, "AscendC::Reg::Select("), 1U);
-  // 谓词是一条 `MaskReg`，不是一段值：这一格里只该多出**一个** MaskReg 声明
+  // 谓词是一条 `MaskReg`，不是一段值：这一格里只该多出一个 MaskReg 声明
   // （`UpdateMask` 那条 lane 活性掩码不走声明，它是带初值的赋值）。物化回值的那条
   // `Reg::Duplicate` 一条都不该有——有就说明走了 legacy 的另一条路。
   EXPECT_EQ(kernel.find("AscendC::Reg::Duplicate"), std::string::npos);

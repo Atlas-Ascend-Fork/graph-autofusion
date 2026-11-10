@@ -83,7 +83,7 @@ mlir::LogicalResult verifyFunctionArgOrResultAttribute(mlir::Operation *op, unsi
   // 跨参数的约束（序号在角色内不重复、workspace / tiling 至多各一个）在这里查，而不是
   // 只留给某个下游 pass：A3 的立论是「旧机制两个都挂是合法 IR，只能在消费端事后发现」
   // ——如果新机制的跨参数约束同样要等到 memory-allocate 跑过才生效，那就是同一个形态
-  // 换了个名字。这条路径在**解析期**就跑，两个 `role = workspace` 的参数进不到任何
+  // 换了个名字。这条路径在解析期就跑，两个 `role = workspace` 的参数进不到任何
   // 消费端。
   //
   // 只回头看 `argIndex` 之前的参数：本函数会被每个参数各调一次，往回查就够覆盖所有
@@ -332,7 +332,7 @@ void mlir::afir::setBufferDescAttr(mlir::Operation *definingOp, mlir::afir::Buff
 // #afir.axis 的可缺省尾部：align / from / split_pair_other_id
 //===----------------------------------------------------------------------===//
 //
-// 三项各自可缺省，且在文本里都以同一个 `,` 开头。ODS 的可选组按组内**首个字面量**
+// 三项各自可缺省，且在文本里都以同一个 `,` 开头。ODS 的可选组按组内首个字面量
 // 判断该组是否出现，三组的首字面量都是逗号，于是解析器一见到逗号就锁定 `align`，
 // 后面写 `from` 会报 "expected 'align'"。打印方向没有这个问题，所以症状是**打印得出、
 // 读不回**——一个带 `from`、不带 `align` 的轴打印出来再解析就失败。
@@ -763,7 +763,7 @@ mlir::LogicalResult mlir::afir::ExprAttr::verify(llvm::function_ref<mlir::InFlig
   return mlir::success();
 }
 
-// 归约域必须是**非空**的、**一一对应**的、**不重复**的轴集合。三条都是为了同一件事：
+// 归约域必须是非空的、一一对应的、不重复的轴集合。三条都是为了同一件事：
 // `N = Π sizes` 这个乘积有意义。空集的积是 1（除以 1 等于不除），少一个 size 的积缺一个
 // 因子，重复的 id 把同一根轴数两遍——三者都不会在任何下游报错，只会让 Mean 静默算错。
 mlir::LogicalResult mlir::afir::ReductionDomainAttr::verify(llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
@@ -863,7 +863,7 @@ mlir::LogicalResult mlir::afir::KernelArgAttr::verify(llvm::function_ref<mlir::I
 // `#afplan.candidate` 把「非负」收进 verifier 是同一笔。
 //
 // 上界是 uint32：这两个数最终落进生成的 host tiling C++ 里 `ResLimit` 的 `uint32_t`
-// 字段。UB 的下界是 257 而不是 1，因为发射端写的是 `set_ub_size(limit->ub_size - 256U)`
+// 字段。UB 的下界是 257 而不是 1，因为生成端写的是 `set_ub_size(limit->ub_size - 256U)`
 // ——256 字节留给 tiling 自身，容量不超过它就没有可分配的空间。
 //
 // `soc` 非空同样在这里判：它今天只写不读（dump 的目标标识），正因为没有读点，空串
@@ -959,7 +959,7 @@ mlir::LogicalResult mlir::afir::LayoutAttr::verify(llvm::function_ref<mlir::InFl
 // `MemRefLayoutAttrInterface` 契约：不接收 rank、不允许返回 NULL，且定义域维数必须等于
 // memref 的 rank。因此 rank 由属性自己携带（见 ODS 说明）。
 //
-// 产出的是**多结果**映射（逻辑下标 -> 物理下标空间），不是线性 offset：NZ 的线性 offset
+// 产出的是多结果映射（逻辑下标 -> 物理下标空间），不是线性 offset：NZ 的线性 offset
 // 需要矩阵一整条边的长度，而本接口同样拿不到 shape。多结果形式只依赖基块尺寸，与 shape 无关。
 mlir::AffineMap mlir::afir::LayoutAttr::getAffineMap() const {
   mlir::MLIRContext *context = getContext();

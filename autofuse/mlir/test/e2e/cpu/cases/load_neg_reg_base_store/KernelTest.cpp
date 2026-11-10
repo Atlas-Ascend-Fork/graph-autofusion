@@ -34,7 +34,7 @@ TEST(MlirE2eCpu, LoadNegRegBaseStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 正负都有，且没有 0：取反是自反的，全零的输入区分不出「算了」和「没算」。
+  // 输入包含正负非零值，避免全零输入无法区分 Neg 已执行和未执行。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = (index % 2 == 0 ? 1.0F : -1.0F) * (static_cast<float>(index % 17) + 1.0F) * 0.25F;
   }

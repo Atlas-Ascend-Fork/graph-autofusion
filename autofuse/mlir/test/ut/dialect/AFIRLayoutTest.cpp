@@ -22,9 +22,8 @@ using namespace mlir;
 
 namespace {
 
-// `#afir.layout` 的契约不是它的文本形态，而是它给出的 affine map——LIT 只能断言前者。
-// 本文件锁住后者：逻辑下标到物理下标空间的映射，以及 `MemRefLayoutAttrInterface` 的
-// 其余几个查询（设计文档 3.1、ADR-16、5.1 步 6）。
+// 验证 layout 的 affine map 和 MemRefLayoutAttrInterface 查询，将逻辑下标映射到物理下标。
+// LIT 检查文本序列化；此处检查实际映射语义（设计文档 3.1/ADR-16/步 6）。
 
 class AFIRLayoutTest : public ::testing::Test {
  protected:
@@ -36,7 +35,7 @@ class AFIRLayoutTest : public ::testing::Test {
     return afir::LayoutAttr::get(&context, outer, tiling, tile, rank);
   }
 
-  // 把期望写成可读的 affine_map 文本再解析，比手工拼 AffineExpr 更像「断言」。
+  // 用 affine_map 文本构造期望值，便于直接核对下标公式。
   AffineMap parseMap(StringRef text) {
     auto attr = dyn_cast_or_null<AffineMapAttr>(parseAttribute(text, &context));
     return attr ? attr.getAffineMap() : AffineMap();
@@ -100,7 +99,7 @@ TEST_F(AFIRLayoutTest, LeadingDimsPassThrough) {
             parseMap("affine_map<(d0, d1, d2) -> (d0, d2 floordiv 16, d1 floordiv 16, d1 mod 16, d2 mod 16)>"));
 }
 
-// memref 构造期就把 rank 与基块整除性钉死——布局进类型之后白拿的闸门。
+// memref 构造期就把 rank 与基块整除性钉死——布局进类型之后白拿的门禁。
 TEST_F(AFIRLayoutTest, MemRefAcceptsAndRejectsLayoutByShape) {
   Type f16 = Float16Type::get(&context);
   afir::LayoutAttr nz = layout(afir::LayoutOrder::ColMajor, afir::TileOrder::RowMajor, {16, 16}, 2);

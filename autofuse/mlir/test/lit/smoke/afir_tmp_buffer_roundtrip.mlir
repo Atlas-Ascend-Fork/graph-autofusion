@@ -7,16 +7,12 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 // RUN: af-opt %s | af-opt | FileCheck %s
 
-// A good half of the AscendC APIs take a caller-provided tmp buffer, so the
-// bufferizable op bases carry an optional `tmp` operand. Its size is not
-// computed here: the buffer descriptor says `size_from_resource`, which binds it
-// to the `b{id}_size` the ATT side aggregates (see the tmp buffer section of
-// docs/design/2026-09-17-afir-op-completion-elementwise-slice-design.md).
+// Bufferizable ops accept optional scratch for AscendC APIs that require it.
+// size_from_resource refers to ATT's aggregated b{id}_size; AFIR does not compute
+// that allocation size (see the elementwise slice design's tmp buffer section).
 //
-// The tmp buffer operand is a `ui8` memref because it is a block of bytes, not a
-// tile of some dtype, and it carries no tensor descriptor -- it describes no
-// value of the computation. That is what `getNumTmpBuffers()` tells the
-// descriptor verifier.
+// Scratch is a ui8 memref of bytes, not a tensor value of the computation, so it has
+// no tensor descriptor. getNumTmpBuffers() excludes it from descriptor counts.
 
 #compute = #afir.tensor_desc<axis = [0], role = <compute>>
 #gm = #afir.buffer_desc<space = <gm>,>

@@ -27,19 +27,16 @@ namespace mlir::ascend {
 inline constexpr llvm::StringLiteral kTargetOptionName = "target";
 inline constexpr llvm::StringLiteral kTargetProfileOptionName = "target-profile";
 
-// af-opt's own --target/--target-profile flags. Defined non-anonymously here
-// (rather than in tools/af-opt/main.cpp) so that passes living outside af-opt,
-// such as the session-scoped AFIR-to-AscendC pipeline passes, can resolve the
-// same command-line-selected target from within runOnOperation()/initialize()
-// without af-opt needing to inject it explicitly: mlir::Pass::Option<> fields
-// cannot backstop these as independent top-level flags in bare (non
-// -pass-pipeline) invocation, so a shared extern cl::opt, the same idiom
-// LLVM itself uses for cross-pass flags (see llvm/include/llvm/IR/PrintPasses.h's
-// PrintChanged), is the only way to keep the existing bare --target=... syntax.
+// Shared af-opt --target/--target-profile flags. Session-scoped passes outside
+// af-opt resolve them during runOnOperation()/initialize(). mlir::Pass::Option<>
+// does not expose independent top-level flags for bare (non -pass-pipeline)
+// invocation, so shared extern cl::opt values preserve the --target=... syntax.
+// LLVM uses the same pattern for cross-pass flags, such as PrintChanged in
+// llvm/include/llvm/IR/PrintPasses.h.
 //
-// Consumers outside this directory must not read these directly: go through
-// TargetProfileRegistry.h's getSelectedTargetProfile, which keeps the
-// command-line dependency inside this layer and parses the profile once.
+// Consumers outside this directory use getSelectedTargetProfile in
+// TargetProfileRegistry.h rather than reading these options directly. This keeps
+// the command-line dependency in this layer and parses each profile once.
 extern llvm::cl::opt<std::string> targetOption;
 extern llvm::cl::opt<std::string> targetProfileOption;
 

@@ -26,15 +26,15 @@
 
 using namespace mlir::afir::bridge;
 
-// 一个张量的形状面：静态维、对应的符号表达式、以及轴编号。
+// 示例张量的静态维、符号尺寸表达式和轴编号。
 struct TensorShapeSpec {
   std::vector<int64_t> shape;
   std::vector<std::string> shapeExprs;
   std::vector<int64_t> axes;
 };
 
-// `position` 这里只区分 0（GM）与非 0（片上）：这个工具造的是最小合法输入，片上张量
-// 一律走队列，和调度真实产出的那些形态无关。
+// 示例只区分 GM（position=0）与片上存储（非零），片上张量统一使用队列。
+// 这里构造最小合法输入，不覆盖调度器的全部存储形态。
 static TensorValueDTO makeTensor(TensorShapeSpec shapeSpec, int64_t tensorId, int64_t position,
                                  mlir::afir::Role role = mlir::afir::Role::Compute) {
   TensorValueDTO value;

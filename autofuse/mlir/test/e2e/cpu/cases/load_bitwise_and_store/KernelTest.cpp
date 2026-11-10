@@ -46,9 +46,8 @@ TEST(MlirE2eCpu, LoadBitwiseAndStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 两个位模式，挑得让每一位在用例里都被两种取值走到：0x5555 / 0x3333 交替，再逐元素
-  // 移一位，于是「同为 1」「一边 1」「同为 0」三种组合都被覆盖。周期只有 16 个元素，
-  // 与形状无关——形状再改也不必回来动这里。
+  // 交替使用 0x5555 / 0x3333 并逐元素移位，覆盖每位上的 1&1、1&0 和 0&0。
+  // 模式每 16 个元素重复，不依赖注册形状。
   for (uint32_t index = 0; index < input0_element_count; ++index) {
     input0[index] = static_cast<int16_t>(0x5555 ^ static_cast<int16_t>(index));
   }

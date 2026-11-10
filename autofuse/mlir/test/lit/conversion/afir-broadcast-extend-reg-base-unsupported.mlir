@@ -6,19 +6,19 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **reg 侧收不了的形态必须报不支持，不能顺手发一条 shape 数组。**
+// reg 侧收不了的形态必须报不支持，不能顺手生成一条 shape 数组。
 //
 // `--split-input-file` 的理由同 `afir-broadcast-unsupported.mlir`：pass 在第一个报错的 op 上
 // 就停。两片各只违反一条判据。
 // RUN: not af-opt --split-input-file --afir-select-implementation --target=Ascend950DT_950x %s 2>&1 \
 // RUN:   | FileCheck %s
 
-// 第一片：**带填充，而且最内那一段是广播段**——这是 2026-10-11 放宽之后的新边界。
+// 第一片：带填充，而且最内那一段是广播段——这是 2026-10-11 放宽之后的新边界。
 //
-// 带填充本身现在收了（`afir-broadcast-extend-padded.mlir` 是那条正例）：最内那一位改发行距，
-// 两侧发同一个数。但那条改法要求两侧的最内位是**同一位**——最内那一段是广播段时
+// 带填充本身现在收了（`afir-broadcast-extend-padded.mlir` 是那条正例）：最内那一位改为传行距，
+// 两侧生成同一个数。但那条改法要求两侧的最内位是同一位——最内那一段是广播段时
 // `src_shape` 那一位是 1、源自己的最内参与位在更外面，两侧要对上的是另一对数。那是一个
-// 独立的形状，今天没有用例，按「宁可拒收」留着。
+// 独立的形状，目前没有用例，按「宁可拒收」留着。
 //
 // 形状：目的地 `stride = [8, 1]`、段长 `[4, 5]`，行距 8 ≠ 行长 5（带填充）；而内段源 stride
 // 是 0（广播段）、外段源 stride 是 1。
@@ -48,9 +48,9 @@ module {
 // stride 是 16 而不是 8——`src_shape = {3, 1, 8}` 描述的稠密张量上，那一维的跨度只能是 8。
 // 目的地那一侧与正例逐字相同，所以这一片违反的只有源这一条。
 //
-// **这一片是 2026-10-11 那次放宽的回归闸门**：那次改动一度把「验稠密」与「发什么数」解耦，
+// 这一片是 2026-10-11 那次放宽的回归门禁：那次改动一度把「验稠密」与「生成什么数」解耦，
 // 源这一条就漏查了（相邻两个参与位之间那个等式没人查），这一格当场变绿。判据必须对着真要
-// 发出去的那几个数查，见 `sideIsDense`。
+// 生成的那几个数查，见 `sideIsDense`。
 #loose_src = #afir.tensor_desc<axis = [0, 1, 2], repeats = [#afir.expr<"3">, #afir.expr<"1">, #afir.expr<"8">],
                                strides = [#afir.expr<"16">, #afir.expr<"0">, #afir.expr<"1">],
                                vectorized_axis = [0, 1, 2],

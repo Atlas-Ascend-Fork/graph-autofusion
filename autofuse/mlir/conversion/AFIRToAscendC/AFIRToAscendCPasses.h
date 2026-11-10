@@ -70,9 +70,9 @@ void registerAFIRMemoryAllocatePass();
 std::unique_ptr<Pass> createAFIRSelectImplementationStandalonePass();
 void registerAFIRSelectImplementationStandalonePass();
 
-// 相位 C.5：`afir.vector_func` -> `emitasc.vec_scope { emitasc.vf_for { 寄存器算子 } }`。
-// 必须跑在实现选择与 `ConvertAFIRToAscendC` **之后**（region 外的算子要先降完，region 内
-// 的算子由它自己按 `regOpMappings()` 那张表降），也必须在 host 产物那一相位**之前**。
+// 阶段 C.5：`afir.vector_func` -> `emitasc.vec_scope { emitasc.vf_for { 寄存器算子 } }`。
+// 必须跑在实现选择与 `ConvertAFIRToAscendC` 之后（region 外的算子要先降完，region 内
+// 的算子由它自己按 `regOpMappings()` 那张表降），也必须在 host 产物那一阶段之前。
 // 这一期收不了的 VF 形态在它入口报能力不足、整图干净回落。
 std::unique_ptr<Pass> createAFIRVectorFuncToRegBasePass();
 void registerAFIRVectorFuncToRegBasePass();

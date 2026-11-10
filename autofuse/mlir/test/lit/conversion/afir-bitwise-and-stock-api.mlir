@@ -11,13 +11,11 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-bitwise-and-extension-api.mlir 的另一半：同一个 `afir.bitwise_and`，在有标准
-// `AscendC::BitwiseAnd` 的那张供给表上。没有 tmp buffer，调用带 `AscendC::` 限定，也不
-// 引任何扩展头——它声明在 CANN 的 `adv_api/math/bitwise_and.h`，与 `IsNan` 一族走同一条
-// `kernel_operator.h` 链进来。
+// 检查标准 AscendC::BitwiseAnd：不接收 tmp buffer，也不引入 Autofuse 扩展头。
+// 声明通过 kernel_operator.h 引入的 CANN adv_api/math/bitwise_and.h 提供。
 //
-// 这里用 ui8 而不是上一份的 i16：位模式这一族的元素类型集合把无符号也算进来，而算术那
-// 几个（add / mul / max / min）不认 ui8。两份用例合起来把这条差别的两端都走到。
+// 使用 ui8，与扩展用例的 i16 对照，验证位运算的无符号类型支持。
+// 这与不接受 ui8 的 Add / Mul / Max / Min 类型集合不同。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

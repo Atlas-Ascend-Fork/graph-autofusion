@@ -44,10 +44,8 @@ class TilingSchema {
   ArrayAttr getTypesAttr() const;
   ArrayAttr getNamesAttr() const;
 
-  // Look up a field's type by name. Assumes the schema was already validated
-  // by get(): unlike getTilingSchemaField(Type, ...), this does not re-walk
-  // the layout, so it is safe to call per field in a loop over one schema.
-  // Returns an empty type if the field is not present.
+  // Look up a field type without revalidating the layout checked by get().
+  // Suitable for repeated queries on one schema; return an empty type for a missing field.
   Type getField(StringRef field) const;
 
  private:

@@ -357,11 +357,11 @@ TEST(AFIRToAscendCConversionPassTest, RejectsTensorFormAddResidual) {
   EXPECT_TRUE(failed(RunConversionPass(*module, registry, CreateTargetProfile())));
 }
 
-// 两个 pipeline pass 的 `getDependentDialects` 是按相位拼出来的（AFIRToAscendCPipeline.cpp
-// 的 `*Dialects`），不是手写的并集——但每个相位的那一行仍是人写的。这条用例是防它漂：
-// 拿真实流水线自己报的依赖方言，与 pass 声明的那份对账。
+// 两个 pipeline pass 的 `getDependentDialects` 是按阶段拼出来的（AFIRToAscendCPipeline.cpp
+// 的 `*Dialects`），不是手写的并集——但每个阶段的那一行仍是人写的。这条用例是防它漂：
+// 拿真实流水线自己报的依赖方言，与 pass 声明的那份比对。
 //
-// 为什么非有不可：`PassManager::run()` 在 `initialize()` **之前**就把依赖方言加载进
+// 为什么非有不可：`PassManager::run()` 在 `initialize()` 之前就把依赖方言加载进
 // context 了，而这两个 pass 的子流水线只在 `initialize()` 里才建出来，所以声明漏了一个
 // 方言不会在这里失败——它会在某条恰好用到那个方言的路径上，以一句「dialect not
 // registered」的形式出现在很远的地方。手写的那份并集已经漂过一次。

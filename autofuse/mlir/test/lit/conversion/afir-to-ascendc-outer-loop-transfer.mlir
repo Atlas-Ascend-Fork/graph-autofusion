@@ -6,17 +6,17 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 有效视图多于两项的搬运：最内两项进 `DataCopyPadExtend`，其余每项在 DMA 外面发一层
-// `scf.for`。`afir-to-ascendc-two-dim-transfer.mlir` 钉的是恰好两项（不发循环）的形态，
+// 有效视图多于两项的搬运：最内两项进 `DataCopyPadExtend`，其余每项在 DMA 外面生成一层
+// `scf.for`。`afir-to-ascendc-two-dim-transfer.mlir` 钉的是恰好两项（不生成循环）的形态，
 // 本用例钉三项（一层）与四项（两层）。
 //
-// **嵌套层数是 N − 2，不是「有循环就行」**。少一层的表现是整块没搬——文本上仍然是一条
+// 嵌套层数是 N − 2，不是「有循环就行」。少一层的表现是整块没搬——文本上仍然是一条
 // 合法的 `data_copy_pad_extend`，所以这里必须按层数钉死，两个 section 各自数 `scf.for`。
 //
 // 两个 section 都没有计算算子：二维及以上的 tile 进 elementwise 是本期明确拒绝的，所以
 // 只能 Load 直接接 Store。
 //
-// V2201 与 V3510 各发一遍：外层循环不含任何目标相关的分支，两个目标的产物必须同形。
+// V2201 与 V3510 各生成一遍：外层循环不含任何目标相关的分支，两个目标的产物必须同形。
 
 // RUN: af-opt --split-input-file --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend910B1 %s | FileCheck %s
 // RUN: af-opt --split-input-file --afir-kernel-body-signature --afir-materialize-tiling-params --afir-loop-generate --afir-memory-allocate --afir-select-implementation --convert-afir-to-ascendc --target=Ascend950DT_950x %s | FileCheck %s
@@ -131,7 +131,7 @@ module @plan0 attributes {
 
 // CHECK-LABEL: func.func private @stage0_template0
 
-// `LoopGenerate` 先发三层调度循环（z0Tb、z1T、z2T），并为每根配对 inner 发一份
+// `LoopGenerate` 先生成三层调度循环（z0Tb、z1T、z2T），并为每根配对 inner 生成一份
 // `actual_size`。搬运侧的三个量全部取自这些绑定，循环外物化一次：
 // CHECK: %[[BOUND:.*]] = arith.select {{.*}}<axis = 2, role = actual_size>
 // CHECK: %[[BLOCKCOUNT:.*]] = arith.select {{.*}}<axis = 7, role = actual_size>
@@ -139,14 +139,14 @@ module @plan0 attributes {
 
 // Load。
 //
-// 两侧缝隙、外层那一项的两侧步长，都在循环**外**算一次；循环体内只剩乘加。这不是风格
+// 两侧缝隙、外层那一项的两侧步长，都在循环外算一次；循环体内只剩乘加。这不是风格
 // ——把 stride 留在体内会让每一轮重算一遍同一个乘积。
 // CHECK:      %[[LGMGAP:.*]] = arith.subi %{{.*}}, %[[BLOCKLEN]] : index
 // CHECK-NEXT: %[[LUBGAP:.*]] = arith.subi %{{.*}}, %[[BLOCKLEN]] : index
 // CHECK-NEXT: %[[LGSTRIDE:.*]] = index.mul
 // CHECK-NEXT: %[[LUBSTRIDE:.*]] = index.mul
 //
-// 上界是 z0t 的 **actual_size**，不是标称尺寸：尾块那一轮少几行，按标称走会多搬。
+// 上界是 z0t 的 actual_size，不是标称尺寸：尾块那一轮少几行，按标称走会多搬。
 // CHECK:      scf.for %[[LIV:.*]] = %{{.*}} to %[[BOUND]] step %{{.*}} {
 // 行内偏移两侧各算各的：GM 侧叠在 tile 起点之上，UB 侧从 0 起算（tile 在 buffer 里的
 // 起点恒为基址）。
@@ -159,7 +159,7 @@ module @plan0 attributes {
 // **只有一层**：DMA 之后立刻收口。少一层的表现是整块没搬，文本上仍是一条合法的 DMA。
 // CHECK-NEXT: {{^ *}}}
 
-// Store。同一套形态，方向相反：两个子视图的先后换位，两个缝隙参数也随之**交换位置**
+// Store。同一套形态，方向相反：两个子视图的先后换位，两个缝隙参数也随之交换位置
 // （src 侧取 UB、dst 侧取 GM）。
 // CHECK:      %[[SGMGAP:.*]] = arith.subi %{{.*}}, %[[BLOCKLEN]] : index
 // CHECK-NEXT: %[[SUBGAP:.*]] = arith.subi %{{.*}}, %[[BLOCKLEN]] : index
@@ -307,7 +307,7 @@ module @plan0 attributes {
 // 两层嵌套，外层走 z0t、内层走 z1t，各自的上界是各自的 actual_size。
 // CHECK:      scf.for %[[LIV0:.*]] = %{{.*}} to %[[BOUND0]] step %{{.*}} {
 // CHECK-NEXT:   scf.for %[[LIV1:.*]] = %{{.*}} to %[[BOUND1]] step %{{.*}} {
-// 两层的行内偏移**分别**累加到两侧。漏掉任何一项的表现是每轮搬同一块，数值上整段重复。
+// 两层的行内偏移分别累加到两侧。漏掉任何一项的表现是每轮搬同一块，数值上整段重复。
 // CHECK-NEXT:     %[[LG0:.*]] = arith.muli %[[LIV0]], %{{.*}}
 // CHECK-NEXT:     %[[LGS:.*]] = arith.addi %{{.*}}, %[[LG0]]
 // CHECK-NEXT:     %[[LL0:.*]] = arith.muli %[[LIV0]], %{{.*}}

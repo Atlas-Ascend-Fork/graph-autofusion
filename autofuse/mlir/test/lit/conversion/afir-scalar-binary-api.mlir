@@ -13,13 +13,13 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | ascir-translate -mlir-to-ascendc \
 // RUN:   | FileCheck %s --check-prefix=CPP
 
-// 同一个 `afir.add`，第二个操作数换成标量 SSA 值。**不是另一族 op**：`add.tensor_tensor`
+// 同一个 `afir.add`，第二个操作数换成标量 SSA 值。不是另一类 op：`add.tensor_tensor`
 // 与 `add.tensor_scalar` 是同一个 op 的两个 implementation，选哪个由操作数形态定死，
 // 两者的判据互斥（`getTensorTypes` 两个方向都挡），不靠优先级。
 //
-// 这一族在两张供给表上是同一个 `AscendC::` 调用、都不要 tmp buffer，所以两个 `--target`
+// 这一类在两张支持表上是同一个 `AscendC::` 调用、都不要 tmp buffer，所以两个 `--target`
 // 共用同一份 IR 和同一组 CHECK——它跟平台没关系，`--implicit-check-not` 里那两条 tensor
-// 形态的名字是这份用例真正在钉的东西：**标量没有被当成一块 tile**。
+// 形态的名字是这份用例真正在钉的东西：标量没有被当成一块 tile。
 //
 // 标量也不取块内下标：它在整条循环里就是同一个值，`LocalTensorSubIndexOp` 只落在
 // 两块 tile 上。

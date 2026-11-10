@@ -53,7 +53,7 @@ TEST(MlirE2eCpu, LoadBroadcastTwoOutputCalculatesCorrectResult) {
   for (uint32_t index = 0; index < inputCount; ++index) {
     input0[index] = static_cast<float>(index) * 0.25F - 3.0F;
   }
-  // 两个输出的初值**不同**：某一条 Store 没发出来时，留下的初值能指出是哪一条。
+  // 两个输出的初值不同：某一条 Store 没生成时，留下的初值能指出是哪一条。
   for (uint32_t index = 0; index < output0Count; ++index) {
     output0[index] = -1.0F;
   }

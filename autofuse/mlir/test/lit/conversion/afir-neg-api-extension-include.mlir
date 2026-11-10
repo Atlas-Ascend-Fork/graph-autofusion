@@ -11,7 +11,7 @@
 // RUN: af-opt --afir-aggregate-launch --afir-aggregate-launch-graph-name=fused_graph %t.membased.mlir | FileCheck %s --check-prefix=MEMBASED
 
 // afir-api-extension-include.mlir 的第二个用例，钉的是同一条通道最不显眼的那一段：
-// **两张供给表都有、名字不同**的扩展头。
+// 两张支持表都有、名字不同的扩展头。
 //
 // `afir.neg` 在两个 target 上生成的调用文本逐字相同（`NegExtend<half>(...)`），
 // 差异只在内联进来的是 `neg.h` 还是 `neg_reg_base.h`。afir-neg-api-family.mlir 走的是
@@ -83,5 +83,5 @@ module @plan0 attributes {
 // MEMBASED: using namespace AscendC;
 // MEMBASED: #include "neg.h"
 // MEMBASED-NOT: #include "neg_reg_base.h"
-// 调用文本两侧一模一样——所以光看它区分不出供给表，上面那两条 include 才是判据。
+// 调用文本两侧一模一样——所以光看它区分不出支持表，上面那两条 include 才是判据。
 // MEMBASED: {{^ *}}NegExtend<half>

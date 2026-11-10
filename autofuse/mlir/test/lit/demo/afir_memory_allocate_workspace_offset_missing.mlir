@@ -8,9 +8,8 @@
 
 // RUN: af-opt --afir-loop-generate --afir-memory-allocate --verify-diagnostics %s
 
-// 签名是手写的：`%ws` 是一块 workspace GM 张量，但形参表里没有与它 `buffer_id` 相配的
-// `role = workspace_offset`。这时必须报错而不是把偏移当 0——当 0 会让这块 workspace 落在
-// workspace 区的起点，与另一块重叠着写，是静默的数据损坏。
+// 手写签名缺少与 ws.buffer_id 对应的 workspace_offset 参数，应报告错误。
+// 不能默认偏移为 0，否则该 workspace 会与区域起点的其他缓冲重叠。
 module attributes {afir.workspace_tensor_ids = array<i64: 2>} {
   func.func private @workspace_without_offset(
       %input: memref<16xf16, 22 : i32> {afir.buffer_desc = #afir.buffer_desc<space = <gm>, size_bytes_expr = <"(2 * s0)">, life_time_axis_id = -1>, afir.kernel_arg = #afir.kernel_arg<role = input, index = 0>},

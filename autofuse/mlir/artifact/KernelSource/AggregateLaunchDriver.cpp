@@ -32,9 +32,8 @@ using namespace mlir::afir;
 
 namespace mlir::ascend::kernel {
 
-// Aggregates `planModules` into one entry module: tiling data -> contract
-// validation -> kernel entry -> kernel body. Mirrors the aggregation stage
-// previously inlined in Codegen::CodegenViaMlir.
+// Aggregate planModules in order: tiling data, contract validation, kernel entry,
+// then kernel body. This is the aggregation stage formerly in Codegen::CodegenViaMlir.
 FailureOr<std::pair<OwningOpRef<ModuleOp>, AggregateArgumentLayout>> buildAggregateEntryModule(
     ArrayRef<ModuleOp> planModules, StringRef fusedGraphName, std::string *diagnostic) {
   auto entry = runGenAggregateTilingData(planModules);
@@ -75,9 +74,8 @@ FailureOr<std::pair<OwningOpRef<ModuleOp>, AggregateArgumentLayout>> buildAggreg
 
 namespace {
 
-// Translates `entryModule` to AscendC and emits the tiling-data header and
-// AutofuseLaunch host wrapper for it. Mirrors the emission stage previously
-// inlined in Codegen::CodegenViaMlir.
+// Translate entryModule to AscendC and emit its tiling header and AutofuseLaunch wrapper.
+// This is the emission stage formerly in Codegen::CodegenViaMlir.
 void setDiagnostic(std::string *diagnostic, const llvm::Twine &message) {
   if (diagnostic) {
     *diagnostic = message.str();

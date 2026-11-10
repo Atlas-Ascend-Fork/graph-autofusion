@@ -24,10 +24,8 @@ namespace mlir::ascend::kernel {
 FailureOr<std::shared_ptr<const ascend::TargetProfile>> resolveSessionTargetProfile(MLIRContext &context) {
   std::string diagnostic;
   llvm::raw_string_ostream diagnosticStream(diagnostic);
-  // Goes through the target layer's registry rather than reading the shared
-  // cl::opt values here: the command-line dependency stays where the flags are
-  // declared, and the profile is parsed once for the whole run instead of once
-  // per session-scoped pass.
+  // Resolve through the target registry to keep CLI option access in the target layer
+  // and reuse one parsed profile across session-scoped passes.
   auto profile = ascend::getSelectedTargetProfile(ascend::TargetSelectionRequirement::Required, diagnosticStream);
   if (failed(profile)) {
     emitError(UnknownLoc::get(&context)) << diagnosticStream.str();

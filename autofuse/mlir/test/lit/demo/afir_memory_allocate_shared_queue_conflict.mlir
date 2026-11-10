@@ -8,7 +8,7 @@
 
 // RUN: not af-opt --afir-kernel-body-signature --afir-loop-generate --afir-memory-allocate %s 2>&1 | FileCheck %s
 
-// 放宽「一条队列上不能混 dtype」之后，**真正不兼容的组合仍然要拒收**。
+// 放宽「一条队列上不能混 dtype」之后，真正不兼容的组合仍然要拒收。
 //
 // 这里两个成员差的是 `queue_depth`（1 与 2）：它说的是这条队列轮转几块，是队列自己的
 // 属性，两个成员各说一个数就是矛盾，取 max 或取第一个都会让物化出来的队列与其中一个

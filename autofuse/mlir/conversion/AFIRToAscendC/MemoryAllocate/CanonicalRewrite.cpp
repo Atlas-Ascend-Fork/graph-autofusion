@@ -61,7 +61,7 @@ Value CanonicalFunctionMemoryAllocator::materializedValue(Value value) const {
 SmallVector<Operation *> CanonicalFunctionMemoryAllocator::collectCanonicalOperations() {
   SmallVector<Operation *> operations;
   func.walk([&](Operation *operation) {
-    // **region 内不进这一层。** `afir.vector_func` 的 region 里是 tensor 形态的算子：它们
+    // region 内不进这一层。 `afir.vector_func` 的 region 里是 tensor 形态的算子：它们
     // 没有存储要物化（VF 的中间结果在寄存器里），而它们同样挂着 descriptor，所以不挡住
     // 就会被当成待物化的算子、去找一个根本不存在的 materialized 值。算子自己（边界是
     // 真的 UB 张量）照常物化，只是不往里走。
@@ -103,7 +103,7 @@ LogicalResult CanonicalFunctionMemoryAllocator::rewriteCanonicalOperation(Operat
   state.addOperands(operands);
   state.addTypes(resultTypes);
   state.addAttributes(operation->getAttrs());
-  // **region 要跟着搬过来。** 这一层是按操作数与结果类型重建算子的，而 `OperationState`
+  // region 要跟着搬过来。 这一层是按操作数与结果类型重建算子的，而 `OperationState`
   // 不会自己把 region 带过去——带 region 的算子（`afir.vector_func`）会被重建成一个空壳，
   // 而空壳的失败方式取决于它的 trait：`SingleBlockImplicitTerminator` 会在下面那次
   // `verify` 上报「区域为空」，而不是报「谁把它清掉了」。
@@ -160,18 +160,9 @@ LogicalResult CanonicalFunctionMemoryAllocator::lowerSymbolicExpressions() {
   RewritePatternSet patterns(context);
   afir::detail::populateSymbolicLoweringPatterns(patterns);
 
-  // 工作表是「整个函数**除了**带 `#afir.axis_binding` 的那些 op」。
-  //
-  // 贪心驱动会顺手删掉没有使用者的纯 op，而循环生成留下的轴绑定值这时恰好全都没有使用
-  // 者——`#afir.axis_binding` 是「从轴找回这个值」的唯一通路，标记本身不构成使用。于是
-  // 「一个轴绑定能不能活到下降阶段」取决于此前碰巧有没有别的消费者：block-inner 轴的
-  // `actual_size` 当了循环上界所以活着，向量化轴的那份（`generatePairedInnerActualSize`
-  // 发的）没人用，被删；搬运下降想按轴查长度就查不到了。
-  //
-  // 不能改成「只扫 `afir.symbolic_eval`」：这一轮同时在做全函数的 fold，偏移为 0 的
-  // `local_tensor.subindex` 之类要靠它折掉（`afir_pipeline_sync_canonical` 等用例钉着
-  // 折叠后的形态）。所以保留全函数范围，只把轴绑定挡在工作表外——`ExistingAndNewOps`
-  // 保证不在初始表里的 op 也不会被中途拉进来。
+  // 贪心重写会删除无 SSA 使用者的纯算子，但 axis_binding 属性不计为 SSA use。
+  // 部分 actual_size 被循环上界使用，其他向量化轴绑定仅供后续按属性查询，不能被 DCE。
+  // 否则搬运下降会丢失 generatePairedInnerActualSize 产生的实际长度。
   SmallVector<Operation *> rewritable;
   func.walk([&](Operation *operation) {
     if (operation != func.getOperation() && !operation->hasAttr(afir::kAxisBindingAttrName)) {

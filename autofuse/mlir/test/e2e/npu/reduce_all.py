@@ -35,8 +35,8 @@ CASES = (
 
 
 def make_module(torch, rank, keepdim):
-    # `torch.sum(x)` 不收 keepdim，全轴归约要把轴显式列全。两种写法在 inductor 侧降下来的
-    # 是同一个 `aten.sum.dim_IntList`，但只有显式列轴这条能表达 keepdim。
+    # 全轴归约显式列出所有维度，以支持 keepdim；torch.sum(x) 不接收该参数。
+    # 两种求和形式均下降为 aten.sum.dim_IntList。
     dims = tuple(range(rank))
 
     class ReduceAll(torch.nn.Module):

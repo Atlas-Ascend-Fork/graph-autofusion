@@ -24,7 +24,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpBase.td"
 
 // Autofuse 的 `CastExtend` 包装，两侧各一个。上面那三个 `AscendC_CastL*Op` **不是**这里
-// 要的供给：它们发的是标准的 `AscendC::Cast`，要一个 `RoundMode` 实参、不收 tmp buffer，
+// 要的可用实现：它们生成的是标准的 `AscendC::Cast`，要一个 `RoundMode` 实参、不收 tmp buffer，
 // 而两张对照表要的都是包装——包装自己按 (InT, OutT) 推 `RoundMode`（`GetRoundMode` /
 // `GetCastRoundMode`），还替中间要转两道的那些 dtype 对开循环。
 //
@@ -36,7 +36,7 @@ include "mlir/IR/OpBase.td"
 // reg 那三个实参是 `const uint32_t (&)[dim]`，`dim` 由 brace-init 的长度推出来。连续
 // 形态下 `dim` 恒为 1、两个 stride 恒为 1，所以它们不进 `arguments`——与
 // `where_contiguous` / `clipbyvalue_contiguous` 同一个办法，「连续」写进助记符里，
-// 由 emitter 把那三个字面量打出来。真要发 2 维形态那天，改的是再建一个 op，不是给
+// 由 emitter 把那三个字面量打出来。真要生成 2 维形态那天，改的是再建一个 op，不是给
 // 这个加操作数。
 //
 // mem 侧要 `utils.h` 前导：`cast.h` 用了 `MAX_REPEAT_TIMES` / `Rational` / `Ceiling` /
@@ -76,17 +76,17 @@ def AscendC_CastExtendContiguousRegBaseOp : VectorOp<"cast_extend_contiguous_reg
 //
 // **`trait` 为什么是个名字而不是四个枚举操作数**：第三个模板实参的类型是
 // `const CastTrait&`——引用类型的非类型模板实参只能绑到有链接的对象上，绑不了临时量，
-// 所以发不出 `Cast<float, half, {ZERO, NO_SAT, ZEROING, CAST_RINT}>` 这种写法。必须指一个
+// 所以生成不出 `Cast<float, half, {ZERO, NO_SAT, ZEROING, CAST_RINT}>` 这种写法。必须指一个
 // 具名的 `constexpr CastTrait`。Autofuse 的那一组定义在 `api_regbase/utils.h` 里
-// （`cast_trait_float_2_half` 一族），所以这个 op 声明 `utils_reg_base.h` 作为扩展头，
-// 发射器把名字原样打出去。
+// （`cast_trait_float_2_half` 一类），所以这个 op 声明 `utils_reg_base.h` 作为扩展头，
+// 生成器把名字原样打出去。
 //
 // **(InT, OutT) -> 哪个名字** 这张判断表不在这里：它是 codegen 的选择，不是 API 的形状，
-// 真源在 `AFIRVectorFuncToRegBase.cpp`（抄自 legacy 的
+// 权威定义在 `AFIRVectorFuncToRegBase.cpp`（抄自 legacy 的
 // `v35/codegen/micro_api_call/micro_cast_api_call.cpp:18`）。这个 op 只保证「名字原样打出、
 // 而且定义它的那个头被内联进来」。
 //
-// 副作用与 `UnaryRegOp` 一族同理（目的地是操作数、没有结果，不声明就被 DCE），见
+// 副作用与 `UnaryRegOp` 一类同理（目的地是操作数、没有结果，不声明就被 DCE），见
 // `Base.td` 里那一段。
 // `Ceil2IntExtend(dst, src, {count}, {1U}, {1U})`。与上面那个
 // `CastExtendContiguousRegBaseOp` **逐项同形**（同一个 `cast_reg_base.h`、同样三个
@@ -94,7 +94,7 @@ def AscendC_CastExtendContiguousRegBaseOp : VectorOp<"cast_extend_contiguous_reg
 // `CastExtend<InT, OutT, dim, RoundMode::CAST_CEIL>(...)`。
 //
 // 所以它不是「又一个 cast」：RoundMode 由**包装**写死，而 `CastExtend` 那个由 legacy 按
-// (输入, 输出) 推。两者都发到 `cast_reg_base.h`，但 AFIR 这一层是两个不同的 op。
+// (输入, 输出) 推。两者都生成到 `cast_reg_base.h`，但 AFIR 这一层是两个不同的 op。
 def AscendC_Ceil2IntExtendRegBaseOp : VectorOp<"ceil2int_extend_contiguous_reg_base", "Ceil2IntExtend", [
   ApiExtensionOpInterface, OpWithDstInterface, OpWithSrcInterface
 ]> {

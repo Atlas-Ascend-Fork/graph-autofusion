@@ -6,32 +6,32 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 形态 B（`[normal][brc]`，最内那一段就是广播段）**带填充**：只换目的地那一边。
+// 形态 B（`[normal][brc]`，最内那一段就是广播段）带填充：只换目的地那一边。
 //
-// 与 `afir-broadcast-tail-pitch.mlir`（形态 A）配成一对，两格的区别就是**换哪一边**：
+// 与 `afir-broadcast-tail-pitch.mlir`（形态 A）配成一对，两格的区别就是换哪一边：
 //
-//   - 形态 A：两侧的最内位是同一位，`sourceK` 与 `destinationK` 发的是同一个值，所以行距
+//   - 形态 A：两侧的最内位是同一位，`sourceK` 与 `destinationK` 生成的是同一个值，所以行距
 //     要两边一起换，否则包装的 `srcShape[i] == dstShape[i]` 对不上。
-//   - 形态 B（本格）：源那一位恒是**字面量 1**，所以只换得了目的地那一边——也只需要换那
+//   - 形态 B（本格）：源那一位恒是字面量 1，所以只换得了目的地那一边——也只需要换那
 //     一边。包装走 `broadcast.h:304` 的 `src_k == 1 && src_m == dst_m` 一支，它对两侧 shape
 //     的要求只落在非广播那一位（`m`）上。
 //
-// 这一格 2026-10-26 之前是**负例**（`afir-broadcast-unsupported.mlir` 的第二片），理由写的是
-// 「两侧要对上的是另一对数，不是发同一个行距能解决的」。那句话只对了一半：确实不是「发同
+// 这一格 2026-10-26 之前是负例（`afir-broadcast-unsupported.mlir` 的第二片），理由写的是
+// 「两侧要对上的是另一对数，不是生成同一个行距能解决的」。那句话只对了一半：确实不是「传同
 // 一个行距」，但也不需要——只换目的地一边就对。实测证据是 CPU 模拟器上的数值
 // （`test/e2e/cpu/cases/load_broadcast_segmented_store` 的 `_33x1` 与 `_2x3x5x7x1` 两格，
 // 哨兵填充、逐元素比对），以及探针 mem 侧 42 格从 `unsupported` 翻成 `ok`、0 格变差。
 //
-// **这一格靠着一条正确性不变量**：行距恒是 32B 的整数倍（填充的定义），所以
+// 这一格靠着一条正确性不变量：行距恒是 32B 的整数倍（填充的定义），所以
 // `AscendC::Broadcast<T, 2, 1>` 要的对齐天然满足。**codegen 这一侧没有检查它**，与形态 A
 // 那一格同一个敞口（见 `docs/development/2026-09-23-afir-broadcast-design.md`）；真被破了
 // 是静默算错，不是报错。
 //
 // 变异验证（2026-10-26，逐条改完重编 af-opt 再跑）：
 //   - `classifySegments` 里把 `broadcastIsInner` 那条早退加回去
-//     → SELECT / IR / CPP **三条都红**（能力层直接报 `no supported`）。
-//   - `emitWindowCall` 去掉 pitch 替换、仍发内段 extent
-//     → IR / CPP 红，**SELECT 仍绿**：这一档照样被选中，只是 `dst_k` 发成了 8。能力层查不
+//     → SELECT / IR / CPP 三条都红（能力层直接报 `no supported`）。
+//   - `emitWindowCall` 去掉 pitch 替换、仍传内段 extent
+//     → IR / CPP 红，SELECT 仍绿：这一档照样被选中，只是 `dst_k` 生成了 8。能力层查不
 //       出这种错，只有钉实参的 CHECK 查得出。
 
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | FileCheck %s --check-prefix=IR
@@ -75,6 +75,6 @@ module {
 // 两段窗口一条调用收完，不建循环。
 // IR-NOT: scf.for
 
-// kernel 文本侧的同一件事。**这一条比 IR 那几条结实**：它不关心中间产生了哪些常量，只要求
-// 发给包装的 `src_k` 是 1、`dst_k` 是行距。
+// kernel 文本侧的同一件事。这一条比 IR 那几条结实：它不关心中间产生了哪些常量，只要求
+// 传给包装的 `src_k` 是 1、`dst_k` 是行距。
 // CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c16_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});

@@ -8,15 +8,15 @@
 
 // RUN: af-opt --afir-kernel-body-signature --afir-loop-generate %s | FileCheck %s --check-prefix=LOOP
 
-// **循环建在第一个 AFIR Op 的位置上，所以排在它后面的循环不变值必须被提上去。**
+// 循环建在第一个 AFIR Op 的位置上，所以排在它后面的循环不变值必须被提上去。
 //
 // bridge 按 AscGraph 的节点次序就地建 `Scalar` / `IndexExpr` 的 `arith.constant`。节点
 // 排在第一个搬运之前时（只有一个 Load 的图通常如此）常量正好落在循环之前，看不出问题；
 // 排在后面时——比如掩码由图里现算、标量节点夹在两个计算之间——常量就留在了 `scf.for`
-// **之后**，而用它的 Op 已经被搬进循环体。MLIR 的 dominance 校验当场拒收：
+// 之后，而用它的 Op 已经被搬进循环体。MLIR 的 dominance 校验当场拒收：
 // `operand #N does not dominate this use`。
 //
-// 这份用例把常量**故意写在第一个 `afir.load` 之后**，复现的就是那个位置。
+// 这份用例把常量故意写在第一个 `afir.load` 之后，复现的就是那个位置。
 // `hoistLoopInvariantSetup` 此前只认 `memref.alloc` 那一条链，把种子改成「操作数的定义方
 // 不是调度出去的 Op」之后这一类一起覆盖。
 //
@@ -51,7 +51,7 @@ module {
       afir.sched = #afir.sched<axis = [0], loop_axis = 0>,
       indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>]
     } : memref<16xf16>, memref<16xf16> -> memref<16xf16>
-    // **位置就是本用例的全部理由**：这一行在第一个 AFIR Op 之后。
+    // 位置就是本用例的全部理由：这一行在第一个 AFIR Op 之后。
     %scalar = arith.constant 2.000000e+00 : f16
     %compute_tile = memref.alloc() {afir.buffer_desc = #ub_buffer_1} : memref<16xf16>
     %computed = afir.add %loaded, %scalar outs(%compute_tile) {

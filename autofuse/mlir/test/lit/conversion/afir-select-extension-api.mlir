@@ -13,10 +13,10 @@
 
 // 选择族的 mem-based 一侧。与 abs / reciprocal 那一档的不同之处有两条,都钉在这里:
 //
-//   - **两侧都是 Autofuse 的包装**,不是「一侧标准、一侧扩展」。所以 reg-base 一侧不是
-//     「换个标准调用」,而是换一个包装(`WhereExtend`)且**不要 tmp buffer**——这份带
+//   - 两侧都是 Autofuse 的包装,不是「一侧标准、一侧扩展」。所以 reg-base 一侧不是
+//     「换个标准调用」,而是换一个包装(`WhereExtend`)且不要 tmp buffer——这份带
 //     tmp buffer 的输入在那一侧因此是 unsupported,见文件末尾的 WRONGTARGET。
-//   - **第一个输入的元素类型与另外两个不同**:它是 ui8 真值。判据要分两条查,合成一条
+//   - 第一个输入的元素类型与另外两个不同:它是 ui8 真值。判据要分两条查,合成一条
 //     「三个输入元素类型相同」的话整条链就只剩 ui8 能过。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
@@ -44,7 +44,7 @@ module {
 // IR-NEXT: ascendc.where_contiguous %arg3, %arg0, %arg1, %arg2, %[[COUNT]], %arg4
 // IR-NOT: afir.select
 
-// 包装是全局函数,不带 `AscendC::` 限定;而且**没有显式模板实参**——legacy 的
+// 包装是全局函数,不带 `AscendC::` 限定;而且没有显式模板实参——legacy 的
 // `where_api_call.cpp` 让元素类型自己推导,写上一个会挑到另一个重载。
 // CPP-LABEL: void select_extend_f32(
 // CPP: {{^ *}}Where(
