@@ -13,6 +13,7 @@
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
 #include "v35/ascir/ascir_codegen_v2.h"
+#include "ascgraph_info_complete.h"
 #include "common_utils.h"
 #include "graph_utils.h"
 #include "graph/symbolizer/symbolic.h"
@@ -24,8 +25,10 @@
 #include "schedule_result.h"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <set>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -4698,62 +4701,25 @@ bool LowersToStridedSimdFacade(const af::AscNodePtr &candidate_node) {
   return metadata.simd.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided;
 }
 
-// 单 gather 打分：候选序（SIMD 先）即平局兜底语义——与组打分的 tie-break（见
-// GenerateGroupScoreFunc 的平局规则）有意不对称：平局规则 ②（静态小 payload → SIMT）
-// 仅在组路径生效（组候选同场竞标的可观测场景）；单 gather 无同场竞标（每模板独立
-// 候选，平局由序裁决 → SIMD），动态 shape 下两者结论一致（均 SIMD），无行为分叉。
-std::string GenerateScoreFunc(const TemplateCase &template_case,
-                              const ascgen_utils::indirect_load::IndirectLoadAccessInfo &access_info,
-                              const af::AscNodePtr &candidate_node, bool simd_lowers_to_strided) {
-  int32_t score = 0;
-  if (IsEmbeddingFastPathCapable(template_case, access_info)) {
-    int64_t input_slice_bytes = 0L;
-    int64_t lookup_count = 0L;
-    const bool static_cost_inputs = access_info.input_slice_bytes.GetConstValue(input_slice_bytes) &&
-                                    access_info.index_varying_extent.GetConstValue(lookup_count);
-    if (!static_cost_inputs) {
-      // Dynamic sizes still get a positive fast-path score.  With both paths
-      // available the existing candidate order is retained until a runtime
-      // shape-aware model is added.
-      score = kEmbeddingAlternateFastPathScore;
-    } else {
-      const bool simd_preferred = input_slice_bytes >= kEmbeddingSimdPayloadBytesThreshold &&
-                                  lookup_count >= kEmbeddingSimdLookupCountThreshold;
-      if (template_case.template_id == ascir::TemplateId::kIndirectLoadSimd) {
-        score = simd_preferred ? kEmbeddingFastPathScore : kEmbeddingAlternateFastPathScore;
-      } else {
-        score = simd_preferred ? kEmbeddingAlternateFastPathScore : kEmbeddingFastPathScore;
-      }
-    }
-  } else if (simd_lowers_to_strided && template_case.template_id == ascir::TemplateId::kIndirectLoadSimt) {
-    // 非 embedding 形态（SIMT 不满足 structured 布局条件）且 SIMD 候选退化到逐元素
-    // strided facade 时偏好 SIMT。
-    score = kSimtStridedFallbackScore;
-  }
-  // Norm 区域候选：Softmax 专用路径复用既有专用 API 与 tmp，给予小幅偏好，
-  // 使同分场景下优先选择可直接融合的形态；通用复合区域不加分，
-  // 待完整多阶段执行协议落地后再纳入评分模型。
-  if (candidate_node != nullptr) {
-    ascgen_utils::norm::NormInfo norm_info;
-    GE_ASSERT_SUCCESS(ascgen_utils::norm::TryGetNormInfo(candidate_node, norm_info));
-    if (norm_info.kind == ascgen_utils::norm::NormInfo::Kind::kSoftmaxDedicated) {
-      score += 1;
-    }
-  }
-  return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-         "  (void)tiling_data;\n"
-         "  return " +
-         std::to_string(score) +
-         ";\n"
-         "}\n";
-}
+// ==================== 统一打分（静态/动态同算法，组/单 gather 同源） ====================
 
-// ==================== 多 gather 组聚合统计与统一打分（成员偏好满足模型） ====================
-// 组候选（SIMD/SIMT/混模板/SK）共用同一套聚合输入与同一个评分函数；分数语义为
-// "该形态下运行在各自偏好模板上的成员占比"（三档映射到 0..2，与单 gather 启发式
-// 同量级，跨生成器竞标不失真）。偏好判据与单 gather 完全同款（slice ≥ payload 阈值
-// && lookup ≥ 次数阈值）逐成员判定后计数；lookup 由配对约束保证全组一致。
-
+// 算法只有一份：vote(m) = slice_m ≥ 2048B ∧ lookup_m ≥ 32 → votes → satisfied(form)
+// → 比例三档（satisfied×3/N ≥2 → 2、≥1 → 1、否则 0）→ 结构代价项（SIMD 组切片总量
+// 过半 UB / SIMT L4 形态 / mixed 少数派 < 1/3）→ Softmax 专用 Norm 加分 → 负值截断
+// → 基分 ×4 + 平局加分（平均 payload ≥ 2048B → SIMD，否则 SIMT——两侧同式可算，
+// 静态/动态结论一致）。静态与动态的差别只在表达式叶子能否在生成期折叠：
+// - 全部叶子常量 → 生成期折叠，发射 `return <字面量>;`（纯静态图行为与历史一致）
+// - 任一叶子动态 → 运行期发射：sizevar → t.<name>（Subs 符号替换 + 逐原子 int64
+//   提升防 uint32 乘法回绕），组绑定用占位符 kGroupTilingDataPlaceholder——ATT 发射
+//   CalcScore 时按本模型 schedule_group_ident 替换为真实组子结构路径，与候选/组序
+//   位置无关（序漂移不再错读他组形状；未替换的异常通路是未声明标识符，tiling 代码
+//   编译期即失败，显性暴露）。
+// 逐成员判定（无全组代表值）：历史静态路径取末成员 lookup 作代表并全组门控、动态
+// 路径取首成员——成员 lookup 不同时两侧结论分歧；统一算法逐成员投票后两端一致。
+// 不可物化成员（叶子含本图原始 sizevar 之外的符号）从分子分母同时剔除（N = 可评估
+// 成员数，不引入方向性偏差）；N==0 时双方 0 分，由候选序破平局。叶子符号判定按词法
+// token：表达式 Str() 的全部标识符 token ∈ 原始 sizevar 名集合（ContainVar 为子串
+// 语义，ks 会假命中 ks0，不作判据；Replace 为表达式整体匹配，改用 Subs 符号替换）。
 enum class GroupCandidateForm {
   kSimd,   // 组 SIMD 共模板候选（L1）
   kSimt,   // 组 SIMT 共模板候选（内部形态 L2/L3/L4 由压力模型定型）
@@ -4761,18 +4727,24 @@ enum class GroupCandidateForm {
   kSk      // L6 SK 分段桥接候选（终态兜底，打分恒 0）
 };
 
+// 统一算法的逐成员叶子（同一表达式树：静态图叶子为常量、动态图为符号——公式只有一份）。
+struct MemberScoreLeaves {
+  af::Expression slice_bytes;    // info.input_slice_bytes（payload 后缀字节）
+  af::Expression lookup_extent;  // info.index_varying_extent（gather 侧 lookup 次数）
+};
+
 struct GroupAccessStats {
-  bool all_static = false;               // 全成员 slice/lookup 静态可得（任一动态即 false）
-  size_t member_count = 0UL;             // 成员总数 N
-  size_t simd_preferring_count = 0UL;    // 偏好 SIMD 的成员数（单 gather 同款判据逐成员）
-  int64_t slice_bytes_sum = 0L;          // Σ 成员切片字节（SIMD UB 压力代理）
-  int64_t ub_size = 0L;                  // 平台 UB 容量（0 = 未知，不施加 UB 代价项）
-  bool simd_embedding_capable = false;   // AND(can_use_simd_embedding)
-  bool simt_structured_capable = false;  // AND(can_use_simt_structured)
+  size_t member_count = 0UL;     // 成员总数 N
+  bool all_static = true;        // 全成员 slice/lookup 常量可得（仅结构回退路径的平局规则消费）
+  int64_t slice_bytes_sum = 0L;  // Σ 常量切片字节（仅结构回退路径的静态平均 payload 消费）
+  int64_t ub_size = 0L;          // 平台 UB 容量（0 = 未知，不施加 UB 代价项）
+  bool simd_embedding_capable = false;     // AND(can_use_simd_embedding)
+  bool simt_structured_capable = false;    // AND(can_use_simt_structured)
+  std::vector<MemberScoreLeaves> members;  // 统一算法逐成员叶子（capable 路径消费）
 };
 
 // 在候选图副本上收集（access_info ext attr 由成员各自的分析流水写入，与既有
-// primary 单点读取同一时机）；任一成员动态 shape 即整体退化为 alternate 平分。
+// primary 单点读取同一时机）。
 GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &members) {
   GroupAccessStats stats;
   stats.member_count = members.size();
@@ -4780,131 +4752,290 @@ GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &memb
   stats.simd_embedding_capable = true;
   stats.simt_structured_capable = true;
   (void)TryGetIndirectLoadPlatformUbSize(stats.ub_size);
-  bool lookup_static = true;
-  bool lookup_gate_passed = true;
-  int64_t lookup_count = 0L;
   for (const af::AscNodePtr &member : members) {
     ascgen_utils::indirect_load::IndirectLoadAccessInfo info;
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(member, info));
     stats.simd_embedding_capable = stats.simd_embedding_capable && info.can_use_simd_embedding;
     stats.simt_structured_capable = stats.simt_structured_capable && info.can_use_simt_structured;
+    stats.members.emplace_back(MemberScoreLeaves{info.input_slice_bytes, info.index_varying_extent});
     int64_t slice_bytes = 0L;
     if (!info.input_slice_bytes.GetConstValue(slice_bytes)) {
       stats.all_static = false;
       continue;
     }
-    stats.slice_bytes_sum += slice_bytes;
     int64_t member_lookup = 0L;
     if (!info.index_varying_extent.GetConstValue(member_lookup)) {
-      lookup_static = false;
+      stats.all_static = false;
       continue;
     }
-    lookup_count = member_lookup;  // 配对约束保证全组一致
-    if (slice_bytes >= kEmbeddingSimdPayloadBytesThreshold && member_lookup >= kEmbeddingSimdLookupCountThreshold) {
-      ++stats.simd_preferring_count;
-    }
-  }
-  // lookup 阈值门控全组统一（配对约束保证 index.shape 全等）：门控不过即全组不偏好 SIMD。
-  lookup_gate_passed = lookup_static && lookup_count >= kEmbeddingSimdLookupCountThreshold;
-  stats.all_static = stats.all_static && lookup_static;
-  if (!stats.all_static || !lookup_gate_passed) {
-    // 动态 shape / lookup 门控不过：偏好计数不可信，统一走 alternate 平分（候选序破平局）。
-    stats.simd_preferring_count = 0UL;
-    stats.slice_bytes_sum = 0L;
+    stats.slice_bytes_sum += slice_bytes;
   }
   return stats;
 }
+// —— 叶子物化辅助 ——
+// 表达式 Str() 的标识符 token（[A-Za-z_][A-Za-z0-9_]*；数字开头视为字面量跳过）。
+std::set<std::string> ExprIdentifierTokens(const af::Expression &expr) {
+  const std::string text = std::string(expr.Str().get());
+  std::set<std::string> tokens;
+  std::string current;
+  const auto flush = [&tokens, &current]() {
+    if (!current.empty() && std::isdigit(static_cast<unsigned char>(current.front())) == 0) {
+      tokens.insert(current);
+    }
+    current.clear();
+  };
+  for (const char ch : text) {
+    if (std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_') {
+      current += ch;
+      continue;
+    }
+    flush();
+  }
+  flush();
+  return tokens;
+}
 
-// 统一打分：满足率三档映射 {≥2/3 → 2, ≥1/3 → 1, else 0} 减形态代价项，限定 [0,2]。
-// 满足率：SIMD → n_simd_pref/n；SIMT → 1−n_simd_pref/n；MIXED → 1（异构各得其所）；
-// SK → 0（纯兜底）。代价项（幅度 ≤1）：SIMD 且组切片总量过半 UB（tile 缩水风险）；
-// SIMT 且 L4 形态且 N>2（相位 N+1/barrier ×N）；MIXED 且少数派占比 < 1/3（分裂
-// 不均衡时整合开销不划算）。动态 shape / 能力门控不满足时统一 0 或 1（平局按
-// 候选序，与单 gather 行为一致）；Softmax 专用 Norm 加分与单 gather 一致。
-// MIXED 的能力门控（访问形态维度，非结构合法性）：门控取 simt_structured_capable
-// （= AND(embedding_like)）。can_use_simd_embedding ⟹ embedding_like，探测又保证
-// SIMD 侧的偏好选择仅发生于 can_use_simd_embedding 成员，故该门控等价于"每个成员
-// 的被选模板都有偏好依据"——满足率 N/N 的 2 分仅授予 embedding 性能分裂；dense 组
-// （含结构强制异构）无偏好依据，0 分按候选序兜底（共模板之后、SK 之前）。结构
-// 合法性由探测逐成员校验，此处不二次门控：embedding_like 度量访问形态（embedding
-// /dense），与"成员可跑哪块模板"（结构维度，探测已覆盖）正交，全组 AND 不与结构
-// 异构的存在前提冲突。
-std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const TemplateCase &template_case,
-                                   const GroupAccessStats &stats, const af::AscNodePtr &candidate_node,
-                                   const bool simt_unfused, const size_t mixed_simd_count,
-                                   const bool simd_lowers_to_strided) {
-  int32_t score = 0;
-  const bool fast_path_eligible = template_case.implementation == ascgen_utils::indirect_load::Implementation::kDefault;
-  const bool capable = fast_path_eligible && (form == GroupCandidateForm::kSimd    ? stats.simd_embedding_capable
-                                              : form == GroupCandidateForm::kSimt  ? stats.simt_structured_capable
-                                              : form == GroupCandidateForm::kMixed ? stats.simt_structured_capable
-                                                                                   : false);
-  if (capable) {
-    if (!stats.all_static) {
-      score = kEmbeddingAlternateFastPathScore;
-    } else {
-      size_t satisfied = 0UL;
-      if (form == GroupCandidateForm::kSimd) {
-        satisfied = stats.simd_preferring_count;
-      } else if (form == GroupCandidateForm::kSimt) {
-        satisfied = stats.member_count - stats.simd_preferring_count;
-      } else if (form == GroupCandidateForm::kMixed) {
-        satisfied = stats.member_count;  // 异构选择：每成员各得其所
-      }
-      const int64_t ratio_x3 = stats.member_count == 0UL
-                                   ? 0L
-                                   : static_cast<int64_t>(satisfied * 3UL) / static_cast<int64_t>(stats.member_count);
-      score = ratio_x3 >= 2L ? kEmbeddingFastPathScore : (ratio_x3 >= 1L ? kEmbeddingAlternateFastPathScore : 0);
-      if (form == GroupCandidateForm::kSimd && stats.member_count > 1UL && stats.ub_size > 0L &&
-          stats.slice_bytes_sum * 2L > stats.ub_size) {
-        --score;  // 组切片总量过半 UB：tile 缩水风险进分数
-      }
-      if (form == GroupCandidateForm::kSimt && simt_unfused && stats.member_count > 2UL) {
-        --score;  // L4 形态（非融合发射）：相位 N+1、barrier ×N
-      }
-      if (form == GroupCandidateForm::kMixed && stats.member_count > 0UL) {
-        const size_t mixed_simt_count = stats.member_count - mixed_simd_count;
-        const size_t minority = std::min(mixed_simd_count, mixed_simt_count);
-        if (minority * 3UL < stats.member_count) {
-          --score;  // 少数派 < 1/3：混搭整合开销不划算
-        }
-      }
-      if (score < 0) {
-        score = 0;
-      }
+// 叶子可物化：全部标识符 token ∈ 原始 sizevar 名集合 ∪ 已知符号函数白名单
+// （Ceiling/Floor/Min/Max 等在 tiling 代码上下文可直接发射；常量叶子无标识符
+// token，恒可物化）。白名单外的函数 token（未知对齐/取整类）→ 该成员剔除并记
+// 日志（否则线上只能看到分数莫名平票，无法定位）。
+bool ExprMaterializable(const af::Expression &expr, const std::set<std::string> &var_names,
+                        std::string &rejected_token) {
+  // [函数白名单] 表达式打印器词表（expr_print_manager.cc kPrint* 系）与 tiling 代码
+  // solver 头 helper 的交集——既能出现在 Str() 又有同名可编译定义。helper 由
+  // GenExpressionMacro()（tiling_code_gen_impl.cpp:2011，源 embed 自
+  // att/core/scalar/expression_helpers.inc）和 GenToolFuncs()（:2070，源 embed 自
+  // att/core/scalar/scalar_helpers.inc）无条件发射到 CalcScore 所在翻译单元：
+  //   Max/Min/Abs/Log/Pow/Rational ← GenExpressionMacro（inline 模板 + 宏）；
+  //   Ceiling/Floor/Mod ← GenToolFuncs（Mod 有整型 % 与浮点 fmod 双重载）。
+  // 交集外不收：Exp/Sqrt 能打印但无 helper（放行会编译失败）；IsEqual/TernaryOp
+  // 有 helper 但不在打印器词表（不会作为 token 出现）；ExpectEq/Ne/Le/Lt 比较结果
+  // 当字节数无语义（出现时保守剔除 + 日志）。Pow/Log/Rational 返回 double——入表
+  // 只为不误剔除（防御性条目），不代表出现在尺寸表达式中有物理意义。白名单只按
+  // token 名放行，不校验 arity/类型——靠 C++ 编译报错兜底（显性失败）。
+  static const std::set<std::string> kKnownFunctionTokens = {"Max", "Min", "Abs", "Ceiling", "Floor",
+                                                             "Mod", "Pow", "Log", "Rational"};
+  const std::set<std::string> tokens = ExprIdentifierTokens(expr);
+  for (const std::string &token : tokens) {
+    if (var_names.count(token) != 0UL || kKnownFunctionTokens.count(token) != 0UL) {
+      continue;
     }
-  } else if (simd_lowers_to_strided && form == GroupCandidateForm::kSimt) {
-    // 非 embedding 形态（能力门控不满足）且组 SIMD 候选退化到逐元素 strided facade
-    // 时偏好 SIMT（单 gather 的 kSimtStridedFallbackScore 同源语义：strided 的逐元素
-    // 标量组装 offsets + 逐元素重排劣于 SIMT 标量直读）。
-    score = kSimtStridedFallbackScore;
+    rejected_token = token;
+    return false;
   }
-  if (candidate_node != nullptr) {
-    ascgen_utils::norm::NormInfo norm_info;
-    GE_ASSERT_SUCCESS(ascgen_utils::norm::TryGetNormInfo(candidate_node, norm_info));
-    if (norm_info.kind == ascgen_utils::norm::NormInfo::Kind::kSoftmaxDedicated) {
-      score += 1;
+  return true;
+}
+
+// 运行期物化：Subs 符号替换（叶级符号替换，规避 Replace 的表达式整体匹配限制）。
+std::string RuntimeExprToCpp(const af::Expression &expr,
+                             const std::vector<std::pair<af::Expression, af::Expression>> &subs) {
+  return std::string(expr.Subs(subs).Str().get());
+}
+
+// —— 折叠物化（全部叶子常量；与运行期发射同公式） ——
+std::string FoldScoreFuncText(const GroupCandidateForm form, const std::vector<MemberScoreLeaves> &members,
+                              const bool softmax_bonus, const bool simd_ub_penalty, const int64_t ub_size,
+                              const bool simt_l4_penalty, const bool mixed_minority_penalty) {
+  size_t votes = 0UL;
+  int64_t slice_sum = 0L;
+  if (form != GroupCandidateForm::kMixed) {
+    for (const MemberScoreLeaves &member : members) {
+      int64_t slice_bytes = 0L;
+      int64_t lookup_extent = 0L;
+      GE_ASSERT_TRUE(member.slice_bytes.GetConstValue(slice_bytes) && member.lookup_extent.GetConstValue(lookup_extent),
+                     "IndirectLoad unified score fold requires constant member leaves.");
+      if (slice_bytes >= kEmbeddingSimdPayloadBytesThreshold && lookup_extent >= kEmbeddingSimdLookupCountThreshold) {
+        ++votes;
+      }
+      slice_sum += slice_bytes;
     }
   }
-  // [平局规则] 基分 ×4 + 平局加分（0/1）：非平局保持序（基分差 ≥1 → 差 ≥4 > 加分），
-  // 平局（动态 shape 一律平局；静态 shape 偏好占比 ∈ (1/3, 2/3)；双方均不 capable 的
-  // 0:0）由加分裁决——静态：平均 payload（slice_bytes_sum/N）≥ 2048 → SIMD，否则
-  // SIMT；动态：SIMD（embedding 业务默认，lookup 少而 payload 大，G/R 融合优于
-  // SIMT 逐元素间接寻址，UB 风险由下限硬门与运行期 solver 兜底）；0:0 兜底双方加分
-  // 均为 0，由候选序（SIMD 先）裁决 → SIMD。SK 恒 0 且枚举序最后——任一候选为 SK
-  // 时平局天然选另一个。
+  const size_t member_count = members.size();
+  const size_t satisfied = form == GroupCandidateForm::kSimd
+                               ? votes
+                               : (form == GroupCandidateForm::kSimt ? member_count - votes : member_count);
+  const int64_t ratio_x3 =
+      member_count == 0UL ? 0L : static_cast<int64_t>(satisfied * 3UL) / static_cast<int64_t>(member_count);
+  int32_t score = ratio_x3 >= 2L ? kEmbeddingFastPathScore : (ratio_x3 >= 1L ? kEmbeddingAlternateFastPathScore : 0);
+  if (simd_ub_penalty && member_count > 1UL && ub_size > 0L && slice_sum * 2L > ub_size) {
+    --score;  // 组切片总量过半 UB：tile 缩水风险进分数
+  }
+  if (simt_l4_penalty) {
+    --score;  // L4 形态（非融合发射）：相位 N+1、barrier ×N
+  }
+  if (mixed_minority_penalty) {
+    --score;  // 少数派 < 1/3：混搭整合开销不划算
+  }
+  if (softmax_bonus) {
+    score += 1;
+  }
+  if (score < 0) {
+    score = 0;
+  }
   int32_t tie_bonus = 0;
   if (form == GroupCandidateForm::kSimd || form == GroupCandidateForm::kSimt) {
-    if (!stats.all_static) {
+    const int64_t avg_payload = member_count == 0UL ? 0L : slice_sum / static_cast<int64_t>(member_count);
+    tie_bonus = form == GroupCandidateForm::kSimd ? (avg_payload >= kEmbeddingSimdPayloadBytesThreshold ? 1 : 0)
+                                                  : (avg_payload < kEmbeddingSimdPayloadBytesThreshold ? 1 : 0);
+  }
+  const int32_t final_score = score * 4 + tie_bonus;
+  return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
+         "  (void)tiling_data;\n"
+         "  return " +
+         std::to_string(final_score) +
+         ";\n"
+         "}\n";
+}
+
+// —— 运行期物化（任一叶子动态；与折叠同公式，叶子为 C++ 表达式文本） ——
+std::string EmitRuntimeScoreFuncText(const GroupCandidateForm form, const std::vector<MemberScoreLeaves> &members,
+                                     const std::vector<std::pair<af::Expression, af::Expression>> &subs,
+                                     const bool softmax_bonus, const bool simd_ub_penalty, const int64_t ub_size,
+                                     const bool simt_l4_penalty, const bool mixed_minority_penalty) {
+  const size_t member_count = members.size();
+  const auto leaf_text = [&subs](const af::Expression &leaf) { return RuntimeExprToCpp(leaf, subs); };
+  std::ostringstream oss;
+  oss << "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
+      << "  const auto &t = tiling_data." << ascgen_utils::kGroupTilingDataPlaceholder << ";\n"
+      << "  size_t votes = 0UL;\n";
+  for (const MemberScoreLeaves &member : members) {
+    oss << "  if (" << leaf_text(member.slice_bytes) << " >= " << kEmbeddingSimdPayloadBytesThreshold << "LL && "
+        << leaf_text(member.lookup_extent) << " >= " << kEmbeddingSimdLookupCountThreshold << "LL) {\n"
+        << "    ++votes;\n"
+        << "  }\n";
+  }
+  oss << "  const size_t member_count = " << member_count << "UL;\n"
+      << "  const size_t satisfied = "
+      << (form == GroupCandidateForm::kSimd
+              ? "votes"
+              : (form == GroupCandidateForm::kSimt ? "member_count - votes" : "member_count"))
+      << ";\n"
+      << "  int32_t score = 0;\n"
+      << "  if (satisfied * 3UL >= member_count * 2UL) {\n"
+      << "    score = " << kEmbeddingFastPathScore << ";\n"
+      << "  } else if (satisfied * 3UL >= member_count) {\n"
+      << "    score = " << kEmbeddingAlternateFastPathScore << ";\n"
+      << "  }\n";
+  if (form == GroupCandidateForm::kSimd || form == GroupCandidateForm::kSimt) {
+    oss << "  const int64_t slice_sum = " << leaf_text(members.front().slice_bytes);
+    for (size_t index = 1UL; index < member_count; ++index) {
+      oss << " + " << leaf_text(members[index].slice_bytes);
+    }
+    oss << ";\n"
+        << "  const int64_t avg_payload = slice_sum / " << static_cast<int64_t>(member_count) << "LL;\n";
+    if (form == GroupCandidateForm::kSimd && simd_ub_penalty && member_count > 1UL && ub_size > 0L) {
+      oss << "  if (slice_sum * 2LL > " << ub_size << "LL) {\n"
+          << "    --score;\n"
+          << "  }\n";
+    }
+  }
+  if (simt_l4_penalty) {
+    oss << "  --score;\n";
+  }
+  if (mixed_minority_penalty) {
+    oss << "  --score;\n";
+  }
+  if (softmax_bonus) {
+    oss << "  score += 1;\n";
+  }
+  oss << "  if (score < 0) {\n"
+      << "    score = 0;\n"
+      << "  }\n";
+  if (form == GroupCandidateForm::kSimd || form == GroupCandidateForm::kSimt) {
+    oss << "  const int32_t tie_bonus = " << (form == GroupCandidateForm::kSimd ? "avg_payload >= " : "avg_payload < ")
+        << kEmbeddingSimdPayloadBytesThreshold << "LL ? 1 : 0;\n"
+        << "  return score * 4 + tie_bonus;\n";
+  } else {
+    oss << "  return score * 4;\n";
+  }
+  oss << "}\n";
+  return oss.str();
+}
+
+// —— 统一发射入口（capable 形态唯一打分路径；组/单 gather 共用） ——
+// 返回值域：final_score = base(0..2) ×4 + tie_bonus(0..1) → {0,1,4,5,8,9}
+// （capable 路径）；结构回退路径 base(0..2) ×4 + tie(0..1) 同域。历史值域 {0,1,2}
+// 的外部绝对值断言需同步；平局由 tie_bonus 显式裁决，不再依赖候选发射序。
+std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vector<MemberScoreLeaves> &members,
+                                 const af::AscGraph &candidate_graph, const bool softmax_bonus,
+                                 const bool simd_ub_penalty, const int64_t ub_size, const bool simt_l4_penalty,
+                                 const bool mixed_minority_penalty) {
+  // 本图原始 sizevar：名集合（叶子可物化判据）+ Subs 替换表（动态 → t.<name>，常量 →
+  // 字面量——常量叶子的取值在发射期折入文本，不依赖其 tiling data 字段存在性）。
+  SizeVarSet original_var_set;
+  AscGraphInfoComplete::AppendOriginalSizeVar(candidate_graph, original_var_set);
+  std::set<std::string> var_names;
+  std::vector<std::pair<af::Expression, af::Expression>> subs;
+  for (const auto &size_var : original_var_set) {
+    var_names.insert(std::string(size_var.Str().get()));
+    int64_t const_value = 0L;
+    if (size_var.GetConstValue(const_value)) {
+      subs.emplace_back(size_var, af::Symbol(std::to_string(const_value).c_str()));
+    } else {
+      subs.emplace_back(size_var,
+                        af::Symbol((std::string("static_cast<int64_t>(t.") + size_var.Str().get() + ")").c_str()));
+    }
+  }
+  // 不可物化成员从分子分母同时剔除（N = 可评估成员数，非整候选回退——避免
+  // 方向性偏差）；全部不可评估（N==0）才恒 0 分由候选序破平局。注意：结构代价项
+  // （SIMT L4 相位数 / mixed 少数派）按**全组物理成员数** stats.member_count 判定，
+  // 不随剔除缩减——L4 的 N+1 相位/barrier ×N 是物理代价（与打分可评估性无关），
+  // mixed 少数派是生成期模板选择分裂（同样是物理事实）；打分侧（SIMD UB）的
+  // slice_sum 仅累计可评估成员（不可评估成员无运行期表达式可读）。
+  std::vector<MemberScoreLeaves> materialized;
+  bool all_const = true;
+  for (size_t member_index = 0UL; member_index < members.size(); ++member_index) {
+    const MemberScoreLeaves &member = members[member_index];
+    std::string rejected_token;
+    if (!ExprMaterializable(member.slice_bytes, var_names, rejected_token) ||
+        !ExprMaterializable(member.lookup_extent, var_names, rejected_token)) {
+      GELOGI(
+          "[IndirectLoad] Unified score: member[%zu] excluded (token[%s] not in sizevar set or function "
+          "allowlist); evaluable N shrinks to %zu.",
+          member_index, rejected_token.c_str(), materialized.size());
+      continue;
+    }
+    materialized.emplace_back(member);
+    int64_t slice_bytes = 0L;
+    int64_t lookup_extent = 0L;
+    all_const =
+        all_const && member.slice_bytes.GetConstValue(slice_bytes) && member.lookup_extent.GetConstValue(lookup_extent);
+  }
+  if (materialized.empty()) {
+    // N==0：双方 0 分，由候选序破平局。
+    return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
+           "  (void)tiling_data;\n"
+           "  return 0;\n"
+           "}\n";
+  }
+  // mixed 的分数不依赖叶子（满足率恒 N、无 UB/平局项）——恒折叠；重启用
+  // kEnableMixedGroupCandidate 后经同一入口获得一致打分。
+  if (all_const || form == GroupCandidateForm::kMixed) {
+    return FoldScoreFuncText(form, materialized, softmax_bonus, simd_ub_penalty, ub_size, simt_l4_penalty,
+                             mixed_minority_penalty);
+  }
+  return EmitRuntimeScoreFuncText(form, materialized, subs, softmax_bonus, simd_ub_penalty, ub_size, simt_l4_penalty,
+                                  mixed_minority_penalty);
+}
+
+// —— 结构回退（能力门控不满足——图结构属性，与 shape 无关） ——
+// strided 让位 / 0 分 + Softmax 加分 + ×4 与平局加分（静态按平均 payload、动态
+// SIMD +1——历史非 capable 行为；组/单 gather 同口径）。
+std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const bool strided_fallback,
+                                            const bool softmax_bonus, const bool all_static,
+                                            const int64_t slice_bytes_sum, const size_t member_count) {
+  int32_t score = strided_fallback ? kSimtStridedFallbackScore : 0;
+  if (softmax_bonus) {
+    score += 1;
+  }
+  int32_t tie_bonus = 0;
+  if (form == GroupCandidateForm::kSimd || form == GroupCandidateForm::kSimt) {
+    if (!all_static) {
       tie_bonus = form == GroupCandidateForm::kSimd ? 1 : 0;
     } else {
-      const int64_t avg_payload =
-          stats.member_count == 0UL ? 0L : stats.slice_bytes_sum / static_cast<int64_t>(stats.member_count);
-      if (form == GroupCandidateForm::kSimd) {
-        tie_bonus = avg_payload >= kEmbeddingSimdPayloadBytesThreshold ? 1 : 0;
-      } else {
-        tie_bonus = avg_payload < kEmbeddingSimdPayloadBytesThreshold ? 1 : 0;
-      }
+      const int64_t avg_payload = member_count == 0UL ? 0L : slice_bytes_sum / static_cast<int64_t>(member_count);
+      tie_bonus = form == GroupCandidateForm::kSimd ? (avg_payload >= kEmbeddingSimdPayloadBytesThreshold ? 1 : 0)
+                                                    : (avg_payload < kEmbeddingSimdPayloadBytesThreshold ? 1 : 0);
     }
   }
   const int32_t final_score = score * 4 + tie_bonus;
@@ -4914,6 +5045,75 @@ std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const Template
          std::to_string(final_score) +
          ";\n"
          "}\n";
+}
+
+// 组候选（SIMD/SIMT/混模板/SK）统一打分入口。能力门控（访问形态维度，结构属性、与
+// shape 无关）：SIMD → AND(can_use_simd_embedding)；SIMT/MIXED → AND(embedding_like)。
+// can_use_simd_embedding ⟹ embedding_like，探测保证 SIMD 侧偏好选择仅发生于
+// can_use_simd_embedding 成员——满足率 N/N 的 2 分仅授予 embedding 性能分裂；dense 组
+// 无偏好依据，0 分按候选序兜底。结构合法性由探测逐成员校验，此处不二次门控。
+std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const TemplateCase &template_case,
+                                   const GroupAccessStats &stats, const af::AscNodePtr &candidate_node,
+                                   const af::AscGraph &candidate_graph, const bool simt_unfused,
+                                   const size_t mixed_simd_count, const bool simd_lowers_to_strided) {
+  const bool fast_path_eligible = template_case.implementation == ascgen_utils::indirect_load::Implementation::kDefault;
+  const bool capable = fast_path_eligible && (form == GroupCandidateForm::kSimd    ? stats.simd_embedding_capable
+                                              : form == GroupCandidateForm::kSimt  ? stats.simt_structured_capable
+                                              : form == GroupCandidateForm::kMixed ? stats.simt_structured_capable
+                                                                                   : false);
+  bool softmax_bonus = false;
+  if (candidate_node != nullptr) {
+    ascgen_utils::norm::NormInfo norm_info;
+    GE_ASSERT_SUCCESS(ascgen_utils::norm::TryGetNormInfo(candidate_node, norm_info));
+    softmax_bonus = norm_info.kind == ascgen_utils::norm::NormInfo::Kind::kSoftmaxDedicated;
+  }
+  if (capable) {
+    // [统一打分] capable 形态唯一路径：静态折叠 / 动态运行期同算法（见区块头注释）。
+    // mixed 预埋：kEnableMixedGroupCandidate 关闭期不生成候选，重启用后经同一入口
+    // 获得一致打分（满足率恒 N、无叶子依赖，恒折叠为常量）。
+    const bool mixed_minority_penalty =
+        form == GroupCandidateForm::kMixed && stats.member_count > 0UL &&
+        std::min(mixed_simd_count, stats.member_count - mixed_simd_count) * 3UL < stats.member_count;
+    return EmitUnifiedScoreFunc(form, stats.members, candidate_graph, softmax_bonus, true, stats.ub_size,
+                                form == GroupCandidateForm::kSimt && simt_unfused && stats.member_count > 2UL,
+                                mixed_minority_penalty);
+  }
+  // 能力门控不满足：strided 让位 / 0 分的常量回退（组 SIMD 候选退化到逐元素 strided
+  // facade 时偏好 SIMT——strided 的逐元素标量组装 offsets + 逐元素重排劣于 SIMT 标量
+  // 直读；kSimtStridedFallbackScore 让位语义）。
+  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided && form == GroupCandidateForm::kSimt,
+                                         softmax_bonus, stats.all_static, stats.slice_bytes_sum, stats.member_count);
+}
+
+// [单 gather 统一打分] 与组路径同一算法（N=1：vote → SIMD 满足 = votes / SIMT 满足
+// = 1−votes → 三档 → ×4+平局）；静态折叠 / 动态运行期同形，组绑定同占位符。能力
+// 门控（IsEmbeddingFastPathCapable）与结构回退（strided 让位）保持既有语义；回退
+// 分统一到 ×4+平局尺度（单 gather 候选仅在同任务内竞标，尺度内部一致）。
+std::string GenerateScoreFunc(const TemplateCase &template_case,
+                              const ascgen_utils::indirect_load::IndirectLoadAccessInfo &access_info,
+                              const af::AscNodePtr &candidate_node, const af::AscGraph &candidate_graph,
+                              const bool simd_lowers_to_strided) {
+  const GroupCandidateForm form =
+      template_case.template_id == ascir::TemplateId::kIndirectLoadSimd   ? GroupCandidateForm::kSimd
+      : template_case.template_id == ascir::TemplateId::kIndirectLoadSimt ? GroupCandidateForm::kSimt
+                                                                          : GroupCandidateForm::kSk;
+  const bool capable = IsEmbeddingFastPathCapable(template_case, access_info);
+  bool softmax_bonus = false;
+  if (candidate_node != nullptr) {
+    ascgen_utils::norm::NormInfo norm_info;
+    GE_ASSERT_SUCCESS(ascgen_utils::norm::TryGetNormInfo(candidate_node, norm_info));
+    softmax_bonus = norm_info.kind == ascgen_utils::norm::NormInfo::Kind::kSoftmaxDedicated;
+  }
+  if (capable) {
+    const std::vector<MemberScoreLeaves> members{{access_info.input_slice_bytes, access_info.index_varying_extent}};
+    return EmitUnifiedScoreFunc(form, members, candidate_graph, softmax_bonus, false, 0L, false, false);
+  }
+  int64_t slice_bytes = 0L;
+  int64_t lookup_extent = 0L;
+  const bool all_static = access_info.input_slice_bytes.GetConstValue(slice_bytes) &&
+                          access_info.index_varying_extent.GetConstValue(lookup_extent);
+  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided && form == GroupCandidateForm::kSimt,
+                                         softmax_bonus, all_static, slice_bytes, 1UL);
 }
 
 // ==================== 调度期组候选 UB 可行性预估（硬下界，保守放行） ====================
@@ -5213,7 +5413,7 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
         template_id == ascir::TemplateId::kIndirectLoadSimd ? GroupCandidateForm::kSimd : GroupCandidateForm::kSimt;
     graphs.emplace_back(std::move(candidate_graph));
     score_functions.emplace_back(GenerateGroupScoreFunc(form, template_case, stats, candidate_group.primary,
-                                                        simt_unfused, 0UL, simd_lowers_to_strided));
+                                                        graphs.back(), simt_unfused, 0UL, simd_lowers_to_strided));
     GELOGI("[IndirectLoad] Add gather group schedule candidate[%d, %d] for primary[%s] with %zu members.",
            static_cast<int32_t>(template_id), static_cast<int32_t>(template_case.implementation),
            candidate_group.primary->GetNamePtr(), members.size());
@@ -5256,7 +5456,7 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
       score_functions.emplace_back(GenerateGroupScoreFunc(
           GroupCandidateForm::kMixed,
           TemplateCase{ascir::TemplateId::kIndirectLoadSimd, ascgen_utils::indirect_load::Implementation::kDefault},
-          stats, candidate_group.primary, false, simd_selected_count, false));
+          stats, candidate_group.primary, graphs.back(), false, simd_selected_count, false));
       GELOGI("[IndirectLoad] Add mixed template candidate for graph[%s] (simd=%zu, simt=%zu).", graph.GetName().c_str(),
              simd_selected_count, candidate_members.size() - simd_selected_count);
     }
@@ -5291,7 +5491,7 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
       score_functions.emplace_back(GenerateGroupScoreFunc(
           GroupCandidateForm::kSk,
           TemplateCase{ascir::TemplateId::kIndirectLoadSK, ascgen_utils::indirect_load::Implementation::kDefault},
-          GroupAccessStats{}, candidate_group.primary, false, 0UL, false));
+          GroupAccessStats{}, candidate_group.primary, graphs.back(), false, 0UL, false));
       GELOGI("[IndirectLoad] Add gather group SK bridge candidate for graph[%s] (coexisting fallback).",
              graph.GetName().c_str());
     }
@@ -5382,7 +5582,7 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     }
     graphs.emplace_back(std::move(candidate_graph));
     score_functions.emplace_back(
-        GenerateScoreFunc(template_case, access_info, candidate_indirect_load, simd_lowers_to_strided));
+        GenerateScoreFunc(template_case, access_info, candidate_indirect_load, graphs.back(), simd_lowers_to_strided));
     GELOGI("[IndirectLoad] Add schedule candidate[%d, %d] for node[%s].", static_cast<int32_t>(template_id),
            static_cast<int32_t>(template_case.implementation), candidate_indirect_load->GetNamePtr());
   }

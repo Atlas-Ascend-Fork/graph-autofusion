@@ -2505,7 +2505,12 @@ af::Status TilingCodeGenImpl::GenGetObj(const ModelInfo &model_info) {
 
 af::Status TilingCodeGenImpl::GenCalcScore(const ModelInfo &model_info) {
   if (!model_info.score_func.empty()) {
-    tiling_func_.AddLine(model_info.score_func);
+    std::string score_func = model_info.score_func;
+    // [统一打分组绑定] 占位符 → 本模型真实组子结构（schedule_group_ident）：
+    // 绑定与候选/组序位置无关。替换逻辑提取为 SubstituteGroupTilingDataPlaceholder
+    // （common_utils.h，UT 直测）。
+    ascgen_utils::SubstituteGroupTilingDataPlaceholder(score_func, model_info.schedule_group_ident.GetItemPrefix());
+    tiling_func_.AddLine(score_func);
   }
   return af::SUCCESS;
 }

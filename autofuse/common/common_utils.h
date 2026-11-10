@@ -30,6 +30,27 @@ enum class SimtAddressPolicy : int64_t;
 const string INVALID_TILING = "invalid_tiling";
 constexpr int32_t NOT_SUPPORT_BRC_INLINE = -1;
 
+// [统一打分组绑定] 任务生成侧在 CalcScore 内引用本组 tiling data 子结构的占位符。
+// ATT 发射 CalcScore（GenCalcScore——model_info.score_func 逐候选竞标路径）时按本
+// 模型 schedule_group_ident 替换为 tiling_data.<item_prefix>_tiling_data：绑定与
+// 候选序/组序的位置无关；若异常通路未替换，占位符是未声明标识符，tiling 代码
+// 编译期即失败（显性暴露，不静默错读他组形状）。
+inline constexpr char kGroupTilingDataPlaceholder[] = "__AUTOFUSE_GROUP_TILING_DATA__";
+
+// [统一打分组绑定·替换] 将 score 函数文本中的占位符替换为真实组子结构路径。
+// group_prefix = schedule_group_ident.GetItemPrefix()（如 "graph0_result2_g1"），
+// 替换结果 = tiling_data.<group_prefix>_tiling_data。多次出现全部替换。
+// 提取为独立函数供 GenCalcScore 调用与 UT 直测（不依赖 ATT 夹具）。
+inline void SubstituteGroupTilingDataPlaceholder(std::string &score_func, const std::string &group_prefix) {
+  const std::string placeholder = kGroupTilingDataPlaceholder;
+  const std::string group_binding = group_prefix + "_tiling_data";
+  size_t pos = score_func.find(placeholder);
+  while (pos != std::string::npos) {
+    score_func.replace(pos, placeholder.size(), group_binding);
+    pos = score_func.find(placeholder, pos + group_binding.size());
+  }
+}
+
 // Semantic vocabulary is defined here; selection sites record these tokens, not display formats.
 namespace template_semantic {
 inline constexpr char kPointwise[] = "Pointwise";

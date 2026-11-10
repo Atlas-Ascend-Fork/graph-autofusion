@@ -1571,7 +1571,6 @@ TEST_F(TestCodegenTiling, DynamicShapeCacheKeyGuardsCapacityAndPreservesSymbolOr
   EXPECT_LT(first_symbol, second_symbol);
   EXPECT_LT(second_symbol, set_size);
 }
-
 TEST_F(TestCodegenTiling, GenerateForInductorValidatesSocTargetBeforeTilingCodegen) {
   const ScopedSocPlatformState platform_state_guard;
   ge::PlatformContext::GetInstance().SetPlatform("UnknownArch");
