@@ -1035,8 +1035,13 @@ Status Optimizer::OptimizeForHintGraph(af::AscGraph &hint_graph,
   GE_CHK_STATUS_RET(ScheduleTaskGenerator::GenerateTasks(optimize_graph, schedule_tasks, options_),
                     "Generate tasks failed");
   for (size_t i = 0U; i < schedule_tasks.size(); ++i) {
-    GE_CHK_STATUS_RET(AutoScheduler(hint_graph, schedule_tasks[i], scheduled_results), "AutoScheduler task[%zu] failed",
-                      i);
+    // 模板形态不支持时返回 UNSUPPORTED，跳过该候选继续尝试后续 task
+    const auto task_status = AutoScheduler(hint_graph, schedule_tasks[i], scheduled_results);
+    if (task_status == af::UNSUPPORTED) {
+      GELOGW("AutoScheduler task[%zu] is unsupported, skip it.", i);
+      continue;
+    }
+    GE_CHK_STATUS_RET(task_status, "AutoScheduler task[%zu] failed", i);
     GELOGI("AutoScheduler task[%zu] end", i);
   }
 
@@ -1199,10 +1204,16 @@ Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, Sc
     std::vector<autoschedule::AutoScheduleOutput> schedule_outputs;
     auto scheduler = autoschedule::AutoSchedule(grouped_graph, schedule_outputs, is_reduce_first_stage,
                                                 schedule_task.reduce_type, schedule_task.cube_type);
-    GE_CHK_STATUS_RET(scheduler.DoAutoSchedule(), "Failed to do schedule, graph:[%s].",
-                      grouped_graph.GetName().c_str());
-    GE_ASSERT_TRUE(!schedule_outputs.empty(), "Failed to gen tiling case for graph:[%s].",
-                   grouped_graph.GetName().c_str());
+    const auto auto_schedule_status = scheduler.DoAutoSchedule();
+    if (auto_schedule_status == af::UNSUPPORTED) {
+      return af::UNSUPPORTED;
+    }
+    GE_CHK_STATUS_RET(auto_schedule_status, "Failed to do schedule, graph:[%s].", grouped_graph.GetName().c_str());
+    // 全部 tiling case 均不可行（UNSUPPORTED 被跳过）时该图无可用候选，跳过该 task
+    if (schedule_outputs.empty()) {
+      GELOGW("Graph[%s] has no feasible tiling case, the schedule is unsupported.", grouped_graph.GetName().c_str());
+      return af::UNSUPPORTED;
+    }
     GELOGI("AutoScheduler end: %s, number of tiling cases = %zu", grouped_graph.GetName().c_str(),
            schedule_outputs.size());
     if (is_reduce_first_stage) {

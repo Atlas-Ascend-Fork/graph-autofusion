@@ -1,4 +1,4 @@
-function(mark_indirect_load_codegen_and_e2e test_name)
+﻿function(mark_indirect_load_codegen_and_e2e test_name)
     target_compile_definitions(${test_name}_codegen_v2 PRIVATE ${ARGN})
     target_compile_definitions(${test_name}_e2e_v2 PRIVATE ${ARGN})
 endfunction()
@@ -406,6 +406,12 @@ mark_indirect_load_codegen_and_e2e(indirect_load_graph_hint_simd_repro
 add_indirect_load_graph_case(indirect_load_graph_hint_embedding_slice
     indirect_load_graph_hint_embedding_slice 0
     IL_CASE_BROADCAST_WHERE IL_GRAPH_HINT_EMBEDDING_SLICE)
+
+# Dynamic-shape tail-axis gather with a cross-dim sliced (non-continuous) index view:
+# the infeasible IndirectLoad template candidate must be skipped so codegen succeeds.
+add_indirect_load_graph_case(indirect_load_graph_hint_dy_gather_slice
+    indirect_load_graph_hint_dy_gather_slice 0
+    IL_CASE_BROADCAST_WHERE IL_GRAPH_HINT_DY_GATHER_SLICE)
 
 # Minimal SIMT reproducer: a partially zero-stride mask view is enough to trigger the bad evaluator offset.
 add_indirect_load_graph_case(indirect_load_user_masked_embedding_minimal
