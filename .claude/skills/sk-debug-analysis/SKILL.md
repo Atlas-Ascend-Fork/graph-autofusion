@@ -1,5 +1,5 @@
 ---
-name: superkernel-debug-analysis
+name: sk-debug-analysis
 description: 用于分析使能昇腾 CANN SuperKernel 后出现的问题，支持用户已明确问题类型或仅提供异常现场的情况。基于 sk_meta、编译产物、plog、profiling 和相关源码判断问题类型并定位原因，覆盖静态编译、卡死、AiCore 超时、融合断图、精度和性能问题。
 ---
 
