@@ -114,8 +114,8 @@ class SkOptimizerTaskReorderTest : public testing::Test {
     return SkTaskBuilder().PrecomputeSyncRelationsFromGraph(ir.tasks, ir.config, context, true);
   }
 
-  SkQueueType QueueFor(const std::vector<SuperKernelBaseNode *> &tasks,
-                       const std::vector<SkQueueType> &queues, const SuperKernelBaseNode *node) {
+  SkQueueType QueueFor(const std::vector<SuperKernelBaseNode *> &tasks, const std::vector<SkQueueType> &queues,
+                       const SuperKernelBaseNode *node) {
     auto it = std::find(tasks.begin(), tasks.end(), node);
     if (it == tasks.end() || queues.size() != tasks.size()) {
       return SkQueueType::UNKNOWN;
