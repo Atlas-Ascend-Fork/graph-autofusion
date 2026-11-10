@@ -29,11 +29,9 @@ Message JobMessage() {
   message.job.resourceId = "resource";
   message.job.kernelEntry = "kernel";
   message.job.arguments = {{0, 1, 255}, {7, 0}};
-  message.job.argumentBytes = {3, 2};
   message.job.basicOptions = {"--first", "--second"};
   message.job.skOptions = {"--sk"};
   message.job.outputElfPath = "/data/hxj/task.elf";
-  message.taskDeadlineNs = 999;
   return message;
 }
 
@@ -54,11 +52,9 @@ TEST(CompileProtocolTest, JobRoundTripPreservesRequestBytesAndOptions) {
   EXPECT_EQ(received.job.resourceId, sent.job.resourceId);
   EXPECT_EQ(received.job.kernelEntry, sent.job.kernelEntry);
   EXPECT_EQ(received.job.arguments, sent.job.arguments);
-  EXPECT_EQ(received.job.argumentBytes, sent.job.argumentBytes);
   EXPECT_EQ(received.job.basicOptions, sent.job.basicOptions);
   EXPECT_EQ(received.job.skOptions, sent.job.skOptions);
   EXPECT_EQ(received.job.outputElfPath, sent.job.outputElfPath);
-  EXPECT_EQ(received.taskDeadlineNs, sent.taskDeadlineNs);
 }
 
 TEST(CompileProtocolTest, HeaderUsesFixedLittleEndianFields) {
@@ -68,41 +64,40 @@ TEST(CompileProtocolTest, HeaderUsesFixedLittleEndianFields) {
   Bytes frame;
   std::string error;
   ASSERT_TRUE(EncodeMessage(message, frame, error));
-  const Bytes expected = {16, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1};
+  const Bytes expected = {16, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1};
   EXPECT_EQ(frame, expected);
 }
 
-TEST(CompileProtocolTest, ReadyAndAllResultKindsRoundTrip) {
-  for (const auto kind : {MessageKind::READY, MessageKind::RESULT, MessageKind::JOB_ERROR}) {
-    Message source;
-    source.kind = kind;
-    source.buildId = WORKER_BUILD_ID;
-    source.jobId = 4;
-    source.reply = {WorkerResultKind::ArtifactFailed, -71, "compile failed", 21, "digest"};
-    Bytes frame;
-    std::string error;
-    Message result;
-    ASSERT_TRUE(EncodeMessage(source, frame, error)) << error;
-    ASSERT_TRUE(DecodeMessage(Body(frame), result, error)) << error;
-    EXPECT_EQ(result.kind, source.kind);
-    EXPECT_EQ(result.jobId, source.jobId);
-    if (kind == MessageKind::READY) {
-      EXPECT_EQ(result.buildId, source.buildId);
-    } else {
-      EXPECT_EQ(result.reply.kind, source.reply.kind);
-      EXPECT_EQ(result.reply.aclrtcCode, source.reply.aclrtcCode);
-      EXPECT_EQ(result.reply.detail, source.reply.detail);
-      EXPECT_EQ(result.reply.artifactSize, source.reply.artifactSize);
-      EXPECT_EQ(result.reply.artifactSha256, source.reply.artifactSha256);
+TEST(CompileProtocolTest, ReadyAndResultReturnCodesRoundTrip) {
+  for (const int32_t code : {0, -71}) {
+    for (const auto kind : {MessageKind::READY, MessageKind::RESULT, MessageKind::JOB_ERROR}) {
+      Message source;
+      source.kind = kind;
+      source.buildId = WORKER_BUILD_ID;
+      source.jobId = 4;
+      source.reply = {code, "compile result"};
+      Bytes frame;
+      std::string error;
+      Message result;
+      ASSERT_TRUE(EncodeMessage(source, frame, error)) << error;
+      ASSERT_TRUE(DecodeMessage(Body(frame), result, error)) << error;
+      EXPECT_EQ(result.kind, source.kind);
+      EXPECT_EQ(result.jobId, source.jobId);
+      if (kind == MessageKind::READY) {
+        EXPECT_EQ(result.buildId, source.buildId);
+      } else {
+        EXPECT_EQ(result.reply.aclrtcCode, source.reply.aclrtcCode);
+        EXPECT_EQ(result.reply.detail, source.reply.detail);
+      }
     }
   }
 }
 
-TEST(CompileProtocolTest, RejectsMismatchedParameterSizeAndOversizedInput) {
+TEST(CompileProtocolTest, RejectsOversizedInput) {
   auto message = JobMessage();
   Bytes frame;
   std::string error;
-  message.job.argumentBytes[0] = 2;
+  message.job.arguments[0].assign(MAX_ARGUMENT_BYTES + 1, 0);
   EXPECT_FALSE(EncodeMessage(message, frame, error));
   message = JobMessage();
   message.job.resourceId.assign(MAX_STRING_BYTES + 1, 'x');
@@ -178,7 +173,6 @@ TEST(CompileProtocolTest, QueuedLargeFrameMakesBoundedProgressAndRoundTrips) {
   FramedChannel receiver(sockets[1]);
   auto source = JobMessage();
   source.job.arguments[0].assign(IO_BYTES_PER_PUMP * 3, 42);
-  source.job.argumentBytes[0] = source.job.arguments[0].size();
   std::string error;
   ASSERT_TRUE(sender.Queue(source, error));
   EXPECT_FALSE(sender.Queue(source, error));

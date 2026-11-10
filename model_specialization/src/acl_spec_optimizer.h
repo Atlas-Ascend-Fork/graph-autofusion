@@ -27,7 +27,6 @@
 #include <vector>
 
 #include "acl/acl.h"
-#include "acl/acl_rt_compile.h"
 #include "feature_manager.h"
 
 namespace model_spec {
@@ -51,7 +50,6 @@ class KernelSpecRequest {
   static void UnloadBinary(aclrtBinHandle binary);
   using Binary = std::unique_ptr<void, decltype(&UnloadBinary)>;
 
-  void BindApiRequest();
   aclmdlRITask task = nullptr;
   uint32_t streamIndex = 0;
   uint32_t taskIndex = 0;
@@ -65,10 +63,7 @@ class KernelSpecRequest {
   std::vector<const void *> argumentAddresses;
   std::vector<uint64_t> argumentBytes;
   std::vector<std::string> basicOptionStorage;
-  std::vector<const char *> basicOptionPointers;
   std::vector<std::string> skOptionStorage;
-  std::vector<const char *> skOptionPointers;
-  aclrtcKernelSpecRequest apiRequest{};
   Binary binary{nullptr, UnloadBinary};
   aclrtFuncHandle specFuncHandle = nullptr;
 };
@@ -115,13 +110,13 @@ class AclSpecOptimizer final {
   bool TryBuildRequest(const aclmdlRITaskParams &originalParams, std::string_view kernelEntry,
                        const model_spec::FeatureManager &featureManager, std::string_view outputDirectory,
                        KernelSpecRequest &request) const;
-  void SpecializeKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests, uint64_t jobs);
-  void RunSerialSpecialization(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
+  void SpecializeKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests);
   aclError LoadKernels(std::vector<std::unique_ptr<KernelSpecRequest>> &requests) const;
   aclError UpdateTasks(aclmdlRI model, const std::vector<std::unique_ptr<KernelSpecRequest>> &requests,
                        const std::vector<ScopeTaskRecord> &markersToDisable) const;
 
   SpecOutputDirectory outputDirectory_;
+  uint64_t parallelJobNum_{1};
 };
 
 class ModelSpecResourceManager final {

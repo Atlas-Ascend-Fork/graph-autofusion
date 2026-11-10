@@ -8,7 +8,6 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "compile_artifact.h"
 #include "compile_protocol.h"
 
 #include <gtest/gtest.h>
@@ -21,13 +20,11 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
-#include <filesystem>
+#include <boost/filesystem.hpp>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
-
-extern char **environ;
 
 namespace model_spec::compile {
 namespace {
@@ -68,12 +65,15 @@ class CompileWorkerTest : public testing::Test {
   void TearDown() override {
     channel_.reset();
     if (pid_ > 0) {
+      // 断言失败也必须回收本测试启动的 worker，避免残留进程影响后续用例。
       kill(pid_, SIGKILL);
-      while (waitpid(pid_, nullptr, 0) < 0 && errno == EINTR) {
-      }
+      pid_t waitResult;
+      do {
+        waitResult = waitpid(pid_, nullptr, 0);
+      } while (waitResult < 0 && errno == EINTR);
     }
     if (!directory_.empty()) {
-      std::filesystem::remove_all(directory_);
+      boost::filesystem::remove_all(directory_);
     }
   }
 
@@ -125,7 +125,6 @@ class CompileWorkerTest : public testing::Test {
     message.job.resourceId = "resource_中文";
     message.job.kernelEntry = entry;
     message.job.arguments = {{0x00, 0xff, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc}, {}, {0x42}};
-    message.job.argumentBytes = {8, 0, 1};
     message.job.basicOptions = {"--optimization=3", "--include=中文路径", ""};
     message.job.skOptions = {"--sk-option=value", "--second"};
     message.job.outputElfPath = directory_ + "/job_" + std::to_string(id) + ".elf";
@@ -162,56 +161,33 @@ TEST_F(CompileWorkerTest, RebuildsCompleteRequestAndPublishesElf) {
   ASSERT_TRUE(Receive(result));
   EXPECT_EQ(result.kind, MessageKind::RESULT);
   EXPECT_EQ(result.jobId, 7U);
-  EXPECT_EQ(result.reply.kind, WorkerResultKind::Produced);
   EXPECT_EQ(result.reply.aclrtcCode, 0);
-  ASSERT_TRUE(std::filesystem::exists(job.job.outputElfPath));
-  EXPECT_FALSE(std::filesystem::exists(job.job.outputElfPath + ".partial"));
+  ASSERT_TRUE(boost::filesystem::exists(job.job.outputElfPath));
+  EXPECT_FALSE(boost::filesystem::exists(job.job.outputElfPath + ".partial"));
   std::ifstream file(job.job.outputElfPath, std::ios::binary);
   const std::string actual((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
   EXPECT_EQ(actual,
             "\177ELF\nresource_中文\nspecialized_kernel\nnonblock=1 cloexec=1\n"
             "arguments=3\n8:00ff123456789abc\n0:\n1:42\noptions=3\n--optimization=3\n"
             "--include=中文路径\n\nskOptions=2\n--sk-option=value\n--second\nreservedZero=1\n");
-  ArtifactInfo info;
-  std::string error;
-  ASSERT_TRUE(InspectArtifact(job.job.outputElfPath, info, error)) << error;
-  EXPECT_EQ(result.reply.artifactSize, info.size);
-  EXPECT_EQ(result.reply.artifactSha256, info.sha256);
   Stop();
 }
 
-TEST_F(CompileWorkerTest, ContinuesAfterCompileAndArtifactFailures) {
+TEST_F(CompileWorkerTest, UsesAclrtcReturnCodeAndContinuesAfterFailure) {
   const std::vector<std::string> entries = {"compile_failure", "missing_output", "invalid_output",
                                             "specialized_kernel"};
-  const std::vector<WorkerResultKind> kinds = {WorkerResultKind::CompileFailed, WorkerResultKind::ArtifactFailed,
-                                               WorkerResultKind::ArtifactFailed, WorkerResultKind::Produced};
   for (size_t i = 0; i < entries.size(); ++i) {
     Message job = Job(i, entries[i]);
     ASSERT_TRUE(Send(job));
     Message result;
     ASSERT_TRUE(Receive(result));
     EXPECT_EQ(result.jobId, i);
-    EXPECT_EQ(result.reply.kind, kinds[i]);
     EXPECT_EQ(result.reply.aclrtcCode, i == 0 ? 12345 : 0);
-    if (kinds[i] != WorkerResultKind::Produced) {
-      EXPECT_FALSE(std::filesystem::exists(job.job.outputElfPath));
+    if (i == 0) {
+      EXPECT_FALSE(boost::filesystem::exists(job.job.outputElfPath));
       EXPECT_FALSE(result.reply.detail.empty());
     }
   }
-  Stop();
-}
-
-TEST_F(CompileWorkerTest, ReportsRenameFailureAndContinues) {
-  Message job = Job(0);
-  ASSERT_TRUE(std::filesystem::create_directory(job.job.outputElfPath));
-  ASSERT_TRUE(Send(job));
-  Message result;
-  ASSERT_TRUE(Receive(result));
-  EXPECT_EQ(result.reply.kind, WorkerResultKind::ArtifactFailed);
-  EXPECT_EQ(result.reply.aclrtcCode, 0);
-  ASSERT_TRUE(Send(Job(1)));
-  ASSERT_TRUE(Receive(result));
-  EXPECT_EQ(result.reply.kind, WorkerResultKind::Produced);
   Stop();
 }
 

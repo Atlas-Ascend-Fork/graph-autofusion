@@ -75,6 +75,8 @@ target_compile_options(acl_spec_optimize_ut PRIVATE
     -include ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/tests/stub/spec_runtime.h
 )
 
+target_link_options(acl_spec_optimize_ut PRIVATE -Wl,--wrap=poll)
+
 target_link_libraries(acl_spec_optimize_ut PRIVATE
     model_spec_compile_common
     ${CMAKE_DL_LIBS}
@@ -103,18 +105,26 @@ add_executable(aclrtc_compile_worker_stub
     ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src/aclrtc_compile_worker.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/tests/stub/worker_acl_rtc_stub.cpp
 )
-target_link_libraries(aclrtc_compile_worker_stub PRIVATE model_spec_compile_common acl_rt_headers)
+target_include_directories(aclrtc_compile_worker_stub PRIVATE ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot)
+target_link_libraries(aclrtc_compile_worker_stub PRIVATE model_spec_compile_common acl_rt_headers unified_dlog)
 set_target_properties(aclrtc_compile_worker_stub PROPERTIES OUTPUT_NAME aclrtc_compile_worker)
 add_dependencies(acl_spec_optimize_ut aclrtc_compile_worker_stub)
 
 add_executable(compile_process_ut
     test_compile_protocol.cpp
-    test_compile_artifact.cpp
     test_compile_process_pool.cpp
     test_compile_worker.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src/compile_process_pool.cpp
 )
-target_link_libraries(compile_process_ut PRIVATE model_spec_compile_common GTest::gtest_main GTest::gtest)
+target_include_directories(compile_process_ut PRIVATE ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot)
+target_link_libraries(compile_process_ut PRIVATE
+    model_spec_compile_common
+    Boost::filesystem
+    GTest::gtest_main
+    GTest::gtest
+    unified_dlog
+)
+target_link_options(compile_process_ut PRIVATE -Wl,--wrap=poll)
 target_compile_options(compile_process_ut PRIVATE -Wall -Wextra -Werror)
 target_compile_definitions(compile_process_ut PRIVATE
     MODEL_SPEC_FAULT_WORKER_PATH="$<TARGET_FILE:compile_pool_fault_worker>"

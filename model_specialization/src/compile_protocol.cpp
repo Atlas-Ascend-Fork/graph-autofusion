@@ -17,13 +17,17 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <climits>
 #include <cstring>
 #include <utility>
 
 namespace model_spec::compile {
 namespace {
 
-constexpr size_t BODY_HEADER_BYTES = 16;
+// 协议整数均为小端序。4 字节长度前缀不计入帧体；帧头依次是版本、消息类型和任务 ID。
+constexpr size_t FRAME_LENGTH_BYTES = sizeof(uint32_t);
+constexpr size_t BODY_HEADER_BYTES = sizeof(PROTOCOL_VERSION) + sizeof(MessageKind) + sizeof(uint64_t);
+constexpr size_t READ_BUFFER_BYTES = 16U * 1024U;
 
 bool Fail(std::string &error, const std::string &detail) {
   error = detail;
@@ -37,13 +41,13 @@ class Encoder {
       return false;
     }
     for (size_t index = 0; index < width; ++index) {
-      bytes.push_back(static_cast<unsigned char>(value >> (index * 8)));
+      bytes.push_back(static_cast<unsigned char>(value >> (index * CHAR_BIT)));
     }
     return true;
   }
 
   bool Blob(const unsigned char *data, size_t size, size_t limit) {
-    if (size > limit || !Integer(size, 8) || size > MAX_FRAME_BYTES - bytes.size()) {
+    if (size > limit || !Integer(size, sizeof(uint64_t)) || size > MAX_FRAME_BYTES - bytes.size()) {
       return false;
     }
     if (size != 0) {
@@ -58,7 +62,7 @@ class Encoder {
   }
 
   bool Strings(const std::vector<std::string> &values) {
-    if (values.size() > MAX_OPTION_COUNT || !Integer(values.size(), 8)) {
+    if (values.size() > MAX_OPTION_COUNT || !Integer(values.size(), sizeof(uint64_t))) {
       return false;
     }
     for (const auto &value : values) {
@@ -82,14 +86,14 @@ class Decoder {
     }
     value = 0;
     for (size_t index = 0; index < width; ++index) {
-      value |= static_cast<uint64_t>(bytes_[offset_++]) << (index * 8);
+      value |= static_cast<uint64_t>(bytes_[offset_++]) << (index * CHAR_BIT);
     }
     return true;
   }
 
   bool Blob(Bytes &value, size_t limit) {
     uint64_t size = 0;
-    if (!Integer(size, 8) || size > limit || size > bytes_.size() - offset_) {
+    if (!Integer(size, sizeof(size)) || size > limit || size > bytes_.size() - offset_) {
       return false;
     }
     value.assign(bytes_.begin() + offset_, bytes_.begin() + offset_ + static_cast<size_t>(size));
@@ -99,7 +103,7 @@ class Decoder {
 
   bool String(std::string &value) {
     uint64_t size = 0;
-    if (!Integer(size, 8) || size > MAX_STRING_BYTES || size > bytes_.size() - offset_) {
+    if (!Integer(size, sizeof(size)) || size > MAX_STRING_BYTES || size > bytes_.size() - offset_) {
       return false;
     }
     value.assign(reinterpret_cast<const char *>(bytes_.data() + offset_), static_cast<size_t>(size));
@@ -109,7 +113,8 @@ class Decoder {
 
   bool Strings(std::vector<std::string> &values) {
     uint64_t count = 0;
-    if (!Integer(count, 8) || count > MAX_OPTION_COUNT || count > (bytes_.size() - offset_) / 8) {
+    if (!Integer(count, sizeof(count)) || count > MAX_OPTION_COUNT ||
+        count > (bytes_.size() - offset_) / sizeof(uint64_t)) {
       return false;
     }
     values.resize(static_cast<size_t>(count));
@@ -132,27 +137,24 @@ class Decoder {
 
 bool EncodeJob(const Message &message, Encoder &encoder) {
   const auto &job = message.job;
-  if (job.jobId != message.jobId || job.arguments.size() != job.argumentBytes.size() ||
-      job.arguments.size() > MAX_ARGUMENT_COUNT || !encoder.String(job.resourceId) ||
-      !encoder.String(job.kernelEntry) || !encoder.Integer(job.arguments.size(), 8)) {
+  if (job.jobId != message.jobId || job.arguments.size() > MAX_ARGUMENT_COUNT || !encoder.String(job.resourceId) ||
+      !encoder.String(job.kernelEntry) || !encoder.Integer(job.arguments.size(), sizeof(uint64_t))) {
     return false;
   }
   for (size_t index = 0; index < job.arguments.size(); ++index) {
     const auto &argument = job.arguments[index];
-    if (argument.size() != job.argumentBytes[index] ||
-        !encoder.Blob(argument.data(), argument.size(), MAX_ARGUMENT_BYTES)) {
+    if (!encoder.Blob(argument.data(), argument.size(), MAX_ARGUMENT_BYTES)) {
       return false;
     }
   }
-  return encoder.Strings(job.basicOptions) && encoder.Strings(job.skOptions) && encoder.String(job.outputElfPath) &&
-         encoder.Integer(message.taskDeadlineNs, 8);
+  return encoder.Strings(job.basicOptions) && encoder.Strings(job.skOptions) && encoder.String(job.outputElfPath);
 }
 
 bool DecodeJob(Decoder &decoder, Message &message) {
   auto &job = message.job;
   job.jobId = message.jobId;
   uint64_t count = 0;
-  if (!decoder.String(job.resourceId) || !decoder.String(job.kernelEntry) || !decoder.Integer(count, 8) ||
+  if (!decoder.String(job.resourceId) || !decoder.String(job.kernelEntry) || !decoder.Integer(count, sizeof(count)) ||
       count > MAX_ARGUMENT_COUNT) {
     return false;
   }
@@ -161,34 +163,22 @@ bool DecodeJob(Decoder &decoder, Message &message) {
     if (!decoder.Blob(argument, MAX_ARGUMENT_BYTES)) {
       return false;
     }
-    job.argumentBytes.push_back(argument.size());
     job.arguments.push_back(std::move(argument));
   }
-  return decoder.Strings(job.basicOptions) && decoder.Strings(job.skOptions) && decoder.String(job.outputElfPath) &&
-         decoder.Integer(message.taskDeadlineNs, 8);
-}
-
-bool IsReplyKind(uint64_t kind) {
-  return kind >= static_cast<uint32_t>(WorkerResultKind::Produced) &&
-         kind <= static_cast<uint32_t>(WorkerResultKind::ArtifactFailed);
+  return decoder.Strings(job.basicOptions) && decoder.Strings(job.skOptions) && decoder.String(job.outputElfPath);
 }
 
 bool EncodeReply(const CompileReply &reply, Encoder &encoder) {
-  return IsReplyKind(static_cast<uint32_t>(reply.kind)) && encoder.Integer(static_cast<uint32_t>(reply.kind), 4) &&
-         encoder.Integer(static_cast<uint32_t>(reply.aclrtcCode), 4) && encoder.String(reply.detail) &&
-         encoder.Integer(reply.artifactSize, 8) && encoder.String(reply.artifactSha256);
+  return encoder.Integer(static_cast<uint32_t>(reply.aclrtcCode), sizeof(uint32_t)) && encoder.String(reply.detail);
 }
 
 bool DecodeReply(Decoder &decoder, CompileReply &reply) {
-  uint64_t kind = 0;
   uint64_t code = 0;
-  if (!decoder.Integer(kind, 4) || !IsReplyKind(kind) || !decoder.Integer(code, 4) || !decoder.String(reply.detail) ||
-      !decoder.Integer(reply.artifactSize, 8) || !decoder.String(reply.artifactSha256)) {
+  if (!decoder.Integer(code, sizeof(uint32_t)) || !decoder.String(reply.detail)) {
     return false;
   }
-  reply.kind = static_cast<WorkerResultKind>(kind);
   const uint32_t unsignedCode = static_cast<uint32_t>(code);
-  std::memcpy(&reply.aclrtcCode, &unsignedCode, sizeof(unsignedCode));
+  reply.aclrtcCode = static_cast<int32_t>(unsignedCode);
   return true;
 }
 
@@ -202,9 +192,9 @@ bool EncodeMessage(const Message &message, Bytes &fullFrame, std::string &error)
   error.clear();
   fullFrame.clear();
   Encoder encoder;
-  encoder.Integer(PROTOCOL_VERSION, 4);
-  encoder.Integer(static_cast<uint32_t>(message.kind), 4);
-  encoder.Integer(message.jobId, 8);
+  encoder.Integer(PROTOCOL_VERSION, sizeof(PROTOCOL_VERSION));
+  encoder.Integer(static_cast<uint32_t>(message.kind), sizeof(MessageKind));
+  encoder.Integer(message.jobId, sizeof(message.jobId));
   bool valid = false;
   switch (message.kind) {
     case MessageKind::READY:
@@ -225,9 +215,9 @@ bool EncodeMessage(const Message &message, Bytes &fullFrame, std::string &error)
     return Fail(error, "invalid message fields or payload exceeds protocol budget");
   }
   const auto size = static_cast<uint32_t>(encoder.bytes.size());
-  fullFrame.reserve(4 + size);
-  for (size_t index = 0; index < 4; ++index) {
-    fullFrame.push_back(static_cast<unsigned char>(size >> (index * 8)));
+  fullFrame.reserve(FRAME_LENGTH_BYTES + size);
+  for (size_t index = 0; index < FRAME_LENGTH_BYTES; ++index) {
+    fullFrame.push_back(static_cast<unsigned char>(size >> (index * CHAR_BIT)));
   }
   fullFrame.insert(fullFrame.end(), encoder.bytes.begin(), encoder.bytes.end());
   return true;
@@ -242,8 +232,8 @@ bool DecodeMessage(const Bytes &body, Message &message, std::string &error) {
   uint64_t version = 0;
   uint64_t kind = 0;
   Message decoded;
-  if (!decoder.Integer(version, 4) || version != PROTOCOL_VERSION || !decoder.Integer(kind, 4) ||
-      !decoder.Integer(decoded.jobId, 8)) {
+  if (!decoder.Integer(version, sizeof(PROTOCOL_VERSION)) || version != PROTOCOL_VERSION ||
+      !decoder.Integer(kind, sizeof(MessageKind)) || !decoder.Integer(decoded.jobId, sizeof(decoded.jobId))) {
     return Fail(error, "invalid protocol header");
   }
   decoded.kind = static_cast<MessageKind>(kind);
@@ -319,7 +309,7 @@ IoStatus FramedChannel::PumpRead(std::vector<Message> &messages, std::string &er
     error = setupError_.empty() ? "IPC fd is closed" : setupError_;
     return IoStatus::Error;
   }
-  std::array<unsigned char, 16384> buffer{};
+  std::array<unsigned char, READ_BUFFER_BYTES> buffer{};
   size_t processed = 0;
   while (processed < IO_BYTES_PER_PUMP) {
     const auto size = recv(fd_, buffer.data(), std::min(buffer.size(), IO_BYTES_PER_PUMP - processed), 0);
@@ -358,6 +348,7 @@ IoStatus FramedChannel::PumpWrite(std::string &error) {
   }
   size_t processed = 0;
   while (WantsWrite() && processed < IO_BYTES_PER_PUMP) {
+    // 对端退出时让 send 返回错误，避免 SIGPIPE 终止当前进程。
     const auto size = send(fd_, tx_.data() + txOffset_, std::min(tx_.size() - txOffset_, IO_BYTES_PER_PUMP - processed),
                            MSG_NOSIGNAL);
     if (size > 0) {
@@ -404,24 +395,25 @@ void FramedChannel::Close() {
 
 bool FramedChannel::ExtractMessages(std::vector<Message> &messages, std::string &error) {
   size_t consumed = 0;
-  while (rx_.size() - consumed >= 4) {
+  while (rx_.size() - consumed >= FRAME_LENGTH_BYTES) {
     uint32_t length = 0;
-    for (size_t index = 0; index < 4; ++index) {
-      length |= static_cast<uint32_t>(rx_[consumed + index]) << (index * 8);
+    for (size_t index = 0; index < FRAME_LENGTH_BYTES; ++index) {
+      length |= static_cast<uint32_t>(rx_[consumed + index]) << (index * CHAR_BIT);
     }
     if (length < BODY_HEADER_BYTES || length > MAX_FRAME_BYTES) {
       return Fail(error, "IPC frame length is outside protocol budget");
     }
-    if (rx_.size() - consumed - 4 < length) {
+    if (rx_.size() - consumed - FRAME_LENGTH_BYTES < length) {
+      // 保留尾部的不完整帧，下次 PumpRead 再接着解析。
       break;
     }
     Message message;
-    const auto begin = rx_.begin() + consumed + 4;
+    const auto begin = rx_.begin() + consumed + FRAME_LENGTH_BYTES;
     if (!DecodeMessage(Bytes(begin, begin + length), message, error)) {
       return false;
     }
     messages.push_back(std::move(message));
-    consumed += 4 + length;
+    consumed += FRAME_LENGTH_BYTES + length;
   }
   rx_.erase(rx_.begin(), rx_.begin() + consumed);
   return true;

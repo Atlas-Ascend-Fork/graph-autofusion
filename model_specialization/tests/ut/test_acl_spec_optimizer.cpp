@@ -36,19 +36,44 @@
 #include <utility>
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <elf.h>
-#include <filesystem>
+#include <boost/filesystem.hpp>
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
+#include <poll.h>
 #include <string>
 #include <sys/stat.h>
 #include <unordered_map>
 #include <vector>
+
+namespace {
+thread_local size_t *failedJobPollCalls = nullptr;
+thread_local size_t *failedStartupPollCalls = nullptr;
+}  // namespace
+
+extern "C" int __real_poll(pollfd *fds, nfds_t count, int timeout);
+
+extern "C" int __wrap_poll(pollfd *fds, nfds_t count, int timeout) {
+  if (failedStartupPollCalls != nullptr) {
+    ++*failedStartupPollCalls;
+    errno = EINVAL;
+    return -1;
+  }
+  if (failedJobPollCalls != nullptr &&
+      (*failedJobPollCalls != 0 ||
+       (count != 0 && std::any_of(fds, fds + count, [](const pollfd &fd) { return (fd.events & POLLOUT) != 0; })))) {
+    ++*failedJobPollCalls;
+    errno = EINVAL;
+    return -1;
+  }
+  return __real_poll(fds, count, timeout);
+}
 
 namespace model_spec {
 
@@ -283,18 +308,18 @@ TEST(SpecOutputDirectoryTest, SameModelGetsUniqueDirectoriesAndRestrictedPermiss
 TEST(SpecOutputDirectoryTest, CleanupRemovesOnlyOwnedDirectoryAndDoesNotFollowSymlinks) {
   SpecOutputDirectory neighbor;
   ASSERT_EQ(neighbor.Create(17), ACL_SUCCESS);
-  const auto protectedFile = std::filesystem::path(neighbor.Path()) / "keep.elf";
-  std::ofstream(protectedFile) << "keep";
+  const auto protectedFile = boost::filesystem::path(neighbor.Path()) / "keep.elf";
+  std::ofstream(protectedFile.string()) << "keep";
   std::string removedPath;
   {
     SpecOutputDirectory current;
     ASSERT_EQ(current.Create(17), ACL_SUCCESS);
     removedPath = current.Path();
-    std::ofstream(std::filesystem::path(removedPath) / "task.elf") << "temporary";
-    std::filesystem::create_directory_symlink(neighbor.Path(), std::filesystem::path(removedPath) / "link");
+    std::ofstream((boost::filesystem::path(removedPath) / "task.elf").string()) << "temporary";
+    boost::filesystem::create_directory_symlink(neighbor.Path(), boost::filesystem::path(removedPath) / "link");
   }
-  EXPECT_FALSE(std::filesystem::exists(removedPath));
-  EXPECT_TRUE(std::filesystem::exists(protectedFile));
+  EXPECT_FALSE(boost::filesystem::exists(removedPath));
+  EXPECT_TRUE(boost::filesystem::exists(protectedFile));
 }
 
 TEST(SpecOutputDirectoryTest, UncreatedDirectoryHasNothingToClean) {
@@ -320,7 +345,7 @@ TEST(SpecOutputDirectoryTest, InvalidTemporaryRootFailsWithoutDeletingExistingFi
   }
   EXPECT_EQ(result, ACL_ERROR_FAILURE);
   EXPECT_TRUE(directory.Path().empty());
-  EXPECT_TRUE(std::filesystem::exists(existingFile));
+  EXPECT_TRUE(boost::filesystem::exists(existingFile));
 }
 
 namespace {
@@ -584,9 +609,6 @@ size_t copyQueries = 0;
 size_t parameterQueries = 0;
 size_t lastParameterIndex = 0;
 size_t argumentCopyCalls = 0;
-std::vector<aclError> specializationResults;
-std::vector<std::string> specializationPaths;
-std::vector<std::string> specializationEntries;
 size_t loadCalls = 0;
 size_t functionCalls = 0;
 size_t unloadCalls = 0;
@@ -649,20 +671,7 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
  protected:
   void SetUp() override {
     SkUtResetTestControls();
-    MOCKER(aclmdlRITaskSetParams).stubs().will(invoke(RecordSetTaskParams));
-    MOCKER(aclmdlRIUpdate).stubs().will(invoke(RecordUpdateModel));
-    MOCKER(aclmdlRIGetStreams).stubs().will(invoke(GetStreams));
-    MOCKER(aclrtStreamGetId).stubs().will(invoke(GetStreamId));
-    MOCKER(aclmdlRIGetTasksByStream).stubs().will(invoke(GetTasks));
-    MOCKER(aclmdlRITaskGetParams).stubs().will(invoke(GetTaskParams));
-    MOCKER(aclmdlRITaskGetType).stubs().will(invoke(GetTaskType));
-    MOCKER(aclmdlRITaskGetSeqId).stubs().will(invoke(GetTaskSequenceId));
-    MOCKER(aclrtGetFunctionName).stubs().will(invoke(GetFunctionName));
-    MOCKER(aclrtFunctionGetBinary).stubs().will(invoke(GetFunctionBinary));
-    MOCKER(aclrtMemcpy).stubs().will(invoke(CopyArgs));
-    MOCKER(rtGetBinBuffer).stubs().will(invoke(GetBinaryBuffer));
-    MOCKER(aclrtBinaryGetFunction).stubs().will(invoke(GetBinaryFunction));
-    MOCKER(KernelSpecRequest::UnloadBinary).stubs().will(invoke(UnloadBinary));
+    MockRuntimeCalls();
     streamQueries = taskQueries = failStreamQuery = failTaskQuery = parameterQueries = 0;
     binaryQueries = paramCountQueries = nameQueries = copyQueries = 0;
     identityParamsQueries = identityTypeQueries = 0;
@@ -671,9 +680,6 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
     taskSequenceIds.clear();
     lastParameterIndex = 0;
     argumentCopyCalls = 0;
-    specializationResults.clear();
-    specializationPaths.clear();
-    specializationEntries.clear();
     loadCalls = functionCalls = 0;
     unloadCalls = 0;
     loadResult = functionResult = ACL_SUCCESS;
@@ -712,6 +718,23 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
     SkUtResetTestControls();
   }
 
+  void MockRuntimeCalls() {
+    MOCKER(aclmdlRITaskSetParams).stubs().will(invoke(RecordSetTaskParams));
+    MOCKER(aclmdlRIUpdate).stubs().will(invoke(RecordUpdateModel));
+    MOCKER(aclmdlRIGetStreams).stubs().will(invoke(GetStreams));
+    MOCKER(aclrtStreamGetId).stubs().will(invoke(GetStreamId));
+    MOCKER(aclmdlRIGetTasksByStream).stubs().will(invoke(GetTasks));
+    MOCKER(aclmdlRITaskGetParams).stubs().will(invoke(GetTaskParams));
+    MOCKER(aclmdlRITaskGetType).stubs().will(invoke(GetTaskType));
+    MOCKER(aclmdlRITaskGetSeqId).stubs().will(invoke(GetTaskSequenceId));
+    MOCKER(aclrtGetFunctionName).stubs().will(invoke(GetFunctionName));
+    MOCKER(aclrtFunctionGetBinary).stubs().will(invoke(GetFunctionBinary));
+    MOCKER(aclrtMemcpy).stubs().will(invoke(CopyArgs));
+    MOCKER(rtGetBinBuffer).stubs().will(invoke(GetBinaryBuffer));
+    MOCKER(aclrtBinaryGetFunction).stubs().will(invoke(GetBinaryFunction));
+    MOCKER(KernelSpecRequest::UnloadBinary).stubs().will(invoke(UnloadBinary));
+  }
+
   aclError Collect() {
     return collector.Collect(&model, manager, "/tmp/spec-output", requests, scopeMarkers);
   }
@@ -734,19 +757,6 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
   std::vector<ScopeTaskRecord> scopeMarkers;
 };
 }  // namespace
-
-extern "C" aclError aclrtcKernelSpecialization(const aclrtcKernelSpecRequest *request, const char *path) {
-  EXPECT_NE(request->resourceId, nullptr);
-  EXPECT_NE(request->kernelEntry, nullptr);
-  EXPECT_EQ(request->argsCount, 3U);
-  EXPECT_NE(request->argsAddr[0], nullptr);
-  EXPECT_GT(request->argsBytes[0], 0U);
-  EXPECT_TRUE(std::filesystem::is_directory(std::filesystem::path(path).parent_path()));
-  const size_t index = specializationPaths.size();
-  specializationPaths.emplace_back(path);
-  specializationEntries.emplace_back(request->kernelEntry == nullptr ? "" : request->kernelEntry);
-  return index < specializationResults.size() ? specializationResults[index] : ACL_SUCCESS;
-}
 
 extern "C" aclError aclrtBinaryLoadFromFile(const char *, aclrtBinaryLoadOptions *, aclrtBinHandle *binary) {
   const size_t index = loadCalls++;
@@ -974,23 +984,7 @@ class AclSpecOptimizerScopeTest : public AclSpecOptimizerCollectionTest, public 
   aclError RunEntry() {
     return GetParam() ? aclmdlRISpecOptimizeByFlag(&model, nullptr) : aclmdlRISpecOptimize(&model, nullptr);
   }
-  KernelState beginKernel, endKernel;
-  CollectorTask begin{}, end{};
-};
-}  // namespace
-
-TEST_P(AclSpecOptimizerScopeTest, RejectsUnreadableTasksBeforeCompilationOrMutation) {
-  const std::array<const char *, 7> reasons{"null task",
-                                            "task type query failed",
-                                            "task parameters query failed",
-                                            "null function handle",
-                                            "function name query failed",
-                                            "empty function name",
-                                            "unterminated function name"};
-  for (size_t failure = 0; failure < reasons.size(); ++failure) {
-    SCOPED_TRACE(reasons[failure]);
-    KernelState invalidKernel = kernel;
-    CollectorTask invalid = task;
+  aclmdlRITask MakeUnreadableTask(size_t failure, KernelState &invalidKernel, CollectorTask &invalid) {
     invalid.sequenceId = std::numeric_limits<uint32_t>::max();
     invalid.params.kernelTaskParams.funcHandle = &invalidKernel;
     aclmdlRITask handle = &invalid;
@@ -1017,6 +1011,26 @@ TEST_P(AclSpecOptimizerScopeTest, RejectsUnreadableTasksBeforeCompilationOrMutat
         invalidKernel.unterminatedName = true;
         break;
     }
+    return handle;
+  }
+  KernelState beginKernel, endKernel;
+  CollectorTask begin{}, end{};
+};
+}  // namespace
+
+TEST_P(AclSpecOptimizerScopeTest, RejectsUnreadableTasksBeforeCompilationOrMutation) {
+  const std::array<const char *, 7> reasons{"null task",
+                                            "task type query failed",
+                                            "task parameters query failed",
+                                            "null function handle",
+                                            "function name query failed",
+                                            "empty function name",
+                                            "unterminated function name"};
+  for (size_t failure = 0; failure < reasons.size(); ++failure) {
+    SCOPED_TRACE(reasons[failure]);
+    KernelState invalidKernel = kernel;
+    CollectorTask invalid = task;
+    const aclmdlRITask handle = MakeUnreadableTask(failure, invalidKernel, invalid);
     stream.tasks = {&begin, &task, handle, &end};
     identityTypeQueries = 0;
     ut_log::LogBuffer::Instance().Clear();
@@ -1026,7 +1040,6 @@ TEST_P(AclSpecOptimizerScopeTest, RejectsUnreadableTasksBeforeCompilationOrMutat
     EXPECT_EQ(identityTypeQueries, failure == 0 ? 2U : 3U);
     EXPECT_EQ(binaryQueries, 0U);
     EXPECT_EQ(paramCountQueries, 0U);
-    EXPECT_TRUE(specializationPaths.empty());
     EXPECT_EQ(loadCalls, 0U);
     EXPECT_TRUE(touched.empty());
     EXPECT_TRUE(disabled.empty());
@@ -1133,7 +1146,6 @@ TEST_P(AclSpecOptimizerScopeTest, TaskSequenceFailurePreventsCompilationOrMutati
   EXPECT_EQ(sequenceQueries, 2U);
   EXPECT_EQ(binaryQueries, 0U);
   EXPECT_EQ(paramCountQueries, 0U);
-  EXPECT_TRUE(specializationPaths.empty());
   EXPECT_EQ(loadCalls, 0U);
   EXPECT_TRUE(commitOperations.empty());
   const auto logs = ut_log::LogBuffer::Instance().GetContent();
@@ -1147,7 +1159,6 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagWithoutScopeLeavesOrdinaryTasksUnto
 
   ASSERT_EQ(aclmdlRISpecOptimizeByFlag(&model, nullptr), ACL_SUCCESS);
   EXPECT_TRUE(touched.empty());
-  EXPECT_TRUE(specializationPaths.empty());
   EXPECT_EQ(loadCalls, 0U);
   EXPECT_EQ(updateCount, 0U);
   EXPECT_TRUE(commitOperations.empty());
@@ -1238,7 +1249,6 @@ TEST_F(AclSpecOptimizerCollectionTest, ByFlagSequenceOrGlobalPairingFailurePreve
     EXPECT_EQ(binaryQueries, 0U);
     EXPECT_TRUE(touched.empty());
     EXPECT_TRUE(disabled.empty());
-    EXPECT_TRUE(specializationPaths.empty());
     EXPECT_EQ(loadCalls, 0U);
     EXPECT_EQ(updateCount, 0U);
     EXPECT_TRUE(commitOperations.empty());
@@ -1277,7 +1287,6 @@ TEST_P(AclSpecOptimizerScopeTest, ConvertsExceptionsWithoutCompilingOrMutatingMo
     };
     EXPECT_EQ(RunEntry(), expected[kind]);
   }
-  EXPECT_TRUE(specializationPaths.empty());
   EXPECT_EQ(loadCalls, 0U);
   EXPECT_TRUE(commitOperations.empty());
 }
@@ -1322,9 +1331,6 @@ class AclSpecOptimizerSubmissionTest : public AclSpecOptimizerCollectionTest {
     }
     EXPECT_EQ(begin.params.kernelTaskParams.funcHandle, &beginKernel);
     EXPECT_EQ(end.params.kernelTaskParams.funcHandle, &endKernel);
-    for (const auto &path : specializationPaths) {
-      EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(path).parent_path()));
-    }
   }
 
   KernelState beginKernel, endKernel, secondKernel;
@@ -1380,13 +1386,16 @@ TEST_P(AclSpecOptimizerCandidateTest, KeepsSkippedTasksAndCleansMarkersAfterComp
   if (expected.unsupportedCount > 1) {
     secondKernel.binary.clear();
   }
-  specializationResults = expected.compileResults;
+  // The worker stub uses the kernel entry to model an ACLRTC compile failure.
+  kernel.name =
+      expected.compileResults.size() > 0 && expected.compileResults[0] != ACL_SUCCESS ? "compile_fail" : "AddCustom";
+  secondKernel.name =
+      expected.compileResults.size() > 1 && expected.compileResults[1] != ACL_SUCCESS ? "compile_fail" : "AddCustom";
   ut_log::LogBuffer::Instance().Clear();
 
   EXPECT_EQ(RunEntry(std::get<0>(GetParam())), ACL_SUCCESS);
   const size_t markerCount = expected.hasMarkers ? 2U : 0U;
   ExpectSubmission(expected.rewrites, markerCount, expected.hasMarkers ? 1U : 0U, 0);
-  EXPECT_EQ(specializationPaths.size(), expected.taskCount - expected.unsupportedCount);
   EXPECT_EQ(loadCalls, expected.rewrites);
   EXPECT_EQ(functionCalls, expected.rewrites);
   const std::vector<aclmdlRITask> expectedMarkers =
@@ -1397,15 +1406,11 @@ TEST_P(AclSpecOptimizerCandidateTest, KeepsSkippedTasksAndCleansMarkersAfterComp
   }
   const auto logs = ut_log::LogBuffer::Instance().GetContent();
   const char *apiName = std::get<0>(GetParam()) ? "aclmdlRISpecOptimizeByFlag" : "aclmdlRISpecOptimize";
-  const std::string warning = "[WARN] [SK][RunSerialSpecialization] aclmdlRISpecOptimize specialized none";
   EXPECT_NE(logs.find(std::string(apiName) + " started:"), std::string::npos);
   if (expected.taskCount == expected.unsupportedCount) {
     EXPECT_NE(logs.find("[WARN] [SK][Optimize] " + std::string(apiName) + " has no candidate kernels"),
               std::string::npos);
-    EXPECT_EQ(logs.find(warning), std::string::npos);
     EXPECT_EQ(logs.find("finished with nothing to specialize"), std::string::npos);
-  } else if (expected.rewrites == 0) {
-    EXPECT_NE(logs.find(warning), std::string::npos);
   }
 }
 
@@ -1488,8 +1493,6 @@ TEST_F(AclSpecOptimizerCollectionTest, UsesFeatureQueriesAndPassesRuntimeSizeWit
   ASSERT_EQ(Collect(), ACL_SUCCESS);
   ASSERT_EQ(requests.size(), 1U);
   auto &request = *requests.front();
-  // Collection leaves the API request unbound; SpecializeKernels binds it right before use.
-  request.BindApiRequest();
   EXPECT_EQ(request.task, &task);
   EXPECT_EQ(request.kernelEntry, kernel.name);
   EXPECT_EQ(request.resourceId, std::string(64, 'b'));
@@ -1501,20 +1504,9 @@ TEST_F(AclSpecOptimizerCollectionTest, UsesFeatureQueriesAndPassesRuntimeSizeWit
     EXPECT_EQ(request.argumentAddresses[index], request.hostArgs.data() + kernel.offset + index * kernel.size);
     EXPECT_EQ(request.argumentBytes[index], kernel.size);
   }
-  EXPECT_EQ(request.apiRequest.argsAddr, request.argumentAddresses.data());
-  EXPECT_EQ(request.apiRequest.argsBytes, request.argumentBytes.data());
-  EXPECT_EQ(request.apiRequest.resourceId, request.resourceId.c_str());
-  EXPECT_EQ(request.apiRequest.kernelEntry, request.kernelEntry.c_str());
-  EXPECT_EQ(request.apiRequest.options, request.basicOptionPointers.data());
-  EXPECT_EQ(request.apiRequest.optionCount, request.basicOptionPointers.size());
-  EXPECT_EQ(request.apiRequest.skOptions, request.skOptionPointers.data());
-  EXPECT_EQ(request.apiRequest.skOptionCount, request.skOptionPointers.size());
   EXPECT_EQ(lastParameterIndex, kernel.paramCount - 1);
   EXPECT_EQ(request.basicOptionStorage, (std::vector<std::string>{"-mllvm", "value with spaces", "-mllvm"}));
   EXPECT_EQ(request.skOptionStorage, (std::vector<std::string>{"--enable-super-kernel"}));
-  ASSERT_EQ(request.basicOptionPointers.size(), 3U);
-  EXPECT_STREQ(request.basicOptionPointers[1], "value with spaces");
-  EXPECT_STREQ(request.skOptionPointers[0], "--enable-super-kernel");
   EXPECT_EQ(request.outputElfPath, "/tmp/spec-output/stream_0_task_0.elf");
   EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &kernel);
 }
@@ -1591,10 +1583,9 @@ TEST_F(AclSpecOptimizerCollectionTest, HostBufferBindsPlaceholderDataInsteadOfPo
   ASSERT_EQ(Collect(), ACL_SUCCESS);
   ASSERT_EQ(requests.size(), 1U);
   auto &request = *requests[0];
-  request.BindApiRequest();
-  EXPECT_EQ(request.apiRequest.argsAddr[0], request.hostArgs.data() + placeHolder.dataOffset);
-  EXPECT_EQ(request.apiRequest.argsBytes[0], args.size() - placeHolder.dataOffset);
-  EXPECT_EQ(std::memcmp(request.apiRequest.argsAddr[0], tiling.data(), sizeof(tiling)), 0);
+  EXPECT_EQ(request.argumentAddresses[0], request.hostArgs.data() + placeHolder.dataOffset);
+  EXPECT_EQ(request.argumentBytes[0], args.size() - placeHolder.dataOffset);
+  EXPECT_EQ(std::memcmp(request.argumentAddresses[0], tiling.data(), sizeof(tiling)), 0);
   EXPECT_EQ(request.argumentAddresses[1], request.hostArgs.data() + 24);
   EXPECT_EQ(request.argumentBytes[1], kernel.size);
   EXPECT_EQ(std::memcmp(&task.params, &original, sizeof(original)), 0);
@@ -1626,18 +1617,17 @@ TEST_F(AclSpecOptimizerCollectionTest, RealAclnnTilingSnapshotIsIndependentOfLau
     ASSERT_EQ(Collect(), ACL_SUCCESS);
     ASSERT_EQ(requests.size(), 1U);
     auto &request = *requests[0];
-    request.BindApiRequest();
-    ASSERT_EQ(request.apiRequest.argsCount, 5U);
-    EXPECT_EQ(request.apiRequest.argsAddr[4], request.hostArgs.data() + 56);
-    EXPECT_EQ(request.apiRequest.argsBytes[4], 32U);
-    EXPECT_EQ(std::memcmp(request.apiRequest.argsAddr[4], expected.data(), sizeof(expected)), 0);
+    ASSERT_EQ(request.argumentAddresses.size(), 5U);
+    EXPECT_EQ(request.argumentAddresses[4], request.hostArgs.data() + 56);
+    EXPECT_EQ(request.argumentBytes[4], 32U);
+    EXPECT_EQ(std::memcmp(request.argumentAddresses[4], expected.data(), sizeof(expected)), 0);
     EXPECT_EQ(std::memcmp(request.hostArgs.data(), captured.data(), sizeof(captured)), 0);
     uint64_t savedPointer = 0;
     std::memcpy(&savedPointer, request.hostArgs.data() + 32, sizeof(savedPointer));
     EXPECT_EQ(savedPointer, pointer);
     for (size_t index = 0; index < 4; ++index) {
-      EXPECT_EQ(request.apiRequest.argsAddr[index], request.hostArgs.data() + index * 8);
-      EXPECT_EQ(request.apiRequest.argsBytes[index], 8U);
+      EXPECT_EQ(request.argumentAddresses[index], request.hostArgs.data() + index * 8);
+      EXPECT_EQ(request.argumentBytes[index], 8U);
     }
   }
   captured.fill(0);
@@ -1750,15 +1740,14 @@ TEST_F(AclSpecOptimizerCollectionTest, HostArgumentCopyFailureKeepsDynamicTask) 
 
 TEST_F(AclSpecOptimizerCollectionTest, OptimizerCompilesInOrderAndCommitsOnlySuccessfulTasks) {
   CollectorTask secondTask = task;
+  KernelState failedKernel = kernel;
+  failedKernel.name = "compile_fail";
+  task.params.kernelTaskParams.funcHandle = &failedKernel;
+  secondTask.params.kernelTaskParams.funcHandle = &kernel;
   stream.tasks = {&task, &secondTask};
-  specializationResults = {ACL_ERROR_FAILURE, ACL_SUCCESS};
   const auto original = task.params;
   const auto result = collector.Optimize(&model, manager);
   EXPECT_EQ(result, ACL_SUCCESS);
-  ASSERT_EQ(specializationPaths.size(), 2U);
-  EXPECT_EQ(std::filesystem::path(specializationPaths[0]).filename(), "stream_0_task_0.elf");
-  EXPECT_EQ(std::filesystem::path(specializationPaths[1]).filename(), "stream_0_task_1.elf");
-  EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(specializationPaths[0]).parent_path()));
   EXPECT_EQ(loadCalls, 1U);
   EXPECT_EQ(functionCalls, 1U);
   EXPECT_EQ(updateCount, 1U);
@@ -1776,7 +1765,17 @@ TEST_F(AclSpecOptimizerCollectionTest, ParallelJobsCompileOutsideParentAndKeepOr
   options.jobs = 2;
   ASSERT_TRUE(manager.Init(&options));
   EXPECT_EQ(collector.Optimize(&model, manager), ACL_SUCCESS);
-  EXPECT_TRUE(specializationPaths.empty());
+  EXPECT_EQ(loadCalls, 2U);
+  EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task, &secondTask}));
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, MaxJobsUsesAutomaticCpuBoundWorkerCount) {
+  CollectorTask secondTask = task;
+  stream.tasks = {&task, &secondTask};
+  aclmdlRISpecOptions options{};
+  options.jobs = std::numeric_limits<uint64_t>::max();
+  ASSERT_TRUE(manager.Init(&options));
+  EXPECT_EQ(collector.Optimize(&model, manager), ACL_SUCCESS);
   EXPECT_EQ(loadCalls, 2U);
   EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task, &secondTask}));
 }
@@ -1791,17 +1790,55 @@ TEST_F(AclSpecOptimizerCollectionTest, ParallelCompileFailureKeepsOtherSuccessfu
   options.jobs = 2;
   ASSERT_TRUE(manager.Init(&options));
   EXPECT_EQ(collector.Optimize(&model, manager), ACL_SUCCESS);
-  EXPECT_TRUE(specializationPaths.empty());
   EXPECT_EQ(loadCalls, 1U);
   EXPECT_EQ(touched, (std::vector<aclmdlRITask>{&task}));
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, StartupPollFailureSkipsWholeBatchAfterCleanup) {
+  CollectorTask secondTask = task;
+  stream.tasks = {&task, &secondTask};
+  aclmdlRISpecOptions options{};
+  options.jobs = 2;
+
+  size_t failedPollCalls = 0;
+  failedStartupPollCalls = &failedPollCalls;
+  const auto result = aclmdlRISpecOptimize(&model, &options);
+  failedStartupPollCalls = nullptr;
+
+  EXPECT_EQ(failedPollCalls, 1U);
+  EXPECT_EQ(result, ACL_SUCCESS);
+  EXPECT_EQ(loadCalls, 0U);
+  EXPECT_TRUE(touched.empty());
+  EXPECT_EQ(updateCount, 1U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, WorkerPollFailureKeepsOriginalKernelsAndUpdatesModel) {
+  CollectorTask secondTask = task;
+  stream.tasks = {&task, &secondTask};
+  aclmdlRISpecOptions options{};
+  options.jobs = 2;
+
+  // READY only polls for input; fail persistently once a JOB can be sent.
+  size_t failedPollCalls = 0;
+  failedJobPollCalls = &failedPollCalls;
+  const auto result = aclmdlRISpecOptimize(&model, &options);
+  failedJobPollCalls = nullptr;
+
+  EXPECT_EQ(failedPollCalls, 1U);
+  EXPECT_EQ(result, ACL_SUCCESS);
+  EXPECT_EQ(loadCalls, 0U);
+  EXPECT_TRUE(touched.empty());
+  EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &kernel);
+  EXPECT_EQ(secondTask.params.kernelTaskParams.funcHandle, &kernel);
+  EXPECT_EQ(updateCount, 1U);
 }
 
 // A kernel ACLRTC declines to specialize is skipped and reported as success; a binary that cannot
 // be loaded, or whose entry is missing, aborts the whole model.
 TEST_F(AclSpecOptimizerCollectionTest, SkipsCompileFailureButReportsLoadAndLookupFailures) {
   for (size_t stage = 0; stage < 3; ++stage) {
-    specializationResults = {stage == 0 ? ACL_ERROR_FAILURE : ACL_SUCCESS};
-    specializationPaths.clear();
+    kernel.name = stage == 0 ? "compile_fail" : "AddCustom";
+    task.params.kernelTaskParams.funcHandle = &kernel;
     loadCalls = functionCalls = 0;
     loadResult = stage == 1 ? ACL_ERROR_FAILURE : ACL_SUCCESS;
     functionResult = stage == 2 ? ACL_ERROR_FAILURE : ACL_SUCCESS;
@@ -1817,8 +1854,6 @@ TEST_F(AclSpecOptimizerCollectionTest, SkipsCompileFailureButReportsLoadAndLooku
     EXPECT_EQ(functionCalls, stage == 2 ? 1U : 0U);
     EXPECT_EQ(unloadCalls, stage == 2 ? 1U : 0U);
     EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
-    ASSERT_EQ(specializationPaths.size(), 1U);
-    EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(specializationPaths[0]).parent_path()));
   }
 }
 
@@ -1838,8 +1873,6 @@ TEST_F(AclSpecOptimizerCollectionTest, PublicEntryUsesDefaultOptionsAndCommits) 
   EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 1U);
   EXPECT_EQ(SkUtInvokeModelDestroyCallback(&model), ACL_SUCCESS);
   EXPECT_EQ(unloadCalls, 1U);
-  ASSERT_EQ(specializationPaths.size(), 1U);
-  EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(specializationPaths[0]).parent_path()));
 }
 
 TEST_F(AclSpecOptimizerCollectionTest, PublicEntryRejectsInvalidConfigurationBeforeTouchingTheModel) {
@@ -1850,7 +1883,6 @@ TEST_F(AclSpecOptimizerCollectionTest, PublicEntryRejectsInvalidConfigurationBef
   EXPECT_EQ(aclmdlRISpecOptimize(nullptr, &options), ACL_ERROR_INVALID_PARAM);
   EXPECT_EQ(aclmdlRISpecOptimize(&model, &options), ACL_ERROR_INVALID_PARAM);
   EXPECT_EQ(streamQueries, 0U);
-  EXPECT_TRUE(specializationPaths.empty());
   EXPECT_TRUE(touched.empty());
 }
 
@@ -2027,18 +2059,11 @@ TEST_F(AclSpecOptimizerCollectionTest, PointerStorageRemainsValidAfterRequestLis
   ASSERT_EQ(requests.size(), 129U);
   for (size_t index = 0; index < requests.size(); ++index) {
     auto &request = *requests[index];
-    request.BindApiRequest();
-    request.BindApiRequest();
     EXPECT_EQ(request.taskIndex, index);
-    EXPECT_EQ(request.apiRequest.argsAddr, request.argumentAddresses.data());
-    EXPECT_EQ(request.apiRequest.argsBytes, request.argumentBytes.data());
-    EXPECT_EQ(request.apiRequest.resourceId, request.resourceId.c_str());
-    EXPECT_EQ(request.apiRequest.kernelEntry, request.kernelEntry.c_str());
-    EXPECT_EQ(request.apiRequest.options, request.basicOptionPointers.data());
-    ASSERT_EQ(request.basicOptionPointers.size(), request.basicOptionStorage.size());
-    for (size_t option = 0; option < request.basicOptionStorage.size(); ++option) {
-      EXPECT_EQ(request.basicOptionPointers[option], request.basicOptionStorage[option].c_str());
-      EXPECT_STREQ(request.basicOptionPointers[option], expectedBasic[option].c_str());
+    EXPECT_EQ(request.basicOptionStorage, expectedBasic);
+    ASSERT_EQ(request.argumentAddresses.size(), kernel.paramCount);
+    for (size_t argument = 0; argument < request.argumentAddresses.size(); ++argument) {
+      EXPECT_EQ(request.argumentAddresses[argument], request.hostArgs.data() + kernel.offset + argument * kernel.size);
     }
   }
 }

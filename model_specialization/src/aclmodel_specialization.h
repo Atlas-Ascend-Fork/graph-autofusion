@@ -46,7 +46,7 @@ struct aclmdlRISpecSKFeature {
 };
 
 struct aclmdlRISpecOptions {
-  uint64_t jobs;  // Parallel compile workers; 0 keeps the default of one (serial).
+  uint64_t jobs;  // 并行数；0 或负数转换值默认使用 CPU 核数的 70%，至少为 1。
   uint64_t specCompileOptionCount;
   aclmdlRISpecCompileOption *specCompileOptions;
   bool enableSK;

@@ -22,40 +22,41 @@
 
 namespace model_spec::compile {
 
-enum class CompileOutcome { Success, CompileFailed, ExecutionFailed, TimedOut, ArtifactFailed, Skipped };
+enum class CompileOutcome { Success, CompileFailed, ExecutionFailed, TimedOut, Skipped };
 
 struct CompileJobResult {
   uint64_t jobId = NO_JOB_ID;
   CompileOutcome outcome = CompileOutcome::Skipped;
   std::optional<int32_t> aclrtcCode;
   std::string detail;
-  uint64_t artifactSize = 0;
-  std::string artifactSha256;
 };
 
-enum class PoolDisposition { Finished, RetrySerialBeforeDispatch };
-
 struct PoolRunResult {
-  PoolDisposition disposition = PoolDisposition::Finished;
   std::vector<CompileJobResult> jobs;
   bool preserveOutputDirectory = false;
 };
 
 struct PoolConfig {
+  static constexpr auto DEFAULT_STARTUP_TIMEOUT = std::chrono::seconds{10};
+  static constexpr auto DEFAULT_TASK_TIMEOUT = std::chrono::minutes{5};
+  static constexpr auto DEFAULT_SHUTDOWN_TIMEOUT = std::chrono::seconds{5};
+  static constexpr auto DEFAULT_TERM_GRACE = std::chrono::seconds{1};
+  static constexpr auto DEFAULT_GROUP_CHECK_TIMEOUT = std::chrono::seconds{1};
+  static constexpr auto DEFAULT_REAP_INTERVAL = std::chrono::milliseconds{20};
+
   uint64_t workerCount = 1;
   std::string workerPath;
   std::string outputDirectory;
-  std::chrono::milliseconds startupTimeout{10000};
-  std::chrono::milliseconds taskTimeout{600000};
-  std::chrono::milliseconds shutdownTimeout{5000};
-  std::chrono::milliseconds termGrace{1000};
-  std::chrono::milliseconds groupCheckTimeout{1000};
-  std::chrono::milliseconds reapInterval{20};
+  std::chrono::milliseconds startupTimeout{DEFAULT_STARTUP_TIMEOUT};
+  std::chrono::milliseconds taskTimeout{DEFAULT_TASK_TIMEOUT};
+  std::chrono::milliseconds shutdownTimeout{DEFAULT_SHUTDOWN_TIMEOUT};
+  std::chrono::milliseconds termGrace{DEFAULT_TERM_GRACE};
+  std::chrono::milliseconds groupCheckTimeout{DEFAULT_GROUP_CHECK_TIMEOUT};
+  std::chrono::milliseconds reapInterval{DEFAULT_REAP_INTERVAL};
 };
 
 struct CleanupReport {
   bool preserveOutputDirectory = false;
-  std::vector<int64_t> unconfirmedWorkers;
 };
 
 class CompileProcessPool final {
