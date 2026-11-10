@@ -260,6 +260,11 @@ LogicalResult CodeEmitter::emitTypeAttr(Location loc, Attribute attr)
     return emitType(loc, type.getValue());
 }
 
+void CodeEmitter::bindParameterName(Value val, StringRef name)
+{
+    valueMapper.insert(val, name.str());
+}
+
 /// Return the existing or a new name for a Value.
 StringRef CodeEmitter::getOrCreateName(Value val)
 {

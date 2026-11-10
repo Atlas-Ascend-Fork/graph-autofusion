@@ -807,6 +807,22 @@ TEST(CodegenOrchestrationTest, EmptyExtensionHeadersAreEmptyCollections) {
   EXPECT_EQ(prelude.front(), "utils.h");
 }
 
+TEST(CodegenOrchestrationTest, OnlyStaticInductorExportsSingleSolutionProtocol) {
+  mlir::test::ScopedEnvVar config("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;");
+  for (bool isStatic : {false, true}) {
+    const auto schedule = BuildFusedScheduleResultWithTwoValidPlans(isStatic);
+    codegen::CodegenResult result;
+    ASSERT_EQ(mlir::bridge::RunMlirCodegen(schedule, mlir::bridge::MlirCallerScene::kInductor, "Ascend910B1", result),
+              mlir::bridge::MlirCodegenStatus::kSucceeded);
+    EXPECT_EQ(result.tiling.find("extern \"C\" int64_t GenerateTopnSolutions(") != std::string::npos, isStatic);
+    EXPECT_NE(result.tiling.find("GetTilingDataRepr("), std::string::npos);
+    EXPECT_NE(result.kernel.find("AutofuseTilingData t) {"), std::string::npos);
+    EXPECT_NE(result.kernel.find("*tiling_data);"), std::string::npos);
+    // Keep the unrelated GenConstTilingData recompilation path disabled.
+    EXPECT_EQ(result.tiling.find("GenConstTilingData("), std::string::npos);
+  }
+}
+
 TEST(CodegenOrchestrationTest, StaticCodegenDoesNotInvokeHostCompiler) {
   mlir::test::ScopedEnvVar compiler("CXX", "/nonexistent/autofuse-test-cxx");
   const auto schedule = BuildFusedScheduleResultWithTwoValidPlans(true);

@@ -128,6 +128,10 @@ FailureOr<AggregateLaunchArtifacts> EmitArtifactsFromEntryModule(ModuleOp entryM
   }
   const std::string graphName = kernelEntryFunc->getName().str();
   ArrayRef<Type> kernelArgumentTypes = kernelEntryFunc->getArgumentTypes();
+  // compile_adapter's tiling_repr rewrite removes "AutofuseTilingData t" and
+  // inserts a constexpr t. All uses must carry this same ABI parameter name.
+  kernelEntryFunc->setArgAttr(kernelEntryFunc->getNumArguments() - 1, "ascendc.parameter_name",
+                              StringAttr::get(entryModule.getContext(), "t"));
 
   AggregateLaunchArtifacts artifacts;
   llvm::raw_string_ostream kernelBodyOs(artifacts.kernel_body);

@@ -9,6 +9,7 @@
  */
 
 #include "artifact/TilingSource/TilingFuncEmitter.h"
+#include "common/tiling_schema/resource_budget.h"
 
 #include <map>
 #include <set>
@@ -427,6 +428,39 @@ FailureOr<std::string> emitInductorTilingFunc(const TilingProgramSpec &spec, con
     return failure();
   }
   result += *abi;
+  if (spec.shape_params.empty()) {
+    // Inductor accepts fewer solutions than requested. Keep ATT's normal
+    // modeled winner and reuse its resource/workspace validation unchanged.
+    result += R"(
+#include <map>
+#include <string>
+#include <vector>
+extern "C" int64_t GenerateTopnSolutions(
+    const std::vector<std::map<std::string, std::string>> &input_configs, int64_t topn,
+    std::vector<AutofuseTilingData> &tiling_datas, std::vector<int64_t> &workspaces,
+    std::vector<int64_t> &block_dims, ResLimit *res_limit = nullptr) {
+  tiling_datas.clear();
+  workspaces.clear();
+  block_dims.clear();
+  if (topn <= 0) { return -1; }
+  // This single-solution adapter supports the default solver configuration only.
+  for (const auto &config : input_configs) {
+    if (!config.empty()) { return -1; }
+  }
+  AutofuseTilingData tiling{};
+  uint64_t workspace = 0;
+  uint32_t block_dim = 0;
+  if (AutofuseTiling(&tiling, &workspace, &block_dim, res_limit) != 0 ||
+      workspace > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return -1;
+  }
+  tiling_datas.push_back(tiling);
+  workspaces.push_back(static_cast<int64_t>(workspace));
+  block_dims.push_back(block_dim);
+  return 0;
+}
+)";
+  }
   result += "// AUTOFUSE_SPLIT_FILE_END: MlirTilingFunc\n";
   return result;
 }

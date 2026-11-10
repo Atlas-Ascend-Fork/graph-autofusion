@@ -62,6 +62,12 @@ LogicalResult mlir::printOperation(CodeEmitter& codeEmitter, func::FuncOp functi
 
     bool isMainFunction = functionOp->hasAttr(ascendc::attr::global);
     auto args = functionOp.getArguments();
+    // Explicit parameter names are part of the external compilation protocol.
+    for (BlockArgument arg : args) {
+        if (auto name = functionOp.getArgAttrOfType<StringAttr>(arg.getArgNumber(), "ascendc.parameter_name")) {
+            codeEmitter.bindParameterName(arg, name.getValue());
+        }
+    }
 
     os << (isMainFunction ? "extern \"C\"  __global__ " : "__inline__ __attribute__((always_inline)) ");
     os << "__aicore__ ";
