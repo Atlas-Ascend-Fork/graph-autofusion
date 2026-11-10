@@ -1153,13 +1153,23 @@ Status ScheduleUtils::SwapInputIndex(const ascir::NodeView &node, const int32_t 
   return af::SUCCESS;
 }
 
+/**
+ * @brief 获取 Transpose 输入端真实生产者输出 Tensor 的轴列表。
+ *
+ * 通过 input[0] 数据锚点定位生产者和输出端口，并校验类型及端口范围，避免误用其他父节点输出。
+ */
 Status ScheduleUtils::GetInputForTranspose(af::AscNode &node, std::vector<ascir::AxisId> &input_axis) {
-  const auto begin_node = std::dynamic_pointer_cast<af::AscNode>(node.shared_from_this());
-  GE_ASSERT_NOTNULL(begin_node);
-  auto parent_nodes = GetParentNodes(begin_node);
-  GE_ASSERT_TRUE(!parent_nodes.empty(), "The node %s has no parent node.", node.GetNamePtr());
-  input_axis = parent_nodes[0]->outputs[0].attr.axis;
-  GELOGD("Found transpose input from %s, the axis is %s.", parent_nodes[0]->GetNamePtr(),
+  const auto input_anchor = node.GetInDataAnchor(0);
+  GE_ASSERT_NOTNULL(input_anchor, "The node %s has no input[0] anchor.", node.GetNamePtr());
+  const auto peer_out_anchor = input_anchor->GetPeerOutAnchor();
+  GE_ASSERT_NOTNULL(peer_out_anchor, "The node %s input[0] has no producer.", node.GetNamePtr());
+  const auto producer = std::dynamic_pointer_cast<af::AscNode>(peer_out_anchor->GetOwnerNode());
+  GE_ASSERT_NOTNULL(producer, "The node %s input[0] producer is null.", node.GetNamePtr());
+  const auto output_index = peer_out_anchor->GetIdx();
+  GE_ASSERT_TRUE(output_index >= 0 && static_cast<size_t>(output_index) < producer->outputs().size(),
+                 "The node %s input[0] producer output index[%d] is out of range.", node.GetNamePtr(), output_index);
+  input_axis = producer->outputs[static_cast<size_t>(output_index)].attr.axis;
+  GELOGD("Found transpose input from %s output[%d], the axis is %s.", producer->GetNamePtr(), output_index,
          af::ViewMemberToString(input_axis).c_str());
   return af::SUCCESS;
 }

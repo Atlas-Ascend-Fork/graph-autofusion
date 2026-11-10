@@ -10,11 +10,14 @@
 
 #include "gtest/gtest.h"
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "ascendc_ir.h"
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
 #include "ascir_ops.h"
+#include "graph/utils/attr_utils.h"
 
 #include "pyascir.h"
 #include "pyascir_types.h"
@@ -137,6 +140,90 @@ TEST_F(TestPyModule, AutofuseBackendRejectsUnknownArchBeforeGraphValidation) {
   Py_XDECREF(autofuser_type);
   Py_XDECREF(options);
   Py_XDECREF(options_type);
+  ge::PlatformContext::GetInstance().Reset();
+}
+
+// ScheduleV2 接收序列化子图组成的 ComputeGraph，通过真实 Python 方法验证异常传播。
+TEST_F(TestPyModule, ScheduleV2ReportsReduceShapeErrorsAndRecovers) {
+  ge::PlatformContext::GetInstance().SetPlatform("2201");
+  const auto own = [](PyObject *object) { return std::unique_ptr<PyObject, decltype(&Py_DecRef)>(object, &Py_DecRef); };
+  auto schedule_type = own(PyObject_GetAttrString(pyautofuse_module_, "Schedule"));
+  ASSERT_NE(schedule_type, nullptr);
+  auto scheduler = own(PyObject_CallObject(schedule_type.get(), nullptr));
+  ASSERT_NE(scheduler, nullptr);
+  for (const auto &shape : {std::vector<int64_t>{4, 2}, std::vector<int64_t>{5, 1}, std::vector<int64_t>{4, 1}}) {
+    SCOPED_TRACE("output=" + std::to_string(shape[0]) + "," + std::to_string(shape[1]));
+    af::AscGraph graph("v2_reduce_shape");
+    const auto a = graph.CreateAxis("a", af::Symbol(4));
+    const auto r = graph.CreateAxis("r", af::Symbol(8));
+    const std::vector<af::AxisId> axes = {a.id, r.id};
+    af::ascir_op::Data data("data", graph);
+    data.ir_attr.SetIndex(0);
+    data.y.dtype = af::DT_FLOAT16;
+    *data.y.axis = axes;
+    *data.y.repeats = {af::Symbol(4), af::Symbol(8)};
+    *data.y.strides = {af::Symbol(8), af::Symbol(1)};
+    af::ascir_op::Load load("load");
+    load.x = data.y;
+    load.attr.sched.axis = axes;
+    load.y.dtype = af::DT_FLOAT16;
+    *load.y.axis = axes;
+    *load.y.repeats = {af::Symbol(4), af::Symbol(8)};
+    *load.y.strides = {af::Symbol(8), af::Symbol(1)};
+    af::ascir_op::Max reduce("reduce");
+    reduce.x = load.y;
+    reduce.attr.sched.axis = axes;
+    reduce.y.dtype = af::DT_FLOAT16;
+    *reduce.y.axis = axes;
+    *reduce.y.repeats = {af::Symbol(shape[0]), af::Symbol(shape[1])};
+    *reduce.y.strides = {af::Symbol(1), af::Symbol(0)};
+    af::ascir_op::Store store("store");
+    store.x = reduce.y;
+    store.attr.sched.axis = axes;
+    store.y.dtype = af::DT_FLOAT16;
+    *store.y.axis = axes;
+    *store.y.repeats = {af::Symbol(shape[0]), af::Symbol(shape[1])};
+    *store.y.strides = {af::Symbol(1), af::Symbol(0)};
+    af::ascir_op::Output output("output");
+    output.x = store.y;
+    output.ir_attr.SetIndex(0);
+
+    std::string serialized;
+    ASSERT_EQ(af::AscGraphUtils::SerializeToReadable(graph, serialized), af::SUCCESS);
+    auto wrapper = own(pyascir::HintComputeGraph::New(&pyascir::HintComputeGraph::type, nullptr, nullptr));
+    ASSERT_NE(wrapper, nullptr);
+    ASSERT_EQ(pyascir::HintComputeGraph::Init(wrapper.get(), nullptr, nullptr), 0);
+    auto compute = reinterpret_cast<pyascir::HintComputeGraph::Object *>(wrapper.get());
+    const auto op = std::make_shared<af::OpDesc>("ascgraph", "AscGraph");
+    ASSERT_TRUE(af::AttrUtils::SetStr(op, "ascgraph", serialized));
+    ASSERT_NE(compute->compute_graph->AddNode(op), nullptr);
+    auto result = own(PyObject_CallMethod(scheduler.get(), "scheduleV2", "O", wrapper.get()));
+    compute->compute_graph.reset();
+    if (shape[0] == 4 && shape[1] == 1) {
+      if (PyErr_Occurred() != nullptr) {
+        PyErr_Print();
+      }
+      EXPECT_NE(result, nullptr);
+    } else {
+      EXPECT_EQ(result, nullptr);
+      ASSERT_TRUE(PyErr_ExceptionMatches(PyExc_RuntimeError));
+      PyObject *error_type = nullptr;
+      PyObject *error_value = nullptr;
+      PyObject *traceback = nullptr;
+      PyErr_Fetch(&error_type, &error_value, &traceback);
+      auto type_owner = own(error_type);
+      auto value_owner = own(error_value);
+      auto traceback_owner = own(traceback);
+      auto message_object = own(PyObject_Str(error_value));
+      ASSERT_NE(message_object, nullptr);
+      const std::string message = PyUnicode_AsUTF8(message_object.get());
+      EXPECT_NE(message.find("[AF][SCHEDULE GRAPH VALIDATION ERROR][REDUCE_AXIS]"), std::string::npos) << message;
+      EXPECT_NE(message.find("stage=schedule"), std::string::npos) << message;
+      EXPECT_NE(message.find("node=reduce"), std::string::npos) << message;
+      EXPECT_NE(message.find(shape[1] == 2 ? "expected=1" : "non-reduced axis length changed"), std::string::npos)
+          << message;
+    }
+  }
   ge::PlatformContext::GetInstance().Reset();
 }
 
