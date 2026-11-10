@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -851,6 +852,88 @@ Result<std::string> MultiplyExpressions(std::string_view lhs, std::string_view r
     return simplified.error();
   }
   return simplified.value().Serialize();
+}
+
+namespace {
+// Size symbols are integers. Ceiling/Floor return integers even for rational
+// arguments; a general Pow may represent division and is deliberately excluded.
+bool isIntegerValued(const afir::detail::ExpressionNode &node) {
+  using afir::detail::NodeKind;
+  switch (node.kind) {
+    case NodeKind::Ceiling:
+    case NodeKind::Floor:
+      return true;
+    case NodeKind::Integer:
+    case NodeKind::Symbol:
+      return true;
+    case NodeKind::Add:
+    case NodeKind::Mul:
+    case NodeKind::Max:
+    case NodeKind::Min:
+    case NodeKind::Mod:
+    case NodeKind::Abs:
+      return std::all_of(node.arguments.begin(), node.arguments.end(), isIntegerValued);
+    default:
+      return false;
+  }
+}
+
+// 字面量正整数节点的值。不是那个形态返回 nullopt。
+std::optional<int64_t> positiveIntegerValue(const afir::detail::ExpressionNode &node) {
+  if (node.kind != afir::detail::NodeKind::Integer) {
+    return std::nullopt;
+  }
+  try {
+    size_t parsed = 0;
+    const int64_t value = std::stoll(node.value, &parsed);
+    if (parsed == node.value.size() && value > 0) {
+      return value;
+    }
+  } catch (const std::exception &) {
+    // An integer outside int64_t cannot establish this bounded factor check.
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
+bool ProveExpressionMultipleOf(std::string_view expression, int64_t factor) {
+  if (expression.empty() || factor <= 0) {
+    return false;
+  }
+  Result<Expression> parsed = Expression::Parse(expression);
+  if (!parsed) {
+    return false;
+  }
+  Result<Expression> simplified = parsed.value().Simplify();
+  if (!simplified) {
+    return false;
+  }
+  Result<afir::detail::ExpressionNode> tree = afir::detail::ExpressionAccess::GetTree(simplified.value());
+  if (!tree) {
+    return false;
+  }
+  const afir::detail::ExpressionNode &root = tree.value();
+  if (std::optional<int64_t> literal = positiveIntegerValue(root)) {
+    return *literal % factor == 0;
+  }
+  if (root.kind != afir::detail::NodeKind::Mul) {
+    return false;
+  }
+  for (size_t index = 0; index < root.arguments.size(); ++index) {
+    std::optional<int64_t> literal = positiveIntegerValue(root.arguments[index]);
+    if (!literal || *literal % factor != 0) {
+      continue;
+    }
+    bool othersAreIntegers = true;
+    for (size_t other = 0; other < root.arguments.size() && othersAreIntegers; ++other) {
+      othersAreIntegers = other == index || isIntegerValued(root.arguments[other]);
+    }
+    if (othersAreIntegers) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool ProveExpressionsEqual(std::string_view lhs, std::string_view rhs) {

@@ -2,6 +2,7 @@ add_executable(af-opt main.cpp)
 target_link_libraries(af-opt PRIVATE
     ascendc_api_headers
     MLIROptLib
+    MLIRTransforms
 
     MLIRArithDialect
     MLIRBufferizationDialect

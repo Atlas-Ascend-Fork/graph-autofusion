@@ -114,6 +114,9 @@ struct VectorPlan {
 //
 // 「证不了」一律封段（保守方向）：多分一段的后果是多一层循环，少分一段的后果是算错地址。
 FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op, bool compactTail = false);
+// Explicit participants retain their original operand/destination indices.
+// Callers remove scalar API operands before merging, not from the completed plan.
+FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op, ArrayRef<VectorTensor> tensors, bool compactTail = false);
 
 // 两个 `ExprAttr` 可证相等吗。文本相同先短路，再走 `ProveExpressionsEqual`；任一侧为空
 // 或证不了（含 `Unknown` 与解析失败）返回 false。`VectorSegmentation.cpp` 合轴判据与

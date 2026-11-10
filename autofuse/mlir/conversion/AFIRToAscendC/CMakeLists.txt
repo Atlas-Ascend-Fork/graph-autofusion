@@ -24,7 +24,7 @@ add_mlir_library(AFIRToAscendC
   Implementations/Broadcast.cpp
   Implementations/ConstBlockTensor.cpp
   Implementations/ElementwiseApiFamily.cpp
-  Implementations/ElementwiseTransferPlan.cpp
+  Implementations/ElementwiseLocalView.cpp
   Implementations/DataMovement.cpp
   Implementations/Execution.cpp
   Implementations/Nddma.cpp

@@ -143,102 +143,6 @@ bool provablyLiteral(afir::ExprAttr expression, llvm::StringRef literal) {
 // `provablyEqual` 直接用 `mlir::afir` 导出的那份（`VectorSegmentation.cpp`）：
 // 文本短路 + `ProveExpressionsEqual`，空侧答 false，语义与这里原先的局部副本一致。
 
-// 这棵子树的取值一定是整数吗。
-//
-// `Ceiling` / `Floor` 无论实参是什么都返回整数，所以不看孩子。`Symbol` 算整数：这套表达式
-// 里的自由符号全是尺寸（轴长、tile 尺寸、block 数）。`Pow` 不算——它在这套表达式里同时
-// 承载除法（`x^-1`），放进来就等于放过一个可能不是整数的因子；`Rational` / `Real` / `Log`
-// 与各谓词节点同理。
-bool isIntegerValued(const afir::detail::ExpressionNode &node) {
-  using afir::detail::NodeKind;
-  switch (node.kind) {
-    case NodeKind::Ceiling:
-    case NodeKind::Floor:
-      return true;
-    case NodeKind::Integer:
-    case NodeKind::Symbol:
-      return true;
-    case NodeKind::Add:
-    case NodeKind::Mul:
-    case NodeKind::Max:
-    case NodeKind::Min:
-    case NodeKind::Mod:
-    case NodeKind::Abs:
-      return llvm::all_of(node.arguments, isIntegerValued);
-    default:
-      return false;
-  }
-}
-
-// 字面量正整数节点的值。不是那个形态返回 nullopt。
-std::optional<int64_t> positiveIntegerValue(const afir::detail::ExpressionNode &node) {
-  if (node.kind != afir::detail::NodeKind::Integer) {
-    return std::nullopt;
-  }
-  int64_t value = 0;
-  if (llvm::StringRef(node.value).getAsInteger(10, value) || value <= 0) {
-    return std::nullopt;
-  }
-  return value;
-}
-
-// `expression` 可证是 `factor` 的整数倍吗。证不了返回 false（保守方向：报不支持，不是算错）。
-//
-// 结构判据，不是算术证明。 想证的是整除，而 `ProveExpressionsEqual` 只答「两个表达式
-// 是否可证相等」。把整除写成相等要用 `P == f * Ceiling(P / f)`，代进 `P = f * Ceiling(Z / f)`
-// 之后左右差一层 `Ceiling(Ceiling(Z / f))`，而 SymEngine 不把 `ceiling` 套 `ceiling` 折掉
-// （它的规范化只在实参是 `Number` 时求值），于是符号行距一律证不出来——而符号行距恰好是
-// 动态 shape 下的常态。
-//
-// 结构判据能过：调度算出来的行距是 `af::sym::Align(Z, f)`，而那个函数就是
-// `Mul(Ceiling(Div(Z, f)), f)`（`graph_metadef/graph/expression/symbol_operator.cc:86`），
-// 序列化出来是 `(f * Ceiling((Z / f)))`——`Mul` 里那个 `f` 是字面量，其余因子是 `Ceiling`。
-//
-// 两种形态：
-//   - 整个树是正整数字面量，且 % factor == 0；
-//   - 树是 `Mul`，其中有一个正整数字面量因子 % factor == 0，且其余每个因子都是整数值。
-//     少了后半句，`(8 * s / 3)` 这种也会被放过去。
-bool isProvablyMultipleOf(afir::ExprAttr expression, int64_t factor) {
-  // `factor <= 0` 是下面那个 `%` 的除数检查。`factor` 是 `32 / sizeof(T)`，在本档收的
-  // 元素类型上取值只有 8 与 16，所以这一条今天走不到；留着是因为它保护的是一次取模。
-  if (!expression || factor <= 0) {
-    return false;
-  }
-  Result<Expression> parsed = Expression::Parse(expression.getValue().getValue());
-  if (!parsed) {
-    return false;
-  }
-  Result<Expression> simplified = parsed.value().Simplify();
-  if (!simplified) {
-    return false;
-  }
-  Result<afir::detail::ExpressionNode> tree = afir::detail::ExpressionAccess::GetTree(simplified.value());
-  if (!tree) {
-    return false;
-  }
-  const afir::detail::ExpressionNode &root = tree.value();
-  if (std::optional<int64_t> literal = positiveIntegerValue(root)) {
-    return *literal % factor == 0;
-  }
-  if (root.kind != afir::detail::NodeKind::Mul) {
-    return false;
-  }
-  for (size_t index = 0; index < root.arguments.size(); ++index) {
-    std::optional<int64_t> literal = positiveIntegerValue(root.arguments[index]);
-    if (!literal || *literal % factor != 0) {
-      continue;
-    }
-    bool othersAreIntegers = true;
-    for (size_t other = 0; other < root.arguments.size() && othersAreIntegers; ++other) {
-      othersAreIntegers = other == index || isIntegerValued(root.arguments[other]);
-    }
-    if (othersAreIntegers) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // 一个 `afir.remove_pad` 在分段之后的形态。三个尺寸各记「哪一段的哪一项」，不记物化出来的
 // 值——capability 只判形态、不建 IR，pattern 才物化。
 struct RemovePadShape {
@@ -347,7 +251,8 @@ FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan
     shape.repeatSegment = 0;
     shape.pitch = inner.strides[shape.source];
   }
-  if (!shape.repeatIsUnit && !isProvablyMultipleOf(shape.pitch, kUbAccessGranularityBytes / elementBytes)) {
+  if (!shape.repeatIsUnit &&
+      !ProveExpressionMultipleOf(shape.pitch.getValue().getValue(), kUbAccessGranularityBytes / elementBytes)) {
     return failure();
   }
   return shape;
@@ -492,8 +397,9 @@ class RemovePadConversionPattern final : public OpConversionPattern<afir::Remove
     // subindex（本地侧偏移恒为 0，与 `UnaryElementwise.cpp` 同一条判据），以及按逐轴 extent
     // 算出各段的元素数（含切分轴的尾块修正）。
     const auto windowSize = static_cast<unsigned>(vectorPlan.segments.size());
-    FailureOr<VectorizedWindow> window =
-        materializeVectorizedSegments(op, rewriter, vectorPlan, *plan, *ordered, windowSize);
+    FailureOr<VectorizedWindow> window = materializeVectorizedSegments(
+        op, rewriter, vectorPlan,
+        plan->kind == TransferPlanKind::Scheduled ? ExtentSource::Actual : ExtentSource::Nominal, *ordered, windowSize);
     if (failed(window) || window->tiles.size() != vectorPlan.tensors.size() || window->extents.size() != windowSize) {
       return rewriter.notifyMatchFailure(op, "cannot materialize the vectorized segment extents");
     }

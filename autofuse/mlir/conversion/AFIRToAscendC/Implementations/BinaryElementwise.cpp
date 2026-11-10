@@ -30,13 +30,12 @@
 #include "conversion/AFIRToAscendC/Implementations/BinaryElementwise.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
 #include "target/Ascend/AscendTargetProfile.h"
-#include "dialect/AFIR/Analysis/TransferPlan.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 
 #include "conversion/AFIRToAscendC/AscendCAttributes.h"
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseApiFamily.h"
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseStockCalls.h"
-#include "conversion/AFIRToAscendC/Implementations/ElementwiseTransferPlan.h"
+#include "conversion/AFIRToAscendC/Implementations/ElementwiseLocalView.h"
 #include "conversion/AFIRToAscendC/Implementations/Synchronization.h"
 #include "dialect/AFIR/Support/SymbolicExpression.h"
 #include "dialect/AFIR/IR/AFIR.h"
@@ -254,21 +253,24 @@ std::optional<BinaryOperandOrder> binaryOperandOrder(Operation *op, ScalarOperan
 }
 
 elementwise::LocalViewCompatibility checkBinaryLocalViews(Operation *op, ScalarOperand form,
-                                                          TransferPlanKind *kind = nullptr) {
+                                                          bool *wholeTensor = nullptr) {
   auto scalar = scalarTensorInput(op, form);
-  if (!scalar) {
-    return elementwise::checkElementwiseLocalViews(op, kind);
+  if (scalar) {
+    auto partition = afir::getOperandPartition(op);
+    if (!scalarReadEvent(op, partition->inputs(op)[*scalar]) || !findFunctionPipe(op)) {
+      return elementwise::LocalViewCompatibility::MissingInformation;
+    }
   }
-  auto partition = afir::getOperandPartition(op);
-  if (!scalarReadEvent(op, partition->inputs(op)[*scalar]) || !findFunctionPipe(op)) {
-    return elementwise::LocalViewCompatibility::MissingInformation;
+  SmallVector<unsigned> scalars;
+  if (scalar) {
+    scalars.push_back(*scalar);
   }
-  auto tensor = elementwise::getOperandDescriptor(op, 1U - *scalar);
-  auto destination = elementwise::getDestinationDescriptor(op);
-  if (failed(tensor) || failed(destination)) {
-    return elementwise::LocalViewCompatibility::MissingInformation;
+  elementwise::ElementwiseLocalView view;
+  auto result = elementwise::prepareElementwiseLocalView(op, scalars, false, view);
+  if (result == elementwise::LocalViewCompatibility::Compatible && wholeTensor) {
+    *wholeTensor = !view.vectorPlan;
   }
-  return elementwise::checkLocalViewCompatibility(op, {*tensor, *destination}, kind);
+  return result;
 }
 
 // 结果类型不在这里比：`verifyBufferizedElementwise` 已经强制「结果类型 == 目的地类型」，
@@ -316,22 +318,6 @@ bool areElementTypesSupported(ResultElementRule relation, uint32_t allowed, Type
   return afir::elementwise::matchesResultElementRule(lhsElement, destinationElement, relation);
 }
 
-// AscendC binary APIs take one element count for the destination window. Either
-// source tile may therefore be smaller only on an outer, non-vectorized axis with
-// stride zero: the generated scheduled loop repeats that window while the local
-// offset stays zero. The exact safety predicate is shared with unary lowering;
-// a size-one dimension on a vectorized axis is not safe to widen there either.
-bool shapesAreCompatibleForOuterBroadcast(Operation *op) {
-  FailureOr<afir::OperandPartition> partition = afir::getOperandPartition(op);
-  if (failed(partition) || partition->inputCount != kBinaryInputCount || partition->destinationCount != 1) {
-    return false;
-  }
-  OperandRange inputs = partition->inputs(op);
-  Value destination = partition->destinations(op)[0];
-  return afir::elementwise::sourceBroadcastsToDestination(op, inputs[0], destination) &&
-         afir::elementwise::sourceBroadcastsToDestination(op, inputs[1], destination);
-}
-
 class BinaryElementwiseCapabilityProvider final : public ascend::instruction::CapabilityProvider {
  public:
   explicit BinaryElementwiseCapabilityProvider(std::shared_ptr<const BinaryElementwiseMapping> mapping)
@@ -342,10 +328,9 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
-    // 秩的门禁下面要按计划种类分流，而种类只有计划知道，所以这里顺带把它取出来。
-    TransferPlanKind planKind = TransferPlanKind::Identity;
+    bool wholeTensor = true;
     const elementwise::LocalViewCompatibility compatibility =
-        checkBinaryLocalViews(operation, mapping_->scalarOperand, &planKind);
+        checkBinaryLocalViews(operation, mapping_->scalarOperand, &wholeTensor);
     if (compatibility == elementwise::LocalViewCompatibility::UnsupportedShape) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
@@ -367,19 +352,17 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
       return *tmpBuffer;
     }
 
-    return queryTensorContract(operation, planKind);
+    return queryTensorContract(operation, wholeTensor);
   }
 
-  CapabilitySupport queryTensorContract(Operation *operation, TransferPlanKind planKind) const {
+  CapabilitySupport queryTensorContract(Operation *operation, bool wholeTensor) const {
     const bool rhsIsTile = mapping_->scalarOperand == ScalarOperand::None;
     FailureOr<BinaryTensorTypes> types = getTensorTypes(operation, mapping_->scalarOperand);
     if (failed(types)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
-    // 秩的门禁只对 identity 计划成立：那条路径把 `LocalTensorGetSizeOp` 当长度，一维
-    // 之外没有第二个下标可解释。scheduled 计划的 LocalTensor 秩跟着 UB buffer 的 memref
-    // 走（多维 tile 上就是多维类型），长度由有效视图折算出的局部跨度给，不看这个秩。
-    if (planKind == TransferPlanKind::Identity &&
+    // Only the minimal whole-tensor contract uses the buffer size as its count.
+    if (wholeTensor &&
         !(types->lhs.hasRank() && types->lhs.getRank() == 1 && types->destination.hasRank() &&
           types->destination.getRank() == 1 && (!rhsIsTile || (types->rhs.hasRank() && types->rhs.getRank() == 1)))) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
@@ -387,12 +370,6 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     if (!areElementTypesSupported(mapping_->resultElementType, mapping_->elementTypes, types->lhs.getElementType(),
                                   types->rhsElement, types->destination.getElementType())) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
-    }
-    // 标量右操作数没有形状可比——它广播到哪个形状都是它自己。
-    const bool sameShape = types->destination.getShape() == types->lhs.getShape() &&
-                           (!rhsIsTile || types->rhs.getShape() == types->lhs.getShape());
-    if (!sameShape && !(rhsIsTile && shapesAreCompatibleForOuterBroadcast(operation))) {
-      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     return CapabilitySupport::supported();
   }
@@ -420,6 +397,9 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     }
     if (query.accessMode != ascend::instruction::AliasAccessMode::ReadWriteInput) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    if (!elementwise::hasSameLocalLayout(operation, query.inputOperandIndex)) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     CapabilitySupport lowering = queryLowering(operation, context);
     if (lowering.getState() != ascend::instruction::SupportState::Supported) {
@@ -481,23 +461,6 @@ FailureOr<std::optional<unsigned>> materializeScalarOperand(SourceOp op, Value (
   return scalarIndex;
 }
 
-void removeScalarInputSegment(afir::VectorPlan &segments, std::optional<unsigned> scalarIndex) {
-  if (!scalarIndex) {
-    return;
-  }
-  for (unsigned i = 0; i < segments.tensors.size(); ++i) {
-    const auto &tensor = segments.tensors[i];
-    if (tensor.side != afir::VectorTensor::Side::Operand || tensor.index != *scalarIndex) {
-      continue;
-    }
-    segments.tensors.erase(segments.tensors.begin() + i);
-    for (auto &segment : segments.segments) {
-      segment.strides.erase(segment.strides.begin() + i);
-    }
-    return;
-  }
-}
-
 FailureOr<Value> applyBinaryVectorizedWindow(BinaryOperandTiles &tiles, const afir::VectorPlan &segments,
                                              const VectorizedWindow &window, BinaryOperandOrder order) {
   if (window.tiles.size() != segments.tensors.size() || window.extents.size() != 1) {
@@ -535,46 +498,26 @@ FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ada
   tiles.lhs = operands[order.tile];
   tiles.rhs = operands[order.other];
   tiles.destination = adaptor.getDestination();
-  // The destination defines the computation domain, independently of which
-  // input becomes a scalar and of the API operand order.
-  FailureOr<TensorDescAttr> descriptor = elementwise::getDestinationDescriptor(op);
-  if (failed(descriptor)) {
+  SmallVector<unsigned> scalarIndices;
+  if (*scalarIndex) {
+    scalarIndices.push_back(**scalarIndex);
+  }
+  elementwise::ElementwiseLocalView view;
+  if (elementwise::prepareElementwiseLocalView(op, scalarIndices, compactTail, view) !=
+      elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
-  FailureOr<TransferPlan> plan = buildTransferPlanForDescriptor(op, *descriptor);
-  if (failed(plan)) {
-    return failure();
-  }
-  if (plan->kind != TransferPlanKind::Scheduled) {
+  if (!view.vectorPlan) {
     tiles.count = rewriter.create<ascendc::LocalTensorGetSizeOp>(op.getLoc(), rewriter.getI32Type(), tiles.destination);
     return tiles;
   }
-
-  // 向量化轴的分段（阶段 2 合轴）。最内一段交给 API，其余段变循环；今天所有图都只有
-  // 一段，走的是「不建循环、偏移恒为常量 0」那条分支，生成的 Op 与此前逐字相同。
-  //
-  // 本地侧偏移恒为 0 的理由（两类成员都是：队列按 slot 自己轮转；TBuf 按 ATT 的
-  // `b{id}_size` 语义只装一个 tile，块内每个迭代整块重写）在单段时仍然成立——单段
-  // 没有外层循环，偏移里没有归纳变量。调度偏移只落在 GM 侧。给本地侧再加「归纳变量 ×
-  // tileSize」是按多 tile 分配算一块单 tile 的缓冲，块内循环多于一趟时越界写 UB
-  // （NPU 上 0x507035）。
-  //
-  // 标量不必在这里判：它没有向量化轴，`collapseVectorizedAxes` 不会把它收进来，
-  // 于是它拿不到 subindex——与此前按 `isa<LocalTensorType>` 分流的结论相同。
-  FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op, compactTail);
-  if (failed(segments)) {
-    return failure();
-  }
-  removeScalarInputSegment(*segments, *scalarIndex);
-  // `order` 重排的是**发射次序**，而 `plan.tensors` 的下标说的是 `afir.operand_descs`
-  // 里的位置，两者不是一回事。所以这里按 adaptor 的原始次序给值，重排后的 `tiles.lhs` /
-  // `tiles.rhs` 再各自从结果里认回去。
+  const auto &segments = view.vectorPlan;
   FailureOr<SmallVector<Value>> ordered = orderTilesForPlan(*segments, operands, tiles.destination);
   if (failed(ordered)) {
     return failure();
   }
   FailureOr<VectorizedWindow> window =
-      materializeVectorizedSegments(op, rewriter, *segments, *plan, *ordered, /*apiWindowSize=*/1);
+      materializeVectorizedSegments(op, rewriter, *segments, view.extentSource, *ordered, /*apiWindowSize=*/1);
   if (failed(window)) {
     return failure();
   }

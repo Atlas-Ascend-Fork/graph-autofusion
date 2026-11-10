@@ -33,7 +33,10 @@ func.func @minimum_lhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.loc
 // CHECK: ascendc.set_flag
 // CHECK: ascendc.wait_flag
 // CHECK: %[[Sminimumlhs:.*]] = ascendc.local_tensor.get_value
-// CHECK: ascendc.mins_l2 %arg1, %arg0, %[[Sminimumlhs]]
+// CHECK: %[[Tminimumlhs:.*]] = ascendc.local_tensor.subindex %arg0[%c0{{.*}}]
+// CHECK: %[[Dminimumlhs:.*]] = ascendc.local_tensor.subindex %arg1[%c0{{.*}}]
+// CHECK: %[[Nminimumlhs:.*]] = arith.constant 32 : index
+// CHECK: ascendc.mins_l2 %[[Dminimumlhs]], %[[Tminimumlhs]], %[[Sminimumlhs]], %[[Nminimumlhs]]
 
 func.func @minimum_rhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_tensor<32xf32>, %aux: !ascendc.local_tensor<?xui8>) {
   %pipe = ascendc.pipe
@@ -49,7 +52,10 @@ func.func @minimum_rhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.loc
 // CHECK: ascendc.set_flag
 // CHECK: ascendc.wait_flag
 // CHECK: %[[Sminimumrhs:.*]] = ascendc.local_tensor.get_value
-// CHECK: ascendc.mins_l2 %arg1, %arg0, %[[Sminimumrhs]]
+// CHECK: %[[Tminimumrhs:.*]] = ascendc.local_tensor.subindex %arg0[%c0{{.*}}]
+// CHECK: %[[Dminimumrhs:.*]] = ascendc.local_tensor.subindex %arg1[%c0{{.*}}]
+// CHECK: %[[Nminimumrhs:.*]] = arith.constant 32 : index
+// CHECK: ascendc.mins_l2 %[[Dminimumrhs]], %[[Tminimumrhs]], %[[Sminimumrhs]], %[[Nminimumrhs]]
 
 func.func @truediv_lhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_tensor<32xf32>, %aux: !ascendc.local_tensor<?xui8>) {
   %pipe = ascendc.pipe
@@ -65,7 +71,10 @@ func.func @truediv_lhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.loc
 // CHECK: ascendc.set_flag
 // CHECK: ascendc.wait_flag
 // CHECK: %[[Struedivlhs:.*]] = ascendc.local_tensor.get_value
-// CHECK: ascendc.true_div_extends %arg1, %arg0, %[[Struedivlhs]]
+// CHECK: %[[Ttruedivlhs:.*]] = ascendc.local_tensor.subindex %arg0[%c0{{.*}}]
+// CHECK: %[[Dtruedivlhs:.*]] = ascendc.local_tensor.subindex %arg1[%c0{{.*}}]
+// CHECK: %[[Ntruedivlhs:.*]] = arith.constant 32 : index
+// CHECK: ascendc.true_div_extends %[[Dtruedivlhs]], %[[Ttruedivlhs]], %[[Struedivlhs]], %arg2, %[[Ntruedivlhs]]
 
 func.func @truediv_rhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_tensor<32xf32>, %aux: !ascendc.local_tensor<?xui8>) {
   %pipe = ascendc.pipe
@@ -81,7 +90,10 @@ func.func @truediv_rhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.loc
 // CHECK: ascendc.set_flag
 // CHECK: ascendc.wait_flag
 // CHECK: %[[Struedivrhs:.*]] = ascendc.local_tensor.get_value
-// CHECK: ascendc.true_div_extends %arg1, %arg0, %[[Struedivrhs]]
+// CHECK: %[[Ttruedivrhs:.*]] = ascendc.local_tensor.subindex %arg0[%c0{{.*}}]
+// CHECK: %[[Dtruedivrhs:.*]] = ascendc.local_tensor.subindex %arg1[%c0{{.*}}]
+// CHECK: %[[Ntruedivrhs:.*]] = arith.constant 32 : index
+// CHECK: ascendc.true_div_extends %[[Dtruedivrhs]], %[[Ttruedivrhs]], %[[Struedivrhs]], %arg2, %[[Ntruedivrhs]]
 
 func.func @pow_lhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_tensor<32xf32>, %aux: !ascendc.local_tensor<?xui8>) {
   %pipe = ascendc.pipe
@@ -97,7 +109,10 @@ func.func @pow_lhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_t
 // CHECK: ascendc.set_flag
 // CHECK: ascendc.wait_flag
 // CHECK: %[[Spowlhs:.*]] = ascendc.local_tensor.get_value
-// CHECK: ascendc.pow %arg1, %[[Spowlhs]], %arg0
+// CHECK: %[[Tpowlhs:.*]] = ascendc.local_tensor.subindex %arg0[%c0{{.*}}]
+// CHECK: %[[Dpowlhs:.*]] = ascendc.local_tensor.subindex %arg1[%c0{{.*}}]
+// CHECK: %[[Npowlhs:.*]] = arith.constant 32 : index
+// CHECK: ascendc.pow %[[Dpowlhs]], %[[Spowlhs]], %[[Tpowlhs]], %arg2, %[[Npowlhs]]
 
 func.func @pow_rhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_tensor<32xf32>, %aux: !ascendc.local_tensor<?xui8>) {
   %pipe = ascendc.pipe
@@ -113,4 +128,7 @@ func.func @pow_rhs(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_t
 // CHECK: ascendc.set_flag
 // CHECK: ascendc.wait_flag
 // CHECK: %[[Spowrhs:.*]] = ascendc.local_tensor.get_value
-// CHECK: ascendc.pow %arg1, %arg0, %[[Spowrhs]]
+// CHECK: %[[Tpowrhs:.*]] = ascendc.local_tensor.subindex %arg0[%c0{{.*}}]
+// CHECK: %[[Dpowrhs:.*]] = ascendc.local_tensor.subindex %arg1[%c0{{.*}}]
+// CHECK: %[[Npowrhs:.*]] = arith.constant 32 : index
+// CHECK: ascendc.pow %[[Dpowrhs]], %[[Tpowrhs]], %[[Spowrhs]], %arg2, %[[Npowrhs]]

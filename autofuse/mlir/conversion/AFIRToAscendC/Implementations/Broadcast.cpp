@@ -953,8 +953,9 @@ class BroadcastSegmentedConversionPattern final : public OpConversionPattern<afi
     // 窗口从最外那个广播段起：它之内的段本档要自己安排层次（循环与两趟的嵌套关系
     // 不是「所有循环建完再生成一条调用」），它之外的段是普通的外层循环。
     const auto windowSize = static_cast<unsigned>(vectorPlan.segments.size() - shape->windowStart);
-    FailureOr<VectorizedWindow> window =
-        materializeVectorizedSegments(op, rewriter, vectorPlan, *plan, *ordered, windowSize);
+    FailureOr<VectorizedWindow> window = materializeVectorizedSegments(
+        op, rewriter, vectorPlan,
+        plan->kind == TransferPlanKind::Scheduled ? ExtentSource::Actual : ExtentSource::Nominal, *ordered, windowSize);
     if (failed(window) || window->tiles.size() != vectorPlan.tensors.size() || window->extents.size() != windowSize) {
       return rewriter.notifyMatchFailure(op, "cannot materialize the outer vectorized segments");
     }

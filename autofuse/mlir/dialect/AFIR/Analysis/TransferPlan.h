@@ -13,7 +13,7 @@
 
 #include <cstdint>
 
-#include "dialect/AFIR/Analysis/VectorSegmentation.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
 
 #include "dialect/AFIR/IR/AFIR.h"
 #include "dialect/AFIR/Support/SymbolicExpressionDetail.h"
@@ -148,16 +148,7 @@ FailureOr<Value> materializeNominalInnermostExtent(Operation *op, OpBuilder &bui
 FailureOr<SmallVector<ScheduledAxisExtent, 4>> materializeScheduledAxisExtents(Operation *op, OpBuilder &builder,
                                                                                ArrayRef<int64_t> axes);
 
-// 取支配 user、并由 `#afir.axis_binding` 标成指定轴与角色的运行期值；找不到返回空 Value。
-Value findAxisValue(func::FuncOp func, Operation *user, int64_t axisId, afir::AxisValueRole role);
-
-// 逐轴替换 ActualSize 后计算段范围；有尾块的轴缺少绑定时失败，不用标称值替代。
-FailureOr<Value> materializeActualSegmentExtent(Operation *op, OpBuilder &builder, const VectorSegment &segment);
 FailureOr<Value> materializeTailAwareTileSize(Operation *op, OpBuilder &builder, const TransferPlan &plan);
-// 将 scheduledAxis 对应的范围替换为 tailAwareSize，再计算段范围。
-// scheduledAxis = -1 表示无尾块修正轴；无修正值时使用各轴的原始范围。
-FailureOr<Value> materializeSegmentExtent(Operation *op, OpBuilder &builder, const VectorSegment &segment,
-                                          int64_t scheduledAxis, Value tailAwareSize);
 // 物化 GM tile 起始元素偏移，不限制局部视图的段数。
 FailureOr<Value> materializeScheduledGlobalOffset(Operation *op, OpBuilder &builder, const TransferPlan &plan);
 // 解析调度轴在 GM 侧的单位元素步长，必要时沿 from 追溯原始轴；无法解析则失败。

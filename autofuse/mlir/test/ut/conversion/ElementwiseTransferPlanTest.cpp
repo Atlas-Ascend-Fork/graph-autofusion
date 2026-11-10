@@ -12,7 +12,7 @@
 // `IsGeneralizeBrcInlineScene`（`common/common_utils.cpp:856`）逐步对齐。设计见
 // docs/development/2026-11-10-afir-broadcast-inline-design.md 功能需求 1。
 
-#include "conversion/AFIRToAscendC/Implementations/ElementwiseTransferPlan.h"
+#include "conversion/AFIRToAscendC/Implementations/ElementwiseLocalView.h"
 
 #include <optional>
 #include <string>

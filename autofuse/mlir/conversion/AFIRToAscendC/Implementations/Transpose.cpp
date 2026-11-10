@@ -517,8 +517,10 @@ class TransposeRegConversionPattern final : public OpConversionPattern<Transpose
     if (failed(ordered)) {
       return rewriter.notifyMatchFailure(op, "cannot order the tiles the segmentation talks about");
     }
-    FailureOr<VectorizedWindow> window = materializeVectorizedSegments(op, rewriter, vectorPlan, *transferPlan,
-                                                                       *ordered, static_cast<unsigned>(totalDim));
+    FailureOr<VectorizedWindow> window = materializeVectorizedSegments(
+        op, rewriter, vectorPlan,
+        transferPlan->kind == TransferPlanKind::Scheduled ? ExtentSource::Actual : ExtentSource::Nominal, *ordered,
+        static_cast<unsigned>(totalDim));
     if (failed(window) || window->tiles.size() != vectorPlan.tensors.size() || window->extents.size() != totalDim) {
       return rewriter.notifyMatchFailure(op, "cannot materialize the vectorized segment window");
     }

@@ -22,9 +22,8 @@
 namespace mlir::ascend::kernel {
 
 FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuilder &rewriter,
-                                                          const afir::VectorPlan &plan,
-                                                          const afir::TransferPlan &transferPlan, ArrayRef<Value> tiles,
-                                                          unsigned apiWindowSize) {
+                                                          const afir::VectorPlan &plan, afir::ExtentSource extentSource,
+                                                          ArrayRef<Value> tiles, unsigned apiWindowSize) {
   // 空 segments 表示所有向量化轴 extent 均为 1。apiWindowSize 为 1 时返回
   // 单元素窗口：不建循环，局部偏移为 0，长度为 1，与搬运侧 materializeScheduledTileIndices 一致。
   // 这会出现在广播轴切分并与外轴合为块轴的模板中：elementwise 位于 broadcast 之前，
@@ -42,7 +41,7 @@ FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuild
 
   // 分段范围沿用搬运的 ActualSize 绑定，支持切分轴位于 tile 内任意位置。
   auto segmentExtent = [&](const afir::VectorSegment &segment) -> FailureOr<Value> {
-    if (transferPlan.kind != afir::TransferPlanKind::Scheduled) {
+    if (extentSource == afir::ExtentSource::Nominal) {
       return afir::materializeSegmentExtent(op, rewriter, segment, -1, {});
     }
     return afir::materializeActualSegmentExtent(op, rewriter, segment);
