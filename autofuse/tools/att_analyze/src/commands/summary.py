@@ -20,6 +20,8 @@ def run(args):
     argv = [args.log_path, "-f", args.format]
     if getattr(args, "all", False):
         argv.append("--all")
+    if getattr(args, "topn", False):
+        argv.append("--topn")
     if args.output:
         argv += ["-o", args.output]
     old_argv = sys.argv[:]

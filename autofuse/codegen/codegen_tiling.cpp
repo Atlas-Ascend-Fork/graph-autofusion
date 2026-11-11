@@ -833,7 +833,7 @@ std::string TilingLib::GetStubTilingHeaders(const ascir::FusedScheduledResult &f
        << "std::vector<uint32_t*> block_dim_vec={}, const SearchConfig *search_cfg=nullptr) {" << std::endl;
     ss << "  return true;" << std::endl;
     ss << "}" << std::endl;
-    ss << "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingData>& tiling_data_list, "
+    ss << "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingDataPerf>& tiling_data_list, "
        << "AutofuseTilingData* tiling_data, uint32_t max_block_dim=48) {" << std::endl;
     ss << "  return true;" << std::endl;
     ss << "}" << std::endl;
@@ -867,7 +867,7 @@ std::string TilingLib::GetStubTilingApi(const ascir::FusedScheduledResult &fused
   ss << "  (void)tiling_data_list; (void)tiling_data; (void)tiling_case_id; (void)output_tiling_data;\n"
         "  (void)tensor_args; (void)stream; (void)workspace_size; (void)out_best_perf; (void)search_cfg; return true;\n"
         "}\n";
-  ss << "inline bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingData> &tiling_data_list, "
+  ss << "inline bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingDataPerf> &tiling_data_list, "
         "AutofuseTilingData *tiling_data, uint32_t max_block_dim = 48) {\n";
   ss << "  (void)tiling_data_list; (void)tiling_data; (void)max_block_dim; return true;\n}\n";
   return ss.str();
@@ -1418,10 +1418,6 @@ std::string TilingLib::GenPlainInductorTilingTail(const ascir::FusedScheduledRes
   ss << "  tiling->set_block_dim(limit->aiv_num);" << std::endl;
   ss << "  tiling->set_ub_size(limit->ub_size - 256);" << std::endl;
   ss << "  if (!optiling::GetTiling(*tiling, -1, nullptr)) {return -1;}" << std::endl;
-  if (UseAttCodegen(elemwise_schedule_result) && ascgen_utils::IsSingleGroup(elemwise_schedule_result)) {
-    ss << "  optiling::EmitFinalTilingByCase(*tiling, tiling->get_block_dim(), \"runtime\", \"default\", 0U, -1);"
-       << std::endl;
-  }
   ss << "  *blockDim = tiling->get_block_dim();" << std::endl;  // Only consider 48 for now
   ss << "  using namespace optiling;" << std::endl;
   ss << "  if (!GetWorkspaceSize(*tiling, *workspaceSize)) {" << std::endl;

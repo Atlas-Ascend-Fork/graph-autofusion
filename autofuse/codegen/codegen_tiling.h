@@ -230,12 +230,12 @@ class TilingLib {
   void GenTopnSearchTilingSetup(std::stringstream &ss, const std::string &tiling,
                                 const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   void GenTopnCollectCandidates(std::stringstream &ss, const std::string &tiling, bool use_att_codegen) const;
-  void GenAppendTemplateSemanticInfos(std::stringstream &ss, const std::string &indent, bool use_att_codegen,
-                                      const std::string &selection_snapshots = "{}") const;
+  void GenMoveTopnSelectionSnapshots(std::stringstream &ss, const std::string &indent, bool use_att_codegen,
+                                     const std::string &selection_snapshots) const;
   std::string GenTemplateSemanticInfosForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   void GenGroupTemplateSemanticInfo(std::stringstream &ss, const std::string &group_prefix,
-                                    const std::string &tiling_data, size_t slot) const;
-  void GenTopnTemplateSemanticLogs(std::stringstream &ss, bool use_att_codegen) const;
+                                    const std::string &tiling_data, size_t group, size_t slot) const;
+  void GenTopnTemplateSemanticLogs(std::stringstream &ss, bool use_att_codegen, size_t observation_slot_count) const;
   void GenTopnMeasuredCoreSearch(std::stringstream &ss, const std::string &tiling) const;
   void GenTopnMeasuredBatchProfiling(std::stringstream &ss, bool use_att_codegen) const;
   void GenTopnAppendMeasuredDefault(std::stringstream &ss, bool use_att_codegen) const;

@@ -202,7 +202,11 @@ class LogParser:
                 else tiling_repr
             )
             repr_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        output_index = self._integer(fields.get("output_index"))
+        if fields.get("source") == "topn" and output_index is None:
+            status = "invalid_final_tiling"
         return FinalTilingRecord(
+            output_index=output_index,
             schema=fields.get("schema"),
             source=fields.get("source"),
             selection_mode=fields.get("selection_mode"),
@@ -225,9 +229,8 @@ class LogParser:
         )
 
     def _parse_final_tiling_end(
-        self, line: str, line_no: int, pending: Dict[str, Dict], source_path: str
+        self, fields: Dict[str, str], pending: Dict[str, Dict], source_path: str
     ):
-        fields = self._envelope(line.split("[ATT][FINAL_TILING_END]", 1)[1])
         item = pending.pop(fields.get("id"), None)
         if item is None:
             return None
@@ -330,15 +333,25 @@ class LogParser:
                 if record.parse_status == "ok":
                     record.parse_status = "duplicate_final_tiling"
 
-    def extract_final_tiling_records(
-        self, log_content: str, source_path: str = ""
+    def _tiling_envelope(self, payload: str, kind: str) -> Dict[str, str]:
+        fields = self._envelope(payload)
+        if kind == "TOPN_TILING":
+            match = re.match(r"\s*stage=topn_output output\[(\d+)\]\s", payload)
+            if match is not None:
+                fields["output_index"] = match.group(1)
+        return fields
+
+    def _extract_tiling_records(
+        self, log_content: str, source_path: str, kind: str
     ) -> List[FinalTilingRecord]:
-        """Parse FINAL_TILING records, including BEGIN/CHUNK/END framing."""
         records: List[FinalTilingRecord] = []
         pending: Dict[str, Dict] = {}
+        begin, chunk, end, single = (
+            f"[ATT][{kind}{suffix}]" for suffix in ("_BEGIN", "_CHUNK", "_END", "")
+        )
         for line_no, line in enumerate(log_content.splitlines(), 1):
-            if "[ATT][FINAL_TILING_BEGIN]" in line:
-                fields = self._envelope(line.split("[ATT][FINAL_TILING_BEGIN]", 1)[1])
+            if begin in line:
+                fields = self._tiling_envelope(line.split(begin, 1)[1], kind)
                 if fields.get("id"):
                     pending[fields["id"]] = {
                         "fields": fields,
@@ -346,8 +359,8 @@ class LogParser:
                         "chunks": {},
                         "bad": False,
                     }
-            elif "[ATT][FINAL_TILING_CHUNK]" in line:
-                fields = self._envelope(line.split("[ATT][FINAL_TILING_CHUNK]", 1)[1])
+            elif chunk in line:
+                fields = self._envelope(line.split(chunk, 1)[1])
                 item = pending.get(fields.get("id"))
                 seq = self._integer(fields.get("seq"))
                 if (
@@ -360,14 +373,14 @@ class LogParser:
                         item["bad"] = True
                 else:
                     item["chunks"][seq] = fields.get("data", "")
-            elif "[ATT][FINAL_TILING_END]" in line:
+            elif end in line:
                 record = self._parse_final_tiling_end(
-                    line, line_no, pending, source_path
+                    self._envelope(line.split(end, 1)[1]), pending, source_path
                 )
                 if record is not None:
                     records.append(record)
-            elif "[ATT][FINAL_TILING]" in line:
-                fields = self._envelope(line.split("[ATT][FINAL_TILING]", 1)[1])
+            elif single in line:
+                fields = self._tiling_envelope(line.split(single, 1)[1], kind)
                 records.append(self._final_record(fields, source_path, line_no))
         for item in pending.values():
             records.append(
@@ -378,6 +391,20 @@ class LogParser:
                     status="incomplete_final_tiling",
                 )
             )
+        return records
+
+    def extract_topn_tiling_records(
+        self, log_content: str, source_path: str = ""
+    ) -> List[FinalTilingRecord]:
+        """Parse exported candidates separately from runtime final tiling."""
+        records = self._extract_tiling_records(log_content, source_path, "TOPN_TILING")
+        return sorted(records, key=lambda record: record.source_line or 0)
+
+    def extract_final_tiling_records(
+        self, log_content: str, source_path: str = ""
+    ) -> List[FinalTilingRecord]:
+        """Parse FINAL_TILING records, including BEGIN/CHUNK/END framing."""
+        records = self._extract_tiling_records(log_content, source_path, "FINAL_TILING")
         self._append_legacy_final_records(records, log_content, source_path)
         self._mark_duplicate_final_records(records)
         return sorted(records, key=lambda record: record.source_line or 0)
