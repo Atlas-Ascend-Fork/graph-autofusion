@@ -28,7 +28,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
   }
   tiling->totalLength = 1024;
   tiling->tileNum = 8;
-  context->SetSimdNumBlocks(8);
+  if (context->SetSimdNumBlocks(8) != ge::GRAPH_SUCCESS) {
+    return ge::GRAPH_FAILED;
+  }
   workspace[0] = 0;
   return ge::GRAPH_SUCCESS;
 }
