@@ -265,7 +265,7 @@ bool ScopeBoundaryEventRemovePass::IsNotifyOrWaitNode(const SuperKernelBaseNode 
 
 bool ScopeBoundaryEventRemovePass::CanMoveBoundaryEvent(const SuperKernelBaseNode *node,
                                                         const std::unordered_set<uint64_t> &scopeNodeIds) const {
-  // Called only for Notify/Wait nodes retained by pre-cancellation.
+  // Called only for head Notify/Wait nodes retained by pre-cancellation.
   if (node->GetNodeType() == SkNodeType::NODE_WAIT) {
     return true;
   }
@@ -329,7 +329,9 @@ void ScopeBoundaryEventRemovePass::CollectMovableBoundaryEvents(
     if (!IsNotifyOrWaitNode(*node) || retained.count(*it) == 0) {
       break;
     }
-    if (!CanMoveBoundaryEvent(node, scopeNodeIds)) {
+    // Event-only streams have already been removed, so a task stays in scope before this Notify.
+    if (node->GetNodeType() == SkNodeType::NODE_NOTIFY) {
+      SK_LOGD("[ScopeBoundaryEventRemove] Keep tail Notify %lu inside the back-block boundary", node->GetNodeId());
       break;
     }
     if (!HasCapacityForBoundaryRemoval(scopeNodes, headEvents, tailEvents, node->GetNodeId())) {
