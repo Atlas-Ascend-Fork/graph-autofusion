@@ -1413,16 +1413,18 @@ TEST_F(TestOptimizerV2, ContinuesBroadcastOptimization_MultiBrcPath_Brc1MultiOut
   EXPECT_EQ(res, af::SUCCESS);
   auto compute_graph = af::AscGraphUtils::GetComputeGraph(graph);
 
+  // 多消费拆分解除 brc1 共享后，abs 分支链整体沉过 abs（abs 在紧凑视图上计算），
+  // brc2 分支保持独立链；ContinuesBroadcast 将两条链各自折叠为单节点：
+  // load0→abs→brc4→store0 与 load0→brc2→add→store1。
   EXPECT_EQ(compute_graph->FindNode("brc0"), nullptr);
-
-  EXPECT_NE(compute_graph->FindNode("brc1"), nullptr);
-  EXPECT_EQ(compute_graph->FindNode("load0")->GetOutDataAnchor(0),
-            compute_graph->FindNode("brc1")->GetInDataAnchor(0)->GetPeerOutAnchor());
-
+  EXPECT_EQ(compute_graph->FindNode("brc1"), nullptr);
   EXPECT_EQ(compute_graph->FindNode("brc3"), nullptr);
-  EXPECT_NE(compute_graph->FindNode("brc1"), nullptr);
+  EXPECT_EQ(compute_graph->FindNode("load0")->GetOutDataAnchor(0),
+            compute_graph->FindNode("abs")->GetInDataAnchor(0)->GetPeerOutAnchor());
   EXPECT_EQ(compute_graph->FindNode("abs")->GetOutDataAnchor(0),
             compute_graph->FindNode("brc4")->GetInDataAnchor(0)->GetPeerOutAnchor());
+  EXPECT_EQ(compute_graph->FindNode("load0")->GetOutDataAnchor(0),
+            compute_graph->FindNode("brc2")->GetInDataAnchor(0)->GetPeerOutAnchor());
 }
 
 /**
