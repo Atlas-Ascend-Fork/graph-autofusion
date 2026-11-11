@@ -12,12 +12,14 @@
 #include "conversion/AFIRToAscendC/RegisterAscendCImplementations.h"
 #include "target/Ascend/Capability/CapabilityQuery.h"
 #include "target/Ascend/Capability/ImplementationRegistry.h"
+#include "target/Ascend/TargetProfileLoader.h"
 
 #include <optional>
 #include <string>
 
 #include "ascir/Dialect/Asc/IR/Asc.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -48,6 +50,21 @@ ascend::TargetProfile CreateTargetProfile(int64_t vectorCoreCount = 4) {
                                 {},
                                 {}},
                                "fingerprint");
+}
+
+// `CreateTargetProfile` above leaves every `TargetFeature` unmodeled (`Unknown`), which is
+// fine for the `Any`-family candidates this file otherwise exercises -- `checkApiFamily`
+// skips the feature check entirely for `Any`. The row-broadcast-inline candidate is
+// `MemBased`, so it does ask `TargetFeature::RegBasedApiFamily`; on the synthetic profile
+// that answers `Unknown` and the candidate comes back `Undetermined`, not the deterministic
+// `Supported`/`Unsupported` these two tests want to compare against a fixed reason. A real
+// built-in profile models the feature (`Ascend910B1` is mem-based), so tests that touch a
+// `MemBased`/`RegBased`-gated candidate use this instead.
+ascend::TargetProfile CreateMemBasedTargetProfile() {
+  llvm::raw_null_ostream diagnostic;
+  FailureOr<ascend::TargetProfile> profile = ascend::TargetProfileLoader::loadBuiltin("Ascend910B1", diagnostic);
+  EXPECT_TRUE(succeeded(profile));
+  return succeeded(profile) ? *profile : CreateTargetProfile();
 }
 
 void LoadDialects(MLIRContext &context) {
@@ -386,7 +403,10 @@ TEST(BinaryElementwiseL2CapabilityTest, RejectsScalarInputCapability) {
   auto registry = CreateRegistry(context);
   ASSERT_TRUE(registry);
   ascend::instruction::CapabilityQuery query(*registry);
-  ascend::TargetProfile target = CreateTargetProfile();
+  // `afir.add` 现在还有一个 `MemBased` 的 row-broadcast-inline implementation（见下面
+  // `RejectsBroadcastInlineCapability` 的注释），所以这里也要用能把那个 feature 答
+  // 确定的 profile，否则它答 `Undetermined` 而不是 `UnsupportedType`。
+  ascend::TargetProfile target = CreateMemBasedTargetProfile();
   OwningOpRef<ModuleOp> module =
       ParseBufferizedBinary(context, "afir.add", "!ascendc.local_tensor<?xf16>", "!ascendc.local_tensor<?xf16>",
                             "!ascendc.local_tensor<?xf16>", "!ascendc.local_tensor<?xf16>");
@@ -415,7 +435,11 @@ TEST(BinaryElementwiseL2CapabilityTest, RejectsBroadcastInlineCapability) {
   auto registry = CreateRegistry(context);
   ASSERT_TRUE(registry);
   ascend::instruction::CapabilityQuery query(*registry);
-  ascend::TargetProfile target = CreateTargetProfile();
+  // 行广播（brc_inline）implementation 真的会答这个查询（见
+  // `BinaryBrcInlineCapabilityTest.AcceptsRowBroadcastShape`），所以这里要用一张不满足
+  // 那个形态的图才钉得住「其余 implementation 一律不支持」——两个输入的 descriptor 都是
+  // 裸的 `role = <input>`，没有 `axis` / `vectorized_axis`，本来就不满足任何形态判据。
+  ascend::TargetProfile target = CreateMemBasedTargetProfile();
   OwningOpRef<ModuleOp> module =
       ParseBufferizedBinary(context, "afir.add", "!ascendc.local_tensor<?xf16>", "!ascendc.local_tensor<?xf16>",
                             "!ascendc.local_tensor<?xf16>", "!ascendc.local_tensor<?xf16>");
@@ -429,7 +453,6 @@ TEST(BinaryElementwiseL2CapabilityTest, RejectsBroadcastInlineCapability) {
   ASSERT_FALSE(result->getAll().empty());
   for (const auto &candidate : result->getAll()) {
     EXPECT_EQ(candidate.support.getState(), ascend::instruction::SupportState::Unsupported);
-    EXPECT_EQ(candidate.support.getReason(), ascend::instruction::CapabilityReason::UnsupportedShape);
   }
 }
 

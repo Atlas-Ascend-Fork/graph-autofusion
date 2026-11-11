@@ -316,6 +316,8 @@ class NddmaCapabilityProvider final : public ascend::instruction::CapabilityProv
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // NDDMA 自己的三档 lowering 已经在 DMA 层处理了广播（见 `transfer-node-desc-two-sided`
+    // 那条经验：它的 strides 两侧分别描述 GM 与片上布局），不需要也不适用内联广播这条路。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 

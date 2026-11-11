@@ -456,6 +456,8 @@ class TransposeRegCapabilityProvider final : public ascend::instruction::Capabil
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // `TransposeExtend` 只有一个输入、一个输出，形状是同一组轴的重排，不是广播——没有第二个
+    // 操作数可比，`(1, A) op (B, A)` 这个形态在这个 op 上根本不成立。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 
@@ -581,6 +583,8 @@ class TransposeMemCapabilityProvider final : public ascend::instruction::Capabil
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // `TransposeExtend` 只有一个输入、一个输出，形状是同一组轴的重排，不是广播——没有第二个
+    // 操作数可比，`(1, A) op (B, A)` 这个形态在这个 op 上根本不成立。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 

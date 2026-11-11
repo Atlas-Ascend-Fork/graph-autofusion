@@ -263,6 +263,8 @@ class UnaryElementwiseCapabilityProvider final : public ascend::instruction::Cap
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // 一元 op 只有一个操作数，没有第二个张量可比出 `(1, A)` 对 `(B, A)` 这个形态——广播只在
+    // 二元（或更多元）op 上才有意义。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 

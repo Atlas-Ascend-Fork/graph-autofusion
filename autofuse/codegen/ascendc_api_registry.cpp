@@ -173,6 +173,9 @@ Register::Register() {
   const std::string kAscendcNegStr = {
 #include "neg_str.h"
   };
+  const std::string kAscendcBrcInlineApiStr = {
+#include "brc_inline_api_str.h"
+  };
   // utils.h 不声明任何 API，它是其余扩展头的前导（KernelUtils / MAX_REPEAT_TIME）。
   // legacy 走的是 IncludeAndDefines 那条无条件内联的路，不查这张表；MLIR 路径按
   // op 声明的前导名来查，所以这里也得有一份。
@@ -220,6 +223,7 @@ Register::Register() {
                                                            {"true_div.h", kAscendcTrueDivStr},
                                                            {"remainder.h", kAscendcRemainderStr},
                                                            {"neg.h", kAscendcNegStr},
+                                                           {"brc_inline_api.h", kAscendcBrcInlineApiStr},
                                                            {"utils.h", kAscendcUtilsStr}};
 
   AscendCApiRegistry::GetInstance().RegisterApi(api_to_file);

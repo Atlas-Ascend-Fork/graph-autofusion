@@ -444,6 +444,8 @@ class RemovePadCapabilityProvider final : public ascend::instruction::Capability
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // `RemovePad` 的输入输出差的是 padding 的有无，不是广播；两者的轴数、步长关系与
+    // `(1, A) op (B, A)` 无关。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 

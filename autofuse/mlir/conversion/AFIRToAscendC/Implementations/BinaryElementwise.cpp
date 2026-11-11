@@ -41,6 +41,7 @@
 #include "dialect/AFIR/Support/SymbolicExpression.h"
 #include "dialect/AFIR/IR/AFIR.h"
 #include "dialect/AFIR/IR/AFIRElementwiseSupport.h"
+#include "dialect/AFIR/IR/SymbolicBuilder.h"
 #include "target/Ascend/Capability/CapabilityProvider.h"
 #include "target/Ascend/Capability/ImplementationRegistry.h"
 #include "target/Ascend/Capability/ImplementationSelection.h"
@@ -1049,6 +1050,136 @@ LogicalResult registerBinaryScalarAttr(ImplementationRegistry &registry, llvm::S
       });
 }
 
+// 行广播使用独立的 mapping、capability 和 pattern。通用二元路径的
+// `queryTensorContract` 和 `collapseVectorizedAxes` 要求张量形状一致，不适用于行广播。
+// 设计见 docs/development/2026-11-10-afir-broadcast-inline-design.md。
+struct BinaryBrcInlineMapping {
+  ApiFamily family = ApiFamily::MemBased;
+  ResultElementRule resultElementType = ResultElementRule::Same;
+  uint32_t elementTypes = kArithmeticElementTypes;
+  ascend::ExecutionSpec executionSpec{ascend::ProcessorType::AICore, ascend::AICoreUnit::Vector,
+                                      ascend::ExecutionModel::SIMD, ascend::InstructionForm::MemoryBased};
+};
+
+class BinaryBrcInlineCapabilityProvider final : public ascend::instruction::CapabilityProvider {
+ public:
+  explicit BinaryBrcInlineCapabilityProvider(std::shared_ptr<const BinaryBrcInlineMapping> mapping)
+      : mapping_(std::move(mapping)) {}
+
+  CapabilitySupport queryLowering(Operation *operation,
+                                  const ascend::instruction::QueryContext &context) const override {
+    if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
+      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+    }
+    ascend::FeatureState executionSupport = context.target.getExecutionSupport(mapping_->executionSpec);
+    if (executionSupport == ascend::FeatureState::Unavailable) {
+      return CapabilitySupport::unsupported(CapabilityReason::TargetFeatureUnavailable);
+    }
+    if (executionSupport == ascend::FeatureState::Unknown) {
+      return CapabilitySupport::undetermined(CapabilityReason::TargetFeatureNotModeled);
+    }
+    if (std::optional<CapabilitySupport> family = elementwise::checkApiFamily(mapping_->family, context)) {
+      return *family;
+    }
+    // 行广播的两个操作数均为张量，复用 tensor-tensor 的 dtype 和 rank 检查。
+    FailureOr<BinaryTensorTypes> types = getTensorTypes(operation, ScalarOperand::None);
+    if (failed(types)) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    if (!areElementTypesSupported(mapping_->resultElementType, mapping_->elementTypes, types->lhs.getElementType(),
+                                  types->rhsElement, types->destination.getElementType())) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    if (!elementwise::matchBroadcastInlineOperands(operation)) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
+    }
+    return CapabilitySupport::supported();
+  }
+
+  // 广播能力与 lowering 使用相同的判据，避免两处结果不一致。
+  CapabilitySupport queryBroadcastInline(Operation *operation, const ascend::instruction::BroadcastInlineQuery &,
+                                         const ascend::instruction::QueryContext &context) const override {
+    return queryLowering(operation, context);
+  }
+
+  // 行广播不支持标量输入，与同一算子的 tensor-tensor 实现保持一致。
+  CapabilitySupport queryScalarInput(Operation *, const ascend::instruction::ScalarInputQuery &,
+                                     const ascend::instruction::QueryContext &) const override {
+    return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+  }
+
+ private:
+  std::shared_ptr<const BinaryBrcInlineMapping> mapping_;
+};
+
+template <typename SourceOp>
+class BinaryBrcInlineConversionPattern final : public OpConversionPattern<SourceOp> {
+ public:
+  using OpAdaptor = typename SourceOp::Adaptor;
+
+  BinaryBrcInlineConversionPattern(TypeConverter &typeConverter, MLIRContext *context, ImplementationKey key,
+                                   std::shared_ptr<const BinaryBrcInlineMapping> mapping, StringRef wrappedApiName)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        key_(std::move(key)),
+        mapping_(std::move(mapping)),
+        wrappedApiName_(wrappedApiName.str()) {}
+
+  LogicalResult matchAndRewrite(SourceOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
+    FailureOr<ImplementationKey> selected = ascend::instruction::getSelectedImplementation(op);
+    if (failed(selected) || *selected != key_) {
+      return rewriter.notifyMatchFailure(op, "another Ascend implementation was selected");
+    }
+    if (!adaptor.getDestination()) {
+      return rewriter.notifyMatchFailure(op, "buffer-form binary elementwise op requires a destination");
+    }
+    // 与 legacy 的 `BrcInlineGenerate` 一致，src0 / src1 保持 lhs / rhs 顺序。
+    std::optional<elementwise::BroadcastInlineOperands> match = elementwise::matchBroadcastInlineOperands(op);
+    if (!match) {
+      return rewriter.notifyMatchFailure(op, "operands do not satisfy the row-broadcast-inline shape");
+    }
+    FailureOr<Value> shape0 = materializeExtentValue(op, rewriter, match->outerRepeat);
+    FailureOr<Value> shape1 = materializeExtentValue(op, rewriter, match->innerRepeat);
+    FailureOr<Value> firstAxisVStride = materializeStrideValue(op, rewriter, match->firstAxisVStride);
+    if (failed(shape0) || failed(shape1) || failed(firstAxisVStride)) {
+      return rewriter.notifyMatchFailure(op, "cannot materialize the row-broadcast-inline shape");
+    }
+    // 与 legacy 一致，非广播侧的 `is_input{0,1}_block_brc` 为 1。
+    // 两个参数虽为编译期常量，仍按 C++ 接口完整传递。
+    const bool input0IsBroadcast = match->broadcastOperandIndex == 0;
+    Value isInput0BlockBrc = rewriter.create<arith::ConstantIntOp>(op.getLoc(), input0IsBroadcast ? 0 : 1, /*width=*/8);
+    Value isInput1BlockBrc = rewriter.create<arith::ConstantIntOp>(op.getLoc(), input0IsBroadcast ? 1 : 0, /*width=*/8);
+    auto targetOp = rewriter.create<ascendc::BinaryBrcInlineOp>(
+        op.getLoc(), adaptor.getDestination(), adaptor.getLhs(), adaptor.getRhs(), *shape0, *shape1, isInput0BlockBrc,
+        isInput1BlockBrc, *firstAxisVStride, rewriter.getStringAttr(wrappedApiName_));
+    if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
+      return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
+    }
+    rewriter.replaceOp(op, adaptor.getDestination());
+    return success();
+  }
+
+ private:
+  ImplementationKey key_;
+  std::shared_ptr<const BinaryBrcInlineMapping> mapping_;
+  std::string wrappedApiName_;
+};
+
+// `wrappedApiName` 是被包装的 AscendC API 名称，由 `TargetOp::getAPIName()` 提供；
+// `id` 是 implementation 的注册名。二者独立，emitter 无需维护 AFIR 到 API 名称的映射。
+template <typename SourceOp>
+LogicalResult registerBinaryBrcInline(ImplementationRegistry &registry, llvm::StringRef id,
+                                      llvm::StringRef wrappedApiName) {
+  return registry.registerImplementation<SourceOp, BinaryBrcInlineMapping, BinaryBrcInlineCapabilityProvider>(
+      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
+      BinaryBrcInlineMapping{},
+      [wrappedApiName = wrappedApiName.str()](RewritePatternSet &patterns, const PatternBuildContext &context,
+                                              const ImplementationKey &key,
+                                              std::shared_ptr<const BinaryBrcInlineMapping> mapping) {
+        patterns.add<BinaryBrcInlineConversionPattern<SourceOp>>(context.typeConverter, patterns.getContext(), key,
+                                                                 std::move(mapping), wrappedApiName);
+      });
+}
+
 }  // namespace
 
 LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &registry,
@@ -1059,6 +1190,17 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
       failed(registerBinary<MulOp, ascendc::MulL2Op>(registry, "mul.tensor_tensor", ApiFamily::Any)) ||
       failed(registerBinary<MaximumOp, ascendc::MaxL2Op>(registry, "maximum.tensor_tensor", ApiFamily::Any)) ||
       failed(registerBinary<MinimumOp, ascendc::MinL2Op>(registry, "minimum.tensor_tensor", ApiFamily::Any))) {
+    return failure();
+  }
+
+  // 内联广播（brc_inline，第三批，设计见
+  // docs/development/2026-11-10-afir-broadcast-inline-design.md）：`afir.add` /
+  // `afir.mul` 的第三个 implementation，只在两个输入满足 `(1, A) op (B, A)` 这个行广播
+  // 形态时命中，与上面那两个 tensor-tensor implementation 的判据互斥（后者要求两个输入
+  // 同形）。只接 mem 侧——`brc_inline_api.h` 没有对等的寄存器包装（设计文档「开工前三条
+  // 实测结论」第三条）。
+  if (failed(registerBinaryBrcInline<AddOp>(registry, "add.row_broadcast_inline", "Add")) ||
+      failed(registerBinaryBrcInline<MulOp>(registry, "mul.row_broadcast_inline", "Mul"))) {
     return failure();
   }
 
