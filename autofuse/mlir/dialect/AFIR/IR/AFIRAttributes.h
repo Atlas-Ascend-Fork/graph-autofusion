@@ -22,7 +22,7 @@ inline constexpr llvm::StringLiteral kOperandDescsAttrName = "afir.operand_descs
 inline constexpr llvm::StringLiteral kResultDescsAttrName = "afir.result_descs";
 inline constexpr llvm::StringLiteral kArgDescsAttrName = "afir.arg_descs";
 inline constexpr llvm::StringLiteral kDestinationDescsAttrName = "afir.destination_descs";
-// 值的规划结果（空间 / 大小 / 对齐 / 资源身份）挂在**值的定义点**，一个值一份
+// 值的规划结果（空间 / 大小 / 对齐 / 资源身份）挂在值的定义点，一个值一份
 // （设计文档 D2 / D3 / 3.2 / 5.1 步 8）。此前它是 4 个按下标对齐的数组属性
 // （`operand_buffer_descs` / `result_buffer_descs` / `destination_buffer_descs` /
 // `arg_buffer_descs`），同一个值在每个使用点各存一份，一致性靠消费端交叉校验。

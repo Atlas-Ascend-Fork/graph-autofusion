@@ -10,7 +10,7 @@
 
 //===- Case.cpp - load -> truediv(tile, scalar) -> store CPU case -*- C++ -*-===//
 //
-// 方向要发出去的那一族（规则二）的第三个 op，也是这一族**标量在右**的第一条 E2E。
+// 方向要生成的那一类（规则二）的第三个 op，也是这一类标量在右的第一条 E2E。
 // `load_scalar_sub_store` 与 `load_scalar_div_store` 都把标量放在左边，走的是
 // `IS_SCALAR_LATTER == false`；标量在右那一侧此前只有 lit。它正好是**缺省值**那一侧
 // （`DefaultValuedAttr<BoolAttr, "true">`），也就是这一位整个丢掉时会落到的那一侧——
@@ -18,15 +18,15 @@
 //
 // 输入 i32、输出 f32，与 `load_truediv_store` 同一档，理由也一样：`true_div.h` 的
 // `else` 分支就是 `Divs` 的逐字转发，拿 f32 写这份用例的话它就是 `load_scalar_div_store`
-// 的别名。i32 那一支多做两件事，**两件都只有这里走得到**：
+// 的别名。i32 那一支多做两件事，两件都只有这里走得到：
 //
-//   - 先把 tile `Cast` 成 f32（`CAST_RINT`）再除，而标量是**按 `U` 也就是 f32 强转**后
+//   - 先把 tile `Cast` 成 f32（`CAST_RINT`）再除，而标量是按 `U` 也就是 f32 强转后
 //     传给 `Divs<U, ...>` 的，不是按 `T`；
 //   - `Divs` 用的 tmp 是 `tmp_buf[cast_buf_size * sizeof(U)]` 之后那一段，**cast 结果与
 //     `Duplicate` 出来的那个 block 共用同一块 tmp、分两段**。切错段两边互相踩，这是
 //     `load_axpy_half_store` 之后第二处「同一块 tmp 切两段」。
 //
-// 还有一件只有编译期拦得住：`TrueDivExtends` 是这一族唯一有**两个** dtype 模板实参的
+// 还有一件只有编译期拦得住：`TrueDivExtends` 是这一类唯一有两个 dtype 模板实参的
 // （`<T, U, LATTER>`），方向那一位跳不过前面两个。少写一个 `U`，`LATTER` 就落到类型的
 // 位置上，bool 当类型用编不过。
 //
@@ -65,13 +65,13 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_truediv_scalar_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // 两个 dtype 模板实参都写出来了，**最后一位是方向**。`true` 是缺省值，但缺省值不等于
+  // 两个 dtype 模板实参都写出来了，最后一位是方向。`true` 是缺省值，但缺省值不等于
   // 「可以不写」：少写一位的话 `LATTER` 落到 `U` 的位置上，bool 当类型用编不过。
   EXPECT_NE(kernel.find("TrueDivExtends<int32_t, float, true>("), std::string::npos);
   EXPECT_EQ(kernel.find("TrueDivExtends<int32_t, float, false>("), std::string::npos);
   // 标量是第三个实参，按 i32 建出来。
   EXPECT_NE(kernel.find("c4_i32"), std::string::npos);
-  // **不能查「`TrueDivExtend(` 一个都没有」**：tensor-tensor 那一份的**定义**就在
+  // 不能查「`TrueDivExtend(` 一个都没有」：tensor-tensor 那一份的定义就在
   // `true_div.h` 里，而这个头是整段内联进 kernel 的。「选中的是标量形态」由上面两条
   // 带模板实参的正 / 负断言管。
   // 三个头都内联进来了：包装自己、它转发去的 `Divs`，以及两者共同的前导。
@@ -81,7 +81,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 一块 tmp buffer，i32 这一支真的用它：前一段装 cast 结果，后一段给 `Divs` 的
   // `Duplicate`。
   EXPECT_NE(kernel.find("AscendC::TBuf<"), std::string::npos);
-  // mem 那一侧：reg 侧的 truediv 发的是 `DivExtends`（`div_reg_base.h`）且不收 i32。
+  // mem 那一侧：reg 侧的 truediv 生成的是 `DivExtends`（`div_reg_base.h`）且不收 i32。
   EXPECT_EQ(kernel.find("__ASCENDC_REGBASE_API_DIV_H__"), std::string::npos);
 }
 }  // namespace mlir::afir

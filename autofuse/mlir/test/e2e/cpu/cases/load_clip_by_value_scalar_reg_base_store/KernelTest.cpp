@@ -21,7 +21,7 @@ using mlir::afir::load_clip_by_value_scalar_reg_base_store::GetShapeConfig;
 using mlir::afir::load_clip_by_value_scalar_reg_base_store::kInputShapes;
 using mlir::afir::load_clip_by_value_scalar_reg_base_store::kOutputShapes;
 
-// 与建图时给的两个 Scalar 节点一致。**不对称**：互换就是另一个函数。
+// 与建图时给的两个 Scalar 节点一致。不对称：互换就是另一个函数。
 constexpr float kLower = -1.0F;
 constexpr float kUpper = 1.0F;
 }  // namespace

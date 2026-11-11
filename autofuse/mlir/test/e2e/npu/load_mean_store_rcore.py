@@ -29,29 +29,29 @@ import sys
 from support.npu_runner import NpuRunner
 
 
-# 与 `load_sum_store_rcore.py` **同一组 shape**，只把算子换成 `mean`。同形是刻意的：
+# 与 `load_sum_store_rcore.py` 同一组 shape，只把算子换成 `mean`。同形是刻意的：
 # RCore 的切分、核数、workspace 组织都由 shape 决定，两份对照着跑才能把「Mean 多出来的那
 # 一次缩放」从求和那一半里分离出来。
 #
 # 为什么必须是这组 shape（理由逐字同那一份）：RCore 的目标区间是「A 轴小、R 轴大」，
 # phase 1 的 `block_dim = Ceiling(A/a0t) x Ceiling(Ceiling(R/a1t)/a1Tt)`，只有 `a1Tt` 是
-# 多核变量。`nA = Ceiling(A/a0t) < corenum` 时核数必须从 R 方向补，**跨核归约才真正启用**；
+# 多核变量。`nA = Ceiling(A/a0t) < corenum` 时核数必须从 R 方向补，跨核归约才真正启用；
 # `nA == corenum` 时 R 根本不跨核切，phase 2 只合并一份 partial。前三格属前者，第四格是
 # 后者的边界，成对用来区分「管道通」与「合并对」。
 #
 # Mean 在这条路上特有的两件事——也就是本用例相对 Sum 的全部增量：
 #
-#   1. **每个核各自除同一个 `N`**，`N` 是**完整逻辑归约域**的元素数（这里就是 R），不是本核
+#   1. 每个核各自除同一个 `N`，`N` 是完整逻辑归约域的元素数（这里就是 R），不是本核
 #      那一段的长度。各核分到的段长不等（`Ceiling` 的尾块），按本核段长除就是「均值的均值」，
 #      错得没有固定倍数。
-#   2. **phase 2 只求和**（调度侧把第二阶段的 reducer 改写成 `Sum`），所以 `Σ_c S_c/N = S/N`。
+#   2. phase 2 只求和（调度侧把第二阶段的 reducer 改写成 `Sum`），所以 `Σ_c S_c/N = S/N`。
 #      若第二阶段也除一次，结果会再小 `Rm` 倍——那是跨核才暴露的错，CPU E2E 的 `block_dim`
 #      是 1，第二阶段只合并一份 partial，测不到。
 #
 # A=1（纯全归约）同样不在列：它在 `LoopGenerate` 就报
 # `tensor SSA value crosses sibling/outer schedule scopes`，与 Mean 无关，是另一条下降缺口；
 # 全轴 Mean 作为后续项单列，见
-# `docs/design/2026-10-14-reduce-mean-correction-design.md` 的「后续项：全轴 Mean 的最小闭环」。
+# `docs/design/2026-10-14-reduce-mean-correction-design.md` 的「后续项：全轴 Mean 的最小完整环」。
 INPUT_SHAPE_CASES = (
     ((8, 131072),),
     ((16, 65536),),
@@ -77,7 +77,7 @@ if __name__ == "__main__":
             # 浮点归约的累加顺序因实现而异，逐位相等不可达；取 float32 的常规容差。
             rtol=1e-5,
             # Mean 的绝对误差比 Sum 小 R 倍：求和那一半的舍入误差约 n*eps*|x|，除以 N 之后
-            # 回到 eps*|x| 量级。所以这里**不**沿用 Sum 那条 1e-2——那会把 100 倍的错分母也放过。
+            # 回到 eps*|x| 量级。所以这里不沿用 Sum 那条 1e-2——那会把 100 倍的错分母也放过。
             atol=1e-5,
             description="Run Mean small-A/large-R shapes through the MLIR NPU E2E path.",
         )

@@ -10,17 +10,17 @@
 
 //===- Case.cpp - load(f16) -> brc -> cast(f32) -> store --------*- C++ -*-===//
 //
-// 级联拓扑 T6：**dtype 在图中途变**。
+// 级联拓扑 T6：dtype 在图中途变。
 //
-// 它动到的那件事是 T1 碰不到的：**一张图里「32B 一档装多少个元素」有两个值**。广播那一层
+// 它动到的那件事是 T1 碰不到的：一张图里「32B 一档装多少个元素」有两个值。广播那一层
 // 的判据正是按这个数算的（「目的地在窗口里稠密」查的是 `Align(Z, 32/sizeof(T))` 与 `Z` 相
 // 不相等），广播之后换 dtype，等于让同一串轴在两种档位下各走一遍。
 //
-// **方向是 f16 → f32，不是反过来**：探针实测 f32 输入那几格整图回落，不是这条路发的调用，
+// 方向是 f16 → f32，不是反过来：探针实测 f32 输入那几格整图回落，不是这条路生成的调用，
 // f16 输入这三格报 ok（2026-10-12 实测）。所以这里收窄到 f16 源。
 //
 // `[8,1] -> [8,128]` 那一格原先是硬失败（`failed to legalize operation 'afir.cast'`）：
-// 那一格的 `B0Y1` 模板把 `cast` 排到 `afir.broadcast` **之前**，于是它作用在广播前那块
+// 那一格的 `B0Y1` 模板把 `cast` 排到 `afir.broadcast` 之前，于是它作用在广播前那块
 // 向量化轴 extent 全为 1 的 tile 上，而计算侧当时不收零段。`materializeVectorizedSegments`
 // 的单元素窗口那一档收下之后它报 ok。
 //
@@ -57,7 +57,7 @@ af::AscGraph BuildGraph() {
 
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace config = load_broadcast_cast_store;
-  // 走的是 MLIR 那条路而不是回落 legacy。**少了这一条，整个用例在回落之后照样全绿。**
+  // 走的是 MLIR 那条路而不是回落 legacy。少了这一条，整个用例在回落之后照样全绿。
   EXPECT_NE(kernel.find(std::string(config::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   // 广播在 Cast 之前。次序反了的话数值也对（广播与逐元素转换可交换），只有次序分得开；
   // 而次序决定了广播那一层按哪个 dtype 的档位算，这正是这一格要测的。

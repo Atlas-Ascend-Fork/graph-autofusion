@@ -432,7 +432,7 @@ LogicalResult reduceEffectiveView(MLIRContext *context, AscGraphAttrGroupsAttr g
     if (failed(merged)) {
       return failure();
     }
-    // 合并只改 extent：这一项的两侧 stride 仍然是**最内**那根轴的，合并出来的范围是乘积。
+    // 合并只改 extent：这一项的两侧 stride 仍然是最内那根轴的，合并出来的范围是乘积。
     dims.back().extent = *merged;
     previousExtent = *merged;
   }
@@ -712,7 +712,7 @@ struct OuterLoopTerm {
   Value localStride;
 };
 
-// 物化一个步长，字面量 0 时把 `result` 留空表示「这一项不发」。
+// 物化一个步长，字面量 0 时把 `result` 留空表示「这一项不生成」。
 LogicalResult materializeStrideOrSkip(OpBuilder &builder, Location location, ExprAttr stride,
                                       const SymbolBindingMap &bindings, Value &result) {
   FailureOr<int64_t> literal = getLiteralStride(stride);
@@ -969,7 +969,7 @@ LogicalResult emitScheduledTransfer(Operation *op, OpBuilder &builder, const Tra
     return failure();
   }
 
-  // 一维：blockCount 恒 1、两侧缝隙恒 0，与二维共用同一条发射路径。
+  // 一维：blockCount 恒 1、两侧缝隙恒 0，与二维共用同一条生成路径。
   Value blockCount = builder.create<arith::ConstantIndexOp>(location, 1);
   Value globalStride = builder.create<arith::ConstantIndexOp>(location, 0);
   Value localStride = globalStride;

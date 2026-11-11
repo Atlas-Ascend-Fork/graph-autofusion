@@ -123,7 +123,7 @@ def test_canonical_line_roundtrip():
         "boom\tgoes\nthe reason",
         "unary",
     )
-    # 制表符和换行必须被洗掉，否则一行结果会被拆成几行、字段数对不上而被整行丢弃。
+    # 替换结果字段中的制表符和换行，保持一条结果对应一行及固定列数。
     assert line.count("\t") == 7, line
     parsed = case_status.parse_cases("噪声\n" + line + "\n更多噪声")
     assert len(parsed) == 1
@@ -196,14 +196,14 @@ def test_reconcile_and_exit_code():
     )
     assert entry.print_report([same]) == 0
 
-    # 声明 PASS 实测 PASS_FALLBACK -> 红。这正是此前测不出来的那类漂移：
-    # 旧规则只看 MISMATCH/ERROR，PASS 退化成靠容错捡回来是全绿的。
+    # 预期 PASS 而实测 PASS_FALLBACK 应判失败；仅检查 MISMATCH/ERROR
+    # 无法发现从原生执行退化到回落的情况。
     worse = _outcome(
         pinned, [("cell_a", case_status.REFUSED), ("cell_b", case_status.PASS_FALLBACK)]
     )
     assert entry.print_report([worse]) == 1
 
-    # 声明 REFUSED 实测 PASS -> 不红，但要被看见（报告里单列一节）
+    # 预期 REFUSED 而实测 PASS 不判回归，但报告中单独列出支持范围扩大。
     better = _outcome(
         pinned, [("cell_a", case_status.PASS), ("cell_b", case_status.PASS)]
     )
@@ -211,7 +211,7 @@ def test_reconcile_and_exit_code():
     verdicts = {row[0]: row[3] for row in entry.reconcile(better)}
     assert verdicts["cell_a"] == "improved"
 
-    # 没有预期声明：沿用旧规则，只有真缺陷红
+    # 未声明预期时沿用旧判定：仅真实缺陷导致失败。
     bare = case_manifest.Case(id="bare", script="x.py")
     assert entry.print_report([_outcome(bare, [("c", case_status.REFUSED)])]) == 0
     assert entry.print_report([_outcome(bare, [("c", case_status.MISMATCH)])]) == 1
@@ -224,9 +224,7 @@ def test_manifest_is_consistent():
         assert (npu_dir / case.script).is_file(), "清单指向不存在的脚本：" + case.script
         for cell, status in case.expect.items():
             assert status in case_status.ALL_STATUSES, (case.id, cell, status)
-    # 每个脚本必须注册；防止意外漏掉用例。
-    # 未说明的漏项就是「统一入口跑不到的用例」，
-    # 而它看起来和跑到了没有区别。
+    # 检查每个脚本均已注册，避免用例未被统一入口执行而汇总中没有记录。
     scripts = {
         path.name
         for path in npu_dir.glob("*.py")
@@ -280,8 +278,8 @@ def test_run_one_parses_a_real_subprocess():
             id="fake", script="fake_case.py", argv=("--steps", "0")
         )
         args = entry.parse_args(["--timeout", "120"])
-        # run_one 会追加 --work-dir，所以假脚本不能用 argparse 卡在未知参数上——
-        # 这里的假脚本直接忽略 argv，真脚本靠 NpuRunner 解析。
+        # run_one 会追加 --work-dir。假脚本忽略 argv，避免因参数解析失败而未执行测试；
+        # 真实脚本由 NpuRunner 解析参数。
         outcome = entry.run_one(case, repo, build, overlay, tmp / "work", args, 0)
         statuses = [(r.cell, r.status) for r in outcome.results]
         assert statuses == [("c0", case_status.PASS), ("c1", case_status.REFUSED)], (

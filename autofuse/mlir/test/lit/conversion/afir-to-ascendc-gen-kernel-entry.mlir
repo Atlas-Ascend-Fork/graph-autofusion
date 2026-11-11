@@ -48,9 +48,8 @@ module @plan0 attributes {
   }
 }
 
-// `_main` 一 stage 收一个 tiling 形参，序号即 stage：ATT 的最外层 TilingData 里没有 plan
-// 那一层，各 stage 的结构体平铺在根上，所以这里没有「先从 plan tiling 上取成员」这一步，
-// 每个 stage 直接用自己那个形参。
+// _main 每个 stage 直接接收一个 tiling 参数，序号为 stage。
+// ATT 将各 stage 结构体平铺在根上，没有中间 plan 结构体需要访问。
 // CHECK-LABEL: module @plan0
 // CHECK: func.func @plan0_main
 // CHECK-SAME: %[[G0:[A-Za-z0-9_]+]]: !emitasc.py_struct<"AscGraph0ScheduleResult0G0TilingData"
@@ -64,9 +63,8 @@ module @plan0 attributes {
 // CHECK: func.call @stage0_template0(%[[G0]])
 // CHECK: case 20
 // CHECK: func.call @stage0_template1(%[[G0]])
-// 缺省分支必须陷入而不是空转：`tiling_key` 由 host 侧 tiling 写，落不进已下降的模板编号就
-// 说明两侧对模板集的认知不一致。空 `scf.yield` 会静默跳过这个 stage，后面的 stage 照常跑在
-// 没算过的数据上——数值错且没有任何报错。每个 stage 的分派表各查一次。
+// 每个 stage 均检查默认分支触发 trap：host 写入的 tiling_key 必须对应已下降模板。
+// 仅 yield 会跳过当前 stage，并使后续 stage 使用尚未计算的数据。
 // CHECK: default {
 // CHECK-NEXT: ascendc.trap
 // CHECK: emitasc.member %[[G1]] "tiling_key"

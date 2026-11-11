@@ -44,18 +44,14 @@ LogicalResult generateAFIRLoops(func::FuncOp func, SymbolBindingMap bindings);
 
 // 循环是否已经物化。
 //
-// 这个问题此前由 `afir.loop_generated` 回答——一个记录「哪个 pass 跑过」的 IR 属性
-// （设计文档 D5）。属性是同一事实的第二份编码：循环生成的产物就摆在 IR 里，判据应当
-// 直接问 IR。对公开面尤其如此——一份形态完全正确、但没挂这个内部属性的 IR 会被判成
-// 「没跑过」，而属性名不在任何对外文档里。
+// 根据循环生成的 IR 结构判断，不使用 afir.loop_generated 执行标记（设计文档 D5）。
+// 结构正确的手写 IR 也应被识别，不应依赖未公开的 pass 状态属性。
 //
-// 判据取 `#afir.axis_binding`：它是循环生成的产物，也是步 3b 为「从物化后的 IR 认回
-// 轴」建立的那条替代通路——`scf.for` 上是 `role = loop`，物化出的标量上是
-// `role = axis_index | axis_size | loop_size | tail_size | actual_size`。轴在生成前
-// 只以 `#afir.asc_graph` 的轴表形式存在，不会出现这个标记；生成后每根轴都有。
+// 检查 axis_binding：scf.for 使用 loop 角色，物化标量使用 axis_index、axis_size、
+// loop_size、tail_size 或 actual_size。循环生成前轴仅存在于 asc_graph 轴表中；
+// 生成后通过这些绑定追踪轴与值的对应关系。
 //
-// 比「函数体里有没有 `scf.for`」准确：只调度在 BlockOuter 上的算子不产生 `scf.for`，
-// 但它的块索引同样带 `#afir.axis_binding`。
+// 不能仅检查 scf.for：仅调度到 BlockOuter 的算子不生成循环，但块索引仍带 axis_binding。
 bool hasGeneratedLoops(func::FuncOp func);
 
 }  // namespace afir

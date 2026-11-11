@@ -9,23 +9,23 @@
 
 //===- Case.cpp - load -> sum(dim 0) -> mul(scalar) -> store CPU case -*- C++ -*-===//
 //
-// 与 `load_sum_mul_store` 只差一处：归约的是**首轴**（RA 布局）而不是末轴。
+// 与 `load_sum_mul_store` 只差一处：归约的是首轴（RA 布局）而不是末轴。
 //
 // 分开一条而不是给那份加一组形状：真机上这两支的结果不同——末轴那支全绿，首轴那支在
 // `[512, 512]` 上**算错值**（`sum(x, 0) * 2` 与 `mean(x, 0)` 的误差逐位相同，所以不是 mean
-// 的问题），而 `[256, 512]`、`[64, 64]` 又是对的。首轴归约**不切图**（`relu(sum(x, 0))`）
+// 的问题），而 `[256, 512]`、`[64, 64]` 又是对的。首轴归约不切图（`relu(sum(x, 0))`）
 // 也是对的，所以被测的是「首轴 + 切图」这个组合。
 //
-// 归约**之后**再接一个带外部输入的节点。这一类此前没有用例，而它走的是一条与
+// 归约之后再接一个带外部输入的节点。这一类此前没有用例，而它走的是一条与
 // `load_neg_sum_store`（归约之前融合）完全不同的路：
 //
 // `ReducePartitionPostFusion` 的 `IsNotPartitionReduce` 一旦发现归约的后继链上某个节点还
-// 有一个**不属于后继链**的输入（这里是 `Scalar`），就判「要切图」，于是
+// 有一个不属于后继链的输入（这里是 `Scalar`），就判「要切图」，于是
 // `PartitionReduceNode` 把图切成 `... -> Sum -> Store -> Workspace` 与
 // `Workspace -> Load -> Mul -> Store -> ...` 两张。节点数那条阈值（4）在这里没起作用——
 // 两个节点也照样切。
 //
-// 这正是 `torch.mean` 走的路：inductor 不发 Mean 节点，它拆成 `Sum` + `Broadcast(Scalar)`
+// 这正是 `torch.mean` 走的路：inductor 不生成 Mean 节点，它拆成 `Sum` + `Broadcast(Scalar)`
 // + `TrueDiv`，那个 `Scalar` 就是外部输入。所以这条用例钉的是 mean 这一大类，而不是一个
 // 边角形状。
 //

@@ -20,8 +20,8 @@ class SelectionPolicyRegistry;
 
 namespace mlir::ascend::kernel {
 
-// Register AFIR reduce implementations. `policies` is accepted (and currently unused) so this
-// registrar matches the signature every other capability module uses.
+// Register reduction implementations. The unused policies parameter keeps the
+// registrar signature consistent with other capability modules.
 LogicalResult registerReduceImplementations(ascend::instruction::ImplementationRegistry &registry,
                                             ascend::instruction::SelectionPolicyRegistry *policies = nullptr);
 

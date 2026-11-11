@@ -22,8 +22,8 @@ inline void SetDiagnostic(std::string *diagnostic, std::string_view message) {
   }
 }
 
-// 只置真、不置假：出口把这一位标成「能力不足」之后，调用链上游不该再把它抹掉。缺省的 `false`
-// 由调用方初始化，语义见 `PlanSelection.h` 上 `unsupported` 那一段。
+// 只设置能力不足标记，不清除下游已设置的值。调用方负责初始化为 false。
+// unsupported 的语义见 PlanSelection.h。
 inline void SetUnsupported(bool *unsupported) {
   if (unsupported != nullptr) {
     *unsupported = true;

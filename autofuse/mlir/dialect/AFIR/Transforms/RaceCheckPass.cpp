@@ -10,10 +10,9 @@
 
 //===- RaceCheckPass.cpp - af-opt entry point for the race checker --------===//
 //
-// 这个 pass 只是 `RaceChecker` 的一层壳，方便在 af-opt 上手动查看某个 kernel 的
-// 结论。竞争检查的真正覆盖在 UT 里（`test/ut/dialect/AFIRRaceCheckTest.cpp`）：
-// 失败形态是「缺一条 happens-before」，LIT 断言的是文本，锁不住这类事实
-// （设计文档 5.3 的测试策略表，步 8b 那一行）。
+// 提供 RaceChecker 的 af-opt 入口，便于检查单个 kernel。
+// 核心 happens-before 和竞争判定由 test/ut/dialect/AFIRRaceCheckTest.cpp 覆盖；
+// LIT 负责检查命令行诊断文本（设计文档 5.3，步 8b）。
 //
 //===----------------------------------------------------------------------===//
 

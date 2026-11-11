@@ -6,18 +6,18 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **收不了的形态必须报不支持，不能顺手发一条 `RemovePadExtend`。** 四种形态各一片，
+// 收不了的形态必须报不支持，不能顺手生成一条 `RemovePadExtend`。 四种形态各一片，
 // 每一片的代价都是静默算错（不是编不过），所以一条都不能放行。
 //
 // `--split-input-file`：pass 在第一个报错的 op 上就停，一个文件里放四片只会测到第一片。
-// **每片只违反一条判据**——两条一起违反的话，删掉其中任一条都不会红。
+// 每片只违反一条判据——两条一起违反的话，删掉其中任一条都不会红。
 // RUN: not af-opt --split-input-file --afir-select-implementation --target=Ascend910B1 %s 2>&1 \
 // RUN:   | FileCheck %s
 
 // 第一片：目的地不稠密（外段 stride 16，而内段只有 8 个元素）。
 //
 // `GatherMask` 的写是连续的，`RemovePadExtend` 的形参表里一个目的地跨度都没有。放行它就是
-// 把第 2 行写到第 1 行的正后方，而目的地实际的第 2 行在 16 个元素处——**静默写错位置**。
+// 把第 2 行写到第 1 行的正后方，而目的地实际的第 2 行在 16 个元素处——静默写错位置。
 // 源那一侧与正例 `remove_pad_two_segment` 逐字相同，所以这一片违反的只有稠密这一条。
 #loose_src = #afir.tensor_desc<axis = [0, 1], repeats = [#afir.expr<"4">, #afir.expr<"8">],
                               strides = [#afir.expr<"16">, #afir.expr<"1">], vectorized_axis = [0, 1],
@@ -72,10 +72,10 @@ module {
 
 // 第三片：行距不是 32 B 的整数倍（9 个 f32 = 36 B）。
 //
-// 包装里那一行是 `params.src0RepeatStride = last_axis_size * sizeof(T) / 32`——**整除截断**。
-// 9 × 4 / 32 == 1，于是 repeat 前进 8 个元素而不是 9 个，**零报错、结果错**。机理与设计文档
+// 包装里那一行是 `params.src0RepeatStride = last_axis_size * sizeof(T) / 32`——整除截断。
+// 9 × 4 / 32 == 1，于是 repeat 前进 8 个元素而不是 9 个，零报错、结果错。机理与设计文档
 // 探针结论 P3 那条 `dst_rpt_stride` 逐字相同。
-// legacy 躲开它是因为它不读 stride、自己重算 `SizeAlign(行长, 32/sizeof(T))`；本档发的是
+// legacy 躲开它是因为它不读 stride、自己重算 `SizeAlign(行长, 32/sizeof(T))`；本档生成的是
 // descriptor 里那条真实行距，所以要自己把这一格挡住。
 #unaligned_src = #afir.tensor_desc<axis = [0, 1], repeats = [#afir.expr<"4">, #afir.expr<"8">],
                                    strides = [#afir.expr<"9">, #afir.expr<"1">], vectorized_axis = [0, 1],
@@ -120,6 +120,6 @@ module {
   }
 }
 
-// 下面那一条是**计数式**的，不是单条匹配：`--split-input-file` 下每片各报一次诊断，只写单条
+// 下面那一条是计数式的，不是单条匹配：`--split-input-file` 下每片各报一次诊断，只写单条
 // 的话某一片被误放行时总退出码仍然非零、那一条也仍然匹配得到——四片就只剩三片在测。
 // CHECK-COUNT-4: no supported

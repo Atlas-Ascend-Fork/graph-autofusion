@@ -176,7 +176,7 @@ TEST_F(KernelBodySignatureTest, RejectsConflictingExplicitMemorySpace) {
 }
 
 // GM kernel 参数按 AscendC ABI 是连续 ND 存储。步 6 让 memref 能表达 NZ / fractal
-// 之后，这条闸门保证这些片上布局不会无声地漏到 kernel 边界上——那里没有对应的 ABI
+// 之后，这条门禁保证这些片上布局不会无声地漏到 kernel 边界上——那里没有对应的 ABI
 // 约定，错了不报错、只算错。
 TEST_F(KernelBodySignatureTest, RejectsNonIdentityLayoutAtAbiBoundary) {
   auto types = llvm::to_vector(function.getArgumentTypes());
@@ -206,15 +206,15 @@ TEST_F(KernelBodySignatureTest, RejectsMaterializedDeclarationWithoutAccessingMi
   ExpectFailureWithoutChanges("requires a function body with matching arguments");
 }
 
-// 按值标量形参穿过签名物化时**类型不变**：它不是一块存储，没有地址空间可换。物化前这里
+// 按值标量形参穿过签名物化时类型不变：它不是一块存储，没有地址空间可换。物化前这里
 // 是 `cast<MemRefType>`，遇到标量是 assert 失败而不是诊断。
 // 按值标量与 GM 张量共用一个 index 序号空间，这条钉住由此而来的两件事。
 //
-// **形状是「标量夹在两个输入中间」**，比 CPU E2E 那条强：E2E 只有一个标量，它落在
+// 形状是「标量夹在两个输入中间」，比 CPU E2E 那条强：E2E 只有一个标量，它落在
 // index 1、后面只剩 output / workspace / tiling，虽然也能照出分秩（`ScalarInput` 的
 // 枚举值追加在末尾，比 `Output` 大），但照不出「标量与指针之间按 index 排先后」。
 TEST(KernelArgumentIdentityTest, ScalarInputSharesTheInputIndexSpace) {
-  // 同键：同一个 index 上的两类输入是**冲突**，不是两个各自合法的参数。
+  // 同键：同一个 index 上的两类输入是冲突，不是两个各自合法的参数。
   EXPECT_EQ(getKernelArgumentKey({KernelArgumentKind::ScalarInput, 1}),
             getKernelArgumentKey({KernelArgumentKind::Input, 1}));
   EXPECT_NE(getKernelArgumentKey({KernelArgumentKind::ScalarInput, 1}),
@@ -242,7 +242,7 @@ TEST_F(KernelBodySignatureTest, MaterializesScalarInputArgumentWithoutRetypingIt
   EXPECT_TRUE(succeeded(verify(*module)));
 }
 
-// 角色与类型是一条**双向**不变量，这条测反方向：声明了 `scalar_input` 却给了 memref。
+// 角色与类型是一条双向不变量，这条测反方向：声明了 `scalar_input` 却给了 memref。
 // 只判「放行标量」不判这一侧的话，两种参数就可以互相冒充。
 TEST_F(KernelBodySignatureTest, RejectsScalarInputRoleOnShapedArgument) {
   InsertScalarArgument(1, MemRefType::get({16}, Float16Type::get(&context), MemRefLayoutAttrInterface{},

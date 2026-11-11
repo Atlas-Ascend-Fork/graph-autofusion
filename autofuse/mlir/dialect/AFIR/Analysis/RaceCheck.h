@@ -59,13 +59,13 @@ struct RaceFinding {
 
 // 竞争检查：依赖图（SSA 值依赖 + 同流程序序）+ 别名分析（`BufferAlias.h`）。
 //
-// 判定规则只有一条：两个可能别名的访问，至少一个是写，且**谁都不 happens-before 谁**，
+// 判定规则只有一条：两个可能别名的访问，至少一个是写，且谁都不 happens-before 谁，
 // 就是竞争。AFIR 层的 happens-before 有三个来源：
 //
 //   1. SSA 值依赖。destination-style Op 把「写了这块存储」表达成一个新结果，消费者
 //      必须用那个结果而不是绕回去用 destination——绕过去就是「未覆盖的 producer」。
 //   2. 同一条 pipe 内的程序序。
-//   3. **显式同步**：一对 `afir.event_record` / `afir.event_wait`（由同一个
+//   3. 显式同步：一对 `afir.event_record` / `afir.event_wait`（由同一个
 //      `!afir.token` 相连）。record 落在 `from` pipe 的链上、wait 落在 `to` pipe 的
 //      链上，中间由 token 的 use-def 串起来——于是这条边和前两类走的是同一张图，
 //      不需要单独一套判定。
@@ -75,7 +75,7 @@ struct RaceFinding {
 // 看得见。`TQue` 的 enque/deque 在 lowering 之后才出现，这里看不到，也不应该看到。
 //
 // 跨迭代方向上第 1 条不成立（AFIR 的 buffer 形态不用 iter_args 串依赖），能覆盖它的
-// 只有同 pipe 程序序、以及**循环体内 wait 在 record 之前**的那种配对——后者正是双缓冲
+// 只有同 pipe 程序序、以及循环体内 wait 在 record 之前的那种配对——后者正是双缓冲
 // WAR 冒险的防护形式：第 i+1 次迭代的 wait 等的是第 i 次迭代的 record。两者都没有，
 // 跨 pipe 的循环携带依赖就是竞争，多缓冲只把距离推远，推不掉。
 class RaceChecker {

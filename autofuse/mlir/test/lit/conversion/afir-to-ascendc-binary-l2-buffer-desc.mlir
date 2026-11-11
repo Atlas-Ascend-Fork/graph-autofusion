@@ -6,7 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// L2 elementwise 的下降在**带**值规划结果时的行为。
+// L2 elementwise 的下降在带值规划结果时的行为。
 //
 // 步 8 之后 `afir.buffer_desc` 挂在值的定义点上；这里的值是 kernel 参数，定义点就是
 // 它的 arg attr（设计文档 5.1 步 8）。这条覆盖单独成文件的原因：`convert-afir-to-ascendc`

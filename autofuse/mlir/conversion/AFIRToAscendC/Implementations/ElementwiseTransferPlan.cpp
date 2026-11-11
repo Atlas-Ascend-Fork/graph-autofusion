@@ -109,17 +109,11 @@ LocalViewCompatibility checkElementwiseLocalViews(Operation *op, TransferPlanKin
   if (failed(partition)) {
     return LocalViewCompatibility::MissingInformation;
   }
-  // 按**是不是标量**挑输入，不按下标挑。标量可以落在第一个操作数上——`Add(two, load0)`
-  // 这种图 legacy 靠改图消化，MLIR 这边是 `ScalarOperand::Any` 那一档，发射时才把有形状
-  // 的那个挪到第一个实参（`emissionOrder`）。按下标取第 0 个会取到标量那一侧：它没有
-  // 可比的局部视图，判出来是 MissingInformation，整个算子于是报「没有可用实现」。
-  //
-  // 判据写成「不是标量」而不是「是某个张量类型」：这道检查在 memref 形态（能力查询）和
-  // 目标方言形态（改写）上都要成立，两处的张量类型不是同一个。
-  //
-  // 挑出来的块数**不与注册形态对账**。对账是 `getTensorTypes` / `emissionOrder` 的事，
-  // 在那之前先答一次会把「形态不符」报成 MissingInformation——标量形态的 implementation
-  // 收到两块 tile 时本该由「没有向量核」之类更靠前的判据先答话。
+  // 根据实际操作数是否为标量选择 tile，不固定取第 0 个输入。ScalarOperand::Any
+  // 允许标量在左侧，例如 Add(two, load0)，生成时才由 emissionOrder 调整实参顺序。
+  // 此检查同时用于 memref 能力查询和目标方言改写，因此排除标量，而不限定某种张量类型。
+  // 这里只选取有局部视图的输入，不重复检查注册形态；形态匹配由 getTensorTypes /
+  // emissionOrder 负责，避免提前把形态错误报告为 MissingInformation。
   SmallVector<TensorDescAttr, 3> descriptors;
   for (auto [index, input] : llvm::enumerate(partition->inputs(op))) {
     if (input.getType().isIntOrIndexOrFloat()) {

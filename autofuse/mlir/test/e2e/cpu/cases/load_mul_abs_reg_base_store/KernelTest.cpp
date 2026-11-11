@@ -37,13 +37,13 @@ TEST(MlirE2eCpu, LoadMulAbsRegBaseStoreCalculatesCorrectResult) {
   ASSERT_NE(input1, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 乘积要跨过 0：全正的乘积会让 `abs` 退化成恒等变换，那样「漏发 Abs」看不出来。
-  // 两个输入都不取 0，免得「没算」被读成「算出 0」；也都不取 ±1，免得「漏发 Mul」碰巧对。
+  // 乘积包含正负值，避免 Abs 退化为恒等变换。输入排除 0 和 ±1，
+  // 以便发现未执行计算、遗漏 Abs 或遗漏 Mul。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = (static_cast<float>(index % 23) + 2.0F) * 0.5F;
     input1[index] = ((index % 2) == 0 ? 1.0F : -1.0F) * (static_cast<float>(index % 37) + 2.0F) * 0.25F;
   }
-  // 哨兵而不是 0：输出没被写时要能和「算出 0」分开。
+  // 用哨兵初始化输出，区分未写入元素与有效零结果。
   for (uint32_t index = 0; index < output_element_count; ++index) {
     output[index] = -12345.0F;
   }

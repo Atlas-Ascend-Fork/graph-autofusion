@@ -81,7 +81,7 @@ ALL_STATUSES: Tuple[str, ...] = (
 # key=value 得为它们定一套引用规则，而制表符在这些值里不可能出现。
 #
 # 人读的那几行（`ELEWISE_RESULT ...`、`MATRIX_SUMMARY_ROW ...`）一行都没改：历史日志、
-# 评审记录和既有的 grep 都还指着它们。机读行是**额外**打的，两者并存。
+# 评审记录和既有的 grep 都还指着它们。机读行是额外打的，两者并存。
 CASE_MARKER = "AF_NPU_CASE"
 SUITE_MARKER = "AF_NPU_SUITE"
 
@@ -216,7 +216,7 @@ def is_defect(status: str) -> bool:
 
 # ---------------------------------------------------------------------------- 判级
 #
-# 判级的核心事实（2026-10-16 实测得到）：**下降失败的原因不在异常里。** inductor 抛的异常
+# 判级的核心事实（2026-10-16 实测得到）：下降失败的原因不在异常里。 inductor 抛的异常
 # 只有包装文本 `Failed to execute graph code: ...`，真正的原因是 MLIR 诊断，由 C++ 写 fd 2。
 # 所以每格都要在 fd 层面捕获 stderr，再拿捕获到的文本判级，否则所有已知支持边界都会被
 # 误判成未知错误（第一轮 broadcast 表就是这样把 3 个 BindingConflict 报成了 ERROR）。

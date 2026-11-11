@@ -10,14 +10,14 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
-// afir-compare-extension-api.mlir 的另一半。两侧的**调用名一样**（`CompareExtend`），
+// afir-compare-extension-api.mlir 的另一半。两侧的调用名一样（`CompareExtend`），
 // 差的是别的三样，其中第一样这条路上此前没出现过：
 //
-//   - **`CMPMODE` 换了位置**：mem 侧是第四个实参，reg 侧是第三个模板实参。同一个
+//   - `CMPMODE` 换了位置：mem 侧是第四个实参，reg 侧是第三个模板实参。同一个
 //     `cmpMode` 属性、两个 emitter，写在同一个 op 上分不开，所以是两个 def。
-//   - **模板实参表**：reg 侧要打 `<InT, 1, CMPMODE::XX>`——`dim` 排在中间，写出它就得
+//   - 模板实参表：reg 侧要打 `<InT, 1, CMPMODE::XX>`——`dim` 排在中间，写出它就得
 //     把 `InT` 也写出来；`OutT` 排在最后，照旧由 dst 推。`1` 就是「连续」的全部含义。
-//   - **tmp buffer**：`GetCompareSizeV2` 照样给这个节点分 32 字节，而 `CompareExtend`
+//   - tmp buffer：`GetCompareSizeV2` 照样给这个节点分 32 字节，而 `CompareExtend`
 //     的签名里没有那个形参——`TmpBufferUse::Unused`。所以函数签名里有 %tmp，调用里
 //     没有它，与 `sub` / `div` 的 mem 侧同一档。
 //
@@ -41,7 +41,7 @@ module {
   }
 
   // reg 侧比 mem 侧多收三个 dtype（i16 / ui8 / ui16）。ui8 这一行还顺带说明：输入与
-  // 结果**可以**同 dtype，判据仍然是「结果恒为 ui8」而不是「结果等于输入」。
+  // 结果可以同 dtype，判据仍然是「结果恒为 ui8」而不是「结果等于输入」。
   func.func @gt_reg_base_ui8(%lhs: !ascendc.local_tensor<?xui8>, %rhs: !ascendc.local_tensor<?xui8>,
                              %destination: !ascendc.local_tensor<?xui8>, %tmp: !ascendc.local_tensor<?xui8>) {
     %result = afir.gt %lhs, %rhs outs(%destination) tmp(%tmp) {

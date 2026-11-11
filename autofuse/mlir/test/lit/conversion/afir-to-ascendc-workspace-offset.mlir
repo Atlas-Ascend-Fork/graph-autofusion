@@ -7,9 +7,8 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 // RUN: af-opt --afir-gen-kernel-entry %s | af-opt | FileCheck %s
 
-// workspace 偏移链路的入口一侧：entry 从 stage tiling 上读 `workspace<ID>`，作为实参传给
-// 声明了 `role = workspace_offset` 的那个形参。`index` 就是这块 workspace 的 buffer id，
-// 因此两块 workspace 各取各的字段，不会串。
+// entry 读取 stage tiling 的 workspace<ID>，传给对应 workspace_offset 参数。
+// 参数 index 为 buffer id，用于区分多块 workspace 的偏移来源。
 module @plan0 attributes {
   afir.module_kind = "plan",
   afir.workspace_tensor_ids = array<i64: 2, 5>,

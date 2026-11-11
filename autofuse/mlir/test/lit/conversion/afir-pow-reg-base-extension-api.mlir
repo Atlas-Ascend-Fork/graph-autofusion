@@ -13,7 +13,7 @@
 
 // afir-pow-extension-api.mlir 的另一半：`pow_reg_base.h`，同样收一块 tmp buffer。
 //
-// **i16 只有这一侧收**：mem 侧 legacy 的 `REG_ASC_IR(Pow)` 只给了 {i32, f16, f32}，
+// i16 只有这一侧收：mem 侧 legacy 的 `REG_ASC_IR(Pow)` 只给了 {i32, f16, f32}，
 // reg 侧那一版连 ui8 / i16 / ui16 一起收。所以整个 module 拿 i16 写，`WRONGTARGET`
 // 那条同时钉住 mem 侧选不出实现——这一对是两侧元素类型差得最远的一对。
 

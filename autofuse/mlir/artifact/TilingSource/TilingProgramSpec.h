@@ -47,7 +47,7 @@ struct TilingPlanSpec {
 struct TilingProgramSpec {
   std::vector<std::string> shape_params;
   std::vector<TilingPlanSpec> plans;
-  // 参与聚合的候选共用的目标；其中的资源上限发射成 host tiling 里的 `g_no_limit_res`。
+  // 参与聚合的候选共用的目标；其中的资源上限生成 host tiling 里的 `g_no_limit_res`。
   afir::TargetAttr target;
 };
 

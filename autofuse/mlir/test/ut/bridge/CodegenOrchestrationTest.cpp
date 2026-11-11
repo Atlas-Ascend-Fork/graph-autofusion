@@ -199,7 +199,7 @@ ascir::FusedScheduledResult BuildValidFusedScheduleResult(bool static_shape = fa
   return fused_schedule_result;
 }
 
-// 同一个子图两个计划：plan 0 不可下降、plan 1 正常。不可下降的那个放在**前面**，这样
+// 同一个子图两个计划：plan 0 不可下降、plan 1 正常。不可下降的那个放在前面，这样
 // 「丢弃 + 重编号」必须真的发生：幸存者会从 plan 1 重排成 result0。
 ascir::FusedScheduledResult BuildFusedScheduleResultWithUnlowerableFirstPlan() {
   af::AscGraph broken_graph = BuildScheduledTestGraph(true);
@@ -413,7 +413,7 @@ TEST(CodegenOrchestrationTest, ValidFixtureDumpsEachLoweringPassResult) {
 // 「能力不足」与「坏了」的分流（`support/CapabilityShortfall.h`）。标记只走诊断的
 // metadata，所以这一条先单独钉住机制本身：没标记的错误不算能力不足。
 //
-// 反过来写不了——`InFlightDiagnostic` 的报告动作在析构时发生，所以两条都必须真的发出去。
+// 反过来写不了——`InFlightDiagnostic` 的报告动作在析构时发生，所以两条都必须真的输出。
 TEST(CodegenOrchestrationTest, OnlyMarkedDiagnosticsCountAsCapabilityShortfall) {
   mlir::MLIRContext context;
   {
@@ -436,7 +436,7 @@ TEST(CodegenOrchestrationTest, OnlyMarkedDiagnosticsCountAsCapabilityShortfall) 
 // 通路（`has no supported Ascend implementation`）收束在同一个标记点上，形态由
 // `test/lit/conversion/afir-transfer-multi-segment-unsupported.mlir` 钉。
 //
-// **先跑一遍没改的 fixture**：不先确认它本来成功，`kFailed` 可能来自别的原因——这条用例
+// 先跑一遍没改的 fixture：不先确认它本来成功，`kFailed` 可能来自别的原因——这条用例
 // 就什么都没证明。
 TEST(CodegenOrchestrationTest, CapabilityShortfallFailsInMlirConfig) {
   mlir::test::ScopedEnvVar scoped_mlir_env("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;");
@@ -498,14 +498,14 @@ TEST(CodegenOrchestrationTest, ValidArgMaxSchedulePassesAttAndFailsInMlirConfig)
   EXPECT_TRUE(result.tiling_data.empty());
 }
 
-// 严格模式的正例：**同一张图、同一处能力不足**，缺省回落（上一条用例）而严格变红。
+// 严格模式的正例：同一张图、同一处能力不足，缺省回落（上一条用例）而严格变红。
 //
 // 两条用例共用 `exec_condition = kConditionInvalid` 这一处埋点，为的是让差别只落在取值上。
 // 换一张图写这一条，变红可能来自别的原因，那就什么都没证明。
 //
 // 同时钉住两件事：
 //   `result` 仍然没被动过——严格模式只改结论，不改「失败时不许留半成品」这条；
-//   成功的图在严格模式下**照旧成功**，否则这台量具量出来的全是红的，没有信息。
+//   成功的图在严格模式下照旧成功，否则这个测量工具量出来的全是红的，没有信息。
 TEST(CodegenOrchestrationTest, StrictModeTurnsCapabilityShortfallIntoFailure) {
   mlir::test::ScopedEnvVar scoped_mlir_env("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;");
   auto fused_schedule_result = BuildValidFusedScheduleResult();
@@ -528,7 +528,7 @@ TEST(CodegenOrchestrationTest, StrictModeTurnsCapabilityShortfallIntoFailure) {
   EXPECT_TRUE(result.tiling_data.empty());
 }
 
-// 严格模式**不收紧** Cube 融合那道闸门：它明确不在这条路的范围内，收紧只会让 legacy 的
+// 严格模式不收紧 Cube 融合那道门禁：它明确不在这条路的范围内，收紧只会让 legacy 的
 // Cube 用例整片变红。于是 `kNotSupported` 在严格模式下只剩「没开路 / 不在范围」两个来路，
 // 「回落」与它们因此分得开——这正是那张接管表不出现「状态未知」行的依据。
 TEST(CodegenOrchestrationTest, StrictModeStillFallsBackForCubeFusion) {
@@ -541,14 +541,14 @@ TEST(CodegenOrchestrationTest, StrictModeStillFallsBackForCubeFusion) {
             mlir::bridge::MlirCodegenStatus::kNotSupported);
 }
 
-// 闸门标签的归属：**每一档取值各走一条路，各自落在自己那道闸门上**。
+// 门禁标签的归属：每一档取值各走一条路，各自落在自己那道门禁上。
 //
 // 这一条是整个严格模式里最容易答错的地方——插错位置不会让任何既有用例变红，只会让接管表把
 // 一行归到别的桶里，而那张表是后面每一项的验收手段。所以这里逐格钉住 `gate=` 与
 // `shortfall=` 两列，并且**要求标签恰好一行**：少一行说明有出口没插，多一行说明某个出口
 // 被插了两次。
 //
-// `shortfall` 这一列单独钉，是因为它与 `gate` 不能互推：同一道 `lowering` 闸门既可能是能力
+// `shortfall` 这一列单独钉，是因为它与 `gate` 不能互推：同一道 `lowering` 门禁既可能是能力
 // 不足（缺省那一档会回落）也可能是坏了（缺省那一档也失败），表里那两态全靠它分。
 TEST(CodegenOrchestrationTest, StrictModeLabelsTheGateThatStoppedTheGraph) {
   mlir::test::ScopedEnvVar scoped_mlir_env("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;");
@@ -620,7 +620,7 @@ TEST(CodegenOrchestrationTest, StrictModeLabelsTheGateThatStoppedTheGraph) {
   }
 }
 
-// 缺省那一档**一个字节都不多输出**：标签只在严格模式下打。
+// 缺省那一档一个字节都不多输出：标签只在严格模式下打。
 // 没有这一条，产品部署会多出一行谁也没要的 stderr。
 TEST(CodegenOrchestrationTest, DefaultModeEmitsNoGateLabel) {
   mlir::test::ScopedEnvVar scoped_mlir_env("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=fallback;");
@@ -634,9 +634,9 @@ TEST(CodegenOrchestrationTest, DefaultModeEmitsNoGateLabel) {
   EXPECT_EQ(text.find(mlir::bridge::kMlirCodegenStrictMarker.str()), std::string::npos) << text;
 }
 
-// 严格模式的负例：**硬失败在两档取值下都是 `kFailed`**。
+// 严格模式的负例：硬失败在两档取值下都是 `kFailed`。
 // 严格模式是把一类回落升级成失败，不是把失败降级——如果它顺手改了这一类的结论，那它就不只
-// 是一台量具了。
+// 是一个测量工具了。
 TEST(CodegenOrchestrationTest, StrictModeKeepsHardFailureFailing) {
   mlir::test::ScopedEnvVar scoped_mlir_env("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;");
   auto fused_schedule_result = BuildValidFusedScheduleResult();
@@ -730,7 +730,7 @@ TEST(CodegenOrchestrationTest, RegBaseApiHeadersReachTheRegistry) {
   EXPECT_TRUE(registry.GetFileContent("no_such_extension_header.h").empty());
 }
 
-// 每个扩展 op 上写死的头文件名都要在供给表里取得到。取不到不会在 MLIR 这一层报错：
+// 每个扩展 op 上写死的头文件名都要在支持表里取得到。取不到不会在 MLIR 这一层报错：
 // include 会被原样留在 kernel 源码里，最后炸在编译器的「找不到这个头」上，离写错的
 // 那个字符串已经隔了几层。名单是手抄的——新加扩展 op 时忘了加进来只是少一条覆盖，
 // 不会让这条断言说谎。
@@ -865,11 +865,11 @@ TEST(CodegenOrchestrationTest, DeclaredExtensionHeadersResolveInTheRegistry) {
            mlir::ascendc::NdtriExtendRegBaseOp::getExtensionHeaders(),
            mlir::ascendc::LogNdtrExtendRegBaseOp::getExtensionHeaders(),
            mlir::ascendc::I0ExtendRegBaseOp::getExtensionHeaders(),
-           // 本族第一个声明两个头的：上面那条「列表里每一项都要取得到」正是为它写的。
+           // 本类第一个声明两个头的：上面那条「列表里每一项都要取得到」正是为它写的。
            mlir::ascendc::AiryAiExtendRegBaseOp::getExtensionHeaders(),
            mlir::ascendc::BesselJ0ExtendRegBaseOp::getExtensionHeaders(),
            mlir::ascendc::BesselJ1ExtendRegBaseOp::getExtensionHeaders(),
-           // 第 4 批的两个是本族第一个声明**两个扩展头**的，所以「列表里每一项都要取得到」
+           // 第 4 批的两个是本类第一个声明两个扩展头的，所以「列表里每一项都要取得到」
            // 这条对它们才是真有内容的：漏注册 `modified_bessel_i0_reg_base.h` 与漏注册
            // `i0e_reg_base.h` 的表现一样。
            mlir::ascendc::I0eExtendRegBaseOp::getExtensionHeaders(),
@@ -917,7 +917,7 @@ TEST(CodegenOrchestrationTest, DeclaredExtensionHeadersResolveInTheRegistry) {
            mlir::ascendc::ZetaExtendRegBaseOp::getExtensionHeaders(),
            mlir::ascendc::IgammaExtendRegBaseOp::getExtensionHeaders(),
            mlir::ascendc::IgammacExtendRegBaseOp::getExtensionHeaders(),
-           // 第 9 批（多项式族八个）。**前导头也要逐个取**：两族各有一个 utils，它们走
+           // 第 9 批（多项式族八个）。前导头也要逐个取：两类各有一个 utils，它们走
            // preludes 而不是 headers——理由见 `Autofuse/OpVecUnary.td` 那段（字典序会把
            // `t` / `u` 排到 `utils` 前面，而依赖序要求 utils 先内联）。
            mlir::ascendc::ChebyshevPolynomialTExtendRegBaseOp::getExtensionHeaders(),
@@ -952,7 +952,7 @@ TEST(CodegenOrchestrationTest, DeclaredExtensionHeadersResolveInTheRegistry) {
            mlir::ascendc::ScaledModifiedBesselK1ExtendRegBaseOp::getExtensionPreludeHeaders(),
            mlir::ascendc::IgammaExtendRegBaseOp::getExtensionPreludeHeaders(),
            mlir::ascendc::IgammacExtendRegBaseOp::getExtensionPreludeHeaders(),
-           // 前导头也要逐项取得到：这一族的 utils 都走那张表，漏注册的表现与漏注册
+           // 前导头也要逐项取得到：这一类的 utils 都走那张表，漏注册的表现与漏注册
            // 扩展头一样，是 kernel 里留下一条解析不了的 include。
            mlir::ascendc::AiryAiExtendRegBaseOp::getExtensionPreludeHeaders(),
            mlir::ascendc::BesselJ0ExtendRegBaseOp::getExtensionPreludeHeaders(),
@@ -962,29 +962,29 @@ TEST(CodegenOrchestrationTest, DeclaredExtensionHeadersResolveInTheRegistry) {
            mlir::ascendc::ReciprocalExtendOp::getExtensionPreludeHeaders(),
            mlir::ascendc::SigmoidExtendOp::getExtensionPreludeHeaders(),
        }) {
-    // 声明的是列表，**列表里每一项**都要取得到：漏注册第二个头的表现与漏注册第一个
+    // 声明的是列表，列表里每一项都要取得到：漏注册第二个头的表现与漏注册第一个
     // 完全一样，而只查第一项的断言会放它过去。
     //
-    // **上面那张 op 名单是手工维护的，加了新的扩展 op 就要在这里加一行。** 漏加的后果不是
+    // 上面那张 op 名单是手工维护的，加了新的扩展 op 就要在这里加一行。 漏加的后果不是
     // 这条用例变弱而已：`datacopy_nddma_reg_base.h` 那一行就是补上的——它原先写成源文件名
-    // `datacopy_nddma.h`，而注册表的键是 `api_regbase/CMakeLists.txt` 生成出来的
+    // `datacopy_nddma.h`，而注册表的键是 `api_regbase/CMakeLists.txt` 生成的
     // `x_reg_base.h`，查不到，于是 kernel 里留下一条解析不了的 include，一路炸到设备编译器。
     // 那时这张名单里没有这个 op，所以这条用例是绿的。
     EXPECT_FALSE(declared.empty());
-    // 这里原先查的是「声明顺序必须已经是字典序」——`AddKernelIncludes` 当时按字典序发 include
+    // 这里原先查的是「声明顺序必须已经是字典序」——`AddKernelIncludes` 当时按字典序生成 include
     // 块，对声明顺序不是字典序的 op 直接报错。那条断言是 2026-10-21 由 `AiryAiExtend` 逼出来
     // 的：它要 `trigonometric_function_utils_reg_base.h` 先内联（`airy_ai.h` 调里面的
     // `AutofuseSin` / `AutofuseCos`），而那个名字的字典序排在 `airy_ai_reg_base.h` **后面**。
     // 当时 lit、UT、CPU 模拟三样全绿，只有 200 格接管表照出来——那一格从干净回落变成硬失败。
-    // 那一课仍然成立，而且是另一条规则：utils 一类放**前导头**那一格（它排在所有扩展头前面），
-    // 而不是塞进这个列表。前导表达不了的只是两个扩展头**之间**的先后。
+    // 那一课仍然成立，而且是另一条规则：utils 一类放前导头那一格（它排在所有扩展头前面），
+    // 而不是塞进这个列表。前导表达不了的只是两个扩展头之间的先后。
     //
-    // 现在发射层照声明次序排（`ApiExtensionOrder` 拓扑排，同层字典序），所以字典序不再是要求：
+    // 现在生成层照声明次序排（`ApiExtensionOrder` 拓扑排，同层字典序），所以字典序不再是要求：
     // `I0e` 那种反字典序的依赖是合法声明——`i0e.h` 用的 `I0_A` / `I0_B` 只有
     // `modified_bessel_i0.h` 定义，而 `i0e_reg_base.h` 的字典序恰好在它前面。
     //
-    // 留给这里查的是重名：同一个列表里重复一个名字在排序那边是个环，而环是**硬失败**——这个
-    // op 一旦出现在图里就在 artifact-assembly 闸门上红，缺省档也不回落。跨 op 的次序冲突和
+    // 留给这里查的是重名：同一个列表里重复一个名字在排序那边是个环，而环是硬失败——这个
+    // op 一旦出现在图里就在 artifact-assembly 门禁上红，缺省档也不回落。跨 op 的次序冲突和
     // 成环归 `ApiExtensionOrderTest` 盯（那是排序本身的用例），这里只盯每个 op 自己那一份。
     std::vector<llvm::StringRef> names(declared.begin(), declared.end());
     llvm::sort(names);

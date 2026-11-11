@@ -108,9 +108,8 @@ TEST(AttSchemaAdapterDetailTest, ValidateGeneratedFieldReferencesRejectsUnknownF
   EXPECT_NE(diagnostic.find("block_dim"), std::string::npos);
 }
 
-// 这一组守的是「结构体成员」那一半对账。此前只扫标量访问器名，多 group 时 ATT 按成员名
-// 直接访问各 schedule group 的结构体（取引用、整体赋值），命名不一致一路漏到真机 host 编译期
-// 才以 `member access into incomplete type` 的形式暴露。
+// 检查多 group 的结构体成员访问，不仅扫描标量访问器。
+// ATT 会取引用或整体赋值；若成员名与 schema 不一致，应在此发现，而非延迟到 host 编译。
 TEST(AttSchemaAdapterDetailTest, ExtractsScheduleGroupMemberAccesses) {
   const std::string source =
       "  auto &g0 = tiling_data.graph0_result0_g0_tiling_data;\n"

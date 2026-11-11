@@ -19,9 +19,9 @@
 //
 // GM 偏移是集合差求和：`axis` 表里不在 `vectorized_axis` 里的每根轴，各乘自己那一格
 // `strides`。这里差集是 `[zTB, zTb]`，于是偏移 = 块号 × (zTb_size × zt_size) + 轮次 ×
-// zt_size。与它替换掉的 `(块号 × zTb_size + 轮次) × zt_size` **数值相等**——旧式子是这个
+// zt_size。与它替换掉的 `(块号 × zTb_size + 轮次) × zt_size` 数值相等——旧式子是这个
 // 和的 Horner 因式分解，而能因式分解依赖 `stride(zTB) = stride(zTb) × size(zTb)` 这层
-// 嵌套关系。reduce 不满足那层关系，所以本用例钉的是**求和形态**，不是那次外提。
+// 嵌套关系。reduce 不满足那层关系，所以本用例钉的是求和形态，不是那次外提。
 
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s | FileCheck %s --check-prefix=IR
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=IR
@@ -108,7 +108,7 @@ module @plan0 attributes {
 // 派生式，不是符号，所以 TilingData 里只有 inner——这条规律见设计文档 4.2.5。
 // 走完整 plan pipeline 后 `afir.tiling_param` 已降成 `emitasc.member` + index_cast。
 // 三个符号按 size_var 顺序连续出现；逐条 NEXT 锚定，不能只 match 字段名——TilingData
-// 的**类型签名里也列着全部字段名**，单独 match `"zt_size"` 会先撞上 `s0` 那一行。
+// 的类型签名里也列着全部字段名，单独 match `"zt_size"` 会先撞上 `s0` 那一行。
 // IR: emitasc.member %{{.*}} "s0"
 // IR-NEXT: arith.index_cast
 // IR-NEXT: emitasc.member %{{.*}} "zt_size"
@@ -116,7 +116,7 @@ module @plan0 attributes {
 // IR-NEXT: emitasc.member %{{.*}} "zTb_size"
 // IR-NEXT: %[[ZTB:.*]] = arith.index_cast
 
-// 分核轴不发 scf.for：块号是 `get_block_idx` 对该轴 loop_size 取模，打 axis_index 标记
+// 分核轴不生成 scf.for：块号是 `get_block_idx` 对该轴 loop_size 取模，打 axis_index 标记
 // （LoopGenerate.cpp:525-531）。二维重构后这个值仍然是 GM 偏移的一项。
 // IR: ascendc.get_block_idx
 // IR: %[[BLOCKIDX:.*]] = arith.remsi {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 3, role = axis_index>}
@@ -124,9 +124,9 @@ module @plan0 attributes {
 // IR: %[[ACTUAL:.*]] = arith.select {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 4, role = actual_size>}
 // IR: scf.for %[[IV:.*]] = %{{.*}} to %[[ACTUAL]]
 
-// 向量化轴自己的 actual_size：循环生成为配对 inner 发的那一份，在循环体内。
+// 向量化轴自己的 actual_size：循环生成为配对 inner 生成的那一份，在循环体内。
 //
-// 这个值**曾经被删掉**：memory-allocate 里下降符号求值那一步顺手扫了全函数、顺手做了
+// 这个值曾经被删掉：memory-allocate 里下降符号求值那一步顺手扫了全函数、顺手做了
 // 死代码消除，而它当时没有使用者——`#afir.axis_binding` 是「从轴找回值」的唯一通路，
 // 标记本身不算使用。于是「一个轴绑定能不能活到下降阶段」取决于此前碰巧有没有消费者。
 // 搬运长度改成查这个绑定之后它才有了使用者。本行把它的存活钉住。
@@ -136,15 +136,15 @@ module @plan0 attributes {
 // GM 偏移 = 块号 × strides[zTB] + 轮次 × strides[zTb]。两项都直接来自 descriptor 的
 // `strides` 表：复合的那格物化成一次 `index.mul`，裸符号那格直接绑回 TilingData 字段。
 //
-// 这里**没有**外提的公因子。旧实现把两项合成 `(块号 × zTb_size + 轮次) × zt_size`，
+// 这里没有外提的公因子。旧实现把两项合成 `(块号 × zTb_size + 轮次) × zt_size`，
 // 靠的是 stride 的嵌套关系；求和式不作这个假设，代价是循环体内多一次乘法。
 // IR: %[[STRIDE:.*]] = index.mul %[[ZTB]], %[[ZT]]
 // IR: %[[BLOCKTERM:.*]] = arith.muli %[[BLOCKIDX]], %[[STRIDE]]
 // IR: %[[ROUNDTERM:.*]] = arith.muli %[[IV]], %[[ZT]]
 // IR: %[[OFF:.*]] = arith.addi %[[BLOCKTERM]], %[[ROUNDTERM]]
 // 一维退化：有效视图只有一项，于是 blockCount 恒 1、两侧缝隙恒 0。一维与二维共用同一条
-// 发射路径，这一行钉的就是「退化得对」——二维用例在
-// `afir-to-ascendc-two-dim-transfer.mlir`，两者的 `data_copy_pad_extend` 是同一个发射点。
+// 生成路径，这一行钉的就是「退化得对」——二维用例在
+// `afir-to-ascendc-two-dim-transfer.mlir`，两者的 `data_copy_pad_extend` 是同一个生成点。
 // IR: %[[ONE:.*]] = arith.constant 1 : index
 // IR: %[[ZEROSTRIDE:.*]] = arith.constant 0 : index
 // GM 侧带偏移、UB 侧恒为 0——`8fcd2ebe` 定下的规则，二维重构后必须保持。
@@ -160,7 +160,7 @@ module @plan0 attributes {
 
 // --- Store ---
 // 方向映射：本地侧取源、GM 侧取目的，偏移仍只落在 GM 侧。求和形态与 Load 逐项相同——
-// 两侧共用一条发射路径，写错一侧的表现是 Store 搬到错的地方而 Load 正常。
+// 两侧共用一条生成路径，写错一侧的表现是 Store 搬到错的地方而 Load 正常。
 // IR: %[[SSTRIDE:.*]] = index.mul %[[ZTB]], %[[ZT]]
 // IR: %[[SBLOCK:.*]] = arith.muli %[[BLOCKIDX]], %[[SSTRIDE]]
 // IR: %[[SROUND:.*]] = arith.muli %[[IV]], %[[ZT]]

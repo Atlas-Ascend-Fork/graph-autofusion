@@ -10,9 +10,9 @@
 
 //===- Case.cpp - load -> isnan -> store CPU case ---------------*- C++ -*-===//
 //
-// 第一个**结果 dtype 与输入不同**的端到端用例：输入 f32，输出 ui8。一路上每一层都要
+// 第一个结果 dtype 与输入不同的端到端用例：输入 f32，输出 ui8。一路上每一层都要
 // 不认为「结果跟输入同类型」——ODS 的 `AllElementTypesMatch`、capability 的元素类型
-// 判据、emitter 的显式模板实参（`IsnanExtend<T>` 的 T 是**源**的类型，目的地恒为
+// 判据、emitter 的显式模板实参（`IsnanExtend<T>` 的 T 是源的类型，目的地恒为
 // uint8）。其中最后一条只有真的把 kernel 编出来才挡得住。
 //
 // `isnan.h` 同时是又一个不自足的扩展头（用了 `MAX_REPEAT_TIME`），所以这个用例也顺带

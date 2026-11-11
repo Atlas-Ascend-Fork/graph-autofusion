@@ -15,7 +15,7 @@
 
 AF_MLIR_E2E_CPU_CASE_BEGIN(load_add_index_expr_store, 1, 1);
 
-// `IndexExpr` 不是 kernel 输入——它没有 index，值在 kernel 顶部由 size var 算出来。
+// IndexExpr 不是 kernel 输入，不分配输入 index；其值在 kernel 顶部按 size var 计算。
 
 AF_MLIR_E2E_CPU_CASE_END(load_add_index_expr_store)
 

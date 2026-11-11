@@ -10,16 +10,16 @@
 
 //===- Case.cpp - load -> div(scalar, tile) -> store CPU case ----*- C++ -*-===//
 //
-// 方向要发出去的那一族（规则二）的第二个 op：`y = 4.0 / x`，标量在**左**。
-// `load_scalar_sub_store` 是这一族的第一条，两者钉的不是同一件事：
+// 方向要生成的那一类（规则二）的第二个 op：`y = 4.0 / x`，标量在左。
+// `load_scalar_sub_store` 是这一类的第一条，两者钉的不是同一件事：
 //
-//   - 那一条钉的是**这条发射规则本身**（`printApiExtensionScalarBinary` 会把方向写进模板
+//   - 那一条钉的是这条生成规则本身（`printApiExtensionScalarBinary` 会把方向写进模板
 //     实参，不是把 tile 挪到第一位了事）；
-//   - 这一条钉的是 `div` 自己那一份供给：`Divs<T, false>` 与 `Subs<T, false>` 不共用任何
+//   - 这一条钉的是 `div` 自己那一份可用实现：`Divs<T, false>` 与 `Subs<T, false>` 不共用任何
 //     代码，方向在 `scalar_div.h` 里落成的是 `BinaryRepeatParams` 的四个 stride
 //     （`src0BlkStride` / `src0RepStride` 置 0，让被 `Duplicate` 出来的那一个 block 在
 //     src0 位上原地重复），以及两处 `AscendC::Div` 的实参次序。**那一整段只有
-//     `IS_SCALAR_LATTER == false` 时才走到**，发射规则再对也走不到它。
+//     `IS_SCALAR_LATTER == false` 时才走到**，生成规则再对也走不到它。
 //
 // 取值全是 2 的整数次幂并带符号，`4.0 / x` 的商也是，所以逐元素比相等而不是比容差
 // （`load_div_store` 那一条比的是 1e-5 绝对量，因为它的输入是任意值）。方向写反算的是
@@ -58,13 +58,13 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_scalar_div_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // **字面量写全**：emitter 打的是定长科学计数。
+  // 字面量写全：emitter 打的是定长科学计数。
   EXPECT_NE(kernel.find("constexpr float c4_f32 = (float)4.000000000e+00;"), std::string::npos);
-  // **`false` 是这条用例的全部理由**：标量在左。写成 `true`（或者少写这一位、落到缺省值）
+  // `false` 是这条用例的全部理由：标量在左。写成 `true`（或者少写这一位、落到缺省值）
   // 逐元素断言当场红。
   EXPECT_NE(kernel.find("Divs<float, false>("), std::string::npos);
   EXPECT_EQ(kernel.find("Divs<float, true>("), std::string::npos);
-  // **不能查「`AscendC::Div<` 一个都没有」**：`scalar_div.h` 的函数体自己就发
+  // 不能查「`AscendC::Div<` 一个都没有」：`scalar_div.h` 的函数体自己就生成
   // `AscendC::Div<T, false>`，而这个头是整段内联进 kernel 的。「选中的是标量形态」
   // 由上面两条正 / 负断言管。
   //
@@ -74,9 +74,9 @@ void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find("__ASCENDC_API_SCALAR_DIV_H__"), std::string::npos);
   EXPECT_NE(kernel.find("__ASCENDC_API_UTILS_H__"), std::string::npos);
   // 标量形态要 tmp buffer（`Duplicate` 出来的那一个 block 放在里面），而 `afir.div` 的
-  // tensor-tensor 形态发的是四参 `AscendC::Div`、不收 tmp。TBuf 只会因为 tmp buffer 出现。
+  // tensor-tensor 形态生成的是四参 `AscendC::Div`、不收 tmp。TBuf 只会因为 tmp buffer 出现。
   EXPECT_NE(kernel.find("AscendC::TBuf<"), std::string::npos);
-  // mem 那一侧：reg 侧发的是 `DivExtends`（`div_reg_base.h`）。
+  // mem 那一侧：reg 侧生成的是 `DivExtends`（`div_reg_base.h`）。
   EXPECT_EQ(kernel.find("__ASCENDC_REGBASE_API_DIV_H__"), std::string::npos);
 }
 }  // namespace mlir::afir

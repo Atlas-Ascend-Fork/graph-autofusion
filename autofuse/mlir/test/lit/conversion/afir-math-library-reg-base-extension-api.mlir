@@ -12,14 +12,14 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=NOFLAG --implicit-check-not="arith.constant false"
 
 // afir-math-library-stock-api.mlir 的另一半。两侧分得开的东西比 `sign` / `remainder`
-// 那几对多：**连函数名都不同**（`TanhExtend` vs `AscendC::Tanh`），而且 reg 侧这个包装
+// 那几对多：连函数名都不同（`TanhExtend` vs `AscendC::Tanh`），而且 reg 侧这个包装
 // 自己把 `isReuseSource` 定死在函数体里（`Tanh<T, false, tanh_config>`），所以这一侧
-// 发的调用**不带模板实参**，也就不物化那个 `arith.constant false`。
+// 生成的调用不带模板实参，也就不物化那个 `arith.constant false`。
 //
 // 下面 `NOFLAG` 那一条 RUN 就是钉这个的：把 `MaterializesReuseSource` 误加到这一侧的话，
 // 多出来的那个常量既没人用、也进不了调用，只有这条能看出来。**它单开一条 RUN 而不是
 // 写成 `IR-NOT`**：`CHECK-NOT` 只管到上一条匹配与下一条匹配之间，而那个常量是建在调用
-// **前面**的，写成 `IR-NOT` 盖不住第一个函数那一段。`--implicit-check-not` 盖整份输出。
+// 前面的，写成 `IR-NOT` 盖不住第一个函数那一段。`--implicit-check-not` 盖整份输出。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
@@ -117,7 +117,7 @@ module {
   }
 
   // 第 3 批。两个的 utils 头都走前导头那一格，这里只钉调用；头名与前导头由
-  // `CodegenOrchestrationTest` 对着供给表查。
+  // `CodegenOrchestrationTest` 对着支持表查。
 
   func.func @bessel_j0_extend_reg_base_f32(%input: !ascendc.local_tensor<?xf32>,
                                      %destination: !ascendc.local_tensor<?xf32>,
@@ -143,8 +143,8 @@ module {
     return
   }
 
-  // 第 4 批。这两个的包装声明了**两个扩展头**（`modified_bessel_i0_reg_base.h` 要先内联），
-  // 而这条管线不经 `AddKernelIncludes`，所以**内联顺序这里钉不住**，只钉调用和选型；顺序由
+  // 第 4 批。这两个的包装声明了两个扩展头（`modified_bessel_i0_reg_base.h` 要先内联），
+  // 而这条管线不经 `AddKernelIncludes`，所以内联顺序这里钉不住，只钉调用和选型；顺序由
   // `ApiExtensionOrderTest` 和 200 格接管表管。
 
   func.func @i0e_extend_reg_base_f32(%input: !ascendc.local_tensor<?xf32>,

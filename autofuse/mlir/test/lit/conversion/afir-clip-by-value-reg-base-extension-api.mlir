@@ -16,8 +16,8 @@
 // 一侧就是 unsupported(见 WRONGTARGET),因为 `clipbyvalue.h` 的 `ClipByValue` 要调用方
 // 给那块 UB,而 AFIR 造不出来。
 //
-// 这一族两侧**同名**(都叫 `ClipByValue`),与选择族的 `Where` / `WhereExtend` 不同,所以
-// 单看生成出来的调用分不出走的是哪一侧。真正的判别式是扩展头名:`clipbyvalue.h` vs
+// 这一类两侧同名(都叫 `ClipByValue`),与选择族的 `Where` / `WhereExtend` 不同,所以
+// 单看生成的调用分不出走的是哪一侧。真正的判别式是扩展头名:`clipbyvalue.h` vs
 // `clipbyvalue_reg_base.h`,注册期的 `checkFamilyMatchesHeader` 逐项比对它们,写反了整张
 // 注册表建不起来。这里靠 SELECT 那条(implementation id)把它钉住。
 

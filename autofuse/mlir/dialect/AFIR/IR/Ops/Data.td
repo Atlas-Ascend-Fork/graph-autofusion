@@ -28,11 +28,11 @@ def AFIR_ScalarOp : AFIR_NullaryOpBase<"scalar", [Pure], [I8, UI8, I16, UI16, I3
 }
 def AFIR_IndexExprOp : AFIR_NullaryOpBase<"index_expr", [Pure], [I8, UI8, I16, UI16, I32, UI32, I64, UI64, F16, F32, BF16], 1>;
 
-// bf16 在搬运这一族上**两侧都有**（`ascir_op_lowering_matrix.csv` 里 Load / Store /
+// bf16 在搬运这一类上两侧都有（`ascir_op_lowering_matrix.csv` 里 Load / Store /
 // Output / Workspace 的 `mem_dtypes` 与 `reg_dtypes` 都列着它），与计算族那批 reg 侧
-// 独有的位不同。**这一条是硬要求，不是顺手加宽**：bf16 一旦过了 bridge 的
+// 独有的位不同。这一条是硬要求，不是顺手加宽：bf16 一旦过了 bridge 的
 // `IsAfirModeledDType`，一张 bf16 图里的 `afir.load` 就会建出来，而 ODS 不收它时
-// 失败在 verifier 上——那是**硬失败**，把本可以干净回落的图变红。探针上实测过一次。
+// 失败在 verifier 上——那是硬失败，把本可以干净回落的图变红。探针上实测过一次。
 defvar AFIR_DataMoveElementTypes = [I8, UI8, I16, UI16, I32, UI32, I64, UI64, F16, F32, BF16];
 
 def AFIR_LoadOp : AFIR_BufferizableUnaryOpBase<"load",
@@ -83,33 +83,9 @@ def AFIR_StoreOp : AFIR_BufferizableUnaryOptionalResultOpBase<"store",
   }];
 }
 
-// 搬入与广播融成一个节点。**不是 `afir.load` 的一个变体，也不是 `afir.broadcast`
-// 的一个变体**：它一条指令同时完成 GM → UB 的搬运与片上的广播，发的是 reg 侧那张供给表
-// 上的 `DataCopyNddma`（`v35/ascendc/api_regbase/datacopy_nddma.h`），由 ND-DMA 硬件按
-// 三组逐维尺寸走地址。
-//
-// 它的来路只有一条：调度的 `NddmaTemplate::GenNddmaNode`
-// （`optimize/template/nddma_template.cpp:101`）把一个 Broadcast 节点吃进它的生产者
-// Load 里，并把 Broadcast 的 `repeats` / `vectorized_strides` 整份搬到 Load 的输出属性上，
-// 再把节点类型改成 `"Nddma"`。所以图上看到它的时候，Broadcast 那个节点已经不在了。
-// reg 侧的广播图在调度之后**全部**是这个形态，`afir.broadcast` 那两档在那一侧根本收不到活。
-//
-// **两端的形状契约与 `afir.load` 同一条：rank 与 shape 可以不同，verifier 不查。** 它们活在
-// 两个不同的下标空间——源是 GM 张量的原始轴，落点是调度切分、合轴之后的那几根，右对齐逐维
-// 比形状在这里没有意义（`afir.load` 的 verifier 正是因此只查 dtype，见 `verifyUnaryOp` 上
-// 那段）。**不要给它挂 `AFIRBroadcastInterface`**：那条判据按右对齐比，而 verifier 失败是
-// **硬失败、不是回落**，挂上去 48 张 reg 侧广播图里有 22 张从「回落 legacy」变成「整图编译
-// 失败」（`af-capability-probe` 实测，2026-10-10）。
-//
-// 唯一与 `afir.load` 不同的那一处在元素数：搬运那一套要求两端静态元素数相等，而一边搬一边
-// 广播改的正是元素数，所以 `verifyIndexingMaps` 走 `equalElementCount = false`。
-// 哪些轴是广播轴由两端 descriptor 的 `vectorized_strides` 定（见下），不由 memref 形状定。
-//
-// **`offset` 这个 ir_attr 不建模。** `REG_ASC_IR(Nddma)` 上有它，legacy 的 `NddmaApiCall`
-// 把它加进 GM 偏移（`reg_nddma_api_call.cpp:81`）。MLIR 侧 `afir.load` 也有同一个缺口
-// （`codegen/api_call/datacopy/load_api_call.cpp:31` 读它，下降路径不发它），不是本 op
-// 引入的；补它要同时动 Load / Store / Nddma 三处的 bridge，是独立一件事。今天的图上
-// 它为空：这条 op 的来路是 Broadcast 融进 Load，而 Load 节点上没人设过它。
+// 与 afir.load 一样，允许源和 destination 的 rank、shape 不同。
+// 源使用 GM 原始轴，destination 使用调度切分、合轴后的坐标，不能按右对齐维度比较形状。
+// 因此不挂 AFIRBroadcastInterface；错误的形状限制会使本可按能力边界回落的图在 verifier 失败。
 def AFIR_NddmaOp : AFIR_BufferizableUnaryOpBase<"nddma",
     [AFIRDataMoveInterface, AFIRDestinationStyleInterface, AFIRIndexingMapInterface,
      AFIR_TransferIn,

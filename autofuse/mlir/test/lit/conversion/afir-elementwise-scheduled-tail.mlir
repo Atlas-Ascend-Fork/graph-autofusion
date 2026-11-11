@@ -6,7 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 调度路径上计算 op 的**元素个数**：最后一个 tile 取尾块长度，其余取轴长。
+// 调度路径上计算 op 的元素个数：最后一个 tile 取尾块长度，其余取轴长。
 //
 // 此前没有任何 lit 钉住这条。走 `ScheduledContiguous` 的 lit 只有 Load / Store 与
 // `afir.broadcast`（那一档另有 stride 为 0 的特判），计算 op 的 lit 一律停在 identity
@@ -119,7 +119,7 @@ module @plan0 attributes {
 // IR: ascendc.abs_extend %[[DST]], %[[SRC]], %{{.*}}, %[[COUNT]]
 
 // kernel 文本侧的同一件事。这一条比 IR 那几条结实：它不关心中间产生了哪些 arith op，
-// 只要求**发给算子的那个元素数就是带尾块修正的那个值**。
+// 只要求传给算子的那个元素数就是带尾块修正的那个值。
 // 先锚到 tile 循环上：循环之前也有形状相同的三元式（block 维的尾块），不锚会先匹配到那个。
 // CPP: for (uint32_t
 // CPP: bool [[USETAIL:v[0-9]+]] = {{.*}} < {{.*}};

@@ -20,7 +20,7 @@ class SelectionPolicyRegistry;
 
 namespace mlir::ascend::kernel {
 
-// 注册 `afir.broadcast` 的 implementation。**今天只有常量源一档**（legacy 的
+// 注册 `afir.broadcast` 的 implementation。目前只有常量源一档（legacy 的
 // `Duplicate` 分支），覆盖不到的形态报 unsupported、整张图回落 legacy。边界与理由见
 // Broadcast.cpp 的文件头注释。
 LogicalResult registerBroadcastImplementations(ascend::instruction::ImplementationRegistry &registry,

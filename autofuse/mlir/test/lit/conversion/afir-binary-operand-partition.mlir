@@ -10,14 +10,14 @@
 // RUN: af-opt --verify-diagnostics --split-input-file --afir-select-implementation --target=Ascend950DT_950x %s
 
 // 二元路径改按 `afir::getOperandPartition()` 切操作数、并加上 tmp buffer 判据之后，这份
-// 负例钉住的是：**多出来的那块 tmp buffer 不会被当成第二个输入**。
+// 负例钉住的是：多出来的那块 tmp buffer 不会被当成第二个输入。
 //
 // 以前这里是位置下标 `{0, 1, 2}` 加一句 `getNumOperands() != 3`。那句话同时兼着两件
 // 事——「操作数个数对」和「没有 tmp buffer」——于是把它换成三段划分之后，很容易只保留
 // 前一件：`afir.add %a, %b outs(%d) tmp(%t)` 的三段划分是 `2 | 1 | 1`，输入数、目的地
 // 数全都对，判据一条不剩，那块 UB 就被默默丢掉了。
 //
-// 四个 op 两张供给表上是同一个调用、都不要 tmp buffer，所以两个 `--target` 共用同一份
+// 四个 op 两张支持表上是同一个调用、都不要 tmp buffer，所以两个 `--target` 共用同一份
 // IR、同一条 expected-error——能触发的只剩 tmp buffer 这一条。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

@@ -29,7 +29,7 @@ extern "C" int64_t AutofuseE2eInitTiling(AutofuseTilingData *tiling, uint64_t *w
 TEST(MlirE2eCpu, LoadLogicalOrStoreCalculatesCorrectResult) {
   const uint32_t input_element_count = GetShapeConfig(kInputShapes, 0).element_count;
   const uint32_t output_element_count = GetShapeConfig(kOutputShapes, 0).element_count;
-  // 输入与输出**不同宽**：这一族的结果恒为一个字节的真值。两边都按各自的元素宽度分配，
+  // 输入与输出不同宽：这一类的结果恒为一个字节的真值。两边都按各自的元素宽度分配，
   // 照着输入的宽度分配输出会多要三倍的内存，照着输出的宽度分配输入会越界读。
   auto *lhs = static_cast<int32_t *>(AscendC::GmAlloc(input_element_count * sizeof(int32_t)));
   auto *rhs = static_cast<int32_t *>(AscendC::GmAlloc(input_element_count * sizeof(int32_t)));
@@ -47,11 +47,11 @@ TEST(MlirE2eCpu, LoadLogicalOrStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // **输入只喂 0 / 1，这不是图省事。**
+  // 输入只喂 0 / 1，这不是图省事。
   //
   // `logical.h` 里的 `LogicalOr` 不是一个会把输入归一化的逻辑运算：它把两个输入
   // `Cast` 成 half 之后直接取逐元素最大值，再 `Cast` 回 `uint8`。喂 2 和 5 进去，出来
-  // 的是 5 而不是 1。**包装的前提是输入已经是 0 / 1 真值**——legacy 自己的 UT
+  // 的是 5 而不是 1。包装的前提是输入已经是 0 / 1 真值——legacy 自己的 UT
   // （tests/ut/ascendc/api/test_logical.cpp）也是按 `std::rand() % 2` 喂的，期望值直接
   // 写成乘积（and）/ max（or）。
   //

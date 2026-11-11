@@ -10,15 +10,11 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 
-// `afir.sub` / `afir.div` 的 mem 侧。两个 op 合在一份用例里，因为它们**是同一件事**：
-// legacy 的两个 impl 类逐行同形，两边这里要钉的也是同一条性质——
+// 检查 mem 侧 Sub / Div 的标准调用，均为四个实参，不接收 scratch。
+// AFIR op 仍携带调度分配的 tmp buffer，以验证 TmpBufferUse::Unused。
 //
-//   **发的是标准的 `AscendC::Sub` / `AscendC::Div`（四个实参，没有 tmp 的位置），
-//   而 AFIR op 上挂着一块 tmp buffer。**
-//
-// 那块是调度按 `CalcBinaryApiTmpSize` 分的，给标量形态的 `Subs` / `Divs` 用；
-// tensor-tensor 这条路只是收下它，不往下传。这是 `TmpBufferUse::Unused` 唯一的现场，
-// 所以 IR 那两条 `-SAME` 很重要：多传一个实参就不是这个重载了。
+// CalcBinaryApiTmpSize 分配的缓冲供标量 Subs / Divs 使用；tensor-tensor 路径
+// 接收但不传递该缓冲。IR 的 SAME 检查确保没有将其作为第五个实参。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

@@ -1,3 +1,11 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 set (CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0 -D_FORTIFY_SOURCE=2 -fPIC -fstack-protector-all -Wl,-z,relro,-z,now,-z,noexecstack")
 set (CMAKE_C_FLAGS   "-D_GLIBCXX_USE_CXX11_ABI=0 -D_FORTIFY_SOURCE=2 -fPIC -fstack-protector-all -Wl,-z,relro,-z,now,-z,noexecstack")
 
@@ -84,6 +92,10 @@ target_compile_options(att_st PRIVATE
         )
 target_compile_definitions(att_st PRIVATE ASCEND_INSTALL_PATH="${ASCEND_INSTALL_PATH}")
 target_compile_definitions(att_st PRIVATE TILING_DATA_DIR="${TC_DIR}/scenario/tiling_data")
+target_compile_definitions(att_st PRIVATE
+        ATT_ST_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
+        ATT_ST_CXX_STANDARD=${CMAKE_CXX_STANDARD}
+        )
 
 target_link_options(att_st PRIVATE
         -rdynamic

@@ -7,11 +7,9 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s | FileCheck %s
 
-// This fixture is a single-candidate plan module as produced by
-// ScheduleToAfir::PlanToAfir: one stage, one template, a canonical
-// load -> add -> store kernel body. It exercises the full per-candidate
-// lowering order (AFIRKernelBodySignature -> addAFIRToAscendCPipeline ->
-// GenTilingData -> GenKernelEntry) that addPlanCandidateLoweringPipeline composes.
+// Check one candidate module from ScheduleToAfir::PlanToAfir: one stage,
+// one template and a load -> add -> store body. The pipeline prepares the body
+// signature, lowers AFIR to AscendC, then generates tiling data and entry dispatch.
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #output_desc = #afir.tensor_desc<axis = [0], role = <output>>

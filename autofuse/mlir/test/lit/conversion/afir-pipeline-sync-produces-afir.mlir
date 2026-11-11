@@ -10,7 +10,7 @@
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s \
 // RUN:   | FileCheck %s --implicit-check-not=afir.pipe_barrier
 
-// 同步族的第一个生产者：Vector -> Vector 的顺序由 `AFIRPipelineSync` 产出 **AFIR** 的
+// 同步族的第一个生产者：Vector -> Vector 的顺序由 `AFIRPipelineSync` 产出 AFIR 的
 // `pipe_barrier`，再由同步族的 lowering 落到 `ascendc.pipe_barrier`。
 //
 // 此前这条顺序是直接写成后端算子的——AFIR 层看不见，也就无从校验（3.2：放弃 TQue 自动
@@ -18,10 +18,10 @@
 // TQue 的入队/出队自带隐式同步，叠一层显式 token 就是双重同步，那一段要与退出 TQue
 // （ADR-11/12 的 pool + memref.view）一起改。
 //
-// **这一步不改变竞争检查的结论**，也不应该改变：`pipe_barrier` 是单 pipe 内的全序点，
+// 这一步不改变竞争检查的结论，也不应该改变：`pipe_barrier` 是单 pipe 内的全序点，
 // 而检查器已经假定同 pipe 程序序即执行序（同一条理由让 `token<from = X, to = X>` 被
 // verifier 拒掉）。它的价值在于把同步从「conversion 内部顺手做的事」变成流水线里
-// selection 之前的一步，这是跨 pipe 那些**真带边**的情形接下来能搬上来的结构前提。
+// selection 之前的一步，这是跨 pipe 那些真带边的情形接下来能搬上来的结构前提。
 //
 // 用例必须是连续两次 Vector 计算：load -> add -> store 走不到 V -> V 这条分支，
 // 现有的 afir-block-id-pipeline 覆盖不到它。

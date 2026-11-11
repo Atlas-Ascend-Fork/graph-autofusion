@@ -7,22 +7,9 @@
  * See the License for the specific language governing permissions and limitations under the License.
  */
 
-//===- Case.cpp - load -> sum -> mul(scalar) -> store CPU case ---*- C++ -*-===//
-//
-// 归约**之后**再接一个带外部输入的节点。这一类此前没有用例，而它走的是一条与
-// `load_neg_sum_store`（归约之前融合）完全不同的路：
-//
-// `ReducePartitionPostFusion` 的 `IsNotPartitionReduce` 一旦发现归约的后继链上某个节点还
-// 有一个**不属于后继链**的输入（这里是 `Scalar`），就判「要切图」，于是
-// `PartitionReduceNode` 把图切成 `... -> Sum -> Store -> Workspace` 与
-// `Workspace -> Load -> Mul -> Store -> ...` 两张。节点数那条阈值（4）在这里没起作用——
-// 两个节点也照样切。
-//
-// 这正是 `torch.mean` 走的路：inductor 不发 Mean 节点，它拆成 `Sum` + `Broadcast(Scalar)`
-// + `TrueDiv`，那个 `Scalar` 就是外部输入。所以这条用例钉的是 mean 这一大类，而不是一个
-// 边角形状。
-//
-//===----------------------------------------------------------------------===//
+// IsNotPartitionReduce 检测到归约后继节点还使用链外 Scalar 输入，因此触发切图。
+// 两段分别为 Sum -> Store -> Workspace 和 Workspace -> Load -> Mul -> Store。
+// 此处由链外输入判据触发，与节点数阈值 4 无关。
 
 #include <gtest/gtest.h>
 

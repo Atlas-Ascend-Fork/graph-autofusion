@@ -23,7 +23,7 @@ using mlir::afir::load_where_scalar_store::GetShapeConfig;
 using mlir::afir::load_where_scalar_store::kInputShapes;
 using mlir::afir::load_where_scalar_store::kOutputShapes;
 
-// 与建图时给的 Scalar 节点一致。它是 **else** 那一路，掩码为假时取它。
+// 与建图时给的 Scalar 节点一致。它是 else 那一路，掩码为假时取它。
 constexpr float kOnFalse = 7.0F;
 }  // namespace
 
@@ -43,7 +43,7 @@ TEST(MlirE2eCpu, LoadWhereScalarStoreCalculatesCorrectResult) {
   ASSERT_NE(output, nullptr);
 
   // 掩码由 `Isnan(input0)` 现算，NaN 与非 NaN 混着来，两条路都要走到。值那一路取
-  // 0.25 + 0.5k，**永远取不到 7.0**：两路的实参位置换过来算的是 `isnan(p) ? 7.0 : v`，
+  // 0.25 + 0.5k，永远取不到 7.0：两路的实参位置换过来算的是 `isnan(p) ? 7.0 : v`，
   // 与这里的期望在每一个元素上都不同。
   for (uint32_t index = 0; index < probe_count; ++index) {
     input0[index] = index % 4U == 0U ? std::numeric_limits<float>::quiet_NaN() : 0.0F;
@@ -68,7 +68,7 @@ TEST(MlirE2eCpu, LoadWhereScalarStoreCalculatesCorrectResult) {
               reinterpret_cast<GM_ADDR>(workspace), tilingData);
 
   for (uint32_t index = 0; index < output_element_count; ++index) {
-    // **掩码为假取标量**。两路的实参位置换过来这里逐元素红。
+    // 掩码为假取标量。两路的实参位置换过来这里逐元素红。
     const float expected = std::isnan(input0[index]) ? input1[index] : kOnFalse;
     EXPECT_FLOAT_EQ(output[index], expected) << "element " << index;
   }

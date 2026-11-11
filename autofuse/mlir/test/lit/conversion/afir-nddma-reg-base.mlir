@@ -13,14 +13,14 @@
 //
 //   - `@discontinuous_tile` 与 `afir-transfer-multi-segment-unsupported.mlir` 里那一格**逐字
 //     相同**，只把 `afir.load` 换成 `afir.nddma`。那一格是「合轴后两段、`DataCopyPadExtend`
-//     表达不了、能力层报不支持」的反例；同一批 descriptor 在这里是**正例**，因为多维恰好是
-//     ND-DMA 存在的理由。两个文件一起读才说得完整：不是「多段不支持」，是「多段要换一条路发」。
+//     表达不了、能力层报不支持」的反例；同一批 descriptor 在这里是正例，因为多维恰好是
+//     ND-DMA 存在的理由。两个文件一起读才说得完整：不是「多段不支持」，是「多段要换一条路径生成」。
 //   - `@broadcast_tile` 在那之上把 GM 内轴的 stride 置 0（源那一维 repeat 为 1），也就是
-//     `NddmaTemplate` 把 Broadcast 融进 Load 之后的样子。`input_stride` 那一位要发 0。
+//     `NddmaTemplate` 把 Broadcast 融进 Load 之后的样子。`input_stride` 那一位要传 0。
 //     片上两轴仍然不连续（行距 16、行长 8），所以合轴照样给两段，分维不必动手。
-//   - `@dense_broadcast_tile` 把片上行距改成 8 —— **片上两轴这就连续了，合轴把它们并成一段**，
+//   - `@dense_broadcast_tile` 把片上行距改成 8 —— 片上两轴这就连续了，合轴把它们并成一段，
 //     而 GM 侧内轴 stride 是 0、外轴是 1，并不连续。这一格是唯一测得出「分维要问两侧」的：
-//     不在 GM 断处切开的话，发出来的是**一维** `output_dims = {zt × 8}`、`input_stride = {1}`，
+//     不在 GM 断处切开的话，生成的是一维 `output_dims = {zt × 8}`、`input_stride = {1}`，
 //     于是把 GM 上连续的 `zt × 8` 个元素搬进来，而正确结果是同一个元素重复 8 次。
 //     **编得过、跑得完、结果错。**
 //   - `@scaled_stride_tile` 钉**两列分工的合法性**：结果描述子上 zt 轴的整图 stride 是
@@ -30,17 +30,17 @@
 //     `a3a534ec` 在 `TransferPlan` 根治了 Store 的 GM 偏移回落，两列本就语义不同），
 //     本格转为纯正向回归锚：这类转置常态形态必须照常选中、照常两维下发。
 //
-// **这一层钉「分成几维」，不钉每一维的数值。** 三组尺寸在这个阶段还是 SSA 值
+// 这一层钉「分成几维」，不钉每一维的数值。 三组尺寸在这个阶段还是 SSA 值
 // （`arith.constant` 加 tiling 参数），而同一个数在一个函数里有好几份、名字带各自的后缀
 // （`%c8` / `%c8_9`），按名字钉等于钉住编号分配；`af-opt` 又没注册 `--cse`，合不掉。
-// 发出来的 C++ 文本在这里也拿不到：这几个 func 是最小用例，没有 workspace / TilingData 形参，
+// 生成的 C++ 文本在这里也拿不到：这几个 func 是最小用例，没有 workspace / TilingData 形参，
 // 走完整 pipeline 会先撞上「canonical AscendC kernel ABI」那道检查（实测），而
 // `ascir-translate` 要的是走完 pipeline 之后的 IR。
 //
 // 所以分工是：
 //
-//   - **维数**由本文件钉。它就是本档的设计内容——`@dense_broadcast_tile` 那一格合轴只给
-//     一段，发出来必须是**两维**；只有一维就说明 GM 侧那一刀没切，而那一格编得过、跑得完、
+//   - 维数由本文件钉。它就是本档的设计内容——`@dense_broadcast_tile` 那一格合轴只给
+//     一段，生成必须是两维；只有一维就说明 GM 侧那一刀没切，而那一格编得过、跑得完、
 //     结果错。
 //   - **每一维的数值**的设计锚是 `test/e2e/cpu/cases/load_broadcast_nddma_store`（基线
 //     既有用例，新基线已随上游 nddma 修复启用）：逐元素对着 `input0[inputIndex]` 比。
@@ -79,7 +79,7 @@
                             strides = [#afir.expr<"1">, #afir.expr<"0">], role = <input>>
 
 // 片上紧凑：行距 8 就是行长 8，`stride(外) == stride(内) × extent(内)` 成立，合轴把两根
-// 向量化轴**并成一段**。GM 侧外轴 1、内轴 0，`1 != 0 × 8` 不成立——分维要在这里切开。
+// 向量化轴并成一段。GM 侧外轴 1、内轴 0，`1 != 0 × 8` 不成立——分维要在这里切开。
 #dense_tile = #afir.tensor_desc<axis = [3, 4, 2, 1],
                            repeats = [#afir.expr<"(128 / (zTb_size * zt_size))">, #afir.expr<"zTb_size">,
                                       #afir.expr<"zt_size">, #afir.expr<"8">],
@@ -277,7 +277,7 @@ func.func private @scaled_stride_tile(
 // SELECT-LABEL: func.func private @scaled_stride_tile
 // SELECT: ascend.implementation = {id = "nddma.gm_ub_reg_base", kind = "ascendc_api"}
 
-// 发出来的是一条 `data_copy_nddma_reg_base`，三组各两项。**不发 `data_copy_pad_extend`**：
+// 生成的是一条 `data_copy_nddma_reg_base`，三组各两项。不生成 `data_copy_pad_extend`：
 // 那是单段那条路，两条路不该同时命中。
 //
 // `operandSegmentSizes` 的后三位就是维数（`1, 1, dim, dim, dim`），这是本文件真正钉的那个数。
@@ -292,7 +292,7 @@ func.func private @scaled_stride_tile(
 // IR-SAME: operandSegmentSizes = array<i32: 1, 1, 2, 2, 2>
 // IR-NOT: ascendc.data_copy_pad_extend
 
-// **这一格是分维判据的反例。** 片上紧凑（行距 8 == 行长 8）所以合轴把两根向量化轴并成
+// 这一格是分维判据的反例。 片上紧凑（行距 8 == 行长 8）所以合轴把两根向量化轴并成
 // 一段，而 GM 侧 `1 != 0 × 8`。不切的话这里会是 `1, 1, 1, 1, 1`——一维、`output_dims = {zt × 8}`、
 // `input_stride = {1}`，把 GM 上连续的 `zt × 8` 个元素搬进来，而正确结果是同一个元素重复 8 次。
 // IR-LABEL: func.func private @dense_broadcast_tile

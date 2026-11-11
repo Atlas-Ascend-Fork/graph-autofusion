@@ -14,19 +14,19 @@
 
 // M3：谓词寄存器作为值（`afir.eq` -> `afir.where`）。
 //
-// 这一格钉的是**边界语义与产物形状**，数值那一半在 `load_eq_where_reg_base_store` 那格
+// 这一格钉的是边界语义与产物形状，数值那一半在 `load_eq_where_reg_base_store` 那格
 // E2E 上（CPU 模拟器，32768 个元素逐个比）。要钉的三件事：
 //
-//   1. `afir.eq` 的结果声明成 `ascendc.mask_reg`，**不是** `ascendc.reg_tensor<ui8>`。
+//   1. `afir.eq` 的结果声明成 `ascendc.mask_reg`，不是 `ascendc.reg_tensor<ui8>`。
 //      两者在 C++ 文本上是两种不同的声明，一位写错就是另一个东西。
-//   2. `afir.where` 的 mask 实参**就是那条谓词**，不是 lane 活性掩码。拿后者当条件会在
+//   2. `afir.where` 的 mask 实参就是那条谓词，不是 lane 活性掩码。拿后者当条件会在
 //      每个条件为假的元素上算错（实测：短路成 lane 掩码后 `element 1` 起就错）。
-//      **两路候选的先后（then / else）这一格钉不住**——换成 `Reg::Select(dst, src1, src0,
+//      两路候选的先后（then / else）这一格钉不住——换成 `Reg::Select(dst, src1, src0,
 //      mask)` 在 IR 与 C++ 文本上都看不出不对，它的判据只能是数值（实测：接反后
 //      `element 0` 就错）。那一条在 `load_eq_where_reg_base_store` 那格 E2E 上。
-//   3. 谓词**一次都不物化成值**：`Reg::Duplicate` 一条都不发。
+//   3. 谓词一次都不物化成值：`Reg::Duplicate` 一条都不生成。
 //
-// 计数式而不是「存在一条」：四路取数少发一条也能编过（上一趟 lane 的寄存器还在）。
+// 计数式而不是「存在一条」：四路取数少生成一条也能编过（上一趟 lane 的寄存器还在）。
 
 #in = #afir.tensor_desc<axis = [0], role = <input>>
 #out = #afir.tensor_desc<axis = [0], role = <compute>>
@@ -66,7 +66,7 @@ module {
 // IR-COUNT-4: ascendc.load_align_reg
 
 // 比较写进那条谓词（`cmpMode = 2` 就是 `CMPMODE::EQ`，`Core/Attributes.td:109`；名字那一侧
-// 由下面的 CPP 段钉），选择把它当 mask 用——**两处必须是同一个 SSA 值**，否则就是在拿
+// 由下面的 CPP 段钉），选择把它当 mask 用——两处必须是同一个 SSA 值，否则就是在拿
 // lane 活性掩码当条件。那个 `%[[PRED]]` 绑定是这一格唯一能钉住的语义位（变异验证里它
 // 确实红了），`src0` / `src1` 的先后它钉不住。
 // IR: ascendc.compare_reg %[[PRED]],
@@ -83,7 +83,7 @@ module {
 // CPP: __VEC_SCOPE__
 // 谓词的声明：一条 `MaskReg`，不是 `RegTensor<uint8_t>`。
 // CPP: AscendC::Reg::MaskReg
-// 比较的元素类型取的是**源**（float），不是目的地——目的地是谓词，没有元素类型。
+// 比较的元素类型取的是源（float），不是目的地——目的地是谓词，没有元素类型。
 // CPP: AscendC::Reg::Compare<float, AscendC::CMPMODE::EQ>(
 // CPP: AscendC::Reg::Select(
 // 谓词没有被物化回一段值。

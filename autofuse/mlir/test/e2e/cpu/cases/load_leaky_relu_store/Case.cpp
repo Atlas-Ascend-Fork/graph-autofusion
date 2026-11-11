@@ -10,7 +10,7 @@
 
 //===- Case.cpp - load -> leaky_relu -> store CPU case ----------*- C++ -*-===//
 //
-// 第一个**带自有属性**的节点走完整条流水。斜率在 AscGraph 上是节点的 `ir_attr`
+// 第一个带自有属性的节点走完整条流水。斜率在 AscGraph 上是节点的 `ir_attr`
 // （`negative_slope`），在 AFIR 上是 op 属性（`negative_slop`），在生成的调用里是第三个
 // 实参——三种形态，中间两段各有一处新代码：`ScheduleToAfir` 读 `ir_attr`、`AfirBuilder`
 // 挂成 op 属性。在此之前 bridge 只有 `Scalar` 节点的 `value` 走过这条路，而它变成的是
@@ -50,16 +50,16 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(std::string(load_leaky_relu_store::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   // `<float, 1>` 里的 1 是 `isSetMask`，与 legacy 不带模板实参时用的默认值同义：API
-  // 自己设 mask。取 `0` 表示调用方已经设好了，今天没有 pass 这么做——见 `Base.td` 的
+  // 自己设 mask。取 `0` 表示调用方已经设好了，目前没有 pass 这么做——见 `Base.td` 的
   // `VecScalarL2Op`。**这个形状探得到那条**（2026-09-23 起）：一趟切出来的 count 超过
-  // 一个 repeat（f32 是 64 个），取 `0` 时 API 按 `repeatTimes = 1` 只发一条指令，
+  // 一个 repeat（f32 是 64 个），取 `0` 时 API 按 `repeatTimes = 1` 只生成一条指令，
   // 逐元素断言会红。形状还是 `[128]` 的那阵子它探不到，见清单 L-2。
   EXPECT_NE(kernel.find("AscendC::LeakyRelu<float, 1>("), std::string::npos);
-  // 斜率作为一个**按元素类型建的**常量出现在 kernel 里（f32 这一份是 `(float)`）。
+  // 斜率作为一个按元素类型建的常量出现在 kernel 里（f32 这一份是 `(float)`）。
   // 丢了属性的话它不会退化成 0，而是根本建不出这个常量——bridge 那边会先报错，
   // 这里是第二道。
   EXPECT_NE(kernel.find("(float)1.25"), std::string::npos);
-  // 两张供给表给的是同一个标准调用，没有扩展头也没有 tmp buffer。
+  // 两张支持表给的是同一个标准调用，没有扩展头也没有 tmp buffer。
   EXPECT_EQ(kernel.find("LeakyReluExtend"), std::string::npos);
 }
 }  // namespace mlir::afir

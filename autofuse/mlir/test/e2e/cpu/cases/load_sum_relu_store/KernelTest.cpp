@@ -41,7 +41,7 @@ TEST(MlirE2eCpu, LoadSumReluStoreCalculatesCorrectResult) {
   float *output = static_cast<float *>(AscendC::GmAlloc(output_element_count * sizeof(float)));
   ASSERT_TRUE(input0 != nullptr && output != nullptr);
 
-  // 每行的和一半为正一半为负，`Relu` 才有区分度：全正的话钳位那一支根本不走。
+  // 各行的和同时包含正负值，覆盖 Relu 的保留与截断分支。
   const uint32_t reduce_extent = static_cast<uint32_t>(input_shape[1]);
   for (uint32_t row = 0; row < output_element_count; ++row) {
     const float sign = (row % 2U == 0U) ? 1.0F : -1.0F;
@@ -57,7 +57,8 @@ TEST(MlirE2eCpu, LoadSumReluStoreCalculatesCorrectResult) {
   uint64_t workspaceSize = 0;
   uint32_t blockDim = 0;
   ASSERT_EQ(AutofuseE2eInitTiling(&tilingData, &workspaceSize, &blockDim), 0);
-  // 这条注册不钉 plan，候选里包含 RCore 两相切分，切分形状按候选而变，观测不到单一的一组。
+  // 不固定 plan，候选包含 RCore 两阶段方案，无法用一组固定访问器观测全部切分。
+  // RCore 第一阶段将部分结果写入 GM workspace，因此必须实际分配该空间。
   const mlir::afir::TilingShape tiling_shape =
       AF_E2E_TILING_SHAPE(tilingData, blockDim, static_cast<uint32_t>(input_shape[0]));
   mlir::afir::ReportTilingShape(AF_MLIR_E2E_CPU_CASE_NAME, tiling_shape);

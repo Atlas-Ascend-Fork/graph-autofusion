@@ -11,14 +11,14 @@
 //===- BinaryElementwise.cpp - AFIR binary elementwise lowering -*- C++ -*-===//
 //
 // 结构与 `UnaryElementwise.cpp` 一致：每个 AFIR 二元 op 在这里注册一到两个
-// implementation，一个 implementation 由「建哪个 AscendC op」「属于哪张扩展 API 供给
+// implementation，一个 implementation 由「建哪个 AscendC op」「属于哪张扩展 API 可用实现
 // 表」「要不要 tmp buffer」三件独立的事确定。判据写在 `ElementwiseApiFamily.h`，一元和
 // 二元共用同一份。
 //
 // 比一元路径多出来的只有「有两个输入」带来的两条检查：两个输入的元素类型要相同，两个
 // 输入的形状要和目的地相同。
 //
-// 操作数用 `afir::getOperandPartition()` 切，不用位置下标。二元 op 今天的布局确实是
+// 操作数用 `afir::getOperandPartition()` 切，不用位置下标。二元 op 当前的布局确实是
 // `lhs, rhs, dst`，但那是 ODS 的 `AttrSizedOperandSegments` 算出来的结果，不是这里可以
 // 直接假定的前提：多一块 tmp buffer，布局就变了。下标写死不会报错，只会把 tmp buffer
 // 当成 rhs 算进去。
@@ -70,12 +70,12 @@ using elementwise::ApiFamily;
 // 一个 implementation 收哪几种元素类型。位的拼写在 `ElementwiseApiFamily.h`，这里只写
 // 集合。
 //
-// **这是一张集合，不是几个能起名字的族。** 原先想给反复出现的那几个集合各起一个名字，
+// 这是一张集合，不是几个能起名字的族。 原先想给反复出现的那几个集合各起一个名字，
 // 接到第三个 op 就不成立了——`bitwise_and` 是 {ui8, i16, ui16, i32}，`floor_div` 的
 // mem 侧是 {f16, f32}、reg 侧是 {f16, f32, i16, i32}，`remainder` 的 mem 侧是
 // {f32, i32}。这些集合两两都不是包含关系，也没有共同的概念，起名字只是把集合又拼写
 // 一遍。所以注册处直接写出那几种类型，看得见、也对得上 legacy 的 `REG_ASC_IR`——
-// **每一处的取值都是从那里抄来的，不是推出来的。**
+// 每一处的取值都是从那里抄来的，不是推出来的。
 //
 // 同一个 AFIR op 的两个 implementation 可以收不同的集合（`floor_div` / `remainder` 都
 // 是）。ODS 那一层写并集，这里各说各的一半。
@@ -97,20 +97,20 @@ constexpr uint32_t kArithmeticElementTypes = kF16 | kF32 | kI16 | kI32;
 // reg 侧的 `sub` / `floor_div`：legacy 在那一侧比 mem 多收 ui8 / ui16。两侧写成同一个
 // 集合会把 mem 侧放宽到它供不出来的类型上，所以单开一个。
 //
-// **bf16 不在这里，尽管 `sub` 的 reg 侧收它。** 两个 op 在这一位上不一样：
+// bf16 不在这里，尽管 `sub` 的 reg 侧收它。 两个 op 在这一位上不一样：
 // `ascir_op_lowering_matrix.csv` 里 `Sub` 的 `reg_dtypes` 有 bf16，`FloorDiv` 的没有。
 // 2026-10-20 一度把 `| kBF16` 加在这个共用常量上，于是 `floor_div` 被静默放宽到一个 legacy
 // 两侧都不供的类型——两份拷贝（这里和 ODS）同时错，所以「ODS == 注册处」那种等号判据照不
 // 出来，是 `OdsElementTypesAgreeWithRegistrationsAndLegacy` 的判据二（ODS ⊆ legacy 两列并集）
-// 抓到的。**两个 op 不一致的位要写在各自的注册处，不要塞进共用常量。**
+// 抓到的。两个 op 不一致的位要写在各自的注册处，不要塞进共用常量。
 constexpr uint32_t kArithmeticRegElementTypes = kArithmeticElementTypes | kUI8 | kUI16;
 
 // 调度分给这个节点的 tmp buffer 与选中的调用之间是什么关系。
 //
-// **原先这里是一位布尔，Sub / Div 把它顶成了三态。** 那一位同时说了两件事：capability
+// 原先这里是一位布尔，Sub / Div 把它顶成了三态。 那一位同时说了两件事：capability
 // 收不收 tmp 操作数、建 target op 时传不传那个实参。两件事此前从来一致，直到 Sub / Div:
 // legacy 的 `CalcBinaryApiTmpSize` 对它们的 tensor-tensor 形态也分了一块（32 字节），
-// 而这条路发的是标准的 `AscendC::Sub` / `AscendC::Div`，四个实参，没有这块的位置。
+// 而这条路生成的是标准的 `AscendC::Sub` / `AscendC::Div`，四个实参，没有这块的位置。
 // 真正用它的是标量形态的 `Subs` / `Divs`。
 //
 // 这块 UB 不能装作不存在：bridge 已经把它挂上了 AFIR op（`node.tmp_buffers` 是调度的
@@ -122,7 +122,7 @@ enum class TmpBufferUse {
   // 调度分了，调用收——包装的签名里有这个形参（哪怕包装自己没用它，如
   // `BitwiseAndExtend`）。
   Passed,
-  // 调度分了，调用不收。今天只有 mem 侧的 `sub` / `div` 落在这一档。
+  // 调度分了，调用不收。目前只有 mem 侧的 `sub` / `div` 落在这一档。
   Unused,
 };
 
@@ -134,7 +134,7 @@ constexpr bool callTakesTmpBuffer(TmpBufferUse use) {
   return use == TmpBufferUse::Passed;
 }
 
-// **哪些操作数可以是标量**，三个取值与 ODS 上 `scalarOperand` 那三个字符串一一对应
+// 哪些操作数可以是标量，三个取值与 ODS 上 `scalarOperand` 那三个字符串一一对应
 // （Elementwise.td）——同一根轴只此一处说法，两边对不上时 `getTensorTypes` 当场判
 // unsupported，不会静默。
 //
@@ -143,8 +143,8 @@ constexpr bool callTakesTmpBuffer(TmpBufferUse use) {
 // `None` 与另外两档建的是不同的 AscendC op（`Add` / `Adds`）。**而 `Any` 的两个方向建
 // 的是同一个 op、同一组实参**：矩阵上带 `swap(2nd)` 的 8 个 op 全是可交换的（理由与
 // 出处写在 Elementwise.td 的 `scalarOperand` 上），legacy 的 `binary_api_call.cpp` 对它们
-// 也是交换完发同一个不带模板实参的 `Adds`。所以标量在左不是第二个 implementation，
-// 只是发射时把有形状的那个操作数放到第一个实参上（`emissionOrder`）。
+// 也是交换完生成同一个不带模板实参的 `Adds`。所以标量在左不是第二个 implementation，
+// 只是生成时把有形状的那个操作数放到第一个实参上（`emissionOrder`）。
 //
 // 不可交换的标量形态（Div / Sub / TrueDiv 的 `is_scalar_latter`）今天一个都没接；等接的
 // 时候它们要的是第二种调用形状，那才是新的一档。
@@ -157,13 +157,13 @@ enum class ScalarOperand {
 // 结果元素类型与输入的关系。`Same` 是这条路上此前的全部；`Uint8Logical` 是
 // `logical_and` / `logical_or`——结果恒为 `ui8`，与输入 dtype 无关。
 //
-// **与一元那条路的 `Uint8Predicate` 不是同一个东西，别合并。** 谓词族（isnan 一族）
+// 与一元那条路的 `Uint8Predicate` 不是同一个东西，别合并。 谓词族（isnan 这一类）
 // 的输入集合被那条判据自己钉死成浮点，于是它不看注册处给的集合；逻辑族的输入集合
 // 两侧不同（mem 侧五个，reg 侧更宽），仍然要按 implementation 各说各的。所以这里
 // 只接管「结果是什么」，输入照旧走 `elementTypes`。
 //
 // `SameOrF32ForI32` 是 `truediv`：结果 dtype 既不是「与输入相同」也不是一个常数，而是
-// **逐行**的——`{f16->f16, f32->f32, i32->f32}`。这一档只加了 i32 那一行，没有改成
+// 逐行的——`{f16->f16, f32->f32, i32->f32}`。这一档只加了 i32 那一行，没有改成
 // 一张 (输入, 结果) 对表：对表化要动全部 45 个注册点，是它自己的一件事。
 // 与一元那条路同一个枚举，也与 ODS 的 `resultRule` 同一个：见
 // `AFIRElementwiseSupport.h` 的 `ResultElementRule`。
@@ -174,7 +174,7 @@ struct BinaryElementwiseMapping {
   ScalarOperand scalarOperand = ScalarOperand::None;
   ResultElementRule resultElementType = ResultElementRule::Same;
   uint32_t elementTypes = kArithmeticElementTypes;
-  // 选中的 API 要不要调用方给的 tmp buffer。唯一的真源是 pattern 的模板实参，注册处由
+  // 选中的 API 要不要调用方给的 tmp buffer。唯一依据是 pattern 的模板实参，注册处由
   // 同一个实参同时决定这里和建 op 的实参个数。
   bool needsTmpBuffer = false;
   uint32_t resultIndex = 0;
@@ -182,11 +182,11 @@ struct BinaryElementwiseMapping {
                                       ascend::ExecutionModel::SIMD, ascend::InstructionForm::MemoryBased};
 };
 
-// 两个输入 + 一个目的地的类型，**按发射顺序**取出来而不是按 AFIR 操作数顺序：`lhs`
-// 恒是有形状的那一个（发射时的第一个输入实参），`rhs` 是第二个实参——tensor 形态下它
+// 两个输入 + 一个目的地的类型，按生成顺序取出来而不是按 AFIR 操作数顺序：`lhs`
+// 恒是有形状的那一个（生成时的第一个输入实参），`rhs` 是第二个实参——tensor 形态下它
 // 是第二块 tile，标量形态下它为空、类型在 `rhsElement` 里。
 //
-// 按发射顺序而不是操作数顺序，是为了让下游只有一套代码：capability 的形状 / 元素类型
+// 按生成顺序而不是操作数顺序，是为了让下游只有一套代码：capability 的形状 / 元素类型
 // 判据、lowering 建 op 都不必知道标量落在哪一边，那件事只在 `emissionOrder` 一处分流。
 struct BinaryTensorTypes {
   ascendc::LocalTensorType lhs;
@@ -195,7 +195,7 @@ struct BinaryTensorTypes {
   ascendc::LocalTensorType destination;
 };
 
-// AFIR 的两个输入下标，**按发射顺序**：`tile` 恒是有形状的那一个，放到第一个实参上。
+// AFIR 的两个输入下标，按生成顺序：`tile` 恒是有形状的那一个，放到第一个实参上。
 // `std::nullopt` 表示实际操作数与本形态对不上——tensor 形态收到标量、标量形态收到两块
 // tile、`Any` 收到两个标量，三种都在这里一次挡掉。
 struct BinaryOperandOrder {
@@ -550,7 +550,7 @@ FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ada
   }
 
   // 向量化轴的分段（阶段 2 合轴）。最内一段交给 API，其余段变循环；今天所有图都只有
-  // 一段，走的是「不建循环、偏移恒为常量 0」那条分支，发出来的 Op 与此前逐字相同。
+  // 一段，走的是「不建循环、偏移恒为常量 0」那条分支，生成的 Op 与此前逐字相同。
   //
   // 本地侧偏移恒为 0 的理由（两类成员都是：队列按 slot 自己轮转；TBuf 按 ATT 的
   // `b{id}_size` 语义只装一个 tile，块内每个迭代整块重写）在单段时仍然成立——单段
@@ -558,7 +558,7 @@ FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ada
   // tileSize」是按多 tile 分配算一块单 tile 的缓冲，块内循环多于一趟时越界写 UB
   // （NPU 上 0x507035）。
   //
-  // **标量不必在这里判**：它没有向量化轴，`collapseVectorizedAxes` 不会把它收进来，
+  // 标量不必在这里判：它没有向量化轴，`collapseVectorizedAxes` 不会把它收进来，
   // 于是它拿不到 subindex——与此前按 `isa<LocalTensorType>` 分流的结论相同。
   FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op, compactTail);
   if (failed(segments)) {
@@ -605,7 +605,7 @@ class BinaryElementwiseConversionPattern final : public OpConversionPattern<Sour
     if (!adaptor.getDestination()) {
       return rewriter.notifyMatchFailure(op, "buffer-form binary elementwise op requires a destination");
     }
-    // 两个输入的实际形态必须与本 pattern 注册的形态一致，并且发射顺序由同一个函数算——
+    // 两个输入的实际形态必须与本 pattern 注册的形态一致，并且生成顺序由同一个函数算——
     // capability 那边走的是 `getTensorTypes`，它查的是同一个 `emissionOrder`。走到这里
     // 对不上说明注册写反了：`Scalar` 与建 op 的实参类型不像 `Tmp` 那样由编译器兜住，
     // 两个输入都是一个 `Value`。
@@ -650,16 +650,16 @@ class BinaryElementwiseConversionPattern final : public OpConversionPattern<Sour
   bool compactTail_;
 };
 
-// 标量形态里**方向要发出去**的那一族：`sub` / `div` / `truediv`。
+// 标量形态里方向要生成的那一类：`sub` / `div` / `truediv`。
 //
 // 与上面那个 pattern 只差一件事：建 op 时多带一个 `isScalarLatter`。它不是新算的——
 // `emissionOrder` 已经把「有形状的那个是哪一个操作数」算出来了，`order->tile == 0` 就是
-// 「标量在右」。**所以方向只有一处编码**，与 capability 查的是同一份。
+// 「标量在右」。所以方向只有一处编码，与 capability 查的是同一份。
 //
-// 为什么这一族要发方向、可交换的那 8 个不用：legacy 的 `binary_api_call.cpp` /
+// 为什么这一类要生成方向、可交换的那 8 个不用：legacy 的 `binary_api_call.cpp` /
 // `truediv_api_call.cpp` 把方向编码成 `IS_SCALAR_LATTER` 这个 bool 模板实参
-// （`Subs<T, false>` = 标量在左），因为 `a - s` 与 `s - a` 不是同一个结果；`Adds` 那一族
-// 交换完发的是逐字相同的调用。详见 `Elementwise.td` 的 `scalarOperand` 那段。
+// （`Subs<T, false>` = 标量在左），因为 `a - s` 与 `s - a` 不是同一个结果；`Adds` 那一类
+// 交换完生成的是逐字相同的调用。详见 `Elementwise.td` 的 `scalarOperand` 那段。
 template <typename SourceOp, typename TargetOp, TmpBufferUse Tmp>
 class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<SourceOp> {
  public:
@@ -719,17 +719,17 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
   bool compactTail_;
 };
 
-// 标量形态里**按 AFIR 原次序发射**的那一族：今天只有 `afir.pow`。
+// 标量形态里按 AFIR 原次序生成的那一类：目前只有 `afir.pow`。
 //
-// 与上面两个 pattern 的分别就在这一件事上。`Adds` 那一族与 `Subs` 那一族发出去的调用都
+// 与上面两个 pattern 的分别就在这一件事上。`Adds` 那一类与 `Subs` 那一类生成的调用都
 // 把有形状的操作数放在第一个输入位——前者因为可交换，后者因为方向由模板实参说。而 `Pow`
-// 的供给是**同名重载**：`pow.h` / `pow_reg_base.h` 各有四个 `Pow`，(t,t) / (t,s) / (s,t) /
+// 的可用实现是同名重载：`pow.h` / `pow_reg_base.h` 各有四个 `Pow`，(t,t) / (t,s) / (s,t) /
 // (s,s)，`Power` 在哪个位置上收标量由 C++ 重载决议挑。legacy 的 `PowApiCall` 因此逐个位置
 // 原样打印，一次都不交换——`x ^ s` 与 `s ^ x` 靠实参位置区分，没有模板实参可以承载方向。
 //
-// 所以这里 `emissionOrder` 只用来**校验形态并找出哪个是 tile**（count 与块内偏移要它），
-// 发射用的是 AFIR 的原次序 `{0, 1}`。两件事分开：一件是「这张图合不合这个 implementation」，
-// 一件是「实参怎么排」，在 `Adds` / `Subs` 两族里恰好是同一个答案，在这里不是。
+// 所以这里 `emissionOrder` 只用来校验形态并找出哪个是 tile（count 与块内偏移要它），
+// 生成用的是 AFIR 的原次序 `{0, 1}`。两件事分开：一件是「这张图合不合这个 implementation」，
+// 一件是「实参怎么排」，在 `Adds` / `Subs` 两类里恰好是同一个答案，在这里不是。
 template <typename SourceOp, typename TargetOp, TmpBufferUse Tmp>
 class BinaryScalarInPlaceConversionPattern final : public OpConversionPattern<SourceOp> {
  public:
@@ -785,11 +785,11 @@ class BinaryScalarInPlaceConversionPattern final : public OpConversionPattern<So
   bool compactTail_;
 };
 
-// 二元 + **一个由 ODS 属性来的实参** + 一块 tmp buffer。今天只有 `afir.axpy` 是这个
-// 形状：发出去的调用是 `AxpyExtend(dst, x1, x2, alpha, tmp, count)`，而 alpha 在 AFIR
+// 二元 + 一个由 ODS 属性来的实参 + 一块 tmp buffer。目前只有 `afir.axpy` 是这个
+// 形状：生成的调用是 `AxpyExtend(dst, x1, x2, alpha, tmp, count)`，而 alpha 在 AFIR
 // 上是属性不是操作数——它不参与三段划分，也不占一块缓冲。
 //
-// **常量恒建 f32，不跟 tile 的元素类型走。** 包装的形参是 `const float alpha`（不是
+// 常量恒建 f32，不跟 tile 的元素类型走。 包装的形参是 `const float alpha`（不是
 // `const T&`），legacy 打的也是 `(float)0.800000`。这与一元那条路的
 // `UnaryScalarAttrConversionPattern` **恰好相反**：`LeakyRelu` 的形参是 `const T&`，
 // 给 f16 的 tile 配 f32 常量会让 T 同时推成 half 和 float。照抄那一段就会在这里错，
@@ -825,7 +825,7 @@ class BinaryScalarAttrConversionPattern final : public OpConversionPattern<Sourc
       return rewriter.notifyMatchFailure(op, "the selected API requires a tmp buffer operand");
     }
 
-    // Axpy 两个输入都是 tile，没有标量形态（`scalarOperand` 是 `"none"`）——发射顺序
+    // Axpy 两个输入都是 tile，没有标量形态（`scalarOperand` 是 `"none"`）——生成顺序
     // 恒是 `{0, 1}`。
     FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(op, adaptor, BinaryOperandOrder{0U, 1U}, rewriter,
                                                                   mapping_->scalarOperand, compactTail_);
@@ -851,10 +851,10 @@ class BinaryScalarAttrConversionPattern final : public OpConversionPattern<Sourc
 
 // 比较族。与 `BinaryElementwiseConversionPattern` 的差别全在建 op 那一行，两处：
 //
-//   - 多一个 `CMPMODE` 实参，它由**是哪个 AFIR op** 定死（`afir.eq` → `CMPMODE::EQ`），
+//   - 多一个 `CMPMODE` 实参，它由是哪个 AFIR op 定死（`afir.eq` → `CMPMODE::EQ`），
 //     不从 IR 上读——AFIR 这一层没有这个属性，六个 op 就是六个 op。所以它是模板实参：
-//     注册处写错了当场编不过，而写成 mapping 字段的话只会发出一条比错的调用。
-//   - **mem 侧的 tmp buffer 排在 count 之后**（`CompareExtend(dst, s0, s1, mode, size,
+//     注册处写错了当场编不过，而写成 mapping 字段的话只会生成一条比错的调用。
+//   - mem 侧的 tmp buffer 排在 count 之后（`CompareExtend(dst, s0, s1, mode, size,
 //     tmp)`），与这条路上其余包装相反。次序落在 ODS 的 `arguments` 上，这里照它写。
 //
 // `Rhs` 与 `Tmp` 两根轴照旧：标量形态建的是 `CompareScalarExtend`（另一个 TargetOp，
@@ -880,7 +880,7 @@ class CompareConversionPattern final : public OpConversionPattern<SourceOp> {
       return rewriter.notifyMatchFailure(op, "buffer-form binary elementwise op requires a destination");
     }
     // 与通用 pattern 同一条判据、同一个 `emissionOrder`。`eq` / `ne` 走 `Any`，标量在
-    // 哪一边都发同一个 `CompareExtend`——`EQ` / `NE` 可交换；`lt` / `le` / `gt` / `ge`
+    // 哪一边都生成同一个 `CompareExtend`——`EQ` / `NE` 可交换；`lt` / `le` / `gt` / `ge`
     // 注册的是 `Rhs`，标量在左这里就不成立。
     const std::optional<BinaryOperandOrder> order = binaryOperandOrder(op, Scalar);
     if (!order) {
@@ -973,18 +973,18 @@ LogicalResult registerCompare(ImplementationRegistry &registry, llvm::StringRef 
       });
 }
 
-// 标量右操作数的一族。`Adds` / `Muls` / `Maxs` / `Mins` 两张供给表上是同一个调用、
+// 标量右操作数的一类。`Adds` / `Muls` / `Maxs` / `Mins` 两张支持表上是同一个调用、
 // 都不要 tmp buffer，所以家族恒为 `Any`。
 template <typename SourceOp, typename TargetOp>
 LogicalResult registerScalarBinary(ImplementationRegistry &registry, llvm::StringRef id) {
-  // `Any`：这四个 op 的标量格两侧都是 `2nd+swap(2nd)`，而且都可交换——标量在左发的是
+  // `Any`：这四个 op 的标量格两侧都是 `2nd+swap(2nd)`，而且都可交换——标量在左生成的是
   // 同一个 `Adds` / `Muls` / `Maxs` / `Mins`。
   return registerBinary<SourceOp, TargetOp, ScalarOperand::Any>(registry, id, ApiFamily::Any);
 }
 
-// 方向要发出去的那一族的注册（`sub` / `div` / `truediv`）。与 `registerScalarBinary`
-// 分开是因为**这一族每个 op 每一侧都是一个独立的 implementation**：mem 侧发 `Subs` 并收
-// tmp，reg 侧发 `DivExtends` 不收，两侧的调用名与实参个数都不同，`ApiFamily::Any` 说不出。
+// 方向要生成的那一类的注册（`sub` / `div` / `truediv`）。与 `registerScalarBinary`
+// 分开是因为这一类每个 op 每一侧都是一个独立的 implementation：mem 侧生成 `Subs` 并收
+// tmp，reg 侧生成 `DivExtends` 不收，两侧的调用名与实参个数都不同，`ApiFamily::Any` 说不出。
 template <typename SourceOp, typename TargetOp, TmpBufferUse Tmp>
 LogicalResult registerScalarBinaryDirection(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family,
                                             uint32_t elementTypes,
@@ -1006,7 +1006,7 @@ LogicalResult registerScalarBinaryDirection(ImplementationRegistry &registry, ll
       });
 }
 
-// 按 AFIR 原次序发射的标量形态的注册（今天只有 `pow`）。capability 与 `Any` 那一族
+// 按 AFIR 原次序生成的标量形态的注册（目前只有 `pow`）。capability 与 `Any` 那一类
 // 逐字相同，只有 pattern 换掉。
 template <typename SourceOp, typename TargetOp, TmpBufferUse Tmp>
 LogicalResult registerScalarBinaryInPlace(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family,
@@ -1028,7 +1028,7 @@ LogicalResult registerScalarBinaryInPlace(ImplementationRegistry &registry, llvm
       });
 }
 
-// `afir.axpy`：两张供给表共用同一个扩展包装（tier D1），所以家族恒为 `Shared`、
+// `afir.axpy`：两张支持表共用同一个扩展包装（tier D1），所以家族恒为 `Shared`、
 // 只有一个 implementation。tmp buffer 恒收，见 pattern 那段。
 template <typename SourceOp, typename TargetOp>
 LogicalResult registerBinaryScalarAttr(ImplementationRegistry &registry, llvm::StringRef id, uint32_t elementTypes) {
@@ -1075,9 +1075,9 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
     return failure();
   }
 
-  // `bitwise_and`：二元一族里第一个两侧调用**不同名**的 op，形状与 `reciprocal` 那条
+  // `bitwise_and`：二元一类里第一个两侧调用**不同名**的 op，形状与 `reciprocal` 那条
   // 一样——reg 侧是标准调用、不要 tmp，mem 侧走包装、要 tmp。于是两个 implementation，
-  // 各自钉死一张供给表，由 `checkApiFamily` 按 target 分流。
+  // 各自钉死一张支持表，由 `checkApiFamily` 按 target 分流。
   //
   // 包装其实一次都没用那块 tmp buffer（`bitwise_and.h` 里它只是个形参），但 legacy 照旧
   // 按 `CalcDefaultTmpSize` 给它留了一块。这里跟着留：少给的话调用的实参个数就对不上。
@@ -1092,10 +1092,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
 
   // step 4。`bitwise_or` / `bitwise_xor` 与 `bitwise_and` 同一张元素类型集合，但只有
   // reg 一侧（mem 侧 legacy 一个都不注册），而且 reg 侧也走包装——legacy 的
-  // `BitwiseOrAscIrCodegenImplV2` / `BitwiseXorAscIrCodegenImplV2` 发的是
+  // `BitwiseOrAscIrCodegenImplV2` / `BitwiseXorAscIrCodegenImplV2` 生成的是
   // `BitwiseOrExtend` / `BitwiseXorExtend`（`api_regbase/bitwise_or.h` /
-  // `bitwise_xor.h`），不是标准调用 `AscendC::BitwiseOr` / `BitwiseXor`——两个供给表对这
-  // 四位的转发是等价的，但发出去的调用字面必须与 legacy 一致。不带 tmp，没有标量形态
+  // `bitwise_xor.h`），不是标准调用 `AscendC::BitwiseOr` / `BitwiseXor`——两个支持表对这
+  // 四位的转发是等价的，但生成的调用字面必须与 legacy 一致。不带 tmp，没有标量形态
   // （`IsNodeValid` 拒标量）。
   if (failed(registerBinary<BitwiseOrOp, ascendc::BitwiseOrExtendRegBaseOp>(
           registry, "bitwise_or.tensor", ApiFamily::RegBased, kUI8 | kI16 | kUI16 | kI32)) ||
@@ -1132,7 +1132,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   // `sub` / `div`：两侧都是 `BinaryApiCall`，legacy 的两个 impl 类逐行同形（连
   // `IsScalarInputSupported` / `IsInplaceSupported` 都一样），所以一起注册。
   //
-  // **mem 侧是这一批里第一个 `TmpBufferUse::Unused`。** 它发的是标准的 `AscendC::Sub` /
+  // mem 侧是这一批里第一个 `TmpBufferUse::Unused`。 它生成的是标准的 `AscendC::Sub` /
   // `AscendC::Div`，四个实参、没有 tmp 的位置；而调度按 `CalcBinaryApiTmpSize` 照样给
   // 这个节点分了一块（tensor 一支 32 字节）。那块 UB 是给标量形态的 `Subs` / `Divs` 的，
   // 这条路用不上，但收下它是必须的——bridge 已经把它挂上了 AFIR op。
@@ -1156,10 +1156,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
 
   // `sub` / `div` 的标量形态。**这里 tmp buffer 的取值与 tensor-tensor 那两条相反**：
   // `Subs` / `Divs` 真用那块（先把标量 `Duplicate` 成一个 block 再走 `BinaryRepeatParams`），
-  // 而 tensor-tensor 发的是不带 tmp 的四参 `AscendC::Sub` —— 同一个 op 的两种形态，一个
+  // 而 tensor-tensor 生成的是不带 tmp 的四参 `AscendC::Sub` —— 同一个 op 的两种形态，一个
   // `Passed` 一个 `Unused`，调度两种都分。第一次出现「同 op 两档 tmp 取值不同」。
   //
-  // **reg 侧只有 `div`**：`sub_reg_base.h` 里 `SubExtends` 也在，但 legacy v2 的
+  // reg 侧只有 `div`：`sub_reg_base.h` 里 `SubExtends` 也在，但 legacy v2 的
   // `IsScalarInputSupported` 对 Sub 返回 false（矩阵 `reg_scalar` 列），调度产不出那种图。
   // 接了就是一个谁也走不到的 implementation。
   //
@@ -1177,11 +1177,11 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   // 第一对同时注册了 tensor 形态与标量形态的 op。`ResultElementRule::Uint8` 那个
   // 实参就是全部的新东西——目的地恒为 `ui8`，两个输入之间照旧要同 dtype。
   //
-  // 两侧差三样——调用名、扩展头、要不要 tmp——**这是第一对三样一起错开的**。
-  // `bitwise_and` 的 reg 侧发的是不带扩展头的标准调用，`floor_div` / `remainder` 两侧
+  // 两侧差三样——调用名、扩展头、要不要 tmp——这是第一对三样一起错开的。
+  // `bitwise_and` 的 reg 侧生成的是不带扩展头的标准调用，`floor_div` / `remainder` 两侧
   // 同名，都只差其中两样：
   //
-  //   - mem 侧 `LogicalAnd(dst, s0, s1, tmp, size)`（`logical.h`），**tmp 是真用的**，
+  //   - mem 侧 `LogicalAnd(dst, s0, s1, tmp, size)`（`logical.h`），tmp 是真用的，
   //     所以是 `Passed`；reg 侧 `LogicalAndExtend(dst, s0, s1, size)`
   //     （`logical_reg_base.h`），`None`。
   //   - mem 侧的 apiName 是裸名 `LogicalAnd` 而不是 `LogicalAndExtend`——它照样走扩展头，
@@ -1189,7 +1189,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   //
   // 元素类型：mem 侧 `REG_ASC_IR` 的 `T1` 就是这五个。reg 侧更宽（bf16 / i8 / i64 /
   // ui32 / ui16 / ui64 / bool），AFIR 一个都建模不出来，于是两侧写成同一个集合——
-  // **这是 AFIR 的建模上限，不是 legacy 两侧真的一样。**
+  // 这是 AFIR 的建模上限，不是 legacy 两侧真的一样。
   constexpr uint32_t kLogicalElementTypes = kUI8 | kI16 | kI32 | kF16 | kF32;
   // reg 侧多一个 ui16。原先两侧共用上面那个集合，注释写的是「AFIR 建模上限，不是 legacy
   // 两侧真的一样」——ui16 恰恰是建模得出来的那一个，于是它被一起漏掉了。
@@ -1206,7 +1206,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
           registry, "logical_or.tensor_tensor.extend_reg_base", ApiFamily::RegBased, kLogicalRegElementTypes,
           ResultElementRule::Uint8)) ||
       // 第 6 批。`logical_xor` 与上面两个逐字同形（四参无 tmp、结果恒 `ui8`），差别是
-      // **只有 reg 侧**：legacy 的 mem 侧（`ascir_builtin_ops_v1.cpp`）不注册 `LogicalXor`,
+      // 只有 reg 侧：legacy 的 mem 侧（`ascir_builtin_ops_v1.cpp`）不注册 `LogicalXor`,
       // 所以没有 `.tensor_tensor` 那一半，也没有标量那一半。
       //
       // dtype 用 `kLogicalElementTypes` 而不是 reg 那个更宽的集合：legacy 的
@@ -1220,7 +1220,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   // 第 6 批的三个二元，全是 reg-only。
   //
   // `fmod` / `mod` **指向同一个 AscendC op**：legacy 两个调度节点的 `GetApiName` 都是
-  // `FmodExtend`、头都是 `fmod_reg_base.h`，与 `gelu`（两张供给表同一个调用）同一种情况。
+  // `FmodExtend`、头都是 `fmod_reg_base.h`，与 `gelu`（两张支持表同一个调用）同一种情况。
   if (failed(registerBinary<FmodOp, ascendc::FmodExtendRegBaseOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "fmod.tensor.extend_reg_base", ApiFamily::RegBased, kF16 | kF32 | kBF16)) ||
       failed(registerBinary<ModOp, ascendc::FmodExtendRegBaseOp, ScalarOperand::None, TmpBufferUse::Passed>(
@@ -1257,13 +1257,13 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   }
 
   // 第 8 批（二元 1 个）。`hypot` 与上面的 `zeta` / `igamma` 逐项同形——reg-only、
-  // 两输入同 dtype、`TmpBufferUse::Passed`——只有供给不同：**它走标准调用**
+  // 两输入同 dtype、`TmpBufferUse::Passed`——只有可用实现不同：它走标准调用
   // `AscendC::Hypot`，所以 target op 是 `HypotL2Op`（不声明
   // `ApiExtensionOpInterface`，进 `kIsStockCall`）而不是一个 `XxxExtendRegBaseOp`。
   //
   // fork 里有一份 `api_regbase/hypot.h`（`HypotExtend`），但 legacy 一处都不加载它——
-  // `HypotAscIrCodegenImplV2` 不覆写 `LoadApiHeaderFiles`。照文件名挑供给会发出一个
-  // legacy 从不发的调用。
+  // `HypotAscIrCodegenImplV2` 不覆写 `LoadApiHeaderFiles`。按文件名选择可用实现会生成一个
+  // legacy 从不生成的调用。
   //
   // tmp 那块的尺寸是 0（`CalcVoidTmpSizeV2`），但形参在就照收：少一个实参就调不上
   // 那个重载，与 `remainder` 的 reg 那一半同一条理由。
@@ -1272,20 +1272,20 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
     return failure();
   }
 
-  // 标量形态。**三个而不是四个**：reg 侧的 `logical_or` 一个标量都不收。
+  // 标量形态。三个而不是四个：reg 侧的 `logical_or` 一个标量都不收。
   //
   // 这不是漏了。`LogicalOrAscIrCodegenImplV2` 没有覆写 `IsScalarInputSupported`，也没有
   // 覆写 `IsScalarInputSupportedIfExchangeInputs`，基类两条都返回 `false`；另外三个
   // impl 类都覆写成了 `OnlySecondInputSupportScalar`。矩阵上那一格写的就是 `no`。
   // 那边换来的是另一套东西（`MicroApiCall` / `GenerateSimtScalarExpr`），这条路上还没有
   // 对应物。`logical_reg_base.h` 里的 `LogicalOrExtends` 这个函数是有的，但**没有哪条
-  // legacy 判据会让它被选中**——供给里存在不等于这条路能发它，所以不注册。
+  // legacy 判据会让它被选中**——可用实现里存在不等于这条路能生成它，所以不注册。
   //
   // 包装名两侧各按各的规矩派生，都不是 apiName 直接加后缀（见 `OpVecBinary.td`）：
   // mem 侧 `LogicalAndScalarExtend(dst, src, scalar, tmp, size)`，tmp 照旧 `Passed`；
   // reg 侧 `LogicalAndExtends(dst, src, scalar, size)`，`None`。
   //
-  // 这一族没有走 `registerScalarBinary`：那个包装把家族写死成 `ApiFamily::Any`
+  // 这一类没有走 `registerScalarBinary`：那个包装把家族写死成 `ApiFamily::Any`
   // （`Adds` / `Muls` 那几个两侧同一个调用），而这里两侧的调用不同名、tmp 需求也不同，
   // 正是它假定不成立的情形。
   if (failed(registerBinary<LogicalAndOp, ascendc::LogicalAndScalarExtendOp, ScalarOperand::Any, TmpBufferUse::Passed>(
@@ -1302,23 +1302,23 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   // `truediv`：**第一个结果 dtype 逐行不同的 op**，也是第一个 mem 侧要说出**两个**扩展头
   // 的二元 op（`scalar_div.h` + `true_div.h`，`sign` 在一元那边先兑现过前置 A）。
   //
-  // 两侧差的不只是头，是**收哪几种输入**：
+  // 两侧差的不只是头，是收哪几种输入：
   //
   //   - mem 侧 `TrueDivExtend`（`true_div.h`）收 {f16, f32, i32}，`ResultElementType::
   //     SameOrF32ForI32` 把 i32→f32 那一行说出来。要 tmp buffer 且是 `Passed`——i32 那支
   //     拿它装两份 `Cast` 结果，f32 那支一次没用但形参在签名里，与 `BitwiseAndExtend` /
   //     `AxpyExtend` 同一种情况（`CalcTrueDivTmpSize` 两支都分）。
-  //   - **reg 侧发的就是 `afir.div` 的 reg 实现今天已经在发的那个调用**：v2 的
+  //   - reg 侧生成的就是 `afir.div` 的 reg 实现今天已经在生成的那个调用：v2 的
   //     `TrueDivAscIrCodegenImplV2` 写的 apiName 是 `DivExtend`、头是 `div_reg_base.h`，
   //     与 `DivAscIrCodegenImplV2` 逐字相同，所以直接复用 `DivExtendRegBaseOp`，不新建
   //     def。不要 tmp（`BinaryApiCall` 的签名里没有），结果 dtype 是 `Same`。
   //
-  // 所以 **i32 只有 mem 侧收**：v2 的 `kTrueDivTypePairs` 是 {f16, f32, bf16}，bf16
+  // 所以 i32 只有 mem 侧收：v2 的 `kTrueDivTypePairs` 是 {f16, f32, bf16}，bf16
   // AFIR 不建模。这一行就是这个 op 存在的全部理由——两侧都写成 `Same` + {f16, f32} 的话
   // `afir.truediv` 就是 `afir.div` 的逐字别名，用例全绿而覆盖面一个没涨。
   //
-  // 标量形态**只有 mem 侧**：v2 的 `IsScalarInputSupported` 对 TrueDiv 返回 false（矩阵
-  // `reg_scalar = no`），reg 侧接了就是死代码。mem 侧发 `TrueDivExtends<T, U, LATTER>`，
+  // 标量形态只有 mem 侧：v2 的 `IsScalarInputSupported` 对 TrueDiv 返回 false（矩阵
+  // `reg_scalar = no`），reg 侧接了就是死代码。mem 侧生成 `TrueDivExtends<T, U, LATTER>`，
   // 三个模板实参——`U` 即使与 `T` 相同也要写出来，否则方向那一位会落到 `U` 的位置上。
   if (failed(registerBinary<TrueDivOp, ascendc::TrueDivExtendOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "truediv.tensor_tensor.extend", ApiFamily::MemBased, kF16 | kF32 | kI32,
@@ -1332,7 +1332,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   }
 
   // `pow`：与 `remainder` 同形的一对——两侧同名、都要 tmp buffer，只有扩展头不同。
-  // 新的只有一件事：**两侧收的元素类型差得最远**。mem 侧 legacy 的 `REG_ASC_IR(Pow)`
+  // 新的只有一件事：两侧收的元素类型差得最远。mem 侧 legacy 的 `REG_ASC_IR(Pow)`
   // 只有 {i32, f16, f32}；reg 侧那一版是 {i8, ui8, ui16, ui32, i16, i32, f16, f32,
   // bf16}，AFIR 建模得出来的是其中六个。于是 ODS 那一层的并集有六种，而 mem 侧只认
   // 其中一半。
@@ -1351,8 +1351,8 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   }
 
   // `pow` 的标量形态。**两侧都有**，而且用的是与 tensor-tensor **同一个 def**：两种形态
-  // 发的是同名重载，实参位置也相同，只有那个位置上的 SSA 值从 tile 变成标量。所以这里
-  // 没有新的 AscendC op，只有一个按 AFIR 原次序发射的 pattern（见
+  // 生成的是同名重载，实参位置也相同，只有那个位置上的 SSA 值从 tile 变成标量。所以这里
+  // 没有新的 AscendC op，只有一个按 AFIR 原次序生成的 pattern（见
   // `BinaryScalarInPlaceConversionPattern` 那段为什么不能交换）。
   //
   // 元素类型与各自 tensor-tensor 那一条相同：legacy 的 `IsScalarInputSupported` 只管
@@ -1365,11 +1365,11 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
     return failure();
   }
 
-  // `axpy`：**这条路上第一个 tier D1** ——两张供给表共用同一个扩展包装
+  // `axpy`：**这条路上第一个 tier D1** ——两张支持表共用同一个扩展包装
   // `AxpyExtend`（`axpy.h`，`api_regbase/` 下没有对应文件）。于是只有一个
   // implementation、不按 target 分流，id 上也没有 `_reg_base` 那一半。
   //
-  // 它与上面所有 op 差的不是供给，是**发射的形状**：二元 + 一个由 ODS 属性来的实参
+  // 它与上面所有 op 差的不是可用实现，是生成的形状：二元 + 一个由 ODS 属性来的实参
   // + 一块 tmp buffer。所以它走自己的 pattern（`BinaryScalarAttrConversionPattern`），
   // 不走 `registerBinary` 那条。
   //
@@ -1380,23 +1380,23 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
     return failure();
   }
 
-  // 比较族（eq / ne / lt / le / gt / ge）：**六个 op 二十四个 implementation**，也是这条
+  // 比较族（eq / ne / lt / le / gt / ge）：六个 op 二十四个 implementation，也是这条
   // 路上第一批「一个 AscendC def 服务六个 AFIR op」。差别只有 `CMPMODE`，所以两侧各
   // 一个 tensor-tensor 与一个 tensor-scalar 的 def，模式由模板实参给。
   //
   // 两侧差三样，与 `logical_and` 那一对同一个形状，只是每一样的取值不同：
   //
-  //   - **调用名相同**（`CompareExtend` / `CompareScalarExtend`），差的是模板实参表：
+  //   - 调用名相同（`CompareExtend` / `CompareScalarExtend`），差的是模板实参表：
   //     mem 侧一个都不打、`CMPMODE` 走实参位；reg 侧打 `<InT, 1, CMPMODE::XX>`。
-  //   - **扩展头**：`compare.h` + `compare_v2.h`（要 `utils.h` 前导）对
+  //   - 扩展头：`compare.h` + `compare_v2.h`（要 `utils.h` 前导）对
   //     `compare_reg_base.h`。id 上照旧用 `_reg_base` 后缀分两侧。
-  //   - **tmp buffer**：mem 侧 `Passed`（`CalcXxTmpSize` 按 dtype 算一块，包装真用它）;
+  //   - tmp buffer：mem 侧 `Passed`（`CalcXxTmpSize` 按 dtype 算一块，包装真用它）;
   //     reg 侧 `Unused`——`GetCompareSizeV2` 照样分 32 字节，而 `CompareExtend` 的签名里
   //     没有那个形参。这是 `sub` / `div` 之外第二处用上第三档的地方。
   //
   // 元素类型两侧差得远：mem 侧 legacy 的 `T1` 是 {f16, f32, i32, i64}（`lt` 那一行连
   // i64 都没有），reg 侧是十二个。AFIR 建模得出来的分别是三个和六个——i64 两侧都有，
-  // 但这一层的位掩码拼不出它。**六个 op 在这里是同一对集合**：mem 侧 `lt` 少的那个
+  // 但这一层的位掩码拼不出它。六个 op 在这里是同一对集合：mem 侧 `lt` 少的那个
   // i64 本来就不在建模范围内，所以不必逐行分。
   //
   // 标量形态两侧六个 op 全都收（`OnlySecondInputSupportScalar`）。**swap 方向只有

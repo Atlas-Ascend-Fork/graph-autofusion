@@ -15,8 +15,8 @@
 
 AF_MLIR_E2E_CPU_CASE_BEGIN(load_add_scalar_data_store, 1, 1);
 
-// 只有 Data 那一个输入有形状。`ScalarData` 是 index 1 的输入，但它按值传、没有形状，
-// 所以不进 INPUT_SHAPES。
+// INPUT_SHAPES 只包含 Data 的形状。index 1 的 ScalarData 按值传递，
+// 没有张量形状，不加入该列表。
 
 AF_MLIR_E2E_CPU_CASE_END(load_add_scalar_data_store)
 

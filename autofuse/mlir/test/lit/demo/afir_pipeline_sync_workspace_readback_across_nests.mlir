@@ -6,9 +6,8 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 跨块负向夹具：store 与回读 load 落在不同的循环嵌套层（store 在 axis 0 循环、load 在
-// axis 0×axis 1 嵌套内）。按 buffer 归并建对不保证支配关系，跨块后会生成非法的 token，
-// 这里在插入点直接拒绝。
+// 负例：Store 位于 axis 0 循环，回读 Load 位于 axis 0×axis 1 嵌套。
+// 仅按 buffer 匹配不能保证 record 支配 wait；插入点不满足支配关系时必须拒绝。
 
 // RUN: not af-opt --afir-kernel-body-signature --afir-loop-generate --afir-memory-allocate --afir-pipeline-sync %s 2>&1 | FileCheck %s
 

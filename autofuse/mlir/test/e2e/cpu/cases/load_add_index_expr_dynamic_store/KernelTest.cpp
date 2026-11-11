@@ -21,14 +21,14 @@ using mlir::afir::load_add_index_expr_dynamic_store::GetShapeConfig;
 using mlir::afir::load_add_index_expr_dynamic_store::kInputShapes;
 using mlir::afir::load_add_index_expr_dynamic_store::kOutputShapes;
 
-// 建图时给的表达式是 `2 * s0`，而 s0 是**第一根轴**的运行期尺寸（每根轴各登记一个符号，
+// 建图时给的表达式是 `2 * s0`，而 s0 是第一根轴的运行期尺寸（每根轴各登记一个符号，
 // 见 Case.cpp）。从形状表里读，不写字面量：形状改了这里跟着改，不会留一个对不上的常量。
 uint32_t FirstAxisExtent() {
   return static_cast<uint32_t>(GetShapeConfig(kInputShapes, 0).shape.begin()[0]);
 }
 }  // namespace
 
-// **签名里没有 `IndexExpr`。** 它不是 kernel 输入——值在 kernel 顶部由 size var 算出来，
+// 签名里没有 `IndexExpr`。 它不是 kernel 输入——值在 kernel 顶部由 size var 算出来，
 // 折成一个常量。这与 `load_add_scalar_data_store` 恰好相反，那边标量占一个形参。
 extern "C" __global__ __aicore__ void AF_MLIR_E2E_CPU_KERNEL_SYMBOL(GM_ADDR input0, GM_ADDR output, GM_ADDR workspace,
                                                                     AutofuseTilingData tilingData);
@@ -42,7 +42,7 @@ TEST(MlirE2eCpu, LoadAddIndexExprDynamicStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 取值在 f32 里全部精确可表示，加上 2.5 之后也是，所以逐元素比相等。
+  // 输入及加上 2.5 后的结果均可被 f32 精确表示，使用逐元素相等比较。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = static_cast<float>(static_cast<int32_t>(index % 9U) - 4) * 0.5F;
   }

@@ -10,7 +10,7 @@
 
 // 竞争检查的覆盖（设计文档 5.1 步 8b、5.3 测试策略表的「数据竞争」一行）。
 //
-// **为什么不是 LIT**：竞争的失败形态是「IR 完全合法，但两次访问之间少一条
+// 为什么不是 LIT：竞争的失败形态是「IR 完全合法，但两次访问之间少一条
 // happens-before」。LIT 断言的是输出文本——一条缺失的顺序边在文本里没有任何形状，
 // 所以 LIT 只能验证「检查器报了什么」，验证不了「检查器该报什么」。这里逐个构造
 // 已知有竞争 / 已知无竞争的形态，正反两侧都钉住；没有反例侧，检查器退化成「全报」
@@ -89,7 +89,7 @@ module {
 
 // 未覆盖的 producer：`afir.load` 写 `%tile` 并把「写过了」表达成结果 `%loaded`，
 // 消费者却绕回去读 `%tile`。两条流之间因此没有任何顺序边——lowering 之后就是搬入
-// 还没落地、搬出已经开始读。
+// 还没完成、搬出已经开始读。
 TEST_F(AFIRRaceCheckTest, ReportsProducerThatConsumerBypasses) {
   auto module = Parse(R"mlir(
     %tile = memref.alloc() {afir.buffer_desc = #ub} : memref<16xf16>
@@ -136,7 +136,7 @@ TEST_F(AFIRRaceCheckTest, AcceptsProducerThreadedThroughItsResult) {
 // AFIR 自己表达顺序的手段（设计文档 3.2 / ADR-12），检查器必须认。
 // tmp buffer 操作数排在 destination 之后。按「destination 是最后几个操作数」去切段的
 // 写法会把 destination 数成输入（读）、把 tmp buffer 数成 destination（写），于是真正
-// 的写被记成了读——这个方向是**漏报**，写对写错的 IR 都一条不报。
+// 的写被记成了读——这个方向是漏报，写对写错的 IR 都一条不报。
 TEST_F(AFIRRaceCheckTest, ReportsBypassedProducerThatCarriesATmpBufferOperand) {
   auto module = Parse(R"mlir(
     %tile = memref.alloc() {afir.buffer_desc = #ub} : memref<16xf16>
@@ -625,7 +625,7 @@ TEST(AFIRBufferAliasTest, RotatingOffsetsFirstCollideAtTheirCommonPeriod) {
   BufferSlice shifted = rotating(inductionVariable, {{2, 1}});
   EXPECT_EQ(firstAliasingIterationDistance(shifted, doubleB), std::optional<int64_t>(1));
 
-  // 两维各自轮转时，同时撞上要等到两个同余式都满足——周期是**最小公倍数**，不是最大
+  // 两维各自轮转时，同时撞上要等到两个同余式都满足——周期是最小公倍数，不是最大
   // 级数。按最大级数截断会在 d ≤ 4 里找不到解就收工，把真竞争报成「永不重叠」。
   BufferSlice twoDimensionalA = rotating(inductionVariable, {{3, 0}, {4, 0}});
   BufferSlice twoDimensionalB = rotating(inductionVariable, {{3, 1}, {4, 3}});

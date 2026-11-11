@@ -10,7 +10,7 @@
 
 //===- ElementTypeMatrixTest.cpp --------------------------------*- C++ -*-===//
 //
-// **每个 implementation 收哪几种元素类型，这一条此前没有真源。**
+// 每个 implementation 收哪几种元素类型，这一条此前没有权威来源。
 //
 // 那个集合是人照着 legacy 的 `REG_ASC_IR` 读出来、手抄进注册处的，抄错不会让任何东西
 // 变红。已经咬过两次，两次都是事后才发现：`floor_div` 写的集合与 mem 侧完全不相交；
@@ -18,16 +18,16 @@
 // `lt` 少了 `I32`）。
 //
 // 这条断言把注册处的位掩码与 `docs/guides/ascir_op_lowering_matrix.csv` 的
-// `mem_dtypes` / `reg_dtypes` 两列对账。那两列由
+// `mem_dtypes` / `reg_dtypes` 两列比对。那两列由
 // `tools/af-mlir-tools/scan_ascir_op_lowering_matrix.py` 从 `REG_ASC_IR` 抽出来，
 // 表本身由 pre-commit 的门禁盯着不许与 legacy 漂移——两者合起来，注册处的集合才算
-// **有真源且可对账**，而不是抄的。
+// 有权威来源，也能比对，而不是手抄结果。
 //
-// **判据是「不得比 legacy 窄」，不是「逐字相等」。** 两个方向的后果不对称：
+// 判据是「不得比 legacy 窄」，不是「逐字相等」。 两个方向的后果不对称：
 //
-//   - **少写了是真损失**：这条路在一个 legacy 收的类型上答 unsupported，整张图静默回落
+//   - 少写了是真损失：这条路在一个 legacy 收的类型上答 unsupported，整张图静默回落
 //     legacy，没有任何用例会红。这是这条断言要抓的东西。
-//   - **多写了不是**：一个不在 legacy `REG_ASC_IR` 列表里的 dtype，它的 AscGraph 节点在
+//   - 多写了不是：一个不在 legacy `REG_ASC_IR` 列表里的 dtype，它的 AscGraph 节点在
 //     调度之前就被 legacy 拒了，根本到不了 bridge。所以「比 legacy 宽」既伤不到人，也用
 //     不上；将来 AFIR 真能比 legacy 多支持一种时，这条判据不该拦着。
 //
@@ -35,7 +35,7 @@
 // 元素类型列表。注册处写了而 ODS 没有的类型，op 本身就建不出来——那不是「更宽」，是一句
 // 没人读的假话，见下面已知差异表里记的那一批。
 //
-// 比较的是**能被 AFIR 建模的那个子集**：哪几位算建模得出来由
+// 比较的是能被 AFIR 建模的那个子集：哪几位算建模得出来由
 // `support/AfirElementTypes.h` 的 `AFIR_ELEMENT_TYPE_TABLE` 说，legacy 收而那张表上没有
 // 的（i8 / i64 / ui32 / ui64 / bool）在这一层表达不出来，不能拿来当差异。
 //
@@ -63,11 +63,11 @@
 namespace mlir::ascend::kernel::elementwise {
 namespace {
 
-// 表里的拼写与位的对应、以及「AFIR 建模哪几位」这件事本身，真源都在
+// 表里的拼写与位的对应、以及「AFIR 建模哪几位」这件事本身，权威定义都在
 // `support/AfirElementTypes.h`。这里只是把它用上。
 //
-// **改造之前这是第三份拷贝**，而它漏一位的后果最隐蔽：`kModelableDtypes` 里没有的拼写按
-// 「表达不出来」跳过，于是下面那条「不得比 legacy 窄」的断言对新那一位**恒真**——它不会
+// 改造之前这是第三份拷贝，而它漏一位的后果最隐蔽：`kModelableDtypes` 里没有的拼写按
+// 「表达不出来」跳过，于是下面那条「不得比 legacy 窄」的断言对新那一位恒真——它不会
 // 红，只是不再查。bf16 刚加上的时候就差点这样过去。
 
 std::string describe(uint32_t mask) {
@@ -165,29 +165,29 @@ llvm::StringMap<MatrixRow> readMatrix(const std::string &path) {
   return rows;
 }
 
-// **今天没有已知差异，所以这里没有差异表。**
+// 目前没有已知差异，所以这里没有差异表。
 //
 // 这条断言第一次跑时照出 28 处不一致，2026-09-23 一次清完，分三类：
 //
-//   - **17 处注册处比 ODS 和 legacy 都宽**：`registerUnary` 原先有个叫
+//   - 17 处注册处比 ODS 和 legacy 都宽：`registerUnary` 原先有个叫
 //     `kLegacyUnaryElementTypes`（= f16|f32|i32）的缺省实参，于是 `exp` / `ln` / `sqrt` /
 //     `sigmoid` / `reciprocal` / 谓词族 / `clip_by_value` 这些 legacy 只收 f16 / f32 的
 //     op 也一并领到了 i32。ODS 本来就拒 i32，那一位是句没人读的假话。缺省实参已去掉
 //     ——集合是每个 op 自己的事实，不该有缺省。
-//   - **4 处注册处比 ODS 和 legacy 都窄**：选择族漏了 i16（ODS 的
+//   - 4 处注册处比 ODS 和 legacy 都窄：选择族漏了 i16（ODS 的
 //     `AFIR_SelectElementTypes` 有、legacy 两侧也有）。补上。
-//   - **10 处 legacy 比 AFIR 宽**：reg 侧的 `abs`（i16/ui8）、`neg`（i16）、`sub` /
+//   - 10 处 legacy 比 AFIR 宽：reg 侧的 `abs`（i16/ui8）、`neg`（i16）、`sub` /
 //     `floor_div`（ui8/ui16）、逻辑族（ui16）、`where`（ui8/ui16）、`clip_by_value`
 //     （i16/i32/ui8/ui16）。这一类要同时放宽 ODS 与注册处，已一并做掉——**ODS 取两侧并集,
 //     每一侧收哪些由各自的注册处说**，所以 `where` 与 `select` 的 ODS 表拆成了两张。
 //
-// **2026-09-23 补：第一个真的比 legacy 窄的 implementation 来了**，按上面那句话办——
+// 2026-09-23 补：第一个真的比 legacy 窄的 implementation 来了，按上面那句话办——
 // 下面这张快照表逐 id 钉死「注册的」和「按表算出来的」两个集合，循环本身一点没放宽。
 
-// 比 legacy 窄、且窄得有理由的 implementation。**这不是豁免，是快照**：两个集合都钉死，
+// 比 legacy 窄、且窄得有理由的 implementation。这不是豁免，是快照：两个集合都钉死，
 // 任何一边动了都会红，逼着动的人回来重读 `reason` 还成不成立。
 //
-// 收窄的理由必须是「legacy 在那个 dtype 上发的根本不是这条路发的调用」，不能是「还没
+// 收窄的理由必须是「legacy 在那个 dtype 上生成的根本不是这条路生成的调用」，不能是「还没
 // 对过」——「还没对过」的正确做法是对完再注册。
 struct KnownNarrowerRow {
   llvm::StringRef id;
@@ -196,7 +196,7 @@ struct KnownNarrowerRow {
   llvm::StringRef reason;
 };
 constexpr KnownNarrowerRow kKnownNarrower[] = {
-    // legacy 的 `BroadcastScalar` 发的是**不带限定**的 `Duplicate(dst, v, n)`，而
+    // legacy 的 `BroadcastScalar` 生成的是不带限定的 `Duplicate(dst, v, n)`，而
     // `duplicate.h` 在全局作用域给 int8 / uint8 / int64 / uint64 各摆了一条非模板重载。
     // 这六位里落在那四条上的只有 `ui8`：它绑的是包装（先 `ReinterpretCast<uint16_t>`
     // 再发一条半宽的 `Duplicate`），不是这条路发的 `AscendC::Duplicate`。把 `ui8` 也
@@ -216,7 +216,7 @@ constexpr KnownNarrowerRow kKnownNarrower[] = {
      "legacy 生产同错；reg 档保留（regbase 显式传 strides）"},
 };
 
-// ODS 比 legacy 的**声明**宽，且宽得有理由。**这不是豁免，是快照**：多出来的那几位逐位
+// ODS 比 legacy 的声明宽，且宽得有理由。这不是豁免，是快照：多出来的那几位逐位
 // 钉死，任何一边动了都会红，逼着动的人回来重读理由。
 //
 // 判据二（下面那条 `OdsElementTypesAgreeWithRegistrationsAndLegacy`）原本是无条件的：
@@ -225,9 +225,9 @@ constexpr KnownNarrowerRow kKnownNarrower[] = {
 // AscendC 头真正供得起的集合**。`afir.broadcast` 上这个前提不成立——
 // `v35/ascendc/api_regbase/broadcast_extend_impl.h:260` 的
 // `static_assert(SupportBytes<T, 1, 2, 4, 8>())` 收 bf16，而 `REG_ASC_IR(Broadcast)` 两侧
-// 都没声明它。功能需求 3 的口径是**以头文件为准，不以 legacy 注册表为准**，所以这一位该开。
+// 都没声明它。功能需求 3 的判定标准是以头文件为准，不以 legacy 注册表为准，所以这一位该开。
 //
-// **这张表不会把判据二变成一句空话**，因为下面多查一条：钉在这里的每一位都必须**真有
+// 这张表不会把判据二变成一句空话，因为下面多查一条：钉在这里的每一位都必须**真有
 // 一个 implementation 注册着它**。判据二要挡的「白回落」正是「ODS 收、没人供」，而
 // 「ODS 收、有人供、只是 legacy 没声明」是另一回事。两者的区别就是那一条。
 //
@@ -289,7 +289,7 @@ TEST(ElementTypeMatrixTest, RegisteredElementTypesMatchTheLoweringMatrix) {
     ASSERT_NE(entry, matrix.end()) << legacy->second.str() << " 不在对照表里";
 
     // `Any` / `Shared` 只有**一个** implementation 供两侧用，所以它的集合要取两列的
-    // **交集**：取并集的话，在窄的那一侧会发出一个 legacy 根本没注册的调用。
+    // 交集：取并集的话，在窄的那一侧会生成一个 legacy 根本没注册的调用。
     // `MemBased` / `RegBased` 各自只看自己那一列。
     const uint32_t memMask = maskOf(entry->second.memDtypes);
     const uint32_t regMask = maskOf(entry->second.regDtypes);
@@ -346,52 +346,52 @@ TEST(ElementTypeMatrixTest, RegisteredElementTypesMatchTheLoweringMatrix) {
   }
 }
 
-// **ODS 的元素类型列表必须等于注册处那两份位掩码的并集**（投影到 AFIR 的供给表上）。
+// ODS 的元素类型列表必须等于注册处那两份位掩码的并集（投影到 AFIR 的支持表上）。
 //
-// 这是功能需求 3 第一步的那条门禁。判据不是人定的口径，而是「AFIR 能不能表达某个 dtype」
+// 这是功能需求 3 第一步的那条门禁。判据不是人为定义，而是「AFIR 能不能表达某个 dtype」
 // 这件事的定义：AFIR 表达得出来，当且仅当至少有一侧的 implementation 供得起——所以 ODS
-// 那一份是**推导得出来的**，不是独立事实。
+// 那一份是推导得出来的，不是独立事实。
 //
-// 之前没有任何机器查过这条关系，于是两个方向都出过事，而且**两个方向都不会红**：
+// 之前没有任何机器查过这条关系，于是两个方向都出过事，而且两个方向都不会红：
 //
-//   - **注册处宽、ODS 窄**：注册的那一位是句没人读的假话。op 根本建不出来，这个
+//   - 注册处宽、ODS 窄：注册的那一位是句没人读的假话。op 根本建不出来，这个
 //     implementation 永远选不到。文件头记的 2026-09-23 清掉的 17 处就是这一类，当时是人
 //     逐个读出来的。
-//   - **ODS 宽、注册处窄**：op 建得出来、选不出 implementation，整图干净回落。不报错，
+//   - ODS 宽、注册处窄：op 建得出来、选不出 implementation，整图干净回落。不报错，
 //     只是白回落，而接管表上这一格的首因会指向「没有 Ascend 实现」而不是「这一位没注册」
 //     ——排期的人按首因挑活，就会去改错的那一层。
 //
-// **投影到供给表上**这一步是必须的，不是放宽：`load` / `store` / `cast` / `broadcast` 的
-// ODS 列表里有 i8 / i64 / ui32 / ui64 这些**在 AFIR 的位表上根本没有位**的类型。它们在那里
+// 投影到支持表上这一步是必须的，不是放宽：`load` / `store` / `cast` / `broadcast` 的
+// ODS 列表里有 i8 / i64 / ui32 / ui64 这些在 AFIR 的位表上根本没有位的类型。它们在那里
 // 是故意的（搬运与 cast 要能承载还没建模的 dtype），但任何位掩码都表示不出它们，所以拿它们
 // 来比就只能永远失败。
-// **ODS 的元素类型列表与注册处的关系有两条判据，而且两条都有方向。**
+// ODS 的元素类型列表与注册处的关系有两条判据，而且两条都有方向。
 //
 // 这是功能需求 3 第一步的那条门禁。写成「ODS == 注册处的并集」是错的，而且错得有后果，
 // 所以把两个方向分开记清楚：
 //
-//   1. **注册处 ⊆ ODS**（硬规则）。注册了一位而 ODS 拒它，那一位就是句没人读的假话：op
+//   1. 注册处 ⊆ ODS（硬规则）。注册了一位而 ODS 拒它，那一位就是句没人读的假话：op
 //      根本建不出来，这个 implementation 永远选不到。`ElementTypeMatrixTest` 文件头记的
 //      2026-09-23 清掉的 17 处就是这一类，当时是人逐个读出来的。
 //
-//   2. **ODS ⊆ legacy 两列的并集**（投影到 AFIR 的供给表上）。ODS 声称一个 legacy 两侧都
+//   2. ODS ⊆ legacy 两列的并集（投影到 AFIR 的支持表上）。ODS 声称一个 legacy 两侧都
 //      不供的 dtype，那一位同样是假话——只是症状换成了「图建得出来、选不出 implementation、
-//      白回落」，一条诊断都没有。**这一条有一张例外快照**（`kOdsWiderThanLegacy`）：
+//      白回落」，一条诊断都没有。这一条有一张例外快照（`kOdsWiderThanLegacy`）：
 //      legacy 的声明不等于 AscendC 头供得起的集合，两者不一致时按头文件走。那张表上每一位
 //      都要有 implementation 真注册着它，所以「白回落」仍然挡着，理由见那张表上面那段。
 //
-// **反过来「ODS 比注册处宽」不是缺陷，是刻意的，而且是硬要求。** 理由见 `Ops/Data.td` 里
+// 反过来「ODS 比注册处宽」不是缺陷，是刻意的，而且是硬要求。 理由见 `Ops/Data.td` 里
 // `AFIR_DataMoveElementTypes` 上那段：一个 dtype 只要过了 bridge 的 `IsAfirModeledDType`，
-// 那张图里每个 op 都会被建出来；ODS 不收它就**失败在 verifier 上，那是硬失败**，把本可以
+// 那张图里每个 op 都会被建出来；ODS 不收它就失败在 verifier 上，那是硬失败，把本可以
 // 干净回落的图变红。所以「ODS 收、但没有 implementation 能降」正是要的状态。
 //
-// 这个缝隙对 `ApiFamily::Any` / `Shared` 的 op 是**必然存在**的：一份 implementation 服务
-// 两侧，收的集合只能是两列的**交集**（取并集会在窄的那一侧发出一个 legacy 根本没注册的
-// 调用），而 ODS 要盖住两列的**并集**。所以 add / mul / maximum / minimum / axpy / exp /
+// 这个缝隙对 `ApiFamily::Any` / `Shared` 的 op 是必然存在的：一份 implementation 服务
+// 两侧，收的集合只能是两列的交集（取并集会在窄的那一侧生成一个 legacy 根本没注册的
+// 调用），而 ODS 要盖住两列的并集。所以 add / mul / maximum / minimum / axpy / exp /
 // ln / sqrt 这 8 个 op 上 bf16 在 ODS 里而不在注册处里，是对的——要让它真能降下去，得先
 // 把那个 implementation 拆成 mem / reg 两份，而不是去删 ODS 的那一位。
 //
-// **投影到供给表上**这一步是必须的，不是放宽：`load` / `store` / `cast` / `broadcast` 的
+// 投影到支持表上这一步是必须的，不是放宽：`load` / `store` / `cast` / `broadcast` 的
 // ODS 列表里有 i8 / i64 / ui32 / ui64 这些在 AFIR 的位表上根本没有位的类型，任何位掩码都
 // 表示不出它们，拿它们来比只能永远失败。
 TEST(ElementTypeMatrixTest, OdsElementTypesAgreeWithRegistrationsAndLegacy) {
@@ -437,7 +437,7 @@ TEST(ElementTypeMatrixTest, OdsElementTypesAgreeWithRegistrationsAndLegacy) {
     ASSERT_NE(matrixRow, matrix.end()) << legacy->second.str() << " 不在对照表里";
 
     // ODS 列表里认得出的那几位。认不出的拼写要当场报出来——那说明 MLIR 的类型记录名字
-    // 与供给表的 CSV 拼写不再是「小写一下就相等」，而那个巧合是这条门禁的前提。
+    // 与支持表的 CSV 拼写不再是「小写一下就相等」，而那个巧合是这条门禁的前提。
     uint32_t odsBits = 0U;
     llvm::SmallVector<llvm::StringRef> parts;
     ods->second.split(parts, ';', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
@@ -447,7 +447,7 @@ TEST(ElementTypeMatrixTest, OdsElementTypesAgreeWithRegistrationsAndLegacy) {
         odsBits |= bit;
         continue;
       }
-      // 供给表上没有位的那些（i8 / i64 / ui32 / ui64 / i4）是故意留在 ODS 里的，跳过；
+      // 支持表上没有位的那些（i8 / i64 / ui32 / ui64 / i4）是故意留在 ODS 里的，跳过；
       // 其余一律是拼写对不上，必须红。
       EXPECT_TRUE(part == "i8" || part == "i64" || part == "ui32" || part == "ui64" || part == "i4")
           << afirOpName.str() << " 的 ODS 列表里有一个供给表认不出的拼写 `" << part.str()
@@ -457,7 +457,7 @@ TEST(ElementTypeMatrixTest, OdsElementTypesAgreeWithRegistrationsAndLegacy) {
 
     uint32_t legacySupplies = maskOf(matrixRow->second.memDtypes) | maskOf(matrixRow->second.regDtypes);
     // 快照上钉着的那几位：legacy 只是没声明，头文件供得起。放进 `legacySupplies` 之前先查
-    // 它**真有 implementation 注册着**——否则这张表就替判据二挡住了它本该抓的「白回落」。
+    // 它真有 implementation 注册着——否则这张表就替判据二挡住了它本该抓的「白回落」。
     if (const KnownWiderRow *wider = findKnownWider(afirOpName)) {
       EXPECT_EQ(wider->extraBits & ~odsBits, 0U)
           << afirOpName.str() << " 的 ODS 已经不收 " << afir::afirDescribeElementTypes(wider->extraBits & ~odsBits)

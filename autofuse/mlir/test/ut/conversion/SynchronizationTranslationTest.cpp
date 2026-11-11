@@ -10,7 +10,7 @@
 
 // 同步族下降产出的 AscendC 算子必须能翻译成 C++ 源码。
 //
-// 这条不是多余的：`Target/AscendC/Translation.cpp` 的分发表 `PrintableOpTypes` 是**手写**
+// 这条不是多余的：`Target/AscendC/Translation.cpp` 的分发表 `PrintableOpTypes` 是手写
 // 的，`ascendc::SetFlagOp` 并不在手写部分里——它由 ODS 生成的 `GET_OP_TYPE_LIST` 补进来。
 // 也就是说「能不能翻译」取决于一个生成列表的内容，而不是某处显式的登记。LIT 只能断言
 // 下降产出了哪些算子，断言不了它们能翻译；这里直接调 `translateToAscendC` 把这一段钉住。
@@ -76,7 +76,7 @@ TEST_F(SynchronizationTranslationTest, SyncAllHardEmitsAivOnlyProtocol) {
   // 下降产出的 `ascendc.sync_all_hard`（`Implementations/Synchronization.cpp` 显式置
   // `isAIVOnly`）走 tablegen 自动 emitter，打出 `AscendC::SyncAll()`——缺省
   // `isAIVOnly = true`，即 AIV-only 协议，恰是非 cube（纯 AIV）范围内唯一正确的取值；
-  // 需 AIC 参与的混模协议 `SyncAll<false>` 在纯 AIV 发射下死锁（910B3 实测）。auto
+  // 需 AIC 参与的混模协议 `SyncAll<false>` 在纯 AIV 生成路径下死锁（910B3 实测）。auto
   // emitter 结构上打不出 `<false>`，属性只作 IR 层意图声明，不参与打印。
   std::string source = Translate(R"mlir(
       module {

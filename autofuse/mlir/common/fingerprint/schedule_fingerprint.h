@@ -20,14 +20,12 @@
 
 namespace mlir::common {
 
-// Changing either format version intentionally invalidates previously
-// generated artifact keys.
+// Changing either format version invalidates existing artifact keys.
 inline constexpr char kScheduleFingerprintFormatVersion[] = "autofuse.schedule.fingerprint.v1";
 inline constexpr char kArtifactCacheKeyFormatVersion[] = "autofuse.artifact.cache.v1";
 
-// A structural fingerprint is deliberately separate from an artifact key.  It
-// describes the schedule shape only; toolchain and pipeline versions belong to
-// ArtifactVersionSet below.
+// Describes schedule structure only. Artifact keys also include the toolchain
+// and pipeline versions in ArtifactVersionSet.
 struct ScheduleFingerprint {
   std::string value;
 
@@ -55,13 +53,9 @@ struct ArtifactVersionSet {
   // part of the versioned key, not left to be inferred from the structural
   // fingerprint alone.
   bool is_dynamic_shape{false};
-  // The concrete shape symbol -> value bindings a static-shape artifact was
-  // compiled against (mirrors mlir::bridge::ConcreteShape; duplicated
-  // here rather than reused by type to keep this header free of a
-  // mlir::bridge dependency). Always empty when is_dynamic_shape is true.
-  // Two static artifacts for the same schedule structure but different
-  // concrete shapes are different compiled programs and must not collide on
-  // one cache key.
+  // Concrete shape bindings used for static compilation; empty in dynamic mode.
+  // Different static shapes must produce different cache keys for the same schedule.
+  // Mirrors bridge::ConcreteShape without introducing a bridge dependency.
   std::map<std::string, int64_t> static_shape_constants;
 };
 
@@ -80,13 +74,9 @@ struct ArtifactCacheKey {
   }
 };
 
-// NOTE on scope (see FR6/3.2.7 in the design doc): the ideal input is a
-// pre-Schedule FusionGraph snapshot, which would let a cache hit skip both
-// Schedule and Codegen. This function's actual input is FusedScheduledResult
-// -- Schedule's OUTPUT, not its input -- because Schedule does not yet
-// expose a stable pre-Schedule structural snapshot. That means a cache hit
-// against this fingerprint can only skip Codegen; Schedule itself still runs
-// every time. Do not present this fingerprint as having skipped Schedule.
+// Fingerprints Schedule output, so a cache hit skips Codegen but not Schedule.
+// Skipping both would require a stable pre-Schedule FusionGraph snapshot, which
+// Schedule does not yet expose (design doc FR6/3.2.7).
 ScheduleFingerprint ComputeScheduleFingerprint(const ascir::FusedScheduledResult &fused_result);
 
 ArtifactCacheKey BuildArtifactCacheKey(const ScheduleFingerprint &structure, const ArtifactVersionSet &versions,

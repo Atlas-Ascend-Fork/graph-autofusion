@@ -250,7 +250,7 @@ TEST_P(TestApiReduceInitPhysicalStride, Prod) {
 // `{dim_a, outer_nominal, outer_actual, inner_stride, inner_actual}`。
 //
 // 外层 R 填充那一支（`dim_r_current != dim_r`）按 R 段遍历、用 `dim_a` 当 repeatTime、
-// 用行距当 dstRepeatStride，而 `Duplicate` 这两个形参都是 `uint8_t`，超了是**静默截断**。
+// 用行距当 dstRepeatStride，而 `Duplicate` 这两个形参都是 `uint8_t`，超了是静默截断。
 // 下面四组专打这条编码边界，缺一不可：
 //   {255,…} 分批前的最后一格；{256,…} repeatTime 截成 0、整段一行都不填；
 //   {257,…} 跨一次分批，验证第二批的基址；

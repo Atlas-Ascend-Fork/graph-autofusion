@@ -1571,7 +1571,6 @@ TEST_F(TestCodegenTiling, DynamicShapeCacheKeyGuardsCapacityAndPreservesSymbolOr
   EXPECT_LT(first_symbol, second_symbol);
   EXPECT_LT(second_symbol, set_size);
 }
-
 TEST_F(TestCodegenTiling, GenerateForInductorValidatesSocTargetBeforeTilingCodegen) {
   const ScopedSocPlatformState platform_state_guard;
   ge::PlatformContext::GetInstance().SetPlatform("UnknownArch");
@@ -6694,6 +6693,7 @@ TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldGenerateValidatedSpawn
   EXPECT_NE(result.tiling.find("aicore_binary_elf_v1"), std::string::npos);
   EXPECT_NE(result.tiling.find("ValidateInductorPgoManifest"), std::string::npos);
   EXPECT_NE(result.tiling.find("ComputeFileSha256"), std::string::npos);
+  EXPECT_EQ(result.tiling.find("libcrypto.so"), std::string::npos);
   EXPECT_NE(result.tiling.find("dladdr(reinterpret_cast<const void *>(&ResolveInductorPgoArtifactsUncached)"),
             std::string::npos);
   EXPECT_NE(result.tiling.find("artifacts.tiling_so = artifacts.generation_dir + \"/\" + base"), std::string::npos);
@@ -6727,6 +6727,61 @@ TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldGenerateValidatedSpawn
   EXPECT_EQ(result.tiling.substr(measured_search, proxy_start - measured_search)
                 .find("EvaluateModeledPerf(raw_candidate.tiling_data)"),
             std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, GeneratedInductorPgoFileSha256MatchesKnownDigests) {
+  std::stringstream helpers;
+  this->GenInductorPgoProxyFileHelpers(helpers);
+  this->GenInductorPgoProxySha256(helpers);
+  const std::string source = R"(
+#include <algorithm>
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+constexpr size_t kMaxPgoArtifactSize = 1024U * 1024U;
+)" + helpers.str() + R"(
+int main(int, char **argv) {
+  const std::string path = std::string(argv[0]) + ".input";
+  std::vector<uint8_t> input(kMaxPgoArtifactSize);
+  for (size_t i = 0; i < input.size(); ++i) {
+    input[i] = static_cast<uint8_t>(i);
+  }
+  // Expected values from hashlib.sha256(bytes(i % 256 for i in range(size))).hexdigest().
+  const struct {
+    size_t size;
+    const char *digest;
+  } cases[] = {
+      {0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+      {55, "463eb28e72f82e0a96c0a4cc53690c571281131f672aa229e0d45ae59b598b59"},
+      {56, "da2ae4d6b36748f2a318f23e7ab1dfdf45acdc9d049bd80e59de82a60895f562"},
+      {63, "29af2686fd53374a36b0846694cc342177e428d1647515f078784d69cdb9e488"},
+      {64, "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108"},
+      {65, "4bfd2c8b6f1eec7a2afeb48b934ee4b2694182027e6d0fc075074f2fabb31781"},
+      {1024U * 1024U, "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"},
+  };
+  for (const auto &test_case : cases) {
+    std::ofstream file(path, std::ios::binary);
+    file.write(reinterpret_cast<const char *>(input.data()), test_case.size);
+    file.close();
+    if (!file) {
+      std::cerr << "Failed to write SHA-256 input of size " << test_case.size << '\n';
+      return 1;
+    }
+    std::string actual;
+    if (!ComputeFileSha256(path, actual) || actual != test_case.digest) {
+      std::cerr << "SHA-256 mismatch for " << test_case.size << " bytes: expected " << test_case.digest
+                << ", got " << actual << '\n';
+      return 1;
+    }
+  }
+  return 0;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
 }
 
 TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldExportPrivateContextAbi) {

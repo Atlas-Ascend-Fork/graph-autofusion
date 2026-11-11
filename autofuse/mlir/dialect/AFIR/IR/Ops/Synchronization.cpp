@@ -15,9 +15,8 @@
 
 namespace mlir::afir {
 
-// 一个 token 代表一个具体的事件槽，只能被等待一次。等第二次时该事件早已被第一次消耗，
-// 硬件上不会阻塞——写的人以为挡住了依赖，实际什么都没挡住，失败方式是静默的数据竞争。
-// 这正是 lowering 阶段的事件槽分配（DAG coloring）所依赖的前提：一个 token 一条边。
+// 每个 token 对应一个事件槽，只能等待一次。事件被首次等待消耗后，第二次等待
+// 不会阻塞，不能保护后续依赖。lowering 的槽位分配依赖这一约束：一个 token 对应一条边。
 LogicalResult EventWaitOp::verify() {
   Value token = getToken();
   auto waits = llvm::make_filter_range(token.getUsers(), [](Operation *user) { return isa<EventWaitOp>(user); });
@@ -27,12 +26,11 @@ LogicalResult EventWaitOp::verify() {
   return success();
 }
 
-// 与「token 只能等一次」对称的另一半（弱化版）：record 产生的 token 至少要被消费一次。
-// 没人消费的 record 在下降层 AllocEventID 占槽后无人 ReleaseEventID——槽泄漏，失败
-// 形态是后续同型 record 拿到越界事件号。
-// 只查「至少一次」、不查「恰好一次」：跨迭代携带（token 经 scf.for 的 iter_args /
-// yield 传给下一迭代的 wait）是合法习语，其末迭代的 record 按构造不被等、必然泄漏
-// 一个槽，强校验会拒掉它。pass 生成的对总是成对，这条拦的是手写 IR 里悬空的 record。
+// record 产生的 token 必须有使用者，否则 AllocEventID 占用的槽位无法释放，
+// 后续同类 record 可能取得越界事件号。
+// 这里只检查至少一个使用者，不强制直接等待：token 可经 scf.for 的 iter_args / yield
+// 传给下一轮，末轮 record 也可能不再被等待。严格检查直接消费次数会拒绝这种循环形式。
+// 此检查主要拒绝手写 IR 中完全悬空的 record。
 LogicalResult EventRecordOp::verify() {
   if (getToken().getUsers().empty()) {
     return emitOpError() << kInvalidDescriptorDiagnostic

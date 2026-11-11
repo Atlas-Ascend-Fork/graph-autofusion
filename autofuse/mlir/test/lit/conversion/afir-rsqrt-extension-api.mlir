@@ -12,12 +12,12 @@
 
 // `afir.rsqrt` 的 mem 侧：`RsqrtExtend(dst, src, blk_tensor_with_value_1, tmp_buf, size)`。
 //
-// **这是头一个要「预先填好 1 的常量 block」的 op。** 那一块不是第二块 tmp buffer——
+// 这是头一个要「预先填好 1 的常量 block」的 op。 那一块不是第二块 tmp buffer——
 // AFIR 上根本没有它，它是 lowering 在 kernel 序言里现造的一块 32 字节常量，元素类型由
 // 包装的形参钉死（这里恒为 `float`，与正在算的 dtype 无关）。
 //
-// 第二个函数钉的是共用：**按 (值, dtype) 整个 kernel 一份**。ATT 侧的 UB 预算
-// （`CalcExtraTmpBufForAscGraph`）就是按这个口径去重后每块 32 字节记的，一个 op 一块
+// 第二个函数钉的是共用：按 (值, dtype) 整个 kernel 一份。ATT 侧的 UB 预算
+// （`CalcExtraTmpBufForAscGraph`）就是按这个规则去重后每块 32 字节记的，一个 op 一块
 // 会超预算，而超出去的症状是运行期 UB 越界，不是编译报错。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

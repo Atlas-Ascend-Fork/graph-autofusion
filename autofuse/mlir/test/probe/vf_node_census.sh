@@ -9,43 +9,43 @@
 #
 #===- vf_node_census.sh - legacy 用例里有多少张图带 VectorFunc -------------===#
 #
-# **这不是测试，是一台量具**（与同目录的 `legacy_takeover_table.sh` / `CapabilityBoundaryProbe.cpp`
+# 这不是测试，是一个测量工具（与同目录的 `legacy_takeover_table.sh` / `CapabilityBoundaryProbe.cpp`
 # 同一性质）。它不断言任何事，产物是一张以 legacy e2e 用例为行的表：
 #
-#     用例 → 调度产物里发射出来的 `__simd_vf__` 函数个数
+#     用例 → 调度产物里生成的 `__simd_vf__` 函数个数
 #
-# 要它是因为**接管表那一列答不出这个数**。接管表记的是「哪一道闸门第一个拦下这张图」，
+# 要它是因为接管表那一列答不出这个数。接管表记的是「哪一道门禁第一个拦下这张图」，
 # 于是「因 `VectorFunc` 回落」只数得到 VF 是第一个拦路的那些格；含 VF 但更早被别的缺口
 # （节点类型没建模、plan selection 枚举不出候选……）挡住的图，诊断记在别的 op 上，
 # VF 一个字都不出现。两个数的差额正是功能需求 4 要的东西：**修掉记下来那条原因也进不来的
 # 那些格**。
 #
-# 判据是生成出来的 kernel 里的 `inline __simd_vf__ void`：一个 `VectorFunc` 节点必然发射成
+# 判据是生成的 kernel 里的 `inline __simd_vf__ void`：一个 `VectorFunc` 节点必然生成
 # 一个这样的函数（`v35/codegen/vec_func_call/vec_func_call.cpp`），所以数它等价于数节点，
-# **而且与 MLIR 这一侧的任何闸门都无关**——这正是要的性质。
+# 而且与 MLIR 这一侧的任何门禁都无关——这正是要的性质。
 #
-# 用法（**先把 build 配成 legacy ST 那一档**，与接管表同一档，见
+# 用法（先把 build 配成 legacy ST 那一档，与接管表同一档，见
 # `legacy_takeover_table.sh` 头部）：
 #
 #     bash autofuse/mlir/test/probe/vf_node_census.sh [-R 正则] [-t 接管表路径]
 #
-# 口径，**读表前先看这几条**：
+# 统计范围，读表前先看这几条：
 #
-#   1. **必须把 `AF_ENABLE_MLIR_CODEGEN` 关掉**（脚本自己 `env -u`）。开着的话，被 MLIR
+#   1. 必须把 `AF_ENABLE_MLIR_CODEGEN` 关掉（脚本自己 `env -u`）。开着的话，被 MLIR
 #      接管的格子不产 legacy kernel，而严格模式下失败的格子产出来的是个空壳——两种都数不到
 #      VF。关掉之后 200 格全走 legacy、全部产出 kernel，这一列才是「调度到底融不融 VF」。
-#   2. **归属靠 mtime，所以一次只跑一格、不并行。** 取的是这一格跑完后 e2e 树里新写的 `.cpp`。
+#   2. 归属靠 mtime，所以一次只跑一格、不并行。 取的是这一格跑完后 e2e 树里新写的 `.cpp`。
 #      并行会把产物算到别的格头上，而算错了看起来仍然像一张表。
-#   3. **按用例名归属，不按目录名。** 169 个用例目录注册出 200 个 `*_codegen_v2` 用例
+#   3. 按用例名归属，不按目录名。 169 个用例目录注册出 200 个 `*_codegen_v2` 用例
 #      （一个目录可以调多次 `backend_e2e_st_test`，sweep 那几格还是 `cmake -P` 驱动器），
 #      按目录数会把多格并成一格。
-#   4. 数的是**发射出来的 VF 函数个数**，不是 VF 节点个数：一张图出多个模板时每个模板各发一份，
+#   4. 数的是生成的 VF 函数个数，不是 VF 节点个数：一张图出多个模板时每个模板各生成一份，
 #      所以这一列 >1 不表示融出了多个 VF 子图。判「含不含」只看 >0。
-#   5. **mem 侧（`_test_codegen$`）那 38 格实测 37 格为 0**，与「V1 的
+#   5. mem 侧（`_test_codegen$`）那 38 格实测 37 格为 0，与「V1 的
 #      `PlatformV1::PartitionSubFunctions` 是空实现」一致。唯一非 0 的
 #      `inductor_matmul_elemwise_test`（6 个 VF 函数）**不是反例**：那个用例自己把平台设成
 #      `kV35AltNpuArch`（`tests/common/att/soc_perf_test_config.h`），它跑的本来就不是 V1。
-#      所以这一列在 mem 侧非 0 时，**先查用例自己设了什么平台**，再怀疑平台分流。
+#      所以这一列在 mem 侧非 0 时，先查用例自己设了什么平台，再怀疑平台分流。
 #
 #===----------------------------------------------------------------------===#
 
@@ -167,7 +167,7 @@ if [[ ! -f "${TAKEOVER_TABLE}" ]]; then
   exit 1
 fi
 
-# 交叉表。接管表的行格式见 `legacy_takeover_table.sh` 的 `printf`：用例名 状态 闸门 shortfall 诊断。
+# 交叉表。接管表的行格式见 `legacy_takeover_table.sh` 的 `printf`：用例名 状态 门禁 shortfall 诊断。
 awk -v table="${TAKEOVER_TABLE}" -F'\t' '
   BEGIN {
     while ((getline line < table) > 0) {
@@ -189,7 +189,7 @@ awk -v table="${TAKEOVER_TABLE}" -F'\t' '
     # 「首因是 VF」怎么认。**这条判据跟着 bridge 的诊断措辞走，换了措辞要两处一起改**
     # ——和上面 `VF_MARKER` 同一类耦合，但它漏改的后果更隐蔽：匹配不上不会报错，只会把
     # 那几格算进「首因不是 VF」，于是「只差 VF」那个数静默变成 0，而 0 看起来像个结论。
-    # 2026-10-26 就栽过一次：VF 那道闸门的诊断从「不支持这个节点类型」换成了按 dtype /
+    # 2026-10-26 就栽过一次：VF 那道门禁的诊断从「不支持这个节点类型」换成了按 dtype /
     # 按子图节点分的两条，旧判据只认前者，于是 17 格读成了 0 格。
     # 今天要认的三种措辞：
     #   does not support node 'X' of type 'VectorFunc'      （节点类型整个没建模）

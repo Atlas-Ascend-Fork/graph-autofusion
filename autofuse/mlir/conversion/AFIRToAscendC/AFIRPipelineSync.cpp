@@ -82,7 +82,7 @@ Pipeline getPipeline(Operation *operation) {
   // The buffer form currently carries no independent pipeline attribute. Transfers
   // retain their MTE semantics; the remaining supported AFIR operations use the vector pipeline.
   //
-  // 判据是**方向 trait**（`AFIR_TransferIn` / `AFIR_TransferOut`），不是 op 名单。那两个
+  // 判据是方向 trait（`AFIR_TransferIn` / `AFIR_TransferOut`），不是 op 名单。那两个
   // trait 存在的全部理由就是在 ODS 上标出搬运方向，而「按名单列」会在加第三个搬运 op 时
   // 静默把它当成 vector 算子：`afir.nddma` 落到 Vector 上的后果是 MTE2 与 vector 之间
   // 少一对 event，读到的是上一趟还没搬完的那块 UB。
@@ -254,7 +254,7 @@ class FunctionPipelineSynchronizer {
           // 成员 tile 的只有 store 和矢量算子；MTE2 op（load / nddma）只写队列、不读，
           // 源端永远在 GM。所以 MTE2 消费者目前到不了这里。但若将来出现 UB→UB 搬运
           // op，它会作为 MTE2 读者消费队列 tile，而它没有可用的释放屏障——静默按 0
-          // 聚合等于漏插。故在此直接报错，不发没有依据的同步。
+          // 聚合等于漏插。故在此直接报错，不生成没有依据的同步。
           if (getPipeline(operation) == Pipeline::MTE2) {
             return operation->emitError("MTE2 queue consumer has no release barrier to order against");
           }
@@ -457,7 +457,7 @@ class FunctionPipelineSynchronizer {
       return success();
     }
 
-    // 产出的是 **AFIR** 的 pipe_barrier，不是 AscendC 的。V -> V 这条路径上没有队列，
+    // 产出的是 AFIR 的 pipe_barrier，不是 AscendC 的。V -> V 这条路径上没有队列，
     // 顺序此前直接写成后端算子，AFIR 层看不见也就无从校验（3.2：放弃 TQue 自动同步后
     // 正确性归 AFIR 自己）。现在它先是一条 AFIR 的顺序事实，再由同步族的 lowering 落到
     // `ascendc.pipe_barrier`——文本产物不变，但竞争检查器从此看得见这条边。
@@ -574,7 +574,7 @@ class FunctionPipelineSynchronizer {
     if (producersWithNonStoreConsumers.contains(producer)) {
       // load 另有矢量消费者：队列归矢量侧的 MTE2→Vector 流程所有；store 侧只补一条
       // transfer_in→transfer_out 的显式同步边，读原始视图，不经队列出队。多个直连 store 消费
-      // 同一 load 时，只与**首个** store 建对：store 全在 MTE3，wait 挡在首 store 前即按程序序
+      // 同一 load 时，只与首个 store 建对：store 全在 MTE3，wait 挡在首 store 前即按程序序
       // 覆盖后续 store，需要的并发事件数收敛为 1（MTE2_MTE3 可用的并发事件上限 QUE_MAX_EVENT）。
       if (state.explicitMte3PairedProducers.insert(producer).second) {
         if (failed(
@@ -696,17 +696,14 @@ class FunctionPipelineSynchronizer {
     return {};
   }
 
-  // store 把数据写进 GM workspace、之后搬运入 op（load / nddma）再从同一块读回
-  // （方向 MTE3 → MTE2）。做法：搬运入的 GM 输入命中程序序在前的搬运出写集时，在写者
-  // 后 record、读者前 wait 一条 transfer_out→transfer_in 的显式同步对。读写按根 memref
-  // 归并（SSA 同值，或经 resolveBufferSlice 追到同一根，别名即命中）。
-  // 写者与读者都按方向 trait（`AFIR_TransferOut` / `AFIR_TransferIn`）认，不按 op 名单：
-  // 名单漏掉 nddma 这类搬运入 op 时它读的是上一趟还没写完的 workspace，静默错数据。
-  // 只与末位写者建对：GM 写者全是搬运出 op（MTE3），同 pipe 程序序保证先写的先完成，
-  // 末写者的 record 即覆盖全部前序 store——需要的并发事件数从「写者个数」收敛到 1
-  // （MTE3_MTE2 可用的并发事件上限是 QUE_MAX_EVENT，逐写者建对会在多 stage 各写子区再
-  // 回读的形态下超限，AllocEventID 返回越界事件号）。
-  // 每个读者一对：token 只能被等待一次，两个读者共用一个 record 会被 verifier 拒掉。
+  // 为 GM workspace 的写后读建立 transfer_out -> transfer_in 同步。
+  // 搬运入的 GM 源与前序搬运出写集按根 memref 匹配；直接 SSA 相同或 resolveBufferSlice
+  // 解析为同根均视为别名。方向按 AFIR_TransferOut / AFIR_TransferIn trait 识别，
+  // 不维护 op 名单，以覆盖 load、nddma 等所有搬运入。
+  //
+  // 只与最后一个 MTE3 写者配对：同 pipe 顺序已覆盖更早的写者，避免为每个写者分配事件，
+  // 超过 MTE3_MTE2 的 QUE_MAX_EVENT 上限并取得越界事件号。
+  // 每个读者仍使用独立 record / wait，因为一个 token 只能等待一次。
   LogicalResult synchronizeWorkspaceReadback(SyncState &state) {
     llvm::DenseMap<Value, Operation *> workspaceLastWriter;
     for (Operation *operation : bufferizedOperations) {

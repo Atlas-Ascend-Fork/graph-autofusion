@@ -44,7 +44,7 @@ add_mlir_e2e_cpu_case(load_sum_store_17x32
 )
 
 # RA：归约**首维**，tile 布局 `[R, A]`。与上面三条 AR 用例互为镜像，覆盖的是
-# `ReduceInit` 不发、`srcShape` 两项对调、32B 对齐落在 A 上这三件 AR 下看不出来的事。
+# `ReduceInit` 不生成、`srcShape` 两项对调、32B 对齐落在 A 上这三件 AR 下看不出来的事。
 # 三档形状分别压 R 尾块、A 尾块和两者同时；R 被切成多个 tile，所以跨轮累加也走到。
 add_mlir_e2e_cpu_case(load_sum_store_ra_37x16
     ENVIRONMENT "AUTOFUSE_DFX_FLAGS=--force_schedule_result=0"
@@ -85,7 +85,7 @@ add_mlir_e2e_cpu_case(load_sum_store_ra_37x17
 # extents respectively; all four local layouts are A...A,R...R and therefore
 # merge to the same two-dimensional ReduceSum AR contract.
 #
-# 这一条**不钉模板**：四个模板全部下降进同一个 kernel，由入口按 stage 的 `tiling_key` 分派，
+# 这一条不钉模板：四个模板全部下降进同一个 kernel，由入口按 stage 的 `tiling_key` 分派，
 # ATT 在 host 侧择优写这个 key。原先是 `arar_case0..3` 四条各钉一个模板，那样四个模板的下降
 # 都走到了，但分派这条路一条都没覆盖——而它恰恰是唯一会静默出错的地方（编号塌掉时多出来的
 # 模板变成死代码，数值断言照样全过）。`Case.cpp` 的 `CheckTemplatesAreDispatched` 把这件事
@@ -161,7 +161,7 @@ add_mlir_e2e_cpu_case(load_sum_store_allload_8x1024
 )
 
 # ARA：AllLoad 下**唯一**能产出 RA 形态的语料（二维 RA 根本不生成 AllLoad 候选，见 `Case.cpp`
-# 三维分支的注释），并且是 RA `srcShape` 公式里 **A 组连乘**项的首个用例。
+# 三维分支的注释），并且是 RA `srcShape` 公式里 A 组连乘项的首个用例。
 add_mlir_e2e_cpu_case(load_sum_store_allload_ara_4x32x8
     ENVIRONMENT "AUTOFUSE_DFX_FLAGS=--force_schedule_result=2"
     OUTPUT_SHAPE "[4, 1, 8]"
@@ -176,7 +176,7 @@ add_mlir_e2e_cpu_case(load_sum_store_allload_ara_4x32x8
 # RA 的 destination 镜像源的物理内维布局，槽位 `(a_outer, a_inner)` 落在
 # `a_outer × align(A_inner_nominal) + a_inner`——有效槽位是**跨步**的。跨 tile 累加的 count
 # 原先按 `align(Π A_actual)` 连续数，于是每个 tile 最后几行根本没被拷/累加进 destination。
-# 两条形状是**回归**用例：修前分别在 A_outer = 2,5,8,… 和 4,9,14,… 整行错（每 tile 装 3 / 5
+# 两条形状是回归用例：修前分别在 A_outer = 2,5,8,… 和 4,9,14,… 整行错（每 tile 装 3 / 5
 # 根 A_outer，count 24 / 32 对真实跨度 21 / 37），修后全绿。
 #
 # 为什么要两档：count 公式里有一项 `Σ (actual - 1) × stride`，单档只能钉住一个 A_outer
@@ -205,7 +205,7 @@ add_mlir_e2e_cpu_case(load_sum_store_ra_agap_64x8x5
 #
 # 这两条钉 plan 1。候选顺序是 General -> RCore -> AllLoad，二维图是 1 + 1 + 1，所以 RCore 是
 # plan 1。身份判据不是下标而是产物形状：RCore 必须出 `stage0_template*` 与 `stage1_template*`
-# 两个 stage，且 kernel 里出现 workspace。AR 输入还会**同时**出现
+# 两个 stage，且 kernel 里出现 workspace。AR 输入还会同时出现
 # `Pattern::Reduce::AR` 和 `::RA`——phase 1 在 `[A, Rm_t]` 上是 AR，phase 2 在 workspace 的
 # `[Rm, A]` 上是 RA。这正是 `2026-09-21-afir-reduce-sum-ra-lowering-design.md` 3.3 说的
 # 「RA 是 RCore phase 2 的硬前置」。

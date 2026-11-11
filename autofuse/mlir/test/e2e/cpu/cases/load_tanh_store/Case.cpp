@@ -8,23 +8,9 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> tanh -> store CPU case ----------------*- C++ -*-===//
-//
-// **这份用例存在的理由是「`constexpr bool` 当模板实参真的编得过」，不是「tanh 算得对」。**
-//
-// `afir.tanh` 的 mem 侧发的是 `AscendC::Tanh<float, c0_i1>(dst, src, tmp, count)`，
-// 其中 `c0_i1` 是 lowering 物化的 `arith.constant false` 被 emit 成的
-// `constexpr bool c0_i1 = false;`。整条链上只有这里会真的把那份 kernel 编一遍——
-// lit 那两份只比文本，`constexpr bool` 填不进模板实参位的话它们照样绿。
-//
-// legacy 的 `UnaryApiTmpCall` 发的是不带模板实参的 `Tanh(y[off], x[off], tmp, size);`，
-// 靠 AscendC 的默认值 `isReuseSource = false`。我们打出来的与它语义相同、文本不同，
-// 所以下面按 `AscendC::Tanh<` 去找，别按 legacy 那个形状找。
-//
-// f32:mem 侧的 `REG_ASC_IR(Tanh)` 只收 f16 / f32，E2E harness 的 soc 钉在 Ascend910B1,
-// 走的就是 mem 这一侧。
-//
-//===----------------------------------------------------------------------===//
+// mem 侧 Tanh 的 isReuseSource 由 arith.constant false 物化为 constexpr bool，
+// 作为 AscendC::Tanh 的模板实参。本 E2E 实际编译该 kernel，补充仅匹配文本的 LIT，
+// 验证布尔常量确实可用于该模板参数。
 
 #include <string>
 
@@ -57,7 +43,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // mem 侧是标准调用，没有包装，所以扩展头一个都不该被内联进来。
   EXPECT_EQ(kernel.find("TanhExtend"), std::string::npos);
   // 调度给了一块 tmp buffer，而且这条调用收了它：四个实参里最后一个是 count。
-  // 这里的标记**不以 `(` 收尾**——常量名由 emitter 自己编，写不死。`CountCallArguments`
+  // 这里的标记不以 `(` 收尾——常量名由 emitter 自己编，写不死。`CountCallArguments`
   // 是从标记末尾往后扫到第一个 `(` 才开始记深度的，中间只剩 `c0_i1>`，不影响计数。
   EXPECT_NE(kernel.find("AscendC::TBuf<"), std::string::npos);
   EXPECT_EQ(CountCallArguments(kernel, "AscendC::Tanh<float, "), 4U);

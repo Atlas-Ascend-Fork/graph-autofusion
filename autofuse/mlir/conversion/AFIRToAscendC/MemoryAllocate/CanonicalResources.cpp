@@ -87,9 +87,8 @@ LogicalResult CanonicalFunctionMemoryAllocator::registerResource(const Canonical
              << afir::kInvalidBindingDiagnostic << ": one queue resource cannot be both TransferIn and TransferOut";
     }
     auto &descriptor = existing->second.descriptor;
-    // 字段清单在 `afir::canonicalResourceFactsAgree`（唯一一处）——bridge 的
-    // `CheckResourceCompatibility` 查的是同一份。哪些字段不参与以及为什么，写在那个
-    // 声明上；这里不再重抄一遍。
+    // 资源事实字段统一由 afir::canonicalResourceFactsAgree 比较，
+    // bridge 的 CheckResourceCompatibility 与此处复用相同规则。
     if (!afir::canonicalResourceFactsAgree(afir::getCanonicalResourceFacts(descriptor),
                                            afir::getCanonicalResourceFacts(info.buffer))) {
       return emitError(info.value.getLoc())

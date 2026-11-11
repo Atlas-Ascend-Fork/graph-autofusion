@@ -8,14 +8,12 @@
 
 // 同步族的 negative 用例。
 //
-// 这一族的失败形态全是静默的：写错的同步边不会让 IR 变得不合法，也不会让 lowering
-// 报错，只会让某条依赖没被挡住，结果是偶发的错数据。因此凡是能在类型或 verifier
-// 阶段判掉的，都必须判掉。
+// 错误同步可能只表现为运行期数据竞争，无法依靠 lowering 成功发现。
+// 本文件验证能在类型和 verifier 阶段提前拒绝的同步错误。
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 
-// 同 pipe 的 token。同一条 pipe 内程序序即执行序，不需要事件；写成这样说明作者以为
-// 自己挡住了某个依赖，而这条边实际什么都没挡。
+// 同 pipe 已由程序序保证执行顺序，不应创建同 pipe 的事件 token。
 module {
   func.func @same_pipe() {
     // expected-error @below {{token pipes must differ, got 'vector' twice}}

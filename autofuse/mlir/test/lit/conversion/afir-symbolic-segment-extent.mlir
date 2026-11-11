@@ -6,17 +6,17 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **段内轴的 extent 是复合符号表达式时，conversion 阶段物化得出来。**
+// 段内轴的 extent 是复合符号表达式时，conversion 阶段物化得出来。
 //
 // 与 `afir-broadcast-two-segment.mlir` 是同一张图，只有一处不同：z1 的长度从字面量 `8`
 // 换成 `(2 * z1_size)`。这一处足以让 Load 的搬运长度、Broadcast 的 `Z`、Store 的每趟前进量
 // 全部落到符号表达式上。
 //
-// **钉的是一条基础设施边界**：descriptor 里非字面量的 stride / extent 由
-// `afir::materializeSizeAt` 物化，它发的是 `afir.symbolic_eval`。进 conversion 之前这个 op
+// 钉的是一条基础设施边界：descriptor 里非字面量的 stride / extent 由
+// `afir::materializeSizeAt` 物化，它生成的是 `afir.symbolic_eval`。进 conversion 之前这个 op
 // 已经被 `AFIRMemoryAllocatePass` 清空（它在末尾跑同一组下降 pattern），所以输入里没有；
-// 但 conversion 的 pattern **自己会建**。少了那一份 pattern，新建的 op 没人 legalize，
-// dialect conversion 会把**整个** pattern 回滚，报的是 `failed to legalize operation
+// 但 conversion 的 pattern 自己会建。少了那一份 pattern，新建的 op 没人 legalize，
+// dialect conversion 会把整个 pattern 回滚，报的是 `failed to legalize operation
 // 'afir.load'` ——看起来像判据写错了，实际是新建的 op 落不了地。这个用例实测过：
 // 把 `ConvertAFIRToAscendCPass` 里那一行 `populateSymbolicLoweringPatterns` 注释掉就变红。
 //

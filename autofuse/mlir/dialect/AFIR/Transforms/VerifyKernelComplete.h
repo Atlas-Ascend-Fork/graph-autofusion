@@ -20,12 +20,8 @@
 
 namespace mlir::afir {
 
-// C4 要问「这个 Op 有没有目标实现」，而实现注册表是**目标层**的东西
-// （target/Ascend/Capability/ImplementationRegistry.h）。判据本身与目标无关，所以这里
-// 收一个谓词而不是注册表：AFIR 层不链接任何一个具体目标，查询由调用方注入。
-//
-// `targetName` 只进诊断（"no <target> implementation is registered for ..."）——把目标
-// 名硬编码在 AFIR 层就等于承认这条判据只对一个后端成立。
+// C4 通过调用方传入的谓词查询目标实现，不在 AFIR 层依赖 ImplementationRegistry。
+// 判据与具体目标无关；targetName 仅用于 "no <target> implementation ..." 诊断。
 struct ImplementationQuery {
   llvm::StringRef targetName;
   llvm::function_ref<bool(Operation *)> contains;
@@ -34,7 +30,7 @@ struct ImplementationQuery {
 // 设计文档 5.2 的四条完备性判据。
 //
 // 把完备性从文档表格变成可运行的检查——否则「完备」永远是主观判断，也无法在 PR 里当
-// 门禁。每条判据都被收窄成一个**对单个 kernel 函数可判定**的命题：判据本身谈的是
+// 门禁。每条判据都被收窄成一个对单个 kernel 函数可判定的命题：判据本身谈的是
 // 表达能力（「任意 SSA buffer 都……」「……可只用 AFIR 表示」），而表达能力的检验方式
 // 就是「我们关心的每个 kernel 都通过」。
 enum class CompletenessCriterion : uint8_t {
@@ -59,10 +55,10 @@ enum class CompletenessCriterion : uint8_t {
   AfirOnlyRepresentation,
   // C4 可通过确定的 lowering 生成目标代码，unsupported 编译期返回原因。
   //
-  // 收窄为：函数里每个 AFIR Op 在实现注册表里都能查到至少一个实现。查不到时今天的
-  // 失败是 `applyFullConversion` 的一句泛化的 "failed to legalize"，既不说是哪条
+  // 收窄为：函数里每个 AFIR Op 在实现注册表里都能查到至少一个实现。查不到时当前的
+  // 失败是 `applyFullConversion` 的一句通用的 "failed to legalize"，既不说是哪条
   // 判据不成立，也不说缺的是什么——本检查把它变成一条指名道姓的诊断，且在下降开始
-  // **之前**就报出来。
+  // 之前就报出来。
   DeterministicLowering,
 };
 

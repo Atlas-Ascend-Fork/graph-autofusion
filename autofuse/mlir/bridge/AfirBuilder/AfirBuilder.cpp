@@ -45,8 +45,7 @@
 
 using namespace mlir;
 
-// 32 bytes is the UB access granularity every other on-chip allocation in this
-// bridge is aligned to; a tmp buffer is no different.
+// Align scratch buffers to the same 32-byte UB access granularity as other on-chip allocations.
 constexpr int64_t kTmpBufferAlignmentBytes = 32;
 
 // Reduce 的 destination 后接变长 scratch，需单独设置 operandSegmentSizes。
@@ -69,17 +68,15 @@ llvm::ArrayRef<AFIRBridgeOpMapping> bridgeableOperationMappings() {
   return mappings;
 }
 
-// AscGraph 名 → AFIR 名。两边的拼写不保证一致，`LeakyRelu` 就不一致——见
-// `AfirBuilder.h` 上那段。ScheduleToAfir 按这张表读 `ir_attr`，下面
-// `buildBufferNodeOp` 按同一张表挂成 op 属性，两处不会再各写一个 `if`。
+// AscGraph 属性名到 AFIR 属性名的映射，例如 LeakyRelu 的拼写差异，见 AfirBuilder.h。
+// ScheduleToAfir 读取 ir_attr 和 buildBufferNodeOp 写入 op 属性时共用此表。
 const FloatIrAttrMapping kFloatIrAttrMappings[] = {
     {"LeakyRelu", "negative_slope", "negative_slop"},
     {"Axpy", "alpha", "alpha"},
 };
 
-// 同一件事的 int64 那一半。多项式族八个的 `n` 两边同名（legacy 的
-// `REG_ASC_IR(...).Attr<int64_t>("n")`，AFIR 的 ODS 属性也叫 `n`），但两列照旧都写出来
-// ——`negative_slope` → `negative_slop` 那个先例说明「同名」不是这一族的性质。
+// int64 属性使用独立映射。多项式族的 n 在 AscGraph 和 AFIR 中同名，仍显式列出两侧名称，
+// 不假定所有属性都同名，例如 negative_slope 对应 negative_slop。
 const IntIrAttrMapping kIntIrAttrMappings[] = {
     {"ChebyshevPolynomialT", "n", "n"},        {"ChebyshevPolynomialU", "n", "n"},
     {"ChebyshevPolynomialV", "n", "n"},        {"ChebyshevPolynomialW", "n", "n"},
@@ -109,9 +106,7 @@ bool isFormSupported(StringRef schedulerName, BridgeOpForm form) {
   return false;
 }
 
-// Names the operations the registry marks as buildable in `form`, for a
-// diagnostic. Built from the table rather than written out, so it cannot go
-// stale the way a hand-listed message does.
+// Builds the diagnostic's supported-operation list from the registry for the requested form.
 std::string listSupportedOperations(BridgeOpForm form) {
   std::string names;
   for (const AFIRBridgeOpMapping &mapping : bridgeableOperationMappings()) {
@@ -126,12 +121,9 @@ std::string listSupportedOperations(BridgeOpForm form) {
   return names;
 }
 
-// 拼写 → MLIR 类型。**两种拼写都收**：长的是 bridge 发过来的（`DTypeStr`），短的是
-// 对照表与 lit 用例里的。两张表的行由 `support/AfirElementTypes.h` 给，所以这里不会出现
-// 「bridge 发得出、builder 解不出」那种一个字母的错。
-//
-// 收的范围比供给表宽，与 `DTypeStr` 一致：解析得出来只是第一步，收不收由
-// `IsAfirModeledDType` 和各 op 的 ODS 约束说。
+// 将 dtype 拼写解析为 MLIR 类型，同时接受 bridge DTypeStr 的长名称和测试中的短名称。
+// 两组名称均来自 support/AfirElementTypes.h，避免 bridge 与 builder 的拼写不一致。
+// 可解析类型的范围与 DTypeStr 一致；实际是否接收由 IsAfirModeledDType 和 op ODS 约束决定。
 Type parseDtypeImpl(MLIRContext *ctx, StringRef dtype) {
   auto build = [ctx](afir::AfirElementTypeKind kind, unsigned width) -> Type {
     switch (kind) {
@@ -400,10 +392,8 @@ SmallVector<DynamicSizeCandidate> collectDynamicSizeCandidates(MemRefType result
   return candidates;
 }
 
-// 为一个节点建 Op 的过程中，整条调用链自上而下都要用到的同一组量：谁在建、建在哪、
-// 建的是哪个节点、它的操作数、以及结果落在哪。此前这五六项在
-// `buildNodeOp` -> `buildBufferNodeOp` -> `getBufferNodeDestination` -> `makeBufferDestination`
-// -> `makeDynamicBufferDimension` 这条链上逐层原样透传，每层签名都要重列一遍。
+// 节点构建调用链共享的上下文：builder、位置、节点、操作数和结果描述。
+// 用于 buildNodeOp、buildBufferNodeOp 及 destination 构建，避免逐层传递同一组参数。
 struct NodeBuildContext {
   OpBuilder &builder;
   Location loc;
@@ -414,10 +404,8 @@ struct NodeBuildContext {
   const TensorValueDTO &resultValue;
   // 仅 buffer 形态的 Store 用：写回的那个函数参数。其余情况为空。
   Value externalDestination;
-  // 这个节点是不是建在 `afir.vector_func` 的 region 里。region 内的值是**寄存器**，
-  // 没有存储，所以不挂 buffer descriptor——挂了的失败方式是资源收集那一步报
-  // 「canonical buffer descriptor is missing buffer_id」（`Analysis/ResourceIds.cpp`），
-  // 而那句话指不到这里。
+  // 是否位于 afir.vector_func region 内。内部值为寄存器，不挂 buffer descriptor；
+  // 否则资源收集会因缺少 buffer_id 失败，见 Analysis/ResourceIds.cpp。
   bool insideVectorFunc = false;
 
   MLIRContext *context() const {
@@ -447,17 +435,11 @@ FailureOr<Value> makeDynamicBufferDimension(const NodeBuildContext &ctx, MemRefT
     }
   }
 
-  // 没有同轴的输入可问时，范围就从调度器给的 shape 表达式本身算出来。
-  //
-  // 这一支此前返回 `arith.constant 1`：`memref.alloc` 的动态尺寸操作数在 AscendC 物化
-  // 路径上没有读点（队列字节数来自 `size_bytes_expr`，成员尺寸来自 tensor descriptor），
-  // 所以那个 1 不会算错任何东西——它只是一句假话。而 `memref<?x...>` 的动态维就是**这块
-  // 缓冲有多大**：写 1 等于说「运行期为 1」，读 IR 的人、任何基于 memref 的分析、以及
-  // ADR-11/12 要落的 `memref.view` 形态都会被它误导。
-  //
-  // 表达式里的自由符号是 tiling 参数（`z0Tb_size` 之类的轴尺寸，或 `s0` 这样的 shape
-  // 符号），逐个取成 `afir.tiling_param`，表达式本身成为一个 `afir.symbolic_eval`；两者
-  // 都落在入口块的尺寸序言里，因此支配所有 alloc。常量表达式不走这条路，直接建常量。
+  // 没有同轴输入时，从调度器的 shape 表达式计算动态维度。
+  // 不能使用常量 1 占位：虽然 AscendC 物化从 size_bytes_expr 和 tensor descriptor 取得
+  // 资源大小，memref 的动态维仍需正确描述缓冲范围，供 IR 分析和 memref.view 使用。
+  // 将表达式中的 tiling 参数和 shape 符号（如 z0Tb_size、s0）读取为 afir.tiling_param，
+  // 再通过 AFIR 的符号表达式物化接口生成尺寸值。
   int64_t literal = 0;
   if (!llvm::StringRef(resultExpression).getAsInteger(10, literal)) {
     if (literal <= 0) {
@@ -602,12 +584,12 @@ FailureOr<Value> getBufferNodeDestination(const NodeBuildContext &ctx, MemRefTyp
 // `destinations` 是这个节点**全部**目的地的 DTO；空表示「只有一个，就是 `resultValue`」，
 // 那是一结果算子的常态。
 //
-// **多输出的算子必须显式传全部**：descriptor 的个数由 verifier 按算子的结果 / destination
+// 多输出的算子必须显式传全部：descriptor 的个数由 verifier 按算子的结果 / destination
 // 个数查（`AFIRDialect.cpp` 的 `getExpectedDescriptorCount`），只挂第一个的后果是
 //
 //     DescriptorCountMismatch: 'afir.destination_descs' expected 2 element but found 1
 //
-// ——那是 verifier，**硬失败**。`afir.vector_func` 是今天唯一的多输出算子（菱形两消费者融成
+// ——那是 verifier，硬失败。`afir.vector_func` 是目前唯一的多输出算子（菱形两消费者融成
 // 一个 VF 就是双输出），2026-10-26 实测探针 reg 侧 5 格命中这一条。
 LogicalResult appendBufferNodeAttrs(const NodeBuildContext &nodeCtx, SmallVectorImpl<NamedAttribute> &attrs,
                                     llvm::ArrayRef<TensorValueDTO> destinations = {}) {
@@ -662,14 +644,9 @@ LogicalResult appendBufferNodeAttrs(const NodeBuildContext &nodeCtx, SmallVector
   return success();
 }
 
-// Materializes the tmp buffer a node's API needs, as a one-dimensional
-// `ui8` allocation whose extent is the canonical resource size `b{id}_size`.
-//
-// Bytes and elements coincide for `ui8`, which is why the dynamic extent can be
-// the resource size itself rather than a placeholder: the IR then states the
-// buffer's real size instead of a convenient lie. The descriptor says
-// `size_from_resource`, so MemoryAllocate binds the same name when it reserves
-// the TBuf -- one number, referenced twice, never recomputed here.
+// Materializes API scratch as a one-dimensional ui8 allocation sized by b{id}_size.
+// For ui8, the element count equals the byte size. The size_from_resource descriptor
+// makes MemoryAllocate use the same canonical size when reserving the TBuf.
 FailureOr<Value> makeTmpBufferAllocation(const NodeBuildContext &ctx, const TmpBufferDTO &tmpBuffer) {
   MLIRContext *context = ctx.context();
   Block *entry = ctx.builder.getInsertionBlock();
@@ -756,20 +733,12 @@ LogicalResult appendReduceScratchOperands(const NodeBuildContext &ctx, Value des
 
 LogicalResult verifyBufferTransferElementTypes(const NodeBuildContext &ctx, Value destination) {
   const NodeInfo &node = ctx.node;
-  // **搬运节点的两端 dtype 不一致，这里要干净拒收，不能把球踢给 verifier。**
-  //
-  // `verifyTransferIndexingMaps`（`dialect/AFIR/IR/Ops/Data.cpp`）本来就会查
-  // `sourceType.getElementType() != destinationType.getElementType()`，但那是**硬失败**
-  // ——整条编译红掉。这条不变量在今天的几张 legacy 调度图上真会被违反：legacy 自己对某些
-  // 节点做「升精度算、按原 dtype 存」（`optimize/graph_completeness/dtype_consistency.cpp`
-  // 的 `GetConversionDtype`，例如 `Fma` 的 `bf16->f32`），存的时候插的 Cast 落回的是节点
-  // 自己声明的 dtype，而 GM 侧的函数签名可能是另一个——两者今天没有保证一致。
-  //
-  // 实测过两次：`round_to_int` / `trunc_to_int`（2b）与 `afir.fma` 接 bf16，都在这一条上
-  // 从「干净回落」变成「硬失败」。真正给「两端 dtype 不同但字节宽度相同」的搬运定语义
-  // （capability 层拒收还是显式建模成 reinterpret）是独立一件设计活，按字节宽度悄悄放开
-  // 会把硬失败换成静默算错，更坏——这里只做风险最低的那一半：**提前问一次，答不支持就
-  // 回落，不让它绕到 verifier 变成红**。
+  // 搬运两端 dtype 不一致时提前返回不支持，由调用方回落 legacy，避免进入
+  // verifyTransferIndexingMaps 后成为编译错误。
+  // legacy 的 GetConversionDtype 可能提升计算精度，再按节点声明的 dtype 插入 Cast；
+  // 该 dtype 不保证与 GM 函数签名一致，例如 round_to_int、trunc_to_int 和 bf16 Fma。
+  // 字节宽度相同不代表搬运语义相同。若要支持这类输入，需要单独定义 capability 或
+  // reinterpret 语义，不能仅按宽度放行。
   if (isTransferNodeType(node.type)) {
     auto sourceMemrefType = ctx.operands.empty() ? MemRefType() : dyn_cast<MemRefType>(ctx.operands.front().getType());
     auto destinationMemrefType = dyn_cast<MemRefType>(destination.getType());
@@ -844,9 +813,9 @@ Value buildBufferNodeOp(const NodeBuildContext &ctx, ShapedType resultTy) {
   }
   bool hasTmpBuffer = false;
   if (!isReduceNodeType(node.type) && !node.tmp_buffers.empty()) {
-    // 能不能带 tmp buffer 由 ODS base 决定，而 base 决定的同一件事也决定了要不要
-    // `operandSegmentSizes`。调度分了 tmp buffer 却落到一个装不下它的 Op 上，说明
-    // 这个 op 的 ODS 形态和调度的假设对不上——静默丢掉会变成一次越界写。
+    // ODS base 同时决定 op 是否接受 tmp buffer，以及是否需要 operandSegmentSizes。
+    // 若调度分配了 tmp buffer 而 op 不接受，说明调度假设与 ODS 不一致，不能静默丢弃，
+    // 否则实际 API 可能越界写入。
     if (!needsOperandSegmentSizes(state.name)) {
       emitError(ctx.loc) << "UnsupportedOperation: node '" << node.name << "' was given a tmp buffer but '"
                          << operationName << "' has no tmp buffer operand";
@@ -890,8 +859,8 @@ Value createLogicalNodeOp(const NodeBuildContext &nodeCtx, ShapedType resultTy, 
       return operands.empty() ? Value() : operands.front();
     }
     op->setAttr(afir::kResultDescsAttrName, resultDescs);
-    // tensor 形态没有 destination，Op 的结果就是这块存储的定义点——**除非它在
-    // `afir.vector_func` 的 region 里**：那里的值是寄存器，没有存储可描述。
+    // tensor 形态的结果是存储定义点，因此 descriptor 挂在结果上。
+    // afir.vector_func region 内的值仅表示寄存器，不带存储 descriptor。
     if (!nodeCtx.insideVectorFunc) {
       afir::setBufferDescAttr(op, resultBufferDesc);
     }
@@ -925,7 +894,7 @@ Value buildLogicalNodeOp(const NodeBuildContext &nodeCtx, ShapedType resultTy) {
   const NodeInfo &node = nodeCtx.node;
   MLIRContext *ctx = nodeCtx.context();
   // tensor 形态的结果描述取自节点自身的 outputs，而不是 `nodeCtx.resultValue`
-  // （后者可能已被 Output 节点改写）。保持原有取值口径。
+  // （后者可能已被 Output 节点改写）。保持原有取值规则。
   const TensorValueDTO &resultValue = node.outputs.empty() ? node.output : node.outputs.front();
   SmallVector<NamedAttribute> attrs;
   FailureOr<ArrayAttr> operandDescs = makeTensorDescArrayAttr(ctx, node.inputs);
@@ -1078,23 +1047,11 @@ struct TemplateBuildState {
   llvm::StringMap<Value> &valueMap;
 };
 
-// 把 `Scalar` 节点的字面值解析成一个有类型的常量。
-//
-// legacy 是把那串文本直接拼进生成的 C++（`codegen_kernel.cpp` 的 `IsOps<Scalar>` 分支），
-// 于是「2.0」「998.998f」「某个宏」全都能过，错了要到设备编译器上才报。这里不走那条
-// 路：AFIR 里它必须是一个有类型的 SSA 值。
-//
-// 两条都要做到，而且**不能靠 APInt / APFloat 的默认行为**：
-//
-//   - 解析不了的写法当场报出来，不静默产出一个别的值；
-//   - 能解析但**放不进目标类型**的也要报，不截断、不溢出成 Inf。
-//
-// 反面教材是 `StringRef::getAsInteger(unsigned, APInt&)`：它是无符号重载，返回的位宽
-// 是「按字符串估出来的最小值」——"8" 给回 4 位的 `0b1000`，再 sext 到 i32 就成了 -8，
-// 而负号它根本不收。走那条路的话 `.Scalar("k", "8", DT_INT32)` 会静默变成 -8，
-// `.Scalar("k", "-1", DT_INT32)`（仓库里的现存写法）会被判成非法。
-// `Scalar` 与常量形态的 `IndexExpr` 共用：两者到这一步都只剩「一串十进制文本 + 一个
-// dtype」，解析规则与诊断没有任何差别，`what` 只用来说清是哪一类节点。
+// 将 Scalar 或常量 IndexExpr 的十进制文本解析为指定 dtype 的 SSA 常量。
+// legacy 直接将文本拼入 C++，这里必须在构建 IR 时拒绝无效文本和目标类型无法表示的值，
+// 不能截断或溢出为 Inf。what 只用于区分诊断中的节点类型。
+// 不能直接依赖 getAsInteger(unsigned, APInt&) 的最小位宽：它将 "8" 解析为四位 0b1000，
+// 符号扩展到 i32 会成为 -8，并且不接受负号。解析须保留数值和符号，支持现有的 -1 写法。
 Value buildTypedConstant(OpBuilder &builder, Location loc, const NodeInfo &node, StringRef what, StringRef valueText) {
   Type elementType = parseDtypeImpl(builder.getContext(), node.output.tensor.dtype);
   if (!elementType) {
@@ -1122,7 +1079,7 @@ Value buildTypedConstant(OpBuilder &builder, Location loc, const NodeInfo &node,
     if (digits.ends_with("f") || digits.ends_with("F")) {
       digits = digits.drop_back();
     }
-    // 直接按**目标**语义解析，不经过 double：先转 double 再转 f16 是两次舍入，边界值
+    // 直接按目标语义解析，不经过 double：先转 double 再转 f16 是两次舍入，边界值
     // 与一次到位的结果不同。
     llvm::APFloat value(floatType.getFloatSemantics());
     llvm::Expected<llvm::APFloat::opStatus> status =
@@ -1174,8 +1131,8 @@ Value buildTypedConstant(OpBuilder &builder, Location loc, const NodeInfo &node,
 
 // `IndexExpr` 的值。两条路，由表达式里有没有自由符号决定：
 //
-//   - **常量**（`"2"`）：直接建一个有类型的常量，与 `Scalar` 完全同路。
-//   - **带自由符号**（`"(2 * s0)"`）：符号逐个取成 `afir.tiling_param`、表达式本身成为
+//   - 常量（`"2"`）：直接建一个有类型的常量，与 `Scalar` 完全同路。
+//   - 带自由符号（`"(2 * s0)"`）：符号逐个取成 `afir.tiling_param`、表达式本身成为
 //     一个 `afir.symbolic_eval`，两者都落在入口块的尺寸序言里——那一段支配函数体里的
 //     任何消费者，且循环生成把它整体当序言看待、不进循环树。这正是 legacy 的落点：
 //     `AppendConstTensorInit` 跑在 `root_loop.Generate` 之前。
@@ -1309,18 +1266,18 @@ LogicalResult buildComputeNode(OpBuilder &builder, Location loc, const NodeInfo 
 // 二次融合：`afir.vector_func`
 //===----------------------------------------------------------------------===//
 //
-// 这个节点**不走注册表那条通用路径**（`buildBufferNodeOp` 的 `make(OP{})`）：它要建的是一个
+// 这个节点不走注册表那条通用路径（`buildBufferNodeOp` 的 `make(OP{})`）：它要建的是一个
 // 带 region 的算子，通用路径给它建出来的是一个没有 region 的空壳，而 `SingleBlockImplicit-
 // Terminator` 会在 verify 时才报出来——那时已经看不出是谁建错的。
 //
-// region 里是 **tensor 形态**（值语义，没有 destination）。这不是写法偏好：VF 的中间结果
+// region 里是 tensor 形态（值语义，没有 destination）。这不是写法偏好：VF 的中间结果
 // 在寄存器里，一块 UB 都没分配过，而 buffer 形态的每个中间结果都要一个 `outs` 指向的存储。
 // 两种形态在 bridge 这一层由 `TemplateBuildState::bufferForm` 分开，所以 region 内只要换一个
 // state 就能复用 `buildComputeNode` 的全部逻辑。
 LogicalResult buildVectorFuncRegion(OpBuilder &builder, Location loc, const NodeInfo &node, TemplateBuildState &state,
                                     afir::VectorFuncOp vectorFunc, ArrayRef<Value> srcs) {
   const VectorFuncBodyDTO &bodyDto = *node.vector_func_body;
-  // 块参数取 src 的形状与元素类型：region 在语义上就是在**整块 tile** 上的一段数据流，
+  // 块参数取 src 的形状与元素类型：region 在语义上就是在整块 tile 上的一段数据流，
   // lane 那一维是下降的事（`GetVecLen()` 是目标属性，AFIR 这层不认识它）。
   SmallVector<Type> argumentTypes;
   SmallVector<Location> argumentLocs;
@@ -1340,7 +1297,7 @@ LogicalResult buildVectorFuncRegion(OpBuilder &builder, Location loc, const Node
   Block *bodyBlock = builder.createBlock(&vectorFunc.getBody(), {}, argumentTypes, argumentLocs);
   builder.setInsertionPointToEnd(bodyBlock);
 
-  // region 自己的 valueMap：它与父图**不共享**（算子是 `IsolatedFromAbove`），边界名字
+  // region 自己的 valueMap：它与父图不共享（算子是 `IsolatedFromAbove`），边界名字
   // 是唯一的入口。
   llvm::StringMap<Value> bodyValueMap;
   for (auto [index, boundaryName] : llvm::enumerate(bodyDto.boundary_input_names)) {
@@ -1410,7 +1367,7 @@ LogicalResult buildVectorFuncNode(OpBuilder &builder, Location loc, const NodeIn
       return failure();
     }
     // 新建的 destination（`memref.alloc`）就是这块存储的定义点，规划结果写在它上面——
-    // 与 `buildBufferNodeOp` 同一条路。**不写的失败方式不在这个算子上**：下游
+    // 与 `buildBufferNodeOp` 同一条路。不写的失败方式不在这个算子上：下游
     // `afir.store` 的 verifier 会报「operand 0 的定义点没有 buffer_desc」，指不到这里。
     if (Operation *destinationDef = destination->getDefiningOp()) {
       FailureOr<afir::BufferDescAttr> descriptor = makeBufferDescAttr(ctx, output.buffer);
@@ -1434,14 +1391,14 @@ LogicalResult buildVectorFuncNode(OpBuilder &builder, Location loc, const NodeIn
                                                        ArrayAttr{}, ArrayAttr{});
 
   // 使用点的 descriptor 与调度属性，与普通 buffer 形态节点走同一条路
-  // （`appendBufferNodeAttrs`）。**这不是装饰**：流水同步那一步按「有没有 destination
+  // （`appendBufferNodeAttrs`）。这不是装饰：流水同步那一步按「有没有 destination
   // descs」认一个算子是不是 buffer 形态的（`AFIRPipelineSync.cpp` 的
   // `isBufferizedOperation`），认不出来就不会给这一段插 enque / deque——产物在 CPU
   // 模拟器上照样算对，到真机上才是偶发错数据。
   {
     SmallVector<NamedAttribute> attrs;
     // 调度属性那一份按第一个输出取（同一个 VF 的各输出共用一套调度），而 descriptor 要
-    // **逐输出各一份**，所以 destination 列表显式传 `node.outputs`。
+    // 逐输出各一份，所以 destination 列表显式传 `node.outputs`。
     NodeBuildContext attrCtx{builder, loc, node, srcs, node.outputs.front(), Value()};
     if (failed(appendBufferNodeAttrs(attrCtx, attrs, node.outputs))) {
       return failure();
@@ -1697,7 +1654,7 @@ LogicalResult appendTemplateValueDescriptors(func::FuncOp func, OpBuilder &build
   }
   // 标量形参那一格换成退化视图——无轴、无 repeats、无 strides，只留角色。AscGraph 上
   // `ScalarData` 的输出确实带着一串全 1 的 repeats，但那是「它在哪个循环里被引用」的
-  // 说法，不是这个**值**的形状；照抄过来就成了一句没人读、又像真的的假话。形状留空
+  // 说法，不是这个值的形状；照抄过来就成了一句没人读、又像真话的假话。形状留空
   // 与 `recordTmpBuffers` 给 tmp buffer 合成退化视图是同一笔。
   SmallVector<Attribute> argDescAttrs(argDescs->begin(), argDescs->end());
   for (auto [index, byValue] : llvm::enumerate(argByValue)) {

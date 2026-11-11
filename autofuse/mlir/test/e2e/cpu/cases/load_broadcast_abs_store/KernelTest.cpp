@@ -42,7 +42,7 @@ TEST(MlirE2eCpu, LoadBroadcastAbsCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 正负都有：`Abs` 要是没被发出来，只有负数那一半分得开。
+  // 输入同时包含正负值；负数用于发现未生成 Abs 的情况。
   for (uint32_t index = 0; index < inputCount; ++index) {
     input0[index] = static_cast<float>(index) * 0.25F - 3.0F;
   }

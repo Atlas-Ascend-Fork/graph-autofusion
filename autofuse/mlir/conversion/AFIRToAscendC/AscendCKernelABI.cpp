@@ -31,9 +31,9 @@ using namespace mlir::afir;
 
 // 参数身份的唯一读点。
 //
-// 此前这里做三件事：查一对**互斥**的整数 arg attr（`afir.input_index` /
+// 此前这里做三件事：查一对互斥的整数 arg attr（`afir.input_index` /
 // `afir.output_index`，两个都挂是合法 IR，只能在这里事后发现）、校验它们的位宽与
-// 非负性、再在两个都没有时按**类型相等**认 workspace。现在这三件事分别落在
+// 非负性、再在两个都没有时按类型相等认 workspace。现在这三件事分别落在
 // `#afir.kernel_arg` 的类型、它的 verifier、和参数自己的声明上，本函数只做翻译。
 FailureOr<mlir::ascend::kernel::KernelArgumentIdentity> mlir::ascend::kernel::getKernelArgumentIdentity(
     func::FuncOp function, unsigned index, StringRef diagnosticPrefix) {
@@ -64,7 +64,7 @@ FailureOr<mlir::ascend::kernel::KernelArgumentIdentity> mlir::ascend::kernel::ge
 
 std::string mlir::ascend::kernel::getKernelArgumentKey(const KernelArgumentIdentity &identity) {
   switch (identity.kind) {
-    // 按值标量与 GM 张量共用一个序号空间，所以同一个 `index` 上出现两者是**冲突**，
+    // 按值标量与 GM 张量共用一个序号空间，所以同一个 `index` 上出现两者是冲突，
     // 而不是两个各自合法的参数。同键就是这条事实的唯一编码点：去重表会当场报
     // `duplicate argument identity input:<N>`。
     case KernelArgumentKind::ScalarInput:
@@ -85,10 +85,9 @@ std::string mlir::ascend::kernel::getKernelArgumentKey(const KernelArgumentIdent
 // Builds the permutation that changes discovered argument order to the canonical
 // input, output, workspace order. Each result entry stores the old index.
 namespace {
-// 排序上的秩。`ScalarInput` 折成 `Input`：两者共用一个 index 序号空间，先后完全由 index
-// 决定。**分秩会把所有标量整体排到指针形参之后**，与 legacy 按 `input_nodes` 位置交错排
-// 的顺序对不上——而图里只有一个标量、且它的 index 恰好最靠后时，分秩与同秩给出的顺序
-// 一模一样，所以这条只有「标量夹在两个 Data 中间」的形状才测得出来。
+// ScalarInput 与 Input 共用 index 空间，按 index 交错排序，与 legacy input_nodes 一致。
+// 若分别排序，标量会整体排到指针参数后面。只有单个末尾标量的用例无法区分这两种顺序，
+// 还需要覆盖标量位于两个 Data 节点之间的情况。
 int kernelArgumentRank(mlir::ascend::kernel::KernelArgumentKind kind) {
   using mlir::ascend::kernel::KernelArgumentKind;
   return static_cast<int>(kind == KernelArgumentKind::ScalarInput ? KernelArgumentKind::Input : kind);
@@ -191,18 +190,11 @@ Type mlir::ascend::kernel::getAscendCTilingDataType(func::FuncOp func) {
                                                  ArrayAttr::get(context, fieldNames));
 }
 
-// 绑定的是 `afir.tiling_param`，不是 `emitasc.member`。
-//
-// 此前这里当场建一个 `emitasc.member` —— 一个**后端**算子，而本函数服务的是循环生成，
-// 那还是 AFIR 阶段。于是 `--afir-loop-generate` 之后的函数体里就躺着一个 emitasc 算子，
-// 判据 C3（函数体里只出现 AFIR 与它复用的标准方言）当场不成立。现在取值这件事由 AFIR
-// 自己的 `afir.tiling_param` 表达，`emitasc.member` 只在 lowering 里出现一次。
-//
-// 保留的是**校验**：字段在不在 TilingData 的 schema 里、类型是不是整数，这两条属于
-// ABI，而本文件就是 ABI 的所在地。挪走的只是「建后端算子」这一个动作。
-//
-// `builder` 因此不再被用到：`afir.tiling_param` 的位置由 `getOrCreateTilingParam` 统一
-// 定在入口块顶部（见 SymbolicBuilder.h 里为什么必须是那里），调用点的插入点无从参与。
+// 循环生成仍处于 AFIR 阶段，用 afir.tiling_param 表达字段读取，后端 emitasc.member
+// 留到 lowering 时生成，以满足 C3 对函数体方言的约束。
+// 此处保留 ABI 校验：字段必须存在于 TilingData schema 中，且类型必须为整数。
+// getOrCreateTilingParam 将算子统一放在入口块顶部（见 SymbolicBuilder.h），
+// 不使用调用方 builder 的插入点。
 FailureOr<mlir::afir::SymbolBindingMap> mlir::ascend::kernel::materializeAscendCTilingDataBindings(
     OpBuilder &, func::FuncOp func, ArrayRef<ExprAttr> sizeVariables) {
   FailureOr<Value> tiling = getCanonicalTilingArgument(func);
@@ -210,7 +202,7 @@ FailureOr<mlir::afir::SymbolBindingMap> mlir::ascend::kernel::materializeAscendC
     return failure();
   }
   // 「哪个参数是 tiling」由 `#afir.kernel_arg<role = tiling>` 回答（getCanonicalTilingArgument），
-  // 这里只要它的类型确实是个 tiling schema 结构体。**不看结构体叫什么名字**：`GenTilingData`
+  // 这里只要它的类型确实是个 tiling schema 结构体。不看结构体叫什么名字：`GenTilingData`
   // 会把它改名成 `<module>TilingData`，靠名字认就等于给整条流水线加一条隐式排序约束，而
   // 违反它的失败形态是「找不到 tiling 参数」，不是「顺序错了」。
   TilingSchema type = getTilingSchema(tiling->getType());
@@ -245,13 +237,9 @@ FailureOr<mlir::afir::SymbolBindingMap> mlir::ascend::kernel::materializeAscendC
   return bindings;
 }
 
-// AscendC kernel ABI 的 TilingData 实参。
-//
-// 此前这里靠**位置 + 形状**反推：倒数第二个参数类型恰好等于 `getAscendCWorkspaceType`
-// 就算 workspace，倒数第一个参数是名字叫 "TilingData" 的结构体就算 tiling。两条规则
-// 都不在任何对外文档里，而且一个碰巧同型的普通 GM 参数排在倒数第二位就会被当成
-// workspace。现在身份由参数自己声明（`#afir.kernel_arg`），位置与类型降级为**对声明的
-// 校验**：顺序仍是 AscendC 生成的 C++ 签名要求的，但它是被检查的约定，不是推断依据。
+// 从 #afir.kernel_arg 的身份声明查找 TilingData 参数。
+// 不能仅按倒数位置、workspace 类型或 TilingData 结构体名称推断，否则普通同型 GM 参数
+// 可能被误认。位置和类型仍按 AscendC ABI 校验，但不再作为身份来源。
 FailureOr<Value> mlir::ascend::kernel::getCanonicalTilingArgument(func::FuncOp func) {
   if (func.isExternal() || func.front().getNumArguments() != func.getNumArguments()) {
     func.emitError("canonical AscendC kernel ABI requires a function body with matching arguments");
@@ -266,7 +254,7 @@ FailureOr<Value> mlir::ascend::kernel::getCanonicalTilingArgument(func::FuncOp f
     func.emitError("canonical AscendC kernel ABI requires workspace and TilingData arguments");
     return failure();
   }
-  // 位置约定：`..., workspace, workspace_offset*, tiling`。workspace 与 tiling 之间**只**允许
+  // 位置约定：`..., workspace, workspace_offset*, tiling`。workspace 与 tiling 之间只允许
   // workspace 偏移参数（可以没有），与 legacy 的
   // `(..., GM_ADDR workspace, uint64_t workspace<ID>..., const T *t)` 同形。
   bool tailIsCanonical = *tilingIndex + 1 == func.getNumArguments() && *workspaceIndex < *tilingIndex;
@@ -342,10 +330,9 @@ LogicalResult verifyCanonicalMemrefArgument(func::FuncOp func, unsigned index, T
       return func.emitError("canonical kernel argument ") << index << " has a conflicting memory space";
     }
   }
-  // kernel 参数是主机侧交进来的 GM 张量，AscendC ABI 按连续 ND 解释它们。步 6 让
-  // `memref` 能表达 NZ / fractal 之后，这条闸门保证这些片上布局不会无声地漏到 kernel
-  // 边界上——那里没有对应的 ABI 约定，错了也不会报错，只会算错。Cube 路线打通 GM 侧
-  // NZ 输入时，这里要随之放开并补上边界上的布局约定。
+  // 主机传入的 GM 张量按 AscendC ABI 的连续 ND 布局解释。
+  // memref 可表达 NZ / fractal 片上布局，但当前 kernel 边界没有对应约定，必须拒绝。
+  // 将来支持 GM 侧 NZ 输入时，需要同时更新 ABI 布局约定和此处校验。
   if (!memref.getLayout().isIdentity()) {
     return func.emitError("canonical kernel argument ")
            << index << " must have an identity layout at the AscendC ABI boundary, got " << memref.getLayout();
@@ -365,9 +352,8 @@ LogicalResult mlir::ascend::kernel::verifyCanonicalKernelArguments(func::FuncOp 
     Attribute declaredBuffer = func.getArgAttr(index, kBufferDescAttrName);
     auto buffer = dyn_cast_or_null<BufferDescAttr>(declaredBuffer);
     auto memref = dyn_cast<MemRefType>(func.getArgumentTypes()[index]);
-    // 角色与类型是一条**双向**不变量：`scalar_input` 的参数不能是 shaped 类型，其余数据
-    // 角色的参数必须是 memref。只判一个方向不够——只放行不回拦的话，一个本该是 GM 张量
-    // 的参数被写成标量类型时会被静默收下，而没有任何用例会红。
+    // 同时校验角色和类型：scalar_input 不能是 shaped 类型，其余数据参数必须是 memref。
+    // 只校验 scalar_input 会遗漏误写为标量类型的 GM 张量参数。
     const bool declaresScalar =
         getKernelArgAttr(func, index) && getKernelArgAttr(func, index).getRole() == KernelArgRole::ScalarInput;
     if (declaresScalar) {
@@ -385,7 +371,7 @@ LogicalResult mlir::ascend::kernel::verifyCanonicalKernelArguments(func::FuncOp 
 
 static LogicalResult verifyMaterializedDataArguments(func::FuncOp func, unsigned dataArgumentCount) {
   for (auto [index, type] : llvm::enumerate(func.getArgumentTypes().take_front(dataArgumentCount))) {
-    // 按值标量形参（`ScalarData`）不是 GM 存储。放行按**角色**判而不是按类型判：否则
+    // 按值标量形参（`ScalarData`）不是 GM 存储。放行按角色判而不是按类型判：否则
     // 一个漏标了角色、类型又碰巧不是 memref 的参数会被当成标量收下。
     afir::KernelArgAttr argument = afir::getKernelArgAttr(func, index);
     if (argument && argument.getRole() == afir::KernelArgRole::ScalarInput) {
@@ -393,7 +379,7 @@ static LogicalResult verifyMaterializedDataArguments(func::FuncOp func, unsigned
     }
     // 收 `BaseMemRefType` 而不是 `MemRefType`：判据是「必须是 GM 存储」，秩不在其中。
     // template 保留 ranked 视图，Plan 与聚合入口使用 unranked ABI 类型；两者都表示合法的
-    // GM 实参，发射出来仍是 `__gm__ float*`。
+    // GM 实参，生成的仍是 `__gm__ float*`。
     auto memref = dyn_cast<BaseMemRefType>(type);
     if (!memref ||
         memref.getMemorySpace() != mlir::ascend::kernel::getAscendCGlobalMemorySpaceAttr(func.getContext())) {
@@ -421,10 +407,8 @@ FailureOr<bool> mlir::ascend::kernel::checkAscendCKernelABI(func::FuncOp func, F
     func.emitError("partially materialized AscendC kernel attributes");
     return failure();
   }
-  // ABI 物化前有几个参数，此前在 `afir.num_inputs` 与 `ascendc.num_inputs` 里各存一份，
-  // 这里把两份比对一遍（D2：同一事实的第二份编码，连校验都要多写一道）。AFIR 侧那份
-  // 已经删掉——它记的是后端 ABI 的形参个数，本来就该由后端属性单独持有；AFIR 侧要知道
-  // 「谁是什么」，问 `#afir.kernel_arg` 即可，不需要计数。
+  // 物化前的 ABI 参数个数只记录在 ascendc.num_inputs 中，不在 AFIR 侧重复计数（D2）。
+  // AFIR 参数身份由 #afir.kernel_arg 描述。
   int64_t backendInputCount = backendInputCountAttr->getInt();
   if (!backendInputCountAttr->getType().isSignlessInteger(32) || backendInputCount < 0 ||
       static_cast<uint64_t>(backendInputCount) + 2 > func.getNumArguments() || func.getNumResults() != 0) {

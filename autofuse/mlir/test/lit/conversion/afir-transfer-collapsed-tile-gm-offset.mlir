@@ -6,24 +6,24 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **向量化轴被剔空、但地址在非向量化轴上前进：偏移要逐轴算出来。**
+// 向量化轴被剔空、但地址在非向量化轴上前进：偏移要逐轴算出来。
 //
-// 这一份是**真实 dump**：`[1024,1] → [1024,128]` 广播图的 `B0Y1` 模板（广播轴 `z1` 切出
+// 这一份是真实 dump：`[1024,1] → [1024,128]` 广播图的 `B0Y1` 模板（广播轴 `z1` 切出
 // `z1T`/`z1t`，`z1T` 与 `z0` 合成 `z0z1T` 再分核，所以循环走的是合轴之后那根，广播轴排在
 // tile 外）。descriptor 一个字没改，只把 template 序号与 tiling_key 归 0。
 //
 // 看 Load 的两个 descriptor：局部侧 `vectorized_axis = [3]`，该轴 `repeats = 1` /
 // `vectorized_strides = 0` → `collapseVectorizedAxes` 按 extent 1 剔掉，一段都不剩；
-// 而 `z0`（**非**向量化轴）上 `strides = 1`，循环每一趟该读下一个元素。
+// 而 `z0`（非向量化轴）上 `strides = 1`，循环每一趟该读下一个元素。
 //
 // 此前 `materializeScheduledTileIndices` 在「一段都不剩」这一档无条件返回偏移 0，理由写的是
-// 「这块 tile 就是一个元素，地址也不随 tile 前进」。**两句都不成立**：局部 tile 是 `1024x1x1`
-// （1024 个元素，只是只有一根轴参与向量化），地址在非向量化的循环轴上照样走。生成出来的
-// kernel 每趟都读 GM 第 0 个元素，编得过、跑得完、**输出每一行都等于 `input0[0]`**
+// 「这块 tile 就是一个元素，地址也不随 tile 前进」。两句都不成立：局部 tile 是 `1024x1x1`
+// （1024 个元素，只是只有一根轴参与向量化），地址在非向量化的循环轴上照样走。生成的
+// kernel 每趟都读 GM 第 0 个元素，编得过、跑得完、输出每一行都等于 `input0[0]`
 // （CPU 模拟器实测，见 `test/e2e/cpu/cases/load_broadcast_segmented_store`）。
 //
 // 现在偏移按 `Σ 坐标(a) × strides[a]` 算（`materializeTensorOffset`），坐标由
-// `materializeAxisIndexFromLinear` 从线性序号按轴树拆出来。本份钉的就是那条拆解：
+// `materializeAxisIndexFromLinear` 从线性序号按轴树拆出来。本份钉的就是那条分解：
 // Load 的偏移必须是 `(线性序号 / size(z1T)) % 1024 × 1`，不是常量 0。
 
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s | FileCheck %s

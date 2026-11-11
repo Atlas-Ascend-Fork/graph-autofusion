@@ -42,13 +42,10 @@ FailureOr<ascend::MemorySpace> toTargetMemorySpace(afir::Space space) {
 }
 
 FailureOr<ascend::MemorySpace> getValueMemorySpace(Value value) {
-  // 先读类型、再回落 descriptor，与 `CanonicalBindings.cpp` 的 `resolveValueSpace` 同一条
-  // 判据。两份此前不一样：这里只读 descriptor，于是同一个值在两处可能得到不同的空间——
-  // 类型上写着 `#afir.space<ub>`、descriptor 却没标或标了别的时，规划侧按类型归组、取用侧
-  // 按 descriptor 发形态，两边对不上而没人报错。
-  //
-  // `memref` 的空间由类型自带，是最权威的一手事实；AscendC 的 local/global tensor 类型
-  // 不带空间属性，`getMemorySpace` 返回空，这时才问 descriptor。
+  // 先读取类型的地址空间，缺失时再查询 descriptor，与 CanonicalBindings 的
+  // resolveValueSpace 一致，避免规划和下降对同一值使用不同空间。
+  // memref 自带空间属性，应优先使用；AscendC local/global tensor 不携带该属性，
+  // getMemorySpace 返回空时才使用 descriptor。
   if (!value) {
     return failure();
   }

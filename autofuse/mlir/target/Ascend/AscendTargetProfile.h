@@ -73,13 +73,10 @@ enum class TargetFeature {
   BF16,
   InfNan,
   NDDMA,
-  // 这个平台的 Autofuse 扩展 API 由哪张供给表提供：reg-base 的 `xxx_reg_base.h`
-  // （Available），还是 mem-based 的 `xxx.h`（Unavailable）。
-  //
-  // 它不等于 `ExecutionSpec::instructionForm`：mem-based 指令两张表上都有，问的是
-  // 「哪张表」而不是「哪种指令」。也不等于「标准 API 可不可用」——两个方向都出现过，
-  // `afir.abs` 的标准调用在 reg-base 一侧，`afir.tanh` 的标准调用在 mem-based 一侧。
-  // 所以这里只描述家族，由各 implementation 自己说它属于哪一家。
+  // 选择 Autofuse 扩展 API 支持表：Available 对应 reg-base 的 xxx_reg_base.h，
+  // Unavailable 对应 mem-based 的 xxx.h，由各 implementation 声明所属家族。
+  // 这与 ExecutionSpec::instructionForm 和标准 API 是否可用是独立维度：两张表都可能使用
+  // mem-based 指令；abs 的标准调用在 reg-base 侧，tanh 的标准调用在 mem-based 侧。
   RegBasedApiFamily,
 };
 

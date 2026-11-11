@@ -24,11 +24,10 @@ include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
 
-# add_mlir_doc() 把生成的 .md 复制到 ${MLIR_BINARY_DIR}/docs/。MLIRConfig.cmake 不定义
-# MLIR_BINARY_DIR（它只在 LLVM 树内构建时存在），留空会让复制目标退化成绝对路径
-# /docs/... 而失败。MLIR_BINARY_DIR 在 AddMLIR.cmake 中仅被 add_mlir_doc 使用，
-# 因此在此指向本项目的 MLIR 构建目录是安全的，且让全部方言 doc target 产物落在
-# <build>/autofuse/mlir/docs/Dialects/ 下。
+# add_mlir_doc() 将文档复制到 ${MLIR_BINARY_DIR}/docs/，但安装的 MLIRConfig.cmake
+# 不定义 MLIR_BINARY_DIR；留空会误写到绝对路径 /docs/。
+# 此变量在 AddMLIR.cmake 中仅供文档复制使用，因此设为本项目 MLIR 构建目录，
+# 使生成文档位于 <build>/autofuse/mlir/docs/Dialects/。
 set(MLIR_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})

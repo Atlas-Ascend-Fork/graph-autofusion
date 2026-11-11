@@ -9,14 +9,14 @@
 // RUN: af-opt --verify-diagnostics --split-input-file --afir-select-implementation --target=Ascend910B1 %s
 // RUN: af-opt --verify-diagnostics --split-input-file --afir-select-implementation --target=Ascend950DT_950x %s
 
-// elementwise 三条路在**未调度**那条路（`TransferPlanKind::Identity`）上都只收秩为 1 的
+// elementwise 三条路在未调度那条路（`TransferPlanKind::Identity`）上都只收秩为 1 的
 // tile。走 `Scheduled` 时不查秩：元素个数由有效视图折算出的局部跨度说了算，多维 tile 上
 // LocalTensor 的秩跟着 UB buffer 的 memref 走，与它无关。
 //
-// **这份用例存在的理由有两条，都不是「补一条负例」那么轻**：
+// 这份用例存在的理由有两条，都不是「补一条负例」那么轻：
 //
 // 一、一元路径原先根本没有这条判据。同一份 `2x8xf16`，`afir.add` 当场报 unsupported，
-//     而 `afir.exp` 会被放行、按 `GetSize()` 发出整块的元素数——三条路对同一份 IR 给
+//     而 `afir.exp` 会被放行、按 `GetSize()` 生成整块的元素数——三条路对同一份 IR 给
 //     不同答案，而且松的那一条没有任何用例拦着。
 //
 // 二、`afir-to-ascendc-binary-l2-invalid.mlir` 里的 `unsupported_add_rank` **并没有真的
@@ -24,7 +24,7 @@
 //     判成 MissingInformation，报出来的错和秩无关；把二元的秩判据整条删掉，它照样绿。
 //     所以这里重做一份：descriptor 三件写全，让秩成为唯一能触发的那一条。
 //
-// 挑 op 的判据是「**只有秩这一条能触发**」：
+// 挑 op 的判据是「只有秩这一条能触发」：
 //
 //   - 一元用 `afir.exp`、二元用 `afir.add`——两者的家族都是 `Any`（两张表同一个
 //     `AscendC::` 调用）、都不要 tmp buffer、元素类型也收 f16，于是 `checkApiFamily` /

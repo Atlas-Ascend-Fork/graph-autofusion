@@ -91,7 +91,7 @@ Result<std::string> MultiplyExpressions(std::string_view lhs, std::string_view r
 // 两个规范表达式是否可证相等。
 //
 // 判据是 `ExpectEq(Simplify(lhs), Simplify(rhs))` 交给 `Prove`，只有答 `True` 才算相等。
-// **`Unknown` 与解析失败都返回 false**：调用方拿到的是「证不了」，不是「不等」。所有调用方
+// `Unknown` 与解析失败都返回 false：调用方拿到的是「证不了」，不是「不等」。所有调用方
 // 都必须能承受这个保守方向——合轴用它时，证不了就封段，后果是多一层循环而不是算错地址。
 //
 // 放在这里而不是各调用点各写一份：`bridge/AfirBuilder/AfirBuilder.cpp` 里

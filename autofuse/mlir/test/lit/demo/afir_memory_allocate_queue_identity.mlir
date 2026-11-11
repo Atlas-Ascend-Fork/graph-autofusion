@@ -8,10 +8,8 @@
 
 // 队列身份只由 descriptor 决定。
 //
-// `%tmp` 是 `afir.load` 的落点，但它的 descriptor 没有 `slot_count` / `queue_depth`，
-// 所以它是一块普通 UB buffer：走 TBuf，尺寸字段是 `b2_size`。判据曾经还有一条
-// 「被搬运族的 Op 读写就算队列」，那时同一段 IR 会得到 TQue 与 `q2_size`。
-//
+// tmp 的 descriptor 未声明 slot_count / queue_depth，因此是普通 UB buffer，
+// 即使由 Load 写入也使用 TBuf。队列身份不能由绑定 owner 的搬运方向推断。
 // 判据必须只看 descriptor，是因为它同时决定 `size_from_resource` 拼出来的字段名：
 // 建 TilingData 字段的是 `collectCanonicalResourceIds`（看函数全局），取符号的是
 // `isQueueBinding`（看绑定点），两边各带一套「谁在读写它」的启发就会各漂一份，漂了

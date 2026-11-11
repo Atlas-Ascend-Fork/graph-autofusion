@@ -10,11 +10,11 @@
 
 //===- Case.cpp - load -> pow(scalar, tile) -> store (reg-base) --*- C++ -*-===//
 //
-// reg-base 一侧的规则三（位置原样保留）：`y = 2.0 ^ x`，标量在**左**。与
+// reg-base 一侧的规则三（位置原样保留）：`y = 2.0 ^ x`，标量在左。与
 // `load_scalar_pow_store` 同一张图、同一份数值断言，差别只有 soc。
 //
-// 两侧用的是**同一个 AscendC def**（`AscendC_PowRegBaseOp` 与 `AscendC_PowOp` 各自那份
-// 都是同名重载），发出来的调用文本也逐字相同——**分得开它们的只有内联进来的那份头**。
+// 两侧用的是同一个 AscendC def（`AscendC_PowRegBaseOp` 与 `AscendC_PowOp` 各自那份
+// 都是同名重载），生成的调用文本也逐字相同——分得开它们的只有内联进来的那份头。
 // 而两份 `pow.h` 的 include guard 还撞名（都是 `__ASCENDC_API_POW_H__`），所以下面钉的
 // 是 reg 那份独有的 `pow_config` / `PowerAlgo`：`load_pow_store` 与
 // `load_scalar_pow_store` 反过来钉它不出现。
@@ -52,9 +52,9 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace cfg = load_scalar_pow_reg_base_store;
   EXPECT_NE(kernel.find(std::string(cfg::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // **字面量写全**：emitter 打的是定长科学计数。
+  // 字面量写全：emitter 打的是定长科学计数。
   EXPECT_NE(kernel.find("constexpr float c2_f32 = (float)2.000000000e+00;"), std::string::npos);
-  // **标量在第二个实参位**，也就是 AFIR 上的原次序。从最后一处 `Pow(` 起算：`pow_reg_base.h`
+  // 标量在第二个实参位，也就是 AFIR 上的原次序。从最后一处 `Pow(` 起算：`pow_reg_base.h`
   // 整段内联进 kernel，前面那些是各重载的定义，调用点排在它们之后（内部转发的是
   // `Power(`，不含 `Pow(`，数不进来）。
   const size_t call = kernel.rfind("Pow(");
@@ -63,7 +63,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   ASSERT_NE(firstComma, std::string::npos);
   EXPECT_EQ(kernel.compare(firstComma + 1, std::string(" c2_f32,").size(), " c2_f32,"), 0)
       << kernel.substr(call, kernel.find(';', call) - call);
-  // 内联进来的是 **reg** 那一份。两份头的 include guard 撞名，所以钉 reg 独有的那两个
+  // 内联进来的是 reg 那一份。两份头的 include guard 撞名，所以钉 reg 独有的那两个
   // 名字——`load_scalar_pow_store` 钉的是它们不出现。
   EXPECT_NE(kernel.find("__ASCENDC_API_POW_H__"), std::string::npos);
   EXPECT_NE(kernel.find("PowerAlgo::DOUBLE_FLOAT_TECH"), std::string::npos);

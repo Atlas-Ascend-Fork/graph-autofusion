@@ -20,8 +20,8 @@ class Pass;
 }  // namespace mlir
 
 namespace mlir::ascend::kernel {
-// The aggregate operation is intentionally an orchestration API because its input
-// consists of independent root modules rather than one bundle operation.
+// Uses an orchestration API because the inputs are independent root modules,
+// not a single bundle operation.
 FailureOr<OwningOpRef<ModuleOp>> runGenAggregateTilingData(ArrayRef<ModuleOp> planModules);
 }  // namespace mlir::ascend::kernel
 

@@ -29,7 +29,7 @@ using namespace mlir::ascendc;
 // shape arrays, and emitted the same way. `pattern` is a type, not a value:
 // `AscendC::Pattern::Reduce::{AR,RA}` are empty structs (reduce_common.h:34-35).
 //
-// `BaseReduce2DL2Op` 那一族（Sum / Max / Min / Prod / Any / All）的 C++ 形态逐字相同，只差
+// `BaseReduce2DL2Op` 那一类（Sum / Max / Min / Prod / Any / All）的 C++ 形态逐字相同，只差
 // 函数名，而函数名从 `getAPIName()` 取，所以这份实现按 op 类型模板化，六个 printOperation
 // 重载各自转发进来。
 namespace {

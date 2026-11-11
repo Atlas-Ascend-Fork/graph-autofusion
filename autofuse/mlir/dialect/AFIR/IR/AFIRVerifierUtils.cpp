@@ -43,13 +43,13 @@ FailureOr<Role> getDescriptorRole(Operation *op, StringRef descriptorName) {
   return *role;
 }
 
-// 迁移期的等价性闸门（设计文档 3.1 步 3）。
+// 迁移期的等价性门禁（设计文档 3.1 步 3）。
 //
 // 地址空间的目标载体是值的类型（memref memory space），`#afir.buffer_desc` 的 `space`
 // 字段是被替换的旧编码。二者并存期间必须逐点一致，否则就是 D2 描述的「同一事实两份
 // 拷贝」——消费端读哪一份取决于它恰好拿到的是值还是 descriptor，发散时不报错。
 //
-// **删除条件**：`BufferDescAttr` 的 `space` 字段随步 9（Schedule 迁移为 `transform.afir`）
+// 删除条件：`BufferDescAttr` 的 `space` 字段随步 9（Schedule 迁移为 `transform.afir`）
 // 一并删除——届时 tensor 形态不再携带调度结果，space 只存在于 buffer 形态的类型上，
 // 本函数连同两处并存的容忍一起消失。详见设计文档 5.1「步 3 实施结论」。
 //
@@ -75,16 +75,10 @@ LogicalResult verifyMemorySpaceAgreement(Operation *op, llvm::StringRef tensorNa
   return success();
 }
 
-// tensor descriptor 仍按使用点存放——同一个 GM 值在不同使用点可以有不同的轴解释，
-// 那是使用点的事实。buffer descriptor 不同：它是**值**的事实，现在只在定义点存一份，
-// 由 `getBufferDescAttr` 顺着 SSA 取（设计文档 5.1 步 8）。
-// `allowsScalars` 对 `afir.operand_descs` 与 `afir.arg_descs` 两处为真：标量只可能出现在
-// 输入里——op 的标量操作数（`afir.add %tile, %scalar`），以及主机按值传进来的标量 kernel
-// 参数（AscGraph 的 `ScalarData`）。**目的地与结果不能是标量**，那条兜底不该一并撤掉。
-//
-// 这一层按**类型**放行（非 `ShapedType`），与操作数那条完全同形。「这个参数的角色是不是
-// `scalar_input`」是 ABI 的事实，由 `verifyCanonicalKernelArguments` 判，它在那里把角色与
-// 类型绑成一条双向不变量；本函数只管描述子数组与值的下标对得上。
+// tensor descriptor 描述使用点的轴解释，同一 GM 值在不同使用点可以不同。
+// buffer descriptor 描述存储本身，仅保存在定义点，通过 getBufferDescAttr 沿 SSA 查询。
+// operand_descs 和 arg_descs 允许标量，分别对应 op 标量输入和 ScalarData 按值参数；
+// destination 和结果仍要求存储描述，不能同时放宽。
 LogicalResult verifyDescriptorList(Operation *op, llvm::StringRef tensorName, ValueRange values,
                                    bool allowsScalars = false) {
   if (values.empty()) {
@@ -164,24 +158,13 @@ FailureOr<Role> mlir::afir::getCanonicalTargetRole(Operation *op) {
   return destinationRole ? *destinationRole : *resultRole;
 }
 
-// `afir.arg_descs` 应当覆盖的参数个数 —— 即**数据参数**的个数。
-//
-// 此前这个数由一个独立的函数属性 `afir.num_inputs` 携带。它的名字不实（buffer 形态下
-// 它等于 inputs + outputs），真正的语义是「ABI 物化之前有几个参数」，而物化之后这件事
-// 已经写在 IR 里了：`workspace` / `tiling` 这两个角色就是物化追加出来的参数（设计文档
-// D2 / D5）。于是数据参数个数 = 参数总数 − 这两个角色的参数个数，不需要另存计数。
-//
-// **期望值必须独立于 `afir.arg_descs` 自己的长度**，否则消费端拿它去和同一个数组比长度
-// 就退化成恒真，「少写描述符」再也没有任何东西能发现。这正是本函数第一版的缺陷：它在
-// 物化后直接返回 `descriptors.size()`，于是给任意参数挂一个
-// `#afir.kernel_arg<role = workspace>` 就能关掉整条闸门。
-//
-// 三种形态下这条规则都成立，且都有牙齿：
-//   物化前            无 ABI 角色参数 → 全部参数都是数据参数；
-//   物化后 buffer 形态 [数据…, workspace, tiling]        → 总数 − 2；
-//   物化后 tensor 形态 [输入…, 追加的输出…, workspace, tiling] → 总数 − 2。
-//     后者要求 `AFIRKernelBodySignature` 在追加输出参数时把 `afir.result_descs` 并入
-//     `afir.arg_descs`，否则数组只覆盖输入，与本规则算出的期望值对不上。
+// 独立计算 arg_descs 应覆盖的数据参数个数，不能从描述符数组长度反推，
+// 否则长度校验恒为真，缺少描述符也无法发现。
+// 不再另存 afir.num_inputs：物化追加的参数已通过 workspace / tiling 角色声明身份
+// （设计文档 D2、D5）。物化前全部参数为数据参数；物化后排除 ABI 角色参数，
+// buffer 形态和 tensor 形态均可按同一规则计算。
+// tensor 输出追加为参数时，AFIRKernelBodySignature 必须将 result_descs 合并到
+// arg_descs，使其覆盖全部数据参数，而不只是原来的输入。
 FailureOr<unsigned> mlir::afir::getCanonicalDataArgumentCount(Operation *owner, unsigned argumentCount) {
   auto function = dyn_cast<FunctionOpInterface>(owner);
   if (!function) {

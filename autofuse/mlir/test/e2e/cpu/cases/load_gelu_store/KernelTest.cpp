@@ -42,8 +42,7 @@ TEST(MlirE2eCpu, LoadGeluStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 取值铺开到 ±4:GELU 在 0 附近弯曲最厉害，在两端分别贴近 0 和 x，一份只在中间对的
-  // 实现分不出来。
+  // 输入覆盖 [-4, 4]，同时检查 GELU 的近零弯曲区及两端接近 0、x 的区域。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input[index] = (static_cast<float>(index % 17U) - 8.0F) * 0.5F;
   }
@@ -75,12 +74,12 @@ TEST(MlirE2eCpu, LoadGeluStoreCalculatesCorrectResult) {
               reinterpret_cast<uint8_t *>(output), reinterpret_cast<uint8_t *>(workspace), tilingData);
 
   for (uint32_t index = 0; index < output_element_count; ++index) {
-    // 精确式 `0.5x(1 + erf(x/sqrt(2)))`。设备上那一份可能是 tanh 近似，两者在 |x| < 4
-    // 上差不到 1e-3，所以 1e-2 的容差既容得下近似，又容不下「算成了别的函数」。
+    // 参考值使用 0.5*x*(1+erf(x/sqrt(2)))。设备可能使用 tanh 近似，
+    // 在此输入范围内使用 1e-2 容差容纳近似差异。
     const float x = input[index];
     const float expected = 0.5F * x * (1.0F + std::erf(x / std::sqrt(2.0F)));
     EXPECT_NEAR(output[index], expected, 1e-2F) << "index=" << index;
-    // GELU 恒被夹在 0 与 x 之间（含端点）。写成 relu / identity / sigmoid 都会破这条。
+    // 另检查 GELU 结果位于 0 与 x 之间（含端点），补充参考值误差比较。
     EXPECT_LE(output[index] * (x >= 0.0F ? 1.0F : -1.0F), std::fabs(x) + 1e-4F) << "index=" << index;
   }
 

@@ -10,9 +10,9 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
-// 第 6 批接通的九个，**全部只有 reg 侧**（legacy 的 mem 侧 `ascir_builtin_ops_v1.cpp`
+// 第 6 批接通的九个，全部只有 reg 侧（legacy 的 mem 侧 `ascir_builtin_ops_v1.cpp`
 // 不注册它们），所以没有「两侧选对了没有」这回事——每个 op 只有一条 implementation。
-// 这一份钉的是三样：建出来的 AscendC op、发出去的调用形态、选中的 implementation id。
+// 这一份钉的是三样：建出来的 AscendC op、生成的调用形态、选中的 implementation id。
 //
 // 这批横跨四种调用形态，`IR` 那组的实参个数正是它们的分界：
 //
@@ -23,7 +23,7 @@
 //   - 二元无 tmp（`logical_xor`）：四个；
 //   - 二元带 tmp（`fmod` / `mod` / `next_after`）：五个。
 //
-// **`fmod` 与 `mod` 落到同一个 AscendC op**（legacy 两个调度节点的 apiName 都是
+// `fmod` 与 `mod` 落到同一个 AscendC op（legacy 两个调度节点的 apiName 都是
 // `FmodExtend`），所以那两格分得开的只有 `SELECT` 那条——`IR` 和 `CPP` 两边逐字一样。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
@@ -180,8 +180,8 @@ module {
 // IR: ascendc.next_after_extend_reg_base %arg2, %arg0, %arg1, %arg3
 // IR-NOT: afir.next_after
 
-// 包装住在全局命名空间，靠 `AddKernelIncludes` 发的那条 using 兜着不带限定的名字。
-// **一元发模板实参、二元不发**（`Erfinv<float>` vs `LogicalXorExtend`）——两个
+// 包装住在全局命名空间，靠 `AddKernelIncludes` 生成的那条 using 兜着不带限定的名字。
+// 一元生成模板实参、二元不生成（`Erfinv<float>` vs `LogicalXorExtend`）——两个
 // printer 各按各的来，与 `afir-remainder-extension-api.mlir` 里的写法一致。
 // CPP-LABEL: void erfinv_reg_base_f32(
 // CPP: {{^ *}}Erfinv<float>({{[^,]*}}, {{[^,]*}}, static_cast<uint32_t>(

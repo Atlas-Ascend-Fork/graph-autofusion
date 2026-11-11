@@ -22,31 +22,26 @@
 
 namespace mlir::ascend::kernel {
 
-// The order Autofuse AscendC API extension headers have to be emitted in.
+// Order Autofuse AscendC API extension headers for emission.
 //
-// 一个 op 可以声明多个扩展头，而且它们之间有先后：一个包装头可以调用另一个包装头里的函数
-// （`where.h` 调 `Duplicate`，而 `Duplicate` 只有 `duplicate.h` 定义），这些头是当作文本内联
-// 进来的、彼此不 include，所以谁在前谁在后完全由发出的 include 次序说了算。
+// 扩展头以文本内联，彼此不 include，但可能相互调用。例如 where.h 调用的 Duplicate
+// 定义在 duplicate.h 中，因此需要按依赖顺序生成。
 //
-// 这里收的是**约束**而不是名字集合：声明列表里每一对相邻项都是一条边（`headers[i]` 必须排在
-// `headers[i + 1]` 之前），`resolve` 对全体头做拓扑排，就绪集合里取字典序最小的出队。于是：
-//   * 跨 op 的约束有保证。这是先前按字典序发射保不住的那一格——`airy_ai` 把
-//     `trigonometric_function_utils` 放在列表首项，而 `bessel_j0` 要 `bessel_j_utils` 排在它
-//     前面；按首见次序发射（legacy 的做法）时谁在前取决于两个 op 哪个先被 walk 到，也就是
-//     取决于 plan，而按字典序发射则根本不看声明。
-//   * 输出确定。同层由字典序定序，所以同一个 module 每次排出来的次序一样，且与 op 在图里的
-//     次序无关。
-//   * 所有边都是正字典序时，输出**精确等于**字典序：剩余节点里字典序最小的那个不可能有来自
-//     剩余节点的入边（入边只能来自比它更小的点，而那些已经出队了）。2026-10-21 之前接通的那些
-//     op 的边全是正字典序，所以它们的 include 块一个字节都不变。
+// 每个 op 的声明列表中，相邻的 headers[i] 和 headers[i + 1] 构成一条顺序约束。
+// resolve 对所有头做拓扑排序，就绪节点按字典序选择：
+//   - 合并跨 op 的约束。airy_ai 将 trigonometric_function_utils 列为首项，bessel_j0
+//     则要求 bessel_j_utils 在它之前；按首次出现顺序会依赖 plan 的遍历顺序，
+//     单纯按字典序排序又会忽略声明的依赖。
+//   - 无依赖的头按名称排序，输出不受图中 op 次序影响。
+//   - 若所有边都沿字典序递增，输出与字典序完全一致：剩余的最小节点不可能还有入边。
+//     2026-10-21 前接入的 op 均满足此条件，原有 include 块保持不变。
 //
-// 排不出来只有一种情况：成环。环不是单个 op 的性质（一个 op 的列表除非有重名，否则永远不
-// 成环），而是跨 op 的，所以边要记下来源 op，诊断才报得到某个具体的 op 上。
+// 无法排序说明约束成环。单个无重名声明列表不会成环，但跨 op 合并后可能成环，
+// 因此每条边保留来源 op，用于报告诊断。
 class ApiExtensionOrder {
  public:
-  // Records the constraint that `headers` be emitted in the order given, as
-  // declared by `declaringOp`. Declaring the same header or the same pair from
-  // several operations is how the common case looks and is not a conflict.
+  // Records the header order declared by declaringOp. Different operations may
+  // declare the same header or ordering pair without conflict.
   void declare(mlir::Operation *declaringOp, llvm::ArrayRef<llvm::StringRef> headers);
 
   bool empty() const {
@@ -57,8 +52,8 @@ class ApiExtensionOrder {
     return nodes.count(header) != 0;
   }
 
-  // The emission order, or failure with a diagnostic already reported on one of
-  // the declaring operations when the declarations cannot all be honored.
+  // Returns the emission order. On conflicting constraints, reports a diagnostic
+  // on a declaring operation and returns failure.
   mlir::FailureOr<llvm::SmallVector<llvm::StringRef>> resolve() const;
 
  private:
@@ -66,7 +61,7 @@ class ApiExtensionOrder {
 
   mlir::LogicalResult reportCycle(const std::map<llvm::StringRef, size_t> &indegrees) const;
 
-  // 都用有序容器：遍历次序进了输出，所以它必须只由头名决定。
+  // 遍历次序影响输出，使用有序容器按头名确定次序。
   std::set<llvm::StringRef> nodes;
   std::map<llvm::StringRef, std::set<llvm::StringRef>> successors;
   std::map<llvm::StringRef, std::set<llvm::StringRef>> predecessors;

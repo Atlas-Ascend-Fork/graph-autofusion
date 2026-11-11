@@ -42,8 +42,7 @@ TEST(MlirE2eCpu, LoadSigmoidStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 取值铺开到 ±4：sigmoid 在 0 附近近似线性、两端饱和到 0 / 1，一份只在中间对的实现
-  // （比如原样输出、或者算成了 tanh）在两端就分得出来了。
+  // 输入覆盖 [-4, 4]，同时检查近零线性区和两端饱和区，避免仅在中部近似正确的实现通过。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input[index] = (static_cast<float>(index % 17U) - 8.0F) * 0.5F;
   }
@@ -76,8 +75,8 @@ TEST(MlirE2eCpu, LoadSigmoidStoreCalculatesCorrectResult) {
 
   for (uint32_t index = 0; index < output_element_count; ++index) {
     const float x = input[index];
-    // 设备上那一份是近似实现，与精确式在 |x| < 4 上差不到 1e-3。1e-2 的容差容得下近似，
-    // 容不下「算成了别的函数」。
+    // 设备实现为近似算法；使用 1e-2 容差容纳舍入和近似误差。
+    // 同时检查结果位于 (0, 1) 且单调递增，以发现误生成 identity / relu / tanh。
     const float expected = 1.0F / (1.0F + std::exp(-x));
     EXPECT_NEAR(output[index], expected, 1e-2F) << "index=" << index;
     // sigmoid 恒落在 (0, 1) 里，且单调递增——写成 identity / relu / tanh 都会破这两条。

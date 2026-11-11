@@ -6,7 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// **真实 dump 的两段 `afir.broadcast`：整条链路端到端落下来。**
+// 真实 dump 的两段 `afir.broadcast`：整条链路端到端落下来。
 //
 // 这个文件此前是反例（「多轴那一档必须报 unsupported」）。descriptor 一个字没改——改的是
 // 判据：`TransferPlan` 的单轴假设被 `collapseVectorizedAxes` 取代之后，这两根向量化轴
@@ -16,18 +16,18 @@
 // 目的地两段的 stride 是 8 与 1。两段不合并不是特判，是同一条 stride 连续性判据的结果：
 // 源这一侧 `0 == 1 * 8` 不成立。
 //
-// 这一份钉的是**三个算子在同一张图上各自读对了同一批 stride**：
+// 这一份钉的是三个算子在同一张图上各自读对了同一批 stride：
 //
-//   - **Load**：源在切分轴上 stride 为 0 → GM 偏移恒为 0（每趟读同一份 8 个元素），
-//     搬运长度是 8（丢掉广播段之后剩下那一段的 extent），**不是**切分轴的轴长；
-//   - **Broadcast**：发 `Broadcast(dst, src, 1, Z, 0, K, Z, 0, tmp)`，落 `BroadcastFirstDim`
+//   - Load：源在切分轴上 stride 为 0 → GM 偏移恒为 0（每趟读同一份 8 个元素），
+//     搬运长度是 8（丢掉广播段之后剩下那一段的 extent），不是切分轴的轴长；
+//   - Broadcast：生成 `Broadcast(dst, src, 1, Z, 0, K, Z, 0, tmp)`，落 `BroadcastFirstDim`
 //     （只有 `Copy`）。legacy 在同一个形状上走三轴形态，`Z > 8` 时落 `BroadcastMiddleDim`
-//     的 `Or`。**第三个实参恒为 `1`** 是那条不变量在编译期唯一钉得住的形式；
-//   - **Store**：目的地是两段合成的一段 → 每趟前进 `zt_size × 8`、搬 `尾块长度 × 8`，
-//     **不是**轴长。
+//     的 `Or`。第三个实参恒为 `1` 是那条不变量在编译期唯一钉得住的形式；
+//   - Store：目的地是两段合成的一段 → 每趟前进 `zt_size × 8`、搬 `尾块长度 × 8`，
+//     不是轴长。
 //
 // 三处此前都取不到：Load 与 Store 走的 `materializeScheduledTileIndices` 当时按
-// 「`vectorized_strides.front()` 是 0 还是 1」分流、按**轴长**算地址与元素数——Load 命中
+// 「`vectorized_strides.front()` 是 0 还是 1」分流、按轴长算地址与元素数——Load 命中
 // 0 那一档（那一档还要求 GM stride 全为 0，而这里的 GM 输入是连续 8 个 float），
 // Store 的 `front()` 是 8、既非 0 也非 1，两边都报失败。
 
@@ -134,8 +134,8 @@ module @plan0 attributes {
 // IR-NOT: scf.for
 // IR: %[[K:.*]] = arith.select {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 2, role = actual_size>}
 
-// Load：GM 偏移是常量 0（源不随 tile 前进），搬运长度是 8——**不是**切分轴的轴长，
-// 也**不是**广播轴上的 repeat（那是 1）。
+// Load：GM 偏移是常量 0（源不随 tile 前进），搬运长度是 8——不是切分轴的轴长，
+// 也不是广播轴上的 repeat（那是 1）。
 // IR: %[[SRC_OFF:.*]] = arith.constant 0 : index
 // IR: %[[SRC_LEN:.*]] = arith.constant 8 : index
 // IR: %[[SRC_GM:.*]] = ascendc.global_tensor.subindex %{{.*}}[%[[SRC_OFF]]]

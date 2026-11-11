@@ -8,16 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> gelu -> store CPU case ----------------*- C++ -*-===//
-//
-// `afir.gelu` 只有一个 implementation：两张供给表给的是同一个 `AscendC::Gelu`，也不引
-// 扩展头。所以这份用例不分两侧——reg 侧那半由 afir-gelu-stock-api.mlir 的第二组 RUN 钉。
-//
-// 它要钉的是另一件事：**这个「同一个调用」是要 tmp buffer 的**。exp / ln / relu / sqrt
-// 那一档也是两侧同调用，但都不要 tmp；照着它们把 gelu 注册成不要 tmp 的话，调度分的那块
-// 会被 `checkTmpBuffer` 判成多给，整个 op 选不出实现。下面那条 TBuf 断言就是这条的现场。
-//
-//===----------------------------------------------------------------------===//
+// 验证两类 API 支持表共用的 AscendC::Gelu 调用需要 tmp buffer，但不引入扩展头。
+// 不能沿用 Exp / Ln / Relu / Sqrt 的无 scratch 注册，否则调度分配的缓冲会使
+// checkTmpBuffer 拒绝该实现。TBuf 断言检查 scratch 已被实际接入。
+// 另一目标的同调用映射由 afir-gelu-stock-api.mlir 覆盖。
 
 #include <string>
 

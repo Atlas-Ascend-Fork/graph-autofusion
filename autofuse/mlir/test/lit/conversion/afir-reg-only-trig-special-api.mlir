@@ -10,11 +10,11 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
-// 第 7 批接通的三十个，与第 6 批同款：**全部只有 reg 侧**，所以每个 op 只有一条
+// 第 7 批接通的三十个，与第 6 批同款：全部只有 reg 侧，所以每个 op 只有一条
 // implementation，没有「两侧选对了没有」这回事。这一份钉的是三样：建出来的 AscendC op、
-// 发出去的调用形态、选中的 implementation id。
+// 生成的调用形态、选中的 implementation id。
 //
-// 这一批真正要钉的是**同名歧义**：`acos` / `ceil` / `cos` / `round` / `tan` 这些在
+// 这一批真正要钉的是同名歧义：`acos` / `ceil` / `cos` / `round` / `tan` 这些在
 // `Adv/Math.td` 里都有一个同名的标准调用 `AscendC::Acos` 等，而 legacy 的 reg 侧走的是
 // fork 的包装 `AcosExtend`。`IR` 那组里带 `_extend_reg_base` 后缀的就是包装那一支；
 // 只有 `digamma` / `erfc` / `trunc` 三个落在不带后缀的标准调用上（legacy 一个包装头都
@@ -523,8 +523,8 @@ module {
 // IR: ascendc.igammac_extend_reg_base %arg2, %arg0, %arg1, %arg3
 // IR-NOT: afir.igammac
 
-// 包装住在全局命名空间，靠 `AddKernelIncludes` 发的那条 using 兜着不带限定的名字。
-// **一元扩展调用发模板实参、二元不发**（`AcosExtend<float>` vs `CopySignExtend`）——两个
+// 包装住在全局命名空间，靠 `AddKernelIncludes` 生成的那条 using 兜着不带限定的名字。
+// 一元扩展调用生成模板实参、二元不生成（`AcosExtend<float>` vs `CopySignExtend`）——两个
 // printer 各按各的来，与 `afir-reg-only-math-api.mlir` 里的写法一致。
 // CPP-LABEL: void acos_f32(
 // CPP: {{^ *}}AcosExtend<float>({{[^,]*}}, {{[^,]*}}, {{[^,]*}}, static_cast<uint32_t>(

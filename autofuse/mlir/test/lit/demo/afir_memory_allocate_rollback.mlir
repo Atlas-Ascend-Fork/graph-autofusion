@@ -28,8 +28,7 @@ module {
 }
 
 // CHECK: UnsupportedOperation: canonical resource materialization currently requires a contiguous identity StorageView
-// 回滚要回滚干净：失败时不能留下半物化的资源。判据是 IR 里有没有 `ascendc` 算子——
-// 此前这里还有一行 `CHECK-NOT: afir.ascendc_materialized`，那个标记属性已随验收 8 删除，
-// 留着是一条恒真的死断言（CHECK-NOT 一个不存在的名字永远通过）。
+// 失败回滚后不得保留任何部分物化的 AscendC 算子。
+// 只检查结构产物；对已删除阶段标记的否定断言无法证明回滚正确。
 // CHECK-NOT: ascendc.pipe
 // CHECK-NOT: ascendc.queue

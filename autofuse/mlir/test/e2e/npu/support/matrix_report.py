@@ -21,9 +21,8 @@ from typing import Any, Callable, Dict, List, Sequence, Tuple
 from support import case_status
 from support.npu_runner import capture_fd_stderr
 
-# 判级与拒收族的定义已下沉到 `case_status`：统一入口 `run.py` 的解析端和 `npu_runner` 的
-# 单用例上报端都要用它，留在这里会和 `npu_runner` 形成循环导入。这里再导出，是为了让
-# 既有的 `from support.matrix_report import ...` 继续成立。
+# 判级与拒收族定义放在 case_status，避免与 npu_runner 循环导入，供解析端和执行端共用。
+# 此处保留再导出，兼容既有 from support.matrix_report import ... 调用。
 from support.case_status import REFUSAL_MARKERS, classify, refusal_tags  # noqa: F401
 
 
@@ -63,7 +62,7 @@ def run_matrix(
         label = f"{status}({tag})" if tag else status
         suffix = f" :: {reason}" if reason else ""
         print(f"{prefix}_RESULT {name} {label} shapes={shapes}{suffix}")
-        # 机读行，给 `run.py` 跨脚本对账用。人读那行一个字都没改。
+        # 机读行，给 `run.py` 跨脚本比对用。人读那行一个字都没改。
         print(
             case_status.emit_case(prefix, name, status, tag, shapes, reason, group),
             flush=True,

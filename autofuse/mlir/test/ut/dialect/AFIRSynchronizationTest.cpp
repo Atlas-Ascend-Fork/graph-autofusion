@@ -10,13 +10,13 @@
 
 // 同步原语的副作用声明（设计文档 3.6）。
 //
-// **为什么值得单独一个用例**：这三个 Op 的「不会被优化掉」此前是隐式的——没有
+// 为什么值得单独一个用例：这三个 Op 的「不会被优化掉」此前是隐式的——没有
 // MemoryEffect 接口即视为未知副作用，于是 DCE / CSE 都不动它们。那份安全依赖于
 // 「没人给它们加 `Pure`」，而 `afir.event_wait` 无结果、无可见产物，一旦被误加
 // `Pure` 就会被静默删掉，失败形态是偶发的错数据——LIT 看不出来，因为被删掉的 IR
 // 本身仍然合法。
 //
-// 现在三个 Op 都显式声明作用在 `PipelineResource` 上。本用例钉住这个声明的**效果**
+// 现在三个 Op 都显式声明作用在 `PipelineResource` 上。本用例钉住这个声明的效果
 // 而不是它的写法：MLIR 的优化按 `isMemoryEffectFree` / `wouldOpBeTriviallyDead` 决策，
 // 所以直接问这两个函数。
 
@@ -72,7 +72,7 @@ TEST_F(AFIRSynchronizationTest, SynchronizationPrimitivesAreNotOptimizableAway) 
   EXPECT_EQ(checked, 3U);
 }
 
-// 两条 `afir.event_record` 即使类型完全相同也是**两个不同的事件**，不能被 CSE 合并成
+// 两条 `afir.event_record` 即使类型完全相同也是两个不同的事件，不能被 CSE 合并成
 // 一条——合并之后第二个 wait 等的是第一个 record，跨的那段依赖就没被挡住。
 TEST_F(AFIRSynchronizationTest, IdenticalEventRecordsAreNotInterchangeable) {
   auto module = Parse(R"mlir(

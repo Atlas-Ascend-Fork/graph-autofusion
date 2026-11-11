@@ -13,11 +13,11 @@
 // harness 把 soc 钉在 Ascend910B1（cpu/CMakeLists.txt），走 V1 也就是 mem-based 一侧：
 // `LogicalNot(dst, src, blk_tensor_with_value_1, tmp_buf, size)`，扩展头 `logical_not.h`。
 //
-// **两侧在这个 op 上差的不止扩展头，还有结果 dtype**：这一侧两端同 dtype（f32 进 f32
+// 两侧在这个 op 上差的不止扩展头，还有结果 dtype：这一侧两端同 dtype（f32 进 f32
 // 出），reg 侧的包装叫 `LogicalNotExtend`、结果恒为 ui8。reg 侧在这里到不了，由
 // afir-logical-not-reg-base-extension-api.mlir 钉。
 //
-// 与 load_rsqrt_store 一起拦那块预先填好 1 的常量 block，但拦的是**另一半**：两个 op
+// 与 load_rsqrt_store 一起拦那块预先填好 1 的常量 block，但拦的是另一半：两个 op
 // 要的常量 dtype 不同（`RsqrtExtend` 收 `LocalTensor<float>`，`LogicalNot` 收
 // `LocalTensor<half>`），而这一块的 dtype 由包装的形参钉死、与正在算的 dtype 无关。
 // 按 dst / src 的 dtype 去造那一块，这条用例是 f32 进 f32 出，会造出 float 那一块，
@@ -56,7 +56,7 @@ af::AscGraph BuildGraph() {
 
 void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(std::string(load_logical_not_store::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // **裸名**，不带 `Extend` 后缀，也不带 `AscendC::` 限定——包装是全局函数，与
+  // 裸名，不带 `Extend` 后缀，也不带 `AscendC::` 限定——包装是全局函数，与
   // `AscendC::LogicalNot` 同名而不同实参个数。legacy 的 `GetApiName` 写的也是这个裸名。
   EXPECT_NE(kernel.find("LogicalNot<float>("), std::string::npos);
   // 内联进来的是 mem 侧那份头，不是 reg 侧那份（`logical_not_reg_base.h` 的 guard 是

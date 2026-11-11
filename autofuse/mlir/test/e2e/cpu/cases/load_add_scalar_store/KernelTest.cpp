@@ -34,7 +34,7 @@ TEST(MlirE2eCpu, LoadAddScalarStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 取值在 f32 里全部精确可表示，加上 2.5 之后也是，所以逐元素比相等。
+  // 输入及加上 2.5 后的结果均可被 f32 精确表示，使用逐元素相等比较。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = static_cast<float>(static_cast<int32_t>(index % 9U) - 4) * 0.5F;
   }

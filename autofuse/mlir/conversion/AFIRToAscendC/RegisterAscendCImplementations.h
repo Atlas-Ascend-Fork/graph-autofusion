@@ -20,10 +20,8 @@ class SelectionPolicyRegistry;
 
 namespace mlir::ascend::kernel {
 
-// `policies` is optional: pass nullptr to register implementations only, or a
-// live registry to also register each capability module's selection
-// policies. Adding a capability module means adding one entry to the
-// registrar list in the .cpp file, not editing this function.
+// Pass nullptr for policies to register implementations only, or supply a registry
+// to register selection policies too. New modules belong in the .cpp registrar list.
 LogicalResult registerAscendCImplementations(ascend::instruction::ImplementationRegistry &registry,
                                              ascend::instruction::SelectionPolicyRegistry *policies = nullptr);
 

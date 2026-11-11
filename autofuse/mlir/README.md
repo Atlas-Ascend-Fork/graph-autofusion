@@ -72,11 +72,15 @@ bash autofuse/mlir/scripts/enter_dev_container.sh -- bash scripts/test/run_autof
 默认下载编译 `LLVM/MLIR 21.1.8 版本` 并安装到 `/opt/llvm`。
 
 ```bash
-# 先指定 LLVM 源码存放路径，如果是CANN WebIDE开发环境，则建议：
+# 先指定 LLVM 源码存放路径，如果是 CANNLab 开发环境，则建议：
 LLVM_SOURCE_DIR=/mnt/workspace/gitCode/llvm-project
 # 否则个人环境自行定义：
 LLVM_SOURCE_DIR="${HOME}/llvm-project"
-# 检查安装必要的工具，克隆、编译代码，安装 LLVM 编译结果
+
+# LLVM 的安装路径，可自行修改
+AF_LLVM_INSTALL_PREFIX=/opt/llvm
+
+# 编译并安装 LLVM 到 AF_LLVM_INSTALL_PREFIX
 bash autofuse/mlir/scripts/build_llvm.sh "${LLVM_SOURCE_DIR}"
 ```
 
@@ -84,23 +88,26 @@ bash autofuse/mlir/scripts/build_llvm.sh "${LLVM_SOURCE_DIR}"
 
 ```bash
 chmod +x Ascend-cann-toolkit_<version>_linux-<arch>.run
-./Ascend-cann-toolkit_<version>_linux-<arch>.run --install --install-path=<install_path>
+
+# 使用默认的 ${HOME}/Ascend 路径（建议）
+./Ascend-cann-toolkit_<version>_linux-<arch>.run -q --install
+
+# 手动指定安装路径
+./Ascend-cann-toolkit_<version>_linux-<arch>.run -q --install --install-path=<install_path>
 ```
 
 ### Step3：编译和执行 Autofuse 测试用例（UT、ST、E2E CPU）
-> 若在 CANNLab 环境中进行编译，CANN 包通常会安装在 `${HOME}/Ascend` 路径下，
-> 即 `source ${HOME}/Ascend/ascend-toolkit/set_env.sh`，其他环境自行设置。
 
 ```bash
 export LLVM_BUILD_DIR=/opt/llvm
 export LLVM_DIR=/opt/llvm/lib/cmake/llvm
 export MLIR_DIR=/opt/llvm/lib/cmake/mlir
-source <install_path>/ascend-toolkit/set_env.sh
+source ${HOME}/Ascend/ascend-toolkit/set_env.sh
 
-# 构建 run 包（启用 MLIR 接入）
+# 构建 run 包（启用 MLIR）
 bash build.sh --pkg --enable-mlir -j 8
 
-# 跑全部 MLIR UT、ST、lit 和 CPU E2E
+# 跑 MLIR 的全量用例，包括 ut/st/lit/e2e_cpu
 bash scripts/test/run_autofuse_test.sh -m mlir -j 8
 
 # 只跑 MLIR UT 和 lit
@@ -113,15 +120,17 @@ bash scripts/test/run_autofuse_test.sh -s -m mlir -j 8
 ### Step4：执行 Autofuse E2E NPU 用例
 > 通常使用 CANNLab 提供的真实 NPU 环境
 
-1. 先初始化 TensorFlow 或 PyTorch/Inductor 环境
+1. 先安装 TensorFlow 或 PyTorch/Inductor 环境
 ```shell
-# 当前 E2E NPU 用例仅支持 Inductor，初始化命令如下：
+# 当前 E2E NPU 用例仅支持 Inductor，环境安装命令如下
+# 安装目录：/mnt/workspace/env/venv/torch210_daily/bin/activate
 bash scripts/env_install/pytorch/setup_torch_npu_daily.sh
 ```
 
 2. 执行用例
 ```shell
-python3 autofuse/mlir/test/e2e/npu/load_add_store.py
+source /mnt/workspace/env/venv/torch210_daily/bin/activate
+python autofuse/mlir/test/e2e/npu/load_add_store.py
 ```
 
 ## MLIR codegen 运行时配置

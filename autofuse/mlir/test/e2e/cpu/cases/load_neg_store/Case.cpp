@@ -8,16 +8,9 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> neg -> store CPU case -----------------*- C++ -*-===//
-//
-// `afir.neg` 是第一个「走 Autofuse 包装、却不要 tmp buffer」的 op。在它之前这两件事是
-// 同一件事——凡是走包装的都要一块 tmp buffer——所以这个用例钉的是那个耦合已经拆开：
-// 生成的 kernel 里既有 `NegExtend`，又一个 `TBuf` 都没有。
-//
-// CPU E2E 只按单个 soc 编译，所以这里只验 mem-based 那一侧；「同一份 AFIR 在另一张
-// 供给表上换成 `neg_reg_base.h`」是 afir-neg-api-family.mlir 的事。
-//
-//===----------------------------------------------------------------------===//
+// 验证 mem-based NegExtend 使用扩展头但不需要 tmp buffer。
+// 生成 kernel 应包含 NegExtend 且不含 TBuf，避免将扩展 API 与 scratch 需求绑定。
+// 另一支持表的头名选择由 afir-neg-api-family.mlir 覆盖。
 
 #include <gtest/gtest.h>
 

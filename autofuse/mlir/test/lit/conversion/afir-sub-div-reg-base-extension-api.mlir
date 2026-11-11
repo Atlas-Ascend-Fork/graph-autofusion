@@ -12,8 +12,8 @@
 
 // afir-sub-div-stock-api.mlir 的另一半。两侧的差别在这里看得最清楚：
 //
-//   - mem 侧发标准的 `AscendC::Sub`，却挂着一块用不上的 tmp buffer；
-//   - reg 侧发 fork 自己的包装 `SubExtend`（`sub_reg_base.h`），**一块 tmp 都没有**。
+//   - mem 侧生成标准的 `AscendC::Sub`，却挂着一块用不上的 tmp buffer；
+//   - reg 侧生成 fork 自己的包装 `SubExtend`（`sub_reg_base.h`），一块 tmp 都没有。
 //
 // 包装的函数体就是转发给同名的 `AscendC::Sub`，所以两侧生成的机器行为一样，分得开它们的
 // 是函数名带不带 `AscendC::` 限定、以及 IR 上建的是哪个 op。

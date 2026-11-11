@@ -29,18 +29,12 @@ using namespace mlir::afir;
 namespace mlir::ascend::kernel {
 namespace {
 
-// Makes the IR half of the aggregate stage available as an ordinary pass.
+// Aggregate independently lowered plan modules through an IR pass. Inputs are
+// ModuleOp children of the pass root; the aggregate replaces the root body,
+// matching af-opt's existing multi-module input convention.
 //
-// The stage takes N independently lowered plan modules and produces one entry
-// module; expressed as a pass, the plan modules are the direct ModuleOp
-// children of the pass root, and the root's body is replaced by the aggregate.
-// That is exactly how af-opt already parses a multi-module fixture, so no new
-// input convention is introduced.
-//
-// Only this half is a pass. The stage that follows -- translating the
-// aggregate to AscendC and emitting the tiling header and host launch wrapper
-// -- produces three text artifacts rather than IR, which is a translation, not
-// a pass; it stays behind runAggregateLaunchDriver.
+// AscendC translation, tiling-header emission and host-wrapper emission produce
+// text rather than IR, so they remain in runAggregateLaunchDriver.
 struct AFIRAggregatePass : public PassWrapper<AFIRAggregatePass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AFIRAggregatePass)
 
@@ -62,8 +56,7 @@ struct AFIRAggregatePass : public PassWrapper<AFIRAggregatePass, OperationPass<M
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    // 本 pass 是构造 `#afplan.candidate` 的那个（`attachPlanContracts`），不只是读它，
-    // 所以 afplan 必须进依赖声明。
+    // attachPlanContracts 构造 afplan.candidate，因此本 pass 必须声明 afplan 依赖。
     // memref：Plan 调用 template 时恢复 ranked 视图；聚合调用点也可能需要适配独立提供的
     // ranked Plan 声明。两层入口使用 ABI 类型，template 签名保持不变。
     registry.insert<afir::AFIRDialect, afplan::AFPlanDialect, ascendc::AscendCDialect, emitasc::EmitAscDialect,

@@ -19,24 +19,17 @@
 namespace mlir::afir {
 
 //===----------------------------------------------------------------------===//
-// 「能力不足」与「坏了」的区分
+// 区分能力不足与编译错误
 //===----------------------------------------------------------------------===//
 //
-// 这条路上的失败有两种，调用方（`RunMlirCodegen`）要用它们做完全不同的事：
+// RunMlirCodegen 根据失败类型决定是否回落 legacy：
+//   能力不足：MLIR 尚未支持节点类型、形状或目标 profile，允许尝试 legacy 并继续编译。
+//   编译错误：不变量被破坏、descriptor 矛盾或 pass 间语义不一致，必须报告失败。
 //
-//   **能力不足**：这张图 MLIR 这一侧还收不了——某个节点类型没建模、某个形状的判据不满足、
-//   某颗芯片没有 profile。legacy 收得了，所以应当回落给它，整条编译继续。
-//
-//   **坏了**：不变量被破坏、descriptor 自相矛盾、pass 之间语义漂移。回落会把它藏起来，
-//   所以必须大声失败。
-//
-// **缺省是「坏了」。** 没有被显式标记的失败一律按坏了处置——漏标的后果是多报一次失败
-// （吵，但看得见），反过来漏判的后果是一个真 bug 被静默回落、再也没人发现。
-//
-// 判据**不是**诊断文本的前缀。`UnsupportedOperation` 那个前缀今天两种都在用
-// （「节点类型没注册」是能力不足，「Scalar 节点没有 value」是输入坏了），按它分类就是
-// 拿一个不可靠的标签当判据，而且那等于把分类信息编码进要给人读的那句话里，再解析回来。
-// 这里走 `Diagnostic` 的 metadata：产生方和消费方共用下面这一个常量，拼不错、不用解析。
+// 未显式标记的失败按编译错误处理，避免把实现缺陷隐藏在回落路径中。
+// 诊断文本的 UnsupportedOperation 前缀不能用于分类：节点类型未注册属于能力不足，
+// Scalar 节点缺少 value 则是输入错误，两者都可能使用该前缀。
+// 分类标记放在 Diagnostic metadata 中，产生方和消费方共用下面的常量，不解析诊断文本。
 //
 // 用法：
 //
@@ -44,15 +37,12 @@ namespace mlir::afir {
 //   调用方           `CapabilityShortfallObserver observer(context);`
 //                    失败时 `observer.sawShortfall() ? kNotSupported : kFailed`
 
-// `Diagnostic::getMetadata()` 里标记这一条的整数。取值本身没有含义，只要全仓唯一——
-// 这个仓库里没有别的 metadata 使用者（grep `getMetadata` 零命中）。
+// Diagnostic metadata 中的能力不足标记。取值无业务含义，须避免与其他 metadata 标记冲突。
 inline constexpr int64_t kCapabilityShortfallMetadata = 0x4146'0001;
 
-// 发一条「能力不足」的错误诊断。文本由调用点续写，与普通 `emitError` 完全一样，所以
-// 既有的 LIT 断言不受影响——标记只走 metadata，不进文本。
+// 给诊断添加能力不足标记，文本仍由调用点续写。标记不进入文本，不影响既有 LIT 断言。
 inline InFlightDiagnostic markCapabilityShortfall(InFlightDiagnostic diagnostic) {
-  // 诊断引擎没有接收方时 `InFlightDiagnostic` 是空的（`getUnderlyingDiagnostic()` 返回
-  // nullptr）。那时标记无处可放，也无人会读。
+  // 没有诊断接收方时 getUnderlyingDiagnostic() 返回 nullptr，无需添加标记。
   if (Diagnostic *underlying = diagnostic.getUnderlyingDiagnostic()) {
     underlying->getMetadata().push_back(DiagnosticArgument(kCapabilityShortfallMetadata));
   }
@@ -67,13 +57,10 @@ inline InFlightDiagnostic emitCapabilityShortfall(Location loc) {
   return markCapabilityShortfall(emitError(loc));
 }
 
-// 本作用域内有没有发生过「能力不足」。
-//
-// **不吞诊断**：handler 返回 `failure()` 表示「没处理」，诊断继续传给下一个 handler，
-// 该打印的照常打印。这个观察者只是在旁边记一个标志。
-//
-// 标志是 atomic：MLIRContext 默认开多线程，pass 可能在工作线程上发诊断（只有在
-// 开 dump 时才 `disableMultithreading`），而 MLIR 不保证 handler 串行调用。
+// 记录作用域内是否出现能力不足诊断，不拦截诊断传播。
+// handler 返回 failure()，诊断仍交给后续 handler 处理和输出。
+// MLIRContext 默认启用多线程（dump 时才禁用），pass 可在工作线程中输出诊断，
+// 且 handler 不保证串行调用，因此标志使用 atomic。
 class CapabilityShortfallObserver {
  public:
   explicit CapabilityShortfallObserver(MLIRContext &context)

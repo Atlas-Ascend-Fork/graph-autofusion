@@ -99,17 +99,17 @@ llvm::StringRef ToString(MlirCodegenGate gate) {
   return "?";
 }
 
-// 严格模式下给每一次调用打一行可机读的标签。**只在严格模式下打**，缺省那一档一个字节都不多
+// 严格模式下给每一次调用打一行可机读的标签。只在严格模式下打，缺省那一档一个字节都不多
 // 输出。
 //
 // 两列就够，而且两列都不能由另一列推出来：
-//   `gate`      是哪一道闸门拦下的，`kNone` 表示这张图是 MLIR 发的；
+//   `gate`      是哪一道门禁拦下的，`kNone` 表示这张图是 MLIR 生成的；
 //   `shortfall` 这一次下降里有没有出现过标记成「能力不足」的诊断——也就是**缺省那一档会不会
 //               回落**。严格模式把结论一律压成失败，不带这一列就分不出「能力不足回落」与
 //               「真坏了」，而那正是接管表三态里的两态。
 //
 // `shortfall` 三态而不是两态：抛异常那一支里观察者已经出了作用域（它和 `MLIRContext` 一起建
-// 在 `try` 内），那时答不出来就打 `unknown`，**不许顺手填 `no`**——填了就是把「不知道」说成
+// 在 `try` 内），那时答不出来就打 `unknown`，不许顺手填 `no`——填了就是把「不知道」说成
 // 「没有」，而接管表会照着它把一行归到硬失败那一桶。
 //
 // 走 stderr 而不走 dlog：legacy 的 e2e 用例把 dlog 调到 ERROR，W 级一句都看不到；而 MLIR 的
@@ -125,15 +125,15 @@ void ReportStrictVerdict(const MlirCodegenOptions &options, const ascir::FusedSc
                << " graph=" << (graph_name == nullptr ? "(unnamed)" : graph_name) << "\n";
 }
 
-// 把一道闸门自己的诊断字符串送到 stderr —— **只在严格模式下**，缺省那一档一个字节都不多输出
+// 把一道门禁自己的诊断字符串送到 stderr —— 只在严格模式下，缺省那一档一个字节都不多输出
 // （与 `ReportStrictVerdict` 同一条约定）。
 //
-// 要它是因为这些闸门的理由今天只走 `GELOGW`，而 legacy 的 e2e 用例把 dlog 调到 ERROR，W 级
+// 要它是因为这些门禁的理由今天只走 `GELOGW`，而 legacy 的 e2e 用例把 dlog 调到 ERROR，W 级
 // 一句都看不到：接管表里 `gate=candidate-preparation` 那一片的「首因」列因此整片是空的，
 // 55 格无诊断（2026-10-26 全量表）。下降那一侧的理由本来就是 stderr 上的 MLIR 诊断，这里
-// 跟着走同一条路，接管表的量具不必改一行就能把它收进同一列。
+// 跟着走同一条路，接管表的测量工具不必改一行就能把它收进同一列。
 //
-// 前缀用 `error: ` 是为了对齐量具里 `grep -m1 -o 'error:.*'` 那一条，与 MLIR 诊断的行首一致。
+// 前缀用 `error: ` 是为了对齐测量工具里 `grep -m1 -o 'error:.*'` 那一条，与 MLIR 诊断的行首一致。
 void ReportStrictDiagnostic(const MlirCodegenOptions &options, llvm::StringRef diagnostic) {
   if (options.config != MlirCodegenConfig::kMlir || diagnostic.empty()) {
     return;
@@ -152,9 +152,8 @@ mlir::FailureOr<mlir::ascend::kernel::AFIRToAscendCPipelineSession> BuildPipelin
   llvm::raw_string_ostream os(diagnostic);
   auto profile = mlir::ascend::TargetProfileLoader::load(selection, os);
   if (mlir::failed(profile)) {
-    // **不标记成能力不足。** 这里分不开两件事：一颗 MLIR 还没建模的真芯片（该回落），与一个
-    // 根本解析不出来的 soc_version（配置坏了，该大声失败）。而 MLIR codegen 是显式开关打开
-    // 的，开的人需要知道「这颗芯片这条路不覆盖」，不是静默什么都没发生。
+    // 此处不标记能力不足，因为无法区分尚未建模的真实芯片与非法 soc_version。
+    // MLIR codegen 由显式开关启用，目标解析失败必须报告给调用方，不能静默回落。
     return mlir::failure();
   }
   auto shared_profile = std::make_shared<const mlir::ascend::TargetProfile>(std::move(*profile));
@@ -322,7 +321,7 @@ mlir::FailureOr<BuiltPlanModules> BuildCandidateAfirModules(const PlanLoweringSe
     mlir::PassManager pm(&lowering.context);
     ConfigurePassDump(pm, options.dump_root, selection.subgraph_id, selection.plan_id);
     if (mlir::failed(mlir::ascend::kernel::addPlanCandidateLoweringPipeline(pm, lowering.session))) {
-      // 同理：流水线**搭建**失败是会话级问题，不是这个候选的问题。
+      // 同理：流水线搭建失败是会话级问题，不是这个候选的问题。
       GELOGW("MLIR codegen: AFIRToAscendC pipeline setup failed for subgraph %zu plan %zu", selection.subgraph_id,
              selection.plan_id);
       return mlir::failure();
@@ -417,18 +416,15 @@ MlirCodegenStatus RunMlirCodegen(const ascir::FusedScheduledResult &fused_schedu
   if (options.config == MlirCodegenConfig::kNone) {
     return finish(MlirCodegenStatus::kNotSupported, "disabled");
   }
-  // **这道闸门严格模式（`kMlir`）也不收紧**：Cube 融合明确不在本条路的范围（见
-  // elementwise/broadcast 收尾设计「范围」一节），收紧它只会让 legacy 的 Cube 用例整片变红，
-  // 量不出任何东西。于是 `kNotSupported` 在严格模式下只剩这一个来路，「回落」与「不在范围」
-  // 因此分得开，而标签里的 `gate=cube-fusion` 让接管表不必按用例名猜哪些是 Cube。
+  // Cube 融合不在此路径范围内，严格模式 kMlir 也返回 kNotSupported。
+  // 严格模式的其他失败均返回 kFailed，以区分能力范围外输入和 MLIR 接管失败。
+  // gate=cube-fusion 标签供接管表分类，不依赖用例名称判断 Cube 图。
   if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result)) {
     ReportStrictVerdict(options, fused_schedule_result, MlirCodegenGate::kCubeFusion, false);
     return MlirCodegenStatus::kNotSupported;
   }
   try {
-    // Context 建在最前面，为的是让**所有**失败都经过同一个观察者。此前它建在候选准备
-    // 之后，于是「准备阶段的失败算哪一类」只能另立一套判据——两套判据说同一件事，
-    // 迟早说岔。
+    // 在候选准备前创建 context 和观察者，使准备、下降阶段的失败使用同一分类机制。
     mlir::MLIRContext context;
     if (!options.dump_root.empty()) {
       // Module-scope IR printing is not safe while pass managers run in
@@ -442,16 +438,10 @@ MlirCodegenStatus RunMlirCodegen(const ascir::FusedScheduledResult &fused_schedu
     context.getOrLoadDialect<mlir::math::MathDialect>();
     context.getOrLoadDialect<ascendc::AscendCDialect>();
 
-    // 「能力不足」与「坏了」的唯一判据（support/CapabilityShortfall.h）：
-    // 本次下降里出现过标记过的诊断就是前者，回落给 legacy；否则大声失败。
-    //
-    // **缺省是 `kFailed`**，所以新增一条没标记的失败路径只会多报一次失败，不会把一个真
-    // bug 静默藏起来。
-    //
-    // 严格模式把这个判据短路成「一律 `kFailed`」：量「谁接管了这张图」时，回落与接管都是绿
-    // 的，两者分不开。**短路的只有结论，不是观察者**——诊断照旧带标记、照旧打印，所以同一
-    // 次失败在两档取值下给出的文本逐字相同，可以拿严格模式那一遍的诊断去解释缺省那一遍的
-    // 回落。
+    // 按 support/CapabilityShortfall.h 的诊断 metadata 分类：出现能力不足标记时允许
+    // 回落 legacy，否则返回 kFailed。未标记的新失败默认视为编译错误，避免隐藏实现缺陷。
+    // 严格模式统一返回 kFailed，但仍保留观察者和诊断标记；两种模式的诊断文本相同，
+    // 可用严格模式的诊断解释普通模式的回落原因。
     mlir::afir::CapabilityShortfallObserver observer(context);
     const auto classify = [&observer, &finish, &options, &fused_schedule_result](MlirCodegenGate gate,
                                                                                  llvm::StringRef stage) {
@@ -500,7 +490,7 @@ MlirCodegenStatus RunMlirCodegen(const ascir::FusedScheduledResult &fused_schedu
       ReportStrictVerdict(options, fused_schedule_result, MlirCodegenGate::kArtifactAssembly, observer.sawShortfall());
       return finish(MlirCodegenStatus::kFailed, "artifact_generation");
     }
-    // 接管了也照旧报 `shortfall`：一个候选被能力层拒掉、另一个成了，这张图仍然是 MLIR 发的，
+    // 接管了也照旧报 `shortfall`：一个候选被能力层拒掉、另一个成了，这张图仍然是 MLIR 生成的，
     // 但那条诊断值得在表里看见。
     ReportStrictVerdict(options, fused_schedule_result, MlirCodegenGate::kNone, observer.sawShortfall());
     return finish(MlirCodegenStatus::kSucceeded, "completed");

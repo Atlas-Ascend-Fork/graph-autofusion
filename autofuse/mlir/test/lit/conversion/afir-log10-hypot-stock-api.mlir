@@ -11,16 +11,16 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// 第 8 批接通的两个：`log10` 与 `hypot`。两个都是 reg-only，而且两个都**走标准调用**
+// 第 8 批接通的两个：`log10` 与 `hypot`。两个都是 reg-only，而且两个都走标准调用
 // ——这是它们与第 7 批那些 `XxxExtendRegBaseOp` 的唯一差别，也是这一份要钉的东西。
 //
 // 两处坑各有一条反向 CHECK 盯着：
 //
-//   - `log10` 挑错供给会变成 `MathLibraryOp`。那一族的 `isReuseSource` 是必填操作数，
+//   - `log10` 选错可用实现会变成 `MathLibraryOp`。那一类的 `isReuseSource` 是必填操作数，
 //     emitter 把它当模板实参打，于是 IR 里会多出一个 `arith.constant false`、调用会变成
 //     `AscendC::Log10<float, c0_i1>(...)`。`IR-NOT: arith.constant` 与 `CPP-NOT: Log10<`
 //     就是这一条——它也是第 6 批那段注释里留下的空组合的落点。
-//   - `hypot` 挑错供给会去调 fork 的 `HypotExtend`（`api_regbase/hypot.h` 里确实有那个
+//   - `hypot` 选错可用实现会去调 fork 的 `HypotExtend`（`api_regbase/hypot.h` 里确实有那个
 //     函数，但 legacy 一处都不加载它）。`CPP-NOT: HypotExtend` 盯这一条。
 //
 // 实参个数仍然是调用形态的分界：`log10` 不要 tmp，三个；`hypot` 要一块，五个。
@@ -55,7 +55,7 @@ module {
   }
 }
 
-// 一元标准调用、不要 tmp：三个实参，而且**没有**第四个 `isReuseSource`。
+// 一元标准调用、不要 tmp：三个实参，而且没有第四个 `isReuseSource`。
 // IR-LABEL: func.func @log10_f32
 // IR: %[[COUNT:.*]] = ascendc.local_tensor.get_size %arg1
 // IR-NEXT: ascendc.log10_l2 %arg1, %arg0, %[[COUNT]]

@@ -26,11 +26,9 @@ namespace mlir::ascend::kernel {
 std::unique_ptr<Pass> createAFIRAggregatePass();
 void registerAFIRAggregatePass();
 
-// Registers every pass this library provides. Separate from
-// registerAFIRToAscendCPasses because this library sits DOWNSTREAM of the
-// conversion: it consumes modules the conversion already lowered. Folding its
-// registration into the conversion's would make the conversion library link
-// against its own consumer.
+// Registers this library's passes separately from registerAFIRToAscendCPasses.
+// This library consumes lowered modules; registering it from conversion would
+// reverse the dependency and make conversion link against its consumer.
 void registerKernelSourcePasses();
 
 }  // namespace mlir::ascend::kernel

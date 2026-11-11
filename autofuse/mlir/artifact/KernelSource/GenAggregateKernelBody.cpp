@@ -72,14 +72,10 @@ std::string genValidName(const std::string &name) {
   return result;
 }
 
-// A Plan's "<symbol>_main" body (built by GenKernelEntry's buildStage/buildSwitch)
-// dispatches into per-stage-per-template functions living in the SAME Plan module
-// via func::CallOp, not inlined into "_main" itself. Cloning only "_main"'s region
-// into entryModule would leave those callees undefined there. Different Plans can
-// legally reuse the same template names (e.g. "stage0_template0"), so callees are
-// first renamed within their own Plan module -- which SymbolTable::rename also
-// rewrites every func::CallOp inside "_main" to match -- before being cloned
-// alongside it, guaranteeing the relocated names cannot collide across Plans.
+// Plan _main calls its stage/template functions rather than inlining their bodies.
+// Clone these callees with _main to avoid undefined symbols in entryModule.
+// Different plans may reuse names such as stage0_template0, so qualify names within
+// each source plan first. SymbolTable::rename updates _main calls before cloning.
 LogicalResult relocateTemplateFunctions(ModuleOp planModule, ModuleOp entryModule, StringRef mainName) {
   if (planModule->hasAttr(mlir::ascend::kernel::kAscendCKernelBodyTemplatesRelocatedAttrName)) {
     return success();

@@ -11,11 +11,11 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
 // afir-logical-extension-api.mlir 的另一半。两侧的差别在这里看得最清楚，而且**三样一起
-// 变**——这是二元一族里第一对三样都不同的 op：
+// 变**——这是二元一类里第一对三样都不同的 op：
 //
 //   - 调用名不同：mem 侧是裸名 `LogicalAnd`，reg 侧是 `LogicalAndExtend`；
 //   - 扩展头不同：`logical.h` / `logical_reg_base.h`；
-//   - tmp buffer：mem 侧要且真用，reg 侧**一块都没有**——所以这里的函数签名里没有 tmp
+//   - tmp buffer：mem 侧要且真用，reg 侧一块都没有——所以这里的函数签名里没有 tmp
 //     参数，IR 上的调用是四个实参。
 //
 // `bitwise_and` 那一对只差前两样（它的 mem 侧 tmp 是个没人用的形参），`floor_div` /

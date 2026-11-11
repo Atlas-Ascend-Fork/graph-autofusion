@@ -47,13 +47,10 @@ TEST(MlirE2eCpu, LoadPowStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 底数取 {1.0, 1.5, 2.0, 2.5}，指数取 {-2, -1, 0, 1, 2}——**两个都要变**：指数恒定
-  // 的话这条用例分不开 `Pow` 与一串 `Mul`，底数恒定的话分不开 `Pow` 与 `Exp`。
-  // 底数全为正，避开「负底数 + 非整数指数」那条无定义的支；指数带 0 与负值，把
-  // 「结果恒为 1」和「取倒数」两行也覆上。
-  //
-  // 两个值在 float 里都精确，期望值 `std::pow` 与设备上的 `exp(y * ln(x))` 差的是
-  // 相对误差，所以下面比的是相对量，不是绝对量。
+  // 底数取 {1.0, 1.5, 2.0, 2.5}，指数取 {-2, -1, 0, 1, 2}，两者均变化，
+  // 以区分 Pow 与固定乘法链或 Exp。正底数避开负底数配非整数指数，零、负指数覆盖
+  // 常量 1 和倒数分支。输入可被 float 精确表示，但 std::pow 与设备 exp(y*ln(x))
+  // 存在计算误差，因此使用相对误差比较。
   for (uint32_t index = 0; index < input0_element_count; ++index) {
     input0[index] = 1.0F + static_cast<float>(index % 4U) * 0.5F;
   }

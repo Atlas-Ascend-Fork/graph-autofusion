@@ -38,11 +38,9 @@ std::unique_ptr<Pass> createAscendCLoopGeneratePass() {
 }
 
 void registerAscendCLoopGeneratePass() {
-  // Registered as a pass, not a pipeline, so it shares one idiom with every
-  // other stage here. createAFIRLoopGeneratePass takes a SymbolBindingProvider
-  // and so is not default-constructible, which rules out PassRegistration<T>;
-  // registerPass takes an allocator and reads the CLI name and description
-  // straight off the constructed pass.
+  // Register this stage as a pass, consistent with the other lowering stages.
+  // createAFIRLoopGeneratePass requires a SymbolBindingProvider, so PassRegistration<T>
+  // cannot default-construct it. registerPass uses an allocator and reads the pass's CLI metadata.
   registerPass([] { return createAscendCLoopGeneratePass(); });
 }
 

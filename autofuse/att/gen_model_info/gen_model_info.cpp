@@ -576,6 +576,18 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
       auto it = all_graph_score_funcs.find(model_info.graph_name);
       if (it != all_graph_score_funcs.end()) {
         model_info.score_func = it->second;
+      } else if (!all_graph_score_funcs.empty() &&
+                 model_info.semantic_name.find(ascgen_utils::template_semantic::kIndirectLoad) != std::string::npos) {
+        // [静默失效诊断] IL 图的打分函数已注入（graph_name_to_score_funcs 非空）
+        // 但本图名未命中——键漂移（跨 pass 改名/过滤未同步）会使候选竞标退化到默认
+        // 分且无任何日志。门控：仅 IL 语义图触发（map 为全融合结果全局，非 IL 图不
+        // 注入打分函数，未命中是常态，不告警——否则含 IL 的混合融合图上每个普通
+        // ele 组都会刷一条误报 WARN）。显性暴露而非静默吞掉。
+        GELOGW(
+            "[ScoreFunc] IL graph[%s] (semantic[%s]) has no score func entry but %zu entries exist (first key: %s) — "
+            "key drift detected, runtime scoring may be silently disabled for this graph.",
+            model_info.graph_name.c_str(), model_info.semantic_name.c_str(), all_graph_score_funcs.size(),
+            all_graph_score_funcs.begin()->first.c_str());
       }
     }
     const auto &ident = model_info_list[0].schedule_group_ident;

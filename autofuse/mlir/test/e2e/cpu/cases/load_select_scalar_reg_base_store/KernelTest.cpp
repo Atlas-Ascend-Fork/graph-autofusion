@@ -23,7 +23,7 @@ using mlir::afir::load_select_scalar_reg_base_store::GetShapeConfig;
 using mlir::afir::load_select_scalar_reg_base_store::kInputShapes;
 using mlir::afir::load_select_scalar_reg_base_store::kOutputShapes;
 
-// 与建图时给的 Scalar 节点一致。它是 **then** 那一路，掩码为真时取它。
+// 与建图时给的 Scalar 节点一致。它是 then 那一路，掩码为真时取它。
 constexpr float kOnTrue = 3.0F;
 }  // namespace
 
@@ -45,7 +45,7 @@ TEST(MlirE2eCpu, LoadSelectScalarRegBaseStoreCalculatesCorrectResult) {
   // 掩码由 `Isnan(input0)` 现算，所以 input0 要 NaN 与非 NaN 混着来；两个取值都出现，
   // 否则「恒取标量」或「恒取 tile」也能过。
   //
-  // 值那一路取 0.25 + 0.5k，**永远取不到 3.0**：两路的实参位置换过来算的是
+  // 值那一路取 0.25 + 0.5k，永远取不到 3.0：两路的实参位置换过来算的是
   // `isnan(p) ? v : 3.0`，与这里的期望在每一个元素上都不同。取值在 f32 里精确，
   // 而且 Where 只搬位不做算术，所以逐元素比相等。
   for (uint32_t index = 0; index < probe_count; ++index) {
@@ -71,7 +71,7 @@ TEST(MlirE2eCpu, LoadSelectScalarRegBaseStoreCalculatesCorrectResult) {
               reinterpret_cast<GM_ADDR>(workspace), tilingData);
 
   for (uint32_t index = 0; index < output_element_count; ++index) {
-    // **掩码为真取标量**。两路的实参位置换过来这里逐元素红。
+    // 掩码为真取标量。两路的实参位置换过来这里逐元素红。
     const float expected = std::isnan(input0[index]) ? kOnTrue : input1[index];
     EXPECT_FLOAT_EQ(output[index], expected) << "element " << index;
   }

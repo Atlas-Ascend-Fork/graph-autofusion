@@ -11,11 +11,8 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// `afir.floor_div` 是二元里的 `afir.neg`：**两张供给表给的是同一个函数名**
-// （`FloorDivExtend`），只有扩展头不同。所以这两份用例里 CPP 那条 check 逐字一样，
-// 分得开两侧的是 IR 里建的是哪个 op、以及收不收 tmp buffer。
-//
-// 这一份钉 mem 侧：`floor_div.h`，要 tmp（装 `Div` 的中间商再交给 `Floor`）。
+// 检查 mem-based FloorDivExtend 使用 floor_div.h 并接收 tmp buffer，
+// 用于保存 Div 的中间商，再执行 Floor。另一 API 家族使用独立 AscendC op 和不同签名。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
@@ -47,5 +44,5 @@ module {
 
 // SELECT: ascend.implementation = {id = "floor_div.tensor.extend", kind = "ascendc_api"}
 
-// reg 侧的包装不收 tmp buffer，所以同一段 IR 在那张供给表上选不出实现。
+// reg 侧的包装不收 tmp buffer，所以同一段 IR 在那张支持表上选不出实现。
 // WRONGTARGET: no supported

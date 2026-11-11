@@ -139,7 +139,7 @@ FailureOr<Value> CanonicalFunctionMemoryAllocator::materializeWorkspaceBase(OpBu
                      : builder.create<emitc::CastOp>(loc, builder.getIndexType(), rawOffset).getResult();
   Value base = func.getArgument(*workspaceArg);
   Value offsetBase = builder.create<emitasc::PtrOffsetOp>(loc, base.getType(), base, IntegerAttr(), offset);
-  // 结果使用 AscendC 的整数地址空间属性；C++ 类型发射不接受 afir.space 方言属性。
+  // 结果使用 AscendC 的整数地址空间属性；C++ 类型生成不接受 afir.space 方言属性。
   MemRefType emittedType = MemRefType::get(type.getShape(), type.getElementType(), type.getLayout(),
                                            getAscendCGlobalMemorySpaceAttr(builder.getContext()));
   return builder.create<emitasc::ReinterpretCastOp>(loc, emittedType, offsetBase).getResult();
@@ -379,8 +379,8 @@ FailureOr<Value> CanonicalFunctionMemoryAllocator::materializeVectorizedAxisSpan
   return materializeCheckedMul(repeatMinusOne, *stride, "queue member vectorized size must not overflow", loc);
 }
 
-// 每条非零 stride 的向量化轴贡献一段元素间隔，累加后再加一补上最后一个元素本身。
-// 一条非零 stride 都没有时就是单个元素。
+// 按各非零 stride 向量化轴累计元素间隔，再加 1 得到包含末元素的跨度。
+// 所有 stride 均为 0 时，跨度为单个元素。
 FailureOr<Value> CanonicalFunctionMemoryAllocator::materializeQueueMemberElementCount(const CanonicalValueInfo &member,
                                                                                       Location loc) {
   constexpr StringLiteral kOverflow = "queue member vectorized size must not overflow";
@@ -603,7 +603,7 @@ LogicalResult CanonicalFunctionMemoryAllocator::materializeLocalGroup(const Cano
       return failure();
     }
   }
-  // 队列的归还由 `closeQueueEpoch` 在整条复用链结束时发一次，不在这里逐组发。
+  // 队列的归还由 `closeQueueEpoch` 在整条复用链结束时生成一次，不在这里逐组生成。
   return success();
 }
 
@@ -616,8 +616,8 @@ LogicalResult CanonicalFunctionMemoryAllocator::materializeCanonicalValues() {
     }
   }
 
-  // DenseMap is intentionally retained for SSA lookup, but it must not
-  // decide the order in which GlobalTensor operations are materialized.
+  // Use DenseMap for SSA lookup only; materialize GlobalTensor operations in an
+  // explicit order independent of map traversal.
   for (Value value : valueOrder) {
     auto it = values.find(value);
     if (it == values.end() || resolveAlias(value) != value || it->second.view.resource.space != afir::Space::GM) {

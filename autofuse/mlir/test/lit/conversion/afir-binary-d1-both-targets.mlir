@@ -13,14 +13,12 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
-// 二元的 D1：Mul / Maximum / Minimum 的 tensor-tensor 形态两套家族同一个调用、都不要
-// tmp buffer，所以和 afir-unary-d0-both-targets.mlir 一样是「同一份 IR、两个 --target、
-// 同一组 CHECK」。对照表把它们列成 D1 是因为**标量变体**两侧共用一个扩展头，那条路在
+// Mul / Maximum / Minimum 的 tensor-tensor 形态在两类 API 家族中均使用同一无 scratch 调用，
+// 因此两目标共用 IR 和检查。D1 分类来自共用扩展头的标量变体，本文件不覆盖该变体。
 // E3——这份文件不涉及。
 //
-// Maximum / Minimum 还顺带钉住一件事：对照表里它们的 API 名带着 `AscendC::` 前缀
-// （E0-1 的 QA 发现）。MLIR 这边前缀由 emitter 加，op 的 APIName 是裸的 `Max` / `Min`，
-// 所以 CPP 侧必须恰好是一个前缀，不能是 `AscendC::AscendC::Max`。
+// Max / Min 的 APIName 不带命名空间，AscendC:: 由 emitter 添加。
+// 检查 C++ 输出只含一个前缀，避免生成 AscendC::AscendC::Max。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

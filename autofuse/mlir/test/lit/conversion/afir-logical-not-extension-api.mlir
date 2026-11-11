@@ -15,13 +15,13 @@
 //
 // 三件值得钉的：
 //
-//   - **apiName 是裸名 `LogicalNot`**，不带 `Extend` 后缀。它与 `AscendC::LogicalNot`
-//     同名而不是同一个函数——包装是全局的，发出去的调用不带 `AscendC::` 限定，两者靠
+//   - apiName 是裸名 `LogicalNot`，不带 `Extend` 后缀。它与 `AscendC::LogicalNot`
+//     同名而不是同一个函数——包装是全局的，生成的调用不带 `AscendC::` 限定，两者靠
 //     实参个数分开（5 个 vs 3 个）。legacy 的 `LogicalNotAscIrCodegenImpl::GetApiName`
 //     写的也是这个裸名。
-//   - **这一侧两端同 dtype**。reg 侧结果恒为 ui8，两侧关系不同，所以这个 op 在 AFIR 上
+//   - 这一侧两端同 dtype。reg 侧结果恒为 ui8，两侧关系不同，所以这个 op 在 AFIR 上
 //     不声明 `InferTypeOpInterface`（理由见 `AFIR_BufferizableLogicalNotOp`）。
-//   - 那块预先填好 1 的常量是 **`half`**，与正在算的 dtype 无关：f32 的 logical_not
+//   - 那块预先填好 1 的常量是 `half`，与正在算的 dtype 无关：f32 的 logical_not
 //     用的仍然是 half 那一块，因为包装的形参写死了 `LocalTensor<half>`。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

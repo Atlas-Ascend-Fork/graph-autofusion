@@ -42,7 +42,7 @@ TEST(MlirE2eCpu, LoadRsqrtStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 输入取 {0.25, 1.0, 4.0, 9.0, ...} 这一串正数，逐个不同——**不能取常数**：那样
+  // 输入取 {0.25, 1.0, 4.0, 9.0, ...} 这一串正数，逐个不同——不能取常数：那样
   // `1 / sqrt(x)` 与「照搬那块常量」这两种结果分不开，而「那块常量没被 Duplicate」
   // 正是这条用例要拦的错法之一。
   //

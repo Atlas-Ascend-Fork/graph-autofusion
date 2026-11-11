@@ -23,14 +23,14 @@ include "mlir/Interfaces/CastInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpBase.td"
 
-// 逐位与的两侧。这是二元一族里第一个两侧调用不同名的 op，所以两个 def 都在这里：
+// 逐位与的两侧。这是二元一类里第一个两侧调用不同名的 op，所以两个 def 都在这里：
 //
 //   - mem 侧走包装 `BitwiseAndExtend(dst, src0, src1, tmp, size)`
 //     （`autofuse/ascendc/api/bitwise_and.h`）。包装对 `int16_t` / `uint16_t` 直接转发
 //     `AscendC::And`，其余 dtype 先 `ReinterpretCast<int16_t>` 再算——**tmp buffer 它
 //     一次都没用**，但形参在签名里，少一个实参就调不上，所以这里照旧收。
 //   - reg 侧是标准的 `AscendC::BitwiseAnd`，不带 tmp，也不引扩展头（它声明在 CANN 的
-//     `adv_api/math/bitwise_and.h`，与 `IsNan` 一族同一条链，由 `kernel_operator.h`
+//     `adv_api/math/bitwise_and.h`，与 `IsNan` 一类同一条链，由 `kernel_operator.h`
 //     无条件带进来）。
 //
 // 于是是两个 op 而不是一个带开关的 op：扩展头是 kernel source 层的键，得是「选中的
@@ -60,7 +60,7 @@ def AscendC_HypotL2Op : BinaryOp<"hypot_l2", "Hypot"> {
                        AnyType:$sharedTmpBuffer, AnyType:$calCount);
 }
 
-// `FloorDivExtend` 是二元里的 `NegExtend`：**两张供给表给的是同一个名字**，只有头文件
+// `FloorDivExtend` 是二元里的 `NegExtend`：**两张支持表给的是同一个名字**，只有头文件
 // 不同。所以与 NegExtend 一样写成一个 base 加两个 def——头是 kernel source 层的键，得是
 // 选中的 implementation 建出来的那个 op 自己的属性，不能是穿过去的一个值。
 //
@@ -95,7 +95,7 @@ def AscendC_FloorDivExtendRegBaseOp : AscendC_FloorDivExtendOpBase<"floor_div_ex
 // buffer**，于是连 `arguments` 都能进 base，两个 def 各自只剩一行扩展头。
 //
 // reg 侧那块 tmp 的尺寸是 0（legacy 的 `CalcVoidTmpSizeV2`）。它不是拿来算的——
-// `remainder_reg_base.h` 里 `RemainderExtend` 有 4 参和 5 参两个重载，legacy 发的是
+// `remainder_reg_base.h` 里 `RemainderExtend` 有 4 参和 5 参两个重载，legacy 生成的是
 // 5 参那个，少一个实参就挑到另一个去了。所以这里照收不误。
 class AscendC_RemainderExtendOpBase<string mnemonic, list<string> headers>
     : BinaryOp<mnemonic, "RemainderExtend", [ApiExtensionOpInterface]> {
@@ -114,7 +114,7 @@ def AscendC_RemainderExtendRegBaseOp
 // `RemainderExtend` 的 reg 那份逐字同形，所以同一种写法。
 //
 // **`Fmod` 与 `Mod` 两个调度节点共用这一个 def**：legacy 两边的 `GetApiName` 都是
-// `FmodExtend`，头也都是 `fmod_reg_base.h`，与 `Gelu`（两张供给表同一个调用）同一种情况。
+// `FmodExtend`，头也都是 `fmod_reg_base.h`，与 `Gelu`（两张支持表同一个调用）同一种情况。
 // 建两个 def 会让两条 implementation 指向同名的 AscendC op，没有意义。
 def AscendC_FmodExtendRegBaseOp
     : BinaryOp<"fmod_extend_reg_base", "FmodExtend", [ApiExtensionOpInterface]> {
@@ -157,7 +157,7 @@ class AscendC_PowOpBase<string mnemonic, list<string> headers>
     : BinaryOp<mnemonic, "Pow", [ApiExtensionOpInterface]> {
   let description = "Call the Autofuse Pow wrapper (" # !interleave(headers, ", ") # ")";
   // **两个 src 是 `AnyType` 而不是 `AscendC_LocalTensor`**：两份 `pow.h` 各有四个同名
-  // 重载，(t,t) / (t,s) / (s,t) / (s,s)，标量在哪个位置由 C++ 重载决议挑。发射侧打的是
+  // 重载，(t,t) / (t,s) / (s,t) / (s,s)，标量在哪个位置由 C++ 重载决议挑。生成侧打的是
   // 同一个位置上的 SSA 值，tile 与标量没有区别（与 `CompareScalarExtend` 那一对注释里
   // 说的是同一件事），所以标量形态**不新建 def**，放宽这两位就够了。
   //
@@ -184,7 +184,7 @@ def AscendC_PowOp : AscendC_PowOpBase<"pow", ["pow.h"]>;
 def AscendC_PowRegBaseOp : AscendC_PowOpBase<"pow_reg_base", ["pow_reg_base.h"]>;
 
 // `Sub` / `Div` 是这一批里第一对 **mem 侧不用新增 def** 的：它们的 tensor-tensor 形态
-// legacy 发的就是标准的 `AscendC::Sub` / `AscendC::Div`（`binary_api_call.cpp` 那条
+// legacy 生成的就是标准的 `AscendC::Sub` / `AscendC::Div`（`binary_api_call.cpp` 那条
 // 不带包装的分支），`SubL2Op` / `DivL2Op` 本来就在上面。矩阵上那两个
 // `scalar_sub.h` / `scalar_div.h` 是**标量形态**的头——包装叫 `Subs` / `Divs`，
 // 带 `IS_SCALAR_LATTER` 模板实参，与 tensor-tensor 这条路无关。
@@ -212,13 +212,13 @@ def AscendC_TruncDivExtendRegBaseOp
     : AscendC_BinaryExtendRegBaseOpBase<"trunc_div_extend_reg_base", "TruncDivExtend", "trunc_div_reg_base.h">;
 
 // step 4。`BitwiseOr` / `BitwiseXor` 与上面四个同形（四参、无 tmp）。legacy 的 reg 侧
-// （`BitwiseOrAscIrCodegenImplV2` / `BitwiseXorAscIrCodegenImplV2`）发的不是标准调用
+// （`BitwiseOrAscIrCodegenImplV2` / `BitwiseXorAscIrCodegenImplV2`）生成的不是标准调用
 // `AscendC::BitwiseOr` / `BitwiseXor`，是 fork 的包装 `BitwiseOrExtend` /
 // `BitwiseXorExtend`（`api_regbase/bitwise_or.h` / `bitwise_xor.h`，legacy 的
 // `LoadApiHeaderFiles` 键是 `bitwise_or_reg_base.h` / `bitwise_xor_reg_base.h`——与
 // `where_reg_base.h` 对应 `where.h` 同一个命名惯例，键不是文件名）。包装对 i16/ui16/i32/ui8
-// 这几位只是转发给标准调用，但发出去的调用必须与 legacy 的字面一致，照标准调用的名字挑会
-// 发一个 legacy 从不发的调用（与 `afir.hypot` 那次同一种坑）。
+// 这几位只是转发给标准调用，但生成的调用必须与 legacy 的字面一致，照标准调用的名字挑会
+// 生成一个 legacy 从不生成的调用（与 `afir.hypot` 那次同一种坑）。
 def AscendC_BitwiseOrExtendRegBaseOp
     : AscendC_BinaryExtendRegBaseOpBase<"bitwise_or_extend_reg_base", "BitwiseOrExtend", "bitwise_or_reg_base.h">;
 def AscendC_BitwiseXorExtendRegBaseOp
@@ -264,7 +264,7 @@ def AscendC_IgammaExtendRegBaseOp
                                             "igammac_helper/asymptotic_series_reg_base.h",
                                             "igammac_helper/series_complement_reg_base.h"]>;
 
-// 标量形态的三个 def（`Subs` / `Divs` / `TrueDivExtends`）。**这一族与 tensor-tensor 那条
+// 标量形态的三个 def（`Subs` / `Divs` / `TrueDivExtends`）。**这一类与 tensor-tensor 那条
 // 路没有共用的 def**，三件事都变了：
 //
 //   - **名字多一个 `s`**，而且是**全局**的 `Subs`，不是 `AscendC::Subs`。上面
@@ -272,7 +272,7 @@ def AscendC_IgammaExtendRegBaseOp
 //     API，走 `AscendC::` 前缀、不收 tmp、没有模板实参——**同名不同函数**，别点那个。
 //     它占的助记符是 `subs_l0` / `_l1` / `_l2`，裸 `subs` 是空的，所以这里用得上。
 //   - **多一个 bool 模板实参 `IS_SCALAR_LATTER`**：`Subs<T, false>` 表示标量在左。legacy
-//     的 `binary_api_call.cpp` 按 `switch_scalar` 发它。**这是这个文件里第一个用属性承载
+//     的 `binary_api_call.cpp` 按 `switch_scalar` 生成它。**这是这个文件里第一个用属性承载
 //     模板实参的 bool**（比较族的 `CMPMODE` 是枚举，reg 侧也落在模板位，同一个形状）。
 //   - **mem 侧要 tmp buffer**：`scalar_sub.h` / `scalar_div.h` 都先把标量 `Duplicate` 成一
 //     个 block 再走 `BinaryRepeatParams`，那块中转就是调用方给的 tmp。tensor-tensor 那条
@@ -295,7 +295,7 @@ def AscendC_DivsOp : AscendC_ScalarBinaryExtendOpBase<"divs", "Divs", ["scalar_d
 // `TrueDivExtends` 与上面两个差一个模板实参：它的 `dst` 与 `src` 可以是两种 dtype
 // （i32 输入 → f32 输出），两个都写在模板位上，所以 emitter 那边是另一条 body。
 // 两个扩展头与次序的理由见下面 `AscendC_TrueDivExtendOp`——标量这条正是那条注释里说
-// 「今天发不出来」的那个重载，现在发得出来了。
+// 「今天生成不出来」的那个重载，现在能生成了。
 def AscendC_TrueDivExtendsOp
     : AscendC_ScalarBinaryExtendOpBase<"true_div_extends", "TrueDivExtends", ["scalar_div.h", "true_div.h"]>;
 
@@ -324,14 +324,14 @@ def AscendC_DivExtendsRegBaseOp
 // 的全部理由**——丢掉它 `afir.truediv` 两侧都成了 `afir.div` 的逐字别名。
 //
 // 于是 `dst` 与两个 `src` 可以是两种 dtype（`LocalTensor<U>` vs `LocalTensor<T>`），
-// 与 `LogicalAnd` 一族同形，别照着上面几个同 dtype 的 def 推。两个模板实参都从实参
-// 推得出来，所以发射侧照旧不写模板实参。
+// 与 `LogicalAnd` 一类同形，别照着上面几个同 dtype 的 def 推。两个模板实参都从实参
+// 推得出来，所以生成侧照旧不写模板实参。
 //
 // **两个扩展头**，而且次序就是依赖次序：`true_div.h` 的标量重载调 `Divs`，那是
 // `scalar_div.h` 定义的。字典序恰好也是这个次序（前置 A 的形状在这里第二次兑现）。
 //
 // `utils.h` 前导：`scalar_div.h` 用了 `MAX_REPEAT_TIME` 与 `KernelUtils::BlkSize` /
-// `RptSize`，只有 `utils.h` 声明。`TrueDivExtends` 这个重载这条路今天发不出来，但头是
+// `RptSize`，只有 `utils.h` 声明。`TrueDivExtends` 这个重载这条路今天生成不出来，但头是
 // 当作文本内联进来的、模板里那些名字又不依赖模板形参，少了前导当场编不过。
 // 与 `floor_div.h` / `logical.h` / `sign.h` 同一条——**lit 一条都测不出来**。
 def AscendC_TrueDivExtendOp
@@ -345,7 +345,7 @@ def AscendC_TrueDivExtendOp
   }];
 }
 
-// `LogicalAnd` / `LogicalOr` 是二元一族里第一对**输入与结果不同 dtype** 的 op。两侧的
+// `LogicalAnd` / `LogicalOr` 是二元一类里第一对**输入与结果不同 dtype** 的 op。两侧的
 // `REG_ASC_IR` 都是 `.Input("x1","T1").Input("x2","T1").Output("y","T2")`，而 `T2` 在
 // mem 侧只有 `uint8`、reg 侧是 `{uint8, bool}`——四个包装的 `dst` 都写死
 // `LocalTensor<uint8_t>`，不跟着 `T` 走。所以 `dst` 与两个 `src` 在这里是两种 dtype，
@@ -353,8 +353,8 @@ def AscendC_TrueDivExtendOp
 //
 // 两侧差三样，每一样都落在 def 上：
 //
-//   - **apiName 不同**：mem 侧发的是裸名 `LogicalAnd`（`logical.h` 里 fork 自己的包装，
-//     名字就叫这个），reg 侧发的是 `LogicalAndExtend`。于是 mem 那两个 def 的 mnemonic
+//   - **apiName 不同**：mem 侧生成的是裸名 `LogicalAnd`（`logical.h` 里 fork 自己的包装，
+//     名字就叫这个），reg 侧生成的是 `LogicalAndExtend`。于是 mem 那两个 def 的 mnemonic
 //     带 `_extend` 说的是「走 ApiExtension 头」，**不是 apiName 的回声**——这是这个文件里
 //     第一对两者对不上的 def，`BitwiseAndExtend` / `FloorDivExtend` / `SubExtend` 都是同名。
 //   - **扩展头不同**：`logical.h` / `logical_reg_base.h`。
@@ -393,7 +393,7 @@ def AscendC_LogicalXorExtendRegBaseOp
     : AscendC_BinaryExtendRegBaseOpBase<"logical_xor_extend_reg_base", "LogicalXorExtend",
                                         "logical_xor_reg_base.h">;
 
-// 标量形态。**这一族是第一个带 `ApiExtensionOpInterface` 的 `VecScalarOp`**，所以
+// 标量形态。**这一类是第一个带 `ApiExtensionOpInterface` 的 `VecScalarOp`**，所以
 // `SrcTensorsFromSrc` 那段注释说的情况到这里才第一次兑现：替掉
 // `extraClassDeclaration` 去写扩展头，就得把基类那份 `getSrcTensors` 贴回来。
 //
@@ -401,7 +401,7 @@ def AscendC_LogicalXorExtendRegBaseOp
 //
 //   - mem 侧 `binary_api_tmp_call.cpp` 在标量分支里拼的是 `api_name_ + "ScalarExtend"`，
 //     于是 `LogicalAndScalarExtend(dst, src, scalar, tmp, size)`——五参，tmp 照旧要。
-//     那条分支还**按名字写死只认 `LogicalOr` / `LogicalAnd`**，是这一族专有的。
+//     那条分支还**按名字写死只认 `LogicalOr` / `LogicalAnd`**，是这一类专有的。
 //   - reg 侧 `binary_api_call.cpp` 走的是通用的 `api_name_ + "s"` 分支（不是 `Sub` /
 //     `Div` 那条带模板实参的），于是 `LogicalAndExtends(dst, src, scalar, size)`——四参。
 //
@@ -427,7 +427,7 @@ def AscendC_LogicalAndExtendsRegBaseOp
   let extraClassDeclaration =
       extraClassDeclarationBase # ApiExtensionHeader<["logical_reg_base.h"]>.decl # SrcTensorsFromSrc<>.decl;
 }
-// `AxpyExtend` 是这个文件里第一个 **tier D1** 的 op：两张供给表共用同一个包装。
+// `AxpyExtend` 是这个文件里第一个 **tier D1** 的 op：两张支持表共用同一个包装。
 // `autofuse/ascendc/api/axpy.h` 一份，`api_regbase/` 下没有 axpy——不是 legacy 漏写了
 // 文件，是那边没有一份不同的实现。于是只有这一个 def，没有 `_reg_base` 那一半，
 // 由 `ApiFamily::Shared` 在注册处说出「两侧都用它」。
@@ -447,7 +447,7 @@ def AscendC_LogicalAndExtendsRegBaseOp
 // 与 `BitwiseAndExtend` 同一种情况。
 //
 // 不声明 `utils.h` 前导：`axpy.h` 没用 `MAX_REPEAT_TIME` / `Rational`。里面的裸
-// `LocalTensor<float>` / `RoundMode` 由 `AddKernelIncludes` 在有扩展头时发的
+// `LocalTensor<float>` / `RoundMode` 由 `AddKernelIncludes` 在有扩展头时生成的
 // `using namespace AscendC;` 兜住。
 def AscendC_AxpyExtendContiguousOp
     : BinaryOp<"axpy_extend_contiguous", "AxpyExtend", [ApiExtensionOpInterface]> {
@@ -462,13 +462,13 @@ def AscendC_AxpyExtendContiguousOp
 // 比较族（Eq / Ne / Lt / Le / Gt / Ge）。**六个 AFIR op 共四个 def**：两侧各一个
 // tensor-tensor、一个 tensor-scalar，比较模式是 `CMPMODE` 属性而不是六份 def。legacy
 // 那边也是一份 emitter 服务六个节点类型（`CompareApiCall` / `CompareV2ApiCall` 把
-// `GetApiName()` 直接拼进 `CMPMODE::`），这里照同一个口径。
+// `GetApiName()` 直接拼进 `CMPMODE::`），这里沿用同一规则。
 //
-// **挂在这一族名下的「新调用形态」核完只剩一件。** 文档一直写着「`<T, dim, CMPMODE>`
+// **挂在这一类名下的「新调用形态」核完只剩一件。** 文档一直写着「`<T, dim, CMPMODE>`
 // + brace-init 数组 + second-to-last stride」，对着两个 `*_api_call.cpp` 核过之后：
 //
 //   - second-to-last stride 只出现在**循环形态**（`outer_repeats_size != 0`）里——
-//     mem 侧那一支来自 `compare_v2.h`，reg 侧是 `dim == 2`。这条路只发连续形态，两侧
+//     mem 侧那一支来自 `compare_v2.h`，reg 侧是 `dim == 2`。这条路只生成连续形态，两侧
 //     都够不着，与 `cast` / `where` / `clipbyvalue` 同一个理由；
 //   - brace-init 数组 `Cast` 那一轮已经做掉了；
 //   - 真正新的是 **同一个 `CMPMODE` 在 mem 侧是运行期实参、在 reg 侧是模板实参**。
@@ -482,7 +482,7 @@ def AscendC_AxpyExtendContiguousOp
 //
 // **mem 侧的 tmp buffer 在 count 之后**——这个文件里别的包装都是 tmp 在 count 之前
 // （`printApiExtensionBinary` 就是按那个次序写死的）。所以这两个 def 的 `arguments`
-// 按发射次序写，不照抄 `LogicalAndExtendOp`：次序写反了没有哪一层会报，发出去的调用
+// 按生成次序写，不照抄 `LogicalAndExtendOp`：次序写反了没有哪一层会报，生成的调用
 // 把 count 当成 tmp。reg 侧一块 tmp 都不收（`GetCompareSizeV2` 照样分 32 字节，那是
 // `TmpBufferUse::Unused` 那一档的事，见 `BinaryElementwise.cpp`）。
 //
@@ -494,7 +494,7 @@ def AscendC_AxpyExtendContiguousOp
 // mem 侧要 `utils.h` 前导：`compare.h` 用了 `MAX_REPEAT_TIME(S)` 和 `KernelUtils::` 的
 // 七个成员，只有 `utils.h` 声明。reg 那份自足（只用 `MicroAPI::` 与 `GetVecLen`）。
 // 两个头 `["compare.h", "compare_v2.h"]` 照 legacy 的 `LoadApiHeaderFiles` 写全：连续
-// 形态只用得上前一个，但这一族在供给表上的记录就是这两个，字典序恰好也是依赖序。
+// 形态只用得上前一个，但这一类在支持表上的记录就是这两个，字典序恰好也是依赖序。
 def AscendC_CompareExtendContiguousOp
     : BinaryOp<"compare_extend_contiguous", "CompareExtend", [ApiExtensionOpInterface]> {
   let description = "Call the Autofuse CompareExtend wrapper on a contiguous tile (compare.h)";

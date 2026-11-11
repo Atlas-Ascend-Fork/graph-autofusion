@@ -11,15 +11,15 @@
 // RUN:   | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 
-// **标量在第一个操作数**（矩阵上 8 个 op 的 `swap(2nd)` 那半张格子）。
+// 标量在第一个操作数（矩阵上 8 个 op 的 `swap(2nd)` 那半张格子）。
 //
-// 这 8 个全是可交换的，所以发出来的调用与标量在第二个**逐字相同**：`Adds(dst, tile,
+// 这 8 个全是可交换的，所以生成的调用与标量在第二个逐字相同：`Adds(dst, tile,
 // scalar, count)`。这份用例钉的就是这件事——`ScalarOperand::Any` 只把有形状的那个操作数
 // 挪到第一个实参上，不新开一个 implementation、也不换调用形状。三条 RUN 各钉一层：
 //
-//   IR     —— 建的是标量那一族的 def，而且 tile 在前（`%arg1, %arg0, %cst`）；
+//   IR     —— 建的是标量那一类的 def，而且 tile 在前（`%arg1, %arg0, %cst`）；
 //   CPP    —— emitter 打出来的实参序，tile 在 scalar 前面。写反了 IR 全绿而这里红；
-//   SELECT —— 选中的 implementation 是 `<op>.tensor_scalar`，**与不交换时同一个 id**。
+//   SELECT —— 选中的 implementation 是 `<op>.tensor_scalar`，与不交换时同一个 id。
 //             要是有人把交换方向做成第二个 implementation，这里会变成另一个名字。
 //
 // `lt` / `le` / `gt` / `ge` 不在这里：它们不可交换，`scalarOperand` 是 `"rhs"`，标量在左
@@ -174,7 +174,7 @@ func.func @ne_scalar_lhs(%input: !ascendc.local_tensor<?xf16>,
 // CPP: {{^ *}}CompareScalarExtend({{v[0-9]+}}, {{v[0-9]+}}, c1_5_f32, CMPMODE::EQ, static_cast<uint32_t>({{v[0-9]+}}), {{v[0-9]+}});
 // CPP: {{^ *}}CompareScalarExtend({{v[0-9]+}}, {{v[0-9]+}}, c2_5_f16, CMPMODE::NE, static_cast<uint32_t>({{v[0-9]+}}), {{v[0-9]+}});
 
-// **与标量在右时同一个 id**：交换方向不是第二个 implementation。
+// 与标量在右时同一个 id：交换方向不是第二个 implementation。
 // SELECT: ascend.implementation = {id = "add.tensor_scalar", kind = "ascendc_api"}
 // SELECT: ascend.implementation = {id = "mul.tensor_scalar", kind = "ascendc_api"}
 // SELECT: ascend.implementation = {id = "maximum.tensor_scalar", kind = "ascendc_api"}

@@ -8,24 +8,24 @@
 
 // `afir.sum` 的 RA 形态（物理布局 `[R, A]`，首维被归约）。
 //
-// 输入是**真实调度产物**，不是手改 stride 改出来的：`load_sum_store` 的 `[16, 32] -> [1, 32]`、
+// 输入是真实调度产物，不是手改 stride 改出来的：`load_sum_store` 的 `[16, 32] -> [1, 32]`、
 // `reduce_axes = {0}`，取 codegen 入口处 dump 的那份模块。这一点很要紧——此前那条 RA 负例
 // 只翻转了 `vectorized_strides` 没翻 `strides`，同一根轴在两处一个说被归约、一个说保留，
 // 拿它当正例会钉住一个永远不会出现的形状。（`afir.original_graph_name` 里的 `ra_probe`
 // 是当时那条临时注册的名字，模块本身是调度器原样产出的。）
 //
-// 本用例钉的是「语义 A/R 到物理外/内的翻译」，这是 AR 下**看不出来**的那一半：
-//   - 轴 5（z0t，从原轴 0 切出）是被归约维 R，物理**外**维；
-//   - 轴 3（z1t，从原轴 1 切出）是保留维 A，物理**内**维。
+// 本用例钉的是「语义 A/R 到物理外/内的翻译」，这是 AR 下看不出来的那一半：
+//   - 轴 5（z0t，从原轴 0 切出）是被归约维 R，物理外维；
+//   - 轴 3（z1t，从原轴 1 切出）是保留维 A，物理内维。
 // 两根轴的 actual 都带 `#afir.axis_binding`，所以下面可以按轴 id 而不是 SSA 编号来断言
 // 「哪一个量进了哪一个参数」。
 //
 // `--implicit-check-not` 守的是 `ReduceInit`：AR 要它把对齐补出来的 R 位置填成单位元，
 // RA 的被归约维在物理外侧、给的已经是 actual，天然没有那一段；而 `reduce_init.h` 的填充
-// 按行主序写死，RA 下发出来就是往错地址写。legacy 同样只在 AR 下发
+// 按行主序写死，RA 下生成就是往错地址写。legacy 同样只在 AR 下生成
 // （`codegen/api_call/reduce/reduce_api_call_base.cpp:547` 的 `if (x.isAr)`）。
 
-// 两个目标各发一遍（950 无 E2E，只能比对文本）：reduce 的下降没有任何目标相关分支，
+// 两个目标各生成一遍（950 无 E2E，只能比对文本）：reduce 的下降没有任何目标相关分支，
 // 两份输出**逐字节相同**，所以共用同一组 CHECK。这是
 // `2026-09-20-two-dim-transfer-addressing-design.md` 8.5 六组合验收项的 lit 一侧。
 // RUN: af-opt --afir-kernel-body-signature --afir-to-ascendc-pipeline --target=Ascend910B1 %s \
@@ -39,14 +39,14 @@
 // CHECK: %[[AACT:[a-zA-Z0-9_]+]] = arith.select %{{[a-zA-Z0-9_]+}}, %{{[a-zA-Z0-9_]+}}, %{{[a-zA-Z0-9_]+}} {afir.axis_binding = #afir.axis_binding<axis = 3, role = actual_size>}
 // CHECK: %[[RACT:[a-zA-Z0-9_]+]] = arith.select %{{[a-zA-Z0-9_]+}}, %{{[a-zA-Z0-9_]+}}, %{{[a-zA-Z0-9_]+}} {afir.axis_binding = #afir.axis_binding<axis = 5, role = actual_size>}
 
-// 32B 对齐落在物理**内**维上，RA 下那是 A；而且取的是 A 的**标称**长度——它是行距，
+// 32B 对齐落在物理内维上，RA 下那是 A；而且取的是 A 的标称长度——它是行距，
 // 行距按标称分配，不随尾块变化。AR 下这次对齐落在 R 上，是本用例与 AR 用例的分水岭。
 // CHECK: %[[ADIV:[a-zA-Z0-9_]+]] = arith.ceildivsi %{{[a-zA-Z0-9_]+}}, %[[C8:[a-zA-Z0-9_]+]]
 // CHECK: %[[AALIGN:[a-zA-Z0-9_]+]], %{{[a-zA-Z0-9_]+}} = arith.mulsi_extended %[[ADIV]], %[[C8]]
 // CHECK: cf.assert %{{[a-zA-Z0-9_]+}}, "reduce aligned extent must not overflow"
 
 // `srcShape = {物理外维行数, 物理内维行距}`：外维取 R 的 **actual**（尾块下必须少走几行，
-// 没有 ReduceInit 兜底），内维取 align 后的 A **nominal**。
+// 没有 ReduceInit 兜底），内维取 align 后的 A nominal。
 // CHECK: %[[SEG:[a-zA-Z0-9_]+]] = ascendc.reinterpret_cast
 // CHECK: %[[OUTER:[a-zA-Z0-9_]+]] = arith.index_cast %[[RACT]] : index to i32
 // CHECK: %[[INNER:[a-zA-Z0-9_]+]] = arith.index_cast %[[AALIGN]] : index to i32
@@ -54,7 +54,7 @@
 // CHECK-SAME: layout = 1
 // CHECK-SAME: srcInnerPad = true
 
-// 跨 tile 累加按**语义 A** 的 actual 对齐后取长度，不是物理外维 R——按 R 合并就是该合
+// 跨 tile 累加按语义 A 的 actual 对齐后取长度，不是物理外维 R——按 R 合并就是该合
 // A 个结果却合了 R 个。这一条 AR / RA 共用同一个来源。
 // CHECK: %[[CDIV:[a-zA-Z0-9_]+]] = arith.ceildivsi %[[AACT]], %{{[a-zA-Z0-9_]+}}
 // CHECK: %[[CALIGN:[a-zA-Z0-9_]+]], %{{[a-zA-Z0-9_]+}} = arith.mulsi_extended %[[CDIV]], %{{[a-zA-Z0-9_]+}}

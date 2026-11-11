@@ -20,10 +20,9 @@ class SelectionPolicyRegistry;
 
 namespace mlir::ascend::kernel {
 
-// Register AFIR unary elementwise implementations -- one per AFIR operation when
-// both API families give the same `AscendC::` call, two when they differ. Which
-// of the two applies is decided by TargetFeature::RegBasedApiFamily together
-// with whether the schedule allocated a tmp buffer, never by a chip name.
+// Register one implementation per unary op when both API families use the same
+// AscendC call, otherwise register both variants. Select by RegBasedApiFamily and
+// scheduled scratch availability, not by chip name.
 LogicalResult registerUnaryElementwiseImplementations(ascend::instruction::ImplementationRegistry &registry,
                                                       ascend::instruction::SelectionPolicyRegistry *policies = nullptr);
 

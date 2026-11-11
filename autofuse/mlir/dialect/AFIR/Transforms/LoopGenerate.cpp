@@ -167,14 +167,14 @@ class FunctionLoopGenerator {
     return success();
   }
 
-  // 调度出去的 Op 会被搬进 `scf.for`，而循环本身建在**第一个 AFIR Op 的位置**上。所以
-  // 它读到的每一个不参与调度的值都必须排在那个位置之前，否则生成出来的是「用在定义之前」
+  // 调度出去的 Op 会被搬进 `scf.for`，而循环本身建在第一个 AFIR Op 的位置上。所以
+  // 它读到的每一个不参与调度的值都必须排在那个位置之前，否则生成的是「用在定义之前」
   // ——MLIR 的 dominance 校验当场拒收（`operand #N does not dominate this use`）。
   //
-  // 种子是「操作数的定义方**不是**调度出去的 Op」，不是「操作数是 `memref.alloc`」：
+  // 种子是「操作数的定义方不是调度出去的 Op」，不是「操作数是 `memref.alloc`」：
   // `memref.alloc` 只是其中最常见的一类，`Scalar` / `IndexExpr` 建出来的 `arith.constant`
   // 是同样的东西。它们由 bridge 按 AscGraph 的节点次序就地建，节点排在第一个搬运之后时
-  // 就会落在循环后面；legacy 把这一族统一物化在 kernel 顶部（`AppendConstTensorInit` 跑在
+  // 就会落在循环后面；legacy 把这一类统一物化在 kernel 顶部（`AppendConstTensorInit` 跑在
   // `root_loop.Generate` 之前），这里的提升就是同一件事在 MLIR 这一侧的落点。
   //
   // 调度出去的 Op 自己不在种子里——它们由循环树安排位置，跨作用域的情况由
@@ -272,7 +272,7 @@ class FunctionLoopGenerator {
     }
     // 「loop_axis 必须出现在 axis 里」是 ScheduleAttr 的不变量，但 `ScheduleAttr::get`
     // 只在 assert 里校验它——断言关掉就构造得出违反不变量的属性。这里不能把 verifier
-    // 当成唯一闸门：漏判的后果不是取到错值，而是 `std::next(end())` 越界读。
+    // 当成唯一门禁：漏判的后果不是取到错值，而是 `std::next(end())` 越界读。
     ArrayRef<int64_t> scheduledAxes = sched.getAxis();
     auto position = llvm::find(scheduledAxes, sched.getLoopAxis());
     if (position == scheduledAxes.end()) {
@@ -296,7 +296,7 @@ class FunctionLoopGenerator {
       if (!afir::isAfirOperation(&operation) || isSizePrologueOperation(operation)) {
         continue;
       }
-      // 同步原语留在当前层：它与邻居的**相对顺序**就是它的全部语义，跟着当前循环节点
+      // 同步原语留在当前层：它与邻居的相对顺序就是它的全部语义，跟着当前循环节点
       // 走既保住了这个顺序，也不会凭空把它提到循环外或压进更深一层。
       if (isSynchronizationOperation(operation)) {
         loopNodeStack.back()->items.emplace_back(&operation);
@@ -596,7 +596,7 @@ class FunctionLoopGenerator {
     return success();
   }
 
-  // 每项发射后刷新插入点，避免继续使用已被移入子循环的后继 Op 迭代器。
+  // 每项生成后刷新插入点，避免继续使用已被移入子循环的后继 Op 迭代器。
   // 子循环的插入点须在 emitLoop 返回后更新。
   LogicalResult emitTree(LoopTreeNode &loop, OpBuilder &currentBuilder, llvm::DenseMap<int64_t, Value> axisIndices) {
     for (LoopTreeItem &item : loop.items) {
@@ -609,7 +609,7 @@ class FunctionLoopGenerator {
       if (failed(loopOperation)) {
         return failure();
       }
-      // 块轴不生成 `scf.for`，它的子树直接用本层 builder 发射，插入点已经停在最后一项之后。
+      // 块轴不生成 `scf.for`，它的子树直接用本层 builder 生成，插入点已经停在最后一项之后。
       if (*loopOperation != nullptr) {
         currentBuilder.setInsertionPointAfter(*loopOperation);
       }

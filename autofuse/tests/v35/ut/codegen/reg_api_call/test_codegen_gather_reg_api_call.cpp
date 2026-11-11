@@ -1951,3 +1951,33 @@ TEST(CodegenKernel, LoadGatherRegApiCall_WhenGatherComputeTypeIsInValid_Faild) {
   auto status = call.Generate(tpipe, current_axis, result);
   EXPECT_EQ(status, af::FAILED);
 }
+
+TEST(CodegenKernel, LoadGatherRegApiCall_WhenValueDtypeIsInt64) {
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  af::AscGraph graph("test");
+  auto current_axis = CreateGraphAttrAxisIsLastAxisAndParamHasOnlyOneAxis<af::DT_INT64>(graph, tiler, 0);
+  auto node = graph.FindNode("gather");
+  node->attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+  node->attr.api.compute_type = af::ComputeType::kComputeLoad;
+  tpipe.AddTensor(node->inputs[0]);
+  tpipe.AddTensor(node->inputs[1]);
+  tpipe.AddTensor(node->outputs[0]);
+  codegen::ApiTensor x1;
+  codegen::ApiTensor x2;
+  x1.id = node->inputs[0].attr.mem.tensor_id;
+  x2.id = node->inputs[1].attr.mem.tensor_id;
+
+  codegen::GatherRegApiCall call("GatherExtend");
+  EXPECT_EQ(call.Init(node), 0);
+  call.inputs.push_back(&x1);
+  call.inputs.push_back(&x2);
+
+  std::string result;
+  auto status = call.Generate(tpipe, current_axis, result);
+  EXPECT_EQ(status, af::SUCCESS);
+  EXPECT_NE(result.find("GatherExtend<int64_t, int64_t"), std::string::npos);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(node);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "Adaptive");
+}

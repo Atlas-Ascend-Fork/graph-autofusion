@@ -105,15 +105,15 @@ using elementwise::kI32;
 using elementwise::kUI16;
 
 // UB 的访问粒度，也是 `removepad.h` 里那条整除的除数。与 bridge 的
-// `kTmpBufferAlignmentBytes` 同一个口径，不是芯片判别。
+// `kTmpBufferAlignmentBytes` 使用同一个常量，不是芯片判别。
 constexpr int64_t kUbAccessGranularityBytes = 32;
 
-// legacy 两侧的供给表逐字相同：`{i16, ui16, i32, ui32, f16, f32, bf16}`
+// legacy 两侧的支持表逐字相同：`{i16, ui16, i32, ui32, f16, f32, bf16}`
 // （`ascir_builtin_ops_v1.cpp:163`）。这里少两个——`ui32` 与 `bf16` 在
 // `ElementTypes` 里没有位（`elementTypeBit` 答 0），够不着也就谈不上收。
 // ODS 的 `AFIR_RemovePadElementTypes` 比这里宽是对的：那是 op 收什么。
-// bf16 在这一条上**两侧都有**（`mem_dtypes` 与 `reg_dtypes` 都列着它），所以它与那 36 个
-// reg 侧独有的位不同——这个包装两张供给表共用一份，加在这里不会对任何一侧说假话。
+// bf16 在这一条上两侧都有（`mem_dtypes` 与 `reg_dtypes` 都列着它），所以它与那 36 个
+// reg 侧独有的位不同——这个包装两张支持表共用一份，加在这里不会对任何一侧说假话。
 constexpr uint32_t kRemovePadElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16;
 
 struct RemovePadMapping {
@@ -129,7 +129,7 @@ struct RemovePadMapping {
 
 // `expression` 可证等于 `literal` 吗。证不了返回 false（保守方向）。
 //
-// **与 Broadcast.cpp 的同名函数逐字相同。** 提到公共头不属于本需求：`SymbolicExpression.h`
+// 与 Broadcast.cpp 的同名函数逐字相同。 提到公共头不属于本需求：`SymbolicExpression.h`
 // 在 `ProveExpressionsEqual` 上已经记着同一类去重（bridge 里还有第三份
 // `proveExpressionsEqual`），那三份应当一起收，不该由本需求单独挪走其中一份。
 bool provablyLiteral(afir::ExprAttr expression, llvm::StringRef literal) {
@@ -146,7 +146,7 @@ bool provablyLiteral(afir::ExprAttr expression, llvm::StringRef literal) {
 // 这棵子树的取值一定是整数吗。
 //
 // `Ceiling` / `Floor` 无论实参是什么都返回整数，所以不看孩子。`Symbol` 算整数：这套表达式
-// 里的自由符号全是尺寸（轴长、tile 尺寸、block 数）。`Pow` **不算**——它在这套表达式里同时
+// 里的自由符号全是尺寸（轴长、tile 尺寸、block 数）。`Pow` 不算——它在这套表达式里同时
 // 承载除法（`x^-1`），放进来就等于放过一个可能不是整数的因子；`Rational` / `Real` / `Log`
 // 与各谓词节点同理。
 bool isIntegerValued(const afir::detail::ExpressionNode &node) {
@@ -184,10 +184,10 @@ std::optional<int64_t> positiveIntegerValue(const afir::detail::ExpressionNode &
 
 // `expression` 可证是 `factor` 的整数倍吗。证不了返回 false（保守方向：报不支持，不是算错）。
 //
-// **结构判据，不是算术证明。** 想证的是整除，而 `ProveExpressionsEqual` 只答「两个表达式
+// 结构判据，不是算术证明。 想证的是整除，而 `ProveExpressionsEqual` 只答「两个表达式
 // 是否可证相等」。把整除写成相等要用 `P == f * Ceiling(P / f)`，代进 `P = f * Ceiling(Z / f)`
 // 之后左右差一层 `Ceiling(Ceiling(Z / f))`，而 SymEngine 不把 `ceiling` 套 `ceiling` 折掉
-// （它的规范化只在实参是 `Number` 时求值），于是**符号行距一律证不出来**——而符号行距恰好是
+// （它的规范化只在实参是 `Number` 时求值），于是符号行距一律证不出来——而符号行距恰好是
 // 动态 shape 下的常态。
 //
 // 结构判据能过：调度算出来的行距是 `af::sym::Align(Z, f)`，而那个函数就是
@@ -196,7 +196,7 @@ std::optional<int64_t> positiveIntegerValue(const afir::detail::ExpressionNode &
 //
 // 两种形态：
 //   - 整个树是正整数字面量，且 % factor == 0；
-//   - 树是 `Mul`，其中**有一个**正整数字面量因子 % factor == 0，**且其余每个因子都是整数值**。
+//   - 树是 `Mul`，其中有一个正整数字面量因子 % factor == 0，且其余每个因子都是整数值。
 //     少了后半句，`(8 * s / 3)` 这种也会被放过去。
 bool isProvablyMultipleOf(afir::ExprAttr expression, int64_t factor) {
   // `factor <= 0` 是下面那个 `%` 的除数检查。`factor` 是 `32 / sizeof(T)`，在本档收的
@@ -263,7 +263,7 @@ struct RemovePadShape {
 // 收的边界（不满足一律 `failure()`，调用方翻成 unsupported）：
 //
 //   - 源与目的地各恰好一个；段数在 `[1, 2]` 内（段数 > 2 的理由见文件头）。
-//   - **目的地稠密**：最内段 `strides[dst]` 可证为 1；两段时外段 `strides[dst]` 可证等于内段
+//   - 目的地稠密：最内段 `strides[dst]` 可证为 1；两段时外段 `strides[dst]` 可证等于内段
 //     `extent`。`GatherMask` 的写是连续的，目的地有任何跨度就是静默写错位置。
 //   - **行形态**（两段、最内段源 stride 可证为 1）：一行内部也有跨度的话，
 //     `GatherMask` 的 `src0BlockStride` 表达不了（包装写死 1）。
@@ -274,7 +274,7 @@ struct RemovePadShape {
 //     else 分支。
 //   - 行距/槽距是 32B 的整数倍（`isProvablyMultipleOf`）。
 //
-// **`N` 可证为 1 时单独放行整除判据**，这是一条有前置条件的放行，前置条件在这里查：
+// `N` 可证为 1 时单独放行整除判据，这是一条有前置条件的放行，前置条件在这里查：
 // `src0RepeatStride` 只被第 2..N 趟 repeat 读，`repeatTimes == 1` 时它读不到。这一格的 `N`
 // 是字面量 1（段只有一个、源 stride 又是 1，趟数就是 1），不是符号，所以前置条件是判得死的。
 FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan, int64_t elementBytes) {
@@ -485,8 +485,8 @@ class RemovePadConversionPattern final : public OpConversionPattern<afir::Remove
     if (failed(ordered)) {
       return rewriter.notifyMatchFailure(op, "cannot order the tiles the segmentation talks about");
     }
-    // 窗口是**整串段**，所以一层循环都不建：段数上限 2 是这一档的判据，`materializeVectorizedSegments`
-    // 在 `apiWindowSize == segments.size()` 时只做两件事——给两个 tile 各发一条偏移为常量 0 的
+    // 窗口是整串段，所以一层循环都不建：段数上限 2 是这一档的判据，`materializeVectorizedSegments`
+    // 在 `apiWindowSize == segments.size()` 时只做两件事——给两个 tile 各生成一条偏移为常量 0 的
     // subindex（本地侧偏移恒为 0，与 `UnaryElementwise.cpp` 同一条判据），以及按逐轴 extent
     // 算出各段的元素数（含切分轴的尾块修正）。
     const auto windowSize = static_cast<unsigned>(vectorPlan.segments.size());
@@ -552,7 +552,7 @@ class RemovePadConversionPattern final : public OpConversionPattern<afir::Remove
 LogicalResult registerRemovePadImplementations(ImplementationRegistry &registry,
                                                ascend::instruction::SelectionPolicyRegistry *) {
   // 两侧共用同一个包装（tier D1），所以 `Shared`、只有这一个 implementation。
-  // id 说的是供给表，不是芯片。
+  // id 说的是支持表，不是芯片。
   constexpr llvm::StringLiteral kId = "remove_pad.tensor.extend";
   if (failed(elementwise::checkFamilyMatchesHeader<ascendc::RemovePadExtendOp>(ApiFamily::Shared))) {
     return failure();

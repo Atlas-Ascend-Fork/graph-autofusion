@@ -10,7 +10,7 @@
 
 // `TmpBufferUse::Unused` 与 `None` 的分界线，单独一份用例钉住。
 //
-// mem 侧的 `afir.sub` 发的是不带 tmp 的 `AscendC::Sub`，**但调度一定会给它一块**
+// mem 侧的 `afir.sub` 生成的是不带 tmp 的 `AscendC::Sub`，但调度一定会给它一块
 // （legacy 的 `CalcBinaryApiTmpSize` 对 tensor / 标量两支都返回一块）。所以「没有 tmp
 // 操作数」不是「这条路不需要它」，而是「这张图不是这条路算出来的」，要判不支持。
 //

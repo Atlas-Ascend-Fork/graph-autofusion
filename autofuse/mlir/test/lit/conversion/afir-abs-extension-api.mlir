@@ -11,17 +11,12 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// `afir.abs` on a target that does not ship the stock `AscendC::Abs`. It lowers
-// onto the Autofuse `AbsExtend` wrapper, which takes the tmp buffer the
-// schedule allocated. The companion file afir-abs-stock-api.mlir covers the
-// other family; between them they pin the whole of a "D2" platform difference
-// -- different API name, different header, different tmp buffer requirement --
-// without either the IR or the stable ids naming a chip.
+// Check AbsExtend on an API family without stock AscendC::Abs. The wrapper
+// uses scheduled scratch; afir-abs-stock-api.mlir checks the stock counterpart.
+// Together they verify API name, header and scratch differences without chip-specific IR or IDs.
 //
-// The pairing of the two is what makes it a difference rather than two
-// unrelated lowerings: the tmp buffer is not optional decoration. A schedule
-// that allocated one cannot be lowered onto the stock call and vice versa, so
-// the mismatch is reported rather than silently papered over (WRONGTARGET).
+// Scratch availability must match the selected API. Reject a wrapper without
+// scratch or a stock call with wrapper scratch, as checked by WRONGTARGET.
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

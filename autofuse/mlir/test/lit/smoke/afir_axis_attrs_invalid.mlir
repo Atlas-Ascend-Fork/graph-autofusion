@@ -6,11 +6,10 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 步 3b：合一之后哪些错误从「静默」变成「解析期失败」。
+// 检查统一轴属性对角色拼写、轴号和调度轴集合的校验。
 //
-// 旧编码下这三类错误都不报：角色拼错只是查不到值（lowering 静默回退到 identity
-// 搬运）；`loop_axis` 不在 `sched_axis` 里只有 `LoopGenerate` 一处检查，其余读点直接
-// 信任；负数轴号无人校验。本文件逐条钉死。
+// 角色拼写错误、负轴号，以及 loop_axis 不在 sched_axis 中均应提前拒绝，
+// 不能等到消费者查询不到绑定后回退或使用无效值。
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 
@@ -64,8 +63,7 @@ func.func private @sched_negative_axis_rejected(%arg: tensor<8xf16>) -> tensor<8
 
 // -----
 
-// 旧的扁平属性不再是已知的 AFIR 属性：写回去会被逃生舱口检查拦下，
-// 保证迁移不会悄悄回流。
+// 旧扁平属性不再属于已知 AFIR 属性，重新写入时应由未知属性检查拒绝。
 func.func private @old_flat_axis_attrs_rejected(%arg: tensor<8xf16>) -> tensor<8xf16> attributes {
   afir.function_role = #afir.function_role<kernel_body>
 } {

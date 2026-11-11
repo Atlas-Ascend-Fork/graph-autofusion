@@ -6,8 +6,8 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-# 级联拓扑 T7（一个 `brc` 的结果经两条 Store 写到两个输出）。两格都取自探针报 ok 的格
-# （2026-10-12 实测），两种段方向各一格：
+# 覆盖 T7：广播结果由两条 Store 写到两个输出。
+# 按 2026-10-12 探针结果注册外轴广播与内轴广播两种形态。
 #
 #   `[1,8] -> [128,8]`   形态 A（广播轴在外）
 #   `[8,1] -> [8,128]`   形态 B（最内轴是广播轴）

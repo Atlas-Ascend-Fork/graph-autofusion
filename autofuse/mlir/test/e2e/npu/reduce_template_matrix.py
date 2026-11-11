@@ -162,7 +162,7 @@ def main():
     args = parse_args()
     form = args.form
     dim, shape_cases = FORMS[form]
-    # 钉的是哪个 plan 要入账：没有它，日志只能证明「某个模板算对了」，证明不了是哪个。
+    # 记录固定的 plan 编号，使日志能确认通过的是哪个模板。
     pinned = selected_plan()
     print(f"MATRIX_CONFIG form={form} dim={dim} pinned_plan={pinned}")
 
@@ -184,8 +184,7 @@ def main():
     for index, (shape, note) in enumerate(shape_cases):
         name = f"MATRIX_{form.upper()}_{index}"
         rtol, atol = tolerances(shape[dim])
-        # 容差是按归约长度算的，不是写死的——写死 atol 会在相消的格子上假报缺陷。
-        # 它跟着形状走，所以必须逐格打出来，否则事后无法复核某一格用的是什么判据。
+        # 逐格输出随归约长度计算的容差，便于复核相消场景的判据，避免固定 atol 误报。
         print(f"MATRIX_TOL {name} reduced={shape[dim]} rtol={rtol:g} atol={atol:g}")
         cells.append((name, form, make(name, shape, rtol, atol), (shape,), note))
 

@@ -71,24 +71,10 @@ struct AFIRBridgeOpMapping {
 // its `form` column included.
 llvm::ArrayRef<AFIRBridgeOpMapping> getAFIRBridgeableOperations();
 
-// 这张表在头文件里而不是实现文件里，是因为它是**唯一一份可遍历的 op 类名单**。
-// `getAFIRBridgeableOperations()` 只给得出名字，给不出类，所以凡是要对每个 op 调一个
-// **静态成员**的断言（`OdsElementTypesMatchRegistrations` 要调
-// `getOdsElementTypeSpellings()`）都只能展开这张表。放在实现文件里的话，那种断言就得自己
-// 再抄一份 op 类名单——而那份名单漏掉一个 op 的后果是那个 op 不被查，静默。
-// The single source of truth for what the Schedule bridge can build, in three
-// columns: the scheduler's node type, the AFIR operation, and which storage
-// forms that operation can be built in.
-//
-// The form column matters because the two forms are not interchangeable: the
-// production path (ScheduleToAfir) always asks for the buffer form, while the
-// tensor form only survives for the legacy DTO path and the af-afir-gen demo.
-// An operation listed as `Tensor` is therefore *not* usable in production, and
-// before this column existed that distinction lived in a second hand-maintained
-// StringSwitch that had already drifted from this table.
-//
-// Adding an operation means: a row here, an ODS definition, and an AscendC
-// implementation registration -- three places, checked by AfirBuilderTest.
+// Schedule bridge 可构建 op 的共享表：调度器节点类型、AFIR op 类和支持的存储形态。
+// 表放在头文件中，供 builder 和 OdsElementTypesMatchRegistrations 等测试共同展开。
+// getAFIRBridgeableOperations 仅提供名称，不能替代需要调用 op 静态成员的类型列表；
+// 单独维护测试名单会遗漏新增 op 的校验。
 #define AFIR_BRIDGE_OPERATION_REGISTRY(M)                                                   \
   M("Load", afir::LoadOp, BridgeOpForm::Both)                                               \
   M("Store", afir::StoreOp, BridgeOpForm::Both)                                             \
@@ -218,7 +204,7 @@ llvm::ArrayRef<AFIRBridgeOpMapping> getAFIRBridgeableOperations();
 // AscGraph 上一个节点自有的 float `ir_attr`，在 AFIR 上成为 op 属性。它不是操作数：
 // 不进三段划分、不占一块缓冲，也不走上面那张操作数表。
 //
-// **两个名字都要说出来**：两边的拼写不保证一致——`LeakyRelu` 在 AscGraph 上是
+// 两个名字都要说出来：两边的拼写不保证一致——`LeakyRelu` 在 AscGraph 上是
 // `negative_slope`，在 AFIR 上是 `negative_slop`（ODS 那边就这么写的）；`Axpy` 两边
 // 都是 `alpha`。只留一个名字的话，第二个拼写不一致的 op 就会悄悄读到空值。
 //
@@ -264,7 +250,7 @@ enum class BindingDomain : uint8_t {
   Queue,
 };
 
-// 调度给出的资源绑定。`position` / `alloc_type` **不在**这里：它们各自的信息已经被
+// 调度给出的资源绑定。`position` / `alloc_type` 不在这里：它们各自的信息已经被
 // 转成了别的字段——position 决定 `BufferDescDTO::space`，alloc_type 决定 `domain`
 // ——再原样带一份就是第二份事实源，两份不一致时没人知道该信哪个。
 struct ScheduleBindingDTO {
@@ -339,10 +325,10 @@ struct NodeInfo;
 
 // 二次融合（`VectorFunc`）节点挂着的那张嵌套子图，已经翻成这一层的 DTO。
 //
-// **边界在这里就已经解掉了**，这是本结构存在的全部理由。子图的边界形状是
+// 边界在这里就已经解掉了，这是本结构存在的全部理由。子图的边界形状是
 // `Data` + `Load`（入）与 `Store` + `Output`（出），而那两对表达的是「从 UB 取进寄存器」
 // 与「从寄存器写回 UB」——与父图里的 `afir.load` / `afir.store`（GM <-> UB）不是一件事。
-// 把它们原样翻成 AFIR 算子会多出两次搬运，而且**两种都编得过**，所以这一处的转换必须
+// 把它们原样翻成 AFIR 算子会多出两次搬运，而且两种都编得过，所以这一处的转换必须
 // 在进 MLIR 之前完成：
 //
 //   父算子 srcs 的第 i 个  ->  `boundary_input_names[i]`（子图里引用这段数据的那个名字，
@@ -374,28 +360,28 @@ struct NodeInfo {
   // 缓存复用周期（`SchedInfo.exec_condition`）的规范拼写，空串按 `no_cache` 处理。
   // 与 `type` / `dtype` / 轴类型同样走字符串：这一层不认识 AFIR 的枚举，把上游枚举
   // 翻译成规范拼写的那一处（`ScheduleToAfir` 的 `detail::ExecConditionStr`）也是拒收
-  // 不支持取值的唯一闸门。
+  // 不支持取值的唯一门禁。
   std::string exec_condition;
   // Empty for the operations whose API needs no tmp buffer, which is most of them
   // on the reg-based family and about a third on the mem-based one.
   std::vector<TmpBufferDTO> tmp_buffers;
   // 编译期标量的字面值，只有 `Scalar` 节点有。AscGraph 那边它是一个字符串
   // （legacy 直接把这串文本拼进生成的 C++），这里按 `output.tensor.dtype` 解析成一个
-  // 真正的常量——**不原样拼接**：AFIR 里它要成为一个有类型的 SSA 值，才谈得上被
+  // 真正的常量——不原样拼接：AFIR 里它要成为一个有类型的 SSA 值，才谈得上被
   // verifier 和 capability 检查。解析不了的写法在 bridge 就报出来，不留到设备编译器。
   std::optional<std::string> scalar_value;
   // `IndexExpr` 节点的表达式，AFIR 规范串形式。与 `scalar_value` 同类——都是「不产生
-  // 计算、只产生一个值」的标量源——差别只在值是**编译期字面量**还是**由 size var 算出
+  // 计算、只产生一个值」的标量源——差别只在值是编译期字面量还是**由 size var 算出
   // 来的运行期常量**。
   //
   // legacy 把两者收进同一张表（`kernel.constant_tensors`），在 kernel 顶部、所有循环
   // 之前一起物化（`AppendConstTensorInit`，跑在 `root_loop.Generate` 前面），渲染时
-  // 只把 size var 换成 TilingData 字段、轴不参与。所以**它不需要归纳变量**，落点与
+  // 只把 size var 换成 TilingData 字段、轴不参与。所以它不需要归纳变量，落点与
   // `Scalar` 同一处。
   std::optional<std::string> index_expr;
   // 节点自有的 float `ir_attr` 的值（`LeakyRelu` 的 `negative_slope`、`Axpy` 的
   // `alpha`）。读哪个名字、挂成 AFIR 上的哪个名字由 `getFloatIrAttrMappings()` 那张表
-  // 说，这里只带一个值——**一个节点至多一个**，今天两个 op 都是如此。
+  // 说，这里只带一个值——一个节点至多一个，今天两个 op 都是如此。
   //
   // 与 `Scalar` 的 `value` 同类（都是节点自己的一个数，不是操作数），但那边是字符串
   // 字面量、要按 dtype 解析成一个有类型的 SSA 常量，这边是 float、成为一个属性。
@@ -440,7 +426,7 @@ struct IoTensor {
   // AscGraph 的 `ScalarData`：主机按值传进来的标量输入，kernel 形参是元素类型本身而不是
   // memref，`index` 与普通输入共用一个序号空间。
   //
-  // **必须是显式的一位，不能从 `info.tensor` 的形状全 1 反推**——一个 `Data` 完全可以是
+  // 必须是显式的一位，不能从 `info.tensor` 的形状全 1 反推——一个 `Data` 完全可以是
   // `[1]` 的张量，两者反推不出来。
   bool by_value = false;
 };

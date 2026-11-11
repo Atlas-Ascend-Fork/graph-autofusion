@@ -216,6 +216,8 @@ Status GatherRegApiCall::GenerateComputeTypeLoad(const TPipe &tpipe, const std::
   ss << "AscendC::PipeBarrier<PIPE_ALL>();"
      << std::
             endl;  // Gather以load形式存在，可能会存在同步遗漏的情况（比如直接接concat），在这里手动加一个。可能是由于SIMT影响，仅增加PIPE_V不行。
+  // GatherExtend selects VReg/DataCopy/SIMT using runtime tile sizes and buffer capacity.
+  GE_ASSERT_SUCCESS(SetSemanticFeature(ascgen_utils::template_semantic::kAdaptive));
   result = ss.str();
   return af::SUCCESS;
 }

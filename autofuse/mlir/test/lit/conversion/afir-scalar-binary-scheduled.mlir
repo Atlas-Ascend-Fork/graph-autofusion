@@ -8,7 +8,7 @@
 
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s | FileCheck %s
 
-// 标量操作数过**整条下降流水**：循环生成、内存分配、队列绑定。
+// 标量操作数过整条下降流水：循环生成、内存分配、队列绑定。
 //
 // `afir-scalar-binary-api.mlir` 那份 IR 停在 `convert` 那一层，碰不到这些 pass。而这
 // 几层每一层都默认「op 的每个操作数都是一块缓冲」：
@@ -22,7 +22,7 @@
 // 「no materialized AscendC value」）。这份用例就是为了让它们报出来——加它之前这两条
 // 路是坏的，`afir-scalar-binary-api.mlir` 全绿。
 //
-// **`Scheduled` 那一支不在这里**：这份 IR 的 add 走的仍是 identity plan，
+// `Scheduled` 那一支不在这里：这份 IR 的 add 走的仍是 identity plan，
 // 元素个数取自 `local_tensor.get_size`。标量形态走到那一支的是 CPU E2E
 // （`load_add_scalar_store` / `load_scalar_add_store`）——原先这里写「标量形态按设计没有
 // E2E」，那是跟着 L-1「ATT tiling 拒收含 Scalar 节点的图」写的，而 L-1 是假的。

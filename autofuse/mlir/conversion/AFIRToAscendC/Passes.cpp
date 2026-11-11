@@ -13,11 +13,9 @@
 namespace mlir::ascend::kernel {
 
 void registerAFIRToAscendCPasses() {
-  // Registration order mirrors the real execution order of the AFIR-to-AscendC
-  // pipeline (AFIRToAscendCPipeline.cpp's addAFIRToAscendCPipeline and
-  // addPlanCandidateLoweringPipeline): per-stage passes first, then the two
-  // public pipelines that compose them, followed by internal-precondition and
-  // diagnostic passes.
+  // Register per-stage passes first, then the two public pipelines, followed by
+  // internal-precondition and diagnostic passes. Keep the stage order consistent
+  // with addAFIRToAscendCPipeline and addPlanCandidateLoweringPipeline.
   registerAFIRKernelBodySignaturePass();
   registerAscendCLoopGeneratePass();
   registerAFIRMemoryAllocatePass();

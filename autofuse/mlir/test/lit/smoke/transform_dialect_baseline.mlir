@@ -8,21 +8,15 @@
 
 // transform dialect 基线验证。
 //
-// 设计文档 3.4 计划把 optimize/autoschedule 迁移为 transform.afir.*；3.0 的待确认项
-// 表把「transform dialect 在当前 LLVM 基线可用且可扩展」列为实施前必须先验证的前提，
-// 它决定 5.1 步 9 是否可行。本用例把该结论固定成本仓构建里的可执行事实，而不是靠
-// 读上游文档推断——LLVM 基线若换成不带 transform dialect 的构建，这里立即失败。
+// 验证当前 LLVM 构建支持 transform dialect，为设计文档 3.4 的 transform.afir.*
+// 调度迁移提供可执行基线。若依赖构建移除该方言，本用例应失败。
 //
-// 验证三件事：
-//   1. transform 方言可解析、可注册（af-opt 的 DialectRegistry）；
-//   2. --transform-interpreter 能在 AFIR IR 上实际执行；
-//   3. 匹配 + 改写这一对基本能力可用——foreach_match 按 Op 名匹配 afir.add，
-//      再由 action sequence 改写命中的 Op。这正是调度变换所需的最小能力集。
+// 验证方言注册与解析、interpreter 在 AFIR 上执行，以及 foreach_match 按名称匹配
+// 并由 action sequence 改写 afir.add。这些是调度变换需要的基础能力。
 //
-// 注意用例刻意用 schedule.selected 而非 afir.selected 打标：AFIR Op 带
-// AFIRRejectUnknownAttributes，任何未登记的 afir.* discardable 属性都会被
-// verifier 拒绝。迁移自定义 transform.afir.* Op 时，凡是要往 AFIR Op 上写属性的
-// 变换，属性名都必须先在 ODS 或已知表里登记。
+// 用 schedule.selected 标记，避免写入未登记的 afir.selected。
+// AFIRRejectUnknownAttributes 会拒绝未知 afir.* 属性；自定义 transform.afir.*
+// 若需写入该前缀属性，必须先在 ODS 或已知属性表登记。
 
 // RUN: af-opt --transform-interpreter %s | FileCheck %s
 

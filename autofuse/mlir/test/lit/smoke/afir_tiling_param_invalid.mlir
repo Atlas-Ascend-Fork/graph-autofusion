@@ -8,9 +8,8 @@
 
 // `afir.tiling_param` 的 negative 用例。
 //
-// 名字要同时活在 `#afir.expr` 的符号表与目标 ABI 的字段名里，两边的交集是标识符。
-// 放宽的代价是静默的：非标识符的名字在 IR 里合法，直到 `emitasc.member` 变成生成
-// 不出来的 C++，而那时诊断已经离写错的地方很远了。
+// 参数名同时用于 expr 符号和目标 ABI 字段，必须是标识符。
+// 非法名称应在本层拒绝，不能等到 emitasc.member 生成 C++ 时才报错。
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 

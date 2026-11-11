@@ -42,8 +42,8 @@ FailureOr<SmallVector<std::string>> buildArgumentNames(const AggregateArgumentLa
         ++workspaceCount;
         break;
       case KernelArgumentKind::Tiling:
-        // host 侧的 launch 包装器自己构造 TilingData，不从实参表里接——它不在
-        // `layout.arguments` 里，走到这里说明上游把 ABI 参数也收进来了。
+        // host launch 包装器自行构造 TilingData，不从 layout.arguments 接收。
+        // 若此处遇到 tiling 参数，说明上游错误地将其纳入了 launch 实参。
         return failure();
     }
   }
@@ -91,15 +91,11 @@ FailureOr<std::string> mlir::ascend::kernel::emitAutofuseLaunch(const AggregateA
 
   std::string text;
   llvm::raw_string_ostream os(text);
-  // 按值标量形参与 GM 指针形参在 host 侧的写法不同，两处都要分流（legacy 的
-  // `GetScheduledResultInputOutput` 是同一套写法）：
-  //
-  //   | | 签名里 | 调用 kernel 时 |
-  //   | GM 张量 | `void* input<i>` | `(<cType>)input<i>` |
-  //   | 按值标量 | `<cType> input<i>` | `input<i>`（**不 cast**） |
-  //
-  // 「是不是按值标量」按参数类型判：ABI 层已经把它与 `scalar_input` 角色绑成一条双向
-  // 不变量（`verifyCanonicalKernelArguments`），到这里两者等价。
+  // host 签名和 kernel 调用均需区分 GM 指针与按值标量，与 legacy
+  // GetScheduledResultInputOutput 一致：指针声明为 void*，调用时转换为 cType；
+  // 标量直接声明为 cType，调用时不转换。
+  // verifyCanonicalKernelArguments 保证 scalar_input 角色与非 shaped 类型对应，
+  // 因此这里可按参数类型判断。
   SmallVector<bool> byValue;
   byValue.reserve(argumentTypes.size());
   for (Type type : argumentTypes) {

@@ -17,19 +17,13 @@ configure_lit_site_cfg(
 )
 
 if(ENABLE_AUTOFUSE_MLIR_TESTS)
-    # Boilerplate collector for MLIR gtest executables: add_executable +
-    # add_test + the per-suite check-* driver. Sources and link libraries are
-    # still declared by the caller via the SOURCES/LIBS keywords; extra
-    # target_include_directories / target_compile_definitions stay at the call
-    # site.
-    #
+    # Register an MLIR gtest executable, its CTest entry and a check-* driver.
+    # Callers supply SOURCES/LIBS and any extra include directories or definitions.
+    # Example:
     #   add_afir_gtest(AFIRSymbolicTest
     #     SOURCES ExpressionTest.cpp
-    #     LIBS AFIRSymbolicSupport
-    #   )
-    #
-    # COMMENT overrides the check-* driver's comment; LABELS are appended to
-    # the default "mlir_ut".
+    #     LIBS AFIRSymbolicSupport)
+    # COMMENT overrides the driver message; LABELS extend the default mlir_ut label.
     function(add_afir_gtest name)
         cmake_parse_arguments(AFIR_GTEST "" "COMMENT" "SOURCES;LIBS;LABELS" ${ARGN})
         if(NOT AFIR_GTEST_SOURCES)
@@ -119,7 +113,7 @@ if(ENABLE_AUTOFUSE_MLIR_TESTS)
     add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/ut" ut)
     add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/st" st)
     add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e" e2e)
-    # 量具，排在 e2e 之后：它借用 e2e 定义的 MlirE2eCpuGraphBuilder。不接 check-*。
+    # probe 依赖 e2e 的 MlirE2eCpuGraphBuilder，因此在 e2e 后配置；不加入 check-*。
     add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/probe" probe)
 
     set(AF_AUTOFUSE_MLIR_TEST_DEPENDS af-afir-gen af-opt ascir-translate)

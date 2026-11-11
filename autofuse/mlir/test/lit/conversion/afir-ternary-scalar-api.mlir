@@ -11,14 +11,14 @@
 // RUN:   | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 
-// **三元族的标量形态（mem 侧）**：`select` / `where` 的 then / else，`clip_by_value` 的
+// 三元族的标量形态（mem 侧）：`select` / `where` 的 then / else，`clip_by_value` 的
 // min / max，各自可以是标量，位置不换。
 //
-// 供给是同名重载——`where.h` 的场景 1/2/3、`clipbyvalue.h` 的场景 2/3/4——所以这一族
-// **没有新的 AscendC def**，只是把后两个操作数的类型约束放宽成「tile 或标量」。三种组合
-// （只有 else、只有 then、两个都是）走的是同一个 implementation，因为发出来的调用位置相同。
+// 可用实现是同名重载——`where.h` 的场景 1/2/3、`clipbyvalue.h` 的场景 2/3/4——所以这一类
+// 没有新的 AscendC def，只是把后两个操作数的类型约束放宽成「tile 或标量」。三种组合
+// （只有 else、只有 then、两个都是）走的是同一个 implementation，因为生成的调用位置相同。
 //
-// **第一个操作数（mask / x）不能是标量**，这一条在 ODS 那一层定死：`where.h` 的三个标量
+// 第一个操作数（mask / x）不能是标量，这一条在 ODS 那一层定死：`where.h` 的三个标量
 // 重载的 `mask` 都是 `LocalTensor<uint8_t>`；`clipbyvalue.h` 只有「三个全是标量」那一个
 // 重载收标量的 `src_x`，而它没有 count / tmp 形参，verifier 的「至少一个输入有形状」本来
 // 就挡掉了全标量。负例在 afir-ternary-scalar-invalid.mlir。
@@ -132,7 +132,7 @@ func.func @clip_scalar_max(%x: !ascendc.local_tensor<?xf32>, %min: !ascendc.loca
 // IR-LABEL: func.func @clip_scalar_max
 // IR: ascendc.clipbyvalue_contiguous %arg2, %arg0, %arg1, %{{.*}}
 
-// 裸名、没有模板实参；**count 在 tmp buffer 前面**（这一族的实参序与 `compare` 那一对
+// 裸名、没有模板实参；count 在 tmp buffer 前面（这一类的实参序与 `compare` 那一对
 // 相反，见 `OpVecCmpsel.td` 上那段）。
 // CPP: {{^ *}}Where({{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}}, c2_f32, static_cast<uint32_t>({{v[0-9]+}}), {{v[0-9]+}});
 // CPP: {{^ *}}Where({{v[0-9]+}}, {{v[0-9]+}}, c3_f32, {{v[0-9]+}}, static_cast<uint32_t>({{v[0-9]+}}), {{v[0-9]+}});

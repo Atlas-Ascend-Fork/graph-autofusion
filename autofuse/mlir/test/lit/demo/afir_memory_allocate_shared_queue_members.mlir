@@ -16,10 +16,8 @@ module {
       #afir.tensor_desc<axis = [0], repeats = [#afir.expr<"5">], strides = [#afir.expr<"1">],
         vectorized_axis = [0], vectorized_strides = [#afir.expr<"1">], role = <input>>
     ],
-    // `size_var` 里不写 `"16"`：size_var 是**符号**表，字面量不是变量。此前写在这里
-    // 会让 TilingData 多出一个叫 `16` 的字段、并按名字去取它——生成的 C++ 是
-    // `tiling.16`，而失败发生在离这里很远的地方。轴尺寸本来就是常量，物化时直接
-    // 出常量，不需要经过 tiling 参数。
+    // size_var 只列符号，不列字面量 "16"。常量轴尺寸直接物化为常量，
+    // 不经 TilingData，避免生成名为 16 的非法 C++ 字段。
     afir.asc_graph = #afir.asc_graph<
       axes = [<id = 0, name = "z", axis_type = Original, size = #afir.expr<"16">>],
       type = Compute>,

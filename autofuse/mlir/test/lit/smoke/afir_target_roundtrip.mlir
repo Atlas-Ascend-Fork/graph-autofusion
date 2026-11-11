@@ -8,12 +8,11 @@
 
 // `#afir.target` 的 round-trip。
 //
-// 此前这份信息是 `ascendc.target_aiv_num` / `ascendc.target_ub_size` 两个散的 i64，
-// 挂在 `api/ascendc` 注册的方言前缀下，因而既没有 verifier 也没有文本形态可锁；目标
-// 标识（soc）则根本没进过 IR，一份 dump 出来的 plan module 看不出它是为哪颗芯片切的。
+// target 将 soc 标识、核数和 UB 大小收敛为有类型属性，替代分散的后端整数属性。
+// round-trip 检查其文本形式，使 dump 能保留完整的目标信息。
 //
-// 锁住文本有两层用处：bridge 的产出与 artifact 的消费之间有一个不依赖任何 pass 的
-// 参照；`soc` 将来要被 `resolveSessionTargetProfile` 反解回 profile，靠的也是这个形态。
+// 固定序列化形式，为 bridge 产出和 artifact 消费提供独立基线，
+// 并保留后续按 soc 恢复目标 profile 所需的信息。
 
 // RUN: af-opt %s | FileCheck %s
 // RUN: af-opt %s | af-opt | FileCheck %s

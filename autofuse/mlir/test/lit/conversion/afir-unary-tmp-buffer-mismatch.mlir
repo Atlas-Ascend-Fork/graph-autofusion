@@ -11,9 +11,9 @@
 
 // 「tmp buffer 的有无必须与选中的 API 匹配」这条判据单独的负例。
 //
-// 它必须和「供给表不匹配」分开验：afir-reciprocal-{extension,stock}-api.mlir 里那条
+// 它必须和「支持表不匹配」分开验：afir-reciprocal-{extension,stock}-api.mlir 里那条
 // `WRONGTARGET` 两条判据同时触发，把 tmp buffer 这一整段删掉它照样绿。这里选的两个 op
-// **两张供给表上的要求相同**（neg 两侧都不要、sigmoid 两侧都要），所以两个 `--target`
+// 两张支持表上的要求相同（neg 两侧都不要、sigmoid 两侧都要），所以两个 `--target`
 // 用同一份 IR、同一条 expected-error——能触发的只剩 tmp buffer 这一条。
 //
 // 两个方向都要报：多给了一块要报（不能把那块 UB 悄悄丢掉），少给了一块也要报

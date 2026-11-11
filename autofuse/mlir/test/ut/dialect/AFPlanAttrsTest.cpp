@@ -19,10 +19,8 @@ using namespace mlir;
 
 namespace {
 
-// `afplan` 承载候选身份（设计文档 2.2 / 2.3、5.1 步 7）。用例覆盖两件事：
-//   1) 访问器——取到即代表已过 verifier，调用方不必重复非负校验；
-//   2) verifier 的每条分支——其中「空分派表」这条在文本 IR 里够不到（ODS 生成的解析器
-//      要求列表非空），只有程序化构造这条路径能触发，因此必须在 UT 里覆盖。
+// 测试候选身份访问器与 verifier 分支。已校验属性无需消费者重复检查非负性。
+// 空分派表在文本解析时即被拒绝，需通过程序化构造覆盖属性 verifier。
 
 class AFPlanAttrsTest : public ::testing::Test {
  protected:

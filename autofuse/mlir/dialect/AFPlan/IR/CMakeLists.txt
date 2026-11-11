@@ -15,9 +15,9 @@ mlir_tablegen(AFPlan/IR/AFPlanAttrs.cpp.inc -gen-attrdef-defs -attrdefs-dialect=
 add_public_tablegen_target(AFPlanAttrsIncGen)
 add_dependencies(AFPlanAttrsIncGen AFPlanDialectIncGen)
 
-# 与 AFIR 同样把方言参考文档接进生成流程（设计文档 5.5）：afplan 是内部命名空间，
-# 不进对外 Op reference 门禁，但属性语义同样不应靠手写文档维护。
-#     cmake --build build --target AFPlanDocGen
+# 从方言定义生成 AFPlan 属性参考文档（设计文档 5.5），不手工维护。
+# afplan 为内部命名空间，不纳入公开 Op reference 门禁。
+# 构建：cmake --build build --target AFPlanDocGen
 add_mlir_doc(AFPlanAttrs AFPlan Dialects/ -gen-dialect-doc -dialect afplan)
 add_dependencies(AFPlanDocGen AFPlanDialectIncGen AFPlanAttrsIncGen)
 

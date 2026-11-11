@@ -15,15 +15,15 @@
 // `copy_sign` / `trunc_div` 同形——**全部只有 reg 侧，不带 tmp**——所以每个 op 只有一条
 // implementation。
 //
-// 这一份要钉的是**挑错供给**那个坑：legacy 的 reg 侧发的是 fork 的包装
+// 这一份要钉的是选错可用实现那个坑：legacy 的 reg 侧生成的是 fork 的包装
 // `BitwiseNotExtend` / `BitwiseOrExtend` / `BitwiseXorExtend`
-// （`api_regbase/bitwise_not.h` / `bitwise_or.h` / `bitwise_xor.h`），**不是**标准调用
+// （`api_regbase/bitwise_not.h` / `bitwise_or.h` / `bitwise_xor.h`），不是标准调用
 // `AscendC::BitwiseNot` / `BitwiseOr` / `BitwiseXor`（`adv_api/math/` 下那三个同名函数
-// 确实存在，对 i16/ui16/i32/ui8 这几位两者转发等价，但字面不同——挑标准调用会发一个
-// legacy 从不发的调用，与 `afir.hypot` 那次同一种坑）。`CPP-NOT` 那几条盯的就是这个。
+// 确实存在，对 i16/ui16/i32/ui8 这几位两者转发等价，但字面不同——挑标准调用会生成一个
+// legacy 从不生成的调用，与 `afir.hypot` 那次同一种坑）。`CPP-NOT` 那几条盯的就是这个。
 //
 // 实参个数：一元三个（dst, src, count），二元四个（dst, src0, src1, count）。
-// **一元带显式模板实参、二元不带**：`printApiExtensionUnary` 一贯打 `<T>`
+// 一元带显式模板实参、二元不带：`printApiExtensionUnary` 一贯打 `<T>`
 // （`NegExtend<float>` 那一支），`printApiExtensionBinary` 的无 tmp 重载不打
 // （`CopySignExtend` 那一支）——两条路径不对称，钉死各自该有的那一半。
 

@@ -6,15 +6,15 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 计算 op 的**向量化轴 extent 全为 1**：本趟只有一个元素，元素数是常量 1，一层循环都不建。
+// 计算 op 的向量化轴 extent 全为 1：本趟只有一个元素，元素数是常量 1，一层循环都不建。
 //
 // 真实来源是广播轴被切分、又与外轴合成一根块轴的那个模板（`exec_condition =
 // cache_block_split_fused_brc_axis`，与 `afir-exec-condition-cache-guard.mlir` 同一张图）：
-// 调度把 elementwise 排到 `afir.broadcast` **之前**，于是它作用在广播前那块
+// 调度把 elementwise 排到 `afir.broadcast` 之前，于是它作用在广播前那块
 // `repeats = [n, 1, 1], vectorized_axis = [zt]` 的 tile 上。`[8,1] -> [8,128]` 的 `B0Y1`
 // 模板实测就是这个形状（2026-10-12，`test/probe/CapabilityBoundaryProbe.cpp` 的 T2 / T6）。
 //
-// 缺了这一条会怎样：`collapseVectorizedAxes` 在这个形状上返回**零段**，而
+// 缺了这一条会怎样：`collapseVectorizedAxes` 在这个形状上返回零段，而
 // `materializeVectorizedSegments` 的第一道闸是「段数不足窗口大小就报失败」，于是 pattern
 // 失败而 capability 答支持——`failed to legalize operation 'afir.abs'`，整图硬失败而不是
 // 回落。搬运侧（`materializeScheduledTileIndices`）早就收下了同一档形状、取常量 1，
@@ -92,7 +92,7 @@ module @plan0 attributes {
     %mid = memref.alloc() {afir.buffer_desc = #afir.buffer_desc<space = <ub>, buffer_id = 2,
                                                                 size_from_resource = true,
                                                                 life_time_axis_id = -1>} : memref<1x1x1xf32>
-    // 广播**之前**的那个计算 op：向量化轴 `zt` 在这块 tile 上 repeat 是 1。
+    // 广播之前的那个计算 op：向量化轴 `zt` 在这块 tile 上 repeat 是 1。
     %computed = afir.abs %loaded outs(%mid) tmp(%tmp) {
       afir.destination_descs = [#src_tile],
       afir.operand_descs = [#src_tile],
@@ -137,5 +137,5 @@ module @plan0 attributes {
 // IR: %[[COUNT:.*]] = arith.constant 1 : index
 // IR-NEXT: ascendc.abs_extend %[[DST]], %[[SRC]], %{{.*}}, %[[COUNT]]
 
-// kernel 文本侧的同一件事：发给算子的元素数就是 1。
+// kernel 文本侧的同一件事：传给算子的元素数就是 1。
 // CPP: AbsExtend<float>({{.*}}, {{.*}}, {{.*}}, static_cast<uint32_t>(c1_idx));

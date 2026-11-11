@@ -6,8 +6,8 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-# 菱形，分叉点是 unary（探针 T5e）。形状与 dtype 都不起作用——五个形状格 × f32/f16
-# 实测一致，所以这里只一格，取 `[128, 8]`。
+# 覆盖 unary 分叉的菱形图，采用 [128, 8]。
+# 探针 T5e 在五种形状及 f32/f16 上结果一致，此处不重复注册所有组合。
 add_mlir_e2e_cpu_case(load_abs_diamond_store_128x8
     OUTPUT_SHAPE "[128, 8]"
     INPUT_SHAPES "[128, 8]" "[128, 8]" "[128, 8]"

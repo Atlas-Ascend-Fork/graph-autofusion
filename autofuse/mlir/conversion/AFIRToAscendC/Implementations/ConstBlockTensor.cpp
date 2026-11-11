@@ -19,13 +19,12 @@
 namespace mlir::ascend::kernel::elementwise {
 namespace {
 
-// 一个 block 的字节数。包装读这块张量时把 `src0BlkStride` / `src0RepStride` 都设成 0,
-// 也就是每个 repeat 都回到同一个 block 的开头——所以一个 block 就够，与 tile 多大无关。
-// legacy 这里写的是 `ONE_BLK_SIZE`，同一个数。
+// 包装将 src0BlkStride / src0RepStride 设为 0，每个 repeat 都读取同一 block，
+// 因此只需分配一个 block，不随 tile 大小增长。字节数与 legacy ONE_BLK_SIZE 一致。
 constexpr int64_t kBlockBytes = 32;
 
-// 已经造过的那一块。查的是 `ascendc.tbuf.get_tensor` 上的认领标记，不是别的：认领标记
-// 的取值是带类型的常量本身，一条属性同时说清「值是几」与「什么 dtype」。
+// 按 ascendc.tbuf.get_tensor 的标记查找已创建的常量块。
+// 标记使用带类型的常量，同时区分数值与 dtype。
 Value findExistingConstBlock(func::FuncOp func, TypedAttr wanted) {
   Value found;
   func.walk([&](ascendc::TBufGetTensorOp get) {
@@ -38,8 +37,8 @@ Value findExistingConstBlock(func::FuncOp func, TypedAttr wanted) {
   return found;
 }
 
-// 入口块里 `MemoryAllocate` 建的那个 `ascendc.pipe`。只喂 `!ascendc.local_tensor` 参数的
-// lit 用例里一个资源都没有，于是也没有 pipe——那时候返回空，调用方自己建一个。
+// 查找 MemoryAllocate 在入口块创建的 ascendc.pipe。
+// 仅带 local_tensor 参数的 LIT 可能没有资源；此时返回空，由调用方创建 pipe。
 Value findPipe(func::FuncOp func) {
   for (Operation &operation : func.front()) {
     if (auto pipe = dyn_cast<ascendc::PipeOp>(operation)) {
@@ -59,8 +58,7 @@ FailureOr<Value> getOrCreateConstBlockTensor(ConversionPatternRewriter &rewriter
   }
   auto floatType = dyn_cast<FloatType>(elementType);
   if (!floatType) {
-    // 今天两块常量都是浮点（`RsqrtExtend` 的 float、`LogicalNot` 的 half）。整数那一支
-    // 一个实例都没有，先让它报出来，别先摆一条没人走的分支在这里。
+    // 当前使用者仅需浮点常量：RsqrtExtend 用 float，LogicalNot 用 half；整数请求时报错。
     return op->emitOpError("a pre-filled constant block currently requires a floating-point element type");
   }
   llvm::APFloat converted = value;
@@ -72,9 +70,8 @@ FailureOr<Value> getOrCreateConstBlockTensor(ConversionPatternRewriter &rewriter
     return existing;
   }
 
-  // 位置：入口块的 pipe 之后。这块常量的字节数是编译期的 32，不引用任何 TilingData
-  // 符号，所以不必排在 `afir.tiling_param` 之后——排在 pipe 之后就够，而 pipe 本身已经
-  // 在那一段之后了。
+  // 在入口块的 pipe 后创建常量块。大小固定为 32 字节，不依赖 TilingData 符号；
+  // pipe 已位于 tiling 参数序言之后，无需另行安排位置。
   OpBuilder::InsertionGuard guard(rewriter);
   const Location loc = func.getLoc();
   Value pipe = findPipe(func);

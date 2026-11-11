@@ -31,9 +31,9 @@ include "mlir/IR/OpBase.td"
 // `DataCopy` 这个函数**——`asc/include/basic_api/reg_compute/kernel_reg_compute_datacopy_intf.h`
 // 提供的是 `Load` / `LoadAlign` / `LoadUnAlign` / `Store` / `StoreAlign` / `StoreUnAlign`
 // 这一组（`DataCopyMode` 只是其中几个重载的模板实参）。上游那两个 op 对的是另一代的
-// 接口；照着发出来的代码编不过，而且是在设备编译器上才报。
+// 接口；照着生成的代码编不过，而且是在设备编译器上才报。
 //
-// 所以这里按**这一档头文件实际的签名**建两个 op，与 legacy 的 `vec_func_call` 发的那一对
+// 所以这里按**这一档头文件实际的签名**建两个 op，与 legacy 的 `vec_func_call` 生成的那一对
 // 逐字同形（legacy 写 `MicroAPI::`，而 `namespace MicroAPI = Reg`，同一个函数）：
 //
 //     LoadAlign(U& dstReg, __ubuf__ T* srcAddr)

@@ -101,21 +101,15 @@ FailureOr<ComputeUnitSpec> TargetProfile::getComputeUnitSpec(AICoreUnit unit) co
   return ComputeUnitSpec{};
 }
 
-// 没写明的 profile 按指令族回落。家族未知就停在 Unknown，由调用点产生诊断，
-// 不得默认视为支持。
-//
-// `getFeatureState` 确实是先查 `features_` 再落到这里，但这一项今天没有 profile 输入
-// 通道：`TargetProfileLoader` 的 `ReadFeatures` 只读 `support_bf16` 与 `support_inf_nan`。
-// 也就是说这张表目前是它的唯一来源，不要按「profile 里可以覆盖」来读。
-//
-// **这里曾经还有一项 `DataCopyPadExtend`**，写的是「reg-base 家族才有这个 wrapper」。
-// 那是错的：包装定义在 mem 侧的 `autofuse/ascendc/api/datacopy.h`，legacy 的
-// `load_api_call.cpp` 两侧都无条件发它。按它分流的后果是 mem 侧发裸
-// `AscendC::DataCopy`，尾块 count 不是 32B 对齐时在 NPU 上静默丢尾巴。已整条删除。
+// 未显式配置的 feature 按指令族查询；未知家族保持 Unknown，由调用点诊断，不能默认支持。
+// getFeatureState 先查 features_，但 ReadFeatures 目前只加载 support_bf16 和
+// support_inf_nan，因此此处列出的 feature 尚不能由 profile 覆盖。
+// DataCopyPadExtend 不按家族区分：mem 侧 datacopy.h 也定义该包装，legacy 两侧均使用。
+// 若 mem 侧改为裸 DataCopy，非 32B 对齐的尾块可能丢失数据。
 FeatureState TargetProfile::getFeatureStateFromArch(TargetFeature feature) const {
   switch (feature) {
     case TargetFeature::RegBasedApiFamily:
-      // reg-base 的扩展头（`xxx_reg_base.h`）只在 V3510 这一族上供给。
+      // reg-base 的扩展头（`xxx_reg_base.h`）只在 V3510 这一类上可用实现。
       return identity_.npuArch == NpuArch::V3510   ? FeatureState::Available
              : identity_.npuArch == NpuArch::V2201 ? FeatureState::Unavailable
                                                    : FeatureState::Unknown;

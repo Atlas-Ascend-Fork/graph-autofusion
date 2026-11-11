@@ -224,7 +224,7 @@ module {
 
 // MULTI-LABEL: func.func private @buffer_reuse_multi_reader
 // 两个矢量读者读同一块 %scratch 后由 load 复用：同 pipe 内程序序公理保证先读先完成，
-// 只有**末读者**需要建边。断言三件事：两个读者相邻（之间无 record，否则是「每个读者
+// 只有末读者需要建边。断言三件事：两个读者相邻（之间无 record，否则是「每个读者
 // 各建一对」的旧形态）、record 紧跟第二个读者、wait 后才是复用的 load。
 // MULTI: afir.add
 // MULTI: ascendc.pipe_barrier pipe_v

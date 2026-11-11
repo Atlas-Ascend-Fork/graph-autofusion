@@ -195,19 +195,22 @@ void SaveConcatTilingApi(const std::map<std::string, std::string> &tiling_funcs)
 }  // namespace
 
 namespace {
-// 编译命令常量
-const std::string kCompileCmd =
-    "g++ tiling_func_main_concat.cpp Concat_tiling_func.cpp "
+// 编译生成代码的参数
+const std::string kCompileArgs =
+    "tiling_func_main_concat.cpp Concat_tiling_func.cpp "
     "-o tiling_func_main_concat -I ./ -DSTUB_LOG";
-const std::string kCompileDebugCmd =
-    "g++ -ggdb3 -O0 tiling_func_main_concat.cpp Concat_tiling_func.cpp "
+const std::string kCompileDebugArgs =
+    "-ggdb3 -O0 tiling_func_main_concat.cpp Concat_tiling_func.cpp "
     "-o tiling_func_main_concat -I ./ -DSTUB_LOG";
-const std::string kCompileAllCmd =
-    "g++ tiling_func_main_concat.cpp Concat_*_tiling_func.cpp "
+const std::string kCompileAllArgs =
+    "tiling_func_main_concat.cpp Concat_*_tiling_func.cpp "
     "-o tiling_func_main_concat -I ./ -DSTUB_LOG";
-const std::string kCompileEmptyCmd =
-    "g++ tiling_func_main_concat_empty.cpp Concat_tiling_func.cpp "
+const std::string kCompileEmptyArgs =
+    "tiling_func_main_concat_empty.cpp Concat_tiling_func.cpp "
     "-o tiling_func_main_concat_empty -I ./ -DSTUB_LOG";
+const std::string kCompileEqualPriorityArgs =
+    "-ggdb3 -O0 tiling_func_main_concat_equal_priority.cpp Concat_tiling_func.cpp "
+    "-o tiling_func_main_concat_equal_priority -I ./ -DSTUB_LOG";
 }  // namespace
 
 class STestGenConcat : public ::testing::Test {
@@ -1162,7 +1165,7 @@ TEST_F(STestGenConcat, tque_tbuf_case0) {
   oss.open("tiling_func_main_concat.cpp", std::ios::out);
   oss << kTqueTbufCase0Main;
   oss.close();
-  ret = std::system(kCompileDebugCmd.c_str());
+  ret = CompileGeneratedTiling(kCompileDebugArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat");
   EXPECT_EQ(ret, 0);
@@ -1233,7 +1236,7 @@ void WriteMainCompileRunAndCheck(const std::string &main_content, const std::str
   oss.open("tiling_func_main_concat.cpp", std::ios::out);
   oss << main_content;
   oss.close();
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -1675,7 +1678,7 @@ int main() {
   oss << kRunTilingFuncMainLocal;
   oss.close();
 
-  auto ret = std::system(kCompileEmptyCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileEmptyArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat_empty > ./info_empty.log");
   EXPECT_EQ(ret, 0);
@@ -1835,7 +1838,7 @@ int main() {
 )";
   oss << ResultCheckerUtils::DefineCheckerFunction() << kRunTilingFuncMainLocal;
   oss.close();
-  auto ret = std::system(kCompileDebugCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileDebugArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat");
   EXPECT_EQ(ret, 0);
@@ -1854,9 +1857,7 @@ TEST_F(STestGenConcat, equal_priority_tiling) {
   oss.open("tiling_func_main_concat_equal_priority.cpp", std::ios::out);
   oss << ResultCheckerUtils::DefineCheckerFunction() << kEqualPriorityTilingMain;
   oss.close();
-  auto ret = std::system(
-      "g++ -ggdb3 -O0 tiling_func_main_concat_equal_priority.cpp "
-      "Concat_tiling_func.cpp -o tiling_func_main_concat_equal_priority -I ./ -DSTUB_LOG");
+  auto ret = CompileGeneratedTiling(kCompileEqualPriorityArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat_equal_priority");
   EXPECT_EQ(ret, 0);
@@ -1875,9 +1876,7 @@ TEST_F(STestGenConcat, equal_priority_tiling_trade_off) {
   std::ofstream oss("tiling_func_main_concat_equal_priority.cpp", std::ios::out);
   oss << ResultCheckerUtils::DefineCheckerFunction() << kEqualPriorityTradeoffMain;
   oss.close();
-  auto ret = std::system(
-      "g++ -ggdb3 -O0 tiling_func_main_concat_equal_priority.cpp "
-      "Concat_tiling_func.cpp -o tiling_func_main_concat_equal_priority -I ./ -DSTUB_LOG");
+  auto ret = CompileGeneratedTiling(kCompileEqualPriorityArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat_equal_priority");
   EXPECT_EQ(ret, 0);
@@ -1926,7 +1925,7 @@ int main() {
 )";
   oss << ResultCheckerUtils::DefineCheckerFunction() << kRunTilingFuncMainLocal;
   oss.close();
-  auto ret = std::system(kCompileDebugCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileDebugArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat");
   EXPECT_EQ(ret, 0);
@@ -1968,7 +1967,7 @@ int main() {
 )";
   oss << ResultCheckerUtils::DefineCheckerFunction() << kRunTilingFuncMainLocal;
   oss.close();
-  auto ret = std::system(kCompileDebugCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileDebugArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat");
   EXPECT_EQ(ret, 0);
@@ -2010,7 +2009,7 @@ int main() {
 )";
   oss << ResultCheckerUtils::DefineCheckerFunction() << kRunTilingFuncMainLocal;
   oss.close();
-  auto ret = std::system(kCompileDebugCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileDebugArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat");
   EXPECT_EQ(ret, 0);
@@ -2168,7 +2167,7 @@ TEST_F(STestGenConcat, case_axes_reorder) {
   ret = autofuse::test::CopyStubFiles(TOP_DIR, "autofuse/tests/st/att/testcase/stub/");
   EXPECT_EQ(ret, 0);
 
-  ret = std::system(kCompileAllCmd.c_str());
+  ret = CompileGeneratedTiling(kCompileAllArgs);
   EXPECT_EQ(ret, 0);
 
   ret = std::system("./tiling_func_main_concat");
@@ -2339,12 +2338,12 @@ void STestGenConcat::PrepareTestEnvironmentFiles(const std::string &test_header_
 }
 
 void STestGenConcat::CompileGeneratedTilingCode() {
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
 }
 
 void STestGenConcat::CompileAndRunTilingTest(const std::string &output_file) {
-  auto ret = std::system((kCompileCmd + " 2>&1").c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs + " 2>&1");
   EXPECT_EQ(ret, 0);
 
   ret = std::system(("./tiling_func_main_concat > " + output_file + " 2>&1").c_str());
@@ -2469,7 +2468,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_search_axis_name) {
 
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order) {
   EXPECT_EQ(ConstructTwoScheduleResultS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2479,7 +2478,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order) {
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_force_schedule_result) {
   setenv("AUTOFUSE_DFX_FLAGS", "--force_schedule_result=0", 1);
   EXPECT_EQ(ConstructTwoScheduleResultS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2490,7 +2489,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_forc
 // 默认选择tiling key 0
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_normal_tiling_case) {
   EXPECT_EQ(ConstructConcatTwoTilingCaseS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2501,7 +2500,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_norm
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_force_tiling_case) {
   setenv("AUTOFUSE_DFX_FLAGS", "--force_tiling_case=1", 1);
   EXPECT_EQ(ConstructConcatTwoTilingCaseS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2513,7 +2512,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_forc
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_force_op_name) {
   setenv("AUTOFUSE_DFX_FLAGS", "--force_template_op_name=Concat;--force_tiling_case=1", 1);
   EXPECT_EQ(ConstructConcatTwoTilingCaseS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2525,7 +2524,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_forc
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_force_error_op_name) {
   setenv("AUTOFUSE_DFX_FLAGS", "--force_template_op_name=Conct;--force_tiling_case=1", 1);
   EXPECT_EQ(ConstructConcatTwoTilingCaseS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2537,7 +2536,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_forc
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_force_op_name_group0_1) {
   setenv("AUTOFUSE_DFX_FLAGS", "--force_template_op_name=Concat;--force_tiling_case=g0_1", 1);
   EXPECT_EQ(ConstructConcatTwoTilingCaseS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2549,7 +2548,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_forc
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_force_error_op_name2) {
   setenv("AUTOFUSE_DFX_FLAGS", "--force_template_op_name=Conct;--force_schedule_result=1", 1);
   EXPECT_EQ(ConstructConcatTwoTilingCaseS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2561,7 +2560,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_forc
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_force_op_name2) {
   setenv("AUTOFUSE_DFX_FLAGS", "--force_template_op_name=Concat;--force_schedule_result=1", 1);
   EXPECT_EQ(ConstructTwoScheduleResultS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);
@@ -2573,7 +2572,7 @@ TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_forc
 TEST_F(STestGenConcat, reuse_schedule_group_with_different_input_axis_order_auto_tuning) {
   setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=1", 1);
   EXPECT_EQ(ConstructTwoScheduleResultS0S1(), af::SUCCESS);
-  auto ret = std::system(kCompileCmd.c_str());
+  auto ret = CompileGeneratedTiling(kCompileArgs);
   EXPECT_EQ(ret, 0);
   ret = std::system("./tiling_func_main_concat > ./info.log");
   EXPECT_EQ(ret, 0);

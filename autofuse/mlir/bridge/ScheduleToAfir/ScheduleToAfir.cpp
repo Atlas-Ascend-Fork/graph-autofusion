@@ -47,58 +47,58 @@ namespace bridge {
 
 namespace detail {
 
-// AFIR 的元素类型域有哪几位，真源在 `support/AfirElementTypes.h`。这里只剩两件 bridge
-// 自己的事：`ge::DataType` 怎么对到那张表上，以及下面那张**暂缓名单**。
+// AFIR 的元素类型域有哪几位，权威定义在 `support/AfirElementTypes.h`。这里只剩两件 bridge
+// 自己的事：`ge::DataType` 怎么对到那张表上，以及下面那张暂缓名单。
 //
-// 暂缓名单与供给表是两回事，改造之前它们挤在同一个 switch 里，于是立刻出事：头文件写着
+// 暂缓名单与支持表是两回事，改造之前它们挤在同一个 switch 里，于是立刻出事：头文件写着
 // 「bf16 已经开了」，而这个函数对 `DT_BF16` 返回 `false`——两句话互相矛盾，谁都不会红。
 // 分开写之后，「这一位建模了没有」由表回答，「建模了为什么还不放进来」由名单回答，而且
 // 名单上每一行都必须带得出理由。
 
-// **这张名单现在是空的。bf16 那一行 2026-10-22 撤掉，理由是量出来的，不是推断。**
+// 这张名单现在是空的。bf16 那一行 2026-10-22 撤掉，理由是量出来的，不是推断。
 //
 // 它原先写的是「搬运两端同 dtype 的 verifier 挡着，开闸会把 9 格干净回落变成硬失败」。
 // 开闸实测（reg 侧接管表，`(bf16|bfloat16).*_codegen_v2`，28 格有目标）：
 //
 //     takeover 10 / hard-failure 12 / fallback 6
 //
-// 那条诊断确实在，12 格都是它——**所以那一行拦得对，但拦的理由找错了地方**：
+// 那条诊断确实在，12 格都是它——所以那一行拦得对，但拦的理由找错了地方：
 //
 //     'afir.store' op transfer source and destination must have the same element type
 //
-// **但首因不在搬运建模上，在 legacy 的用例样板上。** 把 `cos_bf16`（硬失败）与
+// 但首因不在搬运建模上，在 legacy 的用例样板上。 把 `cos_bf16`（硬失败）与
 // `acos_bf16`（接管）的 `AutoFuseAfterOptimize` 图摆在一起，差别只有一处：
 //
-//   - 两张图的 Store 自己都是**同 dtype** 的（`Cast(f32→bf16) → Store(bf16→bf16)`，
+//   - 两张图的 Store 自己都是同 dtype 的（`Cast(f32→bf16) → Store(bf16→bf16)`，
 //     `improve_precision` 的 `ProcessStoreNodes` 按预期插了那个 Cast）；
-//   - `cos_bf16` 的 `Output` 节点落在**缺省的 f32** 上，而它与 Store 共用同一个 GM
+//   - `cos_bf16` 的 `Output` 节点落在缺省的 f32 上，而它与 Store 共用同一个 GM
 //     `tensor_id`。于是那块 GM 被两处声明成两种 dtype，桥按 `Output` 建 GM 张量的元素
 //     类型，verifier 看到的是 bf16 → f32。
 //
 // 源头是 `tests/framework/share_graph/src/share_graph.cc` 的建图函数漏了一行
 // `y.y.dtype = af::DT_BF16;`。legacy codegen 从不读 `Output` 这一位，所以漏了也一直是绿的。
-// 逐个查过 22 个 bf16 建图函数，这条判据**一格不差**：12 个硬失败的全缺那一行，10 个接管
+// 逐个查过 22 个 bf16 建图函数，这条判据一格不差：12 个硬失败的全缺那一行，10 个接管
 // 的全有。（`add_exp_bf16` 一类也缺，但它们先被 VectorFunc 那道闸拦下，到不了 verifier。）
 //
-// 所以 **`verifyTransfer` / `verifyTransferIndexingMaps` 是对的，不要去放宽它**：那 12 张
+// 所以 `verifyTransfer` / `verifyTransferIndexingMaps` 是对的，不要去放宽它：那 12 张
 // 图真的自相矛盾，放宽只会把硬失败换成静默按 f32 读一块 bf16 的内存。账收在用例样板那一侧
 // ——那 12 个建图函数各补一行 `y.y.dtype`，再量：
 //
 //     takeover 18 / hard-failure 0 / fallback 10
 //
 // 12 格里 8 格直接翻成接管（acosh / ceil / cos / erf / log1p / pow / round / sign），另 4 格
-// 变成干净回落，露出的是下一层**另一个**缺口：`afir.add`（add_floor / bf16_add）、
+// 变成干净回落，露出的是下一层另一个缺口：`afir.add`（add_floor / bf16_add）、
 // `afir.nddma`、`afir.reciprocal` 这三个 op 在 bf16 上找不到 implementation，而
 // `ascir_op_lowering_matrix.csv` 的 `reg_dtypes` 列里 legacy 三个都有 bf16。
 // `ElementTypeMatrixTest` 的 `kKnownNarrower` 快照里没有它们，也就是说那道门禁本该报而没报
-// ——**为什么没报还没查清**，别拿这段当已知结论用。
+// ——为什么没报还没查清，别拿这段当已知结论用。
 //
 // 补那 12 行对 legacy 无影响，是量过的：12 个用例的第二阶段（`_e2e_v2`，编生成的 kernel 并
 // 比对 expect_kernel）在 MLIR 全关（不设 `AF_ENABLE_MLIR_CODEGEN`，`ReadMlirCodegenOptions`
 // 的 `enabled` 就是 false）下 12/12 过。legacy codegen 不读 `Output` 这一位，但这是实测，
 // 不是据此推断。
 //
-// 新增一行的格式：供给表上那一位的 NAME / `ge::DataType` 的枚举名 / 一句话理由。理由必须
+// 新增一行的格式：支持表上那一位的 NAME / `ge::DataType` 的枚举名 / 一句话理由。理由必须
 // 是量出来的首因——上一行就是败在「推断得很合理，但没人量过」。
 #define AFIR_ELEMENT_TYPE_HELD_BACK(M)
 
@@ -138,7 +138,7 @@ llvm::ArrayRef<HeldBackDType> HeldBackDTypes() {
   return entries;
 }
 
-// 桥这一层叫它什么。**与 `IsAfirModeledDType` 是两个问题**：这个答得出名字的比那个收的
+// 桥这一层叫它什么。与 `IsAfirModeledDType` 是两个问题：这个答得出名字的比那个收的
 // 多一截（i8 / i64 / ui32 / ui64），多出来的那些正是拒收诊断里要印的那个类型名。
 std::optional<std::string> DTypeStr(ge::DataType dtype) {
   switch (dtype) {
@@ -243,7 +243,7 @@ llvm::StringRef DomainName(BindingDomain domain) {
   return domain == BindingDomain::Queue ? "queue" : "buffer";
 }
 
-// 一个元素占几字节。**答的范围比供给表宽**，理由见
+// 一个元素占几字节。答的范围比支持表宽，理由见
 // `support/AfirElementTypes.h` 里 `AFIR_ELEMENT_TYPE_NAMED_ONLY` 的字节列那段。
 std::optional<int64_t> ElementByteWidth(ge::DataType dtype) {
   switch (dtype) {
@@ -514,7 +514,7 @@ mlir::FailureOr<TensorValueDTO> InitializeTensorValue(const af::AscTensorAttr &a
                                                       mlir::Location loc, int64_t lifeTimeAxisId) {
   std::optional<std::string> dtype = detail::DTypeStr(attr.dtype);
   if (!dtype) {
-    // **能力不足，不是坏了。** 调度收的 dtype 比 AFIR 建模的多（`bool` 就是其中一个，
+    // 能力不足，不是坏了。 调度收的 dtype 比 AFIR 建模的多（`bool` 就是其中一个，
     // 它在这里是 12），这件事的性质是「还没建模」，legacy 收得了，应当整图干净回落。
     // 此前这里报的是硬失败：那让一批图在缺省那一档也红，而它们本可以回落。
     return mlir::afir::emitCapabilityShortfall(loc) << "UnsupportedOperation: scheduler dtype value "
@@ -522,8 +522,8 @@ mlir::FailureOr<TensorValueDTO> InitializeTensorValue(const af::AscTensorAttr &a
   }
   if (!detail::IsAfirModeledDType(attr.dtype)) {
     // Bridge 叫得出名字不等于 AFIR 表达得了：bf16 这一类 `DTypeStr` 给得出规范拼写，
-    // 但 ODS 的类型域收不了（`Elementwise.td` 的 `defvar` 与实现注册处那两份供给表），
-    // 真正拦住它的是**算子的类型约束**——那是 verifier 失败，也就是硬失败。这件事同样
+    // 但 ODS 的类型域收不了（`Elementwise.td` 的 `defvar` 与实现注册处那两份支持表），
+    // 真正拦住它的是算子的类型约束——那是 verifier 失败，也就是硬失败。这件事同样
     // 是「还没建模」（功能需求 3 要补的就是它），所以在这里就报能力不足。
     return mlir::afir::emitCapabilityShortfall(loc)
            << "UnsupportedOperation: element type '" << *dtype << "' is not in the AFIR supply table";
@@ -668,15 +668,15 @@ mlir::FailureOr<std::vector<IoTensor>> ToIoTensors(const af::AscNodePtr &node, m
   return tensors;
 }
 
-// **`space` 必须进 key**：`bufferId` 在这里是两个互不相干的 id 空间叠在一起的——UB 侧取的是
-// 调度器的 `buf.id`，GM workspace 取的是**张量 id**（`mapTemplateWorkspaces` 就靠这个把一块
+// `space` 必须进 key：`bufferId` 在这里是两个互不相干的 id 空间叠在一起的——UB 侧取的是
+// 调度器的 `buf.id`，GM workspace 取的是张量 id（`mapTemplateWorkspaces` 就靠这个把一块
 // GM 认成 workspace）。两者从 0 各数各的，撞号是常态而不是意外：一张 RCore 二相图里
 // `workspace`（GM, tensor_id=2）与归约结果（UB, buf_id=2）就会落进同一个 key，被判成
-// 「同一块资源上挂了两个不同视图」——一条**假的** `BindingConflict`，整张图编不出来，而现场
+// 「同一块资源上挂了两个不同视图」——一条假的 `BindingConflict`，整张图编不出来，而现场
 // 指向的是一个根本不存在的冲突。
 //
 // 不改 `bufferId` 的取法：GM 侧那条语义是下降侧的契约（`afir.workspace_plan` 按 tensor id
-// 对齐），改它要动的是另一半。分开的是**同一个号在不同内存空间里不是同一块**这件事。
+// 对齐），改它要动的是另一半。分开的是同一个号在不同内存空间里不是同一块这件事。
 struct ResourceKey {
   BindingDomain domain;
   mlir::afir::Space space;
@@ -1107,7 +1107,7 @@ mlir::LogicalResult AppendNodeOutputs(const af::AscNodePtr &node, NodeInfo &node
     }
     // GM 张量没有队列/缓冲编号，`bufferId` 因此恒为 -1。workspace 是唯一的例外：同一块
     // GM 要被两个 stage 各自认出来（phase 1 写、phase 2 读），认的依据就是 tensor id。
-    // plan 级的 `ToWorkspaceDescriptor` 早已按这个口径写 `descriptor.bufferId`，这里把
+    // plan 级的 `ToWorkspaceDescriptor` 早已按这个规则写 `descriptor.bufferId`，这里把
     // 节点级对齐过去，两处说的才是同一件事。
     if (nodeInfo.type == "Workspace") {
       output->buffer.bufferId = outputAnchor->attr.mem.tensor_id;
@@ -1161,7 +1161,7 @@ mlir::LogicalResult ReadScalarValue(const af::AscNodePtr &node, NodeInfo &nodeIn
 // 一个数，不是操作数、不占缓冲——但那边是字符串字面量、这边是 float，所以各读各的。
 //
 // 读哪个名字由 `getFloatIrAttrMappings()` 那张表说，AfirBuilder 按同一行挂成 AFIR 上的
-// 属性名。**两边的拼写不保证一致**(`negative_slope` → `negative_slop`)，所以表里两个
+// 属性名。两边的拼写不保证一致(`negative_slope` → `negative_slop`)，所以表里两个
 // 名字都在。
 // `IndexExpr` 节点的表达式。与 `ReadScalarValue` 同形——都只把节点自己的那个值带过
 // bridge，解析交给 AfirBuilder——但这边带的是一条按 size var 写的表达式，不是字面量，
@@ -1209,7 +1209,7 @@ mlir::LogicalResult ReadIntIrAttr(const af::AscNodePtr &node, const mlir::afir::
 // 二次融合（`VectorFunc`）的嵌套子图
 //===----------------------------------------------------------------------===//
 //
-// 这个节点类型**不在 bridge 的算子注册表里**（`AFIR_BRIDGE_OPERATION_REGISTRY`），因为它
+// 这个节点类型不在 bridge 的算子注册表里（`AFIR_BRIDGE_OPERATION_REGISTRY`），因为它
 // 不是「一个节点翻一个算子」那种形状：它翻出来的是一个带 region 的算子，region 里还有
 // 一张子图。注册表里的通用路径（`buildBufferNodeOp` 的 `make(OP{})`）给它建出来的会是
 // 一个没有 region 的空壳，所以两侧都走各自的专门分支：这里收集，`AfirBuilder` 构建。
@@ -1221,8 +1221,8 @@ mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo 
 // 子图的边界要在这一层解掉，不能原样翻成 AFIR 算子。
 //
 // 子图的边界形状是 `Data` + `Load`（入）、`Store` + `Output`（出），这两对表达的是
-// **UB <-> 寄存器**；父图里的 `afir.load` / `afir.store` 表达的是 **GM <-> UB**。两者同名
-// 不同义，原样翻过去会多出两趟搬运，而且**两种都编得过、都算得对**（只是多搬一趟），
+// UB <-> 寄存器；父图里的 `afir.load` / `afir.store` 表达的是 GM <-> UB。两者同名
+// 不同义，原样翻过去会多出两趟搬运，而且两种都编得过、都算得对（只是多搬一趟），
 // 没人会报错——所以这一处必须在进 MLIR 之前转换掉。
 //
 // 产物是两张按序号配对的边界表（见 `VectorFuncBodyDTO`）：序号取调度给的
@@ -1245,22 +1245,22 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
 
   // **dtype 白名单，M1 只收 f16 / f32。**
   //
-  // 这一条不是「这一期懒得做」，它是在**守一个不变量**：VF 这道闸门此前替一批图挡着，
+  // 这一条不是「这一期懒得做」，它是在守一个不变量：VF 这道门禁此前替一批图挡着，
   // 那些图里还有别的没接的东西（bf16 / i8 / ui8 / bool 的类型域、1 维形状的 load 下降）。
-  // 放它们进来之后，拦住它们的是 ODS 的类型约束与 conversion——**那两种都是硬失败**，
+  // 放它们进来之后，拦住它们的是 ODS 的类型约束与 conversion——那两种都是硬失败，
   // 而硬失败会把本来干净回落的图变成红的。实测：不加这一条，reg 侧接管表的
   // hard-failure 从 79 涨到 89。
   //
-  // 判据按**边界与子图节点的 dtype** 来，而不是按「这个 op 支不支持」：dtype 的缺口在
-  // AFIR 的供给表上（功能需求 3），与 VF 无关；VF 这一侧能做的是不要把它们放进来。
+  // 判据按边界与子图节点的 dtype 来，而不是按「这个 op 支不支持」：dtype 的缺口在
+  // AFIR 的支持表上（功能需求 3），与 VF 无关；VF 这一侧能做的是不要把它们放进来。
   //
-  // **这道闸门今天仍然必要，而且理由要收窄。** 2026-10-20 那一轮的说法是「bf16 / uint8 /
+  // 这道门禁今天仍然必要，而且理由要收窄。 2026-10-20 那一轮的说法是「bf16 / uint8 /
   // int16 卡的是同一个缺口，放开后都变硬失败」，依据是那条
   //
   //     'afir.store' op transfer source and destination must have the same element type
   //
-  // 但那一轮量在 `6a525700`（补 12 个 bf16 用例样板漏设的 `Output` dtype）**之前**，所以
-  // 那个数不能直接用。2026-10-26 把 bf16 / uint8 放开重量了一遍，结论是**部分成立**——
+  // 但那一轮量在 `6a525700`（补 12 个 bf16 用例样板漏设的 `Output` dtype）之前，所以
+  // 那个数不能直接用。2026-10-26 把 bf16 / uint8 放开重量了一遍，结论是部分成立——
   // 接管表上「只差 VF」那 8 格，放开后各自落在：
   //
   //   | 用例 | 放开后 | 真实首因 |
@@ -1270,19 +1270,19 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
   //   | `abs_uint8` | 回落 | VF 边界上还有 **int16** 这一位 |
   //   | `abs_brc_add` / `load_compare_scalar_where_store` | 回落 | VF 子图里的 `Scalar` 没建模 |
   //
-  // 所以：**4 格确实是「搬运能不能换 dtype」**，那一条修好它们才进得来，这道闸门替它们挡着
-  // 硬失败；另外 2 格的卡点压根不是 dtype（一个是 op、一个是 int16），拿这道闸门当它们的
+  // 所以：4 格确实是「搬运能不能换 dtype」，那一条修好它们才进得来，这道门禁替它们挡着
+  // 硬失败；另外 2 格的卡点压根不是 dtype（一个是 op、一个是 int16），拿这道门禁当它们的
   // 原因会把活排错层。
   //
-  // **订正（2026-10-28）：`abs_fma_bf16` 那一行只写对了第一因。** `Fma` 接通之后实测它不是
-  // 回落而是**硬失败**，诊断就是上面那条 `afir.store`——legacy 调度出的签名是
+  // 订正（2026-10-28）：`abs_fma_bf16` 那一行只写对了第一因。 `Fma` 接通之后实测它不是
+  // 回落而是硬失败，诊断就是上面那条 `afir.store`——legacy 调度出的签名是
   // `%output: f32`，而 store 的源经 `DtypeConsistency` 插回的 Cast 是 bf16。所以它属于上表
-  // 第一行那一族（4 格变 5 格），不属于「卡点不是 dtype」那两格；接 `Fma` 这件事已因此退回，
+  // 第一行那一类（4 格变 5 格），不属于「卡点不是 dtype」那两格；接 `Fma` 这件事已因此退回，
   // 见工作总表 step 3 那一节。
   //
-  // 探针那一侧的剖面**与接管表不同，别混着读**：同样放开之后探针 reg 侧 `ok` +17、硬失败
+  // 探针那一侧的剖面与接管表不同，别混着读：同样放开之后探针 reg 侧 `ok` +17、硬失败
   // +5，而那 5 格的诊断是 `DescriptorCountMismatch: 'afir.destination_descs' expected 2
-  // element but found 1`——全是 T5c（菱形两消费者）融出来的**双输出 VF**，bridge 只挂了一个
+  // element but found 1`——全是 T5c（菱形两消费者）融出来的双输出 VF，bridge 只挂了一个
   // destination desc。那是 VF 这条路自己的缺陷，与搬运换 dtype 无关。
   const auto isModeledDtype = [](const std::string &dtype) {
     return dtype == "float32" || dtype == "float16" || dtype == "bfloat16" || dtype == "uint8" || dtype == "int16";
@@ -1312,9 +1312,9 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
   bodyInfo.buffer_form = false;
   TemplateNodeContext bodyCtx{{}, {}, parentCtx.tmpBufferLifetimes, parentCtx.templateId, loc};
 
-  // **边界靠边配对，不靠 tensor id。** 分区器是成对插入 `Data` + `Load` 的
+  // 边界靠边配对，不靠 tensor id。 分区器是成对插入 `Data` + `Load` 的
   // （`InsertDataAndLoadNode`），而那个 `Data` 的输出 attr 只设了 dtype——**没有
-  // tensor id**；`Load` 的输出 attr 则是从父图的生产者整份抄过来的，所以带的是**父图**
+  // tensor id；`Load` 的输出 attr 则是从父图的生产者整份抄过来的，所以带的是父图**
   // 的 tensor id。于是「按 id 把 Data 和 Load 串起来」这条路走不通（实测 src #0 找不到
   // 边界就是这么来的），而「Data 的唯一消费者就是它那个 Load」是分区器的结构保证。
   llvm::DenseSet<const void *> boundaryLoads;
@@ -1444,9 +1444,9 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
 
     // 子图内的缓存守卫（`exec_condition` 不是 `kNoCache`）本阶段不收。
     //
-    // **这一条必须拦在这里，不能留给下游**：那些节点的 `loop_axis` 在子图里是 -1，而
+    // 这一条必须拦在这里，不能留给下游：那些节点的 `loop_axis` 在子图里是 -1，而
     // AFIR 的 `#afir.sched` 在属性构造时就查「有缓存周期就必须有 loop_axis」
-    // （`AFIRDialect.cpp` 的 `ScheduleAttr::verify`）——那是**硬失败**，整条编译红掉，
+    // （`AFIRDialect.cpp` 的 `ScheduleAttr::verify`）——那是硬失败，整条编译红掉，
     // 而这件事的性质是「还没建模」，应当干净回落。探针上实测到过 4 格（T5 的广播菱形）。
     if (subNode->attr.sched.exec_condition != af::ExecuteCondition::kNoCache) {
       return mlir::afir::emitCapabilityShortfall(loc)
@@ -1493,7 +1493,7 @@ mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo 
   // `Scalar` / `ScalarData` / `IndexExpr` 与 `Data` / `Output` 同类：它们不产生 AFIR op，
   // 只产生一个值。所以不在「哪些 op 有 buffer 形态」那张表里，也不该被那张表拦住。
   // 三者的值来源各不相同——编译期字面量 / kernel 形参 / 由 size var 算出来的运行期常量
-  // ——但对这道闸门是一回事。
+  // ——但对这道门禁是一回事。
   if (nodeInfo.type == "Scalar") {
     if (mlir::failed(ReadScalarValue(node, nodeInfo, loc))) {
       return mlir::failure();
@@ -1525,7 +1525,7 @@ mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo 
   nodeInfo.sched_axis = node->attr.sched.axis;
   nodeInfo.loop_axis = node->attr.sched.loop_axis;
   // 缓存复用周期与 `axis` / `loop_axis` 同在上游的 `SchedInfo` 里，一起读。忽略它只会
-  // 慢（每个迭代重算），但**照搬一个读不懂的取值会静默丢掉这次决策**，所以不认识的值在
+  // 慢（每个迭代重算），但照搬一个读不懂的取值会静默丢掉这次决策，所以不认识的值在
   // 这里就报出来，由调用方回落 legacy。
   if (std::optional<std::string> execCondition = detail::ExecConditionStr(node->attr.sched.exec_condition)) {
     nodeInfo.exec_condition = *execCondition;

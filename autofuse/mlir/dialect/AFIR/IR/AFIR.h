@@ -211,7 +211,7 @@ inline MemRefType withMemorySpace(MemRefType type, Space space) {
 //===----------------------------------------------------------------------===//
 //
 // 设计文档 D2 / D3 / 3.2 / 5.1 步 8。一块存储的规划结果（空间、字节大小表达式、
-// 对齐、资源身份）是**值**的属性，不是使用点的属性。迁移前它是 4 个按下标对齐的
+// 对齐、资源身份）是值的属性，不是使用点的属性。迁移前它是 4 个按下标对齐的
 // 数组属性，同一个值在每个使用点各存一份；一致性只能靠消费端把所有拷贝收集起来
 // 逐个比对（`CanonicalFunctionMemoryAllocator::recordValue` 正是在做这件事）。
 //
@@ -238,7 +238,7 @@ struct OperandPartition {
   OperandRange destinations(Operation *op) const;
 };
 
-// 段长之和超过操作数总数时返回 failure，说明接口实现与 Op 定义对不上。不发诊断，
+// 段长之和超过操作数总数时返回 failure，说明接口实现与 Op 定义对不上。不输出诊断，
 // 由调用点决定措辞。
 FailureOr<OperandPartition> getOperandPartition(Operation *op);
 

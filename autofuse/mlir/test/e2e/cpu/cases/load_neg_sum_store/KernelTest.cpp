@@ -32,7 +32,7 @@ TEST(MlirE2eCpu, LoadNegSumStoreCalculatesCorrectResult) {
   const uint32_t input_element_count = input_config.element_count;
   const auto output_config = GetShapeConfig(kOutputShapes, 0);
   const uint32_t output_element_count = output_config.element_count;
-  // `ShapeConfig::shape` 是 `initializer_list`，没有下标运算符——先落成 vector 再按维取。
+  // ShapeConfig::shape 为 initializer_list，先转成 vector，再按维度下标访问。
   const std::vector<int64_t> input_shape(input_config.shape);
   const std::vector<int64_t> output_shape(output_config.shape);
   ASSERT_TRUE(input_shape.size() == 2U || input_shape.size() == 4U);

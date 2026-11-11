@@ -13,12 +13,11 @@
 #include "mlir/IR/BuiltinOps.h"
 
 namespace mlir::ascend::kernel {
-// Runs after runGenAggregateKernelEntry.  Clones each Plan's real "<symbol>_main"
-// body into the matching body-less private declaration inside entryModule, then
-// promotes entryModule's aggregate "main" to FunctionRole::KernelEntry and renames
-// it to the legacy-convention name derived from fusedGraphName.  Fails without
-// mutating entryModule further than diagnostics if the aggregate contract does not
-// match planModules (missing plan module, missing "<symbol>_main" definition).
+// After runGenAggregateKernelEntry, clone each plan's <symbol>_main body into its
+// private entryModule declaration. Promote aggregate main to KernelEntry and rename
+// it using the legacy convention derived from fusedGraphName.
+// Validate the aggregate contract, plan modules and main definitions before mutation;
+// on mismatch, return failure with diagnostics only.
 LogicalResult runGenAggregateKernelBody(ArrayRef<ModuleOp> planModules, ModuleOp entryModule, StringRef fusedGraphName);
 }  // namespace mlir::ascend::kernel
 

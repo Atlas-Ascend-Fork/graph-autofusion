@@ -37,10 +37,10 @@ include "mlir/IR/OpBase.td"
 // `reduce_common.h:34`）而不是值；`isReuseSource` 是第二个非类型模板参数；`srcShape` 是
 // `const uint32_t[]`，调用前必须先在栈上物化成数组。这三件由
 // `lib/Target/AscendC/Autofuse/VecReduceND.cpp` 里手写的 printer 处理，与 BroadcastL2Op
-// 出于同样的理由走同一条路。printer 取的是 `getAPIName()`，所以这一族共用同一份实现。
+// 出于同样的理由走同一条路。printer 取的是 `getAPIName()`，所以这一类共用同一份实现。
 //
 // 没有 ReduceMean：它在跨 tile 累加下不能按 tile 求均值再合并（那是「均值的均值」）。与
-// legacy 一致，Mean 发 ReduceSum，最后一次性 `Muls` 乘上归约元素数的倒数
+// legacy 一致，Mean 生成 ReduceSum，最后一次性 `Muls` 乘上归约元素数的倒数
 // （`codegen/api_call/reduce/reduce_api_call.cpp:80`）。
 class BaseReduce2DL2Op<string mnemonic, string apiName, list<Trait> traits = []>
     : VectorOp<mnemonic, apiName, !listconcat([OpWithDstInterface], traits)> {

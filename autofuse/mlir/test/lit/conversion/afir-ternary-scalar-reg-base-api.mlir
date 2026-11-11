@@ -12,7 +12,7 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950PR_9599 %s | FileCheck %s --check-prefix=SELECT
 
 // 三元族标量形态的 reg 侧。与 mem 侧那份（afir-ternary-scalar-api.mlir）是两个文件而不是
-// 两条 RUN：`WhereExtend` / reg 侧的 `ClipByValue` 都**不收 tmp buffer**（自己开寄存器），
+// 两条 RUN：`WhereExtend` / reg 侧的 `ClipByValue` 都不收 tmp buffer（自己开寄存器），
 // 图上带不带 tmp 操作数不一样，一份输入服务不了两侧。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
@@ -48,7 +48,7 @@ func.func @clip_scalar_bounds(%x: !ascendc.local_tensor<?xf32>, %destination: !a
 // IR-LABEL: func.func @clip_scalar_bounds
 // IR: ascendc.clipbyvalue_contiguous_reg_base %arg1, %arg0, %{{.*}}, %{{.*}}
 
-// **没有 tmp buffer 实参**：count 是最后一个。多一个的话这两条就红。
+// 没有 tmp buffer 实参：count 是最后一个。多一个的话这两条就红。
 // CPP: {{^ *}}WhereExtend({{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}}, c2_f32, static_cast<uint32_t>({{v[0-9]+}}));
 // CPP: {{^ *}}ClipByValue({{v[0-9]+}}, {{v[0-9]+}}, cm1_f32, c1_f32, static_cast<uint32_t>({{v[0-9]+}}));
 

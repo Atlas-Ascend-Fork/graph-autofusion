@@ -53,17 +53,11 @@ namespace detail {
 // coerced to a valid AFIR type or axis kind.
 std::optional<std::string> DTypeStr(ge::DataType dtype);
 
-// 这个 dtype AFIR 表达得了吗。
-//
-// 与 `DTypeStr` 是两个问题：那个答的是「桥这一层叫它什么」，这个答的是「AFIR 的类型域
-// 收不收」。两者不一致的那几位（i8 / i64 / ui32 / ui64）今天会一路走到算子的 ODS 约束上
-// 才被拦下，而那是**硬失败**；它们的性质是「还没建模」。
-//
-// **判据不再写在这里。** 哪几位建模得出来由 `support/AfirElementTypes.h` 的
-// `AFIR_ELEMENT_TYPE_TABLE` 说（那是真源，注册位、ODS、字节宽度、对账断言都从它生成）；
-// 建模了却先不放进来的那几位由实现文件里的 `AFIR_ELEMENT_TYPE_HELD_BACK` 说，每一行带
-// 得出理由。两者挤在一个 switch 里的时候，这段注释和那个 switch 立刻就说岔了（头文件写
-// 「bf16 已经开了」、函数对 `DT_BF16` 返回 false），而且谁都不会红。
+// 检查 dtype 是否属于 bridge 当前支持的 AFIR 类型域，与 DTypeStr 的名称转换分开。
+// i8 / i64 / ui32 / ui64 等未建模类型应提前返回不支持，不能等到 ODS 校验才编译失败。
+// 建模类型由 support/AfirElementTypes.h 的 AFIR_ELEMENT_TYPE_TABLE 统一定义，
+// 暂缓接入的类型及原因列于实现中的 AFIR_ELEMENT_TYPE_HELD_BACK，避免头文件说明与
+// 实际接入状态分别维护。注册位、ODS、字节宽度及比对断言均从公共表生成。
 bool IsAfirModeledDType(ge::DataType dtype);
 
 // 暂缓名单上的一位：建模得出来，但 bridge 先不收，以及为什么。

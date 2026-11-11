@@ -20,7 +20,7 @@ class SelectionPolicyRegistry;
 
 namespace mlir::ascend::kernel {
 
-// 注册 `afir.remove_pad` 的 implementation。**只有一个**：两张供给表共用同一个扩展包装
+// 注册 `afir.remove_pad` 的 implementation。只有一个：两张支持表共用同一个扩展包装
 // （矩阵 tier D1），所以家族是 `Shared`。收的形态边界与理由见 RemovePad.cpp 的文件头注释；
 // 收不了的一律报 unsupported，含它的图不走 MLIR。
 LogicalResult registerRemovePadImplementations(ascend::instruction::ImplementationRegistry &registry,

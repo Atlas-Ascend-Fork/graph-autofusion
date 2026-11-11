@@ -15,11 +15,8 @@
 
 namespace mlir::afir {
 
-// 名字要同时活在两个地方：`#afir.expr` 的符号表（尺寸表达式按名字引用它）与目标 ABI 的
-// 字段名（AscendC 侧是 C++ 结构体成员）。两边的交集就是标识符，因此在这里判掉其余形态。
-//
-// 放宽到任意字符串的代价是静默的：一个带空格或以数字开头的名字在 IR 里合法，到
-// `emitasc.member` 才变成生成不出来的 C++，而那时诊断已经离写错的地方很远了。
+// 参数名同时用于 expr 符号引用和目标 ABI 字段访问，因此必须是合法标识符。
+// 在此拒绝空格、数字开头等非法形式，避免到 emitasc.member 生成 C++ 时才报告错误。
 LogicalResult TilingParamOp::verify() {
   llvm::StringRef name = getSymbol();
   if (name.empty()) {

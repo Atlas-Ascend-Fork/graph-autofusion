@@ -9,22 +9,22 @@
 #
 #===- legacy_takeover_table.sh - legacy 用例的接管表 ---------------------===#
 #
-# **这不是测试，是一台量具**（与同目录的 `CapabilityBoundaryProbe.cpp` 同一性质）。它不断言
+# 这不是测试，是一个测量工具（与同目录的 `CapabilityBoundaryProbe.cpp` 同一性质）。它不断言
 # 任何事，产物是一张以 legacy e2e 用例为行的表：
 #
 #     用例 → {接管 / 回落(第一条诊断) / 硬失败 / 不在范围}
 #
-# 要它是因为**拿 legacy 套件跑一遍全绿证明不了任何事**：MLIR 这一侧收不了的图会静默回落给
+# 要它是因为拿 legacy 套件跑一遍全绿证明不了任何事：MLIR 这一侧收不了的图会静默回落给
 # legacy，回落了也是绿的。`AF_ENABLE_MLIR_CODEGEN=strict` 这一档把回落也判成失败，并给每一次
 # 调用在 stderr 上打一行可机读的标签
 #
-#     AF_MLIR_STRICT gate=<哪道闸门拦下的> shortfall=<缺省那档会不会回落> graph=<图名>
+#     AF_MLIR_STRICT gate=<哪道门禁拦下的> shortfall=<缺省那档会不会回落> graph=<图名>
 #
 # 这个脚本只是把那些标签按用例收成一张表。两列都不能由另一列推出来，所以两列都要：`gate`
-# 说是哪一道闸门，`shortfall` 说缺省那一档会回落还是也失败——那正是表里「回落」与「硬失败」
+# 说是哪一道门禁，`shortfall` 说缺省那一档会回落还是也失败——那正是表里「回落」与「硬失败」
 # 两态的分界。
 #
-# 用法（**先把 build 配成 legacy ST 那一档**，见下）：
+# 用法（先把 build 配成 legacy ST 那一档，见下）：
 #
 #     bash autofuse/mlir/test/probe/legacy_takeover_table.sh [-j N] [-R 正则] [--no-build]
 #
@@ -33,17 +33,17 @@
 #
 #     bash scripts/test/run_autofuse_test.sh -s -m backend --enable-mlir -j 6
 #
-# **这一步会覆盖 `mlir-test.sh` 用的那一档配置**（MLIR 自己的测试目标是用 `cmake -U RUN_TEST`
+# 这一步会覆盖 `mlir-test.sh` 用的那一档配置（MLIR 自己的测试目标是用 `cmake -U RUN_TEST`
 # 配的，两档互斥）。量完要回到 MLIR 测试，删掉 `build/CMakeCache.txt` 再跑 `mlir-test.sh`。
-# 脚本**不替你改配置**：它只在已经配好的 build 目录上做「编 + 跑 + 收表」，这样它跑错时不会
+# 脚本不替你改配置：它只在已经配好的 build 目录上做「编 + 跑 + 收表」，这样它跑错时不会
 # 把你的 build 目录连带弄坏。
 #
-# 已知口径限制，**读表前先看这一条**：legacy 的 `*_codegen` 用例走的是
+# 已知统计范围限制，读表前先看这一条：legacy 的 `*_codegen` 用例走的是
 # `Codegen::Generate`（`MlirCallerScene::kTensorFlow`），不是设计范围里的
 # `GenerateForInductor`。场景这一位会传进 ATT（`is_inductor_scene`），而 ATT 在候选准备那一道
-# 闸门里面——**所以 inductor 与 TF 在那一道上的差异这张表量不到**。表里
-# `gate=candidate-preparation` 的行要按这一条打折扣看；其余各道闸门（bridge、能力层、pattern、
-# 产物装配）与场景无关。把这条口径对齐要给 legacy 的用例样板加一个 inductor 入口开关，
+# 门禁里面——所以 inductor 与 TF 在那一道上的差异这张表量不到。表里
+# `gate=candidate-preparation` 的行要按这一条打折扣看；其余各道门禁（bridge、能力层、pattern、
+# 产物装配）与场景无关。把这个统计范围统一要给 legacy 的用例样板加一个 inductor 入口开关，
 # 那是功能需求 7（样板收敛）的事。
 #
 #===----------------------------------------------------------------------===#
@@ -124,14 +124,14 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 ROWS="${WORK_DIR}/rows.tsv"
 : >"${ROWS}"
 
-# 一个用例跑一遍，**严格模式下跑，而且只跑生成器那一阶段**：第二阶段编的是生成出来的 kernel，
+# 一个用例跑一遍，**严格模式下跑，而且只跑生成器那一阶段**：第二阶段编的是生成的 kernel，
 # 与「谁接管了这张图」无关。
 #
 # 用 `ctest -R '^name$'` 而不是直接执行二进制：`LD_LIBRARY_PATH` 那一长串在
 # `CTestTestfile.cmake` 里，路径不对时失败方式是调度在 `ScheduleUtils::ClearAllSizeVar` 段错误，
 # 看起来像建图建错了。
 #
-# **必须 `-V` 而不是 `--output-on-failure`。** 后者只在用例失败时才打输出，而「接管了因此变绿」
+# 必须 `-V` 而不是 `--output-on-failure`。 后者只在用例失败时才打输出，而「接管了因此变绿」
 # 的用例恰好不失败——标签一行都收不到，整片被记成 `no-mlir-call`。第一版就是这么量错的：
 # `add_abs_test` 这张 UT 自己的 fixture 都显示没进过 MLIR。
 for case_name in "${CASES[@]}"; do

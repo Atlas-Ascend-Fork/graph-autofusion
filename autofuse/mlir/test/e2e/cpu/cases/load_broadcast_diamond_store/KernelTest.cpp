@@ -42,8 +42,8 @@ TEST(MlirE2eCpu, LoadBroadcastDiamondStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 正负都有：期望值是 `|x| + (-x)`，正数那一半恒为 0，只有负数那一半分得开两个消费者
-  // 各自到底有没有被发出来。
+  // 输入包含正负值。参考结果为 |x|+(-x)，正输入结果为 0，
+  // 负输入用于发现 Abs 或 Neg 消费者未被生成。
   for (uint32_t index = 0; index < inputCount; ++index) {
     input0[index] = static_cast<float>(index) * 0.25F - 1.0F;
   }

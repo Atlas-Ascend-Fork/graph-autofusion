@@ -20,9 +20,9 @@ class SelectionPolicyRegistry;
 
 namespace mlir::ascend::kernel {
 
-// Register AFIR ternary elementwise implementations here. Individual API levels keep separate typed mappings,
-// providers, and patterns inside this module instead of creating per-op modules. `policies` is accepted (and
-// currently unused) so this registrar matches the signature every other capability module uses.
+// Register ternary elementwise implementations, keeping per-API typed mappings,
+// providers and patterns in this module. The unused policies parameter preserves
+// the common capability-module registrar signature.
 LogicalResult registerTernaryElementwiseImplementations(
     ascend::instruction::ImplementationRegistry &registry,
     ascend::instruction::SelectionPolicyRegistry *policies = nullptr);

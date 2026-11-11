@@ -4,8 +4,8 @@
 // RUN: af-opt --afir-kernel-body-signature --afir-loop-generate --afir-memory-allocate %s | FileCheck %s
 
 module {
-  // 「内存已分配」的结构证据是函数里出现了 ascendc 方言的算子（下面的 ascendc.pipe），
-  // 不再由 `afir.memory_allocated` 属性宣告，判据见 LoweringStage.h。
+  // 以 ascendc.pipe 等 AscendC 算子作为资源已物化的结构证据，
+  // 不依赖 memory_allocated 阶段标记，判据见 LoweringStage.h。
   func.func private @workspace_plan(%input: memref<16xf16> {afir.buffer_desc = #afir.buffer_desc<space = <gm>, life_time_axis_id = -1>}) attributes {
     afir.arg_descs = [#afir.tensor_desc<axis = [0], role = <input>>],
     afir.asc_graph = #afir.asc_graph<

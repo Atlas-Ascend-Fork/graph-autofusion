@@ -70,8 +70,7 @@ class Rule:
 
 
 RULES = (
-    # 下游命名空间。`afir` 是最上游的一层，它谁都不认识；这条随其余命名空间注册而增长
-    # （`transform.afir` 的 C++ 名与 adapter 的命名空间落地时各加一项）。
+    # AFIR 不得依赖的下游命名空间。新增 transform.afir 的 C++ 命名空间或 adapter 时同步补充。
     Rule(
         tokens=("afplan", "AFPlan"),
         link_libs=("AFPlanDialect",),

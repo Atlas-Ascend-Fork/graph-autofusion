@@ -10,9 +10,9 @@
 # 归约之后接一个带外部输入的节点（这里是标量乘）。`ReducePartitionPostFusion` 会把图切成
 # 两张，归约结果经 GM workspace 交接——`torch.mean` 走的就是这条路。
 #
-# **不声明 TILE_ACCESSOR / COVERS**：切图之后每个 group 有自己的 TilingData 结构体
+# 不声明 TILE_ACCESSOR / COVERS：切图之后每个 group 有自己的 TilingData 结构体
 # （`AscGraph0ScheduleResult0G0TilingData` / `...G1TilingData`），`z0t_size` 在它们里面各有
-# 一份，而 `AF_E2E_TILING_SHAPE` 是按**扁平** `AutofuseTilingData` 取访问器的——写上去编不过。
+# 一份，而 `AF_E2E_TILING_SHAPE` 是按扁平 `AutofuseTilingData` 取访问器的——写上去编不过。
 # 于是这条用例照实不提覆盖声明（形状仍会打印，tile / block_inner 显示为 0 即「观测不到」），
 # 它盯的是 workspace 交接那条路，不是搬运偏移的各项。
 add_mlir_e2e_cpu_case(load_sum_mul_store_16x37

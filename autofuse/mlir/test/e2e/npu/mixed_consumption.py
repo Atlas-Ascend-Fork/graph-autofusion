@@ -10,9 +10,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------------------
 
-# 同一输入同时喂矢量计算（x + 1）与直连搬运（x.clone()）。load 的消费者既有矢量算子
-# 也有 store，同步走「队列 + 显式事件对」的混合路径（V 侧队列 + MTE3 侧
-# AllocEventID/SetFlag/WaitFlag/ReleaseEventID）。数值基准：第一路 = x + 1，第二路 = x。
+# 同一输入分别参与 x+1 和 x.clone()，使 Load 同时由矢量算子和 Store 消费。
+# 同步路径同时使用 V 侧队列与 MTE3 显式事件（AllocEventID/SetFlag/WaitFlag/ReleaseEventID）。
+# 两路参考结果分别为 x+1 和 x。
 
 import sys
 

@@ -24,7 +24,7 @@ Environment:
   AF_MLIR_DEV_BASE_IMAGE   Internal tool-only base image, default autofuse-mlir-dev-base:<arch>
   AF_MLIR_LLVM_BASE_IMAGE  Backward-compatible base image alias
   AF_MLIR_DEV_BASE_OS_IMAGE
-                           OS base image used when building the internal base, default ubuntu:22.04
+                           OS base image used when building the internal base, default ubuntu:24.04
   AF_PYTHON_BUILD_REQUIREMENTS
                            Python packages installed in the internal base
   AF_PIP_INDEX_URL         Optional Python package index for the internal base
@@ -77,7 +77,7 @@ esac
 image="${AF_MLIR_LLVM_IMAGE:-${AF_MLIR_DEV_IMAGE:-autofuse-mlir-dev:${image_arch}}}"
 default_base="autofuse-mlir-dev-base:${image_arch}"
 base="${AF_MLIR_LLVM_BASE_IMAGE:-${AF_MLIR_DEV_BASE_IMAGE:-${default_base}}}"
-base_os="${AF_MLIR_DEV_BASE_OS_IMAGE:-${AF_MLIR_DEV_BASE_IMAGE_FROM:-ubuntu:22.04}}"
+base_os="${AF_MLIR_DEV_BASE_OS_IMAGE:-${AF_MLIR_DEV_BASE_IMAGE_FROM:-ubuntu:24.04}}"
 base_overridden=0
 if [ -n "${AF_MLIR_LLVM_BASE_IMAGE:-}" ] || [ -n "${AF_MLIR_DEV_BASE_IMAGE:-}" ]; then
     base_overridden=1

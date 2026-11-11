@@ -27,15 +27,9 @@
 
 namespace mlir::ascend::kernel {
 
-// 次序即 ABI 次序：`getKernelArgumentPermutation` 直接按这个枚举的值排序，所以
-// `WorkspaceOffset` 必须排在 `Workspace` 之后、`Tiling` 之前——与 legacy 的
-// `(..., GM_ADDR workspace, uint64_t workspace<ID>..., const T *t)` 同形。
-// 这与 `afir::KernelArgRole` 的枚举**取值**无关，那边只是编码。
-//
-// `ScalarInput` 是例外，排在最后不代表它在 ABI 上最后：它与 `Input` **共用一个 index
-// 序号空间**（legacy 的 `Data` / `ScalarData` 共用同一个 `index` 属性），所以两者在
-// `getKernelArgumentKey` 下同键，`getKernelArgumentRank` 把它显式折成 `Input`，先后完全
-// 由 `index` 决定。放在末尾只是为了不打乱上面那条「枚举次序 == ABI 次序」的读法。
+// 枚举顺序用于 getKernelArgumentPermutation 的 ABI 排序。
+// WorkspaceOffset 必须位于 Workspace 与 Tiling 之间，与 legacy 的 workspace 基址、
+// 各 workspace<ID> 偏移、tiling 指针顺序一致；不依赖 afir::KernelArgRole 的编码值。
 enum class KernelArgumentKind { Input, Output, Workspace, WorkspaceOffset, Tiling, ScalarInput };
 
 struct KernelArgumentIdentity {
@@ -54,7 +48,7 @@ std::string getKernelArgumentKey(const KernelArgumentIdentity &identity);
 // Returns the old index for each new index after applying the canonical ABI order.
 SmallVector<unsigned> getKernelArgumentPermutation(ArrayRef<KernelArgumentIdentity> arguments);
 
-// AFIR 地址空间到 AscendC memory space 的**唯一**映射点（设计文档 3.1 / I4 / 约束 4）。
+// AFIR 地址空间到 AscendC memory space 的唯一映射点（设计文档 3.1 / I4 / 约束 4）。
 //
 // AFIR 侧全程只出现 `#afir.space<*>`；整数编码只在这一个函数里出现，且取自 forked
 // AscendC 方言自己的 `ascendc::AddressSpace` 枚举，而不是写死的魔数——此前

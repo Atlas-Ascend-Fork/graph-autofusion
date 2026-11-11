@@ -12,7 +12,7 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s -o %t.selected.mlir
 // RUN: af-opt --convert-afir-to-ascendc --target=Ascend910B1 %t.selected.mlir | FileCheck %s --check-prefix=CONVERT
 
-// 本文件的 IR 刻意**不带** `afir.buffer_desc`：`ascir-translate` 只注册 AscendC 方言，
+// 本文件的 IR 刻意不带 `afir.buffer_desc`：`ascir-translate` 只注册 AscendC 方言，
 // 而 `convert-afir-to-ascendc` 会把 kernel 参数上的 `afir.*` attr 原样留下，带上就解析
 // 不了。值的规划结果在场时的下降由 afir-to-ascendc-binary-l2-buffer-desc.mlir 覆盖。
 

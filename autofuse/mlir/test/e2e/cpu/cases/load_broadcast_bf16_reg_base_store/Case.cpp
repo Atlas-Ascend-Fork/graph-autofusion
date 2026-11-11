@@ -52,10 +52,8 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace config = load_broadcast_bf16_reg_base_store;
   EXPECT_NE(kernel.find(std::string(config::kKernelName) + "_subgraph0_plan0"), std::string::npos);
-  // **`<bfloat16_t,` 这一段是这个用例的全部理由。** `broadcast.tensor.extend_reg_base` 这一档
-  // 的 bf16 位（`Implementations/Broadcast.cpp` 的 `kExtendElementTypes`）与 ODS 的
-  // `AFIR_BroadcastElementTypes` 是 2026-10-26 一起开的；开之前这张图失败在 verifier 上
-  // （硬失败），开之后要确认它真的选到了这一档、而不是落到别处或者悄悄回落。
+  // 检查生成调用使用 bfloat16_t，并选中 broadcast.tensor.extend_reg_base。
+  // ODS 接受 bf16 并不代表实现选择正确；需排除其他实现或 legacy 回落。
   EXPECT_NE(kernel.find("BroadcastExtend<bfloat16_t,"), std::string::npos);
 }
 }  // namespace mlir::afir

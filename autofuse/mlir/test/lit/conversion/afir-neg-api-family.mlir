@@ -13,13 +13,9 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=MEMSELECT
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=REGSELECT
 
-// `afir.neg` 是「差异只在扩展 API 由哪张供给表提供」的那一档。两张表都只有
-// `NegExtend` 包装，签名一样，两侧都不要 tmp buffer——所以 AFIR 完全相同，生成的调用
-// 文本也完全相同（CPP 的检查两个 target 共用一份），唯一变的是包装出自
-// `neg.h` 还是 `neg_reg_base.h`，体现在建出来的是哪个 ascendc op。
-//
-// 这正是「标准 API 在哪一侧」答不了的问题：`afir.abs` 的标准调用在 reg-base 一侧，
-// 这里两侧都没有标准调用。把两者塞进同一个 feature 会在其中一个上答反。
+// Neg 的两类 API 均为无 tmp buffer 的 NegExtend 包装，AFIR 和调用文本相同，
+// 但分别来自 neg.h 与 neg_reg_base.h，并对应不同 AscendC op。
+// 可用实现类别与是否使用标准 API 是独立维度，不能合并为一个 feature。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
@@ -48,8 +44,7 @@ module {
 // MEM: %[[COUNT:.*]] = ascendc.local_tensor.get_size %arg1
 // MEM-NEXT: ascendc.neg_extend %arg1, %arg0, %[[COUNT]]
 // MEM-LABEL: func.func @neg_i32
-// 带上后随的操作数：FileCheck 是子串匹配，光写 `ascendc.neg_extend` 会被
-// `ascendc.neg_extend_reg_base` 的前缀吃掉，正好放过它要挡的那个错。
+// 匹配时包含后续操作数，避免 neg_extend_reg_base 的前缀误命中 neg_extend。
 // MEM: ascendc.neg_extend %arg1
 // MEM-NOT: afir.neg
 
@@ -60,15 +55,14 @@ module {
 // REG: ascendc.neg_extend_reg_base %arg1
 // REG-NOT: afir.neg
 
-// 两个 target 上同一组 CHECK：包装是全局函数，没有 `AscendC::` 限定，元素类型是显式
-// 模板实参——两张表给的是同一份文本。
+// 两目标共用调用文本检查：NegExtend 为全局函数，元素类型通过模板实参指定。
 // CPP-LABEL: void neg_f16(
 // CPP: {{^ *}}NegExtend<half>(
 // CPP-LABEL: void neg_i32(
 // CPP: {{^ *}}NegExtend<int32_t>(
 // CPP-NOT: AscendC::Neg
 
-// stable id 说的是供给表，不是芯片。
+// stable id 说的是支持表，不是芯片。
 // MEMSELECT: ascend.implementation = {id = "neg.tensor.extend", kind = "ascendc_api"}
 // MEMSELECT-NOT: neg.tensor.extend_reg_base
 // REGSELECT: ascend.implementation = {id = "neg.tensor.extend_reg_base", kind = "ascendc_api"}

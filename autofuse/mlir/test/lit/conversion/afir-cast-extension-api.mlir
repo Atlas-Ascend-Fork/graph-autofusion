@@ -13,7 +13,7 @@
 // `afir.cast` 的 mem 侧：`CastExtend(dst, src, tmp, size)`，扩展头 `cast.h`，要一块
 // tmp buffer。
 //
-// **两侧不像前面那些 op 那样只差一个头——签名本身不同**（reg 侧收三个数组、不要 tmp），
+// 两侧不像前面那些 op 那样只差一个头——签名本身不同（reg 侧收三个数组、不要 tmp），
 // 所以这两份用例的 CPP check 也逐字不同，不像 `remainder` / `pow` 那样只能靠 IR 分辨。
 //
 // 取 f32 -> f16：两侧的对表里都有这一行。只有一侧有的那些由另一份钉。
@@ -42,7 +42,7 @@ module {
 // IR-NOT: afir.cast
 
 // 包装，不是标准调用：没有 `AscendC::` 限定，也没有 `RoundMode` 实参——包装自己按
-// (输入, 输出) 推。显式模板实参取的是**源**的元素类型，`OutT` 由 dst 推出来。
+// (输入, 输出) 推。显式模板实参取的是源的元素类型，`OutT` 由 dst 推出来。
 // CPP-LABEL: void cast_f32_to_f16(
 // CPP: {{^ *}}CastExtend<float>({{[^,]*}}, {{[^,]*}}, {{[^,]*}}, static_cast<uint32_t>(
 // CPP-NOT: AscendC::RoundMode

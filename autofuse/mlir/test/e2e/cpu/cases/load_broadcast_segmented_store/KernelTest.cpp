@@ -45,7 +45,7 @@ TEST(MlirE2eCpu, LoadBroadcastSegmentedCalculatesCorrectResult) {
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = static_cast<float>(index) * 0.25F - 3.0F;
   }
-  // **哨兵，不是 0。** 输入里取得到 0（`index * 0.25 - 3.0` 在 index 12 处就是 0），用 0 填
+  // 哨兵，不是 0。 输入里取得到 0（`index * 0.25 - 3.0` 在 index 12 处就是 0），用 0 填
   // 的话「kernel 一个字没写」与「算出 0」在那几个下标上分不开。这一格是尾轴带填充那条路
   // ——此前整图回落 legacy、现在才第一次真的走 MLIR，「没写」正是要防的失效方式。
   constexpr float kSentinel = -999.0F;

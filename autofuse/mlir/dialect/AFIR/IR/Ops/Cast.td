@@ -19,22 +19,9 @@ include "Ops/Elementwise.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/CommonTypeConstraints.td"
 
-// `afir.cast` 的 buffer 形态。**它不在 `AFIR_BufferizableUnaryElementwiseOp` 上**，
-// 差两件事，两件都不是「多传一个实参」能说的：
-//
-// 一、**`InferTypeOpInterface` 推不出它的结果元素类型。** 那条接口只拿得到操作数：
-// 谓词族推 `ui8`（常量）、`truediv` 推「i32 就 f32，否则跟着输入」（输入的函数），
-// 而 cast 的结果 dtype 既不是常量也不是输入的函数，是调用方写在 op 上的那一个。
-// 声明了却推不准比不声明更坏：`verifyInferredResultTypes` 拿 `isCompatibleReturnTypes`
-// 对结果，而这一族的那个只比形状（`AFIR_ElementwiseShapeMethods`），于是一个错的
-// 元素类型会被静默放行。所以这里只取 destination-style 那一半。
-//
-// buffer 形态其实推得出来（结果恒等于 destination），但**两种形态共用一个方法**——
-// 为一半能推的情形声明整条接口，换来的是另一半静默出错。
-//
-// 二、**它还要查一张 (输入, 输出) 对表。** `f16 -> i4` 合法而 `f16 -> ui32` 不合法，
-// 这件事 ODS 的类型列表说不出来（那两个列表各自是并集，笛卡尔积里一大半没有供给）。
-// 所以 `verify()` 自己拼：共享的形态检查 + `isSupportedCastPair`。
+// Cast 的结果 dtype 由调用方指定，不能仅从操作数推导，故不继承 InferTypeOpInterface。
+// 此处只复用 destination-style 契约。若使用只比较形状的 isCompatibleReturnTypes，
+// 可能错误接受推导出的元素类型；谓词和 truediv 的结果可由输入确定，与 Cast 不同。
 class AFIR_BufferizableCastOp<string mnemonic, list<Type> inputTypes, list<Type> resultTypes> :
     AFIR_BufferizableUnaryOpBase<mnemonic,
                                  AFIR_BufferizableDestinationStyleTraits,
@@ -59,10 +46,10 @@ class AFIR_BufferizableCastOp<string mnemonic, list<Type> inputTypes, list<Type>
   }];
 }
 
-// **这两个列表不是判据，只是「并集里出现过哪些 dtype」**——真正的判据是
+// 这两个列表不是判据，只是「并集里出现过哪些 dtype」——真正的判据是
 // `Ops/Cast.cpp` 里那两张 (输入, 输出) 对表。合法的 46 对在 12x12 的笛卡尔积里只占
 // 三分之一，ODS 的类型列表说不出这件事，所以两边都写成同一个全集，剩下的交给
-// `verify()`。**改这里之前先改那两张表**，反过来会放进没有供给的组合。
+// `verify()`。**改这里之前先改那两张表**，反过来会放进没有可用实现的组合。
 //
 // 原先输入列表少一个 `UI16`、输出列表少一个 `UI64`，而 mem 侧的对表里
 // `ui16 -> i16` 与 reg 侧的 `i64 -> ui64` 都在——两处都是漏写，这一轮补上。

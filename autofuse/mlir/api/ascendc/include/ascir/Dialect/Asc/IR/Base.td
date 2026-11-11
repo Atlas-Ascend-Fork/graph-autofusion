@@ -16,7 +16,7 @@ include "Interfaces.td"
 include "Core/Attributes.td"
 include "Core/Types.td"
 
-// `Arg<..., [MemWrite]>`（寄存器计算那一族要声明的副作用）在这个头里。
+// `Arg<..., [MemWrite]>`（寄存器计算那一类要声明的副作用）在这个头里。
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def AscConstructor : NativeOpTrait<"AscConstructorTrait">;
@@ -277,14 +277,14 @@ class VecScalarL2Op<string mnemonic, string apiName, list<Trait> traits = []>
   //
   // count 形态里这个模板实参不是「要不要多设一次 mask」的微优化，是**由谁设 mask** 的
   // 分工：取 `true` 时 API 自己 `SetMaskCount()` + `SetMask(0, count)` + 收尾复位；取
-  // `false` 时 API 整段跳过，按 `repeatTimes = 1` 直发一条指令，靠调用方**事先**把
+  // `false` 时 API 整段跳过，按 `repeatTimes = 1` 直生成一条指令，靠调用方**事先**把
   // mask 置成 count 模式并设好 count（见 `dav_c220/kernel_operator_vec_binary_scalar_impl.h`
   // 的 Level 2 分支，m200 / c100 同形）。所以 `false` 是个有用的取值——一串同 count 的
   // L2 调用可以把那四条提到循环外——但它有前置条件。
   //
   // `UnitAttr` 的缺省（属性不写 = `false`）正好落在**有前置条件**的那一侧：谁建 op 时
   // 忘了写，谁就静默声称「mask 我已经设好了」。今天没有任何 pass 提前设 mask，于是
-  // 发出去的 `Adds<float, 0>` 只算一个 repeat，count 根本没被读——128 个 f32 只有前 64
+  // 生成的 `Adds<float, 0>` 只算一个 repeat，count 根本没被读——128 个 f32 只有前 64
   // 个是对的（`load_add_scalar_store_128x23x5` 钉的就是这条）。
   let arguments = (ins AnyType:$dst, AnyType:$src, AnyType:$scalar,
                    AnyType:$calCount, DefaultValuedAttr<BoolAttr, "true">:$isSetMask);
@@ -305,7 +305,7 @@ class RegOp<string mnemonic, string apiName, list<Trait> traits = []>
   let description = "`AscendC::Reg::" # apiName # "` is a register API operation.\n";
 }
 
-// 目的地是**操作数**（`dstReg`）而不是结果，所以这一族 op 没有任何结果。**副作用必须
+// 目的地是**操作数**（`dstReg`）而不是结果，所以这一类 op 没有任何结果。**副作用必须
 // 声明**：不声明时 MLIR 判它是死代码，`--canonicalize` 会把整段寄存器计算抹掉，而产物
 // 仍然编得过（搬运还在，计算没了）。Autofuse 这一侧实测踩过一次，见
 // `conversion/AFIRToAscendC/AFIRVectorFuncToRegBase.cpp`。
@@ -317,7 +317,7 @@ class BinaryRegOp<string baseMnemonic, string apiName, list<Trait> traits = []>
                    Arg<AscendC_RegTensor, "", [MemRead]>:$src1Reg, AscendC_MaskReg:$maskReg);
 }
 
-// 与二元那一族同理（副作用必须声明），见上。
+// 与二元那一类同理（副作用必须声明），见上。
 class UnaryRegOp<string baseMnemonic, string apiName, list<Trait> traits = []>
     : RegOp<baseMnemonic # "_reg", apiName, [UnaryRegOpInterface] # traits> {
   let description = "`AscendC::Reg::" # apiName # "` is a unary register API operation.\n";

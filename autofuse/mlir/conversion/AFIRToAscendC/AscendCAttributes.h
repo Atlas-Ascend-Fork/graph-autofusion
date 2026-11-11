@@ -40,11 +40,9 @@ inline constexpr llvm::StringLiteral kAscendCInstructionFormAttrName = "ascendc.
 // Returns failure for a space the target model does not represent.
 FailureOr<ascend::MemorySpace> toTargetMemorySpace(afir::Space space);
 
-// Read the memory space of one value from the descriptor at its definition
-// (`afir.buffer_desc`). 迁移前这个查询要先选对数组属性再按下标取，选错一侧就会
-// 静默拿到另一端的空间；现在它只需要值本身（设计文档 5.1 步 8）。Returns failure
-// when the value carries no descriptor, or names a space the target model does
-// not represent.
+// Read memory space from the value's defining buffer_desc, rather than choosing
+// an operand/result descriptor array by index (design doc 5.1, step 8).
+// Return failure if the descriptor is missing or the target does not represent its space.
 FailureOr<ascend::MemorySpace> getValueMemorySpace(Value value);
 
 FailureOr<ascend::ExecutionSpec> getExecutionSpec(Operation *op);

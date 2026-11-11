@@ -33,7 +33,7 @@ TEST(MlirE2eCpu, LoadAddSumStoreCalculatesCorrectResult) {
   const uint32_t input_element_count = input_config.element_count;
   const auto output_config = GetShapeConfig(kOutputShapes, 0);
   const uint32_t output_element_count = output_config.element_count;
-  // `ShapeConfig::shape` 是 `initializer_list`，没有下标运算符——先落成 vector 再按维取。
+  // ShapeConfig::shape 为 initializer_list，先转成 vector，再按维度下标访问。
   const std::vector<int64_t> input_shape(input_config.shape);
   ASSERT_EQ(input_shape.size(), 2U);
   // 两份输入必须同形：Add 不走 broadcast，形状不同时被测的就不是这条路径了。
@@ -44,7 +44,7 @@ TEST(MlirE2eCpu, LoadAddSumStoreCalculatesCorrectResult) {
   float *output = static_cast<float *>(AscendC::GmAlloc(output_element_count * sizeof(float)));
   ASSERT_TRUE(input0 != nullptr && input1 != nullptr && output != nullptr);
 
-  // 正负混合，并让两份输入的取值互不相同——同值时 `x + y` 退化成 `2x`，接错操作数看不出来。
+  // 两份输入使用不同的正负值，避免 x+y 退化为 2x，掩盖操作数接错。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = static_cast<float>(index % 7U) - 3.0F;
     input1[index] = 0.5F - static_cast<float>(index % 5U);

@@ -52,19 +52,19 @@ af::AscGraph BuildGraph() {
 void CheckGeneratedKernel(const std::string &kernel) {
   namespace config = load_broadcast_nddma_store;
   // 走的是 MLIR 那条路而不是回落 legacy：`GenerateForInductor` 在 MLIR 报不支持时会接着跑
-  // legacy 并**返回成功**，所以这一条不是形式检查——少了它，整个用例在回落之后照样全绿。
+  // legacy 并返回成功，所以这一条不是形式检查——少了它，整个用例在回落之后照样全绿。
   EXPECT_NE(kernel.find(std::string(config::kKernelName) + "_subgraph0_plan0"), std::string::npos);
 
-  // 这张图在 reg 侧被调度成**四个模板**，计划选择代不出常数，四个都留给运行期选：
+  // 这张图在 reg 侧被调度成四个模板，计划选择代不出常数，四个都留给运行期选：
   // `template0` 走 `BroadcastExtend`、`template1` 走 `Duplicate`（两者都是 Load 与 Broadcast
   // 没有被融掉的那几种排布），`template2` / `template3` 才是 `NddmaTemplate` 融出来的
   // `Nddma` 节点。
   //
-  // **所以这里不能断言「没有 BroadcastExtend」**：那不是回落的证据，是同一张图的另外几个
-  // 候选。要断言的是 ND-DMA 那条路确实发出来了。
+  // 所以这里不能断言「没有 BroadcastExtend」：那不是回落的证据，是同一张图的另外几个
+  // 候选。要断言的是 ND-DMA 那条路确实生成了。
   EXPECT_NE(kernel.find("DataCopyNddma<"), std::string::npos);
 
-  // 扩展头是**按注册表的键查、把头文本整份内联进 kernel**的，不是留一条 `#include`。
+  // 扩展头是按注册表的键查、把头文本整份内联进 kernel的，不是留一条 `#include`。
   // 所以两条一起查：包装的定义在（键查到了），以及没有留下解析不了的 include（键写成源
   // 文件名 `datacopy_nddma.h` 就会这样，设备编译器报找不到头文件 —— ODS 那段注释里有说明）。
   EXPECT_NE(kernel.find("void DataCopyNddma(const AscendC::LocalTensor<T> &dst"), std::string::npos);
@@ -73,7 +73,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 三组尺寸各自一个栈上数组，名字带 `<src>_nddma_to_<dst>` 后缀，调用在三者之后。
   // **结构由 `test/lit/target/ascendc-data-copy-nddma-reg-base.mlir` 与
   // `test/lit/conversion/afir-nddma-reg-base.mlir` 钉**；这里钉的是这条真实路径上确实
-  // 发出了它们，数值则由下面的 KernelTest 逐元素比出来。
+  // 生成了它们，数值则由下面的 KernelTest 逐元素比出来。
   const size_t dims = kernel.find("const int64_t output_dims_");
   ASSERT_NE(dims, std::string::npos);
   const size_t outputStride = kernel.find("const int64_t output_stride_", dims);
@@ -82,7 +82,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   ASSERT_NE(inputStride, std::string::npos);
   EXPECT_LT(inputStride, kernel.find("DataCopyNddma<", inputStride));
 
-  // **维数不在这里钉。** 同一张图的几个模板维数本来就不同——`[8,1] -> [8,128]` 实测
+  // 维数不在这里钉。 同一张图的几个模板维数本来就不同——`[8,1] -> [8,128]` 实测
   // `template2` 是 `DataCopyNddma<float, 2>`（片上连续、GM 不连续，分维那一刀切出来的），
   // 而 `template3` 是 `DataCopyNddma<float, 1>`（广播轴排到 tile 外，整块 tile 重复读 GM
   // 同一个元素，一维是对的）。断言「不许有一维」会把后者判成错。

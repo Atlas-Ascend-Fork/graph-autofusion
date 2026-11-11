@@ -135,9 +135,9 @@ TEST_F(AFIRSymbolicTest, RejectsReservedPlaceholderInSourceExpression) {
   EXPECT_TRUE(failed(materializeSymbolicExpr(builder, builder.getUnknownLoc(), *expression, {})));
 }
 
-// Canonical serialization expands positive integer powers into multiplication, so these Pow nodes
-// cannot be produced by the textual grammar today. The node-level seam still pins the contract for
-// any future producer that constructs the tree before serialization.
+// Canonical serialization expands positive integer powers into multiplication.
+// These Pow nodes therefore need direct construction to test the pre-serialization
+// contract for future tree producers.
 TEST_F(AFIRSymbolicTest, RejectsUncheckedIntegerPowerNode) {
   OpBuilder builder(entry, entry->end());
   SymbolicEvalOp op = MakeSymbolicEvalOp(builder, *entry, false);

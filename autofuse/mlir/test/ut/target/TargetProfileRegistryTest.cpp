@@ -58,8 +58,8 @@ TEST(TargetProfileRegistryTest, DoesNotCacheFailures) {
   EXPECT_TRUE(failed(getTargetProfile(TargetSelection::builtinPlatform("NoSuchPlatform"), stream)));
   EXPECT_FALSE(diagnostic.empty());
 
-  // Still reported on a second attempt: a failed load must not be remembered,
-  // otherwise a corrected profile would never be picked up.
+  // A failed load must not be cached: retrying should report the failure again
+  // and allow a corrected profile to load.
   diagnostic.clear();
   EXPECT_TRUE(failed(getTargetProfile(TargetSelection::builtinPlatform("NoSuchPlatform"), stream)));
   EXPECT_FALSE(diagnostic.empty());

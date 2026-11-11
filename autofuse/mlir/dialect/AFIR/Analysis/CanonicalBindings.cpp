@@ -202,13 +202,11 @@ LogicalResult CanonicalBindingCollector::recordArray(Operation *owner, ValueRang
   if (failed(tensors)) {
     return failure();
   }
-  // 标量输入没有可绑定的存储：它不是一块 buffer，也就没有 `afir.buffer_desc`。它在
-  // 描述子数组里仍然占一格（否则下标就跟操作数错开），但不参与资源绑定。
-  //
-  // 只对 `afir.operand_descs` 放行——目的地和结果不可能是标量，那条兜底不该一并撤掉。
-  // 函数参数那一侧（`afir.arg_descs`）不走本函数，见 `collectFunctionBindings`；
-  // 两处说的是同一件事，**改一处就要改另一处**（`AFIRVerifierUtils.cpp` 的
-  // `verifyDescriptorList` 上那段注释同理）。
+  // 标量输入不表示存储，没有 buffer_desc，但仍占用 operand_descs 的一个位置，
+  // 以保持描述符与操作数下标一致；资源绑定时跳过它。
+  // 仅 operand_descs 允许此情况，destination 和结果仍必须有存储描述。
+  // 函数参数由 collectFunctionBindings 处理；改动时须同步核对该路径和
+  // AFIRVerifierUtils.cpp 的 verifyDescriptorList。
   const bool allowsScalars = tensorName == kOperandDescsAttrName;
   for (auto [index, value] : llvm::enumerate(valueRange)) {
     auto tensor = dyn_cast<TensorDescAttr>((*tensors)[index]);
@@ -367,7 +365,7 @@ LogicalResult CanonicalBindingCollector::collectOperationBinding(Operation *oper
 
 LogicalResult CanonicalBindingCollector::collectOperationBindings() {
   func.walk([&](Operation *operation) {
-    // **region 内不进这一层。** `afir.vector_func` 的 region 里是寄存器上的数据流：那些值
+    // region 内不进这一层。 `afir.vector_func` 的 region 里是寄存器上的数据流：那些值
     // 没有片上存储，也就没有 buffer descriptor 可绑。不挡住的话这里会按「有 canonical
     // 属性」把它们收进来，再去要一份不存在的 descriptor（`requireBufferDescAttr`）。
     // 算子自己（边界是真的 UB 张量）照常参与绑定，只是不往里走。

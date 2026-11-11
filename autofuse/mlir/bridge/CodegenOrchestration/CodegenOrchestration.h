@@ -57,12 +57,12 @@ MlirCodegenOptions ReadMlirCodegenOptions();
 enum class MlirCodegenStatus { kNotSupported, kFailed, kSucceeded };
 enum class MlirCallerScene { kInductor, kTensorFlow };
 
-// 这张图在哪一道闸门上停下的。**按闸门分，不按 op 分**——同一道闸门拦下不同 op 是一件事，
-// 不同闸门拦下同一个 op 是两件事（与 `test/probe/CapabilityBoundaryProbe.cpp` 的分桶同一
-// 口径）。
+// 这张图在哪一道门禁上停下的。按门禁分，不按 op 分——同一道门禁拦下不同 op 是一件事，
+// 不同门禁拦下同一个 op 是两件事（与 `test/probe/CapabilityBoundaryProbe.cpp` 的分桶同一
+// 规则）。
 //
 // 只在严格模式（`options.config == MlirCodegenConfig::kMlir`）下用：取值随那一行标签打到
-// stderr，供「接管表」按它聚合。**结论不看它**——状态仍然由 `classify()` 给，这里只是给同一次
+// stderr，供「接管表」按它聚合。结论不看它——状态仍然由 `classify()` 给，这里只是给同一次
 // 结论配一个可机读的理由。
 enum class MlirCodegenGate {
   kNone,                  // 一道都没拦下：这张图是 MLIR 发的

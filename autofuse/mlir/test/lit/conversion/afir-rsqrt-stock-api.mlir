@@ -11,9 +11,8 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-rsqrt-extension-api.mlir 的另一半：同一个 `afir.rsqrt`，在有标准
-// `AscendC::Rsqrt` 的那张供给表上。**这一侧三样全不要**——不引扩展头、不要 tmp buffer，
-// 也不要那块预先填好 1 的常量。两侧差得比一元里任何一对都远。
+// 检查标准 AscendC::Rsqrt，与扩展用例对照。
+// 此路径不引入扩展头、tmp buffer 或预填 1 的常量块。
 //
 // 反过来的负例（把不带 tmp 的这份 IR 喂给 mem 侧）由 `WRONGTARGET` 那一行钉：那边只有
 // 一个要 tmp buffer 的 implementation，选不出来。

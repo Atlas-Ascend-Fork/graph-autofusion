@@ -30,7 +30,7 @@ inline const ShapeConfig &GetShapeConfig(std::initializer_list<ShapeConfig> shap
 // 输出线性下标 → 广播源的线性下标。广播轴由「输入该维是 1、输出不是」定出来，与
 // `E2eCase.h` 的 `BindBroadcast`（建图侧）是同一条约定的两面。
 //
-// 放在**这个**头里而不是 `E2eCase.h`：`KernelTest` 跑在设备侧那个二进制里，只包得到
+// 放在这个头里而不是 `E2eCase.h`：`KernelTest` 跑在设备侧那个二进制里，只包得到
 // `Case.h` → 本文件 + tikicpulib，包不了带 AscGraph 的那一份。
 inline uint32_t BroadcastSourceIndex(std::initializer_list<int64_t> out_shape, std::initializer_list<int64_t> in_shape,
                                      uint32_t output_index) {

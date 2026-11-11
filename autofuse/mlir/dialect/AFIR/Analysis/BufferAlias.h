@@ -32,7 +32,7 @@ struct DimensionOffset {
   Kind kind = Kind::Unknown;
   int64_t value = 0;    // Static：常量值；Rotating：phase
   int64_t modulus = 0;  // Rotating：轮转级数
-  // Rotating 的归纳变量本身。**必须带上**：相位差只有在两个下标由同一个归纳变量驱动
+  // Rotating 的归纳变量本身。必须带上：相位差只有在两个下标由同一个归纳变量驱动
   // 时才有意义。丢掉它，两个各自轮转的兄弟循环会被按相位差判成「永不撞同一个槽」，
   // 而它们其实各自遍历了全部槽——那是漏报，不是误报。
   Value inductionVariable;
@@ -65,13 +65,11 @@ enum class AliasResult : uint8_t {
 // 识别不了的形式一律退化成 `wholeBase`，宁可多报不可漏报。
 BufferSlice resolveBufferSlice(Value value);
 
-// 两个切片是否可能指向同一块存储。`iterationDistance` 是 `rhs` 相对 `lhs` 的循环迭代
-// 距离（0 = 同一次迭代）——轮转下标只有在距离是级数的整数倍时才会撞上，这正是
-// 「双缓冲把冒险推远，但推不掉」的形式化。
-//
-// `loopInductionVariable` 是这个距离所属的循环的归纳变量。只有当轮转下标正是由它驱动
-// 时，模运算才谈得上成立；由内层循环驱动的下标配上外层循环的距离是两套坐标系，一律
-// 按「可能重叠」处理。传空表示只问同一次迭代内的重叠（此时只要求两边同源即可）。
+// 判断两切片是否可能访问同一存储。iterationDistance 是 rhs 相对 lhs 的迭代距离，
+// 0 表示同一轮；同相位轮转下标在距离为级数倍数时重叠，因此多缓冲只能推迟冒险。
+// loopInductionVariable 指定该距离所属循环的归纳变量。轮转必须由它驱动，不能用内层
+// 轮转坐标推断外层距离；无法匹配时保守地按可能重叠处理。
+// 为空时仅检查同轮重叠，要求两侧轮转同源。
 AliasResult aliasSlices(const BufferSlice &lhs, const BufferSlice &rhs, int64_t iterationDistance = 0,
                         Value loopInductionVariable = {});
 

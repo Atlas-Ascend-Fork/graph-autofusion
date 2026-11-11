@@ -13,7 +13,7 @@
 //   afir.loop_axis       Integer，最内层循环轴
 //   afir.vectorized_axis DenseI64Array，结果的向量化轴
 //   afir.axis_id         Integer，某个 SSA 值 / scf.for 对应哪个轴
-//   afir.axis_role       **自由字符串**，该值是这个轴的什么
+//   afir.axis_role       自由字符串，该值是这个轴的什么
 //
 // 其中 `axis_id` + `axis_role` 承载的是一条 IR 结构上不存在的反向引用：
 // `LoopGenerate` 把轴物化成标量值之后，`TransferPlan` 只能靠遍历全函数、比对这对

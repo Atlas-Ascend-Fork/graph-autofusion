@@ -11,12 +11,12 @@
 // RUN:   | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend950PR_9599 %s | FileCheck %s --check-prefix=SELECT
 
-// reg 侧的标量形态**只有 `div` 一个**。`sub_reg_base.h` 里 `SubExtends` 也在、
+// reg 侧的标量形态只有 `div` 一个。`sub_reg_base.h` 里 `SubExtends` 也在、
 // `true_div.h` 的 `TrueDivExtends` 也在，但 legacy v2 的 `IsScalarInputSupported` 对
 // Sub / TrueDiv 返回 false（矩阵的 `reg_scalar` 列就是那个判据的摘要），调度产不出那种
 // 图——接了是死代码，所以这条路上没有。
 //
-// **与 mem 侧那份是两个文件而不是两条 RUN**：`DivExtends` 不收 tmp buffer（`div_reg_base.h`
+// 与 mem 侧那份是两个文件而不是两条 RUN：`DivExtends` 不收 tmp buffer（`div_reg_base.h`
 // 自己在寄存器里转存），而 `Divs` 收。图上带不带 tmp 操作数不一样，一份输入服务不了两侧
 // ——`afir-logical-scalar-api.mlir` 与它的 `_reg_base` 那一份同一个理由。
 
@@ -50,7 +50,7 @@ func.func @div_scalar_lhs(%input: !ascendc.local_tensor<?xf32>, %destination: !a
 // IR-LABEL: func.func @div_scalar_lhs
 // IR: ascendc.div_extends_reg_base %arg1, %arg0, {{.*}}isScalarLatter = false
 
-// **没有 tmp buffer 实参**：`count` 直接跟在标量后面。多一个的话这两条就红。
+// 没有 tmp buffer 实参：`count` 直接跟在标量后面。多一个的话这两条就红。
 // CPP: {{^ *}}DivExtends<float, true>({{v[0-9]+}}, {{v[0-9]+}}, c4_f32, static_cast<uint32_t>({{v[0-9]+}}));
 // CPP: {{^ *}}DivExtends<float, false>({{v[0-9]+}}, {{v[0-9]+}}, c4_f32, static_cast<uint32_t>({{v[0-9]+}}));
 

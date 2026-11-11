@@ -47,9 +47,9 @@ func.func @invalid_add_element_type(%lhs: tensor<4xf64>, %rhs: tensor<4xf64>) ->
 
 // -----
 
-// 搬运这一族的类型域也会拒收域外的类型。**例子原先是 bf16，2026-10-20 换成 f64**：
+// 搬运这一类的类型域也会拒收域外的类型。例子原先是 bf16，2026-10-20 换成 f64：
 // bf16 那天进了 `AFIR_DataMoveElementTypes`（legacy 的 Load / Store 两侧都供得起它），
-// 于是这一格不再红——**换例子而不是放宽断言**，钉的仍然是「域外就是拒收」这件事。
+// 于是这一格不再红——换例子而不是放宽断言，钉的仍然是「域外就是拒收」这件事。
 // f64 两侧都没有，短期内也不会有。
 func.func @invalid_load_element_type(%input: tensor<4xf64>) -> tensor<4xf64> {
   // expected-error @+1 {{must be Tensor or MemRef of}}

@@ -8,20 +8,12 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- CanonicalBindings.h - canonical 形态的绑定收集 -----------*- C++ -*-===//
+// 按 tensor_desc、buffer_desc 及其所属值收集 canonical 存储，校验绑定一致性。
+// 输出为值到绑定信息的映射；判断只依赖 AFIR 契约，不依赖 AscendC 等后端。
 //
-// 「这个 kernel 函数声明了哪些 canonical 存储，它们彼此一致吗」。
-//
-// 输入是 `#afir.tensor_desc` / `#afir.buffer_desc` 与它们挂在哪个值上，输出是一张
-// 值 -> 绑定信息的表。判据全部来自 AFIR 自己的 descriptor 契约，与任何后端无关——所以
-// 这一相住在 AFIR 层，尽管今天唯一的消费者是 AscendC 的资源物化。
-//
-// **本层只填分析字段。** `CanonicalValueInfo::alias` 与 `materialized` 由下游的物化器
-// 回填；把它们留在同一个结构体里而不是另起一张并行表，是因为它们描述的是同一个值，
-// 拆成两张表之后「哪个 alias 对应哪条绑定」会变成第二处需要维护的对应关系（D2）。
-// `Value` 是核心 MLIR 类型，留着它们不会把后端拉进这一层。
-//
-//===----------------------------------------------------------------------===//
+// 此层只填写分析字段。alias 和 materialized 由下游物化器回填；它们与绑定描述同一值，
+// 保留在 CanonicalValueInfo 中可避免额外维护并行映射（D2）。Value 为核心 MLIR 类型，
+// 不会引入后端依赖。
 
 #ifndef AUTOFUSE_MLIR_DIALECT_AFIR_ANALYSIS_CANONICALBINDINGS_H
 #define AUTOFUSE_MLIR_DIALECT_AFIR_ANALYSIS_CANONICALBINDINGS_H
@@ -59,8 +51,8 @@ struct CanonicalGroupKey {
   CanonicalResourceKey resource;
   int64_t reuseId = -1;
   int64_t lifeTimeAxisId = -1;
-  // 同一组里的成员是**并排**放的：物化时依次累加偏移。tmp buffer 不是这个关系——调度给
-  // 两个节点同一个 buffer id，说的是「先后复用同一块」，而 ATT 的聚合口径正是跨节点
+  // 同一组里的成员是并排放的：物化时依次累加偏移。tmp buffer 不是这个关系——调度给
+  // 两个节点同一个 buffer id，说的是「先后复用同一块」，而 ATT 的聚合定义正是跨节点
   // 取 max（`buf_occupy_expr.cpp`），整块只按一个节点的需要算过一次。并排放会让第二块
   // 整个落在资源之外，而且没有任何断言拦得住（偏移检查只查算术溢出）。
   //
@@ -97,7 +89,7 @@ struct CanonicalValueInfo {
 // 一次收集的结果：值的绑定表加一个稳定的遍历顺序。
 //
 // `valueOrder` 不是可有可无的：`values` 是 DenseMap，遍历顺序由指针决定，而下游要按它
-// 建资源、发算子。少了它，同一份输入两次编译会得到顺序不同的 IR。
+// 建资源、生成算子。少了它，同一份输入两次编译会得到顺序不同的 IR。
 struct CanonicalBindings {
   llvm::DenseMap<Value, CanonicalValueInfo> values;
   SmallVector<Value> valueOrder;
@@ -111,14 +103,9 @@ bool hasCanonicalAttrs(Operation *operation);
 // 所以是自由函数而不是物化器的私有 helper。队列身份不看它——见 `isQueueBinding`。
 TransferDirection getTransferDirection(Operation *owner);
 
-// 这个绑定点上的存储是不是队列。判据就是 `isCanonicalQueueResource`（descriptor 的
-// `slot_count` / `queue_depth`），这里只多一条：非 UB 的空间不可能是队列。
-//
-// 不看 `view.sourceOwner` 的搬运方向。一个值可以在多个点被绑定，`recordValue` 只在
-// 后来遇到搬运 owner 时改 `sourceOwner`，而 `view.resource.queue` 是建 StorageView 时
-// 定的、不会重算——判据掺进 owner 就意味着同一块存储的队列身份取决于哪个绑定点先被
-// 收集到。字段名（`q<id>_size` / `b<id>_size`）正是按这个身份拼的，两处答案不一样时
-// kernel 侧取的字段与 host 侧填的字段就对不上。
+// 队列身份取自构建 StorageView 时确定的 view.resource.queue，不从 sourceOwner 推断。
+// 同一值可能有多个绑定点，recordValue 后续会更新搬运 owner，但不会重算资源身份。
+// 若混用两者，q<id>_size / b<id>_size 会依赖绑定收集顺序，造成 host 和 kernel 字段不一致。
 bool isQueueBinding(const StorageView &view, BufferDescAttr buffer);
 
 // 收集并校验一个函数的 canonical 绑定。失败时诊断已挂在具体的 Op / 值上。

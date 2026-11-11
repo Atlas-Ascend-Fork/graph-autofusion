@@ -192,9 +192,8 @@ FailureOr<ImplementationKey> selectImplementation(Operation *op, const Candidate
 
   llvm::SmallVector<Candidate, 2> supported = candidates.getSupported();
   if (supported.empty()) {
-    // 能力层说不支持 —— 整个 capability 层的拒收都收束在这一处，所以标记也只打在这里。
-    // 它与下面两条的性质不同：下面两条（多个实现没有策略、策略返回了候选集外的实现）是
-    // 注册表与策略的自相矛盾，回落会把它们藏起来。
+    // 能力查询拒绝所有实现时，在此统一标记能力不足，允许调用方回落。
+    // 下面的多实现无选择策略、策略返回候选集外实现则属于注册或策略错误，不能按能力不足处理。
     mlir::afir::markCapabilityShortfall(op->emitOpError("has no supported Ascend implementation"));
     return failure();
   }

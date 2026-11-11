@@ -25,10 +25,8 @@ bool hasMaterializedAscendCResources(func::FuncOp func) {
 
 bool hasPipelineSynchronization(func::FuncOp func) {
   WalkResult found = func.walk([](Operation *op) {
-    // AFIR 同步族与 AscendC 的队列算子都算数：同步阶段的产物现在分两层——本层的顺序
-    // 由 `afir.pipe_barrier` / `event_record` / `event_wait` 表达，队列路径仍落在
-    // `ascendc` 的 enque / deque 上（退出 TQue 依赖 ADR-11/12 的 pool 形态）。判据要认
-    // 全部，否则第二次跑会在已经同步过的函数上重插一遍。
+    // 同步阶段同时产生 AFIR 屏障、事件和 AscendC 队列算子，需要全部识别以防重复插入。
+    // 队列路径仍使用 AscendC enque / deque；替换 TQue 依赖 ADR-11/12 的 pool 形态。
     return isa<afir::PipeBarrierOp, afir::EventRecordOp, afir::EventWaitOp, afir::BarrierAllOp, afir::SyncAllOp,
                ascendc::TQueBindEnqueTensorOp, ascendc::TQueBindDequeTensorOp, ascendc::PipeBarrierOp>(op)
                ? WalkResult::interrupt()

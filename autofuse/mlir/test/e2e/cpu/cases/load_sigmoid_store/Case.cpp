@@ -10,14 +10,14 @@
 
 //===- Case.cpp - load -> sigmoid -> store CPU case -------------*- C++ -*-===//
 //
-// **这份用例存在的理由是「`sigmoid.h` 那段头文本编得过」。**
+// 这份用例存在的理由是「`sigmoid.h` 那段头文本编得过」。
 //
-// mem 侧发的是包装 `SigmoidExtend<float>(dst, src, tmp, count)`，头 `sigmoid.h` 连同它
-// 声明的前导 `utils.h` 被**整段内联**进 kernel。而 `sigmoid.h` 正是当初把「扩展头不是
+// mem 侧生成的是包装 `SigmoidExtend<float>(dst, src, tmp, count)`，头 `sigmoid.h` 连同它
+// 声明的前导 `utils.h` 被整段内联进 kernel。而 `sigmoid.h` 正是当初把「扩展头不是
 // 自足的翻译单元」这件事暴露出来的那个 op——它用了只有 `utils.h` 里才有的 `KernelUtils`
 // 与 `MAX_REPEAT_TIME`，E2 那一轮就是在它身上发现前导头这条通路整条缺失的。
 //
-// 结果是：**整条链上最先撞上这个问题的头，自己反倒一直没有编译型用例**。lit 那两份只
+// 结果是：整条链上最先撞上这个问题的头，自己反倒一直没有编译型用例。lit 那两份只
 // 比文本，前导头声明被删掉它们照样绿，失败要一路走到 device 编译器上，报在内联进来的
 // 那段头文本的行号里。这是清单 L-13 里 mem 侧剩下的最后一个洞。
 //
@@ -53,13 +53,13 @@ void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(std::string(load_sigmoid_store::kKernelName) + "_subgraph0_plan0"), std::string::npos);
   // 裸名加显式模板实参，不带 `AscendC::` 限定——包装是全局函数。
   EXPECT_NE(kernel.find("SigmoidExtend<float>("), std::string::npos);
-  // 业务头与**前导头**都被内联进来了。后一条是这份用例的要害：`sigmoid.h` 用了
+  // 业务头与前导头都被内联进来了。后一条是这份用例的要害：`sigmoid.h` 用了
   // `KernelUtils` / `MAX_REPEAT_TIME`，只有 `utils.h` 声明它们。把 ODS 上那句
   // `ApiExtensionHeader<["sigmoid.h"], ["utils.h"]>` 的前导去掉，这两条里的第二条先红，
   // 紧接着 device 编译也过不去。
   EXPECT_NE(kernel.find("__ASCENDC_API_SIGMOID_H__"), std::string::npos);
   EXPECT_NE(kernel.find("__ASCENDC_API_UTILS_H__"), std::string::npos);
-  // 前导头要排在业务头**前面**——它们是当作文本内联的，彼此不 include。
+  // 前导头要排在业务头前面——它们是当作文本内联的，彼此不 include。
   EXPECT_LT(kernel.find("__ASCENDC_API_UTILS_H__"), kernel.find("__ASCENDC_API_SIGMOID_H__"));
   // 包装要一块调用方给的 tmp buffer：四个实参里最后一个是 count。
   EXPECT_NE(kernel.find("AscendC::TBuf<"), std::string::npos);

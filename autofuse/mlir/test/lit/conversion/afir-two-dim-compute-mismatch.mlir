@@ -6,7 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 逐元素算子的输入与目的地的**局部有效视图必须可证明相同**，不相同时显式拒绝。
+// 逐元素算子的输入与目的地的局部有效视图必须可证明相同，不相同时显式拒绝。
 //
 // 一次一维调用只覆盖一段从基址算起的连续地址，长度由 `materializeScheduledLocalSpan`
 // 按输入的有效视图折算。目的地若是另一套 extent/stride，这个长度对它就是错的：写出去的

@@ -17,13 +17,13 @@
 // the include line with the header text -- runs only in the production codegen
 // path, so what a LIT run sees is the readable include form.
 //
-// 两个 target 都选 `load.gm_ub`，都发 `DataCopyPadExtend`、都要 `datacopy.h`。
-// **这一点从前不是这样**：mem-based 一侧曾按 `TargetFeature::DataCopyPadExtend` 回落到裸
+// 两个 target 都选 `load.gm_ub`，都生成 `DataCopyPadExtend`、都要 `datacopy.h`。
+// 这一点从前不是这样：mem-based 一侧曾按 `TargetFeature::DataCopyPadExtend` 回落到裸
 // `AscendC::DataCopy`、不要任何扩展头，而那个包装其实定义在 mem 侧的
-// `autofuse/ascendc/api/datacopy.h`，legacy 两侧都无条件发它。裸 `DataCopy` 要求
+// `autofuse/ascendc/api/datacopy.h`，legacy 两侧都无条件生成它。裸 `DataCopy` 要求
 // `count * sizeof(T)` 32B 对齐，尾块不对齐时 NPU 上不报错、按 32B 向下取整。
 //
-// 所以两条 RUN 今天钉的不是「同一个计划落到两套 API」，而是**它落到同一套**：谁也不许
+// 所以两条 RUN 今天钉的不是「同一个计划落到两套 API」，而是它落到同一套：谁也不许
 // 按 target 把搬运换成裸 `DataCopy`。两侧各写一遍而不是合成一条，是为了让「哪天又有人
 // 给某个 target 加回落」这件事在两处都变红。
 

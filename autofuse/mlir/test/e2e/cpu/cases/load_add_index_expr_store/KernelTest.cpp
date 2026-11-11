@@ -25,7 +25,7 @@ using mlir::afir::load_add_index_expr_store::kOutputShapes;
 constexpr float kIndexExprValue = 2.0F;
 }  // namespace
 
-// **签名里没有 `IndexExpr`。** 它不是 kernel 输入——值在 kernel 顶部由 size var 算出来，
+// 签名里没有 `IndexExpr`。 它不是 kernel 输入——值在 kernel 顶部由 size var 算出来，
 // 折成一个常量。这与 `load_add_scalar_data_store` 恰好相反，那边标量占一个形参。
 extern "C" __global__ __aicore__ void AF_MLIR_E2E_CPU_KERNEL_SYMBOL(GM_ADDR input0, GM_ADDR output, GM_ADDR workspace,
                                                                     AutofuseTilingData tilingData);
@@ -39,7 +39,7 @@ TEST(MlirE2eCpu, LoadAddIndexExprStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 取值在 f32 里全部精确可表示，加上 2.5 之后也是，所以逐元素比相等。
+  // 输入及加上 2.5 后的结果均可被 f32 精确表示，使用逐元素相等比较。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     input0[index] = static_cast<float>(static_cast<int32_t>(index % 9U) - 4) * 0.5F;
   }

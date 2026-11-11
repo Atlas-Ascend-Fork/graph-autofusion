@@ -13,4 +13,11 @@
 
 #include "../../../common/att/common_gen_utils.h"
 
+namespace att {
+namespace test {
+// Arguments are supplied by the test and may contain shell globs and redirections.
+int CompileGeneratedTiling(const std::string &arguments);
+}  // namespace test
+}  // namespace att
+
 #endif  // TESTS_AUTOFUSE_ST_ATT_UTILS_COMMON_GEN_UTILS_H_

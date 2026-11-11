@@ -8,10 +8,10 @@
 
 // AR 单 A 的物理布局证明（设计文档 `2026-10-13-reduce-micro-refactor-design.md` 功能需求 3）。
 //
-// 这是一组**差分**用例：三份 IR 只差一个 stride，第一份必须通过、后两份必须被拒。只断言
+// 这是一组差分用例：三份 IR 只差一个 stride，第一份必须通过、后两份必须被拒。只断言
 // 「能不能过」而不是报错措辞——差异唯一，拒绝只可能来自那一处。
 //
-// 为什么需要它：`materializePhysicalReduceShape` 自己**构造**
+// 为什么需要它：`materializePhysicalReduceShape` 自己构造
 // `innerFootprint = align(N_Rlast) × Π N_Rother` 喂给高阶 API，而 tile 的真实 stride 来自
 // 调度器。两者不一致时 API 按错的行距走位，算的是补白里的垃圾，而此前没有任何检查会报：
 // 这几条判据以前只写在注释里。
@@ -57,7 +57,7 @@ func.func private @ar_layout_legal(
 
 // -----
 
-// 源侧 A 的 stride 取**未对齐**的裸长度 17。第二行起就偏进了前一行的补白，而高阶 API 仍按
+// 源侧 A 的 stride 取未对齐的裸长度 17。第二行起就偏进了前一行的补白，而高阶 API 仍按
 // 对齐后的 24 走行距。唯一改动：`vectorized_strides` 第一项 24 → 17。
 module {
 func.func private @ar_layout_unaligned_source_pitch(
@@ -82,7 +82,7 @@ func.func private @ar_layout_unaligned_source_pitch(
 
 // -----
 
-// 落点侧 A 的 stride 是 2 而不是 1。高阶 API 把结果**连续**写在开头，消费侧却按跨步 2 读，
+// 落点侧 A 的 stride 是 2 而不是 1。高阶 API 把结果连续写在开头，消费侧却按跨步 2 读，
 // 于是一半结果读到的是没写过的槽位。只验证源侧是不够的——这条正是上一轮检视里
 // 「destination 的 nominal stride 不会自动因尾块压紧」那个发现的门禁化。
 // 唯一改动：destination / result 的 `vectorized_strides` 第一项 1 → 2。
@@ -109,10 +109,10 @@ func.func private @ar_layout_strided_destination(
 
 // -----
 
-// **graph 与 descriptor 的 extent 不同源**（2026-10-13 检视的 P1 回归）。唯一改动：graph 里
+// graph 与 descriptor 的 extent 不同源（2026-10-13 检视的 P1 回归）。唯一改动：graph 里
 // R 的 size 由 17 变成 33，descriptor 的 `repeats` 仍是 17、A stride 仍是 24。
 //
-// 按 descriptor 的 `repeats` 证明会得到 `24 == align(17)` **成立**而放行；但高阶 API 的行距
+// 按 descriptor 的 `repeats` 证明会得到 `24 == align(17)` 成立而放行；但高阶 API 的行距
 // 走的是 graph 的 `align(33) = 40`，连 384 字节的源缓冲都装不下生成的四行。判据因此必须从
 // `materializeScheduledAxisExtents` 实际用的那一份（`AxisAttr::getSize()`）读 extent。
 module {
@@ -138,11 +138,11 @@ func.func private @ar_layout_graph_extent_mismatch(
 
 // -----
 
-// **退化判定也必须按 graph 的 extent**（同一轮检视的第二个反例）。唯一改动：destination /
+// 退化判定也必须按 graph 的 extent（同一轮检视的第二个反例）。唯一改动：destination /
 // result 的 A `repeat` 由 4 变成 1，stride 由 1 变成 2；graph 与 input 仍是 A=4。
 //
 // 按 destination 的 `repeat` 判退化会以为「只有一行、没有行间距要验证」而跳过检查；而 API
-// 按 graph 的 A=4 **连续**写四个结果，与 stride 2 完全对不上。
+// 按 graph 的 A=4 连续写四个结果，与 stride 2 完全对不上。
 module {
 func.func private @ar_layout_destination_degenerate_mismatch(
   %src: !ascendc.local_tensor<?xf32> {afir.buffer_desc = #afir.buffer_desc<space = <ub>, buffer_id = 0, size_bytes_expr = <"384">, life_time_axis_id = -1>},
@@ -166,7 +166,7 @@ func.func private @ar_layout_destination_degenerate_mismatch(
 
 // -----
 
-// 正向：**自洽**的退化保留轴。graph 里 A 的 size 就是 1，两侧 stride 都是 0——这是全归约的
+// 正向：自洽的退化保留轴。graph 里 A 的 size 就是 1，两侧 stride 都是 0——这是全归约的
 // 合法形态（对应 `ReducePlanTest.AllReduceKeepsTheDegenerateAxisAsTheKeptSide`）。只有一行，
 // 不存在行间距可验证，所以跳过 stride 约束是对的，不能因为 stride 不是 1 就拒。
 module {

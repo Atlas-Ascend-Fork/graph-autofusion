@@ -47,12 +47,12 @@ TEST(MlirE2eCpu, LoadRemainderStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 包装算的是 `dividend - floor(dividend / divisor) * divisor`——**符号跟除数走**，
+  // 包装算的是 `dividend - floor(dividend / divisor) * divisor`——符号跟除数走，
   // 与 C 的 `fmod`（符号跟被除数走）在混合符号下答案不同。用例要能把这两者分开，所以
   // 除数正负都有，商也正负都有。
   //
   // 构造法：除数取小整数 d，商取 q ∈ {-1.5, -0.5, 0.5, 1.5, 2.5}，被除数 = d * q。
-  // 三者在 float 里都精确，而且**商离整数边界恒差 0.5**——设备上的 Div 与主机的 `/`
+  // 三者在 float 里都精确，而且商离整数边界恒差 0.5——设备上的 Div 与主机的 `/`
   // 差一个 ulp 也不会让 floor 跳到另一个整数去，用例不会偶发。
   // 于是期望值恒为 `d * 0.5`，符号就是 d 的符号。
   for (uint32_t index = 0; index < input1_element_count; ++index) {

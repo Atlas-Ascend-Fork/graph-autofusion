@@ -20,8 +20,7 @@
 // MLIR omits the empty result type in the printed function signature; the
 // absence of a result is asserted by the following attributes/body checks.
 // CHECK-SAME: ) attributes
-// 局部 buffer 的定义点是它的 `memref.alloc`，规划结果挂在那里；此前它在每个
-// 使用点的 `afir.*_buffer_descs` 数组里各存一份。
+// 局部 buffer 的规划描述挂在定义它的 memref.alloc 上，不在各使用点复制数组属性。
 // CHECK: %[[ALLOC:.*]] = memref.alloc() {afir.buffer_desc = #afir.buffer_desc<space = <ub>, buffer_id = 2, slot_count = 2, queue_depth = 2, size_bytes_expr = <"(16 * s0)">, life_time_axis_id = -1>} : memref<32x8xf16, #afir.space<ub>>
 // CHECK: {{.*}}afir.load %arg0 outs(%[[ALLOC]]) {{.*}}afir.destination_descs = [#afir.tensor_desc<axis = [0, 1],role = <compute>>]{{.*}}indexing_maps = [#{{.*}}, #{{.*}}]
 // 中间值落在 UB：destination 的定义点上写的 space 和它的结果类型说的是同一件事。

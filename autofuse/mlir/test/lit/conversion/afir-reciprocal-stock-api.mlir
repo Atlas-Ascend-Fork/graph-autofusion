@@ -11,8 +11,7 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// afir-reciprocal-extension-api.mlir 的另一半：同一个 `afir.reciprocal`，在有标准
-// `AscendC::Reciprocal` 的那张供给表上。没有 tmp buffer，调用带 `AscendC::` 限定。
+// 检查标准 AscendC::Reciprocal，与扩展用例对照：不接收 tmp buffer，调用使用 AscendC:: 限定。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

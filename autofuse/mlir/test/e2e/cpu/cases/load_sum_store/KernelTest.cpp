@@ -33,7 +33,7 @@ extern "C" int64_t AutofuseE2eInitTiling(AutofuseTilingData *tiling, uint64_t *w
 static void CheckReduceOutput(const float *input0, const float *output, const std::vector<int64_t> &input_shape,
                               uint32_t input_element_count, uint32_t output_element_count, bool reduces_leading_axis) {
   if (input_shape.size() == 3U) {
-    // ARA：`[A0, R, A1]`，沿中间维求和。保留维有两根，所以 `A` 侧是**连乘**出来的——这正是
+    // ARA：`[A0, R, A1]`，沿中间维求和。保留维有两根，所以 `A` 侧是连乘出来的——这正是
     // 这条注册存在的理由（见 `Case.cpp` 三维分支的注释）。
     const uint32_t leading = static_cast<uint32_t>(input_shape[0]);
     const uint32_t reduced = static_cast<uint32_t>(input_shape[1]);
@@ -55,7 +55,7 @@ static void CheckReduceOutput(const float *input0, const float *output, const st
     ASSERT_EQ(rows * columns, input_element_count);
     // 归约哪一维由注册的输出形状决定，与 `Case.cpp` 建图时用的是同一条判据。
     if (reduces_leading_axis) {
-      // RA：`[R, A]`，沿列求和。被归约维是 tile 的**物理外**维，每一列独立。
+      // RA：`[R, A]`，沿列求和。被归约维是 tile 的物理外维，每一列独立。
       ASSERT_EQ(output_element_count, columns);
       for (uint32_t column = 0; column < columns; ++column) {
         float expected = 0.0F;

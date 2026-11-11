@@ -15,14 +15,10 @@
 
 namespace mlir::ascend::kernel {
 
-// Emits an `extern "C" int64_t AutofuseLaunch(...)` host wrapper that invokes
-// `graphName<<<blockDim, nullptr, stream>>>(...)` with the aggregate main's
-// input/output/workspace/tiling arguments in the ABI order recorded by
-// `layout`. Byte-for-byte compatible with the existing
-// `Kernel::GenKernelFuncCallForInductor` (non-CV) launch text in
-// codegen_kernel.cpp. Returns failure() when `layout` does not match exactly
-// one workspace argument, which should already have been rejected by
-// validateAggregateContract.
+// Emit extern "C" int64_t AutofuseLaunch(...) calling graphName with blockDim,
+// stream and layout's input/output/workspace/tiling arguments in canonical ABI order.
+// Preserve the non-CV Kernel::GenKernelFuncCallForInductor launch text in codegen_kernel.cpp.
+// Return failure unless layout has exactly one workspace, as required by validateAggregateContract.
 FailureOr<std::string> emitAutofuseLaunch(const AggregateArgumentLayout &layout, ArrayRef<Type> argumentTypes,
                                           llvm::StringRef graphName, llvm::StringRef tilingTypeName);
 

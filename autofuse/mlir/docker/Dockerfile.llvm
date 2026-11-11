@@ -8,7 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-ARG BASE_IMAGE=ubuntu:22.04
+ARG BASE_IMAGE=ubuntu:24.04
 FROM ${BASE_IMAGE} AS dev-base
 
 ARG PYTHON_BUILD_REQUIREMENTS="setuptools>=68,<80 wheel>=0.42 build>=1.1.1"
@@ -76,9 +76,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     zstd \
     && rm -rf /var/lib/apt/lists/* \
-    && pip_args=(--no-cache-dir --upgrade) \
+    && pip_args=(--no-cache-dir --upgrade --ignore-installed) \
     && if [ -n "${PIP_INDEX_URL}" ]; then pip_args+=(--index-url "${PIP_INDEX_URL}"); fi \
     && if [ -n "${PIP_TRUSTED_HOST}" ]; then pip_args+=(--trusted-host "${PIP_TRUSTED_HOST}"); fi \
+    && pip_args+=(--break-system-packages) \
     && python3 -m pip install "${pip_args[@]}" ${PYTHON_BUILD_REQUIREMENTS} \
         clang-format==18.1.8 "pre-commit>=4,<5" \
     && git lfs install --system

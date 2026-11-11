@@ -6,22 +6,22 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// mem 侧分段广播，**两个广播段相邻**：`[brc][brc][normal]`。
+// mem 侧分段广播，两个广播段相邻：`[brc][brc][normal]`。
 //
 // 这是 `classifySegments` 删掉那条相邻判据所要的正例。此前它拒收这种形状、整图回落 legacy，
 // 理由写着「推下来是对的，但没有用例证明」——这个文件就是那条用例。
 //
-// **为什么相邻的广播段并不上**：合轴要求所有参与张量都满足
+// 为什么相邻的广播段并不上：合轴要求所有参与张量都满足
 // `stride[外] == stride[内] × 段长[内]`。源在两个广播段上 stride 都是 0，`0 == 0 × 4` 成立、
-// 不反对；挡住合并的是**目的地在两段之间有填充**——`stride[z0] = 64`，而
+// 不反对；挡住合并的是目的地在两段之间有填充——`stride[z0] = 64`，而
 // `stride[z1] × 段长(z1) = 8 × 4 = 32`，64 ≠ 32，所以两段留着。设计文档里「相邻的广播段在
 // 合轴那一步就并成一段了」那句话因此不完全成立。
 //
-// **为什么分解是对的**：外层每一趟按本段在目的地上的 stride 整块复制
+// 为什么分解是对的：外层每一趟按本段在目的地上的 stride 整块复制
 // （`emitBlockCopy` 取 `segment.strides[destination]`，不是段长之积），所以两段之间有填充也走
 // 对地址；填充位一起复制，那些位置本来就是 don't care。
 //
-// 填充刻意只放在**两个广播段之间**，没放进最内那两段的窗口：窗口里 `dst_k` 既是行长也是行距
+// 填充刻意只放在两个广播段之间，没放进最内那两段的窗口：窗口里 `dst_k` 既是行长也是行距
 // （`BroadcastFirstDim` 的 `dst_inner_offset`），那里带填充是 mem 侧另一条判据的事
 // （reg 侧的那一条见 `afir-broadcast-extend-padded.mlir`），不是本文件要钉的。
 

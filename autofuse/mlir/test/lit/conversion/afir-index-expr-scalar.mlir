@@ -8,7 +8,7 @@
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s -o %t.lowered.mlir
 // RUN: af-opt --afir-aggregate-launch --afir-aggregate-launch-graph-name=fused_graph %t.lowered.mlir | FileCheck %s
 
-// 符号形态的 `IndexExpr` 降到 AscendC。**与常量标量分得开的就是这一段**：
+// 符号形态的 `IndexExpr` 降到 AscendC。与常量标量分得开的就是这一段：
 // `afir-scalar-binary-api.mlir` 那条的标量是一个 `arith.constant`，这条的标量是尺寸序言
 // 里算出来的——`afir.tiling_param` 读一个运行期尺寸，`afir.symbolic_eval` 求值，再转成
 // 元素类型。
@@ -17,7 +17,7 @@
 // 到浮点要经 i64 中转，因为 `sitofp` 不收 `index`。**这两次转换漏掉或写反，IR 与生成的
 // C++ 都还成立，只是算出另一个数**，所以下面逐个钉。
 //
-// 它**不占 kernel 形参**——这是 `IndexExpr` 与 `ScalarData` 的分界，签名那一行钉住它。
+// 它不占 kernel 形参——这是 `IndexExpr` 与 `ScalarData` 的分界，签名那一行钉住它。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #output_desc = #afir.tensor_desc<axis = [0], role = <output>>
@@ -76,13 +76,13 @@ module @plan0 attributes {
 
 // CHECK: // -----KERNEL_BODY-----
 // CHECK: __aicore__ void plan0_stage0_template0
-// 序言里**读 TilingData 的字段**，不是把它折成常量。折成常量的话这一行就没有了。
+// 序言里读 TilingData 的字段，不是把它折成常量。折成常量的话这一行就没有了。
 // CHECK: {{v[0-9]+}} = {{v[0-9]+}}.s0;
 // 两次转换，相邻两行：index→i64→half。少一次或写反都还编得过，只是算出另一个数。
 // CHECK: int64_t {{v[0-9]+}} = static_cast<int64_t>(
 // CHECK-NEXT: half {{v[0-9]+}} = static_cast<half>(
 // CHECK: AscendC::Adds
-// **签名里没有多出来的标量形参**：只有两个 GM 指针加 workspace 与 tiling。
+// 签名里没有多出来的标量形参：只有两个 GM 指针加 workspace 与 tiling。
 // CHECK: extern "C"  __global__ __aicore__ void fused_graph(__gm__ half* {{v[0-9]+}}, __gm__ half* {{v[0-9]+}}, __gm__ uint8_t*
 // CHECK: // -----AUTOFUSE_LAUNCH-----
 // CHECK: extern "C" int64_t AutofuseLaunch(uint32_t blockDim, void* stream, void* input0, void* output0, void* workspace,

@@ -12,11 +12,11 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
-// `afir.gelu`：两张供给表给的是**同一个** `AscendC::Gelu`，也不引扩展头，所以只有一个
+// `afir.gelu`：两张支持表给的是**同一个** `AscendC::Gelu`，也不引扩展头，所以只有一个
 // implementation、家族恒为 `Any`——两个 target 跑出来的 IR 与选中的 id 都一样，上面那两对
 // RUN 共用同一组 check 就是在钉这件事。
 //
-// 但它**要一块 tmp buffer**，与 exp / ln / relu / sqrt 那一档不同。形状上它是 `sigmoid`
+// 但它要一块 tmp buffer，与 exp / ln / relu / sqrt 那一档不同。形状上它是 `sigmoid`
 // 的 mem 侧那一半，只是不需要第二个 implementation。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

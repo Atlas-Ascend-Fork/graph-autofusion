@@ -14,7 +14,7 @@
 // 它整个删成 `return success()` 不会有一处变红——正是那种看着有、实际没被验过的判据。
 //
 // 判据本身很小，但它挡住的失败是静默的：家族与头名对不上时，capability 照答
-// Supported、`AddKernelIncludes` 照发 include、那个 key 在供给表里也解析得到，于是一份
+// Supported、`AddKernelIncludes` 照生成 include、那个 key 在支持表里也解析得到，于是一份
 // reg-base 的头文本被内联进一个 mem-based 的 kernel。今天两份 `neg.h` 除 include guard
 // 外逐字相同所以看不出来，`broadcast.h` 那一对不是。
 //
@@ -41,7 +41,7 @@ TEST(ElementwiseApiFamily, RejectsAListFromTheOtherFamily) {
   EXPECT_FALSE(headersMatchFamily(reg, {}, ApiFamily::MemBased));
 }
 
-// 扩展包装总是出自某一张供给表。`Any` 是「两侧同一个标准调用」的意思，它和「引用了
+// 扩展包装总是出自某一张支持表。`Any` 是「两侧同一个标准调用」的意思，它和「引用了
 // 一个扩展头」不可能同时成立——放过去的后果是这个 implementation 在两个平台上都被选中，
 // 其中一个平台内联进来的是另一张表的文本。
 TEST(ElementwiseApiFamily, RejectsAnyForAnOperationThatNamesAnExtensionHeader) {
@@ -51,7 +51,7 @@ TEST(ElementwiseApiFamily, RejectsAnyForAnOperationThatNamesAnExtensionHeader) {
   EXPECT_FALSE(headersMatchFamily(reg, {}, ApiFamily::Any));
 }
 
-// **前导头与扩展头一起判，不各判各的。**
+// 前导头与扩展头一起判，不各判各的。
 //
 // 原先它们分开判，理由是「前导头有各自的族」——写的是 `utils.h` / 将来的
 // `utils_reg_base.h`。这个前提是错的：`utils_reg_base.h` 不是 `utils.h` 的 reg 版本，
@@ -79,14 +79,14 @@ TEST(ElementwiseApiFamily, CountsThePreludeWhenItNamesRegBasedSupply) {
   EXPECT_TRUE(headersMatchFamily({}, regPrelude, ApiFamily::RegBased));
 }
 
-// **这条判据原先是「逐项都要对」，`sign` 把它推翻了。**
+// 这条判据原先是「逐项都要对」，`sign` 把它推翻了。
 //
-// 当时的理由是「一张列表里混进一个另一族的名字，跟整条写反一样坏」，前提是每个头都
-// 属于某一族。`sign` 不是：它两侧分别是 `{cast.h, sign.h}` 与 `{cast.h, sign_reg_base.h}`,
-// **`cast.h` 两边是同一个文件**——两张注册表灌的是同一个 `AscendCApiRegistry` 单例，
+// 当时的理由是「一张列表里混进一个另一类的名字，跟整条写反一样坏」，前提是每个头都
+// 属于某一类。`sign` 不是：它两侧分别是 `{cast.h, sign.h}` 与 `{cast.h, sign_reg_base.h}`,
+// `cast.h` 两边是同一个文件——两张注册表灌的是同一个 `AscendCApiRegistry` 单例，
 // 它在里面只有一条，reg 侧照样取得到。`broadcast` 的 `duplicate.h` 也是这样。
 //
-// 所以判的是「这份列表有没有点名 reg-base 供给」。
+// 所以判的是「这份列表有没有点名 reg-base 可用实现」。
 TEST(ElementwiseApiFamily, AcceptsAFamilyNeutralHeaderAlongsideTheFamilysOwn) {
   // `sign` 的两侧，逐字照抄 legacy 的 `LoadApiHeaderFiles`。
   const llvm::StringRef signMem[] = {"cast.h", "sign.h"};
@@ -94,7 +94,7 @@ TEST(ElementwiseApiFamily, AcceptsAFamilyNeutralHeaderAlongsideTheFamilysOwn) {
   EXPECT_TRUE(headersMatchFamily(signMem, {}, ApiFamily::MemBased));
   EXPECT_TRUE(headersMatchFamily(signReg, {}, ApiFamily::RegBased));
 
-  // 两侧仍然分得开：mem 那份没点名 reg-base 供给，reg 那份点了。
+  // 两侧仍然分得开：mem 那份没点名 reg-base 可用实现，reg 那份点了。
   EXPECT_FALSE(headersMatchFamily(signMem, {}, ApiFamily::RegBased));
   EXPECT_FALSE(headersMatchFamily(signReg, {}, ApiFamily::MemBased));
 }
@@ -110,7 +110,7 @@ TEST(ElementwiseApiFamily, StillRejectsRegBasedSupplyNamedByAMemBasedOperation) 
   EXPECT_FALSE(headersMatchFamily(mixedHead, {}, ApiFamily::MemBased));
 
   // 反过来，一个 reg-base 的 op 一个 `_reg_base.h` 都没点名，同样拒——它拿不到自己那张
-  // 表的任何供给。
+  // 表的任何可用实现。
   const llvm::StringRef neutralOnly[] = {"cast.h"};
   EXPECT_FALSE(headersMatchFamily(neutralOnly, {}, ApiFamily::RegBased));
 }

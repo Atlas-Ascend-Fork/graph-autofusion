@@ -47,8 +47,7 @@ TEST(MlirE2eCpu, LoadBroadcastAddCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 两个输入的量级拉开（广播源 ×100），这样「两个 operand 接反」或者「广播那一侧取错下标」
-  // 都分得开——同量级的数据上接反了也可能碰巧接近。
+  // 将广播源放大 100 倍，与完整形状输入区分，以提高广播下标或实参映射错误的可见性。
   for (uint32_t index = 0; index < sourceCount; ++index) {
     input0[index] = (static_cast<float>(index) + 1.0F) * 100.0F;
   }

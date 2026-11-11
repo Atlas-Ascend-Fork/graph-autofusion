@@ -11,7 +11,7 @@
 //===- ReducePlan.h - AFIR reduction analysis ------------------*- C++ -*-===//
 // 分析 tensor_desc、sched 和 asc_graph，提供累加语义、实现布局与逻辑归约域。
 // 语义 pass 仅依赖累加分析；AR/RA 布局与 scratch 要求由完整计划检查。
-// 分析函数不发诊断；diagnostic 非空时返回失败原因，成功时清空。
+// 分析函数不输出诊断；diagnostic 非空时返回失败原因，成功时清空。
 
 #ifndef AUTOFUSE_MLIR_DIALECT_AFIR_ANALYSIS_REDUCEPLAN_H
 #define AUTOFUSE_MLIR_DIALECT_AFIR_ANALYSIS_REDUCEPLAN_H

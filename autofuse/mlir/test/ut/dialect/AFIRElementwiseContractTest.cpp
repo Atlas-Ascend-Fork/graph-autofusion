@@ -10,7 +10,7 @@
 
 //===- AFIRElementwiseContractTest.cpp -------------------------*- C++ -*-===//
 //
-// elementwise ODS 上两条**写对了但没人读**的轴。两条都不是 LIT 能钉住的，理由不同：
+// elementwise ODS 上两条写对了但没人读的轴。两条都不是 LIT 能钉住的，理由不同：
 //
 //   - 结果元素类型（`logicalResultElementType`）只在 `inferReturnTypes` 的「没有目的地」
 //     那一支里读。而两种造 tensor 形态 op 的办法都不走那一支：汇编里把结果类型写全了，
@@ -125,7 +125,7 @@ TEST_F(AFIRElementwiseContractTest, TrueDivKeepsF32InputsUnchanged) {
   EXPECT_EQ(inferred[0], RankedTensorType::get({4}, Float32Type::get(&context)));
 }
 
-// 比较族：结果恒为 ui8，与输入的 dtype 无关。这一族六个 op 共用 ODS 里的同一行
+// 比较族：结果恒为 ui8，与输入的 dtype 无关。这一类六个 op 共用 ODS 里的同一行
 // （`AFIR_CompareOp` 的那个 `ui8`），六个手写的 `inferReturnTypeComponents` 是被它替掉的
 // ——但替掉前后这条轴的覆盖都是零。
 TEST_F(AFIRElementwiseContractTest, CompareFamilyInfersUint8Result) {
@@ -144,7 +144,7 @@ TEST_F(AFIRElementwiseContractTest, CompareFamilyInfersUint8Result) {
   EXPECT_EQ(inferred[0], RankedTensorType::get({4}, IntegerType::get(&context, 8, IntegerType::Unsigned)));
 }
 
-// 对照组：结果 dtype 与输入相同的那一族，`logicalResultElementType` 传的是空。
+// 对照组：结果 dtype 与输入相同的那一类，`logicalResultElementType` 传的是空。
 // 没有这一条，把空的那一支也改成 ui8 不会有任何用例红。
 TEST_F(AFIRElementwiseContractTest, AddInfersInputElementType) {
   OwningOpRef<ModuleOp> module = Parse(R"mlir(
@@ -187,9 +187,9 @@ func.func private @add_scalar(
 }
 )mlir";
 
-// 标量操作数**不带 `Read`**。这条分支在 `getBufferizedElementwiseEffects` 里，删掉那句
+// 标量操作数不带 `Read`。这条分支在 `getBufferizedElementwiseEffects` 里，删掉那句
 // `contributesShape` 判断后所有 lit 用例与 E2E 仍然全绿：标量是 `arith.constant`
-// （`Pure`），多一个 `Read` 在今天的图上改不了任何调度结论。
+// （`Pure`），多一个 `Read` 在当前的图上改不了任何调度结论。
 //
 // 所以这里直接断言 effect 列表：tile 一个 `Read`，目的地一个 `Write`，标量一条都没有。
 TEST_F(AFIRElementwiseContractTest, ScalarOperandCarriesNoReadEffect) {

@@ -6,8 +6,8 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// `afir.tiling_param` 的 round-trip。它是尺寸 SSA 化的地基：队列/缓冲的尺寸是符号
-// 表达式，而 `memref.alloc(%n)` 要的是 index 操作数，本 Op 就是两者之间那一步。
+// 检查 tiling_param 的 round-trip：将符号尺寸读取为 index SSA 值，
+// 供 memref.alloc 等操作使用。
 //
 // 两条 RUN 缺一不可：第一条只验打印，第二条才是 round-trip。
 

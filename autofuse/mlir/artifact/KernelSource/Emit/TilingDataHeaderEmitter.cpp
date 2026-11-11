@@ -26,7 +26,7 @@ using namespace mlir;
 using namespace mlir::afir;
 
 namespace {
-// ATT 侧的 TilingData 标量字段一律是无符号定宽整数，三处发射（字段声明、字段访问器、
+// ATT 侧的 TilingData 标量字段一律是无符号定宽整数，三处生成（字段声明、字段访问器、
 // root 转发访问器）必须写出同一个拼法。
 std::string scalarTypeName(mlir::IntegerType integer) {
   return ("uint" + llvm::Twine(integer.getWidth()) + "_t").str();
@@ -129,11 +129,9 @@ LogicalResult emitStructFields(mlir::ascend::kernel::TilingSchema structure, llv
     if (!integer) {
       return failure();
     }
-    // ATT-generated tiling_func code (see AttSchemaAdapter's
-    // ExtractReferencedFieldNames) calls get_<field>()/set_<field>(...)/
-    // get_addr_<field>() on every scalar field, following the legacy
-    // TILING_DATA_FIELD_DEF_T macro expansion. Emit the same accessors so
-    // that generated code compiles against this MLIR-emitted header.
+    // Emit get_<field>(), set_<field>() and get_addr_<field>() for each scalar,
+    // matching legacy TILING_DATA_FIELD_DEF_T. ATT-generated tiling functions call
+    // these accessors (see AttSchemaAdapter's ExtractReferencedFieldNames).
     std::string typeName = scalarTypeName(integer);
     output << "    " << typeName << " " << field << ";\n";
     accessorStream << "    inline void set_" << field << "(" << typeName << " value) { " << field << " = value; }\n"
@@ -216,7 +214,7 @@ LogicalResult emitType(Type type, llvm::StringMap<std::string> &layouts, std::se
   std::string layout = makeLayoutSignature(structure);
   auto existingLayout = layouts.find(name);
   if (existingLayout != layouts.end()) {
-    // 同名结构体必须同形；已发射过的不再发射第二遍。
+    // 同名结构体必须同形；已生成过的不再生成第二遍。
     return success(existingLayout->second == layout);
   }
   layouts.try_emplace(name, std::move(layout));
@@ -231,7 +229,7 @@ LogicalResult emitType(Type type, llvm::StringMap<std::string> &layouts, std::se
     }
   }
 
-  // 字段与访问器分两段发射：先铺完所有字段，再把访问器get/set统一放到结构体末尾。
+  // 字段与访问器分两段生成：先铺完所有字段，再把访问器get/set统一放到结构体末尾。
   output << "struct " << name << " {\n";
   std::string accessors;
   llvm::raw_string_ostream accessorStream(accessors);
@@ -241,7 +239,7 @@ LogicalResult emitType(Type type, llvm::StringMap<std::string> &layouts, std::se
     return failure();
   }
   accessorStream.flush();
-  // 全是嵌套结构体字段时一个访问器都没有，那就不要留下一行空行。
+  // 全为嵌套结构体时没有访问器，不额外输出空行。
   if (!accessors.empty()) {
     output << "\n" << accessors;
   }

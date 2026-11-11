@@ -35,9 +35,8 @@ TEST(MlirE2eCpu, LoadCastStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // `f32 -> i32` 那一行的 round mode 是 `CAST_TRUNC`——向零截断，不是四舍五入。
-  // 所以小数部分恒取 ±0.5：一份按 `lrintf` 写的实现会在这里全错，而按
-  // `truncf` 写的全对，两者分得开。正负都要有，截断方向在负数上才看得出来。
+  // f32 -> i32 使用 CAST_TRUNC 向零截断。输入包含正负半整数，
+  // 以区分截断与四舍五入，并检查负数的舍入方向。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     const float magnitude = static_cast<float>(index % 13U) + 0.5F;
     input0[index] = (index % 2U == 0U) ? magnitude : -magnitude;

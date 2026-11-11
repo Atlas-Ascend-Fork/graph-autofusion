@@ -11,9 +11,8 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// `afir.reciprocal` 与 `afir.abs` 同一档，理由在 afir-abs-extension-api.mlir 里写全了：
-// 标准调用只在一侧，另一侧走包装且要 tmp buffer。这里只钉住第二个 op 确实按同一条规则
-// 注册了——mem-based 一侧建包装，reg-base 一侧因为多了这块 tmp buffer 而报 unsupported。
+// 与 Abs 相同，Reciprocal 的 mem-based 包装需要 tmp buffer，标准调用不需要。
+// 此处检查包装注册，并拒绝将带 scratch 的 IR 用于 reg-base 标准实现。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

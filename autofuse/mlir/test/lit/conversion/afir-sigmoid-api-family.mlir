@@ -13,12 +13,10 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=MEMSELECT
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=REGSELECT
 
-// `afir.sigmoid` 是把「要不要 tmp buffer」和「标准还是扩展」拆开的那个例子：两侧都要一块
-// tmp buffer，但一侧调 `AscendC::Sigmoid`，另一侧调 `SigmoidExtend` 包装。所以 AFIR 两侧
-// 相同（都带 tmp），两个 target 却建出不同的 ascendc op。
+// Sigmoid 两侧均需要 tmp buffer，但分别使用标准 Sigmoid 与 SigmoidExtend 包装。
+// 同一份带 scratch 的 AFIR 应在两目标上选择不同的 AscendC op。
 //
-// 如果哪天有人把「要 tmp buffer」重新推导成「用了扩展包装」，reg-base 这一侧会先判成
-// unsupported——REG 的两条 RUN 会红，而不是悄悄少传一块 UB。
+// 不能以 tmp buffer 的存在推断扩展包装；reg-base 标准调用也必须接收该缓冲。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

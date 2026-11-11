@@ -96,11 +96,10 @@ LogicalResult verifyFunctionAxisBindings(func::FuncOp func) {
 }  // namespace
 
 LogicalResult CanonicalFunctionMemoryAllocator::run() {
-  // 两个阶段判据都问 IR 自身，不问「哪个 pass 跑过」的标记属性（见 LoweringStage.h）。
-  // 幂等闸门。退化形态（函数没有任何片上资源）在这里为假，于是重跑不报错——这与旧的
-  // `afir.memory_allocated` 不同，那个标记由 `commit()` 无条件写入。可以接受：那种函数
-  // 既没有资源可物化、也没有待物化的落点，重跑是个空操作。真正不能漏的是反方向——已经
-  // 物化过的函数再跑一遍会插入重复资源，而那种函数必然带 `ascendc` 算子。
+  // 根据 IR 结构判断阶段状态，见 LoweringStage.h。
+  // 已有 AscendC 资源时拒绝重跑，防止重复插入资源。无片上资源的函数没有物化产物，
+  // 也没有待物化的 destination，重复执行为空操作，因此允许通过。
+  // 这与旧 memory_allocated 标记由 commit() 无条件写入的行为不同。
   if (hasMaterializedAscendCResources(func)) {
     return func.emitError(
         "canonical AFIR resources are already materialized: the function already contains "
@@ -115,9 +114,8 @@ LogicalResult CanonicalFunctionMemoryAllocator::run() {
   if (failed(getCanonicalTilingArgument(func))) {
     return failure();
   }
-  // 绑定的收集与校验是 AFIR 层的事——判据全部来自 descriptor 契约，与后端无关
-  // （dialect/AFIR/Analysis/CanonicalBindings.h）。本类从这里开始才接手：读这张表，
-  // 发 `ascendc` 算子。这条分界就是这一相能搬走、其余三相不能的理由。
+  // AFIR 层按 descriptor 契约收集和校验绑定，见 Analysis/CanonicalBindings.h。
+  // 此处消费绑定表并生成 AscendC 算子，将后端无关分析与后端物化分开。
   FailureOr<afir::CanonicalBindings> bindings = afir::collectCanonicalBindings(func);
   if (failed(bindings)) {
     return failure();
@@ -180,7 +178,7 @@ struct AFIRMemoryAllocatePass : public PassWrapper<AFIRMemoryAllocatePass, Opera
       return success();
     }
     // 「这个函数走 canonical 路径吗」的判据是它是否携带 canonical descriptor 契约。
-    // 迁移前看的是 `afir.arg_buffer_descs` 这个数组属性**存在与否**——空数组也算。
+    // 迁移前看的是 `afir.arg_buffer_descs` 这个数组属性存在与否——空数组也算。
     // descriptor 归位到定义点之后，零参数、零局部 buffer 的函数在定义点上什么都没有，
     // 因此判据回到同样恒存在的 `afir.arg_descs`（设计文档 5.1 步 8）。
     if (func->hasAttr(afir::kArgDescsAttrName) || afir::hasBufferDescriptors(func.getOperation())) {

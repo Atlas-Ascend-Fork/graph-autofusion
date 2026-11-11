@@ -8,9 +8,8 @@ endif()
 
 message(STATUS "Enable Autofuse MLIR migration infrastructure")
 
-# Registers ctest tests for every add_test() under this tree. The top-level
-# autofuse/tests entry only enables testing under RUN_TEST builds; MLIR test
-# targets need it here so `ctest` works in the standalone MLIR configuration.
+# Enable CTest registration for standalone MLIR builds; the main autofuse test
+# entry enables it only when RUN_TEST is set.
 enable_testing()
 
 set(AF_ASCENDC_API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/api/ascendc" CACHE PATH "AscendC API dialect/target source directory")

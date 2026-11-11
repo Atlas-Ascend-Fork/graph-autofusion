@@ -31,9 +31,8 @@ def AFIRDataMoveInterface : AFIR_OpInterface<"AFIRDataMoveInterface", [MemoryEff
   let description = "Marks an AFIR data-movement operation and reuses MLIR memory effects";
 }
 
-// 操作数按 inputs | destinations | tmpBuffers 三段排列，本接口就是那两条段长的唯一
-// 问法（`afir::getOperandPartition` 据此切片）。三个 `AFIR_Bufferizable*OpBase` 与
-// `isBufferizedForm()` 并排生成这两个方法体，所以建在 base 上的 Op 不用自己写。
+// 操作数按 inputs | destinations | tmpBuffers 排列，getOperandPartition 通过本接口取得段长。
+// AFIR_Bufferizable*OpBase 同时生成段长方法和 isBufferizedForm，派生 op 无需重复实现。
 def AFIRDestinationStyleInterface : AFIR_OpInterface<"AFIRDestinationStyleInterface"> {
   let description = "Describes destination operands and tied results";
   let methods = [
@@ -41,9 +40,8 @@ def AFIRDestinationStyleInterface : AFIR_OpInterface<"AFIRDestinationStyleInterf
     InterfaceMethod<"Return the result tied to a destination, if any",
                     "::mlir::FailureOr<unsigned>", "getTiedResultIndex",
                     (ins "unsigned":$destinationIndex)>,
-    // 刻意不给默认实现：默认值只可能是 0，而「有 tmp buffer 操作数但没人回答」这件事
-    // 的后果是输入段和 descriptor 静默错位。不建在上述 base 上的 Op 必须自己回答，
-    // 漏写是链接错误。
+    // 不提供默认 tmp buffer 数量，避免将未实现的计数误当为 0，造成操作数与 descriptor 错位。
+    // 未继承上述 base 的 op 必须自行实现，遗漏时由链接错误暴露。
     InterfaceMethod<"Return the number of trailing tmp buffer operands",
                     "unsigned", "getNumTmpBuffers">,
     InterfaceMethod<"Whether the operation is in destination-passing (buffer) form",

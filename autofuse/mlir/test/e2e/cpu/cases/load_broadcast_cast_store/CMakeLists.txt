@@ -18,7 +18,7 @@
 #                          原先硬失败（`failed to legalize operation 'afir.cast'`），
 #                          由 `materializeVectorizedSegments` 的单元素窗口那一档收下。
 #
-# 反方向（f32 → f16）**不在这里**：探针实测整图回落，不是这条路发的调用。
+# 反方向（f32 → f16）不在这里：探针实测整图回落，不是这条路生成的调用。
 add_mlir_e2e_cpu_case(load_broadcast_cast_store_1x8
     OUTPUT_SHAPE "[128, 8]"
     INPUT_SHAPES "[1, 8]"

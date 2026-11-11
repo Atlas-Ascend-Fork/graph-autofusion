@@ -63,27 +63,24 @@ FailureOr<AFIRToAscendCPipelineSession> createAFIRToAscendCPipelineSession(
 
 namespace {
 
-// 流水线的四个相位。每个相位有一个 `add*` 与一个 `*Dialects`，写在一起，往相位里加一个
-// pass 时两处都在眼前。方言清单最终由 `AFIRPipelineDependentDialectsTest` 与真实流水线
-// 的 `OpPassManager::getDependentDialects()` 对账，漏写会变红。
+// 流水线按 IR 形态分为四个阶段，每个阶段的 add* 与 *Dialects 放在一起维护。
+// AFIRPipelineDependentDialectsTest 对比方言清单与实际流水线的 getDependentDialects()，
+// 检查遗漏的方言依赖。
 //
-// 相位划分的依据是 IR 的形态，不是调用方：
-//
-//   A 准备      补齐 AscendC 的参数表，把全部运行期尺寸符号变成 SSA 值
+//   A 准备      补齐 AscendC 参数表，将运行期尺寸符号物化为 SSA 值
 //   B AFIR 物化  轴 -> scf.for、缓冲 -> 资源、顺序 -> 同步边
-//   C 下降      选实现，转成 AscendC
-//   D host 产物  每候选的 tiling schema 与入口分派
+//   C 下降      选择实现，转换为 AscendC
+//   D host 产物  生成每候选的 tiling schema 与入口分派
 //
-// 相邻相位之间是真实约束，不是约定：B 的第一步要用 A 补出的 TilingData 参数，C 要 B 产出
-// 的同步算子先被选出实现（ADR-19），D 的改名必须在最后一个 TilingData 消费者之后。
+// B 的循环生成依赖 A 补齐的 TilingData 参数；C 需要先为 B 产生的同步算子选择实现
+// （ADR-19）；D 的改名必须在最后一个 TilingData 消费者之后。
 
-// 相位 A。
+// 阶段 A。
 void addKernelABIPreparation(OpPassManager &passManager) {
   passManager.addPass(createAFIRKernelBodySignaturePass());
-  // 尺寸的 SSA 化。这一步**不是**后面几步的前置——`getOrCreateTilingParam` 是
-  // get-or-create，循环生成与资源物化都会在缺的时候自己建（LIT 里有不跑这一步的 RUN 行）。
-  // 放在这里是为了两件事：尺寸序言的顺序与来源无关地固定下来，以及坏的尺寸表达式在一处
-  // 一次性报出来，而不是等到某个消费者恰好第一个碰到它。
+  // 提前物化尺寸 SSA 值，固定尺寸序言的顺序，并集中报告无效尺寸表达式。
+  // 这不是后续 pass 的必需前置：循环生成和资源物化均可通过 getOrCreateTilingParam
+  // 补建缺失参数，LIT 也覆盖了省略此 pass 的路径。
   passManager.addPass(afir::createAFIRMaterializeTilingParamsPass());
 }
 
@@ -92,40 +89,35 @@ void kernelABIPreparationDialects(DialectRegistry &registry) {
       .insert<AFIRDialect, arith::ArithDialect, emitasc::EmitAscDialect, func::FuncDialect, memref::MemRefDialect>();
 }
 
-// 相位 B。这三步都不需要 session：它们读 AFIR，产物是 AFIR 加已物化的 AscendC 资源。
+// 阶段 B：不依赖 session，将 AFIR 转换为带已物化 AscendC 资源的 IR。
 void addAFIRMaterialization(OpPassManager &passManager) {
   passManager.addPass(createAscendCLoopGeneratePass());
   // Scratch uses are scoped only after the actual loop tree is known. Physical IDs stay unchanged.
   passManager.addPass(afir::createAFIRScopeReduceScratchPass());
   passManager.addPass(createAFIRMemoryAllocatePass());
-  // 同步排在实现选择**之前**：它现在产出 AFIR 的同步算子（V -> V 屏障），而 AFIR 算子要
-  // 先被选出实现才能下降。此前它跑在 conversion 内部、选择之后，那时产物全是 AscendC
-  // 算子，不经过选择这条路。
+  // 同步必须先于实现选择：此 pass 产生 AFIR 同步算子（V -> V 屏障），需先选实现再下降。
+  // 旧路径在 conversion 内、实现选择后运行，当时只产生 AscendC 算子。
   passManager.addPass(createAFIRPipelineSyncPass());
-  // 缓存守卫排在最后：被它包起来的只有算子本身，生命周期与同步边每趟照发，所以它必须
-  // 看到已经物化完的资源与已经插好的同步（ExecConditionPass.cpp 顶部那段）。
+  // 缓存守卫只包围算子计算，资源生命周期操作和同步边仍须每轮执行。
+  // 因此在资源物化和同步插入之后添加守卫，见 ExecConditionPass.cpp。
   passManager.addPass(afir::createAFIRExecConditionPass());
 }
 
 void afirMaterializationDialects(DialectRegistry &registry) {
-  // `emitc`：workspace 张量的偏移形参是 `ui64`，转 `index` 只能走 `emitc.cast`
-  // （`arith.index_cast` 不吃带符号性标记的整数），见 `CanonicalMaterialization.cpp` 的
-  // `materializeWorkspaceBase`。
+  // workspace 偏移参数为 ui64，转换为 index 需要 emitc.cast；arith.index_cast
+  // 不接受带符号性标记的整数。见 CanonicalMaterialization.cpp 的 materializeWorkspaceBase。
   registry.insert<AFIRDialect, arith::ArithDialect, ascendc::AscendCDialect, bufferization::BufferizationDialect,
                   cf::ControlFlowDialect, emitasc::EmitAscDialect, emitc::EmitCDialect, func::FuncDialect,
                   index::IndexDialect, math::MathDialect, memref::MemRefDialect, scf::SCFDialect>();
 }
 
-// 相位 C。唯一需要 session 的相位——实现注册表与目标 profile 都在里面。
+// 阶段 C：从 session 读取实现注册表和目标 profile。其他阶段不依赖 session。
 void addAscendCLowering(OpPassManager &passManager, const AFIRToAscendCPipelineSession &session) {
-  // 二次融合的 region **排在实现选择之前**。region 里是 tensor 形态的算子，它们没有
-  // destination、也没有 tile 级的实现可选——选型走进去的结果是
-  // 「'afir.add' op has no supported Ascend implementation」，一条看起来像「这个 op 没接」
-  // 的诊断，而真正的事实是「它不该被问」。这一步把整段 region 换成寄存器形态之后，
-  // 后面两步看到的就只剩 region 外的算子了。
-  //
-  // 它放在这一相位而不是相位 B，是因为它要的边界张量（`!ascendc.local_tensor`）由
-  // 资源物化产出；放在 host 产物那一相位之前，因为它产出的 `emitasc.vec_scope` 要被发射。
+  // 先将二次融合 region 转为寄存器形态，再选择 region 外算子的实现。
+  // region 内算子仍为 tensor 形态，没有 destination，也没有 tile 级实现，直接参与
+  // 选择会误报 "'afir.add' op has no supported Ascend implementation"。
+  // 此步骤依赖资源物化产生的 !ascendc.local_tensor 边界张量，不能放在阶段 B 之前；
+  // 它产生的 emitasc.vec_scope 需要后续生成，因此又必须先于 host 产物阶段。
   passManager.addPass(createAFIRVectorFuncToRegBasePass());
   passManager.addPass(ascend::instruction::createSelectImplementationPass(
       session.implementationRegistry, session.targetProfile, session.selectionPolicies, nullptr));
@@ -137,23 +129,23 @@ void ascendCLoweringDialects(DialectRegistry &registry) {
                   index::IndexDialect, math::MathDialect, memref::MemRefDialect, scf::SCFDialect>();
 }
 
-// 相位 D。
+// 阶段 D。
 void addHostArtifacts(OpPassManager &passManager) {
   passManager.addPass(createGenTilingDataPass());
   passManager.addPass(createGenKernelEntryPass());
 }
 
 void hostArtifactsDialects(DialectRegistry &registry) {
-  // `memref`：`GenKernelEntry` 在调用 template 的点上插 `memref.cast`——`_main` 的 GM 形参按 ABI
-  // 形态声明（无条件退到 unranked），各 template 保留自己的调度视图，理由见 `appendMainArgument`。
+  // GenKernelEntry 在 template 调用点插入 memref.cast：_main 的 GM 参数按 ABI
+  // 声明为 unranked，各 template 保留各自的调度视图。见 appendMainArgument。
   registry
       .insert<AFIRDialect, afplan::AFPlanDialect, arith::ArithDialect, ascendc::AscendCDialect, emitasc::EmitAscDialect,
               emitc::EmitCDialect, func::FuncDialect, memref::MemRefDialect, scf::SCFDialect>();
 }
 
-// session 的完整性。诊断发不出来——`OpPassManager` 上没有 MLIRContext，这两个 `add*`
-// 入口也不收一个。发诊断的是调用方：session 由 `createAFIRToAscendCPipelineSession` 建，
-// 那里有 context；本函数只挡住手工拼出来的 session。
+// 检查手工构造的 session 是否完整。OpPassManager 没有 MLIRContext，两个 add* 入口
+// 也不接收 context，因此这里只返回状态；正常创建路径由 createAFIRToAscendCPipelineSession
+// 使用 context 报告诊断。
 bool isUsableSession(const AFIRToAscendCPipelineSession &session) {
   return session.targetProfile && session.implementationRegistry && session.implementationRegistry->isFrozen() &&
          (!session.selectionPolicies || session.selectionPolicies->isFrozen());
@@ -161,8 +153,8 @@ bool isUsableSession(const AFIRToAscendCPipelineSession &session) {
 
 }  // namespace
 
-// 相位 B + C。名字里的「AFIR 到 AscendC」说的正是这两步合起来的效果：进来是 AFIR，出去是
-// AscendC。相位 A 不在里面——它补的是 ABI 参数表，与后端形态无关的准备工作。
+// 组合阶段 B 和 C，完成 AFIR 到 AscendC 的转换。
+// 阶段 A 只准备 ABI 参数表，与后端 IR 形态无关，由调用方单独添加。
 LogicalResult addAFIRToAscendCPipeline(OpPassManager &passManager, const AFIRToAscendCPipelineSession &session) {
   if (!isUsableSession(session)) {
     return failure();
@@ -201,8 +193,7 @@ struct AFIRToAscendCPipelinePass : public AFIRSessionScopedPass<AFIRToAscendCPip
     return addAFIRToAscendCPipeline(pipeline, session);
   }
 
-  // 按相位拼，不再手写并集。手写的那份已经漂过一次：注释声称是四个 pass 的并集，而
-  // `MaterializeTilingParams` 与 `PipelineSync` 后来加进流水线时没人回来改它。
+  // 复用各阶段的方言清单，避免新增 pass 时遗漏独立维护的方言并集。
   void getStaticDependentDialects(DialectRegistry &registry) const {
     afirMaterializationDialects(registry);
     ascendCLoweringDialects(registry);

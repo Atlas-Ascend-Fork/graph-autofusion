@@ -11,7 +11,7 @@
 // 这份输入与 `afir-to-ascendc-reduce-mean-accumulation.mlir` 逐字相同，只去掉了 mean 上的
 // `afir.reduction_domain`。那一份能走完整条流水线，所以这里失败**只可能**来自那个属性缺席。
 //
-// 为什么缺席就必须拒绝：Mean 的分母必须是**完整**逻辑归约域，而
+// 为什么缺席就必须拒绝：Mean 的分母必须是完整逻辑归约域，而
 // `afir::analyzeMeanReductionDomain` 只能回答「这张图的轴图怎么说」。跨阶段改写会**合成**
 // 自己的 Original 轴——RCore 第二阶段的图里 `Rm` 就是一根 Original 轴、`size` 齐全、`from`
 // 为空，分析的每一条判据它都满足，可它数的是第一阶段留下了几份 partial，不是元素数。按它
@@ -19,7 +19,7 @@
 //
 // 「输入代表的是不是完整域」只在 bridge 产物上还看得见（`AFIRMemoryAllocate` 之后 reduce 的
 // 输入与 `afir.load` 之间没有 SSA 边），所以由 `afir::annotateReductionDomains` 在那里证一次
-// 写进 IR。**缺席即未证明**，这里只能拒绝——不得退回轴图的结论，那正是会给出错误分母的路。
+// 写进 IR。缺席即未证明，这里只能拒绝——不得退回轴图的结论，那正是会给出错误分母的路。
 
 // RUN: not af-opt --afir-kernel-body-signature --afir-to-ascendc-pipeline --target=Ascend910B1 %s 2>&1 \
 // RUN:   | FileCheck %s

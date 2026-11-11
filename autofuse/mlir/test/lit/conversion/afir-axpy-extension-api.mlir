@@ -13,21 +13,21 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 
-// `afir.axpy`：**第一个 tier D1 的 op**——两张供给表共用同一个扩展包装 `AxpyExtend`
+// `afir.axpy`：**第一个 tier D1 的 op**——两张支持表共用同一个扩展包装 `AxpyExtend`
 // （`axpy.h`），`api_regbase/` 下没有 axpy。所以两个 `--target` 走的是同一条路、用同一组
 // CHECK，与 `afir-binary-d1-both-targets.mlir` 一个形状，但那边共用的是**标准调用**、
-// 这边共用的是**扩展包装**——`ApiFamily` 上是 `Any` 与 `Shared` 两档，正是这份用例钉的东西。
+// 这边共用的是扩展包装——`ApiFamily` 上是 `Any` 与 `Shared` 两档，正是这份用例钉的东西。
 //
 // 把 `Shared` 改回 `Any`，注册期 `checkFamilyMatchesHeader` 就会因为「标准调用不该带扩展头」
 // 拒掉，整张注册表建不起来；改成 `MemBased` 或 `RegBased`，两条 SELECT 里必有一条落空。
 //
 // 另外两件只有这里钉得住的：
 //
-//   - **alpha 的实参位置**。真实签名是 `AxpyExtend(dst, src0, src1, alpha, tmp, count)`，
+//   - alpha 的实参位置。真实签名是 `AxpyExtend(dst, src0, src1, alpha, tmp, count)`，
 //     tmp 在 count 前面、alpha 在 tmp 前面。`OpVecBinaryExt.td` 里那个用不了的
 //     `AscendC_AxpyExtendOp` 写的是 `$alpha, $count, $tmpBuf`——顺序错的那一版编得过、
 //     只是调用打反。CPP 那条 check 逐个位置对，就是拦这个。
-//   - **alpha 恒建 f32**。包装的形参是 `const float alpha`，不跟 `T` 走。下面 f16 那一份
+//   - alpha 恒建 f32。包装的形参是 `const float alpha`，不跟 `T` 走。下面 f16 那一份
 //     拿到的仍然是 `f32` 常量——这与 `afir.leaky_relu` 恰好相反，那边的形参是 `const T&`。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>

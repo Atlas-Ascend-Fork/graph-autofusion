@@ -23,15 +23,10 @@ namespace mlir::ascend::kernel {
 // a flat name -> text table with no platform axis of its own.
 using ApiExtensionProvider = llvm::function_ref<llvm::StringRef(llvm::StringRef)>;
 
-// Replaces every `#include "<name>"` line of `kernelSource` whose name the
-// provider resolves with the header text itself, leaving every other line
-// untouched. This is how the extension headers reach the compiler: the kernel
-// is handed to bisheng as a single translation unit with no include path of its
-// own, so the text has to be part of it -- see ADR-E1 in the elementwise op
-// completion plan for why this was chosen over shipping the headers separately.
-//
-// Callers that produce IR for inspection rather than for compilation (af-opt,
-// LIT) simply do not run this, and keep the readable `#include "abs.h"` form.
+// Replace resolved extension includes with their header text; leave all other lines unchanged.
+// The kernel reaches bisheng as one translation unit without its own include path,
+// so extension headers must be inlined (elementwise completion plan, ADR-E1).
+// IR inspection paths such as af-opt and LIT skip this step and retain readable includes.
 std::string inlineApiExtensionHeaders(llvm::StringRef kernelSource, ApiExtensionProvider provider);
 
 }  // namespace mlir::ascend::kernel

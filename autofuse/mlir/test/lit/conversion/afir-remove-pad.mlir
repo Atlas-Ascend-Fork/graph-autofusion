@@ -11,22 +11,22 @@
 // CPP 路线（`ascir-translate`）不认输出里残留的 `afir.*` 属性，所以它住在单独的
 // `afir-remove-pad-whole-window.mlir`。
 //
-// **三个实参的含义按包装内部那条 `GatherMask` 反推**：从 src 取 N 行、行距 P 个元素、每行取
+// 三个实参的含义按包装内部那条 `GatherMask` 反推：从 src 取 N 行、行距 P 个元素、每行取
 // 前 R 个，连续写到 dst。`dst` 侧没有跨度参数，所以目的地必须稠密——反例见
 // `afir-remove-pad-unsupported.mlir`。
 //
-// **为什么这里是三个独立的 func 而不是一张端到端的图**：`afir.remove_pad` 的两个真实上游
+// 为什么这里是三个独立的 func 而不是一张端到端的图：`afir.remove_pad` 的两个真实上游
 // （带填充的 tile、尾轴非连续的 Load）今天都下降不了——`materializeScheduledTileIndices`
-// 要求局部侧合轴后**只有一段、且那一段的 stride 字面量为 1**
+// 要求局部侧合轴后只有一段、且那一段的 stride 字面量为 1
 // （`dialect/AFIR/Analysis/TransferPlan.cpp:720`），带填充的 tile 是两段，非连续 Load 的那一段
-// stride 不是 1。所以今天没有一条含 `RemovePad` 的图能走到执行那一步，前置是逐轴的
+// stride 不是 1。所以目前没有一条含 `RemovePad` 的图能走到执行那一步，前置是逐轴的
 // `TransferPlan`，不是本档。见 `docs/development/2026-09-30-afir-remove-pad-design.md`。
 
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | FileCheck %s --check-prefix=IR
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | ascir-translate -mlir-to-ascendc \
 // RUN:   | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
-// 两侧共用同一个包装（矩阵 tier D1），所以 reg 侧选中的是**同一个** implementation。
+// 两侧共用同一个包装（矩阵 tier D1），所以 reg 侧选中的是同一个 implementation。
 // 这一条是 `ApiFamily::Shared` 与 `ApiFamily::MemBased` 的分水岭：写成 MemBased 的话这一行会红。
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s \
 // RUN:   | FileCheck %s --check-prefix=SELECT
@@ -50,7 +50,7 @@
                                 strides = [#afir.expr<"1">], vectorized_axis = [0],
                                 vectorized_strides = [#afir.expr<"1">], role = <compute>>
 
-// 形态三：纯搬运。只有一段、源已经连续，趟数就是 1，行距那一位发的是行长本身
+// 形态三：纯搬运。只有一段、源已经连续，趟数就是 1，行距那一位生成的是行长本身
 // ——`repeatTimes == 1` 时 `src0RepeatStride` 读不到它（`removepad.h:22` 只在第 2..N 趟用它）。
 #copy_desc = #afir.tensor_desc<axis = [0], repeats = [#afir.expr<"8">],
                                 strides = [#afir.expr<"1">], vectorized_axis = [0],
@@ -88,8 +88,8 @@ module {
 // IR-LABEL: func.func @remove_pad_two_segment
 // 零层循环：两段全部交给这一条调用（段数上限 2 是本档的判据）。
 // IR-NOT: scf.for
-// 三个常量按**段的次序**建（外段的趟数在前、内段的行长在后），行距最后建；调用按 C++
-// 形参表的次序发（行长、行距、趟数）。两个次序不同是对的，不要把其中一个改成另一个。
+// 三个常量按段的次序建（外段的趟数在前、内段的行长在后），行距最后建；调用按 C++
+// 形参表的次序生成（行长、行距、趟数）。两个次序不同是对的，不要把其中一个改成另一个。
 // IR: %[[N:.*]] = arith.constant 4 : index
 // IR: %[[R:.*]] = arith.constant 8 : index
 // IR: %[[P:.*]] = arith.constant 16 : index
@@ -103,7 +103,7 @@ module {
 // IR: ascendc.remove_pad_extend %{{.*}}, %{{.*}}, %[[G_ONE]], %[[G_P]], %[[G_N]]
 
 // IR-LABEL: func.func @remove_pad_copy
-// 趟数恒为 1，行距那一位发的就是行长。
+// 趟数恒为 1，行距那一位生成的就是行长。
 // IR: %[[C_R:.*]] = arith.constant 8 : index
 // IR: %[[C_ONE:.*]] = arith.constant 1 : index
 // IR: ascendc.remove_pad_extend %{{.*}}, %{{.*}}, %[[C_R]], %[[C_R]], %[[C_ONE]]

@@ -2787,7 +2787,7 @@ TEST_F(TestBackendIndirectLoadBroadcastE2e, IndirectLoadBroadcastCodegen) {
     defined(IL_USER_POSITION_BIAS_EXP_SUM) || defined(IL_USER_GATHER_SUM_TRANSPOSE) ||                                \
     defined(IL_USER_ABS_EMBEDDING_SUM) || defined(IL_USER_DTYPE_INT64) || defined(IL_USER_INT64_GATHER_DENSE) ||      \
     defined(IL_USER_DTYPE_INT8) || defined(IL_USER_DTYPE_UINT8) || defined(IL_USER_DTYPE_BOOL) ||                     \
-    defined(IL_USER_DTYPE_UINT64) || defined(IL_USER_EMBEDDING_SLICE)
+    defined(IL_USER_DTYPE_UINT64) || defined(IL_USER_EMBEDDING_SLICE) || defined(IL_GRAPH_HINT_DY_GATHER_SLICE)
 /**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -5980,6 +5980,111 @@ TEST_F(TestBackendIndirectLoadGraphHintEmbeddingSliceE2e, GeneratesGraphHintEmbe
   const auto graph = backend.Finalize(sub_graph, "output0");
   ASSERT_NE(graph, nullptr);
 
+  ascir::FusedScheduledResult scheduled_result;
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
+  EXPECT_NE(result.kernel.find("IndirectLoad"), std::string::npos);
+  indirect_load_test::WriteGeneratedFiles(result);
+}
+#elif defined(IL_GRAPH_HINT_DY_GATHER_SLICE)
+// Dynamic-shape tail-axis gather whose index source is a cross-dim sliced (non-continuous)
+// view: the IndirectLoad template candidate that merges tensor axes would leave the Cast
+// consumer's input in the old axis space while its output moves to the merged axis space,
+// failing codegen shape validation (E19999). The scheduler must skip that infeasible
+// candidate and let a feasible one win instead of failing the whole codegen.
+constexpr int64_t kGraphHintDyGatherS0 = 37;
+constexpr int64_t kGraphHintDyGatherS5 = 520;
+constexpr int64_t kGraphHintDyGatherS76 = 76;
+constexpr int64_t kGraphHintDyGatherS86 = 86;
+constexpr int64_t kGraphHintDyGatherSliceDim = 512;
+constexpr char kGraphHintDyGatherGraphName[] = "graph_hint";
+constexpr char kGraphHintDyGatherFusedGraphName[] = "autofused_dy_gather_slice";
+
+std::shared_ptr<af::AscGraph> CreateGraphHintDyGatherSubGraph() {
+  auto graph = std::make_shared<af::AscGraph>(kGraphHintDyGatherGraphName);
+  const auto s0 = graph->CreateSizeVar(kGraphHintDyGatherS0);
+  const auto s5 = graph->CreateSizeVar(kGraphHintDyGatherS5);
+  const auto s76 = graph->CreateSizeVar(kGraphHintDyGatherS76);
+  const auto s86 = graph->CreateSizeVar(kGraphHintDyGatherS86);
+  const auto columns = graph->CreateSizeVar(kGraphHintDyGatherSliceDim);
+  const auto a0 = graph->CreateAxis("a0", s0).id;
+  const auto a1 = graph->CreateAxis("a1", columns).id;
+  const auto a2 = graph->CreateAxis("a2", s76).id;
+  const std::vector<af::AxisId> axes = {a0, a1, a2};
+  af::AscGraphUtils::GetComputeGraph(*graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis = axes;
+
+  af::ascir_op::Data data("graph_hint/data", *graph);
+  data.ir_attr.SetIndex(0);
+  data.y.dtype = af::DT_INT32;
+  af::ascir_op::Load load("graph_hint/load");
+  graph->AddNode(load);
+  load.ir_attr.SetOffset(af::ops::Zero);
+  load.x = data.y;
+  SetView(load, axes, {s0, columns, s76}, {af::sym::Mul(s5, s76), s76, af::ops::One}, af::DT_INT32);
+
+  af::ascir_op::Cast cast("graph_hint/cast");
+  graph->AddNode(cast);
+  cast.x = load.y;
+  SetView(cast, axes, {s0, columns, s76}, {af::sym::Mul(columns, s76), s76, af::ops::One}, af::DT_INT64);
+
+  af::ascir_op::Data data1("graph_hint/data1", *graph);
+  data1.ir_attr.SetIndex(1);
+  data1.y.dtype = af::DT_FLOAT;
+  af::ascir_op::Load load1("graph_hint/load1");
+  graph->AddNode(load1);
+  load1.ir_attr.SetOffset(af::ops::Zero);
+  load1.x = data1.y;
+  SetView(load1, axes, {s0, columns, s86}, {af::sym::Mul(s5, s86), s86, af::ops::One}, af::DT_FLOAT);
+
+  af::ascir_op::IndirectLoad indirectload("graph_hint/indirectload");
+  graph->AddNode(indirectload);
+  indirectload.x1 = load1.y;
+  indirectload.x2 = cast.y;
+  indirectload.ir_attr.SetAxis(2);
+  indirectload.ir_attr.SetNegative_index_support(true);
+  indirectload.ir_attr.SetNeed_check_bound(true);
+  indirectload.ir_attr.SetMax(s86);
+  SetView(indirectload, axes, {s0, columns, s76}, {af::sym::Mul(columns, s76), s76, af::ops::One}, af::DT_FLOAT);
+
+  af::ascir_op::Exp exp("graph_hint/exp");
+  graph->AddNode(exp);
+  exp.x = indirectload.y;
+  SetView(exp, axes, {s0, columns, s76}, {af::sym::Mul(columns, s76), s76, af::ops::One}, af::DT_FLOAT);
+
+  af::ascir_op::Store store("graph_hint/store");
+  graph->AddNode(store);
+  store.ir_attr.SetOffset(af::ops::Zero);
+  store.x = exp.y;
+  SetView(store, axes, {s0, columns, s76}, {af::sym::Mul(columns, s76), s76, af::ops::One}, af::DT_FLOAT);
+
+  af::ascir_op::Output output("graph_hint/output");
+  graph->AddNode(output);
+  output.ir_attr.SetIndex(0);
+  output.x = store.y;
+  output.y.dtype = af::DT_FLOAT;
+  return graph;
+}
+
+using TestBackendIndirectLoadGraphHintDyGatherSliceE2e = indirect_load_test::PrecisionBackendE2e;
+
+TEST_F(TestBackendIndirectLoadGraphHintDyGatherSliceE2e, GeneratesGraphHintDyGatherSliceKernel) {
+  // 尾轴 gather + Cast index 链需要 V2 codegen impl，默认单测平台 2201 下 SIMT 候选不可行，
+  // 须按生产环境（Ascend950PR / dav-3510）初始化平台才能复现候选选择路径。
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  indirect_load_test::VariadicBackendGraph backend(kGraphHintDyGatherFusedGraphName, {af::DT_INT32, af::DT_FLOAT},
+                                                   {af::DT_FLOAT});
+  const auto sub_graph = CreateGraphHintDyGatherSubGraph();
+  ASSERT_NE(sub_graph->FindNode("graph_hint/cast"), nullptr);
+  const auto graph = backend.Finalize(sub_graph);
+  ASSERT_NE(graph, nullptr);
   ascir::FusedScheduledResult scheduled_result;
   optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
   ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);

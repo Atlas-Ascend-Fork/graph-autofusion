@@ -85,18 +85,12 @@ LogicalResult collectDescriptorSymbols(func::FuncOp func, BufferDescAttr descrip
   return collectExpressionSymbols(func, descriptor.getSizeBytesExpr(), symbols);
 }
 
-// 一份 tensor descriptor 里的尺寸符号：`repeats` / `strides` / `vectorized_strides`。
-//
-// 这一份不能省。下降侧把 descriptor 里非字面量的 extent 与 stride 物化成 `index` 值
-// （`materializeExtentValue` / `materializeStrideValue` → `materializeSizeAt`），自由符号绑到
-// `getOrCreateTilingParam`；本 pass 不收它们的话，第一个碰到的消费者就地建一条，而那时
-// 实现选择已经跑过、诊断也早该在这里一次性报完了。
-//
-// 只走 Op 上的三份（`afir.operand_descs` / `afir.destination_descs` / `afir.result_descs`），
-// **不额外走函数的 `afir.arg_descs`**：一个 SSA 值上的 canonical descriptor 只能有一份
-// （`CanonicalBindings` 把块参数的 arg_desc 与用到它的 Op 那一份绑成同一条，冲突即
-// `InvalidBinding`），所以 `arg_descs` 里不可能出现 Op 那边没有的符号。写过那一遍，变异
-// 验证显示它一条用例都挡不住。
+// 收集 tensor descriptor 中 repeats、strides、vectorized_strides 的自由符号。
+// 下降的 materializeExtentValue / materializeStrideValue 会通过 materializeSizeAt
+// 使用这些符号；提前物化可避免在实现选择后才由消费者补建参数、延迟报告尺寸错误。
+// 仅遍历 op 上的 operand_descs、destination_descs 和 result_descs。
+// CanonicalBindings 保证块参数的 arg_descs 与 op 使用处的描述一致，冲突时返回
+// InvalidBinding，因此无需重复扫描 arg_descs。
 LogicalResult collectTensorDescSymbols(func::FuncOp func, Attribute attr, llvm::SetVector<llvm::StringRef> &symbols) {
   auto descriptors = dyn_cast_if_present<ArrayAttr>(attr);
   if (!descriptors) {

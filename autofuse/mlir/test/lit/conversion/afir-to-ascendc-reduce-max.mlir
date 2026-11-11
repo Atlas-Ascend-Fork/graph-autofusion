@@ -17,7 +17,7 @@
 //   高阶 API          `ascendc.reduce_max_2d_l2` 而不是 `reduce_sum_2d_l2`
 //   跨轮合并指令      `ascendc.max_l2` 而不是 `add_l2`
 //
-// 三项各自错了都是**静默错值**：填 0 而不是 -INFINITY，会让对齐补出来的位置在全负输入上
+// 三项各自错了都是静默错值：填 0 而不是 -INFINITY，会让对齐补出来的位置在全负输入上
 // 变成最大值；合并用 `Add` 则把各段的最大值加起来。没有一项会崩。
 
 // RUN: af-opt --afir-kernel-body-signature --afir-to-ascendc-pipeline --target=Ascend910B1 %s | FileCheck %s
@@ -75,7 +75,7 @@ module @reduce_max_lowering attributes {afir.cube_type = -1 : i64, afir.enable_g
 // 对齐补出来的位置先填成 -INFINITY，否则它们会被一起并进最大值。`reduceType = 1` 是
 // `reduce_init.h` 的 `kReduceOpSum`。填的是**输入**那块 tile，不是归约的落点。
 //
-// 第 4 个参数（`dim_r_current`）是段长**对齐之后**的值，第 5 个（`inner_r`）是原始段长：
+// 第 4 个参数（`dim_r_current`）是段长对齐之后的值，第 5 个（`inner_r`）是原始段长：
 // helper 用前者作整块填充的起点（必须 32B 对齐），用后者算每行最后一个 32B 块里的掩码。
 // 传同一个值进去会让整块填充从一个不对齐的偏移开始，`Duplicate` 的地址检查当场 abort。
 // 对齐两次：`%[[R]]` 是 tile 大小对齐后的 R（循环无关，也是 UB 里的行距），

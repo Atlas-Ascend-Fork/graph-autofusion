@@ -14,10 +14,8 @@
 namespace mlir::ascend::kernel {
 namespace {
 
-// Returns the quoted name of `#include "name"`, or an empty StringRef when
-// `line` is anything else -- a system include, an indented include inside a
-// conditional block, or ordinary code. Only the exact shape emitc emits is
-// recognized, so nothing that merely mentions the word include is rewritten.
+// Returns the name from an exact #include "name" line, or an empty StringRef.
+// System includes, indented conditional includes, and ordinary code are not rewritten.
 llvm::StringRef getQuotedIncludeName(llvm::StringRef line) {
   constexpr llvm::StringLiteral kPrefix = "#include \"";
   if (!line.consume_front(kPrefix) || !line.consume_back("\"")) {
@@ -44,11 +42,8 @@ std::string inlineApiExtensionHeaders(llvm::StringRef kernelSource, ApiExtension
         result.push_back('\n');
       }
     } else {
-      // The header text stands in for the whole include line, its own
-      // terminator included. Registry entries are whole files and normally end
-      // in a newline already; normalizing to exactly one keeps a file that does
-      // not from splicing onto the code after it, and a file that does from
-      // leaving a stray blank line behind.
+      // Replace the entire include line, including its terminator, with the header text.
+      // Normalize the trailing newline so the next line is neither joined nor separated by an extra blank line.
       result.append(text.begin(), text.end());
       if (!text.ends_with("\n")) {
         result.push_back('\n');

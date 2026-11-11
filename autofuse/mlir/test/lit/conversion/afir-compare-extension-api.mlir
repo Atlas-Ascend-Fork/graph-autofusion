@@ -10,13 +10,13 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 
-// 比较族的 mem 侧。六个 op 建的是**同一个** `ascendc.compare_extend_contiguous`，
+// 比较族的 mem 侧。六个 op 建的是同一个 `ascendc.compare_extend_contiguous`，
 // 只有 `cmpMode` 不同——这是这条路上第一次一个 AscendC def 服务六个 AFIR op，所以
 // 这份用例的第一件事是钉住「那个属性真的跟着 AFIR op 走」：三个 op 各一个函数，
 // IR 上的 `cmpMode` 必须是 0 / 2 / 4（LT / EQ / GE，见 `AscendC_CMPMODEAttr` 的编号）。
 //
-// 第二件事是**实参次序**：`CompareExtend(dst, s0, s1, CMPMODE::XX, size, tmp)` 里
-// tmp 排在 size **之后**，与这条路上其余每一个包装都相反。次序写反了编译器不会报
+// 第二件事是实参次序：`CompareExtend(dst, s0, s1, CMPMODE::XX, size, tmp)` 里
+// tmp 排在 size 之后，与这条路上其余每一个包装都相反。次序写反了编译器不会报
 // ——两个都是 `LocalTensor`——只有 CPP 那条 check 拦得住。
 //
 // 结果 dtype 恒为 `ui8`、与输入无关，这一条与 `logical_and` 同形，那边已经钉过，

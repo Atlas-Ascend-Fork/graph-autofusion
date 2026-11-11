@@ -11,9 +11,8 @@
 // (load -> add -> store), reverse-engineered from the mlir-af translator
 // inputs (test/Target/*-input.mlir, test/Conversion/linalg-to-ascendc.mlir).
 //
-// This is the IR that:
-//   * the AFIR -> ascendc lowering (queue-faithful mode) must PRODUCE, and
-//   * the CannTranslation step (#2) CONSUMES to emit Ascend C.
+// Target IR produced by queue-faithful AFIR lowering and consumed by CannTranslation
+// for AscendC emission.
 //
 // Buffer/queue positions here are the schedule's decisions (VECIN for loads,
 // VECOUT for the result) — the lowering honors them, it does not invent them.

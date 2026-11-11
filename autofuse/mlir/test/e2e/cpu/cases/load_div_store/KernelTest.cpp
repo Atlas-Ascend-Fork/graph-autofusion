@@ -46,12 +46,12 @@ TEST(MlirE2eCpu, LoadDivStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 除数远离 0（取 ±[1, 4]），免得把 CPU 模拟器与主机 `/` 的末位差放大成用例抖动。
+  // 除数取 ±[1, 4]，避免接近 0 时放大 CPU 模拟器与主机除法的舍入差异。
   for (uint32_t index = 0; index < input1_element_count; ++index) {
     const float magnitude = static_cast<float>((index % 4U) + 1U);
     input1[index] = (index % 2U == 0U) ? magnitude : -magnitude;
   }
-  // 被除数取除数的整倍数加个半，商就落在 ±(k + 0.5)，两边都精确，也都不为 0。
+  // 选择可精确表示的被除数和除数，使商为非零的 ±(k + 0.5)。
   for (uint32_t index = 0; index < input0_element_count; ++index) {
     const float quotient = static_cast<float>(static_cast<int32_t>(index % 5U) - 2) + 0.5F;
     input0[index] = input1[index] * quotient;
@@ -89,7 +89,7 @@ TEST(MlirE2eCpu, LoadDivStoreCalculatesCorrectResult) {
   for (uint32_t index = 0; index < output_element_count; ++index) {
     const float expected = input0[index] / input1[index];
     EXPECT_NEAR(output[index], expected, 1e-5F) << "index=" << index;
-    // 商是 ±(k + 0.5)，不会是 0——`Div` 被写成别的调用时不至于因为期望值恰好是 0 而漏过。
+    // 期望商非零，避免错误调用因恰好得到零结果而通过。
     EXPECT_NE(output[index], 0.0F) << "index=" << index;
   }
 

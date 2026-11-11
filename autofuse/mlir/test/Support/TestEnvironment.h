@@ -21,8 +21,8 @@
 
 namespace mlir::test {
 
-// Temporarily sets or unsets a process environment variable and restores its previous state on destruction.
-// The guard is intentionally non-copyable because copying would make two objects restore the same variable.
+// Temporarily sets or unsets an environment variable, restoring its original state on destruction.
+// Non-copyable to prevent two guards from restoring the same variable.
 class ScopedEnvVar {
  public:
   ScopedEnvVar(std::string name, std::string value) : ScopedEnvVar(std::move(name), std::move(value), true) {}
@@ -60,9 +60,8 @@ class ScopedEnvVar {
   std::string old_value_;
 };
 
-// 按 fd 收 stderr。**按 fd 而不是换 `llvm::errs()` 的流**：要收的既有 `llvm::errs()`，也有
-// MLIR 诊断引擎默认 handler 打出去的那些，两者只有 fd 2 这一个共同出口。与
-// `test/probe/CapabilityBoundaryProbe.cpp` 的 `StderrCapture` 同一写法。
+// 通过 fd 2 捕获 llvm::errs() 和 MLIR 默认诊断 handler 的输出。
+// 仅替换 llvm::errs() 的流不能覆盖后者；与 CapabilityBoundaryProbe 的 StderrCapture 一致。
 class ScopedStderrCapture {
  public:
   ScopedStderrCapture() {
@@ -83,7 +82,7 @@ class ScopedStderrCapture {
   ScopedStderrCapture(const ScopedStderrCapture &) = delete;
   ScopedStderrCapture &operator=(const ScopedStderrCapture &) = delete;
 
-  // 收到的全文。**先 `Restore()` 再读**，否则断言失败时 gtest 的输出也进了这个临时文件。
+  // 读取前先 Restore()，避免后续 gtest 断言输出也被重定向到临时文件。
   std::string Text() {
     Restore();
     if (file_ == nullptr) {

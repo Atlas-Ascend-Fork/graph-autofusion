@@ -8,13 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> isinf -> store CPU case ---------------*- C++ -*-===//
-//
-// 同 `load_isfinite_store` 的理由：把第三份扩展头文本（`is_inf.h`）也真编一遍。它的
-// 文件名和 op 名对不上（`isinf` 对 `is_inf.h`），这条映射写在 ODS 的
-// `ApiExtensionHeader` 实参里，拼错了要到内联查表时才 fail——那也只有编到这里才看得见。
-//
-//===----------------------------------------------------------------------===//
+// 编译 is_inf.h 并验证 isinf 到该文件名的 ODS ApiExtensionHeader 映射。
+// 文件名与 op 名不同，映射错误需通过内联查表和实际 kernel 编译发现。
 
 #include <gtest/gtest.h>
 

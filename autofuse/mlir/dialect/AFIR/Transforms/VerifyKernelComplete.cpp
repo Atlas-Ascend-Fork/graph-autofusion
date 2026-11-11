@@ -35,12 +35,9 @@ namespace {
 
 constexpr llvm::StringLiteral kIncompleteDiagnostic = "Incomplete";
 
-// C1 的 buffer 集合：函数里**每一个** memref 值。
-//
-// 三个来源缺一不可——函数参数、算子结果，以及**嵌套区域的块参数**。最后一个容易漏：
-// memref 类型的 `scf.for` iter_arg 是一个货真价实的 buffer 值，它的地址空间同样要可
-// 追踪；只收前两类的话，判据的措辞（「任意 SSA buffer」）比实现宽，而宽出去的那部分
-// 恰好是多缓冲轮转最常用的形态。
+// C1 检查全部 memref SSA 值，包括函数参数、算子结果和嵌套 region 的块参数。
+// scf.for 的 memref iter_arg 也属于 buffer，必须检查其地址空间；
+// 只收集前两类会遗漏多缓冲轮转常用的循环携带值。
 void collectBufferValues(func::FuncOp func, llvm::SmallVectorImpl<Value> &buffers) {
   auto collect = [&](Value value) {
     if (isa<MemRefType>(value.getType())) {
@@ -55,7 +52,7 @@ void collectBufferValues(func::FuncOp func, llvm::SmallVectorImpl<Value> &buffer
       collect(result);
     }
     // 算子自己的 entry block 参数不算（那是 `func.func` 的参数，上面已经收过）；
-    // 这里要的是它**内嵌区域**的块参数。
+    // 这里要的是它内嵌区域的块参数。
     if (op == func.getOperation()) {
       return;
     }

@@ -52,13 +52,13 @@ TEST(MlirE2eCpu, LoadSumMulStoreCalculatesCorrectResult) {
   uint64_t workspaceSize = 0;
   uint32_t blockDim = 0;
   ASSERT_EQ(AutofuseE2eInitTiling(&tilingData, &workspaceSize, &blockDim), 0);
-  // 这条注册没声明访问器（理由见 CMakeLists）：切分形状观测不到，`AF_E2E_TILING_SHAPE`
-  // 会把 tile / block_inner 填 0，只有元素数是真的。仍然打印，失败时它是第一行线索。
+  // 本注册未声明 tiling 访问器，AF_E2E_TILING_SHAPE 的 tile / block_inner 为 0，
+  // 不能据此推断切分；元素总数仍有效，保留输出供失败诊断。
   const uint32_t tiled_extent = static_cast<uint32_t>(input_shape[0]);
   const mlir::afir::TilingShape tiling_shape = AF_E2E_TILING_SHAPE(tilingData, blockDim, tiled_extent);
   mlir::afir::ReportTilingShape(AF_MLIR_E2E_CPU_CASE_NAME, tiling_shape);
   AF_E2E_ASSERT_TILING_COVERAGE(tiling_shape);
-  // 这条用例的图被切成两张，归约结果落在 GM workspace 上，所以 workspace 必须真的分配。
+  // 归约结果通过 GM workspace 传给下一子图，因此测试必须分配 workspace。
   void *workspace = nullptr;
   if (workspaceSize > 0U) {
     workspace = AscendC::GmAlloc(workspaceSize);

@@ -11,11 +11,11 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 
 // `afir.pow` 与 `afir.remainder` 同形：两侧同名、都要 tmp buffer，只有扩展头不同。
-// 所以两份用例分得开的**只有 IR 里建的是哪个 op**，CPP 那条 check 两边逐字一样。
+// 所以两份用例分得开的只有 IR 里建的是哪个 op，CPP 那条 check 两边逐字一样。
 //
 // 这一份钉 mem 侧（`pow.h`）。这里用 f32——mem 侧收 {i32, f16, f32}。
 //
-// 发出来的是裸名 `Pow(`，不是 `PowExtend(`：两侧 legacy 的 `GetApiName()` 写的就是
+// 生成的是裸名 `Pow(`，不是 `PowExtend(`：两侧 legacy 的 `GetApiName()` 写的就是
 // `Pow`。**别把这条 check 写成 `AscendC::Pow`**——`AscendC::` 里没有这个名字，
 // 标准调用叫 `Power`。
 

@@ -8,7 +8,7 @@
 
 // `#afir.reduction_domain` 的 round-trip。
 //
-// 这个属性是 Mean 分母的**唯一**合法来源：`axes` 是归约域对应的 Original 轴（归属），
+// 这个属性是 Mean 分母的唯一合法来源：`axes` 是归约域对应的 Original 轴（归属），
 // `sizes` 是与之一一对应的尺寸表达式，`N` 为其乘积。bridge 在来源还看得见的时候写，
 // 下降侧只读与校验绑定（`afir::getProvenReductionDomain`）。
 //

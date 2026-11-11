@@ -94,15 +94,14 @@ module attributes {
 
 // workspace：先按字节偏移挪，再按元素类型解释回去，最后才绑。
 //
-// 结果类型的地址空间钉成 `22 : i32`（AscendC 的 `AddressSpace`）而不是 `#afir.space<gm>`：
-// 这条 memref 要被发成 C++ 变量声明，`CodeEmitter::emitBaseMemRefType` 按 `IntegerAttr`
-// 取 memory space，给它方言属性会在发射期直接 assert 掉（MLIR 各 pass 全绿也查不出来）。
+// 物化结果使用 AscendC 的整数地址空间 22 : i32，而不是 afir.space<gm>。
+// C++ memref 类型生成器按 IntegerAttr 读取 memory space；方言属性会在生成时触发断言。
 // CHECK: %[[IDX:[0-9]+]] = emitc.cast %[[OFF]] : ui64 to index
 // CHECK: %[[BASE:[0-9]+]] = emitasc.ptr_offset %[[WS]][%[[IDX]]] : memref<ui8, 22 : i32>, memref<ui8, 22 : i32>
 // CHECK: %[[TYPED:[0-9]+]] = emitasc.reinterpret_cast %[[BASE]] : memref<ui8, 22 : i32> to memref<16xf16, 22 : i32>
 // CHECK: ascendc.global_tensor.set_global_buffer %{{[0-9]+}}, %[[TYPED]]
 
-// stage 1 同样绑了 workspace，但它是最后一个 stage——后面没有读方，不发同步。
+// stage 1 同样绑了 workspace，但它是最后一个 stage——后面没有读方，不生成同步。
 // CHECK-LABEL: func.func private @stage1
 // CHECK-NOT: ascendc.need_sync_all
 // CHECK: emitasc.ptr_offset

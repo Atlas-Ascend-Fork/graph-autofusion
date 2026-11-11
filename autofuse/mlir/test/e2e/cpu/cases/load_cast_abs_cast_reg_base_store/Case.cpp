@@ -10,12 +10,12 @@
 
 //===- Case.cpp - load -> cast -> abs -> cast -> store (reg-base) -*- C++ -*-===//
 //
-// **第一个中途换 dtype 的 VF（M2）。** M1 那格（`load_add_abs_reg_base_store`）全程 f32，
+// 第一个中途换 dtype 的 VF（M2）。 M1 那格（`load_add_abs_reg_base_store`）全程 f32，
 // 所以 lane 的宽度与边界的宽度是同一个数，三件只在跨 dtype 下才成立的事一条都走不到：
 //
-//   1. lane 的宽度由**最宽**的那个元素类型定。这一格 half 进、half 出、中间走 float，
+//   1. lane 的宽度由最宽的那个元素类型定。这一格 half 进、half 出、中间走 float，
 //      所以一段 lane 装 `VL/4` 个元素而不是 `VL/2` 个。取错（按 half 取）的后果是
-//      **第一趟 lane 仍然全对、从第 65 个元素起才错**（实测），所以形状要够跑多趟，
+//      第一趟 lane 仍然全对、从第 65 个元素起才错（实测），所以形状要够跑多趟，
 //      见 CMakeLists。
 //   2. 窄边界的搬运要带 `dist`：取进来 `DIST_UNPACK_B16`（把 half 撑进 4 字节的 lane
 //      槽位）、存回去 `DIST_PACK_B32`（压回 half）。**不带就是 `DIST_NORM`，编得过、
@@ -27,7 +27,7 @@
 // f16 -> f32 与 f32 -> f16 都在表上），所以调度在 buffer 分配阶段把它们聚成一个
 // `VectorFunc`。
 //
-// **它在 M2 落地之前是红的**：M1 的能力判据里有「边界混了元素类型就报能力不足」那一条，
+// 它在 M2 实现之前是红的：M1 的能力判据里有「边界混了元素类型就报能力不足」那一条，
 // 而 CPU E2E 的生成器直接调 `RunMlirCodegen`、不接 legacy 回落，所以失败在生成那一步。
 //
 // 设计见 docs/development/2026-10-18-afir-vector-func-implementation-design.md 的 M2。
@@ -69,18 +69,18 @@ void CheckGeneratedKernel(const std::string &kernel) {
             std::string::npos);
   // 产物必须是寄存器形态：一个向量作用域、一层 lane 循环，中间结果不落 UB。
   EXPECT_NE(kernel.find("__VEC_SCOPE__"), std::string::npos);
-  // **lane 的宽度按最宽的那个 dtype**。写成 `<half>` 也编得过、也跑得完，只有尾段会错。
+  // lane 的宽度按最宽的那个 dtype。写成 `<half>` 也编得过、也跑得完，只有尾段会错。
   EXPECT_NE(kernel.find("AscendC::Reg::UpdateMask<float>("), std::string::npos);
-  // 两条 dist。**计数式而不是「存在一条」**，而且连 dist 一起看：不带 dist 的
+  // 两条 dist。计数式而不是「存在一条」，而且连 dist 一起看：不带 dist 的
   // `LoadAlign<half>` 同样是一条 `LoadAlign`，数条数数不出区别。
   EXPECT_EQ(CountOccurrences(kernel, "AscendC::Reg::LoadAlign<half, AscendC::Reg::LoadDist::DIST_UNPACK_B16>"), 1U);
   EXPECT_EQ(CountOccurrences(kernel, "AscendC::Reg::StoreAlign<half, AscendC::Reg::StoreDist::DIST_PACK_B32>"), 1U);
   EXPECT_EQ(CountOccurrences(kernel, "LoadAlign"), 1U);
   EXPECT_EQ(CountOccurrences(kernel, "StoreAlign"), 1U);
-  // 一来一回挑的是**不同**的两个 trait（舍入方向不一样）。两条写成同一个也编得过。
+  // 一来一回挑的是不同的两个 trait（舍入方向不一样）。两条写成同一个也编得过。
   EXPECT_NE(kernel.find("AscendC::Reg::Cast<float, half, cast_trait_bf16_2_float>"), std::string::npos);
   EXPECT_NE(kernel.find("AscendC::Reg::Cast<half, float, cast_trait_float_2_half>"), std::string::npos);
-  // trait 的**定义**要被内联进来，否则编译器找不到那个名字。
+  // trait 的定义要被内联进来，否则编译器找不到那个名字。
   EXPECT_NE(kernel.find("cast_trait_float_2_half = {"), std::string::npos);
   // 这几条是「真的走了 VF 这条路」的判据：tile 级的包装一条都不该剩。
   EXPECT_EQ(kernel.find("CastExtend"), std::string::npos);

@@ -13,8 +13,8 @@
 
 // RUN: not af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s 2>&1 | FileCheck %s
 
-// 能力查询在 SelectImplementation 处就拒了，走不到下降。下降侧还有第二道
-// （`isSupportedReduceLayout` 的同一个谓词），去掉这一道时它会接住并报 `failed to legalize`。
+// SelectImplementation 通过共享布局谓词提前拒绝该输入。
+// 若直接运行 lowering，同一谓词仍须阻止改写，并报告 legalize 失败。
 // CHECK: error: 'afir.sum' op has no supported Ascend implementation
 
 module {

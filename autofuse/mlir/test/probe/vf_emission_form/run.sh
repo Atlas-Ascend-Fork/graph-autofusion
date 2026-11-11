@@ -7,9 +7,9 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 #
-#===- run.sh - 编并跑 VF 两种发射形态的探针 -------------------------------===#
+#===- run.sh - 编并跑 VF 两种生成形态的探针 -------------------------------===#
 #
-# 问题与口径见 `VfEmissionFormProbe.cpp` 的头部。这里只说怎么跑。
+# 问题与统计范围见 `VfEmissionFormProbe.cpp` 的头部。这里只说怎么跑。
 #
 #     bash autofuse/mlir/test/probe/vf_emission_form/run.sh            # CPU 模拟器，跑数值
 #     bash autofuse/mlir/test/probe/vf_emission_form/run.sh --device   # 真实 NPU 编译器，只编
@@ -18,14 +18,14 @@
 # ccec 收得下。`--device` 这一档还会反汇编出两种形态的向量指令直方图——这是「两种形态
 # 等不等价」的判据，而不是「编过了」。
 #
-# **编译选项不自己攒，从 build 目录里现成的 reg 侧 AscendC UT 目标抄**
+# 编译选项不自己攒，从 build 目录里现成的 reg 侧 AscendC UT 目标抄
 # （`autofuse/tests/v35/ut/ascendc/api_regbase` 的 `test_regbase_ascendc`）：那一份是被
 # 既有用例证过的组合，含 `-D__DAV_C310__ -D__NPU_ARCH__=3510` 与一长串 CANN include。
-# 手攒的话漏一个宏的失败方式是**架构门不命中、整段 VF 被预处理器吃掉**，而探针仍然
+# 手攒的话漏一个宏的失败方式是架构门不命中、整段 VF 被预处理器吃掉，而探针仍然
 # 编得过、跑得完——哨兵就是防这个的，但省下排查更好。
 #
 # 前置：build 目录里要有那个目标的 `flags.make`（任意一档配置都行，`-u`/`-s` 都会配出它）。
-# 它只需要 `flags.make`，**不需要先把那个目标编出来**。
+# 它只需要 `flags.make`，不需要先把那个目标编出来。
 #
 # 两个额外 include 是 `flags.make` 里没有、但 tikicpulib 自己要的：
 # `tools/cpudebug/include`（`tikicpulib.h` 在这里，不在 `tools/tikicpulib/lib/include`）
@@ -36,7 +36,7 @@
 # `--device` 这一档的选项抄 CANN 自己的 kernel 编译命令
 # （`python/site-packages/asc_op_compile_base/asc_op_compiler/super_kernel_op_compile.py`
 # 里那一长串 `-I` 与 `--cce-aicore-arch` / `--cce-aicore-only`）。两处容易踩：
-#   - **要 `-x cce`**。`.cpp` 后缀下 ccec 按普通 C++ 编，失败方式是 CANN 自己的头里报
+#   - 要 `-x cce`。`.cpp` 后缀下 ccec 按普通 C++ 编，失败方式是 CANN 自己的头里报
 #     `unknown type name '__gm__'`，看起来像头文件坏了；
 #   - include 根要给到 `asc` 目录本身（头里有 `#include "impl/utils/sys_macros.h"` 这种
 #     相对 `asc/` 的写法），只给 `asc/include` 不够。

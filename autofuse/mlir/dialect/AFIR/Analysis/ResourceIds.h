@@ -11,7 +11,7 @@
 //===- ResourceIds.h - canonical 片上资源的身份集合 -------------*- C++ -*-===//
 //
 // 一个 kernel 函数用到哪些队列 id、哪些普通缓冲 id。判据全部来自 `#afir.buffer_desc`
-// 与 `afir.workspace_plan`，与任何后端无关——所以住在 AFIR 层，尽管今天唯一的消费者是
+// 与 `afir.workspace_plan`，与任何后端无关——所以住在 AFIR 层，尽管目前唯一的消费者是
 // AscendC 的 ABI 物化（它拿这两个集合去拼 `q{id}_size` / `b{id}_size` 字段）。
 //
 // `buffer_id` 不只是资源身份，它同时是 kernel 的 host 侧 ABI（设计文档 2.3 的判别：
@@ -44,7 +44,7 @@ namespace mlir::afir {
 //
 // 这个名字是与 ATT 的 ABI，两侧必须逐字相同，所以拼法只此一处：`AFIRKernelBodySignature`
 // 按它往 TilingData 里追加字段，memory allocate 按它把 `afir.tiling_param` 绑回来。
-// 此前两处各拼一遍（一处还是手写字符串拼接），对不上时唯一的症状是很晚才发的
+// 此前两处各拼一遍（一处还是手写字符串拼接），对不上时唯一的症状是很晚才生成的
 // 「TilingData is missing canonical size expression field」。
 //
 // 另一半在 `common/tiling_schema/canonical_resource_names.h`，与 legacy Codegen 共用。
@@ -79,7 +79,7 @@ bool isCanonicalQueueResource(BufferDescAttr buffer);
 
 // 同一个 canonical 资源上的多个张量，descriptor 里必须逐字一致的那几个字段。
 //
-// **这张清单只此一处。** 两侧各查一遍：bridge 在 DTO 上查
+// 这张清单只此一处。 两侧各查一遍：bridge 在 DTO 上查
 // （`ScheduleToAfir` 的 `CheckResourceCompatibility`，判成 `BindingConflict`），conversion
 // 在聚合 descriptor 时再查一遍（`CanonicalResources` 的 `registerResource`，判成
 // "conflicting descriptors"）。此前两处各写一份字段列表，分开写就会分开漂，而且漂了
@@ -87,20 +87,20 @@ bool isCanonicalQueueResource(BufferDescAttr buffer);
 //
 // 不在清单里的三类字段，各有各的理由：
 //
-//   - `slot_count`：每个张量说自己要几格，队列的格数是这些数的**最大值**
+//   - `slot_count`：每个张量说自己要几格，队列的格数是这些数的最大值
 //     （legacy `codegen_kernel.cpp` 对 `que_buf_num_value` 取 max）。聚合在
 //     `registerResource` 里做；
-//   - `alignment_bytes`：它不是资源的身份，而是**某个张量对这块存储字节数的要求**
+//   - `alignment_bytes`：它不是资源的身份，而是某个张量对这块存储字节数的要求
 //     （-1 = 没有要求），所以多个张量共用一块存储时，这块存储要同时满足它们——聚合取
 //     最小公倍数，同样在 `registerResource` 里做。要求它们相等会拒掉合法调度：
-//     tmp buffer 与普通计算缓冲**同在一个 id 空间**（见 `ScheduleToAfir` 里那段注释），
+//     tmp buffer 与普通计算缓冲同在一个 id 空间（见 `ScheduleToAfir` 里那段注释），
 //     前者由 bridge 固定带 32、后者是 -1，于是「tmp buffer 与某个中间结果落到同一个
 //     `b<id>`」这种调度就只差这一个字段。单输入单输出算子有两个消费者时就是这个形状
 //     （探针 T5c / T5e / T5，2026-10-12）。聚合之后这块存储只会更大不会更小
 //     （`ceil32(max(a, b)) >= ceil32(a)`），所以任何一个成员都装得下；
 //   - `reuse_id`：legacy 的 `que->share_group[reuse_id]` 本来就允许一条队列上并存多个
 //     复用组，所以它是资源身份的一部分而不是要比相等的字段；
-//   - **张量的 dtype**：队列就是一块字节，legacy 的 `oneBufSize` 取成员的 max，所以
+//   - 张量的 dtype：队列就是一块字节，legacy 的 `oneBufSize` 取成员的 max，所以
 //     一条队列上混 dtype 是合法调度——ui8 掩码与两边的 f32 一起搬入就是这个形状
 //     （`load_mask_select_store`）。片上资源的字节数由 ATT 填进 `q<id>_size` /
 //     `b<id>_size`（`size_from_resource`），descriptor 上没有一处依赖 dtype。
@@ -123,7 +123,7 @@ inline bool canonicalResourceFactsAgree(const CanonicalResourceFacts &first, con
 // `alignment_bytes` 那一条。-1 是「没有要求」，按 1 参与，所以两边都没有要求时结果仍是 -1。
 //
 // 取最小公倍数而不是 max：要求的含义是「字节数必须是 N 的倍数」，48 与 32 的公共解是 96，
-// 取 48 会让 32 那一条落空。**今天分不出来**——`alignment_bytes` 实际取值只有 -1 与 32
+// 取 48 会让 32 那一条落空。今天分不出来——`alignment_bytes` 实际取值只有 -1 与 32
 // （32 是 bridge 的 `kTmpBufferAlignmentBytes`），两种聚合同解，所以这条判据的证据在
 // UT 里（`CanonicalResourceFactsTest`），不在 lit 或 E2E 上。
 inline int64_t aggregateAlignmentBytes(int64_t first, int64_t second) {

@@ -25,7 +25,7 @@ INPUT_SHAPE_CASES = (
 
 
 def build_module(torch):
-    # clone 生成纯搬运 kernel（load 直连 store）；恒等映射会被 inductor 消除成无 kernel。
+    # 使用 clone 保留 Load 直连 Store 的搬运 kernel；直接恒等映射会被 Inductor 消除。
     class Copy(torch.nn.Module):
         def forward(self, x):
             return x.clone()

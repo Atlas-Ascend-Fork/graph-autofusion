@@ -7,8 +7,8 @@
 # IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See the License for the specific language governing permissions and limitations under the License.
 
-# 归约首轴（RA）+ 切图。形状取真机上实测会错的那一档，理由见 Case.cpp。
-# 不钉 plan、不声明 TILE_ACCESSOR：与 `load_sum_mul_store_8x1024` 同理。
+# 覆盖首轴归约（RA）及切图路径，使用 Case.cpp 所述回归形状。
+# 不固定 plan，也不声明 TILE_ACCESSOR，与 load_sum_mul_store_8x1024 一致。
 add_mlir_e2e_cpu_case(load_sum0_store_512x512
     OUTPUT_SHAPE "[1, 512]"
     INPUT_SHAPES "[512, 512]"

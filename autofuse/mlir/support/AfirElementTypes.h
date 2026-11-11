@@ -8,35 +8,15 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- AfirElementTypes.h - AFIR 元素类型供给表的真源 ----------*- C++ -*-===//
+// AFIR 元素类型的共享定义，用于生成 ElementTypes 位、bridge 的 dtype 名称与字节宽度，
+// 以及 ElementTypeMatrixTest 的类型集合，避免各处分别维护。
+// 遗漏接入点可能导致 implementation 无法选择、bridge 提前拒绝、workspace 大小缺项，
+// 或测试未覆盖新增类型。
 //
-// **「AFIR 的元素类型域有哪几位」只写在这里一遍。**
-//
-// 改造之前这件事写了四遍，而且四遍的拼写、顺序、口径各不相同：
-//
-//   1. `Implementations/ElementwiseApiFamily.h` 的 `ElementTypes` 位；
-//   2. `bridge/ScheduleToAfir.cpp` 的 `IsAfirModeledDType`（一张 `ge::DataType` 的白名单）；
-//   3. 同一个文件里的 `DTypeStr` 与 `ElementByteWidth`（两张各自独立的 switch）；
-//   4. `test/ut/conversion/ElementTypeMatrixTest.cpp` 的 `kModelableDtypes`。
-//
-// **漏掉其中任何一处都不会红**，而且四种漏法的症状完全不同，所以每一次都要重新查：
-//
-//   - 漏 1：implementation 收不到那一位，图建得出来但选不出 implementation——干净回落，
-//     只是白回落；
-//   - 漏 2：bridge 当场拒掉，连图都不建——也是干净回落，但首因标签指向 dtype，把真正的
-//     卡点盖住（i64 那 11 格就是这么被盖了一整期）；
-//   - 漏 3（`ElementByteWidth`）：**算不出字节数**，workspace 尺寸表达式缺项；
-//   - 漏 4：那条「不得比 legacy 窄」的断言对新那一位**恒真**——它不会红，只是不再查。
-//
-// 所以这里的两张表是**位置表**，不是「谁收哪几种」：后者是每个 op 自己的事实，写在各自的
-// 注册处，由 `ElementTypeMatrixTest` 对着 `docs/guides/ascir_op_lowering_matrix.csv` 对账。
-// 这里只回答「AFIR 这一层表达得出哪几种元素类型」。
-//
-// **加一位 = 把一行从 `AFIR_ELEMENT_TYPE_NAMED_ONLY` 搬到 `AFIR_ELEMENT_TYPE_TABLE`。**
-// 两张表分开的理由见 `AFIR_ELEMENT_TYPE_NAMED_ONLY` 上面那段——「叫得出名字」与「建模得
-// 出来」是两个问题，合成一张表会把拒收诊断里的那个类型名弄丢。
-//
-//===----------------------------------------------------------------------===//
+// 表中记录的是 AFIR 可表达的类型，不是各 op 的支持范围；后者在 implementation 注册处
+// 声明，并由 ElementTypeMatrixTest 与 ascir_op_lowering_matrix.csv 对比。
+// 新增建模类型时，将对应行从 AFIR_ELEMENT_TYPE_NAMED_ONLY 移至 AFIR_ELEMENT_TYPE_TABLE。
+// 命名表与建模表分开，使未建模类型仍能在拒绝诊断中显示正确名称。
 
 #ifndef AUTOFUSE_MLIR_SUPPORT_AFIRELEMENTTYPES_H
 #define AUTOFUSE_MLIR_SUPPORT_AFIRELEMENTTYPES_H
@@ -69,10 +49,10 @@ enum class AfirElementTypeKind : uint8_t {
 //
 //   NAME     位的名字。`ElementTypes` 的 `k<NAME>` 与它同名。
 //   BIT      位号。显式写出来而不靠行序，是为了让快照式断言（`kKnownNarrower`）在表里
-//            插一行时不跟着变。**位号不得复用**：旧位号出现在测试快照里。
-//   CSV      `ascir_op_lowering_matrix.csv` 两列 dtype 的拼写。对账靠它，不能自己另起。
-//   BUILDER  `AfirBuilder::parseDtype` 收的长拼写，也是 bridge 发给它的那个字符串。
-//   BYTES    一个元素占几字节。**这是真源，不是 `getIntOrFloatBitWidth() / 8`**——理由见
+//            插一行时不跟着变。位号不得复用：旧位号出现在测试快照里。
+//   CSV      `ascir_op_lowering_matrix.csv` 两列 dtype 的拼写。比对靠它，不能自己另起。
+//   BUILDER  `AfirBuilder::parseDtype` 收的长拼写，也是 bridge 传给它的那个字符串。
+//   BYTES    一个元素占几字节。这是权威来源，不是 `getIntOrFloatBitWidth() / 8`——理由见
 //            下面 `afirElementByteWidth` 那段。
 //   GE       调度侧 `ge::DataType` 的枚举名。这里只是一个 token，不引 ge 的头；要用它的
 //            地方自己拼 `ge::` 前缀（只有 bridge 拼得出来，也只有 bridge 需要）。
@@ -90,12 +70,12 @@ enum class AfirElementTypeKind : uint8_t {
 // legacy 叫得出名字、但 AFIR 这一层还没建模的元素类型。列依次是 CSV / BUILDER / BYTES / GE，
 // 含义与上面那张表同名的列一样。
 //
-// **字节数这一列这里也要有**，因为 `ElementByteWidth` 答的范围比供给表宽：workspace 的尺寸
+// 字节数这一列这里也要有，因为 `ElementByteWidth` 答的范围比支持表宽：workspace 的尺寸
 // 表达式对一个 ui32 的张量也得算得出来，哪怕没有哪个 op 收 ui32。把这一列省掉的后果是那种
 // 图报 `InvalidWorkspace: workspace peer tensor has unsupported dtype or size`——一条和 dtype
 // 建模毫无关系的错。
 //
-// **这张表的唯一用途是让拒收诊断说得出那个类型名。** 合进上面那张表会同时丢掉两件事：
+// 这张表的唯一用途是让拒收诊断说得出那个类型名。 合进上面那张表会同时丢掉两件事：
 // 「叫得出名字」与「建模得出来」的区分（`DTypeStr` 与 `IsAfirModeledDType` 答的是两个
 // 问题），以及
 //
@@ -104,7 +84,7 @@ enum class AfirElementTypeKind : uint8_t {
 // 这条诊断里的 `int64`——换成「不认识的 dtype 值 9」之后，接管表的首因列就再也指不出是
 // 哪一位缺了，而那一列正是排期靠的东西。
 //
-// **这里缺一行的后果是报出 `scheduler dtype value N is not modeled by AFIR`**（bool 那 4
+// 这里缺一行的后果是报出 `scheduler dtype value N is not modeled by AFIR`（bool 那 4
 // 格今天就是这样），比缺名字更难查一层。
 #define AFIR_ELEMENT_TYPE_NAMED_ONLY(M)                  \
   M("i8", "int8", 1, DT_INT8, SignlessInteger, 8)        \
@@ -200,8 +180,8 @@ inline uint32_t afirElementTypeBit(Type type) {
 
 /// `type` 一个元素占几字节；不在表上就是 `nullopt`。
 ///
-/// **不要换回 `type.getIntOrFloatBitWidth() / 8`。** 那个写法对今天表上的七位都对，所以
-/// 看不出问题，但它对「位宽不是 8 的倍数」的类型**静默算出 0**，而 AFIR 的类型域里迟早
+/// 不要换回 `type.getIntOrFloatBitWidth() / 8`。 那个写法对今天表上的七位都对，所以
+/// 看不出问题，但它对「位宽不是 8 的倍数」的类型静默算出 0，而 AFIR 的类型域里迟早
 /// 会有这样一位（`bool` 在 MLIR 里的自然选择是 `i1`，在 AscendC 侧却占一整字节）。
 /// 查过的三处除数写法：`Analysis/CanonicalBindings.cpp` 与
 /// `MemoryAllocate/CanonicalMaterialization.cpp` 各有一道保护，第三处

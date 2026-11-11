@@ -14,7 +14,7 @@
 // CMake 里不链接 `AFPlanDialect`。两半各管一件事，谁都替代不了谁——脚本看得见依赖但
 // 看不见语义，本用例看得见语义但看不见一个没被走到的 `#include`。
 //
-// 这里问的是：`afir` 的解析与校验路径**会不会自己去碰 afplan**。做法是把 `afplan`
+// 这里问的是：`afir` 的解析与校验路径会不会自己去碰 afplan。做法是把 `afplan`
 // 从 context 里拿掉：一个只加载了 `afir` 的 context 能完整解析并校验一个 kernel body，
 // 且解析结束后 `afplan` 仍然没被加载。若哪天 `afir` 的某个 verifier 开始读候选身份
 // （`afplan.variant` 之类），它要么在这里崩、要么把 `afplan` 拉进 context——两种都会

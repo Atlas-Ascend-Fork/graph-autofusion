@@ -41,7 +41,7 @@ class AFIR_BufferizableShapedType<list<Type> elementTypes> :
 // 47 个共有 elementwise Op 里有 34 个要），语义上是「一块字节」而不是某个 dtype 的
 // 张量，所以固定成一维 `ui8` memref。
 //
-// 它的**字节数不在 AFIR 里算**：实际分配值是 ATT 侧按 `max(各节点 Σ) ⊔ 8KB` 聚合出
+// 它的字节数不在 AFIR 里算：实际分配值是 ATT 侧按 `max(各节点 Σ) ⊔ 8KB` 聚合出
 // 来的 `b{id}_size`，AFIR 只能引用。因此承载它的 `memref.alloc` 上挂的是
 // `#afir.buffer_desc<size_from_resource = true>`，尺寸由 MemoryAllocate 绑到那个
 // canonical 资源名上——见 docs/design/2026-09-17 的 tmp buffer 一节。
@@ -63,7 +63,7 @@ def AFIR_TmpBufferType : AFIR_BufferizableShapedType<[UI8]>;
 // 转为强类型 Attr。届时字段已知，应直接建强类型 Attr 而非复用字典。
 //
 // 删除 ODS 属性 `loop_axis`（步 3b）：它声明在全部 54 个 Op 上，生成的 `getLoopAxis()`
-// **零调用**。它唯一的作用是让 `AFIR_RejectUnknownAttributes` 的「去前缀后比对已注册名」
+// 零调用。它唯一的作用是让 `AFIR_RejectUnknownAttributes` 的「去前缀后比对已注册名」
 // 逻辑放行同名的 discardable 属性 `afir.loop_axis`——而后者是 i64、这里声明的是 I32，
 // 于是 ODS 里写的类型与 IR 里实际出现的值对不上，等于用一个假声明当白名单。
 //
@@ -73,10 +73,10 @@ def AFIR_TmpBufferType : AFIR_BufferizableShapedType<[UI8]>;
 // 删除 ODS 属性 `operand_buffer_descs` / `result_buffer_descs` / `destination_buffer_descs`
 // （步 8）：值的规划结果改挂在值的定义点上，一个值一份（`afir.buffer_desc`），使用点不再
 // 有与操作数按下标对齐的数组。留着这三个声明会让 `AFIR_RejectUnknownAttributes` 继续
-// 放行同名的 discardable 属性——旧写法写回来不报错，等于迁移没有闸门。
+// 放行同名的 discardable 属性——旧写法写回来不报错，等于迁移没有门禁。
 //
 // tensor descriptor（`operand_descs` / `result_descs` / `destination_descs`）保留：轴与
-// role 是**使用点**的事实，同一个 GM 值在不同使用点可以有不同的轴解释。
+// role 是使用点的事实，同一个 GM 值在不同使用点可以有不同的轴解释。
 class AFIR_CommonAttrs {
   dag commonArgs = (ins
     OptionalAttr<AffineMapArrayAttr>:$indexing_maps,
@@ -92,7 +92,7 @@ class AFIR_CommonAttrs {
 //
 // 同步原语（`afir.event_record` / `afir.event_wait` / `afir.pipe_barrier`）作用在
 // 「pipe 之间的执行顺序」这件全局状态上，而不是某个操作数或结果。它们既没有操作数也
-// 没有可依赖的结果，因此必须显式声明副作用——否则「不会被删掉」这份安全是**隐式**的：
+// 没有可依赖的结果，因此必须显式声明副作用——否则「不会被删掉」这份安全是隐式的：
 // 今天成立只是因为没有 MemoryEffect 接口即视为未知副作用，一旦有人给基类加上 `Pure`，
 // `afir.event_wait` 会被静默 DCE 掉，而失败形态是偶发的错数据。
 def AFIR_PipelineResource : Resource<"::mlir::afir::PipelineResource">;
@@ -165,11 +165,11 @@ class AFIR_NaryOp<string mnemonic,
 // ODS 元素类型列表的可机读副本
 //===----------------------------------------------------------------------===//
 //
-// **ODS 这一份元素类型列表是推导得出来的，不是独立事实。**
+// ODS 这一份元素类型列表是推导得出来的，不是独立事实。
 //
 // 按设计（`docs/development/2026-10-16-afir-elementwise-broadcast-closeout-design.md`
 // 的功能需求 3 第一步）：「AFIR 能不能表达某个 dtype」= 两侧 implementation「供不供得起」
-// 的**并集**。所以 ODS 的列表应当等于注册处那两份位掩码的并集（投影到 AFIR 的供给表上）。
+// 的并集。所以 ODS 的列表应当等于注册处那两份位掩码的并集（投影到 AFIR 的支持表上）。
 //
 // 在这个 mixin 之前，这件事没有任何机器查过，于是两个方向都出过事，而且**两个方向都不会
 // 红**：
@@ -179,8 +179,8 @@ class AFIR_NaryOp<string mnemonic,
 //   - ODS 有而注册处没有：op 建得出来、选不出 implementation，整图干净回落。不报错，只是
 //     白回落，而接管表上这一格的首因会指向「没有 Ascend 实现」而不是「这一位没注册」。
 //
-// 发出来的是 CSV 拼写（`i16;ui8;bf16`），与 `ascir_op_lowering_matrix.csv` 和
-// `support/AfirElementTypes.h` 的 `CSV` 列同一套拼写。能直接这么发是因为 MLIR 内建类型
+// 生成的是 CSV 拼写（`i16;ui8;bf16`），与 `ascir_op_lowering_matrix.csv` 和
+// `support/AfirElementTypes.h` 的 `CSV` 列同一套拼写。能直接这样输出是因为 MLIR 内建类型
 // 记录的名字小写之后恰好就是那套拼写（`I16` → `i16`、`BF16` → `bf16`）；哪天这个巧合不
 // 成立，门禁会报「不认识的拼写」而不是静默少查一位。
 class AFIR_OdsElementTypes<list<Type> types> {
@@ -300,11 +300,11 @@ class AFIR_BufferizableUnaryOptionalResultOpBase<string mnemonic,
 }
 
 // `lhsType` / `rhsType` 默认都与 `shapedType` 相同。它们各占一个参数，是为了让
-// tensor-scalar 形态的 op 把**那一个**操作数放宽成「一块 tile 或者一个标量」——放宽
+// tensor-scalar 形态的 op 把那一个操作数放宽成「一块 tile 或者一个标量」——放宽
 // 的只是被指名的位置，别的一律不动。两边都能放宽：矩阵上 8 个 op 的标量格是
 // `2nd+swap(2nd)`，标量在第一个操作数上那半张格子由 `lhsType` 说出来。
 //
-// **「两个都是标量」不由类型约束挡**：ODS 的约束是逐个操作数的，说不出「至多一个」。
+// 「两个都是标量」不由类型约束挡：ODS 的约束是逐个操作数的，说不出「至多一个」。
 // 那一条在 verifier 里（`verifyBufferizedElementwise` 要求至少一个输入有形状）。
 //
 // `extraAttrs` 与一元那边同义：这个 op 自己的属性（`afir.axpy` 的 `alpha`）。属性进
@@ -437,21 +437,11 @@ class AFIR_UnaryOpBase<string mnemonic,
   let hasVerifier = 1;
 }
 
-// 只有 tensor 形态的二元 base（`AFIR_BinaryOpBase` / `AFIR_BinaryOp` /
-// `AFIR_BinaryHomoOp`）也在这里存在过，最后一批实例是比较族那六行。它们换到
-// `AFIR_BufferizableBinaryElementwiseOp` 之后三个类一个实例都不剩，理由与下面三元那
-// 两个逐字相同。`AFIR_UnaryOpBase` 留着——`Reduce.td` 还在用它；只有它上面那层薄封装
-// `AFIR_UnaryOp` 没有实例了，一起删掉。
 
-// 只有 tensor 形态的三元 base（`AFIR_TernaryOpBase` / `AFIR_TernaryOp`）在这里存在过，
-// 唯一的实例是 `afir.clip_by_value`。它换到 `AFIR_BufferizableTernaryHomoElementwiseOp`
-// 之后两个类一个实例都不剩——没有实例的 tablegen class 不会被展开，留着等于带一段没被
-// 检查过的代码，所以删掉。三元的 tensor 形态没有消失：bufferizable 那条的 destination
-// 是 `Optional`，不给就是 tensor 形态。
+// 二元和三元 elementwise 统一使用 bufferizable base；destination 可选，省略时即 tensor 形态。
+// 原 tensor-only 二元、三元 base 及无实例的 AFIR_UnaryOp 薄封装已移除，避免维护
+// 不会被 TableGen 实例化检查的类。AFIR_UnaryOpBase 仍供 Reduce.td 使用。
 
-//===----------------------------------------------------------------------===//
-// Variadic op base (N inputs, 1 result)
-//===----------------------------------------------------------------------===//
 class AFIR_VariadicOpBase<string mnemonic,
                          list<Trait> traits,
                          list<Type> inputTypes,

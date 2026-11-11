@@ -11,9 +11,8 @@
 
 // MISSING-TARGET: TargetSelectionConflict: one of --target or --target-profile is required
 
-// descriptor 三件写全，元素类型才是唯一能触发的那一条。**不写 descriptor 的话这份 IR
-// 先被 `hasCanonicalDescriptors` 判成 MissingInformation**，报出来的错与 f64 无关——把
-// 元素类型判据整条删掉它照样绿。原先这里就是这么写的。
+// 补全 canonical descriptors，使 f64 类型成为唯一拒绝原因。
+// 否则能力查询会先返回 MissingInformation，无法验证元素类型检查是否生效。
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
 
@@ -33,16 +32,11 @@ module {
 
 // -----
 
-// 这里原本还有一个 `unsupported_add_rank`：`2x8xf16`，断言未调度那条路只收秩为 1 的
-// tile。它同样没写 descriptor，拦住它的其实是 MissingInformation 而不是秩——二元的秩
-// 判据整条删掉它也照样绿。重做之后挪到了
-// `afir-elementwise-identity-rank-invalid.mlir`，那份把一元 / 二元 / 三元三条一起钉住
-// （一元原先根本没有这条判据）。
+// identity 路径的秩限制由 afir-elementwise-identity-rank-invalid.mlir 覆盖，
+// 该文件统一检查一元、二元和三元算子，并提供完整 descriptor。
 
-// 这里原本还有一个 `mismatched_add_types`：lhs f16 / rhs f32，断言 capability 查询
-// 报「没有可用实现」。判据上移到了 ODS 的 `AllElementTypesMatch` 之后，这段 IR 连
-// 解析都过不去，留在本文件里会让第一条 RUN（它不分 split）在解析期就失败。负例已挪到
-// test/lit/smoke/afir_transfer_ops_invalid.mlir。
+// lhs/rhs dtype 不一致由 ODS AllElementTypesMatch 在解析后校验，
+// 不再进入 capability 查询。负例位于 smoke/afir_transfer_ops_invalid.mlir。
 
 // -----
 

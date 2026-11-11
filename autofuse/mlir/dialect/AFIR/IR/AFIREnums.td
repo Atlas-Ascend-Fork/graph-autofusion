@@ -135,7 +135,7 @@ def AFIR_AxisValueRoleEnum : I32EnumAttr<"AxisValueRole",
 // 拼写与 legacy 的 `ExecuteConditionToString`（`ascir/meta/ascendc_graph_txt_dumper.cpp:941`）
 // 逐字相同，AscGraph 的 txt dump 与 AFIR 的 dump 才对得上。
 //
-// **`kConditionInvalid` 没有对应取值**，是有意的：它在上游表示「还没定」，照搬进来会给
+// `kConditionInvalid` 没有对应取值，是有意的：它在上游表示「还没定」，照搬进来会给
 // 生成侧一个既不是「不缓存」也不是某个周期的第三种状态。bridge 碰到它报不支持。
 def AFIR_ExecConditionEnum : I32EnumAttr<"ExecCondition",
     "Reuse cycle of a cacheable operation: when it has to be executed again",
@@ -158,7 +158,7 @@ def AFIR_ExecConditionEnum : I32EnumAttr<"ExecCondition",
 // Memory layout: outer order and intra-tile order
 //===----------------------------------------------------------------------===//
 //
-// 布局按 ADR-16 做**正交分解**而不是扁平枚举：外层布局（基块网格的遍历序）× 分块布局
+// 布局按 ADR-16 做正交分解而不是扁平枚举：外层布局（基块网格的遍历序）× 分块布局
 // （基块内部的遍历序）× 基块尺寸参数。扁平枚举（`nd|nz|dn|fractal`）随组合爆炸，且基块
 // 大小跨代变化时还要新增枚举项。
 //
@@ -203,9 +203,9 @@ def AFIR_TileOrderEnum : I32EnumAttr<"TileOrder",
 // 这个词表此前只以 `RaceCheck.h` 里的一个内部 C++ enum（`ExecutionStream`）加一个
 // 手写的 name 映射存在——竞争检查器和同步原语要谈的是同一件事，各留一份就是 D2。
 //
-// **一个取值对应一台引擎。** 此前 `compute` 一个值兼管矢量、标量与 Cube，而这三者在
+// 一个取值对应一个引擎。 此前 `compute` 一个值兼管矢量、标量与 Cube，而这三者在
 // 硬件上是三台独立的引擎、彼此异步。写 Cube kernel 时 `L1 -> L0A/L0B` 的搬运、MAD
-// 本身、以及 `L0C` 的搬出各在一台引擎上，塌成一个值就等于说它们之间不需要同步——而
+// 本身、以及 `L0C` 的搬出各在一个引擎上，塌成一个值就等于说它们之间不需要同步——而
 // lowering 会把它照直映射成 `PIPE_V`，既不报错也不正确。
 def AFIR_PipeEnum : I32EnumAttr<"Pipe",
     "Asynchronous engine an AFIR operation executes on",
@@ -237,10 +237,10 @@ def AFIR_PipeEnum : I32EnumAttr<"Pipe",
 //
 // kernel 参数在 ABI 里扮演什么角色（设计文档 3.6「Kernel 程序容器」）。
 //
-// 此前这个问题由三套互不相干的机制分别回答：数据参数靠一对**互斥**的整数 arg attr
+// 此前这个问题由三套互不相干的机制分别回答：数据参数靠一对互斥的整数 arg attr
 // （`afir.input_index` / `afir.output_index`，「两个都挂」只能在消费端事后发现）；
-// workspace 靠**类型相等**（参数类型恰好等于 `getAscendCWorkspaceType`）；TilingData
-// 靠**结构体名字**等于 "TilingData"。三者都不是参数自己声明的身份，而是消费端反推的
+// workspace 靠类型相等（参数类型恰好等于 `getAscendCWorkspaceType`）；TilingData
+// 靠结构体名字等于 "TilingData"。三者都不是参数自己声明的身份，而是消费端反推的
 // 结论，因此每个消费端都要把这套反推重写一遍，且反推规则不在任何对外文档里。
 //
 // 枚举化之后 kernel ABI 的参数词表就是这个枚举本身，进 `-gen-dialect-doc`。
@@ -255,15 +255,15 @@ def AFIR_KernelArgRoleEnum : I32EnumAttr<"KernelArgRole",
       I32EnumAttrCase<"Workspace", 2, "workspace">,
       // host tiling 求解结果的描述符（当前形态是 TilingData 结构体）。至多一个。
       I32EnumAttrCase<"Tiling", 3, "tiling">,
-      // 主机侧**按值**传进来的标量输入（AscGraph 的 `ScalarData`）。它不是一块 GM 存储，
+      // 主机侧按值传进来的标量输入（AscGraph 的 `ScalarData`）。它不是一块 GM 存储，
       // 因此没有 `afir.buffer_desc`，在 `afir.arg_descs` 里只占一格退化的描述子。
       //
-      // **`index` 与 `Input` 是同一个序号空间**，不是各排各的：legacy 的 `Data` 与
+      // `index` 与 `Input` 是同一个序号空间，不是各排各的：legacy 的 `Data` 与
       // `ScalarData` 共用同一个 `index` 属性，kernel 形参就按它交错排列
       // （`codegen_kernel.cpp` 的 `ParseGraph`）。所以同一个 `index` 上同时出现
       // `input` 与 `scalar_input` 是冲突，由 `getKernelArgumentKey` 判掉。
       //
-      // 为什么不复用 `Input` 再按类型（非 `ShapedType`）反推：那样一个**本该是 GM 张量**
+      // 为什么不复用 `Input` 再按类型（非 `ShapedType`）反推：那样一个本该是 GM 张量
       // 的参数被写成了标量类型时，会被静默当成合法的标量输入收下，而没有任何用例会红。
       // 角色写出来，两个方向才都拦得住。
       I32EnumAttrCase<"ScalarInput", 4, "scalar_input">,

@@ -42,7 +42,7 @@ LogicalResult verifyBufferForm(Operation *op, ValueRange inputs, Value destinati
 
 /// 调度形态下的单输入广播：source 可以只在非向量化外轴上比 destination 小。
 ///
-/// 这是 buffer-form 的**调度语义**，不是 tensor-form 的结果类型推导：scheduler 可能删掉
+/// 这是 buffer-form 的调度语义，不是 tensor-form 的结果类型推导：scheduler 可能删掉
 /// redundant Broadcast，把「广播视图 + unary」折叠成「小 source tile + full destination」。
 /// 判据由 canonical descriptor 钉住——差异轴必须 stride 为 0，且不能落在 source 或
 /// destination 的向量化轴上；否则 AscendC API 会按 destination 的窗口读出小 tile。
@@ -56,13 +56,13 @@ void getBufferFormEffects(Operation *op, MutableOperandRange destination, Mutabl
 // tensor 形态的结果类型：形状取各输入的广播；元素类型用 `resultElementType`，传空则
 // 取第一个输入的。无秩输入返回第一个输入的类型（元素类型按同一规则替换）。
 //
-// 元素类型要显式传，是因为这一族里有结果 dtype 与输入不同的 op（谓词族出 `ui8`）：
+// 元素类型要显式传，是因为这一类里有结果 dtype 与输入不同的 op（谓词族出 `ui8`）：
 // 「取第一个输入的」对它们是错的，而错的表现是 tensor 形态静默造出 `f32` 结果，
 // 再被 ODS 的类型约束在别处报成一个看不懂的错。
 LogicalResult inferLogicalReturnType(ValueRange inputs, Type resultElementType,
                                      SmallVectorImpl<Type> &inferredReturnTypes);
 
-/// 结果元素类型与输入是什么关系。**一条规则，两个读点**：
+/// 结果元素类型与输入是什么关系。一条规则，两个读点：
 ///
 ///   - ODS 的 tensor 形态结果推导（`AFIR_BufferizableElementwiseMethods` 的
 ///     `inferReturnTypes`）；
@@ -79,18 +79,18 @@ enum class ResultElementRule {
   Same,
   /// 结果恒为 `ui8`，与输入 dtype 无关：谓词族、逻辑族、比较族。
   Uint8,
-  /// 结果恒为 **signless i32**，与输入 dtype 无关：取整到整数那一族（`ceil2int` /
+  /// 结果恒为 signless i32，与输入 dtype 无关：取整到整数那一类（`ceil2int` /
   /// `floor_to_int`）。与 `Uint8` 逐项同形，只换位宽与有无符号——AFIR 的 i32 是无符号性的
   /// （`isSignlessInteger(32)`），而 `Uint8` 那一位是 `IntegerType::Unsigned`，两者不是
   /// 同一种构造，抄错了 ODS 会拒收而且报的是「属性/类型不满足约束」那种看不出所以然的错。
   ///
-  /// **`round_to_int` / `trunc_to_int` 不走这一档**：它们的合法组合是一张逐对对表
+  /// `round_to_int` / `trunc_to_int` 不走这一档：它们的合法组合是一张逐对对表
   /// （f32->i64 / f16->i8 / ... ），归 `CastPair`。
   Int32,
   /// i32 的结果是 f32，其余跟着输入。只有 `afir.truediv`，legacy 的 `kTrueDivTypePairs`
   /// 就是这三行。
   SameOrF32ForI32,
-  /// 合法组合是一张逐行对表，**推不出来**：`afir.cast`。`inferResultElementType` 对这一
+  /// 合法组合是一张逐行对表，推不出来：`afir.cast`。`inferResultElementType` 对这一
   /// 档返回空 `Type`，ODS 那边因此不给 cast 取 `inferReturnTypes`（理由见 Elementwise.td
   /// 的 `AFIR_BufferizableElementwiseTraits`），capability 那边走 `isSupportedCastPair`。
   CastPair,
@@ -104,14 +104,14 @@ Type inferResultElementType(MLIRContext *context, Type input, ResultElementRule 
 /// 见 `isSupportedCastPair`）。
 bool matchesResultElementRule(Type input, Type result, ResultElementRule rule);
 
-/// `afir.cast` 的 (输入, 输出) 对表出自哪一侧。两张表不是包含关系：mem 独有 i4 那一族
-/// 3 对，reg 独有 i8 / i64 那两族 10 对。
+/// `afir.cast` 的 (输入, 输出) 对表出自哪一侧。两张表不是包含关系：mem 独有 i4 那一类
+/// 3 对，reg 独有 i8 / i64 那两类 10 对。
 enum class CastSupply { MemBased, RegBased };
 
 /// `supply` 那一侧供得起 `input -> result` 这一对吗。收的可以是元素类型，也可以是整个
 /// shaped type。
 ///
-/// **两个读点**：lowering 的 capability 判据（`UnaryElementwise.cpp` 的
+/// 两个读点：lowering 的 capability 判据（`UnaryElementwise.cpp` 的
 /// `ResultElementType::CastPair`）按侧查这一个，ODS 的 `verify()` 查并集
 /// （`verifyCastPair`）。两处共用 `Ops/Cast.cpp` 里那两张表，理由与
 /// `trueDivResultElementType` 逐字相同。

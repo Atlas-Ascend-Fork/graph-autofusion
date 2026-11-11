@@ -12,7 +12,7 @@
 
 // `afir.sign` 的 mem 侧：`cast.h` + `sign.h`，要 tmp buffer。
 //
-// **这是第一个声明两个业务头的 op。** 包装按 dtype 分流——f16 / f32 直接转发
+// 这是第一个声明两个业务头的 op。 包装按 dtype 分流——f16 / f32 直接转发
 // `AscendC::Sign`，其余先 `Cast`——所以两个头都得内联进 kernel。这条 lit 测不出头文件
 // 内联（它不编译内联进来的文本），拦它的是 load_sign_store。这里能钉的是 IR 上建的是
 // 哪个 op，以及选中的 id。

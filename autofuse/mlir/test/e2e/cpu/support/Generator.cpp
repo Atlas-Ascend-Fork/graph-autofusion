@@ -22,16 +22,16 @@ namespace mlir::afir {
 
 namespace {
 #ifdef AF_MLIR_E2E_CPU_NPU_ARCH
-// 换平台的第 2 处：**NpuArch 字符串**。legacy 那一半全部按它分流——`REG_ASC_IR` 的
+// 换平台的第 2 处：NpuArch 字符串。legacy 那一半全部按它分流——`REG_ASC_IR` 的
 // `.Impl(v1_soc_versions, ...)` 注册的键是 `"2201"`，v2 那份是 `"3510"`，optimizer 的
 // `PlatformFactory` 与 ATT 的 tmp 尺寸函数也都查它。
 //
 // 只改 `CodegenOptions::soc_version` 是不够的：那一处只管 MLIR 侧选哪一侧的
-// implementation，调度算出来的 tmp buffer 仍然是 v1 的口径，两边对不上，
+// implementation，调度算出来的 tmp buffer 仍然是 v1 的规则，两边对不上，
 // `checkTmpBuffer` 当场判 unsupported。
 //
 // 走 `SetPlatformInfo` 而不是改 runtime stub：stub 由整个测试套件共用，把它的返回值
-// 改成可配会牵连到所有用例。**必须用 `SetPlatformInfo` 而不是 `SetPlatform`**——后者
+// 改成可配会牵连到所有用例。必须用 `SetPlatformInfo` 而不是 `SetPlatform`——后者
 // 只写 `soc_ver` 就把 `initialized_` 置了位，`aiv_num` / `ub_size` / `l2_size` 全留在 0，
 // 调度拿到的是一台没有 UB 的机器。
 void OverridePlatformForCase() {

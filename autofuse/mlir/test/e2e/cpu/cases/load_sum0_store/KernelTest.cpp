@@ -69,7 +69,7 @@ TEST(MlirE2eCpu, LoadSum0StoreCalculatesCorrectResult) {
   ICPU_RUN_KF(AF_MLIR_E2E_CPU_KERNEL_SYMBOL, blockDim, reinterpret_cast<uint8_t *>(input0),
               reinterpret_cast<uint8_t *>(output), reinterpret_cast<uint8_t *>(workspace), tilingData);
 
-  // reference 是 `sum(x, dim=0)`：沿**首轴**求和，结果一行 `input_shape[1]` 个。
+  // reference 是 `sum(x, dim=0)`：沿首轴求和，结果一行 `input_shape[1]` 个。
   const uint32_t reduce_extent = static_cast<uint32_t>(input_shape[0]);
   const uint32_t kept_extent = static_cast<uint32_t>(input_shape[1]);
   ASSERT_EQ(output_element_count, kept_extent);

@@ -35,9 +35,8 @@ using namespace mlir;
 namespace mlir::afir {
 namespace {
 
-// 失败原因只回给调用方，**不发诊断**——这条契约见 `ReducePlan.h`：同一个失败在
-// LoopGenerate 与能力查询两处要说不同的话。此前原因根本传不出来，于是调用方想报也
-// 没得报，只能各自编一句笼统的话，真因全丢。
+// 失败原因通过 diagnostic 返回，不在分析层输出诊断，契约见 ReducePlan.h。
+// LoopGenerate 与能力查询复用分析结果，但需要按各自语境生成诊断。
 LogicalResult failWithReason(std::string *diagnostic, llvm::StringRef reason) {
   if (diagnostic != nullptr) {
     diagnostic->assign(reason.begin(), reason.end());
@@ -45,11 +44,9 @@ LogicalResult failWithReason(std::string *diagnostic, llvm::StringRef reason) {
   return failure();
 }
 
-// stride 是否为常量 0。bridge 对零 stride 写的就是字面量 `"0"`（调度器的
-// `SizeExpr` 序列化结果），因此这里按文本判定而不去解析表达式：解析要引入 SymEngine，
-// 而「是不是 0」在这条链路上是一个**已经被序列化固定**的事实。
-// 判不出来时一律按「非 0」处理——漏判一维归约会让调用方拒绝下降（报错），
-// 误判成归约则会静默算错值。
+// 检查 stride 是否为字面量 0。bridge 将调度器零 stride 固定序列化为 "0"，
+// 因此可按文本判断，不必为此引入 SymEngine。
+// 无法确认时按非零处理，使不确定输入被拒绝，而不是误判归约后生成错误结果。
 bool isZeroExpr(ExprAttr expr) {
   if (!expr) {
     return false;
@@ -104,8 +101,7 @@ bool isDerivedOnlyFromReducedAxes(int64_t axisId, const llvm::SmallDenseSet<int6
   return reduced;
 }
 
-// 两个入口都要的那几样东西。抽出来是为了让语义查询与完整计划**读同一份输入**——各写一遍
-// 取用的后果是「同一个 op，两处对它是不是合法 reduce 的判断不一致」。
+// 语义查询和完整计划共用输入解析，保持对同一 reduce op 的合法性判断一致。
 struct ReduceDescriptors {
   TensorDescAttr input;
   TensorDescAttr destination;
@@ -167,7 +163,7 @@ FailureOr<ReduceAccumulationInfo> analyzeReduceAccumulation(Operation *op, std::
   // 累加轴：调度路径（最外到 loop_axis）上属于归约维的轴。落在 `loop_axis` 之内的归约维
   // 由这一次 API 调用一并算完，不跨轮，因此不进这张表。
   //
-  // 这里**不检查** `vectorized_axis` 的根数、不读 scratch：一个归约沿哪些轴累加，与高阶
+  // 这里不检查 `vectorized_axis` 的根数、不读 scratch：一个归约沿哪些轴累加，与高阶
   // API 能不能把它表示成二维、与调度器给了几块缓冲都无关。按 `sched.getAxis()` 的顺序走，
   // 不依赖哈希序。
   ReduceAccumulationInfo info;
@@ -195,7 +191,7 @@ FailureOr<ReducePlan> buildReducePlan(Operation *op, std::string *diagnostic) {
   TensorDescAttr input = descs->input;
   TensorDescAttr destination = descs->destination;
 
-  // 语义那一半复用同一个入口，不再在这里重算一遍——两份 provenance 遍历迟早会漂。
+  // 复用语义分析入口，避免重复遍历 provenance 后产生不一致的累加轴结论。
   FailureOr<ReduceAccumulationInfo> accumulation = analyzeReduceAccumulation(op, diagnostic);
   if (failed(accumulation)) {
     return failure();
@@ -273,7 +269,7 @@ LogicalResult collectOriginalAxes(int64_t axisId, const llvm::DenseMap<int64_t, 
       return failWithReason(diagnostic, "an original reduction axis has no size expression");
     }
     // 字面量尺寸必须为正。判在这里而不是等物化：物化那一步
-    // （`materializeExtentValue`，下界 1）在**下降**侧，而能力查询只调本函数——两处判据不
+    // （`materializeExtentValue`，下界 1）在下降侧，而能力查询只调本函数——两处判据不
     // 同就会出现「能力说支持、下降才失败」，候选被丢掉而诊断停在「下降失败」这一层。
     // 符号尺寸判不了，归运行期的 shape 合法性约束。
     int64_t literal = 0;
@@ -360,7 +356,7 @@ bool isReduceOp(Operation *op) {
 }
 
 // 这个值是不是一块 GM workspace（跨阶段/跨 template 的载体）。是的话给出它的 buffer id：
-// 那是调度器的 tensor id，也是**唯一**跨 func 对得上的身份——两个阶段各自建自己的
+// 那是调度器的 tensor id，也是唯一跨 func 对得上的身份——两个阶段各自建自己的
 // `memref.alloc`，彼此之间没有 SSA 边。
 std::optional<int64_t> workspaceBufferId(Value value) {
   auto alloc = value.getDefiningOp<memref::AllocOp>();
@@ -378,7 +374,7 @@ std::optional<int64_t> workspaceBufferId(Value value) {
   return bufferId;
 }
 
-// 「写进某块 workspace 的东西里有没有经过归约」。**只用于跨阶段那一侧**，见下面
+// 「写进某块 workspace 的东西里有没有经过归约」。只用于跨阶段那一侧，见下面
 // `reachesAPartialWorkspace` 的注释。
 //
 // `workspaceCarriesReduction` 是跨 func 的那一半：由下面的不动点算出，这里只查。memo 只在
@@ -397,7 +393,7 @@ bool touchesAReduction(Value value, const llvm::DenseMap<int64_t, bool> &workspa
     return carries;
   }
   Operation *producer = value.getDefiningOp();
-  // 块参数即 kernel 入参。跨阶段的 partial **不**从这里进来——它走的是上面那块 GM
+  // 块参数即 kernel 入参。跨阶段的 partial 不从这里进来——它走的是上面那块 GM
   // workspace；入参里与 workspace 有关的只有一个偏移标量。
   if (!producer) {
     return false;
@@ -461,7 +457,7 @@ FailureOr<llvm::DenseMap<int64_t, bool>> computeWorkspaceCarriesReduction(Module
 
   llvm::DenseMap<int64_t, bool> carries;
   bool changed = true;
-  // N 个 workspace 最多发生 N 轮标记变化，之后检查收敛。
+  // N 个 workspace 最多生成生 N 轮标记变化，之后检查收敛。
   for (size_t round = 0; round <= workspaceIds.size() + 1U; ++round) {
     if (!changed) {
       return carries;

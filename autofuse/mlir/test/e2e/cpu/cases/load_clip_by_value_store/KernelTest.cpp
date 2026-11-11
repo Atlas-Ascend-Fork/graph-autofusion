@@ -42,9 +42,8 @@ TEST(MlirE2eCpu, LoadClipByValueStoreCalculatesCorrectResult) {
   ASSERT_NE(input2, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 三段都要有元素落进去：低于下界、区间内、高于上界。只喂区间内的值的话，把 clip 换成
-  // 「原样拷贝」也能过。上下界逐元素不同（不是同一个常数铺满），否则 min / max 两个输入
-  // 接反也看不出来。
+  // 输入覆盖低于下界、区间内和高于上界，避免恒等拷贝也能通过。
+  // 上下界逐元素变化且不同，用于发现 min / max 操作数映射错误。
   for (uint32_t index = 0; index < x_count; ++index) {
     input0[index] = static_cast<float>(static_cast<int32_t>(index % 9) - 4);
     input1[index] = -1.0F - static_cast<float>(index % 2);

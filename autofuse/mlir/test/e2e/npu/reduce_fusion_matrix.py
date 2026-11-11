@@ -145,9 +145,8 @@ def build_multi_sum_max(torch):
     return MultiSumMax()
 
 
-# (格子名, 形态族, 构图函数, 输入 shape 生成器, 容差)
-# shape 生成器收一个基础 shape，返回输入 shape 元组——因为 cons_* 的第二个输入是
-# 降维后的形状，不能直接用基础 shape。
+# 条目为 (格子名, 形态族, 构图函数, 输入 shape 生成器, 容差)。
+# shape 生成器将基础形状转换为各输入形状；cons_* 的第二个输入已降维，不能直接复用基础形状。
 FORMS = (
     ("prod_mul_sum", "prod", build_prod_mul_sum, lambda s: (s, s), 1e-4),
     ("prod_mul_sum0", "prod", build_prod_mul_sum0, lambda s: (s, s), 1e-4),

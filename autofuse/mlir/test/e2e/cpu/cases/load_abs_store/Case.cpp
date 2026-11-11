@@ -8,21 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load -> abs -> store CPU end-to-end case ------*- C++ -*-===//
-//
-// The end-to-end half of the elementwise slice's vertical probe. Unlike
-// load_add_store, this graph exercises all three of the slice's foundations at
-// once on a real schedule: the scheduler allocates a tmp buffer for the
-// node, the lowering picks the Autofuse extension API rather than a stock
-// AscendC call, and the kernel-source layer has to bring the extension header
-// in for the kernel to compile at all.
-//
-// int32 rather than float on purpose: the stock `AscendC::Abs` has no integer
-// overload at all, so int32 is the case the extension wrapper exists for. On
-// float the wrapper just forwards to the stock call, which would leave the
-// interesting half of the D2 difference untested.
-//
-//===----------------------------------------------------------------------===//
+// Exercises scheduler scratch allocation, extension API lowering, and extension-header
+// inlining on a real schedule. All three are needed to compile the generated kernel.
+// Use int32 because stock AscendC::Abs has no integer overload; float would only test
+// the wrapper's forwarding path rather than its integer implementation.
 
 #include <gtest/gtest.h>
 

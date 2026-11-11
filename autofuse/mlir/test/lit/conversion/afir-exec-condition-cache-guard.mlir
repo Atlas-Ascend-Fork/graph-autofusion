@@ -12,8 +12,8 @@
 // 标这个条件**（`optimize/autoschedule/node_cache_marker.cpp`）。守卫本身与是哪个算子无关，
 // 由 `afir.sched` 一处决定。
 //
-// 跑整条 lowering，不是只跑 `--afir-exec-condition`：要钉的事实有一半在守卫**之外**——
-// `AllocTensor` / `EnQue` / `DeQue` / `FreeTensor` 与流水屏障必须每趟照发，只有算子本身进
+// 跑整条 lowering，不是只跑 `--afir-exec-condition`：要钉的事实有一半在守卫之外——
+// `AllocTensor` / `EnQue` / `DeQue` / `FreeTensor` 与流水屏障必须每趟照常生成，只有算子本身进
 // `if`。这与 legacy 的 `Loop::GenerateBody` 逐字一致，而它只在资源物化与同步都跑过之后
 // 才看得见。
 
@@ -114,7 +114,7 @@ module @plan0 attributes {
 // IR: %[[BLOCKIDX:.*]] = ascendc.get_block_idx
 // IR: %[[BLOCKPOS:.*]] = arith.remsi %[[BLOCKIDX]], %{{.*}} {afir.axis_binding = #afir.axis_binding<axis = 3, role = axis_index>}
 // IR: scf.for %[[IV:.*]] = %{{.*}} to %{{.*}} step
-// 谓词发在循环体开头，两个算子共用一份——legacy 那边也是每个循环一个 `bool`。
+// 谓词放在循环体开头，两个算子共用一份——legacy 那边也是每个循环一个 `bool`。
 // IR: %[[FIRST:.*]] = arith.cmpi eq, %[[IV]], %[[ZERO:.*]] : index
 // 分块轴源轴（`zT`）上的全局序号：分核序号 × 块内长度 + 块内序号。
 // IR: %[[SCALED:.*]] = arith.muli %[[BLOCKPOS]], %{{.*}} : index
@@ -123,7 +123,7 @@ module @plan0 attributes {
 // IR: %[[PHASE:.*]] = arith.remsi %[[LINEAR]], %{{.*}} : index
 // IR: %[[START:.*]] = arith.cmpi eq, %[[PHASE]], %[[ZERO]] : index
 // IR: %[[GUARD:.*]] = arith.ori %[[FIRST]], %[[START]] : i1
-// 队列的 Alloc 在 `if` **外面**：被跳过的只有搬运本身，缓冲的 slot 每趟照旧轮转一遍。
+// 队列的 Alloc 在 `if` 外面：被跳过的只有搬运本身，缓冲的 slot 每趟照旧轮转一遍。
 // IR: ascendc.que_bind.alloc_tensor
 // IR: scf.if %[[GUARD]] {
 // IR:   ascendc.data_copy_pad_extend

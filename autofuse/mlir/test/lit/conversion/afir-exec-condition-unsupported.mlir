@@ -6,13 +6,11 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// `exec_condition` 建不出谓词时**报错，不当成 `no_cache` 放过**：放过在生成的 kernel 里看不出
-// 任何痕迹，上游那次决策就无声消失了；报错则整份 plan 被拒、调用方回落 legacy。
+// exec_condition 无法生成谓词时应拒绝 plan，不能按 no_cache 忽略，
+// 否则会丢失上游复用决策；调用方负责处理失败与 legacy 回落。
 //
-// 另一格「有 `exec_condition` 却没有 `loop_axis`」在这里写不出来：`afir.sched` 的
-// assembly format 里 `loop_axis` 排在前面，省掉它之后 `exec_condition` 根本解析不到（试出来
-// 的是 `expected 'loop_axis'`）。那条由 `ScheduleAttr` 的 verifier 挡在 C++ 构造路径上，
-// 覆盖在 `AfirBuilderTest` 里。
+// 缺少 loop_axis 却设置 exec_condition 的文本会在解析 loop_axis 时失败，
+// 无法通过此 LIT 进入 verifier。ScheduleAttr 的 C++ 构造路径由 AfirBuilderTest 覆盖。
 
 // RUN: not af-opt --afir-kernel-body-signature --afir-materialize-tiling-params \
 // RUN:   --afir-loop-generate --afir-exec-condition %s 2>&1 | FileCheck %s

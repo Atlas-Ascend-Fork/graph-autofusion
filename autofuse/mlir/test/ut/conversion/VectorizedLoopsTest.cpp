@@ -10,11 +10,11 @@
 
 // 分段落成 IR 的覆盖。
 //
-// **断言的是结构不是文本**：这里要钉的是「几层循环」「偏移是哪几个值乘加出来的」
+// 断言的是结构不是文本：这里要钉的是「几层循环」「偏移是哪几个值乘加出来的」
 // 「窗口 extent 取的是哪一段」。这些在打印出来的文本里要靠正则去凑，而结构断言是直接的。
 // 文本那一层由 LIT 在算子接通之后覆盖。
 //
-// **尾块那一档不在这里**：它要 `TransferPlanKind::Scheduled`，而那条路要先有
+// 尾块那一档不在这里：它要 `TransferPlanKind::Scheduled`，而那条路要先有
 // 循环生成铺好的 `afir.axis_binding` 值（`findAxisValue`）。搭那套脚手架的成本远大于它
 // 能钉住的东西，所以尾块由 LIT 在整条 pipeline 上覆盖。这里跑的是 `Identity` 一档，
 // 逐轴 extent 一律取 descriptor 的值。
@@ -143,9 +143,9 @@ constexpr llvm::StringLiteral kSingleSegment = R"mlir(
                          vectorized_axis = [0], vectorized_strides = [#afir.expr<"1">], role = <compute>>
 )mlir";
 
-// 单段：**一层循环都不建**，偏移落成常量 0，窗口 extent 就是那一段。
+// 单段：一层循环都不建，偏移落成常量 0，窗口 extent 就是那一段。
 //
-// 这一格是「今天的路径逐字不变」的锚点——今天单段发的就是「常量 0 + subindex」。
+// 这一格是「当前的路径逐字不变」的锚点——今天单段生成的就是「常量 0 + subindex」。
 TEST_F(VectorizedLoopsTest, SingleSegmentBuildsNoLoop) {
   ASSERT_TRUE(Build(kSingleSegment, 1));
   auto window = Run(/*apiWindowSize=*/1);
@@ -155,7 +155,7 @@ TEST_F(VectorizedLoopsTest, SingleSegmentBuildsNoLoop) {
   ASSERT_EQ(window->tiles.size(), 2U);
   ASSERT_EQ(window->extents.size(), 1U);
 
-  // 两块 tile 都发了 subindex，偏移是常量 0。
+  // 两块 tile 都生成了 subindex，偏移是常量 0。
   for (Value tile : window->tiles) {
     auto subIndex = tile.getDefiningOp<ascendc::LocalTensorSubIndexOp>();
     ASSERT_TRUE(subIndex);
@@ -189,7 +189,7 @@ TEST_F(VectorizedLoopsTest, OuterSegmentBecomesALoop) {
   EXPECT_EQ(innerExtent.value(), 8);
 }
 
-// 偏移是 `iv × stride`，而且**逐张量各取各的 stride**：src 在广播段上 stride 是 0，
+// 偏移是 `iv × stride`，而且逐张量各取各的 stride：src 在广播段上 stride 是 0，
 // dst 是 8。两块 tile 共用一个偏移的实现会让这一格红。
 TEST_F(VectorizedLoopsTest, OffsetsUsePerTensorStrides) {
   ASSERT_TRUE(Build(kTwoSegments, 2));
@@ -226,7 +226,7 @@ TEST_F(VectorizedLoopsTest, TwoSegmentWindowLeavesNoLoop) {
   EXPECT_EQ(inner.value(), 8);
 }
 
-// 段数少于窗口 → 失败，不是凑合着发。
+// 段数少于窗口 → 失败，不是凑合生成。
 TEST_F(VectorizedLoopsTest, FailsWhenWindowIsWiderThanThePlan) {
   ASSERT_TRUE(Build(kSingleSegment, 1));
   FailureOr<afir::VectorPlan> plan = afir::collapseVectorizedAxes(carrier);

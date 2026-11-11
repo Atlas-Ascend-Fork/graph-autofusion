@@ -372,12 +372,11 @@ struct GenTilingDataPass : PassWrapper<GenTilingDataPass, OperationPass<ModuleOp
       return signalPassFailure();
     }
 
-    // 这张 plan 级 schema 是**载体**，不是一个会被发射出来的 C++ 结构体：它只把本 plan 的
-    // 各 stage 结构体连同它们在最外层 TilingData 里的成员名带给下游
-    // （`GenKernelEntry` 按它铺 `_main` 的 tiling 形参，`GenAggregateTilingData` 把它的
-    // 字段原样摊进 `AutofuseTilingData`）。ATT 的最外层布局里没有 plan 这一层
-    // （`codegen_tiling_data.cpp` 的 `ProcessMultiGroup` 逐 group 直接挂在根上），所以它
-    // 不能进 `emitTilingDataHeader` 的递归——只要它不是根的某个字段就不会进。
+    // plan 级 schema 仅承载各 stage 结构体及其在顶层 TilingData 中的成员名，不生成
+    // 独立 C++ 结构体。GenKernelEntry 据此排列 _main 的 tiling 参数，GenAggregateTilingData
+    // 将字段直接合入 AutofuseTilingData。
+    // ATT 的 ProcessMultiGroup 同样将 group 直接挂在根上，没有 plan 层，因此本 schema
+    // 不应成为根字段，也不进入 emitTilingDataHeader 的递归生成。
     std::string typeName = mlir::afir::makeCxxIdentifier(*module.getSymName()) + "TilingData";
     auto schema = mlir::ascend::kernel::TilingSchema::get(
         module.getContext(), StringAttr::get(module.getContext(), typeName),

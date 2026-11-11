@@ -11,11 +11,11 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// `afir.bitwise_and` 是**二元**一族里第一个两侧调用不同名的 op，与一元的
+// `afir.bitwise_and` 是**二元**一类里第一个两侧调用不同名的 op，与一元的
 // `afir.reciprocal` 同一档：mem 侧走包装且要 tmp buffer，reg 侧是标准调用、不要。
 // 这一份钉 mem 侧；reg 侧在 afir-bitwise-and-stock-api.mlir。
 //
-// 包装的实参顺序是 `(dst, src0, src1, tmp, count)`——tmp 在 count **之前**，与一元包装
+// 包装的实参顺序是 `(dst, src0, src1, tmp, count)`——tmp 在 count 之前，与一元包装
 // 同向、与三元的选择 / clip 族反向。写反了 device 上一个重载都对不上，所以 CPP 那条
 // check 把五个实参连着钉。
 //
@@ -53,5 +53,5 @@ module {
 
 // SELECT: ascend.implementation = {id = "bitwise_and.tensor.extend", kind = "ascendc_api"}
 
-// reg 侧的标准调用不收 tmp buffer，所以同一段 IR 在那张供给表上选不出实现。
+// reg 侧的标准调用不收 tmp buffer，所以同一段 IR 在那张支持表上选不出实现。
 // WRONGTARGET: no supported

@@ -39,7 +39,7 @@ module {
 
 // -----
 
-// tiling 的序号是**可选**的，带号时号是 stage：Plan 的 `_main` 一 stage 收一个 tiling 形参
+// tiling 的序号是可选的，带号时号是 stage：Plan 的 `_main` 一 stage 收一个 tiling 形参
 // （ATT 的最外层 TilingData 里没有 plan 那一层，见
 // `common/tiling_schema/schedule_group_names.h`）。所以带号本身合法，负号才非法。
 module {
@@ -105,7 +105,7 @@ module {
 
 // -----
 
-// 反例侧：input 与 output 各自的序号从 0 起算，同为 0 不是冲突——序号是**角色内**的
+// 反例侧：input 与 output 各自的序号从 0 起算，同为 0 不是冲突——序号是角色内的
 // 序号，不是参数列表下标。放过这条才说明判重查的是 (角色, 序号) 而不是序号本身。
 module {
   func.func private @distinct_roles(%a: memref<4xf16> {afir.kernel_arg = #afir.kernel_arg<role = input, index = 0>},

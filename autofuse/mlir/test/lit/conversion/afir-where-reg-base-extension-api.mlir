@@ -11,12 +11,11 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// 选择族的 reg-base 一侧,与 afir-select-extension-api.mlir 互为对照:**同一个 AFIR op,
-// 少一块 tmp buffer**。两个方向都钉住——这一份没有 tmp buffer,在 mem-based 一侧就是
-// unsupported(见 WRONGTARGET),因为 `Where` 要调用方给那块 UB,而 AFIR 造不出来。
+// reg-base Where 不接收 tmp buffer，与 mem-based 用例对照。
+// 同一 AFIR op 省略 scratch 后，mem 侧应拒绝，因为其包装要求调用方提供该缓冲。
 //
-// 两个包装的头名也是两张供给表的判别式:`where.h` vs `where_reg_base.h`。注册期的
-// `checkFamilyMatchesHeader` 逐项比对它们,写反了整张注册表建不起来。
+// 两侧分别使用 where.h 与 where_reg_base.h。
+// 注册时 checkFamilyMatchesHeader 校验家族与头名一致，写反会导致注册失败。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>

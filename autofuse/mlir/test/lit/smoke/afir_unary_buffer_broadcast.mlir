@@ -6,8 +6,8 @@
 // RUN: af-opt --verify-diagnostics --split-input-file %s
 
 // scheduler 删除 redundant Broadcast 后，buffer-form unary 可能收到
-// `source = 1x8`、`destination = 4x8`。这不是 tensor-form 的结果类型推导；
-// 只有 descriptor 明确说明差异轴 stride 为 0 且不在向量化轴上时才合法。
+// source 为 1×8，destination 为 4×8，不是 tensor-form 的结果类型推导。
+// 仅当 descriptor 证明差异轴 stride 为 0，且该轴不参与向量化时才允许这种形状差异。
 #src = #afir.tensor_desc<axis = [0, 1],
                          repeats = [#afir.expr<"1">, #afir.expr<"8">],
                          strides = [#afir.expr<"0">, #afir.expr<"1">],

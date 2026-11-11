@@ -25,9 +25,8 @@ af::AscGraph BuildGraph() {
   builder.Loops(output_shape).Data("input0", 0, input0_shape, {}, af::DT_FLOAT);
   builder.Load("load0", "input0", input0_shape, {});
   builder.Add("add0", "load0", "load0");
-  // 先落到 GM（store 写 kernel 的输出参），再从同一块 GM 读回继续计算。
-  // 回读目标是 role=output 的 GM memref，而不是专门的 Workspace 节点
-  // （buffer-form bridge 尚不支持后者）。
+  // 先将结果 Store 到 kernel 的 GM 输出参数，再读回同一存储继续计算。
+  // 使用 role=output 的 memref，因为 buffer-form bridge 尚不支持专用 Workspace 节点。
   builder.Store("store0", "add0");
   builder.Output("output", "store0", 0, af::DT_FLOAT);
   builder.Load("load1", "output", input0_shape, {});

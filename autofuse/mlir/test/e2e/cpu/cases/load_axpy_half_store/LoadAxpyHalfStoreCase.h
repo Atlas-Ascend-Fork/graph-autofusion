@@ -17,7 +17,7 @@ AF_MLIR_E2E_CPU_CASE_BEGIN(load_axpy_half_store, 2, 1);
 
 // 系数。用 2 的负幂，f16 里也精确可表示，`x1 + alpha * x2` 的期望值不引入舍入。
 //
-// **alpha 恒是 f32，不跟 tile 的元素类型走**：`AxpyExtend` 的形参写死 `const float
+// alpha 恒是 f32，不跟 tile 的元素类型走：`AxpyExtend` 的形参写死 `const float
 // alpha`（不是 `const T&`），这一点与 `afir.leaky_relu` 恰好相反。f16 这份用例顺带把
 // 这条也钉住了——常量要是跟着 tile 建成了 half，生成的 kernel 里就不是 `constexpr
 // float`。

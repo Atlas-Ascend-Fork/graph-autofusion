@@ -9,27 +9,27 @@
 // RCore（R 轴也参与分核）模板的下降。输入是 `load_sum_store_rcore_ar_8x1024` 的真实候选
 // （`f32[8, 1024] -> [8, 1]`，`schedule plan 1`），两个 stage 都在这一份模块里。
 //
-// 这条用例补的是「调度模板 × 归约形态」矩阵里 **RCore 两格**——
+// 这条用例补的是「调度模板 × 归约形态」矩阵里 RCore 两格——
 // `2026-09-20-two-dim-transfer-addressing-design.md` 8.5 的六组合验收项此前只有四格有 lit。
 // 一份输入同时钉住两格，是因为 RCore 的两格不是两张独立的图：
 //
 //   stage 0 = phase 1，`..._r_multicore_phase_1_graph_B1Y0R1_S1G0C0`，在 `[A, Rm_t]` 上做
-//             **AR**，结果写 GM workspace；
+//             AR，结果写 GM workspace；
 //   stage 1 = phase 2，`..._r_multicore_phase_2_graph_B0Y1R0_S1G1C0`，从 workspace 的
 //             `[Rm, A]` 上做 **RA**，结果写 kernel 输出。
 //
 // 「RA 是 RCore phase 2 的硬前置」（`2026-09-21-afir-reduce-sum-ra-lowering-design.md` 3.3）
-// 在这里是字面的：同一个 kernel 里两种 layout 都要发对。
+// 在这里是字面的：同一个 kernel 里两种 layout 都要传对。
 //
 // 另外钉住三件只在 RCore 下成立的事：
 //   - 两个 stage 共用 `afir.workspace_tensor_ids = array<i64: 2>` 的那一块 GM；
 //   - `afir.var_relations` 把 stage 0 算出的 `Rm_org_size` 绑到 stage 1 的同名变量上，
 //     这条跨 stage 的绑定必须活着穿过整条下降管线；
-//   - **stage 1 不发 `ReduceInit`**：RA 的被归约维在物理外侧，没有要填单位元的那一段，而
-//     `reduce_init.h` 的填充按行主序写死，发出来是往错地址写。这条用 `CHECK-NOT` 写在
+//   - stage 1 不生成 `ReduceInit`：RA 的被归约维在物理外侧，没有要填单位元的那一段，而
+//     `reduce_init.h` 的填充按行主序写死，生成是往错地址写。这条用 `CHECK-NOT` 写在
 //     stage 1 的 `CHECK-LABEL` 块内，所以不会被 stage 0 那一处 `ReduceInit` 满足。
 //
-// 两个目标各发一遍：reduce 的下降没有任何目标相关分支，两份输出**逐字节相同**。950 无
+// 两个目标各生成一遍：reduce 的下降没有任何目标相关分支，两份输出逐字节相同。950 无
 // E2E，只能比对文本，这就是它在矩阵验收里的位置。
 
 // RUN: af-opt --afir-kernel-body-signature --afir-to-ascendc-pipeline --target=Ascend910B1 %s | FileCheck %s
@@ -98,7 +98,7 @@ module @reduce_rcore_subgraph0_plan0 attributes {afir.cube_type = -1 : i64, afir
 // CHECK-SAME: afir.workspace_tensor_ids = array<i64: 2>
 // CHECK-SAME: afplan.stages = #afplan.stages<template_counts = [1, 1]>
 
-// phase 1：AR。被归约维在物理内侧，对齐补出来的那几列要填单位元，所以必须发 `ReduceInit`。
+// phase 1：AR。被归约维在物理内侧，对齐补出来的那几列要填单位元，所以必须生成 `ReduceInit`。
 // CHECK-LABEL: func.func private @stage0_template0
 // CHECK: ascendc.data_copy_pad_extend
 // CHECK: ascendc.duplicate_l1
@@ -112,7 +112,7 @@ module @reduce_rcore_subgraph0_plan0 attributes {afir.cube_type = -1 : i64, afir
 // 落点是 GM workspace，不是 kernel 输出。
 // CHECK: ascendc.data_copy_pad_extend
 
-// phase 2：RA，且**不发** `ReduceInit`。
+// phase 2：RA，且不生成 `ReduceInit`。
 // CHECK-LABEL: func.func private @stage1_template0
 // CHECK-NOT: ascendc.duplicate_l1
 // CHECK: ascendc.reduce_sum_2d_l2

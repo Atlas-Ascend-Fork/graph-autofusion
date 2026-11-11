@@ -44,15 +44,13 @@ module {
 // CHECK-SAME: %{{[A-Za-z0-9_]+}}: memref<16xf16, 22 : i32>
 // CHECK-SAME: memref<ui8, 22 : i32>
 // CHECK-SAME: !emitasc.py_struct<"TilingData", [i64, i64, i64], ["block_dim", "s0", "q2_size"]>
-// 运行期尺寸在 AFIR 层就是一个 SSA 值。此前这里是两个 `emitasc.member` 加两次
-// index cast——循环生成与资源物化各取一遍 `s0`，而 `emitasc` 是后端方言，出现在这个
-// 阶段的函数体里就让判据 C3 当场不成立。现在两处共用同一个 `afir.tiling_param`，
-// `emitasc.member` 只在 lowering 里出现一次（RUN 行的 implicit-check-not 钉住这条）。
+// 循环生成与资源物化共用同一个 afir.tiling_param SSA 值，不重复读取 s0。
+// emitasc.member 属于后端，只在 lowering 时生成，以保持 AFIR 阶段的方言边界（C3）。
 // CHECK: %[[S0:.*]] = afir.tiling_param "s0"
 // 「资源已物化」不再由 `afir.ascendc_materialized` 属性宣告——下面这行 `ascendc.pipe`
 // 就是它的结构证据，判据见 conversion/AFIRToAscendC/AFIRToAscendCLoweringStage.h。
 // CHECK: %[[PIPE:.*]] = ascendc.pipe
-// queue_depth 由 QueueType 的第二个参数承载，不再另发扁平属性（设计文档 I2/I3，5.1 步 2）。
+// queue_depth 由 QueueType 的第二个参数承载，不再另外生成扁平属性（设计文档 I2/I3，5.1 步 2）。
 // CHECK: %[[QUEUE:.*]] = ascendc.queue : <vecin, 2>
 // CHECK: arith.ceildivsi
 // CHECK: arith.mulsi_extended

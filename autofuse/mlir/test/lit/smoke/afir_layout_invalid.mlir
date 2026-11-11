@@ -14,7 +14,7 @@
 //   布局与 memref 的一致性（`verifyLayout`，由 `MemRefType` 在构造期调用）——rank 必须
 //     相等，基块必须整除对应维度。
 //
-// 后一组正是布局进入类型之后白拿的东西：迁移前这些检查根本没有落点（D8）。
+// 布局进入类型后，MemRefType 构造时可检查 rank 和基块整除性（D8）。
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 
@@ -47,8 +47,7 @@ func.func private @col_major_rank_one(%x: memref<64xf16, #afir.layout<outer = co
 
 // -----
 
-// rank 是 `MemRefLayoutAttrInterface` 逼出来的冗余（getAffineMap 不接收 rank），
-// 这条闸门把冗余变成可核对的不变量，而不是靠约定。
+// getAffineMap 不接收 rank，因此属性需记录 rank，并在 MemRefLayoutAttrInterface 校验中核对。
 // expected-error@+1 {{afir.layout rank 3 does not match memref rank 2}}
 func.func private @rank_mismatch(%x: memref<64x32xf16, #afir.layout<outer = col_major, rank = 3>>)
 

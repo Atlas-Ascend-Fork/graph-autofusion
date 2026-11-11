@@ -42,9 +42,9 @@ struct MainSignature {
   std::string entryName;
   FunctionType entryType;
   // 本 Plan 的 stage schema 载体：字段按 stage 次序，字段名就是这些 stage 结构体在最外层
-  // `AutofuseTilingData` 里的成员名。载体本身不是一个会被发射的结构体，见 GenTilingData。
+  // `AutofuseTilingData` 里的成员名。载体本身不是一个会被生成的结构体，见 GenTilingData。
   mlir::ascend::kernel::TilingSchema tilingType;
-  // **第一个** tiling 形参的下标。ATT 的最外层布局里没有 plan 这一层，各 stage 结构体
+  // 第一个 tiling 形参的下标。ATT 的最外层布局里没有 plan 这一层，各 stage 结构体
   // 平铺在根上，所以 `_main` 也一 stage 收一个 tiling 形参，按 stage 次序紧挨在参数表尾部：
   // stage `i` 就是 `tilingArgument + i`。
   size_t tilingArgument;
@@ -398,10 +398,9 @@ Value castSelectorToIndex(OpBuilder &builder, Location loc, Value selector) {
   return builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), selector);
 }
 
-// `mapping` 的三态各自去哪儿取实参。workspace 偏移取的是 stage tiling 的 `workspace<ID>`
-// 成员：`GenTilingData` 把 workspace 字段复制进每个 Stage 结构体（`GenTilingData.cpp` 的
-// `collectStageFields`），入口里所有 tiling 成员也都是从 stage 结构体上读的。成员不存在就
-// 报错，不退化成 0——退化会让两块 workspace 叠在同一个地址上写，是静默的数据损坏。
+// 按 mapping 指定的来源构造实参。workspace 偏移取自 stage tiling 的 workspace<ID> 字段，
+// GenTilingData.cpp 中的 collectStageFields 会将这些字段复制到每个 Stage 结构体。
+// 字段缺失必须报错，不能用 0 代替，否则不同 workspace 会重叠写入同一地址。
 FailureOr<SmallVector<Value>> buildTemplateArguments(OpBuilder &builder, Location loc, ValueRange arguments,
                                                      ArrayRef<TemplateArgumentSource> mapping, Value stageTiling,
                                                      func::FuncOp reportOn) {
@@ -453,9 +452,8 @@ void buildSwitch(OpBuilder &builder, Location loc, SwitchDispatch dispatch,
   assert(cases.size() == callees.size());
   auto switchOp = builder.create<scf::IndexSwitchOp>(loc, TypeRange{}, selector, cases, cases.size());
   switchOp.getDefaultRegion().emplaceBlock();
-  // 与聚合入口的 plan 分派同理：stage 的 `tiling_key` 由 host 侧 tiling 写，落不进已下降的
-  // 模板编号就说明两侧对模板集的认知不一致。空 `scf.yield` 会静默跳过这个 stage，后面的
-  // stage 照常跑在没算过的数据上——错得比整条不执行还隐蔽。
+  // host tiling 写入的 stage tiling_key 必须对应已下降的模板，否则 host 与 kernel
+  // 使用的模板集不一致。默认分支需触发 trap，不能只 yield 并让后续 stage 读取未计算的数据。
   OpBuilder defaultBuilder = OpBuilder::atBlockEnd(&switchOp.getDefaultRegion().front());
   defaultBuilder.create<ascendc::TrapOp>(loc);
   defaultBuilder.create<scf::YieldOp>(loc);
@@ -505,8 +503,8 @@ void buildStage(const StageEmitContext &ctx, size_t stage) {
   buildStage(ctx, stage + 1);
 }
 
-// `KernelArgumentIdentity` 到参数声明的翻译。两者同形，但前者是 pass 内部的中间结果，
-// 后者是写进 IR 的公开声明——分开写，免得哪天中间结构改了顺手改掉 IR 形态。
+// 将 pass 内部的 KernelArgumentIdentity 转为公开 IR 参数声明。
+// 单独维护映射，避免内部结构调整改变公开 IR 形态。
 void setPlanMainArgumentRole(func::FuncOp main, unsigned index, const KernelArgumentIdentity &argument) {
   switch (argument.kind) {
     case KernelArgumentKind::Input:
@@ -522,8 +520,8 @@ void setPlanMainArgumentRole(func::FuncOp main, unsigned index, const KernelArgu
       mlir::afir::setKernelArgAttr(main, index, mlir::afir::KernelArgRole::Workspace);
       return;
     case KernelArgumentKind::WorkspaceOffset:
-      // main 不收它——`collectTemplateAbi` 已把这一格从形参表里摘掉，实参在调用点从根
-      // tiling 上读。走到这里说明摘漏了。
+      // workspace offset 不属于 main 参数，collectTemplateAbi 应已将其排除。
+      // 调用点从根 tiling 读取实参；进入此分支表示 ABI 收集结果有误。
       main.emitError("GenKernelEntry: workspace offset must not become a plan main argument");
       return;
     case KernelArgumentKind::Tiling:

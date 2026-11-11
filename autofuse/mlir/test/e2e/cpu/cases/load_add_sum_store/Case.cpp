@@ -8,24 +8,11 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-//===- Case.cpp - load, load -> add -> sum -> store CPU case -----*- C++ -*-===//
-//
-// 归约**之前**融合一个**二元**算子，两侧都是张量输入。
-//
-// 与 `load_neg_sum_store`（同是前融合）并列而不是给它加一组形状：那条是一元，被归约的
-// tile 只有一个生产者；这条有**两个**，于是第一次走到「同一个多维有效视图上，两个输入侧的
-// 局部跨度要各自物化、再喂给同一条 `calCount`」这件事。`2026-09-19-ub-tile-addressing-
-// model-design.md` 7.2 的探针表里 `load_add_sum_store` 一行记的就是它（当时的表现是
-// `failed to legalize 'afir.add'`），从那以后一直没有注册。
-//
-// 为什么此前漏掉：reduce 侧的融合语料全是一元（`Neg`、`Relu`）或带 `Scalar`
-// （`load_sum_mul_store`）。带 `Scalar` 的那条虽然是二元 op，但第二个操作数不是张量、不参与
-// tile 寻址，所以它覆盖不到两份局部跨度这件事。
-//
-// 形状取 `[16, 37]`：R 轴 37 不是 32B 对齐，Add 要覆盖到 padding 之后 `ReduceInit` 仍要能把
-// 补出来的位置恢复成 sum 的单位元——与 `load_neg_sum_store_16x37` 同一组形状，便于对账。
-//
-//===----------------------------------------------------------------------===//
+// 覆盖双张量 Add 前融合后执行 Sum 的路径。两个输入都参与 tile 寻址，
+// 需要分别物化多维有效视图的局部跨度，再使用相同 calCount。
+// 一元前融合和带 Scalar 的二元算子都不能覆盖两份张量跨度。
+// 形状 [16, 37] 的 R 轴未按 32B 对齐；Add 处理 padding 后，ReduceInit 必须将其
+// 恢复为 Sum 单位元 0，与 load_neg_sum_store_16x37 对照。
 
 #include <gtest/gtest.h>
 
@@ -83,7 +70,7 @@ af::AscGraph BuildGraph() {
   auto graph = builder.Store("store0", "sum0").Output("output", "store0", 0, af::DT_FLOAT).Build();
   SetOutputView(graph, "output", cfg::GetShapeConfig(cfg::kOutputShapes, 0).shape);
   EXPECT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
-  // 与 `load_neg_sum_store` 同一口径：单 plan 单模板，自带 key 不会撞到自增计数器。
+  // 与 `load_neg_sum_store` 同一规则：单 plan 单模板，自带 key 不会撞到自增计数器。
   return graph;
 }
 

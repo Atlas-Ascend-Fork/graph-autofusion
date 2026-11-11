@@ -6,9 +6,8 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// afir_race_check_total_order_point.mlir 的对照组：同一数据流（store 末读 %scratch 后
-// 第二个 add 复用写入，跨 pipe WAR），没有全序点时竞争被报出——证明正例里的
-// barrier_all 确实是让竞争消失的那条边，而不是检查器本来就不报。
+// 与 total_order_point 用例采用相同数据流：Store 仍读取 scratch 时，第二个 Add 跨 pipe 复用写入。
+// 移除全序点后应报告 WAR，验证正例确由 barrier_all 建立顺序，而非检查器漏报。
 
 // RUN: not af-opt --afir-race-check %s 2>&1 | FileCheck %s
 

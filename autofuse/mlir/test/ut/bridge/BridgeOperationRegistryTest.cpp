@@ -93,7 +93,7 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsTheProductionCoverage) {
   EXPECT_FALSE(bufferForm.contains(
       "ArgMaxMultiRPhase2"));  // `Nddma` 是搬运族的第三个（2026-10-10）：搬入与广播融成一条指令，调度在 reg 侧把每个
   // `Load → Broadcast` 都换成它（`dialect/AFIR/IR/Ops/Data.td`）。它与 `Load` / `Store` 一样
-  // **不进 `registeredFamilies()` 那张侧表**，所以下面那条按族覆盖的断言不覆盖它——理由写在
+  // 不进 `registeredFamilies()` 那张侧表，所以下面那条按族覆盖的断言不覆盖它——理由写在
   // `Implementations/Nddma.cpp` 的注册处。
   //
   // `Ndtr` 是特殊函数一元族的第一个（2026-10-20），也是**第一个 legacy 只有 reg 侧有**的
@@ -235,7 +235,7 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsTheProductionCoverage) {
 // 两个目录里，谁也不引用谁，只有这条断言把它们绑在一起；不绑的话，多出来的那一个
 // 要一路走到 conversion 才炸，报的还是「kernel 不完备」而不是「bridge 不该建它」。
 TEST(BridgeOperationRegistryTest, BufferFormSetIsCoveredByAscendCImplementations) {
-  // **今天没有豁免，所以这张表是空的。** 最后一行是 `Broadcast`，2026-09-23 接通常量源
+  // 目前没有豁免，所以这张表是空的。 最后一行是 `Broadcast`，2026-09-23 接通常量源
   // 一档（`Implementations/Broadcast.cpp`）之后删掉。**注意它只覆盖 legacy 四条分支里的
   // 一条**——其余形态在 capability 里报 unsupported、整张图回落 legacy，而这条断言问的
   // 是「有没有实现」，答不到「覆盖了几条分支」。想让它答得到，就得让 registry 记下形态，
@@ -283,7 +283,7 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsCoveredByAscendCImplementations
 // 这一条按族补上：elementwise 的每个 op 要么有一个两侧通用的 implementation（`Any` 或
 // `Shared`），要么 mem / reg 各至少一个。
 //
-// **两条断言是接力，不是重复**：一侧都没有的 op 根本不出现在家族侧表里，由上面那条的
+// 两条断言是接力，不是重复：一侧都没有的 op 根本不出现在家族侧表里，由上面那条的
 // 豁免名单接住；一侧有一侧没有的，由这一条接住。
 //
 // 粒度是「每个 afir op」，不是「每个形态」。所以 `logical_or` 的标量形态只有 mem 侧
@@ -292,11 +292,11 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsCoveredByAscendCImplementations
 TEST(BridgeOperationRegistryTest, EveryElementwiseOpCoversBothApiFamilies) {
   namespace elementwise = mlir::ascend::kernel::elementwise;
 
-  // 曾经有过一行 `afir.masked_fill`（reg 侧没接），2026-09-23 查清原因不是缺供给、而是
+  // 曾经有过一行 `afir.masked_fill`（reg 侧没接），2026-09-23 查清原因不是缺少可用实现、而是
   // `MaskedFillInputReorderPass` 在调度之前就把 `MaskedFill` 改写成了 `Select`，于是那个
   // op 连同 ODS、bridge 行与 mem 侧 implementation 一起删掉了，表也就空了。
   //
-  // **2026-10-20 第一个真的只接得了一侧的 op 来了**，按上面那段原话办——加这张显式表加
+  // 2026-10-20 第一个真的只接得了一侧的 op 来了，按上面那段原话办——加这张显式表加
   // 反向断言，下面那条循环一点没放宽。
   //
   // 收进来的理由必须是「legacy 那一侧根本没有这个算子」，不能是「那一侧还没接」：
@@ -328,7 +328,7 @@ TEST(BridgeOperationRegistryTest, EveryElementwiseOpCoversBothApiFamilies) {
       {"afir.modified_bessel_k0", kRegOnlyReason},
       {"afir.modified_bessel_k1", kRegOnlyReason},
       // 第 6 批。这十四个在 legacy 的 mem 侧（`ascir_builtin_ops_v1.cpp`）都没注册——注意
-      // `BitwiseAnd` / `LogicalAnd` / `LogicalOr` 是两侧都有的，不能照它们看这一族。
+      // `BitwiseAnd` / `LogicalAnd` / `LogicalOr` 是两侧都有的，不能照它们看这一类。
       {"afir.logical_xor", kRegOnlyReason},
       {"afir.log2", kRegOnlyReason},
       {"afir.exp2", kRegOnlyReason},
@@ -339,7 +339,7 @@ TEST(BridgeOperationRegistryTest, EveryElementwiseOpCoversBothApiFamilies) {
       {"afir.mod", kRegOnlyReason},
       {"afir.next_after", kRegOnlyReason},
       // 第 7 批的三十个，legacy 的 mem 侧同样一个都不注册。**`erfc` 与 `trunc` 不能照
-      // `erf` 看**：`erf` 两侧都有供给（mem 侧标准调用、reg 侧包装），这两个只有 reg 侧。
+      // `erf` 看**：`erf` 两侧都有可用实现（mem 侧标准调用、reg 侧包装），这两个只有 reg 侧。
       {"afir.acos", kRegOnlyReason},
       {"afir.acosh", kRegOnlyReason},
       {"afir.asin", kRegOnlyReason},
@@ -371,7 +371,7 @@ TEST(BridgeOperationRegistryTest, EveryElementwiseOpCoversBothApiFamilies) {
       {"afir.igamma", kRegOnlyReason},
       {"afir.igammac", kRegOnlyReason},
       // 第 8 批的两个。`log10` 不能照 `log2` 之外的 `ln` 看、`hypot` 也不能照 `pow` 看：
-      // 那两个两侧都有供给，这两个的 `mem_present` 是 0。
+      // 那两个两侧都有可用实现，这两个的 `mem_present` 是 0。
       {"afir.log10", kRegOnlyReason},
       {"afir.hypot", kRegOnlyReason},
       // 第 9 批的八个。多项式族在 legacy 的 mem 侧一个都没注册，而且**连对应的
@@ -384,8 +384,8 @@ TEST(BridgeOperationRegistryTest, EveryElementwiseOpCoversBothApiFamilies) {
       {"afir.shifted_chebyshev_polynomial_u", kRegOnlyReason},
       {"afir.shifted_chebyshev_polynomial_v", kRegOnlyReason},
       {"afir.shifted_chebyshev_polynomial_w", kRegOnlyReason},
-      // step 2a 的两个。取整到整数那一族在 legacy 的 mem 侧一个都没注册。**`ceil2int` 不能
-      // 照 `afir.cast` 看**：cast 两侧都有供给，这两个只有 reg 侧。
+      // step 2a 的两个。取整到整数那一类在 legacy 的 mem 侧一个都没注册。**`ceil2int` 不能
+      // 照 `afir.cast` 看**：cast 两侧都有可用实现，这两个只有 reg 侧。
       {"afir.ceil2int", kRegOnlyReason},
       {"afir.floor_to_int", kRegOnlyReason},
       // step 3。`AscendC::Fma` 这个标准调用是存在的（`adv_api/math/fma.h`），所以这一行
@@ -393,7 +393,7 @@ TEST(BridgeOperationRegistryTest, EveryElementwiseOpCoversBothApiFamilies) {
       // `afir.hypot` 同一种情况。
       {"afir.fma", kRegOnlyReason},
       // step 4。三个都只有 reg 一侧——mem 侧 `ascir_builtin_ops_v1.cpp` 一个都没注册。
-      // **不能照 `afir.bitwise_and` 看**：and 两侧都有供给（mem 走包装、reg 走标准调用），
+      // 不能照 `afir.bitwise_and` 看：and 两侧都有可用实现（mem 走包装、reg 走标准调用），
       // 这三个一个标准调用都没有，reg 侧也走包装。
       {"afir.bitwise_not", kRegOnlyReason},
       {"afir.bitwise_or", kRegOnlyReason},
@@ -496,7 +496,7 @@ TEST(BridgeOperationRegistryTest, IntIrAttrRowsNameABridgeableOperation) {
   }
   EXPECT_EQ(findIntIrAttr("NoSuchScheduleNode"), nullptr);
   EXPECT_EQ(findIntIrAttr("Add"), nullptr);
-  // **两张表不许收同一个节点类型**：`buildBufferNodeOp` 对两张表各挂一次属性，同一个
+  // 两张表不许收同一个节点类型：`buildBufferNodeOp` 对两张表各挂一次属性，同一个
   // 节点同时在两张表上就会挂两个属性，而 `NodeInfo` 只带得了一个值——另一个必然是
   // `nullopt`，于是那个 op 永远在 bridge 上报「carries no ...」。
   for (const IntIrAttrMapping &intAttr : getIntIrAttrMappings()) {

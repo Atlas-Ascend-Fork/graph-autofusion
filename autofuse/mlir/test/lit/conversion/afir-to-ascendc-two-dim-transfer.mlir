@@ -6,8 +6,8 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// 二维 tile 的搬运。`afir-to-ascendc-scheduled-transfer.mlir` 钉的是同一条发射路径在一维
-// 上的**退化**形态（blockCount 恒 1、两侧缝隙恒 0），本用例钉它在二维上的真实形态。
+// 二维 tile 的搬运。`afir-to-ascendc-scheduled-transfer.mlir` 钉的是同一条生成路径在一维
+// 上的退化形态（blockCount 恒 1、两侧缝隙恒 0），本用例钉它在二维上的真实形态。
 //
 // 轴形态：两根原始轴各切一刀 tile，外层那根再 block 切一刀。
 //
@@ -15,8 +15,8 @@
 //     ├─ tile  → z0T / z0t(z0t_size)     └─ tile → z1T / z1t(z1t_size)
 //     └─ z0T 再 block → z0TB / z0Tb(z0Tb_size)
 //
-// tile 是 `z0t_size × z1t_size` 的一块，在 GM 里**不连续**：相邻两行隔着整整一个 s1，
-// 而 tile 只占其中 z1t_size 个元素。这正是一维路径搬不了的形态——按一维发射会把行间那
+// tile 是 `z0t_size × z1t_size` 的一块，在 GM 里不连续：相邻两行隔着整整一个 s1，
+// 而 tile 只占其中 z1t_size 个元素。这正是一维路径搬不了的形态——按一维生成会把行间那
 // 段不属于本 tile 的数据一并搬走。
 //
 // 有效视图归约到两项就停：
@@ -126,7 +126,7 @@ module @plan0 attributes {
 
 // 尺寸序言：五个 size_var 按 `size_var` 的顺序连续物化，逐条 NEXT 锚定。
 //
-// 字段名后面那个 `:` 不能省：TilingData 的**类型签名里也列着全部字段名**，
+// 字段名后面那个 `:` 不能省：TilingData 的类型签名里也列着全部字段名，
 // `emitasc.member %x "s1"` 会先撞上 `... "s0" : !emitasc.py_struct<..., ["block_dim",
 // "s0", "s1", ...]>` 那一行，于是 S1 捕获到 s0 的值。加上 `:` 才只匹配取成员那一处。
 // IR: emitasc.member %{{.*}} "s0" :
@@ -140,15 +140,15 @@ module @plan0 attributes {
 // IR-NEXT: emitasc.member %{{.*}} "z1t_size" :
 // IR-NEXT: %[[Z1T:.*]] = arith.index_cast
 
-// 块轴不发循环，块号是 `get_block_idx` 对该轴 loop_size 取模。
+// 块轴不生成循环，块号是 `get_block_idx` 对该轴 loop_size 取模。
 // IR: %[[BLOCKIDX:.*]] = arith.remsi {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 3, role = axis_index>}
 // 两层循环：block-inner（z0Tb）在外，R 侧的 tile-outer（z1T）在内。
 // IR: scf.for %[[ROUND:.*]] = %{{.*}} to %{{.*}}
-// A 侧 tile 内轴的 actual_size：block-inner 循环体里反推出 z0T 的序号后配对发出。它是
+// A 侧 tile 内轴的 actual_size：block-inner 循环体里反推出 z0T 的序号后配对生成。它是
 // 二维搬运的 blockCount——"搬几行"。
 // IR: %[[BLOCKCOUNT:.*]] = arith.select {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 2, role = actual_size>}
 // IR: scf.for %[[COL:.*]] = %{{.*}} to %{{.*}}
-// R 侧 tile 内轴的 actual_size：z1T 自己生成循环，进循环体就为配对 inner 发一份。它是
+// R 侧 tile 内轴的 actual_size：z1T 自己生成循环，进循环体就为配对 inner 生成一份。它是
 // blockLen——"每行搬几个"。
 // IR: %[[BLOCKLEN:.*]] = arith.select {{.*}} {afir.axis_binding = #afir.axis_binding<axis = 7, role = actual_size>}
 
@@ -164,11 +164,11 @@ module @plan0 attributes {
 // IR: %[[T2:.*]] = arith.muli %[[COL]], %[[Z1T]]
 // IR: %[[OFF:.*]] = arith.addi %[[SUM0]], %[[T2]]
 
-// 两侧缝隙各按自己那一侧的口径算，**不能互换**：
+// 两侧缝隙分别按本侧规则计算，不能互换：
 //   GM 缝隙 = s1 − blockLen        行距就是张量的实际排布
 //   UB 缝隙 = z1t_size − blockLen  UB 按整块 tile 铺，行距是标称值、与尾块无关
 // legacy `SetDmaParams` 的 `ActualSize(gm − repeat)` 与 `Size(ub) − ActualSize(repeat)`
-// 就是这个区别。写成同一个口径在整块上看不出来，只有尾块会错。
+// 就是这个区别。写成同一个公式在整块上看不出来，只有尾块会错。
 // IR: %[[GMGAP:.*]] = arith.subi %[[S1]], %[[BLOCKLEN]]
 // MEM: %[[UBGAP:.*]] = arith.subi %[[Z1T]], %[[BLOCKLEN]]
 // REG: %[[UBGAP:.*]] = arith.subi %[[BLOCKLEN]], %[[BLOCKLEN]]
@@ -179,9 +179,9 @@ module @plan0 attributes {
 // IR: ascendc.data_copy_pad_extend{{(_reg_base)?}} %{{.*}}, %{{.*}}, %[[BLOCKCOUNT]], %[[BLOCKLEN]], %[[GMGAP]], %[[UBGAP]]
 
 // --- Store ---
-// 同一个发射点，方向相反：src 是 UB 侧、dst 是 GM 侧，于是两个缝隙参数**交换位置**。
+// 同一次生成，方向相反：src 是 UB 侧、dst 是 GM 侧，于是两个缝隙参数交换位置。
 //
-// **这一行是方向映射唯一会变红的地方**。把 `emitTransfer` 退回「不看方向、按
+// 这一行是方向映射唯一会变红的地方。把 `emitTransfer` 退回「不看方向、按
 // global/local 原样传」之后，Load 那条仍然对（它的顺序恰好就是 global, local），只有
 // 这一条会挂——变异验证的判据就是"只有二维 Store 一条失败"。
 // IR: %[[SGMGAP:.*]] = arith.subi %[[S1]], %[[BLOCKLEN]]

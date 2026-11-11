@@ -11,21 +11,21 @@
 // 的 RCommon 同一张图、不同模板。
 //
 // AllLoad 的签名是三件事同时成立，缺一不可：
-//   1. **归约轴 `z1` 整根不切** —— `afir.asc_graph` 的 axes 里没有 `z1T`/`z1t`，只有 A 轴的
+//   1. 归约轴 `z1` 整根不切 —— `afir.asc_graph` 的 axes 里没有 `z1T`/`z1t`，只有 A 轴的
 //      Tile/Block 四根。`vectorized_axis = [3, 1]` 里的 1 就是未切的原始 R 轴。
-//   2. **`is_reduce_mem_reuse = true`** —— 调度器只在 AllLoad 置真（`optimize/optimize.cpp`）。
+//   2. `is_reduce_mem_reuse = true` —— 调度器只在 AllLoad 置真（`optimize/optimize.cpp`）。
 //      MLIR 侧不读它，复用决策在 `buf_que_allocator` 已经做完，这里只是模板的身份标记。
-//   3. **不跨轮累加** —— `loop_axis = 5`（A 的 BlockInner）之内已经没有归约维，`ReducePlan`
+//   3. 不跨轮累加 —— `loop_axis = 5`（A 的 BlockInner）之内已经没有归约维，`ReducePlan`
 //      的 `accumulationAxes` 为空，`isAccumulating()` 假。
 //
 // 第 3 条是本用例真正要钉的东西，判据写成 `--implicit-check-not=ascendc.add_l2`：RCommon 要
-// 在「第一轮拷贝 / 后续轮累加」的 `scf.if` 里发 `add_l2`，AllLoad 一次算完，**一条都不该有**。
+// 在「第一轮拷贝 / 后续轮累加」的 `scf.if` 里生成 `add_l2`，AllLoad 一次算完，一条都不该有。
 // 这条反向断言比正向检查更结实——它在整份输出上生效，新插进来的累加也躲不过。
 //
 // 调度器仍然给了两块 scratch（AllLoad 用不到第二块），`ReducePlan` 只按 `apiScratchIndex`
 // 取第一块给高阶 API，不因为「有两块」就去动第二块。
 
-// 两个目标各发一遍（950 无 E2E，只能比对文本）：reduce 的下降没有任何目标相关分支，
+// 两个目标各生成一遍（950 无 E2E，只能比对文本）：reduce 的下降没有任何目标相关分支，
 // 两份输出**逐字节相同**，所以共用同一组 CHECK。这是
 // `2026-09-20-two-dim-transfer-addressing-design.md` 8.5 六组合验收项的 lit 一侧。
 // RUN: af-opt --afir-kernel-body-signature --afir-to-ascendc-pipeline --target=Ascend910B1 %s \

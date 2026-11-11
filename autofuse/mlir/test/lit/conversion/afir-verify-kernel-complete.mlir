@@ -12,7 +12,7 @@
 // 门禁。每条判据在这里都有一正一负：只有正向，检查器退化成「全放行」也能通过；只有
 // 负向，它退化成「全拒绝」也能通过。
 //
-// 判据逐条可选。默认只跑 C3，因为另外三条在今天的生产 kernel 上还会红（5.2 的「当前」
+// 判据逐条可选。默认只跑 C3，因为另外三条在当前的生产 kernel 上还会红（5.2 的「当前」
 // 列：C1 部分、C2 未满足、C4 覆盖面窄）——把它们一起设成默认，这个 pass 会立刻被加进
 // 忽略名单。逐条可选之后，每条转绿的那一刻是一次显式提交。
 //
@@ -21,8 +21,8 @@
 // RUN: af-opt --split-input-file --verify-diagnostics --target=Ascend910B1 \
 // RUN:   --afir-verify-kernel-complete=criteria=c1,c2,c3,c4 %s
 
-// 判据的**选择语义**本身也要钉住，它是 5.2 实施结论的核心主张：默认只跑 C3，显式点名是
-// **替换**默认值而不是追加。后者依赖 MLIR `ListOption` 的实现细节——`handleOccurrence`
+// 判据的选择语义本身也要钉住，它是 5.2 实施结论的核心主张：默认只跑 C3，显式点名是
+// 替换默认值而不是追加。后者依赖 MLIR `ListOption` 的实现细节——`handleOccurrence`
 // 在首次出现时 `clear()` 掉默认值（PassOptions.h）——正因为它依赖上游实现，更该有用例
 // 锁住：哪天上游改成追加，下面第二条 RUN 会立刻红。
 //
@@ -158,10 +158,10 @@ module {
 // -----
 
 // C4 负向：`afir.abs` 属于那 50 个「有 ODS 定义、没有注册实现」的 Op 之一。缺实现时
-// 今天的失败是 `applyFullConversion` 的一句泛化的 "failed to legalize operation"；判据
+// 当前的失败是 `applyFullConversion` 的一句通用的 "failed to legalize operation"；判据
 // 要求的是「unsupported 编译期返回原因」，所以这里必须指名道姓，且在下降开始之前就报。
 //
-// 这条负例此前用的是同步族——同步族的 lowering 落地（2026-09-14）之后它不再缺实现，
+// 这条负例此前用的是同步族——同步族的 lowering 实现（2026-09-14）之后它不再缺实现，
 // 用例如实地不再报错。之后换成 `afir.abs`，而 `afir.abs` 在 elementwise 切片的纵向
 // 探针里补齐了实现，于是同样不再报错；再之后是 `afir.mean`，它随归约族补齐 max / min /
 // mean / prod / any / all 一并有了实现。换成一个真没有实现的 Op，而不是把判据放宽：

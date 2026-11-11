@@ -17,10 +17,8 @@
 namespace mlir::ascend::kernel {
 namespace {
 
-// Stands in for codegen::AscendCApiRegistry: one flat name -> text table, with
-// entries from both the mem-based and the reg-based header families, which is
-// exactly how the real registry is populated -- the two families' names do not
-// collide, so no platform axis reaches this layer.
+// Mock AscendCApiRegistry with one header-name-to-text table. Both mem-based
+// and reg-based names share the table without collisions or platform selection.
 class FakeRegistry {
  public:
   FakeRegistry() {

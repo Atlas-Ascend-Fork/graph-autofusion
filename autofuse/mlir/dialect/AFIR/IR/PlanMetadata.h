@@ -19,9 +19,9 @@ namespace mlir::afir {
 // Module kind: which of the two AFIR module shapes this is. kPlanModuleKind and
 // kEntryModuleKind are defined in AFIRAttributes.h.
 //
-// 候选身份（"是哪个候选"）不在这里，它属 `afplan`：见 dialect/AFPlan/IR/AFPlan.h 的
-// `getCandidate`。module kind 留在 `afir`，因为即使只有一个候选，它仍然决定生成哪种
-// module——按设计文档 2.3 的判别，这是 `afir` 的公开面事实。
+// 候选身份由 afplan 管理，见 dialect/AFPlan/IR/AFPlan.h 的 getCandidate。
+// module kind 决定生成的 module 形态，即使只有一个候选也需要，因此属于 afir 公开信息
+// （设计文档 2.3）。
 bool isPlanModule(ModuleOp module);
 bool isEntryModule(ModuleOp module);
 

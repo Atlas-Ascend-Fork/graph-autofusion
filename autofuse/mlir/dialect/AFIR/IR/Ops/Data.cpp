@@ -319,7 +319,7 @@ LogicalResult verifyTransferElementCount(Operation *op, MemRefType sourceType, M
 // `equalElementCount` 说的是「两端搬的是同样多个元素」。`afir.load` / `afir.store` 是
 // 真，`afir.nddma` 是假——它一边搬一边广播，落点的元素数本来就比源多，那不是形态错误。
 //
-// 关掉它之后两端的形状**在 ODS 这一层就不再被约束**，这是有意的：三个搬运 op 的两端都活在
+// 关掉它之后两端的形状在 ODS 这一层就不再被约束，这是有意的：三个搬运 op 的两端都活在
 // 不同的下标空间，形状对不对只有 descriptor 答得出来，而 verifier 失败是硬失败、不是回落
 // （`afir.nddma` 的 ODS 上记着实测数字）。真正的形状判据在下降侧按 descriptor 查。
 LogicalResult verifyTransferIndexingMaps(Operation *op, bool equalElementCount) {
@@ -463,7 +463,7 @@ Speculation::Speculatability StoreOp::getSpeculatability() {
 //===----------------------------------------------------------------------===//
 //
 // 与 `afir.load` 共用搬运那一整套（buffer 形态、indexing maps、descriptor 契约、
-// destination-style、pipe、副作用），**只有一处不同**：indexing maps 不要求两端元素数相等
+// destination-style、pipe、副作用），只有一处不同：indexing maps 不要求两端元素数相等
 // ——一边搬一边广播改的正是元素数。两端的形状关系不在这里查，理由见 ODS 上那段。
 
 LogicalResult NddmaOp::verify() {

@@ -10,9 +10,8 @@
 
 //===- Reduce.cpp - AFIR reduce op implementation ---------------*- C++ -*-===//
 //
-// Ported from Ascend-MLIR-gsr: reduce verifiers. The seven reduce ops share one
-// ODS class (`AFIR_ReduceOp`), so their verifiers and interface methods share one
-// set of templates here.
+// Reduce verifiers ported from Ascend-MLIR-gsr. The seven ops share AFIR_ReduceOp,
+// so their verifier and interface implementations use common templates.
 //
 //===----------------------------------------------------------------------===//
 
@@ -121,10 +120,9 @@ LogicalResult verifyBufferizedReduce(OpT op) {
   auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
   auto destinationType = dyn_cast<MemRefType>(op.getDestination().getType());
   if (!inputType || !destinationType) {
-    // 资源物化之后操作数换成 AscendC 的 `LocalTensor`，而 `afir.sum` 要到相位 C 才下降，
-    // 因此它会以非 memref 形态存在一段时间。memref 专属的结构检查此时不再适用——与
-    // `verifyBufferizedAdd` 的处理一致（Elementwise.cpp）。descriptor 一致性仍然要查，
-    // `verifyCanonicalBufferDescriptors` 自己会在非 memref 形态下放行。
+    // 资源物化后操作数已变为 AscendC LocalTensor，但归约算子要到阶段 C 才下降。
+    // 此时跳过 memref 专属结构检查，与 verifyBufferizedAdd 一致；仍调用
+    // verifyCanonicalBufferDescriptors，由它处理非 memref 形态。
     return verifyCanonicalBufferDescriptors(op);
   }
   if (inputType.getElementType() != destinationType.getElementType()) {
@@ -171,9 +169,8 @@ void getReduceEffects(OpT op, SmallVectorImpl<MemoryEffect> &effects) {
     effects.emplace_back(MemoryEffects::Write::get(), &operation->getOpOperand(index),
                          SideEffects::DefaultResource::get());
   }
-  // destination 既读又写：沿被归约的 tile 外轴分段累加时，本轮要把上一轮的结果读出来
-  // 合并（legacy 的 `Add(y, tmp, y)`）。只标 Write 等于声称"调用前的内容无关紧要"，
-  // 依赖 effect 的分析会据此复用或丢弃这块存储，那是静默算错而不是报错。
+  // destination 同时读写：跨轮累加需要读取上一轮结果，再合并当前结果，
+  // 与 legacy Add(y, tmp, y) 一致。只声明 Write 会使依赖分析误认为原内容可丢弃或复用。
   effects.emplace_back(MemoryEffects::Read::get(), &operation->getOpOperand(destinationIndex),
                        SideEffects::DefaultResource::get());
   effects.emplace_back(MemoryEffects::Write::get(), &operation->getOpOperand(destinationIndex),
@@ -190,8 +187,8 @@ FailureOr<unsigned> getReduceTiedResultIndex(OpT op, unsigned destinationIndex) 
 
 }  // namespace
 
-// 七个 op 的接口实现逐字相同，各自转发进上面那一套模板。ODS 不能替 op 生成这些方法体，
-// 所以宏是这里唯一避免七份复制的手段——与 `Elementwise.cpp` 对二元算子族的做法一致。
+// 七个 op 的接口方法转发到同一组模板。ODS 不生成这些方法体，
+// 用宏避免逐个复制，与 Elementwise.cpp 的二元族实现一致。
 #define AFIR_REDUCE_OP_IMPL(OP)                                                           \
   LogicalResult OP::verify() {                                                            \
     return verifyReduce(*this);                                                           \

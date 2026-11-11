@@ -37,7 +37,7 @@ TEST(MlirE2eCpu, LoadScalarDivRegBaseStoreCalculatesCorrectResult) {
   ASSERT_NE(input0, nullptr);
   ASSERT_NE(output, nullptr);
 
-  // 取值是 ±2^k（k 取 -2..1），除数与商在 f32 里都精确，所以逐元素比相等。**不能有 0**：
+  // 取值是 ±2^k（k 取 -2..1），除数与商在 f32 里都精确，所以逐元素比相等。不能有 0：
   // 被除数是常量 4.0，除以 0 出来的是 inf，两边的 inf 比相等能过，钉不住任何东西。
   for (uint32_t index = 0; index < input_element_count; ++index) {
     const float magnitude = 0.25F * static_cast<float>(1U << (index % 4U));
@@ -59,7 +59,7 @@ TEST(MlirE2eCpu, LoadScalarDivRegBaseStoreCalculatesCorrectResult) {
               reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(workspace), tilingData);
 
   for (uint32_t index = 0; index < output_element_count; ++index) {
-    // **`4.0F / x`，不是 `x / 4.0F`**。方向那一位写反的话这里逐元素红——两者相等要
+    // `4.0F / x`，不是 `x / 4.0F`。方向那一位写反的话这里逐元素红——两者相等要
     // |x| = 4，而取值全在 [0.25, 2] 里，一个都不是。
     EXPECT_FLOAT_EQ(output[index], kDividend / input0[index]) << "element " << index;
   }

@@ -13,16 +13,16 @@
 // `afir.logical_and` / `afir.logical_or` 的 mem 侧。两个 op 合在一份用例里，因为它们
 // 只差名字：legacy 的两个 impl 类逐行同形，两侧的 `REG_ASC_IR` 也逐字同形。
 //
-// 这份用例钉的是二元一族里**第一次出现的那条性质**：
+// 这份用例钉的是二元一类里第一次出现的那条性质：
 //
-//   **结果的 dtype 与两个输入无关，恒为 `ui8`。**
+//   结果的 dtype 与两个输入无关，恒为 `ui8`。
 //
 // 每个函数的两个输入都是同一个非 `ui8` 的 dtype，目的地是 `ui8`。此前所有二元 op 的
 // `AllElementTypesMatch` 都把三者绑在一起，这一对只绑前两个——ODS 那一层放开了，
 // capability 那一层由 `ResultElementType::Uint8Logical` 接住，两层缺一层都会让
 // `f32, f32 -> ui8` 判成 UnsupportedType。
 //
-// 另一条是 tmp buffer：mem 侧的包装**真的用它**（把两个输入 `Cast` 成 half 都落在
+// 另一条是 tmp buffer：mem 侧的包装真的用它（把两个输入 `Cast` 成 half 都落在
 // 里面），所以是五个实参的调用。这与 reg 侧那份（四参、无 tmp）正好成对。
 
 #input_desc = #afir.tensor_desc<axis = [0], role = <input>>
@@ -102,7 +102,7 @@ module {
 // IR: ascendc.logical_or_extend
 // IR-NOT: afir.logical_or
 
-// 裸名，不带 `AscendC::` 限定——`logical.h` 里的包装是全局函数。名字上**没有**
+// 裸名，不带 `AscendC::` 限定——`logical.h` 里的包装是全局函数。名字上没有
 // `Extend` 后缀，这正是与 reg 侧分得开的地方。
 // CPP-LABEL: void logical_and_f32(
 // CPP: {{^ *}}LogicalAnd({{[^,]*}}, {{[^,]*}}, {{[^,]*}}, {{[^,]*}}, static_cast<uint32_t>(

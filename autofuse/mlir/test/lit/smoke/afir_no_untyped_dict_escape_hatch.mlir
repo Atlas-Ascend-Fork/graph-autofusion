@@ -8,10 +8,8 @@
 
 // RUN: af-opt --split-input-file --verify-diagnostics %s
 
-// AFIR Core 不提供无类型字典逃生舱口：`ir_attr_def` 已移出 `AFIR_CommonAttrs`
-// （设计文档 I1 / 3.7 / ADR-7）。这里锁住"移出"这件事本身——限定名与非限定名
-// 两种写法都必须被 AFIRRejectUnknownAttributes 拦截，而不是被静默接受成
-// discardable 属性。若将来有人把字典属性加回 Core，本用例立即失败。
+// ir_attr_def 不属于 AFIR_CommonAttrs（设计文档 I1/3.7/ADR-7）。
+// 限定名和非限定名均应由 AFIRRejectUnknownAttributes 拒绝，不能作为 discardable 字典接收。
 
 func.func @qualified_dict_rejected(%arg: memref<4xf16>) {
   // expected-error @+1 {{UnsupportedOperation: unknown AFIR operation attribute '"afir.ir_attr_def"'}}

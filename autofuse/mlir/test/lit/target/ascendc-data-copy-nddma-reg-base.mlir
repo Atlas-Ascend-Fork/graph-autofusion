@@ -9,11 +9,11 @@
 // `ascendc.data_copy_nddma_reg_base` → reg 侧的 `DataCopyNddma` 包装
 // （`v35/ascendc/api_regbase/datacopy_nddma.h`）。
 //
-// 这一层**只钉发出来的 C++**，不涉及 AFIR：三组尺寸落成三个栈上 `const int64_t[dim]` 数组，
+// 这一层只钉生成的 C++，不涉及 AFIR：三组尺寸落成三个栈上 `const int64_t[dim]` 数组，
 // `dim` 作为第二个模板实参，与包装的 `const int64_t (&output_dims)[dim]` 对上。手写 printer
-// 的理由就是这个形态——自动 emitter 发不出「栈上数组 + 两个模板实参」。
+// 的理由就是这个形态——自动 emitter 生成不出「栈上数组 + 两个模板实参」。
 //
-// **数组名带 `<src>_nddma_to_<dst>` 后缀**：同一个作用域里两条 ND-DMA 时只按 dst 命名会撞名，
+// 数组名带 `<src>_nddma_to_<dst>` 后缀：同一个作用域里两条 ND-DMA 时只按 dst 命名会撞名，
 // 与 `BroadcastExtendRegBaseOp` 的 `dst_shape_<src>_brc_to_<dst>` 同一条规则。
 
 // RUN: af-opt %s | FileCheck %s --check-prefix=IR
@@ -41,5 +41,5 @@ module {
 // CPP-NEXT: const int64_t input_stride_[[SRC]]_nddma_to_[[DST]][2] = {
 // 调用在三个数组之后，`dim` 与数组长度一致。
 // CPP-NEXT: DataCopyNddma<float, 2>([[DST]], [[SRC]], output_dims_[[SRC]]_nddma_to_[[DST]], output_stride_[[SRC]]_nddma_to_[[DST]], input_stride_[[SRC]]_nddma_to_[[DST]]);
-// 发的不是原生那个同名邻居（`AscendC::DataCopy(dst, src, NdDmaParams, dims)`）。
+// 生成的不是原生那个同名邻居（`AscendC::DataCopy(dst, src, NdDmaParams, dims)`）。
 // CPP-NOT: NdDmaParams

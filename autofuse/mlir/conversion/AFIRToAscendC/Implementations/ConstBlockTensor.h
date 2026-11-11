@@ -10,28 +10,28 @@
 
 //===- ConstBlockTensor.h - kernel-scoped pre-filled constant blocks -*- C++ -*-===//
 //
-// 有几个 Autofuse 包装除了 tmp buffer，还要一块**预先填好某个常量**的 block 张量：
+// 有几个 Autofuse 包装除了 tmp buffer，还要一块预先填好某个常量的 block 张量：
 // `RsqrtExtend(dst, src, blk_tensor_with_value_1, tmp_buf, size)` 和
 // `LogicalNot(dst, src, blk_tensor_with_value_1, tmp_buf, size)`。本文件负责造这一块。
 //
-// **它不是第二块 tmp buffer。** 两者没有一处相同：
+// 它不是第二块 tmp buffer。 两者没有一处相同：
 //
 //   - tmp buffer 由调度分配，内容未初始化，就是一张草稿纸。它的尺寸是 ATT 按
 //     `max(同 id) ⊔ Σ(同 reuse 组)` 聚合出来的 `b{id}_size`；AFIR 只带得动一个 id，
 //     造不出这块存储，也没有谁往里写初值。
-//   - 这一块是一个 block（32 字节）的**常量**。包装把它当作 `Div` / `Sub` / `Min` 的
+//   - 这一块是一个 block（32 字节）的常量。包装把它当作 `Div` / `Sub` / `Min` 的
 //     左操作数，配合 `src0BlkStride = 0` 和 `src0RepStride = 0` 反复读同一个 block，
-//     所以一个 block 就够用，和 tile 多大无关。它的元素类型由**包装的形参**写死
+//     所以一个 block 就够用，和 tile 多大无关。它的元素类型由包装的形参写死
 //     （`RsqrtExtend` 收 `LocalTensor<float>`，`LogicalNot` 收 `LocalTensor<half>`），
 //     和 dst / src 的 dtype 没有关系。
 //
 // 因此它既不参与 AFIR 操作数的三段划分，也不经过 `MemoryAllocate`：它在 AscGraph 上
 // 本来就不存在。legacy 是在 codegen 里查一张按节点类型索引的静态表现造的
 // （`common_utils.cpp` 的 `GetApiExtractDupSet` 和 `api_extract_dup_map`）。本文件做的
-// 是同一件事，只是挪到了 lowering，并且**唯一的真源是 pattern 的模板实参**，不再另立
+// 是同一件事，只是挪到了 lowering，并且唯一依据是 pattern 的模板实参，不再另立
 // 一张表。
 //
-// **UB 预算 ATT 已经算过了**：`CalcExtraTmpBufForAscGraph` 把这些 block 记进
+// UB 预算 ATT 已经算过了：`CalcExtraTmpBufForAscGraph` 把这些 block 记进
 // `tuning_space_->builtin_tmp_buffer`，按 (值, dtype) 去重，每块 32 字节。所以这里也
 // 必须按 (值, dtype) 在整个 kernel 内共用一块。一个 op 造一块会超预算，而超出去的表现
 // 是运行期 UB 越界，不是编译报错。

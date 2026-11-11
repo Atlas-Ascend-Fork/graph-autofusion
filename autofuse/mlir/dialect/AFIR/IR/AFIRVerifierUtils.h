@@ -44,8 +44,8 @@ LogicalResult verifyCanonicalBufferDescriptors(Operation *op);
 // Destination and result descriptors must agree when both are present.
 FailureOr<Role> getCanonicalTargetRole(Operation *op);
 
-// 数据参数（非 workspace / tiling）的个数，也就是 `afir.arg_descs` 应当覆盖的个数。
-// 实现处说明了为什么它不再另存为属性，以及为什么期望值必须独立于数组自己的长度。
+// 返回 arg_descs 应覆盖的数据参数个数，不含 workspace / tiling。
+// 该数独立于描述符数组长度计算，避免长度校验恒为真；规则见实现。
 FailureOr<unsigned> getCanonicalDataArgumentCount(Operation *owner, unsigned argumentCount);
 
 }  // namespace mlir::afir

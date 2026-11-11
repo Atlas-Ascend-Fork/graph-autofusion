@@ -46,7 +46,7 @@ TEST(MlirE2eCpu, LoadAxpyStoreCalculatesCorrectResult) {
     FAIL() << "input/output allocation failed";
   }
 
-  // 两个输入喂得**不一样**，而且 `x1 != x2`：`y = x1 + alpha * x2` 里两个 src 的位置不
+  // 两个输入喂得不一样，而且 `x1 != x2`：`y = x1 + alpha * x2` 里两个 src 的位置不
   // 对称，喂同一份数据的话把两个实参调换过来照样全绿。取值都是 2 的幂的小倍数，f32 里
   // 精确可表示，期望值不引入舍入。
   for (uint32_t index = 0; index < input_element_count; ++index) {

@@ -29,8 +29,7 @@ module @plan3 attributes {
       afir.api_tiling_fields = [{field = "api", type = "Api", fields = ["a", "b"]}],
       afplan.variant = #afplan.variant<stage = 0, template = 0>
   } {
-    // tmp buffer 的 id 与普通缓冲同一个空间，bridge 收集时就并进 `afir.buffer_ids`
-    // 了（这里是 id 1）——没有第三张表，GenTilingData 也就没有第三条分支。
+    // tmp buffer 与普通缓冲共用 id 空间，bridge 将其并入 afir.buffer_ids（此处为 1）。
     return
   }
   func.func private @stage0_template1(%input: tensor<1024xf16>) attributes {
@@ -64,7 +63,7 @@ module @plan3 attributes {
 // stage 结构体的类型名与它在最外层 TilingData 里的成员名都由 ATT 定死
 // （`ScheduleGroupIdent::GetGroupPrefix()` / `GetItemPrefix()`，见
 // `common/tiling_schema/schedule_group_names.h`），坐标取自 `#afplan.candidate`
-// ——这里是 subgraph 0 / plan 3。`plan3TilingData` 只是载体，不会被发成 C++ 结构体。
+// ——这里是 subgraph 0 / plan 3。`plan3TilingData` 只是载体，不会被生成 C++ 结构体。
 // CHECK-SAME: ascendc.tiling_schema = !emitasc.py_struct<"plan3TilingData",
 // CHECK-SAME: !emitasc.py_struct<"AscGraph0ScheduleResult3G0TilingData", [ui32, ui32, ui32, ui32, ui64, ui64,
 // CHECK-SAME: !emitasc.py_struct<"Api", [ui32, ui32], ["a", "b"]>
