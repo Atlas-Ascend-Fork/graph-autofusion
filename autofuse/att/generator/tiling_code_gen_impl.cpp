@@ -2504,12 +2504,34 @@ af::Status TilingCodeGenImpl::GenGetObj(const ModelInfo &model_info) {
 }
 
 af::Status TilingCodeGenImpl::GenCalcScore(const ModelInfo &model_info) {
+  // [ScoreFunc 诊断] 空 score_func 会静默继承基类 CalcScore{return 0;}——与"运行期算出的 0"
+  // 在日志上无法区分。这里把"是否送达"与"是否带组绑定占位符（运行期形态）"显性打出来，
+  // 用于排障：empty=1 表示打分函数没送达（见 gen_model_info 的 key 漂移告警）；placeholder=1
+  // 表示该函数体引用了运行期组子结构。
+  GELOGI(
+      "[ScoreFunc] emit graph[%s] empty=%d placeholder=%d", model_info.graph_name.c_str(),
+      static_cast<int32_t>(model_info.score_func.empty()),
+      static_cast<int32_t>(model_info.score_func.find(ascgen_utils::kGroupTilingDataPlaceholder) != std::string::npos));
   if (!model_info.score_func.empty()) {
     std::string score_func = model_info.score_func;
     // [统一打分组绑定] 占位符 → 本模型真实组子结构（schedule_group_ident）：
     // 绑定与候选/组序位置无关。替换逻辑提取为 SubstituteGroupTilingDataPlaceholder
     // （common_utils.h，UT 直测）。
-    ascgen_utils::SubstituteGroupTilingDataPlaceholder(score_func, model_info.schedule_group_ident.GetItemPrefix());
+    // 单 group（is_uniq_group_）时 tiling_data 本身就是组 tiling data，没有
+    // graphX_resultY_gZ_tiling_data 子结构，必须绑定到 tiling_data 本身。
+    if (is_uniq_group_) {
+      const std::string qualified = std::string("tiling_data.") + ascgen_utils::kGroupTilingDataPlaceholder;
+      size_t pos = score_func.find(qualified);
+      while (pos != std::string::npos) {
+        score_func.replace(pos, qualified.size(), "tiling_data");
+        pos = score_func.find(qualified, pos + std::string("tiling_data").size());
+      }
+    } else {
+      ascgen_utils::SubstituteGroupTilingDataPlaceholder(score_func, model_info.schedule_group_ident.GetItemPrefix());
+    }
+    // [ScoreFunc 诊断] 记录本模型的绑定目标，便于核对 result 级与 case 级是否绑到同一子结构。
+    GELOGI("[ScoreFunc] bind graph[%s] target=[%s]", model_info.graph_name.c_str(),
+           is_uniq_group_ ? "tiling_data" : (model_info.schedule_group_ident.GetItemPrefix() + "_tiling_data").c_str());
     tiling_func_.AddLine(score_func);
   }
   return af::SUCCESS;
@@ -4887,8 +4909,34 @@ void TilingCodeGenImpl::GenGetScoreFuncs(
     if (score_func.empty()) {
       score_func =
           "int32_t CalcScore(" + config_.tiling_data_type_name + " &tiling_data) { (void)tiling_data; return 0;}";
+    } else if (score_func.find(ascgen_utils::kGroupTilingDataPlaceholder) != std::string::npos) {
+      // [双通道·结果级组绑定] 结果级打分（跨 schedule result 竞标：scores[] → max_index）
+      // 与 per-model 通道共用同一套占位符替换规则：
+      //  - uniq_group：tiling_data 本身就是组 tiling data，没有 graphX_resultY_gZ 子结构；
+      //  - 单 group：用该 group 的 item_prefix 绑定子结构；
+      //  - 多 group：一个结果级函数无法同时绑多个组，退化为常量 0（避免未声明标识符）。
+      if (is_uniq_group_) {
+        const std::string qualified = std::string("tiling_data.") + ascgen_utils::kGroupTilingDataPlaceholder;
+        size_t pos = score_func.find(qualified);
+        while (pos != std::string::npos) {
+          score_func.replace(pos, qualified.size(), "tiling_data");
+          pos = score_func.find(qualified, pos + std::string("tiling_data").size());
+        }
+      } else {
+        const auto groups_iter = namespace_map.find(i);
+        if (groups_iter != namespace_map.end() && groups_iter->second.size() == 1UL) {
+          ascgen_utils::SubstituteGroupTilingDataPlaceholder(score_func, groups_iter->second.begin()->second.second);
+        } else {
+          GELOGW(
+              "[ScoreFunc] schedule result[%zu] has %zu groups; group binding placeholder cannot be resolved, "
+              "fall back to constant 0.",
+              i, groups_iter == namespace_map.end() ? 0UL : groups_iter->second.size());
+          score_func =
+              "int32_t CalcScore(" + config_.tiling_data_type_name + " &tiling_data) { (void)tiling_data; return 0;}";
+        }
+      }
     }
-    // Inject (void)tiling_data; for externally-provided score funcs that don't use the parameter
+    // 外部提供的打分函数可能不使用 tiling_data 参数，统一补 (void) 以避免未使用告警。
     if (!score_func.empty() && score_func.find("(void)tiling_data") == std::string::npos) {
       auto brace_pos = score_func.find('{');
       if (brace_pos != std::string::npos) {
@@ -4907,6 +4955,9 @@ void TilingCodeGenImpl::GenGetScoreFuncsCalling(
   for (size_t i = 0UL; i < namespace_map.size(); i++) {
     tiling_func_.AddLine("  scores[" + std::to_string(i) + "] = " + GetScheduleResultPrefix(asc_graph_id, i) +
                          "::CalcScore(tiling_data);");
+    // [ScoreFunc 诊断] 跨 schedule result 打分逐个可见（此前只有被执行的 result 才有 score is）。
+    tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"[ScoreFunc] result[" + std::to_string(i) + "] score=%d\", scores[" +
+                         std::to_string(i) + "]);");
   }
 }
 
@@ -4919,6 +4970,8 @@ void TilingCodeGenImpl::GenGetMaxScoreIndex(const AscGraphNamepspaceMap &namespa
     tiling_func_.AddLine("    }");
     tiling_func_.AddLine("  }");
   }
+  // [ScoreFunc 诊断] max_index 及其分数（严格 >，平票保留下标最小）。
+  tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"[ScoreFunc] max_index=%d score=%d\", max_index, scores[max_index]);");
 }
 
 void TilingCodeGenImpl::GenScheduleResultGetTilingCalling(const std::string &index, const std::string &ident) {
@@ -4938,6 +4991,11 @@ af::Status TilingCodeGenImpl::GenGetAllSchedulesResults(const AscGraphNamepspace
       (config_.force_schedule_result < 0) ? "max_index" : std::to_string(config_.force_schedule_result);
   if (NeedGenScoreFunc(score_funcs_)) {
     GenScheduleResultGetTilingCalling(chosen_index);
+  } else if (!namespace_map.empty()) {
+    // [ScoreFunc 诊断] 没有任何打分函数 → 退化为"遍历全部 result 按 perf 选"。
+    // 注意：namespace_map 为空（无 schedule result）时不输出任何代码，保持函数产物为空。
+    tiling_func_.AddLine(
+        "  OP_LOGW(OP_NAME, \"[ScoreFunc] no score func emitted; fall back to perf over all results\");");
   }
   if (config_.force_schedule_result >= 0) {
     GELOGI("Force schedule result %ld for op %s", config_.force_schedule_result, config_.tiling_data_type_name.c_str());
