@@ -33,6 +33,7 @@ add_library(test_regbase_ascendc OBJECT
     ./test_bitwise_or.cpp
     ./test_bitwise_xor.cpp
     ./test_rshift.cpp
+    ./test_shift.cpp
     ./test_sin.cpp
     ./test_pow.cpp
     ./test_reciprocal.cpp

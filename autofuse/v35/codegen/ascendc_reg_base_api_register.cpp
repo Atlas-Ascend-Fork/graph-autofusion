@@ -414,6 +414,9 @@ Register::Register() {
   const std::string kAscendcRoundRegBaseStr = {
 #include "round_reg_base.h"
   };
+  const std::string kAscendcShiftRegBaseStr = {
+#include "shift_reg_base.h"
+  };
   const std::string kAscendcCeilRegBaseStr = {
 #include "ceil_reg_base.h"
   };
@@ -531,6 +534,7 @@ Register::Register() {
       {"rsqrt_reg_base.h", kAscendcRsqrtRegBaseStr},
       {"sqrt_reg_base.h", kAscendcSqrtRegBaseStr},
       {"round_reg_base.h", kAscendcRoundRegBaseStr},
+      {"shift_reg_base.h", kAscendcShiftRegBaseStr},
       {"reciprocal_reg_base.h", kAscendcReciprocalRegBaseStr},
       {"ceil_reg_base.h", kAscendcCeilRegBaseStr},
       {"acosh_reg_base.h", kAscendcAcoshRegBaseStr},

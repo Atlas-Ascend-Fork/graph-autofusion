@@ -2032,7 +2032,10 @@ class LShiftAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "ShiftLeft";
+    return "ShiftLeftExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"shift_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -5395,7 +5398,10 @@ class RShiftAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "ShiftRight";
+    return "ShiftRightExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"shift_reg_base.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
