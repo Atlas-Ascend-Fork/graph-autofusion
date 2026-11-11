@@ -411,8 +411,7 @@ void RecordTaskUpdate(aclmdlRITask handle, const aclmdlRITaskParams &params) {
     } else {
       owned.attributes.clear();
     }
-    if (params.type == ACL_MODEL_RI_TASK_KERNEL &&
-        params.kernelTaskParams.argsType == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+    if (params.type == ACL_MODEL_RI_TASK_KERNEL && params.kernelTaskParams.argsType == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
       const auto &host = params.kernelTaskParams.hostBuffer;
       const auto *data = static_cast<const unsigned char *>(host.hostArgs);
       std::vector<unsigned char> copied(data, data + host.hostArgsSize);

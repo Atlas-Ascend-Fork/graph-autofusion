@@ -840,7 +840,8 @@ void SuperKernelBaseNode::LogNodeUpdateResult(const aclmdlRITaskParams *paramsTo
     case ACL_MODEL_RI_TASK_KERNEL: {
       const auto &kernelParams = paramsToLog->kernelTaskParams;
       oss << ", opInfoPtr=" << paramsToLog->opInfoPtr << ", opInfoSize=" << paramsToLog->opInfoSize
-          << ", funcHandle=" << kernelParams.funcHandle << ", numBlocks=" << static_cast<uint32_t>(kernelParams.numBlocks)
+          << ", funcHandle=" << kernelParams.funcHandle
+          << ", numBlocks=" << static_cast<uint32_t>(kernelParams.numBlocks)
           << ", argsType=" << static_cast<uint32_t>(kernelParams.argsType);
       switch (static_cast<uint32_t>(kernelParams.argsType)) {
         case ACL_RT_KERNEL_ARGS_HOST_BUFFER:

@@ -186,8 +186,8 @@ TEST_F(AotSystemTest, OptimizeDebugDumpPersistsOptionsAndGeneratedTaskQueues) {
         EXPECT_EQ(kernel.at("hostBuffer").at("hostArgsSize"), host.hostArgsSize);
         const auto snapshot = model.Snapshot(task);
         ASSERT_EQ(snapshot.args.size(), host.hostArgsSize);
-        EXPECT_TRUE(std::equal(snapshot.args.begin(), snapshot.args.end(),
-                               static_cast<const unsigned char *>(host.hostArgs)));
+        EXPECT_TRUE(
+            std::equal(snapshot.args.begin(), snapshot.args.end(), static_cast<const unsigned char *>(host.hostArgs)));
       }
     }
   }
