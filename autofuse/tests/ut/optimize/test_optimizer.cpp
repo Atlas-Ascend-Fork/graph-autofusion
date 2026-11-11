@@ -3105,6 +3105,7 @@ TEST_F(TestOptimizer, MergeAxesGatherOnlyOneDim) {
 
 TEST_F(TestOptimizer, CompleteGatherApiInfoSetsDcacheSize) {
   constexpr int64_t kSimtDcacheSize = 40 * 1024;
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
   af::AscGraph graph("GatherDcacheGraph");
 
   af::ascir_op::Data data0("data0", graph);
@@ -3137,6 +3138,7 @@ TEST_F(TestOptimizer, CompleteGatherApiInfoSetsDcacheSize) {
 
 TEST_F(TestOptimizer, CompleteExpm1ApiInfoSetsDcacheSize) {
   constexpr int64_t kSimtDcacheSize = 40 * 1024;
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
   af::AscGraph graph("Expm1DcacheGraph");
 
   af::ascir_op::Data data("data", graph);
@@ -3158,6 +3160,91 @@ TEST_F(TestOptimizer, CompleteExpm1ApiInfoSetsDcacheSize) {
 
   ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
   EXPECT_EQ(::ascir::GetDcacheSize(*expm1_node), kSimtDcacheSize);
+}
+
+// dav-2201（A3）上 Expm1/FloorDiv 等走非 SIMT 实现，不应打 SIMT d-cache 标记，
+// 否则 kernel 启动语句第二参数为数字，A3 设备编译把该位置按 void* 解释导致编译失败
+TEST_F(TestOptimizer, CompleteApiInfoSkipsDcacheSizeOnV1Platform) {
+  ge::PlatformContext::GetInstance().SetPlatform("2201");
+  af::AscGraph graph("V1DcacheGraph");
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_BF16;
+  data.ir_attr.SetIndex(0);
+
+  af::ascir_op::Data scalar("scalar", graph);
+  scalar.y.dtype = ge::DT_INT64;
+  scalar.ir_attr.SetIndex(1);
+
+  af::ascir_op::Expm1 expm1("expm1");
+  expm1.x = data.y;
+  expm1.y.dtype = ge::DT_BF16;
+
+  af::ascir_op::FloorDiv floor_div("floor_div");
+  floor_div.x1 = scalar.y;
+  floor_div.x2 = scalar.y;
+  floor_div.y.dtype = ge::DT_INT64;
+
+  af::ascir_op::Output output("output");
+  output.x = floor_div.y;
+  output.y.dtype = ge::DT_INT64;
+  output.ir_attr.SetIndex(0);
+
+  auto expm1_node = graph.FindNode("expm1");
+  ASSERT_NE(expm1_node, nullptr);
+  auto floor_div_node = graph.FindNode("floor_div");
+  ASSERT_NE(floor_div_node, nullptr);
+
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
+  EXPECT_EQ(::ascir::GetDcacheSize(*expm1_node), 0);
+  EXPECT_EQ(::ascir::GetDcacheSize(*floor_div_node), 0);
+}
+
+TEST_F(TestOptimizer, CompleteFloorDivApiInfoSetsDcacheSizeOnlyForInt64) {
+  constexpr int64_t kSimtDcacheSize = 40 * 1024;
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
+
+  af::AscGraph int64_graph("FloorDivInt64DcacheGraph");
+  af::ascir_op::Data x1("x1", int64_graph);
+  x1.y.dtype = ge::DT_INT64;
+  x1.ir_attr.SetIndex(0);
+  af::ascir_op::Data x2("x2", int64_graph);
+  x2.y.dtype = ge::DT_INT64;
+  x2.ir_attr.SetIndex(1);
+  af::ascir_op::FloorDiv int64_floor_div("floor_div");
+  int64_floor_div.x1 = x1.y;
+  int64_floor_div.x2 = x2.y;
+  int64_floor_div.y.dtype = ge::DT_INT64;
+  af::ascir_op::Output int64_output("output");
+  int64_output.x = int64_floor_div.y;
+  int64_output.y.dtype = ge::DT_INT64;
+  int64_output.ir_attr.SetIndex(0);
+
+  auto int64_node = int64_graph.FindNode("floor_div");
+  ASSERT_NE(int64_node, nullptr);
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(int64_graph), af::SUCCESS);
+  EXPECT_EQ(::ascir::GetDcacheSize(*int64_node), kSimtDcacheSize);
+
+  af::AscGraph int32_graph("FloorDivInt32DcacheGraph");
+  af::ascir_op::Data y1("y1", int32_graph);
+  y1.y.dtype = ge::DT_INT32;
+  y1.ir_attr.SetIndex(0);
+  af::ascir_op::Data y2("y2", int32_graph);
+  y2.y.dtype = ge::DT_INT32;
+  y2.ir_attr.SetIndex(1);
+  af::ascir_op::FloorDiv int32_floor_div("floor_div");
+  int32_floor_div.x1 = y1.y;
+  int32_floor_div.x2 = y2.y;
+  int32_floor_div.y.dtype = ge::DT_INT32;
+  af::ascir_op::Output int32_output("output");
+  int32_output.x = int32_floor_div.y;
+  int32_output.y.dtype = ge::DT_INT32;
+  int32_output.ir_attr.SetIndex(0);
+
+  auto int32_node = int32_graph.FindNode("floor_div");
+  ASSERT_NE(int32_node, nullptr);
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(int32_graph), af::SUCCESS);
+  EXPECT_EQ(::ascir::GetDcacheSize(*int32_node), 0);
 }
 
 TEST_F(TestOptimizer, MergeAxesReduce) {

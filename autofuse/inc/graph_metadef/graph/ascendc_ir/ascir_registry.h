@@ -188,6 +188,12 @@ class AscIrCodegen {
     (void)node;
     return true;
   }
+
+  // SIMT 实现需预留的 d-cache 字节数，参与动态 UB 预算与 tiling 预留；非 SIMT 实现返回 0
+  virtual int64_t GetSimtDcacheSize(const AscNode &node) const {
+    (void)node;
+    return 0;
+  }
 };
 
 class AscIrAtt {

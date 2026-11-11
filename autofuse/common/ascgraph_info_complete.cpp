@@ -22,13 +22,26 @@
 #include "graph/symbolizer/symbolic.h"
 #include "graph/attribute_group/attr_group_shape_env.h"
 #include "ascir_ops_utils.h"
+#include "common_utils.h"
 #include "schedule_result.h"
 
 using namespace af::ascir_op;
 
 namespace optimize {
 namespace {
-constexpr int64_t kSimtDcacheSize = 40 * 1024;
+
+// SIMT d-cache 预留是实现（impl）的属性：当前架构选中的 codegen impl 声明需要预留的大小，
+// v2 SIMT 实现返回非 0，非 SIMT 实现（v1 或未注册）返回 0，据此决定是否打 kDcacheSizeAttr 标记。
+void CompleteSimtDcacheSize(const af::AscNodePtr &node) {
+  auto impl = ascgen_utils::GetAscIrCodegenImpl(node->GetType());
+  if (impl == nullptr) {
+    return;
+  }
+  const int64_t simt_dcache_size = impl->GetSimtDcacheSize(*node);
+  if (simt_dcache_size > 0) {
+    (void)::ascir::SetDcacheSize(node, simt_dcache_size);
+  }
+}
 
 static Status GetNodeIrAttrOffset(const af::NodePtr &node, af::Expression &offset) {
   auto asc_node = std::dynamic_pointer_cast<af::AscNode>(node);
@@ -91,18 +104,7 @@ void CompleteStoreApiInfo(af::AscNodePtr &node) {
 void CompleteElewiseApiInfo(af::AscNodePtr &node) {
   node->attr.api.type = af::ApiType::kAPITypeCompute;
   node->attr.api.unit = af::ComputeUnit::kUnitVector;
-  if (af::ops::IsOps<Expm1>(node) || af::ops::IsOps<Sin>(node) || af::ops::IsOps<Cos>(node) ||
-      af::ops::IsOps<Asin>(node) || af::ops::IsOps<Acos>(node) || af::ops::IsOps<Tan>(node) ||
-      af::ops::IsOps<Atanh>(node)) {
-    (void)::ascir::SetDcacheSize(node, kSimtDcacheSize);
-  }
-  if (af::ops::IsOps<Remainder>(node) || af::ops::IsOps<Fmod>(node) || af::ops::IsOps<Mod>(node)) {
-    (void)::ascir::SetDcacheSize(node, kSimtDcacheSize);
-  }
-  // FloorDiv 仅 int64 走 SIMT 实现，只为该 dtype 预留 dcache
-  if (af::ops::IsOps<FloorDiv>(node) && node->inputs[0].attr.dtype == af::DT_INT64) {
-    (void)::ascir::SetDcacheSize(node, kSimtDcacheSize);
-  }
+  CompleteSimtDcacheSize(node);
 }
 
 void CompleteBroadcastApiInfo(af::AscNodePtr &node) {
@@ -128,7 +130,7 @@ void CompleteSplitApiInfo(af::AscNodePtr &node) {
 void CompleteGatherApiInfo(af::AscNodePtr &node) {
   node->attr.api.type = af::ApiType::kAPITypeCompute;
   node->attr.api.unit = af::ComputeUnit::kUnitMTE2;
-  (void)::ascir::SetDcacheSize(node, kSimtDcacheSize);
+  CompleteSimtDcacheSize(node);
 }
 
 void CompleteCubeApiInfo(af::AscNodePtr &node) {

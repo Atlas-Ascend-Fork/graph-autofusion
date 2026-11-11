@@ -11,10 +11,10 @@
 #include <gtest/gtest.h>
 
 #include "ascir_ops.h"
-#include "ascgraph_info_complete.h"
 #include "common/ub_expr/asc_graph_ub_expr_builder.h"
 #include "common/ub_expr/ub_expr_utils.h"
 #include "graph/utils/graph_utils.h"
+#include "schedule_result.h"
 
 namespace {
 struct UbQueueAttrConfig {
@@ -360,7 +360,9 @@ TEST(AscGraphUbExprBuilderTest, BuildIncludesReservedUbForGather) {
   af::Operator op("Gather", "Gather");
   auto node = graph.AddNode(op);
   ASSERT_NE(node, nullptr);
-  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
+  // dcache 标记的生产路径（CompleteApiInfo 询问 impl）由 optimize UT 覆盖；
+  // test_common 未链接 ascir_builtin_ops 注册库，本用例直接打标记验证 builder 的预留计算
+  ASSERT_EQ(::ascir::SetDcacheSize(node, 40 * 1024), af::SUCCESS);
 
   ascir::UbExprContext context;
   EXPECT_EQ(ascir::AscGraphUbExprBuilder().Build(graph, context), af::SUCCESS);
