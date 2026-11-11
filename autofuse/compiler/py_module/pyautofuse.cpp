@@ -20,7 +20,6 @@
 #include "ascir/meta/asc_graph_dumper_context.h"
 #include "common_utils.h"
 #include "gen_model_info/api_perf_register/soc_perf_config.h"
-#include "schedule_graph_validator.h"
 
 namespace pyascir {
 namespace {
@@ -49,16 +48,6 @@ class DumpGraphGuard {
     ascir::AscGraphDumperContext::GetThreadLocalCtx().ClearAllWatchGraphs();
   }
 };
-
-/**
- * @brief 将 Schedule 阶段保存的图校验诊断转换为 Python RuntimeError。
- *
- * 没有专用诊断时使用调用方提供的通用错误文本。
- */
-PyObject *BuildScheduleError(const char *fallback) {
-  const auto &diagnostic = optimize::GetScheduleValidationError();
-  return PyErr_Format(PyExc_RuntimeError, "%s", diagnostic.empty() ? fallback : diagnostic.c_str());
-}
 }  // namespace
 class AutofuserOptions {
  public:
@@ -229,29 +218,24 @@ PyObject *Autofuser::Schedule(PyObject *self, PyObject *args, PyObject *kwds) {
     auto hint_graph = reinterpret_cast<pyascir::HintGraph::Object *>(graph_obj);
     PY_ASSERT_NOTNULL(hint_graph->graph);
     AssignDefaultIoIndex(*hint_graph->graph);
-    optimize::ClearScheduleValidationError();
     auto ret = self_->optimizer->Optimize(*(hint_graph->graph), fused_schedule_result->fused_schedule_result);
     if (ret != 0) {
       ERROR_PRINT("Optimize fail ret %d", ret);
       ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
-      Py_DECREF(fused_schedule_result_obj);
-      return BuildScheduleError("Optimize fail");
+      return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
     }
     return Py_BuildValue("O", fused_schedule_result_obj);
   } else if (PyObject_IsInstance(graph_obj, reinterpret_cast<PyObject *>(&pyascir::FusedGraph::type)) ==
              kPythonSuccess) {
     auto fused_graph = reinterpret_cast<pyascir::FusedGraph::Object *>(graph_obj);
-    optimize::ClearScheduleValidationError();
     auto ret = self_->optimizer->Optimize(fused_graph->graph, fused_schedule_result->fused_schedule_result);
     if (ret != 0) {
       ERROR_PRINT("Optimize fail ret %d", ret);
       ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
-      Py_DECREF(fused_schedule_result_obj);
-      return BuildScheduleError("Optimize fail");
+      return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
     }
     return Py_BuildValue("O", fused_schedule_result_obj);
   } else {
-    Py_DECREF(fused_schedule_result_obj);
     return PyErr_Format(PyExc_RuntimeError, "schedule requires hint graph or fused graph");
   }
 }
@@ -305,20 +289,18 @@ PyObject *Autofuser::AutofuseBackend(PyObject *self, PyObject *args, PyObject *k
     auto hint_graph = reinterpret_cast<pyascir::HintGraph::Object *>(graph_obj);
     PY_ASSERT_NOTNULL(hint_graph->graph);
     AssignDefaultIoIndex(*hint_graph->graph);
-    optimize::ClearScheduleValidationError();
     auto ret = self_->optimizer->Optimize(*(hint_graph->graph), fused_schedule_result);
     if (ret != 0) {
       ERROR_PRINT("Optimize fail ret %d", ret);
-      return BuildScheduleError("Optimize fail");
+      return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
     }
   } else if (PyObject_IsInstance(graph_obj, reinterpret_cast<PyObject *>(&pyascir::FusedGraph::type)) ==
              kPythonSuccess) {
     auto fused_graph = reinterpret_cast<pyascir::FusedGraph::Object *>(graph_obj);
-    optimize::ClearScheduleValidationError();
     auto ret = self_->optimizer->Optimize(fused_graph->graph, fused_schedule_result);
     if (ret != 0) {
       ERROR_PRINT("Optimize fail ret %d", ret);
-      return BuildScheduleError("Optimize fail");
+      return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
     }
   } else {
     return PyErr_Format(PyExc_RuntimeError, "schedule requires hint graph or fused graph");
@@ -407,11 +389,8 @@ PyObject *Schedule::ScheduleV1(PyObject *self_pyobject, PyObject *args, PyObject
   auto fused_schedule_result = reinterpret_cast<pyascir::FusedScheduledResult::Object *>(fused_schedule_result_obj);
   PY_ASSERT_NOTNULL(hint_graph->graph);
   AssignDefaultIoIndex(*hint_graph->graph);
-  optimize::ClearScheduleValidationError();
   if (self->optimizer->Optimize(*hint_graph->graph, fused_schedule_result->fused_schedule_result) != af::SUCCESS) {
     ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
-    Py_DECREF(fused_schedule_result_obj);
-    return BuildScheduleError("Optimize fail");
   }
   return Py_BuildValue("O", fused_schedule_result_obj);
 }
@@ -436,13 +415,11 @@ PyObject *Schedule::ScheduleV2(PyObject *self_pyobject, PyObject *args, PyObject
                                  "FusedScheduledResult init fail");
 
   auto fused_schedule_result = reinterpret_cast<pyascir::FusedScheduledResult::Object *>(fused_schedule_result_obj);
-  optimize::ClearScheduleValidationError();
   auto ret = self->optimizer->Optimize(hint_compute_graph->compute_graph, fused_schedule_result->fused_schedule_result);
   if (ret != 0) {
     ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
     ERROR_PRINT("Optimize fail ret %d", ret);
-    Py_DECREF(fused_schedule_result_obj);
-    return BuildScheduleError("Optimize fail");
+    return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
   }
 
   return Py_BuildValue("O", fused_schedule_result_obj);

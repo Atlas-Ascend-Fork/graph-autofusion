@@ -7406,9 +7406,8 @@ TEST_F(TestOptimizer, ReducePartition) {
   sum.x = exp.y;
   *sum.y.axis = {z0.id, z1.id};
   sum.y.dtype = ge::DT_FLOAT;
-  // 全归约保留两条轴：输出长度均为 1，归约轴 stride 均为 0。
-  *sum.y.strides = {af::ops::Zero, af::ops::Zero};
-  *sum.y.repeats = {af::ops::One, af::ops::One};
+  *sum.y.strides = {af::ops::One, af::ops::One};
+  *sum.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Broadcast broadcast("broadcast");
   broadcast.x = sum.y;
@@ -7446,9 +7445,9 @@ TEST_F(TestOptimizer, ReducePartition) {
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
   // 通用模板 1 + R 轴分核模板 1 (phase_1 各 tiling case 装入同一 group 作为多 impl) + 全载模板 1
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
-  // 全归约轴规范化后，phase_1 只有一个 tiling case；phase_2 保持原有分组。
+  // R 轴分核结果: phase_1 group + phase_2 groups, phase_1 的两种 tiling case 全部在同一 group 内
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 3);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs.size(), 1);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs.size(), 2);
 }
 
 TEST_F(TestOptimizer, ReducePartitionLoad) {
@@ -7605,24 +7604,24 @@ TEST_F(TestOptimizer, ReducePartition3) {
   sum.attr.sched.axis = {z0.id, z1.id};
   sum.y.dtype = ge::DT_FLOAT16;
   *sum.y.axis = {z0.id, z1.id};
-  *sum.y.strides = {af::ops::Zero, af::ops::Zero};
-  *sum.y.repeats = {af::ops::One, af::ops::One};
+  *sum.y.strides = {af::ops::One, af::ops::One};
+  *sum.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Cast cast("cast");
   cast.x = sum.y;
   cast.attr.sched.axis = {z0.id, z1.id};
   cast.y.dtype = ge::DT_FLOAT;
   *cast.y.axis = {z0.id, z1.id};
-  *cast.y.strides = {af::ops::Zero, af::ops::Zero};
-  *cast.y.repeats = {af::ops::One, af::ops::One};
+  *cast.y.strides = {af::ops::One, af::ops::One};
+  *cast.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Store store_op1("store1");
   store_op1.attr.sched.axis = {z0.id, z1.id};
   store_op1.x = cast.y;
   *store_op1.y.axis = {z0.id, z1.id};
   store_op1.y.dtype = ge::DT_FLOAT;
-  *store_op1.y.strides = {af::ops::Zero, af::ops::Zero};
-  *store_op1.y.repeats = {af::ops::One, af::ops::One};
+  *store_op1.y.strides = {af::ops::One, af::ops::One};
+  *store_op1.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Output output_op("output");
   output_op.x = store_op1.y;
@@ -7697,16 +7696,16 @@ TEST_F(TestOptimizer, ReducePartition4) {
   sum.attr.sched.axis = {z0.id, z1.id};
   sum.y.dtype = ge::DT_FLOAT16;
   *sum.y.axis = {z0.id, z1.id};
-  *sum.y.strides = {af::ops::Zero, af::ops::Zero};
-  *sum.y.repeats = {af::ops::One, af::ops::One};
+  *sum.y.strides = {af::ops::One, af::ops::One};
+  *sum.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Cast cast("cast");
   cast.x = sum.y;
   cast.attr.sched.axis = {z0.id, z1.id};
   cast.y.dtype = ge::DT_FLOAT;
   *cast.y.axis = {z0.id, z1.id};
-  *cast.y.strides = {af::ops::Zero, af::ops::Zero};
-  *cast.y.repeats = {af::ops::One, af::ops::One};
+  *cast.y.strides = {af::ops::One, af::ops::One};
+  *cast.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Broadcast broadcast("broadcast");
   broadcast.x = cast.y;
@@ -7793,24 +7792,24 @@ TEST_F(TestOptimizer, ReduceRMulticore) {
   sum.attr.sched.axis = {z0.id, z1.id};
   sum.y.dtype = ge::DT_FLOAT16;
   *sum.y.axis = {z0.id, z1.id};
-  *sum.y.strides = {af::ops::Zero, af::ops::Zero};
-  *sum.y.repeats = {af::ops::One, af::ops::One};
+  *sum.y.strides = {af::ops::One, af::ops::One};
+  *sum.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Cast cast("cast");
   cast.x = sum.y;
   cast.attr.sched.axis = {z0.id, z1.id};
   cast.y.dtype = ge::DT_FLOAT;
   *cast.y.axis = {z0.id, z1.id};
-  *cast.y.strides = {af::ops::Zero, af::ops::Zero};
-  *cast.y.repeats = {af::ops::One, af::ops::One};
+  *cast.y.strides = {af::ops::One, af::ops::One};
+  *cast.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Store store_op1("store1");
   store_op1.attr.sched.axis = {z0.id, z1.id};
   store_op1.x = cast.y;
   *store_op1.y.axis = {z0.id, z1.id};
   store_op1.y.dtype = ge::DT_FLOAT;
-  *store_op1.y.strides = {af::ops::Zero, af::ops::Zero};
-  *store_op1.y.repeats = {af::ops::One, af::ops::One};
+  *store_op1.y.strides = {af::ops::One, af::ops::One};
+  *store_op1.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Output output_op("output");
   output_op.x = store_op1.y;
@@ -7947,11 +7946,6 @@ TEST_F(TestOptimizer, ReducePartitionScalar) {
 
   Workspace workspace("workspace");
   graph.AddNode(workspace);
-  workspace.attr.sched.axis = {z0.id, z1.id};
-  workspace.y.dtype = ge::DT_FLOAT;
-  *workspace.y.axis = {z0.id, z1.id};
-  *workspace.y.repeats = {s0, s1};
-  *workspace.y.strides = {s1, af::ops::One};
 
   Load load("load");
   load.attr.sched.axis = {z0.id, z1.id};
@@ -7976,8 +7970,8 @@ TEST_F(TestOptimizer, ReducePartitionScalar) {
   mean.attr.sched.axis = {z0.id, z1.id};
   mean.y.dtype = ge::DT_FLOAT;
   *mean.y.axis = {z0.id, z1.id};
-  *mean.y.strides = {af::ops::Zero, af::ops::Zero};
-  *mean.y.repeats = {af::ops::One, af::ops::One};
+  *mean.y.strides = {af::ops::One, af::ops::One};
+  *mean.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Broadcast broadcast("broadcast");
   broadcast.x = mean.y;
@@ -8010,8 +8004,8 @@ TEST_F(TestOptimizer, ReducePartitionScalar) {
   store_op1.x = add1.y;
   *store_op1.y.axis = {z0.id, z1.id};
   store_op1.y.dtype = ge::DT_FLOAT;
-  *store_op1.y.strides = {s1, af::ops::One};
-  *store_op1.y.repeats = {s0, s1};
+  *store_op1.y.strides = {af::ops::One, af::ops::One};
+  *store_op1.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Output output_op("output");
   output_op.x = store_op1.y;

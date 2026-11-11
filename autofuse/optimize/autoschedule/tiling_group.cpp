@@ -9,9 +9,6 @@
  */
 
 #include "tiling_group.h"
-#include <sstream>
-
-#include "schedule_graph_validator.h"
 #include "ascir_ops_utils.h"
 #include "ascgraph_info_complete.h"
 #include "ascir_utils.h"
@@ -501,15 +498,8 @@ Status TilingGroup::GenTilingGroup(const ascir::ImplGraph &impl_graph, AxisGroup
 
   // merge xyr groups.
   for (auto &iter : node_name_to_tiling_group) {
-    const bool can_merge = MergeAxesGroup(tiling_group, iter.second);
-    if (!can_merge) {
-      std::ostringstream detail;
-      detail << kScheduleGraphValidationErrorPrefix << "[AXIS_GROUP] stage=schedule graph=" << impl_graph.GetName()
-             << " node=" << iter.first << ": axis groups are incompatible; current=" << tiling_group.ToString()
-             << " incoming=" << iter.second.ToString();
-      RecordScheduleValidationError(detail.str());
-    }
-    GE_ASSERT_TRUE(can_merge, "Merged axis group: %s to target: %s failed, the graph [%s] cannot be fused.",
+    GE_ASSERT_TRUE(MergeAxesGroup(tiling_group, iter.second),
+                   "Merged axis group: %s to target: %s failed, the graph [%s] cannot be fused.",
                    iter.second.ToString().c_str(), tiling_group.ToString().c_str(), impl_graph.GetName().c_str());
   }
 

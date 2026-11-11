@@ -80,15 +80,15 @@ void Construct_Reduce_RR(af::AscGraph &graph) {
   *load.y.axis = {z0.id, z1.id};
   load.y.dtype = af::DT_FLOAT;
   *load.y.strides = {s1, af::ops::One};
-  *load.y.repeats = {s0, s1};
+  *load.y.repeats = {s1, s0};
 
   Sum sum("sum");
   sum.attr.sched.axis = {z0.id, z1.id};
   sum.x = load.y;
   *sum.y.axis = {z0.id, z1.id};
   sum.y.dtype = af::DT_FLOAT;
-  *sum.y.strides = {af::ops::Zero, af::ops::Zero};
-  *sum.y.repeats = {af::ops::One, af::ops::One};
+  *sum.y.strides = {af::ops::One, af::ops::One};
+  *sum.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Store store_op1("store1");
   store_op1.attr.sched.axis = {z0.id, z1.id};
@@ -96,8 +96,8 @@ void Construct_Reduce_RR(af::AscGraph &graph) {
   *store_op1.y.axis = {z0.id, z1.id};
   store_op1.y.dtype = af::DT_FLOAT;
   *store_op1.y.axis = {z0.id, z1.id};
-  *store_op1.y.strides = {af::ops::Zero, af::ops::Zero};
-  *store_op1.y.repeats = {af::ops::One, af::ops::One};
+  *store_op1.y.strides = {af::ops::One, af::ops::One};
+  *store_op1.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Output output_op("output");
   output_op.x = store_op1.y;
@@ -244,15 +244,15 @@ void Construct_Reduce_Cast_RR(af::AscGraph &graph) {
   *load.y.axis = {z0.id, z1.id};
   load.y.dtype = af::DT_FLOAT;
   *load.y.strides = {s1, af::ops::One};
-  *load.y.repeats = {s0, s1};
+  *load.y.repeats = {s1, s0};
 
   Sum sum("sum");
   sum.attr.sched.axis = {z0.id, z1.id};
   sum.x = load.y;
   *sum.y.axis = {z0.id, z1.id};
   sum.y.dtype = af::DT_FLOAT;
-  *sum.y.strides = {af::ops::Zero, af::ops::Zero};
-  *sum.y.repeats = {af::ops::One, af::ops::One};
+  *sum.y.strides = {af::ops::One, af::ops::One};
+  *sum.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Cast cast("cast");
   cast.attr.sched.axis = {z0.id, z1.id};
@@ -260,8 +260,8 @@ void Construct_Reduce_Cast_RR(af::AscGraph &graph) {
   *cast.y.axis = {z0.id, z1.id};
   cast.y.dtype = af::DT_FLOAT16;
   *cast.y.axis = {z0.id, z1.id};
-  *cast.y.strides = {af::ops::Zero, af::ops::Zero};
-  *cast.y.repeats = {af::ops::One, af::ops::One};
+  *cast.y.strides = {af::ops::One, af::ops::One};
+  *cast.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Store store_op1("store1");
   store_op1.attr.sched.axis = {z0.id, z1.id};
@@ -269,8 +269,8 @@ void Construct_Reduce_Cast_RR(af::AscGraph &graph) {
   *store_op1.y.axis = {z0.id, z1.id};
   store_op1.y.dtype = af::DT_FLOAT16;
   *store_op1.y.axis = {z0.id, z1.id};
-  *store_op1.y.strides = {af::ops::Zero, af::ops::Zero};
-  *store_op1.y.repeats = {af::ops::One, af::ops::One};
+  *store_op1.y.strides = {af::ops::One, af::ops::One};
+  *store_op1.y.repeats = {af::ops::Zero, af::ops::Zero};
 
   Output output_op("output");
   output_op.x = store_op1.y;
