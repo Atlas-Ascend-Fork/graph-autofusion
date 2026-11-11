@@ -117,6 +117,24 @@ bool IsSplitTilingHeaderKey(const std::string &key) {
          key == kTilingEntryHeaderIdentify || key == kTilingTailHeaderIdentify;
 }
 
+#ifdef ENABLE_AUTOFUSE_MLIR
+void MlirDebugResult(mlir::bridge::MlirCodegenStatus status) {
+  const char *status_name = "Unknown";
+  switch (status) {
+    case mlir::bridge::MlirCodegenStatus::kNotSupported:
+      status_name = "kNotSupported";
+      break;
+    case mlir::bridge::MlirCodegenStatus::kFailed:
+      status_name = "kFailed";
+      break;
+    case mlir::bridge::MlirCodegenStatus::kSucceeded:
+      status_name = "kSucceeded";
+      break;
+  }
+  GELOGI("MLIR Codegen Result：%s", status_name);
+}
+#endif
+
 std::string RemoveSplitCppIncludes(const std::string &content);
 
 Status CombineTilings(const std::map<std::string, std::string> &tiling_file_name_to_content, std::string &result) {
@@ -406,6 +424,7 @@ Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_sch
 #ifdef ENABLE_AUTOFUSE_MLIR
   const auto mlir_status = mlir::bridge::RunMlirCodegen(fused_schedule_result, mlir::bridge::MlirCallerScene::kInductor,
                                                         soc_version_, result);
+  MlirDebugResult(mlir_status);
   if (mlir_status != mlir::bridge::MlirCodegenStatus::kNotSupported) {
     return mlir_status == mlir::bridge::MlirCodegenStatus::kSucceeded ? af::SUCCESS : af::FAILED;
   }
@@ -455,6 +474,7 @@ Status Codegen::Generate(const std::map<std::string, std::string> &shape_info,
 #ifdef ENABLE_AUTOFUSE_MLIR
   const auto mlir_status = mlir::bridge::RunMlirCodegen(
       fused_schedule_result, mlir::bridge::MlirCallerScene::kTensorFlow, soc_version_, result);
+  MlirDebugResult(mlir_status);
   if (mlir_status != mlir::bridge::MlirCodegenStatus::kNotSupported) {
     return mlir_status == mlir::bridge::MlirCodegenStatus::kSucceeded ? af::SUCCESS : af::FAILED;
   }
