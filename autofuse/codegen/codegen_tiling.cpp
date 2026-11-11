@@ -51,16 +51,56 @@ constexpr uint64_t kMaxPgoTilingKeyCount = 10000U;
 constexpr uint64_t kInt64TilingKeyCapacity = static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1U;
 // fp32且K轴不小于该阈值且未启用hf32时, CV融合UB模板存在精度问题, 需走common兜底模板
 constexpr int64_t kFp32LargeKThreshold = 2048;
-constexpr char kCvUbUnsupportedKeyCondition[] =
-    "(cube_tiling_key_ub != 1 && cube_tiling_key_ub != 2 && cube_tiling_key_ub != 0x20001)";
+std::string GenBmmInputPackSemanticRecord(const std::string &name, size_t graph, size_t result, size_t group) {
+  std::stringstream ss;
+  ss << "  if (ShouldEmitFinalTiling() && tiling->cv_tiling_data.materialize_b\n"
+     << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\n && tiling->cv_tiling_data.b_input_shape[2] == 1U\n#endif\n) {\n"
+     << "    try {\n"
+     << "      TemplateSemanticRecord input_record;\n"
+     << "      input_record.stage = \"cube_tiling\";\n"
+     << "      input_record.has_group = input_record.has_identity = true;\n"
+     << "      input_record.graph = " << graph << "U;\n"
+     << "      input_record.result = " << result << "U;\n"
+     << "      input_record.group = " << group << "U;\n"
+     << "      input_record.tiling_key = static_cast<uint32_t>(cube_tiling_key);\n"
+     << "      input_record.template_name = \"CvMaterializeBmmInput\";\n"
+     << "      input_record.semantic_name = \"" << name << "\";\n"
+     << "      input_record.name_status = \"" << (name.empty() ? "unavailable" : "exact") << "\";\n"
+     << "      EmitTemplateSemanticRecord(input_record);\n"
+     << "    } catch (...) {}\n"
+     << "  }\n";
+  return ss.str();
+}
 
-std::string GenCvUbUnsupportedKeyCondition(const MatMulCubeInfo &cube_info) {
-  std::string condition = kCvUbUnsupportedKeyCondition;
-  // Native Tensor B-full-load supports split-M UB output without dtype conversion.
-  if (!cube_info.is_batch && cube_info.type_size == sizeof(float)) {
-    condition.insert(condition.size() - 1U, " && cube_tiling_key_ub != 0x20002");
+// The input plan is chosen by native Cube tiling, independently of the vector ATT case.
+std::string GenBmmInputPackSemanticLog(const ascir::FusedScheduledResult &fused) {
+  const auto view = FindBmmInputView(fused);
+  if (!CanPackBmmInput(view)) {
+    return "";
   }
-  return condition;
+  const auto params = CodegenApiParam::TryGetNodeApiParam(view);
+  // The final input record is emitted only after runtime tiling selected the unit-N register path.
+  const std::string feature = params == nullptr ? "" : template_semantic::kRegisterGather;
+  const auto name = feature.empty() ? ""
+                                    : NormalizeTemplateSemanticName(MakeTemplateSemanticName(
+                                          template_semantic::kTranspose, template_semantic::kLoad, "", {feature}));
+  for (size_t graph = 0U; graph < fused.node_idx_to_scheduled_results.size(); ++graph) {
+    const auto &results = fused.node_idx_to_scheduled_results[graph];
+    for (size_t result = 0U; result < results.size(); ++result) {
+      const auto &groups = results[result].schedule_groups;
+      for (size_t group = 0U; group < groups.size(); ++group) {
+        for (const auto &impl : groups[group].impl_graphs) {
+          for (const auto &node : impl.GetAllNodes()) {
+            if (GetBmmInputView(node) != view) {
+              continue;
+            }
+            return GenBmmInputPackSemanticRecord(name, graph, result, group);
+          }
+        }
+      }
+    }
+  }
+  return "";
 }
 
 std::string GenWorkspaceCheckedHelpers() {
@@ -114,7 +154,6 @@ void GenInductorCvSafetyFallback(std::stringstream &ss, uint64_t count, const st
      << std::endl;
   ss << indent << "// Rebase the selected Common key after the " << common_begin << " UB cases." << std::endl;
   ss << indent << "const bool is_cv_safety_aiv_only = is_cv_safety_aiv_only_mode(cube_tiling_key);" << std::endl;
-  ss << indent << "const bool is_cv_safety_mix = is_cv_safety_mix_mode(cube_tiling_key);" << std::endl;
   ss << indent << "const bool use_launch_aic_num = is_cv_safety_blockidx_scheduled_mode(cube_tiling_key);" << std::endl;
   ss << indent << "uint32_t vec_block_dim = tiling->tiling_data.get_block_dim();" << std::endl;
   ss << indent << "uint64_t vec_wss = 0U;" << std::endl;
@@ -130,8 +169,7 @@ void GenInductorCvSafetyFallback(std::stringstream &ss, uint64_t count, const st
   ss << indent << "}" << std::endl;
   ss << indent << "tiling->cv_tiling_data.fusion_mode = 1;" << std::endl;
   ss << indent << "tiling->cv_tiling_data.ub_mode = 0;" << std::endl;
-  ss << indent << "tiling->cv_tiling_data.mix_mode = is_cv_safety_aiv_only ? 2 : (is_cv_safety_mix ? 1 : 0);"
-     << std::endl;
+  ss << indent << "tiling->cv_tiling_data.mix_mode = is_cv_safety_fusion_mode(cube_tiling_key);" << std::endl;
   ss << indent << "tiling->cv_tiling_data.cv_aic_num = use_launch_aic_num ? *blockDim : cube_block_dim;" << std::endl;
   ss << indent << "tiling->cv_tiling_data.cv_aiv_num = vec_block_dim;" << std::endl;
   ss << indent << "tiling->cv_tiling_data.cv_vec_wss = vec_wss;" << std::endl;
@@ -1286,7 +1324,7 @@ std::string TilingLib::GenCubeFusionTilingBodyInductor(const ascir::FusedSchedul
   ss << "  if (!CallCubeTiling(" << shape_dim_param
      << "ws_size, cube_block_dim, cube_tiling_key, basem, basen, tiling)) {return -1;}" << std::endl;
   ss << "  tiling->cube_tiling_key = cube_tiling_key;" << std::endl;
-  ss << "  int64_t cube_tiling_key_ub = cube_tiling_key & ~0xF0;" << std::endl;
+  ss << GenBmmInputPackSemanticLog(fused_schedule_result);
   // 32元素对齐: 最坏dtype(bool)的32B行对齐行宽也是basen_align, 保证按行宽申请的
   // queue tensor在任何dtype下都不超过求解器按STAGE_SIZE_NAME给出的UB元素预算
   ss << "  const int32_t ub_align_value = 32;" << std::endl;
@@ -1308,7 +1346,11 @@ std::string TilingLib::GenCubeFusionTilingBodyInductor(const ascir::FusedSchedul
 
   // fp32且K轴大于阈值且未启用hf32时, CV融合UB模板有精度问题, 强制走common兜底
   std::string fp32_large_k_cond = GenFp32LargeKCondition(cube_info);
-  ss << "  if (" << GenCvUbUnsupportedKeyCondition(cube_info) << " || (" << fp32_large_k_cond << ")) {" << std::endl;
+  ss << "  if (!is_cv_ub_supported_key(cube_tiling_key) || (" << fp32_large_k_cond << ")";
+  if (FindBmmInputView(fused_schedule_result) != nullptr && !IsRegisterBmmInputPackSupported()) {
+    ss << " || tiling->cv_tiling_data.materialize_b";
+  }
+  ss << ") {" << std::endl;
   const std::string tiling_entry = use_att_codegen ? "GetTilingCore" : "GetTiling";
   GenInductorCvSafetyFallback(ss, count, "    ", fallback_final_tiling_call, tiling_entry);
   ss << "  }" << std::endl;
@@ -1351,6 +1393,7 @@ std::string TilingLib::GenCallCubeTilingForInductor(const ascir::FusedScheduledR
   ss << "using namespace ge::autofuse;" << std::endl;
   AppendCvBaseAlignHelperDefs(ss);
   AppendCvSafetyMixModeHelperDefs(ss, cube_info.is_batch);
+  AppendCvUbSupportedKeyHelperDef(ss, (!cube_info.is_batch && cube_info.type_size == sizeof(float)) ? "true" : "false");
 
   // 在CallCubeTiling函数之前定义全局变量（用于静态shape常量生成）
   ss << "// Global variable to store tiling bytes for const generation in static shape\n";
@@ -1360,7 +1403,7 @@ std::string TilingLib::GenCallCubeTilingForInductor(const ascir::FusedScheduledR
         "&basen, CVAutofuseTilingData *tiling_data) {"
      << std::endl;
   GenCallCubeTilingCacheRead(ss, dynamic_shape_vars);
-  ss << ProcessCubeKernelTilingFromFusedResult(fused_schedule_result) << std::endl;
+  ss << ProcessCubeKernelTilingFromFusedResult(fused_schedule_result, true) << std::endl;
   GenCallCubeTilingCacheWrite(ss, dynamic_shape_vars);
   ss << "return true;" << std::endl;
   ss << "}" << std::endl;
@@ -1380,11 +1423,22 @@ void TilingLib::GenCallCubeTilingCacheRead(std::stringstream &ss,
   ss << "static uint32_t g_cube_tiling_cache_basen = 0;\n";
   ss << "static uint8_t g_cube_tiling_cache_bytes[sizeof(tiling_data->matmul_tiling_data)] = {};\n";
   ss << "static size_t g_cube_tiling_cache_bytes_size = 0;\n";
+  ss << "#ifdef CV_BMM_INPUT_VIEW\n";
+  ss << "static bool g_cube_tiling_cache_materialize_b = false;\n";
+  ss << "static uint64_t g_cube_tiling_cache_b_workspace_offset = 0U;\n";
+  ss << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\nstatic uint64_t g_cube_tiling_cache_b_input_shape[3] = {};\n#endif\n";
+  ss << "#endif\n";
   ss << "if (g_cube_tiling_cache_valid";
   for (const auto &var_name : dynamic_shape_vars) {
     ss << " && g_cube_tiling_cache_" << var_name << " == " << var_name;
   }
   ss << ") {\n";
+  ss << "#ifdef CV_BMM_INPUT_VIEW\n";
+  ss << "  tiling_data->cv_tiling_data.materialize_b = g_cube_tiling_cache_materialize_b;\n";
+  ss << "  tiling_data->cv_tiling_data.b_workspace_offset = g_cube_tiling_cache_b_workspace_offset;\n";
+  ss << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\n"
+        "  std::copy_n(g_cube_tiling_cache_b_input_shape, 3U, tiling_data->cv_tiling_data.b_input_shape);\n#endif\n";
+  ss << "#endif\n";
   ss << "  ws_size = g_cube_tiling_cache_ws_size;\n";
   ss << "  cube_block_dim = g_cube_tiling_cache_block_dim;\n";
   ss << "  tiling_key = g_cube_tiling_cache_tiling_key;\n";
@@ -1398,6 +1452,12 @@ void TilingLib::GenCallCubeTilingCacheRead(std::stringstream &ss,
 
 void TilingLib::GenCallCubeTilingCacheWrite(std::stringstream &ss,
                                             const std::vector<std::string> &dynamic_shape_vars) const {
+  ss << "#ifdef CV_BMM_INPUT_VIEW\n";
+  ss << "g_cube_tiling_cache_materialize_b = tiling_data->cv_tiling_data.materialize_b;\n";
+  ss << "g_cube_tiling_cache_b_workspace_offset = tiling_data->cv_tiling_data.b_workspace_offset;\n";
+  ss << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\n"
+        "std::copy_n(tiling_data->cv_tiling_data.b_input_shape, 3U, g_cube_tiling_cache_b_input_shape);\n#endif\n";
+  ss << "#endif\n";
   ss << "g_cube_tiling_cache_valid = true;\n";
   for (const auto &var_name : dynamic_shape_vars) {
     ss << "g_cube_tiling_cache_" << var_name << " = " << var_name << ";\n";
@@ -1716,7 +1776,6 @@ static void AppendCubeFusionInitCode(std::stringstream &ss, const std::string &s
   ss << "  uint32_t basen = 0;" << std::endl;
   ss << "  if (!CallCubeTiling(" << shape_dim_param
      << "ws_size, cube_block_dim, cube_tiling_key, basem, basen, tiling_data)) {return ge::GRAPH_FAILED;}" << std::endl;
-  ss << "  int64_t cube_tiling_key_ub = cube_tiling_key & ~0xF0;" << std::endl;
   ss << "  ResLimit limit;" << std::endl << "  limit.aiv_num = parse->aiv_num;" << std::endl;
   ss << "  limit.ub_size = (uint32_t)parse->ub_size;" << std::endl;
   ss << "  auto ret = ge::GRAPH_SUCCESS;" << std::endl;
@@ -1786,8 +1845,8 @@ void TilingLib::AppendCubeFusionUbModeCode(std::stringstream &ss,
   ss << "    set_g_basen_basem_align(basen_basem_align);" << std::endl;
   ss << "    tiling->tiling_data.set_block_dim(limit->aiv_num);" << std::endl;
   ss << "    tiling->tiling_data.set_ub_size(limit->ub_size - 256);" << std::endl;
-  ss << "    if (" << GenCvUbUnsupportedKeyCondition(cube_info) << " || (" << GenFp32LargeKCondition(cube_info)
-     << ")) {" << std::endl;
+  ss << "    if (!is_cv_ub_supported_key(cube_tiling_key) || (" << GenFp32LargeKCondition(cube_info) << ")) {"
+     << std::endl;
   GenInductorCvSafetyFallback(ss, count, "      ", "", "GetTiling", ub_count);
   ss << "    }" << std::endl;
   AppendCubeFusionUbSelectionCode(ss, cube_info, non_db_cases, count);
@@ -1823,8 +1882,7 @@ static void AppendCubeFusionCommonCode(std::stringstream &ss, const std::string 
   ss << "  *context->GetWorkspaceSizes(1) = static_cast<int64_t>(total_workspace_size);" << std::endl;
   ss << "  tiling_data->cv_tiling_data.fusion_mode = 1;" << std::endl;
   ss << "  tiling_data->cv_tiling_data.ub_mode = 0;" << std::endl;
-  ss << "  tiling_data->cv_tiling_data.mix_mode = aiv_only ? 2 : (is_cv_safety_mix_mode(cube_tiling_key) ? 1 : 0);"
-     << std::endl;
+  ss << "  tiling_data->cv_tiling_data.mix_mode = is_cv_safety_fusion_mode(cube_tiling_key);" << std::endl;
   ss << "  tiling_data->cv_tiling_data.cv_aic_num = is_cv_safety_blockidx_scheduled_mode(cube_tiling_key) ? "
         "launch_block_dim : cube_block_dim;"
      << std::endl;

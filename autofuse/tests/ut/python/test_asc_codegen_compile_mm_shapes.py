@@ -21,6 +21,57 @@ def compiler():
 
 
 @pytest.mark.parametrize(
+    "a,b,transpose_a,transpose_b,expected",
+    [
+        ((2, 1, 32, 1536), (1, 2, 1536, 64), False, False, (2, 2, 32, 64)),
+        ((3, 1, 32, 1536), (1, 3, 1536, 64), False, False, (3, 3, 32, 64)),
+        ((2, 1, 3, 32, 64), (1, 4, 1, 64, 16), False, False, (2, 4, 3, 32, 16)),
+        ((2, 1, 1536, 32), (1, 2, 64, 1536), True, True, (2, 2, 32, 64)),
+        ((32, 64), (2, 64, 16), False, False, (2, 32, 16)),
+        ((2, 32, 64), (64, 16), False, False, (2, 32, 16)),
+        ((2, 32, 64), (2, 64, 16), False, False, (2, 32, 16)),
+        ((32, 64), (64, 16), False, False, (32, 16)),
+        ((-1, 32, 64), (-1, 64, 16), False, False, (-1, 32, 16)),
+        ((-1, 1, 32, 64), (1, -1, 64, 16), False, False, (-1, -1, 32, 16)),
+    ],
+)
+def test_cube_output_uses_input_batch_broadcast(
+    compiler, a, b, transpose_a, transpose_b, expected
+):
+    # The vector output may broadcast further; its descriptor must stay intact.
+    vector_output = dict(shape=(4, *expected), dtype="float32")
+    _, outputs, _ = compiler._build_mm_args(
+        [
+            dict(shape=a, dtype="float32"),
+            dict(shape=b, dtype="float32"),
+            vector_output,
+            "kernel",
+        ],
+        2,
+        dict(value=transpose_a),
+        dict(value=transpose_b),
+    )
+    assert outputs[0]["shape"] == expected
+    assert outputs[0]["ori_shape"] == expected
+    assert vector_output == dict(shape=(4, *expected), dtype="float32")
+
+
+def test_cube_output_rejects_incompatible_batch_shapes(compiler):
+    with pytest.raises(ValueError, match="batch dimensions cannot broadcast"):
+        compiler._build_mm_args(
+            [
+                dict(shape=(2, 32, 64), dtype="float32"),
+                dict(shape=(3, 64, 16), dtype="float32"),
+                dict(shape=(3, 32, 16), dtype="float32"),
+                "kernel",
+            ],
+            2,
+            dict(value=False),
+            dict(value=False),
+        )
+
+
+@pytest.mark.parametrize(
     "a,b,specialized,transpose_a,transpose_b,bias,expected",
     [
         ((12, -1, 64), (12, 64, 100), (12, 50, 64), False, False, False, (12, 50, 100)),

@@ -307,6 +307,12 @@ Status TilingLib::ExtractInputsFromMatMulNode(const ge::AscNodePtr &matmul_node,
 
     TensorInfo tensor_info;
     GE_CHK_STATUS(GetInputTensorInfoFromLoadNode(load_node, tensor_info), "Get matmul input info failed.");
+    const auto bmm_input_view = i == 1U ? GetBmmInputView(matmul_node) : nullptr;
+    if (bmm_input_view != nullptr) {
+      tensor_info.strides = bmm_input_view->outputs[0].attr.strides;
+      // A unit N axis may have zero stride after loop normalization.
+      tensor_info.strides.back() = af::sym::kSymbolOne;
+    }
     inputs.push_back(tensor_info);
   }
 
@@ -346,6 +352,9 @@ std::string TilingLib::GenerateTensorInfoCode(const TensorInfo &tensor, const st
   ss << "  " << var_name << ".format = \"" << tensor.format << "\";\n";
   ss << "  " << var_name << ".shape = " << TensorShapeToStr(tensor.shape) << ";\n";
   ss << "  " << var_name << ".ori_shape = " << TensorShapeToStr(tensor.ori_shape) << ";\n";
+  if (!tensor.strides.empty()) {
+    ss << "  " << var_name << ".strides = " << TensorShapeToStr(tensor.strides) << ";\n";
+  }
   ss << "  " << var_name << ".param_name = \"" << tensor.param_name << "\";\n";
   return ss.str();
 }
@@ -450,6 +459,16 @@ void TilingLib::GenerateTilingCallCode(std::stringstream &code_ss, bool is_batch
   code_ss << "  return false;\n";
   code_ss << "}\n";
   code_ss << "ws_size = result.workspace_size;\n";
+  code_ss << "#ifdef CV_BMM_INPUT_VIEW\n";
+  code_ss << "tiling_data->cv_tiling_data.materialize_b = result.materialize_b;\n";
+  code_ss << "tiling_data->cv_tiling_data.b_workspace_offset = result.b_workspace_offset;\n";
+  code_ss << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\n";
+  code_ss << "const auto b_input_shape = inputs[1].shape;\n";
+  code_ss << "for (size_t i = 0U; i < 3U; ++i) {\n";
+  code_ss << "  tiling_data->cv_tiling_data.b_input_shape[i] = static_cast<uint64_t>(b_input_shape[i]);\n";
+  code_ss << "}\n";
+  code_ss << "#endif\n";
+  code_ss << "#endif\n";
 
   // 保存字节流到全局变量（用于静态shape常量生成）
   code_ss << "// Save tiling bytes for const generation in static shape\n";
@@ -502,8 +521,8 @@ std::string TilingLib::GenerateMatMulTilingCode(const CompileInfo &compile_info,
   return code_ss.str();
 }
 
-std::string TilingLib::ProcessCubeKernelTilingFromFusedResult(
-    const ascir::FusedScheduledResult &fused_schedule_result) const {
+std::string TilingLib::ProcessCubeKernelTilingFromFusedResult(const ascir::FusedScheduledResult &fused_schedule_result,
+                                                              bool enable_input_view) const {
   MatMulCubeInfo cube_info;
   GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
                     "[Extract][MatMulCubeInfo]Failed to extract MatMul cube info from FusedScheduledResult");
@@ -523,6 +542,13 @@ std::string TilingLib::ProcessCubeKernelTilingFromFusedResult(
         })) {
       bias.shape = {bias.shape.back()};
       bias.ori_shape = bias.shape;
+    }
+  }
+
+  // Only Inductor graphs that retain the original B view carry native strides.
+  if (!enable_input_view || FindBmmInputView(fused_schedule_result) == nullptr) {
+    for (auto &input : inputs) {
+      input.strides.clear();
     }
   }
 
@@ -602,6 +628,8 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionDynamic(
   GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
                     "[Extract][MatMulCubeInfo]Failed to extract MatMul cube info from FusedScheduledResult");
   AppendCvSafetyMixModeHelperDefs(call_cube_tiling, cube_info.is_batch);
+  AppendCvUbSupportedKeyHelperDef(call_cube_tiling,
+                                  (!cube_info.is_batch && cube_info.type_size == sizeof(float)) ? "true" : "false");
 
   // 在CallCubeTiling函数之前定义全局变量（用于静态shape常量生成）
   call_cube_tiling << "// Global variable to store tiling bytes for const generation in static shape\n";

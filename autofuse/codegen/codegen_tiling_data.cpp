@@ -10,6 +10,7 @@
 
 #include "codegen_tiling_data.h"
 #include "codegen_kernel.h"
+#include "codegen_tiling_utils.h"
 #include <sstream>
 #include <iomanip>
 
@@ -249,6 +250,12 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
       }
     }
 
+    if (is_inductor && FindBmmInputView(fused_schedule_result) != nullptr) {
+      ss << "#define CV_BMM_INPUT_VIEW 1\n";
+      if (!IsFrontendStaticSchedResult(fused_schedule_result)) {
+        ss << "#define CV_DYNAMIC_BMM_INPUT_VIEW 1\n";
+      }
+    }
     ss << "#ifndef DYNAMIC_MM_TILING_DATA\n"
        << "#define DYNAMIC_MM_TILING_DATA\n"
        << "#include \"arch35/mat_mul_tiling_data.h\"\n"
@@ -268,6 +275,13 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
        << "    uint8_t cv_aiv_num;\n"
        << "    uint64_t cv_vec_wss;\n"
        << "    uint8_t mix_mode;\n"
+       << "#ifdef CV_BMM_INPUT_VIEW\n"
+       << "    bool materialize_b;\n"
+       << "    uint64_t b_workspace_offset; // Relative to native Cube workspace, after vector workspace.\n"
+       << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\n"
+       << "    uint64_t b_input_shape[3];\n"
+       << "#endif\n"
+       << "#endif\n"
        << "};\n"
        << "#define CV_TILING_ALIGN_UP(value, align) ((((value) + (align) - 1) / (align)) * (align))\n"
        << "template <typename MatmulTilingT>\n"
@@ -317,20 +331,14 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
        << "#define DTYPE_BIAS " << output_type << "\n"
        << "#define OP_TYPE_RELU_VALUE 0\n";
     if (!is_conv) {
-      // Use the same capability macro as native MM/BMM registration, for both host and device compilation.
-      ss << "#if defined(__FIXED_POINT_ONLY_CUBE_TO_L0C__) && __FIXED_POINT_ONLY_CUBE_TO_L0C__\n"
-         << "#define CV_TENSOR_API_SUPPORTED 0\n#else\n#define CV_TENSOR_API_SUPPORTED 1\n#endif\n"
-         << "#define CV_AVOID_TENSOR_API " << (matmul_attr.offset_x == ascgen_utils::kAvoidTensorApiOffset ? 1 : 0)
-         << "\n"
-         << "#define CV_MM_DISPATCH_SUPPORTED(API, MD, FL, LO) \\\n"
-         << "  (CV_TENSOR_API_SUPPORTED ? \\\n"
-         << "   ((API) != 1 || CV_AVOID_TENSOR_API || (MD) != 0) : \\\n"
-         << "   ((API) == 1 && (MD) == 0 && (LO) == 0))\n"
-         << "#define CV_BMM_DISPATCH_SUPPORTED(API, MD, FL, LO, ITER) \\\n"
-         << "  (CV_TENSOR_API_SUPPORTED ? \\\n"
-         << "   ((API) != 1 || CV_AVOID_TENSOR_API || (FL) == 0) : \\\n"
-         << "   ((MD) == 0 && (LO) == 0 && (((API) == 0 && (ITER) == 0) || \\\n"
-         << "    ((API) == 1 && ((ITER) == 0 || (ITER) == 1)))))\n";
+      const auto b_view = FindBmmInputView(fused_schedule_result);
+      int64_t input_n = 0;
+      const bool may_normalize_unit_n =
+          b_view != nullptr && (!b_view->outputs[0].attr.repeats.back().GetConstValue(input_n) || input_n == 1);
+      AppendCvPlatformSelectionDefs(
+          ss, matmul_attr.offset_x == ascgen_utils::kAvoidTensorApiOffset,
+          (matmul_attr.transpose_x1 != 0) || (matmul_attr.adj_x1 != 0),
+          (matmul_attr.transpose_x2 != 0) || (matmul_attr.adj_x2 != 0) || may_normalize_unit_n);
     }
     if (const_mode_) {
       ss << "template <typename T>\n"
@@ -746,7 +754,14 @@ std::string codegen::TilingData::GenCVConstReplace(const std::string &tiling_dat
   ss << "  k_const_tiling_data_ss << std::to_string((uint32_t)" << tiling_data_struct_name
      << ".cv_tiling_data.cv_vec_wss) << \", \";" << std::endl;
   ss << "  k_const_tiling_data_ss << std::to_string((uint32_t)" << tiling_data_struct_name
-     << ".cv_tiling_data.mix_mode) << \"}}}, \";" << std::endl;
+     << ".cv_tiling_data.mix_mode);" << std::endl;
+  ss << "#ifdef CV_BMM_INPUT_VIEW\n";
+  ss << "  k_const_tiling_data_ss << \", \" << (" << tiling_data_struct_name
+     << ".cv_tiling_data.materialize_b ? \"true\" : \"false\");" << std::endl;
+  ss << "  k_const_tiling_data_ss << \", \" << std::to_string(" << tiling_data_struct_name
+     << ".cv_tiling_data.b_workspace_offset);" << std::endl;
+  ss << "#endif\n";
+  ss << "  k_const_tiling_data_ss << \"}}}, \";" << std::endl;
   ss << "  k_const_tiling_data_ss << std::to_string((uint32_t)" << tiling_data_struct_name
      << ".stage_size_name) << \", \";" << std::endl;
   ss << "  k_const_tiling_data_ss << std::to_string((uint32_t)" << tiling_data_struct_name

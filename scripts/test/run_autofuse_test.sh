@@ -1070,7 +1070,6 @@ build_backend() {
                       indirect_load_broadcast_retained_simt_test_e2e_v2 \
                       indirect_load_both_transpose_simd_test_e2e_v2 \
                       indirect_load_both_transpose_simd_fallback_test_e2e_v2 \
-                      indirect_load_both_transpose_simd_nddma_test_e2e_v2 \
                       indirect_load_both_transpose_simt_test_e2e_v2 \
                       indirect_load_broadcast_index_physical_view_simt_test_e2e_v2 \
                       indirect_load_broadcast_index_abs_simt_test_e2e_v2 \

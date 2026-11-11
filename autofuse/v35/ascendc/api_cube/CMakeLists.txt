@@ -3,6 +3,7 @@ set(ascendc_api_cube_src
         matmul/matmul_include_headers.h
         matmul/mat_mul_tiling_key.h
         matmul/batch_mat_mul_v3_tiling_key.h
+        matmul/mat_mul_basic_cv_pipeline.h
         matmul/mat_mul_pingpong_basic_cmct.h
         matmul/mat_mul_pingpong_tensor_cv.h
         matmul/mat_mul_tensor_include_headers.h

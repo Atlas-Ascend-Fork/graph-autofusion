@@ -169,6 +169,12 @@ __aicore__ inline __attribute__((always_inline)) void batch_mat_mul_v3(GM_ADDR a
     BMMV3_IMPL_CLASS_COMMON_TRNAS(aTran, bTran, BatchMatMulV3Advanced::BatchMatMulAswKernel,
                                   BatchMatMulV3Advanced::BatchMatMulAswBlock, MM_CFG_NO_PRELOAD);
 #if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 5102))
+  } else if constexpr (BATCH_API_LEVEL == MAT_MUL_TENSOR_LEVEL && BMODEL == MAT_MUL_BASIC &&
+                       BATCH_FULL_LOAD == MAT_MUL_NO_FULL_LOAD && BATCH_L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY &&
+                       BATCH_ITER_MODEL == MAT_MUL_BROADCAST_BATCH) {
+    GET_TILING_DATA_WITH_STRUCT(BatchMatMulV3TilingData, tilingData, tilingGM);
+    BatchMatMulV3Advanced::BatchMatMulBroadcastKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB,
+                                                      layoutC>(aGM, bGM, biasGM, cGM, nullptr, tilingData);
   } else if constexpr (BATCH_API_LEVEL == MAT_MUL_BASIC_LEVEL && BMODEL == MAT_MUL_BASIC &&
                        BATCH_FULL_LOAD == MAT_MUL_NO_FULL_LOAD && BATCH_L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY &&
                        BATCH_ITER_MODEL == MAT_MUL_FOR_BATCH) {

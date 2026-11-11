@@ -67,6 +67,7 @@ struct TensorInfo {
   std::string param_name;
   std::vector<ge::Expression> shape;
   std::vector<ge::Expression> ori_shape;
+  std::vector<ge::Expression> strides;
   std::string dtype;
   std::string format;
   std::string name;
@@ -448,7 +449,8 @@ class TilingLib {
   std::string GenerateMatMulTilingCode(const CompileInfo &compile_info, const std::vector<TensorInfo> &inputs,
                                        const std::vector<TensorInfo> &outputs, const std::vector<AttrInfo> &attrs,
                                        bool is_batch) const;
-  std::string ProcessCubeKernelTilingFromFusedResult(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  std::string ProcessCubeKernelTilingFromFusedResult(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                                     bool enable_input_view = false) const;
   std::string GenCubeFusionTilingBodyInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                               const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                               const std::string &shape_dim_param) const;

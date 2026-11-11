@@ -32,6 +32,7 @@ struct TensorInfo {
     std::string param_name;
     std::vector<int64_t> shape;
     std::vector<int64_t> ori_shape;
+    std::vector<int64_t> strides;
     std::string dtype;
     std::string format;
     std::string name;
@@ -74,6 +75,8 @@ struct TilingResult {
     bool atomic_flag = false;
     std::string error_msg;
     bool success = false;
+    bool materialize_b = false;
+    uint64_t b_workspace_offset = 0U;
 
     BatchMatMulV3BasicTilingData batch_matmul_tiling_data;
     MatMulV3BasicTilingData matmul_basic_tiling_data;
@@ -183,6 +186,8 @@ struct RuntimeTilingKey {
   std::string format;
   std::vector<int64_t> input0_shape;
   std::vector<int64_t> input1_shape;
+  std::vector<int64_t> input0_strides;
+  std::vector<int64_t> input1_strides;
   std::vector<int64_t> input2_shape;
   std::vector<int64_t> input3_shape;
   std::string input2_dtype;
@@ -205,11 +210,11 @@ struct RuntimeTilingKey {
   bool operator<(const RuntimeTilingKey &other) const {
     return std::tie(soc_version, device_id, op_type, dtype, format, input0_shape, input1_shape, input2_shape,
                     input3_shape, input2_dtype, input3_dtype, input2_format, input3_format, output_shape, is_batch,
-                    input_num, has_bias, has_offset_w, transpose_x1, transpose_x2, offset_x, op_impl_mode, enable_hf32,
+                    input_num, input0_strides, input1_strides, has_bias, has_offset_w, transpose_x1, transpose_x2, offset_x, op_impl_mode, enable_hf32,
                     aicore_num, aiv_num) <
            std::tie(other.soc_version, other.device_id, other.op_type, other.dtype, other.format, other.input0_shape,
                     other.input1_shape, other.input2_shape, other.input3_shape, other.input2_dtype, other.input3_dtype,
-                    other.input2_format, other.input3_format, other.output_shape, other.is_batch, other.input_num,
+                    other.input2_format, other.input3_format, other.output_shape, other.is_batch, other.input_num, other.input0_strides, other.input1_strides,
                     other.has_bias, other.has_offset_w, other.transpose_x1, other.transpose_x2, other.offset_x,
                     other.op_impl_mode, other.enable_hf32, other.aicore_num, other.aiv_num);
   }
@@ -766,9 +771,11 @@ RuntimeTilingKey MakeRuntimeTilingKey(const TilingRequest &request) {
     key.dtype = request.inputs[0].dtype;
     key.format = request.inputs[0].format;
     key.input0_shape = GetRuntimeShape(request.inputs[0]);
+    key.input0_strides = request.inputs[0].strides;
   }
   if (request.inputs.size() > 1) {
     key.input1_shape = GetRuntimeShape(request.inputs[1]);
+    key.input1_strides = request.inputs[1].strides;
   }
   if (request.inputs.size() > 2) {
     key.input2_shape = GetRuntimeShape(request.inputs[2]);
@@ -1038,6 +1045,10 @@ bool RunSharedCubeTiling(const TilingRequest &request, TilingResult &result) {
   (void)workspace->SetSize(0UL);
 
   gert::StorageFormat storage_format(request.format, request.format, {});
+  std::vector<gert::TensorV2> input_views;
+  if (request.inputs.size() > 1U && !request.inputs[1].strides.empty()) {
+    input_views.reserve(1U);
+  }
   std::vector<gert::Tensor> input_tensors_storage;
   const auto input_slots = BuildMatMulInputSlots(request.inputs, request.matmul_attrs);
   input_tensors_storage.reserve(input_slots.size());
@@ -1048,6 +1059,27 @@ bool RunSharedCubeTiling(const TilingRequest &request, TilingResult &result) {
     }
     ge::Format input_format = FormatToGeFormat(input->format);
     gert::StorageFormat input_storage_format(input_format, input_format, {});
+    if (!input->strides.empty()) {
+      const auto shape = GetRuntimeShape(*input);
+      if (!request.is_batch || scratch.input_tensors.size() != 1U || shape.size() != 3U || input->strides.size() != 3U) {
+        result.error_msg = "Unsupported cube input View descriptor";
+        return false;
+      }
+      int64_t elements = 1;
+      for (const auto dim : shape) {
+        if (dim <= 0 || elements > std::numeric_limits<int64_t>::max() / dim) {
+          result.error_msg = "Invalid cube input View shape";
+          return false;
+        }
+        elements *= dim;
+      }
+      auto storage_shape = MakeStorageShape(*input);
+      FillShape(storage_shape.MutableStorageShape(), {elements});
+      input_views.emplace_back(storage_shape, input_storage_format, DtypeToGeDataType(input->dtype));
+      input_views.back().MutableStride() = gert::Stride({input->strides[0], input->strides[1], input->strides[2]});
+      scratch.input_tensors.push_back(reinterpret_cast<gert::Tensor *>(&input_views.back()));
+      continue;
+    }
     input_tensors_storage.emplace_back(MakeStorageShape(*input), input_storage_format, DtypeToGeDataType(input->dtype));
     scratch.input_tensors.push_back(&input_tensors_storage.back());
   }
@@ -1151,11 +1183,76 @@ void CubeKernelTilingWrapper::BuildMatMulArgs(const std::vector<TensorInfo> &arg
   }
 }
 
+// Native unit-N reshaping only changes the dense view, never the original non-contiguous descriptor.
+static inline void NormalizeMaterializedUnitNBmmInput(TensorInfo &b, std::vector<AttrInfo> &attrs) {
+  if (b.shape.size() != 3U || b.shape.back() != 1 || ReadMatMulAttrs(attrs, true).transpose_x2) {
+    return;
+  }
+  auto transpose = std::find_if(attrs.begin(), attrs.end(), [](const AttrInfo &attr) { return attr.name == "adj_x2"; });
+  if (transpose == attrs.end()) {
+    return;
+  }
+  std::swap(b.shape[1], b.shape[2]);
+  b.ori_shape = b.shape;
+  transpose->value_bool = true;
+}
+
 TilingResult CubeKernelTilingWrapper::DoMatMulTiling(const CompileInfo &compile_info,
                                                      const std::vector<TensorInfo> &inputs,
                                                      const std::vector<TensorInfo> &outputs,
                                                      const std::vector<AttrInfo> &attrs, bool is_batch) {
   TilingResult result;
+  if (is_batch && inputs.size() == 2U && !inputs[1].strides.empty()) {
+    // Preserve native priority: MergeBatch/StreamK still materialize the view.
+    auto dense_inputs = inputs;
+    dense_inputs[1].strides.clear();
+    auto dense_attrs = attrs;
+    NormalizeMaterializedUnitNBmmInput(dense_inputs[1], dense_attrs);
+    result = DoMatMulTiling(compile_info, dense_inputs, outputs, dense_attrs, is_batch);
+    if (!result.success) {
+      return result;
+    }
+    constexpr int64_t kTransposeMask = 0xF0;
+    constexpr int64_t kIterBatchBasic = 0x101;
+    constexpr int64_t kIterBatchTensor = 0x102;
+    constexpr int64_t kL0cToOut = 0x200000;
+    const int64_t family = (result.tiling_key & ~kTransposeMask) & ~kL0cToOut;
+    TilingResult view;
+    if ((family == kIterBatchBasic || family == kIterBatchTensor) &&
+        AutofuseDoCubeMatMulTiling(&compile_info, &inputs, &outputs, &attrs, is_batch, &view) &&
+        ((view.tiling_key & ~kTransposeMask) & ~kL0cToOut) == kIterBatchBasic) {
+      BatchMatMulV3IterBatchBasicTilingData view_tiling = {};
+      const auto shape = GetRuntimeShape(inputs[1]);
+      // A successful key alone does not prove that native tiling consumed the view metadata.
+      if (CopyExactTilingData(view, view.tiling_data.size(), view_tiling) &&
+          view_tiling.innerBatch == static_cast<uint32_t>(shape[0])) {
+        FillTilingMeta(view, is_batch);
+        return view;
+      }
+    }
+    constexpr int64_t kInputWorkspaceAlignment = 512;
+    constexpr int64_t kInputAlignmentPadding = kInputWorkspaceAlignment - 1;
+    uint64_t bytes = static_cast<uint64_t>(ge::GetSizeByDataType(DtypeToGeDataType(inputs[1].dtype)));
+    for (auto dim : GetRuntimeShape(inputs[1])) {
+      if (dim <= 0 || bytes > static_cast<uint64_t>(INT64_MAX - kInputAlignmentPadding) / static_cast<uint64_t>(dim)) {
+        result.success = false;
+        result.error_msg = "BMM input transpose workspace overflow";
+        return result;
+      }
+      bytes *= static_cast<uint64_t>(dim);
+    }
+    bytes = (bytes + kInputAlignmentPadding) / kInputWorkspaceAlignment * kInputWorkspaceAlignment;
+    if (result.workspace_size < 0 || result.workspace_size > INT64_MAX - kInputAlignmentPadding ||
+        bytes > static_cast<uint64_t>(INT64_MAX - result.workspace_size - kInputAlignmentPadding)) {
+      result.success = false;
+      result.error_msg = "BMM input transpose workspace overflow";
+      return result;
+    }
+    result.b_workspace_offset = static_cast<uint64_t>(result.workspace_size);
+    result.workspace_size += static_cast<int64_t>(bytes + kInputAlignmentPadding);
+    result.materialize_b = true;
+    return result;
+  }
   if (AutofuseDoCubeMatMulTiling(&compile_info, &inputs, &outputs, &attrs, is_batch, &result)) {
     FillTilingMeta(result, is_batch);
   } else {

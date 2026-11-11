@@ -18,6 +18,7 @@
 #include "high_perf_tiling_code_gen_impl.h"
 #include "codegen.h"
 #include "codegen_tiling.h"
+#include "codegen_tiling_utils.h"
 #include "codegen_tiling_cube_wrapper.h"
 #include "common_utils.h"
 #include "ascir_ops.h"
@@ -1783,7 +1784,7 @@ TEST_F(TestCodegenTiling, InductorAivOnlyLaunchCoversNativeAndEpilogueBlocks) {
   const auto end = body.find("return 0;", begin);
   ASSERT_NE(end, std::string::npos);
   const auto call_cube_tiling = this->GenCallCubeTilingForInductor(fused, {}, codegen::PgoShapeStringStream{});
-  const auto helpers_begin = call_cube_tiling.find("static inline bool is_cv_safety_aiv_only_mode");
+  const auto helpers_begin = call_cube_tiling.find("static inline constexpr bool is_cv_safety_aiv_only_mode");
   const auto helpers_end = call_cube_tiling.find("// Global variable", helpers_begin);
   ASSERT_NE(helpers_begin, std::string::npos);
   ASSERT_NE(helpers_end, std::string::npos);
@@ -4904,7 +4905,7 @@ TEST_F(TestCodegenTiling, TestBatchMatmulDynamicShapeFuse) {
   EXPECT_NE(common_source.find("const bool aiv_only = is_cv_safety_aiv_only_mode(cube_tiling_key);"),
             std::string::npos);
   EXPECT_NE(common_source.find("launch_block_dim = aiv_only ? block_dim"), std::string::npos);
-  EXPECT_NE(common_source.find("mix_mode = aiv_only ? 2"), std::string::npos);
+  EXPECT_NE(common_source.find("mix_mode = is_cv_safety_fusion_mode(cube_tiling_key)"), std::string::npos);
   EXPECT_NE(common_source.find("cv_aic_num = is_cv_safety_blockidx_scheduled_mode(cube_tiling_key)"),
             std::string::npos);
   EXPECT_EQ(common_source.find("GetCvUbStageSize("), std::string::npos);
@@ -7188,6 +7189,44 @@ TEST_F(TestCodegenTiling, InductorBatchMatmulDispatchShouldKeepReachableBasicFal
   }
 }
 
+TEST_F(TestCodegenTiling, BroadcastBatchUsesCommonPayloadAndRejectsUbDispatch) {
+  for (const bool is_dynamic : {false, true}) {
+    SCOPED_TRACE(is_dynamic);
+    auto graph = ascir::ShareGraph::LoadBatchMatmulElewiseBrcFusedGraph(is_dynamic);
+    optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+    ascir::FusedScheduledResult fused;
+    ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+    const auto launch = codegen::Kernel::GenKernelFuncCallForInductor(fused);
+    EXPECT_NE(launch.find("_DISPATCH_BATCH_MATMUL(2, 0, 0, 0, 5, BatchMatMulV3TilingData)"), std::string::npos);
+    EXPECT_NE(launch.find(
+                  "if constexpr (!is_cv_dispatch_supported(CV_DISPATCH_KEY(API, AT, BT, ITER, BMODEL, FL, LO), 0, 0))"),
+              std::string::npos);
+    EXPECT_NE(
+        launch.find(
+            "if constexpr (!is_cv_dispatch_supported(CV_DISPATCH_KEY(API, AT, BT, ITER, BMODEL, FL, LO), 1, MIX))"),
+        std::string::npos);
+  }
+}
+
+TEST_F(TestCodegenTiling, BroadcastBatchSchedulerUsesActualLaunchCoresForAllTransposes) {
+  for (const bool is_batch : {false, true}) {
+    std::stringstream helpers;
+    codegen::AppendCvSafetyMixModeHelperDefs(helpers, is_batch);
+    const std::string source = "#include <cstdint>\n#include <initializer_list>\n" + helpers.str() + R"(
+int main() {
+  for (const int64_t key : {1282, 1298, 1346, 1362}) {
+    if (is_cv_safety_blockidx_scheduled_mode(key) != )" +
+                               (is_batch ? "true" : "false") + R"() { return 1; }
+    if (is_cv_safety_mix_mode(key) || is_cv_safety_aiv_only_mode(key)) { return 2; }
+  }
+  if (is_cv_safety_blockidx_scheduled_mode(0) || is_cv_safety_blockidx_scheduled_mode(1) ||
+      is_cv_safety_blockidx_scheduled_mode(2)) { return 3; }
+  return 0;
+})";
+    ASSERT_TRUE(CompileAndRunCode(source));
+  }
+}
+
 TEST_F(TestCodegenTiling, InductorCvDispatchUsesCompileTimePlatformAndShapeSelection) {
   for (const bool is_batch : {false, true}) {
     for (const bool is_dynamic : {false, true}) {
@@ -7205,8 +7244,129 @@ TEST_F(TestCodegenTiling, InductorCvDispatchUsesCompileTimePlatformAndShapeSelec
       EXPECT_NE(result.tiling_data.find("#define CV_AVOID_TENSOR_API 0"), std::string::npos);
       EXPECT_NE(result.kernel.find("#define CV_DISPATCH_IF if constexpr"), std::string::npos);
       EXPECT_NE(result.kernel.find("#define CV_DISPATCH_IF if\n"), std::string::npos);
+      EXPECT_NE(result.kernel.find("if constexpr (MIX_MODE == 1)"), std::string::npos);
+      EXPECT_NE(result.kernel.find("if constexpr (MIX_MODE == 2)"), std::string::npos);
       EXPECT_NE(result.kernel.find(is_batch ? "!CV_BMM_DISPATCH_SUPPORTED" : "!CV_MM_DISPATCH_SUPPORTED"),
                 std::string::npos);
+    }
+  }
+}
+
+TEST_F(TestCodegenTiling, CvHostAdmissionCanRejectUnreachableDeviceModesAtCompileTime) {
+  for (const bool is_batch : {false, true}) {
+    for (const bool fp32_output : {false, true}) {
+      std::stringstream helpers;
+      codegen::AppendCvSafetyMixModeHelperDefs(helpers, is_batch);
+      codegen::AppendCvUbSupportedKeyHelperDef(
+          helpers, is_batch ? "false" : (fp32_output ? "sizeof(float) == 4" : "sizeof(uint16_t) == 4"));
+      std::string source = "#include <cstdint>\n#include <initializer_list>\n" + helpers.str() + R"(
+static_assert(is_cv_ub_supported_key(1), "Basic UB");
+static_assert(is_cv_ub_supported_key(2), "Tensor UB");
+static_assert(is_cv_ub_supported_key(0x20001), "Basic B-full-load UB");
+static_assert(!is_cv_ub_supported_key(257), "IterBatch uses Common");
+static_assert(!is_cv_ub_supported_key(1282), "BroadcastBatch uses Common");
+static_assert(!is_cv_ub_supported_key(2097409), "IterBatch Fixpipe uses Common");
+static_assert(!is_cv_ub_supported_key(8193), "K=0 uses Common");
+static_assert(is_cv_safety_fusion_mode(1) == 0, "ordinary Common");
+static_assert(is_cv_safety_fusion_mode(8193) == 2, "AIV-only Common");
+int main() {
+  for (const int64_t trans : {0, 16, 64, 80}) {
+    if (!is_cv_ub_supported_key(1 + trans) || !is_cv_ub_supported_key(2 + trans)) { return 1; }
+    if (is_cv_ub_supported_key(257 + trans) || is_cv_ub_supported_key(1282 + trans)) { return 2; }
+    if (is_cv_safety_fusion_mode(1282 + trans) != 0) { return 3; }
+  }
+)";
+      if (is_batch) {
+        source += "static_assert(is_cv_safety_fusion_mode(2097409) == 1, \"IterBatch MIX\");\n";
+        source += "static_assert(is_cv_safety_fusion_mode(513) == 2, \"ToMul AIV\");\n";
+      } else {
+        source += "static_assert(is_cv_safety_fusion_mode(2097154) == 1, \"Tensor Fixpipe MIX\");\n";
+      }
+      source += std::string("static_assert(is_cv_ub_supported_key(0x20002) == ") +
+                ((!is_batch && fp32_output) ? "true" : "false") + ", \"dtype-aware Tensor B-full-load\");\n";
+      source += "return 0;\n}\n";
+      ASSERT_TRUE(CompileAndRunCode(source));
+    }
+  }
+}
+
+TEST_F(TestCodegenTiling, GeCvDynamicKernelSpecializesOnlyHostReachableModes) {
+  for (const bool is_batch : {false, true}) {
+    for (const bool is_dynamic : {false, true}) {
+      SCOPED_TRACE(is_batch);
+      SCOPED_TRACE(is_dynamic);
+      auto graph = is_batch ? ascir::ShareGraph::LoadBatchMatmulElewiseBrcFusedGraph(is_dynamic)
+                            : ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph(is_dynamic);
+      optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+      ascir::FusedScheduledResult fused;
+      ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+      codegen::Codegen codegen(codegen::CodegenOptions{});
+      std::string kernel;
+      ASSERT_EQ(codegen.GenerateKernel(fused, kernel), af::SUCCESS);
+      if (is_dynamic) {
+        EXPECT_NE(kernel.find("#define CV_TENSOR_API_SUPPORTED"), std::string::npos);
+        EXPECT_NE(kernel.find("#define CV_AVOID_TENSOR_API 0"), std::string::npos);
+        EXPECT_NE(kernel.find("static inline __aicore__ constexpr bool is_cv_ub_supported_key"), std::string::npos);
+        EXPECT_NE(kernel.find("constexpr int MIX_MODE = is_cv_safety_fusion_mode(cv_cube_tiling_key)"),
+                  std::string::npos);
+        EXPECT_NE(kernel.find("if constexpr (is_cv_ub_supported_key(cv_cube_tiling_key))"), std::string::npos);
+        EXPECT_NE(kernel.find("if constexpr (MIX_MODE == 1)"), std::string::npos);
+      } else {
+        EXPECT_EQ(kernel.find("#define CV_TENSOR_API_SUPPORTED"), std::string::npos);
+        EXPECT_EQ(kernel.find("constexpr int MIX_MODE ="), std::string::npos);
+        EXPECT_EQ(kernel.find("if constexpr (is_cv_ub_supported_key(cv_cube_tiling_key))"), std::string::npos);
+      }
+    }
+  }
+}
+
+TEST_F(TestCodegenTiling, CvUbAdmissionUsesCubeOutputByteSize) {
+  std::stringstream source;
+  source << "#include <cstdint>\n";
+  for (const std::string output_type : {"float", "int32_t", "uint32_t", "uint16_t"}) {
+    source << "namespace output_" << output_type << " {\n";
+    codegen::AppendCvUbSupportedKeyHelperDef(source, "sizeof(" + output_type + ") == sizeof(float)");
+    source << "static_assert(is_cv_ub_supported_key(0x20002) == (sizeof(" << output_type
+           << ") == sizeof(float)), \"match host output-size rule\");\n}\n";
+  }
+  source << "int main() { return 0; }\n";
+  ASSERT_TRUE(CompileAndRunCode(source.str()));
+}
+
+TEST_F(TestCodegenTiling, CvTransposePruningKeepsCanonicalZerosAndLegacyPlatforms) {
+  for (const bool is_inductor : {false, true}) {
+    for (const bool tensor_supported : {false, true}) {
+      for (const bool avoid_tensor_api : {false, true}) {
+        for (const bool a_trans : {false, true}) {
+          for (const bool b_trans : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "is_inductor=" << is_inductor << ", tensor_supported="
+                                              << tensor_supported << ", avoid_tensor_api=" << avoid_tensor_api
+                                              << ", a_trans=" << a_trans << ", b_trans=" << b_trans);
+            std::stringstream source;
+            source << "#define MAT_MUL_NO_TRANS 0\n#define MAT_MUL_TRANS 1\n"
+                   << "#define __FIXED_POINT_ONLY_CUBE_TO_L0C__ " << (tensor_supported ? 0 : 1) << "\n";
+            if (is_inductor) {
+              source << "#define INDUCTOR_CV_FUSION\n";
+            }
+            codegen::AppendCvPlatformSelectionDefs(source, avoid_tensor_api, a_trans, b_trans);
+            const bool inductor_tensor_api = is_inductor && tensor_supported && !avoid_tensor_api;
+            const bool full_registration = !inductor_tensor_api;
+            source << "static_assert(CV_TRANSPOSE_SUPPORTED(0, 0), \"native normalization remains reachable\");\n"
+                   << "static_assert(CV_TRANSPOSE_SUPPORTED(1, 0) == " << (full_registration || a_trans)
+                   << ", \"A transpose admission\");\n"
+                   << "static_assert(CV_TRANSPOSE_SUPPORTED(0, 1) == " << (full_registration || b_trans)
+                   << ", \"B transpose admission\");\n"
+                   << "constexpr int a_choices[] = {CV_A_TRANS_CHOICES};\n"
+                   << "constexpr int b_choices[] = {CV_B_TRANS_CHOICES};\n"
+                   << "static_assert(sizeof(a_choices) / sizeof(int) == " << ((full_registration || a_trans) ? 2 : 1)
+                   << ", \"A registration matches dispatcher\");\n"
+                   << "static_assert(sizeof(b_choices) / sizeof(int) == " << ((full_registration || b_trans) ? 2 : 1)
+                   << ", \"B registration matches dispatcher\");\n"
+                   << "int main() { return 0; }\n";
+            ASSERT_TRUE(CompileAndRunCode(source.str()));
+          }
+        }
+      }
     }
   }
 }
@@ -7297,7 +7457,7 @@ TEST_F(TestCodegenTiling, CodegenGenerateForInductorCvFusionShouldFallbackToSafe
   ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), af::SUCCESS);
 
   // FP32 B-full-load can use the Tensor CV epilogue; failed UB cases still fall back to Common.
-  EXPECT_NE(result.tiling.find("cube_tiling_key_ub != 0x20002"), std::string::npos);
+  EXPECT_NE(result.tiling.find("key == 0x20002"), std::string::npos);
   EXPECT_EQ(result.tiling.find("if (!optiling::GetTiling(tiling->tiling_data, 1)) {\n      return -1;"),
             std::string::npos);
   const std::string tiling_entry =
@@ -7374,6 +7534,8 @@ TEST_F(TestCodegenTiling, CodegenGenerateForInductorCvFusionLaunchDecoupleContro
   EXPECT_EQ(rt_result.kernel.find("int8_t FUSION_MODE"), std::string::npos);
   EXPECT_EQ(rt_result.kernel.find("int8_t UB_MODE"), std::string::npos);
   EXPECT_EQ(rt_result.kernel.find("int8_t MIX_MODE"), std::string::npos);
+  EXPECT_EQ(rt_result.kernel.find("if constexpr (MIX_MODE"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("if (cv_tiling_data.mix_mode == 1)"), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, CodegenGenerateShouldNotEmitSplitMarkers) {
@@ -7829,4 +7991,241 @@ TEST_F(TestCodegenTiling, CodegenViaMlirTensorFlowSceneCubeFusionFallsBackToLega
   EXPECT_EQ(mlir_result.tiling, legacy_result.tiling);
   EXPECT_EQ(mlir_result.tiling_data, legacy_result.tiling_data);
   // proto/infer_shape are written by neither path, so comparing them proves nothing.
+}
+
+TEST_F(TestCodegenTiling, StaticBmmInputViewPreservesNativeStrides) {
+  af::AscGraph graph("static_bmm_input_view");
+  CreateBatchMatmulElemwiseFusedGraph(graph);
+  auto b = graph.FindNode("load1");
+  auto cube = graph.FindNode("batch_matmul");
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(cube, nullptr);
+  EXPECT_EQ(codegen::GetBmmInputView(cube), nullptr);
+  b->outputs[0].attr.strides = {af::Symbol(32), af::Symbol(64), af::Symbol(1)};
+  EXPECT_EQ(codegen::GetBmmInputView(cube), b);
+
+  codegen::TilingLib tiling_lib("", "");
+  std::vector<codegen::TensorInfo> inputs;
+  ASSERT_EQ(tiling_lib.ExtractInputsFromMatMulNode(cube, inputs), af::SUCCESS);
+  ASSERT_EQ(inputs.size(), 2U);
+  EXPECT_TRUE(inputs[0].strides.empty());
+  ASSERT_EQ(inputs[1].strides.size(), 3U);
+  EXPECT_EQ(inputs[1].strides[1], af::Symbol(64));
+}
+
+TEST_F(TestCodegenTiling, StaticBmmInputViewNormalizesUnitNStride) {
+  af::AscGraph graph("static_bmm_unit_n_view");
+  CreateBatchMatmulElemwiseFusedGraph(graph);
+  auto b = graph.FindNode("load1");
+  auto cube = graph.FindNode("batch_matmul");
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(cube, nullptr);
+  auto &attr = b->outputs[0].attr;
+  attr.repeats[2] = af::sym::kSymbolOne;
+  attr.strides = {af::Symbol(1), af::Symbol(2), af::Symbol(0)};
+  ASSERT_EQ(codegen::GetBmmInputView(cube), b);
+
+  codegen::TilingLib tiling_lib("", "");
+  std::vector<codegen::TensorInfo> inputs;
+  ASSERT_EQ(tiling_lib.ExtractInputsFromMatMulNode(cube, inputs), af::SUCCESS);
+  ASSERT_EQ(inputs.size(), 2U);
+  ASSERT_EQ(inputs[1].strides.size(), 3U);
+  EXPECT_EQ(inputs[1].strides.back(), af::sym::kSymbolOne);
+  EXPECT_EQ(attr.strides.back(), af::Symbol(0));
+  attr.repeats[2] = af::Symbol(0);
+  EXPECT_EQ(codegen::GetBmmInputView(cube), nullptr);
+  attr.repeats[2] = af::sym::kSymbolOne;
+  attr.repeats[1] = af::sym::kSymbolOne;
+  EXPECT_EQ(codegen::GetBmmInputView(cube), nullptr);
+  attr.repeats[1] = af::Symbol(64);
+  attr.repeats[0] = af::sym::kSymbolOne;
+  EXPECT_EQ(codegen::GetBmmInputView(cube), nullptr);
+}
+
+TEST_F(TestCodegenTiling, StaticBmmInputViewRejectsSymbolicAndOtherLayouts) {
+  af::AscGraph graph("unsupported_bmm_input_view");
+  CreateBatchMatmulElemwiseFusedGraph(graph);
+  auto b = graph.FindNode("load1");
+  auto cube = graph.FindNode("batch_matmul");
+  ASSERT_NE(b, nullptr);
+  b->outputs[0].attr.strides = {af::Symbol(32), af::Symbol(64), af::Symbol(1)};
+  b->outputs[0].attr.repeats[0] = graph.CreateSizeVar("batch");
+  EXPECT_EQ(codegen::GetBmmInputView(cube), nullptr);
+  b->outputs[0].attr.repeats[0] = af::Symbol(2);
+  for (const int64_t inner_stride : {0, 2, -1}) {
+    b->outputs[0].attr.strides[2] = af::Symbol(inner_stride);
+    EXPECT_EQ(codegen::GetBmmInputView(cube), nullptr);
+  }
+  EXPECT_EQ(codegen::GetBmmInputView(nullptr), nullptr);
+  EXPECT_EQ(codegen::GetBmmInputView(b), nullptr);
+}
+
+TEST_F(TestCodegenTiling, StaticBmmInputViewIsRestrictedToInductor) {
+  af::AscGraph graph("static_bmm_input_view_frontend");
+  CreateBatchMatmulElemwiseFusedGraph(graph);
+  auto b = graph.FindNode("load1");
+  ASSERT_NE(b, nullptr);
+  b->outputs[0].attr.strides = {af::Symbol(32), af::Symbol(64), af::Symbol(1)};
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(graph);
+  ascir::ScheduledResult scheduled;
+  scheduled.cube_type = ascir::CubeTemplateType::kCommon;
+  scheduled.schedule_groups.push_back(group);
+  ascir::FusedScheduledResult fused;
+  fused.node_idx_to_scheduled_results.push_back({scheduled});
+  ASSERT_EQ(codegen::FindBmmInputView(fused), b);
+
+  const auto tf_tiling = ProcessCubeKernelTilingFromFusedResult(fused);
+  const auto inductor_tiling = GenCallCubeTilingForInductor(fused, {}, codegen::PgoShapeStringStream{});
+  ASSERT_FALSE(tf_tiling.empty());
+  ASSERT_FALSE(inductor_tiling.empty());
+  EXPECT_EQ(tf_tiling.find(".strides ="), std::string::npos);
+  EXPECT_NE(inductor_tiling.find(".strides ="), std::string::npos);
+  EXPECT_EQ(codegen::Kernel::GetIncludeApiHeaderFiles(fused).find("CvMaterializeBmmInput"), std::string::npos);
+  EXPECT_NE(codegen::Kernel::GetIncludeApiHeaderFiles(fused, true).find("CvMaterializeBmmInput"), std::string::npos);
+  EXPECT_EQ(b->outputs[0].attr.strides[1], af::Symbol(64));
+}
+
+TEST_F(TestCodegenTiling, StaticBmmInputViewUnitNPackKeepsLoadIdentityAndSemanticApi) {
+  af::AscGraph graph("static_bmm_pack");
+  CreateBatchMatmulElemwiseFusedGraph(graph);
+  auto b = graph.FindNode("load1");
+  ASSERT_NE(b, nullptr);
+  b->outputs[0].attr.repeats[2] = af::sym::kSymbolOne;
+  b->outputs[0].attr.strides = {af::Symbol(1), af::Symbol(2), af::Symbol(0)};
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(graph);
+  ascir::ScheduledResult scheduled;
+  scheduled.cube_type = ascir::CubeTemplateType::kCommon;
+  scheduled.schedule_groups.push_back(group);
+  ascir::FusedScheduledResult fused;
+  fused.node_idx_to_scheduled_results.push_back({scheduled});
+  ASSERT_TRUE(codegen::IsRegisterBmmInputPackSupported());
+  const auto code = codegen::Kernel::GetIncludeApiHeaderFiles(fused, true);
+  EXPECT_NE(code.find("#define CV_BMM_INPUT_REGISTER_PACK 1"), std::string::npos);
+  const auto api = codegen::CodegenApiParam::TryGetNodeApiParam(b);
+  ASSERT_NE(api, nullptr);
+  EXPECT_EQ(api->api_name, "CvMaterializeBmmInput");
+  EXPECT_EQ(api->semantic_feature, ascgen_utils::template_semantic::kRegisterGather);
+  EXPECT_EQ(b->outputs[0].attr.strides.back(), af::Symbol(0));
+  EXPECT_EQ(codegen::CodegenApiParam::TryGetNodeApiParam(graph.FindNode("load")), nullptr);
+  const auto body = GenCubeFusionTilingBodyInductor(fused, fused, "");
+  EXPECT_NE(body.find("input_record.graph = 0U"), std::string::npos);
+  EXPECT_NE(body.find("input_record.result = 0U"), std::string::npos);
+  EXPECT_NE(body.find("input_record.group = 0U"), std::string::npos);
+  EXPECT_NE(body.find("input_record.tiling_key = static_cast<uint32_t>(cube_tiling_key)"), std::string::npos);
+  EXPECT_NE(body.find("RegisterGather"), std::string::npos);
+  EXPECT_LT(body.find("ShouldEmitFinalTiling()"), body.find("TemplateSemanticRecord input_record"));
+  fused.node_idx_to_scheduled_results.insert(fused.node_idx_to_scheduled_results.begin(),
+                                             std::vector<ascir::ScheduledResult>{});
+  EXPECT_NE(GenCubeFusionTilingBodyInductor(fused, fused, "").find("input_record.graph = 1U"), std::string::npos);
+
+  // Larger batches retain the same RegisterGather API and use bounded groups in its prologue.
+  b->outputs[0].attr.repeats[0] = af::Symbol(64);
+  b->outputs[0].attr.strides = {af::Symbol(1), af::Symbol(64), af::Symbol(0)};
+  EXPECT_TRUE(codegen::CanPackBmmInput(b));
+  b->outputs[0].attr.repeats[0] = af::Symbol(65);
+  b->outputs[0].attr.strides[1] = af::Symbol(65);
+  EXPECT_TRUE(codegen::CanPackBmmInput(b));
+  EXPECT_NE(codegen::Kernel::GetIncludeApiHeaderFiles(fused, true).find("#define CV_BMM_INPUT_REGISTER_PACK 1"),
+            std::string::npos);
+  const auto grouped_api = codegen::CodegenApiParam::TryGetNodeApiParam(b);
+  ASSERT_NE(grouped_api, nullptr);
+  EXPECT_EQ(grouped_api->semantic_feature, ascgen_utils::template_semantic::kRegisterGather);
+  EXPECT_NE(GenCubeFusionTilingBodyInductor(fused, fused, "").find("TemplateSemanticRecord input_record"),
+            std::string::npos);
+
+  // A later non-unit candidate clears its own observation, without mutating a shared prior record.
+  b->outputs[0].attr.repeats[0] = af::Symbol(2);
+  b->outputs[0].attr.repeats[2] = af::Symbol(2);
+  b->outputs[0].attr.strides = {af::Symbol(2), af::Symbol(4), af::Symbol(1)};
+  (void)codegen::Kernel::GetIncludeApiHeaderFiles(fused, true);
+  EXPECT_EQ(codegen::CodegenApiParam::TryGetNodeApiParam(b), nullptr);
+  EXPECT_EQ(api->semantic_feature, ascgen_utils::template_semantic::kRegisterGather);
+}
+
+TEST_F(TestCodegenTiling, StaticBmmInputViewUnitNReshapeMatchesNativeMetadataOnly) {
+  const auto &wrapper = kCubeKernelTilingWrapperCppValue;
+  const auto begin = wrapper.find("void NormalizeMaterializedUnitNBmmInput(");
+  ASSERT_NE(begin, std::string::npos);
+  const auto end = wrapper.find("\n}\n", begin);
+  ASSERT_NE(end, std::string::npos);
+  const std::string declarations = R"(
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <vector>
+struct TensorInfo { std::vector<int64_t> shape, ori_shape; };
+struct AttrInfo { std::string name; bool value_bool; };
+struct MatMulAttrs { bool transpose_x2 = false; };
+MatMulAttrs ReadMatMulAttrs(const std::vector<AttrInfo> &attrs, bool) {
+  for (const auto &attr : attrs) { if (attr.name == "adj_x2") { return {attr.value_bool}; } }
+  return {};
+}
+)";
+  const std::string checks = R"(
+int main() {
+  TensorInfo b{{17, 4097, 1}, {17, 4097, 1}};
+  const TensorInfo original = b;
+  std::vector<AttrInfo> attrs{{"adj_x2", false}};
+  NormalizeMaterializedUnitNBmmInput(b, attrs);
+  if (b.shape != std::vector<int64_t>({17, 1, 4097}) || b.ori_shape != b.shape || !attrs[0].value_bool) { return 1; }
+  NormalizeMaterializedUnitNBmmInput(b, attrs);
+  if (b.shape != std::vector<int64_t>({17, 1, 4097})) { return 2; }
+  b = original;
+  NormalizeMaterializedUnitNBmmInput(b, attrs);
+  if (b.shape != original.shape) { return 3; }
+  attrs.clear();
+  NormalizeMaterializedUnitNBmmInput(b, attrs);
+  if (b.shape != original.shape) { return 4; }
+  b = {{17, 4097, 32}, {17, 4097, 32}};
+  attrs = {{"adj_x2", false}};
+  NormalizeMaterializedUnitNBmmInput(b, attrs);
+  if (b.shape.back() != 32 || attrs[0].value_bool) { return 5; }
+  return 0;
+}
+)";
+  EXPECT_TRUE(CompileAndRunCode(declarations + wrapper.substr(begin, end + 3U - begin) + checks));
+}
+
+TEST_F(TestCodegenTiling, DynamicBmmInputViewPreservesSymbolicStrides) {
+  af::AscGraph graph("dynamic_bmm_input_view");
+  CreateBatchMatmulElemwiseFusedGraph(graph);
+  const auto b = graph.FindNode("load1");
+  const auto cube = graph.FindNode("batch_matmul");
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(cube, nullptr);
+  const auto batch = graph.CreateSizeVar("batch");
+  const auto k = graph.CreateSizeVar("k");
+  const auto n = graph.CreateSizeVar("n");
+  b->outputs[0].attr.repeats = {batch, k, n};
+  b->outputs[0].attr.strides = {n, batch * n, af::sym::kSymbolOne};
+  ASSERT_EQ(codegen::GetBmmInputView(cube), b);
+  std::vector<codegen::TensorInfo> inputs;
+  ASSERT_EQ(ExtractInputsFromMatMulNode(cube, inputs), af::SUCCESS);
+  ASSERT_EQ(inputs.size(), 2U);
+  EXPECT_EQ(inputs[1].strides[1], batch * n);
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(graph);
+  ascir::ScheduledResult scheduled;
+  scheduled.cube_type = ascir::CubeTemplateType::kCommon;
+  scheduled.schedule_groups.push_back(group);
+  ascir::FusedScheduledResult fused;
+  fused.origin_vars = {batch, k, n};
+  fused.node_idx_to_scheduled_results.push_back({scheduled});
+  ASSERT_EQ(codegen::FindBmmInputView(fused), b);
+  const auto declare = codegen::Kernel::KernelFuncDeclare("dynamic_view", fused, false, true, false);
+  EXPECT_NE(declare.find("CVTilingData cv_input_plan"), std::string::npos);
+  const auto runtime_declare = codegen::Kernel::KernelFuncDeclare("dynamic_view", fused, false, true, false, true);
+  EXPECT_NE(runtime_declare.find("const CVAutofuseTilingData &t"), std::string::npos);
+  EXPECT_EQ(runtime_declare.find("CVTilingData cv_input_plan"), std::string::npos);
+  const auto code = codegen::Kernel::GetIncludeApiHeaderFiles(fused, true);
+  EXPECT_NE(code.find("uint64_t batch = StaticBatch"), std::string::npos);
+  EXPECT_NE(code.find("copy bounded row fragments"), std::string::npos);
+  EXPECT_TRUE(codegen::CanPackBmmInput(b));
+  const auto api = codegen::CodegenApiParam::TryGetNodeApiParam(b);
+  ASSERT_NE(api, nullptr);
+  EXPECT_EQ(api->semantic_feature, ascgen_utils::template_semantic::kAdaptive);
+  b->outputs[0].attr.strides[1] = k * n;
+  EXPECT_EQ(codegen::GetBmmInputView(cube), nullptr);
 }

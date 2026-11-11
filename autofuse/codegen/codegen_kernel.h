@@ -241,6 +241,7 @@ struct CommonOutputReusePlan {
   std::string output_name;
   ascir::TensorId workspace_id = af::kIdNone;
   bool reuses_vector_output = false;
+  bool uses_legacy_vector_output = false;
   std::set<std::string> vector_impl_names;
   std::set<std::pair<std::string, std::string>> copy_stores;
   std::vector<std::pair<std::string, std::vector<af::Expression>>> buffer_sizes;
@@ -434,6 +435,7 @@ struct TilingFuncCall {
 };
 
 struct CubeTilingOptions {
+  bool has_b_view{false};
   bool is_batch{false};
   bool is_cv_fuse{false};
   bool has_bias{false};
@@ -474,7 +476,8 @@ class Kernel {
                            Kernel &kernel);
   Status Generate(const std::string &impl_graph_name, const std::string &tiling_data, std::string &result,
                   const ascir::ImplGraph &graph, const std::string &workspace_buffer_arg_override = "");
-  static std::string GetIncludeApiHeaderFiles(const ascir::FusedScheduledResult &fused_schedule_result);
+  static std::string GetIncludeApiHeaderFiles(const ascir::FusedScheduledResult &fused_schedule_result,
+                                              bool enable_input_view = false);
   static std::string IncludeAndDefines(const ascir::FusedScheduledResult &fused_schedule_result,
                                        const std::string &kernel_task_type, bool use_tensor_desc = false,
                                        bool is_inductor = false);
@@ -482,6 +485,10 @@ class Kernel {
   std::string GenTilingFuncCall(const std::string &impl_graph_name, const std::string &tiling_data, uint32_t index,
                                 bool enable_group_parallel = false, bool need_sync_all = false,
                                 const std::string &workspace_tiling_data = "t") const;
+  std::string GenTilingFuncCall(const std::string &impl_graph_name, const std::string &tiling_data, uint32_t index,
+                                bool enable_group_parallel, bool need_sync_all,
+                                const std::string &workspace_tiling_data,
+                                const std::string &workspace_arg_override) const;
   std::string GenTilingFuncCall(const std::string &impl_graph_name, const std::string &tiling_data) const;
   // launch_decouple：rtLaunch 运行时形态判定（与 fusion_mode_runtime 同口径，排除
   // conv2d）；缺省 false 走 legacy constexpr 形态（GE 路径不受影响）。

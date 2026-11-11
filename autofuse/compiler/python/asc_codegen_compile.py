@@ -1621,6 +1621,23 @@ def _resolve_static_mm_args(args_list, input_num, input_shapes):
     return resolved
 
 
+def _matmul_batch_shape(shape_a, shape_b):
+    rank = max(len(shape_a), len(shape_b)) - 2
+    batch_a = (1,) * (rank - len(shape_a) + 2) + tuple(shape_a[:-2])
+    batch_b = (1,) * (rank - len(shape_b) + 2) + tuple(shape_b[:-2])
+    batch = []
+    for a, b in zip(batch_a, batch_b):
+        if a == b or a == 1:
+            batch.append(b)
+        elif b == 1:
+            batch.append(a)
+        elif a < 0 or b < 0:
+            batch.append(-1)
+        else:
+            raise ValueError("MatMul input batch dimensions cannot broadcast")
+    return batch
+
+
 def _build_mm_args(args_list, input_num, mm_attr1, mm_attr2):
     _inputs_ = []
     _origin_inputs_ = []
@@ -1648,7 +1665,6 @@ def _build_mm_args(args_list, input_num, mm_attr1, mm_attr2):
         _inputs_[-1]["shape"] = shape
         _inputs_[-1]["ori_shape"] = shape
         if i == 0:
-            write_shape = list(shape)
             if mm_attr1["value"]:  # a矩阵是否有transpose
                 _m = shape[-1]
             else:
@@ -1662,10 +1678,11 @@ def _build_mm_args(args_list, input_num, mm_attr1, mm_attr2):
     msg = "Processing output " + ":" + str(args_list[-2])
     logger.info("CV fusion op, matmul output info: %s", msg)
     CommonUtility.print_compile_log("", msg, AscendCLogLevel.LOG_INFO)
-    _origin_outputs_.append(args_list[-2])
+    # Cube output batches follow both inputs, independently of epilogue broadcasts.
+    write_shape = _matmul_batch_shape(_inputs_[0]["shape"], _inputs_[1]["shape"])
+    write_shape.extend((_m, _n))
+    _origin_outputs_.append(dict(args_list[-2]))
     _origin_outputs_[-1]["param_name"] = "output0"
-    write_shape[-1] = _n
-    write_shape[-2] = _m
     _origin_outputs_[-1]["shape"] = tuple(write_shape)
     _origin_outputs_[-1]["dtype"] = _inputs_[-1]["dtype"]
     _origin_outputs_[-1]["ori_shape"] = tuple(write_shape)
