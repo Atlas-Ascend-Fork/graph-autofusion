@@ -119,6 +119,51 @@ FailureOr<ExprAttr> resolveGlobalStride(MLIRContext *context, const llvm::DenseM
                                         const llvm::DenseMap<int64_t, ExprAttr> &strides, int64_t id,
                                         llvm::SmallDenseSet<int64_t> &visiting);
 
+// A scheduled layout is already usable when its GM and UB strides agree
+// on every vectorized axis (including identity views with no such axes)
+// AND every other axis it shares (by id) with the real destination
+// descriptor agrees with that descriptor's stride. The second half guards
+// a producer's own non-vectorized axis: its `strides` column there can
+// describe a broadcast/reduction relationship relative to the UB
+// computation (e.g. 0 because the value doesn't vary along that axis)
+// rather than the true GM address delta for that axis on this op's own
+// destination. Blindly trusting it drops that axis from the GM offset.
+// NDDMA breaks the first half: its strides still describe the input GM
+// layout while vectorized_strides describe the broadcast output tile.
+//
+// A hard `failure()` (as opposed to returning `false`) means the descriptor
+// itself is malformed (an axis the vectorized table points at is missing
+// from `axis`/`strides`), which the caller must propagate instead of
+// falling back to the graph-level projection below.
+FailureOr<bool> isScheduledLayoutUsable(afir::TensorDescAttr localDescriptor, bool destinationHasStrideTable,
+                                        const llvm::DenseMap<int64_t, ExprAttr> &destinationStrides) {
+  for (auto [axis, localStride] :
+       llvm::zip_equal(localDescriptor.getVectorizedAxis(), localDescriptor.getVectorizedStrides())) {
+    auto found = llvm::find(localDescriptor.getAxis(), axis);
+    if (found == localDescriptor.getAxis().end()) {
+      return failure();
+    }
+    const size_t index = std::distance(localDescriptor.getAxis().begin(), found);
+    if (index >= localDescriptor.getStrides().size()) {
+      return failure();
+    }
+    auto stride = localDescriptor.getStrides()[index];
+    if (!ProveExpressionsEqual(stride.getValue().getValue(), localStride.getValue().getValue())) {
+      return false;
+    }
+  }
+  if (destinationHasStrideTable && localDescriptor.getAxis().size() == localDescriptor.getStrides().size()) {
+    for (auto [axis, localStride] : llvm::zip_equal(localDescriptor.getAxis(), localDescriptor.getStrides())) {
+      auto destinationStride = destinationStrides.find(axis);
+      if (destinationStride != destinationStrides.end() &&
+          !ProveExpressionsEqual(localStride.getValue().getValue(), destinationStride->second.getValue().getValue())) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 // GM 偏移使用落点的 stride，不能用归约后 UB 的零 stride 替代。
 // Load 沿用局部 descriptor 的 strides；Store 优先使用带 vectorized_axis 的调度目的视图。
 // 图输出使用原始轴时，将目的 GM stride 投影到局部调度轴；不能沿用 NDDMA 输入的 stride。
@@ -152,46 +197,12 @@ FailureOr<afir::TensorDescAttr> getGlobalDescriptor(Operation *op, TransferPlanS
       destinationStrides.try_emplace(axis, stride);
     }
   }
-  // A scheduled layout is already usable when its GM and UB strides agree
-  // on every vectorized axis (including identity views with no such axes)
-  // AND every other axis it shares (by id) with the real destination
-  // descriptor agrees with that descriptor's stride. The second half guards
-  // a producer's own non-vectorized axis: its `strides` column there can
-  // describe a broadcast/reduction relationship relative to the UB
-  // computation (e.g. 0 because the value doesn't vary along that axis)
-  // rather than the true GM address delta for that axis on this op's own
-  // destination. Blindly trusting it drops that axis from the GM offset.
-  // NDDMA breaks the first half: its strides still describe the input GM
-  // layout while vectorized_strides describe the broadcast output tile.
-  bool hasScheduledLayout = true;
-  for (auto [axis, localStride] :
-       llvm::zip_equal(localDescriptor.getVectorizedAxis(), localDescriptor.getVectorizedStrides())) {
-    auto found = llvm::find(localDescriptor.getAxis(), axis);
-    if (found == localDescriptor.getAxis().end()) {
-      return failure();
-    }
-    const size_t index = std::distance(localDescriptor.getAxis().begin(), found);
-    if (index >= localDescriptor.getStrides().size()) {
-      return failure();
-    }
-    auto stride = localDescriptor.getStrides()[index];
-    if (!ProveExpressionsEqual(stride.getValue().getValue(), localStride.getValue().getValue())) {
-      hasScheduledLayout = false;
-      break;
-    }
+  FailureOr<bool> hasScheduledLayout =
+      isScheduledLayoutUsable(localDescriptor, destinationHasStrideTable, destinationStrides);
+  if (failed(hasScheduledLayout)) {
+    return failure();
   }
-  if (hasScheduledLayout && destinationHasStrideTable &&
-      localDescriptor.getAxis().size() == localDescriptor.getStrides().size()) {
-    for (auto [axis, localStride] : llvm::zip_equal(localDescriptor.getAxis(), localDescriptor.getStrides())) {
-      auto destinationStride = destinationStrides.find(axis);
-      if (destinationStride != destinationStrides.end() &&
-          !ProveExpressionsEqual(localStride.getValue().getValue(), destinationStride->second.getValue().getValue())) {
-        hasScheduledLayout = false;
-        break;
-      }
-    }
-  }
-  if (hasScheduledLayout) {
+  if (*hasScheduledLayout) {
     return localDescriptor;
   }
   if (!destinationHasStrideTable) {
@@ -486,7 +497,6 @@ LogicalResult reduceEffectiveView(MLIRContext *context, AscGraphAttrGroupsAttr g
 // 一根轴的**原始轴集合**：沿 `from` 链上溯，收集所有 Original 轴。合轴（Merged）有多个来源，
 // 于是集合多于一项——这正是需要集合而不是单根轴的原因：先合轴再分块的调度里，块轴同时含着
 // 好几维。
-//
 // 工作表的长度以轴表大小为界。轴表由 bridge 构造，`from` 链有限且无环；这个界只是防止非法
 // 轴表把这里变成死循环。链上出现表里没有的 id 时返回空集，调用方按「解析不出」处理。
 llvm::SmallDenseSet<int64_t> collectOriginAxes(const llvm::DenseMap<int64_t, AxisAttr> &axes, int64_t id) {
@@ -521,12 +531,10 @@ bool disjoint(const llvm::SmallDenseSet<int64_t> &lhs, const llvm::SmallDenseSet
 }
 
 // 缓存守卫要用的那几根轴与维度关系（`materializeExecConditionGuard`）。
-//
 // **块轴按「原始轴集合覆盖切分轴那一维」取，不按「与 `loop_axis` 配对」取。** 后者只在一维
 // 调度上成立：那时 `loop_axis` 恰好是块内轴。多维调度里 `loop_axis` 往往是另一维的 TileOuter，
 // 于是块轴一根都解析不出来，fused 取值整类回落（遗留问题清单 BR-1）。周期长度由切分轴那一维
 // 决定，块轴要取的也是含着同一维的那一对，与循环跑在哪根轴上无关。
-//
 // 用集合而不是单根原始轴，是因为先合轴再分块是常见形态：`z0z1T` 这种合轴同时含 z0 与 z1，
 // 它上面的块轴照样推进切分轴那一维。按单根原始轴判断会把这类调度判成「解析不出」，而它们
 // 本来是能生成的。
@@ -1280,7 +1288,6 @@ FailureOr<Value> materializeExecConditionGuard(Operation *op, OpBuilder &builder
   // `fused` 且循环跑的那根轴在**另一维**上：缓存值沿切分轴那一维变化，而那一维的 tile 序号
   // 在本循环内不变，于是本循环内也不变，只在首趟算。相位在这里无从谈起——`index` 走的是另一
   // 维；外层循环每推进一步，本循环重新从 0 开始，首趟那一项正好重算一次。
-  //
   // legacy 在这种形态下发的是跨维取模（`codegen_kernel_loop.cpp` 取轴表里第一个 BlockInner
   // 与第一个 TileOuter，循环变量却是当前这根轴的），它只会比需要的更频繁地重算、不会漏算；
   // 这里按维度关系分支，重算次数不多于它。

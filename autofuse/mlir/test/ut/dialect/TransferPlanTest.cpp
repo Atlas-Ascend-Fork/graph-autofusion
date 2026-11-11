@@ -691,7 +691,6 @@ TEST_F(TransferPlanTest, StoreProjectsOriginalDestinationStridesInsteadOfProduce
 // `vectorized_axis`，但两侧在这根轴上的步长不一致——局部侧（生产者 UB 张量）的步长是
 // 广播语义下的 0（这个值不随这根轴变化），落点（真实 GM 输出）在同一根轴上有真实步长
 // （每一轮写的是不同一行）。
-//
 // 旧实现只核对局部侧**向量化轴**自己的两列是否互相一致，核对通过就整份沿用局部侧，
 // 根本没有拿落点的步长表比对过非向量化轴。于是这根轴的真实步长被取成 0，在
 // `materializeScheduledGlobalOffset` 里被「零 stride 对偏移无贡献」整项剔掉——多份广播

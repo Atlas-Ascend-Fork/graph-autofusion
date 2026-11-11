@@ -39,7 +39,6 @@ namespace mlir::afir {
 enum class TransferPlanKind { Identity, Scheduled };
 
 // 缓存守卫里循环轴与切分轴的维度关系，按两者的**原始轴集合**（`from` 链的闭包）比较：
-//
 //   - `SameDimension`：循环轴的集合覆盖切分轴的集合，循环推进就会推进切分轴那一维。合轴
 //     （Merged）之后再分块的调度也落在这一支——合出来的轴同时含那一维。
 //   - `OtherDimension`：两个集合不相交，循环跑的是另一维，切分轴那一维的 tile 序号在本循环
@@ -56,12 +55,10 @@ struct TransferOuterAxis {
 // 搬运循环嵌套里的一层：循环 `extent` 次，每走一步 GM 指针前进 `globalStride`、UB 指针
 // 前进 `localStride`。
 // `TransferPlan::dims` 外到内排开就是这段嵌套本身：
-//
 //     for (i = 0; i < dims[0].extent; i++)
 //       for (j = 0; j < dims[1].extent; j++)
 //         ub[i * dims[0].localStride  + j * dims[1].localStride]
 //          = gm[i * dims[0].globalStride + j * dims[1].globalStride];
-//
 // 一层有两个 stride，是因为同一批数据在两侧的间隔不同；
 // Load 与 Store 共用，方向由两端类型决定。
 struct TransferDim {

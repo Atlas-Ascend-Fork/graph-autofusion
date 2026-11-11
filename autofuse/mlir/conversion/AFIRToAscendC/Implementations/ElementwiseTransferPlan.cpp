@@ -45,16 +45,47 @@ FailureOr<ExprAttr> multiplyExpressionsHere(MLIRContext *context, ExprAttr lhs, 
   return makeExprAttr(context, product.value());
 }
 
+// `mergeBrcAxisRepeats` 第一阶段的结果：剔除「两侧都是 1」的轴之后的 repeat/步长表，
+// 以及每根保留轴在哪一侧是广播轴（`isAxisBrc*`，供第二阶段判断能否与前一根轴合并）。
+struct FilteredBrcAxisRepeats {
+  SmallVector<ExprAttr> repeatsNoOne0, repeatsNoOne1;
+  SmallVector<ExprAttr> stridesNoOne0, stridesNoOne1;
+  SmallVector<bool> isAxisBrc0, isAxisBrc1;
+};
+
+// 剔除两侧 repeat 都为 1 的轴；步长为 0（该轴不产生地址偏移）按 1 处理，配合调用方把
+// `repeat * stride` 当缩放因子使用。两侧的「最内轴要求对齐」那一步都读**同一张**
+// `otherStrides` 表——legacy 的两个 `MergeBrcAxisParams` 构造时传的是同一个实参，不是
+// 各自的步长表。
+FailureOr<FilteredBrcAxisRepeats> filterBroadcastAxisRepeats(MLIRContext *context, ArrayRef<ExprAttr> repeats0,
+                                                             ArrayRef<ExprAttr> repeats1,
+                                                             ArrayRef<ExprAttr> otherStrides) {
+  FailureOr<ExprAttr> one = makeExprAttr(context, "1");
+  if (failed(one)) {
+    return failure();
+  }
+  FilteredBrcAxisRepeats result;
+  for (auto [repeat0, repeat1, stride] : llvm::zip_equal(repeats0, repeats1, otherStrides)) {
+    if (isProvenEqualToLiteral(repeat0, "1") && isProvenEqualToLiteral(repeat1, "1")) {
+      continue;
+    }
+    result.repeatsNoOne0.push_back(repeat0);
+    result.repeatsNoOne1.push_back(repeat1);
+    ExprAttr strideOrOne = isProvenEqualToLiteral(stride, "0") ? *one : stride;
+    result.stridesNoOne0.push_back(strideOrOne);
+    result.stridesNoOne1.push_back(strideOrOne);
+    const bool repeatsDiffer = !ProveExpressionsEqual(repeat0.getValue().getValue(), repeat1.getValue().getValue());
+    result.isAxisBrc0.push_back(repeatsDiffer && isProvenEqualToLiteral(repeat0, "1"));
+    result.isAxisBrc1.push_back(repeatsDiffer && isProvenEqualToLiteral(repeat1, "1"));
+  }
+  return result;
+}
+
 // 合并连续的广播轴和非广播轴，与 legacy `MergeBrcAxisRepeats`
-// （`common/common_utils.cpp:789`）逐步对齐，包括它的两个怪癖：
-//
-//   - 两侧的「最内轴要求对齐」那一步都读**同一张** `otherStrides`
-//     表——legacy 的两个 `MergeBrcAxisParams` 构造时传的是同一个实参，不是各自的步长表；
-//   - 合并后的「最后一组」不是整组 repeat 的累乘，只取该组**第一个**位置的
-//     `repeat * stride`——legacy 的 for 循环只填到 `size()-2`，最后一格由循环外单独一行
-//     赋值覆盖。这与直觉不符，但在今天唯一验证过的形态（每组恰好一根轴）里两者等价，
-//     而本函数的职责是复刻 legacy，不是重新设计这条合轴规则。
-//
+// （`common/common_utils.cpp:789`）逐步对齐，包括它的一个怪癖：合并后的「最后一组」不是
+// 整组 repeat 的累乘，只取该组**第一个**位置的 `repeat * stride`——legacy 的 for 循环只
+// 填到 `size()-2`，最后一格由循环外单独一行赋值覆盖。这与直觉不符，但在今天唯一验证过的
+// 形态（每组恰好一根轴）里两者等价，而本函数的职责是复刻 legacy，不是重新设计这条合轴规则。
 // 剔除「两侧都是 1」的轴之后两侧必然等长；返回的两个数组也必然等长（同一份 partition）。
 FailureOr<std::pair<SmallVector<ExprAttr>, SmallVector<ExprAttr>>> mergeBrcAxisRepeats(
     MLIRContext *context, ArrayRef<ExprAttr> repeats0, ArrayRef<ExprAttr> repeats1, ArrayRef<ExprAttr> otherStrides) {
@@ -62,21 +93,12 @@ FailureOr<std::pair<SmallVector<ExprAttr>, SmallVector<ExprAttr>>> mergeBrcAxisR
   if (failed(one)) {
     return failure();
   }
-  SmallVector<ExprAttr> repeatsNoOne0, repeatsNoOne1, stridesNoOne0, stridesNoOne1;
-  SmallVector<bool> isAxisBrc0, isAxisBrc1;
-  for (auto [repeat0, repeat1, stride] : llvm::zip_equal(repeats0, repeats1, otherStrides)) {
-    if (isProvenEqualToLiteral(repeat0, "1") && isProvenEqualToLiteral(repeat1, "1")) {
-      continue;
-    }
-    repeatsNoOne0.push_back(repeat0);
-    repeatsNoOne1.push_back(repeat1);
-    ExprAttr strideOrOne = isProvenEqualToLiteral(stride, "0") ? *one : stride;
-    stridesNoOne0.push_back(strideOrOne);
-    stridesNoOne1.push_back(strideOrOne);
-    const bool repeatsDiffer = !ProveExpressionsEqual(repeat0.getValue().getValue(), repeat1.getValue().getValue());
-    isAxisBrc0.push_back(repeatsDiffer && isProvenEqualToLiteral(repeat0, "1"));
-    isAxisBrc1.push_back(repeatsDiffer && isProvenEqualToLiteral(repeat1, "1"));
+  FailureOr<FilteredBrcAxisRepeats> filtered = filterBroadcastAxisRepeats(context, repeats0, repeats1, otherStrides);
+  if (failed(filtered)) {
+    return failure();
   }
+  const auto &[repeatsNoOne0, repeatsNoOne1, stridesNoOne0, stridesNoOne1, isAxisBrc0, isAxisBrc1] = *filtered;
+
   SmallVector<ExprAttr> merged0, merged1;
   if (repeatsNoOne0.empty()) {
     merged0.push_back(*one);
@@ -148,6 +170,44 @@ FailureOr<SmallVector<ExprAttr>> vectorizedRepeats(TensorDescAttr descriptor) {
   return result;
 }
 
+// 两个操作数里哪一个带广播轴（恰好一个有）：按向量化轴逐一比较 repeat，`1` 对 `非 1` 的
+// 一侧是广播侧。两侧都有、或都没有时 legacy 一律回退，所以这里也返回空。
+std::optional<unsigned> findBroadcastOperandIndex(ArrayRef<ExprAttr> repeats0, ArrayRef<ExprAttr> repeats1) {
+  bool operand0HasBrcAxis = false;
+  bool operand1HasBrcAxis = false;
+  for (auto [repeat0, repeat1] : llvm::zip_equal(repeats0, repeats1)) {
+    operand0HasBrcAxis |= isProvenEqualToLiteral(repeat0, "1") && !isProvenEqualToLiteral(repeat1, "1");
+    operand1HasBrcAxis |= isProvenEqualToLiteral(repeat1, "1") && !isProvenEqualToLiteral(repeat0, "1");
+  }
+  if (operand0HasBrcAxis == operand1HasBrcAxis) {
+    return std::nullopt;
+  }
+  return operand0HasBrcAxis ? 0 : 1;
+}
+
+// `first_axis_v_stride`：沿广播侧自身的向量化轴走，读目的地同一位置的
+// `vectorized_strides`，在第一个 repeat 不为 1 的位置之前，留最后一个非零值。
+FailureOr<ExprAttr> computeFirstAxisVStride(MLIRContext *context, ArrayRef<ExprAttr> broadcastRepeats,
+                                            TensorDescAttr destination) {
+  if (destination.getVectorizedStrides().size() != broadcastRepeats.size()) {
+    return failure();
+  }
+  FailureOr<ExprAttr> zero = makeExprAttr(context, "0");
+  if (failed(zero)) {
+    return failure();
+  }
+  ExprAttr firstAxisVStride = *zero;
+  for (auto [repeat, destinationStride] : llvm::zip_equal(broadcastRepeats, destination.getVectorizedStrides())) {
+    if (!isProvenEqualToLiteral(repeat, "1")) {
+      break;
+    }
+    if (!isProvenEqualToLiteral(destinationStride, "0")) {
+      firstAxisVStride = destinationStride;
+    }
+  }
+  return firstAxisVStride;
+}
+
 }  // namespace
 
 std::optional<BroadcastInlineOperands> matchBroadcastInlineOperands(Operation *op) {
@@ -167,17 +227,12 @@ std::optional<BroadcastInlineOperands> matchBroadcastInlineOperands(Operation *o
     return std::nullopt;
   }
 
-  bool operand0HasBrcAxis = false;
-  bool operand1HasBrcAxis = false;
-  for (auto [repeat0, repeat1] : llvm::zip_equal(*repeats0, *repeats1)) {
-    operand0HasBrcAxis |= isProvenEqualToLiteral(repeat0, "1") && !isProvenEqualToLiteral(repeat1, "1");
-    operand1HasBrcAxis |= isProvenEqualToLiteral(repeat1, "1") && !isProvenEqualToLiteral(repeat0, "1");
-  }
-  if (operand0HasBrcAxis == operand1HasBrcAxis) {
+  std::optional<unsigned> broadcastIndexOrNone = findBroadcastOperandIndex(*repeats0, *repeats1);
+  if (!broadcastIndexOrNone) {
     // 两侧都有广播轴、或都没有：legacy 两种都返回不支持。
     return std::nullopt;
   }
-  const unsigned broadcastIndex = operand0HasBrcAxis ? 0 : 1;
+  const unsigned broadcastIndex = *broadcastIndexOrNone;
   const unsigned otherIndex = 1 - broadcastIndex;
   ArrayRef<ExprAttr> broadcastRepeats = broadcastIndex == 0 ? ArrayRef(*repeats0) : ArrayRef(*repeats1);
   ArrayRef<ExprAttr> otherRepeats = broadcastIndex == 0 ? ArrayRef(*repeats1) : ArrayRef(*repeats0);
@@ -200,30 +255,16 @@ std::optional<BroadcastInlineOperands> matchBroadcastInlineOperands(Operation *o
     return std::nullopt;
   }
 
-  // `first_axis_v_stride`：沿广播侧自身的向量化轴走，读目的地同一位置的
-  // `vectorized_strides`，在第一个 repeat 不为 1 的位置之前，留最后一个非零值。
-  if (destination->getVectorizedStrides().size() != broadcastRepeats.size()) {
+  FailureOr<ExprAttr> firstAxisVStride = computeFirstAxisVStride(context, broadcastRepeats, *destination);
+  if (failed(firstAxisVStride)) {
     return std::nullopt;
-  }
-  FailureOr<ExprAttr> zero = makeExprAttr(context, "0");
-  if (failed(zero)) {
-    return std::nullopt;
-  }
-  ExprAttr firstAxisVStride = *zero;
-  for (auto [repeat, destinationStride] : llvm::zip_equal(broadcastRepeats, destination->getVectorizedStrides())) {
-    if (!isProvenEqualToLiteral(repeat, "1")) {
-      break;
-    }
-    if (!isProvenEqualToLiteral(destinationStride, "0")) {
-      firstAxisVStride = destinationStride;
-    }
   }
 
   BroadcastInlineOperands result;
   result.broadcastOperandIndex = broadcastIndex;
   result.outerRepeat = otherMerged[0];
   result.innerRepeat = otherMerged[1];
-  result.firstAxisVStride = firstAxisVStride;
+  result.firstAxisVStride = *firstAxisVStride;
   return result;
 }
 

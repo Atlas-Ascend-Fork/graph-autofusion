@@ -540,25 +540,21 @@ def AscendC_CompareScalarExtendContiguousRegBaseOp
 
 // 内联广播（brc_inline）：MLIR 侧对等 legacy `BrcInlineTemplate` 的能力。设计见
 // docs/development/2026-11-10-afir-broadcast-inline-design.md 功能需求 3。
-//
 // `BinaryBrcInlineApiWithTwoVectorizedAxisV2<T>(dst, src0, src1, shape0, shape1,
 // is_input0_block_brc, is_input1_block_brc, first_axis_v_stride, &AscendC::<Api><T, false>)`
 // （`autofuse/ascendc/api/brc_inline_api.h`）。**这个包装本身不计算**，只是按形状把广播
 // 折进重复调用——真正做计算的是最后一个函数指针实参指向的标准 AscendC 调用（`Add` /
 // `Mul` / ...），由 `wrappedApiName` 这个属性记住是哪一个；`getAPIName()`（走
 // `ApiExtensionHeader` 那条既有机制）仍然是包装自己固定的名字，两者不是一回事。
-//
 // **形参表逐字照抄 C++，不省略恒定项**：五个标量都是独立的操作数，即使某次调用里某个
 // 恒为编译期常量（如非广播侧的 `is_input*_block_brc` 恒为 1）——理由与 `BroadcastDim3Op`
 // 保留恒为 0 的 `srcZ` 相同，省一个就得在 emitter 里补字面量，把「发的是什么」拆到两个
 // 文件去读。
-//
 // **`<T, false>` 不是沿用 AGENTS 经验 3.3 说的危险缺省，与它的结论不冲突**：
 // `BinaryBrcInlineApiWithTwoVectorizedAxisV2` 自己在 counter 模式下设 mask（内部的
 // `SetMaskCount` / `SetVectorMask` / `SetMaskNorm`），调用方必须交出 mask 控制权，这正是
 // `false` 的正当用途——与 `isSetMask` 缺省该是 `true` 的那条经验说的是另一种情况
 // （没有任何代码会替调用方设 mask）。
-//
 // 只有 mem 侧：`autofuse/v35/ascendc/api_regbase/` 下没有对等的寄存器包装（实测见设计文档
 // 「实施前的三项实测结论」第三条），所以这里不建 `_reg_base` 变体。
 def AscendC_BinaryBrcInlineOp

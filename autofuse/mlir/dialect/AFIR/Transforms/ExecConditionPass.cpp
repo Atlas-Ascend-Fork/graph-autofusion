@@ -85,7 +85,6 @@ class GuardCache {
   // 「拒收还是放过」取决于遍历顺序（单独出现时报告能力不足，跟在一个解析得出的算子后面就被
   // 静默放过）。键带上轴之后，不一致的算子走到 `materializeExecConditionGuard`，该拒的在
   // 那里拒。
-  //
   // `origin` 那一支的谓词只有「本核第一趟」一项，与这三根轴无关，所以它的键把三根轴归零：
   // 同一循环内仍然只发一份。新增取值默认落到「依赖轴」那一侧——宁可多发一份谓词。
   using Key = std::tuple<Operation *, unsigned, int64_t, int64_t, int64_t>;
@@ -123,7 +122,6 @@ LogicalResult detachResults(Operation *op) {
 }
 
 // 被守卫算子写的那块存储要满足两条，不满足一律拒收。
-//
 // **单 slot。** 守卫跳过的只有算子本身，`AllocTensor` / `EnQue` / `DeQue` / `FreeTensor`
 // 每趟照发（见文件头）。单 slot 时地址每趟相同，跳过一趟写入之后读到的正是上一趟的结果；
 // 多 slot 队列每趟轮转，跳过之后读到的是**两趟之前**的数据，静默产生错误结果。文件头把
@@ -131,7 +129,6 @@ LogicalResult detachResults(Operation *op) {
 // `optimize/buffer_allocate/buf_que_allocator.cpp` 对 VecOut 位置是
 // `is_node_cached && !is_reusable` 才给 1。所以这里查，不假设。
 // `slot_count == -1` 是「没设这个字段」（TBuf 等），那种缓冲不轮转，按单 slot 看。
-//
 // **不在 GM。** 缓存说的是「片上那块结果在一个周期内不变」。写 GM 的算子被包起来之后，
 // 输出只在周期起点写出去，其余 tile 根本没落盘。上游不会这么标
 // （`MarkNodesCacheableBottomUp` 走到 Load 就截断），legacy 也不按算子类别区分
