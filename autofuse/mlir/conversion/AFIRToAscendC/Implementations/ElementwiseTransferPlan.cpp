@@ -31,6 +31,11 @@ bool isProvenEqualToLiteral(ExprAttr expr, StringRef literal) {
   return expr && ProveExpressionsEqual(expr.getValue().getValue(), literal);
 }
 
+// `mergeBrcAxisRepeats` 合并后必须恰好剩外、内两组，对应 `BroadcastInlineOperands` 的
+// `outerRepeat`/`innerRepeat` 两个字段，也是底层 AscendC broadcast API 的 `shape0`/
+// `shape1` 两个形参——合并结果组数超过这个值就超出了该 API 能表达的形态。
+constexpr size_t kInlineBroadcastMergedAxisCount = 2;
+
 // `lhs * rhs` 的规范形式，与 `TransferPlan.cpp` 里同名的私有版本做同一件事，但这里要
 // 导出给 `matchBroadcastInlineOperands` 用——两处各自是私有实现，不是共用的理由见
 // `TransferPlan.cpp` 的注释（该函数也是文件内 `static`）。
@@ -248,7 +253,7 @@ std::optional<BroadcastInlineOperands> matchBroadcastInlineOperands(Operation *o
     return std::nullopt;
   }
   const auto &[brcMerged, otherMerged] = *merged;
-  if (brcMerged.size() != 2 || otherMerged.size() != 2) {
+  if (brcMerged.size() != kInlineBroadcastMergedAxisCount || otherMerged.size() != kInlineBroadcastMergedAxisCount) {
     return std::nullopt;
   }
   if (!isProvenEqualToLiteral(brcMerged[0], "1") && !isProvenEqualToLiteral(otherMerged[0], "1")) {

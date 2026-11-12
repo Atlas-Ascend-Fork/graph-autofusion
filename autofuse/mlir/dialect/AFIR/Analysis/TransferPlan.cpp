@@ -130,7 +130,7 @@ FailureOr<ExprAttr> resolveGlobalStride(MLIRContext *context, const llvm::DenseM
 // destination. Blindly trusting it drops that axis from the GM offset.
 // NDDMA breaks the first half: its strides still describe the input GM
 // layout while vectorized_strides describe the broadcast output tile.
-//
+// .
 // A hard `failure()` (as opposed to returning `false`) means the descriptor
 // itself is malformed (an axis the vectorized table points at is missing
 // from `axis`/`strides`), which the caller must propagate instead of
