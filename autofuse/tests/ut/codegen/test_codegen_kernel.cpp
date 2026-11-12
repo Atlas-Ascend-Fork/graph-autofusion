@@ -2536,6 +2536,8 @@ TEST_F(CodegenKernel_CallSync, LoadEnq_DeqVec1_Vec23_PipeVec4ReuseLoad) {
 
 // load 的输出被 store(MTE3) 读取，同时被 vec 原地复用(覆盖写)，
 // vec 写之前必须等 store 读完，即插入 MTE3->V 同步。
+// MTE3->V 同步是 vector 核专用指令，分核架构 cube pass 中 PIPE_V 非法，
+// 生成体必须被 #ifndef SPLIT_CORE_CUBE 裁剪。
 TEST_F(CodegenKernel_CallSync, Load_StoreReader_And_VecReuseLoad_ShouldSyncMte3ToVec) {
   auto load = Load("Load", x);
   load->attr.api.compute_type = af::ComputeType::kComputeLoad;
@@ -2543,14 +2545,20 @@ TEST_F(CodegenKernel_CallSync, Load_StoreReader_And_VecReuseLoad_ShouldSyncMte3T
   auto vec4 = Vec("vec4", true, load);
 
   auto res = Generate();
+  const auto guard_begin = res.find("#ifndef SPLIT_CORE_CUBE");
+  ASSERT_NE(guard_begin, std::string::npos) << res;
   const auto sync = res.find("TQueSync<PIPE_MTE3, PIPE_V>");
   ASSERT_NE(sync, std::string::npos) << res;
+  const auto guard_end = res.find("#endif", sync);
+  ASSERT_NE(guard_end, std::string::npos) << res;
+  EXPECT_LT(guard_begin, sync);
+  EXPECT_LT(sync, guard_end);
   const auto store_pos = res.find("Store();");
   const auto reuse_pos = res.find("uint32_t q1_reuse2_offset");
   ASSERT_NE(store_pos, std::string::npos) << res;
   ASSERT_NE(reuse_pos, std::string::npos) << res;
-  EXPECT_LT(store_pos, sync);
-  EXPECT_LT(sync, reuse_pos);
+  EXPECT_LT(store_pos, guard_begin);
+  EXPECT_LT(guard_end, reuse_pos);
 }
 
 // vec 输出被 Store 读取并 FreeTensor 后，下一个 vec 经 AllocTensor 复用该 que buffer，
@@ -6029,6 +6037,80 @@ TEST(CodegenKernel, Kernel_GenerateKernel_Single_ScheduleGroup) {
           "    test_kernel_general_2_nil_2_nil(x, y, workspace, &t);\n"
           "  }\n"
           "}\n"});
+}
+
+// 纯 vector kernel（AIV_ONLY / MIX_AIV_1_0）在分核架构上仍会编译 cube pass，
+// cube 核无 V pipe 且不执行 vector 代码，入口需对 AIC 直接返回；
+// CV/AIC task type 的 cube 侧要执行 cube 代码，不得加该返回。
+TEST(CodegenKernel, Kernel_Prologue_AivOnlyTaskType_ShouldGuardAicEntry) {
+  af::AscGraph graph("test_kernel");
+  af::ascir_op::Data x_op("x", graph);
+  x_op.ir_attr.SetIndex(0);
+  af::ascir_op::Output y_op("y");
+  y_op.ir_attr.SetIndex(0);
+  af::ascir_op::Load load_op("load");
+  af::ascir_op::Store store_op("store");
+  graph.AddNode(load_op);
+  graph.AddNode(store_op);
+  graph.AddNode(y_op);
+
+  x_op.y.dtype = ge::DT_FLOAT16;
+  load_op.x = x_op.y;
+  load_op.y.dtype = ge::DT_FLOAT16;
+  store_op.x = load_op.y;
+  store_op.y.dtype = ge::DT_FLOAT16;
+  y_op.x = store_op.y;
+  store_op.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  auto x = graph.FindNode("x");
+  auto y = graph.FindNode("y");
+
+  x->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  x->outputs[0].attr.mem.tensor_id = 0;
+
+  ::ascir::ScheduledResult schedule_result0;
+  schedule_result0.schedule_groups.resize(1);
+  schedule_result0.schedule_groups[0].impl_graphs.emplace_back(graph);
+
+  std::vector<::ascir::ScheduledResult> schedule_results;
+  schedule_results.push_back(schedule_result0);
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString(graph.GetName().c_str());
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.input_nodes.push_back(x);
+  fused_schedule_result.output_nodes.push_back(y);
+
+  const std::string aic_entry_guard = "    if (g_coreType == AIC) { return; }\n";
+  for (const auto &task_type : {ascgen_utils::kKernelTaskTypeAIVOnly, ascgen_utils::kKernelTaskTypeMixAIVOneZero}) {
+    std::stringstream aiv_ss;
+    codegen::Kernel::GenKernelFuncByTilingKey(fused_schedule_result, aiv_ss, false, CodegenConfig{}, task_type);
+    const auto kernel_txt = aiv_ss.str();
+    // 非 inductor：防护必须是函数体第一条语句（先于 REGISTER_TILING_DEFAULT）。
+    const auto prologue_pos = kernel_txt.find("gm_tiling_data) {");
+    ASSERT_NE(prologue_pos, std::string::npos) << kernel_txt;
+    const auto guard_pos = kernel_txt.find(aic_entry_guard, prologue_pos);
+    ASSERT_NE(guard_pos, std::string::npos) << kernel_txt;
+    EXPECT_LT(guard_pos, kernel_txt.find("REGISTER_TILING_DEFAULT")) << kernel_txt;
+  }
+  {
+    // inductor：防护同样必须是函数体第一条语句（先于 KERNEL_TASK_TYPE_DEFAULT）。
+    codegen::CodegenConfig inductor_config{};
+    inductor_config.is_inductor = true;
+    std::stringstream inductor_ss;
+    codegen::Kernel::GenKernelFuncByTilingKey(fused_schedule_result, inductor_ss, false, inductor_config,
+                                              ascgen_utils::kKernelTaskTypeMixAIVOneZero);
+    const auto kernel_txt = inductor_ss.str();
+    const auto task_type_pos = kernel_txt.find("KERNEL_TASK_TYPE_DEFAULT(");
+    ASSERT_NE(task_type_pos, std::string::npos) << kernel_txt;
+    const auto guard_pos = kernel_txt.find(aic_entry_guard);
+    ASSERT_NE(guard_pos, std::string::npos) << kernel_txt;
+    EXPECT_LT(guard_pos, task_type_pos) << kernel_txt;
+  }
+  std::stringstream cv_ss;
+  codegen::Kernel::GenKernelFuncByTilingKey(fused_schedule_result, cv_ss, false, CodegenConfig{},
+                                            ascgen_utils::kKernelTaskTypeMixAICOneTwo);
+  EXPECT_EQ(cv_ss.str().find("if (g_coreType == AIC) { return; }"), std::string::npos) << cv_ss.str();
 }
 
 TEST(CodegenKernel, DynamicInputsAndOutputs) {

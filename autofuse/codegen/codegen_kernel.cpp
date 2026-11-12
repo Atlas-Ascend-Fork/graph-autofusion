@@ -764,6 +764,12 @@ Status AppendKernelFuncPrologueByTilingKey(const ascir::FusedScheduledResult &fu
   ss1 << Kernel::KernelFuncDeclare(graph_name, fused_schedule_result, use_list_tensor, config.is_inductor,
                                    IsConv2DFusedScheduled(fused_schedule_result), launch_decouple)
       << " {" << std::endl;
+  // 纯 vector kernel 在分核架构上仍会编译/启动 cube pass，cube 核无 V pipe 且不执行
+  // vector 代码，入口对 AIC 直接返回，避免 vector 专用指令流入 cube pass。
+  // g_coreType 为编译期常量：cube pass 恒为 AIC，编译器实测会将其后不可达代码 DCE。
+  if (kernel_task_type == kKernelTaskTypeAIVOnly || kernel_task_type == kKernelTaskTypeMixAIVOneZero) {
+    ss1 << "    if (g_coreType == AIC) { return; }" << std::endl;
+  }
   if (config.is_inductor) {
     if (launch_decouple) {
       return af::SUCCESS;
@@ -2431,11 +2437,15 @@ std::string TPipe::SyncMte3ToVec(const Tensor in_tensor) const {
   std::string event_name = in_tensor.Str() + "_e_mte3_2_v";
   std::string sync_name = in_tensor.Str() + "_s_mte3_2_v";
 
-  ss << "auto " << event_name << " = tpipe.AllocEventID<HardEvent::MTE3_V>();" << std::endl
+  // MTE3->V 同步仅 vector 核有效；分核架构（A5 等）的 cube pass 中 PIPE_V 非法，
+  // 对齐 kernel_event.h 官方 API 的裁剪方式，用 SPLIT_CORE_CUBE 在 cube pass 裁掉。
+  ss << "#ifndef SPLIT_CORE_CUBE" << std::endl
+     << "auto " << event_name << " = tpipe.AllocEventID<HardEvent::MTE3_V>();" << std::endl
      << "TQueSync<PIPE_MTE3, PIPE_V> " << sync_name << ";" << std::endl
      << sync_name << ".SetFlag(" << event_name << ");" << std::endl
      << sync_name << ".WaitFlag(" << event_name << ");" << std::endl
-     << "tpipe.ReleaseEventID<HardEvent::MTE3_V>(" << event_name << ");" << std::endl;
+     << "tpipe.ReleaseEventID<HardEvent::MTE3_V>(" << event_name << ");" << std::endl
+     << "#endif" << std::endl;
   return ss.str();
 }
 
