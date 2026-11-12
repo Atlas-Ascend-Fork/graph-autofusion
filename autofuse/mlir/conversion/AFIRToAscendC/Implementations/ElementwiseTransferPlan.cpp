@@ -241,8 +241,16 @@ std::optional<BroadcastInlineOperands> matchBroadcastInlineOperands(Operation *o
   const unsigned otherIndex = 1 - broadcastIndex;
   ArrayRef<ExprAttr> broadcastRepeats = broadcastIndex == 0 ? ArrayRef(*repeats0) : ArrayRef(*repeats1);
   ArrayRef<ExprAttr> otherRepeats = broadcastIndex == 0 ? ArrayRef(*repeats1) : ArrayRef(*repeats0);
+  TensorDescAttr broadcastDescriptor = broadcastIndex == 0 ? *operand0 : *operand1;
   TensorDescAttr otherDescriptor = otherIndex == 0 ? *operand0 : *operand1;
   if (otherDescriptor.getVectorizedStrides().size() != otherRepeats.size()) {
+    return std::nullopt;
+  }
+  // `computeFirstAxisVStride` 按位置把 `broadcastRepeats`（广播侧的 `vectorized_axis`
+  // 顺序）与 `destination.getVectorizedStrides()` 配对；只有两者的 `vectorized_axis`
+  // 完全一致（根数和顺序都一致）时这种按位置配对才成立。destination 的 `vectorized_axis`
+  // 是独立属性，调度允许其与广播侧重新排序，不能假设天然对齐。
+  if (destination->getVectorizedAxis() != broadcastDescriptor.getVectorizedAxis()) {
     return std::nullopt;
   }
 

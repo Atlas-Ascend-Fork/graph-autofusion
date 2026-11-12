@@ -152,9 +152,18 @@ LogicalResult checkGuardableDestinations(Operation *op, ExecCondition condition)
              << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
              << " caches an on-chip result; a destination in gm would only be written at cycle starts";
     }
-    if (buffer.getSlotCount() > 1) {
+    // `slot_count` 未设（`-1`）时才退到 `queue_depth` 判「轮转数」：
+    // `ResourceIds.cpp:isCanonicalQueueResource` 判定「是不是队列」时
+    // `slot_count != -1 || queue_depth != -1` 两者都看，说明一块缓冲可能只设了
+    // `queue_depth` 就已经是队列、会按它轮转（`CanonicalResources.cpp` 建
+    // `ascendc::QueueType` 用的正是 `queue_depth`）。但本仓既有语料里 `slot_count` 一旦
+    // 设过就是权威值（如 `slot_count = 1, queue_depth = 2` 这个常见组合，`slot_count`
+    // 为 1 代表调度上该资源不轮转），不能被 `queue_depth` 覆盖，否则现有的全部正向用例
+    // 都会被误拒。
+    const int64_t slotCount = buffer.getSlotCount() != -1 ? buffer.getSlotCount() : buffer.getQueueDepth();
+    if (slotCount > 1) {
       return emitCapabilityShortfall(op) << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
-                                         << " needs a single-slot buffer, got " << buffer.getSlotCount()
+                                         << " needs a single-slot buffer, got " << slotCount
                                          << " slots; a skipped iteration would read the slot written two iterations "
                                             "back instead of the cached one";
     }
