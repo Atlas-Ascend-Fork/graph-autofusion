@@ -1486,6 +1486,45 @@ bool IsIndexSourceConverged(const af::AscNodePtr &indirect_load) {
          IsIndexPayloadInvariantFromSources(indirect_load, input, index, axis_index);
 }
 
+namespace {
+// 单个 tensor 视图是否将被通用对齐 pad: 与 MayHaveVectorizedPadding 同门槛
+// （vectorized 视图至少两轴才有行间 padding 可言），尾轴宽度按 dtype 对齐 32B 块
+// （ONE_BLK_SIZE同源）有余，即对齐后将引入行间空洞（对齐公式与Tiler::TensorActualSize 的
+// 尾轴 pad 同源。只判静态可证的非对齐：动态shape不动评分，codegen 兜底降级（GenerateSimd padded视图检查）仍兜底正确性
+bool PredictTensorTailPadding(const af::AscTensorAttr &attr) {
+  if (attr.axis.size() != attr.repeats.size() || attr.vectorized_axis.size() != attr.vectorized_strides.size() ||
+      attr.vectorized_axis.size() <= 1UL) {
+    return false;
+  }
+  if (af::SymbolicUtils::StaticCheckEq(attr.vectorized_strides.back(), af::sym::kSymbolZero) == af::TriBool::kTrue) {
+    return false;
+  }
+  const auto axis_it = std::find(attr.axis.begin(), attr.axis.end(), attr.vectorized_axis.back());
+  if (axis_it == attr.axis.end()) {
+    return false;
+  }
+  const size_t axis_pos = static_cast<size_t>(std::distance(attr.axis.begin(), axis_it));
+  int64_t tail_size = 0L;
+  if (!attr.repeats[axis_pos].GetConstValue(tail_size) || tail_size <= 1L) {
+    return false;
+  }
+  const int64_t dtype_size = static_cast<int64_t>(af::GetSizeByDataType(attr.dtype));
+  constexpr int64_t kAlignBlkBytes = 32L;
+  const int64_t blk_elems = kAlignBlkBytes / dtype_size;
+  return blk_elems > 0L && tail_size % blk_elems != 0L;
+}
+}  // namespace
+
+bool PredictSimdAlignmentPadding(const af::AscNodePtr &node) {
+  if (node == nullptr || node->outputs().empty() || node->inputs().size() <= kIndexTensorIndex) {
+    return false;
+  }
+  // 与 FinalizeLoweringMetadata pre-check 的两视图对称：输出 + 索引（变位宽生产者
+  // （cast）产生的索引缓冲同样会被通用对齐 pad）。
+  return PredictTensorTailPadding(node->outputs()[0]->attr) ||
+         PredictTensorTailPadding(node->inputs()[kIndexTensorIndex]->attr);
+}
+
 af::Status FinalizeLoweringMetadata(const af::AscNodePtr &node, bool &is_supported) {
   is_supported = false;
   GE_ASSERT_NOTNULL(node);

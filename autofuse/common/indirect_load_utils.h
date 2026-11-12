@@ -126,6 +126,13 @@ inline bool MayHaveVectorizedPadding(const AxisIdRange &axis, const SizeRange &s
   return af::SymbolicUtils::StaticCheckEq(span, product) != af::TriBool::kTrue;
 }
 
+// 调度期预测：通用对齐发生在调度之后，FinalizeLoweringMetadata 序列化时
+// vectorized_strides 仍为图原生稠密视图（pre-check 漏判 out_padded[0]），而codegen期
+// 尾轴已被对齐 pad->dense facade 强制降级 strided。本函数按 dtype 对齐
+// 32B 块有余“静态预测对齐后的padded视图，供调度评分提前感知降级（与lowring/codegen
+// 两期检查同向保守）。动态shape或尾轴宽度为1，维持既有评分。
+bool PredictSimdAlignmentPadding(const af::AscNodePtr &node);
+
 struct TemplateLogicalView {
   IndirectLoadTensorLayout input;
   IndirectLoadTensorLayout index;

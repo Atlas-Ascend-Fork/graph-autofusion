@@ -4686,8 +4686,9 @@ bool IsEmbeddingFastPathCapable(const TemplateCase &template_case,
   return false;
 }
 
-// SIMD 候选是否退化到 strided facade：索引/输入布局非 dense 或输出存在物理 padding 时，
-// SIMD 只能逐元素标量组装 offsets 并逐元素重排（与最终 lowering 的 facade 判定同源）。
+// SIMD 候选是否退化到 strided facade：索引/输入布局非 dense 或输出存在物理 padding，
+// 或调度期预测通用对齐将引入 padded 视图时，SIMD 只能逐元素标量组装 offsets 并逐元素
+// 重排（与最终 lowering 的 facade 判定同源）。
 bool LowersToStridedSimdFacade(const af::AscNodePtr &candidate_node) {
   bool is_supported = false;
   if (ascgen_utils::indirect_load::FinalizeLoweringMetadata(candidate_node, is_supported) != af::SUCCESS ||
@@ -4698,7 +4699,13 @@ bool LowersToStridedSimdFacade(const af::AscNodePtr &candidate_node) {
   if (ascgen_utils::indirect_load::GetLoweringMetadata(candidate_node, metadata) != af::SUCCESS) {
     return false;
   }
-  return metadata.simd.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided;
+  if (metadata.simd.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided) {
+    return true;
+  }
+  // [调度期 padding 预测] 通用对齐晚于调度：lowering metadata 序列化时视图仍为原生
+  // 稠密（pre-check out_padded[0] 漏判），codegen 时期尾轴 pad 后 dense 必降级 strided。
+  // 按尾轴对齐性静态预测，让 GenerateScoreFunc 的 SIMT 让位评分提前生效。
+  return ascgen_utils::indirect_load::PredictSimdAlignmentPadding(candidate_node);
 }
 
 // ==================== 统一打分（静态/动态同算法，组/单 gather 同源） ====================
