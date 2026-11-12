@@ -1790,8 +1790,7 @@ BroadcastGraphView CreateGraphView() {
   view.input.dtype = af::DT_FLOAT16;
   if constexpr (kInputTranspose) {
     view.input.axes = view.output.axes;
-    af::AscGraphUtils::GetComputeGraph(*view.graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis =
-        view.output.axes;
+    // Keep node-local schedules: the pre-broadcast source has distinct singleton axes.
   }
   view.output.dtype = kBothTranspose ? af::DT_INT32 : af::DT_INT64;
   view.input_source = view.input;

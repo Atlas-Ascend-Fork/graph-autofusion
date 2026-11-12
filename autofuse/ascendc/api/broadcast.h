@@ -268,6 +268,44 @@ inline __aicore__ void BroadcastWithStride(const LocalTensor<T> &dst, const Loca
 }
 
 template <typename T>
+inline __aicore__ void BroadcastWithCastStride(const LocalTensor<T> &dst, const LocalTensor<T> &src,
+                                               const uint32_t src_m, const uint32_t dst_k,
+                                               const uint32_t last_dim_stride, LocalTensor<uint8_t> &tmp_buf) {
+  // Use the same half source, half destination and scratch layout as byte Broadcast.
+  constexpr uint32_t min_broadcast_scratch_bytes = 8192U;
+  const uint32_t src_size = KernelUtils::BlkAlign<half>(src_m);
+  const uint64_t dst_elements = static_cast<uint64_t>(src_m) * dst_k;
+  const uint64_t dst_size_aligned =
+      (dst_elements + KernelUtils::BlkSize<half>() - 1U) / KernelUtils::BlkSize<half>() * KernelUtils::BlkSize<half>();
+  const uint64_t stage_bytes = (static_cast<uint64_t>(src_size) + dst_size_aligned) * sizeof(half);
+  const uint64_t required_bytes = stage_bytes + min_broadcast_scratch_bytes;
+  ASCENDC_ASSERT((dst_elements <= UINT32_MAX && required_bytes <= UINT32_MAX && tmp_buf.GetSize() >= required_bytes), {
+    KERNEL_LOG(KERNEL_ERROR, "tmp_buf is too small for strided byte broadcast: size=%u, required=%llu",
+               tmp_buf.GetSize(), static_cast<unsigned long long>(required_bytes));
+  });
+  if (dst_elements > UINT32_MAX || required_bytes > UINT32_MAX || tmp_buf.GetSize() < required_bytes) {
+    return;
+  }
+  LocalTensor<half> half_src = tmp_buf.template ReinterpretCast<half>();
+  LocalTensor<half> half_dst = half_src[src_size];
+  LocalTensor<uint8_t> scratch = tmp_buf[static_cast<uint32_t>(stage_bytes)];
+  scratch.SetSize(static_cast<uint32_t>(tmp_buf.GetSize() - stage_bytes));
+
+  // The destination staging area is free until the half broadcast starts.
+  LocalTensor<T> compact_src = half_dst.template ReinterpretCast<T>();
+  GetSrcTensorWithoutStride(compact_src, src, src_m, last_dim_stride);
+  AscendC::Cast(half_src, compact_src, RoundMode::CAST_NONE, src_m);
+  AscendC::PipeBarrier<PIPE_V>();
+
+  const uint32_t dst_shape[2]{src_m, dst_k};
+  const uint32_t src_shape[2]{src_m, 1};
+  AscendC::Broadcast<half, 2, 1>(half_dst, half_src, dst_shape, src_shape, scratch);
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Cast(dst, half_dst, RoundMode::CAST_NONE, src_m * dst_k);
+  AscendC::PipeBarrier<PIPE_V>();
+}
+
+template <typename T>
 inline __aicore__ void BroadcastMiddleDimWithCopy(const LocalTensor<T> &dst, const LocalTensor<T> &src,
                                                   const uint32_t src_m, const uint32_t src_k, const uint32_t src_z,
                                                   const uint32_t dst_m, const uint32_t dst_k, const uint32_t dst_z,
@@ -350,9 +388,13 @@ inline __aicore__ void BroadcastWithCast(const LocalTensor<T> &dst, const LocalT
     BroadcastFirstDim(dst_tmp, src_tmp, src_m, dst_inner_offset, 0, dst_m, dst_inner_offset, 0, tmp_buf);
   } else if (src_k == 1 && src_m == dst_m) {
     if (src_z == 0) {
-      const uint32_t dst_shape[2]{dst_m, dst_k};
-      const uint32_t src_shape[2]{src_m, src_k};
-      AscendC::Broadcast<T, 2, 1>(dst, src, dst_shape, src_shape, tmp_buf);
+      if (last_dim_stride > 1) {
+        BroadcastWithCastStride(dst, src, src_m, dst_k, last_dim_stride, tmp_buf);
+      } else {
+        const uint32_t dst_shape[2]{dst_m, dst_k};
+        const uint32_t src_shape[2]{src_m, src_k};
+        AscendC::Broadcast<T, 2, 1>(dst, src, dst_shape, src_shape, tmp_buf);
+      }
     } else {
       const uint8_t scalar = 0.0;
       const uint32_t dst_shape[2]{dst_k, dst_z};

@@ -714,10 +714,10 @@ TEST(CodegenKernel, ApiCallPreProcessUbScalarTest) {
                         "SetFlag<HardEvent::MTE2_S>(eventID);\n"
                         "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
                         "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "}\n"
                         "AscendC::PipeBarrier<PIPE_ALL>();\n"
                         "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(float));\n"
-                        "AscendC::PipeBarrier<PIPE_V>();\n"
-                        "}\n"});
+                        "AscendC::PipeBarrier<PIPE_V>();\n"});
 }
 
 TEST(CodegenKernel, ApiCallPreProcessLoadUbScalarTest) {
@@ -779,10 +779,10 @@ TEST(CodegenKernel, ApiCallPreProcessLoadUbScalarTest) {
                         "SetFlag<HardEvent::MTE2_S>(eventID);\n"
                         "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
                         "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "}\n"
                         "AscendC::PipeBarrier<PIPE_ALL>();\n"
                         "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(float));\n"
-                        "AscendC::PipeBarrier<PIPE_V>();\n"
-                        "}\n"});
+                        "AscendC::PipeBarrier<PIPE_V>();\n"});
 }
 
 TEST(CodegenKernel, kernelUbScalarVarDef) {
@@ -2851,7 +2851,7 @@ TEST(CodegenKernel, CompareApiCallThrowingFor) {
   call.Generate(tpipe, current_axis, result);
   EXPECT_EQ(result, std::string{"CompareExtend<int32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, "
                                 "((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * "
-                                "t->s2))))/(1), tmp_buf_0);\n"});
+                                "t->s2))))/(1), tmp_buf_0, local_1_size * sizeof(int32_t));\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -2970,7 +2970,7 @@ TEST(CodegenKernel, CompareApiCallTwoAxis) {
   call.Generate(tpipe, current_axis, result);
   EXPECT_EQ(result, std::string{"CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, "
                                 "((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * "
-                                "t->s2))))/(1), tmp_buf_0);\n"});
+                                "t->s2))))/(1), tmp_buf_0, local_1_size * sizeof(float));\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -3097,11 +3097,10 @@ TEST(CodegenKernel, CompareApiCallThrowingForWithX2IsUbScalar) {
 
   std::string result;
   call.Generate(tpipe, current_axis, result);
-  EXPECT_EQ(
-      result,
-      std::string{
-          "CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
-          "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), tmp_buf_0);\n"});
+  EXPECT_EQ(result,
+            std::string{"CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
+                        "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), "
+                        "tmp_buf_0, ONE_BLK_SIZE);\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -3228,11 +3227,10 @@ TEST(CodegenKernel, CompareApiCallThrowingForWithX2IsUbScalarForUint32) {
 
   std::string result;
   call.Generate(tpipe, current_axis, result);
-  EXPECT_EQ(
-      result,
-      std::string{
-          "CompareExtend<uint32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
-          "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), tmp_buf_0);\n"});
+  EXPECT_EQ(result,
+            std::string{"CompareExtend<uint32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
+                        "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), "
+                        "tmp_buf_0, ONE_BLK_SIZE);\n"});
 }
 
 // 测试compare api需要外抛for循环的场景

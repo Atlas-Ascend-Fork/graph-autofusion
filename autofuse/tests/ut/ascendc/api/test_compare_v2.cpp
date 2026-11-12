@@ -24,6 +24,46 @@
 
 using namespace AscendC;
 
+TEST(TestApiCompareV2Regression, ScalarBlockInLargerAllocation) {
+  constexpr uint32_t rows = 260;
+  constexpr uint32_t input_stride = ONE_BLK_SIZE / sizeof(int32_t);
+  constexpr uint32_t output_stride = ONE_BLK_SIZE;
+  auto *input = static_cast<int32_t *>(GmAlloc(rows * ONE_BLK_SIZE));
+  auto *threshold = static_cast<int32_t *>(GmAlloc(rows * ONE_BLK_SIZE));
+  auto *output = static_cast<uint8_t *>(GmAlloc(rows * output_stride));
+  for (uint32_t i = 0; i < rows * input_stride; ++i) {
+    input[i] = static_cast<int32_t>((i / input_stride) % 7) - 3;
+    threshold[i] = i < input_stride ? 2 : -99;
+  }
+  auto kernel = [](int32_t *input, int32_t *threshold, uint8_t *output) {
+    TPipe pipe;
+    TBuf<TPosition::VECCALC> xbuf, scalarbuf, ybuf, tmpbuf;
+    pipe.InitBuffer(xbuf, rows * ONE_BLK_SIZE);
+    pipe.InitBuffer(scalarbuf, rows * ONE_BLK_SIZE);
+    pipe.InitBuffer(ybuf, rows * output_stride);
+    pipe.InitBuffer(tmpbuf, 64 * 1024);
+    auto x = xbuf.Get<int32_t>();
+    auto scalar = scalarbuf.Get<int32_t>();
+    auto y = ybuf.Get<uint8_t>();
+    auto tmp = tmpbuf.Get<uint8_t>();
+    GmToUb(x, input, rows * input_stride);
+    GmToUb(scalar, threshold, rows * input_stride);
+    // Only the first block is valid, despite sharing a much larger allocation.
+    CompareExtend<int32_t, CMPMODE::LT>(y, x, scalar, rows, 1, input_stride, output_stride, tmp, ONE_BLK_SIZE);
+    UbToGm(output, y, rows * output_stride);
+  };
+  SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1, input, threshold, output);
+  uint32_t mismatches = 0;
+  for (uint32_t row = 0; row < rows; ++row) {
+    mismatches += output[row * output_stride] != static_cast<uint8_t>(input[row * input_stride] < 2);
+  }
+  EXPECT_EQ(mismatches, 0U);
+  GmFree(input);
+  GmFree(threshold);
+  GmFree(output);
+}
+
 namespace af {
 template <typename O, typename I>
 struct TensorCompareV2InputParam {

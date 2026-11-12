@@ -1230,7 +1230,7 @@ Status ApiCall::PostProcess(const TPipe &tpipe, const std::vector<ascir::AxisId>
         std::string tmp;
         GE_CHK_STATUS_RET(ub.InitUbScalar(tmp));
         ss << tmp;
-        if (ub.need_duplicate_value_of_ub_scalar) {
+        if (ub.need_duplicate_value_of_ub_scalar && !is_all_outputs_ub_scalar) {
           GE_CHK_STATUS_RET(ub.GenDuplicateValueOfUbScalar(tmp));
           ss << tmp;
         }
@@ -1240,6 +1240,16 @@ Status ApiCall::PostProcess(const TPipe &tpipe, const std::vector<ascir::AxisId>
 
   if (is_all_outputs_ub_scalar && !current_axis.empty()) {
     ss << "}" << std::endl;
+    // The scalar value is cached in a register, but its UB allocation can be
+    // reused by other tensors between loop iterations. Restore the block each time.
+    for (const auto &output : outputs) {
+      const auto &ub = output.get();
+      if (ub.need_gen_get_value_of_ub_scalar && ub.need_duplicate_value_of_ub_scalar) {
+        std::string tmp;
+        GE_CHK_STATUS_RET(ub.GenDuplicateValueOfUbScalar(tmp));
+        ss << tmp;
+      }
+    }
   }
 
   result = ss.str();
