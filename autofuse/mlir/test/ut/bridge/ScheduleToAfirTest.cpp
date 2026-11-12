@@ -771,15 +771,18 @@ TEST(ScheduleToAfirTest, WorkspaceUint64CapacityAndOverflowExecuteGeneratedHelpe
       std::vector<int64_t> workspaces, block_dims;
       auto limit = g_no_limit_res;
       limit.aiv_num = 2;
-      if (GenerateTopnSolutions({}, 10, solutions, workspaces, block_dims, &limit) != 0 ||
-          solutions.size() != 1 || workspaces.size() != 1 || block_dims.size() != 1 ||
-          workspaces[0] != 0 || block_dims[0] != 2 || solutions[0].get_block_dim() != 2) return 10;
-      if (GenerateTopnSolutions({}, 0, solutions, workspaces, block_dims) == 0 ||
-          !solutions.empty() || !workspaces.empty() || !block_dims.empty()) return 11;
+      if (GenerateTopnSolutions({}, 10, solutions, workspaces, block_dims, &limit) != 0 || solutions.size() != 1 ||
+          workspaces.size() != 1 || block_dims.size() != 1 || workspaces[0] != 0 || block_dims[0] != 2 ||
+          solutions[0].get_block_dim() != 2)
+        return 10;
+      if (GenerateTopnSolutions({}, 0, solutions, workspaces, block_dims) == 0 || !solutions.empty() ||
+          !workspaces.empty() || !block_dims.empty())
+        return 11;
       if (GenerateTopnSolutions({{{"unsupported", "1"}}}, 1, solutions, workspaces, block_dims) == 0) return 12;
       limit.ub_size = 0;
-      if (GenerateTopnSolutions({}, 1, solutions, workspaces, block_dims, &limit) == 0 ||
-          !solutions.empty() || !workspaces.empty() || !block_dims.empty()) return 13;
+      if (GenerateTopnSolutions({}, 1, solutions, workspaces, block_dims, &limit) == 0 || !solutions.empty() ||
+          !workspaces.empty() || !block_dims.empty())
+        return 13;
       auto &a = data.graph0_result0_g0_tiling_data;
       auto &b = data.graph0_result0_g1_tiling_data;
       a.s0 = 65536;

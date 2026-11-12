@@ -650,9 +650,8 @@ TEST(BinaryElementwiseL2CapabilityTest, LocalViewChecksDomainWindowAndStaticStor
   EXPECT_EQ(view.vectorPlan->segments.size(), 1U);
   EXPECT_FALSE(ascend::kernel::elementwise::hasSameLocalLayout(op, 0));
   EXPECT_TRUE(ascend::kernel::elementwise::hasSameLocalLayout(op, 1));
-  auto duplicate = TensorDescAttr::get(&context, contiguous.getAxis(), contiguous.getRepeats(),
-                                       contiguous.getStrides(), {1, 1}, contiguous.getVectorizedStrides(),
-                                       contiguous.getRole());
+  auto duplicate = TensorDescAttr::get(&context, contiguous.getAxis(), contiguous.getRepeats(), contiguous.getStrides(),
+                                       {1, 1}, contiguous.getVectorizedStrides(), contiguous.getRole());
   EXPECT_EQ(analyze(duplicate), LocalViewCompatibility::MissingInformation);
   auto incomplete = TensorDescAttr::get(&context, {0, 1, 2}, {}, {}, {1, 2},
                                         {*makeExprAttr(&context, "8"), *makeExprAttr(&context, "1")},
