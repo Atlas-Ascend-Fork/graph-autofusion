@@ -9,7 +9,7 @@
  */
 
 #include "aclmodel_specialization.h"
-#include "sample_resources.h"
+#include "../common/sample_resources.h"
 #include <cmath>
 
 // Check each call once; resources are released on normal completion or early return.

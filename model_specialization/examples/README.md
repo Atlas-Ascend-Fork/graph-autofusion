@@ -8,6 +8,7 @@
 
 ```text
 examples/
+├── common/                     # 共用资源管理
 ├── custom_op/                  # 共用 AddCustom 算子工程
 ├── example01_optimize/          # 模型常量化编译
 └── example02_optimize_by_flag/  # 指定 Scope 常量化编译

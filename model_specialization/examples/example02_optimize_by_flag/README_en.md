@@ -7,12 +7,14 @@ This example captures two custom Add calls and specializes only the second call 
 ## Directory Structure
 
 ```text
-example02_optimize_by_flag/
-├── CMakeLists.txt      # Host build configuration
-├── main.cpp            # Input preparation, capture, optimization, execution, and verification
-├── sample_resources.h  # Runtime, Tensor, and executor resource management
-├── README.md
-└── README_en.md
+examples/
+├── common/
+│   └── sample_resources.h  # Shared Runtime, Tensor, and executor resource management
+└── example02_optimize_by_flag/
+    ├── CMakeLists.txt      # Host build configuration
+    ├── main.cpp            # Input preparation, capture, optimization, execution, and verification
+    ├── README.md
+    └── README_en.md
 ```
 
 ## Example Description

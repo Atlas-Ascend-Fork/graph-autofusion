@@ -7,12 +7,14 @@
 ## 目录结构
 
 ```text
-example01_optimize/
-├── CMakeLists.txt      # Host 编译工程
-├── main.cpp            # 数据准备、捕获、优化、执行和校验
-├── sample_resources.h  # Runtime、Tensor 和 executor 资源管理
-├── README.md
-└── README_en.md
+examples/
+├── common/
+│   └── sample_resources.h  # 共用 Runtime、Tensor 和 executor 资源管理
+└── example01_optimize/
+    ├── CMakeLists.txt      # Host 编译工程
+    ├── main.cpp            # 数据准备、捕获、优化、执行和校验
+    ├── README.md
+    └── README_en.md
 ```
 
 ## 用例介绍

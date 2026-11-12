@@ -8,6 +8,7 @@ These examples show how to specialize a captured model or only the operators ins
 
 ```text
 examples/
+├── common/                     # Shared resource management
 ├── custom_op/                  # Shared AddCustom operator package
 ├── example01_optimize/          # Whole-model specialization
 └── example02_optimize_by_flag/  # Scope-based specialization
