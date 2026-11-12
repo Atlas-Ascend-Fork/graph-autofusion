@@ -100,3 +100,25 @@ LogicalResult mlir::ascendc::printApiExtensionCompareRegBase(CodeEmitter& emitte
        << emitter.getOrCreateName(calCount) << ")}, {static_cast<uint16_t>(1)}, {static_cast<uint16_t>(1)})";
     return success();
 }
+
+// `BinaryBrcInlineOp`：两处模板实参，一处在包装自己的名字上（`<T>`，由 `dst` 的元素类型
+// 推），一处在尾部的函数指针上（`&AscendC::<wrappedApiName><T, false>`）。后者的 `T`
+// 与前者同一个值，但必须各打一遍——函数指针那一位不参与整个调用的模板实参推导，写漏了
+// 编不过。`false` 是 `isSetMask`，理由见 `OpVecBinary.td` 上这个 op 的注释，不是沿用
+// 危险缺省。
+LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::BinaryBrcInlineOp op)
+{
+    auto& os = emitter.ostream();
+    const Type elementType = cast<ascendc::LocalTensorType>(op.getDst().getType()).getElementType();
+    os << op.getAPIName() << "<";
+    FAIL_OR(emitter.emitType(op->getLoc(), elementType));
+    os << ">(" << emitter.getOrCreateName(op.getDst()) << ", " << emitter.getOrCreateName(op.getSrc0()) << ", "
+       << emitter.getOrCreateName(op.getSrc1()) << ", static_cast<int64_t>(" << emitter.getOrCreateName(op.getShape0())
+       << "), static_cast<int64_t>(" << emitter.getOrCreateName(op.getShape1()) << "), static_cast<uint8_t>("
+       << emitter.getOrCreateName(op.getIsInput0BlockBrc()) << "), static_cast<uint8_t>("
+       << emitter.getOrCreateName(op.getIsInput1BlockBrc()) << "), static_cast<int64_t>("
+       << emitter.getOrCreateName(op.getFirstAxisVStride()) << "), &AscendC::" << op.getWrappedApiName() << "<";
+    FAIL_OR(emitter.emitType(op->getLoc(), elementType));
+    os << ", false>)";
+    return success();
+}

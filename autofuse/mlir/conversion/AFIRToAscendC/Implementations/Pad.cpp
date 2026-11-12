@@ -298,6 +298,7 @@ class PadCapabilityProvider final : public ascend::instruction::CapabilityProvid
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // `Pad` 的输入输出差的是补零的范围，不是广播；形状关系与 `(1, A) op (B, A)` 无关。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 

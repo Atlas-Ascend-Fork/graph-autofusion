@@ -842,6 +842,8 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // `afir.broadcast` 自己就是显式广播，它的输出本来就应该与某个输入形状不同；这里问的是
+    // 另一件事——把广播折进二元 elementwise 调用本身，与这个 op 的职责不重叠。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 

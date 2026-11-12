@@ -18,7 +18,7 @@
 | `LegacyGraphGuardRegSt.LoadCastTransposeCase` | f16[64,64] → Cast f32 → Transpose；P0/T0、P1/T1 可生成，P0/T1、P1/T0 的 Cast 无匹配实现 | 补齐这些候选的 Cast 局部布局支持，并检查类型变化后的元素步长 |
 | `LegacyGraphGuardRegSt.LoadGEWhereTransposeCaseLoweringBoundary` | Ge → Where → Transpose[0,3,1,2]；P0/T0、P0/T1 可生成，P1/T0 的 Ge 输入输出 UB stride 不同；另三个候选 NDDMA 无实现 | Compare/Where 支持独立输入输出步长和 ui8 mask 布局；补齐 NDDMA 候选。恢复为正向测试，不再要求合法候选失败 |
 | `LegacyGraphGuardRegSt.TransposeTwoAxisSplitCaseNeedInputAlignCandidateBoundary` | 转置、输入对齐、广播后 Mul；部分候选 Mul 局部布局/广播契约不匹配，P1/T1、P1/T3 广播形状不兼容 | 核对 schedule 到 AFIR 的轴映射，补齐 Mul 广播与局部布局适配；恢复正向测试 |
-| `LegacyGraphGuardRegSt.ContinuesBrc` | 五维动态 shape 连续展开第 0、2、4 轴，广播结果分别直接 Store 和 Add 后 Store；T4 缺少 cache guard，T5～T8 的 Add 不匹配 | 支持 `cache_block_split_fused_brc_axis` 执行条件，补齐链式广播及多消费者的局部布局匹配 |
+| `LegacyGraphGuardRegSt.ContinuesBrc` | 五维动态 shape 连续展开第 0、2、4 轴，广播结果分别直接 Store 和 Add 后 Store；**订正（2026-11-10）**：T4 不是「缺少 cache guard」——缓存谓词构造侧已在 [2026-11-09-brc-cache-and-brc-inline-issues-design.md](2026-11-09-brc-cache-and-brc-inline-issues-design.md) 的第一、二批补齐（含多维图）。reg 侧真正拦住 T4 的是 `bridge/ScheduleToAfir/ScheduleToAfir.cpp:1454`：VectorFunc 子图内带缓存 `exec_condition` 的节点在寄存器形态尚未建模，一律 `emitCapabilityShortfall`，根本到不了谓词构造。mem 侧同一张图卡在五维链式广播 `'afir.broadcast' op has no supported Ascend implementation`。T5～T8 的 Add 不匹配未重新核实，维持原记录 | 两道独立闸门都要过：VF 寄存器形态补齐缓存 `exec_condition` 建模（归 VF M3/M4 范围，见 2026-11-10 剩余工作清单 H.2），以及补齐五维链式广播的 Ascend 实现；补齐链式广播及多消费者的局部布局匹配 |
 
 恢复时必须验证完整候选集。逐模板测试可用于定位，但不能代替不指定模板的门槛测试。
 

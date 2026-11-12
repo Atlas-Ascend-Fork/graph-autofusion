@@ -301,6 +301,8 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // 内联广播包装只收两个源操作数（`BinaryBrcInlineApiWithTwoVectorizedAxisV2`），三元 op
+    // 有三个源，形状都对不上这个接口。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 
