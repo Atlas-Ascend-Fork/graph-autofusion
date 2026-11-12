@@ -687,6 +687,35 @@ TEST_F(TransferPlanTest, StoreProjectsOriginalDestinationStridesInsteadOfProduce
   EXPECT_EQ(plan->dims.front().localStride.getValue().getValue(), "1");
 }
 
+// H.1（2026-11-10 剩余工作清单）：局部侧与落点共用同一根轴 id，落点没有
+// `vectorized_axis`，但两侧在这根轴上的步长不一致——局部侧（生产者 UB 张量）的步长是
+// 广播语义下的 0（这个值不随这根轴变化），落点（真实 GM 输出）在同一根轴上有真实步长
+// （每一轮写的是不同一行）。
+// 旧实现只核对局部侧**向量化轴**自己的两列是否互相一致，核对通过就整份沿用局部侧，
+// 根本没有拿落点的步长表比对过非向量化轴。于是这根轴的真实步长被取成 0，在
+// `materializeScheduledGlobalOffset` 里被「零 stride 对偏移无贡献」整项剔掉——多份广播
+// 输出全部写到同一个 GM 地址，CPU 仿真数值大面积为 0。复现见
+// `load_broadcast_abs_store_1x65536`（`[1, 65536] -> [33, 65536]`）。
+TEST_F(TransferPlanTest, StoreSharedNonVectorizedAxisTakesTheDestinationStrideNotTheProducersBroadcastStride) {
+  DescriptorShape shape;
+  // 轴 3（局部侧的外层块轴）在生产者那块 UB 张量上步长为 0：计算结果不随它变化。
+  shape.strides = R"AF(#afir.expr<"0">, #afir.expr<"zt_size">, #afir.expr<"1">)AF";
+  // 落点在同一根轴上有真实步长，且与真实复现一样没有 `vectorized_axis`。
+  shape.destinationStrides = R"AF(#afir.expr<"(zTb_size * zt_size)">, #afir.expr<"zt_size">, #afir.expr<"1">)AF";
+  shape.destinationVectorizedAxis = "";
+  OwningOpRef<ModuleOp> module = ParseStore(shape);
+  ASSERT_TRUE(module);
+  Operation *store = FindStore(*module);
+  ASSERT_NE(store, nullptr);
+
+  FailureOr<TransferPlan> plan = buildTransferPlan(store);
+  ASSERT_TRUE(succeeded(plan));
+  EXPECT_EQ(plan->kind, TransferPlanKind::Scheduled);
+  EXPECT_EQ(OuterAxesOf(*plan),
+            (std::vector<std::pair<int64_t, std::string>>{{3, "(zTb_size * zt_size)"}, {4, "zt_size"}}))
+      << "共享轴在生产者那块 UB 张量上步长为 0 不代表落点也是 0，不能因此整项消失";
+}
+
 // 落点被调度过、但轴表比局部侧多几根轴：偏移要把多出来的那几根一并算进去。
 //
 // 这是 RCore 一阶段写 workspace 的形态。归约轴跨在保留轴两侧时（`[R, A, R, R]` 归约

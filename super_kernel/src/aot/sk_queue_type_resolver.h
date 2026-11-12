@@ -13,6 +13,8 @@
 
 #include <vector>
 
+#include "sk_task_ir.h"
+
 class SuperKernelBaseNode;
 class SuperKernelGraph;
 
@@ -20,7 +22,7 @@ class SkQueueTypeResolver {
  public:
   explicit SkQueueTypeResolver(const SuperKernelGraph &graph) : graph_(graph) {}
 
-  bool Resolve(const std::vector<SuperKernelBaseNode *> &tasks) const;
+  bool Resolve(const std::vector<SuperKernelBaseNode *> &tasks, std::vector<SkQueueType> &queueTypes) const;
 
  private:
   const SuperKernelGraph &graph_;

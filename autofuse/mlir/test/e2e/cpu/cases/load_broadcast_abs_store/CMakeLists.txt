@@ -34,3 +34,13 @@ add_mlir_e2e_cpu_case(load_broadcast_abs_store_8x1
     OUTPUT_SHAPE "[8, 128]"
     INPUT_SHAPES "[8, 1]"
 )
+
+#   `[1, 65536] -> [33, 65536]`  内轴超过 UB、必须切 tile 且广播轴与内轴先合轴再分块。
+#                           H.1（2026-11-10 剩余工作清单）：这一档曾经「声称接管」但生成
+#                           的 kernel 里没有任何 Broadcast/Duplicate 调用，输出大面积为
+#                           0——`TransferPlan.cpp` 的 `getGlobalDescriptor` 把 Store 的
+#                           GM 偏移错取成生产者 UB 侧的步长，广播轴那一项被当成 0 剔掉。
+add_mlir_e2e_cpu_case(load_broadcast_abs_store_1x65536
+    OUTPUT_SHAPE "[33, 65536]"
+    INPUT_SHAPES "[1, 65536]"
+)

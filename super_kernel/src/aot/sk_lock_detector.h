@@ -424,14 +424,16 @@ class ScopeDeadlockDetector {
     LockDetector::GetDeviceCores();
   }
 
-  // 返回风险Wait所属scope，并通过riskWaitId输出对应节点；无风险时返回nullptr。
+  // 返回风险Wait所属scope，并通过riskWaitId输出对应节点；超限组合的新加入scope通过overCapacityScopeIds输出。
   const SuperKernelScopeInfo *CheckParallelScopeResources(const std::vector<SuperKernelScopeInfo> &scopes,
                                                           uint64_t &riskWaitId,
-                                                          ResourceConflictInfo *conflictInfo = nullptr);
+                                                          ResourceConflictInfo *conflictInfo = nullptr,
+                                                          std::vector<uint16_t> *overCapacityScopeIds = nullptr);
 
  private:
   using ScopeConcurrentRanges = ScopeConcurrentRangeAnalyzer::ScopeConcurrentRanges;
 
+  static std::string FormatScopeIds(const std::vector<const SuperKernelScopeInfo *> &combination);
   std::vector<const SuperKernelScopeInfo *> CollectWaitScopeCandidates(
       const std::vector<SuperKernelScopeInfo> &scopes) const;
   ScopeConcurrentRanges BuildScopeConcurrentRanges(const std::vector<SuperKernelScopeInfo> &scopes) const;

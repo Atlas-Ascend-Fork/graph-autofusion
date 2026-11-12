@@ -211,6 +211,11 @@ auto printOperation(CodeEmitter& emitter, BinaryTmpL2Op op) -> LogicalResultForT
     return success();
 }
 
+// `BinaryBrcInlineOp`：与这个文件里其余的二元包装都不同形，body 在 `VecBinary.cpp`——
+// 那里写了为什么（尾部是一个函数指针实参，模板实参要打两处：包装自己的 `<T>` 与被包装
+// API 的 `<T, false>`）。
+LogicalResult printOperation(CodeEmitter& emitter, ascendc::BinaryBrcInlineOp op);
+
 } // namespace ascendc
 } // namespace mlir
 

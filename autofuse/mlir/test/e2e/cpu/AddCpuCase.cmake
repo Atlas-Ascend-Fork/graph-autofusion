@@ -315,7 +315,10 @@ function(add_mlir_e2e_cpu_case name)
             list(APPEND host_tiling_libs "${case_host_tiling_lib_${host_tiling_lib}}")
         endforeach()
         target_link_options(${target} PRIVATE -Wl,--allow-shlib-undefined)
-        target_link_libraries(${target} PRIVATE ${host_tiling_libs})
+        # libtiling_api.a 的 host_log.cpp / platform_ascendc.cpp 直接调 dlopen/dlsym/dlclose；
+        # 这几个符号在本机 glibc（< 2.34）上拆在 libdl 里，必须显式给出且排在该静态库之后，
+        # 否则链接期报 undefined reference，与 tiling_api 是否解析成功无关。
+        target_link_libraries(${target} PRIVATE ${host_tiling_libs} ${CMAKE_DL_LIBS})
     endif()
 
     # Match runtime simulator libraries to the same target used for compilation

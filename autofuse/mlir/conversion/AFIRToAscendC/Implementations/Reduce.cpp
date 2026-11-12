@@ -224,6 +224,8 @@ class ReduceCapabilityProvider final : public ascend::instruction::CapabilityPro
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
                                          const ascend::instruction::QueryContext &) const override {
+    // 归约的输出比输入少几根轴（归约轴被折掉），不是同秩的 `(1, A)` 对 `(B, A)`——形状关系
+    // 不是广播，是降维。
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
   }
 

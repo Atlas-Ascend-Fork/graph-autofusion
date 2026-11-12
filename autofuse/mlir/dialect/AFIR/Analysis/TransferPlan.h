@@ -38,6 +38,14 @@ namespace mlir::afir {
 // Identity 表示整块访问；Scheduled 按调度视图处理，可包含非连续维度。
 enum class TransferPlanKind { Identity, Scheduled };
 
+// 缓存守卫里循环轴与切分轴的维度关系，按两者的**原始轴集合**（`from` 链的闭包）比较：
+//   - `SameDimension`：循环轴的集合覆盖切分轴的集合，循环推进就会推进切分轴那一维。合轴
+//     （Merged）之后再分块的调度也落在这一支——合出来的轴同时含那一维。
+//   - `OtherDimension`：两个集合不相交，循环跑的是另一维，切分轴那一维的 tile 序号在本循环
+//     内不变。
+//   - `Unresolved`：切分轴取不到、`from` 链断了，或两个集合部分重叠。守卫据此返回失败。
+enum class GuardLoopRelation { Unresolved, SameDimension, OtherDimension };
+
 // tile 外的一根调度轴及其 GM 元素步长，用于计算起点偏移。
 struct TransferOuterAxis {
   int64_t axis = -1;
@@ -47,12 +55,10 @@ struct TransferOuterAxis {
 // 搬运循环嵌套里的一层：循环 `extent` 次，每走一步 GM 指针前进 `globalStride`、UB 指针
 // 前进 `localStride`。
 // `TransferPlan::dims` 外到内排开就是这段嵌套本身：
-//
 //     for (i = 0; i < dims[0].extent; i++)
 //       for (j = 0; j < dims[1].extent; j++)
 //         ub[i * dims[0].localStride  + j * dims[1].localStride]
 //          = gm[i * dims[0].globalStride + j * dims[1].globalStride];
-//
 // 一层有两个 stride，是因为同一批数据在两侧的间隔不同；
 // Load 与 Store 共用，方向由两端类型决定。
 struct TransferDim {
@@ -71,8 +77,14 @@ struct TransferPlan {
   // 无法解析时保留 -1；消费者须按无对应轴处理或返回失败，不得作为真实轴索引。
   int64_t tileInnerAxis = -1;
   int64_t loopAxis = -1;
+  // 执行守卫用的块轴对：取其原始轴集合**覆盖** `tileOuterAxis` 原始轴集合的那一对，与
+  // `loopAxis` 是哪根轴无关。解析不出时两者都保留 -1。
   int64_t blockOuterAxis = -1;
+  int64_t blockInnerAxis = -1;
   int64_t tileOuterAxis = -1;
+  // `loopAxis` 与 `tileOuterAxis` 的维度关系。fused 守卫按它分两种谓词形态，见
+  // `materializeExecConditionGuard`；`Unresolved` 时守卫返回失败，不得挑一种形态。
+  GuardLoopRelation guardLoopRelation = GuardLoopRelation::Unresolved;
 };
 
 // DMA 参数与两侧偏移。globalOffset 包含 GM tile 起点和 tile 内部行偏移；

@@ -15,6 +15,7 @@ add_afir_gtest(AFIRToAscendCTest
     ${MLIR_CODE_ROOT_DIR}/test/ut/conversion/BinaryElementwiseL2CapabilityTest.cpp
     ${MLIR_CODE_ROOT_DIR}/test/ut/conversion/ElementTypeMatrixTest.cpp
     ${MLIR_CODE_ROOT_DIR}/test/ut/conversion/ElementwiseApiFamilyTest.cpp
+    ${MLIR_CODE_ROOT_DIR}/test/ut/conversion/ElementwiseTransferPlanTest.cpp
     ${MLIR_CODE_ROOT_DIR}/test/ut/conversion/SynchronizationTranslationTest.cpp
     ${MLIR_CODE_ROOT_DIR}/test/ut/conversion/VectorizedLoopsTest.cpp
   LIBS

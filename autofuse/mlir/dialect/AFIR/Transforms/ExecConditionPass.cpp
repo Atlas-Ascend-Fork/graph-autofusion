@@ -34,6 +34,8 @@
 #include "dialect/AFIR/IR/AFIR.h"
 #include "support/CapabilityShortfall.h"
 
+#include <tuple>
+
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -59,7 +61,7 @@ ExecCondition getExecCondition(Operation *op) {
 class GuardCache {
  public:
   FailureOr<Value> get(Operation *op, const TransferPlan &plan, ExecCondition condition, scf::ForOp loop) {
-    Key key{loop.getOperation(), static_cast<unsigned>(condition)};
+    Key key = makeKey(plan, condition, loop);
     auto existing = cached.find(key);
     if (existing != cached.end()) {
       return existing->second;
@@ -75,7 +77,24 @@ class GuardCache {
   }
 
  private:
-  using Key = std::pair<Operation *, unsigned>;
+  // 键里**必须**带上谓词真正依赖的那几根轴。只写 `(循环, 取值)` 的版本会让同一循环内第二个
+  // 算子直接拿到第一个算子的谓词，而 fused 那一支的谓词是按算子自己的
+  // `blockOuterAxis` / `loopAxis` / `tileOuterAxis` 建的（`materializeExecConditionGuard`），
+  // 两个算子的周期可以不同——`tileOuterAxis` 取的是算子自己 tile 最外那根向量化轴的配对轴。
+  // 复用于是有两种表现，都不可接受：周期不同的算子按别人的周期缓存；轴解析不出来的算子
+  // 「拒收还是放过」取决于遍历顺序（单独出现时报告能力不足，跟在一个解析得出的算子后面就被
+  // 静默放过）。键带上轴之后，不一致的算子走到 `materializeExecConditionGuard`，该拒的在
+  // 那里拒。
+  // `origin` 那一支的谓词只有「本核第一趟」一项，与这三根轴无关，所以它的键把三根轴归零：
+  // 同一循环内仍然只发一份。新增取值默认落到「依赖轴」那一侧——宁可多发一份谓词。
+  using Key = std::tuple<Operation *, unsigned, int64_t, int64_t, int64_t>;
+
+  static Key makeKey(const TransferPlan &plan, ExecCondition condition, scf::ForOp loop) {
+    const bool axisDependent = condition != ExecCondition::CacheBlockSplitOriginBroadcastAxis;
+    return Key{loop.getOperation(), static_cast<unsigned>(condition), axisDependent ? plan.blockOuterAxis : -1,
+               axisDependent ? plan.loopAxis : -1, axisDependent ? plan.tileOuterAxis : -1};
+  }
+
   llvm::DenseMap<Key, Value> cached;
 };
 
@@ -102,6 +121,56 @@ LogicalResult detachResults(Operation *op) {
   return success();
 }
 
+// 被守卫算子写的那块存储要满足两条，不满足一律拒收。
+// **单 slot。** 守卫跳过的只有算子本身，`AllocTensor` / `EnQue` / `DeQue` / `FreeTensor`
+// 每趟照发（见文件头）。单 slot 时地址每趟相同，跳过一趟写入之后读到的正是上一趟的结果；
+// 多 slot 队列每趟轮转，跳过之后读到的是**两趟之前**的数据，静默产生错误结果。文件头把
+// `buf_num = 1` 写成上游的不变量，而上游那条规则本身带例外——
+// `optimize/buffer_allocate/buf_que_allocator.cpp` 对 VecOut 位置是
+// `is_node_cached && !is_reusable` 才给 1。所以这里查，不假设。
+// `slot_count == -1` 是「没设这个字段」（TBuf 等），那种缓冲不轮转，按单 slot 看。
+// **不在 GM。** 缓存说的是「片上那块结果在一个周期内不变」。写 GM 的算子被包起来之后，
+// 输出只在周期起点写出去，其余 tile 根本没落盘。上游不会这么标
+// （`MarkNodesCacheableBottomUp` 走到 Load 就截断），legacy 也不按算子类别区分
+// （`enable_cache` 只看 `IsValidCacheCondition`），所以这是一条未校验的输入约束。
+// 判据写在存储空间上而不是算子类型上：`afir.store` 之外还有别的写 GM 的算子。
+LogicalResult checkGuardableDestinations(Operation *op, ExecCondition condition) {
+  FailureOr<OperandPartition> partition = getOperandPartition(op);
+  if (failed(partition) || partition->destinationCount == 0) {
+    return emitCapabilityShortfall(op) << "MissingInformation: exec_condition " << stringifyExecCondition(condition)
+                                       << " needs a destination operand whose storage the guard can be checked "
+                                          "against, which this operation does not expose";
+  }
+  for (Value destination : partition->destinations(op)) {
+    BufferDescAttr buffer = getBufferDescAttr(destination);
+    if (!buffer || !buffer.getSpace()) {
+      return emitCapabilityShortfall(op) << "MissingInformation: the destination of a cached operation carries no "
+                                            "buffer descriptor, so the guard's reuse assumption cannot be checked";
+    }
+    if (buffer.getSpace().getValue() == Space::GM) {
+      return emitCapabilityShortfall(op)
+             << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
+             << " caches an on-chip result; a destination in gm would only be written at cycle starts";
+    }
+    // `slot_count` 未设（`-1`）时才退到 `queue_depth` 判「轮转数」：
+    // `ResourceIds.cpp:isCanonicalQueueResource` 判定「是不是队列」时
+    // `slot_count != -1 || queue_depth != -1` 两者都看，说明一块缓冲可能只设了
+    // `queue_depth` 就已经是队列、会按它轮转（`CanonicalResources.cpp` 建
+    // `ascendc::QueueType` 用的正是 `queue_depth`）。但本仓既有语料里 `slot_count` 一旦
+    // 设过就是权威值（如 `slot_count = 1, queue_depth = 2` 这个常见组合，`slot_count`
+    // 为 1 代表调度上该资源不轮转），不能被 `queue_depth` 覆盖，否则现有的全部正向用例
+    // 都会被误拒。
+    const int64_t slotCount = buffer.getSlotCount() != -1 ? buffer.getSlotCount() : buffer.getQueueDepth();
+    if (slotCount > 1) {
+      return emitCapabilityShortfall(op) << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
+                                         << " needs a single-slot buffer, got " << slotCount
+                                         << " slots; a skipped iteration would read the slot written two iterations "
+                                            "back instead of the cached one";
+    }
+  }
+  return success();
+}
+
 LogicalResult guardOperation(Operation *op, ExecCondition condition, GuardCache &guards) {
   FailureOr<TransferPlan> plan = buildTransferPlan(op);
   if (failed(plan) || plan->kind != TransferPlanKind::Scheduled) {
@@ -121,6 +190,10 @@ LogicalResult guardOperation(Operation *op, ExecCondition condition, GuardCache 
     return emitCapabilityShortfall(op) << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
                                        << " requires an enclosing loop on axis " << plan->loopAxis
                                        << ", which loop generation did not materialize";
+  }
+  // 谓词之前先查存储：这两条不满足时发出去的 kernel 会静默产生错误结果，而谓词本身建得出来。
+  if (failed(checkGuardableDestinations(op, condition))) {
+    return failure();
   }
   FailureOr<Value> guard = guards.get(op, *plan, condition, loop);
   if (failed(guard)) {

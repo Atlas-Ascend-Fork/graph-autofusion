@@ -20,7 +20,7 @@
 #include "sk_scope_split.h"
 #include "sk_scope_postprocess.h"
 #include "sk_task_builder.h"
-#include "sk_queue_type_resolver.h"
+#include "sk_task_lowering.h"
 #include "sk_log.h"
 #include "sk_dump_json.h"
 #include "aprof_pub.h"
@@ -321,16 +321,17 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
     tasks.emplace_back(eventNode.get());
   }
 
-  SkQueueTypeResolver queueTypeResolver(graph);
-  if (!queueTypeResolver.Resolve(tasks)) {
-    SK_LOGE("failed to prepare task queue types before task building");
+  SkTaskIR taskIR;
+  SkTaskLowering lowering(opts, graph);
+  if (!lowering.Run(skFuncName, tasks, scopeInfo.GetScopeId(), scopeInfo.GetScopeCoreInfo(), taskIR)) {
+    SK_LOGE("failed to lower task nodes before task building");
     return false;
   }
 
   SK_LOGI("schedule scope: graphTaskCount=%zu, eventTaskCount=%zu, taskCount=%zu, updateStreamCount=%zu",
           reorderedTaskNodes.size(), eventNodes.size(), tasks.size(), scopeInfo.GetScopeStreamInfos().size());
 
-  SkBuildResult buildResult = builder.Build(skFuncName, tasks, scopeInfo.GetScopeId(), scopeInfo.GetScopeCoreInfo());
+  SkBuildResult buildResult = builder.Build(taskIR);
   SkLaunchInfo &launchInfo = buildResult.launchInfo;
 
   // Collect task queue JSON for this scope
@@ -374,7 +375,7 @@ bool SuperKernelOptimizer::Process(SuperKernelGraph &graph) {
   // Save scope infos for later access (e.g., dump to JSON)
   processedScopeInfos_ = std::move(splitter.GetScopeInfos());
 
-  SkTaskBuilder builder(opts, graph);
+  SkTaskBuilder builder;
   SuperKernelScopePostProcessor postProcessor(graph);
 
   for (size_t i = 0; i < processedScopeInfos_.size(); ++i) {

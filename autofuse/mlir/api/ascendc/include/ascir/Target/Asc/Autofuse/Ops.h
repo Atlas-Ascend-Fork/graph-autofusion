@@ -105,6 +105,8 @@ using PrintableOpTypes = std::tuple<
     ascendc::SubsOp, ascendc::DivsOp, ascendc::TrueDivExtendsOp, ascendc::DivExtendsRegBaseOp,
     ascendc::CompareExtendContiguousOp, ascendc::CompareExtendContiguousRegBaseOp,
     ascendc::CompareScalarExtendContiguousOp, ascendc::CompareScalarExtendContiguousRegBaseOp,
+    // 内联广播（brc_inline，custom emitter -- see VecBinary.cpp）
+    ascendc::BinaryBrcInlineOp,
     // Type conversion operations
     ascendc::CastExtendContiguousOp, ascendc::CastExtendContiguousRegBaseOp, ascendc::CastRegOp,
     ascendc::Ceil2IntExtendRegBaseOp,
