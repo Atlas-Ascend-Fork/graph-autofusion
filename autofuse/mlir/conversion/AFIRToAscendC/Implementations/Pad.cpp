@@ -37,14 +37,13 @@
 //     `api_tiling_gen/api/pad.cpp:25` 的 `GetPadHeightAndWidth(node->inputs[0])`），
 //     device 按**输出**的布局写，两侧说岔了 host 写的 tiling 与 device 的布局对不上。
 //
-// 尾块修正（`materializeTailAwareAxisExtent`）只对切分轴（TileInner）成立：切分轴上
-// 修正失败**不是**「退回整块」——那个值在尾块上是错的，静默算错不如不支持；非切分轴
-// 各趟等长，直接物化 repeats。
+// 调度范围统一由 ComputeExtent 按轴身份读取；需要尾块修正却缺少 ActualSize
+// 绑定时必须失败，不能退回名义长度。独立 local view 使用 descriptor repeats。
 //
 //===----------------------------------------------------------------------===//
 
 #include "conversion/AFIRToAscendC/Implementations/Pad.h"
-#include "dialect/AFIR/Analysis/TransferPlan.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 #include "dialect/AFIR/Support/SymbolicExpression.h"
 
@@ -80,8 +79,6 @@ using namespace mlir::afir;
 namespace mlir::ascend::kernel {
 namespace {
 constexpr size_t kMinimumPadRank = 2;
-constexpr int64_t kPadAxis = std::numeric_limits<uint32_t>::digits / CHAR_BIT;
-constexpr size_t kPadExtentCapacity = std::numeric_limits<uint32_t>::digits / CHAR_BIT;
 
 using ascend::instruction::CapabilityReason;
 using ascend::instruction::CapabilitySupport;
@@ -136,13 +133,10 @@ FailureOr<PadShape> analyzePad(Operation *op) {
   auto operandDescs = op->getAttrOfType<ArrayAttr>(kOperandDescsAttrName);
   TensorDescAttr source =
       (operandDescs && !operandDescs.empty()) ? dyn_cast<TensorDescAttr>(operandDescs[0]) : TensorDescAttr();
-  // 本 op 带结果，局部侧（y）就是 result_descs[0]——`getLocalDescriptor` 的取法与
-  // bridge 写 `result_descs = destination_descs` 是同一份事实。
-  FailureOr<TensorDescAttr> destinationView = getLocalDescriptor(op, TransferPlanSide::Automatic);
-  if (failed(destinationView)) {
-    return failure();
-  }
-  TensorDescAttr destination = *destinationView;
+  auto destinationDescs = op->getAttrOfType<ArrayAttr>(kDestinationDescsAttrName);
+  TensorDescAttr destination = (destinationDescs && !destinationDescs.empty())
+                                   ? dyn_cast<TensorDescAttr>(destinationDescs[0])
+                                   : TensorDescAttr();
   if (!descriptorArraysConsistent(source) || !descriptorArraysConsistent(destination)) {
     return failure();
   }
@@ -198,29 +192,16 @@ FailureOr<PadShape> analyzePad(Operation *op) {
   return shape;
 }
 
-// 轴是不是切分轴（TileInner）。轴表拿不到时答 false：让下面的物化走 repeats 那条路，
-// 真因此算错的话，失败会落在 `materializeExtentValue` 而不是这里悄悄放过。
-bool isTileInnerAxis(Operation *op, int64_t axisId) {
-  FailureOr<llvm::DenseMap<int64_t, AxisAttr>> axes = collectGraphAxes(op);
-  if (failed(axes)) {
-    return false;
-  }
-  auto entry = axes->find(axisId);
-  return entry != axes->end() && entry->second.getAxisType() == AxisType::TileInner;
-}
-
-// 一根向量化轴的**实际**元素数（legacy `ActualSize` 的运行期对应物）：
-// 切分轴走尾块修正（最后一块取尾长），其余轴各趟等长、直接物化 repeats。
+// Scheduled axes use the shared ActualSize bindings; missing bindings must not
+// fall back to nominal extents. Standalone local views use descriptor repeats.
 FailureOr<Value> materializeAxisExtent(Operation *op, OpBuilder &builder, TensorDescAttr descriptor, int64_t axisId) {
-  // 尾块修正走计划侧的标称/实际范围机制（`materializeScheduledAxisExtents`）：
-  // 与搬运发射、Reduce 消费的是同一份 actual 事实源，不在本文件另起一套推导。
-  FailureOr<SmallVector<ScheduledAxisExtent, kPadExtentCapacity>> extents =
-      materializeScheduledAxisExtents(op, builder, {kPadAxis});
-  if (succeeded(extents) && (*extents)[0].actual) {
+  auto func = op->getParentOfType<func::FuncOp>();
+  if (func && func->hasAttr(kAscGraphAttrName)) {
+    auto extents = materializeScheduledAxisExtents(op, builder, {axisId});
+    if (failed(extents)) {
+      return failure();
+    }
     return (*extents)[0].actual;
-  }
-  if (isTileInnerAxis(op, axisId)) {
-    return failure();
   }
   FailureOr<size_t> position = axisPosition(descriptor, axisId);
   if (failed(position)) {
@@ -236,10 +217,6 @@ class PadCapabilityProvider final : public ascend::instruction::CapabilityProvid
   CapabilitySupport queryLowering(Operation *operation,
                                   const ascend::instruction::QueryContext &context) const override {
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
-      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
-    }
-    FailureOr<TransferPlan> plan = buildTransferPlan(operation);
-    if (failed(plan)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
 
@@ -371,10 +348,6 @@ class PadConversionPattern final : public OpConversionPattern<PadOp> {
     FailureOr<PadShape> shape = analyzePad(op);
     if (failed(shape)) {
       return rewriter.notifyMatchFailure(op, "not a supported pad form");
-    }
-    FailureOr<TransferPlan> plan = buildTransferPlan(op);
-    if (failed(plan)) {
-      return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR transfer plan");
     }
 
     std::optional<llvm::StringRef> field = op.getApiTilingField();

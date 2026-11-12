@@ -99,21 +99,6 @@ FailureOr<afir::TensorDescAttr> getLocalDescriptor(Operation *op, TransferPlanSi
   return descriptor;
 }
 
-// 图上的轴表（`afir.asc_graph` 的 axes），按轴 id 索引。取不到（无 func 或无属性）失败。
-// `Implementations/` 侧（`Pad.cpp` 的 `isTileInnerAxis`）与本文件共用同一份轴表事实。
-FailureOr<llvm::DenseMap<int64_t, AxisAttr>> collectGraphAxes(Operation *op) {
-  auto func = op->getParentOfType<func::FuncOp>();
-  auto graph = func ? func->getAttrOfType<AscGraphAttrGroupsAttr>(afir::kAscGraphAttrName) : AscGraphAttrGroupsAttr();
-  if (!graph) {
-    return failure();
-  }
-  llvm::DenseMap<int64_t, AxisAttr> axesById;
-  for (AxisAttr axis : graph.getAxes()) {
-    axesById[axis.getId()] = axis;
-  }
-  return axesById;
-}
-
 namespace {
 FailureOr<ExprAttr> resolveGlobalStride(MLIRContext *context, const llvm::DenseMap<int64_t, AxisAttr> &axes,
                                         const llvm::DenseMap<int64_t, ExprAttr> &strides, int64_t id,
@@ -990,52 +975,6 @@ FailureOr<Value> materializeNominalInnermostExtent(Operation *op, OpBuilder &bui
     return failure();
   }
   return materializeExpression(builder, op->getLoc(), plan.dims.back().extent, collectTilingParamBindings(func));
-}
-
-FailureOr<SmallVector<ScheduledAxisExtent, 4>> materializeScheduledAxisExtents(Operation *op, OpBuilder &builder,
-                                                                               ArrayRef<int64_t> axes) {
-  if (axes.empty()) {
-    return failure();
-  }
-  auto func = op->getParentOfType<func::FuncOp>();
-  if (!func) {
-    return failure();
-  }
-  auto graph = func->getAttrOfType<AscGraphAttrGroupsAttr>(afir::kAscGraphAttrName);
-  if (!graph) {
-    return failure();
-  }
-
-  llvm::DenseMap<int64_t, AxisAttr> axesById;
-  for (AxisAttr axis : graph.getAxes()) {
-    axesById.try_emplace(axis.getId(), axis);
-  }
-  SmallVector<TransferDim, 4> requested;
-  requested.reserve(axes.size());
-  for (int64_t axisId : axes) {
-    auto found = axesById.find(axisId);
-    if (found == axesById.end() || !found->second.getSize()) {
-      return failure();
-    }
-    requested.push_back(TransferDim{found->second.getSize(), {}, {}});
-  }
-
-  const SymbolBindingMap nominalBindings = collectTilingParamBindings(func);
-  FailureOr<SymbolBindingMap> actualBindings = collectExtentBindings(func, op, graph, requested);
-  if (failed(actualBindings)) {
-    return failure();
-  }
-  SmallVector<ScheduledAxisExtent, 4> values;
-  values.reserve(requested.size());
-  for (const TransferDim &dim : requested) {
-    FailureOr<Value> nominal = materializeExpression(builder, op->getLoc(), dim.extent, nominalBindings);
-    FailureOr<Value> actual = materializeExpression(builder, op->getLoc(), dim.extent, *actualBindings);
-    if (failed(nominal) || failed(actual)) {
-      return failure();
-    }
-    values.push_back(ScheduledAxisExtent{*nominal, *actual});
-  }
-  return values;
 }
 
 FailureOr<SmallVector<Value, 2>> materializeScheduledTransferDims(Operation *op, OpBuilder &builder,

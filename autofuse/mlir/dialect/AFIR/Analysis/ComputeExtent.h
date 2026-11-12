@@ -19,6 +19,16 @@
 namespace mlir::afir {
 LogicalResult collectFreeSymbols(MLIRContext *context, ExprAttr expression, llvm::SetVector<StringRef> &symbols);
 enum class ExtentSource { Nominal, Actual };
+// 单轴的标称/实际范围，供 Reduce 按语义组合 A/R 维；独立于搬运的双侧连续性合轴。
+struct ScheduledAxisExtent {
+  Value nominal;
+  Value actual;
+};
+
+// 按给定轴序物化标称/实际范围；有尾块的轴缺少 ActualSize 绑定时失败。
+FailureOr<SmallVector<ScheduledAxisExtent, 4>> materializeScheduledAxisExtents(Operation *op, OpBuilder &builder,
+                                                                               ArrayRef<int64_t> axes);
+
 Value findAxisValue(func::FuncOp func, Operation *user, int64_t axisId, AxisValueRole role);
 SymbolBindingMap collectTilingParamBindings(func::FuncOp func);
 FailureOr<int64_t> getLiteralStride(ExprAttr expression);

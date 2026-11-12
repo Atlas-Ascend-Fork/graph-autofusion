@@ -61,7 +61,7 @@
 
 #include "conversion/AFIRToAscendC/Implementations/RemovePad.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
-#include "dialect/AFIR/Analysis/TransferPlan.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 #include "dialect/AFIR/Support/SymbolicExpression.h"
 #include "dialect/AFIR/Support/SymbolicExpressionDetail.h"
@@ -292,10 +292,6 @@ class RemovePadCapabilityProvider final : public ascend::instruction::Capability
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
-    FailureOr<TransferPlan> plan = buildTransferPlan(operation);
-    if (failed(plan)) {
-      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
-    }
 
     ascend::FeatureState executionSupport = context.target.getExecutionSupport(mapping_->executionSpec);
     if (executionSupport == ascend::FeatureState::Unavailable) {
@@ -377,10 +373,6 @@ class RemovePadConversionPattern final : public OpConversionPattern<afir::Remove
     if (!sourceType) {
       return rewriter.notifyMatchFailure(op, "source is not a target-dialect tile");
     }
-    FailureOr<TransferPlan> plan = buildTransferPlan(op);
-    if (failed(plan)) {
-      return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR transfer plan");
-    }
     afir::VectorPlan vectorPlan;
     FailureOr<RemovePadShape> shape = analyzeRemovePad(op, elementByteWidth(sourceType.getElementType()), vectorPlan);
     if (failed(shape)) {
@@ -397,9 +389,10 @@ class RemovePadConversionPattern final : public OpConversionPattern<afir::Remove
     // subindex（本地侧偏移恒为 0，与 `UnaryElementwise.cpp` 同一条判据），以及按逐轴 extent
     // 算出各段的元素数（含切分轴的尾块修正）。
     const auto windowSize = static_cast<unsigned>(vectorPlan.segments.size());
-    FailureOr<VectorizedWindow> window = materializeVectorizedSegments(
-        op, rewriter, vectorPlan,
-        plan->kind == TransferPlanKind::Scheduled ? ExtentSource::Actual : ExtentSource::Nominal, *ordered, windowSize);
+    auto func = op->getParentOfType<func::FuncOp>();
+    const auto extentSource = func && func->hasAttr(kAscGraphAttrName) ? ExtentSource::Actual : ExtentSource::Nominal;
+    FailureOr<VectorizedWindow> window =
+        materializeVectorizedSegments(op, rewriter, vectorPlan, extentSource, *ordered, windowSize);
     if (failed(window) || window->tiles.size() != vectorPlan.tensors.size() || window->extents.size() != windowSize) {
       return rewriter.notifyMatchFailure(op, "cannot materialize the vectorized segment extents");
     }

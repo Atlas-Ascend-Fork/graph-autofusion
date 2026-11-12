@@ -203,4 +203,50 @@ FailureOr<Value> materializeActualSegmentExtent(Operation *op, OpBuilder &builde
   return result;
 }
 
+FailureOr<SmallVector<ScheduledAxisExtent, 4>> materializeScheduledAxisExtents(Operation *op, OpBuilder &builder,
+                                                                               ArrayRef<int64_t> axes) {
+  if (axes.empty()) {
+    return failure();
+  }
+  auto func = op->getParentOfType<func::FuncOp>();
+  if (!func) {
+    return failure();
+  }
+  auto graph = func->getAttrOfType<AscGraphAttrGroupsAttr>(afir::kAscGraphAttrName);
+  if (!graph) {
+    return failure();
+  }
+
+  llvm::DenseMap<int64_t, AxisAttr> axesById;
+  for (AxisAttr axis : graph.getAxes()) {
+    axesById.try_emplace(axis.getId(), axis);
+  }
+  SmallVector<ExprAttr, 4> requested;
+  requested.reserve(axes.size());
+  for (int64_t axisId : axes) {
+    auto found = axesById.find(axisId);
+    if (found == axesById.end() || !found->second.getSize()) {
+      return failure();
+    }
+    requested.push_back(found->second.getSize());
+  }
+
+  const SymbolBindingMap nominalBindings = collectTilingParamBindings(func);
+  FailureOr<SymbolBindingMap> actualBindings = collectExtentBindings(func, op, graph, requested);
+  if (failed(actualBindings)) {
+    return failure();
+  }
+  SmallVector<ScheduledAxisExtent, 4> values;
+  values.reserve(requested.size());
+  for (ExprAttr extent : requested) {
+    FailureOr<Value> nominal = materializeExpression(builder, op->getLoc(), extent, nominalBindings);
+    FailureOr<Value> actual = materializeExpression(builder, op->getLoc(), extent, *actualBindings);
+    if (failed(nominal) || failed(actual)) {
+      return failure();
+    }
+    values.push_back(ScheduledAxisExtent{*nominal, *actual});
+  }
+  return values;
+}
+
 }  // namespace mlir::afir
