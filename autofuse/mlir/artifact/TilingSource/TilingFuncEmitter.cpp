@@ -392,15 +392,20 @@ FailureOr<std::string> EmitAbi(const TilingProgramSpec &spec) {
   }
   out << "AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim, ResLimit *res_limit = nullptr) {\n"
       << "  if (tiling == nullptr || workspaceSize == nullptr || blockDim == nullptr) { return -1; }\n"
-      << "  const ResLimit *limit = (res_limit == nullptr || res_limit->aiv_num == 0) ? &g_no_limit_res : res_limit;\n"
-      << "  if (limit->aiv_num == 0 || limit->aiv_num > g_no_limit_res.aiv_num || limit->ub_size <= "
-      << common::kTilingReservedUbBytes << " ||\n"
-      << "      limit->ub_size > g_no_limit_res.ub_size) { return -1; }\n";
+      // Zero leaves that resource at its target default. Validate explicit limits before tiling.
+      << "  uint32_t aivNum = g_no_limit_res.aiv_num;\n"
+      << "  uint32_t ubSize = g_no_limit_res.ub_size;\n"
+      << "  if (res_limit != nullptr) {\n"
+      << "    if (res_limit->aiv_num != 0U) { aivNum = res_limit->aiv_num; }\n"
+      << "    if (res_limit->ub_size != 0U) { ubSize = res_limit->ub_size; }\n"
+      << "  }\n"
+      << "  if (aivNum == 0U || aivNum > g_no_limit_res.aiv_num || ubSize <= " << common::kTilingReservedUbBytes
+      << "U || ubSize > g_no_limit_res.ub_size) { return -1; }\n";
   for (const std::string &var : spec.shape_params) {
     AppendShapeAssignments(spec, var, out);
   }
-  out << "  tiling->set_block_dim(limit->aiv_num);\n  tiling->set_ub_size(limit->ub_size - "
-      << common::kTilingReservedUbBytes << "U);\n"
+  out << "  tiling->set_block_dim(aivNum);\n  tiling->set_ub_size(ubSize - " << common::kTilingReservedUbBytes
+      << "U);\n"
       << "  if (!optiling::GetTiling(*tiling, -1, nullptr)) { return -1; }\n"
       << "  *blockDim = tiling->get_block_dim();\n"
       << "  if (!CalculateWorkspaceSize(*tiling, *workspaceSize)) { return -1; }\n"

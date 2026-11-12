@@ -1704,7 +1704,19 @@ mlir::OwningOpRef<mlir::ModuleOp> PlanToAfir(mlir::MLIRContext &context, const a
   if (mlir::failed(info)) {
     return nullptr;
   }
-  return BuildAfirModule(context, *info);
+  auto module = BuildAfirModule(context, *info);
+  if (!module) {
+    return nullptr;
+  }
+  // 任务类型由桥接层决策(对齐 legacy GetKernelTaskType 的纯AIV分支),
+  // 以模块属性传给发射层照单打印; 发射层不做策略判断。
+  // 当前桥接拒cube,此路径仅覆盖纯AIV图: 有workspace -> MIX_AIV_1_0, 否则AIV_ONLY。
+  // cube支持落地时,在此处扩决策分支即可,发射层无需改动。
+  const bool hasWorkspace = !fusedResult.workspace_nodes.empty();
+  module->getOperation()->setAttr(
+      "autofuse.kernel_task_type",
+      mlir::StringAttr::get(&context, hasWorkspace ? "KERNEL_TYPE_MIX_AIV_1_0" : "KERNEL_TYPE_AIV_ONLY"));
+  return module;
 }
 
 void MaybeDumpAfirModule(const std::string &stage, mlir::ModuleOp module, const std::string &dumpRoot) {
