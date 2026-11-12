@@ -147,11 +147,6 @@ else
 			ret=$?
 			coverage_save="false"
 			;;
-		ST_Test_autofuse_v35_1|ST_Test_autofuse_v35_2|ST_Test_autofuse_v35_3)
-			bash build.sh -s -c --module=${ut_type#ST_Test_} --cann_3rd_lib_path="/home/jenkins/opensource"
-			ret=$?
-			coverage_save="false"
-			;;
         *)
             echo "Skip UT test execution for ${ut_type} on non-master branch"
             exit 0

@@ -255,6 +255,7 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
       JOB_ST_TEST_autofuse_v35_1:
         name: ST_Test_autofuse_v35_1
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
         select: selected_by_default
         needs: []
         uses: .gitcode/workflows/ut_action.yml
@@ -265,6 +266,7 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
       JOB_ST_TEST_autofuse_v35_2:
         name: ST_Test_autofuse_v35_2
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
         select: selected_by_default
         needs: []
         uses: .gitcode/workflows/ut_action.yml
@@ -275,6 +277,7 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
       JOB_ST_TEST_autofuse_v35_3:
         name: ST_Test_autofuse_v35_3
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
         select: selected_by_default
         needs: []
         uses: .gitcode/workflows/ut_action.yml
