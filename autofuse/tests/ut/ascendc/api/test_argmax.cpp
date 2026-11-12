@@ -77,6 +77,8 @@ TEST_P(TestApiArgmax, Test_argmax_float_ar) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST_P(TestApiArgmax, Test_argmax_int32_ar) {
@@ -136,6 +138,8 @@ TEST_P(TestApiArgmax, Test_argmax_int32_ar) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 INSTANTIATE_TEST_SUITE_P(CalcWithDifferentShape, TestApiArgmax,
@@ -202,6 +206,8 @@ TEST(TestApiArgmaxRA, Test_argmax_float_ra) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiArgmaxRA, Test_argmax_int32_ra) {
@@ -264,6 +270,8 @@ TEST(TestApiArgmaxRA, Test_argmax_int32_ra) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiArgmaxLE64, Test_argmax_float_le64) {
@@ -322,6 +330,8 @@ TEST(TestApiArgmaxLE64, Test_argmax_float_le64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiArgmaxLE64, Test_argmax_int32_le64) {
@@ -380,4 +390,6 @@ TEST(TestApiArgmaxLE64, Test_argmax_int32_le64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }

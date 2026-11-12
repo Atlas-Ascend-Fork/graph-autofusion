@@ -2903,7 +2903,11 @@ Status Kernel::GenCubeCommonFuncForAIV(const ascir::FusedScheduledResult &fused_
                                        std::stringstream &ss, std::stringstream &vec_ss, const bool use_list_tensor,
                                        std::unordered_set<const std::string *> &kernel_file_ptr) {
   vec_ss << "if ASCEND_IS_AIV {" << std::endl;
+  vec_ss << "    #ifdef CV_SAFETY_FUSION_AIV_ONLY" << std::endl;
+  vec_ss << "    SyncAll<true>();" << std::endl;
+  vec_ss << "    #else" << std::endl;
   vec_ss << "    SyncAll<false>();" << std::endl;
+  vec_ss << "    #endif" << std::endl;
   vec_ss << "    #ifdef CV_AIV_NUM" << std::endl;
   vec_ss << "        if (GetBlockIdx() >= CV_AIV_NUM) {" << std::endl;
   vec_ss << "            return;" << std::endl;

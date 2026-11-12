@@ -70,6 +70,8 @@ TEST(TestApiBroadcast, Test_a1_to_ab) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1c_to_abc) {
@@ -127,6 +129,8 @@ TEST(TestApiBroadcast, Test_a1c_to_abc) {
     }
   }
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1c_to_abc_withcopy) {
@@ -184,6 +188,8 @@ TEST(TestApiBroadcast, Test_a1c_to_abc_withcopy) {
     }
   }
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1_to_ab_uint8) {
@@ -237,6 +243,8 @@ TEST(TestApiBroadcast, Test_a1_to_ab_uint8) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1b_to_ab_uint8) {
@@ -290,6 +298,8 @@ TEST(TestApiBroadcast, Test_1b_to_ab_uint8) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1bc_to_abc_uint8) {
@@ -347,6 +357,8 @@ TEST(TestApiBroadcast, Test_1bc_to_abc_uint8) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1c_to_abc_uint8) {
@@ -404,6 +416,8 @@ TEST(TestApiBroadcast, Test_a1c_to_abc_uint8) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_11_to_ab_uint8) {
@@ -457,6 +471,8 @@ TEST(TestApiBroadcast, Test_11_to_ab_uint8) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1b_to_ab_int64) {
@@ -510,6 +526,8 @@ TEST(TestApiBroadcast, Test_1b_to_ab_int64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // TEST(TestApiBroadcast, Test_1b_to_ab_int64_jd) {
@@ -620,6 +638,8 @@ TEST(TestApiBroadcast, Test_1bc_to_abc_int64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1_to_ab_int64) {
@@ -673,6 +693,8 @@ TEST(TestApiBroadcast, Test_a1_to_ab_int64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // TEST(TestApiBroadcast, Test_a1c_to_abc_int64) {
@@ -783,6 +805,8 @@ TEST(TestApiBroadcast, Test_11_to_ab_int64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1bc_to_abc_uint64) {
@@ -840,6 +864,8 @@ TEST(TestApiBroadcast, Test_1bc_to_abc_uint64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1_to_ab_uint64) {
@@ -893,6 +919,8 @@ TEST(TestApiBroadcast, Test_a1_to_ab_uint64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // TEST(TestApiBroadcast, Test_a1c_to_abc_uint64) {
@@ -1003,6 +1031,8 @@ TEST(TestApiBroadcast, Test_11_to_ab_uint64) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1_to_ab_stride) {
@@ -1059,6 +1089,8 @@ TEST(TestApiBroadcast, Test_a1_to_ab_stride) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // TEST(TestApiBroadcast, Test_a1_to_ab_int32) {
@@ -1165,6 +1197,8 @@ TEST(TestApiBroadcast, Test_1b_to_ab_int32) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1bc_to_abc_int32) {
@@ -1222,6 +1256,8 @@ TEST(TestApiBroadcast, Test_1bc_to_abc_int32) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1c_to_abc_int32) {
@@ -1279,6 +1315,8 @@ TEST(TestApiBroadcast, Test_a1c_to_abc_int32) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // TEST(TestApiBroadcast, Test_11_to_ab_int32) {
@@ -1438,6 +1476,8 @@ TEST(TestApiBroadcast, Test_1b_to_ab_uint32) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1bc_to_abc_uint32) {
@@ -1495,6 +1535,8 @@ TEST(TestApiBroadcast, Test_1bc_to_abc_uint32) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1c_to_abc_uint32) {
@@ -1552,6 +1594,8 @@ TEST(TestApiBroadcast, Test_a1c_to_abc_uint32) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // TEST(TestApiBroadcast, Test_a1_to_ab_int16) {
@@ -1658,6 +1702,8 @@ TEST(TestApiBroadcast, Test_1b_to_ab_int16) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1bc_to_abc_int16) {
@@ -1715,6 +1761,8 @@ TEST(TestApiBroadcast, Test_1bc_to_abc_int16) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1c_to_abc_int16) {
@@ -1772,6 +1820,8 @@ TEST(TestApiBroadcast, Test_a1c_to_abc_int16) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // TEST(TestApiBroadcast, Test_11_to_ab_int16) {
@@ -1931,6 +1981,8 @@ TEST(TestApiBroadcast, Test_1b_to_ab_uint16) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1bc_to_abc_uint16) {
@@ -1988,6 +2040,8 @@ TEST(TestApiBroadcast, Test_1bc_to_abc_uint16) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1c_to_abc_uint16) {
@@ -2045,6 +2099,8 @@ TEST(TestApiBroadcast, Test_a1c_to_abc_uint16) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_a1a1_to_abab_half) {
@@ -2111,6 +2167,8 @@ TEST(TestApiBroadcast, Test_a1a1_to_abab_half) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 TEST(TestApiBroadcast, Test_1a1_to_bab_half) {
@@ -2171,6 +2229,8 @@ TEST(TestApiBroadcast, Test_1a1_to_bab_half) {
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // TEST(TestApiBroadcast, Test_1b1b_to_abab_half) {

@@ -1418,6 +1418,115 @@ TEST_F(TestCodegenTiling, CubeCommonTilingAbiUsesUint64WorkspaceSize) {
   EXPECT_EQ(common_code.find("uint32_t* workspace_size"), std::string::npos);
 }
 
+TEST_F(TestCodegenTiling, CubeCommonWorkspaceOffsetExcludesSystemReserve) {
+  const std::string stubs = R"(
+#include <cstdint>
+#include <initializer_list>
+#define OP_LOGI(...)
+struct ResLimit { uint32_t aiv_num; uint32_t ub_size; };
+struct TilingData { uint64_t user_workspace; } TilingDataValue;
+int tiling_status = 0;
+bool workspace_valid = true;
+int AutofuseTilingWithConfig(char *, TilingData *tiling, uint64_t *workspace,
+                            uint32_t *block_dim, ResLimit *limit) {
+  *workspace = tiling->user_workspace + 16ULL * 1024 * 1024;
+  *block_dim = limit->aiv_num;
+  return tiling_status;
+}
+bool GetWorkspaceSize(const TilingData &tiling, uint64_t &workspace) {
+  workspace = tiling.user_workspace;
+  return workspace_valid;
+}
+)";
+  const std::string main = R"(
+int main() {
+  uint64_t workspace = 0;
+  uint32_t block_dim = 0;
+  for (uint64_t user_workspace : {0ULL, 33024ULL, 0x120000000ULL}) {
+    TilingDataValue.user_workspace = user_workspace;
+    if (GenTilingDataValueBlockDimAndWss(nullptr, 56, 256 * 1024, &workspace, &block_dim) != 0 ||
+        workspace != user_workspace || block_dim != 56) {
+      return 1;
+    }
+  }
+  tiling_status = -1;
+  if (GenTilingDataValueBlockDimAndWss(nullptr, 56, 256 * 1024, &workspace, &block_dim) != -1) {
+    return 2;
+  }
+  tiling_status = 0;
+  workspace_valid = false;
+  return GenTilingDataValueBlockDimAndWss(nullptr, 56, 256 * 1024, &workspace, &block_dim) == -1 ? 0 : 3;
+}
+)";
+  EXPECT_TRUE(CompileAndRunCode(stubs + this->GenTilingDataBlockDimAndWss() + main));
+}
+
+TEST_F(TestCodegenTiling, InductorAivOnlyLaunchCoversNativeAndEpilogueBlocks) {
+  af::AscGraph graph("batch_matmul_relu");
+  CreateBatchMatmulElemwiseFusedGraph(graph);
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(graph);
+  ascir::ScheduledResult result;
+  result.cube_type = ascir::CubeTemplateType::kCommon;
+  result.schedule_groups.push_back(group);
+  ascir::FusedScheduledResult fused;
+  fused.node_idx_to_scheduled_results.push_back({result});
+  const auto body = this->GenCubeFusionTilingBodyInductor(fused, fused, "");
+  const auto begin = body.find("const bool is_cv_safety_aiv_only");
+  ASSERT_NE(begin, std::string::npos);
+  const auto end = body.find("return 0;", begin);
+  ASSERT_NE(end, std::string::npos);
+  const auto cube_tiling = this->GenCallCubeTilingForInductor(fused, {}, {});
+  const auto helpers_begin = cube_tiling.find("static inline bool is_cv_safety_aiv_only_mode");
+  ASSERT_NE(helpers_begin, std::string::npos);
+  const auto helpers_end = cube_tiling.find("// Global variable", helpers_begin);
+  ASSERT_NE(helpers_end, std::string::npos);
+  const auto helpers = cube_tiling.substr(helpers_begin, helpers_end - helpers_begin);
+  const std::string stubs = R"(
+#include <algorithm>
+#include <cstdint>
+struct VectorTiling {
+  uint32_t blocks;
+  uint32_t get_block_dim() const { return blocks; }
+};
+struct Tiling {
+  VectorTiling tiling_data;
+  struct {
+    uint32_t fusion_mode, ub_mode, mix_mode, cv_aic_num, cv_aiv_num;
+    uint64_t cv_vec_wss;
+  } cv_tiling_data;
+};
+bool GetWorkspaceSize(const VectorTiling &, uint64_t &size) { size = 0; return true; }
+bool CheckedWorkspaceAdd(uint64_t a, uint64_t b, uint64_t &sum) { sum = a + b; return true; }
+)";
+  const std::string signature = R"(
+int GetLaunchBlocks(int64_t cube_tiling_key, uint32_t cube_block_dim, Tiling *tiling, uint32_t *blockDim) {
+  int64_t ws_size = 0;
+  uint64_t workspace = 0;
+  uint64_t *workspaceSize = &workspace;
+)";
+  const std::string main = R"(
+}
+int main() {
+  struct Case { int64_t key; uint32_t native_blocks, vector_blocks, launch_blocks, mix_mode; };
+  const Case cases[] = {{513, 56, 4, 56, 2}, {513, 4, 56, 56, 2}, {513, 56, 56, 56, 2},
+                        {4097, 28, 56, 28, 1}, {4097, 56, 4, 56, 1}};
+  for (const auto &test : cases) {
+    Tiling tiling{};
+    tiling.tiling_data.blocks = test.vector_blocks;
+    uint32_t blocks = 0;
+    if (GetLaunchBlocks(test.key, test.native_blocks, &tiling, &blocks) != 0 ||
+        blocks != test.launch_blocks || tiling.cv_tiling_data.cv_aiv_num != test.vector_blocks ||
+        tiling.cv_tiling_data.mix_mode != test.mix_mode) {
+      return 1;
+    }
+  }
+  return 0;
+}
+)";
+  EXPECT_TRUE(CompileAndRunCode(stubs + helpers + signature + body.substr(begin, end + 9U - begin) + main));
+}
+
 TEST_F(TestCodegenTiling, PrepareMatMulAttrsShouldUseDefaultOpImplModeForMatMulV3) {
   codegen::MatMulCubeInfo cube_info;
   cube_info.is_batch = false;
@@ -2367,6 +2476,8 @@ TEST_F(TestCodegenTiling, TestGenExternTilingFunc) {
   const std::map<std::string, std::string> shape_info;
   auto res = this->Generate(fused_schedule_result, shape_info, "", "0");
 
+  EXPECT_EQ(res.at("tiling_def_and_tiling_const").find("CUBE_WORKSPACE_SIZE"), std::string::npos);
+
   auto pos = res["tiling_def_and_tiling_const"].find("extern \"C\" int64_t FindBestTilingKey(AutofuseTilingData &t)");
   ASSERT_EQ(pos, std::string::npos);
   ge::RuntimeStub::Reset();
@@ -3127,6 +3238,14 @@ TEST_F(TestCodegenTiling, TestMatmulElemwiseFuse) {
   const std::map<std::string, std::string> shape_info;
   auto res = this->Generate(fused_schedule_result, shape_info, "", "0");
 
+  const auto &source = res.at("tiling_def_and_tiling_const");
+  const auto vector_entry = source.find("extern \"C\" ge::graphStatus TilingFuncVec");
+  const auto cube_workspace = source.find("CUBE_WORKSPACE_SIZE");
+  ASSERT_NE(vector_entry, std::string::npos);
+  ASSERT_NE(cube_workspace, std::string::npos);
+  EXPECT_LT(cube_workspace, vector_entry);
+  EXPECT_EQ(source.find("CUBE_WORKSPACE_SIZE", vector_entry), std::string::npos);
+
   std::fstream tiling_func("Mutmul_fuse_tiling_func.cpp", std::ios::out);
   tiling_func << res["tiling_def_and_tiling_const"];
 
@@ -3772,6 +3891,8 @@ TEST_F(TestCodegenTiling, TestMatmulElemwiseDynamicShapeFuse) {
   shape_info["s1"] = "64";
   auto res = this->Generate(fused_schedule_result, shape_info, "", "0");
 
+  EXPECT_EQ(res.at("tiling_def_and_tiling_const").find("CUBE_WORKSPACE_SIZE"), std::string::npos);
+
   std::fstream tiling_func("Mutmul_fuse_tiling_func.cpp", std::ios::out);
   tiling_func << res["tiling_def_and_tiling_const"];
 
@@ -3897,6 +4018,8 @@ TEST_F(TestCodegenTiling, TestConv2dElemwiseFuse) {
 
   const std::map<std::string, std::string> shape_info;
   auto res = this->Generate(fused_schedule_result, shape_info, "", "0");
+
+  EXPECT_EQ(res.at("tiling_def_and_tiling_const").find("CUBE_WORKSPACE_SIZE"), std::string::npos);
 
   std::fstream tiling_func("Conv2d_fuse_tiling_func.cpp", std::ios::out);
   tiling_func << res["tiling_def_and_tiling_const"];
@@ -4220,6 +4343,8 @@ TEST_F(TestCodegenTiling, TestBatchMatmulDynamicShapeFuse) {
   shape_info["n"] = "64";
   shape_info["k"] = "64";
   auto res = this->Generate(fused_schedule_result, shape_info, "", "0");
+
+  EXPECT_EQ(res.at("tiling_def_and_tiling_const").find("CUBE_WORKSPACE_SIZE"), std::string::npos);
 
   std::fstream tiling_func("Batch_matmul_dynamic_fuse_tiling_func.cpp", std::ios::out);
   tiling_func << res["tiling_def_and_tiling_const"];
@@ -5412,6 +5537,38 @@ TEST_F(TestCodegenTiling, SingleGroupEvaluateModeledPerfShouldUsePublicGetPerf) 
   EXPECT_NE(perf_func.find("return optiling::GetPerf(tmp);"), std::string::npos);
   EXPECT_EQ(perf_func.find("TilingCaseImplPtr impl = GetTilingImplPtr"), std::string::npos);
   EXPECT_EQ(tiling_impl.find("GetModeledPerfForTesting"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, CvSafetyModeHelpersShouldCompileWithoutUnreachableStatements) {
+  for (const bool is_batch : {false, true}) {
+    optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+    ascir::FusedScheduledResult fused_schedule_result;
+    if (is_batch) {
+      af::AscGraph graph("cv_safety_mode");
+      CreateBatchMatmulElemwiseFusedGraph(graph);
+      ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), af::SUCCESS);
+    } else {
+      auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+      ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), af::SUCCESS);
+    }
+    codegen::Codegen codegen(codegen::CodegenOptions{});
+    codegen::CodegenResult result;
+    ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), af::SUCCESS);
+    const auto begin = result.tiling.find("static inline bool is_cv_safety_blockidx_scheduled_mode(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = result.tiling.find("\n}\n", begin);
+    ASSERT_NE(end, std::string::npos);
+    std::stringstream source;
+    source << "#include <cstdint>\n#pragma GCC diagnostic error \"-Wswitch-unreachable\"\n";
+    source << result.tiling.substr(begin, end + 3U - begin);
+    source << "int main() {\n"
+           << "  if (is_cv_safety_blockidx_scheduled_mode(0)) { return 1; }\n"
+           << "  if (is_cv_safety_blockidx_scheduled_mode(257) != " << is_batch << ") { return 2; }\n"
+           << "  if (is_cv_safety_blockidx_scheduled_mode(2097489) != " << is_batch << ") { return 3; }\n"
+           << "  return 0;\n"
+           << "}\n";
+    EXPECT_TRUE(CompileAndRunCode(source.str())) << "is_batch=" << is_batch;
+  }
 }
 
 TEST_F(TestCodegenTiling, CodegenGenerateForInductorCvFusionShouldKeepCubeWrapperHeaderInTilingHead) {

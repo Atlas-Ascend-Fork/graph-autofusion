@@ -831,7 +831,12 @@ def get_cv_ub_fusion_stage_size_name(kernel_name, temp_dir, graph_name, host_so)
 
 
 def static_shape_cv_common_compile(
-    kernel_name, temp_dir, graph_name, vector_core_num=None, cross_info=None
+    kernel_name,
+    temp_dir,
+    graph_name,
+    vector_core_num=None,
+    cross_info=None,
+    cube_tiling_key=0,
 ):
     host_build_dir = os.path.join(temp_dir, "host", "cv_common")
     lib, pgo_config_path = _compile_and_load_cv_host_so(
@@ -839,6 +844,8 @@ def static_shape_cv_common_compile(
     )
     vec_block_dim = -1
     wss = -1
+    is_aiv_only = False
+    use_launch_aic_num = False
     if hasattr(lib, "GenTilingDataValueBlockDimAndWss"):
         import ctypes
 
@@ -856,7 +863,15 @@ def static_shape_cv_common_compile(
         if ret != -1:
             vec_block_dim = block_dim.value
             wss = workspace_size.value
-    return vec_block_dim, wss
+            lib.IsCVSafetyAivOnly.argtypes = [ctypes.c_int64]
+            lib.IsCVSafetyAivOnly.restype = ctypes.c_bool
+            is_aiv_only = bool(lib.IsCVSafetyAivOnly(ctypes.c_int64(cube_tiling_key)))
+            lib.IsCVSafetyBlockIdxScheduled.argtypes = [ctypes.c_int64]
+            lib.IsCVSafetyBlockIdxScheduled.restype = ctypes.c_bool
+            use_launch_aic_num = bool(
+                lib.IsCVSafetyBlockIdxScheduled(ctypes.c_int64(cube_tiling_key))
+            )
+    return vec_block_dim, wss, is_aiv_only, use_launch_aic_num
 
 
 def is_static_compile(params, tiling_func_srcs):
@@ -1730,6 +1745,7 @@ def _process_tiling_info(
     )
     tiling_info.tiling_data = run_info["tiling_data"]
     tiling_info.tiling_key = run_info["tiling_key"]
+    tiling_info.static_workspace_size = sum(run_info["workspaces"])
     tiling_key_list[0] = tiling_info.tiling_key
     cube_block_dim = run_info["block_dim"]
     tiling_info.file_content = gen_static_shape_v2(
@@ -1839,27 +1855,36 @@ def _apply_safety_fusion(ctx):
     )
     tiling_info.file_content += "\n#define CV_SAFETY_FUSION 1\n"
     ctx.use_cv_common[0] = True
-    vec_block_dim, wss = static_shape_cv_common_compile(
-        **ctx.compile_kwargs, cross_info=ctx.cross_info
+    vec_block_dim, wss, is_aiv_only, use_launch_aic_num = (
+        static_shape_cv_common_compile(
+            **ctx.compile_kwargs,
+            cross_info=ctx.cross_info,
+            cube_tiling_key=tiling_info.tiling_key,
+        )
     )
+    if is_aiv_only:
+        tiling_info.file_content += "\n#define CV_SAFETY_FUSION_AIV_ONLY 1\n"
+        new_block_dim = max(ctx.cube_block_dim, vec_block_dim)
+    else:
+        new_block_dim = (
+            (vec_block_dim + 1) // 2
+            if ctx.cube_block_dim * 2 < vec_block_dim
+            else ctx.cube_block_dim
+        )
+    cv_aic_num = new_block_dim if use_launch_aic_num else ctx.cube_block_dim
     logger.info(
         "CV fusion op, CV_AIC_NUM=[%s] CV_AIV_NUM=[%s] CV_VEC_WSS=[%s]",
-        str(ctx.cube_block_dim),
+        str(cv_aic_num),
         str(vec_block_dim),
         str(wss),
     )
     for name, value in [
-        ("CV_AIC_NUM", ctx.cube_block_dim),
+        ("CV_AIC_NUM", cv_aic_num),
         ("CV_AIV_NUM", vec_block_dim),
         ("CV_VEC_WSS", wss),
     ]:
         if value >= 0:
             tiling_info.file_content += f"\n#define {name} {value}\n"
-    new_block_dim = (
-        (vec_block_dim + 1) // 2
-        if ctx.cube_block_dim * 2 < vec_block_dim
-        else ctx.cube_block_dim
-    )
     return f"#define CUBE_BLOCK_DIM {new_block_dim}\n"
 
 
@@ -1897,7 +1922,8 @@ def template_decider(
         target_machine=compile_context.target_machine,
     )
     tiling_key = static_shape_cv_compile(**compile_kwargs, cross_info=cross_info)
-    host_tiling_content = f"#define CUBE_TILING_KEY {tiling_key}\n"
+    # Host dispatch must use the native Cube kernel entry key.
+    host_tiling_content = f"#define CUBE_TILING_KEY {tiling_info.tiling_key}\n"
     logger.info("CV fusion op, get vector tilingkey(%s)", tiling_key)
     use_cv_common = use_cv_common or [False]
     cube_tiling_key_ub = tiling_info.tiling_key & ~0xF0
@@ -2011,6 +2037,7 @@ def create_matmul_tiling_data(
     # 生成host端tiling数据
     host_tiling_data = f"""
 #include "arch35/mat_mul_tiling_data.h"
+#define CUBE_WORKSPACE_SIZE {tiling_info.static_workspace_size}ULL
 const int32_t cube_output_type_size = {cube_output_type_size};
 GET_TILING_DATA_PTR_WITH_STRUCT({struct_name}, tmpTilingData, tmpTilingGM);
 """

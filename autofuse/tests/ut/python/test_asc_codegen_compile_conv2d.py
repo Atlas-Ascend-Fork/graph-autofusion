@@ -559,8 +559,17 @@ class TestStaticShapeCompileHasattrCheck:
         assert fake_lib.GenCVFusionTilingKey.calls[0][1].value == 4
 
     @staticmethod
+    @pytest.mark.parametrize(
+        "cube_key,is_aiv_only,use_launch_aic_num",
+        [(513, True, False), (4097, False, False), (769, False, True)],
+    )
     def test_static_shape_cv_common_compile_uses_vector_core_num_when_provided(
-        asc_codegen_compile_module, tmpdir, monkeypatch
+        asc_codegen_compile_module,
+        tmpdir,
+        monkeypatch,
+        cube_key,
+        is_aiv_only,
+        use_launch_aic_num,
     ):
         """CV common block dim/wss Calculation uses the passed vector_core_num"""
 
@@ -572,24 +581,35 @@ class TestStaticShapeCompileHasattrCheck:
             return 0
 
         fake_lib = SimpleNamespace(
-            GenTilingDataValueBlockDimAndWss=FakeCFunc(on_call=fill_outputs)
+            GenTilingDataValueBlockDimAndWss=FakeCFunc(on_call=fill_outputs),
+            IsCVSafetyAivOnly=FakeCFunc(result=is_aiv_only),
+            IsCVSafetyBlockIdxScheduled=FakeCFunc(result=use_launch_aic_num),
         )
         TestStaticShapeCompileHasattrCheck._mock_static_compile_dependencies(
             asc_codegen_compile_module, monkeypatch, fake_lib
         )
 
-        vec_block_dim, workspace_size = (
+        vec_block_dim, workspace_size, actual_aiv_only, actual_use_launch_aic_num = (
             asc_codegen_compile_module.static_shape_cv_common_compile(
                 kernel_name="kernel",
                 temp_dir=str(tmpdir),
                 graph_name="graph",
                 vector_core_num=4,
+                cube_tiling_key=cube_key,
             )
         )
 
         assert fake_lib.GenTilingDataValueBlockDimAndWss.calls[0][1].value == 4
         assert vec_block_dim == 4
         assert workspace_size == 0x120000000
+        assert actual_aiv_only == is_aiv_only
+        assert actual_use_launch_aic_num == use_launch_aic_num
+        assert fake_lib.IsCVSafetyAivOnly.calls[0][0].value == cube_key
+        assert fake_lib.IsCVSafetyAivOnly.argtypes == [ctypes.c_int64]
+        assert fake_lib.IsCVSafetyAivOnly.restype == ctypes.c_bool
+        assert fake_lib.IsCVSafetyBlockIdxScheduled.calls[0][0].value == cube_key
+        assert fake_lib.IsCVSafetyBlockIdxScheduled.argtypes == [ctypes.c_int64]
+        assert fake_lib.IsCVSafetyBlockIdxScheduled.restype == ctypes.c_bool
         assert isinstance(
             fake_lib.GenTilingDataValueBlockDimAndWss.calls[0][3]._obj, ctypes.c_uint64
         )
@@ -611,7 +631,8 @@ class TestStaticShapeCompileHasattrCheck:
             asc_codegen_compile_module,
             "static_shape_cv_common_compile",
             lambda **kwargs: (
-                calls.append(("cv_common", kwargs["vector_core_num"])) or (4, 16)
+                calls.append(("cv_common", kwargs["vector_core_num"]))
+                or (4, 16, False, False)
             ),
         )
 

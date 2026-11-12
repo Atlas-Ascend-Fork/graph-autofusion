@@ -38,8 +38,8 @@ void AppendCvSafetyBlockIdxScheduledModeDef(std::stringstream &ss, bool is_batch
     for (auto key : {257, 273, 321, 337, 769, 785, 833, 849, 2097409, 2097425, 2097473, 2097489}) {
       ss << "      case " << key << ":" << std::endl;
     }
+    ss << "        return true;" << std::endl;
   }
-  ss << "        return true;" << std::endl;
   ss << "      default:" << std::endl;
   ss << "        return false;" << std::endl;
   ss << "    }" << std::endl;

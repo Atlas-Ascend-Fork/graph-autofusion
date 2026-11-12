@@ -135,7 +135,8 @@ extern "C" int GenTilingDataValueBlockDimAndWss(char* config_file, uint32_t aiv_
         OP_LOGI(OP_NAME, "get_block_dim_and_wss return -1");
         return -1;
     } else {
-        return 0;
+        // The kernel receives user workspace after the AscendC system-reserved region.
+        return GetWorkspaceSize(TilingDataValue, *workspace_size) ? 0 : -1;
     }
 }
 )";
@@ -483,6 +484,21 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionStatic(
   ss << GenCVTilingFunc();
   AppendCvUbFusionStageSizeName(elemwise_schedule_result, ss);
   ss << GenTilingDataBlockDimAndWss();
+  if (!ascgen_utils::IsConv2DFusedScheduled(fused_schedule_result)) {
+    MatMulCubeInfo cube_info;
+    GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
+                      "Failed to extract MatMul cube info for static CV kernel mode.");
+    AppendCvSafetyMixModeHelperDefs(ss, cube_info.is_batch);
+    ss << R"(
+extern "C" bool IsCVSafetyAivOnly(int64_t tiling_key) {
+  return is_cv_safety_aiv_only_mode(tiling_key);
+}
+
+extern "C" bool IsCVSafetyBlockIdxScheduled(int64_t tiling_key) {
+  return is_cv_safety_blockidx_scheduled_mode(tiling_key);
+}
+)";
+  }
   return {{kTilingDefAndConstIdentify, ss.str()}};
 }
 

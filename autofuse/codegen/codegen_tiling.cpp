@@ -107,7 +107,7 @@ void GenInductorCvSafetyFallback(std::stringstream &ss, uint64_t count, const st
   ss << indent << "  return -1;" << std::endl;
   ss << indent << "}" << std::endl;
   ss << indent
-     << "*blockDim = is_cv_safety_aiv_only ? vec_block_dim : "
+     << "*blockDim = is_cv_safety_aiv_only ? std::max(cube_block_dim, vec_block_dim) : "
         "((cube_block_dim * 2 < vec_block_dim) ? (vec_block_dim + 1) / 2 : cube_block_dim);"
      << std::endl;
   ss << indent << "if (!CheckedWorkspaceAdd(vec_wss, static_cast<uint64_t>(ws_size), *workspaceSize)) {" << std::endl;
@@ -966,7 +966,8 @@ std::string TilingLib::TilingFuncDef(const ascir::FusedScheduledResult &fused_sc
   if (enable_autofuse_pgo_) {
     ss << GenGetTilingKeyCount(elemwise_schedule_result);
   }
-  ss << this->GenExternTilingFunc(elemwise_schedule_result, shape_info, tiling_data_name, pgo_dir, core_num)
+  ss << this->GenExternTilingFunc(elemwise_schedule_result, shape_info, tiling_data_name, pgo_dir, core_num,
+                                  fused_schedule_result)
      << std::endl;
   ss << this->GenTilingCacheFunc(elemwise_schedule_result, shape_info);
   ss << this->GenDfxInputSymbolInfo(elemwise_schedule_result, shape_info);
@@ -1779,7 +1780,8 @@ std::string TilingLib::GenExternTilingFuncBody(const ascir::FusedScheduledResult
 std::string TilingLib::GenExternTilingFunc(const ascir::FusedScheduledResult &fused_schedule_result,
                                            const std::map<std::string, std::string> &shape_info,
                                            const std::string tiling, const std::string &pgo_dir,
-                                           const std::string &core_num) const {
+                                           const std::string &core_num,
+                                           const ascir::FusedScheduledResult &origin_schedule_result) const {
   std::stringstream ss;
   std::string extern_c = "extern \"C\"";
   std::string tiling_context = R"(
@@ -1817,6 +1819,14 @@ namespace gert {
     ss << extern_c << " ge::graphStatus TilingFunc(gert::TilingSymbolEvalContext *context)" << std::endl;
     ss << "{" << std::endl;
     ss << GenExternTilingFuncBody(fused_schedule_result, shape_info, tiling, pgo_dir);
+    if (!ascgen_utils::IsConv2DFusedScheduled(origin_schedule_result)) {
+      // GE static tasks add Cube workspace to TilingFuncVec separately; Host tasks use TilingFunc directly.
+      ss << "  if (!CheckedWorkspaceAdd(*context->GetWorkspaceSizes(1), CUBE_WORKSPACE_SIZE, workspace_size)) {"
+         << std::endl;
+      ss << "    return ge::GRAPH_FAILED;" << std::endl;
+      ss << "  }" << std::endl;
+      ss << "  *context->GetWorkspaceSizes(1) = workspace_size;" << std::endl;
+    }
     ss << "  context->SetBlockDim(CUBE_BLOCK_DIM);" << std::endl;
     ss << "  context->SetTilingKey(static_cast<uint64_t>(CUBE_TILING_KEY));" << std::endl;
     ss << "  return ret;" << std::endl;

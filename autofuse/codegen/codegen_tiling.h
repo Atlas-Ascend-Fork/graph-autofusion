@@ -382,7 +382,8 @@ class TilingLib {
   void GenInductorPgoProxyFunction(std::stringstream &ss, const std::string &tiling) const;
   std::string GenExternTilingFunc(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                   const std::map<std::string, std::string> &shape_info, const std::string tiling,
-                                  const std::string &pgo_dir, const std::string &core_num) const;
+                                  const std::string &pgo_dir, const std::string &core_num,
+                                  const ::ascir::FusedScheduledResult &origin_schedule_result) const;
   void TilingSetShapeDim(std::stringstream &tiling_set_shape_dim, const std::string &var_define,
                          const ::ascir::FusedScheduledResult &fused_schedule_result,
                          const std::string &tiling_expr = "tiling->") const;

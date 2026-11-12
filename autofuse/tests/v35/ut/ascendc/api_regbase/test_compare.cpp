@@ -201,6 +201,9 @@ class TestApiCompareUT : public testing::Test {
     // 验证结果
     uint32_t diff_count = Valid(param);
     EXPECT_EQ(diff_count, 0);
+    AscendC::GmFree(param.y);
+    AscendC::GmFree(param.exp);
+    AscendC::GmFree(param.src0);
   }
 
   /* -------------------- 输入是两个tensor相关的测试基础方法定义(count+normal)-------------------- */
@@ -376,6 +379,10 @@ class TestApiCompareUT : public testing::Test {
     // 验证结果
     uint32_t diff_count = Valid(param.y, param.exp, param.size);
     EXPECT_EQ(diff_count, 0);
+    AscendC::GmFree(param.y);
+    AscendC::GmFree(param.exp);
+    AscendC::GmFree(param.src0);
+    AscendC::GmFree(param.src1);
   }
   template <typename O, typename I, uint8_t dim, CMPMODE mode>
   static void TensorCompareTest(uint16_t size, float def_src1 = 4.5) {
@@ -395,6 +402,10 @@ class TestApiCompareUT : public testing::Test {
     // 验证结果
     uint32_t diff_count = Valid(param.y, param.exp, param.size);
     EXPECT_EQ(diff_count, 0);
+    AscendC::GmFree(param.y);
+    AscendC::GmFree(param.exp);
+    AscendC::GmFree(param.src0);
+    AscendC::GmFree(param.src1);
   }
 };
 
