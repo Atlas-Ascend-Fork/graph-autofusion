@@ -610,6 +610,7 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
       GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(new_case, semantic::kTransposeFold));
     }
   }
+  GE_ASSERT_SUCCESS(PadNddmaOutputVectorizedStrides(new_case));
   GE_ASSERT_SUCCESS(ScheduleUtils::TopologicalSorting(new_case));
   return af::SUCCESS;
 }

@@ -58,6 +58,7 @@ af::Status LoadToNddmaTemplate::Generate(const af::AscGraph &origin_graph,
     GELOGD("No load_to_nddma template generated.");
     return af::FAILED;
   }
+  GE_ASSERT_SUCCESS(PadNddmaOutputVectorizedStrides(new_case));
   GE_ASSERT_SUCCESS(ScheduleUtils::TopologicalSorting(new_case));
   return af::SUCCESS;
 }

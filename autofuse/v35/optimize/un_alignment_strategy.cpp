@@ -19,6 +19,19 @@
 
 namespace optimize {
 namespace {
+constexpr uint32_t kAlignBytes = 32U;
+
+bool IsStaticUnalignedStride(const af::Expression &stride, int64_t dtype_size) {
+  if (dtype_size <= 0) {
+    return false;
+  }
+  int64_t stride_val = 0;
+  if (!stride.IsConstExpr() || !stride.GetConstValue(stride_val)) {
+    return false;
+  }
+  return (stride_val * dtype_size) % static_cast<int64_t>(kAlignBytes) != 0;
+}
+
 bool ArangeStoreNeedsDiscontinuousAlignment(const af::AscTensorAttr &attr) {
   for (auto id = attr.vectorized_axis.rbegin(); id != attr.vectorized_axis.rend(); ++id) {
     const auto iter = std::find(attr.axis.begin(), attr.axis.end(), *id);
@@ -267,6 +280,78 @@ Status GenLoadToGenNddmaNode(const af::AscNodePtr &node_load) {
   return af::SUCCESS;
 }
 
+Status PadNddmaOutputVectorizedStrides(const af::AscGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    GE_CHECK_NOTNULL(node);
+    if (node->outputs().empty()) {
+      continue;
+    }
+    auto &output_attr = node->outputs[0].attr;
+    const auto vec_stride_size = output_attr.vectorized_strides.size();
+    if (vec_stride_size < 2UL || output_attr.vectorized_axis.size() != vec_stride_size) {
+      continue;
+    }
+    const auto dtype_size = static_cast<int64_t>(af::GetSizeByDataType(output_attr.dtype));
+    if (dtype_size <= 0) {
+      continue;
+    }
+    const auto &tail_stride = output_attr.vectorized_strides[vec_stride_size - 1UL];
+    if (af::SymbolicUtils::StaticCheckEq(tail_stride, af::sym::kSymbolOne) != af::TriBool::kTrue) {
+      continue;
+    }
+    auto tail_axis_iter =
+        std::find(output_attr.axis.begin(), output_attr.axis.end(), output_attr.vectorized_axis[vec_stride_size - 1UL]);
+    if (tail_axis_iter == output_attr.axis.end()) {
+      continue;
+    }
+    const auto tail_axis_index = std::distance(output_attr.axis.begin(), tail_axis_iter);
+    const auto &tail_repeat = output_attr.repeats[tail_axis_index];
+    if (af::SymbolicUtils::StaticCheckEq(tail_repeat, af::sym::kSymbolOne) == af::TriBool::kTrue) {
+      continue;
+    }
+    const auto &penultimate_stride = output_attr.vectorized_strides[vec_stride_size - 2UL];
+    if (af::SymbolicUtils::StaticCheckEq(penultimate_stride, af::sym::Mul(tail_repeat, tail_stride)) !=
+        af::TriBool::kTrue) {
+      continue;
+    }
+    if (!IsStaticUnalignedStride(penultimate_stride, dtype_size)) {
+      continue;
+    }
+    std::vector<af::Expression> padded_strides = output_attr.vectorized_strides;
+    af::Expression size_product = tail_stride;
+    const auto align_factor = kAlignBytes / static_cast<uint32_t>(dtype_size);
+    bool valid = true;
+    for (int64_t index = static_cast<int64_t>(vec_stride_size) - 1; index >= 0; --index) {
+      auto &stride = padded_strides.at(static_cast<size_t>(index));
+      if (af::SymbolicUtils::StaticCheckEq(stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
+        continue;
+      }
+      auto axis_iter = std::find(output_attr.axis.begin(), output_attr.axis.end(),
+                                 output_attr.vectorized_axis[static_cast<size_t>(index)]);
+      if (axis_iter == output_attr.axis.end()) {
+        valid = false;
+        break;
+      }
+      const auto axis_index = std::distance(output_attr.axis.begin(), axis_iter);
+      const auto &repeat = output_attr.repeats[axis_index];
+      if (index == static_cast<int64_t>(vec_stride_size) - 1) {
+        stride = size_product;
+        size_product = af::sym::Mul(size_product, repeat);
+      } else if (index == static_cast<int64_t>(vec_stride_size) - 2) {
+        stride = af::sym::Align(size_product, align_factor);
+        size_product = af::sym::Mul(stride, repeat);
+      } else {
+        stride = size_product;
+        size_product = af::sym::Mul(size_product, repeat);
+      }
+    }
+    if (!valid) {
+      continue;
+    }
+    output_attr.vectorized_strides = padded_strides;
+  }
+  return af::SUCCESS;
+}
 Status UnAlignmentStrategy::GetCurrentNodeContinuousTailAxisNum(const af::AscNodePtr &node,
                                                                 uint32_t &continuous_tail_axis_num,
                                                                 uint32_t &discontinuous_axis_num) {

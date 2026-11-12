@@ -44,5 +44,6 @@ class UnAlignmentStrategy : public BaseAlignmentStrategy {
 };
 
 Status GenLoadToGenNddmaNode(const af::AscNodePtr &node_load);
+Status PadNddmaOutputVectorizedStrides(const af::AscGraph &graph);
 }  // namespace optimize
 #endif  // OPTIMIZE_PLATFORM_V2_UN_ALIGNMENT_STRATEGY_H
