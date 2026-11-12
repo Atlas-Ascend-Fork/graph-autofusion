@@ -4466,6 +4466,13 @@ TEST_F(CodegenCommonOutputReuse, RejectsWorkspaceMismatchAndMissingMmProducer) {
   EXPECT_EQ(Create(), nullptr);
 }
 
+TEST_F(CodegenCommonOutputReuse, LeavesConvCommonOutputUnchanged) {
+  Conv2D conv("conv");
+  cube.AddNode(conv);
+  fused.node_idx_to_scheduled_results = {{scheduled}};
+  EXPECT_EQ(Create(), nullptr);
+}
+
 TEST_F(CodegenCommonOutputReuse, DynamicProofUsesFrontendSymbolsAndExpandsSquaredSizes) {
   const auto m = cube.CreateSizeVar("m");
   const auto n = cube.CreateSizeVar("n");
@@ -4689,7 +4696,7 @@ TEST_F(CodegenCommonOutputReuse, ProvesAllTiledImplementationsIncludingRationalI
   EXPECT_EQ(plan->vector_impl_names.size(), 4U);
 }
 
-TEST_F(CodegenCommonOutputReuse, LeavesAlreadySupportedVectorOutputReuseUnchanged) {
+TEST_F(CodegenCommonOutputReuse, ExistingVectorOutputReuseUsesTheNativeMixGuard) {
   UseVectorOutput();
   Scalar scalar("scalar");
   vec.AddNode(scalar);
@@ -4697,7 +4704,23 @@ TEST_F(CodegenCommonOutputReuse, LeavesAlreadySupportedVectorOutputReuseUnchange
             af::SUCCESS);
   fused.input_nodes.resize(2);
   fused.gm_tensor_sizes.input_sizes.resize(2);
-  EXPECT_EQ(Create(), nullptr);
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  ASSERT_TRUE(plan->reuses_vector_output);
+  EXPECT_TRUE(plan->uses_legacy_vector_output);
+  EXPECT_EQ(plan->output_name, "tail");
+  const auto code = plan->GenerateGuard(CodegenConfig{}, true);
+  EXPECT_EQ(code, "constexpr bool cv_reuse_common_output = MIX_MODE != 1;\n");
+  CodegenConfig config;
+  config.is_inductor = true;
+  EXPECT_EQ(plan->GenerateGuard(config, false), code);
+  config.launch_decouple = true;
+  EXPECT_EQ(plan->GenerateGuard(config, false), "const bool cv_reuse_common_output = cv_tiling_data.mix_mode != 1;\n");
+  RecordProperty("legacy_vector_output_guard", code);
+  const auto static_code = plan->GenerateGuard(CodegenConfig{}, false);
+  EXPECT_NE(static_code.find("!defined(CV_SAFETY_FUSION_AIV_ONLY)"), std::string::npos);
+  EXPECT_EQ(static_code.find("cv_output_tiling"), std::string::npos);
+  RecordProperty("legacy_vector_output_static_guard", static_code);
 }
 
 TEST_F(CodegenCommonOutputReuse, RetainsCubeOnlyDimensionForFullRuntimeInputRanges) {
@@ -4821,16 +4844,22 @@ TEST_F(CodegenCommonOutputReuse, VectorOutputReuseRequiresAnAicOnlyNativeProduce
   RecordProperty("vector_output_static_guard", static_code);
 
   const auto dynamic_code = plan->GenerateGuard(CodegenConfig{}, true);
-  EXPECT_NE(dynamic_code.find("cv_tiling_data.mix_mode == 0U"), std::string::npos);
+  EXPECT_NE(dynamic_code.find("MIX_MODE == 0"), std::string::npos);
+  EXPECT_EQ(dynamic_code.find("cv_tiling_data.mix_mode"), std::string::npos);
   EXPECT_EQ(dynamic_code.find("CV_SAFETY_FUSION_MIX_MODE"), std::string::npos);
   RecordProperty("vector_output_dynamic_guard", dynamic_code);
 
   CodegenConfig config;
   config.is_inductor = true;
   const auto inductor_code = plan->GenerateGuard(config, false);
-  EXPECT_NE(inductor_code.find("cv_tiling_data.mix_mode == 0U"), std::string::npos);
+  EXPECT_NE(inductor_code.find("MIX_MODE == 0"), std::string::npos);
+  EXPECT_EQ(inductor_code.find("cv_tiling_data.mix_mode"), std::string::npos);
   EXPECT_EQ(inductor_code.find("CV_SAFETY_FUSION_MIX_MODE"), std::string::npos);
   RecordProperty("vector_output_inductor_guard", inductor_code);
+  config.launch_decouple = true;
+  const auto runtime_code = plan->GenerateGuard(config, false);
+  EXPECT_NE(runtime_code.find("cv_tiling_data.mix_mode == 0"), std::string::npos);
+  EXPECT_EQ(runtime_code.find("MIX_MODE"), std::string::npos);
 }
 
 TEST_F(CodegenCommonOutputReuse, NativeMixDoesNotDisableOriginalMmOutputCopyElimination) {
@@ -4858,6 +4887,19 @@ TEST(CodegenKernel, GenCubeCommonTilingSingleFuncCallShouldUseOutputOverride) {
 
   EXPECT_NE(result.find("y0, workspace + vec_wss, gm_tiling_data);"), std::string::npos);
   EXPECT_EQ(result.find("workspace, workspace + vec_wss, gm_tiling_data);"), std::string::npos);
+}
+
+TEST(CodegenKernel, CommonVectorWorkspaceOverrideOnlyChangesTheCallArgument) {
+  codegen::Kernel kernel("vector_kernel");
+  kernel.inputs.emplace_back(GM_ADDR("x"));
+  kernel.outputs.emplace_back(GM_ADDR("y"));
+  kernel.workspaces.emplace_back(Uint64("workspace0"));
+  const std::string selected_workspace = "(cv_reuse_common_output ? y : workspace)";
+  const auto result = kernel.GenTilingFuncCall("vector", "t", 0U, false, false, "t", selected_workspace);
+  EXPECT_NE(result.find("vector(x, y, " + selected_workspace + ", t.workspace0, &t);"), std::string::npos);
+  EXPECT_EQ(kernel.workspace_arg.Str(), "workspace");
+  EXPECT_NE(kernel.GenTilingFuncCall("vector", "t", 0U).find("vector(x, y, workspace, t.workspace0, &t);"),
+            std::string::npos);
 }
 
 TEST(CodegenKernel, WorkspaceReuseOutputAsInputCodegen) {

@@ -1139,6 +1139,8 @@ TEST(GeneratorUT, ReuseGroupPgoCopiesPrimaryGroupTiling) {
             std::string::npos);
   const auto pgo_by_core_num_begin = tail_source.find("bool GetScheduleResult0PGOByCoreNum");
   const auto pgo_by_core_num_end = tail_source.find("using ScheduleResultFunctionPGOByCoreNum", pgo_by_core_num_begin);
+  EXPECT_NE(reuse_source.find("void CopyPgoReuseSelection("), std::string::npos);
+  EXPECT_NE(tail_source.find("AscGraph0ScheduleResult0G1::CopyPgoReuseSelection("), std::string::npos);
   ASSERT_NE(pgo_by_core_num_begin, std::string::npos);
   ASSERT_NE(pgo_by_core_num_end, std::string::npos);
   EXPECT_EQ(tail_source.substr(pgo_by_core_num_begin, pgo_by_core_num_end - pgo_by_core_num_begin)
@@ -1574,6 +1576,9 @@ TEST(GeneratorUT, PGOByCoreNumSingleGroupUsesGetTilingKey) {
   ASSERT_EQ(genImpl.GenPGOByCoreNumSearchTilingKey(), af::SUCCESS);
   const std::string output = genImpl.tiling_func_.GetOutputStr();
   EXPECT_NE(output.find("GetTilingKey(*tiling_data, tiling_case)"), std::string::npos);
+  EXPECT_NE(output.find("FinalTilingObservationSlotGuard final_tiling_slot_guard(0U);"), std::string::npos);
+  EXPECT_NE(output.find("tiling_data_list.push_back({tiling_data_tmp, DBL_MAX, GetFinalTilingSelectionSnapshots()});"),
+            std::string::npos);
   EXPECT_EQ(output.find("GetTilingCore(*tiling_data, tiling_case"), std::string::npos);
 }
 
@@ -1632,6 +1637,10 @@ TEST(GeneratorUT, PGOByCoreNumNormalizesSharedGroupBlockDim) {
   EXPECT_EQ(genImpl.GenPGOByCoreNumFusedScheduleResultsGetTilingDefine(namespace_map), af::SUCCESS);
   const std::string output = genImpl.tiling_func_.GetOutputStr();
   EXPECT_NE(output.find("tiling_data->set_block_dim(block_dim_i);"), std::string::npos);
+  EXPECT_NE(output.find("MergeFinalTilingSelectionSnapshots(ascgraph_candidate_0.final_tiling_selections);"),
+            std::string::npos);
+  EXPECT_NE(output.find("tiling_data_list.push_back({tiling_data_tmp, DBL_MAX, GetFinalTilingSelectionSnapshots()});"),
+            std::string::npos);
   EXPECT_NE(output.find("uint32_t result_block_dim = 0U;"), std::string::npos);
   EXPECT_NE(output.find("result_block_dim = std::min(result_block_dim, block_dim_i);"), std::string::npos);
   EXPECT_NE(output.find("total_block_dim = std::max(total_block_dim, result_block_dim);"), std::string::npos);

@@ -67,6 +67,7 @@ struct TensorInfo {
   std::string param_name;
   std::vector<ge::Expression> shape;
   std::vector<ge::Expression> ori_shape;
+  std::vector<ge::Expression> strides;
   std::string dtype;
   std::string format;
   std::string name;
@@ -230,12 +231,12 @@ class TilingLib {
   void GenTopnSearchTilingSetup(std::stringstream &ss, const std::string &tiling,
                                 const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   void GenTopnCollectCandidates(std::stringstream &ss, const std::string &tiling, bool use_att_codegen) const;
-  void GenAppendTemplateSemanticInfos(std::stringstream &ss, const std::string &indent, bool use_att_codegen,
-                                      const std::string &selection_snapshots = "{}") const;
+  void GenMoveTopnSelectionSnapshots(std::stringstream &ss, const std::string &indent, bool use_att_codegen,
+                                     const std::string &selection_snapshots) const;
   std::string GenTemplateSemanticInfosForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   void GenGroupTemplateSemanticInfo(std::stringstream &ss, const std::string &group_prefix,
-                                    const std::string &tiling_data, size_t slot) const;
-  void GenTopnTemplateSemanticLogs(std::stringstream &ss, bool use_att_codegen) const;
+                                    const std::string &tiling_data, size_t group, size_t slot) const;
+  void GenTopnTemplateSemanticLogs(std::stringstream &ss, bool use_att_codegen, size_t observation_slot_count) const;
   void GenTopnMeasuredCoreSearch(std::stringstream &ss, const std::string &tiling) const;
   void GenTopnMeasuredBatchProfiling(std::stringstream &ss, bool use_att_codegen) const;
   void GenTopnAppendMeasuredDefault(std::stringstream &ss, bool use_att_codegen) const;
@@ -448,7 +449,8 @@ class TilingLib {
   std::string GenerateMatMulTilingCode(const CompileInfo &compile_info, const std::vector<TensorInfo> &inputs,
                                        const std::vector<TensorInfo> &outputs, const std::vector<AttrInfo> &attrs,
                                        bool is_batch) const;
-  std::string ProcessCubeKernelTilingFromFusedResult(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  std::string ProcessCubeKernelTilingFromFusedResult(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                                     bool enable_input_view = false) const;
   std::string GenCubeFusionTilingBodyInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                               const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                               const std::string &shape_dim_param) const;

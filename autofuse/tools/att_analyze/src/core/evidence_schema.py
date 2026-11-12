@@ -34,6 +34,21 @@ from typing import Any, Dict, Mapping, Optional
 SCHEMA_VERSION = "att-evidence/v1"
 
 
+_PIPE_ALIASES = {"M2": "AIV_MTE2", "M3": "AIV_MTE3", "V": "AIV_VEC"}
+
+
+def normalize_pipe_estimates(pipe: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    values = pipe or {}
+    normalized = {
+        name: values.get(name, values.get(alias))
+        for alias, name in _PIPE_ALIASES.items()
+    }
+    normalized.update(
+        (name, value) for name, value in values.items() if name not in _PIPE_ALIASES
+    )
+    return normalized
+
+
 @dataclass
 class FinalTilingRecord:
     """A normalized final ATT tiling observation."""
@@ -57,6 +72,7 @@ class FinalTilingRecord:
     parse_status: str = "ok"
     source_path: str = ""
     source_line: Optional[int] = None
+    output_index: Optional[int] = None
 
 
 @dataclass

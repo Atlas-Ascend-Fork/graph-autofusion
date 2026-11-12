@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from core.evidence_schema import make_record
+from core.evidence_schema import make_record, normalize_pipe_estimates
 from core.log_parser import LogParser
 
 
@@ -55,17 +55,9 @@ _GRAPH_SELECTION_RE = re.compile(
 _GRAPH_RE = re.compile(
     rf"{_MESSAGE_PREFIX}The value of\s+graph(\d+)_result(\d+)\s+is\s+({_NUMBER})"
 )
-_PIPE_NAMES = {"M2": "AIV_MTE2", "M3": "AIV_MTE3", "V": "AIV_VEC"}
-_PIPE_ORDER = ("AIV_MTE2", "AIV_MTE3", "AIV_VEC")
 
 
 def _final_record_json(record: Any) -> Dict[str, Any]:
-    pipe = record.pipe_est or {}
-    pipe_est = (
-        {name: pipe.get(name, pipe.get(alias)) for alias, name in _PIPE_NAMES.items()}
-        if pipe
-        else {name: None for name in _PIPE_ORDER}
-    )
     return {
         "schema_version": "att-evidence/v1",
         "operator": record.op,
@@ -79,7 +71,7 @@ def _final_record_json(record: Any) -> Dict[str, Any]:
         "score": record.score,
         "sub_case_tag": record.sub_case_tag,
         "template_name": record.template_name,
-        "pipe_est": pipe_est,
+        "pipe_est": normalize_pipe_estimates(record.pipe_est),
         "tiling_repr": record.tiling_repr,
         "repr_kind": record.repr_kind,
         "repr_hash": record.repr_hash,
@@ -303,9 +295,9 @@ def export(
                 content = input_stream.read()
             final_records = []
             final_summaries = []
+            parser = LogParser()
+            source_path = os.path.abspath(path)
             if "[ATT][FINAL_TILING" in content:
-                parser = LogParser()
-                source_path = os.path.abspath(path)
                 final_records = parser.extract_final_tiling_records(
                     content, source_path
                 )
@@ -336,6 +328,20 @@ def export(
                             sort_keys=True,
                         )
                         + "\n"
+                    )
+                    count += 1
+
+            if "[ATT][TOPN_TILING" in content:
+                for candidate in parser.extract_topn_tiling_records(
+                    content, source_path
+                ):
+                    record = _final_record_json(candidate)
+                    record.update(
+                        record_type="topn_tiling",
+                        output_index=candidate.output_index,
+                    )
+                    stream.write(
+                        json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
                     )
                     count += 1
 

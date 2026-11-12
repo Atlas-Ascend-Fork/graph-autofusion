@@ -120,11 +120,15 @@ Status GetPeerOutNodes(const NodePtr &node, std::vector<NodePtr> &vec) {
   return SUCCESS;
 }
 
-Status GetOutputTensorAttr(const NodePtr &node, AscTensorAttr *&attr) {
+Status GetOutputTensorAttrAt(const NodePtr &node, AscTensorAttr *&attr, uint32_t output_index) {
   GE_ASSERT_NOTNULL(node);
-  GE_ASSERT_TRUE(node->GetAllOutDataAnchorsSize() > 0U);
-  attr = &node->outputs[0].attr;
+  GE_ASSERT_TRUE(node->GetAllOutDataAnchorsSize() > output_index);
+  attr = &node->outputs[output_index].attr;
   return SUCCESS;
+}
+
+Status GetOutputTensorAttr(const NodePtr &node, AscTensorAttr *&attr) {
+  return GetOutputTensorAttrAt(node, attr, 0U);
 }
 
 bool IsSingleInAndOutNode(const NodePtr &node) {
@@ -325,207 +329,221 @@ bool IsDtypeNotSupportOp(const NodePtr &next_node, af::DataType &output_dtype) {
          (ScheduleUtils::CallAscirInferDataType<Broadcast>(input_dtypes, expect_output_dtypes) != SUCCESS);
 }
 
-Status ReverseCollectBrcNodes(const NodePtr &node, std::vector<NodePtr> &bro_nodes) {
+Status ReverseCollectBrcNodes(const NodePtr &node, std::vector<NodePtr> &brc_nodes) {
   NodePtr cur_node = node;
   while ((cur_node->GetType() == kBroadcastType) && IsSingleInAndOutNode(cur_node)) {
-    bro_nodes.push_back(cur_node);
+    brc_nodes.push_back(cur_node);
     GE_ASSERT_SUCCESS(GetPeerOutNodeSafe(cur_node, cur_node, 0));
   }
   return SUCCESS;
 }
 
-Status GetBroAxisFromNode(const NodePtr &bro_node, int64_t &bro_axis) {
-  bro_axis = -1;
-  NodePtr pre_bro_node;
-  GE_ASSERT_SUCCESS(GetPeerOutNodeSafe(bro_node, pre_bro_node, 0));
-  AscTensorAttr *pre_bro_output_attr = nullptr;
-  GE_ASSERT_SUCCESS(GetOutputTensorAttr(pre_bro_node, pre_bro_output_attr));
-  auto pre_bro_repeats = pre_bro_output_attr->repeats;
-  auto pre_bro_strides = pre_bro_output_attr->strides;
-  auto pre_bro_axis = pre_bro_output_attr->axis;
+Status GetBrcAxisFromNode(const NodePtr &brc_node, int64_t &brc_axis) {
+  brc_axis = -1;
+  NodePtr pre_brc_node;
+  GE_ASSERT_SUCCESS(GetPeerOutNodeSafe(brc_node, pre_brc_node, 0));
+  AscTensorAttr *pre_brc_output_attr = nullptr;
+  GE_ASSERT_SUCCESS(GetOutputTensorAttr(pre_brc_node, pre_brc_output_attr));
+  auto pre_brc_repeats = pre_brc_output_attr->repeats;
+  auto pre_brc_strides = pre_brc_output_attr->strides;
+  auto pre_brc_axis = pre_brc_output_attr->axis;
 
-  AscTensorAttr *bro_output_attr = nullptr;
-  GE_ASSERT_SUCCESS(GetOutputTensorAttr(bro_node, bro_output_attr));
-  auto bro_repeats = bro_output_attr->repeats;
-  auto bro_strides = bro_output_attr->strides;
-  auto bro_attr_axis = bro_output_attr->axis;
-  GE_ASSERT_TRUE(pre_bro_repeats.size() == pre_bro_strides.size());
-  GE_ASSERT_TRUE(bro_repeats.size() == bro_attr_axis.size());
-  GE_ASSERT_TRUE(bro_strides.size() == bro_attr_axis.size());
-  GE_ASSERT_TRUE(pre_bro_repeats.size() == pre_bro_axis.size());
+  AscTensorAttr *brc_output_attr = nullptr;
+  GE_ASSERT_SUCCESS(GetOutputTensorAttr(brc_node, brc_output_attr));
+  auto brc_repeats = brc_output_attr->repeats;
+  auto brc_strides = brc_output_attr->strides;
+  auto brc_attr_axis = brc_output_attr->axis;
+  GE_ASSERT_TRUE(pre_brc_repeats.size() == pre_brc_strides.size());
+  GE_ASSERT_TRUE(brc_repeats.size() == brc_attr_axis.size());
+  GE_ASSERT_TRUE(brc_strides.size() == brc_attr_axis.size());
+  GE_ASSERT_TRUE(pre_brc_repeats.size() == pre_brc_axis.size());
   const auto all_repeats_one =
-      std::all_of(bro_repeats.begin(), bro_repeats.end(), [](const Expression &repeat) { return IsEqOne(repeat); });
+      std::all_of(brc_repeats.begin(), brc_repeats.end(), [](const Expression &repeat) { return IsEqOne(repeat); });
   if (all_repeats_one) {
-    bro_axis = -1;
+    brc_axis = -1;
     GELOGI("No-op broadcast node %s(%s) with all-one output repeats, treat as no broadcast axis.",
-           bro_node->GetName().c_str(), bro_node->GetType().c_str());
+           brc_node->GetName().c_str(), brc_node->GetType().c_str());
     return SUCCESS;
   }
-  for (size_t index = 0U; index < bro_attr_axis.size(); index++) {
-    if (IsEqOne(bro_repeats[index])) {
+  for (size_t index = 0U; index < brc_attr_axis.size(); index++) {
+    if (IsEqOne(brc_repeats[index])) {
       continue;
     }
 
-    const auto pre_axis_iter = std::find(pre_bro_axis.begin(), pre_bro_axis.end(), bro_attr_axis[index]);
-    if (pre_axis_iter == pre_bro_axis.end()) {
+    const auto pre_axis_iter = std::find(pre_brc_axis.begin(), pre_brc_axis.end(), brc_attr_axis[index]);
+    if (pre_axis_iter == pre_brc_axis.end()) {
       // A missing input axis is a scalar/implicit broadcast dimension.
-      bro_axis = bro_attr_axis[index];
+      brc_axis = brc_attr_axis[index];
       return SUCCESS;
     }
 
-    const size_t pre_index = static_cast<size_t>(std::distance(pre_bro_axis.begin(), pre_axis_iter));
-    if (IsEqOne(pre_bro_repeats[pre_index]) && IsEqZero(pre_bro_strides[pre_index])) {
-      bro_axis = bro_attr_axis[index];
+    const size_t pre_index = static_cast<size_t>(std::distance(pre_brc_axis.begin(), pre_axis_iter));
+    if (IsEqOne(pre_brc_repeats[pre_index]) && IsEqZero(pre_brc_strides[pre_index])) {
+      brc_axis = brc_attr_axis[index];
       return SUCCESS;
     }
   }
-  GELOGW("Cannot infer broadcast axis: broadcast[%s], source[%s].", bro_node->GetName().c_str(),
-         pre_bro_node->GetName().c_str());
+  GELOGW("Cannot infer broadcast axis: broadcast[%s], source[%s].", brc_node->GetName().c_str(),
+         pre_brc_node->GetName().c_str());
   return FAILED;
 }
 
-Status GetBroAxises(const std::vector<NodePtr> &bro_nodes, std::vector<int64_t> &bro_axis_idx) {
-  for (const auto &bro_node : bro_nodes) {
-    int64_t bro_axis = -1;
-    if (GetBroAxisFromNode(bro_node, bro_axis) != SUCCESS) {
-      GELOGI("GetBroAxisFromNode failed for node %s(%s), skipping.", bro_node->GetName().c_str(),
-             bro_node->GetType().c_str());
+Status GetBrcAxises(const std::vector<NodePtr> &brc_nodes, std::vector<int64_t> &brc_axis_idx) {
+  for (const auto &brc_node : brc_nodes) {
+    int64_t brc_axis = -1;
+    if (GetBrcAxisFromNode(brc_node, brc_axis) != SUCCESS) {
+      GELOGI("GetBrcAxisFromNode failed for node %s(%s), skipping.", brc_node->GetName().c_str(),
+             brc_node->GetType().c_str());
       continue;
     }
-    if (bro_axis >= 0) {
-      bro_axis_idx.push_back(bro_axis);
+    if (brc_axis >= 0) {
+      brc_axis_idx.push_back(brc_axis);
     }
   }
   return SUCCESS;
 }
 
 // 收集广播节点的全部扩维轴：输出 repeat!=1 且（生产者缺失该轴，或生产者该轴
-// repeat=1/stride=0）。单轴广播结果与 GetBroAxisFromNode 一致；单节点多轴扩维
+// repeat=1/stride=0）。单轴广播结果与 GetBrcAxisFromNode 一致；单节点多轴扩维
 // （真实前端形态，如退化轴 Arange [1,1,N] 一步扩到 [B,M,N]）为首轴语义的超集。
 // 同链判定与删除判定必须使用全集，否则首轴相同而轴集不同的分支会被误判等价，
 // 删除对方广播后丢失非公共轴扩维语义。
-Status GetAllBroAxisesFromNode(const NodePtr &bro_node, std::set<int64_t> &bro_axises) {
-  bro_axises.clear();
-  NodePtr pre_bro_node;
-  GE_ASSERT_SUCCESS(GetPeerOutNodeSafe(bro_node, pre_bro_node, 0));
-  AscTensorAttr *pre_bro_output_attr = nullptr;
-  GE_ASSERT_SUCCESS(GetOutputTensorAttr(pre_bro_node, pre_bro_output_attr));
-  AscTensorAttr *bro_output_attr = nullptr;
-  GE_ASSERT_SUCCESS(GetOutputTensorAttr(bro_node, bro_output_attr));
+Status GetAllBrcAxisesFromNode(const NodePtr &brc_node, std::set<int64_t> &brc_axises) {
+  brc_axises.clear();
+  NodePtr pre_brc_node;
+  GE_ASSERT_SUCCESS(GetPeerOutNodeSafe(brc_node, pre_brc_node, 0));
+  AscTensorAttr *pre_brc_output_attr = nullptr;
+  GE_ASSERT_SUCCESS(GetOutputTensorAttr(pre_brc_node, pre_brc_output_attr));
+  AscTensorAttr *brc_output_attr = nullptr;
+  GE_ASSERT_SUCCESS(GetOutputTensorAttr(brc_node, brc_output_attr));
 
   // 视图三元组尺寸必须自洽（生产者与广播之间轴数允许不同——前缀扩维形态）；
   // 不自洽的视图属于非法图结构，fail-closed 返回失败，避免越界读取。
-  const bool pre_view_valid = pre_bro_output_attr->axis.size() == pre_bro_output_attr->repeats.size() &&
-                              pre_bro_output_attr->axis.size() == pre_bro_output_attr->strides.size();
-  const bool bro_view_valid = bro_output_attr->axis.size() == bro_output_attr->repeats.size() &&
-                              bro_output_attr->axis.size() == bro_output_attr->strides.size();
-  if (!pre_view_valid || !bro_view_valid) {
+  const bool pre_view_valid = pre_brc_output_attr->axis.size() == pre_brc_output_attr->repeats.size() &&
+                              pre_brc_output_attr->axis.size() == pre_brc_output_attr->strides.size();
+  const bool brc_view_valid = brc_output_attr->axis.size() == brc_output_attr->repeats.size() &&
+                              brc_output_attr->axis.size() == brc_output_attr->strides.size();
+  if (!pre_view_valid || !brc_view_valid) {
     GELOGW("Cannot infer broadcast axes from inconsistent views: broadcast[%s], source[%s].",
-           bro_node->GetName().c_str(), pre_bro_node->GetName().c_str());
+           brc_node->GetName().c_str(), pre_brc_node->GetName().c_str());
     return FAILED;
   }
 
-  for (size_t index = 0U; index < bro_output_attr->axis.size(); index++) {
-    if (IsEqOne(bro_output_attr->repeats[index])) {
+  for (size_t index = 0U; index < brc_output_attr->axis.size(); index++) {
+    if (IsEqOne(brc_output_attr->repeats[index])) {
       continue;
     }
     const auto pre_axis_iter =
-        std::find(pre_bro_output_attr->axis.begin(), pre_bro_output_attr->axis.end(), bro_output_attr->axis[index]);
-    if (pre_axis_iter == pre_bro_output_attr->axis.end()) {
-      bro_axises.insert(bro_output_attr->axis[index]);
+        std::find(pre_brc_output_attr->axis.begin(), pre_brc_output_attr->axis.end(), brc_output_attr->axis[index]);
+    if (pre_axis_iter == pre_brc_output_attr->axis.end()) {
+      brc_axises.insert(brc_output_attr->axis[index]);
       continue;
     }
-    const size_t pre_index = static_cast<size_t>(std::distance(pre_bro_output_attr->axis.begin(), pre_axis_iter));
-    if (IsEqOne(pre_bro_output_attr->repeats[pre_index]) && IsEqZero(pre_bro_output_attr->strides[pre_index])) {
-      bro_axises.insert(bro_output_attr->axis[index]);
+    const size_t pre_index = static_cast<size_t>(std::distance(pre_brc_output_attr->axis.begin(), pre_axis_iter));
+    if (IsEqOne(pre_brc_output_attr->repeats[pre_index]) && IsEqZero(pre_brc_output_attr->strides[pre_index])) {
+      brc_axises.insert(brc_output_attr->axis[index]);
     }
   }
   return SUCCESS;
 }
 
-Status GetBroAxisesIndex(std::vector<size_t> &bro_axis_idx, const std::vector<Expression> &pre_bro_repeats,
-                         const std::vector<Expression> &pre_bro_strides,
-                         const std::vector<Expression> &last_bro_repeats) {
-  GE_ASSERT_TRUE(pre_bro_repeats.size() == pre_bro_strides.size());
-  GE_ASSERT_TRUE(pre_bro_repeats.size() == last_bro_repeats.size());
-  for (size_t index = 0U; index < pre_bro_repeats.size(); index++) {
-    if (IsEqOne(pre_bro_repeats[index]) && IsEqZero(pre_bro_strides[index])) {
-      if (IsEqOne(last_bro_repeats[index])) {
+Status GetBrcAxisesIndex(std::vector<size_t> &brc_axis_idx, const std::vector<Expression> &pre_brc_repeats,
+                         const std::vector<Expression> &pre_brc_strides,
+                         const std::vector<Expression> &last_brc_repeats) {
+  GE_ASSERT_TRUE(pre_brc_repeats.size() == pre_brc_strides.size());
+  GE_ASSERT_TRUE(pre_brc_repeats.size() == last_brc_repeats.size());
+  for (size_t index = 0U; index < pre_brc_repeats.size(); index++) {
+    if (IsEqOne(pre_brc_repeats[index]) && IsEqZero(pre_brc_strides[index])) {
+      if (IsEqOne(last_brc_repeats[index])) {
         continue;
       }
-      bro_axis_idx.push_back(index);
+      brc_axis_idx.push_back(index);
     }
   }
   return SUCCESS;
 }
 
-bool IsSameBroNodes(const std::vector<NodePtr> &bro_nodes1, const std::vector<NodePtr> &bro_nodes2) {
-  if (bro_nodes1.size() != bro_nodes2.size()) {
+// 同轴兄弟链判定。除逐节点全扩维轴集比较外，支持可选公共轴门控 allowed_axises：
+// 兄弟链整链删除只有在"链尾按公共轴重建广播"能完全补偿被删扩维时才安全。原始整链后移
+// （ProcessOriginalBackwardLogic）把含全部轴的整条链搬到计算链尾，任何同轴兄弟都可整链
+// 删除（不传门控）；partial backward（JudgePartBackward）每轮只迁移公共轴，兄弟链中不属于
+// 公共轴的扩维无人恢复，会留下消费者两输入视图不一致——此时传入本轮公共轴集，要求兄弟链
+// 每个节点的全部扩维轴都落在其中，否则不穿透该消费者、退回公共轴 partial backward。
+bool IsSameBrcNodes(const std::vector<NodePtr> &brc_nodes1, const std::vector<NodePtr> &brc_nodes2,
+                    const std::set<int64_t> *allowed_axises = nullptr) {
+  if (brc_nodes1.size() != brc_nodes2.size()) {
     return false;
   }
   // 逐节点比较全扩维轴集：首轴相同而轴集不同（如 {s0,s1} vs {s0,s2}）的分支
   // 不是同链，删重复广播+整链后移会丢失非公共轴扩维语义，必须改走公共轴
   // partial backward（否则改写后 Add 输入/输出视图不一致）。
-  for (size_t index = 0U; index < bro_nodes1.size(); index++) {
-    std::set<int64_t> bro_axis_set1;
-    std::set<int64_t> bro_axis_set2;
-    if (GetAllBroAxisesFromNode(bro_nodes1[index], bro_axis_set1) != SUCCESS ||
-        GetAllBroAxisesFromNode(bro_nodes2[index], bro_axis_set2) != SUCCESS) {
+  for (size_t index = 0U; index < brc_nodes1.size(); index++) {
+    std::set<int64_t> brc_axis_set1;
+    std::set<int64_t> brc_axis_set2;
+    if (GetAllBrcAxisesFromNode(brc_nodes1[index], brc_axis_set1) != SUCCESS ||
+        GetAllBrcAxisesFromNode(brc_nodes2[index], brc_axis_set2) != SUCCESS) {
       return false;
     }
-    if (bro_axis_set1 != bro_axis_set2) {
+    if (brc_axis_set1 != brc_axis_set2) {
       return false;
+    }
+    if (allowed_axises != nullptr) {
+      for (const auto axis : brc_axis_set1) {
+        if (allowed_axises->count(axis) == 0U) {
+          return false;
+        }
+      }
     }
   }
   return true;
 }
 
-Status RemoveAndRelinkNodeEdge(af::InDataAnchorPtr &bro_in_anchor, af::OutDataAnchorPtr &bro_out_anchor) {
-  GE_ASSERT_NOTNULL(bro_in_anchor);
-  GE_ASSERT_NOTNULL(bro_out_anchor);
-  GE_ASSERT_TRUE(!bro_out_anchor->GetPeerInDataAnchors().empty());
-  auto before_bro_out_anchor = bro_in_anchor->GetPeerOutAnchor();
-  auto after_bro_in_anchor = bro_out_anchor->GetPeerInDataAnchors().at(0);
-  GE_ASSERT_NOTNULL(before_bro_out_anchor);
-  GE_ASSERT_NOTNULL(after_bro_in_anchor);
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(before_bro_out_anchor, bro_in_anchor));
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(bro_out_anchor, after_bro_in_anchor));
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(before_bro_out_anchor, after_bro_in_anchor));
+Status RemoveAndRelinkNodeEdge(af::InDataAnchorPtr &brc_in_anchor, af::OutDataAnchorPtr &brc_out_anchor) {
+  GE_ASSERT_NOTNULL(brc_in_anchor);
+  GE_ASSERT_NOTNULL(brc_out_anchor);
+  GE_ASSERT_TRUE(!brc_out_anchor->GetPeerInDataAnchors().empty());
+  auto before_brc_out_anchor = brc_in_anchor->GetPeerOutAnchor();
+  auto after_brc_in_anchor = brc_out_anchor->GetPeerInDataAnchors().at(0);
+  GE_ASSERT_NOTNULL(before_brc_out_anchor);
+  GE_ASSERT_NOTNULL(after_brc_in_anchor);
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(before_brc_out_anchor, brc_in_anchor));
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(brc_out_anchor, after_brc_in_anchor));
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(before_brc_out_anchor, after_brc_in_anchor));
   return SUCCESS;
 }
 
-Status RemoveBroadcastOneByOne(std::vector<NodePtr> &bro_nodes, AscGraph &graph) {
-  for (auto &node : bro_nodes) {
-    auto bro_in_anchor = node->GetInDataAnchor(0);
-    auto bro_out_anchor = node->GetOutDataAnchor(0);
-    GE_ASSERT_SUCCESS(RemoveAndRelinkNodeEdge(bro_in_anchor, bro_out_anchor));
+Status RemoveBroadcastOneByOne(std::vector<NodePtr> &brc_nodes, AscGraph &graph) {
+  for (auto &node : brc_nodes) {
+    auto brc_in_anchor = node->GetInDataAnchor(0);
+    auto brc_out_anchor = node->GetOutDataAnchor(0);
+    GE_ASSERT_SUCCESS(RemoveAndRelinkNodeEdge(brc_in_anchor, brc_out_anchor));
     GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveNodeWithoutRelink(af::AscGraphUtils::GetComputeGraph(graph), node));
     af::NodeUtils::UnlinkAll(*node);
   }
   return SUCCESS;
 }
 
-Status RemoveBroadcasts(std::vector<NodePtr> &bro_nodes, AscGraph &graph) {
-  auto bro_in_anchor = bro_nodes.front()->GetInDataAnchor(0);
-  auto bro_out_anchor = bro_nodes.back()->GetOutDataAnchor(0);
-  GE_ASSERT_SUCCESS(RemoveAndRelinkNodeEdge(bro_in_anchor, bro_out_anchor));
-  for (auto &node : bro_nodes) {
+Status RemoveBroadcasts(std::vector<NodePtr> &brc_nodes, AscGraph &graph) {
+  auto brc_in_anchor = brc_nodes.front()->GetInDataAnchor(0);
+  auto brc_out_anchor = brc_nodes.back()->GetOutDataAnchor(0);
+  GE_ASSERT_SUCCESS(RemoveAndRelinkNodeEdge(brc_in_anchor, brc_out_anchor));
+  for (auto &node : brc_nodes) {
     GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveNodeWithoutRelink(af::AscGraphUtils::GetComputeGraph(graph), node));
     af::NodeUtils::UnlinkAll(*node);
   }
   return SUCCESS;
 }
 
-std::set<int64_t> FindSubSet(std::vector<int64_t> &bro_axis_idx1, std::vector<int64_t> &bro_axis_idx2) {
+std::set<int64_t> FindSubSet(std::vector<int64_t> &brc_axis_idx1, std::vector<int64_t> &brc_axis_idx2) {
   std::set<int64_t> common_elements;
-  if (bro_axis_idx1.empty() || bro_axis_idx2.empty()) {
+  if (brc_axis_idx1.empty() || brc_axis_idx2.empty()) {
     return common_elements;
   }
-  std::sort(bro_axis_idx1.begin(), bro_axis_idx1.end(), std::greater<int64_t>());
-  std::sort(bro_axis_idx2.begin(), bro_axis_idx2.end(), std::greater<int64_t>());
-  auto it1 = bro_axis_idx1.begin();
-  auto it2 = bro_axis_idx2.begin();
-  while (it1 != bro_axis_idx1.end() && it2 != bro_axis_idx2.end()) {
+  std::sort(brc_axis_idx1.begin(), brc_axis_idx1.end(), std::greater<int64_t>());
+  std::sort(brc_axis_idx2.begin(), brc_axis_idx2.end(), std::greater<int64_t>());
+  auto it1 = brc_axis_idx1.begin();
+  auto it2 = brc_axis_idx2.begin();
+  while (it1 != brc_axis_idx1.end() && it2 != brc_axis_idx2.end()) {
     if (*it1 == *it2) {
       common_elements.insert(*it1);
       ++it1;
@@ -539,8 +557,8 @@ std::set<int64_t> FindSubSet(std::vector<int64_t> &bro_axis_idx1, std::vector<in
   return common_elements;
 }
 
-bool CollectSameBrcAxis(NodePtr &cur_node, NodePtr &next_node, std::vector<std::vector<NodePtr>> &bro_nodes_list,
-                        std::set<int64_t> &common_axes, std::vector<NodePtr> &origin_bro_nodes,
+bool CollectSameBrcAxis(NodePtr &cur_node, NodePtr &next_node, std::vector<std::vector<NodePtr>> &brc_nodes_list,
+                        std::set<int64_t> &common_axes, std::vector<NodePtr> &origin_brc_nodes,
                         std::vector<NodePtr> *retained_cast_nodes = nullptr) {
   std::vector<NodePtr> peer_out_nodes;
   GE_ASSERT_SUCCESS(GetPeerOutNodes(next_node, peer_out_nodes));
@@ -551,41 +569,41 @@ bool CollectSameBrcAxis(NodePtr &cur_node, NodePtr &next_node, std::vector<std::
     NodePtr broadcast_node;
     NodePtr retained_cast_node;
     if (!GetBroadcastPeerThroughCast(node, broadcast_node, retained_cast_node)) {
-      bro_nodes_list.clear();
+      brc_nodes_list.clear();
       common_axes.clear();
       return false;
     }
     if (retained_cast_nodes != nullptr && retained_cast_node != nullptr) {
       retained_cast_nodes->push_back(retained_cast_node);
     }
-    if (origin_bro_nodes.empty()) {
-      ReverseCollectBrcNodes(broadcast_node, origin_bro_nodes);
-      std::reverse(origin_bro_nodes.begin(), origin_bro_nodes.end());
-      bro_nodes_list.push_back(origin_bro_nodes);
+    if (origin_brc_nodes.empty()) {
+      ReverseCollectBrcNodes(broadcast_node, origin_brc_nodes);
+      std::reverse(origin_brc_nodes.begin(), origin_brc_nodes.end());
+      brc_nodes_list.push_back(origin_brc_nodes);
       continue;
     }
-    std::vector<NodePtr> temp_bro_nodes;
-    ReverseCollectBrcNodes(broadcast_node, temp_bro_nodes);
-    std::reverse(temp_bro_nodes.begin(), temp_bro_nodes.end());
-    bro_nodes_list.push_back(temp_bro_nodes);
+    std::vector<NodePtr> temp_brc_nodes;
+    ReverseCollectBrcNodes(broadcast_node, temp_brc_nodes);
+    std::reverse(temp_brc_nodes.begin(), temp_brc_nodes.end());
+    brc_nodes_list.push_back(temp_brc_nodes);
 
-    std::vector<int64_t> bro_axis_idx1;
-    std::vector<int64_t> bro_axis_idx2;
+    std::vector<int64_t> brc_axis_idx1;
+    std::vector<int64_t> brc_axis_idx2;
     if (common_axes.empty()) {
-      GetBroAxises(origin_bro_nodes, bro_axis_idx1);
+      GetBrcAxises(origin_brc_nodes, brc_axis_idx1);
     } else {
-      bro_axis_idx1.assign(common_axes.begin(), common_axes.end());
+      brc_axis_idx1.assign(common_axes.begin(), common_axes.end());
     }
-    GetBroAxises(temp_bro_nodes, bro_axis_idx2);
-    std::set<int64_t> temp_common_axes = FindSubSet(bro_axis_idx1, bro_axis_idx2);
+    GetBrcAxises(temp_brc_nodes, brc_axis_idx2);
+    std::set<int64_t> temp_common_axes = FindSubSet(brc_axis_idx1, brc_axis_idx2);
 
     if (temp_common_axes.empty()) {
-      bro_nodes_list.clear();
+      brc_nodes_list.clear();
       common_axes.clear();
       return false;
     }
     common_axes = temp_common_axes;
-    origin_bro_nodes = origin_bro_nodes.size() < temp_bro_nodes.size() ? origin_bro_nodes : temp_bro_nodes;
+    origin_brc_nodes = origin_brc_nodes.size() < temp_brc_nodes.size() ? origin_brc_nodes : temp_brc_nodes;
   }
   return true;
 }
@@ -599,16 +617,16 @@ Status GetNodeScalarInputList(const af::AscNodePtr &asc_node, std::vector<bool> 
   return SUCCESS;
 }
 
-Status ProcessOtherInputBranches(const NodePtr &next_comp_op, size_t current_idx, const std::vector<int64_t> &bro_axes,
+Status ProcessOtherInputBranches(const NodePtr &next_comp_op, size_t current_idx, const std::vector<int64_t> &brc_axes,
                                  std::vector<bool> &is_scalar_list);
 
 // 统计 node 的输入中由"非本事务"broadcast 支撑的路数：peer 是 Broadcast 时直接判定，peer 是 compute 时看其
-// in-0 生产者（本链广播后移后将停靠在 peer 与 node 之间，属于本链而非外源）。excluded_bro_nodes 为本次
-// 后移事务涉及的广播全集：链内广播（bro_nodes，提交期后移到链尾 compute 与 node 之间）与同轴兄弟广播
-// （pending_remove_bros，提交期统一删除，但探测期仍垫在链内多输入节点的输入上，会被 in-0 生产者检查看到）。
+// in-0 生产者（本链广播后移后将停靠在 peer 与 node 之间，属于本链而非外源）。excluded_brc_nodes 为本次
+// 后移事务涉及的广播全集：链内广播（brc_nodes，提交期后移到链尾 compute 与 node 之间）与同轴兄弟广播
+// （pending_remove_brcs，提交期统一删除，但探测期仍垫在链内多输入节点的输入上，会被 in-0 生产者检查看到）。
 // 二者提交后都不会以"peer 背后的外源广播"形态存在，排除后语义变为"≥2 路外源广播才拒绝"，
 // 避免本事务自己的广播反过来否决自己的后移。
-bool HasMultipleInputsBroadcastBehind(const NodePtr &node, const std::vector<NodePtr> &excluded_bro_nodes) {
+bool HasMultipleInputsBroadcastBehind(const NodePtr &node, const std::vector<NodePtr> &excluded_brc_nodes) {
   if (node->GetAllInDataAnchorsSize() <= 1U) {
     return false;
   }
@@ -623,14 +641,14 @@ bool HasMultipleInputsBroadcastBehind(const NodePtr &node, const std::vector<Nod
     }
     bool has_broadcast = false;
     if (peer->GetType() == kBroadcastType) {
-      has_broadcast = std::find(excluded_bro_nodes.begin(), excluded_bro_nodes.end(), peer) == excluded_bro_nodes.end();
+      has_broadcast = std::find(excluded_brc_nodes.begin(), excluded_brc_nodes.end(), peer) == excluded_brc_nodes.end();
     } else {
       NodePtr pre_node;
       if (GetPeerOutNodeSafe(peer, pre_node, 0) == SUCCESS && pre_node != nullptr &&
           pre_node->GetType() == kBroadcastType) {
         // peer 背后的广播属于本事务（链内广播将移到 peer 与 node 之间、待删兄弟提交期删除）时不算"别人"。
         has_broadcast =
-            std::find(excluded_bro_nodes.begin(), excluded_bro_nodes.end(), pre_node) == excluded_bro_nodes.end();
+            std::find(excluded_brc_nodes.begin(), excluded_brc_nodes.end(), pre_node) == excluded_brc_nodes.end();
       }
     }
     if (has_broadcast) {
@@ -697,7 +715,7 @@ bool IsScalarInput(const NodePtr &input_node) {
 }
 
 Status CheckNodeSupportsScalarInput(const NodePtr &compute_node, int32_t input_idx,
-                                    const std::vector<int64_t> &bro_axes, bool &is_support) {
+                                    const std::vector<int64_t> &brc_axes, bool &is_support) {
   is_support = false;
   GE_ASSERT_NOTNULL(std::dynamic_pointer_cast<AscNode>(compute_node));
   const auto &asc_node = std::dynamic_pointer_cast<AscNode>(compute_node);
@@ -709,7 +727,7 @@ Status CheckNodeSupportsScalarInput(const NodePtr &compute_node, int32_t input_i
     is_scalar_list[input_idx] = true;
   }
 
-  GE_ASSERT_SUCCESS(ProcessOtherInputBranches(compute_node, input_idx, bro_axes, is_scalar_list));
+  GE_ASSERT_SUCCESS(ProcessOtherInputBranches(compute_node, input_idx, brc_axes, is_scalar_list));
 
   is_support = ascgen_utils::IsNodeSupportsScalarInput(asc_node, is_scalar_list);
   if (!is_support) {
@@ -719,7 +737,7 @@ Status CheckNodeSupportsScalarInput(const NodePtr &compute_node, int32_t input_i
   return SUCCESS;
 }
 
-bool CheckScalarInputSupport(const NodePtr &next_node, const std::vector<NodePtr> &bro_nodes) {
+bool CheckScalarInputSupport(const NodePtr &next_node, const std::vector<NodePtr> &brc_nodes) {
   GE_ASSERT_NOTNULL(std::dynamic_pointer_cast<AscNode>(next_node));
 
   auto in_data_anchor_size = next_node->GetAllInDataAnchorsSize();
@@ -728,12 +746,12 @@ bool CheckScalarInputSupport(const NodePtr &next_node, const std::vector<NodePtr
     GE_ASSERT_SUCCESS(GetPeerOutNodeSafe(next_node, input_node, i));
 
     if (IsScalarInput(input_node)) {
-      std::vector<int64_t> bro_axes;
-      if (!bro_nodes.empty()) {
-        GE_ASSERT_SUCCESS(GetBroAxises(bro_nodes, bro_axes));
+      std::vector<int64_t> brc_axes;
+      if (!brc_nodes.empty()) {
+        GE_ASSERT_SUCCESS(GetBrcAxises(brc_nodes, brc_axes));
       }
       bool is_support = false;
-      GE_ASSERT_SUCCESS(CheckNodeSupportsScalarInput(next_node, i, bro_axes, is_support));
+      GE_ASSERT_SUCCESS(CheckNodeSupportsScalarInput(next_node, i, brc_axes, is_support));
       if (!is_support) {
         return false;
       }
@@ -742,9 +760,9 @@ bool CheckScalarInputSupport(const NodePtr &next_node, const std::vector<NodePtr
   return true;
 }
 
-bool IsMulInputsCanBackward(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePtr> &bro_nodes,
-                            std::set<NodePtr> &mul_input_nodes,
-                            std::vector<std::vector<NodePtr>> &pending_remove_bros) {
+bool IsMulInputsCanBackward(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePtr> &brc_nodes,
+                            std::set<NodePtr> &mul_input_nodes, std::vector<std::vector<NodePtr>> &pending_remove_brcs,
+                            const std::set<int64_t> *sibling_axis_gate) {
   auto in_data_anchor_size = next_node->GetAllInDataAnchorsSize();
   if (in_data_anchor_size == 1U) {
     return false;
@@ -757,9 +775,24 @@ bool IsMulInputsCanBackward(NodePtr &cur_node, NodePtr &next_node, std::vector<N
     return false;
   }
 
+  // MI-MO：链式收集依赖唯一后继，无法穿过该节点（不登记同轴兄弟删除、图保持原状）；
+  // 同链与不同链统一按公共轴探测，分支存在公共轴时登记 partial backward，由
+  // JudgePartBackward 将公共轴 Brc 挨个后移到每路输出分支首节点之前。
+  if (!IsSingleOutNode(next_node)) {
+    std::vector<std::vector<NodePtr>> brc_nodes_list;
+    std::set<int64_t> common_axes;
+    std::vector<NodePtr> origin_brc_nodes;
+    origin_brc_nodes.assign(brc_nodes.begin(), brc_nodes.end());
+    brc_nodes_list.push_back(origin_brc_nodes);
+    if (CollectSameBrcAxis(cur_node, next_node, brc_nodes_list, common_axes, origin_brc_nodes)) {
+      mul_input_nodes.insert(next_node);
+    }
+    return false;
+  }
+
   std::vector<NodePtr> peer_out_nodes;
   GE_ASSERT_SUCCESS(GetPeerOutNodes(next_node, peer_out_nodes));
-  std::vector<std::vector<NodePtr>> remove_bro_nodes_list;
+  std::vector<std::vector<NodePtr>> remove_brc_nodes_list;
   for (const auto &node : peer_out_nodes) {
     if (node == cur_node) {
       continue;
@@ -770,19 +803,19 @@ bool IsMulInputsCanBackward(NodePtr &cur_node, NodePtr &next_node, std::vector<N
       return false;
     }
 
-    std::vector<NodePtr> temp_bro_nodes;
-    GE_ASSERT_SUCCESS(ReverseCollectBrcNodes(broadcast_node, temp_bro_nodes));
-    std::reverse(temp_bro_nodes.begin(), temp_bro_nodes.end());
-    if (retained_cast_node != nullptr && temp_bro_nodes.size() <= 1U) {
+    std::vector<NodePtr> temp_brc_nodes;
+    GE_ASSERT_SUCCESS(ReverseCollectBrcNodes(broadcast_node, temp_brc_nodes));
+    std::reverse(temp_brc_nodes.begin(), temp_brc_nodes.end());
+    if (retained_cast_node != nullptr && temp_brc_nodes.size() <= 1U) {
       return false;
     }
-    if (!IsSameBroNodes(bro_nodes, temp_bro_nodes)) {
-      std::vector<std::vector<NodePtr>> bro_nodes_list;
+    if (!IsSameBrcNodes(brc_nodes, temp_brc_nodes, sibling_axis_gate)) {
+      std::vector<std::vector<NodePtr>> brc_nodes_list;
       std::set<int64_t> common_axes;
-      std::vector<NodePtr> origin_bro_nodes;
-      origin_bro_nodes.assign(bro_nodes.begin(), bro_nodes.end());
-      bro_nodes_list.push_back(origin_bro_nodes);
-      if (CollectSameBrcAxis(cur_node, next_node, bro_nodes_list, common_axes, origin_bro_nodes)) {
+      std::vector<NodePtr> origin_brc_nodes;
+      origin_brc_nodes.assign(brc_nodes.begin(), brc_nodes.end());
+      brc_nodes_list.push_back(origin_brc_nodes);
+      if (CollectSameBrcAxis(cur_node, next_node, brc_nodes_list, common_axes, origin_brc_nodes)) {
         mul_input_nodes.insert(next_node);
       }
       return false;
@@ -791,43 +824,46 @@ bool IsMulInputsCanBackward(NodePtr &cur_node, NodePtr &next_node, std::vector<N
     // fail-closed：不删重复广播、链到此为止，图保持原状，交由 partial backward
     // 的组级守卫决定是否按公共轴后移。
     NodePtr chain_producer;
-    if (!bro_nodes.empty() && GetPeerOutNodeSafe(bro_nodes.front(), chain_producer, 0) == SUCCESS &&
+    if (!brc_nodes.empty() && GetPeerOutNodeSafe(brc_nodes.front(), chain_producer, 0) == SUCCESS &&
         chain_producer != nullptr && chain_producer->GetType() == Arange::Type) {
       GELOGI("Skip multi-input backward at node[%s]: branch producer[%s] is Arange.", next_node->GetName().c_str(),
              chain_producer->GetName().c_str());
       return false;
     }
-    remove_bro_nodes_list.push_back(temp_bro_nodes);
+    remove_brc_nodes_list.push_back(temp_brc_nodes);
   }
 
-  if (!CheckScalarInputSupport(next_node, bro_nodes)) {
+  if (!CheckScalarInputSupport(next_node, brc_nodes)) {
     return false;
   }
 
-  for (std::vector<NodePtr> &remove_nodes : remove_bro_nodes_list) {
+  for (std::vector<NodePtr> &remove_nodes : remove_brc_nodes_list) {
     // 探测期只登记、提交期统一删除：链收集后的守卫（外源广播/IndirectLoad 下游/视图轴数）拒绝提交时
     // 图保持原状，避免"兄弟已删、链未后移"的半改写状态。
-    pending_remove_bros.push_back(std::move(remove_nodes));
+    pending_remove_brcs.push_back(std::move(remove_nodes));
   }
   return true;
 }
 
-bool CanBackward(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePtr> &bro_nodes,
-                 std::set<NodePtr> &mul_input_nodes, std::vector<std::vector<NodePtr>> &pending_remove_bros) {
+bool CanBackward(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePtr> &brc_nodes,
+                 std::set<NodePtr> &mul_input_nodes, std::vector<std::vector<NodePtr>> &pending_remove_brcs,
+                 const std::set<int64_t> *sibling_axis_gate) {
   if (!CheckBackwardCommon(next_node)) {
     return false;
   }
-  if (!IsSingleOutNode(next_node)) {
+  // 单输入多输出仍受限：链式收集依赖唯一后继，且单输入无多分支公共轴可求交；
+  // 多输入多输出不再一刀切拒绝，交由 IsMulInputsCanBackward 按公共轴登记 partial backward。
+  if (!IsSingleOutNode(next_node) && IsSingleInNode(next_node)) {
     return false;
   }
-  if (!IsSingleInNode(next_node) &&
-      !IsMulInputsCanBackward(cur_node, next_node, bro_nodes, mul_input_nodes, pending_remove_bros)) {
+  if (!IsSingleInNode(next_node) && !IsMulInputsCanBackward(cur_node, next_node, brc_nodes, mul_input_nodes,
+                                                            pending_remove_brcs, sibling_axis_gate)) {
     return false;
   }
   return true;
 }
 
-Status CollectBroNodes(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePtr> &nodes) {
+Status CollectBrcNodes(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePtr> &nodes) {
   if (cur_node->GetType() == kBroadcastType && !HasNoControlEdges(cur_node)) {
     return SUCCESS;
   }
@@ -846,9 +882,10 @@ Status CollectBroNodes(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePt
 }
 
 Status CollectCmpNodes(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePtr> &nodes,
-                       std::vector<NodePtr> &bro_nodes, std::set<NodePtr> &mul_input_nodes,
-                       std::vector<std::vector<NodePtr>> &pending_remove_bros) {
-  while (CanBackward(cur_node, next_node, bro_nodes, mul_input_nodes, pending_remove_bros)) {
+                       std::vector<NodePtr> &brc_nodes, std::set<NodePtr> &mul_input_nodes,
+                       std::vector<std::vector<NodePtr>> &pending_remove_brcs,
+                       const std::set<int64_t> *sibling_axis_gate) {
+  while (CanBackward(cur_node, next_node, brc_nodes, mul_input_nodes, pending_remove_brcs, sibling_axis_gate)) {
     nodes.push_back(next_node);
     cur_node = next_node;
     GE_ASSERT_SUCCESS(GetSingleNextNode(cur_node, next_node));
@@ -856,59 +893,59 @@ Status CollectCmpNodes(NodePtr &cur_node, NodePtr &next_node, std::vector<NodePt
   return SUCCESS;
 }
 
-Status ReorderBroadcasts(std::vector<NodePtr> &compute_nodes, std::vector<NodePtr> &bro_nodes) {
-  auto bro_in_anchor = bro_nodes.front()->GetInDataAnchor(0);
-  auto bro_out_anchor = bro_nodes.back()->GetOutDataAnchor(0);
+Status ReorderBroadcasts(std::vector<NodePtr> &compute_nodes, std::vector<NodePtr> &brc_nodes) {
+  auto brc_in_anchor = brc_nodes.front()->GetInDataAnchor(0);
+  auto brc_out_anchor = brc_nodes.back()->GetOutDataAnchor(0);
   auto comp_out_anchor = compute_nodes.back()->GetOutDataAnchor(0);
-  GE_ASSERT_NOTNULL(bro_in_anchor);
-  GE_ASSERT_NOTNULL(bro_out_anchor);
+  GE_ASSERT_NOTNULL(brc_in_anchor);
+  GE_ASSERT_NOTNULL(brc_out_anchor);
   GE_ASSERT_NOTNULL(comp_out_anchor);
   GE_ASSERT_TRUE(!comp_out_anchor->GetPeerInDataAnchors().empty());
-  GE_ASSERT_TRUE(!bro_out_anchor->GetPeerInDataAnchors().empty());
-  auto before_bro_out_anchor = bro_in_anchor->GetPeerOutAnchor();
+  GE_ASSERT_TRUE(!brc_out_anchor->GetPeerInDataAnchors().empty());
+  auto before_brc_out_anchor = brc_in_anchor->GetPeerOutAnchor();
   auto after_comp_in_anchor = comp_out_anchor->GetPeerInDataAnchors().at(0);
-  auto comp_in_anchor = bro_out_anchor->GetPeerInDataAnchors().at(0);
-  GE_ASSERT_NOTNULL(before_bro_out_anchor);
+  auto comp_in_anchor = brc_out_anchor->GetPeerInDataAnchors().at(0);
+  GE_ASSERT_NOTNULL(before_brc_out_anchor);
   GE_ASSERT_NOTNULL(after_comp_in_anchor);
   GE_ASSERT_NOTNULL(comp_in_anchor);
 
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(before_bro_out_anchor, bro_in_anchor));
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(bro_out_anchor, comp_in_anchor));
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(before_brc_out_anchor, brc_in_anchor));
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(brc_out_anchor, comp_in_anchor));
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(comp_out_anchor, after_comp_in_anchor));
 
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(before_bro_out_anchor, comp_in_anchor));
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(comp_out_anchor, bro_in_anchor));
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(bro_out_anchor, after_comp_in_anchor));
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(before_brc_out_anchor, comp_in_anchor));
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(comp_out_anchor, brc_in_anchor));
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(brc_out_anchor, after_comp_in_anchor));
   return SUCCESS;
 }
 
-Status UpdateComputeNodesAscTensorAttr(std::vector<NodePtr> &bro_nodes, std::vector<NodePtr> &compute_nodes,
-                                       const NodePtr &pre_bro_node) {
-  AscTensorAttr *pre_bro_output_attr = nullptr;
-  GE_ASSERT_SUCCESS(GetOutputTensorAttr(pre_bro_node, pre_bro_output_attr));
+Status UpdateComputeNodesAscTensorAttr(std::vector<NodePtr> &brc_nodes, std::vector<NodePtr> &compute_nodes,
+                                       const NodePtr &pre_brc_node) {
+  AscTensorAttr *pre_brc_output_attr = nullptr;
+  GE_ASSERT_SUCCESS(GetOutputTensorAttr(pre_brc_node, pre_brc_output_attr));
 
-  AscTensorAttr *last_bro_output_attr = nullptr;
-  GE_ASSERT_SUCCESS(GetOutputTensorAttr(bro_nodes.back(), last_bro_output_attr));
+  AscTensorAttr *last_brc_output_attr = nullptr;
+  GE_ASSERT_SUCCESS(GetOutputTensorAttr(brc_nodes.back(), last_brc_output_attr));
 
-  std::vector<size_t> bro_axis_idx;
-  auto pre_bro_axis = pre_bro_output_attr->axis;
-  auto pre_bro_repeats = pre_bro_output_attr->repeats;
-  auto pre_bro_strides = pre_bro_output_attr->strides;
-  auto last_bro_repeats = last_bro_output_attr->repeats;
-  GE_ASSERT_SUCCESS(GetBroAxisesIndex(bro_axis_idx, pre_bro_repeats, pre_bro_strides, last_bro_repeats));
-  GELOGD("Broadcast chain contains %zu broadcast axes.", bro_axis_idx.size());
+  std::vector<size_t> brc_axis_idx;
+  auto pre_brc_axis = pre_brc_output_attr->axis;
+  auto pre_brc_repeats = pre_brc_output_attr->repeats;
+  auto pre_brc_strides = pre_brc_output_attr->strides;
+  auto last_brc_repeats = last_brc_output_attr->repeats;
+  GE_ASSERT_SUCCESS(GetBrcAxisesIndex(brc_axis_idx, pre_brc_repeats, pre_brc_strides, last_brc_repeats));
+  GELOGD("Broadcast chain contains %zu broadcast axes.", brc_axis_idx.size());
   for (const auto &compute_node : compute_nodes) {
     AscTensorAttr *compute_output_attr = nullptr;
     GE_ASSERT_SUCCESS(GetOutputTensorAttr(compute_node, compute_output_attr));
-    compute_output_attr->axis = last_bro_output_attr->axis;
-    compute_output_attr->repeats = pre_bro_repeats;
-    compute_output_attr->strides = pre_bro_strides;
+    compute_output_attr->axis = last_brc_output_attr->axis;
+    compute_output_attr->repeats = pre_brc_repeats;
+    compute_output_attr->strides = pre_brc_strides;
     GE_ASSERT_TRUE(compute_output_attr->strides.size() > 0U);
-    auto it = std::find(bro_axis_idx.begin(), bro_axis_idx.end(), pre_bro_strides.size() - 1U);
-    if (it != bro_axis_idx.end()) {
+    auto it = std::find(brc_axis_idx.begin(), brc_axis_idx.end(), pre_brc_strides.size() - 1U);
+    if (it != brc_axis_idx.end()) {
       compute_output_attr->strides[compute_output_attr->strides.size() - 1U] = af::sym::kSymbolZero;
     }
-    if (pre_bro_node->GetType() != kScalarType) {
+    if (pre_brc_node->GetType() != kScalarType) {
       GE_ASSERT_SUCCESS(
           ScheduleUtils::RecalculateStridesFromRepeats(compute_output_attr->repeats, compute_output_attr->strides));
     }
@@ -916,34 +953,34 @@ Status UpdateComputeNodesAscTensorAttr(std::vector<NodePtr> &bro_nodes, std::vec
   return SUCCESS;
 }
 
-Status UpdateBroadcastNodesDataType(std::vector<NodePtr> &bro_nodes, const NodePtr &last_comp_node) {
+Status UpdateBroadcastNodesDataType(std::vector<NodePtr> &brc_nodes, const NodePtr &last_comp_node) {
   const auto last_comp_opdesc = last_comp_node->GetOpDesc();
   GE_ASSERT_NOTNULL(last_comp_opdesc);
   const auto comp_output_tensor_desc = last_comp_opdesc->MutableOutputDesc(0);
   GE_ASSERT_NOTNULL(comp_output_tensor_desc);
   auto last_comp_dtype = comp_output_tensor_desc->GetDataType();
-  for (const auto &bro_node : bro_nodes) {
-    const auto bro_opdesc = bro_node->GetOpDesc();
-    GE_ASSERT_NOTNULL(bro_opdesc);
-    const auto bro_output_tensor_desc = bro_opdesc->MutableOutputDesc(0);
-    GE_ASSERT_NOTNULL(bro_output_tensor_desc);
-    bro_output_tensor_desc->SetDataType(last_comp_dtype);
+  for (const auto &brc_node : brc_nodes) {
+    const auto brc_opdesc = brc_node->GetOpDesc();
+    GE_ASSERT_NOTNULL(brc_opdesc);
+    const auto brc_output_tensor_desc = brc_opdesc->MutableOutputDesc(0);
+    GE_ASSERT_NOTNULL(brc_output_tensor_desc);
+    brc_output_tensor_desc->SetDataType(last_comp_dtype);
   }
   return SUCCESS;
 }
 
-Status BroadcastBackwardReally(std::vector<NodePtr> &compute_nodes, std::vector<NodePtr> &bro_nodes,
-                               const NodePtr &pre_bro_node) {
-  GE_ASSERT_SUCCESS(ReorderBroadcasts(compute_nodes, bro_nodes));
-  GE_ASSERT_SUCCESS(UpdateComputeNodesAscTensorAttr(bro_nodes, compute_nodes, pre_bro_node));
-  GE_ASSERT_SUCCESS(UpdateBroadcastNodesDataType(bro_nodes, compute_nodes.back()));
+Status BroadcastBackwardReally(std::vector<NodePtr> &compute_nodes, std::vector<NodePtr> &brc_nodes,
+                               const NodePtr &pre_brc_node) {
+  GE_ASSERT_SUCCESS(ReorderBroadcasts(compute_nodes, brc_nodes));
+  GE_ASSERT_SUCCESS(UpdateComputeNodesAscTensorAttr(brc_nodes, compute_nodes, pre_brc_node));
+  GE_ASSERT_SUCCESS(UpdateBroadcastNodesDataType(brc_nodes, compute_nodes.back()));
   return SUCCESS;
 }
 
-Status CollectBranchBroadcastNodes(const NodePtr &input_node, std::vector<NodePtr> &branch_bro_nodes) {
+Status CollectBranchBroadcastNodes(const NodePtr &input_node, std::vector<NodePtr> &branch_brc_nodes) {
   NodePtr temp_node = input_node;
   while (temp_node->GetType() == kBroadcastType && IsSingleInAndOutNode(temp_node)) {
-    branch_bro_nodes.push_back(temp_node);
+    branch_brc_nodes.push_back(temp_node);
     NodePtr next_temp_node;
     if (GetPeerOutNodeSafe(temp_node, next_temp_node, 0) != SUCCESS) {
       break;
@@ -962,31 +999,31 @@ bool HasCommonBroadcastAxis(const std::vector<int64_t> &axes1, const std::vector
   return false;
 }
 
-NodePtr GetPreBroadcastNode(const NodePtr &branch_bro_node) {
-  auto bro_in_anchor = branch_bro_node->GetInDataAnchor(0);
-  if (bro_in_anchor == nullptr) {
+NodePtr GetPreBroadcastNode(const NodePtr &branch_brc_node) {
+  auto brc_in_anchor = branch_brc_node->GetInDataAnchor(0);
+  if (brc_in_anchor == nullptr) {
     return nullptr;
   }
-  auto peer_out_anchor = bro_in_anchor->GetPeerOutAnchor();
+  auto peer_out_anchor = brc_in_anchor->GetPeerOutAnchor();
   if (peer_out_anchor == nullptr) {
     return nullptr;
   }
   return ToAscNode(peer_out_anchor->GetOwnerNode());
 }
 
-Status ProcessSingleInputBranch(const NodePtr &input_node, const std::vector<int64_t> &bro_axes, bool &is_scalar) {
-  std::vector<NodePtr> branch_bro_nodes;
-  GE_ASSERT_SUCCESS(CollectBranchBroadcastNodes(input_node, branch_bro_nodes));
+Status ProcessSingleInputBranch(const NodePtr &input_node, const std::vector<int64_t> &brc_axes, bool &is_scalar) {
+  std::vector<NodePtr> branch_brc_nodes;
+  GE_ASSERT_SUCCESS(CollectBranchBroadcastNodes(input_node, branch_brc_nodes));
 
-  if (!branch_bro_nodes.empty()) {
-    std::vector<int64_t> branch_bro_axes;
-    GE_ASSERT_SUCCESS(GetBroAxises(branch_bro_nodes, branch_bro_axes));
-    if (HasCommonBroadcastAxis(bro_axes, branch_bro_axes)) {
-      NodePtr pre_bro_node = GetPreBroadcastNode(branch_bro_nodes.front());
-      if (pre_bro_node != nullptr) {
-        AscTensorAttr *pre_bro_attr = nullptr;
-        if (GetOutputTensorAttr(pre_bro_node, pre_bro_attr) == SUCCESS) {
-          const std::vector<Expression> repeats = pre_bro_attr->repeats;
+  if (!branch_brc_nodes.empty()) {
+    std::vector<int64_t> branch_brc_axes;
+    GE_ASSERT_SUCCESS(GetBrcAxises(branch_brc_nodes, branch_brc_axes));
+    if (HasCommonBroadcastAxis(brc_axes, branch_brc_axes)) {
+      NodePtr pre_brc_node = GetPreBroadcastNode(branch_brc_nodes.front());
+      if (pre_brc_node != nullptr) {
+        AscTensorAttr *pre_brc_attr = nullptr;
+        if (GetOutputTensorAttr(pre_brc_node, pre_brc_attr) == SUCCESS) {
+          const std::vector<Expression> repeats = pre_brc_attr->repeats;
           is_scalar = ascgen_utils::IsScalarInput(repeats);
         }
       }
@@ -995,7 +1032,7 @@ Status ProcessSingleInputBranch(const NodePtr &input_node, const std::vector<int
   return SUCCESS;
 }
 
-Status ProcessOtherInputBranches(const NodePtr &next_comp_op, size_t current_idx, const std::vector<int64_t> &bro_axes,
+Status ProcessOtherInputBranches(const NodePtr &next_comp_op, size_t current_idx, const std::vector<int64_t> &brc_axes,
                                  std::vector<bool> &is_scalar_list) {
   for (size_t i = 0; i < is_scalar_list.size(); ++i) {
     if (i == current_idx) {
@@ -1006,7 +1043,7 @@ Status ProcessOtherInputBranches(const NodePtr &next_comp_op, size_t current_idx
       continue;
     }
     bool scalar_flag = is_scalar_list[i];
-    GE_ASSERT_SUCCESS(ProcessSingleInputBranch(input_node, bro_axes, scalar_flag));
+    GE_ASSERT_SUCCESS(ProcessSingleInputBranch(input_node, brc_axes, scalar_flag));
     is_scalar_list[i] = scalar_flag;
   }
   return SUCCESS;
@@ -1026,21 +1063,21 @@ Status JudgeNextCompOpSupportsScalarInput(const NodePtr &node, bool &is_next_sup
   for (const auto &peer_in_anchor : peer_in_anchors) {
     NodePtr branch_start_node = ToAscNode(peer_in_anchor->GetOwnerNode());
 
-    std::vector<NodePtr> bro_nodes;
+    std::vector<NodePtr> brc_nodes;
     NodePtr temp_cur_node = node;
     NodePtr temp_next_node = branch_start_node;
-    GE_ASSERT_SUCCESS(CollectBroNodes(temp_cur_node, temp_next_node, bro_nodes));
+    GE_ASSERT_SUCCESS(CollectBrcNodes(temp_cur_node, temp_next_node, brc_nodes));
 
     NodePtr compute_node = temp_next_node;
-    if (compute_node == nullptr || bro_nodes.empty()) {
+    if (compute_node == nullptr || brc_nodes.empty()) {
       all_branches_support_scalar = false;
       break;
     }
 
     bool is_support = false;
-    std::vector<int64_t> bro_axes;
-    GE_ASSERT_SUCCESS(GetBroAxises(bro_nodes, bro_axes));
-    GE_ASSERT_SUCCESS(CheckNodeSupportsScalarInput(compute_node, peer_in_anchor->GetIdx(), bro_axes, is_support));
+    std::vector<int64_t> brc_axes;
+    GE_ASSERT_SUCCESS(GetBrcAxises(brc_nodes, brc_axes));
+    GE_ASSERT_SUCCESS(CheckNodeSupportsScalarInput(compute_node, peer_in_anchor->GetIdx(), brc_axes, is_support));
     if (!is_support) {
       all_branches_support_scalar = false;
       break;
@@ -1086,7 +1123,7 @@ Status CollectCandidateMultiRefNodes(const AscGraph &graph, std::vector<NodePtr>
   return SUCCESS;
 }
 
-Status ExtractBroadcastChainFromNode(const NodePtr &node, std::vector<NodePtr> &bro_nodes) {
+Status ExtractBroadcastChainFromNode(const NodePtr &node, std::vector<NodePtr> &brc_nodes) {
   NodePtr cur_node = node;
 
   if (cur_node != nullptr && cur_node->GetType() != kBroadcastType) {
@@ -1096,7 +1133,7 @@ Status ExtractBroadcastChainFromNode(const NodePtr &node, std::vector<NodePtr> &
   }
 
   while (cur_node != nullptr && cur_node->GetType() == kBroadcastType) {
-    bro_nodes.push_back(cur_node);
+    brc_nodes.push_back(cur_node);
     NodePtr pre_node;
     if (GetPeerOutNodeSafe(cur_node, pre_node, 0) != SUCCESS) {
       break;
@@ -1104,7 +1141,7 @@ Status ExtractBroadcastChainFromNode(const NodePtr &node, std::vector<NodePtr> &
     cur_node = pre_node;
   }
 
-  std::reverse(bro_nodes.begin(), bro_nodes.end());
+  std::reverse(brc_nodes.begin(), brc_nodes.end());
   return SUCCESS;
 }
 
@@ -1202,11 +1239,11 @@ bool CheckAllBranchesSupportBackward(const std::vector<std::vector<NodePtr>> &al
   return true;
 }
 
-Status DisconnectBranchesFromBroadcast(const NodePtr &last_bro_node,
+Status DisconnectBranchesFromBroadcast(const NodePtr &last_brc_node,
                                        std::vector<af::OutDataAnchorPtr> &branch_out_anchors,
                                        std::vector<af::InDataAnchorPtr> &branch_in_anchors) {
-  auto bro_out_anchor = last_bro_node->GetOutDataAnchor(0);
-  auto peer_in_anchors = bro_out_anchor->GetPeerInDataAnchors();
+  auto brc_out_anchor = last_brc_node->GetOutDataAnchor(0);
+  auto peer_in_anchors = brc_out_anchor->GetPeerInDataAnchors();
 
   for (const auto &in_anchor : peer_in_anchors) {
     auto branch_node = in_anchor->GetOwnerNode();
@@ -1221,7 +1258,7 @@ Status DisconnectBranchesFromBroadcast(const NodePtr &last_bro_node,
   return SUCCESS;
 }
 
-Status MoveBroadcastAfterMerge(const NodePtr &merge_node, const NodePtr &first_bro_node, const NodePtr &last_bro_node) {
+Status MoveBroadcastAfterMerge(const NodePtr &merge_node, const NodePtr &first_brc_node, const NodePtr &last_brc_node) {
   auto merge_out_anchor = merge_node->GetOutDataAnchor(0);
   if (merge_out_anchor == nullptr || merge_out_anchor->GetPeerInDataAnchors().empty()) {
     return FAILED;
@@ -1232,44 +1269,44 @@ Status MoveBroadcastAfterMerge(const NodePtr &merge_node, const NodePtr &first_b
     GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(merge_out_anchor, in_anchor));
   }
 
-  auto bro_in_anchor = first_bro_node->GetInDataAnchor(0);
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(merge_out_anchor, bro_in_anchor));
+  auto brc_in_anchor = first_brc_node->GetInDataAnchor(0);
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(merge_out_anchor, brc_in_anchor));
 
-  auto bro_out_anchor = last_bro_node->GetOutDataAnchor(0);
+  auto brc_out_anchor = last_brc_node->GetOutDataAnchor(0);
   for (const auto &in_anchor : merge_next_in_anchors) {
-    GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(bro_out_anchor, in_anchor));
+    GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(brc_out_anchor, in_anchor));
   }
   return SUCCESS;
 }
 
 Status BackwardMultiRefBroadcast(const NodePtr &candidate_node, const NodePtr &merge_node,
                                  const std::vector<std::vector<NodePtr>> &all_branch_nodes,
-                                 std::vector<NodePtr> &bro_nodes, [[maybe_unused]] AscGraph &graph) {
-  auto bro_in_anchor = bro_nodes.front()->GetInDataAnchor(0);
-  auto pre_bro_out_anchor = bro_in_anchor->GetPeerOutAnchor();
-  NodePtr pre_bro_node = ToAscNode(pre_bro_out_anchor->GetOwnerNode());
-  bool is_pre_scalar = IsScalarLikeProducer(pre_bro_node);
+                                 std::vector<NodePtr> &brc_nodes, [[maybe_unused]] AscGraph &graph) {
+  auto brc_in_anchor = brc_nodes.front()->GetInDataAnchor(0);
+  auto pre_brc_out_anchor = brc_in_anchor->GetPeerOutAnchor();
+  NodePtr pre_brc_node = ToAscNode(pre_brc_out_anchor->GetOwnerNode());
+  bool is_pre_scalar = IsScalarLikeProducer(pre_brc_node);
 
   // Arange 生产者的多消费后移沿用整链视图推导（UpdateComputeNodesAscTensorAttr），
   // 退化轴视图代数未适配，与单链路径同等 fail-closed。
-  if (pre_bro_node->GetType() == Arange::Type) {
+  if (pre_brc_node->GetType() == Arange::Type) {
     GELOGI("Skip multi-ref broadcast backward at merge[%s]: branch producer[%s] is Arange.",
-           merge_node->GetName().c_str(), pre_bro_node->GetName().c_str());
+           merge_node->GetName().c_str(), pre_brc_node->GetName().c_str());
     return FAILED;
   }
 
   if (is_pre_scalar) {
-    std::vector<int64_t> bro_axes;
-    if (!bro_nodes.empty()) {
-      GE_ASSERT_SUCCESS(GetBroAxises(bro_nodes, bro_axes));
+    std::vector<int64_t> brc_axes;
+    if (!brc_nodes.empty()) {
+      GE_ASSERT_SUCCESS(GetBrcAxises(brc_nodes, brc_axes));
     }
-    auto bro_out_anchor = bro_nodes.back()->GetOutDataAnchor(0);
-    auto peer_in_anchors = bro_out_anchor->GetPeerInDataAnchors();
+    auto brc_out_anchor = brc_nodes.back()->GetOutDataAnchor(0);
+    auto peer_in_anchors = brc_out_anchor->GetPeerInDataAnchors();
     for (const auto &in_anchor : peer_in_anchors) {
       NodePtr compute_node = ToAscNode(in_anchor->GetOwnerNode());
       int32_t input_idx = in_anchor->GetIdx();
       bool is_support = false;
-      GE_ASSERT_SUCCESS(CheckNodeSupportsScalarInput(compute_node, input_idx, bro_axes, is_support));
+      GE_ASSERT_SUCCESS(CheckNodeSupportsScalarInput(compute_node, input_idx, brc_axes, is_support));
       if (!is_support) {
         return FAILED;
       }
@@ -1278,13 +1315,13 @@ Status BackwardMultiRefBroadcast(const NodePtr &candidate_node, const NodePtr &m
 
   std::vector<af::OutDataAnchorPtr> branch_out_anchors;
   std::vector<af::InDataAnchorPtr> branch_in_anchors;
-  GE_ASSERT_SUCCESS(DisconnectBranchesFromBroadcast(bro_nodes.back(), branch_out_anchors, branch_in_anchors));
+  GE_ASSERT_SUCCESS(DisconnectBranchesFromBroadcast(brc_nodes.back(), branch_out_anchors, branch_in_anchors));
 
-  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(pre_bro_out_anchor, bro_in_anchor));
-  GE_ASSERT_SUCCESS(MoveBroadcastAfterMerge(merge_node, bro_nodes.front(), bro_nodes.back()));
+  GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(pre_brc_out_anchor, brc_in_anchor));
+  GE_ASSERT_SUCCESS(MoveBroadcastAfterMerge(merge_node, brc_nodes.front(), brc_nodes.back()));
 
   for (size_t i = 0; i < branch_out_anchors.size(); ++i) {
-    GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(pre_bro_out_anchor, branch_in_anchors[i]));
+    GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(pre_brc_out_anchor, branch_in_anchors[i]));
   }
 
   std::vector<NodePtr> compute_nodes;
@@ -1295,10 +1332,10 @@ Status BackwardMultiRefBroadcast(const NodePtr &candidate_node, const NodePtr &m
     compute_nodes.insert(compute_nodes.end(), branch.begin(), branch.end());
   }
   compute_nodes.push_back(merge_node);
-  GE_ASSERT_SUCCESS(UpdateComputeNodesAscTensorAttr(bro_nodes, compute_nodes, pre_bro_node));
+  GE_ASSERT_SUCCESS(UpdateComputeNodesAscTensorAttr(brc_nodes, compute_nodes, pre_brc_node));
 
   if (!compute_nodes.empty()) {
-    GE_ASSERT_SUCCESS(UpdateBroadcastNodesDataType(bro_nodes, compute_nodes.back()));
+    GE_ASSERT_SUCCESS(UpdateBroadcastNodesDataType(brc_nodes, compute_nodes.back()));
   }
   return SUCCESS;
 }
@@ -1308,18 +1345,18 @@ Status ProcessMultiRefBroadcastBackward(AscGraph &graph, bool &is_changed) {
   GE_ASSERT_SUCCESS(CollectCandidateMultiRefNodes(graph, candidate_nodes));
 
   for (const auto &candidate_node : candidate_nodes) {
-    std::vector<NodePtr> bro_nodes;
-    GE_ASSERT_SUCCESS(ExtractBroadcastChainFromNode(candidate_node, bro_nodes));
+    std::vector<NodePtr> brc_nodes;
+    GE_ASSERT_SUCCESS(ExtractBroadcastChainFromNode(candidate_node, brc_nodes));
 
-    if (bro_nodes.empty()) {
+    if (brc_nodes.empty()) {
       continue;
     }
 
-    if (std::any_of(bro_nodes.begin(), bro_nodes.end(), [](const NodePtr &node) { return !HasNoControlEdges(node); })) {
+    if (std::any_of(brc_nodes.begin(), brc_nodes.end(), [](const NodePtr &node) { return !HasNoControlEdges(node); })) {
       continue;
     }
 
-    NodePtr bro_node = bro_nodes.front();
+    NodePtr brc_node = brc_nodes.front();
     NodePtr merge_node = nullptr;
     std::vector<std::vector<NodePtr>> all_branch_nodes;
 
@@ -1338,9 +1375,13 @@ Status ProcessMultiRefBroadcastBackward(AscGraph &graph, bool &is_changed) {
       continue;
     }
     GELOGI("Move shared broadcast from node[%s] to merge[%s], broadcasts=%zu, branches=%zu.",
-           candidate_node->GetName().c_str(), merge_node->GetName().c_str(), bro_nodes.size(), all_branch_nodes.size());
+           candidate_node->GetName().c_str(), merge_node->GetName().c_str(), brc_nodes.size(), all_branch_nodes.size());
 
-    is_changed = BackwardMultiRefBroadcast(candidate_node, merge_node, all_branch_nodes, bro_nodes, graph) == SUCCESS;
+    // 逐候选累积改写标记：不能覆盖赋值，否则前序候选已后移、末位候选被守卫拒绝时
+    // 会丢失改写事实，外层迭代将提前收敛。
+    if (BackwardMultiRefBroadcast(candidate_node, merge_node, all_branch_nodes, brc_nodes, graph) == SUCCESS) {
+      is_changed = true;
+    }
   }
   return SUCCESS;
 }
@@ -1375,42 +1416,30 @@ Status CollectBackwardSatisfyStartNodes(const NodePtr &node, std::vector<NodePtr
   return SUCCESS;
 }
 
-Status RemoveBroadcasts(AscGraph &graph, std::vector<std::vector<NodePtr>> &bro_nodes_list,
+Status RemoveBroadcasts(AscGraph &graph, std::vector<std::vector<NodePtr>> &brc_nodes_list,
                         const std::set<int64_t> &common_axises) {
-  for (std::vector<NodePtr> &bro_nodes : bro_nodes_list) {
+  for (std::vector<NodePtr> &brc_nodes : brc_nodes_list) {
     std::vector<NodePtr> remove_nodes;
-    for (auto it = bro_nodes.begin(); it != bro_nodes.end();) {
+    for (auto it = brc_nodes.begin(); it != brc_nodes.end();) {
       // 仅当广播的全部扩维轴都属于公共轴时才可整节点删除；单节点多轴扩维
       // （[1,1,N]→[B,M,N]）含非公共轴时必须保留节点——其输出视图随后由
       // UpdateOutputTensor 塌缩公共轴，节点退化为仅扩非公共轴，非公共轴的
       // 扩维职责保留在计算之前（外积语义不变）。整节点删除会丢失非公共轴
       // 扩维（否则改写后视图不一致）。
       std::set<int64_t> expansion_axes;
-      GE_ASSERT_SUCCESS(GetAllBroAxisesFromNode(*it, expansion_axes));
+      GE_ASSERT_SUCCESS(GetAllBrcAxisesFromNode(*it, expansion_axes));
       const bool all_axes_common = !expansion_axes.empty() && std::all_of(expansion_axes.begin(), expansion_axes.end(),
                                                                           [&common_axises](int64_t axis) {
                                                                             return common_axises.count(axis) != 0;
                                                                           });
       if (all_axes_common) {
         remove_nodes.push_back(*it);
-        it = bro_nodes.erase(it);
+        it = brc_nodes.erase(it);
       } else {
         ++it;
       }
     }
     GE_ASSERT_SUCCESS(RemoveBroadcastOneByOne(remove_nodes, graph));
-  }
-  return SUCCESS;
-}
-
-Status GetBackwardBrcNodes(const std::vector<NodePtr> &origin_bro_nodes,
-                           std::vector<NodePtr> &origin_need_move_bro_nodes, const std::set<int64_t> &common_axises) {
-  for (auto &bro_node : origin_bro_nodes) {
-    int64_t bro_axis;
-    GE_ASSERT_SUCCESS(GetBroAxisFromNode(bro_node, bro_axis));
-    if ((bro_axis != -1) && common_axises.count(bro_axis) != 0) {
-      origin_need_move_bro_nodes.push_back(bro_node);
-    }
   }
   return SUCCESS;
 }
@@ -1424,15 +1453,19 @@ struct TensorInfo {
   std::vector<int64_t> broadcast_info;
 };
 
-Status GetTensorInfo(const NodePtr &node, TensorInfo &tensor_info) {
+Status GetTensorInfoAtOutput(const NodePtr &node, uint32_t output_index, TensorInfo &tensor_info) {
   AscTensorAttr *attr = nullptr;
-  GE_ASSERT_SUCCESS(GetOutputTensorAttr(node, attr));
+  GE_ASSERT_SUCCESS(GetOutputTensorAttrAt(node, attr, output_index));
   tensor_info.axis = attr->axis;
   tensor_info.repeats = attr->repeats;
   tensor_info.strides = attr->strides;
   tensor_info.dtype = attr->dtype;
   tensor_info.sched_axis = attr->axis.back();
   return SUCCESS;
+}
+
+Status GetTensorInfo(const NodePtr &node, TensorInfo &tensor_info) {
+  return GetTensorInfoAtOutput(node, 0U, tensor_info);
 }
 
 Status UpdateBroadcastNodeAttrs(const NodePtr &b_node, const std::vector<int64_t> &axis,
@@ -1469,8 +1502,22 @@ Status FromDtypeToOtherDtype(const NodePtr &b_node, af::DataType from_dtype, af:
   return SUCCESS;
 }
 
-Status CreateAndUpdateBroadcastNode(AscGraph &asc_graph, const NodePtr &node, NodePtr &connect_node,
-                                    const TensorInfo &tensor_info, const TensorInfo &expanded_tensor_info) {
+// 插入广播命名：基础名 = "backward_broadcast_<生产者>_<扩维轴>"。多输出场景同轴
+// 多路插入（以及迭代式多轮后移时消费侧已挂上一轮广播）会产生同名，按图内现存
+// 节点名追加下划线消歧；单输出场景单路无冲突，命名与历史行为完全一致。多路同
+// 构插入随后由收尾 MergeSharedBroadcastConsumers 合并回一条共享广播（合并只保留
+// 拓扑序在前的链，名字同样取幸存链），这是收尾阶段的预期行为。
+std::string MakeUniqueBrcName(const AscGraph &asc_graph, const NodePtr &node, int64_t axis) {
+  std::string name = "backward_broadcast_" + node->GetName() + "_" + std::to_string(axis);
+  while (asc_graph.FindNode(name.c_str()) != nullptr) {
+    name += "_";
+  }
+  return name;
+}
+
+Status CreateAndUpdateBroadcastNode(AscGraph &asc_graph, const NodePtr &node, const NodePtr &first_connect_node,
+                                    int32_t first_connect_in_idx, const TensorInfo &tensor_info,
+                                    const TensorInfo &expanded_tensor_info) {
   const std::vector<int64_t> &broadcast_info = tensor_info.broadcast_info;
   GE_ASSERT_TRUE(broadcast_info.size() > 0U);
   GE_ASSERT_TRUE(tensor_info.axis == expanded_tensor_info.axis);
@@ -1478,8 +1525,9 @@ Status CreateAndUpdateBroadcastNode(AscGraph &asc_graph, const NodePtr &node, No
   GE_ASSERT_TRUE(expanded_tensor_info.repeats.size() == expanded_tensor_info.axis.size());
 
   TensorInfo current_tensor_info = tensor_info;
+  NodePtr connect_node = first_connect_node;
   for (size_t index = 0U; index < broadcast_info.size(); index++) {
-    const std::string brc_name = "backward_broadcast_" + node->GetName() + "_" + std::to_string(index);
+    const std::string brc_name = MakeUniqueBrcName(asc_graph, node, broadcast_info[index]);
     Broadcast brc_op(brc_name.c_str());
     auto b_node = asc_graph.AddNode(brc_op);
     GE_ASSERT_NOTNULL(b_node);
@@ -1488,12 +1536,13 @@ Status CreateAndUpdateBroadcastNode(AscGraph &asc_graph, const NodePtr &node, No
     brc_op.attr.api.compute_type = af::ComputeType::kComputeBroadcast;
     brc_op.attr.api.type = af::ApiType::kAPITypeCompute;
 
-    int32_t anchor_idx = 0;
-    GE_ASSERT_TRUE(node->GetOutDataAnchor(0)->GetPeerInDataAnchors().size() == 1U);
-    anchor_idx = node->GetOutDataAnchor(0)->GetPeerInDataAnchors().at(0)->GetIdx();
-    GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::ReplaceNodeDataAnchors(b_node, connect_node, {anchor_idx}, {}));
+    // 首个广播接管 first_connect_node 的 first_connect_in_idx 输入连接（多输出场景
+    // 生产者输出可多路消费，不能从 out-0 唯一消费边推断插入位）；后续广播串联在
+    // 前一个广播之前，接管其输入 0。
+    const int32_t connect_in_idx = (index == 0U) ? first_connect_in_idx : 0;
+    GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::ReplaceNodeDataAnchors(b_node, connect_node, {connect_in_idx}, {}));
     GE_ASSERT_GRAPH_SUCCESS(
-        af::GraphUtils::AddEdge(b_node->GetOutDataAnchor(0), connect_node->GetInDataAnchor(anchor_idx)));
+        af::GraphUtils::AddEdge(b_node->GetOutDataAnchor(0), connect_node->GetInDataAnchor(connect_in_idx)));
 
     auto next_repeats = current_tensor_info.repeats;
     auto axis_iter = std::find(current_tensor_info.axis.begin(), current_tensor_info.axis.end(), broadcast_info[index]);
@@ -1518,33 +1567,77 @@ Status CreateAndUpdateBroadcastNode(AscGraph &asc_graph, const NodePtr &node, No
   return SUCCESS;
 }
 
-Status InsertBroadcastNode(NodePtr &pre_bro_node, AscGraph &graph, std::set<int64_t> &broadcast_axis,
+Status InsertBroadcastNode(NodePtr &pre_brc_node, AscGraph &graph, std::set<int64_t> &broadcast_axis,
                            const TensorInfo &expanded_tensor_info) {
   std::vector<int64_t> broadcast_info(broadcast_axis.begin(), broadcast_axis.end());
   TensorInfo tensor_info;
-  GE_ASSERT_SUCCESS(GetTensorInfo(pre_bro_node, tensor_info));
+  GE_ASSERT_SUCCESS(GetTensorInfo(pre_brc_node, tensor_info));
   tensor_info.broadcast_info = broadcast_info;
   NodePtr connect_node;
-  GE_ASSERT_SUCCESS(GetSingleNextNode(pre_bro_node, connect_node));
-  GE_ASSERT_SUCCESS(CreateAndUpdateBroadcastNode(graph, pre_bro_node, connect_node, tensor_info, expanded_tensor_info));
+  GE_ASSERT_SUCCESS(GetSingleNextNode(pre_brc_node, connect_node));
+  auto out_anchor = pre_brc_node->GetOutDataAnchor(0);
+  GE_ASSERT_NOTNULL(out_anchor);
+  GE_ASSERT_TRUE(out_anchor->GetPeerInDataAnchors().size() == 1U);
+  const int32_t connect_in_idx = out_anchor->GetPeerInDataAnchors().at(0)->GetIdx();
+  GE_ASSERT_SUCCESS(CreateAndUpdateBroadcastNode(graph, pre_brc_node, connect_node, connect_in_idx, tensor_info,
+                                                 expanded_tensor_info));
+  return SUCCESS;
+}
+
+// MI-MO 提交：将公共轴 Brc 挨个后移到多输出节点的每路输出分支首节点之前（每路
+// 独立广播链）。每路以该输出端口的当前（扩维）视图为基线创建广播链：插入时生产
+// 者输出尚未塌缩（UpdateOutputTensor 随后执行），公共轴塌缩后广播恢复扩维语义，
+// 各路消费者看到的输入视图保持不变。同轴多路插入的命名按图内现存节点消歧。
+Status InsertBroadcastNodeForEachOutput(const NodePtr &pre_node, AscGraph &graph,
+                                        const std::set<int64_t> &broadcast_axis) {
+  std::vector<int64_t> broadcast_info(broadcast_axis.begin(), broadcast_axis.end());
+  const auto out_anchor_size = pre_node->GetAllOutDataAnchorsSize();
+  for (uint32_t out_idx = 0U; out_idx < out_anchor_size; ++out_idx) {
+    auto out_anchor = pre_node->GetOutDataAnchor(static_cast<int32_t>(out_idx));
+    if (out_anchor == nullptr) {
+      continue;
+    }
+    // 逐路改写输出边，先拷贝消费者列表避免遍历中边被替换。
+    const auto peer_in_anchors = out_anchor->GetPeerInDataAnchors();
+    for (const auto &in_anchor : peer_in_anchors) {
+      if (in_anchor == nullptr) {
+        continue;
+      }
+      auto connect_node = ToAscNode(in_anchor->GetOwnerNode());
+      if (connect_node == nullptr) {
+        continue;
+      }
+      TensorInfo expanded_tensor_info;
+      GE_ASSERT_SUCCESS(GetTensorInfoAtOutput(pre_node, out_idx, expanded_tensor_info));
+      TensorInfo tensor_info = expanded_tensor_info;
+      tensor_info.broadcast_info = broadcast_info;
+      GE_ASSERT_SUCCESS(CreateAndUpdateBroadcastNode(graph, pre_node, connect_node, in_anchor->GetIdx(), tensor_info,
+                                                     expanded_tensor_info));
+    }
+  }
   return SUCCESS;
 }
 
 Status UpdateOutputTensor(std::vector<NodePtr> &nodes, std::set<int64_t> &common_axises) {
   for (auto &node : nodes) {
-    AscTensorAttr *compute_output_attr = nullptr;
-    GE_ASSERT_SUCCESS(GetOutputTensorAttr(node, compute_output_attr));
-    auto &repeats = compute_output_attr->repeats;
-    auto &strides = compute_output_attr->strides;
-    auto &attr_axis = compute_output_attr->axis;
-    for (auto common_axis : common_axises) {
-      auto it = std::find(attr_axis.begin(), attr_axis.end(), common_axis);
-      GE_ASSERT_TRUE(it != attr_axis.end());
-      auto index = std::distance(attr_axis.begin(), it);
-      repeats[index] = af::sym::kSymbolOne;
-      strides[index] = af::sym::kSymbolZero;
+    // 多输出节点（MI-MO partial backward）的每个输出端口视图都要塌缩公共轴；
+    // 单输出节点退化为 outputs[0]，与历史行为一致。
+    const auto out_anchor_size = node->GetAllOutDataAnchorsSize();
+    for (uint32_t out_idx = 0U; out_idx < out_anchor_size; ++out_idx) {
+      AscTensorAttr *compute_output_attr = nullptr;
+      GE_ASSERT_SUCCESS(GetOutputTensorAttrAt(node, compute_output_attr, out_idx));
+      auto &repeats = compute_output_attr->repeats;
+      auto &strides = compute_output_attr->strides;
+      auto &attr_axis = compute_output_attr->axis;
+      for (auto common_axis : common_axises) {
+        auto it = std::find(attr_axis.begin(), attr_axis.end(), common_axis);
+        GE_ASSERT_TRUE(it != attr_axis.end());
+        auto index = std::distance(attr_axis.begin(), it);
+        repeats[index] = af::sym::kSymbolOne;
+        strides[index] = af::sym::kSymbolZero;
+      }
+      GE_ASSERT_SUCCESS(ScheduleUtils::RecalculateStridesFromRepeats(repeats, strides));
     }
-    GE_ASSERT_SUCCESS(ScheduleUtils::RecalculateStridesFromRepeats(repeats, strides));
   }
   return SUCCESS;
 }
@@ -1557,9 +1650,9 @@ Status UpdateOutputTensor(std::vector<NodePtr> &nodes, std::set<int64_t> &common
 // 协议），标量语义与轴无关、可广播到任意视图，公共轴塌缩不改变其取值——免轴
 // 检查放行，与图级门控合入前的 partial backward 行为一致（标量链经 Cast 穿透
 // 参与多输入组的级联后移依赖此路径）。
-bool PartialBackwardBranchesCoverCommonAxes(const std::vector<std::vector<NodePtr>> &bro_nodes_list,
+bool PartialBackwardBranchesCoverCommonAxes(const std::vector<std::vector<NodePtr>> &brc_nodes_list,
                                             const std::set<int64_t> &common_axises) {
-  for (const auto &row : bro_nodes_list) {
+  for (const auto &row : brc_nodes_list) {
     if (row.empty()) {
       return false;
     }
@@ -1593,60 +1686,130 @@ bool PartialBackwardBranchesCoverCommonAxes(const std::vector<std::vector<NodePt
   return true;
 }
 
+// MI-MO partial backward 的输出侧守卫：公共轴塌缩（UpdateOutputTensor）与每路
+// 广播恢复都按"输出视图包含全部公共轴"推导；任何输出端口缺失公共轴，说明该输出
+// 与公共轴解耦（非逐元素语义），改写后无法保证视图代数等价，fail-closed 拒绝整
+// 个节点的后移，图保持原状。
+bool MultiOutViewCoversCommonAxes(const NodePtr &node, const std::set<int64_t> &common_axises) {
+  const auto out_anchor_size = node->GetAllOutDataAnchorsSize();
+  for (uint32_t out_idx = 0U; out_idx < out_anchor_size; ++out_idx) {
+    AscTensorAttr *output_attr = nullptr;
+    if (GetOutputTensorAttrAt(node, output_attr, out_idx) != SUCCESS) {
+      return false;
+    }
+    for (const auto common_axis : common_axises) {
+      if (std::find(output_attr->axis.begin(), output_attr->axis.end(), common_axis) == output_attr->axis.end()) {
+        GELOGI("Skip multi-output partial backward at node[%s]: output[%u] misses common axis[%ld].",
+               node->GetName().c_str(), out_idx, static_cast<long>(common_axis));
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+Status JudgePartBackward(std::set<NodePtr> &mul_input_nodes, bool &is_changed, AscGraph &graph);
+
+// partial backward 收集与提交阶段：门控全部通过后，单输出形态先沿输出收集计算链并登记
+// 链内待删的同轴兄弟广播（收集不改写图，失败时直接返回、图保持原状）；随后统一执行图改
+// 写——先删登记的链内同轴兄弟广播与分支链公共轴广播，再按多输出/单输出形态重建广播，
+// 最后塌缩参与节点的输出视图；多公共轴时就地递归逐轮迁移剩余公共轴。
+Status CollectAndCommitPartBackward(const NodePtr &mul_input_node, std::vector<std::vector<NodePtr>> &brc_nodes_list,
+                                    const std::vector<NodePtr> &retained_cast_nodes,
+                                    std::vector<NodePtr> &compute_nodes, std::vector<NodePtr> &origin_brc_nodes,
+                                    std::set<NodePtr> &next_mul_input_nodes, const TensorInfo &expanded_tensor_info,
+                                    std::set<int64_t> &common_axises, bool is_multi_out_mul_input,
+                                    bool has_remaining_common_axes, bool &is_changed, AscGraph &graph) {
+  std::vector<std::vector<NodePtr>> pending_remove_brcs;
+  if (!is_multi_out_mul_input) {
+    auto cur_node = mul_input_node;
+    auto next_node = mul_input_node;
+    GE_ASSERT_SUCCESS(GetSingleNextNode(cur_node, next_node));
+    GE_ASSERT_SUCCESS(CollectCmpNodes(cur_node, next_node, compute_nodes, origin_brc_nodes, next_mul_input_nodes,
+                                      pending_remove_brcs, &common_axises));
+  }
+  GELOGD("Move partial broadcast at node[%s]: common_axes=%zu, compute_nodes=%zu, broadcasts=%zu, multi_out=%d.",
+         mul_input_node->GetName().c_str(), common_axises.size(), compute_nodes.size(), origin_brc_nodes.size(),
+         is_multi_out_mul_input ? 1 : 0);
+  is_changed = true;
+  // 部分后移的分支链删除与链内同轴兄弟删除操作的是不相交节点集，先应用 pending 与原"探测期删除"
+  // 行为终态等价，同时保证失败路径上图未被改写。
+  for (std::vector<NodePtr> &remove_nodes : pending_remove_brcs) {
+    GE_ASSERT_SUCCESS(RemoveBroadcasts(remove_nodes, graph));
+  }
+  GE_ASSERT_SUCCESS(RemoveBroadcasts(graph, brc_nodes_list, common_axises));
+  if (is_multi_out_mul_input) {
+    GE_ASSERT_SUCCESS(InsertBroadcastNodeForEachOutput(mul_input_node, graph, common_axises));
+  } else {
+    GE_ASSERT_SUCCESS(InsertBroadcastNode(compute_nodes.back(), graph, common_axises, expanded_tensor_info));
+  }
+
+  std::vector<NodePtr> merged_nodes;
+  for (const auto &row : brc_nodes_list) {
+    merged_nodes.insert(merged_nodes.end(), row.begin(), row.end());
+  }
+  merged_nodes.insert(merged_nodes.end(), retained_cast_nodes.begin(), retained_cast_nodes.end());
+  merged_nodes.insert(merged_nodes.end(), compute_nodes.begin(), compute_nodes.end());
+  RemoveDuplicates(merged_nodes);
+  GE_ASSERT_SUCCESS(UpdateOutputTensor(merged_nodes, common_axises));
+  if (has_remaining_common_axes) {
+    // 本轮仅迁移一个公共轴：就地递归完成本节点剩余公共轴的逐轮迁移，再继续处
+    // 理其他节点。链收集登记的下游多输入节点（next_mul_input_nodes）与同帧后
+    // 续节点的分支链包含本节点插入的广播，必须等本节点全部轮次完成后处理，否
+    // 则会看到"半迁移"状态（公共轴交集为空）而被跳过且不再重试；重入顺序不能
+    // 依赖 next_mul_input_nodes 的指针序。
+    std::set<NodePtr> reentry_nodes = {mul_input_node};
+    GE_ASSERT_SUCCESS(JudgePartBackward(reentry_nodes, is_changed, graph));
+  }
+  return SUCCESS;
+}
+
 Status JudgePartBackward(std::set<NodePtr> &mul_input_nodes, bool &is_changed, AscGraph &graph) {
   std::set<NodePtr> next_mul_input_nodes;
   for (auto mul_input_node : mul_input_nodes) {
-    std::vector<std::vector<NodePtr>> bro_nodes_list;
-    std::vector<NodePtr> origin_bro_nodes;
-    std::vector<NodePtr> origin_need_move_bro_nodes;
+    std::vector<std::vector<NodePtr>> brc_nodes_list;
+    std::vector<NodePtr> origin_brc_nodes;
     std::vector<NodePtr> compute_nodes;
     std::vector<NodePtr> retained_cast_nodes;
     std::set<int64_t> common_axises;
     NodePtr peer_out_node = nullptr;
-    if (!CollectSameBrcAxis(peer_out_node, mul_input_node, bro_nodes_list, common_axises, origin_bro_nodes,
+    if (!CollectSameBrcAxis(peer_out_node, mul_input_node, brc_nodes_list, common_axises, origin_brc_nodes,
                             &retained_cast_nodes)) {
       continue;
     }
-    if (bro_nodes_list.empty() || (origin_bro_nodes.size() > 1U && common_axises.size() > 1)) {
-      GELOGD("Skip partial broadcast backward at node[%s]: branches=%zu, origin_broadcasts=%zu, common_axes=%zu.",
-             mul_input_node->GetName().c_str(), bro_nodes_list.size(), origin_bro_nodes.size(), common_axises.size());
+    if (brc_nodes_list.empty()) {
+      GELOGD("Skip partial broadcast backward at node[%s]: branches=%zu.", mul_input_node->GetName().c_str(),
+             brc_nodes_list.size());
       continue;
     }
-    if (!PartialBackwardBranchesCoverCommonAxes(bro_nodes_list, common_axises)) {
+    // 多输入多公共轴：迭代式单轴后移。每轮只迁移一个公共轴（先迁最大轴，重建
+    // 链沿数据流按轴升序展开），剩余公共轴由本轮改写后就地递归逐轮处理；每轮
+    // 均为已验证的单公共轴路径，重入时重新收集分支链并重过全部门控。
+    bool has_remaining_common_axes = false;
+    if (common_axises.size() > 1U) {
+      const int64_t kept_axis = *common_axises.rbegin();
+      common_axises.clear();
+      common_axises.insert(kept_axis);
+      has_remaining_common_axes = true;
+    }
+    if (!PartialBackwardBranchesCoverCommonAxes(brc_nodes_list, common_axises)) {
       continue;
+    }
+    // MI-MO：无唯一后继，不沿输出收集计算链，公共轴 Brc 由提交阶段挨个后移到每
+    // 路输出分支首节点之前；输出侧守卫先行，缺失公共轴的输出端口 fail-closed。
+    const bool is_multi_out_mul_input = !IsSingleOutNode(mul_input_node);
+    if (is_multi_out_mul_input) {
+      if (!MultiOutViewCoversCommonAxes(mul_input_node, common_axises)) {
+        continue;
+      }
     }
     TensorInfo expanded_tensor_info;
-    GE_ASSERT_SUCCESS(GetTensorInfo(origin_bro_nodes.back(), expanded_tensor_info));
+    GE_ASSERT_SUCCESS(GetTensorInfo(origin_brc_nodes.back(), expanded_tensor_info));
 
-    GE_ASSERT_SUCCESS(GetBackwardBrcNodes(origin_bro_nodes, origin_need_move_bro_nodes, common_axises));
-
-    auto cur_node = mul_input_node;
-    auto next_node = mul_input_node;
-    GE_ASSERT_SUCCESS(GetSingleNextNode(cur_node, next_node));
     compute_nodes.push_back(mul_input_node);
-    std::vector<std::vector<NodePtr>> pending_remove_bros;
-    GE_ASSERT_SUCCESS(CollectCmpNodes(cur_node, next_node, compute_nodes, origin_bro_nodes, next_mul_input_nodes,
-                                      pending_remove_bros));
-    GELOGD("Move partial broadcast at node[%s]: common_axes=%zu, compute_nodes=%zu, broadcasts=%zu.",
-           mul_input_node->GetName().c_str(), common_axises.size(), compute_nodes.size(), origin_bro_nodes.size());
-
-    is_changed = true;
-    // 部分后移的分支链删除与链内同轴兄弟删除操作的是不相交节点集，先应用 pending 与原"探测期删除"
-    // 行为终态等价，同时保证失败路径上图未被改写。
-    for (std::vector<NodePtr> &remove_nodes : pending_remove_bros) {
-      GE_ASSERT_SUCCESS(RemoveBroadcasts(remove_nodes, graph));
-    }
-    GE_ASSERT_SUCCESS(RemoveBroadcasts(graph, bro_nodes_list, common_axises));
-    GE_ASSERT_SUCCESS(InsertBroadcastNode(compute_nodes.back(), graph, common_axises, expanded_tensor_info));
-
-    std::vector<NodePtr> merged_nodes;
-    for (const auto &row : bro_nodes_list) {
-      merged_nodes.insert(merged_nodes.end(), row.begin(), row.end());
-    }
-    merged_nodes.insert(merged_nodes.end(), retained_cast_nodes.begin(), retained_cast_nodes.end());
-    merged_nodes.insert(merged_nodes.end(), compute_nodes.begin(), compute_nodes.end());
-    RemoveDuplicates(merged_nodes);
-    GE_ASSERT_SUCCESS(UpdateOutputTensor(merged_nodes, common_axises));
+    GE_ASSERT_SUCCESS(CollectAndCommitPartBackward(
+        mul_input_node, brc_nodes_list, retained_cast_nodes, compute_nodes, origin_brc_nodes, next_mul_input_nodes,
+        expanded_tensor_info, common_axises, is_multi_out_mul_input, has_remaining_common_axes, is_changed, graph));
   }
   if (!next_mul_input_nodes.empty()) {
     return JudgePartBackward(next_mul_input_nodes, is_changed, graph);
@@ -1665,30 +1828,30 @@ Status ProcessOriginalBackwardLogic(AscGraph &graph, bool &is_changed, std::set<
       NodePtr cur_node = start_node;
       NodePtr next_node = peer_in_node;
 
-      std::vector<NodePtr> bro_nodes;
+      std::vector<NodePtr> brc_nodes;
       std::vector<NodePtr> compute_nodes;
-      std::vector<std::vector<NodePtr>> pending_remove_bros;
-      NodePtr pre_bro_node = start_node;
-      GE_ASSERT_SUCCESS(CollectBroNodes(cur_node, next_node, bro_nodes));
-      GE_ASSERT_SUCCESS(
-          CollectCmpNodes(cur_node, next_node, compute_nodes, bro_nodes, mul_input_nodes, pending_remove_bros));
+      std::vector<std::vector<NodePtr>> pending_remove_brcs;
+      NodePtr pre_brc_node = start_node;
+      GE_ASSERT_SUCCESS(CollectBrcNodes(cur_node, next_node, brc_nodes));
+      GE_ASSERT_SUCCESS(CollectCmpNodes(cur_node, next_node, compute_nodes, brc_nodes, mul_input_nodes,
+                                        pending_remove_brcs, nullptr));
 
       GELOGI("Move broadcast backward from node[%s]: broadcasts=%zu, computes=%zu.", peer_in_node->GetName().c_str(),
-             bro_nodes.size(), compute_nodes.size());
+             brc_nodes.size(), compute_nodes.size());
 
-      if (!bro_nodes.empty() && !compute_nodes.empty()) {
+      if (!brc_nodes.empty() && !compute_nodes.empty()) {
         // 后移会把 compute 链输出改写为后移视图；若链尾下游到达 IndirectLoad，
         // 索引链视图被标量化会导致 IndirectLoad 索引解析错误，必须整体拒绝。
-        // 守卫只统计外源广播：本事务广播——链内广播（bro_nodes，后移后停靠在链尾 compute 与 next_node
-        // 之间）与已登记待删的同轴兄弟广播（pending_remove_bros，提交期统一删除）——都不构成拒绝理由。
+        // 守卫只统计外源广播：本事务广播——链内广播（brc_nodes，后移后停靠在链尾 compute 与 next_node
+        // 之间）与已登记待删的同轴兄弟广播（pending_remove_brcs，提交期统一删除）——都不构成拒绝理由。
         // 待删兄弟探测期仍垫在链内多输入节点的输入上，若不排除会被守卫经 peer 的 in-0 生产者检查
         // 误计为外源广播、与真正的外源广播凑满 count≥2 而误拒提交；兄弟删除已延迟到提交期，
         // 图未被改写，拒绝时可干净放弃。
-        std::vector<NodePtr> transaction_bro_nodes = bro_nodes;
-        for (const std::vector<NodePtr> &remove_nodes : pending_remove_bros) {
-          transaction_bro_nodes.insert(transaction_bro_nodes.end(), remove_nodes.begin(), remove_nodes.end());
+        std::vector<NodePtr> transaction_brc_nodes = brc_nodes;
+        for (const std::vector<NodePtr> &remove_nodes : pending_remove_brcs) {
+          transaction_brc_nodes.insert(transaction_brc_nodes.end(), remove_nodes.begin(), remove_nodes.end());
         }
-        if (HasMultipleInputsBroadcastBehind(next_node, transaction_bro_nodes) || ChainReachesIndirectLoad(next_node)) {
+        if (HasMultipleInputsBroadcastBehind(next_node, transaction_brc_nodes) || ChainReachesIndirectLoad(next_node)) {
           GELOGI(
               "Skip broadcast backward at node[%s]: next node[%s] has peer inputs with broadcast behind or "
               "downstream reaches IndirectLoad.",
@@ -1697,33 +1860,33 @@ Status ProcessOriginalBackwardLogic(AscGraph &graph, bool &is_changed, std::set<
         }
         // 广播后移要求前广播视图与广播输出视图轴数一致；scalar-like 生产者（如 IndexExpr）
         // 输出视图为空，不满足该前提，后移会产生前后视图不一致的半改写状态，必须整体拒绝。
-        AscTensorAttr *pre_bro_output_attr = nullptr;
-        AscTensorAttr *last_bro_output_attr = nullptr;
-        GE_ASSERT_SUCCESS(GetOutputTensorAttr(pre_bro_node, pre_bro_output_attr));
-        GE_ASSERT_SUCCESS(GetOutputTensorAttr(bro_nodes.back(), last_bro_output_attr));
-        if (pre_bro_output_attr->repeats.size() != last_bro_output_attr->repeats.size()) {
+        AscTensorAttr *pre_brc_output_attr = nullptr;
+        AscTensorAttr *last_brc_output_attr = nullptr;
+        GE_ASSERT_SUCCESS(GetOutputTensorAttr(pre_brc_node, pre_brc_output_attr));
+        GE_ASSERT_SUCCESS(GetOutputTensorAttr(brc_nodes.back(), last_brc_output_attr));
+        if (pre_brc_output_attr->repeats.size() != last_brc_output_attr->repeats.size()) {
           GELOGI(
               "Skip broadcast backward at node[%s]: pre-broadcast node[%s] view has %zu axes but broadcast "
               "output has %zu axes.",
-              peer_in_node->GetName().c_str(), pre_bro_node->GetName().c_str(), pre_bro_output_attr->repeats.size(),
-              last_bro_output_attr->repeats.size());
+              peer_in_node->GetName().c_str(), pre_brc_node->GetName().c_str(), pre_brc_output_attr->repeats.size(),
+              last_brc_output_attr->repeats.size());
           continue;
         }
         // Arange 生产者的整链后移未适配：整链后移把 compute 链输出改写为 Arange
         // 退化视图，退化轴（size=1/stride=0）的扩维职责语义在视图改写中丢失
         // （triu/remainder_cast 类图 codegen 失败）。链级 fail-closed，保持图原状。
-        if (pre_bro_node->GetType() == Arange::Type) {
+        if (pre_brc_node->GetType() == Arange::Type) {
           GELOGI("Skip broadcast backward at node[%s]: pre-broadcast producer[%s] is Arange.",
-                 peer_in_node->GetName().c_str(), pre_bro_node->GetName().c_str());
+                 peer_in_node->GetName().c_str(), pre_brc_node->GetName().c_str());
           continue;
         }
         is_changed = true;
         // 提交期统一执行链上多输入节点的同轴兄弟广播删除：守卫与轴数检查全部通过才动手，
         // 保证"删除 + 移动"原子化，杜绝"兄弟已删、链未后移"的半改写状态。
-        for (std::vector<NodePtr> &remove_nodes : pending_remove_bros) {
+        for (std::vector<NodePtr> &remove_nodes : pending_remove_brcs) {
           GE_ASSERT_SUCCESS(RemoveBroadcasts(remove_nodes, graph));
         }
-        GE_ASSERT_SUCCESS(BroadcastBackwardReally(compute_nodes, bro_nodes, pre_bro_node));
+        GE_ASSERT_SUCCESS(BroadcastBackwardReally(compute_nodes, brc_nodes, pre_brc_node));
       }
     }
   }
@@ -1736,34 +1899,39 @@ Status BroadcastBackward(AscGraph &graph) {
     return SUCCESS;
   }
 
-  // Arange 生产者的改写防护已下沉为链级/组级判定：单链与多消费路径按生产者
-  // 类型 fail-closed；partial backward 按公共轴在生产者视图中的退化性放行
-  // （退化轴 Arange 公共轴后移）或拒绝（1D 前缀扩维）。含 Arange 的图中与
-  // Arange 无关的正常链不再被整体跳过。
+  // 后移迭代至不动点：is_changed 复用为每轮迭代的改写标记（初值 true 进入循环，
+  // 每轮开头清零；三个后移路径只置 true 不清零），任一路径本轮发生后移则继续整轮
+  // 重跑，直到一轮内三个路径均无后移为止。has_moved 记录整个过程中是否存在过一次
+  // 后移，替代循环标记驱动收尾的拓扑重排（循环正常退出时 is_changed 恒为 false）。
+  bool is_changed = true;
+  bool has_moved = false;
+  while (is_changed) {
+    is_changed = false;
+    // Arange 生产者的改写防护已下沉为链级/组级判定：单链与多消费路径按生产者
+    // 类型 fail-closed；partial backward 按公共轴在生产者视图中的退化性放行
+    // （退化轴 Arange 公共轴后移）或拒绝（1D 前缀扩维）。含 Arange 的图中与
+    // Arange 无关的正常链不再被整体跳过。
 
-  GE_ASSERT_SUCCESS(broadcast_backward_shared_split::SplitSharedBroadcastBranches(graph));
-  GE_ASSERT_SUCCESS(broadcast_backward_shared_split::SplitSharedBroadcastConsumers(graph));
-
-  bool is_changed = false;
-  bool has_multi_ref_change = true;
-  while (has_multi_ref_change) {
-    has_multi_ref_change = false;
+    GE_ASSERT_SUCCESS(broadcast_backward_shared_split::SplitSharedBroadcastBranches(graph));
+    GE_ASSERT_SUCCESS(broadcast_backward_shared_split::SplitSharedBroadcastConsumers(graph));
 
     std::set<NodePtr> mul_input_nodes;
     GE_ASSERT_SUCCESS(ProcessOriginalBackwardLogic(graph, is_changed, mul_input_nodes));
     if (!mul_input_nodes.empty()) {
       GE_ASSERT_SUCCESS(JudgePartBackward(mul_input_nodes, is_changed, graph));
     }
+    GE_ASSERT_SUCCESS(ProcessMultiRefBroadcastBackward(graph, is_changed));
 
-    bool multi_ref_changed = false;
-    GE_ASSERT_SUCCESS(ProcessMultiRefBroadcastBackward(graph, multi_ref_changed));
-    if (multi_ref_changed) {
-      is_changed = true;
-      has_multi_ref_change = true;
+    if (is_changed) {
+      has_moved = true;
     }
   }
+  // 拆分的反向动作（与 SplitSharedBroadcastConsumers 相反）：后移主循环结束后，把
+  // 未能后移且同源同签名的广播链合并回一条共享链（链尾恢复多消费），并将幸存克隆的
+  // 命名回退为原始链名，保证"拆分无后移收益"时图恢复等价形态。
+  GE_ASSERT_SUCCESS(broadcast_backward_shared_split::MergeSharedBroadcastConsumers(graph));
 
-  if (is_changed) {
+  if (has_moved) {
     GE_ASSERT_SUCCESS(ScheduleUtils::TopologicalSorting(graph));
   }
   return SUCCESS;

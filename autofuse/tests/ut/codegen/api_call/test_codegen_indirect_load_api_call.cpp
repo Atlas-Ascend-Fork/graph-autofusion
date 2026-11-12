@@ -1864,7 +1864,7 @@ TEST(IndirectLoadApiCallTest, InitSimtGroupMemberLocalTargetWithoutPostReduceSuc
 // 归并树标 kSimtInlineTransform，Store 标 kSimtDirectGmBoundary（evaluator 归并结果经
 // OutputTargets 直写其 GM 目标，跳过独立发射）。
 
-void BuildSimtFusedGroupGraph(ILTestGraph &g) {
+void BuildSimtFusedGroupGraph(ILTestGraph &g, bool shared_reduce_terminal = false) {
   const af::Expression One = af::sym::kSymbolOne;
 
   Data x0_data("x0", g.graph);
@@ -1965,20 +1965,40 @@ void BuildSimtFusedGroupGraph(ILTestGraph &g) {
   *merge_add.y.repeats = {g.s2, g.s3};
   *merge_add.y.strides = {g.s3, One};
 
-  Store store("store");
-  g.graph.AddNode(store);
-  store.x = merge_add.y;
-  store.y.dtype = ge::DT_FLOAT16;
-  store.attr.sched.axis = {g.z2.id, g.z3.id};
-  *store.y.axis = {g.z2.id, g.z3.id};
-  *store.y.repeats = {g.s2, g.s3};
-  *store.y.strides = {g.s3, One};
+  if (shared_reduce_terminal) {
+    // 共享 Reduce 终端（形态 2）：fake Reduce（Abs + kComputeReduce，同
+    // BuildSimtPostReduceGraph 先例）——post-Reduce 使 primary 行为复位、不可提升，
+    // fused 调用经循环体路径发射。
+    Abs reduce_sum("reduce_sum");
+    g.graph.AddNode(reduce_sum);
+    reduce_sum.x = merge_add.y;
+    reduce_sum.y.dtype = ge::DT_FLOAT16;
+    reduce_sum.attr.sched.axis = {g.z2.id, g.z3.id};
+    *reduce_sum.y.axis = {g.z2.id, g.z3.id};
+    *reduce_sum.y.repeats = {g.s2, g.s3};
+    *reduce_sum.y.strides = {g.s3, One};
 
-  Output y_out("y");
-  g.graph.AddNode(y_out);
-  y_out.ir_attr.SetIndex(0);
-  y_out.x = store.y;
-  y_out.y.dtype = ge::DT_FLOAT16;
+    Output y_out("y");
+    g.graph.AddNode(y_out);
+    y_out.ir_attr.SetIndex(0);
+    y_out.x = reduce_sum.y;
+    y_out.y.dtype = ge::DT_FLOAT16;
+  } else {
+    Store store("store");
+    g.graph.AddNode(store);
+    store.x = merge_add.y;
+    store.y.dtype = ge::DT_FLOAT16;
+    store.attr.sched.axis = {g.z2.id, g.z3.id};
+    *store.y.axis = {g.z2.id, g.z3.id};
+    *store.y.repeats = {g.s2, g.s3};
+    *store.y.strides = {g.s3, One};
+
+    Output y_out("y");
+    g.graph.AddNode(y_out);
+    y_out.ir_attr.SetIndex(0);
+    y_out.x = store.y;
+    y_out.y.dtype = ge::DT_FLOAT16;
+  }
 
   // ----- API attrs -----
   for (const char *name : {"x0", "x1", "idx0", "idx1", "y"}) {
@@ -2005,9 +2025,16 @@ void BuildSimtFusedGroupGraph(ILTestGraph &g) {
   merge_add_node->attr.api.unit = af::ComputeUnit::kUnitVector;
 
   auto store_node = g.graph.FindNode("store");
-  store_node->attr.api.compute_type = af::ComputeType::kComputeStore;
-  store_node->attr.api.type = af::ApiType::kAPITypeCompute;
-  store_node->attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  if (store_node != nullptr) {
+    store_node->attr.api.compute_type = af::ComputeType::kComputeStore;
+    store_node->attr.api.type = af::ApiType::kAPITypeCompute;
+    store_node->attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  } else {
+    auto reduce_node = g.graph.FindNode("reduce_sum");
+    reduce_node->attr.api.compute_type = af::ComputeType::kComputeReduce;
+    reduce_node->attr.api.type = af::ApiType::kAPITypeCompute;
+    reduce_node->attr.api.unit = af::ComputeUnit::kUnitVector;
+  }
 
   // ----- Axis splitting: merge output axes → z2z3 -----
   auto axes = g.graph.GetAllAxis();
@@ -2026,7 +2053,8 @@ void BuildSimtFusedGroupGraph(ILTestGraph &g) {
     g.graph.ApplyReorder(n, {z2z3TB->id, z2z3Tb->id, z2z3t->id});
   }
 
-  for (const char *name : {"indirect_load0", "indirect_load1", "merge_add", "store"}) {
+  const char *terminal_name = shared_reduce_terminal ? "reduce_sum" : "store";
+  for (const char *name : {"indirect_load0", "indirect_load1", "merge_add", terminal_name}) {
     auto n = g.graph.FindNode(name);
     n->attr.sched.loop_axis = z2z3Tb->id;
     n->outputs[0].attr.vectorized_axis = {z2z3t->id};
@@ -2056,7 +2084,12 @@ void BuildSimtFusedGroupGraph(ILTestGraph &g) {
   set_gm(g.graph.FindNode("x1"), 6);
   set_gm(g.graph.FindNode("idx0"), 3);
   set_gm(g.graph.FindNode("idx1"), 7);
-  set_gm(g.graph.FindNode("store"), 2);
+  if (shared_reduce_terminal) {
+    set_ub_que(g.graph.FindNode("reduce_sum"), 12, 12, af::Position::kPositionVecOut, 7);
+    g.graph.FindNode("reduce_sum")->outputs[0].attr.dtype = ge::DT_FLOAT16;
+  } else {
+    set_gm(g.graph.FindNode("store"), 2);
+  }
   set_ub_que(g.graph.FindNode("x_load0"), 4, 4, af::Position::kPositionVecIn, 1);
   set_ub_que(g.graph.FindNode("idx_load0"), 5, 5, af::Position::kPositionVecIn, 2);
   set_ub_que(g.graph.FindNode("x_load1"), 9, 9, af::Position::kPositionVecIn, 4);
@@ -2353,6 +2386,108 @@ TEST_F(IndirectLoadSimtFusedUbMergeTest, KeepsUbMergeStoreRowWidthConstInlineFor
   EXPECT_EQ(store_section.find("t->"), std::string::npos);
   EXPECT_EQ(generated.find("uint64_t rt_size_"), std::string::npos);
   EXPECT_EQ(generated.find("static_cast<uint64_t>(t->"), std::string::npos);
+}
+
+TEST_F(IndirectLoadConstructFromNodesTest, DeclaresSimtFusedUbMergeGroupAtHoistBeforeFusedTargets) {
+  // L3（UB 归并）提升形态回归：fused 调用的 ftgt 逐成员引用 UB 局部目标（含 primary
+  // 自身——kSimtOp 无 post-Reduce 时 hoist 守卫不声明，历史依赖祖先 cross-loop 归类）。
+  // 全组 tensor 声明必须先于 ftgt 初始化，成员循环体不再独立发射（提前返回 + skip）。
+  ILTestGraph g("simt_fused_ub_merge_hoist");
+  BuildSimtFusedGroupGraph(g);
+  AnnotateSimtFusedUbMergeGroupTemplate(g);
+  for (const char *name : {"indirect_load0", "indirect_load1"}) {
+    // kSimtOp 无 post-Reduce：FindIndirectLoadOpCall(require_direct_gm) 可发现 → 触发提升。
+    ASSERT_EQ(SetTemplateRole(g.graph.FindNode(name), TemplateRole::kSimtOp), af::SUCCESS);
+  }
+  // 生产形态：组员 value UB 局部目标为共享 buffer 型（TensorAlloc 定义 local_N 变量），
+  // 提升点 AllocOutputs 即声明发射点。
+  auto set_ub_buf = [&g](const char *name, int64_t buf_id) {
+    auto node = g.graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    node->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+    node->outputs[0].attr.mem.hardware = af::MemHardware::kMemHardwareUB;
+    node->outputs[0].attr.mem.position = af::Position::kPositionVecCalc;
+    node->outputs[0].attr.que.id = af::kIdNone;
+    node->outputs[0].attr.buf.id = buf_id;
+    node->outputs[0].attr.opt.merge_scope = af::kIdNone;
+  };
+  set_ub_buf("indirect_load0", 0);
+  set_ub_buf("indirect_load1", 1);
+
+  Kernel kernel("simt_fused_ub_merge_hoist");
+  std::string generated;
+  ASSERT_EQ(ParseGraphAndGenerateLoop(g, {"x0", "x1", "idx0", "idx1"}, kernel, generated), af::SUCCESS);
+
+  // 提升形态：fused 调用出现，BlockInner 循环体被替换（提前返回）。
+  EXPECT_NE(generated.find("// IndirectLoad SIMT Fused"), std::string::npos);
+  EXPECT_EQ(generated.find("for (int z2z3Tb"), std::string::npos);
+  // L3 ftgt 逐成员引用 UB 局部目标（primary local_1 + 成员 local_8）。
+  const auto ftgt_pos = generated.find("FusedBody::OutputTargets ftgt = {");
+  ASSERT_NE(ftgt_pos, std::string::npos);
+  EXPECT_NE(generated.find("local_1.GetPhyAddr()"), std::string::npos);
+  EXPECT_NE(generated.find("local_8.GetPhyAddr()"), std::string::npos);
+  // 全组声明（primary 与成员）先于 ftgt 初始化——提升形态下 hoist 守卫不声明 primary，
+  // 由组路径补齐（回归：成员/primary 输出 undeclared identifier）。
+  const auto primary_decl_pos = generated.find("local_1 =");
+  const auto member_decl_pos = generated.find("local_8 =");
+  ASSERT_NE(primary_decl_pos, std::string::npos);
+  ASSERT_NE(member_decl_pos, std::string::npos);
+  EXPECT_LT(primary_decl_pos, ftgt_pos);
+  EXPECT_LT(member_decl_pos, ftgt_pos);
+  // 成员 ApiCall 置 skip_api_emit（防循环体重复声明）。
+  ApiCall *member_call = FindCallByNodeName(kernel.root_loop, "indirect_load1");
+  ASSERT_NE(member_call, nullptr);
+  EXPECT_TRUE(member_call->skip_api_emit);
+}
+
+TEST_F(IndirectLoadConstructFromNodesTest, DeclaresSimtFusedUbMergeGroupInLoopBodyBeforeFusedTargets) {
+  // 共享 Reduce 终端的 L3（形态 2）回归：post-Reduce 使 primary 行为复位、不可提升
+  // （FindIndirectLoadOpCall 不可发现），fused 调用经循环体路径发射——拓扑序在
+  // primary 之后的成员声明此前落在 fused 调用之后（undeclared identifier，末位成员
+  // 依赖祖先 cross-loop 归类）。修复后 primary 发射点为其后的成员统一补声明。
+  ILTestGraph g("simt_fused_ub_merge_loop_body");
+  BuildSimtFusedGroupGraph(g, true);
+  AnnotateSimtFusedUbMergeGroupTemplate(g);
+  for (const char *name : {"indirect_load0", "indirect_load1"}) {
+    ASSERT_EQ(SetTemplateRole(g.graph.FindNode(name), TemplateRole::kSimtOp), af::SUCCESS);
+  }
+  // 生产形态：组员 value UB 局部目标为共享 buffer 型（TensorAlloc 定义 local_N 变量）。
+  auto set_ub_buf = [&g](const char *name, int64_t buf_id) {
+    auto node = g.graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    node->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+    node->outputs[0].attr.mem.hardware = af::MemHardware::kMemHardwareUB;
+    node->outputs[0].attr.mem.position = af::Position::kPositionVecCalc;
+    node->outputs[0].attr.que.id = af::kIdNone;
+    node->outputs[0].attr.buf.id = buf_id;
+    node->outputs[0].attr.opt.merge_scope = af::kIdNone;
+  };
+  set_ub_buf("indirect_load0", 0);
+  set_ub_buf("indirect_load1", 1);
+
+  Kernel kernel("simt_fused_ub_merge_loop_body");
+  std::string generated;
+  ASSERT_EQ(ParseGraphAndGenerateLoop(g, {"x0", "x1", "idx0", "idx1"}, kernel, generated), af::SUCCESS);
+
+  // 循环体路径：BlockInner for 循环仍在（未提升），fused 调用在循环体内发射。
+  EXPECT_NE(generated.find("for (int z2z3Tb"), std::string::npos);
+  EXPECT_NE(generated.find("// IndirectLoad SIMT Fused"), std::string::npos);
+  const auto ftgt_pos = generated.find("FusedBody::OutputTargets ftgt = {");
+  ASSERT_NE(ftgt_pos, std::string::npos);
+  EXPECT_NE(generated.find("local_1.GetPhyAddr()"), std::string::npos);
+  EXPECT_NE(generated.find("local_8.GetPhyAddr()"), std::string::npos);
+  // primary（post-Reduce 行为复位，通用 AllocOutputs 声明）与成员（primary 发射点
+  // 统一补声明——回归：末位成员 undeclared identifier）的声明均先于 ftgt。
+  const auto primary_decl_pos = generated.find("local_1 =");
+  const auto member_decl_pos = generated.find("local_8 =");
+  ASSERT_NE(primary_decl_pos, std::string::npos);
+  ASSERT_NE(member_decl_pos, std::string::npos);
+  EXPECT_LT(primary_decl_pos, ftgt_pos);
+  EXPECT_LT(member_decl_pos, ftgt_pos);
+  // 位置在后的成员由 primary 发射点补声明并置 skip（防其循环体位置重复声明）。
+  ApiCall *member_call = FindCallByNodeName(kernel.root_loop, "indirect_load1");
+  ASSERT_NE(member_call, nullptr);
+  EXPECT_TRUE(member_call->skip_api_emit);
 }
 
 // L4（V2 逐成员发射）标注：成员携带组员标记与 lowering 元数据，但不设 fused

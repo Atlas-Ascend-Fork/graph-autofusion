@@ -530,6 +530,24 @@ af::Status GetAllSubImplGraphs(const ascir::FusedScheduledResult &schedule_resul
 }
 
 namespace {
+// [ScoreFunc 诊断门控] 判断本组内指定图是否含 IndirectLoad 节点。
+// 不用 semantic_name 子串匹配做门控：IL 图的语义名可为 "SIMT@Strided#Offset64" 这类形态，
+// 不含 "IndirectLoad" 字样，会让"打分函数未送达"的诊断永远不触发（真正的静默失效被吞掉）。
+bool GroupGraphContainsIndirectLoad(const std::vector<af::AscGraph> &graphs, const std::string &graph_name) {
+  for (const auto &graph : graphs) {
+    if (graph.GetName() != graph_name) {
+      continue;
+    }
+    for (const auto &node : graph.GetAllNodes()) {
+      if (node != nullptr && node->GetType() == ascgen_utils::template_semantic::kIndirectLoad) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
 af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscGraph>> &schedule_groups,
                                           const std::map<std::string, std::string> &all_graph_score_funcs,
                                           const ascir::FusedScheduledResult &schedule_results,
@@ -577,12 +595,11 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
       if (it != all_graph_score_funcs.end()) {
         model_info.score_func = it->second;
       } else if (!all_graph_score_funcs.empty() &&
-                 model_info.semantic_name.find(ascgen_utils::template_semantic::kIndirectLoad) != std::string::npos) {
+                 GroupGraphContainsIndirectLoad(schedule_groups[schedule_group_id], model_info.graph_name)) {
         // [静默失效诊断] IL 图的打分函数已注入（graph_name_to_score_funcs 非空）
         // 但本图名未命中——键漂移（跨 pass 改名/过滤未同步）会使候选竞标退化到默认
-        // 分且无任何日志。门控：仅 IL 语义图触发（map 为全融合结果全局，非 IL 图不
-        // 注入打分函数，未命中是常态，不告警——否则含 IL 的混合融合图上每个普通
-        // ele 组都会刷一条误报 WARN）。显性暴露而非静默吞掉。
+        // 分且无任何日志。门控：仅含 IndirectLoad 节点的图触发（map 为全融合结果全局，
+        // 非 IL 图不注入打分函数，未命中是常态，不告警）。显性暴露而非静默吞掉。
         GELOGW(
             "[ScoreFunc] IL graph[%s] (semantic[%s]) has no score func entry but %zu entries exist (first key: %s) — "
             "key drift detected, runtime scoring may be silently disabled for this graph.",

@@ -18,6 +18,9 @@
 #include "cmct/block/block_scheduler_policy.h"
 #include "cmct/block/block_scheduler_utils.h"
 #include "cmct/kernel/kernel_matmul_without_que.h"
+#if __has_include("mat_mul_basic_cv_pipeline.h")
+#include "mat_mul_basic_cv_pipeline.h"
+#endif
 #ifdef CV_UB_FUSION
 #include "cmct/kernel/kernel_matmul_mix_without_que.h"
 #include "cmct/epilogue/block_epilogue_cv.h"
@@ -69,7 +72,8 @@ __aicore__ inline void MatMulActKernel(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM,
   using ProblemShape = MatmulShape;
 
   // 定义Kernel类型
-  using MatmulKernel = Kernel::KernelMatmulMixWithoutQue<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
+  using FusionBlockMmad = BasicCVBlockMmadBuilder<BlockMmad, OutType, FULL_LOAD_MODE>;
+  using MatmulKernel = Kernel::KernelMatmulMixWithoutQue<ProblemShape, FusionBlockMmad, BlockEpilogue, BlockScheduler>;
   using Params = typename MatmulKernel::Params;
   Params params = {{tilingData.m, tilingData.n, tilingData.k, batch},  // shape
                    {aGM, bGM, cGM, biasGM},                            // gm addr

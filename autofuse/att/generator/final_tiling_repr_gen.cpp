@@ -22,7 +22,7 @@ void TilingCodeGenImpl::GenSingleGroupFinalTilingObserveBegin() {
   if (!is_uniq_group_) {
     return;
   }
-  tiling_func_.AddLine("  const bool emit_final_tiling = ShouldEmitFinalTiling();");
+
   tiling_func_.AddLine("  FinalTilingObservationSlotGuard final_tiling_observation_slot_guard(0U);");
 }
 
@@ -31,14 +31,13 @@ void TilingCodeGenImpl::GenSingleGroupFinalTilingObserveReset() {
 }
 
 void TilingCodeGenImpl::GenSingleGroupFinalTilingObserveEmit(const bool need_operator_cache) {
-  // Inductor entry functions and CV safety fallback emit the final record themselves.  They also cover the
-  // PGO-selected tiling path, where this GetTiling function is not called, so emitting here would duplicate logs.
-  if (!is_uniq_group_ || config_.is_inductor_scene) {
+  if (!is_uniq_group_) {
     return;
   }
   const std::string cache_guard = need_operator_cache ? " && !cache_hit" : "";
+  const std::string runtime_guard = config_.is_inductor_scene ? " && emit_runtime_tiling" : "";
   const auto &ident = tiling_model_info_[0].schedule_group_ident;
-  tiling_func_.AddLine("  if (ret && emit_final_tiling" + cache_guard + ") {");
+  tiling_func_.AddLine("  if (ret" + runtime_guard + cache_guard + " && IsFinalTilingObservationEnabled()) {");
   tiling_func_.AddLine(
       "    EmitFinalTilingByCase(tiling_data, tiling_data.get_block_dim(), \"runtime\", "
       "tiling_case_id == -1 ? \"default\" : \"explicit\", " +
@@ -47,9 +46,7 @@ void TilingCodeGenImpl::GenSingleGroupFinalTilingObserveEmit(const bool need_ope
 }
 
 af::Status TilingCodeGenImpl::GenSingleGroupGetTilingCoreAlias() {
-  // Inductor TopN/PGO entries probe the default tiling through the raw GetTilingCore symbol, mirroring the
-  // multi-group contract.  The single-group GetTiling never emits final tiling records in the Inductor scene,
-  // so forwarding keeps the probe free of observability side effects.
+  // Inductor TopN/PGO probes bypass the runtime GetTiling wrapper and its final record emission.
   if (!config_.is_inductor_scene) {
     return af::SUCCESS;
   }

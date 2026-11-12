@@ -45,6 +45,19 @@ TopN 分析按 case/visit/shape、`GenerateTopnSolutions enter` 中的 operator 
 同一 visit 内多个 kernel 或多次调用不会合并。日志缺少 operator 关联时，CSV 的 `association_status` 输出
 `unconfirmed`，不当作已确认调用边界。
 
+TopN 导出成功后，INFO 日志按 `output[i]` 和最终返回候选内的逻辑 group 输出
+`[ATT][TOPN_TILING] stage=topn_output`，携带 `graph/result/group`、`tiling_repr`
+及该组的模型 `pipe_estimates`。缺少精确快照或可用模型时，`pipe_estimates=null`。
+长 repr 用相同 `id` 的 `TOPN_TILING_BEGIN/CHUNK/END` 分片，估值位于 BEGIN 行。
+`evidence` 将这些记录导出为 `record_type="topn_tiling"`，并保留 `output_index`。
+这些记录描述已导出的候选，运行期最终选择仍使用 `FINAL_TILING`。
+
+用 `summary --topn` 在 console、CSV 或 Excel 中追加 TopN 候选。每行保留
+`Graph`、`Result`、`Group`、`Output Index`、日志来源行、`Tiling Repr` 和
+`Pipe Estimate`。各候选按日志中记录的 result 和 group 展示。默认 summary 导出沿用原有
+CSV 格式，可继续用于 `compare`。`summary` 和 `evidence` 对 FINAL 与 TopN 使用同一套
+pipe 字段名，`M2/M3/V` 归一化为 `AIV_MTE2/AIV_MTE3/AIV_VEC`，缺失估值保留为 `null`。
+
 ## FINAL_TILING 日志契约
 
 `FINAL_TILING` 只表示运行期已经写入最终 tiling data 的记录。运行期最终选择使用

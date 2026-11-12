@@ -35,6 +35,9 @@ Register::Register() {
 #include "batch_mat_mul_v3_tiling_key_str.h"
 
   };
+  const std::string kAscendcMatMulBasicCVPipeline = {
+#include "mat_mul_basic_cv_pipeline_str.h"
+  };
   const std::string kAscendcmat_mul_pingpong_basic_cmct = {
 #include "mat_mul_pingpong_basic_cmct_str.h"
 
@@ -109,6 +112,7 @@ Register::Register() {
       {"matmul_include_headers.h", kAscendcmat_mul_include_headers},
       {"mat_mul_tiling_key.h", kAscendcmat_mul_tiling_key},
       {"batch_mat_mul_v3_tiling_key.h", kAscendcbatch_mat_mul_v3_tiling_key},
+      {"mat_mul_basic_cv_pipeline.h", kAscendcMatMulBasicCVPipeline},
       {"mat_mul_pingpong_basic_cmct.h", kAscendcmat_mul_pingpong_basic_cmct},
       {"mat_mul_tensor_cv_block.h", kAscendcMatMulTensorCVBlock},
       {"mat_mul_pingpong_tensor_cv.h", kAscendcmat_mul_pingpong_tensor_cv},

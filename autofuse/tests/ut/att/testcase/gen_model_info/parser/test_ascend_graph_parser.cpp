@@ -280,6 +280,7 @@ TEST_F(TestAscendGraphParser, case1) {
 }
 
 TEST_F(TestAscendGraphParser, test_gather_graph_parse) {
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
   af::AscGraph graph1("gather_graph");
   ASSERT_EQ(af::ascir::cg::BuildGatherAscendGraphND(graph1), af::SUCCESS);
   ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph1), af::SUCCESS);

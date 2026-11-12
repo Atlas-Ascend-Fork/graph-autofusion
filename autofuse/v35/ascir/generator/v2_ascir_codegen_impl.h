@@ -57,6 +57,9 @@ bool IsSimtFloatDtype(ge::DataType dtype) {
   return dtype == DT_FLOAT || dtype == DT_FLOAT16 || dtype == DT_BF16;
 }
 
+// v2 SIMT 实现运行时按 1024 线程并发读写，需从动态 UB 中预留的 d-cache 大小
+constexpr int64_t kSimtDcacheSize = 40 * 1024;
+
 const char *GetSimtDtypeName(ge::DataType dtype) {
   static constexpr std::pair<ge::DataType, const char *> kDtypeNames[] = {
       {DT_FLOAT, "float"},     {DT_FLOAT16, "half"},  {DT_BF16, "bfloat16_t"}, {DT_INT8, "int8_t"},
@@ -1961,6 +1964,9 @@ class Expm1AscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
   [[nodiscard]] std::string GetSimtScalarApiName() const override {
     return "Expm1";
   }
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"expm1_reg_base.h"};
   }
@@ -2026,7 +2032,10 @@ class LShiftAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "ShiftLeft";
+    return "ShiftLeftExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"shift_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -2044,6 +2053,9 @@ class LShiftAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class ModAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcVoidTmpSizeV2(node);
   }
@@ -3773,6 +3785,9 @@ class SplitAscIrCodegenImplV2 : public AscIrCodegenV2 {
 /*********************************************************************************/
 class GatherAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcGatherTmpSizeV2(node);
   }
@@ -4091,6 +4106,9 @@ class CeilAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class CosAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcCosTmpSizeV2(node);
   }
@@ -4133,6 +4151,9 @@ class CosAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class AcosAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcAcosTmpSizeV2(node);
   }
@@ -4254,6 +4275,9 @@ class CoshAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class AsinAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcAsinTmpSizeV2(node);
   }
@@ -4369,6 +4393,9 @@ class AtanAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class AtanhAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcAtanhTmpSizeV2(node);
   }
@@ -4897,6 +4924,10 @@ class BitwiseXorAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class FloorDivAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  // FloorDiv 仅 int64 走 SIMT 实现，只为该 dtype 预留 dcache
+  [[nodiscard]] int64_t GetSimtDcacheSize(const AscNode &node) const override {
+    return GetSimtInputDtype(node) == DT_INT64 ? kSimtDcacheSize : 0;
+  }
   [[nodiscard]] std::string GetApiCallName() const override {
     return "BinaryApiCallV2";
   }
@@ -4957,6 +4988,9 @@ class FloorToIntAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class FmodAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcVoidTmpSizeV2(node);
   }
@@ -5224,13 +5258,21 @@ class MatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic) const override {
     if (is_dynamic) {
-      return {"mat_mul_tiling_key_dynamic.h",          "matmul_include_headers.h",  "mat_mul_tensor_include_headers.h",
-              "mat_mul_pingpong_basic_cmct_dynamic.h", "mat_mul_tensor_cv_block.h", "mat_mul_pingpong_tensor_cv.h",
-              "mat_mul_tensor_common_scheduler.h",     "mat_mul_tensor_common.h",   "matmul_dynamic.h"};
+      return {"mat_mul_tiling_key_dynamic.h",
+              "matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct_dynamic.h",
+              "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",
+              "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",
+              "matmul_dynamic.h"};
     } else {
       return {"mat_mul_tiling_key.h",
               "matmul_include_headers.h",
               "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
               "mat_mul_pingpong_basic_cmct.h",
               "mat_mul_tensor_cv_block.h",
               "mat_mul_pingpong_tensor_cv.h",
@@ -5264,14 +5306,22 @@ class BatchMatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic) const override {
     if (is_dynamic) {
-      return {
-          "batch_mat_mul_v3_tiling_key_dynamic.h", "batch_matmul_include_headers.h", "mat_mul_tensor_include_headers.h",
-          "mat_mul_pingpong_basic_cmct_dynamic.h", "mat_mul_tensor_cv_block.h",      "mat_mul_pingpong_tensor_cv.h",
-          "mat_mul_tensor_common_scheduler.h",     "mat_mul_tensor_common.h",        "batch_matmul_dynamic.h"};
+      return {"batch_mat_mul_v3_tiling_key_dynamic.h",
+              "batch_matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct_dynamic.h",
+              "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",
+              "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",
+              "batch_matmul_dynamic.h"};
     } else {
-      return {"batch_mat_mul_v3_tiling_key.h",     "batch_matmul_include_headers.h", "mat_mul_tensor_include_headers.h",
-              "mat_mul_pingpong_basic_cmct.h",     "mat_mul_tensor_cv_block.h",      "mat_mul_pingpong_tensor_cv.h",
-              "mat_mul_tensor_common_scheduler.h", "mat_mul_tensor_common.h",        "batch_matmul.h"};
+      return {"batch_mat_mul_v3_tiling_key.h",    "batch_matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h", "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct.h",    "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",     "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",          "batch_matmul.h"};
     }
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
@@ -5316,6 +5366,9 @@ class Conv2DAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class SinAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::string GetApiCallName() const override {
     return "UnaryApiTmpCall";
   }
@@ -5361,7 +5414,10 @@ class RShiftAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "ShiftRight";
+    return "ShiftRightExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"shift_reg_base.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -5505,6 +5561,9 @@ class SinhAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class TanAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcTanTmpSizeV2(node);
   }
@@ -5654,6 +5713,9 @@ class SquareAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class RemainderAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcVoidTmpSizeV2(node);
   }

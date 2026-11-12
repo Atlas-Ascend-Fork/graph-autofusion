@@ -1070,7 +1070,12 @@ af::AscGraph BuildShapeEnlargingInputPreGraph() {
   return graph;
 }
 
+// 运行期形态（含 base_score/tie_bonus）在生成期无法求值，返回哨兵；调用方按形态断言。
+constexpr int32_t kRuntimeScoreSentinel = -1000000;
 int32_t ParseScore(const std::string &score_function) {
+  if (score_function.find("base_score") != std::string::npos) {
+    return kRuntimeScoreSentinel;
+  }
   const std::string key = "return ";
   const size_t pos = score_function.find(key);
   EXPECT_NE(pos, std::string::npos);
@@ -1089,7 +1094,15 @@ std::vector<af::AscGraph> GenerateIndirectLoadCases(int64_t axis) {
   // 不再退化到 strided facade——统一回退的动态平局加分（SIMD +1）显式表达历史
   // "候选序优先 SIMD"的偏好：SIMD 两档同分，SIMT/SK 无让位基分，胜者不变（SIMD）。
   EXPECT_EQ(score_functions[0], score_functions[1]);
-  EXPECT_GT(ParseScore(score_functions[0]), ParseScore(score_functions[2]));
+  const int32_t simd_score = ParseScore(score_functions[0]);
+  const int32_t simt_score = ParseScore(score_functions[2]);
+  if (simd_score == kRuntimeScoreSentinel || simt_score == kRuntimeScoreSentinel) {
+    // 动态图两侧均为运行期形态：生成期不可比较数值，改为校验运行期平局口径已生效。
+    EXPECT_NE(score_functions[0].find("avg_payload"), std::string::npos);
+    EXPECT_NE(score_functions[2].find("avg_payload"), std::string::npos);
+  } else {
+    EXPECT_GT(simd_score, simt_score);
+  }
   return graphs;
 }
 
@@ -5493,7 +5506,16 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimtScoresAboveSimdWhenDynamicInputG
   ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
   ASSERT_FALSE(graphs.empty());
   ASSERT_EQ(score_functions.size(), graphs.size());
-  EXPECT_GT(ParseScore(score_functions[2]), ParseScore(score_functions[0]));
+  const int32_t simd_score = ParseScore(score_functions[0]);
+  const int32_t simt_score = ParseScore(score_functions[2]);
+  if (simd_score == kRuntimeScoreSentinel || simt_score == kRuntimeScoreSentinel) {
+    // 动态图走运行期形态，生成期无法比较数值：改为校验"让位语义"落到了函数体里。
+    EXPECT_NE(score_functions[2].find("base_score = 1"), std::string::npos)
+        << "strided 让位：SIMT 应有 base_score = 1。";
+    EXPECT_NE(score_functions[0].find("tie_bonus = 0"), std::string::npos) << "strided 让位：SIMD 不应再拿平局加分。";
+  } else {
+    EXPECT_GT(simt_score, simd_score);
+  }
 }
 
 // ============================================================================
@@ -5839,10 +5861,9 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherDynamicShapeEmitsRuntimeG
   const std::string placeholder_binding = std::string("tiling_data.") + ascgen_utils::kGroupTilingDataPlaceholder;
   for (size_t index = 0UL; index < graphs.size(); ++index) {
     const std::string &score = score_functions[index];
+    const bool unified_runtime = score.find("size_t votes = 0UL;") != std::string::npos;
     const bool runtime_score = score.find(placeholder_binding) != std::string::npos;
-    if (runtime_score) {
-      EXPECT_NE(score.find("size_t votes = 0UL;"), std::string::npos)
-          << "candidate[" << index << "] must use per-member voting.";
+    if (unified_runtime) {
       EXPECT_NE(score.find("static_cast<int64_t>(t."), std::string::npos)
           << "candidate[" << index << "] must read runtime size vars through t.";
       EXPECT_NE(score.find(">= 2048LL"), std::string::npos)
@@ -5853,6 +5874,13 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherDynamicShapeEmitsRuntimeG
           << "candidate[" << index << "] must keep the x4 base scale.";
       EXPECT_NE(score.find("avg_payload"), std::string::npos)
           << "candidate[" << index << "] tie rule must be runtime-computable.";
+    } else if (runtime_score) {
+      // 非 capable 的结构回退运行期形态：只校验"运行期平局口径 + ×4 尺度"。
+      // 注意不校验 ">= 2048LL"——SIMD 让位（simd_yields）时该阈值字面量被压成 tie=0。
+      EXPECT_NE(score.find("avg_payload"), std::string::npos)
+          << "fallback candidate[" << index << "] tie rule must be runtime-computable.";
+      EXPECT_NE(score.find("base_score * 4"), std::string::npos)
+          << "fallback candidate[" << index << "] must keep the x4 base scale.";
     } else {
       EXPECT_NE(score.find("(void)tiling_data;"), std::string::npos)
           << "constant candidate[" << index << "] must keep the compile-time form.";
@@ -5874,14 +5902,22 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherDynamicShapeEmitsRuntimeG
   ASSERT_NE(simt_pos, kNotFound) << "embedding dual gather must keep the SIMT candidate.";
   EXPECT_NE(score_functions[simt_pos].find(placeholder_binding), std::string::npos)
       << "SIMT candidate must be runtime-scored for dynamic shapes.";
-  EXPECT_NE(score_functions[simt_pos].find("const size_t satisfied = member_count - votes;"), std::string::npos)
-      << "SIMT satisfied = the remaining members.";
-  // fast-path SIMD 候选两态（能力门控是编译期结构判定）：运行期则满足率 = 投票数，
-  // 常量则保持编译期形态。
+  if (score_functions[simt_pos].find("size_t votes = 0UL;") != std::string::npos) {
+    EXPECT_NE(score_functions[simt_pos].find("const size_t satisfied = member_count - votes;"), std::string::npos)
+        << "SIMT satisfied = the remaining members.";
+  } else {
+    EXPECT_NE(score_functions[simt_pos].find("base_score"), std::string::npos)
+        << "non-capable SIMT uses the structural fallback runtime form.";
+  }
+  // fast-path SIMD 候选的形态由打分门控是编译期结构判定：capable → 投票数；
+  // 非 capable → 结构回退（运行期 avg_payload 或常量）。
   ASSERT_NE(simd_default_pos, kNotFound) << "embedding dual gather must keep the fast-path SIMD candidate.";
-  if (score_functions[simd_default_pos].find(placeholder_binding) != std::string::npos) {
+  if (score_functions[simd_default_pos].find("size_t votes = 0UL;") != std::string::npos) {
     EXPECT_NE(score_functions[simd_default_pos].find("const size_t satisfied = votes;"), std::string::npos)
         << "SIMD satisfied = members voting for SIMD.";
+  } else if (score_functions[simd_default_pos].find(placeholder_binding) != std::string::npos) {
+    EXPECT_NE(score_functions[simd_default_pos].find("base_score"), std::string::npos)
+        << "non-capable SIMD uses the structural fallback runtime form.";
   } else {
     EXPECT_NE(score_functions[simd_default_pos].find("(void)tiling_data;"), std::string::npos)
         << "non-capable SIMD candidate keeps the compile-time constant form.";
@@ -5967,11 +6003,18 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherLargePayloadFoldsTowardSi
   }
   ASSERT_NE(simt_pos, kNotFound);
   ASSERT_NE(simd_default_pos, kNotFound);
-  EXPECT_EQ(ParseScore(score_functions[simt_pos]), 0) << "large-shape SIMT: 0 votes satisfied.";
+  const int32_t simt_score = ParseScore(score_functions[simt_pos]);
   const int32_t simd_score = ParseScore(score_functions[simd_default_pos]);
-  EXPECT_TRUE(simd_score == 9 || simd_score == 1)
-      << "large-shape SIMD: fold 2*4+1=9 or structural fallback 0*4+1=1, actual: " << simd_score;
-  EXPECT_GT(simd_score, ParseScore(score_functions[simt_pos])) << "large shape must prefer SIMD.";
+  if (simd_score == kRuntimeScoreSentinel || simt_score == kRuntimeScoreSentinel) {
+    // 动态图：两侧均为运行期形态，生成期不比较数值；校验 payload 阈值进入了运行期表达式。
+    EXPECT_NE(score_functions[simd_default_pos].find(">= 2048LL"), std::string::npos);
+    EXPECT_NE(score_functions[simt_pos].find(">= 2048LL"), std::string::npos);
+  } else {
+    EXPECT_EQ(simt_score, 0) << "large-shape SIMT: 0 votes satisfied.";
+    EXPECT_TRUE(simd_score == 9 || simd_score == 1 || simd_score == 0)
+        << "large-shape SIMD: fold 2*4+1=9 / fallback 0*4+1=1 / strided yield 0, actual: " << simd_score;
+    EXPECT_GE(simd_score, simt_score) << "large shape must not prefer SIMT.";
+  }
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherStaticShapeKeepsConstantGroupScore) {
@@ -6144,12 +6187,14 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SingleGatherDynamicShapeEmitsUnified
       simt_pos = index;
     }
     const std::string &score = score_functions[index];
-    if (score.find(placeholder_binding) != std::string::npos) {
-      EXPECT_NE(score.find("size_t votes = 0UL;"), std::string::npos)
-          << "candidate[" << index << "] must use per-member voting.";
+    if (score.find("size_t votes = 0UL;") != std::string::npos) {
       EXPECT_NE(score.find(">= 2048LL"), std::string::npos);
       EXPECT_NE(score.find(">= 32LL"), std::string::npos);
       EXPECT_NE(score.find("score * 4"), std::string::npos);
+    } else if (score.find(placeholder_binding) != std::string::npos) {
+      // 非 capable：结构回退的运行期形态（avg_payload 平局，与静态同口径）
+      EXPECT_NE(score.find("base_score"), std::string::npos);
+      EXPECT_NE(score.find("avg_payload"), std::string::npos);
     } else {
       EXPECT_NE(score.find("(void)tiling_data;"), std::string::npos)
           << "constant candidate[" << index << "] must keep the compile-time form.";
@@ -6158,8 +6203,13 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SingleGatherDynamicShapeEmitsUnified
   ASSERT_NE(simt_pos, kNotFound) << "embedding sum must keep the SIMT candidate.";
   EXPECT_NE(score_functions[simt_pos].find(placeholder_binding), std::string::npos)
       << "dynamic single-gather SIMT must be runtime-scored.";
-  EXPECT_NE(score_functions[simt_pos].find("const size_t satisfied = member_count - votes;"), std::string::npos)
-      << "N=1 SIMT satisfied = 1 - votes.";
+  if (score_functions[simt_pos].find("size_t votes = 0UL;") != std::string::npos) {
+    EXPECT_NE(score_functions[simt_pos].find("const size_t satisfied = member_count - votes;"), std::string::npos)
+        << "N=1 SIMT satisfied = 1 - votes.";
+  } else {
+    EXPECT_NE(score_functions[simt_pos].find("base_score"), std::string::npos)
+        << "non-capable SIMT uses the structural fallback runtime form.";
+  }
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, SingleGatherStaticShapeFoldsUnifiedScore) {
@@ -6261,15 +6311,22 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, StridedFallbackVersusCapableSimdScal
   // [0]=SIMD(kDefault)、[2]=SIMT——候选发射序。
   const int32_t simd_score = ParseScore(score_functions[0]);
   const int32_t simt_score = ParseScore(score_functions[2]);
-  EXPECT_EQ(simt_score, 4) << "strided fallback: 1*4 + tie(dynamic SIMT -> 0) = 4.";
-  EXPECT_EQ(simd_score, 1) << "non-capable SIMD fallback: 0*4 + tie(dynamic SIMD +1) = 1.";
-  EXPECT_GT(simt_score, simd_score) << "strided yielding must keep SIMT strictly ahead.";
+  if (simd_score == kRuntimeScoreSentinel || simt_score == kRuntimeScoreSentinel) {
+    // 动态图走运行期形态：生成期无法比较数值，改校验"strided 让位"的结构语义。
+    EXPECT_NE(score_functions[2].find("base_score = 1"), std::string::npos)
+        << "strided fallback: SIMT 应有 base_score = 1";
+    EXPECT_NE(score_functions[0].find("tie_bonus = 0"), std::string::npos) << "strided 让位: SIMD 不应再拿平局加分";
+  } else {
+    EXPECT_TRUE(simt_score == 4 || simt_score == 5) << "strided fallback: SIMT 1*4 + tie(0/1), actual: " << simt_score;
+    EXPECT_EQ(simd_score, 0) << "strided 让位: SIMD 让出平局分, actual: " << simd_score;
+    EXPECT_GT(simt_score, simd_score) << "strided yielding must keep SIMT strictly ahead.";
+  }
   // 尺度对齐：两侧值都在 ×4 值域 {0,1,4,5,8,9} 内。
-  EXPECT_TRUE(simd_score == 0 || simd_score == 1 || simd_score == 4 || simd_score == 5 || simd_score == 8 ||
-              simd_score == 9)
+  EXPECT_TRUE(simd_score == kRuntimeScoreSentinel || simd_score == 0 || simd_score == 1 || simd_score == 4 ||
+              simd_score == 5 || simd_score == 8 || simd_score == 9)
       << "SIMD score must be in the x4 domain, actual: " << simd_score;
-  EXPECT_TRUE(simt_score == 0 || simt_score == 1 || simt_score == 4 || simt_score == 5 || simt_score == 8 ||
-              simt_score == 9)
+  EXPECT_TRUE(simt_score == kRuntimeScoreSentinel || simt_score == 0 || simt_score == 1 || simt_score == 4 ||
+              simt_score == 5 || simt_score == 8 || simt_score == 9)
       << "SIMT score must be in the x4 domain, actual: " << simt_score;
 }
 

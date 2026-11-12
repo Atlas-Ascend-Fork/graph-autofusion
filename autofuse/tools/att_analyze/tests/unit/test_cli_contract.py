@@ -9,7 +9,9 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
+import csv
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -76,6 +78,85 @@ def test_summary_missing_log_returns_failure(tmp_path):
 
     assert result.returncode == 1
     assert "not found" in result.stdout
+
+
+@pytest.mark.parametrize("output_format", ["console", "csv", "excel"])
+def test_summary_topn_preserves_candidates_across_results(tmp_path, output_format):
+    if output_format == "excel":
+        openpyxl = pytest.importorskip("openpyxl")
+    log = tmp_path / "mixed.log"
+    runtime = (
+        '[ATT][FINAL_TILING] schema=1 source="runtime" operator="Concat" graph=0 '
+        'result=1 group=0 case_id=0 tiling_key=0 repr_kind="full_json" tiling_repr="{}"'
+    )
+    candidates = []
+    for output_index, result_id in enumerate((1, 2, 2)):
+        tile = 64 * (output_index + 1)
+        pipe = json.dumps(json.dumps({"V": tile}))
+        repr_text = json.dumps(json.dumps({"tile": tile}))
+        candidates.append(
+            f"[ATT][TOPN_TILING] stage=topn_output output[{output_index}] schema=1 "
+            f'source="topn" operator="Concat" graph=0 result={result_id} group=0 case_id=0 '
+            f'tiling_key=0 repr_kind="full_json" pipe_estimates={pipe} tiling_repr={repr_text}'
+        )
+    log.write_text("\n".join([runtime, *candidates]), encoding="utf-8")
+    suffix = {"console": "txt", "csv": "csv", "excel": "xlsx"}[output_format]
+    output = tmp_path / f"summary.{suffix}"
+    command = [
+        sys.executable,
+        ENTRYPOINT,
+        "summary",
+        str(log),
+        "-f",
+        output_format,
+        "-o",
+        str(output),
+    ]
+    process = subprocess.run(command + ["--topn"], capture_output=True, text=True)
+    assert process.returncode == 0, process.stdout + process.stderr
+
+    if output_format == "console":
+        text = output.read_text(encoding="utf-8")
+        assert "TopN candidates" in text
+        for index, result_id in enumerate((1, 2, 2)):
+            tile = 64 * (index + 1)
+            assert f"Concat  0  {result_id}  0  0  topn" in text
+            assert f'"AIV_VEC":{tile}' in text
+            assert f'{{"tile":{tile}}}  ok  {index}' in text
+        return
+
+    if output_format == "csv":
+        with output.open(encoding="utf-8-sig") as stream:
+            rows = list(csv.DictReader(stream))
+    else:
+        workbook = openpyxl.load_workbook(output, read_only=True)
+        try:
+            values = workbook.active.values
+            columns = next(values)
+            rows = [dict(zip(columns, row)) for row in values]
+        finally:
+            workbook.close()
+
+    assert [row["Final Source"] for row in rows] == ["runtime", "topn", "topn", "topn"]
+    assert [(int(row["Result"]), int(row["Output Index"])) for row in rows[1:]] == [
+        (1, 0),
+        (2, 1),
+        (2, 2),
+    ]
+    for index, row in enumerate(rows[1:]):
+        tile = 64 * (index + 1)
+        assert json.loads(row["Tiling Repr"]) == {"tile": tile}
+        assert json.loads(row["Pipe Estimate"])["AIV_VEC"] == tile
+        assert row["Final Parse Status"] == "ok"
+        assert row["Source Path"] == str(log)
+        assert int(row["Source Line"]) == index + 2
+
+    if output_format == "csv":
+        default = subprocess.run(command, capture_output=True, text=True)
+        assert default.returncode == 0, default.stdout + default.stderr
+        with output.open(encoding="utf-8-sig") as stream:
+            rows = list(csv.DictReader(stream))
+        assert len(rows) == 1 and "Output Index" not in rows[0]
 
 
 def test_examples_start_with_cli_usage(capsys):

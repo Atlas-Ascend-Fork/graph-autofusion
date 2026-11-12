@@ -4944,6 +4944,9 @@ std::string EmitRuntimeScoreFuncText(const GroupCandidateForm form, const std::v
   if (form == GroupCandidateForm::kSimd || form == GroupCandidateForm::kSimt) {
     oss << "  const int32_t tie_bonus = " << (form == GroupCandidateForm::kSimd ? "avg_payload >= " : "avg_payload < ")
         << kEmbeddingSimdPayloadBytesThreshold << "LL ? 1 : 0;\n"
+        << "  OP_LOGI(OP_NAME, \"[ScoreFunc] unified form=" << static_cast<int32_t>(form)
+        << " votes=%zu/%zu score=%d tie=%d avg_payload=%lld\", votes, member_count, score, tie_bonus, "
+           "static_cast<long long>(avg_payload));\n"
         << "  return score * 4 + tie_bonus;\n";
   } else {
     oss << "  return score * 4;\n";
@@ -5003,6 +5006,8 @@ std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vecto
   }
   if (materialized.empty()) {
     // N==0：双方 0 分，由候选序破平局。
+    GELOGI("[ScoreFunc] unified graph[%s] members=%zu evaluable=0 runtime=0", candidate_graph.GetName().c_str(),
+           members.size());
     return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
            "  (void)tiling_data;\n"
            "  return 0;\n"
@@ -5011,9 +5016,13 @@ std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vecto
   // mixed 的分数不依赖叶子（满足率恒 N、无 UB/平局项）——恒折叠；重启用
   // kEnableMixedGroupCandidate 后经同一入口获得一致打分。
   if (all_const || form == GroupCandidateForm::kMixed) {
+    GELOGI("[ScoreFunc] unified graph[%s] members=%zu evaluable=%zu runtime=0 form=%d",
+           candidate_graph.GetName().c_str(), members.size(), materialized.size(), static_cast<int32_t>(form));
     return FoldScoreFuncText(form, materialized, softmax_bonus, simd_ub_penalty, ub_size, simt_l4_penalty,
                              mixed_minority_penalty);
   }
+  GELOGI("[ScoreFunc] unified graph[%s] members=%zu evaluable=%zu runtime=1 form=%d", candidate_graph.GetName().c_str(),
+         members.size(), materialized.size(), static_cast<int32_t>(form));
   return EmitRuntimeScoreFuncText(form, materialized, subs, softmax_bonus, simd_ub_penalty, ub_size, simt_l4_penalty,
                                   mixed_minority_penalty);
 }
@@ -5021,30 +5030,131 @@ std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vecto
 // —— 结构回退（能力门控不满足——图结构属性，与 shape 无关） ——
 // strided 让位 / 0 分 + Softmax 加分 + ×4 与平局加分（静态按平均 payload、动态
 // SIMD +1——历史非 capable 行为；组/单 gather 同口径）。
-std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const bool strided_fallback,
-                                            const bool softmax_bonus, const bool all_static,
-                                            const int64_t slice_bytes_sum, const size_t member_count) {
-  int32_t score = strided_fallback ? kSimtStridedFallbackScore : 0;
+// 结构回退（能力门控不满足——图结构属性，与 shape 无关）。
+// [动静态对齐] 原实现：静态按 avg_payload 给平局分、动态固定 SIMD +1，同一张非 embedding 图
+// 会得到相反倾向。现在两条分支统一为「运行期算 avg_payload」，与静态口径完全一致；
+// 另外 strided 让位（simd_lowers_to_strided）时 SIMD 不再拿平局加分，确保 SIMT 严格胜出。
+std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const bool simd_lowers_to_strided,
+                                            const bool softmax_bonus, const std::vector<MemberScoreLeaves> &members,
+                                            const af::AscGraph &candidate_graph) {
+  const bool is_simd = form == GroupCandidateForm::kSimd;
+  const bool is_simt = form == GroupCandidateForm::kSimt;
+  int32_t base_score = (simd_lowers_to_strided && is_simt) ? kSimtStridedFallbackScore : 0;
   if (softmax_bonus) {
-    score += 1;
+    base_score += 1;
   }
-  int32_t tie_bonus = 0;
-  if (form == GroupCandidateForm::kSimd || form == GroupCandidateForm::kSimt) {
-    if (!all_static) {
-      tie_bonus = form == GroupCandidateForm::kSimd ? 1 : 0;
-    } else {
-      const int64_t avg_payload = member_count == 0UL ? 0L : slice_bytes_sum / static_cast<int64_t>(member_count);
-      tie_bonus = form == GroupCandidateForm::kSimd ? (avg_payload >= kEmbeddingSimdPayloadBytesThreshold ? 1 : 0)
-                                                    : (avg_payload < kEmbeddingSimdPayloadBytesThreshold ? 1 : 0);
+  const auto emit_constant = [base_score](int32_t tie_bonus) {
+    return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
+           "  (void)tiling_data;\n"
+           "  return " +
+           std::to_string(base_score * 4 + tie_bonus) +
+           ";\n"
+           "}\n";
+  };
+  if (!is_simd && !is_simt) {
+    return emit_constant(0);  // SK：无平局项
+  }
+  // SIMD 让位：strided 降级形态下 SIMD 不参与平局加分（与静态同口径）
+  const bool simd_yields = simd_lowers_to_strided && is_simd;
+
+  // 结构性常量判定：只要叶子里的自由符号全是常量，就按常量折叠。
+  // 不用"整棵表达式能否 GetConstValue"——const sizevar 参与的乘法不一定折叠，
+  // 那会把静态图误判成动态，发射出"没有任何 t. 读取"的伪运行期函数。
+  int64_t slice_bytes_sum = 0L;
+  bool has_dynamic_leaf = false;
+  bool sum_known = true;
+  for (const MemberScoreLeaves &member : members) {
+    for (const af::Expression &expr : {member.slice_bytes, member.lookup_extent}) {
+      for (const auto &symbol : expr.FreeSymbols()) {
+        int64_t symbol_value = 0L;
+        if (!symbol.GetConstValue(symbol_value)) {
+          has_dynamic_leaf = true;
+        }
+      }
+    }
+    int64_t slice_bytes = 0L;
+    if (!member.slice_bytes.GetConstValue(slice_bytes)) {
+      sum_known = false;
+      continue;
+    }
+    slice_bytes_sum += slice_bytes;
+  }
+  const bool all_const = !has_dynamic_leaf;
+
+  // 运行期形态：全部成员可物化且存在动态叶子（与 capable 路径同一套替换规则）
+  std::vector<MemberScoreLeaves> materialized;
+  std::vector<std::pair<af::Expression, af::Expression>> subs;
+  if (!all_const && !members.empty()) {
+    SizeVarSet original_var_set;
+    AscGraphInfoComplete::AppendOriginalSizeVar(candidate_graph, original_var_set);
+    std::set<std::string> var_names;
+    for (const auto &size_var : original_var_set) {
+      var_names.insert(std::string(size_var.Str().get()));
+      int64_t const_value = 0L;
+      if (size_var.GetConstValue(const_value)) {
+        subs.emplace_back(size_var, af::Symbol(std::to_string(const_value).c_str()));
+      } else {
+        subs.emplace_back(size_var,
+                          af::Symbol((std::string("static_cast<int64_t>(t.") + size_var.Str().get() + ")").c_str()));
+      }
+    }
+    for (const MemberScoreLeaves &member : members) {
+      std::string rejected_token;
+      if (!ExprMaterializable(member.slice_bytes, var_names, rejected_token)) {
+        GELOGI("[ScoreFunc] fallback member excluded (token[%s]); use constant tie rule.", rejected_token.c_str());
+        materialized.clear();
+        break;
+      }
+      materialized.emplace_back(member);
+    }
+    if (materialized.size() != members.size()) {
+      materialized.clear();
     }
   }
-  const int32_t final_score = score * 4 + tie_bonus;
-  return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-         "  (void)tiling_data;\n"
-         "  return " +
-         std::to_string(final_score) +
-         ";\n"
-         "}\n";
+
+  if (materialized.empty()) {
+    // 常量折叠（静态图 / 含不可物化成员）。
+    // 注意：动态图若物化失败，slice_bytes_sum 是"部分累加"，不可用来算 avg_payload——
+    // 否则 avg 恒 0，会把不可物化的动态图静默推向 SIMT。此类情形退回历史规则（SIMD +1）。
+    int32_t tie_bonus = 0;
+    if (!simd_yields) {
+      if (all_const && sum_known) {
+        const int64_t avg_payload = members.empty() ? 0L : slice_bytes_sum / static_cast<int64_t>(members.size());
+        tie_bonus = is_simd ? (avg_payload >= kEmbeddingSimdPayloadBytesThreshold ? 1 : 0)
+                            : (avg_payload < kEmbeddingSimdPayloadBytesThreshold ? 1 : 0);
+      } else {
+        tie_bonus = is_simd ? 1 : 0;
+      }
+    }
+    return emit_constant(tie_bonus);
+  }
+
+  std::ostringstream oss;
+  oss << "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
+      << "  const auto &t = tiling_data." << ascgen_utils::kGroupTilingDataPlaceholder << ";\n"
+      << "  const int64_t slice_sum = " << RuntimeExprToCpp(materialized[0].slice_bytes, subs);
+  for (size_t index = 1UL; index < materialized.size(); ++index) {
+    oss << " + " << RuntimeExprToCpp(materialized[index].slice_bytes, subs);
+  }
+  oss << ";\n"
+      << "  const int64_t avg_payload = slice_sum / " << static_cast<int64_t>(materialized.size()) << "LL;\n"
+      << "  const int32_t base_score = " << base_score << ";\n";
+  if (simd_yields) {
+    oss << "  const int32_t tie_bonus = 0;\n";
+  } else if (is_simd) {
+    oss << "  const int32_t tie_bonus = avg_payload >= " << kEmbeddingSimdPayloadBytesThreshold << "LL ? 1 : 0;\n";
+  } else {
+    oss << "  const int32_t tie_bonus = avg_payload < " << kEmbeddingSimdPayloadBytesThreshold << "LL ? 1 : 0;\n";
+  }
+  oss << "  OP_LOGI(OP_NAME, \"[ScoreFunc] fallback form=" << static_cast<int32_t>(form)
+      << " slice_sum=%lld avg_payload=%lld base=%d tie=%d\", static_cast<long long>(slice_sum), "
+         "static_cast<long long>(avg_payload), base_score, tie_bonus);\n"
+      << "  return base_score * 4 + tie_bonus;\n"
+      << "}\n";
+  GELOGI("[ScoreFunc] fallback graph[%s] runtime=1 form=%d members=%zu base=%d simd_yields=%d",
+         candidate_graph.GetName().c_str(), static_cast<int32_t>(form), materialized.size(), base_score,
+         static_cast<int32_t>(simd_yields));
+  return oss.str();
 }
 
 // 组候选（SIMD/SIMT/混模板/SK）统一打分入口。能力门控（访问形态维度，结构属性、与
@@ -5061,6 +5171,11 @@ std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const Template
                                               : form == GroupCandidateForm::kSimt  ? stats.simt_structured_capable
                                               : form == GroupCandidateForm::kMixed ? stats.simt_structured_capable
                                                                                    : false);
+  // [ScoreFunc 诊断] capable=0 → 结构回退（常量打分），与 shape 无关；all_static=0 但 capable=1
+  // 才是真正的运行期打分形态。
+  GELOGI("[ScoreFunc] group primary[%s] form=%d capable=%d all_static=%d members=%zu",
+         candidate_node != nullptr ? candidate_node->GetNamePtr() : "unknown", static_cast<int32_t>(form),
+         static_cast<int32_t>(capable), static_cast<int32_t>(stats.all_static), stats.member_count);
   bool softmax_bonus = false;
   if (candidate_node != nullptr) {
     ascgen_utils::norm::NormInfo norm_info;
@@ -5081,8 +5196,7 @@ std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const Template
   // 能力门控不满足：strided 让位 / 0 分的常量回退（组 SIMD 候选退化到逐元素 strided
   // facade 时偏好 SIMT——strided 的逐元素标量组装 offsets + 逐元素重排劣于 SIMT 标量
   // 直读；kSimtStridedFallbackScore 让位语义）。
-  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided && form == GroupCandidateForm::kSimt,
-                                         softmax_bonus, stats.all_static, stats.slice_bytes_sum, stats.member_count);
+  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, stats.members, candidate_graph);
 }
 
 // [单 gather 统一打分] 与组路径同一算法（N=1：vote → SIMD 满足 = votes / SIMT 满足
@@ -5098,6 +5212,11 @@ std::string GenerateScoreFunc(const TemplateCase &template_case,
       : template_case.template_id == ascir::TemplateId::kIndirectLoadSimt ? GroupCandidateForm::kSimt
                                                                           : GroupCandidateForm::kSk;
   const bool capable = IsEmbeddingFastPathCapable(template_case, access_info);
+  // [ScoreFunc 诊断] capable=0 → 走结构回退（常量），动态 shape 下分数与 shape 无关；
+  // 排查"恒 0"时必须先看这个标志，而不是看分数。
+  GELOGI("[ScoreFunc] single gather node[%s] template=%d capable=%d",
+         candidate_node != nullptr ? candidate_node->GetNamePtr() : "unknown",
+         static_cast<int32_t>(template_case.template_id), static_cast<int32_t>(capable));
   bool softmax_bonus = false;
   if (candidate_node != nullptr) {
     ascgen_utils::norm::NormInfo norm_info;
@@ -5108,12 +5227,8 @@ std::string GenerateScoreFunc(const TemplateCase &template_case,
     const std::vector<MemberScoreLeaves> members{{access_info.input_slice_bytes, access_info.index_varying_extent}};
     return EmitUnifiedScoreFunc(form, members, candidate_graph, softmax_bonus, false, 0L, false, false);
   }
-  int64_t slice_bytes = 0L;
-  int64_t lookup_extent = 0L;
-  const bool all_static = access_info.input_slice_bytes.GetConstValue(slice_bytes) &&
-                          access_info.index_varying_extent.GetConstValue(lookup_extent);
-  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided && form == GroupCandidateForm::kSimt,
-                                         softmax_bonus, all_static, slice_bytes, 1UL);
+  const std::vector<MemberScoreLeaves> members{{access_info.input_slice_bytes, access_info.index_varying_extent}};
+  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, members, candidate_graph);
 }
 
 // ==================== 调度期组候选 UB 可行性预估（硬下界，保守放行） ====================

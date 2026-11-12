@@ -34,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_summary.add_argument(
         "-f", "--format", choices=["console", "csv", "excel"], default="console"
     )
+    p_summary.add_argument(
+        "--topn", action="store_true", help="同时汇总 TopN 返回候选的逐组详情"
+    )
     p_summary.add_argument("-o", "--output", default=None)
 
     # compare 子命令

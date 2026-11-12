@@ -12,6 +12,7 @@ set(CMAKE_CXX_COMPILE_OBJECT "<CMAKE_CXX_COMPILER> <DEFINES> <INCLUDES> <FLAGS> 
 file(GLOB_RECURSE CODEGEN_TEST_SRCS CONFIGURE_DEPENDS "*.cpp")
 add_library(test_codegen OBJECT
         ${CODEGEN_TEST_SRCS}
+        ${CODE_ROOT_DIR}/codegen/codegen_tiling_utils.cpp
         ${CODE_ROOT_DIR}/tests/ut/att/testcase/gen_model_info/core/test_brc_buf_graph.cpp
         ${CODE_ROOT_DIR}/tests/ut/att/utils/graph_construct_utils.cpp
 )

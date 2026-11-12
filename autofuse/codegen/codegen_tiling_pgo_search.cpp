@@ -149,25 +149,20 @@ std::string TilingLib::GenProfilingAllTilingData(std::string tiling_data_list_na
   std::stringstream ss;
   ss << "  double out_cost = DBL_MAX;" << std::endl;
   ss << "  *workspaceSize = 0;" << std::endl;
-  ss << "  std::vector<AutofuseTilingDataPerf> raw_search_candidates;" << std::endl;
   ss << "  for (const auto &tiling_data_item : " << tiling_data_list_name << ") {" << std::endl;
   ss << "    uint64_t candidate_workspace_size = 0U;" << std::endl;
-  ss << "    if (!GetWorkspaceSize(tiling_data_item, candidate_workspace_size)) {" << std::endl;
+  ss << "    if (!GetWorkspaceSize(tiling_data_item.tiling_data, candidate_workspace_size)) {" << std::endl;
   ss << "      return -1;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    *workspaceSize = std::max(candidate_workspace_size, *workspaceSize);" << std::endl;
-  ss << "    AutofuseTilingDataPerf tiling_data_perf;" << std::endl;
-  ss << "    tiling_data_perf.tiling_data = tiling_data_item;" << std::endl;
-  ss << "    tiling_data_perf.best_perf = DBL_MAX;" << std::endl;
-  ss << "    raw_search_candidates.push_back(tiling_data_perf);" << std::endl;
   ss << "  }" << std::endl;
   if (!is_inductor_scene) {
     ss << "    if (!CheckedWorkspaceAdd(*workspaceSize, 16ULL * 1024ULL * 1024ULL, *workspaceSize)) {" << std::endl;
     ss << "      return -1;" << std::endl;
     ss << "    }" << std::endl;
   }
-  ss << "  auto normalized_search_candidates = NormalizePgoMeasuredCandidates(std::move(raw_search_candidates));"
-     << std::endl;
+  ss << "  auto normalized_search_candidates = NormalizePgoMeasuredCandidates(std::move(" << tiling_data_list_name
+     << "));" << std::endl;
   ss << "  " << tiling_data_perf_list_name << ".insert(" << tiling_data_perf_list_name
      << ".end(), normalized_search_candidates.begin(), normalized_search_candidates.end());" << std::endl;
   ss << "  PgoConfig::Instance().batch_callback(" << PGOSearchFuncInputOutputCall(fused_schedule_result)
@@ -197,7 +192,7 @@ std::string TilingLib::GenPgoTilingSearchByCoreNum(const ascir::FusedScheduledRe
   ss << "  uint32_t max_block_dim = limit->aiv_num;" << std::endl;
   ss << GenGetMaxBlockDimFromInput(core_num);
   ss << "  using namespace optiling;" << std::endl;
-  ss << "  std::vector<AutofuseTilingData> tiling_data_list;" << std::endl;
+  ss << "  std::vector<AutofuseTilingDataPerf> tiling_data_list;" << std::endl;
   ss << "  std::vector<AutofuseTilingDataPerf> tiling_data_perf_list;" << std::endl;
   ss << "  double axeorder_cost = DBL_MAX;" << std::endl;
   ss << "  AutofuseTiling(";

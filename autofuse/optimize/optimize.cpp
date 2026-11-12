@@ -329,9 +329,26 @@ Status DoSeqAdjustment(const af::AscGraph &impl_graph, const std::map<int64_t, i
   return af::SUCCESS;
 }
 
+// [候选图级打分函数兜底] AutoSchedule 不回填 AutoScheduleOutput::score_func，
+// 任务生成侧给出的打分函数只落到 schedule_result.score_func（结果级）；
+// 候选图级注册因此因空串被跳过 → model_info.score_func 为空 → 每个
+// TilingCaseXxxImpl 继承基类 CalcScore{return 0;} → 所有候选 0 分、平票按发射序，
+// 运行期/静态打分整体静默失效（PR#2884 的收益无法落地）。
+// 兜底只在含 IndirectLoad 的图上启用（其它模板的打分注册语义保持不变）。
+bool GraphContainsIndirectLoad(const af::AscGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node != nullptr && node->GetType() == ascgen_utils::template_semantic::kIndirectLoad) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::string RegisterScoreFuncInScheduleGroup(const autoschedule::AutoScheduleOutput &schedule_output,
-                                             ScheduleGroup &schedule_group, const bool should_skip_registry = true) {
-  if (schedule_output.score_func.empty()) {
+                                             ScheduleGroup &schedule_group, const bool should_skip_registry = true,
+                                             const std::string &fallback_score_func = "") {
+  const std::string score_func = schedule_output.score_func.empty() ? fallback_score_func : schedule_output.score_func;
+  if (score_func.empty()) {
     return "";
   }
 
@@ -342,8 +359,8 @@ std::string RegisterScoreFuncInScheduleGroup(const autoschedule::AutoScheduleOut
     return "";
   }
 
-  schedule_group.graph_name_to_score_funcs[graph_name] = schedule_output.score_func;
-  GELOGD("The score func of template [%s] is [%s].", graph_name.c_str(), schedule_output.score_func.c_str());
+  schedule_group.graph_name_to_score_funcs[graph_name] = score_func;
+  GELOGD("The score func of template [%s] is [%s].", graph_name.c_str(), score_func.c_str());
   return graph_name;
 }
 
@@ -385,11 +402,37 @@ void FilterComplexTilingDataScoreFuncs(std::vector<::ascir::ScheduledResult> &sc
     return;
   }
 
+  // [IL 运行期打分保留] 本过滤的语义是"复杂 tilingdata 不开放 nddma 模板打分"，
+  // 但 IndirectLoad 候选的打分函数走同一张 graph_name_to_score_funcs：若一并删掉，
+  // 复杂结果（多 result / 多 group）下 model_info.score_func 为空，候选竞标静默退化到
+  // 基类 CalcScore{return 0;}——动态 shape 的运行期打分整体失效且无日志。
+  // 因此按"图内是否含 IndirectLoad 节点"区分，IL 图一律保留。
+  std::set<std::string> indirect_load_graph_names;
+  for (const auto &result : scheduled_results) {
+    for (const auto &group : result.schedule_groups) {
+      for (const auto &impl_graph : group.impl_graphs) {
+        for (const auto &node : impl_graph.GetAllNodes()) {
+          if (node != nullptr && node->GetType() == ascgen_utils::template_semantic::kIndirectLoad) {
+            indirect_load_graph_names.insert(impl_graph.GetName());
+            break;
+          }
+        }
+      }
+    }
+  }
   for (auto &result : scheduled_results) {
     for (auto &group : result.schedule_groups) {
-      // 遍历 score_funcs，检查是否在 scored_graph_names 中
+      // 遍历 score_funcs，判断是否在 scored_graph_names 中
       auto it = group.graph_name_to_score_funcs.begin();
       while (it != group.graph_name_to_score_funcs.end()) {
+        if (indirect_load_graph_names.count(it->first) != 0UL) {
+          GELOGI(
+              "Keep autoschedule score func for IndirectLoad graph [%s] in complex tiling data: %zu results, "
+              "%zu groups",
+              it->first.c_str(), scheduled_results.size(), result.schedule_groups.size());
+          ++it;
+          continue;
+        }
         if (scored_graph_names.count(it->first) == 0) {
           ++it;
           continue;
@@ -1142,8 +1185,9 @@ static Status ProcessNonReduceSchedules(const std::vector<autoschedule::AutoSche
     schedule_group.impl_graphs.emplace_back(schedule_output.scheduled_graph);
     // 目前仅对elewise+brc/单group/单result开放nddma模板打分，单result单group场景过滤放在FilterComplexTilingDataScoreFuncs
     // transpose/split/concat有场景触发转为Load/Store
-    std::string autoschedule_graph_name =
-        RegisterScoreFuncInScheduleGroup(schedule_output, schedule_group, schedule_task.has_load_store_conversion);
+    std::string autoschedule_graph_name = RegisterScoreFuncInScheduleGroup(
+        schedule_output, schedule_group, schedule_task.has_load_store_conversion,
+        GraphContainsIndirectLoad(schedule_output.scheduled_graph) ? schedule_task.score_func : std::string());
     scored_graph_names.insert(autoschedule_graph_name);
   }
   for (auto &res : scheduled_results_cur) {
@@ -1155,6 +1199,9 @@ static Status ProcessNonReduceSchedules(const std::vector<autoschedule::AutoSche
 Status Optimizer::InitializeScheduledResults(std::vector<ascir::ScheduledResult> &scheduled_results_cur,
                                              ScheduleTask &schedule_task) {
   ::ascir::ScheduledResult schedule_result;
+  // [双通道打分] 结果级 score_func 是"跨 schedule result 打分"的入口（GenGetScoreFuncs →
+  // scores[] → max_index），必须保留；其中的组绑定占位符由 GenGetScoreFuncs 在发射时替换，
+  // 不能在这里清空，否则跨 result 打分退化为全 0、max_index 恒为 0。
   schedule_result.score_func = schedule_task.score_func.c_str();
   schedule_result.is_reduce_mem_reuse = schedule_task.reduce_type == ReduceTemplateType::kAllLoad;
   schedule_result.cube_type = schedule_task.cube_type;

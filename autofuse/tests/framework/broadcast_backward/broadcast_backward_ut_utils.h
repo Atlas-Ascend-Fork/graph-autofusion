@@ -373,6 +373,68 @@ inline void ExpectDirectFanOutMoved(af::AscGraph &graph) {
   EXPECT_TRUE(IsEdgeAttrConsistent(graph, "broadcast", "store"));
 }
 
+// 多级广播链（load0(1,s1,1) → b1 扩轴0 → b2 扩轴2）+ 两个多输入消费者；消费者另一路为仅扩
+// 轴 1 的广播（与链扩维轴 {0,2} 无公共轴，拆分后无公共轴部分后移），用于观测纯拆分形态。
+inline af::AscGraph BuildMultiLevelChainFanOutGraph(const std::string &name) {
+  const auto s0 = af::testing::Sym("s0");
+  const auto s1 = af::testing::Sym("s1");
+  const auto s2 = af::testing::Sym("s2");
+  const auto one = af::sym::kSymbolOne;
+  const auto zero = af::sym::kSymbolZero;
+  return af::testing::AscGraphBuilder(name)
+      .Loops({s0, s1, s2})
+      .Data("data0", 0)
+      .Data("dataX", 1)
+      .Data("dataY", 2)
+      .Load("load0", "data0", {one, s1, one}, {zero, one, zero})
+      .Broadcast("b1", "load0", {0})
+      .Broadcast("b2", "b1", {2})
+      .Load("loadX", "dataX", {s0, one, s2}, {s2, zero, one})
+      .Broadcast("bx", "loadX", {1})
+      .Load("loadY", "dataY", {s0, one, s2}, {s2, zero, one})
+      .Broadcast("by", "loadY", {1})
+      .Add("add", "b2", "bx")
+      .Sub("sub", "b2", "by")
+      .Store("store1", "add")
+      .Output("output1", "store1")
+      .Store("store2", "sub")
+      .Output("output2", "store2")
+      .Build();
+}
+
+// 多级广播链（扩轴 {0,2}）+ 两个多输入消费者；消费者另一路为逐节点同轴同构广播链，
+// 拆分后主循环可执行同轴兄弟删除并将整链沉过消费者。
+inline af::AscGraph BuildMultiLevelChainSiblingGraph(const std::string &name) {
+  const auto s0 = af::testing::Sym("s0");
+  const auto s1 = af::testing::Sym("s1");
+  const auto s2 = af::testing::Sym("s2");
+  const auto one = af::sym::kSymbolOne;
+  const auto zero = af::sym::kSymbolZero;
+  const std::vector<af::Expression> compact = {one, s1, one};
+  const std::vector<af::Expression> strides = {zero, one, zero};
+  return af::testing::AscGraphBuilder(name)
+      .Loops({s0, s1, s2})
+      .Data("data0", 0)
+      .Data("dataX", 1)
+      .Data("dataY", 2)
+      .Load("load0", "data0", compact, strides)
+      .Broadcast("b1", "load0", {0})
+      .Broadcast("b2", "b1", {2})
+      .Load("loadX", "dataX", compact, strides)
+      .Broadcast("x1", "loadX", {0})
+      .Broadcast("x2", "x1", {2})
+      .Load("loadY", "dataY", compact, strides)
+      .Broadcast("y1", "loadY", {0})
+      .Broadcast("y2", "y1", {2})
+      .Add("add", "b2", "x2")
+      .Mul("mul", "b2", "y2")
+      .Store("store1", "add")
+      .Output("output1", "store1")
+      .Store("store2", "mul")
+      .Output("output2", "store2")
+      .Build();
+}
+
 }  // namespace broadcast_backward_test
 
 #endif  // AUTOFUSE_TESTS_FRAMEWORK_BROADCAST_BACKWARD_UT_UTILS_H_

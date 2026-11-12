@@ -69,6 +69,7 @@ set(ascendc_api_regbase_extend_src
         expm1.h
         fmod.h
         neg.h
+        shift.h
         square.h
         softmax_af.h
         trunc_div.h

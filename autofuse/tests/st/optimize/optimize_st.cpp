@@ -2002,12 +2002,12 @@ TEST_F(OptimizerSt, RemoveRedundantBroadcast) {
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   auto impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 4);
-  // consumer split creates clone for exp1; common-axis backward removes brc0/brc1 from add0's chain
+  // consumer split creates clone for exp1; sibling removal deletes the original brc0 (add0
+  // reads abs0/exp0 directly) and the surviving clone is renamed back to "brc0"
   auto impl_grp_0_exp1 = impl_graphs[0].FindNode("exp1");
   EXPECT_NE(impl_grp_0_exp1, nullptr);
   EXPECT_EQ(impl_grp_0_exp1->GetAllInDataAnchorsSize(), 1);
-  EXPECT_EQ(impl_grp_0_exp1->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(),
-            "brc0_consumer_split_1");
+  EXPECT_EQ(impl_grp_0_exp1->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "brc0");
 
   auto impol_grp_0_add0 = impl_graphs[0].FindNode("add0");
   EXPECT_NE(impol_grp_0_add0, nullptr);
@@ -2015,7 +2015,8 @@ TEST_F(OptimizerSt, RemoveRedundantBroadcast) {
   EXPECT_EQ(impol_grp_0_add0->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "abs0");
   EXPECT_EQ(impol_grp_0_add0->GetInDataAnchor(1)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "exp0");
 
-  EXPECT_NE(impl_graphs[0].FindNode("brc0_consumer_split_1"), nullptr);
+  EXPECT_NE(impl_graphs[0].FindNode("brc0"), nullptr);
+  EXPECT_EQ(impl_graphs[0].FindNode("brc0_consumer_split_1"), nullptr);
 
   // check remove brc in unaligned template
   auto impl_grp_1_exp1 = impl_graphs[1].FindNode("exp1");

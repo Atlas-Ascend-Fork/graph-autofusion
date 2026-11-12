@@ -12,11 +12,26 @@
 #define AUTOFUSE_CODEGEN_CODEGEN_TILING_UTILS_H_
 
 #include <sstream>
+#include <string>
+#include "ascir.h"
+#include "schedule_result.h"
 
 namespace codegen {
 
+// A [K, B, N] storage exposed as a zero-offset [B, K, N] B input.
+__attribute__((visibility("hidden"))) ge::AscNodePtr GetBmmInputView(const ge::AscNodePtr &node);
+__attribute__((visibility("hidden"))) ge::AscNodePtr FindBmmInputView(const ascir::FusedScheduledResult &fused);
+__attribute__((visibility("hidden"))) bool IsRegisterBmmInputPackSupported();
+__attribute__((visibility("hidden"))) bool CanPackBmmInput(const ge::AscNodePtr &view);
+
 __attribute__((visibility("hidden"))) void AppendCvBaseAlignHelperDefs(std::stringstream &ss);
-__attribute__((visibility("hidden"))) void AppendCvSafetyMixModeHelperDefs(std::stringstream &ss, bool is_batch);
+__attribute__((visibility("hidden"))) void AppendCvPlatformSelectionDefs(std::stringstream &ss, bool avoid_tensor_api,
+                                                                         bool a_trans, bool b_trans);
+__attribute__((visibility("hidden"))) void AppendCvSafetyMixModeHelperDefs(std::stringstream &ss, bool is_batch,
+                                                                           bool is_device = false);
+__attribute__((visibility("hidden"))) void AppendCvUbSupportedKeyHelperDef(std::stringstream &ss,
+                                                                           const std::string &tensor_b_full_load,
+                                                                           bool is_device = false);
 
 }  // namespace codegen
 

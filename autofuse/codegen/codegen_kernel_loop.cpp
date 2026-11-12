@@ -67,6 +67,24 @@ ApiCall *FindIndirectLoadOpCall(Loop *loop, bool require_direct_gm) {
   return nullptr;
 }
 
+// [SIMT 融合组·成员 ApiCall 查找] 按节点名在循环树中递归查找（成员与 primary 同属
+// 一个 schedule group，但在循环树中的位置可能嵌套于子循环）。
+ApiCall *FindApiCallByNodeName(Loop *loop, const std::string &name) {
+  if (loop == nullptr) {
+    return nullptr;
+  }
+  for (const auto &body : loop->bodys) {
+    if (body.type == LoopType::CALL) {
+      if (body.call != nullptr && body.call->node_name == name) {
+        return body.call;
+      }
+    } else if (ApiCall *call = FindApiCallByNodeName(body.loop, name); call != nullptr) {
+      return call;
+    }
+  }
+  return nullptr;
+}
+
 bool HasRedirectedIndirectLoadOutput(const ApiCall *call) {
   if (call == nullptr || !IsOps<IndirectLoad>(call->node) || call->outputs.size() != 1UL ||
       call->node->outputs().size() != 1UL) {
@@ -909,7 +927,8 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
   static const std::vector<ApiCall *> kEmptyCrossLoopCalls;
   const auto mm_queue_pipe = MakeCommonMmQueuePipe(tpipe);
 
-  for (const auto &body : this->bodys) {
+  for (size_t body_index = 0UL; body_index < this->bodys.size(); ++body_index) {
+    const auto &body = this->bodys[body_index];
     if ((body.type == LoopType::CALL) && (body.call->api_call_context.scene == ApiScene::kCVFuseUBLoad ||
                                           body.call->api_call_context.stage != this->compute_stage)) {
       continue;
@@ -945,6 +964,103 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       }
       if (!IsFindInUsedCalls(body.call) && !behavior.skips_ub_lifecycle) {
         GE_CHK_STATUS_RET(body.call->AllocOutputs(call_tpipe, ss), "Codegen alloc outputs failed");
+      }
+      // [SIMT 融合组·循环体发射路径] 非提升形态（如共享 Reduce 终端的 L3：post-Reduce
+      // 使 primary 行为复位、不可被 FindIndirectLoadOpCall 发现，不经 hoist 点）下
+      // fused 调用经本路径发射，ftgt 逐成员引用 UB 局部目标——拓扑序在 primary 之后
+      // 的成员声明落在其自身循环体位置（fused 调用之后，use-before-declaration）；
+      // 在前者依赖前导段/祖先 cross-loop 归类。成员的独立执行由 IsSimtFusedMemberEmitted
+      // 抑制（其 Generate 仅输出注释，与 SetSimtFusedPrimary 同点原子设置），全组唯一
+      // 执行者是 fused 调用；skip_api_emit 在此基础上抑制成员循环体发射的冗余生命
+      // 周期文本。在 primary 发射点统一补声明：位置在后的成员补声明并置 skip——
+      // 抑制其循环体发射（亦防重复 AllocOutputs——redefinition）；位置在前的成员
+      // 仅当 skips_ub_lifecycle（通用 AllocOutputs 未覆盖）时补声明。buf 型 UB 目标
+      // 无 que 生命周期、SIMT 输入不进通用 Wait/Free，跳过成员循环体发射无泄漏。
+      // L2（寄存器归并）value 不落 UB、OutputTargets 走 GM 输出链，整块跳过。
+      const auto fused_primary_node = std::dynamic_pointer_cast<af::AscNode>(body.call->node);
+      if (fused_primary_node != nullptr && af::ops::IsOps<af::ascir_op::IndirectLoad>(fused_primary_node) &&
+          ascgen_utils::indirect_load::IsSimtFusedPrimary(fused_primary_node) &&
+          !ascgen_utils::indirect_load::GetSimtFusedMergeInfo(fused_primary_node).register_merge) {
+        if (behavior.skips_ub_lifecycle && !IsFindInUsedCalls(body.call)) {
+          GE_CHK_STATUS_RET(body.call->AllocOutputs(call_tpipe, ss),
+                            "Codegen alloc SIMT fused primary[%s] outputs failed.", body.call->node_name.c_str());
+        }
+        const auto member_names = ascgen_utils::indirect_load::GetSimtFusedMemberNames(fused_primary_node);
+        const size_t primary_body_index = body_index;
+        std::set<const ApiCall *> unique_members;
+        for (const auto &member_name : member_names) {
+          if (member_name == body.call->node_name) {
+            continue;
+          }
+          ApiCall *member_call = nullptr;
+          size_t member_body_index = 0UL;
+          for (size_t scan_index = 0UL; scan_index < this->bodys.size(); ++scan_index) {
+            if (this->bodys[scan_index].type == LoopType::CALL) {
+              if (this->bodys[scan_index].call != nullptr && this->bodys[scan_index].call->node_name == member_name) {
+                member_call = this->bodys[scan_index].call;
+                member_body_index = scan_index;
+                break;
+              }
+            } else if (ApiCall *call = FindApiCallByNodeName(this->bodys[scan_index].loop, member_name);
+                       call != nullptr) {
+              member_call = call;
+              member_body_index = scan_index;
+              break;
+            }
+          }
+          if (member_call == nullptr) {
+            // 不在本循环子树内的成员沿用前导段/祖先 cross-loop 机制（与 hoist 点同口径，
+            // 不作硬性约束——同一张图不应因提升与否改变可编译性）
+            GELOGW(
+                "SIMT fused group: member[%s] of primary[%s] is not found in the current loop subtree; its "
+                "outputs are left to the ancestor cross-loop mechanism.",
+                member_name.c_str(), body.call->node_name.c_str());
+            continue;
+          }
+          // 名表重复名/多名同解析：同一 ApiCall 被多次 AllocOutputs 会 redefinition，
+          // 与 hoist 点同口径校验
+          GE_ASSERT_TRUE(unique_members.emplace(member_call).second,
+                         "SIMT fused group of primary[%s]: member[%s] resolves to a duplicate call.",
+                         body.call->node_name.c_str(), member_name.c_str());
+          if (IsFindInUsedCalls(member_call)) {
+            // 祖先 cross-loop 已声明：跳过本点声明，skip 抑制该成员循环体发射
+            member_call->skip_api_emit = true;
+            continue;
+          }
+          // 成员 AllocOutputs 按成员自身判定 MM queue（不借用 primary 的 call_tpipe，
+          // 防将来 MM-queue 分裂覆盖 IndirectLoad 时从错误 queue 分配）
+          const auto &member_tpipe =
+              mm_queue_pipe != nullptr && tpipe.common_queue_split_plan->UsesMmQueue(*member_call) ? *mm_queue_pipe
+                                                                                                   : tpipe;
+          if (member_body_index < primary_body_index) {
+            // 位置在前的成员已发射完毕：post-Reduce 形态通用 AllocOutputs 已声明；
+            // skips_ub_lifecycle 形态其通用路径未声明，此处补齐。适用范围：生产形态
+            // 成员按拓扑序位于 primary 之后（GetAllNodes 首个 IndirectLoad 为 primary），
+            // 出现本分支即该约定被破坏——记录可见；同层更早兄弟循环的 cross-loop 声明
+            // 因 used_calls 逐 body 清空无法回查，该形态下可能重复声明（当前无覆盖场景）。
+            GELOGW(
+                "SIMT fused group: member[%s] is emitted before primary[%s] (unexpected topological order); its "
+                "execution is suppressed by the fused primary, only a duplicate declaration is at risk.",
+                member_name.c_str(), body.call->node_name.c_str());
+            const auto member_behavior = ascgen_utils::indirect_load::GetTemplateBehavior(
+                std::dynamic_pointer_cast<af::AscNode>(member_call->node));
+            if (member_behavior.skips_ub_lifecycle) {
+              GE_CHK_STATUS_RET(member_call->AllocOutputs(member_tpipe, ss),
+                                "Codegen alloc SIMT fused member[%s] outputs failed.", member_name.c_str());
+              GELOGI("SIMT fused group: member[%s] outputs declared before primary[%s] in loop body.",
+                     member_name.c_str(), body.call->node_name.c_str());
+            }
+            continue;
+          }
+          // 位置在后的成员：本点统一补声明并置 skip。成员执行本身已由 IsSimtFusedMemberEmitted
+          // 抑制（其 Generate 仅输出注释，fused 调用是全组唯一执行者）；置 skip 只为抑制本成员
+          // 循环体位置重复的 Wait/AllocOutputs（redefinition）与冗余生命周期文本
+          GE_CHK_STATUS_RET(member_call->AllocOutputs(member_tpipe, ss),
+                            "Codegen alloc SIMT fused member[%s] outputs failed.", member_name.c_str());
+          member_call->skip_api_emit = true;
+          GELOGI("SIMT fused group: member[%s] declared at primary[%s] emission point (order after).",
+                 member_name.c_str(), body.call->node_name.c_str());
+        }
       }
       std::string call;
       std::string cache_guard;
@@ -1127,8 +1243,61 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
             ascgen_utils::indirect_load::GetTemplateBehavior(std::dynamic_pointer_cast<af::AscNode>(call->node));
         const auto indirect_load = std::dynamic_pointer_cast<af::AscNode>(call->node);
         const bool has_post_reduce = ascgen_utils::indirect_load::GetPostReduceConsumer(indirect_load) != nullptr;
-        if (!behavior.skips_ub_lifecycle || has_post_reduce) {
+        const bool primary_alloc_at_hoist = !behavior.skips_ub_lifecycle || has_post_reduce;
+        if (primary_alloc_at_hoist && !IsFindInUsedCalls(call)) {
           GE_CHK_STATUS_RET(call->AllocOutputs(tpipe, ss), "Codegen alloc hoisted IndirectLoad outputs failed");
+        }
+        // [SIMT 融合组·全组成员声明先于 fused 引用] L3（UB 归并）fused 调用的
+        // OutputTargets 逐成员引用 UB 局部目标（含 primary 自身的输出）。primary 的
+        // 声明存在空窗：kSimtOp 无 post-Reduce 的提升形态（L3 不要求链上有 Reduce，
+        // 见 PlanSimtFusedEmission 的降级判定）上方守卫不触发，声明完全依赖祖先
+        // cross-loop 归类——正是成员侧已消除的调度位置依赖。故 primary 与成员统一
+        // 收口到组路径：上方守卫或祖先 cross-loop 已声明时跳过，否则与成员同点补
+        // 声明。本提升点以提前返回替换整个子树的循环体发射，成员（含 primary）
+        // 不再有各自的循环体发射点；skip_api_emit 抑制该成员的独立发射（fused 调用
+        // 统一承担全组发射，亦防止后续结构变化后循环体内重复 AllocOutputs）。
+        // L2（寄存器归并）value 不落 UB、OutputTargets 走 GM 输出链，无需成员 UB
+        // 声明，整块跳过。
+        if (indirect_load != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(indirect_load)) {
+          const auto member_names = ascgen_utils::indirect_load::GetSimtFusedMemberNames(indirect_load);
+          const auto merge_info = ascgen_utils::indirect_load::GetSimtFusedMergeInfo(indirect_load);
+          // 名表契约：SetSimtFusedPrimary 写入含 primary 在内的全组成员名（primary 为
+          // 首成员）；空表即名表契约破坏（fused 发射侧同口径断言）。名表重复名会使
+          // 同一 ApiCall 被多次 AllocOutputs（redefinition），与名表契约同点校验。
+          GE_ASSERT_TRUE(!member_names.empty(), "SIMT fused group of primary[%s] has an empty member list.",
+                         call->node_name.c_str());
+          GE_ASSERT_TRUE(std::find(member_names.begin(), member_names.end(), call->node_name) != member_names.end(),
+                         "SIMT fused group member list of primary[%s] does not contain the primary itself.",
+                         call->node_name.c_str());
+          if (!merge_info.register_merge) {
+            std::set<const ApiCall *> unique_members;
+            for (const auto &member_name : member_names) {
+              ApiCall *member_call = FindApiCallByNodeName(this, member_name);
+              if (member_call == nullptr) {
+                // 不在本提升子树内的成员沿用前导段/祖先 cross-loop 机制——与循环体
+                // 发射路径同口径（同一张图不应因提升与否改变可编译性，不作硬性约束）
+                GELOGW(
+                    "SIMT fused group: member[%s] of primary[%s] is not found in the hoisted loop subtree; its "
+                    "outputs are left to the ancestor cross-loop mechanism.",
+                    member_name.c_str(), call->node_name.c_str());
+                continue;
+              }
+              GE_ASSERT_TRUE(unique_members.emplace(member_call).second,
+                             "SIMT fused group of primary[%s]: member[%s] resolves to a duplicate call.",
+                             call->node_name.c_str(), member_name.c_str());
+              const bool is_primary = member_call == call;
+              if ((is_primary && primary_alloc_at_hoist) || IsFindInUsedCalls(member_call)) {
+                // primary 已由上方守卫声明，或该成员已由祖先循环的 cross-loop 路径声明
+                member_call->skip_api_emit = true;
+                continue;
+              }
+              GE_CHK_STATUS_RET(member_call->AllocOutputs(tpipe, ss), "Codegen alloc SIMT fused %s[%s] outputs failed.",
+                                is_primary ? "primary" : "member", member_name.c_str());
+              member_call->skip_api_emit = true;
+              GELOGI("SIMT fused group: %s[%s] outputs declared at the hoist point (skip_api_emit set).",
+                     is_primary ? "primary" : "member", member_name.c_str());
+            }
+          }
         }
         std::string call_code;
         GE_CHK_STATUS_RET(call->Generate(tpipe, current_axis, call_code), "Codegen generate hoisted call failed");

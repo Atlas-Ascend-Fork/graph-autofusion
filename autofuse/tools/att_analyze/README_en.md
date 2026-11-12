@@ -10,6 +10,19 @@ The CLI provides `summary`, `compare`, `split-slog`, `perf-formula`, `verify-til
 
 `LogParser` exposes `OperatorSummary.parse_status` to make incomplete evidence explicit. `ok` means complete selection records; `inferred_graph_result` means graph/result came from template lines; `missing_group_case`, `missing_result_performance`, and `missing_graph_result` identify missing records. Existing CSV column meanings are unchanged.
 
+After TopN export succeeds, INFO logs emit `[ATT][TOPN_TILING] stage=topn_output` for each
+returned candidate and logical group. Each record contains `output[i]`, `graph/result/group`,
+the group's `tiling_repr` and modeled `pipe_estimates`. The value is `null` when no exact
+snapshot or model is available. Long representations use `TOPN_TILING_BEGIN/CHUNK/END`
+with a shared ID and estimates on the BEGIN line. The `evidence` command exports these as
+`record_type="topn_tiling"` with `output_index`. Runtime selections use `FINAL_TILING`.
+
+Use `summary --topn` to include returned candidate groups in console, CSV, or Excel output.
+Rows retain the graph, result, group, output index, source location, tiling representation,
+and pipe estimates. The default summary CSV remains compatible with `compare`.
+For both FINAL and TopN, `summary` and `evidence` normalize `M2/M3/V` to
+`AIV_MTE2/AIV_MTE3/AIV_VEC` and use `null` for missing estimates.
+
 ## FINAL_TILING log contract
 
 `FINAL_TILING` means that the runtime entry has written the final tiling data. The runtime final

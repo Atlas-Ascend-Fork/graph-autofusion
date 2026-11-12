@@ -184,6 +184,14 @@ inline void RestoreFinalTilingSelectionSnapshots(const std::vector<FinalTilingSe
   std::copy_n(snapshots.begin(), std::min(snapshots.size(), selections.size()), selections.begin());
 }
 
+inline void MergeFinalTilingSelectionSnapshots(const std::vector<FinalTilingSelectionSnapshot> &snapshots) {
+  if (!IsFinalTilingObservationEnabled()) { return; }
+  auto &selections = g_final_tiling_observation_context->selections;
+  for (size_t slot = 0; slot < std::min(snapshots.size(), selections.size()); ++slot) {
+    if (snapshots[slot].valid) { selections[slot] = snapshots[slot]; }
+  }
+}
+
 class FinalTilingObservationCallGuard {
  public:
   FinalTilingObservationCallGuard(FinalTilingObservationContext &context, const bool enabled,
@@ -324,7 +332,7 @@ inline std::string FinalTilingPipeJson(const FinalTilingContext &context) {
   return pipe;
 }
 
-inline std::string FinalTilingCommon(const FinalTilingContext &context) {
+inline std::string FinalTilingCommon(const FinalTilingContext &context, const bool is_topn) {
   return std::string("schema=") + std::to_string(context.schema) + " source=" + FinalTilingShellQuote(context.source) +
       " selection_mode=" + FinalTilingShellQuote(context.selection_mode) + " operator=" +
       FinalTilingShellQuote(context.op) + " graph=" + std::to_string(context.graph) +
@@ -333,12 +341,7 @@ inline std::string FinalTilingCommon(const FinalTilingContext &context) {
       " score=" + std::to_string(context.score) + " sub_case_tag=" + FinalTilingShellQuote(context.sub_case_tag) +
       " template=" + FinalTilingShellQuote(context.template_name) + " repr_kind=" +
       FinalTilingShellQuote(context.repr_kind) + " pipe_estimates=" +
-      FinalTilingShellQuote(FinalTilingPipeJson(context));
-}
-
-inline std::string FinalTilingChunkPrefix(const std::string &id, const size_t seq) {
-  return std::string("[ATT][FINAL_TILING_CHUNK] id=") + FinalTilingShellQuote(id) +
-         " seq=" + std::to_string(seq) + " data=";
+      (is_topn && context.pipe_estimates.empty() ? "null" : FinalTilingShellQuote(FinalTilingPipeJson(context)));
 }
 )";
 }
@@ -379,22 +382,28 @@ inline std::vector<std::string> FinalTilingSplitPayload(const std::string &paylo
 
 void AppendFinalTilingRecordFormatter(std::stringstream &code) {
   code << R"(
-inline std::vector<std::string> FormatFinalTilingRecord(const FinalTilingContext &context) {
-  const std::string common = FinalTilingCommon(context);
-  const std::string single = std::string("[ATT][FINAL_TILING] ") + common + " tiling_repr=" +
-      FinalTilingShellQuote(context.tiling_repr);
+inline std::vector<std::string> FormatFinalTilingRecord(const FinalTilingContext &context,
+                                                        const int64_t topn_output = -1) {
+  const bool is_topn = topn_output >= 0;
+  const std::string marker = is_topn ? "[ATT][TOPN_TILING" : "[ATT][FINAL_TILING";
+  const std::string output = is_topn ? std::to_string(topn_output) : "";
+  const std::string common = (is_topn ? "stage=topn_output output[" + output + "] " : "") +
+      FinalTilingCommon(context, is_topn);
+  const std::string single = marker + "] " + common + " tiling_repr=" + FinalTilingShellQuote(context.tiling_repr);
   if (single.size() <= 700U) { return {single}; }
-  const std::string id = FinalTilingStableId(context);
+  const std::string id = FinalTilingShellQuote(FinalTilingStableId(context) + (is_topn ? "|" + output : ""));
   const std::string hash = FinalTilingChecksum(context.tiling_repr);
-  const auto chunks = FinalTilingSplitPayload(context.tiling_repr, FinalTilingChunkPrefix(id, std::numeric_limits<size_t>::max()));
+  const std::string chunk_prefix = marker + "_CHUNK] id=" + id + " seq=";
+  const auto chunks = FinalTilingSplitPayload(
+      context.tiling_repr, chunk_prefix + std::to_string(std::numeric_limits<size_t>::max()) + " data=");
   std::vector<std::string> lines;
-  lines.emplace_back(std::string("[ATT][FINAL_TILING_BEGIN] ") + common + " id=" + FinalTilingShellQuote(id) +
+  lines.emplace_back(marker + "_BEGIN] " + common + " id=" + id +
                      " chunks=" + std::to_string(chunks.size()) + " len=" + std::to_string(context.tiling_repr.size()) +
                      " hash_alg=att_mix64_v1 hash=" + hash);
   for (size_t seq = 0U; seq < chunks.size(); ++seq) {
-    lines.emplace_back(FinalTilingChunkPrefix(id, seq) + FinalTilingShellQuote(chunks[seq]));
+    lines.emplace_back(chunk_prefix + std::to_string(seq) + " data=" + FinalTilingShellQuote(chunks[seq]));
   }
-  lines.emplace_back(std::string("[ATT][FINAL_TILING_END] id=") + FinalTilingShellQuote(id) +
+  lines.emplace_back(marker + "_END] id=" + id +
                      " chunks=" + std::to_string(chunks.size()) + " len=" + std::to_string(context.tiling_repr.size()) +
                      " hash_alg=att_mix64_v1 hash=" + hash);
   return lines;
@@ -697,9 +706,9 @@ inline void EmitTemplateSemanticRecord(const FinalTilingContext &context, const 
   }
 }
 
-inline void EmitFinalTilingRecord(const FinalTilingContext &context) noexcept {
+inline void EmitFinalTilingRecord(const FinalTilingContext &context, const int64_t topn_output = -1) noexcept {
   try {
-    EmitFinalTilingLines(FormatFinalTilingRecord(context));
+    EmitFinalTilingLines(FormatFinalTilingRecord(context, topn_output));
   } catch (...) {
     // Formatting and allocation failures are also observational only.
   }
