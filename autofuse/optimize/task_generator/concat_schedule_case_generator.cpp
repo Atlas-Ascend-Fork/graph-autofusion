@@ -236,9 +236,10 @@ std::vector<af::AscNodePtr> ConcatFusionCaseGenerator::FindConcatNodes(const asc
       concat_nodes.emplace_back(node);
     } else if (has_unsupported_op != nullptr && (!*has_unsupported_op)) {
       const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(node);
-      if ((asc_node != nullptr) && (ScheduleUtils::IsTranspose(asc_node) || ScheduleUtils::IsReduce(asc_node))) {
+      if ((asc_node != nullptr) && (ScheduleUtils::IsTranspose(asc_node) || ScheduleUtils::IsReduce(asc_node) ||
+                                    af::ops::IsOps<af::ascir_op::IndirectLoad>(node))) {
         *has_unsupported_op = true;
-        GELOGI("graph contains Transpose/Reduce node %s", node->GetNamePtr());
+        GELOGI("graph contains unsupported node %s, type = %s", node->GetNamePtr(), node->GetTypePtr());
       }
     } else {
       // do nothing
