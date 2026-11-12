@@ -159,6 +159,51 @@ def _copy_host_source_files(src_dir, dst_dir):
             _copy_host_source_files(src_path, os.path.join(dst_dir, item))
 
 
+# GE 运行时对交付 so 实际 dlsym 的对外 ABI 符号（清单单一来源见
+# docs/zh/autofuse/design/features/auto_tiling.md S11："正式 ABI 以 GE/TorchAir 实际加载的符号为准"）。
+# codegen 新增 GE 消费接口或 CV 场景纳入瘦身时必须同步此清单
+# （注意 TilingFuncVec/GetTilingDataSizeVec 当前仅在 CV 分支生成，见 codegen_tiling.cpp GenExternTilingFunc）
+VV_SLIM_EXPORT_SYMBOLS = [
+    "TilingFunc",
+    "TilingParse",
+    "InferShape",
+    "GetSymbolTilingCacheKey",
+    "DfxInputSymbolInfo",
+    "GetTilingDataSize",
+    "GetKernelBin",
+]
+
+
+def generate_export_map(host_build_dir):
+    lines = ["{"]
+    lines.append("  global:")
+    lines.extend("    %s;" % sym for sym in VV_SLIM_EXPORT_SYMBOLS)
+    lines.append("  local: *;")
+    lines.append("};")
+    with open(os.path.join(host_build_dir, "export.map"), "w") as map_file:
+        map_file.write("\n".join(lines) + "\n")
+
+
+def strip_slim_so(so_path, cross_compiler_prefix=None):
+    strip_tool = (cross_compiler_prefix or "") + "strip"
+    try:
+        size_before = os.path.getsize(so_path)
+        ret = subprocess.run([strip_tool, so_path], capture_output=True, text=True)
+    except OSError as e:
+        # so 缺失或 strip 工具（含交叉前缀）不在 PATH：告警降级为未瘦身交付，不阻断编译
+        _log_warning("[SOSIZE] strip %s failed: %s", so_path, str(e))
+        return
+    if ret.returncode != 0:
+        _log_warning("[SOSIZE] strip %s failed: %s", so_path, ret.stderr)
+        return
+    logger.info(
+        "[SOSIZE] strip %s: %d -> %d",
+        so_path,
+        size_before,
+        os.path.getsize(so_path),
+    )
+
+
 def compile_native_host_so(host_ctx):
     (
         graph_name,
@@ -237,7 +282,7 @@ CV_COMMON_BMM_MIX_WHITE_LIST = [
 ]
 
 
-def generate_cmake_lists(host_ctx, cross_info=None):
+def generate_cmake_lists(host_ctx, cross_info=None, slim_export=None):
     (
         graph_name,
         kernel_name,
@@ -246,6 +291,10 @@ def generate_cmake_lists(host_ctx, cross_info=None):
         is_static_shape,
         is_cube,
     ) = host_ctx
+    if slim_export is None:
+        # 仅交付编译（VV 第二次 host 编译产物拷入 kernel_meta）收敛导出符号；
+        # PGO 等临时 so 需 dlsym GetTilingKeyCount/PgoTilingSearch 等，不得收敛
+        slim_export = not is_cube and is_last_compile
     is_cross_compile_flag = cross_info.is_cross_compile_flag if cross_info else False
     target_machine = cross_info.target_machine if cross_info else None
     source = f"################ {kernel_name}.so ################\n"
@@ -279,6 +328,12 @@ def generate_cmake_lists(host_ctx, cross_info=None):
         f"    {opt_level} -fno-common -Werror -Wextra -Wfloat-equal -fvisibility=default -DLOG_CPP"
         f" -ffile-prefix-map=${{CMAKE_CURRENT_SOURCE_DIR}}/=\n)\n\n"
     )
+    if slim_export:
+        generate_export_map(host_build_dir)
+        source += (
+            f"target_link_options({kernel_name} PRIVATE"
+            f" -Wl,--version-script=${{CMAKE_CURRENT_SOURCE_DIR}}/export.map)\n\n"
+        )
     source += f'message(STATUS "Using environment variable ASCEND_INSTALL_PATH: {ASCEND_PATH}")\n'
     # 交叉编译场景仅有libgraph.so的桩文件，libgraph桩已包含graph_base的符号，故link graph；
     # 非交叉编译场景保持link graph_base不变
@@ -320,7 +375,7 @@ def generate_file(dst_dir, file_name, text, append=False):
         file.write(text)
 
 
-def ascbc_host_compile(host_ctx, cross_info=None):
+def ascbc_host_compile(host_ctx, cross_info=None, slim_export=None):
     (
         graph_name,
         kernel_name,
@@ -330,7 +385,7 @@ def ascbc_host_compile(host_ctx, cross_info=None):
         is_cube,
     ) = host_ctx
     cross_compiler_prefix = cross_info.cross_compiler_prefix if cross_info else None
-    generate_cmake_lists(host_ctx, cross_info=cross_info)
+    generate_cmake_lists(host_ctx, cross_info=cross_info, slim_export=slim_export)
     ori_directory = os.getcwd()
     # 切换到临时工作目录
     os.chdir(host_build_dir)
@@ -1081,7 +1136,8 @@ def pgo_kernel_compile(*args, temp_dir, params, op_kernel_src, code_gen):
     get_kernel_src = code_gen.get_kernel_and_json_generator(kernel_file, json_file)
     generate_file(host_build_dir, graph_name + "_get_kernel.cpp", get_kernel_src)
     ascbc_host_compile(
-        HostCompileContext(graph_name, kernel_name, host_build_dir, True, False, False)
+        HostCompileContext(graph_name, kernel_name, host_build_dir, True, False, False),
+        slim_export=False,
     )
     source_lib_path = os.path.join(host_build_dir, f"lib{kernel_name}.so")
     target_lib_path = os.path.join(pgo_dir, f"lib{graph_name}.so")
@@ -2718,6 +2774,7 @@ def asc_graph_compile_post(
 
     # 重新编译host so
     timestamp_set(True, graph_name, "CompileSecondHost")
+    slim_delivery = not is_cube
     ascbc_host_compile(
         HostCompileContext(
             graph_name, kernel_name, host_build_dir, True, static_compile_flag, is_cube
@@ -2725,6 +2782,7 @@ def asc_graph_compile_post(
         cross_info=CrossCompileInfo(
             is_cross_compile_flag, cross_compiler_prefix, target_machine
         ),
+        slim_export=slim_delivery,
     )
     if is_cross_compile_flag:
         compile_native_host_so(
@@ -2739,10 +2797,11 @@ def asc_graph_compile_post(
         )
     timestamp_set(False, graph_name, "CompileSecondHost", True)
 
-    # 拷贝so和json
     host_so = os.path.join(host_build_dir, f"lib{kernel_name}.so")
     kernel_meta_dir = get_current_build_config("kernel_meta_parent_dir")
     dest = os.path.join(kernel_meta_dir, "kernel_meta")
+    if slim_delivery:
+        strip_slim_so(host_so, cross_compiler_prefix)
     shutil.copy(host_so, dest)
     if is_cross_compile_flag:
         native_host_so = os.path.join(
