@@ -156,9 +156,9 @@ TEST_F(ArangeApiCallTest, GeneratesDiscontinuousVectorizedStrideLoop) {
       result.find(
           ".SetValue(static_cast<uint32_t>(0 + arange_i * (4)), static_cast<int64_t>((0) + (0 + arange_i) * (12)));"),
       std::string::npos);
-  // 循环上界必须是有效元素数（size），而非物理跨度 (size-1)*4+1
-  EXPECT_NE(result.find("for (int64_t arange_i = 0; arange_i < size; ++arange_i) {"), std::string::npos);
-  EXPECT_EQ(result.find("(size - 1) * 4 + 1"), std::string::npos);
+  // 循环上界必须是有效元素数（t->size），而非物理跨度 (t->size-1)*4+1
+  EXPECT_NE(result.find("for (int64_t arange_i = 0; arange_i < t->size; ++arange_i) {"), std::string::npos);
+  EXPECT_EQ(result.find("(t->size - 1) * 4 + 1"), std::string::npos);
 }
 
 // 多轴布局：最内层 kDiscontinuous（stride=4）、外层物理紧凑（stride=size）时，
@@ -175,7 +175,7 @@ TEST_F(ArangeApiCallTest, GeneratesDiscontinuousInnerWithCompactOuterAxis) {
   ASSERT_EQ(call->Generate(g.tpipe, {}, result), af::SUCCESS);
   RecordProperty("generated_code", result);
   EXPECT_NE(result.find("arange_i * (4)"), std::string::npos);
-  EXPECT_NE(result.find("for (int64_t arange_i = 0; arange_i < (2 * size); ++arange_i) {"), std::string::npos);
+  EXPECT_NE(result.find("for (int64_t arange_i = 0; arange_i < (2 * t->size); ++arange_i) {"), std::string::npos);
 }
 
 // 多轴布局：外层带空洞（stride 非紧凑）时，物化会静默错位，必须拒绝。

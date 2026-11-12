@@ -142,7 +142,7 @@ Status ArangeApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
       GE_ASSERT_TRUE(pos < slice.axis_size.size(), "Arange slice axis position out of range");
       effective_count = af::sym::Mul(effective_count, slice.axis_size[pos]);
     }
-    count = effective_count.Str().get();
+    count = tpipe.tiler.Size(effective_count);
   } else {
     count = has_fixed_axis ? tpipe.tiler.TensorActualSize(slice) : output.actual_size.Str();
   }
