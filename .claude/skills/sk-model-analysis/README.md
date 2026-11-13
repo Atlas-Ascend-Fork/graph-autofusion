@@ -25,7 +25,7 @@ python scripts/model_analysis.py analyze <input> --dfx-debug --output <debug_rep
 
 当前暂不展示重复结构识别与折叠。Scope 默认折叠，框头提供折叠/展开和独立 Update，工具栏支持全部折叠。局部 Update 只改变当前 Scope 内部排布；全局 Update 统一切换并清除局部覆盖。没有明确更新后数据时局部 Update 不可用。
 
-原 Analysis View 已下线；Scope、Task 能力合并至 Graph。当前不展示真实执行时长，不提供性能热点或耗时归因。
+当前不展示真实执行时长，不提供性能热点或耗时归因。
 
 ## 通过 skill 生成 AI 汇报
 
@@ -86,17 +86,15 @@ report_dir/
 
 压缩包默认仅包含单 HTML，不包含原始日志、二进制、缓存或样例。压缩解决传输体积，解压后打开 HTML。使用第三方图像或网络字体不是报告运行前提。
 
-退出码：0 为已产出可用结果（可以包含运行异常或解析降级）；1 为无可用分析结果或生成/交付失败；2 为参数错误或已下线命令。详细状态见 HTML 的 DFX 和生成状态，显式导出的 run-summary 保留完整机器结果。
+退出码：0 为已产出可用结果（可以包含运行异常或解析降级）；1 为无可用分析结果或生成/交付失败；2 为参数错误。详细状态见 HTML 的 DFX 和生成状态，显式导出的 run-summary 保留完整机器结果。
 
 ## 其他入口
 
 ```bash
 python scripts/model_analysis.py diagnose-hang-crash <input> --output <report_dir>
-python scripts/model_analysis.py trace-nodes <model_dir> -o <node-trace.json>
-python scripts/model_analysis.py trace-nodes <model_dir> --model-instance-id mi01 -o <node-trace.json>
 ```
 
-`diagnose-hang-crash` 同样输出统一报告。`trace-nodes` 是独立导出工具，不自动生成旧页面。`diagnose-performance` 明确返回下线说明。
+`diagnose-hang-crash` 是生成统一 Graph / DFX 报告的兼容入口。
 
 ## 验证与维护
 

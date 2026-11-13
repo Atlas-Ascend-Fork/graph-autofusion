@@ -32,7 +32,7 @@ Log 的原始 after 仍只记录明确修改；当主结果采用 Log 时，Grap
 
 AI 汇报可以直接消费 HTML：`report-data` 的 `payload_encoding` 未设置时读取完整 `models`；值为 `gzip-base64-models-v1` 时，`models` 只含目录摘要，完整数据位于 `report-model-{index}` 的 Base64/gzip JSON 块，须逐 Model 解码。普通用户 HTML 优先读取 `model.dfx.fusion`，不要求存在原始 `fusion_analysis` 或 `diagnostics`。汇报由 agent 按 [ai-report.md](ai-report.md) 完成，默认另存 Markdown，不改变 HTML 载荷或图数据，也不增加 AI 后端或 CLI。
 
-图页面仅提供单 Update，不切换解析器。Analysis View 下线，Scope / Task 不再作为独立主页面。开发排查信息不提供页面内开关，只能通过 `--dfx-debug` 重新生成独立 HTML。
+图页面仅提供单 Update，不切换解析器。Scope / Task 在 Graph 中查看。开发排查信息不提供页面内开关，只能通过 `--dfx-debug` 重新生成独立 HTML。
 
 ## 状态原则
 

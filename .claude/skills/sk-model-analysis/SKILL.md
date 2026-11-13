@@ -28,9 +28,7 @@ python3 <skills_root>/sk-model-analysis/scripts/model_analysis.py analyze <input
 `input` 支持结果根目录、模型资产目录和单 model 目录。默认 `both`，也支持 `json`、`log`。模式在触发解析时指定，页面不切换解析器。默认生成用户版 DFX；需要原始开发排查证据时使用 `--dfx-debug` 单独生成调试版 HTML。
 
 - `analyze`：生成统一 Graph / DFX 报告。
-- `diagnose-hang-crash`：同一报告入口，保留运行异常诊断能力。
-- `trace-nodes`：独立导出 tracing，支持 `--model-instance-id`，不提供真实耗时归因。
-- `diagnose-performance` 已下线；Analysis View 不再生成。
+- `diagnose-hang-crash`：统一 Graph / DFX 报告的异常诊断兼容入口。
 
 ## 目录解析与阅读流程
 

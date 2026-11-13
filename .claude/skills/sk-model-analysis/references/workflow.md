@@ -10,4 +10,4 @@
 6. 对外回答结论、证据、受影响对象、完整度和下一步。真实耗时当前不分析。
 7. 按配置压缩 HTML。报告离线可用；缓存和原始资产不自动进入压缩包。
 
-Analysis View 已下线，Scope/Task 为 Graph 内部下钻能力。`diagnose-hang-crash` 生成相同统一报告；`trace-nodes` 为独立导出。
+Scope/Task 为 Graph 内部下钻能力。`diagnose-hang-crash` 生成相同统一报告。

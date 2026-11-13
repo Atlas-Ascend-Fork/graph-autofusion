@@ -14,30 +14,6 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-import subprocess
-import sys
-
-
-def _retired(args):
-    print(
-        "Analysis View / diagnose-performance 已下线；请使用 analyze 查看 Graph / DFX。真实耗时分析暂不提供。",
-        file=sys.stderr,
-    )
-    return 2
-
-
-def _trace(args):
-    command = [
-        sys.executable,
-        str(Path(__file__).with_name("sk_node_tracing.py")),
-        args.input,
-    ]
-    if args.output:
-        command.extend(["-o", str(args.output)])
-    if args.model_instance_id:
-        command.extend(["--model-instance-id", args.model_instance_id])
-    return subprocess.run(command, check=False).returncode
 
 
 def build_parser():
@@ -55,20 +31,6 @@ def build_parser():
         command = commands.add_parser(name, help=help_text)
         add_arguments(command)
         command.set_defaults(func=generate)
-    retired = commands.add_parser(
-        "diagnose-performance", help="Retired: Analysis View has been removed"
-    )
-    retired.add_argument("input", nargs="?")
-    retired.set_defaults(func=_retired)
-    trace = commands.add_parser(
-        "trace-nodes", help="Export standalone node tracing (no timing analysis)"
-    )
-    trace.add_argument("input")
-    trace.add_argument("-o", "--output", type=Path)
-    trace.add_argument(
-        "--model-instance-id", help="Select optimize instance for tracing"
-    )
-    trace.set_defaults(func=_trace)
     return parser
 
 

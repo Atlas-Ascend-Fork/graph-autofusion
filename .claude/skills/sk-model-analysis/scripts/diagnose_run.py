@@ -83,7 +83,6 @@ from sk_library_extractor import (
 
 
 RE_RUN_NAME = re.compile(r"^\d{8}-\d{6}-(.+)$")
-REPORT_MODES = {"full", "hang", "performance", "trace"}
 EVENT_FILE_PATTERNS = ("sk_event_dev_device_*.json", "sk_prof_device_*.json")
 EVENT_FILE_PREFIXES = ("sk_event_dev_device_", "sk_prof_device_")
 EVENT_ASSET_KEY = "sk_event_dev_device_*.json"
@@ -3242,8 +3241,6 @@ def _render_model_bundle_worker(
     )
     local_portal_href = _portal_href_for_model_views(views_dir, reports_dir)
     report_paths = dict(entry.get("report_paths", {}))
-    data_dir = views_dir.parent / "data"
-    script_dir = Path(__file__).resolve().parent
 
     result = {
         "index": index,
@@ -3276,44 +3273,6 @@ def _render_model_bundle_worker(
                 [path for path in event_file_paths if Path(path).is_file()]
             ),
         }
-        if (
-            "performance_report" in expected_reports or "node_trace" in expected_reports
-        ) and model_dir.exists():
-            node_detail_log = model_dir / "sk_node_detail.log"
-            if node_detail_log.exists():
-                node_trace_path = data_dir / "node-trace.json"
-                node_trace_command = [
-                    sys.executable,
-                    str(script_dir / "sk_node_tracing.py"),
-                    str(model_dir),
-                    "-o",
-                    str(node_trace_path),
-                ]
-                model_instance_count = _entry_model_instance_count(entry)
-                model_instance_id = _entry_model_instance_id(entry)
-                if model_instance_count > 1:
-                    node_trace_command.extend(
-                        ["--model-instance-id", model_instance_id]
-                    )
-                ok, output = _run_tool(node_trace_command)
-                local_tool_runs["node_trace"] = {
-                    "ok": ok,
-                    "status": _status_from_ok(ok),
-                    "output": output[-3000:],
-                }
-                if ok and node_trace_path.exists():
-                    local_node_trace_report_links["node_trace"] = os.path.relpath(
-                        node_trace_path, run_dir
-                    )
-                    result["report_paths"]["node_trace"] = os.path.relpath(
-                        node_trace_path, reports_dir
-                    )
-            else:
-                local_tool_runs["node_trace"] = {
-                    "ok": False,
-                    "status": "missing",
-                    "output": "sk_node_detail.log is missing",
-                }
         local_node_trace_summary = _collect_node_trace_summary(
             run_dir, local_node_trace_report_links, local_tool_runs
         )
@@ -7166,10 +7125,6 @@ def _render_ai_hints(
     focus = []
     if not phase_assertions["built_tasks_finish"]:
         focus.append("重点先排查 build tasks 前后的日志区段。")
-    if validation["reports"].get("node_trace", {}).get("status") != "ok":
-        focus.append(
-            "当前 node tracing 未稳定产出，优先回查 `sk_node_tracing.py` 输入格式。"
-        )
     if event_stats["event_file_count"] == 0:
         focus.append("当前没有 time event 文件，性能判断先停留在结构与队列层。")
     if not focus:
@@ -7206,24 +7161,6 @@ def _render_ai_hints(
     return "\n".join(lines) + "\n"
 
 
-def _expected_reports_for_mode(mode: str) -> list[str]:
-    if mode == "full":
-        return [
-            "scope_graph",
-            "task_queue_graph",
-            "node_trace",
-            "hang_crash_report",
-            "performance_report",
-        ]
-    if mode == "hang":
-        return ["hang_crash_report"]
-    if mode == "performance":
-        return ["performance_report"]
-    if mode == "trace":
-        return ["node_trace"]
-    raise ValueError(f"unsupported mode: {mode}")
-
-
 def main() -> None:
     """Compatibility CLI; all report generation now uses the unified pipeline."""
     from model_analysis import build_parser
@@ -7239,8 +7176,6 @@ def main() -> None:
     command = {
         "full": "analyze",
         "hang": "diagnose-hang-crash",
-        "trace": "trace-nodes",
-        "performance": "diagnose-performance",
     }.get(mode)
     if command is None:
         raise SystemExit("Unknown mode: " + mode)
