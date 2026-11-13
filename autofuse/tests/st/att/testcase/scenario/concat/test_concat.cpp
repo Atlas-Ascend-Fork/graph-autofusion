@@ -2251,7 +2251,7 @@ void STestGenConcat::VerifyStaticShapeCacheBehavior() {
 
   // 验证生成的代码包含静态shape的缓存处理（空key）
   EXPECT_TRUE(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp",
-                                                       "std::array<uint32_t, kInputShapeSize> input_shapes = {};"));
+                                                       "std::array<int64_t, kInputShapeSize> input_shapes = {};"));
 
   // 验证生成的代码包含算子级缓存查询（静态shape）
   EXPECT_TRUE(ResultCheckerUtils::IsFileContainsString("Concat_tiling_func.cpp", "if (cache_hit) {"));

@@ -39,7 +39,7 @@ af::Status GroupLevelCacheGen::GenGroupCacheFunctions(ge::CodePrinter &code_prin
   // 生成缓存函数
   std::string cache_decl = R"(
 // 第二级：Group间缓存（通过参数传递）
-static inline bool FindGroupCache(const std::array<uint32_t, kInputShapeSize> &key,
+static inline bool FindGroupCache(const std::array<int64_t, kInputShapeSize> &key,
                                    )" +
                            tiling_data_type_name + R"(& tiling_data,
                                    GroupLevelCache &group_level_cache) {
@@ -66,7 +66,7 @@ static inline bool FindGroupCache(const std::array<uint32_t, kInputShapeSize> &k
 }
 
 // 保存到Group级缓存
-static inline bool SaveGroupCache(const std::array<uint32_t, kInputShapeSize>& key,
+static inline bool SaveGroupCache(const std::array<int64_t, kInputShapeSize>& key,
                                    const TilingDataCopy& data,
                                    GroupLevelCache &group_level_cache) {
   bool success = group_level_cache.Insert(key, data);
@@ -77,7 +77,7 @@ static inline bool SaveGroupCache(const std::array<uint32_t, kInputShapeSize>& k
              out.append(std::to_string(axis));
            }
            return out;
-         }.operator()().c_str(), data.tiling_key);
+         }.operator()().c_str(), static_cast<unsigned>(data.tiling_key));
   return success;
 }
 

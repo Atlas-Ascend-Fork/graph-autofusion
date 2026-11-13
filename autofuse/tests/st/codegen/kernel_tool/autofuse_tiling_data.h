@@ -30,13 +30,11 @@
 #define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) struct_type filed_name;
 
 BEGIN_TILING_DATA_DEF_T(AutofuseTilingData)
-TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);
-TILING_DATA_FIELD_DEF_T(uint32_t, corenum);
+TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
 TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);
-TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);
-TILING_DATA_FIELD_DEF_T(uint32_t, s2);
-TILING_DATA_FIELD_DEF_T(uint32_t, s3);
+TILING_DATA_FIELD_DEF_T(int64_t, s2);
+TILING_DATA_FIELD_DEF_T(int64_t, s3);
 TILING_DATA_FIELD_DEF_T(uint32_t, z0z1t_size);
 TILING_DATA_FIELD_DEF_T(uint32_t, z0z1Tb_size);
 TILING_DATA_FIELD_DEF_T(uint32_t, q0_size);

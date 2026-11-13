@@ -772,8 +772,8 @@ bool GeneralSolverGen::GenMapVarVal() {
       continue;
     }
     impl_codes_ += "    tiling_data.set_" + Str(pair.first) + "(static_cast<uint64_t>(" + Str(pair.second) + "));\n";
-    impl_codes_ +=
-        "    OP_LOGD(OP_NAME, \"" + Str(pair.first) + " = %u\", tiling_data.get_" + Str(pair.first) + "());\n";
+    impl_codes_ += "    OP_LOGD(OP_NAME, \"" + Str(pair.first) +
+                   " = %llu\", static_cast<unsigned long long>(tiling_data.get_" + Str(pair.first) + "()));\n";
   }
   impl_codes_ += "}\n\n";
   return true;

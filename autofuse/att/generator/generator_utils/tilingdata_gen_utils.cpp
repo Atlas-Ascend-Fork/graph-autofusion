@@ -8,8 +8,24 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "generator_utils/tilingdata_gen_utils.h"
+#include "common_utils.h"
 
 namespace att {
+std::string TilingDataGenUtils::GetFieldType(const std::string &var_name) {
+  if (var_name == "block_dim" || var_name == "tiling_key") {
+    return "uint16_t";
+  }
+  if (ascgen_utils::IsDynamicSizeVarName(var_name)) {
+    return "int64_t";
+  }
+  const std::string tiling_key_suffix = "_tiling_key";
+  if (var_name.size() > tiling_key_suffix.size() &&
+      var_name.compare(var_name.size() - tiling_key_suffix.size(), tiling_key_suffix.size(), tiling_key_suffix) == 0) {
+    return "uint16_t";
+  }
+  return "uint32_t";
+}
+
 void TilingDataGenUtils::AddElementDefinition(ge::CodePrinter &printer, const std::string &type_name,
                                               const std::string &var_name) {
   printer.AddLine(("    TILING_DATA_FIELD_DEF(" + type_name + ", ") + var_name + ")");

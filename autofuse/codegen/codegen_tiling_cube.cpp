@@ -616,7 +616,7 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionDynamic(
       std::string var_define = std::string(vars.Str().get());
       auto it = shape_info.find(var_define);
       if (it != shape_info.end()) {
-        shape_symbol << "uint32_t " << var_define << ", ";
+        shape_symbol << "int64_t " << var_define << ", ";
       }
     }
   }

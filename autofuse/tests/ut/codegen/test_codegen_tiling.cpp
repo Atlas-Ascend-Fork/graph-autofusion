@@ -1768,6 +1768,30 @@ int main() {
   EXPECT_TRUE(CompileAndRunCode(stubs + this->GenTilingDataBlockDimAndWss(true) + main));
 }
 
+TEST_F(TestCodegenTiling, InductorCubeTilingCacheUsesInt64ForDynamicShapeVars) {
+  std::stringstream read_ss;
+  this->GenCallCubeTilingCacheRead(read_ss, {"s0", "s1"});
+  const std::string read_code = read_ss.str();
+  EXPECT_NE(read_code.find("static int64_t g_cube_tiling_cache_s0 = 0;"), std::string::npos);
+  EXPECT_NE(read_code.find("static int64_t g_cube_tiling_cache_s1 = 0;"), std::string::npos);
+  EXPECT_EQ(read_code.find("static uint32_t g_cube_tiling_cache_s0"), std::string::npos);
+  EXPECT_NE(read_code.find("g_cube_tiling_cache_s0 == s0"), std::string::npos);
+
+  std::stringstream write_ss;
+  this->GenCallCubeTilingCacheWrite(write_ss, {"s0", "s1"});
+  const std::string write_code = write_ss.str();
+  EXPECT_NE(write_code.find("g_cube_tiling_cache_s0 = s0;"), std::string::npos);
+  EXPECT_NE(write_code.find("g_cube_tiling_cache_s1 = s1;"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, OperatorCacheKeyUsesInt64ForDynamicShape) {
+  ge::CodePrinter code_printer;
+  ASSERT_EQ(att::cache::OperatorLevelCacheGen::GenOperatorCacheTypes(code_printer), af::SUCCESS);
+  const std::string generated = code_printer.GetOutputStr();
+  EXPECT_NE(generated.find("std::array<int64_t, kInputShapeSize> input_shapes;"), std::string::npos);
+  EXPECT_EQ(generated.find("std::array<uint32_t, kInputShapeSize> input_shapes;"), std::string::npos);
+}
+
 TEST_F(TestCodegenTiling, InductorAivOnlyLaunchCoversNativeAndEpilogueBlocks) {
   af::AscGraph graph("batch_matmul_relu");
   CreateBatchMatmulElemwiseFusedGraph(graph);
@@ -3636,9 +3660,9 @@ TEST_F(TestCodegenTiling, GenerateForInductorGetTilingDataReprShouldContainStabl
   const auto &tiling_impl = tiling_files.at(codegen::kTilingDefAndConstIdentify);
   EXPECT_NE(tiling_impl.find("GetTilingDataRepr returns a valid C++ designated initializer string"), std::string::npos);
   EXPECT_NE(tiling_impl.find("emit_field(\"block_dim\", tiling_data->get_block_dim()"), std::string::npos);
-  EXPECT_NE(tiling_impl.find("emit_field(\"corenum\", tiling_data->get_corenum()"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("emit_field(\"corenum\", tiling_data->get_corenum()"), std::string::npos);
   EXPECT_NE(tiling_impl.find("emit_field(\"ub_size\", tiling_data->get_ub_size()"), std::string::npos);
-  EXPECT_NE(tiling_impl.find("emit_field(\"hbm_size\", tiling_data->get_hbm_size()"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("emit_field(\"hbm_size\", tiling_data->get_hbm_size()"), std::string::npos);
   EXPECT_TRUE(tiling_impl.find("emit_field(\"tiling_key\"") != std::string::npos ||
               tiling_impl.find("emit_field(\"graph0_tiling_key\"") != std::string::npos);
 }
@@ -3678,9 +3702,9 @@ TEST_F(TestCodegenTiling, GenerateForInductorGetTilingDataReprShouldKeepZeroValu
   ASSERT_TRUE(tiling_files.find(codegen::kTilingDefAndConstIdentify) != tiling_files.end());
   const auto &tiling_impl = tiling_files.at(codegen::kTilingDefAndConstIdentify);
   EXPECT_NE(tiling_impl.find("emit_field(\"block_dim\", tiling_data->get_block_dim()"), std::string::npos);
-  EXPECT_NE(tiling_impl.find("emit_field(\"corenum\", tiling_data->get_corenum()"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("emit_field(\"corenum\", tiling_data->get_corenum()"), std::string::npos);
   EXPECT_NE(tiling_impl.find("emit_field(\"ub_size\", tiling_data->get_ub_size()"), std::string::npos);
-  EXPECT_NE(tiling_impl.find("emit_field(\"hbm_size\", tiling_data->get_hbm_size()"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("emit_field(\"hbm_size\", tiling_data->get_hbm_size()"), std::string::npos);
   EXPECT_EQ(tiling_impl.find("if (tiling_data->get_block_dim() != 0)"), std::string::npos);
   EXPECT_EQ(tiling_impl.find("if (tiling_data->get_corenum() != 0)"), std::string::npos);
   EXPECT_EQ(tiling_impl.find("if (tiling_data->get_ub_size() != 0)"), std::string::npos);
@@ -4892,7 +4916,11 @@ TEST_F(TestCodegenTiling, TestBatchMatmulDynamicShapeFuse) {
   const auto mixed_dynamic_pos =
       mixed_shape_res.at("tiling_def_and_tiling_const").find("AutofuseIsStaticShape() {\n  return false;");
   ASSERT_NE(mixed_dynamic_pos, std::string::npos);
-  EXPECT_NE(mixed_shape_res.at("tiling_def_and_tiling_const").find("CallCubeTiling"), std::string::npos);
+  const auto &mixed_tiling = mixed_shape_res.at("tiling_def_and_tiling_const");
+  EXPECT_NE(mixed_tiling.find("CallCubeTiling"), std::string::npos);
+  // 动态 shape 形参必须与 AutofuseTiling 一致使用 int64_t
+  EXPECT_NE(mixed_tiling.find("CallCubeTiling(int64_t "), std::string::npos);
+  EXPECT_EQ(mixed_tiling.find("CallCubeTiling(uint32_t "), std::string::npos);
 
   auto common_result = fused_schedule_result;
   common_result.node_idx_to_scheduled_results[0][0].cube_type = ascir::CubeTemplateType::kCommon;
@@ -5083,6 +5111,9 @@ TEST_F(TestCodegenTiling, GetTilingShouldEnterMainSearchNotForKey) {
   EXPECT_NE(tiling_impl.find(
                 "int64_t GetTopnCandidateSolutions(const GetTilingRequest &request, GetTilingResponse &response)"),
             std::string::npos);
+  // symbol_values 是 int64_t，TopN 搜索路径不得再截断成 uint32_t
+  EXPECT_NE(tiling_impl.find("const int64_t s0 = request.symbol_values[0];"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("static_cast<uint32_t>(request.symbol_values"), std::string::npos);
   // GetTiling must enter ATT main search skeleton via PGOSearchTilingKey (which internally calls
   // SearchAllTilingbyCaseId / ExecutePGOSolver). In codegen UT (no ATT callback), verify PGOSearchTilingKey
   // is used. In integrated environments (solver_func key present), also verify the internal functions.

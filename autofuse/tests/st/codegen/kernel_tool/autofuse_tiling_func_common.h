@@ -170,11 +170,11 @@ struct TilingDataCopy {
   inline uint32_t get_b0_size() {
     return b0_size;
   }
-  uint32_t block_dim;
-  void set_block_dim(uint32_t val) {
+  uint16_t block_dim;
+  void set_block_dim(uint16_t val) {
     block_dim = val;
   }
-  inline uint32_t get_block_dim() {
+  inline uint16_t get_block_dim() {
     return block_dim;
   }
   uint32_t q0_size;
@@ -198,25 +198,25 @@ struct TilingDataCopy {
   inline uint32_t get_q2_size() {
     return q2_size;
   }
-  uint32_t s2;
-  void set_s2(uint32_t val) {
+  int64_t s2;
+  void set_s2(int64_t val) {
     s2 = val;
   }
-  inline uint32_t get_s2() {
+  inline int64_t get_s2() {
     return s2;
   }
-  uint32_t s3;
-  void set_s3(uint32_t val) {
+  int64_t s3;
+  void set_s3(int64_t val) {
     s3 = val;
   }
-  inline uint32_t get_s3() {
+  inline int64_t get_s3() {
     return s3;
   }
-  uint32_t tiling_key;
-  void set_tiling_key(uint32_t val) {
+  uint16_t tiling_key;
+  void set_tiling_key(uint16_t val) {
     tiling_key = val;
   }
-  inline uint32_t get_tiling_key() {
+  inline uint16_t get_tiling_key() {
     return tiling_key;
   }
   uint32_t ub_size;
@@ -243,9 +243,9 @@ struct TilingDataCopy {
 };
 template <size_t INPUT_VARS_SIZE>
 struct InputKeyHash {
-  size_t operator()(const std::array<uint32_t, INPUT_VARS_SIZE> &key) const {
+  size_t operator()(const std::array<int64_t, INPUT_VARS_SIZE> &key) const {
     size_t hash = 0;
-    for (uint32_t value : key) {
+    for (int64_t value : key) {
       hash ^= value + 0x9e3779b9 + (hash << 6) + (hash >> 2);
     }
     return hash;
@@ -255,7 +255,7 @@ struct InputKeyHash {
 template <size_t INPUT_VARS_SIZE, size_t CAPACITY>
 class FixedSizeHashMap {
  private:
-  using Key = std::array<uint32_t, INPUT_VARS_SIZE>;
+  using Key = std::array<int64_t, INPUT_VARS_SIZE>;
   using Value = TilingDataCopy;
   enum BucketState { EMPTY, OCCUPIED, DELETED };
   struct Bucket {

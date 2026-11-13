@@ -310,7 +310,7 @@ void AppendSolverImplPart4(std::string &codes) {
   codes += "    uint64_t x1 = vars[x1_idx];\n";
   codes += "    OP_LOGD(OP_NAME, \"The output of the solver for tilingCaseId Case0 is:\");\n";
   codes += "    tiling_data.set_x3(static_cast<uint64_t>(1));\n";
-  codes += "    OP_LOGD(OP_NAME, \"x3 = %u\", tiling_data.get_x3());\n";
+  codes += "    OP_LOGD(OP_NAME, \"x3 = %llu\", static_cast<unsigned long long>(tiling_data.get_x3()));\n";
   codes += "}\n";
   codes += "\n";
 

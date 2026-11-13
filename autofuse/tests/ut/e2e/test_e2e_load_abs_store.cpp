@@ -336,10 +336,8 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
   limit.ub_size = ub_size - 256;
   (void)AutofuseTilingWithConfig(config_file, &TilingDataValue, &workspace_size, &block_dim, &limit);
   std::string GenTilingDataValue_block_dim_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("block_dim", TilingDataValue.block_dim);
-  std::string GenTilingDataValue_corenum_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("corenum", TilingDataValue.corenum);
-  std::string GenTilingDataValue_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.ub_size);
-  std::string GenTilingDataValue_hbm_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("hbm_size", TilingDataValue.hbm_size);
   std::string GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("graph0_tiling_key", TilingDataValue.graph0_tiling_key);
+  std::string GenTilingDataValue_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.ub_size);
 
   tiling_data_const_gen_result = R"(#ifndef __Autofuse_Tiling_Data_H__
 #define __Autofuse_Tiling_Data_H__
@@ -357,10 +355,8 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
 
 BEGIN_TILING_DATA_DEF_T(AutofuseTilingData)
   GenTilingDataValue_block_dim_field_DeclareFunc_def
-  GenTilingDataValue_corenum_field_DeclareFunc_def
-  GenTilingDataValue_ub_size_field_DeclareFunc_def
-  GenTilingDataValue_hbm_size_field_DeclareFunc_def
   GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def
+  GenTilingDataValue_ub_size_field_DeclareFunc_def
 END_TILING_DATA_DEF_T;
 
 struct AutofuseTilingDataPerf {
@@ -370,10 +366,8 @@ struct AutofuseTilingDataPerf {
 #endif
 )";
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_block_dim_field_DeclareFunc_def",GenTilingDataValue_block_dim_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_corenum_field_DeclareFunc_def",GenTilingDataValue_corenum_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_ub_size_field_DeclareFunc_def",GenTilingDataValue_ub_size_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_hbm_size_field_DeclareFunc_def",GenTilingDataValue_hbm_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def",GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def);
+  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_ub_size_field_DeclareFunc_def",GenTilingDataValue_ub_size_field_DeclareFunc_def);
 
   return tiling_data_const_gen_result.c_str();
 }
@@ -1691,10 +1685,8 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
   limit.ub_size = ub_size - 256;
   (void)AutofuseTilingWithConfig(config_file, &TilingDataValue, &workspace_size, &block_dim, &limit);
   std::string GenTilingDataValue_block_dim_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("block_dim", TilingDataValue.block_dim);
-  std::string GenTilingDataValue_corenum_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("corenum", TilingDataValue.corenum);
-  std::string GenTilingDataValue_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.ub_size);
-  std::string GenTilingDataValue_hbm_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("hbm_size", TilingDataValue.hbm_size);
   std::string GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("graph0_tiling_key", TilingDataValue.graph0_tiling_key);
+  std::string GenTilingDataValue_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.ub_size);
 
   tiling_data_const_gen_result = R"(#ifndef __Autofuse_Tiling_Data_H__
 #define __Autofuse_Tiling_Data_H__
@@ -1712,10 +1704,8 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
 
 BEGIN_TILING_DATA_DEF_T(AutofuseTilingData)
   GenTilingDataValue_block_dim_field_DeclareFunc_def
-  GenTilingDataValue_corenum_field_DeclareFunc_def
-  GenTilingDataValue_ub_size_field_DeclareFunc_def
-  GenTilingDataValue_hbm_size_field_DeclareFunc_def
   GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def
+  GenTilingDataValue_ub_size_field_DeclareFunc_def
 END_TILING_DATA_DEF_T;
 
 struct AutofuseTilingDataPerf {
@@ -1725,10 +1715,8 @@ struct AutofuseTilingDataPerf {
 #endif
 )";
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_block_dim_field_DeclareFunc_def",GenTilingDataValue_block_dim_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_corenum_field_DeclareFunc_def",GenTilingDataValue_corenum_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_ub_size_field_DeclareFunc_def",GenTilingDataValue_ub_size_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_hbm_size_field_DeclareFunc_def",GenTilingDataValue_hbm_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def",GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def);
+  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_ub_size_field_DeclareFunc_def",GenTilingDataValue_ub_size_field_DeclareFunc_def);
 
   return tiling_data_const_gen_result.c_str();
 }
@@ -1809,10 +1797,8 @@ TEST_F(E2E_LoadAbsStore, Codegen_TilingData) {
   struct_type filed_name;
 
 BEGIN_TILING_DATA_DEF_T(AutofuseTilingData)
-  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
   TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);
 
 END_TILING_DATA_DEF_T;
 

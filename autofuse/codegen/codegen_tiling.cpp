@@ -1376,7 +1376,7 @@ void TilingLib::GenInductorShapeDim(const ascir::FusedScheduledResult &elemwise_
     if (!(vars.IsConstExpr())) {
       std::string var_define = std::string(vars.Str().get());
       dynamic_shape_vars.push_back(var_define);
-      pgo_shape_dim.shape_dim_def << "uint32_t " << var_define << ", ";
+      pgo_shape_dim.shape_dim_def << "int64_t " << var_define << ", ";
       pgo_shape_dim.shape_dim_use << var_define << ", ";
       TilingSetShapeDim(pgo_shape_dim.tiling_set_shape_dim, var_define, elemwise_schedule_result, tiling_var);
     }
@@ -1414,7 +1414,7 @@ void TilingLib::GenCallCubeTilingCacheRead(std::stringstream &ss,
                                            const std::vector<std::string> &dynamic_shape_vars) const {
   ss << "static bool g_cube_tiling_cache_valid = false;\n";
   for (const auto &var_name : dynamic_shape_vars) {
-    ss << "static uint32_t g_cube_tiling_cache_" << var_name << " = 0;\n";
+    ss << "static int64_t g_cube_tiling_cache_" << var_name << " = 0;\n";
   }
   ss << "static int64_t g_cube_tiling_cache_ws_size = 0;\n";
   ss << "static uint32_t g_cube_tiling_cache_block_dim = 0;\n";
@@ -1554,7 +1554,7 @@ std::string TilingLib::GenInductorTilingV2(const std::vector<std::string> &dynam
   ss << "    }" << std::endl;
   ss << "    return " << func << "(";
   for (size_t i = 0; i < dynamic_shape_vars.size(); ++i) {
-    ss << "static_cast<uint32_t>(symbols[" << i << "]), ";
+    ss << "symbols[" << i << "], ";
   }
   ss << "static_cast<" << tiling << "*>(tiling_data), workspaceSize, blockDim, res_limit);" << std::endl;
   ss << "}" << std::endl;
@@ -1574,7 +1574,7 @@ std::string TilingLib::GenTilingFunc(const std::map<std::string, std::string> &s
       auto it = shape_info.find(var_define);
       if (it != shape_info.end()) {
         // shape dim参数和tiling set shape dim匹配
-        pgo_shape_dim.shape_dim_def << "uint32_t " << var_define << ", ";
+        pgo_shape_dim.shape_dim_def << "int64_t " << var_define << ", ";
         pgo_shape_dim.shape_dim_use << var_define << ", ";
         TilingSetShapeDim(pgo_shape_dim.tiling_set_shape_dim, var_define, fused_schedule_result, tiling_var);
       }

@@ -34,7 +34,7 @@ class TilingDataGenUtils {
     for (const auto &var_name : var_names) {
       const auto iter = tiling_data_vars.find(var_name);
       if (iter == tiling_data_vars.end()) {
-        AddElementDefinition(printer, "uint32_t", var_name);
+        AddElementDefinition(printer, GetFieldType(var_name), var_name);
         tiling_data_vars.insert(var_name);
       }
     }
@@ -48,6 +48,7 @@ class TilingDataGenUtils {
       tiling_data_vars.insert(var_name);
     }
   }
+  static std::string GetFieldType(const std::string &var_name);
   static void AddElementDefinition(ge::CodePrinter &printer, const std::string &type_name, const std::string &var_name);
   static void AddStructElementDefinition(ge::CodePrinter &printer, const std::string &type_name,
                                          const std::string &var_name);

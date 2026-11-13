@@ -680,6 +680,17 @@ TEST_F(TestGenModelInfo, ModelInfoParser) {
   EXPECT_EQ(MakeJson(model_info_list, json_info), af::SUCCESS);
 }
 
+TEST_F(TestGenModelInfo, RejectTilingKeyAboveUint16Range) {
+  std::vector<af::AscGraph> graphs;
+  TilingModelInfo model_info_list;
+  af::AscGraph graph("graph");
+  ASSERT_EQ(af::ascir::cg::Build2DTransposeAscendGraph(graph, {1, 0}), af::SUCCESS);
+  graph.SetTilingKey(static_cast<uint32_t>(UINT16_MAX) + 1U);
+  graphs.emplace_back(graph);
+  const auto &tiling_data_name = graph.GetName() + "TilingData";
+  EXPECT_NE(GenerateModelInfo(graphs, model_info_list, {{kTilingDataTypeName, tiling_data_name}}), af::SUCCESS);
+}
+
 TEST_F(TestGenModelInfo, RefreshCommonUbExprKeepsNonContainerVariables) {
   std::vector<af::AscGraph> graphs;
   TilingModelInfo model_info_list;
