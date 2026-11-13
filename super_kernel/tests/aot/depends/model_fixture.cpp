@@ -32,7 +32,10 @@ struct Function {
 struct OwnedTask {
   RuntimeTask task;
   std::vector<unsigned char> args;
+  std::vector<unsigned char> hostArgs;
+  std::vector<aclrtPlaceHolderInfo> placeHolders;
   std::vector<unsigned char> opInfo;
+  std::vector<std::vector<unsigned char>> argsBackups;
   std::vector<aclrtLaunchKernelAttr> attributes;
   aclrtLaunchKernelCfg config{};
   bool disabled = false;
@@ -109,6 +112,8 @@ aclmdlRITask AppendKernel(Stream &stream, const std::string &name, const void *a
   params.funcHandle = GetFunction(name, spec);
   params.args = owned.args.data();
   params.argsSize = size;
+  params.argsType = ACL_RT_KERNEL_ARGS_DEVICE_BUFFER;
+  params.deviceBuffer = {owned.args.data(), size};
   params.numBlocks = spec.numBlocks;
   return &owned.task;
 }
@@ -262,11 +267,34 @@ void Model::Destroy() {
       tasks.erase(&task->task);
       std::lock_guard<std::mutex> lock(memoryMutex);
       memory.erase(reinterpret_cast<uintptr_t>(task->args.data()));
+      for (const auto &backup : task->argsBackups) {
+        memory.erase(reinterpret_cast<uintptr_t>(backup.data()));
+      }
     }
     streams.erase(stream.get());
   }
   models.erase(Handle());
   impl_.reset();
+}
+
+bool CopyTaskArgs(aclmdlRITask task, void **address, size_t *size) {
+  auto it = tasks.find(task);
+  if (it == tasks.end()) {
+    return false;
+  }
+  auto &owned = *it->second;
+  const auto &kernel = owned.task.params.kernelTaskParams;
+  std::lock_guard<std::mutex> lock(memoryMutex);
+  if (kernel.argsSize == 0 || !ContainsMemory(kernel.args, kernel.argsSize)) {
+    return false;
+  }
+  const auto *data = static_cast<const unsigned char *>(kernel.args);
+  owned.argsBackups.emplace_back(data, data + kernel.argsSize);
+  auto &backup = owned.argsBackups.back();
+  *address = backup.data();
+  *size = backup.size();
+  memory[reinterpret_cast<uintptr_t>(*address)] = *size;
+  return true;
 }
 
 bool ModelStreams(aclmdlRI model, aclrtStream *output, uint32_t *count, aclError &result) {
@@ -334,8 +362,28 @@ bool ValidTaskUpdate(aclmdlRITask handle, const aclmdlRITaskParams &params) {
     return true;
   }
   const auto &kernel = params.kernelTaskParams;
-  if (kernel.argsSize > maxBytes || (kernel.argsSize != 0 && kernel.args == nullptr)) {
-    return false;
+  switch (kernel.argsType) {
+    case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
+      if (kernel.hostBuffer.hostArgs == nullptr || kernel.hostBuffer.hostArgsSize == 0 ||
+          kernel.hostBuffer.hostArgsSize > maxBytes ||
+          kernel.hostBuffer.placeHolderNum > maxBytes / sizeof(aclrtPlaceHolderInfo) ||
+          (kernel.hostBuffer.placeHolderNum != 0 && kernel.hostBuffer.placeHolderArray == nullptr)) {
+        return false;
+      }
+      break;
+    case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
+      if (kernel.deviceBuffer.deviceArgs == nullptr || kernel.deviceBuffer.deviceArgsSize == 0 ||
+          kernel.deviceBuffer.deviceArgsSize > maxBytes) {
+        return false;
+      }
+      break;
+    case ACL_RT_KERNEL_ARGS_ARRAY:
+      if (kernel.argsArray == nullptr) {
+        return false;
+      }
+      break;
+    default:
+      return false;
   }
   return kernel.cfg == nullptr || (kernel.cfg->numAttrs <= maxBytes / sizeof(aclrtLaunchKernelAttr) &&
                                    (kernel.cfg->numAttrs == 0 || kernel.cfg->attrs != nullptr));
@@ -363,12 +411,19 @@ void RecordTaskUpdate(aclmdlRITask handle, const aclmdlRITaskParams &params) {
     } else {
       owned.attributes.clear();
     }
-    if (params.type == ACL_MODEL_RI_TASK_KERNEL && params.kernelTaskParams.isHostArgs) {
-      const auto *data = static_cast<const unsigned char *>(params.kernelTaskParams.args);
-      std::vector<unsigned char> copied;
-      if (params.kernelTaskParams.argsSize != 0) {
-        copied.assign(data, data + params.kernelTaskParams.argsSize);
+    if (params.type == ACL_MODEL_RI_TASK_KERNEL && params.kernelTaskParams.argsType == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+      const auto &host = params.kernelTaskParams.hostBuffer;
+      const auto *data = static_cast<const unsigned char *>(host.hostArgs);
+      std::vector<unsigned char> copied(data, data + host.hostArgsSize);
+      std::vector<aclrtPlaceHolderInfo> placeHolders;
+      if (host.placeHolderNum != 0) {
+        placeHolders.assign(host.placeHolderArray, host.placeHolderArray + host.placeHolderNum);
       }
+      owned.hostArgs = copied;
+      owned.placeHolders = std::move(placeHolders);
+      owned.task.params.kernelTaskParams.hostBuffer.hostArgs = owned.hostArgs.data();
+      owned.task.params.kernelTaskParams.hostBuffer.placeHolderArray =
+          owned.placeHolders.empty() ? nullptr : owned.placeHolders.data();
       std::lock_guard<std::mutex> lock(memoryMutex);
       memory.erase(reinterpret_cast<uintptr_t>(owned.args.data()));
       owned.args = std::move(copied);
@@ -376,6 +431,14 @@ void RecordTaskUpdate(aclmdlRITask handle, const aclmdlRITaskParams &params) {
         memory[reinterpret_cast<uintptr_t>(owned.args.data())] = owned.args.size();
       }
       owned.task.params.kernelTaskParams.args = owned.args.data();
+      owned.task.params.kernelTaskParams.argsSize = owned.args.size();
+      owned.task.params.kernelTaskParams.isHostArgs = 0;
+    } else if (params.type == ACL_MODEL_RI_TASK_KERNEL) {
+      auto &kernel = owned.task.params.kernelTaskParams;
+      // ARRAY recording preserves the input form; this fixture has no parameter metadata to pack it.
+      kernel.args = kernel.argsType == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER ? kernel.deviceBuffer.deviceArgs : nullptr;
+      kernel.argsSize = kernel.argsType == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER ? kernel.deviceBuffer.deviceArgsSize : 0;
+      kernel.isHostArgs = 0;
     }
   }
 }

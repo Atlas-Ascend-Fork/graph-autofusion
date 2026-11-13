@@ -30,6 +30,7 @@
 #include "sk_options_manager.h"
 #include "ut_common_stubs.h"
 #include "runtime/kernel.h"
+#include "runtime/rt.h"
 #include "securec.h"
 #include "sk_lock_detector.h"
 
@@ -76,7 +77,7 @@ struct JudgeTaskKernelInfo {
   std::unique_ptr<char[]> scopeName;
 };
 
-extern bool GetScopeKernelInfo(aclmdlRIKernelTaskParams params, JudgeTaskKernelInfo *info);
+extern bool GetScopeKernelInfo(aclmdlRIKernelTaskParams params, const void *devArgs, JudgeTaskKernelInfo *info);
 extern bool DumpSingleKernelBinary(const KernelInfos &kernelInfo, const std::string &kernelBinsDir);
 aclError FakeAclrtGetFunctionNameFailure(aclrtFuncHandle funcHandle, uint32_t maxLen, char *name);
 
@@ -85,7 +86,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_GetFunctionName_Failed) {
   params.funcHandle = nullptr;
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(FakeAclrtGetFunctionNameFailure));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_EQ(ret, false);
 }
 
@@ -125,13 +126,35 @@ int Fake_aclrtMemcpyFailed(void *dst, size_t dstSize, const void *src, size_t co
   return ACL_ERROR_FAILURE;
 }
 
+TEST_F(SkNodeTest, GetScopeKernelInfo_UsesCopiedDeviceArgs) {
+  ScopeKernelArgs original;
+  ScopeKernelArgs copied;
+  std::strcpy(original.name, "original_scope");
+  std::strcpy(copied.name, "copied_scope");
+  aclmdlRIKernelTaskParams params{};
+  params.args = &original;
+  JudgeTaskKernelInfo info;
+  MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameBeginDav2201));
+  MOCKER(aclrtMemcpy)
+      .expects(once())
+      .with(any(), eq(sizeof(ScopeKernelArgs)), eq(static_cast<const void *>(&copied)), eq(sizeof(ScopeKernelArgs)),
+            eq(ACL_MEMCPY_DEVICE_TO_HOST))
+      .will(invoke(+[](void *dst, size_t, const void *src, size_t count, aclrtMemcpyKind) -> aclError {
+        std::memcpy(dst, src, count);
+        return ACL_SUCCESS;
+      }));
+  ASSERT_TRUE(GetScopeKernelInfo(params, &copied, &info));
+  ASSERT_NE(info.scopeName, nullptr);
+  EXPECT_STREQ(info.scopeName.get(), "copied_scope");
+}
+
 TEST_F(SkNodeTest, GetScopeKernelInfo_CopyScopeArgsFailed) {
   aclmdlRIKernelTaskParams params{};
   params.funcHandle = nullptr;
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameBeginDav2201));
   MOCKER(aclrtMemcpy).stubs().will(invoke(Fake_aclrtMemcpyFailed));
-  EXPECT_FALSE(GetScopeKernelInfo(params, &info));
+  EXPECT_FALSE(GetScopeKernelInfo(params, params.args, &info));
 }
 
 TEST_F(SkNodeTest, GetScopeKernelInfo_Normal_ScopeName) {
@@ -140,7 +163,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_Normal_ScopeName) {
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameBeginDav2201));
   MOCKER(aclrtMemcpy).stubs().will(invoke(Fake_aclrtMemcpy));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_EQ(ret, true);
   EXPECT_TRUE(info.isBegin);
   EXPECT_FALSE(info.isEnd);
@@ -153,7 +176,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_Dav3510EndScopeName) {
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameEndDav3510));
   MOCKER(aclrtMemcpy).stubs().will(invoke(Fake_aclrtMemcpy));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_EQ(ret, true);
   EXPECT_FALSE(info.isBegin);
   EXPECT_TRUE(info.isEnd);
@@ -166,7 +189,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_PlaceholderScopeName) {
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNamePlaceholderDav2201));
   MOCKER(aclrtMemcpy).stubs().will(invoke(Fake_aclrtMemcpy));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_EQ(ret, true);
   EXPECT_FALSE(info.isBegin);
   EXPECT_FALSE(info.isEnd);
@@ -178,7 +201,7 @@ TEST_F(SkNodeTest, GetScopeKernelInfo_WithoutArchSuffix_ReturnsRegularKernelInfo
   params.funcHandle = nullptr;
   JudgeTaskKernelInfo info;
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(Fake_aclrtGetFunctionNameBeginWithoutSuffix));
-  bool ret = GetScopeKernelInfo(params, &info);
+  bool ret = GetScopeKernelInfo(params, params.args, &info);
   EXPECT_TRUE(ret);
   EXPECT_FALSE(info.isBegin);
   EXPECT_FALSE(info.isEnd);
@@ -647,6 +670,59 @@ TEST_F(SkNodeTest, KernelUpdate_CustomParamsStoredSeparatelyForDump) {
   EXPECT_EQ(node.GetUpdateParams().valueWriteTaskParams.value, 0x1234U);
 }
 
+TEST_F(SkNodeTest, KernelInitNode_StoresCopiedArgsAndPreservesOriginalParams) {
+  for (auto argsType : {ACL_RT_KERNEL_ARGS_HOST_BUFFER, ACL_RT_KERNEL_ARGS_DEVICE_BUFFER, ACL_RT_KERNEL_ARGS_ARRAY}) {
+    UtSkNodeRITaskInternal task{};
+    task.type = ACL_MODEL_RI_TASK_KERNEL;
+    task.params.type = ACL_MODEL_RI_TASK_KERNEL;
+    char original[64]{};
+    char copied[96]{};
+    auto &params = task.params.kernelTaskParams;
+    params.args = original;
+    params.argsSize = sizeof(original);
+    params.isHostArgs = 0;
+    params.argsType = argsType;
+    void *array[] = {original};
+    if (argsType == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+      params.hostBuffer = {original, sizeof(original), nullptr, 0};
+    } else if (argsType == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER) {
+      params.deviceBuffer = {original, sizeof(original)};
+    } else {
+      params.argsArray = array;
+    }
+    params.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x3008);
+    params.numBlocks = 1;
+    SuperKernelKernelNode node(MakeOriginTask(task), ACL_MODEL_RI_TASK_KERNEL, 0, 0, 0, INVALID_TASK_ID);
+    void *copiedAddress = copied;
+    size_t copiedSize = sizeof(copied);
+    MOCKER(rtModelTaskCopyArgsDeviceBuffer)
+        .expects(once())
+        .with(eq(static_cast<rtTask_t>(&task)), outBoundP(&copiedAddress, sizeof(copiedAddress)),
+              outBoundP(&copiedSize, sizeof(copiedSize)))
+        .will(returnValue(RT_ERROR_NONE));
+    MOCKER(aclrtGetFunctionName).stubs().will(invoke(FakeAclrtGetFunctionNameRegular));
+    MOCKER(aclrtGetFunctionAttribute).stubs().will(invoke(FakeAclrtGetFunctionAttributeMix11));
+    MOCKER(aclrtFunctionGetBinary).stubs().will(invoke(FakeAclrtFunctionGetBinaryNonNull));
+    ASSERT_TRUE(node.InitNode());
+    EXPECT_EQ(node.GetNodeInfos().kernelInfos.devArgs, copiedAddress);
+    EXPECT_EQ(node.GetNodeInfos().kernelInfos.devArgsSize, sizeof(copied));
+    EXPECT_EQ(node.GetTaskParams().kernelTaskParams.args, original);
+    EXPECT_EQ(node.GetTaskParams().kernelTaskParams.argsSize, sizeof(original));
+    const auto &stored = node.GetTaskParams().kernelTaskParams;
+    EXPECT_EQ(stored.argsType, argsType);
+    if (argsType == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+      EXPECT_EQ(stored.hostBuffer.hostArgs, original);
+      EXPECT_EQ(stored.hostBuffer.hostArgsSize, sizeof(original));
+    } else if (argsType == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER) {
+      EXPECT_EQ(stored.deviceBuffer.deviceArgs, original);
+      EXPECT_EQ(stored.deviceBuffer.deviceArgsSize, sizeof(original));
+    } else {
+      EXPECT_EQ(stored.argsArray, array);
+    }
+    GlobalMockObject::verify();
+  }
+}
+
 TEST_F(SkNodeTest, KernelInitNode_AcceptsMaximumFunctionName) {
   UtSkNodeRITaskInternal task{};
   task.taskId = 9;
@@ -734,6 +810,9 @@ TEST_F(SkNodeTest, KernelUpdate_LaunchInfoDoesNotInheritOriginParams) {
   task.params.reserved0[0] = 0x12;
   task.params.reserved1[0] = 0x34;
   task.params.kernelTaskParams.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x3019);
+  char originArgs[32]{};
+  task.params.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_DEVICE_BUFFER;
+  task.params.kernelTaskParams.deviceBuffer = {originArgs, sizeof(originArgs)};
   task.params.kernelTaskParams.numBlocks = 1;
   task.params.kernelTaskParams.rsv[0] = 0x56;
   aclrtLaunchKernelAttr originAttr{};
@@ -766,14 +845,19 @@ TEST_F(SkNodeTest, KernelUpdate_LaunchInfoDoesNotInheritOriginParams) {
   EXPECT_EQ(params.opInfoPtr, nullptr);
   EXPECT_EQ(params.opInfoSize, 0U);
   EXPECT_EQ(params.kernelTaskParams.funcHandle, launchInfo.entryInfo.skEntryFunc);
-  EXPECT_EQ(params.kernelTaskParams.args, launchInfo.devArgs.Get());
-  EXPECT_EQ(params.kernelTaskParams.argsSize, sizeof(SkDeviceEntryArgs));
-  EXPECT_EQ(params.kernelTaskParams.isHostArgs, 1U);
+  EXPECT_EQ(params.kernelTaskParams.argsType, ACL_RT_KERNEL_ARGS_HOST_BUFFER);
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.hostArgs, launchInfo.devArgs.Get());
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.hostArgsSize, sizeof(SkDeviceEntryArgs));
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.placeHolderArray, nullptr);
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.placeHolderNum, 0U);
   EXPECT_EQ(params.kernelTaskParams.numBlocks, launchInfo.entryInfo.numBlocks);
   EXPECT_EQ(params.kernelTaskParams.cfg, nullptr);
   EXPECT_EQ(params.reserved0[0], 0U);
   EXPECT_EQ(params.reserved1[0], 0);
   EXPECT_EQ(params.kernelTaskParams.rsv[0], 0U);
+  EXPECT_EQ(node.GetTaskParams().kernelTaskParams.argsType, ACL_RT_KERNEL_ARGS_DEVICE_BUFFER);
+  EXPECT_EQ(node.GetTaskParams().kernelTaskParams.deviceBuffer.deviceArgs, originArgs);
+  EXPECT_EQ(node.GetTaskParams().kernelTaskParams.deviceBuffer.deviceArgsSize, sizeof(originArgs));
   EXPECT_EQ(node.GetTaskParams().kernelTaskParams.cfg, &originCfg);
   EXPECT_EQ(node.GetTaskParams().reserved0[0], 0x12U);
   EXPECT_EQ(node.GetTaskParams().reserved1[0], 0x34U);

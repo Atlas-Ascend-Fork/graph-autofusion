@@ -156,7 +156,7 @@ bool LowerPayload(const SuperKernelBaseNode &node, const SuperKernelOptionsManag
     return true;
   }
 
-  const auto argsSize = node.GetTaskParams().kernelTaskParams.argsSize;
+  const auto argsSize = node.GetNodeInfos().kernelInfos.devArgsSize;
   if (argsSize > std::numeric_limits<uint32_t>::max()) {
     SK_LOGE("Lower failed: kernel args size overflow, nodeId=%lu, argsSize=%zu", node.GetNodeId(), argsSize);
     return false;

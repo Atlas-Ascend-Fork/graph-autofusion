@@ -92,23 +92,25 @@ TEST(AotModelFixture, SetParamsCopiesHostArgumentsBeforeCallerReleasesThem) {
     attr.value.schemMode = 1;
     aclrtLaunchKernelCfg cfg{&attr, 1};
     params.kernelTaskParams.cfg = &cfg;
-    params.kernelTaskParams.args = hostArgs.data();
-    params.kernelTaskParams.argsSize = hostArgs.size();
-    params.kernelTaskParams.isHostArgs = true;
+    params.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+    params.kernelTaskParams.hostBuffer = {hostArgs.data(), hostArgs.size(), nullptr, 0};
     ASSERT_EQ(aclmdlRITaskSetParams(task, &params), ACL_SUCCESS);
     hostArgs.assign(hostArgs.size(), 9);
     attr.value.schemMode = 0;
   }
   EXPECT_EQ(model.Snapshot(task).args, (std::vector<unsigned char>{1, 2, 3, 4}));
   ASSERT_EQ(aclmdlRITaskGetParams(task, &params), ACL_SUCCESS);
-  EXPECT_EQ(static_cast<unsigned char *>(params.kernelTaskParams.args)[0], 1);
+  ASSERT_EQ(params.kernelTaskParams.argsType, ACL_RT_KERNEL_ARGS_HOST_BUFFER);
+  EXPECT_EQ(params.kernelTaskParams.hostBuffer.hostArgsSize, 4U);
+  EXPECT_EQ(static_cast<unsigned char *>(params.kernelTaskParams.hostBuffer.hostArgs)[0], 1);
+  EXPECT_NE(params.kernelTaskParams.hostBuffer.hostArgs, params.kernelTaskParams.args);
   ASSERT_NE(params.kernelTaskParams.cfg, nullptr);
   ASSERT_EQ(params.kernelTaskParams.cfg->numAttrs, 1U);
   EXPECT_EQ(params.kernelTaskParams.cfg->attrs[0].value.schemMode, 1);
   auto snapshot = model.Snapshot(task);
   ASSERT_EQ(snapshot.attributes.size(), 1U);
   EXPECT_EQ(snapshot.attributes[0].value.schemMode, 1);
-  params.kernelTaskParams.args = nullptr;
+  params.kernelTaskParams.hostBuffer.hostArgs = nullptr;
   EXPECT_EQ(aclmdlRITaskSetParams(task, &params), ACL_ERROR_INVALID_PARAM);
 }
 
@@ -162,4 +164,40 @@ TEST(AotModelFixture, CompilerBindingsPreserveWireCapabilityAndDistinctEntryOffs
   EXPECT_EQ(values, (std::array<uint64_t, 6>{3, 16, 32, 48, 64, 80}));
   size = payload.size() - 1;
   EXPECT_NE(rtBinaryGetMetaInfo(binary, RT_BINARY_TYPE_SK_INFO, 1, &data, &size), 0);
+}
+
+TEST(AotModelFixture, DeviceBufferSetPreservesCallerStorage) {
+  sk::test::Model model;
+  auto task = model.AddKernel(model.AddStream(), "device_args");
+  aclmdlRITaskParams params{};
+  ASSERT_EQ(aclmdlRITaskGetParams(task, &params), ACL_SUCCESS);
+  std::array<unsigned char, 4> deviceArgs{1, 2, 3, 4};
+  params.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_DEVICE_BUFFER;
+  params.kernelTaskParams.deviceBuffer = {deviceArgs.data(), deviceArgs.size()};
+  ASSERT_EQ(aclmdlRITaskSetParams(task, &params), ACL_SUCCESS);
+  deviceArgs[0] = 9;
+  ASSERT_EQ(aclmdlRITaskGetParams(task, &params), ACL_SUCCESS);
+  EXPECT_EQ(params.kernelTaskParams.argsType, ACL_RT_KERNEL_ARGS_DEVICE_BUFFER);
+  EXPECT_EQ(params.kernelTaskParams.deviceBuffer.deviceArgs, deviceArgs.data());
+  EXPECT_EQ(params.kernelTaskParams.deviceBuffer.deviceArgsSize, deviceArgs.size());
+  EXPECT_EQ(static_cast<unsigned char *>(params.kernelTaskParams.deviceBuffer.deviceArgs)[0], 9);
+}
+
+TEST(AotModelFixture, ArgsArrayRecordingDoesNotInterpretArrayAsBuffer) {
+  sk::test::Model model;
+  auto task = model.AddKernel(model.AddStream(), "array_args");
+  aclmdlRITaskParams params{};
+  ASSERT_EQ(aclmdlRITaskGetParams(task, &params), ACL_SUCCESS);
+  uint64_t value = 7;
+  void *args[] = {&value};
+  params.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_ARRAY;
+  params.kernelTaskParams.argsArray = args;
+  ASSERT_EQ(aclmdlRITaskSetParams(task, &params), ACL_SUCCESS);
+  ASSERT_EQ(aclmdlRITaskGetParams(task, &params), ACL_SUCCESS);
+  EXPECT_EQ(params.kernelTaskParams.argsType, ACL_RT_KERNEL_ARGS_ARRAY);
+  EXPECT_EQ(params.kernelTaskParams.argsArray, args);
+  EXPECT_EQ(params.kernelTaskParams.argsArray[0], &value);
+  // No loaded buffer is synthesized without kernel parameter metadata.
+  EXPECT_EQ(params.kernelTaskParams.args, nullptr);
+  EXPECT_EQ(params.kernelTaskParams.argsSize, 0U);
 }

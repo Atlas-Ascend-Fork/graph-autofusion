@@ -248,6 +248,7 @@ struct KernelInfos {
   uint32_t vecNum = 0;   ///< Number of vector cores required
   uint32_t cubeNum = 0;  ///< Number of cube cores required
   const void *devArgs = nullptr;
+  size_t devArgsSize = 0;
   void *opInfoPtr = nullptr;
   size_t opInfoSize = 0;
   size_t dynUbufSize = 0;
