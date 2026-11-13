@@ -312,9 +312,9 @@ FailureOr<PhysicalReduceShape> materializePhysicalReduceShape(Operation *op, OpB
   const ArrayRef<int64_t> innerAxes = isAR ? ArrayRef<int64_t>(plan.last.axes) : ArrayRef<int64_t>(plan.first.axes);
 
   // 按物理外、内维物化：AR 为 A/R，RA 为 R/A。
-  FailureOr<SmallVector<afir::ScheduledAxisExtent, 4>> outer =
+  FailureOr<SmallVector<afir::ScheduledAxisExtent>> outer =
       afir::materializeScheduledAxisExtents(op, builder, outerAxes);
-  FailureOr<SmallVector<afir::ScheduledAxisExtent, 4>> inner =
+  FailureOr<SmallVector<afir::ScheduledAxisExtent>> inner =
       afir::materializeScheduledAxisExtents(op, builder, innerAxes);
   if (failed(outer) || failed(inner) || outer->empty() || inner->empty()) {
     return failure();

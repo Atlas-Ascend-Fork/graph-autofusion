@@ -37,12 +37,14 @@
 // RUN:   | FileCheck %s --check-prefix=NOEMPTY
 // NOEMPTY-NOT: #include ""
 
-// RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s | FileCheck %s --check-prefix=IR
+// RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 --cse %s | FileCheck %s --check-prefix=IR
 // kernel 文本与 TilingData 头由 `--afir-aggregate-launch` 直接出（它自己翻译，不再过
 // `ascir-translate`；`ascir-translate` 不认 `index` 方言与残留的 afir 属性，实测过不了）。
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s -o %t.mlir
 // RUN: af-opt --afir-aggregate-launch --afir-aggregate-launch-graph-name=pad_ub_ub %t.mlir \
 // RUN:   | FileCheck %s --check-prefix=CPP
+// Axis IDs are graph identities, not fixed positions. Renumber TileInner 4 to 14.
+// RUN: sed 's/id = 4,/id = 14,/g;s/split_pair_other_id = 4>/split_pair_other_id = 14>/g;s/\[4,/[14,/g;s/, 4,/, 14,/g' %s | af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 --cse | FileCheck %s --check-prefix=IR
 // SELECT 用手工链（`afir-broadcast-duplicate.mlir` 同款分工：candidate pipeline 的产物
 // 已带实现属性，但这里单独钉「选中了哪一个」更直观）。
 // RUN: af-opt --target=Ascend910B1 --afir-kernel-body-signature --afir-materialize-tiling-params \
@@ -202,19 +204,22 @@ func.func private @pad_after_transpose(
 // SELECT: ascend.implementation = {id = "transpose.ub_ub_extend", kind = "ascendc_api"}
 // SELECT: ascend.implementation = {id = "pad.ub_ub_extend", kind = "ascendc_api"}
 
-// mem 档三件套：按字段名取整个 `PadTiling`（`emitasc.member` 是一份局部拷贝，非常量
-// 引用绑上去）、`S-E` 与 `S != E`（S=16、E=3 是本格的实算值，同函数里 transpose 也会
-// 发同名常量，所以这里靠 member 之后的**次序**钉，不用变量回引）、`scf.if` 两侧、
-// else 支的元素数连乘（bt 轴的尾块修正 + 8 × 16 × 3，常量按连乘的次序出现）。
+// Check values and SSA uses, not just the presence of arithmetic. CSE shares
+// constants, so the same 16 is both the padded pitch and the z-axis extent.
 // IR-LABEL: func.func private @pad_after_transpose
-// IR: emitasc.member {{.*}} "pad_tilingData_0"
-// IR: {{.*}} = arith.constant 16 : index
-// IR: %[[PADNUM:.*]] = arith.subi {{.*}}, {{.*}} : index
-// IR: %[[COND:.*]] = arith.cmpi ne, {{.*}}, {{.*}} : index
+// IR: %[[ACTUAL:.*]] = arith.select {{.*}} {afir.axis_binding = #afir.axis_binding<axis = {{4|14}}, role = actual_size>}
+// IR: emitasc.member %{{[^ ]+}} "pad_tilingData_0" :
+// IR: %[[PITCH:.*]] = arith.constant 16 : index
+// IR: %[[WIDTH:.*]] = arith.constant 3 : index
+// IR: %[[PADNUM:.*]] = arith.subi %[[PITCH]], %[[WIDTH]] : index
+// IR: %[[COND:.*]] = arith.cmpi ne, %[[PITCH]], %[[WIDTH]] : index
 // IR: scf.if %[[COND]]
 // IR: ascendc.pad {{.*}}, {{.*}}, %[[PADNUM]]
-// IR: {{.*}} = arith.muli
-// IR: ascendc.data_copy_blk_aligned {{.*}}, {{.*}}, {{.*}}
+// IR: %[[W:.*]] = arith.constant 8 : index
+// IR: %[[BW:.*]] = arith.muli %[[ACTUAL]], %[[W]] : index
+// IR: %[[BWZ:.*]] = arith.muli %[[BW]], %[[PITCH]] : index
+// IR: %[[COUNT:.*]] = arith.muli %[[BWZ]], %[[WIDTH]] : index
+// IR: ascendc.data_copy_blk_aligned {{.*}}, {{.*}}, %[[COUNT]]
 // IR-NOT: afir.pad
 
 // include 块四段（kernel 文本的头几行）：官方头（`lib/pad/pad.h`，不内联文本）在固定块

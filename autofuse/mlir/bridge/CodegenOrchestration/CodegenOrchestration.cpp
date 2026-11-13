@@ -278,8 +278,6 @@ mlir::FailureOr<PlanGenerationResult> PrepareCodegenPlans(const ascir::FusedSche
                                                           MlirCallerScene scene,
                                                           const common::ResourceBudget &resources,
                                                           std::string &diagnostic, bool &unsupported) {
-  const auto mode =
-      ascgen_utils::IsStaticSchedResult(schedule) ? PlanGenerationMode::Static : PlanGenerationMode::Dynamic;
   // Static schedules embed concrete dimensions, but retain all candidates.
   // The emitted host tiling program solves tile sizes and core partitioning.
   AttOptions att_options;
@@ -288,8 +286,8 @@ mlir::FailureOr<PlanGenerationResult> PrepareCodegenPlans(const ascir::FusedSche
     att_options.emplace(att::kInternalEnableAutofusePgo, "false");
   }
   PlanGenerationResult preparation;
-  if (!PreparePlanGeneration({schedule, mode, resources, scene == MlirCallerScene::kInductor, {}, att_options},
-                             preparation, &diagnostic, &unsupported)) {
+  if (!PreparePlanGeneration({schedule, resources, scene == MlirCallerScene::kInductor, att_options}, preparation,
+                             &diagnostic, &unsupported)) {
     return mlir::failure();
   }
   return preparation;
@@ -339,25 +337,22 @@ mlir::FailureOr<BuiltPlanModules> BuildCandidateAfirModules(const PlanLoweringSe
 }
 
 mlir::FailureOr<std::string> GenerateTiling(llvm::ArrayRef<mlir::ModuleOp> plan_modules,
-                                            const mlir::bridge::TilingArtifact &tiling, MlirCallerScene scene) {
-  if (scene == MlirCallerScene::kInductor || std::holds_alternative<StaticTilingData>(tiling)) {
+                                            const mlir::bridge::TilingCodeBundle &tiling, MlirCallerScene scene) {
+  if (scene == MlirCallerScene::kInductor) {
     auto spec = buildAggregateTilingProgramSpec(plan_modules);
     if (failed(spec)) {
       return mlir::failure();
     }
-    if (const auto *solved = std::get_if<StaticTilingData>(&tiling)) {
-      return emitStaticTilingFunc(*spec, *solved);
-    }
-    return emitInductorTilingFunc(*spec, std::get<TilingCodeBundle>(tiling));
+    return emitInductorTilingFunc(*spec, tiling);
   }
-  return assembleTilingSources(std::get<TilingCodeBundle>(tiling));
+  return assembleTilingSources(tiling);
 }
 
 // Runs the aggregate + AutofuseLaunch driver over `plan_modules` and copies
 // its artifacts, plus the per-candidate ATT tiling functions in `bundle`,
 // into `result`.
 bool FinalizeMlirCodegenResult(llvm::ArrayRef<mlir::ModuleOp> plan_modules, const std::string &op_name,
-                               const mlir::bridge::TilingArtifact &artifact, MlirCallerScene scene,
+                               const mlir::bridge::TilingCodeBundle &artifact, MlirCallerScene scene,
                                codegen::CodegenResult &result) {
   codegen::CodegenResult generated;
   std::string diagnostic;

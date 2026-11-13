@@ -80,6 +80,9 @@ struct CodeEmitter {
     /// Return the existing or a new name for a Value.
     StringRef getOrCreateName(Value val);
 
+    /// Bind an ABI parameter name before emitting its uses.
+    void bindParameterName(Value val, StringRef name);
+
     /// Return the name of the first value in a range (for Variadic operands).
     StringRef getOrCreateName(Operation::operand_range vals)
     {

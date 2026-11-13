@@ -219,14 +219,23 @@ static FailureOr<VectorPlan> mergeVectorSegments(Operation *op, VectorPlan plan,
 }
 
 FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op, bool compactTail) {
+  if (!op) {
+    return failure();
+  }
+  return collapseVectorizedAxes(op, collectTensors(op), compactTail);
+}
+
+FailureOr<VectorPlan> collapseVectorizedAxes(Operation *op, ArrayRef<VectorTensor> tensors, bool compactTail) {
   if (op == nullptr) {
     return failure();
   }
   MLIRContext *context = op->getContext();
 
   VectorPlan plan;
-  plan.tensors = collectTensors(op);
-  if (plan.tensors.empty()) {
+  plan.tensors.assign(tensors.begin(), tensors.end());
+  if (plan.tensors.empty() || llvm::any_of(plan.tensors, [](const VectorTensor &tensor) {
+        return !tensor.descriptor || tensor.descriptor.getVectorizedAxis().empty();
+      })) {
     return failure();
   }
 

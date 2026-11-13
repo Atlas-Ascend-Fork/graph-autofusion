@@ -70,21 +70,6 @@ TEST(PlanSelectorTest, KeepsEveryDynamicTemplateAcrossSubgraphs) {
   }
 }
 
-TEST(PlanSelectorTest, RejectsInvalidStaticShapeSymbol) {
-  std::vector<mlir::bridge::PlanSelection> selections;
-  mlir::bridge::AttOptions options;
-  mlir::bridge::PlanGenerationResult prepared;
-  std::string diagnostic;
-  EXPECT_FALSE(mlir::bridge::PreparePlanGeneration({mlir::test::MakeFusedResult(),
-                                                    mlir::bridge::PlanGenerationMode::Static,
-                                                    {32, 196608},
-                                                    true,
-                                                    {{"s-0", 32}},
-                                                    options},
-                                                   prepared, &diagnostic));
-  EXPECT_EQ(diagnostic, "static plan selection received an invalid shape symbol");
-}
-
 TEST(PlanSelectorTest, DynamicSelectionKeepsTemplatesInEveryStage) {
   const auto result = mlir::test::MakeMultiStageFusedResult(2U, 3U, 2U);
   std::vector<mlir::bridge::PlanSelection> selections;
@@ -93,7 +78,7 @@ TEST(PlanSelectorTest, DynamicSelectionKeepsTemplatesInEveryStage) {
                                                                   {0U, 1U, {{0U, 1U}, {0U, 1U}, {0U, 1U}}}}));
 }
 
-TEST(PlanSelectorTest, BothStrategiesRejectMalformedSchedulesAndClearPreviousResults) {
+TEST(PlanSelectorTest, SelectionAndPreparationRejectMalformedSchedulesAndClearPreviousResults) {
   const std::vector<ascir::FusedScheduledResult> invalid_results{{},
                                                                  mlir::test::MakeMultiSubgraphFusedResult({1U, 0U}),
                                                                  mlir::test::MakeMultiStageFusedResult(1U, 0U),
@@ -104,13 +89,13 @@ TEST(PlanSelectorTest, BothStrategiesRejectMalformedSchedulesAndClearPreviousRes
     EXPECT_FALSE(mlir::bridge::SelectDynamicCandidates(result, selections, &dynamic_diagnostic));
     EXPECT_TRUE(selections.empty());
     selections = {{0U, 0U, {{0U}}}};
-    std::string static_diagnostic;
+    std::string preparation_diagnostic;
     mlir::bridge::PlanGenerationResult prepared;
-    EXPECT_FALSE(mlir::bridge::PreparePlanGeneration(
-        {result, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {}, {}}, prepared, &static_diagnostic));
+    EXPECT_FALSE(
+        mlir::bridge::PreparePlanGeneration({result, {32, 196608}, true, {}}, prepared, &preparation_diagnostic));
     selections = prepared.selections;
-    EXPECT_EQ(static_diagnostic, dynamic_diagnostic);
-    EXPECT_FALSE(static_diagnostic.empty());
+    EXPECT_EQ(preparation_diagnostic, dynamic_diagnostic);
+    EXPECT_FALSE(preparation_diagnostic.empty());
     EXPECT_TRUE(selections.empty());
   }
 }

@@ -61,7 +61,7 @@
 
 #include "conversion/AFIRToAscendC/Implementations/RemovePad.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
-#include "dialect/AFIR/Analysis/TransferPlan.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 #include "dialect/AFIR/Support/SymbolicExpression.h"
 #include "dialect/AFIR/Support/SymbolicExpressionDetail.h"
@@ -143,102 +143,6 @@ bool provablyLiteral(afir::ExprAttr expression, llvm::StringRef literal) {
 // `provablyEqual` 直接用 `mlir::afir` 导出的那份（`VectorSegmentation.cpp`）：
 // 文本短路 + `ProveExpressionsEqual`，空侧答 false，语义与这里原先的局部副本一致。
 
-// 这棵子树的取值一定是整数吗。
-//
-// `Ceiling` / `Floor` 无论实参是什么都返回整数，所以不看孩子。`Symbol` 算整数：这套表达式
-// 里的自由符号全是尺寸（轴长、tile 尺寸、block 数）。`Pow` 不算——它在这套表达式里同时
-// 承载除法（`x^-1`），放进来就等于放过一个可能不是整数的因子；`Rational` / `Real` / `Log`
-// 与各谓词节点同理。
-bool isIntegerValued(const afir::detail::ExpressionNode &node) {
-  using afir::detail::NodeKind;
-  switch (node.kind) {
-    case NodeKind::Ceiling:
-    case NodeKind::Floor:
-      return true;
-    case NodeKind::Integer:
-    case NodeKind::Symbol:
-      return true;
-    case NodeKind::Add:
-    case NodeKind::Mul:
-    case NodeKind::Max:
-    case NodeKind::Min:
-    case NodeKind::Mod:
-    case NodeKind::Abs:
-      return llvm::all_of(node.arguments, isIntegerValued);
-    default:
-      return false;
-  }
-}
-
-// 字面量正整数节点的值。不是那个形态返回 nullopt。
-std::optional<int64_t> positiveIntegerValue(const afir::detail::ExpressionNode &node) {
-  if (node.kind != afir::detail::NodeKind::Integer) {
-    return std::nullopt;
-  }
-  int64_t value = 0;
-  if (llvm::StringRef(node.value).getAsInteger(10, value) || value <= 0) {
-    return std::nullopt;
-  }
-  return value;
-}
-
-// `expression` 可证是 `factor` 的整数倍吗。证不了返回 false（保守方向：报不支持，不是算错）。
-//
-// 结构判据，不是算术证明。 想证的是整除，而 `ProveExpressionsEqual` 只答「两个表达式
-// 是否可证相等」。把整除写成相等要用 `P == f * Ceiling(P / f)`，代进 `P = f * Ceiling(Z / f)`
-// 之后左右差一层 `Ceiling(Ceiling(Z / f))`，而 SymEngine 不把 `ceiling` 套 `ceiling` 折掉
-// （它的规范化只在实参是 `Number` 时求值），于是符号行距一律证不出来——而符号行距恰好是
-// 动态 shape 下的常态。
-//
-// 结构判据能过：调度算出来的行距是 `af::sym::Align(Z, f)`，而那个函数就是
-// `Mul(Ceiling(Div(Z, f)), f)`（`graph_metadef/graph/expression/symbol_operator.cc:86`），
-// 序列化出来是 `(f * Ceiling((Z / f)))`——`Mul` 里那个 `f` 是字面量，其余因子是 `Ceiling`。
-//
-// 两种形态：
-//   - 整个树是正整数字面量，且 % factor == 0；
-//   - 树是 `Mul`，其中有一个正整数字面量因子 % factor == 0，且其余每个因子都是整数值。
-//     少了后半句，`(8 * s / 3)` 这种也会被放过去。
-bool isProvablyMultipleOf(afir::ExprAttr expression, int64_t factor) {
-  // `factor <= 0` 是下面那个 `%` 的除数检查。`factor` 是 `32 / sizeof(T)`，在本档收的
-  // 元素类型上取值只有 8 与 16，所以这一条今天走不到；留着是因为它保护的是一次取模。
-  if (!expression || factor <= 0) {
-    return false;
-  }
-  Result<Expression> parsed = Expression::Parse(expression.getValue().getValue());
-  if (!parsed) {
-    return false;
-  }
-  Result<Expression> simplified = parsed.value().Simplify();
-  if (!simplified) {
-    return false;
-  }
-  Result<afir::detail::ExpressionNode> tree = afir::detail::ExpressionAccess::GetTree(simplified.value());
-  if (!tree) {
-    return false;
-  }
-  const afir::detail::ExpressionNode &root = tree.value();
-  if (std::optional<int64_t> literal = positiveIntegerValue(root)) {
-    return *literal % factor == 0;
-  }
-  if (root.kind != afir::detail::NodeKind::Mul) {
-    return false;
-  }
-  for (size_t index = 0; index < root.arguments.size(); ++index) {
-    std::optional<int64_t> literal = positiveIntegerValue(root.arguments[index]);
-    if (!literal || *literal % factor != 0) {
-      continue;
-    }
-    bool othersAreIntegers = true;
-    for (size_t other = 0; other < root.arguments.size() && othersAreIntegers; ++other) {
-      othersAreIntegers = other == index || isIntegerValued(root.arguments[other]);
-    }
-    if (othersAreIntegers) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // 一个 `afir.remove_pad` 在分段之后的形态。三个尺寸各记「哪一段的哪一项」，不记物化出来的
 // 值——capability 只判形态、不建 IR，pattern 才物化。
 struct RemovePadShape {
@@ -258,27 +162,8 @@ struct RemovePadShape {
   afir::ExprAttr pitch;
 };
 
-// `plan` 是不是本档收的形状；是就把判据用得上的那几项算出来。
-//
-// 收的边界（不满足一律 `failure()`，调用方翻成 unsupported）：
-//
-//   - 源与目的地各恰好一个；段数在 `[1, 2]` 内（段数 > 2 的理由见文件头）。
-//   - 目的地稠密：最内段 `strides[dst]` 可证为 1；两段时外段 `strides[dst]` 可证等于内段
-//     `extent`。`GatherMask` 的写是连续的，目的地有任何跨度就是静默写错位置。
-//   - **行形态**（两段、最内段源 stride 可证为 1）：一行内部也有跨度的话，
-//     `GatherMask` 的 `src0BlockStride` 表达不了（包装写死 1）。
-//   - **整窗口逐元素收集**（两段、最内段源 stride 是对齐槽距）：外段源步长可证等于
-//     「槽距 × 内段元素数（名义）」，源侧整窗线性。这是 legacy
-//     `remove_pad_api_call.cpp` `is_last_axis_align` 分支的同款形态：转置折进 Load
-//     布局后，源按 `Align(1, 32/sizeof(T))` 逐元素开槽。单段时同款收集见下面的
-//     else 分支。
-//   - 行距/槽距是 32B 的整数倍（`isProvablyMultipleOf`）。
-//
-// `N` 可证为 1 时单独放行整除判据，这是一条有前置条件的放行，前置条件在这里查：
-// `src0RepeatStride` 只被第 2..N 趟 repeat 读，`repeatTimes == 1` 时它读不到。这一格的 `N`
-// 是字面量 1（段只有一个、源 stride 又是 1，趟数就是 1），不是符号，所以前置条件是判得死的。
-FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan, int64_t elementBytes) {
-  RemovePadShape shape;
+// 校验源/目的数量、段数和步长表，并记录张量索引。
+LogicalResult validateRemovePadPlan(const afir::VectorPlan &plan, RemovePadShape &shape) {
   std::optional<unsigned> source;
   std::optional<unsigned> destination;
   for (auto [index, tensor] : llvm::enumerate(plan.tensors)) {
@@ -303,51 +188,66 @@ FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan
       return failure();
     }
   }
-  const afir::VectorSegment &inner = plan.segments[count - 1];
+  return success();
+}
+
+// 两段布局要求目的地连续；源侧支持连续行或整窗口等槽距收集。
+LogicalResult classifyTwoSegmentRemovePad(const afir::VectorPlan &plan, RemovePadShape &shape) {
+  const auto &outer = plan.segments.front();
+  const auto &inner = plan.segments.back();
+  if (!provablyEqual(outer.strides[shape.destination], inner.extent)) {
+    return failure();
+  }
+  if (provablyLiteral(inner.strides[shape.source], "1")) {
+    // GatherMask 的 src0BlockStride 固定为 1，行内必须连续。
+    shape.rowSegment = plan.segments.size() - 1;
+    shape.repeatSegment = 0;
+    shape.pitch = outer.strides[shape.source];
+    return success();
+  }
+  // 源侧跨段仍须保持等槽距，才能线性收集整个窗口。
+  // 对应 legacy remove_pad_api_call.cpp 的 is_last_axis_align 分支：
+  // 窗口大小采用「外段实际元素数 × 内段名义元素数」。
+  FailureOr<ExprAttr> expected =
+      multiplyExprs(inner.strides[shape.source].getContext(), inner.strides[shape.source], inner.extent);
+  if (failed(expected) || !provablyEqual(outer.strides[shape.source], *expected)) {
+    return failure();
+  }
+  shape.rowIsUnit = true;
+  shape.gatherWholeWindow = true;
+  shape.pitch = inner.strides[shape.source];
+  // 整窗口收集使用两个段的 extent，不使用 repeatSegment。
+  return success();
+}
+
+// 支持一至两段、目的地连续的布局；无法证明约束成立时返回 failure。
+// 行距或槽距须按 UB 访问粒度对齐，单次连续搬运除外。
+FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan, int64_t elementBytes) {
+  RemovePadShape shape;
+  if (failed(validateRemovePadPlan(plan, shape))) {
+    return failure();
+  }
+  const auto &inner = plan.segments.back();
   if (!provablyLiteral(inner.strides[shape.destination], "1")) {
     return failure();
   }
-  const bool contiguousRow = provablyLiteral(inner.strides[shape.source], "1");
-  if (count == 2) {
-    const afir::VectorSegment &outer = plan.segments[0];
-    // 目的地稠密两种形态共用：外段步长必须等于内段元素数（名义），`GatherMask` 的写
-    // 才是线性的。
-    if (!provablyEqual(outer.strides[shape.destination], inner.extent)) {
+  if (plan.segments.size() == 2) {
+    if (failed(classifyTwoSegmentRemovePad(plan, shape))) {
       return failure();
     }
-    if (contiguousRow) {
-      // 行形态：外段是行距，内段是整行。
-      shape.rowSegment = count - 1;
-      shape.repeatSegment = 0;
-      shape.pitch = outer.strides[shape.source];
-    } else {
-      // 整窗口逐元素收集（两段 gather）：最内段源 stride 是槽距（对齐粒度，见下面
-      // `isProvablyMultipleOf`），外段源步长必须可证等于「槽距 × 内段元素数（名义）」
-      // ——源侧整窗线性，`GatherMask` 才能用一条线性寻址扫过两段。对应 legacy
-      // `remove_pad_api_call.cpp` 的 `is_last_axis_align` 分支：那边的 R 由
-      // `GetOneAxisSize` 逐轴相乘，非首 TileInner 轴取名义 `Size`、其余取
-      // `ActualSize`，与本处「外段实际 × 内段名义」同一口径。
-      FailureOr<ExprAttr> expected =
-          multiplyExprs(inner.strides[shape.source].getContext(), inner.strides[shape.source], inner.extent);
-      if (failed(expected) || !provablyEqual(outer.strides[shape.source], *expected)) {
-        return failure();
-      }
-      shape.rowIsUnit = true;
-      shape.gatherWholeWindow = true;
-      // Whole-window gathering consumes both extents; repeatSegment is unused.
-      shape.pitch = inner.strides[shape.source];
-    }
-  } else if (contiguousRow) {
-    // 纯搬运：一行就是整段，趟数 1。
+  } else if (provablyLiteral(inner.strides[shape.source], "1")) {
+    // 单段连续搬运：整段为一行，repeatTimes 固定为 1。
     shape.rowSegment = 0;
     shape.repeatIsUnit = true;
   } else {
-    // 逐元素收集：每个元素单独占一段行距（调度给的是 `Align(1, 32/sizeof(T))`）。
+    // 单段逐元素收集：源步长即槽距，每次收集一个元素。
     shape.rowIsUnit = true;
     shape.repeatSegment = 0;
     shape.pitch = inner.strides[shape.source];
   }
-  if (!shape.repeatIsUnit && !isProvablyMultipleOf(shape.pitch, kUbAccessGranularityBytes / elementBytes)) {
+  // 单次搬运不读取 src0RepeatStride，无需检查行距对齐。
+  if (!shape.repeatIsUnit &&
+      !ProveExpressionMultipleOf(shape.pitch.getValue().getValue(), kUbAccessGranularityBytes / elementBytes)) {
     return failure();
   }
   return shape;
@@ -385,10 +285,6 @@ class RemovePadCapabilityProvider final : public ascend::instruction::Capability
   CapabilitySupport queryLowering(Operation *operation,
                                   const ascend::instruction::QueryContext &context) const override {
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
-      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
-    }
-    FailureOr<TransferPlan> plan = buildTransferPlan(operation);
-    if (failed(plan)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
 
@@ -472,10 +368,6 @@ class RemovePadConversionPattern final : public OpConversionPattern<afir::Remove
     if (!sourceType) {
       return rewriter.notifyMatchFailure(op, "source is not a target-dialect tile");
     }
-    FailureOr<TransferPlan> plan = buildTransferPlan(op);
-    if (failed(plan)) {
-      return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR transfer plan");
-    }
     afir::VectorPlan vectorPlan;
     FailureOr<RemovePadShape> shape = analyzeRemovePad(op, elementByteWidth(sourceType.getElementType()), vectorPlan);
     if (failed(shape)) {
@@ -492,8 +384,10 @@ class RemovePadConversionPattern final : public OpConversionPattern<afir::Remove
     // subindex（本地侧偏移恒为 0，与 `UnaryElementwise.cpp` 同一条判据），以及按逐轴 extent
     // 算出各段的元素数（含切分轴的尾块修正）。
     const auto windowSize = static_cast<unsigned>(vectorPlan.segments.size());
+    auto func = op->getParentOfType<func::FuncOp>();
+    const auto extentSource = func && func->hasAttr(kAscGraphAttrName) ? ExtentSource::Actual : ExtentSource::Nominal;
     FailureOr<VectorizedWindow> window =
-        materializeVectorizedSegments(op, rewriter, vectorPlan, *plan, *ordered, windowSize);
+        materializeVectorizedSegments(op, rewriter, vectorPlan, extentSource, *ordered, windowSize);
     if (failed(window) || window->tiles.size() != vectorPlan.tensors.size() || window->extents.size() != windowSize) {
       return rewriter.notifyMatchFailure(op, "cannot materialize the vectorized segment extents");
     }

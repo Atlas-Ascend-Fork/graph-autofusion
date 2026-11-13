@@ -15,7 +15,7 @@
 #ifndef AUTOFUSE_MLIR_CONVERSION_AFIRTOASCENDC_VECTORIZEDLOOPS_H
 #define AUTOFUSE_MLIR_CONVERSION_AFIRTOASCENDC_VECTORIZEDLOOPS_H
 
-#include "dialect/AFIR/Analysis/TransferPlan.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -35,19 +35,20 @@ struct VectorizedWindow {
 
 // 为最内 apiWindowSize 段之外的各段建立 scf.for。
 // tiles 按 plan.tensors 排列，由调用方按 VectorTensor 的 side / index 从 adaptor 取值。
-// 尾块使用 materializeScheduledTileIndices 得到的 tileInnerAxis 实际长度，
-// 并按 axisExtents 逐轴相乘计算段 extent，不能直接使用完整 VectorSegment::extent。
 //
 // 返回时插入点位于最内新建循环的终结符之前，供调用方生成 API；未建循环时保持插入点。
 // 接口只需 OpBuilder 的 create / setInsertionPoint；传入 ConversionPatternRewriter
 // 仍通过其 listener 跟踪新算子，也便于 UT 直接调用，与 materializeScheduledTileIndices 一致。
 //
+// ExtentSource::Actual uses dominating ActualSize axis bindings for tail sizes;
+// Nominal uses descriptor extents. Neither policy needs a transfer plan.
+// The substitution is performed per axis before multiplying a segment extent.
+//
 // 空 segments 且 apiWindowSize 为 1 时返回偏移 0、extent 1 的单元素窗口，不建循环。
 // 空计划请求多段窗口、非空段数不足、tiles 数量不匹配或尺寸表达式无法物化时返回 failure。
 FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuilder &rewriter,
-                                                          const afir::VectorPlan &plan,
-                                                          const afir::TransferPlan &transferPlan, ArrayRef<Value> tiles,
-                                                          unsigned apiWindowSize);
+                                                          const afir::VectorPlan &plan, afir::ExtentSource extentSource,
+                                                          ArrayRef<Value> tiles, unsigned apiWindowSize);
 
 // 按 `VectorTensor` 的出处把 tile 值排成 `plan.tensors` 的顺序。
 //

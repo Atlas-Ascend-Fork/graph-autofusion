@@ -90,7 +90,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 三个输入里只有掩码源与值那一路走 Load；标量不是 GM 输入，所以形参比 tensor 形态少一个。
   EXPECT_NE(kernel.find(std::string("__global__ __aicore__ void ") + cfg::kKernelName +
                         "(__gm__ float* v1, __gm__ float* v2, __gm__ float* v3, __gm__ uint8_t* v4, "
-                        "AutofuseTilingData v5)"),
+                        "AutofuseTilingData t)"),
             std::string::npos);
   // mem 一侧要 tmp buffer：标量那一路先 `Duplicate` 进去一个 block。
   EXPECT_NE(kernel.find("AscendC::TBuf<"), std::string::npos);

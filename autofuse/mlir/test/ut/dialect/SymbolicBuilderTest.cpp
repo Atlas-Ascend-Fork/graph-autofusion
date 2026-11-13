@@ -16,6 +16,7 @@
 // 报错。所以这里直接对照真实 descriptor 里出现过的字面串。
 
 #include "dialect/AFIR/IR/SymbolicBuilder.h"
+#include "dialect/AFIR/Support/SymbolicExpression.h"
 
 #include <string>
 
@@ -92,6 +93,21 @@ TEST_F(SymbolicBuilderTest, AlignedExtentProvesContiguityAgainstSchedulerStride)
   // 没对齐的裸长度证不过去——这正是少了 `alignUpExpr` 时会发生的静默判否。
   EXPECT_FALSE(
       provablyContiguous(&context, Expr("(8 * Ceiling((Rational(1 , 8) * z1t_size)))"), Expr("1"), Expr("z1t_size")));
+}
+
+TEST_F(SymbolicBuilderTest, ProvesAlignedSymbolicPitchWithoutAcceptingRationalFactors) {
+  auto proves = [](llvm::StringRef expression, int64_t factor) {
+    auto parsed = Expression::ParseRelaxed(expression.str());
+    return parsed && ProveExpressionMultipleOf(parsed.value().Serialize(), factor);
+  };
+  EXPECT_TRUE(proves("16 * Ceiling(n / 16)", 16));
+  EXPECT_TRUE(proves("8 * Ceiling(n / 8)", 8));
+  EXPECT_TRUE(proves("8 * n", 8));
+  EXPECT_TRUE(proves("32", 8));
+  EXPECT_FALSE(proves("12", 8));
+  EXPECT_FALSE(proves("8 * n / 3", 8));
+  EXPECT_FALSE(proves("n", 8));
+  EXPECT_FALSE(proves("8", 0));
 }
 
 }  // namespace

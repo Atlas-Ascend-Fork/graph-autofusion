@@ -5,6 +5,7 @@ add_mlir_library(AFIRAnalysis
   ReduceScratchLifetime.cpp
   ReducePlan.cpp
   ResourceIds.cpp
+  ComputeExtent.cpp
   TransferPlan.cpp
   VectorSegmentation.cpp
 

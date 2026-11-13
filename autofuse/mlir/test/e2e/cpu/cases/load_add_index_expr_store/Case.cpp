@@ -49,7 +49,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   // 主判据：它不占 kernel 形参。 与 `load_add_scalar_data_store` 那条恰好相反——
   // 那边标量夹在两个指针中间，这边签名里压根没有它。生成形参的话这一行就对不上。
   EXPECT_NE(kernel.find(std::string("__global__ __aicore__ void ") + cfg::kKernelName +
-                        "(__gm__ float* v1, __gm__ float* v2, __gm__ uint8_t* v3, AutofuseTilingData v4)"),
+                        "(__gm__ float* v1, __gm__ float* v2, __gm__ uint8_t* v3, AutofuseTilingData t)"),
             std::string::npos);
   EXPECT_NE(kernel.find("extern \"C\" int64_t AutofuseLaunch(uint32_t blockDim, void* stream, void* input0, "
                         "void* output0, void* workspace, AutofuseTilingData* tiling_data)"),

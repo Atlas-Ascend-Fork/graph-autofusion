@@ -29,6 +29,7 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
+#include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/CommandLine.h"
@@ -92,6 +93,9 @@ void RegisterDialectsAndPasses(mlir::DialectRegistry &registry) {
   mlir::ascendc::registerInlinerInterfaces(registry);
   mlir::emitasc::registerExternalModels(registry);
   mlir::registerascendcPasses();
+  // Direct AFIR codegen tests need the same constant deduplication as the
+  // aggregate launch driver before translating to C++.
+  mlir::registerCSEPass();
 
   mlir::ascend::kernel::registerAFIRToAscendCPasses();
   mlir::ascend::kernel::registerKernelSourcePasses();

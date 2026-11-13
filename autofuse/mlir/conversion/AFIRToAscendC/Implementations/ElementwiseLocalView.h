@@ -8,10 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef AUTOFUSE_MLIR_CONVERSION_AFIRTOASCENDC_IMPLEMENTATIONS_ELEMENTWISETRANSFERPLAN_H_
-#define AUTOFUSE_MLIR_CONVERSION_AFIRTOASCENDC_IMPLEMENTATIONS_ELEMENTWISETRANSFERPLAN_H_
+#ifndef AUTOFUSE_MLIR_CONVERSION_AFIRTOASCENDC_IMPLEMENTATIONS_ELEMENTWISELOCALVIEW_H_
+#define AUTOFUSE_MLIR_CONVERSION_AFIRTOASCENDC_IMPLEMENTATIONS_ELEMENTWISELOCALVIEW_H_
 
-#include "dialect/AFIR/Analysis/TransferPlan.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
 
 #include <optional>
 
@@ -50,20 +50,26 @@ enum class LocalViewCompatibility {
 FailureOr<afir::TensorDescAttr> getOperandDescriptor(Operation *op, unsigned index = 0);
 FailureOr<afir::TensorDescAttr> getDestinationDescriptor(Operation *op, unsigned index = 0);
 
-// `kind` 是可选出参：判定为 `Compatible` 时写入参与比较的那一组计划的共同种类，其余
-// 情况不写。调用方要它，是因为「未切 tile」与「已切 tile」两种形态对 LocalTensor 的秩
-// 要求不同，而这个区分只有计划知道。
+// A missing plan denotes the explicit minimal rank-one whole-tensor contract.
+// A present plan with no segments denotes a single logical element.
+struct ElementwiseLocalView {
+  std::optional<afir::VectorPlan> vectorPlan;
+  afir::ExtentSource extentSource = afir::ExtentSource::Nominal;
+};
+// Interpret descriptors and construct the common loop plan, without imposing
+// continuous API lane, alignment, capacity or alias requirements.
+LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
+                                                   ElementwiseLocalView &view);
+// Continuous elementwise API contract: equal vector lane domains, independent
+// aligned addresses, known static bounds and conservative shared-storage checks.
+// Dynamic storage sufficiency remains the allocation/caller contract.
+LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
+                                                   ElementwiseLocalView &view);
 LocalViewCompatibility checkLocalViewCompatibility(Operation *op, ArrayRef<afir::TensorDescAttr> descriptors,
-                                                   afir::TransferPlanKind *kind = nullptr);
-// A logical singleton that must be widened to the destination domain.
+                                                   bool *wholeTensor = nullptr);
 bool isSingletonTensorInput(Operation *op, unsigned index);
-
-// 参与比较的是这个算子**有形状的那些输入**加上 destination，由操作数类型现场认出来，
-// 不由调用方声明形态。声明形态在 `ScalarOperand::Any` 上认不出谁是 tile（标量可以落在
-// 第一个操作数上），而形态与实际操作数对不对得上是 `getTensorTypes` / `emissionOrder`
-// 那一处的判据，不在这里重复一份——重复的那份会先于它答话，把「形态不符」报成别的理由。
-LocalViewCompatibility checkElementwiseLocalViews(Operation *op, afir::TransferPlanKind *kind = nullptr);
+bool hasSameLocalLayout(Operation *op, unsigned inputIndex);
+LocalViewCompatibility checkElementwiseLocalViews(Operation *op, bool *wholeTensor = nullptr);
 
 }  // namespace mlir::ascend::kernel::elementwise
-
-#endif  // AUTOFUSE_MLIR_CONVERSION_AFIRTOASCENDC_IMPLEMENTATIONS_ELEMENTWISETRANSFERPLAN_H_
+#endif

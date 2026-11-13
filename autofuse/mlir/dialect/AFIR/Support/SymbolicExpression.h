@@ -11,6 +11,7 @@
 #ifndef AUTOFUSE_MLIR_DIALECT_AFIR_SUPPORT_SYMBOLICEXPRESSION_H
 #define AUTOFUSE_MLIR_DIALECT_AFIR_SUPPORT_SYMBOLICEXPRESSION_H
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -98,6 +99,11 @@ Result<std::string> MultiplyExpressions(std::string_view lhs, std::string_view r
 // `proveExpressionsEqual` 是同一件事的一份文件内静态实现，那一份应当切到这里来，
 // 但切它不属于本需求，先记下不动。
 bool ProveExpressionsEqual(std::string_view lhs, std::string_view rhs);
+
+// Proves a positive literal or a literal multiple times integer-valued factors.
+// Free symbols must denote integer sizes. Unknown forms conservatively return false.
+// Shared by API alignment checks; supports Align(n, f) = f * Ceiling(n / f).
+bool ProveExpressionMultipleOf(std::string_view expression, int64_t factor);
 
 }  // namespace mlir::afir
 

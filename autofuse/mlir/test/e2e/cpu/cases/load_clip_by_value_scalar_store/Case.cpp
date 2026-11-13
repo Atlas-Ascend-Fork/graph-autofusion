@@ -64,7 +64,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
   EXPECT_NE(kernel.find(", cm1_f32, c1_f32, "), std::string::npos);
   // 三个输入里只有 x 走 Load；两个标量不是 GM 输入，所以 kernel 形参比 tensor 形态少两个。
   EXPECT_NE(kernel.find(std::string("__global__ __aicore__ void ") + cfg::kKernelName +
-                        "(__gm__ float* v1, __gm__ float* v2, __gm__ uint8_t* v3, AutofuseTilingData v4)"),
+                        "(__gm__ float* v1, __gm__ float* v2, __gm__ uint8_t* v3, AutofuseTilingData t)"),
             std::string::npos);
   // mem 侧这个包装要 tmp buffer。TBuf 只会因为 tmp buffer 出现。
   EXPECT_NE(kernel.find("AscendC::TBuf<"), std::string::npos);

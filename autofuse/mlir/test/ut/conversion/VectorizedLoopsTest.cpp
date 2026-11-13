@@ -14,10 +14,7 @@
 // 「窗口 extent 取的是哪一段」。这些在打印出来的文本里要靠正则去凑，而结构断言是直接的。
 // 文本那一层由 LIT 在算子接通之后覆盖。
 //
-// 尾块那一档不在这里：它要 `TransferPlanKind::Scheduled`，而那条路要先有
-// 循环生成铺好的 `afir.axis_binding` 值（`findAxisValue`）。搭那套脚手架的成本远大于它
-// 能钉住的东西，所以尾块由 LIT 在整条 pipeline 上覆盖。这里跑的是 `Identity` 一档，
-// 逐轴 extent 一律取 descriptor 的值。
+// Tail bindings are covered by pipeline tests; these tests use nominal extents.
 
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
 
@@ -100,7 +97,7 @@ func.func private @kernel(
     return carrier != nullptr && localTensors.size() == 2;
   }
 
-  // 在载体处调用 helper。`TransferPlan` 留默认（`Identity`），尾块修正不参与。
+  // 在载体处按标称范围物化分段，不做尾块替换。
   FailureOr<VectorizedWindow> Run(unsigned apiWindowSize) {
     FailureOr<afir::VectorPlan> plan = afir::collapseVectorizedAxes(carrier);
     if (failed(plan)) {
@@ -109,7 +106,8 @@ func.func private @kernel(
     }
     segmentCount = plan->segments.size();
     OpBuilder builder(carrier);
-    return materializeVectorizedSegments(carrier, builder, *plan, afir::TransferPlan{}, localTensors, apiWindowSize);
+    return materializeVectorizedSegments(carrier, builder, *plan, afir::ExtentSource::Nominal, localTensors,
+                                         apiWindowSize);
   }
 
   unsigned CountLoops() {
@@ -232,7 +230,8 @@ TEST_F(VectorizedLoopsTest, FailsWhenWindowIsWiderThanThePlan) {
   FailureOr<afir::VectorPlan> plan = afir::collapseVectorizedAxes(carrier);
   ASSERT_TRUE(succeeded(plan));
   OpBuilder builder(carrier);
-  EXPECT_TRUE(failed(materializeVectorizedSegments(carrier, builder, *plan, afir::TransferPlan{}, localTensors, 2)));
+  EXPECT_TRUE(
+      failed(materializeVectorizedSegments(carrier, builder, *plan, afir::ExtentSource::Nominal, localTensors, 2)));
 }
 
 // `tiles` 与 `plan.tensors` 不等长 → 失败。少了这道检查，下面按下标取 stride 会越界读。
@@ -242,7 +241,7 @@ TEST_F(VectorizedLoopsTest, FailsOnTileCountMismatch) {
   ASSERT_TRUE(succeeded(plan));
   OpBuilder builder(carrier);
   SmallVector<Value> tooFew{localTensors.front()};
-  EXPECT_TRUE(failed(materializeVectorizedSegments(carrier, builder, *plan, afir::TransferPlan{}, tooFew, 1)));
+  EXPECT_TRUE(failed(materializeVectorizedSegments(carrier, builder, *plan, afir::ExtentSource::Nominal, tooFew, 1)));
 }
 
 }  // namespace

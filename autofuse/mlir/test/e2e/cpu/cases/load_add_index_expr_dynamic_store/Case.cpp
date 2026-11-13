@@ -79,7 +79,7 @@ void CheckGeneratedKernel(const std::string &kernel) {
 
   // 它不占 kernel 形参——与 ScalarData 的分界。
   EXPECT_NE(kernel.find(std::string("__global__ __aicore__ void ") + cfg::kKernelName +
-                        "(__gm__ float* v1, __gm__ float* v2, __gm__ uint8_t* v3, AutofuseTilingData v4)"),
+                        "(__gm__ float* v1, __gm__ float* v2, __gm__ uint8_t* v3, AutofuseTilingData t)"),
             std::string::npos);
 
   EXPECT_NE(kernel.find("AscendC::Adds<float, 1>("), std::string::npos);

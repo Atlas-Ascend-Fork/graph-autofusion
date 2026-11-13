@@ -32,14 +32,13 @@
 #include "conversion/AFIRToAscendC/Implementations/UnaryElementwise.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
 #include "target/Ascend/AscendTargetProfile.h"
-#include "dialect/AFIR/Analysis/TransferPlan.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 
 #include "conversion/AFIRToAscendC/AscendCAttributes.h"
 #include "conversion/AFIRToAscendC/Implementations/ConstBlockTensor.h"
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseApiFamily.h"
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseStockCalls.h"
-#include "conversion/AFIRToAscendC/Implementations/ElementwiseTransferPlan.h"
+#include "conversion/AFIRToAscendC/Implementations/ElementwiseLocalView.h"
 #include "dialect/AFIR/IR/AFIR.h"
 #include "dialect/AFIR/IR/AFIRElementwiseSupport.h"
 #include "target/Ascend/Capability/CapabilityProvider.h"
@@ -182,9 +181,9 @@ class UnaryElementwiseCapabilityProvider final : public ascend::instruction::Cap
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
-    TransferPlanKind planKind = TransferPlanKind::Identity;
+    bool wholeTensor = true;
     const elementwise::LocalViewCompatibility compatibility =
-        elementwise::checkElementwiseLocalViews(operation, &planKind);
+        elementwise::checkElementwiseLocalViews(operation, &wholeTensor);
     if (compatibility == elementwise::LocalViewCompatibility::UnsupportedShape) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
@@ -207,10 +206,10 @@ class UnaryElementwiseCapabilityProvider final : public ascend::instruction::Cap
       return *tmpBuffer;
     }
 
-    return queryTensorContract(operation, planKind);
+    return queryTensorContract(operation, wholeTensor);
   }
 
-  CapabilitySupport queryTensorContract(Operation *operation, TransferPlanKind planKind) const {
+  CapabilitySupport queryTensorContract(Operation *operation, bool wholeTensor) const {
     FailureOr<afir::OperandPartition> partition = afir::getOperandPartition(operation);
     if (failed(partition) || partition->inputCount != 1 || partition->destinationCount != 1) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
@@ -220,30 +219,15 @@ class UnaryElementwiseCapabilityProvider final : public ascend::instruction::Cap
     if (!sourceType || !destinationType) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
-    // 未调度那条路（`Identity`）只收秩为 1 的 tile。这条判据二元和三元一直都有，一元
-    // 这边原先漏了：同一份 `2x8xf16`，`afir.add` 当场报 unsupported，而 `afir.exp` 会被
-    // 放行、按 `GetSize()` 生成整块的元素数。三条路对同一份 IR 给不同答案，不是有意的
-    // 放宽，所以在这里补齐。三条一起钉在
-    // `afir-elementwise-identity-rank-invalid.mlir`（二元那条原先拦住它的其实是缺
-    // descriptor，不是秩，那份用例一并重做了）。
-    //
-    // 走 `Scheduled` 时不查秩：元素个数由有效视图折算出的局部跨度说了算，多维 tile 上
-    // LocalTensor 的秩跟着 UB buffer 的 memref 走，与它无关。
-    if (planKind == TransferPlanKind::Identity && !(sourceType.hasRank() && sourceType.getRank() == 1 &&
-                                                    destinationType.hasRank() && destinationType.getRank() == 1)) {
+    // The minimal whole-tensor contract uses GetSize and requires rank one.
+    // Complete local views obtain their logical count from VectorPlan instead.
+    if (wholeTensor && !(sourceType.hasRank() && sourceType.getRank() == 1 && destinationType.hasRank() &&
+                         destinationType.getRank() == 1)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     if (!areElementTypesSupported(mapping_->resultElementType, mapping_->elementTypes, mapping_->castSupply,
                                   sourceType.getElementType(), destinationType.getElementType())) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
-    }
-    // 形状默认逐字相同；唯一例外是 scheduler 删除 redundant Broadcast 后留下的
-    // unary inline broadcast。它必须走 AFIR 层的窄判据：差异轴 stride 为 0 且不在
-    // 向量化轴上，AscendC API 才能按 destination 窗口重复读取 source。
-    if (sourceType.getShape() != destinationType.getShape() &&
-        !afir::elementwise::sourceBroadcastsToDestination(operation, partition->inputs(operation)[0],
-                                                          partition->destinations(operation)[0])) {
-      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     return CapabilitySupport::supported();
   }
@@ -296,31 +280,22 @@ FailureOr<UnaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adap
   UnaryOperandTiles tiles;
   tiles.source = adaptor.getInput();
   tiles.destination = adaptor.getDestination();
-  FailureOr<TransferPlan> plan = buildTransferPlan(op, TransferPlanSide::Operand);
-  if (failed(plan)) {
+  elementwise::ElementwiseLocalView view;
+  if (elementwise::prepareElementwiseLocalView(op, {}, compactTail, view) !=
+      elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
-  if (plan->kind != TransferPlanKind::Scheduled) {
+  if (!view.vectorPlan) {
     tiles.count = rewriter.create<ascendc::LocalTensorGetSizeOp>(op.getLoc(), rewriter.getI32Type(), tiles.destination);
     return tiles;
   }
-
-  // 向量化轴的分段（阶段 2 合轴）。一元 elementwise 把最内一段交给 API，其余段变循环。
-  //
-  // 今天所有图在这里都只有一段——图级合轴已经合到底——所以走的是「不建循环、偏移恒为
-  // 常量 0」那条分支，生成的 Op 与此前逐字相同。多段此前是被
-  // `materializeScheduledTileIndices` 的「stride 必须是 0 或 1」挡回去的（**安全地拒绝**，
-  // 不是算错），现在变成支持。
-  FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op, compactTail);
-  if (failed(segments)) {
-    return failure();
-  }
+  const auto &segments = view.vectorPlan;
   FailureOr<SmallVector<Value>> ordered = orderTilesForPlan(*segments, {tiles.source}, tiles.destination);
   if (failed(ordered)) {
     return failure();
   }
   FailureOr<VectorizedWindow> window =
-      materializeVectorizedSegments(op, rewriter, *segments, *plan, *ordered, /*apiWindowSize=*/1);
+      materializeVectorizedSegments(op, rewriter, *segments, view.extentSource, *ordered, /*apiWindowSize=*/1);
   if (failed(window) || window->tiles.size() != segments->tensors.size() || window->extents.size() != 1) {
     return failure();
   }

@@ -9,6 +9,8 @@
  */
 
 #include "dialect/AFIR/IR/AFIR.h"
+#include "dialect/AFIR/Analysis/TransferPlan.h"
+#include "conversion/AFIRToAscendC/Implementations/ElementwiseLocalView.h"
 #include "conversion/AFIRToAscendC/RegisterAscendCImplementations.h"
 #include "target/Ascend/Capability/CapabilityQuery.h"
 #include "target/Ascend/Capability/ImplementationRegistry.h"
@@ -20,7 +22,9 @@
 #include "ascir/Dialect/Asc/IR/Asc.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
+#include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -539,6 +543,176 @@ func.func @test(%input: !ascendc.local_tensor<32xf32>, %dst: !ascendc.local_tens
       }
     }
   }
+}
+
+// The GM rows differ while the UB tile is identical. The old transfer-plan
+// comparison rejected the one-segment/two-segment pair before API selection.
+TEST(BinaryElementwiseL2CapabilityTest, LocalCompatibilityIgnoresGmAxisMerging) {
+  MLIRContext context;
+  LoadDialects(context);
+  const llvm::StringRef type = "!ascendc.local_tensor<2x4x8xf32>";
+  auto module = ParseBufferizedBinary(context, "afir.add", type, type, type, type);
+  ASSERT_TRUE(module);
+  auto *op = FindOperation(*module, "afir.add");
+  auto graph = parseAttribute(R"mlir(#afir.asc_graph<tiling_key = 0, axes = [
+    <id = 0, name = "outer", axis_type = Original, size = <"2">>,
+    <id = 1, name = "row", axis_type = Original, size = <"4">>,
+    <id = 2, name = "col", axis_type = Original, size = <"8">>], type = Compute>)mlir",
+                              &context);
+  ASSERT_TRUE(graph);
+  op->getParentOfType<func::FuncOp>()->setAttr(kAscGraphAttrName, graph);
+  op->setAttr(kSchedAttrName, parseAttribute("#afir.sched<axis = [0, 1, 2], loop_axis = 0>", &context));
+  auto descriptor = [&](llvm::StringRef gmRow, llvm::StringRef ubRow, llvm::StringRef rows) {
+    auto parsed = parseAttribute("#afir.tensor_desc<axis = [0, 1, 2], repeats = [<\"2\">, <\"" + rows.str() +
+                                     "\">, <\"8\">], strides = [<\"128\">, <\"" + gmRow.str() +
+                                     "\">, <\"1\">], vectorized_axis = [1, 2], vectorized_strides = [<\"" +
+                                     ubRow.str() + "\">, <\"1\">], role = <compute>>",
+                                 &context);
+    auto result = dyn_cast_or_null<TensorDescAttr>(parsed);
+    EXPECT_TRUE(result) << "invalid local-view test descriptor";
+    return result;
+  };
+  auto source = descriptor("8", "8", "4");
+  auto destination = descriptor("32", "8", "4");
+  auto sourcePlan = buildTransferPlanForDescriptor(op, source);
+  auto destinationPlan = buildTransferPlanForDescriptor(op, destination);
+  ASSERT_TRUE(succeeded(sourcePlan));
+  ASSERT_TRUE(succeeded(destinationPlan));
+  ASSERT_EQ(sourcePlan->kind, TransferPlanKind::Scheduled);
+  ASSERT_EQ(sourcePlan->dims.size(), 1U);
+  ASSERT_EQ(destinationPlan->dims.size(), 2U);
+
+  using ascend::kernel::elementwise::LocalViewCompatibility;
+  bool wholeTensor = true;
+  EXPECT_EQ(ascend::kernel::elementwise::checkLocalViewCompatibility(op, {source, destination}, &wholeTensor),
+            LocalViewCompatibility::Compatible);
+  EXPECT_FALSE(wholeTensor);
+  EXPECT_EQ(ascend::kernel::elementwise::checkLocalViewCompatibility(op, {destination, source}),
+            LocalViewCompatibility::Compatible);
+  EXPECT_EQ(ascend::kernel::elementwise::checkLocalViewCompatibility(op, {source, descriptor("0", "8", "4")}),
+            LocalViewCompatibility::Compatible);
+  EXPECT_EQ(ascend::kernel::elementwise::checkLocalViewCompatibility(op, {source, descriptor("32", "16", "4")}),
+            LocalViewCompatibility::Compatible);
+  EXPECT_EQ(ascend::kernel::elementwise::checkLocalViewCompatibility(op, {source, descriptor("32", "8", "3")}),
+            LocalViewCompatibility::Compatible);
+  EXPECT_EQ(ascend::kernel::elementwise::checkLocalViewCompatibility(op, {source, TensorDescAttr{}}),
+            LocalViewCompatibility::MissingInformation);
+}
+
+TEST(BinaryElementwiseL2CapabilityTest, LocalViewChecksDomainWindowAndStaticStorage) {
+  MLIRContext context;
+  LoadDialects(context);
+  const llvm::StringRef type = "!ascendc.local_tensor<2x4x8xf32>";
+  auto module = ParseBufferizedBinary(context, "afir.add", type, type, type, type);
+  ASSERT_TRUE(module);
+  Operation *op = FindOperation(*module, "afir.add");
+  auto desc = [&](StringRef row, StringRef col = "1", StringRef rows = "4") {
+    // tensor_desc requires a GM array, but these unbound symbols must not be
+    // interpreted by the local computation analysis.
+    auto expr = [&](StringRef text) { return *makeExprAttr(&context, text); };
+    return TensorDescAttr::get(&context, {0, 1, 2}, {expr("2"), expr(rows), expr("8")},
+                               {expr("gm0"), expr("gm1"), expr("gm2")}, {1, 2}, {expr(row), expr(col)},
+                               RoleAttr::get(&context, Role::Compute));
+  };
+  auto contiguous = desc("8");
+  ASSERT_TRUE(contiguous);
+  op->setAttr(kDestinationDescsAttrName, ArrayAttr::get(&context, {contiguous}));
+  op->setAttr(kResultDescsAttrName, ArrayAttr::get(&context, {contiguous}));
+  using ascend::kernel::elementwise::ElementwiseLocalView;
+  using ascend::kernel::elementwise::LocalViewCompatibility;
+  auto analyze = [&](TensorDescAttr input, ArrayRef<unsigned> scalars = {}) {
+    op->setAttr(kOperandDescsAttrName, ArrayAttr::get(&context, {input, contiguous}));
+    ElementwiseLocalView view;
+    return ascend::kernel::elementwise::prepareElementwiseLocalView(op, scalars, false, view);
+  };
+  EXPECT_EQ(analyze(desc("16")), LocalViewCompatibility::Compatible);
+  // No GM symbol bindings, schedule or graph required for a complete local view.
+  ElementwiseLocalView view;
+  ASSERT_EQ(ascend::kernel::elementwise::prepareElementwiseLocalView(op, {}, false, view),
+            LocalViewCompatibility::Compatible);
+  ASSERT_TRUE(view.vectorPlan);
+  ASSERT_EQ(view.vectorPlan->segments.size(), 2U);
+  EXPECT_EQ(view.extentSource, ExtentSource::Nominal);
+  EXPECT_TRUE(provablyEqual(view.vectorPlan->segments[0].strides[0], *makeExprAttr(&context, "16")));
+  EXPECT_TRUE(provablyEqual(view.vectorPlan->segments[0].strides[1], *makeExprAttr(&context, "8")));
+  EXPECT_EQ(analyze(desc("32")), LocalViewCompatibility::UnsupportedShape);           // span exceeds capacity
+  EXPECT_EQ(analyze(desc("4")), LocalViewCompatibility::UnsupportedShape);            // overlapping rows
+  EXPECT_EQ(analyze(desc("9")), LocalViewCompatibility::UnsupportedShape);            // unaligned API starts
+  EXPECT_EQ(analyze(desc("16", "2")), LocalViewCompatibility::UnsupportedShape);      // strided API window
+  EXPECT_EQ(analyze(desc("8", "1", "1")), LocalViewCompatibility::UnsupportedShape);  // implicit broadcast
+  // Scalar selection occurs before merging: the excluded descriptor cannot split
+  // the continuous window or alter its domain, and original operand indices remain.
+  op->setAttr(kOperandDescsAttrName, ArrayAttr::get(&context, {desc("0", "0", "1"), contiguous}));
+  ASSERT_EQ(ascend::kernel::elementwise::prepareElementwiseLocalView(op, {0}, false, view),
+            LocalViewCompatibility::Compatible);
+  ASSERT_EQ(view.vectorPlan->tensors.size(), 2U);
+  EXPECT_EQ(view.vectorPlan->tensors[0].index, 1U);
+  EXPECT_EQ(view.vectorPlan->segments.size(), 1U);
+  EXPECT_FALSE(ascend::kernel::elementwise::hasSameLocalLayout(op, 0));
+  EXPECT_TRUE(ascend::kernel::elementwise::hasSameLocalLayout(op, 1));
+  auto duplicate = TensorDescAttr::get(&context, contiguous.getAxis(), contiguous.getRepeats(), contiguous.getStrides(),
+                                       {1, 1}, contiguous.getVectorizedStrides(), contiguous.getRole());
+  EXPECT_EQ(analyze(duplicate), LocalViewCompatibility::MissingInformation);
+  auto incomplete = TensorDescAttr::get(&context, {0, 1, 2}, {}, {}, {1, 2},
+                                        {*makeExprAttr(&context, "8"), *makeExprAttr(&context, "1")},
+                                        RoleAttr::get(&context, Role::Compute));
+  EXPECT_EQ(analyze(incomplete), LocalViewCompatibility::MissingInformation);
+  op->setAttr(kDestinationDescsAttrName, ArrayAttr::get(&context, {desc("32")}));
+  op->setAttr(kOperandDescsAttrName, ArrayAttr::get(&context, {desc("32"), desc("32")}));
+  EXPECT_EQ(ascend::kernel::elementwise::prepareElementwiseLocalView(op, {}, false, view),
+            LocalViewCompatibility::UnsupportedShape);
+  op->setAttr(kDestinationDescsAttrName, ArrayAttr::get(&context, {contiguous}));
+  context.getOrLoadDialect<arith::ArithDialect>();
+  OpBuilder builder(op);
+  Value zero = builder.create<arith::ConstantIndexOp>(op->getLoc(), 0);
+  Value alias = builder.create<ascendc::LocalTensorSubIndexOp>(op->getLoc(), op->getOperand(0).getType(),
+                                                               op->getOperand(0), zero);
+  op->setOperand(2, alias);
+  EXPECT_EQ(analyze(desc("16")), LocalViewCompatibility::UnsupportedShape);
+  op->setOperand(2, op->getOperand(0));
+  EXPECT_EQ(analyze(desc("16")), LocalViewCompatibility::UnsupportedShape);  // incompatible in-place mapping
+}
+
+TEST(BinaryElementwiseL2CapabilityTest, SymbolicIndependentPitchesAndAxisOrder) {
+  MLIRContext context;
+  LoadDialects(context);
+  const llvm::StringRef sourceType = "!ascendc.local_tensor<?x8x?xf32>";
+  const llvm::StringRef destinationType = "!ascendc.local_tensor<?x?x8xf32>";
+  auto module =
+      ParseBufferizedBinary(context, "afir.add", sourceType, destinationType, destinationType, destinationType);
+  ASSERT_TRUE(module);
+  Operation *op = FindOperation(*module, "afir.add");
+  auto expr = [&](StringRef text) { return *makeExprAttr(&context, text); };
+  auto source = TensorDescAttr::get(
+      &context, {0, 2, 1}, {expr("m"), expr("8"), expr("n")}, {expr("gm0"), expr("gm2"), expr("gm1")}, {1, 2},
+      {expr("(16 * Ceiling((Rational(1 , 16) * n)))"), expr("1")}, RoleAttr::get(&context, Role::Compute));
+  auto destination = TensorDescAttr::get(
+      &context, {0, 1, 2}, {expr("m"), expr("n"), expr("8")}, {expr("gm0"), expr("gm1"), expr("gm2")}, {1, 2},
+      {expr("(8 * Ceiling((Rational(1 , 8) * n)))"), expr("1")}, RoleAttr::get(&context, Role::Compute));
+  op->setAttr(kOperandDescsAttrName, ArrayAttr::get(&context, {source, destination}));
+  op->setAttr(kDestinationDescsAttrName, ArrayAttr::get(&context, {destination}));
+  op->setAttr(kResultDescsAttrName, ArrayAttr::get(&context, {destination}));
+  using namespace ascend::kernel::elementwise;
+  ElementwiseLocalView view;
+  EXPECT_EQ(prepareElementwiseLocalView(op, {}, false, view), LocalViewCompatibility::Compatible);
+  ASSERT_TRUE(view.vectorPlan);
+  EXPECT_EQ(view.vectorPlan->segments.size(), 2U);
+  auto registry = CreateRegistry(context);
+  ASSERT_TRUE(registry);
+  ascend::instruction::CapabilityQuery query(*registry);
+  auto target = CreateTargetProfile();
+  auto candidates = query.queryLowering(op, ascend::instruction::QueryContext{target});
+  ASSERT_TRUE(succeeded(candidates));
+  const auto *candidate = FindCandidate(*candidates, "add.tensor_tensor");
+  ASSERT_NE(candidate, nullptr);
+  EXPECT_EQ(candidate->support.getState(), ascend::instruction::SupportState::Supported);
+  // A scalar-looking dimension inside the vector domain is still broadcast, not an equal-domain Add.
+  auto broadcast =
+      TensorDescAttr::get(&context, {0, 1, 2}, {expr("m"), expr("1"), expr("8")}, {expr("gm0"), expr("0"), expr("gm2")},
+                          {1, 2}, {expr("0"), expr("1")}, RoleAttr::get(&context, Role::Compute));
+  op->setAttr(kOperandDescsAttrName, ArrayAttr::get(&context, {broadcast, destination}));
+  EXPECT_EQ(analyzeElementwiseLocalView(op, {}, false, view), LocalViewCompatibility::Compatible);
+  EXPECT_EQ(prepareElementwiseLocalView(op, {}, false, view), LocalViewCompatibility::UnsupportedShape);
 }
 
 }  // namespace

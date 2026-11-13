@@ -13,7 +13,7 @@
 
 #include <cstdint>
 
-#include "dialect/AFIR/Analysis/VectorSegmentation.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
 
 #include "dialect/AFIR/IR/AFIR.h"
 #include "dialect/AFIR/Support/SymbolicExpressionDetail.h"
@@ -100,12 +100,6 @@ struct ScheduledTileIndices {
   Value localStride;
 };
 
-// 单轴的标称/实际范围，供 Reduce 按语义组合 A/R 维；独立于搬运的双侧连续性合轴。
-struct ScheduledAxisExtent {
-  Value nominal;
-  Value actual;
-};
-
 // Automatic：有结果取 result，无结果取 operand；Operand 显式选择输入视图。
 enum class TransferPlanSide { Automatic, Operand };
 
@@ -122,9 +116,6 @@ FailureOr<TransferPlan> buildTransferPlanForDescriptor(Operation *op, TensorDesc
 // 局部视图取自 TensorDescAttr：Load 取结果，Store 取操作数；`Implementations/` 侧的
 // 形态判据（`Transpose.cpp` / `Pad.cpp`）与计划构造取同一份事实。
 FailureOr<TensorDescAttr> getLocalDescriptor(Operation *op, TransferPlanSide side);
-
-// 图上的轴表（`afir.asc_graph` 的 axes），按轴 id 索引；取不到（无 func 或无属性）失败。
-FailureOr<llvm::DenseMap<int64_t, AxisAttr>> collectGraphAxes(Operation *op);
 
 // 两个符号表达式的相等性证明。Unknown 表示不能证明，不表示不相等。
 detail::TruthValue proveEqual(ExprAttr lhs, ExprAttr rhs);
@@ -144,20 +135,7 @@ FailureOr<SmallVector<Value, 2>> materializeScheduledTransferDims(Operation *op,
 FailureOr<Value> materializeScheduledLocalSpan(Operation *op, OpBuilder &builder, const TransferPlan &plan);
 // 物化最内有效维的标称范围，供不随尾块缩小的 UB 布局与 ReduceInit 使用。
 FailureOr<Value> materializeNominalInnermostExtent(Operation *op, OpBuilder &builder, const TransferPlan &plan);
-// 按给定轴序物化标称/实际范围；有尾块的轴缺少 ActualSize 绑定时失败。
-FailureOr<SmallVector<ScheduledAxisExtent, 4>> materializeScheduledAxisExtents(Operation *op, OpBuilder &builder,
-                                                                               ArrayRef<int64_t> axes);
-
-// 取支配 user、并由 `#afir.axis_binding` 标成指定轴与角色的运行期值；找不到返回空 Value。
-Value findAxisValue(func::FuncOp func, Operation *user, int64_t axisId, afir::AxisValueRole role);
-
-// 逐轴替换 ActualSize 后计算段范围；有尾块的轴缺少绑定时失败，不用标称值替代。
-FailureOr<Value> materializeActualSegmentExtent(Operation *op, OpBuilder &builder, const VectorSegment &segment);
 FailureOr<Value> materializeTailAwareTileSize(Operation *op, OpBuilder &builder, const TransferPlan &plan);
-// 将 scheduledAxis 对应的范围替换为 tailAwareSize，再计算段范围。
-// scheduledAxis = -1 表示无尾块修正轴；无修正值时使用各轴的原始范围。
-FailureOr<Value> materializeSegmentExtent(Operation *op, OpBuilder &builder, const VectorSegment &segment,
-                                          int64_t scheduledAxis, Value tailAwareSize);
 // 物化 GM tile 起始元素偏移，不限制局部视图的段数。
 FailureOr<Value> materializeScheduledGlobalOffset(Operation *op, OpBuilder &builder, const TransferPlan &plan);
 // 解析调度轴在 GM 侧的单位元素步长，必要时沿 from 追溯原始轴；无法解析则失败。

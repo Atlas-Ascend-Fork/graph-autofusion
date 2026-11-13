@@ -420,14 +420,10 @@ TEST_F(PlanSelectorPolicyTest, ConflictingQueueResourceTemplateIsPreserved) {
   EXPECT_EQ(selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U}}}, {0U, 1U, {{0U}}}}));
 }
 
-TEST_F(PlanSelectorPolicyTest, InvalidStructureAndShapeFailBeforeModelGeneration) {
+TEST_F(PlanSelectorPolicyTest, InvalidStructureFailsBeforeModelGeneration) {
   mlir::bridge::PlanGenerationResult result;
   const auto no_stage = mlir::test::MakeMultiStageFusedResult(1U, 0U);
-  EXPECT_FALSE(mlir::bridge::PreparePlanGeneration(
-      {no_stage, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {}, {}}, result));
-  const auto input = mlir::test::MakeFusedResult(2U);
-  EXPECT_FALSE(mlir::bridge::PreparePlanGeneration(
-      {input, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {{"s-0", 1}}, {}}, result));
+  EXPECT_FALSE(mlir::bridge::PreparePlanGeneration({no_stage, {32, 196608}, true, {}}, result));
   EXPECT_EQ(tiling_stub.calls, 0U);
 }
 
@@ -450,40 +446,36 @@ TEST_F(PlanSelectorPolicyTest, LogicalSingletonBroadcastReachesImplementationSel
   ASSERT_EQ(selections.size(), 1U);
 }
 
-TEST_F(PlanSelectorPolicyTest, StaticPreparationKeepsEveryPlanStageAndTemplateWithoutExecutingSolver) {
+TEST_F(PlanSelectorPolicyTest, InductorPreparationKeepsEveryPlanStageAndTemplate) {
   const auto input = mlir::test::MakeMultiStageFusedResult(3U, 2U, 3U);
   mlir::bridge::PlanGenerationResult result;
-  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration(
-      {input, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {}, {}}, result));
+  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration({input, {32, 196608}, true, {}}, result));
   EXPECT_EQ(tiling_stub.calls, 1U);
   EXPECT_TRUE(tiling_stub.is_inductor_scene);
   std::vector<mlir::bridge::PlanSelection> expected;
   ASSERT_TRUE(mlir::bridge::BuildAllCandidateSelections(input, expected));
   EXPECT_EQ(result.selections, expected);
-  ASSERT_TRUE(std::holds_alternative<mlir::bridge::TilingCodeBundle>(result.tiling));
-  EXPECT_EQ(std::get<mlir::bridge::TilingCodeBundle>(result.tiling).tiling_functions, tiling_stub.generated);
+  EXPECT_EQ(result.tiling.tiling_functions, tiling_stub.generated);
 }
 
 TEST_F(PlanSelectorPolicyTest, UniqueCandidateDefersTilingToRuntime) {
   const auto input = mlir::test::MakeFusedResult();
   mlir::bridge::PlanGenerationResult result;
-  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration(
-      {input, mlir::bridge::PlanGenerationMode::Static, {32, 196608}, true, {}, {}}, result));
+  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration({input, {32, 196608}, true, {}}, result));
   EXPECT_EQ(tiling_stub.calls, 1U);
   EXPECT_EQ(result.selections, (std::vector<mlir::bridge::PlanSelection>{{0U, 0U, {{0U}}}}));
-  EXPECT_TRUE(std::holds_alternative<mlir::bridge::TilingCodeBundle>(result.tiling));
+  EXPECT_EQ(result.tiling.tiling_functions, tiling_stub.generated);
 }
 
-TEST_F(PlanSelectorPolicyTest, DynamicPreparationGeneratesOnceAndDoesNotExecuteSolver) {
+TEST_F(PlanSelectorPolicyTest, NonInductorPreparationGeneratesOnce) {
   const auto input = mlir::test::MakeMultiStageFusedResult(3U, 2U, 3U);
   mlir::bridge::PlanGenerationResult result;
-  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration(
-      {input, mlir::bridge::PlanGenerationMode::Dynamic, {32, 196608}, false, {}, {}}, result));
+  ASSERT_TRUE(mlir::bridge::PreparePlanGeneration({input, {32, 196608}, false, {}}, result));
   EXPECT_EQ(tiling_stub.calls, 1U);
   EXPECT_FALSE(tiling_stub.is_inductor_scene);
   ASSERT_EQ(result.selections.size(), 3U);
   EXPECT_EQ(result.selections[2].template_ids_per_stage, (std::vector<std::vector<size_t>>{{0, 1, 2}, {0, 1, 2}}));
-  EXPECT_TRUE(std::holds_alternative<mlir::bridge::TilingCodeBundle>(result.tiling));
+  EXPECT_EQ(result.tiling.tiling_functions, tiling_stub.generated);
 }
 TEST_F(PlanSelectorPolicyTest, InvalidResourceBudgetsNeverReachAtt) {
   const auto input = mlir::test::MakeFusedResult();
@@ -493,8 +485,7 @@ TEST_F(PlanSelectorPolicyTest, InvalidResourceBudgetsNeverReachAtt) {
                             {uint64_t(UINT32_MAX) + 1, 196608},
                             {32, uint64_t(UINT32_MAX) + 1}}) {
     mlir::bridge::PlanGenerationResult result;
-    EXPECT_FALSE(mlir::bridge::PreparePlanGeneration(
-        {input, mlir::bridge::PlanGenerationMode::Static, budget, true, {}, {}}, result));
+    EXPECT_FALSE(mlir::bridge::PreparePlanGeneration({input, budget, true, {}}, result));
   }
   EXPECT_EQ(tiling_stub.calls, 0U);
   EXPECT_EQ((mlir::common::ResourceBudget{1, 257}).availableUb(), 1U);

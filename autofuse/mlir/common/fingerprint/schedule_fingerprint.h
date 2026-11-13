@@ -45,17 +45,12 @@ struct ArtifactVersionSet {
   std::string codegen_version;
   std::string pass_pipeline_version;
   std::string entry_abi_version;
-  // Whether this artifact targets the dynamic-shape dispatch-by-tiling_key
-  // path or one concrete (static) shape (see FR4/3.2.5 in the design doc:
-  // dynamic generation keeps every candidate, static generation keeps
-  // only the ATT winner). A dynamic-mode and a static-mode artifact are never
-  // interchangeable even for the same schedule structure, so this must be
-  // part of the versioned key, not left to be inferred from the structural
-  // fingerprint alone.
+  // Shape specialization is part of the artifact cache key. This metadata
+  // does not imply compile-time ATT winner selection by PlanSelector.
   bool is_dynamic_shape{false};
   // Concrete shape bindings used for static compilation; empty in dynamic mode.
   // Different static shapes must produce different cache keys for the same schedule.
-  // Mirrors bridge::ConcreteShape without introducing a bridge dependency.
+  // Kept local to the fingerprint contract to avoid a bridge dependency.
   std::map<std::string, int64_t> static_shape_constants;
 };
 

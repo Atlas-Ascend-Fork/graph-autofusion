@@ -41,10 +41,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "conversion/AFIRToAscendC/Implementations/TernaryElementwise.h"
-#include "conversion/AFIRToAscendC/Implementations/ElementwiseTransferPlan.h"
+#include "conversion/AFIRToAscendC/Implementations/ElementwiseLocalView.h"
 #include "conversion/AFIRToAscendC/Implementations/Synchronization.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
-#include "dialect/AFIR/Analysis/TransferPlan.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
 
 #include "conversion/AFIRToAscendC/AscendCAttributes.h"
@@ -192,14 +191,6 @@ bool hasUnsupportedTernaryElementTypes(const TernaryElementwiseMapping &mapping,
   return !mapping.conditionIsMask && types.condition.getElementType() != elementType;
 }
 
-bool hasUnsupportedTernaryShapes(const TernaryTensorTypes &types) {
-  // 形状按**目的地**比，不按 `source0` 比：标量形态下 `source0` 可能就是标量，没有形状。
-  // 目的地恒是 tile，而且 `verifyBufferizedElementwise` 已经把「结果 == 目的地」钉死了。
-  return types.condition.getShape() != types.destination.getShape() ||
-         (types.source0 && types.source0.getShape() != types.destination.getShape()) ||
-         (types.source1 && types.source1.getShape() != types.destination.getShape());
-}
-
 class TernaryElementwiseCapabilityProvider final : public ascend::instruction::CapabilityProvider {
  public:
   explicit TernaryElementwiseCapabilityProvider(std::shared_ptr<const TernaryElementwiseMapping> mapping)
@@ -210,13 +201,20 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
-    auto destination = elementwise::getDestinationDescriptor(operation);
-    if (failed(destination)) {
-      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+    SmallVector<unsigned> scalars;
+    if (mapping_->scalarInputs) {
+      for (unsigned index : {kSource0InputIndex, kSource1InputIndex}) {
+        if (elementwise::isSingletonTensorInput(operation, index)) {
+          scalars.push_back(index);
+        }
+      }
     }
-    FailureOr<TransferPlan> plan = buildTransferPlanForDescriptor(operation, *destination);
-    if (failed(plan)) {
-      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+    elementwise::ElementwiseLocalView view;
+    auto compatibility = elementwise::prepareElementwiseLocalView(operation, scalars, false, view);
+    if (compatibility != elementwise::LocalViewCompatibility::Compatible) {
+      return CapabilitySupport::unsupported(compatibility == elementwise::LocalViewCompatibility::MissingInformation
+                                                ? CapabilityReason::MissingInformation
+                                                : CapabilityReason::UnsupportedShape);
     }
 
     ascend::FeatureState executionSupport = context.target.getExecutionSupport(mapping_->executionSpec);
@@ -233,10 +231,10 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
       return *tmpBuffer;
     }
 
-    return queryTensorContract(operation, plan->kind);
+    return queryTensorContract(operation, !view.vectorPlan);
   }
 
-  CapabilitySupport queryTensorContract(Operation *operation, TransferPlanKind planKind) const {
+  CapabilitySupport queryTensorContract(Operation *operation, bool wholeTensor) const {
     FailureOr<TernaryTensorTypes> types = getTensorTypes(operation, mapping_->scalarInputs);
     if (failed(types)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
@@ -245,14 +243,11 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
     // Rank applies to tiles only; scalar inputs have no rank.
-    if (planKind == TransferPlanKind::Identity && !hasRankOneTernaryTiles(*types)) {
+    if (wholeTensor && !hasRankOneTernaryTiles(*types)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     if (hasUnsupportedTernaryElementTypes(*mapping_, *types)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
-    }
-    if (hasUnsupportedTernaryShapes(*types)) {
-      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     return CapabilitySupport::supported();
   }
@@ -274,6 +269,9 @@ class TernaryElementwiseCapabilityProvider final : public ascend::instruction::C
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
     if (mapping_->scalarInputs && elementwise::isSingletonTensorInput(operation, query.inputOperandIndex)) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
+    }
+    if (!elementwise::hasSameLocalLayout(operation, query.inputOperandIndex)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     CapabilitySupport lowering = queryLowering(operation, context);
@@ -337,19 +335,6 @@ FailureOr<SmallVector<unsigned>> materializeScalarInputs(SourceOp op, TernaryOpe
   return scalarIndices;
 }
 
-void removeScalarInputSegments(afir::VectorPlan &segments, ArrayRef<unsigned> scalarIndices) {
-  for (unsigned i = segments.tensors.size(); i > 0; --i) {
-    const auto &tensor = segments.tensors[i - 1];
-    if (tensor.side != afir::VectorTensor::Side::Operand || !llvm::is_contained(scalarIndices, tensor.index)) {
-      continue;
-    }
-    segments.tensors.erase(segments.tensors.begin() + i - 1);
-    for (auto &segment : segments.segments) {
-      segment.strides.erase(segment.strides.begin() + i - 1);
-    }
-  }
-}
-
 FailureOr<Value> applyVectorizedWindow(TernaryOperandTiles &tiles, const afir::VectorPlan &segments,
                                        const VectorizedWindow &window) {
   if (window.tiles.size() != segments.tensors.size() || window.extents.size() != 1) {
@@ -385,39 +370,23 @@ FailureOr<TernaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ad
     }
     scalarIndices = *materialized;
   }
-  auto descriptor = elementwise::getDestinationDescriptor(op);
-  if (failed(descriptor)) {
+  elementwise::ElementwiseLocalView view;
+  if (elementwise::prepareElementwiseLocalView(op, scalarIndices, false, view) !=
+      elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
-  FailureOr<TransferPlan> plan = buildTransferPlanForDescriptor(op, *descriptor);
-  if (failed(plan)) {
-    return failure();
-  }
-  if (plan->kind != TransferPlanKind::Scheduled) {
+  if (!view.vectorPlan) {
     tiles.count = rewriter.create<ascendc::LocalTensorGetSizeOp>(op.getLoc(), rewriter.getI32Type(), tiles.destination);
     return tiles;
   }
-
-  // 向量化轴的分段（阶段 2 合轴）。最内一段交给 API，其余段变循环；今天所有图都只有
-  // 一段，走的是「不建循环、偏移恒为常量 0」那条分支，生成的 Op 与此前逐字相同。
-  //
-  // 本地侧偏移恒为 0 的理由（队列按 slot 自己轮转；TBuf 按 ATT 的 `b{id}_size` 语义只装
-  // 一个 tile，块内每个迭代整块重写）在单段时仍然成立。调度偏移只落在 GM 侧。
-  //
-  // 标量不必在这里判：它没有向量化轴，`collapseVectorizedAxes` 不会把它收进来，
-  // 于是它拿不到 subindex——与此前按 `isa<LocalTensorType>` 分流的结论相同。
-  FailureOr<afir::VectorPlan> segments = afir::collapseVectorizedAxes(op);
-  if (failed(segments)) {
-    return failure();
-  }
-  removeScalarInputSegments(*segments, scalarIndices);
+  const auto &segments = view.vectorPlan;
   FailureOr<SmallVector<Value>> ordered =
       orderTilesForPlan(*segments, {tiles.condition, tiles.source0, tiles.source1}, tiles.destination);
   if (failed(ordered)) {
     return failure();
   }
   FailureOr<VectorizedWindow> window =
-      materializeVectorizedSegments(op, rewriter, *segments, *plan, *ordered, /*apiWindowSize=*/1);
+      materializeVectorizedSegments(op, rewriter, *segments, view.extentSource, *ordered, /*apiWindowSize=*/1);
   if (failed(window)) {
     return failure();
   }

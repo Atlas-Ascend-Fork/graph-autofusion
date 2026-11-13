@@ -34,9 +34,6 @@ namespace mlir::afplan {
 // are read outside ODS, so keep the spellings centralized.
 inline constexpr llvm::StringLiteral kAFPlanAttrPrefix = "afplan.";
 // module 级：这是哪个候选。
-// Module retains original ATT coordinates after compile-time selection. Keep
-// graph selectors in its aggregate ABI even when only one plan survives.
-inline constexpr llvm::StringLiteral kStaticSelectionAttrName = "afplan.static_selection";
 inline constexpr llvm::StringLiteral kCandidateAttrName = "afplan.candidate";
 // func 级：候选内部的哪个 (stage, template) 变体。
 inline constexpr llvm::StringLiteral kVariantAttrName = "afplan.variant";

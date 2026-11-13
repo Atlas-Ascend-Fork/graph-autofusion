@@ -47,8 +47,7 @@ size_t getStageCount(const AggregatePlanInfo &info) {
 // 自带 `block_dim`/`corenum`/`ub_size`/`hbm_size`。判据缺了 stage 这一维，两 stage 单 plan
 // 时 ATT 生成 `graph0_tiling_key` 而根上没有这个字段。
 bool isFlatLayout(ArrayRef<AggregatePlanInfo> infos) {
-  return infos.size() == 1U && !infos.front().module->hasAttr(mlir::afplan::kStaticSelectionAttrName) &&
-         infos.front().candidate.getSubgraph() == 0 && getStageCount(infos.front()) == 1U;
+  return infos.size() == 1U && infos.front().candidate.getSubgraph() == 0 && getStageCount(infos.front()) == 1U;
 }
 
 FailureOr<SmallVector<AggregatePlanInfo>> collectAndValidateAggregatePlanInfos(ArrayRef<ModuleOp> planModules,
@@ -97,8 +96,7 @@ LogicalResult sortAndValidateSubgraphAndPlanIds(SmallVector<AggregatePlanInfo> &
       info.module.emitError("GenAggregateTilingData: duplicate or invalid plan ID");
       return failure();
     }
-    // Frozen winners retain their original plan ID, even when it is not zero.
-    if (!info.module->hasAttr(mlir::afplan::kStaticSelectionAttrName) && planId != previousPlan + 1) {
+    if (planId != previousPlan + 1) {
       info.module.emitError("GenAggregateTilingData: plan IDs must be contiguous");
       return failure();
     }
