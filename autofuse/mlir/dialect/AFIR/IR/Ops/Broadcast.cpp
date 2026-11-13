@@ -32,16 +32,15 @@ LogicalResult verifyBroadcastShapeImpl(Operation *op) {
     return op->emitOpError("expected one shaped input and one shaped result");
   }
 
-  // 源可以是裸标量（legacy `BroadcastScalar` 的 `in.is_constant` 一支）。元素类型那一条
-  // 对标量仍然成立——`getElementTypeOrSelf` 对标量给的就是它自己。
+  // 源可以是裸标量。dtype 这一条对它仍然成立：`getElementTypeOrSelf` 对标量给的就是
+  // 它自己，所以放开源的形状不会顺手放掉 `f32` 广播进 `f16` 目的地。
   if (getElementTypeOrSelf(op->getOperand(0).getType()) != resultType.getElementType()) {
     return op->emitOpError("broadcast input and result must have the same element type");
   }
 
+  // 标量源没有形状可比，broadcastable 这一条退化成恒真——它在整个目的地上就是同一个值，
+  // legacy 的 `IsBroadcastConstantTensor` 对常量节点同样不看轴、直接判真。
   auto inputType = dyn_cast<ShapedType>(op->getOperand(0).getType());
-  // 标量源没有形状可比：它在整个目的地上就是同一个值，broadcastable 这一条退化成恒真
-  // （legacy 的 `IsBroadcastConstantTensor` 对常量节点同样直接恒真、不看轴）。放开的只有
-  // 形状这一项，元素类型已在上面查过。
   if (!inputType) {
     return success();
   }

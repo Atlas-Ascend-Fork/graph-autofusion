@@ -121,17 +121,19 @@ enum class BroadcastTier {
   Extend,
 };
 
-// 源的形态。两种形态最终发的都是 `Duplicate`，差别只在那个标量从哪来：
+// 源的形态。两种形态发的都是 `Duplicate`，差别只在那个标量从哪来：
 //
-//   Tile   —— 源是一块 tile，且在每根向量化轴上 repeat 都是 1。标量用 `GetValue(0)`
-//             从 tile 里读，读之前要同步事件（legacy `BroadcastScalar` 的第三支，
-//             `codegen/api_call/broadcast/broadcast_api_call.cpp:255`）。
-//   Scalar —— 源就是一个裸标量 SSA 值，bridge 对 ASCIR `Scalar` / `IndexExpr` 节点
-//             「不建 op 只建值」给出的那种。直接当实参用：没有 tile、不读值、不发事件
-//             （legacy 第一支 `in.is_constant`，`broadcast_api_call.cpp:249`）。
+//   Tile   —— 源是一块 tile，且在每根向量化轴上 repeat 都是 1。标量要用 `GetValue(0)`
+//             从 tile 里读出来，读之前得同步事件（legacy 第三支，
+//             `broadcast_api_call.cpp:255`）。
+//   Scalar —— 源就是一个裸标量 SSA 值（bridge 对 ASCIR `Scalar` / `IndexExpr` 的产物）。
+//             直接当实参：没有 tile、不读值、因此也没有要同步的事件（legacy 第一支
+//             `in.is_constant`，`broadcast_api_call.cpp:249`）。
 //
-// 分两个 implementation 而不是在一个里面分支，与 elementwise 的 `add.tensor_tensor` /
-// `add.tensor_scalar` 同一个办法：判据按操作数形态互斥，选哪个由 IR 定死，不靠优先级。
+// 这一位分成两个 implementation、而不是在一个里面按源分支：与 elementwise 的
+// `add.tensor_tensor` / `add.tensor_scalar` 同一个办法，判据按操作数形态互斥，选哪个由
+// IR 定死，不靠优先级。代价是 reg 侧标量档要在 `ElementTypeMatrixTest` 的
+// `kKnownNarrower` 里单独占一行（ui8 的理由与 tile 侧那行逐字相同）。
 enum class BroadcastSource {
   Tile,
   Scalar,
@@ -819,7 +821,7 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
     if (scalarSource != (mapping_->source == BroadcastSource::Scalar)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
-    // 源是 tile 时必须已经是目标方言的 tile；标量源没有这一问。
+    // 源是 tile 时必须已经转成目标方言的 tile，这一条标量源不适用。
     if (!scalarSource && !sourceType) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
@@ -831,8 +833,9 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
     }
 
     if (mapping_->tier == BroadcastTier::Duplicate) {
-      // 这两条只对 tile 源成立：标量源没有 descriptor 可读（它在描述子列表里占一格但
-      // 不描述任何事实），也不从 tile 读值、因此没有要同步的事件。
+      // 这两条只对 tile 源成立。标量源在描述子列表里占一格、但那一格不描述任何事实
+      // （`AFIRVerifierUtils.cpp` 里 `verifyDescriptorList` 的 `allowsScalars` 一支），
+      // 所以没有轴可查；它也不从 tile 读值，没有要同步的事件。
       if (!scalarSource) {
         // 这一档的判据：源在每一根向量化轴上都是 1。
         if (!isConstantOnVectorizedAxes(firstDescriptor(operation, afir::kOperandDescsAttrName))) {
@@ -943,8 +946,8 @@ class BroadcastDuplicateConversionPattern final : public OpConversionPattern<afi
     Value scalar;
     Type elementType;
     if (scalarSource) {
-      // legacy 第一支：标量直接当实参，没有 tile、不读值、也就没有要同步的事件
-      // （`broadcast_api_call.cpp:249`）。
+      // 直接当实参：没有 tile 可读，也就没有要同步的事件。对应的 legacy 分支见
+      // `BroadcastSource` 的注释。
       scalar = source;
       elementType = source.getType();
     } else {
