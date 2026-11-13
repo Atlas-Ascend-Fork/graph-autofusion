@@ -113,6 +113,11 @@ class AscGraphBuilder {
 
   AscGraphBuilder &Broadcast(const std::string &name, const std::string &input, const std::vector<Expression> &shape);
 
+  // 标量源的广播（legacy `BroadcastScalar` 的 `in.is_constant` 一支）。与上面三个重载分开：
+  // `Scalar` / `IndexExpr` 这类节点的输出视图是空的（与真实前端一致，不补 axis），而广播的
+  // 输出必须带上循环轴，跟源取是空的。源只有一个输入，没有别的输入可以跟。
+  AscGraphBuilder &BroadcastFromScalar(const std::string &name, const std::string &input);
+
   // reduce - 通用接口
   template <typename ReduceOp>
   AscGraphBuilder &Reduce(const std::string &name, const std::string &input, const std::vector<size_t> &reduce_axes);

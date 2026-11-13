@@ -27,14 +27,23 @@ LogicalResult verifyBroadcastShapeImpl(Operation *op) {
   if (op->getNumOperands() < 1 || op->getNumResults() != 1) {
     return op->emitOpError("expected one shaped input and one shaped result");
   }
-  auto inputType = dyn_cast<ShapedType>(op->getOperand(0).getType());
   auto resultType = dyn_cast<ShapedType>(op->getResult(0).getType());
-  if (!inputType || !resultType) {
+  if (!resultType) {
     return op->emitOpError("expected one shaped input and one shaped result");
   }
 
-  if (inputType.getElementType() != resultType.getElementType()) {
+  // 源可以是裸标量（legacy `BroadcastScalar` 的 `in.is_constant` 一支）。元素类型那一条
+  // 对标量仍然成立——`getElementTypeOrSelf` 对标量给的就是它自己。
+  if (getElementTypeOrSelf(op->getOperand(0).getType()) != resultType.getElementType()) {
     return op->emitOpError("broadcast input and result must have the same element type");
+  }
+
+  auto inputType = dyn_cast<ShapedType>(op->getOperand(0).getType());
+  // 标量源没有形状可比：它在整个目的地上就是同一个值，broadcastable 这一条退化成恒真
+  // （legacy 的 `IsBroadcastConstantTensor` 对常量节点同样直接恒真、不看轴）。放开的只有
+  // 形状这一项，元素类型已在上面查过。
+  if (!inputType) {
+    return success();
   }
 
   if (inputType.hasRank() && resultType.hasRank()) {

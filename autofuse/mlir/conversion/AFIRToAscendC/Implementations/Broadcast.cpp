@@ -12,8 +12,13 @@
 //
 // `afir.broadcast` 的 lowering。**两档**，判据互斥；第二档两侧各生成各的 API：
 //
-//   1. `Duplicate` 一档：源在每一根向量化轴上 repeat 都是 1（源就是一个值）。legacy 的
-//      `BroadcastScalar` 生成的 `Duplicate(dst, 标量, count)`。两侧各注册一个。
+//   1. `Duplicate` 一档：源就是一个值。legacy 的 `BroadcastScalar` 生成的
+//      `Duplicate(dst, 标量, count)`。源有两种形态，各自两侧各注册一个（共四个）：
+//        - tile 源（`broadcast.tensor.duplicate*`）：源是一块 tile 且在每根向量化轴上
+//          repeat 都是 1，标量由 `GetValue(0)` 读出，读前同步事件——legacy 第三支；
+//        - 标量源（`broadcast.scalar.duplicate*`）：源是裸标量 SSA 值（bridge 对 ASCIR
+//          `Scalar` / `IndexExpr` 的产物），直接当实参，不读值不发事件——legacy 第一支。
+//      两种形态的判据按操作数形态互斥，不靠优先级。
 //   2. 分段一档：其余形态。按向量化轴的分段（`collapseVectorizedAxes`，阶段 2 合轴）
 //      分解，两侧的分解方式不同，因为生成的不是同一个函数：
 //        - mem 侧（`Segmented`）把最内两段交给两轴 API、其余段交给 `scf.for`；多个广播段时
@@ -23,7 +28,10 @@
 //
 // legacy 对应的四条分支在 `codegen/api_call/broadcast/broadcast_api_call.cpp`：
 //
-//   1. `IsBroadcastConstantTensor(x)` → `BroadcastScalar` → `Duplicate(dst, 标量, count)`；
+//   1. `IsBroadcastConstantTensor(x)` → `BroadcastScalar` → `Duplicate(dst, 标量, count)`，
+//      它自己再按源分三支：`is_constant`（常量名直接进调用，`broadcast_api_call.cpp:249`）、
+//      `is_ub_scalar`（`:252`，AFIR 未建模）、其余（事件 + `GetValue(0)`，`:255`）。
+//      本文件接的是第一支与第三支，第二支仍由能力层拒收、整图回落；
 //   2. `broadcast_num == 0`           → `DataCopy`（调度会把这种节点删掉，见该处注释）；
 //   3. `broadcast_num == 1`           → 三轴 `Broadcast(dst, src, s0,s1,s2, d0,d1,d2, tmp, stride)`；
 //   4. `broadcast_num == 2`           → 四轴形态。
@@ -113,6 +121,22 @@ enum class BroadcastTier {
   Extend,
 };
 
+// 源的形态。两种形态最终发的都是 `Duplicate`，差别只在那个标量从哪来：
+//
+//   Tile   —— 源是一块 tile，且在每根向量化轴上 repeat 都是 1。标量用 `GetValue(0)`
+//             从 tile 里读，读之前要同步事件（legacy `BroadcastScalar` 的第三支，
+//             `codegen/api_call/broadcast/broadcast_api_call.cpp:255`）。
+//   Scalar —— 源就是一个裸标量 SSA 值，bridge 对 ASCIR `Scalar` / `IndexExpr` 节点
+//             「不建 op 只建值」给出的那种。直接当实参用：没有 tile、不读值、不发事件
+//             （legacy 第一支 `in.is_constant`，`broadcast_api_call.cpp:249`）。
+//
+// 分两个 implementation 而不是在一个里面分支，与 elementwise 的 `add.tensor_tensor` /
+// `add.tensor_scalar` 同一个办法：判据按操作数形态互斥，选哪个由 IR 定死，不靠优先级。
+enum class BroadcastSource {
+  Tile,
+  Scalar,
+};
+
 struct BroadcastMapping {
   ApiFamily family = ApiFamily::MemBased;
   BroadcastTier tier = BroadcastTier::Duplicate;
@@ -121,6 +145,7 @@ struct BroadcastMapping {
   // 接到 `Duplicate` 的参数尾巴上，而那两种 dtype 不在 `kDuplicateElementTypes` 里。
   // 这一位存在只是为了让 `checkTmpBuffer` 与调度对得上，两侧的值不同。
   bool needsTmpBuffer = false;
+  BroadcastSource source = BroadcastSource::Tile;
   ascend::ExecutionSpec executionSpec{ascend::ProcessorType::AICore, ascend::AICoreUnit::Vector,
                                       ascend::ExecutionModel::SIMD, ascend::InstructionForm::MemoryBased};
 };
@@ -785,22 +810,37 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
     Value source = partition->inputs(operation)[0];
     auto sourceType = dyn_cast<ascendc::LocalTensorType>(source.getType());
     auto destinationType = dyn_cast<ascendc::LocalTensorType>(partition->destinations(operation)[0].getType());
-    if (!sourceType || !destinationType) {
+    if (!destinationType) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    // 注册的源形态与实际操作数必须对上，两种形态互相挡住：tile 形态收到裸标量会去一个
+    // 不存在的 tile 上读 `GetValue(0)`，标量形态收到 tile 会把整块 tile 当成一个值。
+    const bool scalarSource = !isa<ShapedType>(source.getType());
+    if (scalarSource != (mapping_->source == BroadcastSource::Scalar)) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    // 源是 tile 时必须已经是目标方言的 tile；标量源没有这一问。
+    if (!scalarSource && !sourceType) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
     // 广播不改 dtype——ODS 的 `verifyBroadcastShapeImpl` 已经钉住了，这里只查集合。
-    if (!isSupportedElementType(mapping_->elementTypes, sourceType.getElementType()) ||
-        sourceType.getElementType() != destinationType.getElementType()) {
+    const Type sourceElementType = sourceType ? sourceType.getElementType() : source.getType();
+    if (!isSupportedElementType(mapping_->elementTypes, sourceElementType) ||
+        sourceElementType != destinationType.getElementType()) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
     }
 
     if (mapping_->tier == BroadcastTier::Duplicate) {
-      // 这一档的判据：源在每一根向量化轴上都是 1。
-      if (!isConstantOnVectorizedAxes(firstDescriptor(operation, afir::kOperandDescsAttrName))) {
-        return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
-      }
-      if (!scalarReadEvent(operation, source)) {
-        return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+      // 这两条只对 tile 源成立：标量源没有 descriptor 可读（它在描述子列表里占一格但
+      // 不描述任何事实），也不从 tile 读值、因此没有要同步的事件。
+      if (!scalarSource) {
+        // 这一档的判据：源在每一根向量化轴上都是 1。
+        if (!isConstantOnVectorizedAxes(firstDescriptor(operation, afir::kOperandDescsAttrName))) {
+          return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
+        }
+        if (!scalarReadEvent(operation, source)) {
+          return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+        }
       }
       // 这一档生成的是一次覆盖整块 tile 的填充，长度取 `materializeScheduledLocalSpan`，
       // 而那是首末元素之间的物理跨度（`1 + Σ (actual − 1) × stride`），不是元素个数。
@@ -835,9 +875,15 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
   }
 
-  CapabilitySupport queryScalarInput(Operation *, const ascend::instruction::ScalarInputQuery &,
+  CapabilitySupport queryScalarInput(Operation *, const ascend::instruction::ScalarInputQuery &query,
                                      const ascend::instruction::QueryContext &) const override {
-    return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    // 只有标量源那一档收。广播只有一个输入，所以能答「支持」的查询只有「第 0 个操作数是
+    // 标量」这一种；`allScalar` 在这里说不通——目的地恒是一块 tile。
+    if (mapping_->source != BroadcastSource::Scalar || query.allScalar || query.scalarOperandIndices.size() != 1 ||
+        query.scalarOperandIndices[0] != 0) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    return CapabilitySupport::supported();
   }
 
   CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
@@ -873,6 +919,7 @@ class BroadcastDuplicateConversionPattern final : public OpConversionPattern<afi
     }
     Value source = adaptor.getInput();
     Value destination = adaptor.getDestination();
+    const bool scalarSource = mapping_->source == BroadcastSource::Scalar;
     Value count;
     if (plan->kind == TransferPlanKind::Scheduled) {
       FailureOr<Value> span = materializeScheduledLocalSpan(op, rewriter, *plan);
@@ -882,26 +929,41 @@ class BroadcastDuplicateConversionPattern final : public OpConversionPattern<afi
       count = *span;
       // 本地侧的偏移恒为 0，队列与 TBuf 都是——与 UnaryElementwise.cpp 同一条判据。
       Value zeroOffset = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 0);
-      source = rewriter.create<ascendc::LocalTensorSubIndexOp>(op.getLoc(), source.getType(), source, zeroOffset);
+      // 标量源不取块内下标：它在整条循环里就是同一个值，与 `afir-scalar-binary-api` 那组
+      // 用例里标量不落 `LocalTensorSubIndexOp` 同一个道理。
+      if (!scalarSource) {
+        source = rewriter.create<ascendc::LocalTensorSubIndexOp>(op.getLoc(), source.getType(), source, zeroOffset);
+      }
       destination =
           rewriter.create<ascendc::LocalTensorSubIndexOp>(op.getLoc(), destination.getType(), destination, zeroOffset);
     } else {
       count = rewriter.create<ascendc::LocalTensorGetSizeOp>(op.getLoc(), rewriter.getI32Type(), destination);
     }
 
-    auto sourceType = dyn_cast<ascendc::LocalTensorType>(source.getType());
-    if (!sourceType) {
-      return rewriter.notifyMatchFailure(op, "source is not a target-dialect tile");
-    }
-    auto scalar = materializeScalarRead(op, source, scalarReadEvent(op, op->getOperand(0)), rewriter);
-    if (failed(scalar)) {
-      return rewriter.notifyMatchFailure(op, "cannot synchronize scalar tensor read");
+    Value scalar;
+    Type elementType;
+    if (scalarSource) {
+      // legacy 第一支：标量直接当实参，没有 tile、不读值、也就没有要同步的事件
+      // （`broadcast_api_call.cpp:249`）。
+      scalar = source;
+      elementType = source.getType();
+    } else {
+      auto sourceType = dyn_cast<ascendc::LocalTensorType>(source.getType());
+      if (!sourceType) {
+        return rewriter.notifyMatchFailure(op, "source is not a target-dialect tile");
+      }
+      FailureOr<Value> read = materializeScalarRead(op, source, scalarReadEvent(op, op->getOperand(0)), rewriter);
+      if (failed(read)) {
+        return rewriter.notifyMatchFailure(op, "cannot synchronize scalar tensor read");
+      }
+      scalar = *read;
+      elementType = sourceType.getElementType();
     }
     Operation *targetOp;
-    if (sourceType.getElementType().isUnsignedInteger(kUInt8BitWidth)) {
-      targetOp = rewriter.create<ascendc::DuplicateU8Op>(op.getLoc(), destination, *scalar, count);
+    if (elementType.isUnsignedInteger(kUInt8BitWidth)) {
+      targetOp = rewriter.create<ascendc::DuplicateU8Op>(op.getLoc(), destination, scalar, count);
     } else {
-      targetOp = rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), destination, *scalar, count);
+      targetOp = rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), destination, scalar, count);
     }
     if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
       return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
@@ -1099,7 +1161,7 @@ LogicalResult registerSegmented(ImplementationRegistry &registry, llvm::StringRe
 }
 
 LogicalResult registerDuplicate(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family,
-                                bool needsTmpBuffer) {
+                                bool needsTmpBuffer, BroadcastSource source) {
   if (failed(elementwise::checkFamilyMatchesHeader<ascendc::DuplicateL2Op>(family))) {
     return failure();
   }
@@ -1113,7 +1175,7 @@ LogicalResult registerDuplicate(ImplementationRegistry &registry, llvm::StringRe
   elementwise::recordRegisteredFamily(afir::BroadcastOp::getOperationName(), id, family, elementTypes);
   return registry.registerImplementation<afir::BroadcastOp, BroadcastMapping, BroadcastCapabilityProvider>(
       ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
-      BroadcastMapping{family, BroadcastTier::Duplicate, elementTypes, needsTmpBuffer},
+      BroadcastMapping{family, BroadcastTier::Duplicate, elementTypes, needsTmpBuffer, source},
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const BroadcastMapping> mapping) {
         patterns.add<BroadcastDuplicateConversionPattern>(context.typeConverter, patterns.getContext(), key,
@@ -1128,11 +1190,22 @@ LogicalResult registerBroadcastImplementations(ImplementationRegistry &registry,
   // Native types use AscendC::Duplicate on both sides; mem-based ui8 uses the
   // legacy wrapper. Keep the existing family ids and their tmp-buffer contracts.
   if (failed(registerDuplicate(registry, "broadcast.tensor.duplicate", ApiFamily::MemBased,
-                               /*needsTmpBuffer=*/true))) {
+                               /*needsTmpBuffer=*/true, BroadcastSource::Tile))) {
     return failure();
   }
   if (failed(registerDuplicate(registry, "broadcast.tensor.duplicate_reg_base", ApiFamily::RegBased,
-                               /*needsTmpBuffer=*/false))) {
+                               /*needsTmpBuffer=*/false, BroadcastSource::Tile))) {
+    return failure();
+  }
+  // 标量源两档，对应 legacy `BroadcastScalar` 的 `in.is_constant` 一支。dtype 集合与
+  // tmp buffer 契约与 tile 源逐字相同：legacy 这两支同属一个 `BroadcastApiCall`，调度
+  // 给的东西一样，差别只在那个标量从哪来。
+  if (failed(registerDuplicate(registry, "broadcast.scalar.duplicate", ApiFamily::MemBased,
+                               /*needsTmpBuffer=*/true, BroadcastSource::Scalar))) {
+    return failure();
+  }
+  if (failed(registerDuplicate(registry, "broadcast.scalar.duplicate_reg_base", ApiFamily::RegBased,
+                               /*needsTmpBuffer=*/false, BroadcastSource::Scalar))) {
     return failure();
   }
   // 分段的两档两侧各一个，生成的是两个不同的函数：mem 侧是 `broadcast.h` 的包装，

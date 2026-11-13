@@ -31,11 +31,25 @@ defvar AFIR_BroadcastElementTypes = [I8, UI8, I16, UI16, I32, UI32, UI64, F16, F
 // Keep the logical and buffer forms on the same ODS element-type constraint.
 // TensorOrMemRef permits the two storage forms while preserving the canonical
 // element-type list in TableGen.
+//
+// 源这一位收裸标量，写法与二元 elementwise 的 `scalarOperand` 同一个
+// （`Elementwise.td` 的 `AnyTypeOf<[shaped] # elementTypes>`）：legacy 的
+// `BroadcastScalar` 第一支 `in.is_constant` 把常量名直接拼进 `Duplicate(dst, 标量,
+// count)`，源侧压根没有 tile（`codegen/api_call/broadcast/broadcast_api_call.cpp:249`）。
+// bridge 对 ASCIR `Scalar` / `IndexExpr` 节点也正是「不建 op 只建值」，给出的是裸标量。
+// 目的地与结果两位不动——它们恒是 tile。
+//
+// 放开的只是「表达得出」。哪些标量源真能生成由能力层按 implementation 判（标量源只有
+// `Duplicate` 一档收，分段两档需要源的几何，判据互斥），拒收因此落在能力层、整图干净
+// 回落 legacy，而不是在 verifier 上变成硬失败。
+// logical（tensor）形态不受影响：`BroadcastOp::verify()` 的非 buffer 分支要求输入输出
+// 都是 `TensorType`，裸标量在那里照旧被挡。
 def AFIR_BroadcastOp : AFIR_BufferizableUnaryOpBase<"broadcast",
     [AFIRBroadcastInterface, AFIRDestinationStyleInterface,
      DeclareOpInterfaceMethods<AFIRBroadcastInterface>,
      DeclareOpInterfaceMethods<AFIRDestinationStyleInterface>],
-    1, AFIR_BufferizableShapedType<AFIR_BroadcastElementTypes>>,
+    1, AnyTypeOf<[AFIR_BufferizableShapedType<AFIR_BroadcastElementTypes>] # AFIR_BroadcastElementTypes>,
+    AFIR_BufferizableShapedType<AFIR_BroadcastElementTypes>>,
     AFIR_OdsElementTypes<AFIR_BroadcastElementTypes> {
   let extraClassDeclaration = baseMethodDecl # odsElementTypesDecl;
 }

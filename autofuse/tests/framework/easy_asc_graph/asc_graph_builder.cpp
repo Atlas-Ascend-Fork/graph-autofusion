@@ -315,6 +315,20 @@ AscGraphBuilder &AscGraphBuilder::Broadcast(const std::string &name, const std::
   return BroadcastImpl(name, input, shape);
 }
 
+AscGraphBuilder &AscGraphBuilder::BroadcastFromScalar(const std::string &name, const std::string &input) {
+  auto &input_tensor = GetInputOutputTensor(input);
+
+  ascir_op::Broadcast brc_op(name.c_str());
+  brc_op.attr.sched.axis = impl_->axis_ids_;
+  // 轴取图的循环轴，不跟源：标量源的输出视图是空的。
+  *brc_op.y.axis = impl_->axis_ids_;
+  brc_op.y.dtype = input_tensor.attr.dtype;
+  *brc_op.y.repeats = impl_->loop_repeats_;
+
+  CreateNodeAndConnect(name, brc_op, input);
+  return *this;
+}
+
 AscGraphBuilder &AscGraphBuilder::Transpose(const std::string &name, const std::string &input,
                                             const std::vector<int64_t> &axes) {
   auto &input_tensor = GetInputOutputTensor(input);
