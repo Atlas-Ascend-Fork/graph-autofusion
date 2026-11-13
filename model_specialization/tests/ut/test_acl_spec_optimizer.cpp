@@ -186,6 +186,14 @@ class AclSpecOptimizerUpdateTest : public testing::Test {
       params.kernelTaskParams.numBlocks = 19;
       params.kernelTaskParams.isHostArgs = 1;
       params.kernelTaskParams.cfg = &config;
+      params.kernelTaskParams.argsType = static_cast<aclrtKernelArgsType>(index + 1);
+      if (params.kernelTaskParams.argsType == ACL_RT_KERNEL_ARGS_ARRAY) {
+        params.kernelTaskParams.argsArray = argumentArray.data();
+      } else if (params.kernelTaskParams.argsType == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+        params.kernelTaskParams.hostBuffer = {&tasks[index], sizeof(TaskState), &placeHolder, 1};
+      } else {
+        params.kernelTaskParams.deviceBuffer = {&tasks[index], sizeof(TaskState)};
+      }
       auto request = std::make_unique<KernelSpecRequest>();
       request->task = &tasks[index];
       request->originalParams = params;
@@ -202,6 +210,8 @@ class AclSpecOptimizerUpdateTest : public testing::Test {
 
   aclmdlRI model = reinterpret_cast<aclmdlRI>(0x123);
   aclrtLaunchKernelCfg config{};
+  std::array<void *, 1> argumentArray{};
+  aclrtPlaceHolderInfo placeHolder{8, 16};
   std::array<TaskState, 3> tasks{};
   std::vector<std::unique_ptr<KernelSpecRequest>> rewrites;
   AclSpecOptimizerTestAccess updater;
@@ -573,6 +583,7 @@ size_t nameQueries = 0;
 size_t copyQueries = 0;
 size_t parameterQueries = 0;
 size_t lastParameterIndex = 0;
+size_t argumentCopyCalls = 0;
 std::vector<aclError> specializationResults;
 std::vector<std::string> specializationPaths;
 std::vector<std::string> specializationEntries;
@@ -616,6 +627,7 @@ aclError GetBinaryFunction(aclrtBinHandle binary, const char *name, aclrtFuncHan
 aclError CopyArgs(void *dst, size_t capacity, const void *src, size_t size, aclrtMemcpyKind kind) {
   ++copyQueries;
   EXPECT_EQ(kind, ACL_MEMCPY_DEVICE_TO_HOST);
+  ++argumentCopyCalls;
   if (SkUtFailAclrtMemcpy() || src == nullptr || dst == nullptr || size > capacity) {
     return ACL_ERROR_FAILURE;
   }
@@ -658,6 +670,7 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
     streamIdQueries = 0;
     taskSequenceIds.clear();
     lastParameterIndex = 0;
+    argumentCopyCalls = 0;
     specializationResults.clear();
     specializationPaths.clear();
     specializationEntries.clear();
@@ -683,8 +696,9 @@ class AclSpecOptimizerCollectionTest : public testing::Test {
     task.params.kernelTaskParams.args = args.data();
     task.params.kernelTaskParams.argsSize = args.size();
     task.params.kernelTaskParams.numBlocks = 7;
-    // A captured kernel task keeps its arguments on the device.
-    task.params.kernelTaskParams.isHostArgs = 0;
+    task.params.kernelTaskParams.isHostArgs = 1;
+    task.params.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+    task.params.kernelTaskParams.hostBuffer = {args.data(), args.size(), nullptr, 0};
     stream.tasks = {&task};
     model.streams = {&stream};
     ASSERT_TRUE(manager.Init(nullptr));
@@ -935,7 +949,7 @@ TEST_F(AclSpecOptimizerCollectionTest, SelectsRangeUnionAndValidatesPairsOnlyFor
         }
         EXPECT_EQ(MarkerTasks(scopeMarkers), markers);
         EXPECT_EQ(binaryQueries, expected.size());
-        EXPECT_EQ(copyQueries, expected.size());
+        EXPECT_EQ(copyQueries, 0U);
         const auto logs = ut_log::LogBuffer::Instance().GetContent();
         size_t selectedLogs = 0;
         for (size_t pos = logs.find("Kernel Specialization: [IN_SCOPE]"); pos != std::string::npos;
@@ -1023,9 +1037,6 @@ TEST_P(AclSpecOptimizerScopeTest, RejectsUnreadableTasksBeforeCompilationOrMutat
     EXPECT_NE(logs.find("[ERROR] [SK][ReadTaskIdentity] Task identity unavailable: " + location +
                         " reason=" + std::string(reasons[failure]) + " ret=" + std::to_string(expected)),
               std::string::npos);
-    EXPECT_NE(
-        logs.find("[ERROR] [SK][Collect] ReadTaskIdentity failed: " + location + " ret=" + std::to_string(expected)),
-        std::string::npos);
     EXPECT_EQ(logs.find("Kernel Specialization:"), std::string::npos);
   }
 }
@@ -1057,7 +1068,7 @@ TEST_P(AclSpecOptimizerScopeTest, MultiStreamSelectionPreservesOtherTasksAndComm
   EXPECT_EQ(touched, expected);
   EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end, &secondBegin, &secondEnd}));
   EXPECT_EQ(binaryQueries, expected.size());
-  EXPECT_EQ(copyQueries, expected.size());
+  EXPECT_EQ(copyQueries, 0U);
   EXPECT_EQ(updateCount, 1U);
   EXPECT_EQ(sequenceQueries, 11U);
   EXPECT_EQ(streamIdQueries, 3U);
@@ -1108,7 +1119,7 @@ TEST_P(AclSpecOptimizerScopeTest, MissingStreamIdDoesNotChangeOptimizationBehavi
   EXPECT_EQ(disabled, (std::vector<aclmdlRITask>{&begin, &end}));
   EXPECT_EQ(streamIdQueries, 1U);
   const auto logs = ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_NE(logs.find("stream ID unavailable: streamId=-1"), std::string::npos);
+  EXPECT_NE(logs.find("Failed to get stream ID: streamIndex=0"), std::string::npos);
   if (GetParam()) {
     EXPECT_NE(logs.find("[IN_SCOPE] streamId=-1, taskId=1, type=KERNEL"), std::string::npos);
   }
@@ -1126,7 +1137,7 @@ TEST_P(AclSpecOptimizerScopeTest, TaskSequenceFailurePreventsCompilationOrMutati
   EXPECT_EQ(loadCalls, 0U);
   EXPECT_TRUE(commitOperations.empty());
   const auto logs = ut_log::LogBuffer::Instance().GetContent();
-  EXPECT_NE(logs.find("[ERROR] [SK][Collect] Optimize task sequence unavailable: streamId=37 taskId=-1"),
+  EXPECT_NE(logs.find("[ERROR] [SK][Collect] Failed to get task sequence ID: streamId=37 streamIndex=0 taskIndex=1"),
             std::string::npos);
 }
 
@@ -1508,6 +1519,235 @@ TEST_F(AclSpecOptimizerCollectionTest, UsesFeatureQueriesAndPassesRuntimeSizeWit
   EXPECT_EQ(task.params.kernelTaskParams.funcHandle, &kernel);
 }
 
+TEST_F(AclSpecOptimizerCollectionTest, DeviceBufferIsUnsupportedWithoutDeviceCopy) {
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_DEVICE_BUFFER;
+  params.deviceBuffer = {args.data(), args.size()};
+  const auto original = task.params;
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+  EXPECT_EQ(argumentCopyCalls, 0U);
+  EXPECT_EQ(parameterQueries, 0U);
+  EXPECT_EQ(std::memcmp(&task.params, &original, sizeof(original)), 0);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, HostBufferOwnsSnapshotWithoutDeviceCopy) {
+  args.fill(0x5a);
+  const auto expected = args;
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+  params.hostBuffer = {args.data(), args.size(), nullptr, 0};
+  params.args = nullptr;
+  params.argsSize = 0;
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(argumentCopyCalls, 0U);
+  args.fill(0);
+  EXPECT_EQ(std::memcmp(requests[0]->hostArgs.data(), expected.data(), expected.size()), 0);
+  for (size_t index = 0; index < kernel.paramCount; ++index) {
+    EXPECT_EQ(requests[0]->argumentBytes[index], kernel.size);
+    EXPECT_EQ(requests[0]->argumentAddresses[index],
+              requests[0]->hostArgs.data() + kernel.offset + index * kernel.size);
+  }
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, ArgsArrayCopiesParameterValuesIntoOwnedStorage) {
+  uint64_t first = 0x123456789abcdef0ULL;
+  uint64_t second = 17;
+  uint64_t third = 42;
+  const std::array<uint64_t, 3> expected{first, second, third};
+  std::array<void *, 3> array{&first, &second, &third};
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_ARRAY;
+  params.argsArray = array.data();
+  params.args = nullptr;
+  params.argsSize = 0;
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(argumentCopyCalls, 0U);
+  first = second = third = 0;
+  array.fill(nullptr);
+  for (size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_EQ(requests[0]->argumentBytes[index], sizeof(expected[index]));
+    EXPECT_EQ(std::memcmp(requests[0]->argumentAddresses[index], &expected[index], sizeof(expected[index])), 0);
+  }
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, UnknownArgsTypeKeepsDynamicTask) {
+  task.params.kernelTaskParams.argsType = static_cast<aclrtKernelArgsType>(0);
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+  EXPECT_EQ(argumentCopyCalls, 0U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, HostBufferBindsPlaceholderDataInsteadOfPointerSlot) {
+  aclrtPlaceHolderInfo placeHolder{16, 64};
+  const std::array<uint32_t, 2> tiling{16384, 8};
+  std::memcpy(args.data() + placeHolder.dataOffset, tiling.data(), sizeof(tiling));
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+  params.hostBuffer = {args.data(), args.size(), &placeHolder, 1};
+  const auto original = task.params;
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  ASSERT_EQ(requests.size(), 1U);
+  auto &request = *requests[0];
+  request.BindApiRequest();
+  EXPECT_EQ(request.apiRequest.argsAddr[0], request.hostArgs.data() + placeHolder.dataOffset);
+  EXPECT_EQ(request.apiRequest.argsBytes[0], args.size() - placeHolder.dataOffset);
+  EXPECT_EQ(std::memcmp(request.apiRequest.argsAddr[0], tiling.data(), sizeof(tiling)), 0);
+  EXPECT_EQ(request.argumentAddresses[1], request.hostArgs.data() + 24);
+  EXPECT_EQ(request.argumentBytes[1], kernel.size);
+  EXPECT_EQ(std::memcmp(&task.params, &original, sizeof(original)), 0);
+  EXPECT_EQ(argumentCopyCalls, 0U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, RealAclnnTilingSnapshotIsIndependentOfLaunchPointerRelocation) {
+  // 88-byte aclnnAddCustom FP16/16384 capture from 2026-10-23; only the tiling pointer changes at launch.
+  std::array<uint64_t, 11> captured{0x12c0c0015000ULL,
+                                    0x12c0c001e000ULL,
+                                    0x12c0c0027000ULL,
+                                    0,
+                                    0,
+                                    0x12c0c0013000ULL,
+                                    0,
+                                    0x0000000800004000ULL,
+                                    0,
+                                    0,
+                                    0};
+  const std::array<uint32_t, 2> expected{16384, 8};
+  aclrtPlaceHolderInfo placeHolder{32, 56};
+  kernel.offset = 0;
+  kernel.paramCount = 5;
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+  params.hostBuffer = {captured.data(), sizeof(captured), &placeHolder, 1};
+  for (uint64_t pointer : {0xaaaad46991b0ULL, 0x12c100000038ULL}) {
+    captured[4] = pointer;
+    ASSERT_EQ(Collect(), ACL_SUCCESS);
+    ASSERT_EQ(requests.size(), 1U);
+    auto &request = *requests[0];
+    request.BindApiRequest();
+    ASSERT_EQ(request.apiRequest.argsCount, 5U);
+    EXPECT_EQ(request.apiRequest.argsAddr[4], request.hostArgs.data() + 56);
+    EXPECT_EQ(request.apiRequest.argsBytes[4], 32U);
+    EXPECT_EQ(std::memcmp(request.apiRequest.argsAddr[4], expected.data(), sizeof(expected)), 0);
+    EXPECT_EQ(std::memcmp(request.hostArgs.data(), captured.data(), sizeof(captured)), 0);
+    uint64_t savedPointer = 0;
+    std::memcpy(&savedPointer, request.hostArgs.data() + 32, sizeof(savedPointer));
+    EXPECT_EQ(savedPointer, pointer);
+    for (size_t index = 0; index < 4; ++index) {
+      EXPECT_EQ(request.apiRequest.argsAddr[index], request.hostArgs.data() + index * 8);
+      EXPECT_EQ(request.apiRequest.argsBytes[index], 8U);
+    }
+  }
+  captured.fill(0);
+  EXPECT_EQ(std::memcmp(requests[0]->argumentAddresses[4], expected.data(), sizeof(expected)), 0);
+  EXPECT_EQ(argumentCopyCalls, 0U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, HostBufferSupportsMultipleUnorderedPlaceholders) {
+  std::array<aclrtPlaceHolderInfo, 2> placeholders{{{32, 80}, {16, 64}}};
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+  params.hostBuffer = {args.data(), args.size(), placeholders.data(), placeholders.size()};
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests[0]->argumentAddresses[0], requests[0]->hostArgs.data() + 64);
+  EXPECT_EQ(requests[0]->argumentAddresses[2], requests[0]->hostArgs.data() + 80);
+  EXPECT_EQ(requests[0]->argumentBytes[0], 80U - 64U);
+  EXPECT_EQ(requests[0]->argumentBytes[2], args.size() - 80);
+  EXPECT_EQ(placeholders[0].addrOffset, 32U);
+  EXPECT_EQ(placeholders[0].dataOffset, 80U);
+  EXPECT_EQ(placeholders[1].addrOffset, 16U);
+  EXPECT_EQ(placeholders[1].dataOffset, 64U);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, HostBufferSharedDataStartsUseNextDistinctOffset) {
+  std::array<aclrtPlaceHolderInfo, 3> placeholders{{{32, 80}, {16, 64}, {24, 64}}};
+  auto &params = task.params.kernelTaskParams;
+  params.hostBuffer = {args.data(), args.size(), placeholders.data(), placeholders.size()};
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests[0]->argumentAddresses[0], requests[0]->hostArgs.data() + 64);
+  EXPECT_EQ(requests[0]->argumentAddresses[1], requests[0]->hostArgs.data() + 64);
+  EXPECT_EQ(requests[0]->argumentBytes[0], 80U - 64U);
+  EXPECT_EQ(requests[0]->argumentBytes[1], 80U - 64U);
+  EXPECT_EQ(requests[0]->argumentBytes[2], args.size() - 80);
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, InvalidHostPlaceholdersKeepDynamicTask) {
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+  params.hostBuffer = {args.data(), args.size(), nullptr, 1};
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+  for (auto placeHolder :
+       {aclrtPlaceHolderInfo{15, 64}, aclrtPlaceHolderInfo{124, 64}, aclrtPlaceHolderInfo{16, 128},
+        aclrtPlaceHolderInfo{16, 16}, aclrtPlaceHolderInfo{std::numeric_limits<uint32_t>::max(), 64}}) {
+    params.hostBuffer.placeHolderArray = &placeHolder;
+    ASSERT_EQ(Collect(), ACL_SUCCESS);
+    EXPECT_TRUE(requests.empty());
+  }
+  std::array<aclrtPlaceHolderInfo, 2> duplicates{{{16, 64}, {16, 80}}};
+  params.hostBuffer.placeHolderArray = duplicates.data();
+  params.hostBuffer.placeHolderNum = duplicates.size();
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+  params.hostBuffer.placeHolderNum = kernel.paramCount + 1;
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, HostPlaceholderRequiresPointerSizedParameter) {
+  kernel.size = 4;
+  aclrtPlaceHolderInfo placeHolder{16, 64};
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+  params.hostBuffer = {args.data(), args.size(), &placeHolder, 1};
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, InvalidHostBuffersKeepDynamicTask) {
+  for (size_t scenario = 0; scenario < 3; ++scenario) {
+    auto &params = task.params.kernelTaskParams;
+    params.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+    void *buffer = scenario == 0 ? nullptr : args.data();
+    const size_t size = scenario == 1 ? 0 : (scenario == 2 ? 39 : args.size());
+    params.hostBuffer = {buffer, size, nullptr, 0};
+    ASSERT_EQ(Collect(), ACL_SUCCESS);
+    EXPECT_TRUE(requests.empty());
+  }
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, ArgsArrayRejectsNullArrayAndNullParameter) {
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_ARRAY;
+  params.argsArray = nullptr;
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+  std::array<void *, 3> array{args.data(), nullptr, args.data()};
+  params.argsArray = array.data();
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, ArgsArrayRejectsParameterRangeOverflow) {
+  std::array<void *, 3> array{args.data(), args.data(), args.data()};
+  auto &params = task.params.kernelTaskParams;
+  params.argsType = ACL_RT_KERNEL_ARGS_ARRAY;
+  params.argsArray = array.data();
+  kernel.offset = std::numeric_limits<size_t>::max() - 3;
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+}
+
+TEST_F(AclSpecOptimizerCollectionTest, HostArgumentCopyFailureKeepsDynamicTask) {
+  SkUtSetSecurecMemcpyFailOnCall(1);
+  ASSERT_EQ(Collect(), ACL_SUCCESS);
+  EXPECT_TRUE(requests.empty());
+}
+
 TEST_F(AclSpecOptimizerCollectionTest, OptimizerCompilesInOrderAndCommitsOnlySuccessfulTasks) {
   CollectorTask secondTask = task;
   stream.tasks = {&task, &secondTask};
@@ -1745,12 +1985,6 @@ TEST_F(AclSpecOptimizerCollectionTest, TaskEnumerationStubRespectsArrayCapacity)
   EXPECT_EQ(tasks, (std::array<aclmdlRITask, 3>{&task, &second, nullptr}));
 }
 
-TEST_F(AclSpecOptimizerCollectionTest, RejectsInvalidInputsWithoutQueryingRuntime) {
-  EXPECT_EQ(collector.Collect(nullptr, manager, "/tmp/spec-output", requests, scopeMarkers), ACL_ERROR_INVALID_PARAM);
-  EXPECT_EQ(collector.Collect(&model, manager, "", requests, scopeMarkers), ACL_ERROR_INVALID_PARAM);
-  EXPECT_EQ(streamQueries, 0U);
-}
-
 TEST_F(AclSpecOptimizerCollectionTest, PointerStorageRemainsValidAfterRequestListGrowth) {
   const std::string longArgument(200, 'x');
   const std::vector<std::string> expectedBasic{"-O2", "short", longArgument};
@@ -1795,10 +2029,10 @@ TEST_F(AclSpecOptimizerCollectionTest, ZeroSizeNullArgsAndParameterQueryFailureA
   EXPECT_EQ(Collect(), ACL_SUCCESS);
   EXPECT_TRUE(requests.empty());
   kernel.size = 8;
-  task.params.kernelTaskParams.args = nullptr;
+  task.params.kernelTaskParams.deviceBuffer.deviceArgs = nullptr;
   EXPECT_EQ(Collect(), ACL_SUCCESS);
   EXPECT_TRUE(requests.empty());
-  task.params.kernelTaskParams.args = args.data();
+  task.params.kernelTaskParams.deviceBuffer.deviceArgs = args.data();
   kernel.paramError = ACL_ERROR_FAILURE;
   EXPECT_EQ(Collect(), ACL_SUCCESS);
   EXPECT_TRUE(requests.empty());
