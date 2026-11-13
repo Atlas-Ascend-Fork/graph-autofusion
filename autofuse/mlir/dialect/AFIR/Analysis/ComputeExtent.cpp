@@ -77,8 +77,9 @@ FailureOr<int64_t> getLiteralStride(ExprAttr expression) {
   if (!expression) {
     return failure();
   }
+  constexpr unsigned kDecimalRadix = 10;
   int64_t value = 0;
-  if (expression.getValue().getValue().trim().getAsInteger(10, value)) {
+  if (expression.getValue().getValue().trim().getAsInteger(kDecimalRadix, value)) {
     return failure();
   }
   return value;
@@ -203,8 +204,8 @@ FailureOr<Value> materializeActualSegmentExtent(Operation *op, OpBuilder &builde
   return result;
 }
 
-FailureOr<SmallVector<ScheduledAxisExtent, 4>> materializeScheduledAxisExtents(Operation *op, OpBuilder &builder,
-                                                                               ArrayRef<int64_t> axes) {
+FailureOr<SmallVector<ScheduledAxisExtent>> materializeScheduledAxisExtents(Operation *op, OpBuilder &builder,
+                                                                            ArrayRef<int64_t> axes) {
   if (axes.empty()) {
     return failure();
   }
@@ -221,7 +222,7 @@ FailureOr<SmallVector<ScheduledAxisExtent, 4>> materializeScheduledAxisExtents(O
   for (AxisAttr axis : graph.getAxes()) {
     axesById.try_emplace(axis.getId(), axis);
   }
-  SmallVector<ExprAttr, 4> requested;
+  SmallVector<ExprAttr> requested;
   requested.reserve(axes.size());
   for (int64_t axisId : axes) {
     auto found = axesById.find(axisId);
@@ -236,7 +237,7 @@ FailureOr<SmallVector<ScheduledAxisExtent, 4>> materializeScheduledAxisExtents(O
   if (failed(actualBindings)) {
     return failure();
   }
-  SmallVector<ScheduledAxisExtent, 4> values;
+  SmallVector<ScheduledAxisExtent> values;
   values.reserve(requested.size());
   for (ExprAttr extent : requested) {
     FailureOr<Value> nominal = materializeExpression(builder, op->getLoc(), extent, nominalBindings);

@@ -12,6 +12,75 @@
 
 using namespace mlir;
 
+namespace {
+
+void bindParameterNames(CodeEmitter& codeEmitter, func::FuncOp functionOp)
+{
+    // Explicit parameter names are part of the external compilation protocol.
+    for (BlockArgument arg : functionOp.getArguments()) {
+        if (auto name = functionOp.getArgAttrOfType<StringAttr>(arg.getArgNumber(), "ascendc.parameter_name")) {
+            codeEmitter.bindParameterName(arg, name.getValue());
+        }
+    }
+}
+
+LogicalResult emitFunctionSignature(CodeEmitter& codeEmitter, func::FuncOp functionOp)
+{
+    raw_ostream& os = codeEmitter.ostream();
+    bool isMainFunction = functionOp->hasAttr(ascendc::attr::global);
+    auto args = functionOp.getArguments();
+
+    os << (isMainFunction ? "extern \"C\"  __global__ " : "__inline__ __attribute__((always_inline)) ");
+    os << "__aicore__ ";
+    FAIL_OR(codeEmitter.emitTypes(functionOp.getLoc(), functionOp.getResultTypes()));
+    os << " " << functionOp.getName() << "(";
+    FAIL_OR(interleaveCommaWithError(args, os, [&](BlockArgument arg) {
+        if (failed(codeEmitter.emitType(functionOp.getLoc(), arg.getType()))) {
+            return failure();
+        }
+        os << " " << codeEmitter.getOrCreateName(arg);
+        return success();
+    }));
+    os << ") {\n";
+    return success();
+}
+
+LogicalResult emitBlockDeclarations(CodeEmitter& codeEmitter, func::FuncOp functionOp)
+{
+    raw_ostream& os = codeEmitter.ostream();
+    Region::BlockListType& blocks = functionOp.getBlocks();
+    for (Block& block : llvm::drop_begin(blocks)) {
+        for (BlockArgument& arg : block.getArguments()) {
+            if (codeEmitter.hasValueInScope(arg)) {
+                return functionOp.emitOpError(" block argument #") << arg.getArgNumber() << " is out of scope";
+            }
+            if (failed(codeEmitter.emitType(block.getParentOp()->getLoc(), arg.getType()))) {
+                return failure();
+            }
+            os << " " << codeEmitter.getOrCreateName(arg) << ";\n";
+        }
+    }
+    return success();
+}
+
+LogicalResult emitFunctionBody(CodeEmitter& codeEmitter, func::FuncOp functionOp)
+{
+    Region::BlockListType& blocks = functionOp.getBlocks();
+    for (Block& block : blocks) {
+        if (!block.hasNoPredecessors() && failed(codeEmitter.emitLabel(block))) {
+            return failure();
+        }
+        for (Operation& op : block.getOperations()) {
+            if (failed(emitOperation(codeEmitter, op, needsSemicolon(op)))) {
+                return failure();
+            }
+        }
+    }
+    return success();
+}
+
+} // namespace
+
 LogicalResult mlir::printOperation(CodeEmitter& codeEmitter, func::ConstantOp constantOp)
 {
     Operation* operation = constantOp.getOperation();
@@ -60,27 +129,8 @@ LogicalResult mlir::printOperation(CodeEmitter& codeEmitter, func::FuncOp functi
     CodeEmitter::Scope scope(codeEmitter);
     auto& os = codeEmitter.ostream();
 
-    bool isMainFunction = functionOp->hasAttr(ascendc::attr::global);
-    auto args = functionOp.getArguments();
-    // Explicit parameter names are part of the external compilation protocol.
-    for (BlockArgument arg : args) {
-        if (auto name = functionOp.getArgAttrOfType<StringAttr>(arg.getArgNumber(), "ascendc.parameter_name")) {
-            codeEmitter.bindParameterName(arg, name.getValue());
-        }
-    }
-
-    os << (isMainFunction ? "extern \"C\"  __global__ " : "__inline__ __attribute__((always_inline)) ");
-    os << "__aicore__ ";
-    FAIL_OR(codeEmitter.emitTypes(functionOp.getLoc(), functionOp.getResultTypes()));
-    os << " " << functionOp.getName() << "(";
-    FAIL_OR(interleaveCommaWithError(args, os, [&](BlockArgument arg) {
-        if (failed(codeEmitter.emitType(functionOp.getLoc(), arg.getType()))) {
-            return failure();
-        }
-        os << " " << codeEmitter.getOrCreateName(arg);
-        return success();
-    }));
-    os << ") {\n";
+    bindParameterNames(codeEmitter, functionOp);
+    FAIL_OR(emitFunctionSignature(codeEmitter, functionOp));
     os.indent();
 
     Region::BlockListType& blocks = functionOp.getBlocks();
@@ -89,30 +139,8 @@ LogicalResult mlir::printOperation(CodeEmitter& codeEmitter, func::FuncOp functi
         codeEmitter.getOrCreateName(block);
     }
 
-    // Declare variables for basic block arguments.
-    for (Block& block : llvm::drop_begin(blocks)) {
-        for (BlockArgument& arg : block.getArguments()) {
-            if (codeEmitter.hasValueInScope(arg)) {
-                return functionOp.emitOpError(" block argument #") << arg.getArgNumber() << " is out of scope";
-            }
-            if (failed(codeEmitter.emitType(block.getParentOp()->getLoc(), arg.getType()))) {
-                return failure();
-            }
-            os << " " << codeEmitter.getOrCreateName(arg) << ";\n";
-        }
-    }
-
-    for (Block& block : blocks) {
-        // Only print a label if the block has predecessors.
-        if (!block.hasNoPredecessors() && failed(codeEmitter.emitLabel(block))) {
-            return failure();
-        }
-        for (Operation& op : block.getOperations()) {
-            if (failed(emitOperation(codeEmitter, op, needsSemicolon(op)))) {
-                return failure();
-            }
-        }
-    }
+    FAIL_OR(emitBlockDeclarations(codeEmitter, functionOp));
+    FAIL_OR(emitFunctionBody(codeEmitter, functionOp));
 
     os.unindent() << "}";
 

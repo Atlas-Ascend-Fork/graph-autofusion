@@ -198,7 +198,7 @@ FailureOr<Value> materializeAxisExtent(Operation *op, OpBuilder &builder, Tensor
   auto func = op->getParentOfType<func::FuncOp>();
   if (func && func->hasAttr(kAscGraphAttrName)) {
     auto extents = materializeScheduledAxisExtents(op, builder, {axisId});
-    if (failed(extents)) {
+    if (failed(extents) || extents->empty() || !(*extents)[0].actual) {
       return failure();
     }
     return (*extents)[0].actual;

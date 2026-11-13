@@ -91,6 +91,59 @@ FailureOr<FilteredBrcAxisRepeats> filterBroadcastAxisRepeats(MLIRContext *contex
   return result;
 }
 
+SmallVector<size_t> partitionBroadcastAxes(const FilteredBrcAxisRepeats &filtered) {
+  SmallVector<size_t> partition = {0};
+  bool previousIsSame = ProveExpressionsEqual(filtered.repeatsNoOne0[0].getValue().getValue(),
+                                              filtered.repeatsNoOne1[0].getValue().getValue());
+  for (size_t i = 1; i < filtered.repeatsNoOne0.size(); ++i) {
+    const bool currentIsSame = ProveExpressionsEqual(filtered.repeatsNoOne0[i].getValue().getValue(),
+                                                     filtered.repeatsNoOne1[i].getValue().getValue());
+    const bool canMerge0 = (filtered.isAxisBrc0[i - 1] == filtered.isAxisBrc0[i]);
+    const bool canMerge1 = (filtered.isAxisBrc1[i - 1] == filtered.isAxisBrc1[i]);
+    if (previousIsSame != currentIsSame || !canMerge0 || !canMerge1) {
+      partition.push_back(i);
+      previousIsSame = currentIsSame;
+    }
+  }
+  return partition;
+}
+
+FailureOr<std::pair<SmallVector<ExprAttr>, SmallVector<ExprAttr>>> mergeBroadcastPartitions(
+    MLIRContext *context, const FilteredBrcAxisRepeats &filtered, ArrayRef<size_t> partition, ExprAttr one) {
+  SmallVector<ExprAttr> merged0(partition.size());
+  SmallVector<ExprAttr> merged1(partition.size());
+  size_t start = 0;
+  for (size_t i = 1; i < partition.size(); ++i) {
+    const size_t end = partition[i];
+    ExprAttr acc0 = one;
+    ExprAttr acc1 = one;
+    for (size_t j = start; j < end; ++j) {
+      FailureOr<ExprAttr> next0 = multiplyExpressionsHere(context, acc0, filtered.repeatsNoOne0[j]);
+      FailureOr<ExprAttr> next1 = multiplyExpressionsHere(context, acc1, filtered.repeatsNoOne1[j]);
+      if (failed(next0) || failed(next1)) {
+        return failure();
+      }
+      acc0 = *next0;
+      acc1 = *next1;
+    }
+    merged0[i - 1] = acc0;
+    merged1[i - 1] = acc1;
+    start = end;
+  }
+  if (start < filtered.stridesNoOne0.size()) {
+    FailureOr<ExprAttr> last0 =
+        multiplyExpressionsHere(context, filtered.repeatsNoOne0[start], filtered.stridesNoOne0[start]);
+    FailureOr<ExprAttr> last1 =
+        multiplyExpressionsHere(context, filtered.repeatsNoOne1[start], filtered.stridesNoOne1[start]);
+    if (failed(last0) || failed(last1)) {
+      return failure();
+    }
+    merged0.back() = *last0;
+    merged1.back() = *last1;
+  }
+  return std::make_pair(merged0, merged1);
+}
+
 // 合并连续的广播轴和非广播轴，与 legacy `MergeBrcAxisRepeats`
 // （`common/common_utils.cpp:789`）逐步对齐，包括它的一个怪癖：合并后的「最后一组」不是
 // 整组 repeat 的累乘，只取该组**第一个**位置的 `repeat * stride`——legacy 的 for 循环只
@@ -107,59 +160,15 @@ FailureOr<std::pair<SmallVector<ExprAttr>, SmallVector<ExprAttr>>> mergeBrcAxisR
   if (failed(filtered)) {
     return failure();
   }
-  const auto &[repeatsNoOne0, repeatsNoOne1, stridesNoOne0, stridesNoOne1, isAxisBrc0, isAxisBrc1] = *filtered;
-
   SmallVector<ExprAttr> merged0, merged1;
-  if (repeatsNoOne0.empty()) {
+  if (filtered->repeatsNoOne0.empty()) {
     merged0.push_back(*one);
     merged1.push_back(*one);
     return std::make_pair(merged0, merged1);
   }
 
-  bool previousIsSame =
-      ProveExpressionsEqual(repeatsNoOne0[0].getValue().getValue(), repeatsNoOne1[0].getValue().getValue());
-  SmallVector<size_t> partition = {0};
-  for (size_t i = 1; i < repeatsNoOne0.size(); ++i) {
-    const bool currentIsSame =
-        ProveExpressionsEqual(repeatsNoOne0[i].getValue().getValue(), repeatsNoOne1[i].getValue().getValue());
-    const bool canMerge0 = (isAxisBrc0[i - 1] == isAxisBrc0[i]);
-    const bool canMerge1 = (isAxisBrc1[i - 1] == isAxisBrc1[i]);
-    if (previousIsSame != currentIsSame || !canMerge0 || !canMerge1) {
-      partition.push_back(i);
-      previousIsSame = currentIsSame;
-    }
-  }
-  merged0.resize(partition.size());
-  merged1.resize(partition.size());
-
-  size_t start = 0;
-  for (size_t i = 1; i < partition.size(); ++i) {
-    const size_t end = partition[i];
-    ExprAttr acc0 = *one;
-    ExprAttr acc1 = *one;
-    for (size_t j = start; j < end; ++j) {
-      FailureOr<ExprAttr> next0 = multiplyExpressionsHere(context, acc0, repeatsNoOne0[j]);
-      FailureOr<ExprAttr> next1 = multiplyExpressionsHere(context, acc1, repeatsNoOne1[j]);
-      if (failed(next0) || failed(next1)) {
-        return failure();
-      }
-      acc0 = *next0;
-      acc1 = *next1;
-    }
-    merged0[i - 1] = acc0;
-    merged1[i - 1] = acc1;
-    start = end;
-  }
-  if (start < stridesNoOne0.size()) {
-    FailureOr<ExprAttr> last0 = multiplyExpressionsHere(context, repeatsNoOne0[start], stridesNoOne0[start]);
-    FailureOr<ExprAttr> last1 = multiplyExpressionsHere(context, repeatsNoOne1[start], stridesNoOne1[start]);
-    if (failed(last0) || failed(last1)) {
-      return failure();
-    }
-    merged0.back() = *last0;
-    merged1.back() = *last1;
-  }
-  return std::make_pair(merged0, merged1);
+  SmallVector<size_t> partition = partitionBroadcastAxes(*filtered);
+  return mergeBroadcastPartitions(context, *filtered, partition, *one);
 }
 
 // 取某个 descriptor 在各向量化轴位置上的 repeat，按 `vectorizedAxis` 的顺序排列——
@@ -218,6 +227,46 @@ FailureOr<ExprAttr> computeFirstAxisVStride(MLIRContext *context, ArrayRef<ExprA
   return firstAxisVStride;
 }
 
+std::optional<BroadcastInlineOperands> buildBroadcastInlineOperands(
+    MLIRContext *context, unsigned broadcastIndex, TensorDescAttr broadcastDescriptor, TensorDescAttr otherDescriptor,
+    TensorDescAttr destination, ArrayRef<ExprAttr> broadcastRepeats, ArrayRef<ExprAttr> otherRepeats) {
+  if (otherDescriptor.getVectorizedStrides().size() != otherRepeats.size()) {
+    return std::nullopt;
+  }
+  // `computeFirstAxisVStride` 按位置把 `broadcastRepeats`（广播侧的 `vectorized_axis`
+  // 顺序）与 `destination.getVectorizedStrides()` 配对；只有两者的 `vectorized_axis`
+  // 完全一致（根数和顺序都一致）时这种按位置配对才成立。destination 的 `vectorized_axis`
+  // 是独立属性，调度允许其与广播侧重新排序，不能假设天然对齐。
+  if (destination.getVectorizedAxis() != broadcastDescriptor.getVectorizedAxis()) {
+    return std::nullopt;
+  }
+
+  FailureOr<std::pair<SmallVector<ExprAttr>, SmallVector<ExprAttr>>> merged =
+      mergeBrcAxisRepeats(context, broadcastRepeats, otherRepeats, otherDescriptor.getVectorizedStrides());
+  if (failed(merged)) {
+    return std::nullopt;
+  }
+  const auto &[brcMerged, otherMerged] = *merged;
+  if (brcMerged.size() != kInlineBroadcastMergedAxisCount || otherMerged.size() != kInlineBroadcastMergedAxisCount) {
+    return std::nullopt;
+  }
+  if (!isProvenEqualToLiteral(brcMerged[0], "1") && !isProvenEqualToLiteral(otherMerged[0], "1")) {
+    return std::nullopt;
+  }
+
+  FailureOr<ExprAttr> firstAxisVStride = computeFirstAxisVStride(context, broadcastRepeats, destination);
+  if (failed(firstAxisVStride)) {
+    return std::nullopt;
+  }
+
+  BroadcastInlineOperands result;
+  result.broadcastOperandIndex = broadcastIndex;
+  result.outerRepeat = otherMerged[0];
+  result.innerRepeat = otherMerged[1];
+  result.firstAxisVStride = *firstAxisVStride;
+  return result;
+}
+
 }  // namespace
 
 std::optional<BroadcastInlineOperands> matchBroadcastInlineOperands(Operation *op) {
@@ -248,42 +297,8 @@ std::optional<BroadcastInlineOperands> matchBroadcastInlineOperands(Operation *o
   ArrayRef<ExprAttr> otherRepeats = broadcastIndex == 0 ? ArrayRef(*repeats1) : ArrayRef(*repeats0);
   TensorDescAttr broadcastDescriptor = broadcastIndex == 0 ? *operand0 : *operand1;
   TensorDescAttr otherDescriptor = otherIndex == 0 ? *operand0 : *operand1;
-  if (otherDescriptor.getVectorizedStrides().size() != otherRepeats.size()) {
-    return std::nullopt;
-  }
-  // `computeFirstAxisVStride` 按位置把 `broadcastRepeats`（广播侧的 `vectorized_axis`
-  // 顺序）与 `destination.getVectorizedStrides()` 配对；只有两者的 `vectorized_axis`
-  // 完全一致（根数和顺序都一致）时这种按位置配对才成立。destination 的 `vectorized_axis`
-  // 是独立属性，调度允许其与广播侧重新排序，不能假设天然对齐。
-  if (destination->getVectorizedAxis() != broadcastDescriptor.getVectorizedAxis()) {
-    return std::nullopt;
-  }
-
-  MLIRContext *context = op->getContext();
-  FailureOr<std::pair<SmallVector<ExprAttr>, SmallVector<ExprAttr>>> merged =
-      mergeBrcAxisRepeats(context, broadcastRepeats, otherRepeats, otherDescriptor.getVectorizedStrides());
-  if (failed(merged)) {
-    return std::nullopt;
-  }
-  const auto &[brcMerged, otherMerged] = *merged;
-  if (brcMerged.size() != kInlineBroadcastMergedAxisCount || otherMerged.size() != kInlineBroadcastMergedAxisCount) {
-    return std::nullopt;
-  }
-  if (!isProvenEqualToLiteral(brcMerged[0], "1") && !isProvenEqualToLiteral(otherMerged[0], "1")) {
-    return std::nullopt;
-  }
-
-  FailureOr<ExprAttr> firstAxisVStride = computeFirstAxisVStride(context, broadcastRepeats, *destination);
-  if (failed(firstAxisVStride)) {
-    return std::nullopt;
-  }
-
-  BroadcastInlineOperands result;
-  result.broadcastOperandIndex = broadcastIndex;
-  result.outerRepeat = otherMerged[0];
-  result.innerRepeat = otherMerged[1];
-  result.firstAxisVStride = *firstAxisVStride;
-  return result;
+  return buildBroadcastInlineOperands(op->getContext(), broadcastIndex, broadcastDescriptor, otherDescriptor,
+                                      *destination, broadcastRepeats, otherRepeats);
 }
 
 bool isSingletonTensorInput(Operation *op, unsigned index) {
@@ -354,7 +369,9 @@ Value localStorageRoot(Value value) {
 }
 
 bool hasUniqueAxes(ArrayRef<int64_t> axes) {
-  llvm::SmallDenseSet<int64_t, 4> seen;
+  // Inline storage capacity, not a limit on the number of axes.
+  constexpr unsigned kInlineAxisSetCapacity = 4;
+  llvm::SmallDenseSet<int64_t, kInlineAxisSetCapacity> seen;
   return llvm::all_of(axes, [&](int64_t axis) { return seen.insert(axis).second; });
 }
 
@@ -392,6 +409,33 @@ std::optional<int64_t> staticSpan(TensorDescAttr descriptor) {
   }
   return span;
 }
+
+LocalViewCompatibility checkLocalDescriptorCompatibility(TensorDescAttr desc, TensorDescAttr reference, bool whole) {
+  if (whole) {
+    // Only the explicit minimal tensor contract may use GetSize. A partial
+    // scheduled view must never silently fall back to the buffer capacity.
+    if (!desc.getVectorizedAxis().empty() || !desc.getVectorizedStrides().empty() || !desc.getRepeats().empty()) {
+      return LocalViewCompatibility::MissingInformation;
+    }
+    return LocalViewCompatibility::Compatible;
+  }
+  if (!hasUniqueAxes(desc.getAxis()) || !hasUniqueAxes(desc.getVectorizedAxis()) ||
+      desc.getAxis().size() != desc.getRepeats().size() ||
+      desc.getVectorizedAxis().size() != desc.getVectorizedStrides().size() || desc.getVectorizedAxis().empty()) {
+    return LocalViewCompatibility::MissingInformation;
+  }
+  if (desc.getVectorizedAxis() != reference.getVectorizedAxis()) {
+    return LocalViewCompatibility::UnsupportedShape;
+  }
+  for (int64_t axis : reference.getVectorizedAxis()) {
+    auto a = axisPosition(desc, axis);
+    auto b = axisPosition(reference, axis);
+    if (failed(a) || failed(b) || *b >= reference.getRepeats().size()) {
+      return LocalViewCompatibility::MissingInformation;
+    }
+  }
+  return LocalViewCompatibility::Compatible;
+}
 }  // namespace
 
 bool hasSameLocalLayout(Operation *op, unsigned inputIndex) {
@@ -409,28 +453,9 @@ LocalViewCompatibility checkLocalViewCompatibility(Operation *op, ArrayRef<Tenso
   const auto reference = descriptors.back();
   const bool whole = reference.getVectorizedAxis().empty();
   for (TensorDescAttr desc : descriptors) {
-    if (whole) {
-      // Only the explicit minimal tensor contract may use GetSize. A partial
-      // scheduled view must never silently fall back to the buffer capacity.
-      if (!desc.getVectorizedAxis().empty() || !desc.getVectorizedStrides().empty() || !desc.getRepeats().empty()) {
-        return LocalViewCompatibility::MissingInformation;
-      }
-      continue;
-    }
-    if (!hasUniqueAxes(desc.getAxis()) || !hasUniqueAxes(desc.getVectorizedAxis()) ||
-        desc.getAxis().size() != desc.getRepeats().size() ||
-        desc.getVectorizedAxis().size() != desc.getVectorizedStrides().size() || desc.getVectorizedAxis().empty()) {
-      return LocalViewCompatibility::MissingInformation;
-    }
-    if (desc.getVectorizedAxis() != reference.getVectorizedAxis()) {
-      return LocalViewCompatibility::UnsupportedShape;
-    }
-    for (int64_t axis : reference.getVectorizedAxis()) {
-      auto a = axisPosition(desc, axis);
-      auto b = axisPosition(reference, axis);
-      if (failed(a) || failed(b) || *b >= reference.getRepeats().size()) {
-        return LocalViewCompatibility::MissingInformation;
-      }
+    auto compatibility = checkLocalDescriptorCompatibility(desc, reference, whole);
+    if (compatibility != LocalViewCompatibility::Compatible) {
+      return compatibility;
     }
   }
   if (wholeTensor) {
@@ -439,19 +464,13 @@ LocalViewCompatibility checkLocalViewCompatibility(Operation *op, ArrayRef<Tenso
   return LocalViewCompatibility::Compatible;
 }
 
-LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
-                                                   ElementwiseLocalView &view) {
-  if (!op) {
-    return LocalViewCompatibility::MissingInformation;
-  }
-  auto partition = getOperandPartition(op);
-  if (failed(partition) || partition->destinationCount != 1) {
-    return LocalViewCompatibility::MissingInformation;
-  }
-  SmallVector<VectorTensor> tensors;
-  SmallVector<TensorDescAttr> descriptors;
-  SmallVector<Value> values;
-  for (auto [index, input] : llvm::enumerate(partition->inputs(op))) {
+namespace {
+
+LocalViewCompatibility collectLocalViewTensors(Operation *op, const OperandPartition &partition,
+                                               ArrayRef<unsigned> scalarInputs, SmallVectorImpl<VectorTensor> &tensors,
+                                               SmallVectorImpl<TensorDescAttr> &descriptors,
+                                               SmallVectorImpl<Value> &values) {
+  for (auto [index, input] : llvm::enumerate(partition.inputs(op))) {
     if (input.getType().isIntOrIndexOrFloat() || llvm::is_contained(scalarInputs, index)) {
       continue;
     }
@@ -469,7 +488,28 @@ LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsig
   }
   tensors.push_back({VectorTensor::Side::Destination, 0, *destination});
   descriptors.push_back(*destination);
-  values.push_back(partition->destinations(op)[0]);
+  values.push_back(partition.destinations(op)[0]);
+  return LocalViewCompatibility::Compatible;
+}
+
+}  // namespace
+
+LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
+                                                   ElementwiseLocalView &view) {
+  if (!op) {
+    return LocalViewCompatibility::MissingInformation;
+  }
+  auto partition = getOperandPartition(op);
+  if (failed(partition) || partition->destinationCount != 1) {
+    return LocalViewCompatibility::MissingInformation;
+  }
+  SmallVector<VectorTensor> tensors;
+  SmallVector<TensorDescAttr> descriptors;
+  SmallVector<Value> values;
+  auto collected = collectLocalViewTensors(op, *partition, scalarInputs, tensors, descriptors, values);
+  if (collected != LocalViewCompatibility::Compatible) {
+    return collected;
+  }
   bool whole = false;
   auto compatibility = checkLocalViewCompatibility(op, descriptors, &whole);
   if (compatibility != LocalViewCompatibility::Compatible) {
@@ -496,33 +536,32 @@ LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsig
   return LocalViewCompatibility::Compatible;
 }
 
-LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
-                                                   ElementwiseLocalView &view) {
-  auto result = analyzeElementwiseLocalView(op, scalarInputs, compactTail, view);
-  if (result != LocalViewCompatibility::Compatible) {
-    return result;
-  }
-  auto partition = getOperandPartition(op);
-  SmallVector<TensorDescAttr> descriptors;
-  SmallVector<Value> values;
-  if (!view.vectorPlan) {
-    // GetSize counts the whole destination; every tensor input must have the same shape.
-    auto destinationType = cast<ascendc::LocalTensorType>(partition->destinations(op)[0].getType());
-    for (auto [index, input] : llvm::enumerate(partition->inputs(op))) {
-      if (input.getType().isIntOrIndexOrFloat() || llvm::is_contained(scalarInputs, index)) {
-        continue;
-      }
-      if (cast<ascendc::LocalTensorType>(input.getType()).getShape() != destinationType.getShape()) {
-        return LocalViewCompatibility::UnsupportedShape;
-      }
+namespace {
+
+LocalViewCompatibility checkWholeTensorShapes(Operation *op, const OperandPartition &partition,
+                                              ArrayRef<unsigned> scalarInputs) {
+  // GetSize counts the whole destination; every tensor input must have the same shape.
+  auto destinationType = cast<ascendc::LocalTensorType>(partition.destinations(op)[0].getType());
+  for (auto [index, input] : llvm::enumerate(partition.inputs(op))) {
+    if (input.getType().isIntOrIndexOrFloat() || llvm::is_contained(scalarInputs, index)) {
+      continue;
     }
-    return LocalViewCompatibility::Compatible;
+    if (cast<ascendc::LocalTensorType>(input.getType()).getShape() != destinationType.getShape()) {
+      return LocalViewCompatibility::UnsupportedShape;
+    }
   }
+  return LocalViewCompatibility::Compatible;
+}
+
+LocalViewCompatibility collectCompatibleLocalTensors(Operation *op, const OperandPartition &partition,
+                                                     const ElementwiseLocalView &view,
+                                                     SmallVectorImpl<TensorDescAttr> &descriptors,
+                                                     SmallVectorImpl<Value> &values) {
   const auto destinationDesc = view.vectorPlan->tensors.back().descriptor;
   for (const auto &tensor : view.vectorPlan->tensors) {
     auto desc = tensor.descriptor;
-    Value value = tensor.side == VectorTensor::Side::Destination ? partition->destinations(op)[tensor.index]
-                                                                 : partition->inputs(op)[tensor.index];
+    Value value = tensor.side == VectorTensor::Side::Destination ? partition.destinations(op)[tensor.index]
+                                                                 : partition.inputs(op)[tensor.index];
     // Continuous elementwise APIs do not repeat lanes inside their API window.
     for (int64_t axis : destinationDesc.getVectorizedAxis()) {
       auto a = axisPosition(desc, axis);
@@ -539,11 +578,97 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
       sameDomain &= succeeded(a) && provablyEqual(desc.getRepeats()[*a], destinationDesc.getRepeats()[*b]);
     }
     if (!sameDomain && (tensor.side == VectorTensor::Side::Destination ||
-                        !afir::elementwise::sourceBroadcastsToDestination(op, value, partition->destinations(op)[0]))) {
+                        !afir::elementwise::sourceBroadcastsToDestination(op, value, partition.destinations(op)[0]))) {
       return LocalViewCompatibility::UnsupportedShape;
     }
     descriptors.push_back(desc);
     values.push_back(value);
+  }
+  return LocalViewCompatibility::Compatible;
+}
+
+LocalViewCompatibility checkLocalTensorCapacity(TensorDescAttr desc, ascendc::LocalTensorType type) {
+  auto span = staticSpan(desc);
+  const bool staticGeometry =
+      llvm::all_of(desc.getVectorizedAxis(),
+                   [&](int64_t axis) {
+                     auto position = axisPosition(desc, axis);
+                     return succeeded(position) && succeeded(getLiteralStride(desc.getRepeats()[*position]));
+                   }) &&
+      llvm::all_of(desc.getVectorizedStrides(), [](ExprAttr stride) { return succeeded(getLiteralStride(stride)); });
+  if (staticGeometry && !span) {
+    return LocalViewCompatibility::UnsupportedShape;
+  }
+  int64_t capacity = 1;
+  bool staticCapacity = type.hasRank();
+  if (staticCapacity) {
+    for (int64_t size : type.getShape()) {
+      if (ShapedType::isDynamic(size)) {
+        staticCapacity = false;
+        break;
+      }
+      if (size <= 0 || capacity > std::numeric_limits<int64_t>::max() / size) {
+        return LocalViewCompatibility::UnsupportedShape;
+      }
+      capacity *= size;
+    }
+  }
+  if (span && staticCapacity && *span > capacity) {
+    return LocalViewCompatibility::UnsupportedShape;
+  }
+  return LocalViewCompatibility::Compatible;
+}
+
+LocalViewCompatibility checkLocalTensorAlignment(const ElementwiseLocalView &view, size_t tensorIndex,
+                                                 ascendc::LocalTensorType type) {
+  // Each API invocation starts on a data block. Merged inner axes do not
+  // introduce new API starts and therefore need no separate alignment test.
+  for (size_t i = 0; i + 1 < view.vectorPlan->segments.size(); ++i) {
+    auto stride = view.vectorPlan->segments[i].strides[tensorIndex];
+    const auto bits = type.getElementType().getIntOrFloatBitWidth();
+    if (bits == 0 || kDataBlockBits % bits != 0 ||
+        !afir::ProveExpressionMultipleOf(stride.getValue().getValue(), kDataBlockBits / bits)) {
+      return LocalViewCompatibility::UnsupportedShape;
+    }
+  }
+  return LocalViewCompatibility::Compatible;
+}
+
+LocalViewCompatibility checkLocalTensorAliasing(Value value, Value destinationValue, TensorDescAttr desc,
+                                                TensorDescAttr destination) {
+  const auto sourceRoot = localStorageRoot(value);
+  const auto destinationRoot = localStorageRoot(destinationValue);
+  const auto sourceBuffer = getBufferDescAttr(value);
+  const auto destinationBuffer = getBufferDescAttr(destinationValue);
+  // TQue and TBuf IDs are allocated independently; q0 and b0 are distinct resources.
+  const bool sharedStorage = value == destinationValue || (sourceRoot && sourceRoot == destinationRoot) ||
+                             (sourceBuffer && destinationBuffer && sourceBuffer.getBufferId() >= 0 &&
+                              sourceBuffer.getBufferId() == destinationBuffer.getBufferId() &&
+                              isCanonicalQueueResource(sourceBuffer) == isCanonicalQueueResource(destinationBuffer) &&
+                              sourceBuffer.getSpace() == destinationBuffer.getSpace());
+  if (sharedStorage && !sameStrides(desc, destination)) {
+    return LocalViewCompatibility::UnsupportedShape;
+  }
+  return LocalViewCompatibility::Compatible;
+}
+
+}  // namespace
+
+LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
+                                                   ElementwiseLocalView &view) {
+  auto result = analyzeElementwiseLocalView(op, scalarInputs, compactTail, view);
+  if (result != LocalViewCompatibility::Compatible) {
+    return result;
+  }
+  auto partition = getOperandPartition(op);
+  SmallVector<TensorDescAttr> descriptors;
+  SmallVector<Value> values;
+  if (!view.vectorPlan) {
+    return checkWholeTensorShapes(op, *partition, scalarInputs);
+  }
+  result = collectCompatibleLocalTensors(op, *partition, view, descriptors, values);
+  if (result != LocalViewCompatibility::Compatible) {
+    return result;
   }
   if (!view.vectorPlan->segments.empty() && !llvm::all_of(view.vectorPlan->segments.back().strides, provablyOne)) {
     return LocalViewCompatibility::UnsupportedShape;
@@ -556,58 +681,18 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
     if (!type) {
       return LocalViewCompatibility::UnsupportedShape;
     }
-    auto span = staticSpan(desc);
-    const bool staticGeometry =
-        llvm::all_of(desc.getVectorizedAxis(),
-                     [&](int64_t axis) {
-                       auto position = axisPosition(desc, axis);
-                       return succeeded(position) && succeeded(getLiteralStride(desc.getRepeats()[*position]));
-                     }) &&
-        llvm::all_of(desc.getVectorizedStrides(), [](ExprAttr stride) { return succeeded(getLiteralStride(stride)); });
-    if (staticGeometry && !span) {
-      return LocalViewCompatibility::UnsupportedShape;
-    }
-    int64_t capacity = 1;
-    bool staticCapacity = type.hasRank();
-    if (staticCapacity) {
-      for (int64_t size : type.getShape()) {
-        if (ShapedType::isDynamic(size)) {
-          staticCapacity = false;
-          break;
-        }
-        if (size <= 0 || capacity > std::numeric_limits<int64_t>::max() / size) {
-          return LocalViewCompatibility::UnsupportedShape;
-        }
-        capacity *= size;
-      }
-    }
-    if (span && staticCapacity && *span > capacity) {
-      return LocalViewCompatibility::UnsupportedShape;
+    result = checkLocalTensorCapacity(desc, type);
+    if (result != LocalViewCompatibility::Compatible) {
+      return result;
     }
     if (unequal) {
-      // Each API invocation starts on a data block. Merged inner axes do not
-      // introduce new API starts and therefore need no separate alignment test.
-      for (size_t i = 0; i + 1 < view.vectorPlan->segments.size(); ++i) {
-        auto stride = view.vectorPlan->segments[i].strides[tensorIndex];
-        const auto bits = type.getElementType().getIntOrFloatBitWidth();
-        if (bits == 0 || kDataBlockBits % bits != 0 ||
-            !afir::ProveExpressionMultipleOf(stride.getValue().getValue(), kDataBlockBits / bits)) {
-          return LocalViewCompatibility::UnsupportedShape;
-        }
+      result = checkLocalTensorAlignment(view, tensorIndex, type);
+      if (result != LocalViewCompatibility::Compatible) {
+        return result;
       }
-      const auto sourceRoot = localStorageRoot(value);
-      const auto destinationRoot = localStorageRoot(values.back());
-      const auto sourceBuffer = getBufferDescAttr(value);
-      const auto destinationBuffer = getBufferDescAttr(values.back());
-      // TQue and TBuf IDs are allocated independently; q0 and b0 are distinct resources.
-      const bool sharedStorage =
-          value == values.back() || (sourceRoot && sourceRoot == destinationRoot) ||
-          (sourceBuffer && destinationBuffer && sourceBuffer.getBufferId() >= 0 &&
-           sourceBuffer.getBufferId() == destinationBuffer.getBufferId() &&
-           isCanonicalQueueResource(sourceBuffer) == isCanonicalQueueResource(destinationBuffer) &&
-           sourceBuffer.getSpace() == destinationBuffer.getSpace());
-      if (sharedStorage && !sameStrides(desc, destination)) {
-        return LocalViewCompatibility::UnsupportedShape;
+      result = checkLocalTensorAliasing(value, values.back(), desc, destination);
+      if (result != LocalViewCompatibility::Compatible) {
+        return result;
       }
     }
   }

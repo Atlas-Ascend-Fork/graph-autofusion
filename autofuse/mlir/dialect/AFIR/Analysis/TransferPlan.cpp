@@ -1094,7 +1094,7 @@ FailureOr<Value> materializeTailAwareTileSize(Operation *op, OpBuilder &builder,
   if (plan.kind != TransferPlanKind::Scheduled || plan.tileInnerAxis < 0) {
     return failure();
   }
-  FailureOr<SmallVector<ScheduledAxisExtent, 4>> values =
+  FailureOr<SmallVector<ScheduledAxisExtent>> values =
       materializeScheduledAxisExtents(op, builder, {plan.tileInnerAxis});
   if (failed(values)) {
     return failure();

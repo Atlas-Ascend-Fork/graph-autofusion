@@ -408,11 +408,7 @@ FailureOr<std::string> EmitAbi(const TilingProgramSpec &spec) {
   return out.str();
 }
 
-}  // namespace
-
-FailureOr<std::string> emitInductorTilingFunc(const TilingProgramSpec &spec, const TilingCodeBundle &bundle) {
-  std::string result = AssembleSources(bundle.tiling_functions);
-  if (result.empty()) return failure();
+void AppendTilingFunctionIncludes(const TilingCodeBundle &bundle, std::string &result) {
   result +=
       "// AUTOFUSE_SPLIT_FILE_BEGIN: MlirTilingFunc\n#include <cstddef>\n#include <limits>\n"
       "#include \"autofuse_tiling_data.h\"\n";
@@ -423,15 +419,10 @@ FailureOr<std::string> emitInductorTilingFunc(const TilingProgramSpec &spec, con
   } else {
     result += "#include \"autofuse_tiling_func_common.h\"\n";
   }
-  auto abi = EmitAbi(spec);
-  if (failed(abi)) {
-    return failure();
-  }
-  result += *abi;
-  if (spec.shape_params.empty()) {
-    // Inductor accepts fewer solutions than requested. Keep ATT's normal
-    // modeled winner and reuse its resource/workspace validation unchanged.
-    result += R"(
+}
+
+void AppendGenerateTopnSolutions(std::string &result) {
+  result += R"(
 #include <map>
 #include <string>
 #include <vector>
@@ -460,6 +451,23 @@ extern "C" int64_t GenerateTopnSolutions(
   return 0;
 }
 )";
+}
+
+}  // namespace
+
+FailureOr<std::string> emitInductorTilingFunc(const TilingProgramSpec &spec, const TilingCodeBundle &bundle) {
+  std::string result = AssembleSources(bundle.tiling_functions);
+  if (result.empty()) return failure();
+  AppendTilingFunctionIncludes(bundle, result);
+  auto abi = EmitAbi(spec);
+  if (failed(abi)) {
+    return failure();
+  }
+  result += *abi;
+  if (spec.shape_params.empty()) {
+    // Inductor accepts fewer solutions than requested. Keep ATT's normal
+    // modeled winner and reuse its resource/workspace validation unchanged.
+    AppendGenerateTopnSolutions(result);
   }
   result += "// AUTOFUSE_SPLIT_FILE_END: MlirTilingFunc\n";
   return result;

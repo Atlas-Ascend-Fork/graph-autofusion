@@ -162,27 +162,8 @@ struct RemovePadShape {
   afir::ExprAttr pitch;
 };
 
-// `plan` 是不是本档收的形状；是就把判据用得上的那几项算出来。
-//
-// 收的边界（不满足一律 `failure()`，调用方翻成 unsupported）：
-//
-//   - 源与目的地各恰好一个；段数在 `[1, 2]` 内（段数 > 2 的理由见文件头）。
-//   - 目的地稠密：最内段 `strides[dst]` 可证为 1；两段时外段 `strides[dst]` 可证等于内段
-//     `extent`。`GatherMask` 的写是连续的，目的地有任何跨度就是静默写错位置。
-//   - **行形态**（两段、最内段源 stride 可证为 1）：一行内部也有跨度的话，
-//     `GatherMask` 的 `src0BlockStride` 表达不了（包装写死 1）。
-//   - **整窗口逐元素收集**（两段、最内段源 stride 是对齐槽距）：外段源步长可证等于
-//     「槽距 × 内段元素数（名义）」，源侧整窗线性。这是 legacy
-//     `remove_pad_api_call.cpp` `is_last_axis_align` 分支的同款形态：转置折进 Load
-//     布局后，源按 `Align(1, 32/sizeof(T))` 逐元素开槽。单段时同款收集见下面的
-//     else 分支。
-//   - 行距/槽距是 32B 的整数倍（`isProvablyMultipleOf`）。
-//
-// `N` 可证为 1 时单独放行整除判据，这是一条有前置条件的放行，前置条件在这里查：
-// `src0RepeatStride` 只被第 2..N 趟 repeat 读，`repeatTimes == 1` 时它读不到。这一格的 `N`
-// 是字面量 1（段只有一个、源 stride 又是 1，趟数就是 1），不是符号，所以前置条件是判得死的。
-FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan, int64_t elementBytes) {
-  RemovePadShape shape;
+// 校验源/目的数量、段数和步长表，并记录张量索引。
+LogicalResult validateRemovePadPlan(const afir::VectorPlan &plan, RemovePadShape &shape) {
   std::optional<unsigned> source;
   std::optional<unsigned> destination;
   for (auto [index, tensor] : llvm::enumerate(plan.tensors)) {
@@ -207,50 +188,64 @@ FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan
       return failure();
     }
   }
-  const afir::VectorSegment &inner = plan.segments[count - 1];
+  return success();
+}
+
+// 两段布局要求目的地连续；源侧支持连续行或整窗口等槽距收集。
+LogicalResult classifyTwoSegmentRemovePad(const afir::VectorPlan &plan, RemovePadShape &shape) {
+  const auto &outer = plan.segments.front();
+  const auto &inner = plan.segments.back();
+  if (!provablyEqual(outer.strides[shape.destination], inner.extent)) {
+    return failure();
+  }
+  if (provablyLiteral(inner.strides[shape.source], "1")) {
+    // GatherMask 的 src0BlockStride 固定为 1，行内必须连续。
+    shape.rowSegment = plan.segments.size() - 1;
+    shape.repeatSegment = 0;
+    shape.pitch = outer.strides[shape.source];
+    return success();
+  }
+  // 源侧跨段仍须保持等槽距，才能线性收集整个窗口。
+  // 对应 legacy remove_pad_api_call.cpp 的 is_last_axis_align 分支：
+  // 窗口大小采用「外段实际元素数 × 内段名义元素数」。
+  FailureOr<ExprAttr> expected =
+      multiplyExprs(inner.strides[shape.source].getContext(), inner.strides[shape.source], inner.extent);
+  if (failed(expected) || !provablyEqual(outer.strides[shape.source], *expected)) {
+    return failure();
+  }
+  shape.rowIsUnit = true;
+  shape.gatherWholeWindow = true;
+  shape.pitch = inner.strides[shape.source];
+  // 整窗口收集使用两个段的 extent，不使用 repeatSegment。
+  return success();
+}
+
+// 支持一至两段、目的地连续的布局；无法证明约束成立时返回 failure。
+// 行距或槽距须按 UB 访问粒度对齐，单次连续搬运除外。
+FailureOr<RemovePadShape> classifyRemovePadSegments(const afir::VectorPlan &plan, int64_t elementBytes) {
+  RemovePadShape shape;
+  if (failed(validateRemovePadPlan(plan, shape))) {
+    return failure();
+  }
+  const auto &inner = plan.segments.back();
   if (!provablyLiteral(inner.strides[shape.destination], "1")) {
     return failure();
   }
-  const bool contiguousRow = provablyLiteral(inner.strides[shape.source], "1");
-  if (count == 2) {
-    const afir::VectorSegment &outer = plan.segments[0];
-    // 目的地稠密两种形态共用：外段步长必须等于内段元素数（名义），`GatherMask` 的写
-    // 才是线性的。
-    if (!provablyEqual(outer.strides[shape.destination], inner.extent)) {
+  if (plan.segments.size() == 2) {
+    if (failed(classifyTwoSegmentRemovePad(plan, shape))) {
       return failure();
     }
-    if (contiguousRow) {
-      // 行形态：外段是行距，内段是整行。
-      shape.rowSegment = count - 1;
-      shape.repeatSegment = 0;
-      shape.pitch = outer.strides[shape.source];
-    } else {
-      // 整窗口逐元素收集（两段 gather）：最内段源 stride 是槽距（对齐粒度，见下面
-      // `isProvablyMultipleOf`），外段源步长必须可证等于「槽距 × 内段元素数（名义）」
-      // ——源侧整窗线性，`GatherMask` 才能用一条线性寻址扫过两段。对应 legacy
-      // `remove_pad_api_call.cpp` 的 `is_last_axis_align` 分支：那边的 R 由
-      // `GetOneAxisSize` 逐轴相乘，非首 TileInner 轴取名义 `Size`、其余取
-      // `ActualSize`，与本处「外段实际 × 内段名义」同一口径。
-      FailureOr<ExprAttr> expected =
-          multiplyExprs(inner.strides[shape.source].getContext(), inner.strides[shape.source], inner.extent);
-      if (failed(expected) || !provablyEqual(outer.strides[shape.source], *expected)) {
-        return failure();
-      }
-      shape.rowIsUnit = true;
-      shape.gatherWholeWindow = true;
-      // Whole-window gathering consumes both extents; repeatSegment is unused.
-      shape.pitch = inner.strides[shape.source];
-    }
-  } else if (contiguousRow) {
-    // 纯搬运：一行就是整段，趟数 1。
+  } else if (provablyLiteral(inner.strides[shape.source], "1")) {
+    // 单段连续搬运：整段为一行，repeatTimes 固定为 1。
     shape.rowSegment = 0;
     shape.repeatIsUnit = true;
   } else {
-    // 逐元素收集：每个元素单独占一段行距（调度给的是 `Align(1, 32/sizeof(T))`）。
+    // 单段逐元素收集：源步长即槽距，每次收集一个元素。
     shape.rowIsUnit = true;
     shape.repeatSegment = 0;
     shape.pitch = inner.strides[shape.source];
   }
+  // 单次搬运不读取 src0RepeatStride，无需检查行距对齐。
   if (!shape.repeatIsUnit &&
       !ProveExpressionMultipleOf(shape.pitch.getValue().getValue(), kUbAccessGranularityBytes / elementBytes)) {
     return failure();
