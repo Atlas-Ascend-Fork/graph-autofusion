@@ -983,6 +983,29 @@ ApiPerfRegister<ApiPerf> i0e_api_perf_v2(ApiPerfRegisterV2(kI0e, kUnitVector, nu
                                                            &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> i1e_api_perf_v2(ApiPerfRegisterV2(kI1e, kUnitVector, nullptr, &perf_param_table_v2,
                                                            &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> i1_api_perf_v2(ApiPerfRegisterV2(kI1, kUnitVector, nullptr, &perf_param_table_v2,
+                                                          &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> identity_api_perf_v2(ApiPerfRegisterV2(kIdentity, kUnitVector, nullptr, &perf_param_table_v2,
+                                                                &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> device_assert_async_api_perf_v2(ApiPerfRegisterV2(kDeviceAssertAsync, kUnitVector, nullptr,
+                                                                           &perf_param_table_v2,
+                                                                           &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> inline_asm_elementwise_api_perf_v2(ApiPerfRegisterV2(kInlineAsmElementwise, kUnitVector,
+                                                                              nullptr, &perf_param_table_v2,
+                                                                              &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> masked_api_perf_v2(ApiPerfRegisterV2(kMasked, kUnitVector, nullptr, &perf_param_table_v2,
+                                                              &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> randint64_api_perf_v2(ApiPerfRegisterV2(kRandint64, kUnitVector, nullptr, &perf_param_table_v2,
+                                                                 &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> xor_sum_api_perf_v2(ApiPerfRegisterV2(kXorSum, kUnitVector, nullptr, &perf_param_table_v2,
+                                                               &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> welford_api_perf_v2(ApiPerfRegisterV2(kWelford, kUnitVector, nullptr, &perf_param_table_v2,
+                                                               &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> scan_api_perf_v2(ApiPerfRegisterV2(kScan, kUnitVector, nullptr, &perf_param_table_v2,
+                                                            &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> store_reduction_api_perf_v2(ApiPerfRegisterV2(kStoreReduction, kUnitVector, nullptr,
+                                                                       &perf_param_table_v2,
+                                                                       &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> bessel_j0_api_perf_v2(ApiPerfRegisterV2(kBesselJ0, kUnitVector, nullptr, &perf_param_table_v2,
                                                                  &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> bessel_j1_api_perf_v2(ApiPerfRegisterV2(kBesselJ1, kUnitVector, nullptr, &perf_param_table_v2,
@@ -1013,6 +1036,8 @@ ApiPerfRegister<ApiPerf> ndtri_api_perf_v2(ApiPerfRegisterV2(kNdtri, kUnitVector
 ApiPerfRegister<ApiPerf> logndtr_api_perf_v2(ApiPerfRegisterV2(kLogNdtr, kUnitVector, nullptr, &perf_param_table_v2,
                                                                &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> nextafter_api_perf_v2(ApiPerfRegisterV2(kNextAfter, kUnitVector, nullptr, &perf_param_table_v2,
+                                                                 &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> bucketize_api_perf_v2(ApiPerfRegisterV2(kBucketize, kUnitVector, nullptr, &perf_param_table_v2,
                                                                  &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> polygamma_api_perf_v2(ApiPerfRegisterV2(kPolyGamma, kUnitVector, nullptr, &perf_param_table_v2,
                                                                  &tiling_schedule_config_table_v2));

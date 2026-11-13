@@ -58,7 +58,16 @@ inline constexpr char kNeedCheckBoundAttr[] = "need_check_bound";
 inline constexpr char kMaxAttr[] = "max";
 inline constexpr char kAlphaAttr[] = "alpha";
 inline constexpr char kNAttr[] = "n";
+inline constexpr char kRightAttr[] = "right";
 inline constexpr char kErrorMsgAttr[] = "error_msg";
+inline constexpr char kMsgAttr[] = "msg";
+inline constexpr char kAsmAttr[] = "asm_str";
+inline constexpr char kContaintsAttr[] = "containts";
+inline constexpr char kIsPureAttr[] = "ispure";
+inline constexpr char kPacketAttr[] = "packet";
+inline constexpr char kDtypesAttr[] = "dtypes";
+inline constexpr char kCombineFnAttr[] = "combine_fn";
+inline constexpr char kStoreNameAttr[] = "value_name";
 struct DTypeEntry {
   const char *py_name{nullptr};
   int64_t dtype_value{-1};
@@ -1291,10 +1300,38 @@ DEFINE_IR_ATTR_ACCESSORS(ChebyshevPolynomialV, AscChebyshevPolynomialVIrAttrDef,
                          PyLong_FromLong, PyLong_AsLong, SetN, GetN)
 DEFINE_IR_ATTR_ACCESSORS(ChebyshevPolynomialW, AscChebyshevPolynomialWIrAttrDef, kNAttr, int64_t, PyLong_Check,
                          PyLong_FromLong, PyLong_AsLong, SetN, GetN)
+DEFINE_IR_ATTR_ACCESSORS(Bucketize, AscBucketizeIrAttrDef, kRightAttr, bool, PyBool_Check, PyBool_FromLong,
+                         PyObject_IsTrue, SetRight, GetRight)
 DEFINE_IR_ATTR_ACCESSORS(
     Unsupported, AscUnsupportedIrAttrDef, kErrorMsgAttr, std::string, PyUnicode_Check,
     [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetError_msg,
     GetError_msg)
+DEFINE_IR_ATTR_ACCESSORS(
+    DeviceAssertAsync, AscDeviceAssertAsyncIrAttrDef, kMsgAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetMsg, GetMsg)
+DEFINE_IR_ATTR_ACCESSORS(
+    InlineAsmElementwise, AscInlineAsmElementwiseIrAttrDef, kAsmAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetAsm_str, GetAsm_str)
+DEFINE_IR_ATTR_ACCESSORS(
+    InlineAsmElementwise, AscInlineAsmElementwiseIrAttrDef, kContaintsAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetContaints,
+    GetContaints)
+DEFINE_IR_ATTR_ACCESSORS(InlineAsmElementwise, AscInlineAsmElementwiseIrAttrDef, kIsPureAttr, bool, PyBool_Check,
+                         PyBool_FromLong, PyObject_IsTrue, SetIspure, GetIspure)
+DEFINE_IR_ATTR_ACCESSORS(InlineAsmElementwise, AscInlineAsmElementwiseIrAttrDef, kPacketAttr, int64_t, PyLong_Check,
+                         PyLong_FromLong, PyLong_AsLong, SetPacket, GetPacket)
+DEFINE_IR_ATTR_ACCESSORS(
+    Scan, AscScanIrAttrDef, kDtypesAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetDtypes, GetDtypes)
+DEFINE_IR_ATTR_ACCESSORS(
+    Scan, AscScanIrAttrDef, kCombineFnAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetCombine_fn,
+    GetCombine_fn)
+DEFINE_IR_ATTR_ACCESSORS(
+    StoreReduction, AscStoreReductionIrAttrDef, kStoreNameAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetValue_name,
+    GetValue_name)
+DEFINE_IR_EXPR_ATTR_ACCESSORS(StoreReduction, AscStoreReductionIrAttrDef, kOffsetAttr, SetOffset, GetOffset)
 
 template <>
 PyObject *OpsOperatorIrAttr<af::ascir_op::IndirectLoad, kMaxAttr>::_getter(PyObject *self, void *closure) {
@@ -1419,7 +1456,13 @@ const std::map<std::string, typename IrAttr<OpType>::handler> IrAttr<OpType>::at
     {"ChebyshevPolynomialU", AutoRegAttrHandle<af::ascir_op::ChebyshevPolynomialU, kNAttr>::RegHandle},
     {"ChebyshevPolynomialV", AutoRegAttrHandle<af::ascir_op::ChebyshevPolynomialV, kNAttr>::RegHandle},
     {"ChebyshevPolynomialW", AutoRegAttrHandle<af::ascir_op::ChebyshevPolynomialW, kNAttr>::RegHandle},
+    {"Bucketize", AutoRegAttrHandle<af::ascir_op::Bucketize, kRightAttr>::RegHandle},
     {"Unsupported", AutoRegAttrHandle<af::ascir_op::Unsupported, kErrorMsgAttr>::RegHandle},
+    {"DeviceAssertAsync", AutoRegAttrHandle<af::ascir_op::DeviceAssertAsync, kMsgAttr>::RegHandle},
+    {"InlineAsmElementwise", AutoRegAttrHandle<af::ascir_op::InlineAsmElementwise, kAsmAttr, kContaintsAttr,
+                                               kIsPureAttr, kPacketAttr>::RegHandle},
+    {"Scan", AutoRegAttrHandle<af::ascir_op::Scan, kDtypesAttr, kCombineFnAttr>::RegHandle},
+    {"StoreReduction", AutoRegAttrHandle<af::ascir_op::StoreReduction, kStoreNameAttr, kOffsetAttr>::RegHandle},
 };
 PyTypeObject &OpsOperatorTypeObject::GetPyType() {
   return pytype;

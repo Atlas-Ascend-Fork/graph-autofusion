@@ -192,6 +192,14 @@ REG_ASC_IR(I1e)
                             af::ascir::AscIrImplCreator<af::ascir::I1eAscIrCodegenImplV2>(),
                             {{"T", TensorType{DT_FLOAT}}}});
 
+REG_ASC_IR(I1)
+    .Input("x", "T")
+    .Output("y", "T")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::I1AscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::I1AscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT}}}});
+
 REG_ASC_IR(BesselJ0)
     .Input("x", "T")
     .Output("y", "T")
@@ -1443,6 +1451,114 @@ REG_ASC_IR(RShift)
     .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::RShiftAscIrAttImplV2>(),
                             af::ascir::AscIrImplCreator<af::ascir::RShiftAscIrCodegenImplV2>(),
                             {{"T1", MakeT1List(kRShiftTypePairs)}, {"T2", MakeT2List(kRShiftTypePairs)}}});
+
+REG_ASC_IR(Bucketize)
+    .Input("x1", "T")
+    .Input("x2", "T")
+    .Output("y", "U")
+    .Attr<bool>("right")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::BucketizeAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::BucketizeAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_INT64,
+                                              DT_UINT64, DT_FLOAT16, DT_BF16, DT_FLOAT}},
+                             {"U", TensorType{DT_INT32}}}});
+
+REG_ASC_IR(Identity)
+    .Input("x", "T")
+    .Output("y", "T")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::IdentityAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::IdentityAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_INT64,
+                                              DT_UINT64, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_BOOL}}}});
+
+REG_ASC_IR(DeviceAssertAsync)
+    .Input("x", "T")
+    .Output("y", "T")
+    .Attr<std::string>("msg")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::DeviceAssertAsyncAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::DeviceAssertAsyncAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_INT64,
+                                              DT_UINT64, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_BOOL}}}});
+
+REG_ASC_IR(InlineAsmElementwise)
+    .DynamicInput("x", "T")
+    .Output("y", "U")
+    .Attr<std::string>("asm_str")
+    .Attr<std::string>("containts")
+    .Attr<bool>("ispure")
+    .Attr<int64_t>("packet")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::InlineAsmElementwiseAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::InlineAsmElementwiseAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_INT64,
+                                              DT_UINT64, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_BOOL}},
+                             {"U", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_INT64,
+                                              DT_UINT64, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_BOOL}}}});
+
+REG_ASC_IR(Masked)
+    .Input("x1", "T1")
+    .Input("x2", "T2")
+    .Input("x3", "T2")
+    .Output("y", "T2")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::MaskedAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::MaskedAscIrCodegenImplV2>(),
+                            {{"T1", TensorType{DT_UINT8, DT_BOOL}},
+                             {"T2", TensorType{DT_FLOAT16, DT_FLOAT, DT_INT16, DT_INT32, DT_INT64, DT_BF16, DT_INT8,
+                                               DT_UINT8, DT_UINT16, DT_UINT32, DT_UINT64}}}});
+
+REG_ASC_IR(Randint64)
+    .Input("seed", "T")
+    .Input("offset", "T")
+    .Input("low", "T")
+    .Input("high", "T")
+    .Output("y", "T")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::Randint64AscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::Randint64AscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT64}}}});
+
+REG_ASC_IR(XorSum)
+    .Input("x1", "T")
+    .Input("x2", "T")
+    .Output("y", "T")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::XorSumAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::XorSumAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT16}}}});
+
+REG_ASC_IR(Welford)
+    .Input("x", "T")
+    .Output("mean", "T")
+    .Output("m2", "T")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::WelfordAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::WelfordAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT}}}});
+
+REG_ASC_IR(Scan)
+    .DynamicInput("x", "T")
+    .DynamicOutput("y", "T")
+    .Attr<std::string>("dtypes")
+    .Attr<std::string>("combine_fn")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ScanAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ScanAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT16, DT_FLOAT, DT_BF16, DT_INT32, DT_INT64}}}});
+
+REG_ASC_IR(StoreReduction)
+    .Input("x", "T")
+    .Output("y", "T")
+    .Attr<std::string>("value_name")
+    .Attr<Expression>("offset")
+    .ComputeType(ComputeType::kComputeStore)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::StoreReductionAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::StoreReductionAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_FLOAT16,
+                                              DT_FLOAT, DT_INT64, DT_BF16, DT_UINT64, DT_BOOL}}}});
 
 REG_ASC_IR(Unsupported)
     .Inputs({})

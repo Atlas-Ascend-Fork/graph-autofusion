@@ -941,6 +941,37 @@ class I0eAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
   }
 };
 
+class I1AscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
+ public:
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcVoidTmpSizeV2(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "UnaryApiTmpCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "I1Extend";
+  }
+  [[nodiscard]] std::string GetSimtScalarApiName() const override {
+    return "j1";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"i1_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "basic_api/reg_compute/kernel_reg_compute_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
+                   node.GetNamePtr());
+    GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node), "Node %s[%s] check shape consistency failed",
+                      node.GetTypePtr(), node.GetNamePtr());
+    return true;
+  }
+};
+
 class I1eAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
@@ -5810,6 +5841,153 @@ class RandnAscIrCodegenImplV2 : public AscIrCodegenV2 {
 };
 
 /*********************************************************************************/
+class BucketizeAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcBucketizeTmpSizeV2(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "BucketizeApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "BucketizeExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"bucketize_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "basic_api/reg_compute/kernel_reg_compute_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    constexpr size_t kValueIndex = 0U;
+    constexpr size_t kBoundaryIndex = 1U;
+    auto inputs = node.inputs;
+    GE_ASSERT_TRUE(inputs.Size() >= 2U, "Node %s[%s] needs values and boundaries", node.GetTypePtr(),
+                   node.GetNamePtr());
+    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
+                   node.GetNamePtr());
+    const auto value_dtype = inputs[kValueIndex].attr.dtype;
+    GE_ASSERT_TRUE(inputs[kBoundaryIndex].attr.dtype == value_dtype, "Node %s[%s] boundaries dtype must match values",
+                   node.GetTypePtr(), node.GetNamePtr());
+    const bool src_supported = value_dtype == DT_INT8 || value_dtype == DT_UINT8 || value_dtype == DT_INT16 ||
+                               value_dtype == DT_UINT16 || value_dtype == DT_INT32 || value_dtype == DT_UINT32 ||
+                               value_dtype == DT_INT64 || value_dtype == DT_UINT64 || value_dtype == DT_FLOAT16 ||
+                               value_dtype == DT_BF16 || value_dtype == DT_FLOAT;
+    GE_ASSERT_TRUE(src_supported, "Node %s[%s] does not support dtype %d", node.GetTypePtr(), node.GetNamePtr(),
+                   static_cast<int32_t>(value_dtype));
+    AscNodeOutputs outputs = node.outputs;
+    GE_ASSERT_TRUE(outputs().size() == 1U && outputs[0].attr.dtype == DT_INT32,
+                   "Node %s[%s] output dtype must be int32", node.GetTypePtr(), node.GetNamePtr());
+    return true;
+  }
+};
+
+/*********************************************************************************/
+class IdentityAscIrCodegenImplV2 : public Ub2ubAscIrCodegenImplV2 {};
+
+class DeviceAssertAsyncAscIrCodegenImplV2 : public Ub2ubAscIrCodegenImplV2 {};
+
+class InlineAsmElementwiseAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "ApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "InlineAsmElementwise";
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(false, "Node %s[%s] cannot emit raw inline asm on the V2 device path", node.GetTypePtr(),
+                   node.GetNamePtr());
+    return false;
+  }
+};
+
+class MaskedAscIrCodegenImplV2 : public WhereAscIrCodegenImplV2 {};
+
+class Randint64AscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "ApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "Randint64";
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(false, "Node %s[%s] has no V2 device kernel", node.GetTypePtr(), node.GetNamePtr());
+    return false;
+  }
+};
+
+class XorSumAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "BinaryApiCallV2";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "ReduceXorSumExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"reduce_init_reg_base.h", "reduce_extend_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "adv_api/reduce/reduce.h",
+        "basic_api/kernel_operator_vec_binary_intf.h",
+        "basic_api/reg_compute/kernel_reg_compute_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    constexpr size_t kInputCount = 2U;
+    auto inputs = node.inputs;
+    GE_ASSERT_TRUE(inputs.Size() == kInputCount, "Node %s[%s] needs two int16 inputs", node.GetTypePtr(),
+                   node.GetNamePtr());
+    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
+                   node.GetNamePtr());
+    GE_ASSERT_TRUE(inputs[0].attr.dtype == DT_INT16 && inputs[1].attr.dtype == DT_INT16,
+                   "Node %s[%s] only supports int16", node.GetTypePtr(), node.GetNamePtr());
+    AscNodeOutputs outputs = node.outputs;
+    GE_ASSERT_TRUE(outputs().size() == 1U && outputs[0].attr.dtype == DT_INT16,
+                   "Node %s[%s] output dtype must be int16", node.GetTypePtr(), node.GetNamePtr());
+    return true;
+  }
+};
+
+class WelfordAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcWelfordUpdateTmpSize(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "ApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "WelfordUpdate";
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(false, "Node %s[%s] has no V2 device kernel", node.GetTypePtr(), node.GetNamePtr());
+    return false;
+  }
+};
+
+class ScanAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "ApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "Scan";
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(false, "Node %s[%s] combine_fn must be lowered before V2 codegen", node.GetTypePtr(),
+                   node.GetNamePtr());
+    return false;
+  }
+};
+
+class StoreReductionAscIrCodegenImplV2 : public StoreAscIrCodegenImplV2 {};
+
 class UnsupportedAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
   [[nodiscard]] std::string GetApiCallName() const override {

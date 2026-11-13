@@ -164,6 +164,7 @@ __attribute__((visibility("default"))) PyObject *PyInit_autofuse(void);
   OP(I0)                          \
   OP(I0e)                         \
   OP(I1e)                         \
+  OP(I1)                          \
   OP(BesselJ0)                    \
   OP(BesselJ1)                    \
   OP(BesselY0)                    \
@@ -175,6 +176,7 @@ __attribute__((visibility("default"))) PyObject *PyInit_autofuse(void);
   OP(Ndtri)                       \
   OP(LogNdtr)                     \
   OP(NextAfter)                   \
+  OP(Bucketize)                   \
   OP(PolyGamma)                   \
   OP(SignBit)                     \
   OP(Frexp)                       \
@@ -191,5 +193,14 @@ __attribute__((visibility("default"))) PyObject *PyInit_autofuse(void);
   OP(ChebyshevPolynomialW)        \
   OP(HermitePolynomialH)          \
   OP(HermitePolynomialHe)         \
+  OP(Identity)                    \
+  OP(DeviceAssertAsync)           \
+  OP(InlineAsmElementwise)        \
+  OP(Masked)                      \
+  OP(Randint64)                   \
+  OP(XorSum)                      \
+  OP(Welford)                     \
+  OP(Scan)                        \
+  OP(StoreReduction)              \
   OP(Unsupported)
 #endif

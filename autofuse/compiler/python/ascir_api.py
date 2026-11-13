@@ -10,7 +10,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-from typing import Optional, Dict, Union, List, Tuple
+from typing import Optional, Dict, Union, List, Tuple, Callable
 from autofuse.pyautofuse import ascir
 
 # 全局状态管理
@@ -1004,6 +1004,63 @@ def LogNdtr(
     return _common_in_1_out_1_normal_op(
         "LogNdtr", owner_graph, x, axis=axis, size=size, stride=stride
     )
+
+
+def _reject_bucketize_sorter(sorter, sorter_indices) -> None:
+    if sorter is not None or sorter_indices is not None:
+        raise ValueError(
+            "Bucketize AscIR does not support sorter; boundaries must already be sorted"
+        )
+
+
+def _is_int32_indexing_dtype(indexing_dtype) -> bool:
+    if indexing_dtype is None:
+        return True
+    if indexing_dtype in ("int32", "torch.int32", "DT_INT32"):
+        return True
+    name = getattr(indexing_dtype, "name", None) or getattr(
+        indexing_dtype, "__name__", None
+    )
+    text = str(indexing_dtype)
+    return name in ("int32", "DT_INT32") or text in ("int32", "torch.int32", "DT_INT32")
+
+
+def Bucketize(
+    owner_graph: ascir.HintGraph,
+    values: ascir.OpsOperatorOutput,
+    boundaries: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+    right: bool = False,
+    indexing_dtype=None,
+    boundary_indices: Optional[ascir.OpsOperatorOutput] = None,
+    sorter=None,
+    sorter_indices: Optional[ascir.OpsOperatorOutput] = None,
+) -> ascir.OpsOperatorOutput:
+    """Convert inductor bucketize into an AscIR node.
+
+    values and boundaries are graph tensors. boundaries keeps its own shape and
+    is binary-searched, not broadcast onto values. The returned tensor is the
+    int32 bucket index. boundary_indices is accepted for signature compatibility
+    and is not an extra input: the kernel writes the indices itself.
+    """
+    del boundary_indices
+    _reject_bucketize_sorter(sorter, sorter_indices)
+    if not _is_int32_indexing_dtype(indexing_dtype):
+        raise ValueError("Bucketize AscIR only supports indexing_dtype int32")
+    name = _generate_op_name(owner_graph, "bucketize")
+    op_instance = ascir.ops.Bucketize(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op_instance)
+    op_instance.attr.ir_attr.right = bool(right)
+    op_instance.attr.sched.axis = axis
+    op_instance.x1 = values
+    op_instance.x2 = boundaries
+    _infer_or_set_view(op_instance.y, axis, size, stride)
+    op_instance.infer_dtype()
+    return op_instance.y
 
 
 def NextAfter(
@@ -2330,6 +2387,19 @@ def I1e(
     )
 
 
+def I1(
+    owner_graph: ascir.HintGraph,
+    x: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    return _common_in_1_out_1_normal_op(
+        "I1", owner_graph, x, axis=axis, size=size, stride=stride
+    )
+
+
 def Rand(
     owner_graph: ascir.HintGraph,
     *,
@@ -2380,3 +2450,201 @@ def Randn(
     randn_op.infer_dtype()
 
     return randn_op.y
+
+
+def Identity(
+    owner_graph: ascir.HintGraph,
+    x: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    return _common_in_1_out_1_normal_op(
+        "Identity", owner_graph, x, axis=axis, size=size, stride=stride
+    )
+
+
+def DeviceAssertAsync(
+    owner_graph: ascir.HintGraph,
+    cond: ascir.OpsOperatorOutput,
+    msg: str,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    name = _generate_op_name(owner_graph, "device_assert_async")
+    op = ascir.ops.DeviceAssertAsync(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op)
+    op.attr.ir_attr.msg = str(msg)
+    op.attr.sched.axis = axis
+    op.x = cond
+    _infer_or_set_view(op.y, axis, size, stride)
+    op.infer_dtype()
+    return op.y
+
+
+def InlineAsmElementwise(
+    owner_graph: ascir.HintGraph,
+    *inputs: ascir.OpsOperatorOutput,
+    asm: str,
+    axis: List[ascir.Axis],
+    containts: Optional[str] = None,
+    dtype=ascir.dtypes.float32,
+    ispure: bool = True,
+    packet: int = 1,
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    if not inputs:
+        raise ValueError("InlineAsmElementwise requires at least one input")
+    name = _generate_op_name(owner_graph, "inline_asm_elementwise")
+    op = ascir.ops.InlineAsmElementwise(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op)
+    op.attr.ir_attr.asm_str = asm
+    op.attr.ir_attr.containts = "" if containts is None else containts
+    op.attr.ir_attr.ispure = bool(ispure)
+    op.attr.ir_attr.packet = int(packet)
+    op.attr.sched.axis = axis
+    op.x = list(inputs)
+    op.y.dtype = dtype
+    _infer_or_set_view(op.y, axis, size, stride)
+    op.infer_dtype()
+    return op.y
+
+
+def Masked(
+    owner_graph: ascir.HintGraph,
+    mask: ascir.OpsOperatorOutput,
+    body: Union[ascir.OpsOperatorOutput, Callable[[], ascir.OpsOperatorOutput]],
+    other: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    body_value = body() if callable(body) else body
+    return _common_in_3_out_1_normal_op(
+        "Masked",
+        owner_graph,
+        mask,
+        body_value,
+        other,
+        axis=axis,
+        size=size,
+        stride=stride,
+    )
+
+
+def Randint64(
+    owner_graph: ascir.HintGraph,
+    seed: ascir.OpsOperatorOutput,
+    offset: ascir.OpsOperatorOutput,
+    low: ascir.OpsOperatorOutput,
+    high: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    name = _generate_op_name(owner_graph, "randint64")
+    op = ascir.ops.Randint64(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op)
+    op.attr.sched.axis = axis
+    op.seed = seed
+    op.offset = offset
+    op.low = low
+    op.high = high
+    op.y.dtype = ascir.dtypes.int64
+    _infer_or_set_view(op.y, axis, size, stride)
+    op.infer_dtype()
+    return op.y
+
+
+def XorSum(
+    owner_graph: ascir.HintGraph,
+    x1: ascir.OpsOperatorOutput,
+    x2: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    return _common_in_2_out_1_normal_op(
+        "XorSum", owner_graph, x1, x2, axis=axis, size=size, stride=stride
+    )
+
+
+def Welford(
+    owner_graph: ascir.HintGraph,
+    x: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> Tuple[ascir.OpsOperatorOutput, ascir.OpsOperatorOutput]:
+    name = _generate_op_name(owner_graph, "welford")
+    op = ascir.ops.Welford(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op)
+    op.attr.sched.axis = axis
+    op.x = x
+    _infer_or_set_view(op.mean, axis, size, stride)
+    _infer_or_set_view(op.m2, axis, size, stride)
+    op.infer_dtype()
+    return op.mean, op.m2
+
+
+def Scan(
+    owner_graph: ascir.HintGraph,
+    dtypes: Tuple[int, ...],
+    combine_fn: Callable,
+    *values: ascir.OpsOperatorOutput,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> Tuple[ascir.OpsOperatorOutput, ...]:
+    if not dtypes:
+        raise ValueError("Scan dtypes must be non-empty")
+    name = _generate_op_name(owner_graph, "scan")
+    op = ascir.ops.Scan(name, len(dtypes))
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op)
+    op.attr.ir_attr.dtypes = ",".join(str(item) for item in dtypes)
+    op.attr.ir_attr.combine_fn = getattr(combine_fn, "__name__", repr(combine_fn))
+    op.attr.sched.axis = axis
+    op.x = list(values)
+    outputs = []
+    for index, item in enumerate(dtypes):
+        op.y[index].dtype = item
+        _infer_or_set_view(op.y[index], axis, size, stride)
+        outputs.append(op.y[index])
+    op.infer_dtype()
+    return tuple(outputs)
+
+
+def StoreReduction(
+    owner_graph: ascir.HintGraph,
+    name: str,
+    index: ascir.SizeExpr,
+    values: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> None:
+    op_name = _generate_op_name(owner_graph, "store_reduction")
+    op = ascir.ops.StoreReduction(op_name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op)
+    op.attr.ir_attr.value_name = name
+    op.attr.ir_attr.offset = index
+    op.attr.sched.axis = axis
+    op.x = values
+    _infer_or_set_view(op.y, axis, size, stride)
+    op.infer_dtype()
+    return None

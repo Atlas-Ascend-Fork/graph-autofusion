@@ -261,6 +261,9 @@ Register::Register() {
   const std::string kAscendcI1eRegBaseStr = {
 #include "i1e_reg_base.h"
   };
+  const std::string kAscendcI1RegBaseStr = {
+#include "i1_reg_base.h"
+  };
   const std::string kAscendcBesselJ0RegBaseStr = {
 #include "bessel_j0_reg_base.h"
   };
@@ -314,6 +317,9 @@ Register::Register() {
   };
   const std::string kAscendcNextAfterRegBaseStr = {
 #include "next_after_reg_base.h"
+  };
+  const std::string kAscendcBucketizeRegBaseStr = {
+#include "bucketize_reg_base.h"
   };
   const std::string kAscendcPolyGammaRegBaseStr = {
 #include "polygamma_reg_base.h"
@@ -483,6 +489,7 @@ Register::Register() {
       {"i0_reg_base.h", kAscendcI0RegBaseStr},
       {"i0e_reg_base.h", kAscendcI0eRegBaseStr},
       {"i1e_reg_base.h", kAscendcI1eRegBaseStr},
+      {"i1_reg_base.h", kAscendcI1RegBaseStr},
       {"bessel_j_utils_reg_base.h", kAscendcBesselJUtilsRegBaseStr},
       {"bessel_j0_reg_base.h", kAscendcBesselJ0RegBaseStr},
       {"bessel_j1_reg_base.h", kAscendcBesselJ1RegBaseStr},
@@ -502,6 +509,7 @@ Register::Register() {
       {"ndtri_reg_base.h", kAscendcNdtriRegBaseStr},
       {"log_ndtr_reg_base.h", kAscendcLogNdtrRegBaseStr},
       {"next_after_reg_base.h", kAscendcNextAfterRegBaseStr},
+      {"bucketize_reg_base.h", kAscendcBucketizeRegBaseStr},
       {"polygamma_reg_base.h", kAscendcPolyGammaRegBaseStr},
       {"random_reg_base.h", kAscendcRandomRegBaseStr},
       {"signbit_reg_base.h", kAscendcSignBitRegBaseStr},
