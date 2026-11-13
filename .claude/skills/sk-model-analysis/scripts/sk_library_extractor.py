@@ -937,9 +937,7 @@ def write_update_libraries(
     ):
         # Keep this optional evidence beside runtime DFX data in the persisted
         # artifact while retaining the sibling field in the in-memory report.
-        dfx_library_payload["fusion_analysis"] = copy.deepcopy(
-            fusion_analysis_payload
-        )
+        dfx_library_payload["fusion_analysis"] = copy.deepcopy(fusion_analysis_payload)
 
     scope_library_output.write_text(
         json.dumps(scope_library_payload, indent=2, ensure_ascii=False),
@@ -3451,7 +3449,9 @@ def _parse_update_execution_line_items(
                     "flag": extra.get("flag"),
                     "detail": line.strip(),
                     "line": line_no,
-                    "sk_function": current_scope.get("sk_function") if current_scope else None,
+                    "sk_function": current_scope.get("sk_function")
+                    if current_scope
+                    else None,
                 }
             )
             continue

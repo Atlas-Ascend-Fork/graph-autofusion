@@ -201,7 +201,9 @@ def _parse_scope_split(
         if current_batch is None:
             if "BreakInfo:" in line or (
                 "Scope split results" in line
-                and not (_SCOPE_BATCH_BEGIN.search(line) or _SCOPE_BATCH_END.search(line))
+                and not (
+                    _SCOPE_BATCH_BEGIN.search(line) or _SCOPE_BATCH_END.search(line)
+                )
             ):
                 unknown_count += 1
                 if len(samples) < 10:
@@ -226,9 +228,7 @@ def _parse_scope_split(
         break_match = _SCOPE_BREAK.search(line)
         if break_match:
             record = {
-                "scope_id": (
-                    current_scope.get("scope_id") if current_scope else None
-                ),
+                "scope_id": (current_scope.get("scope_id") if current_scope else None),
                 "display_scope_id": (
                     current_scope.get("display_scope_id") if current_scope else None
                 ),
@@ -405,9 +405,8 @@ def _parse_fusion_failures(
         looks_like_fused_node_ids = (
             "[PrintFusedNodeIds]" in line and "fusedNodeIds" in line
         )
-        looks_like_fused_status = (
-            "[PrintFusedScopes]" in line
-            and ("scopeStatus=" in line or "breakReason=[breakReason=" in line)
+        looks_like_fused_status = "[PrintFusedScopes]" in line and (
+            "scopeStatus=" in line or "breakReason=[breakReason=" in line
         )
         if looks_like_failure or looks_like_fused_node_ids or looks_like_fused_status:
             unknown_count += 1
@@ -858,12 +857,9 @@ def _failure_identity(
 def _failure_explanation(
     failure: dict[str, Any], identity: dict[str, Any]
 ) -> dict[str, Any] | None:
-    if (
-        failure.get("reason_code") == "BINDMAP_INIT_EMPTY"
-        and not str(identity.get("raw_name") or "").lower().startswith(
-            "static_kernel_"
-        )
-    ):
+    if failure.get("reason_code") == "BINDMAP_INIT_EMPTY" and not str(
+        identity.get("raw_name") or ""
+    ).lower().startswith("static_kernel_"):
         return {
             "rule_id": "bindmap_init_empty_without_static_prefix",
             "summary": "算子不支持静态编译，或静态编译失败",
@@ -996,7 +992,9 @@ def build_fusion_analysis(
     impacts: dict[str, dict[str, Any]] = {}
 
     def get_impact(identity: dict[str, Any], source_kind: str) -> dict[str, Any]:
-        key = str(identity.get("normalized_name") or identity.get("raw_name") or "未命名节点")
+        key = str(
+            identity.get("normalized_name") or identity.get("raw_name") or "未命名节点"
+        )
         if key not in impacts:
             impacts[key] = {
                 "operator": dict(identity),
@@ -1038,16 +1036,25 @@ def build_fusion_analysis(
 
     for failure in failures:
         identity = failure_identities[int(failure["node_id"])]
-        source_kind = "structural" if identity["name_pattern"]["kind"] == "structural" else "operator"
+        source_kind = (
+            "structural"
+            if identity["name_pattern"]["kind"] == "structural"
+            else "operator"
+        )
         item = get_impact(identity, source_kind)
         evidence = item["evidence"]
         evidence["failure_count"] += 1
-        reason_key = f"{failure.get('reason', '')}|{failure.get('reason_code', '')}".strip("|")
+        reason_key = (
+            f"{failure.get('reason', '')}|{failure.get('reason_code', '')}".strip("|")
+        )
         counts = Counter(evidence.get("failure_reason_counts", {}))
         counts[reason_key] += 1
         evidence["failure_reason_counts"] = _counter_dict(counts)
         _append_unique(evidence["failure_node_ids"], int(failure["node_id"]))
-        if failure.get("raw_name") and failure["raw_name"] not in evidence["raw_examples"]:
+        if (
+            failure.get("raw_name")
+            and failure["raw_name"] not in evidence["raw_examples"]
+        ):
             if len(evidence["raw_examples"]) < 5:
                 evidence["raw_examples"].append(failure["raw_name"])
         explanation = _failure_explanation(failure, identity)
@@ -1073,7 +1080,10 @@ def build_fusion_analysis(
     # normal two-source case.
     for scope_id, fused in fused_scopes.items():
         fused_break = fused.get("break") if isinstance(fused, dict) else None
-        if not isinstance(fused_break, dict) or fused_break.get("trigger_node_id") is None:
+        if (
+            not isinstance(fused_break, dict)
+            or fused_break.get("trigger_node_id") is None
+        ):
             continue
         if selected_scope_ids and int(scope_id) not in selected_scope_ids:
             continue
@@ -1105,9 +1115,7 @@ def build_fusion_analysis(
 
     for ordinal, boundary in enumerate(boundary_records):
         trigger_id = int(boundary["trigger_node_id"])
-        identity, source_kind = _identity_for_node(
-            trigger_id, nodes, failures_by_node
-        )
+        identity, source_kind = _identity_for_node(trigger_id, nodes, failures_by_node)
         scope_id = boundary.get("scope_id")
         boundary_id = ":".join(
             str(value)
@@ -1120,7 +1128,11 @@ def build_fusion_analysis(
                 ordinal,
             )
         )
-        region_node_ids = set(parsed_scope_nodes.get(int(scope_id), set())) if scope_id is not None else set()
+        region_node_ids = (
+            set(parsed_scope_nodes.get(int(scope_id), set()))
+            if scope_id is not None
+            else set()
+        )
         failure_node_ids = {
             node_id for node_id in region_node_ids if node_id in failures_by_node
         }
@@ -1147,7 +1159,9 @@ def build_fusion_analysis(
             # it is still the kernel that directly caused the boundary.
             unfused_kernel_ids.add(trigger_id)
 
-        scope_position = final_scope_positions.get(int(scope_id)) if scope_id is not None else None
+        scope_position = (
+            final_scope_positions.get(int(scope_id)) if scope_id is not None else None
+        )
         previous_scope_id = (
             final_scope_order[scope_position - 1]
             if scope_position is not None and scope_position > 0
@@ -1171,8 +1185,12 @@ def build_fusion_analysis(
         ]
         target_refs = []
         if scope_id is not None:
-            target_refs.append({"kind": "scope", "stage": "before", "scope_id": str(scope_id)})
-        target_refs.append({"kind": "node", "stage": "before", "node_id": str(trigger_id)})
+            target_refs.append(
+                {"kind": "scope", "stage": "before", "scope_id": str(scope_id)}
+            )
+        target_refs.append(
+            {"kind": "node", "stage": "before", "node_id": str(trigger_id)}
+        )
         if previous_scope_id is not None:
             target_refs.append(
                 {
@@ -1292,12 +1310,15 @@ def build_fusion_analysis(
             for index, variant in enumerate(item["implementation_variants"])
             if variant not in item["implementation_variants"][:index]
         ]
-        if len(
-            {
-                _implementation_signature(variant)
-                for variant in item["implementation_variants"]
-            }
-        ) > 1:
+        if (
+            len(
+                {
+                    _implementation_signature(variant)
+                    for variant in item["implementation_variants"]
+                }
+            )
+            > 1
+        ):
             # The same normalized name can represent dynamic, static, Triton,
             # or custom implementations.  Do not present the first observed
             # variant as a fact when the evidence is mixed.

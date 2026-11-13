@@ -196,7 +196,11 @@ def _reason_summary(code: Any, reason: Any, detail: Any = None) -> str:
     reason_text = str(reason or "").strip()
     if reason_text in _REASON_LABELS:
         return _REASON_LABELS[reason_text]
-    if reason_text and reason_text.replace("_", "").isalnum() and reason_text.upper() == reason_text:
+    if (
+        reason_text
+        and reason_text.replace("_", "").isalnum()
+        and reason_text.upper() == reason_text
+    ):
         return _REASON_LABELS["UNKNOWN"]
     detail_text = str(detail or "").strip()
     return reason_text or detail_text or _REASON_LABELS["UNKNOWN"]
@@ -204,9 +208,15 @@ def _reason_summary(code: Any, reason: Any, detail: Any = None) -> str:
 
 def _safe_operator_impact(item: Any, *, include_raw: bool = False) -> dict[str, Any]:
     item = item if isinstance(item, dict) else {}
-    direct = item.get("direct_breaks") if isinstance(item.get("direct_breaks"), dict) else {}
+    direct = (
+        item.get("direct_breaks") if isinstance(item.get("direct_breaks"), dict) else {}
+    )
     evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-    observed = item.get("observed_effect") if isinstance(item.get("observed_effect"), dict) else {}
+    observed = (
+        item.get("observed_effect")
+        if isinstance(item.get("observed_effect"), dict)
+        else {}
+    )
     reasons = {
         str(code): _number(count) or 0
         for code, count in (direct.get("by_reason") or {}).items()
@@ -227,7 +237,8 @@ def _safe_operator_impact(item: Any, *, include_raw: bool = False) -> dict[str, 
             "failure_count": _number(evidence.get("failure_count")) or 0,
         },
         "observed_effect": {
-            "affected_region_count": _number(observed.get("affected_region_count")) or 0,
+            "affected_region_count": _number(observed.get("affected_region_count"))
+            or 0,
             "affected_scope_count": _number(observed.get("affected_region_count")) or 0,
             "affected_scope_ids": _safe_ids(observed.get("affected_scope_ids")),
             "adjacent_scope_count": _number(observed.get("adjacent_scope_count")) or 0,
@@ -243,7 +254,9 @@ def _safe_operator_impact(item: Any, *, include_raw: bool = False) -> dict[str, 
 def _safe_boundary(item: Any, *, include_raw: bool = False) -> dict[str, Any]:
     item = item if isinstance(item, dict) else {}
     trigger = item.get("trigger") if isinstance(item.get("trigger"), dict) else {}
-    operator = trigger.get("operator") if isinstance(trigger.get("operator"), dict) else {}
+    operator = (
+        trigger.get("operator") if isinstance(trigger.get("operator"), dict) else {}
+    )
     result = {
         "id": item.get("id") if include_raw else None,
         "scope_id": item.get("scope_id"),
@@ -340,7 +353,9 @@ def _safe_operator_outcomes(value: Any) -> dict[str, Any] | None:
 
 def _deadlock_break_detail(boundary: dict, fused_scopes: dict[str, list[str]]) -> dict:
     """Explain a recorded fusion-time split, without inferring runtime failure."""
-    trigger = boundary.get("trigger") if isinstance(boundary.get("trigger"), dict) else {}
+    trigger = (
+        boundary.get("trigger") if isinstance(boundary.get("trigger"), dict) else {}
+    )
     node_id = str(trigger["node_id"]) if trigger.get("node_id") is not None else None
     match = re.fullmatch(
         r"Deadlock at node (\d+), split at Wait node (\d+)",
@@ -361,7 +376,9 @@ def _deadlock_break_detail(boundary: dict, fused_scopes: dict[str, list[str]]) -
         targets.append({"kind": "node", "stage": "before", "node_id": split_id})
     if node_id is not None:
         targets.append({"kind": "node", "stage": "before", "node_id": node_id})
-    targets.extend({"kind": "scope", "stage": "after", "scope_id": sid} for sid in scopes)
+    targets.extend(
+        {"kind": "scope", "stage": "after", "scope_id": sid} for sid in scopes
+    )
     return {
         "trigger_node_id": node_id,
         "split_node_id": split_id,
@@ -371,10 +388,14 @@ def _deadlock_break_detail(boundary: dict, fused_scopes: dict[str, list[str]]) -
     }
 
 
-def _safe_fusion(fusion: Any, *, include_raw: bool = False, model: dict | None = None) -> dict[str, Any]:
+def _safe_fusion(
+    fusion: Any, *, include_raw: bool = False, model: dict | None = None
+) -> dict[str, Any]:
     fusion = fusion if isinstance(fusion, dict) else {}
     summary = fusion.get("summary") if isinstance(fusion.get("summary"), dict) else {}
-    coverage = fusion.get("coverage") if isinstance(fusion.get("coverage"), dict) else {}
+    coverage = (
+        fusion.get("coverage") if isinstance(fusion.get("coverage"), dict) else {}
+    )
     sources = fusion.get("sources") if isinstance(fusion.get("sources"), dict) else {}
     filtered_failures = fusion.get("unfused_node_failures")
     if not isinstance(filtered_failures, list):
@@ -382,8 +403,12 @@ def _safe_fusion(fusion: Any, *, include_raw: bool = False, model: dict | None =
     result = {
         "schema_version": fusion.get("schema_version", "1.0"),
         "status": _safe_status(fusion.get("status")),
-        "summary": {key: summary.get(key) for key in _FUSION_SUMMARY_FIELDS if key in summary},
-        "coverage": {key: coverage.get(key) for key in _FUSION_COVERAGE_FIELDS if key in coverage},
+        "summary": {
+            key: summary.get(key) for key in _FUSION_SUMMARY_FIELDS if key in summary
+        },
+        "coverage": {
+            key: coverage.get(key) for key in _FUSION_COVERAGE_FIELDS if key in coverage
+        },
         "sources": {
             str(name): _safe_source(source, include_debug=include_raw)
             for name, source in sources.items()
@@ -406,14 +431,17 @@ def _safe_fusion(fusion: Any, *, include_raw: bool = False, model: dict | None =
     }
     # Only explicit fusion transformations establish where a trigger ended up.
     model = model or {}
-    after_nodes = {str(n.get("id")): n for n in (model.get("after") or {}).get("nodes", [])}
+    after_nodes = {
+        str(n.get("id")): n for n in (model.get("after") or {}).get("nodes", [])
+    }
     fusion_targets: dict[str, set[str]] = {}
     for row in model.get("transformations") or []:
         if row.get("kind") != "fusion":
             continue
         for node_id in row.get("before_ids") or []:
             fusion_targets.setdefault(str(node_id), set()).update(
-                str(target) for target in row.get("after_ids") or []
+                str(target)
+                for target in row.get("after_ids") or []
                 if str(target) in after_nodes
             )
     fused_scopes = {}
@@ -423,7 +451,11 @@ def _safe_fusion(fusion: Any, *, include_raw: bool = False, model: dict | None =
         target = after_nodes[next(iter(targets))]
         if target.get("is_sk") and target.get("scope_id") is not None:
             fused_scopes[node_id] = [str(target["scope_id"])]
-    boundaries = {str(b.get("id")): b for b in fusion.get("boundaries") or [] if isinstance(b, dict) and b.get("id") is not None}
+    boundaries = {
+        str(b.get("id")): b
+        for b in fusion.get("boundaries") or []
+        if isinstance(b, dict) and b.get("id") is not None
+    }
     original_impacts = [
         item for item in fusion.get("operator_impacts") or [] if isinstance(item, dict)
     ]
@@ -434,7 +466,8 @@ def _safe_fusion(fusion: Any, *, include_raw: bool = False, model: dict | None =
         details = [
             _deadlock_break_detail(boundaries[str(bid)], fused_scopes)
             for bid in (original.get("direct_breaks") or {}).get("boundary_ids") or []
-            if str(bid) in boundaries and boundaries[str(bid)].get("break_reason") == "DEADLOCK_DETECTED"
+            if str(bid) in boundaries
+            and boundaries[str(bid)].get("break_reason") == "DEADLOCK_DETECTED"
         ]
         public["break_details"] = details[:8]
         public["break_detail_count"] = len(details)
@@ -448,8 +481,19 @@ def _public_source(source: Any) -> dict[str, Any]:
     if isinstance(source, str):
         token = source.strip()
         normalized = _safe_status(token)
-        if normalized in {"unavailable", "partial", "available", "ready", "complete", "ok"}:
-            status = "available" if normalized in {"available", "ready", "complete", "ok"} else normalized
+        if normalized in {
+            "unavailable",
+            "partial",
+            "available",
+            "ready",
+            "complete",
+            "ok",
+        }:
+            status = (
+                "available"
+                if normalized in {"available", "ready", "complete", "ok"}
+                else normalized
+            )
             return {
                 "status": status,
                 "parser": None,
@@ -475,7 +519,9 @@ def _public_source(source: Any) -> dict[str, Any]:
     }
 
 
-def _public_sources(model: dict[str, Any], fusion: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _public_sources(
+    model: dict[str, Any], fusion: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
     result = {
         str(name): _public_source(source)
         for name, source in (model.get("sources") or {}).items()
@@ -515,11 +561,19 @@ def _public_issue(
         return None
     if code in _NON_ACTIONABLE_PUBLIC_CODES and not runtime_signal:
         return None
-    if code not in _PUBLIC_DIAGNOSTIC_CODES and not runtime_signal and not runtime_warning:
+    if (
+        code not in _PUBLIC_DIAGNOSTIC_CODES
+        and not runtime_signal
+        and not runtime_warning
+    ):
         return None
     state = "attention" if severity in {"warning", "error", "abnormal"} else "confirmed"
     public_severity = (
-        "error" if severity in {"error", "abnormal"} else "warning" if state == "attention" else "info"
+        "error"
+        if severity in {"error", "abnormal"}
+        else "warning"
+        if state == "attention"
+        else "info"
     )
     object_refs = list(objects or [])
     obj = issue.get("object")
@@ -536,12 +590,18 @@ def _public_issue(
     details = issue.get("details") if isinstance(issue.get("details"), dict) else {}
     if code == "log_event_association_skipped":
         title = "部分 Event 的融合关联被跳过"
-        summary = str(issue.get("message") or "日志未找到相邻 Kernel，跳过了对应的融合关联。")
+        summary = str(
+            issue.get("message") or "日志未找到相邻 Kernel，跳过了对应的融合关联。"
+        )
         if count > 1:
             summary = f"日志记录 {count} 处 Event 前后未找到相邻 Kernel，跳过了对应方向的融合关联。"
         impact = "对应方向的相邻 Kernel 未建立融合关联。"
-        location = "对应 Event 节点" if object_refs else "super_kernel.log · AddEventAssociate"
-        next_step = "核对 Event 前后的任务是否存在相邻 Kernel；没有相邻 Kernel 时无需处理。"
+        location = (
+            "对应 Event 节点" if object_refs else "super_kernel.log · AddEventAssociate"
+        )
+        next_step = (
+            "核对 Event 前后的任务是否存在相邻 Kernel；没有相邻 Kernel 时无需处理。"
+        )
     elif runtime_warning:
         title = "日志 Warning"
         summary = str(issue.get("message") or "日志记录了 Warning。")
@@ -567,7 +627,9 @@ def _public_issue(
         title = f"{kind_label}{target_label}"
         summary = f"已记录{kind_label}{target_label}，可在图中定位（Graph）。"
         impact = f"影响{target_label.strip() or '当前 Model'}的运行状态判断。"
-        location = f"Graph：{target_label.strip()}" if target_label else "Graph：当前 Model"
+        location = (
+            f"Graph：{target_label.strip()}" if target_label else "Graph：当前 Model"
+        )
         next_step = "打开对应节点详情，核对异常函数或核心符号。"
     elif code in {"source_fallback", "model_identity_mismatch"}:
         title = "当前图按 Log 结果展示"
@@ -624,9 +686,13 @@ def _public_issue(
     }
 
 
-def _issue_inputs(model: dict[str, Any], global_diagnostics: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def _issue_inputs(
+    model: dict[str, Any], global_diagnostics: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
     values = []
-    values.extend(item for item in model.get("diagnostics", []) if isinstance(item, dict))
+    values.extend(
+        item for item in model.get("diagnostics", []) if isinstance(item, dict)
+    )
     runtime = model.get("runtime") if isinstance(model.get("runtime"), dict) else {}
     values.extend(item for item in runtime.get("issues", []) if isinstance(item, dict))
     model_key = model.get("key")
@@ -634,14 +700,19 @@ def _issue_inputs(model: dict[str, Any], global_diagnostics: Iterable[dict[str, 
         item
         for item in global_diagnostics
         if isinstance(item, dict)
-        and (item.get("model_key") is None or str(item.get("model_key")) == str(model_key))
+        and (
+            item.get("model_key") is None
+            or str(item.get("model_key")) == str(model_key)
+        )
     )
     unique = []
     seen = set()
     for item in values:
         key = str(item.get("id") or "")
         if not key:
-            key = repr(sorted((str(k), repr(v)) for k, v in item.items() if k != "details"))
+            key = repr(
+                sorted((str(k), repr(v)) for k, v in item.items() if k != "details")
+            )
         if key in seen:
             continue
         seen.add(key)
@@ -649,7 +720,9 @@ def _issue_inputs(model: dict[str, Any], global_diagnostics: Iterable[dict[str, 
     return unique
 
 
-def _public_findings(model: dict[str, Any], global_diagnostics: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def _public_findings(
+    model: dict[str, Any], global_diagnostics: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
     inputs = _issue_inputs(model, global_diagnostics)
     groups: dict[str, list[dict[str, Any]]] = {}
     for item in inputs:
@@ -659,7 +732,11 @@ def _public_findings(model: dict[str, Any], global_diagnostics: Iterable[dict[st
         # A fallback usually emits both an identity mismatch and a source
         # selection record.  Present one actionable warning instead of two
         # parser-internal cards.
-        group_key = "source_selection" if code in {"source_fallback", "model_identity_mismatch"} else code
+        group_key = (
+            "source_selection"
+            if code in {"source_fallback", "model_identity_mismatch"}
+            else code
+        )
         groups.setdefault(group_key, []).append(item)
     findings = []
     for group_key, items in groups.items():
@@ -679,7 +756,11 @@ def _public_findings(model: dict[str, Any], global_diagnostics: Iterable[dict[st
             scopes = details.get("scopes") if isinstance(details, dict) else None
             if isinstance(scopes, dict):
                 for scope_id in list(scopes)[:8]:
-                    target = {"kind": "scope", "stage": "before", "scope_id": str(scope_id)}
+                    target = {
+                        "kind": "scope",
+                        "stage": "before",
+                        "scope_id": str(scope_id),
+                    }
                     if target not in refs:
                         refs.append(target)
         finding = _public_issue(representative, count=len(items), objects=refs)
@@ -714,7 +795,9 @@ def _fusion_reason_counts(fusion: Any) -> list[dict[str, Any]]:
             if not isinstance(boundary, dict):
                 continue
             label = _reason_summary(
-                boundary.get("break_reason"), boundary.get("break_reason"), boundary.get("detail")
+                boundary.get("break_reason"),
+                boundary.get("break_reason"),
+                boundary.get("detail"),
             )
             counts[label] = counts.get(label, 0) + 1
     return [
@@ -723,7 +806,9 @@ def _fusion_reason_counts(fusion: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _fusion_findings(model: dict[str, Any], safe_fusion: dict[str, Any]) -> list[dict[str, Any]]:
+def _fusion_findings(
+    model: dict[str, Any], safe_fusion: dict[str, Any]
+) -> list[dict[str, Any]]:
     """Return only a blocking fusion-data error.
 
     Fusion progress and break causes belong to the fusion result card.  They do
@@ -763,7 +848,9 @@ def _graph_status(model: dict[str, Any]) -> str:
     return "unavailable"
 
 
-def _status_summary(status: dict[str, str], fusion: dict[str, Any], runtime: dict[str, Any]) -> str:
+def _status_summary(
+    status: dict[str, str], fusion: dict[str, Any], runtime: dict[str, Any]
+) -> str:
     graph_text = {
         "available": "执行图已生成",
         "partial": "执行图已生成",
@@ -786,7 +873,9 @@ def _status_summary(status: dict[str, str], fusion: dict[str, Any], runtime: dic
     return "；".join(clauses) + "。"
 
 
-def _status_findings(status: dict[str, str], fusion: dict[str, Any], runtime: dict[str, Any]) -> list[dict[str, Any]]:
+def _status_findings(
+    status: dict[str, str], fusion: dict[str, Any], runtime: dict[str, Any]
+) -> list[dict[str, Any]]:
     findings = []
     if status["graph"] == "unavailable":
         findings.append(
@@ -878,18 +967,29 @@ def _build_conclusion(
     }
 
 
-def build_dfx(model: dict[str, Any], global_diagnostics: Iterable[dict[str, Any]] = (), *, include_debug: bool = False) -> dict[str, Any]:
+def build_dfx(
+    model: dict[str, Any],
+    global_diagnostics: Iterable[dict[str, Any]] = (),
+    *,
+    include_debug: bool = False,
+) -> dict[str, Any]:
     """Return a stable DFX view model for one report model."""
     model = model if isinstance(model, dict) else {}
     runtime = model.get("runtime") if isinstance(model.get("runtime"), dict) else {}
-    fusion = _safe_fusion(model.get("fusion_analysis"), include_raw=include_debug, model=model)
+    fusion = _safe_fusion(
+        model.get("fusion_analysis"), include_raw=include_debug, model=model
+    )
     status = {
         "graph": _graph_status(model),
         "runtime": _safe_status(runtime.get("status"), "insufficient"),
         "fusion": fusion["status"],
-        "analysis": "partial" if fusion["status"] in {"partial", "unavailable"} else "complete",
+        "analysis": "partial"
+        if fusion["status"] in {"partial", "unavailable"}
+        else "complete",
     }
-    statistics = model.get("statistics") if isinstance(model.get("statistics"), dict) else {}
+    statistics = (
+        model.get("statistics") if isinstance(model.get("statistics"), dict) else {}
+    )
     summary = fusion["summary"]
     outcomes = (
         fusion.get("operator_outcomes")
@@ -897,7 +997,9 @@ def build_dfx(model: dict[str, Any], global_diagnostics: Iterable[dict[str, Any]
         else {}
     )
 
-    def outcome_or_stat(outcome_key: str, statistic_key: str, fallback: Any = None) -> Any:
+    def outcome_or_stat(
+        outcome_key: str, statistic_key: str, fallback: Any = None
+    ) -> Any:
         value = outcomes.get(outcome_key)
         return value if value is not None else statistics.get(statistic_key, fallback)
 
@@ -911,12 +1013,16 @@ def build_dfx(model: dict[str, Any], global_diagnostics: Iterable[dict[str, Any]
         "fused_nodes": statistics.get("fused_nodes"),
         "single_kernel_fusion_count": statistics.get("single_kernel_fusion_count"),
         "multi_kernel_fusion_count": statistics.get("multi_kernel_fusion_count"),
-        "pure_scope_kernel_scope_count": statistics.get("pure_scope_kernel_scope_count"),
+        "pure_scope_kernel_scope_count": statistics.get(
+            "pure_scope_kernel_scope_count"
+        ),
         # The annotated outcome is derived from the pre-update kernel universe
         # and therefore wins over legacy statistics built from final Scope
         # membership.  Keep the statistics fallback for older reports.
         "fused_operator_count": outcome_or_stat(
-            "actual_node_count", "fused_operator_count", statistics.get("fused_kernel_nodes")
+            "actual_node_count",
+            "fused_operator_count",
+            statistics.get("fused_kernel_nodes"),
         ),
         "expected_operator_count": outcome_or_stat(
             "expected_node_count", "expected_operator_count"
@@ -928,7 +1034,9 @@ def build_dfx(model: dict[str, Any], global_diagnostics: Iterable[dict[str, Any]
         "final_region_count": summary.get("final_region_count"),
         "successful_sk_count": summary.get("successful_sk_count"),
         "boundary_count": summary.get("boundary_count"),
-        "operator_triggered_boundary_count": summary.get("operator_triggered_boundary_count"),
+        "operator_triggered_boundary_count": summary.get(
+            "operator_triggered_boundary_count"
+        ),
         "control_boundary_count": summary.get("control_boundary_count"),
         "failure_record_count": summary.get("failure_record_count"),
     }
@@ -976,7 +1084,9 @@ def _public_top_level_diagnostic(item: Any) -> dict[str, Any] | None:
         "id": result["id"],
         "code": result["code"],
         "domain": result["category"],
-        "severity": result.get("severity", "warning" if result["state"] == "attention" else "info"),
+        "severity": result.get(
+            "severity", "warning" if result["state"] == "attention" else "info"
+        ),
         "message": result["summary"],
         "impact": result["impact"],
         "next_step": result["next_step"],
@@ -1026,7 +1136,9 @@ def project_report(
             continue
         for key in ("diagnostics", "comparison", "fusion_analysis"):
             model.pop(key, None)
-        runtime = original.get("runtime") if isinstance(original.get("runtime"), dict) else {}
+        runtime = (
+            original.get("runtime") if isinstance(original.get("runtime"), dict) else {}
+        )
         model["runtime"] = {
             key: runtime.get(key)
             for key in ("status", "conclusion")

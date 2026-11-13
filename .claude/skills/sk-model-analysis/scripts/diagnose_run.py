@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import hashlib

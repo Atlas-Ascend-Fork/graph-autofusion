@@ -154,7 +154,8 @@ def render_report(report: dict, *, include_debug: bool = False) -> str:
         (assets / "scope_children.js").read_text(encoding="utf-8"),
     )
     js = js.replace(
-        "/* USER_SCOPE_OVERLAY */", (assets / "user_scopes.js").read_text(encoding="utf-8")
+        "/* USER_SCOPE_OVERLAY */",
+        (assets / "user_scopes.js").read_text(encoding="utf-8"),
     )
     js = js.replace(
         "/* MINIMAP */", (assets / "minimap.js").read_text(encoding="utf-8")

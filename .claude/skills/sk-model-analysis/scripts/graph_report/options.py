@@ -37,11 +37,11 @@ def read_log_options(path, span=None):
     return result
 
 
-def resolve_options(j, l, mode, diagnostics):
+def resolve_options(j, log_data, mode, diagnostics):
     out = {}
     for stage in ("before", "after"):
         js = j.get(stage, {}).get("options", {}) if mode != "log" else {}
-        ls = l.get("options", {}) if mode != "json" else {}
+        ls = log_data.get("options", {}) if mode != "json" else {}
         out[stage] = {k: {**copy.deepcopy(v), "parser": "log"} for k, v in ls.items()}
         for key, value in js.items():
             if key in ls and value.get("value") != ls[key].get("value"):

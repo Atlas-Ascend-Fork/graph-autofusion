@@ -72,29 +72,34 @@ def compare_results(json_result: dict, log_result: dict) -> dict:
     differences, single_sides, incomparable = [], [], []
     compared = 0
 
-    def fields(j: dict, l: dict, names: tuple, obj: dict, capability: str):
+    def fields(j: dict, log_data: dict, names: tuple, obj: dict, capability: str):
         nonlocal compared
         for name in names:
-            if name not in j or name not in l or j[name] is None or l[name] is None:
+            if (
+                name not in j
+                or name not in log_data
+                or j[name] is None
+                or log_data[name] is None
+            ):
                 continue
             compared += 1
-            if _norm(j[name]) != _norm(l[name]):
+            if _norm(j[name]) != _norm(log_data[name]):
                 differences.append(
                     {
                         "capability": capability,
                         "object": obj,
                         "field": name,
                         "json": j[name],
-                        "log": l[name],
+                        "log": log_data[name],
                         "json_source": j.get("source", {}),
-                        "log_source": l.get("source", {}),
+                        "log_source": log_data.get("source", {}),
                     }
                 )
 
-    def membership(j: dict, l: dict, capability: str):
+    def membership(j: dict, log_data: dict, capability: str):
         for source, keys in (
-            ("json", j.keys() - l.keys()),
-            ("log", l.keys() - j.keys()),
+            ("json", j.keys() - log_data.keys()),
+            ("log", log_data.keys() - j.keys()),
         ):
             for key in sorted(keys, key=str):
                 single_sides.append(
@@ -102,23 +107,23 @@ def compare_results(json_result: dict, log_result: dict) -> dict:
                 )
 
     for stage in ("before", "after"):
-        j, l = json_result[stage], log_result[stage]
-        if "unavailable" in (j["status"], l["status"]):
+        j, log_data = json_result[stage], log_result[stage]
+        if "unavailable" in (j["status"], log_data["status"]):
             incomparable.append(
-                {"capability": stage, "json": j["status"], "log": l["status"]}
+                {"capability": stage, "json": j["status"], "log": log_data["status"]}
             )
             continue
-        if "partial" in (j["status"], l["status"]):
+        if "partial" in (j["status"], log_data["status"]):
             incomparable.append(
                 {
                     "capability": stage,
                     "reason": "partial_coverage",
                     "json": j["status"],
-                    "log": l["status"],
+                    "log": log_data["status"],
                 }
             )
         jnodes = {n["id"]: n for n in j["nodes"]}
-        lnodes = {n["id"]: n for n in l["nodes"]}
+        lnodes = {n["id"]: n for n in log_data["nodes"]}
         membership(jnodes, lnodes, stage)
         for key in sorted(jnodes.keys() & lnodes.keys()):
             fields(
@@ -146,7 +151,7 @@ def compare_results(json_result: dict, log_result: dict) -> dict:
             )
         # Compare edge multiplicities, without equating parser confidence with topology.
         je = Counter((e["source"], e["target"], e["kind"]) for e in j["edges"])
-        le = Counter((e["source"], e["target"], e["kind"]) for e in l["edges"])
+        le = Counter((e["source"], e["target"], e["kind"]) for e in log_data["edges"])
         for key in sorted(je.keys() | le.keys()):
             if not je[key] or not le[key]:
                 single_sides.append(
@@ -179,17 +184,29 @@ def compare_results(json_result: dict, log_result: dict) -> dict:
         ls = {r[key_name]: r for r in log_result[capability]}
         membership(js, ls, capability)
         for key in sorted(js.keys() & ls.keys()):
-            j, l = dict(js[key]), dict(ls[key])
+            j, log_data = dict(js[key]), dict(ls[key])
             j["node_ids"] = sorted(set(j.get("node_ids", [])))
-            l["node_ids"] = sorted(set(l.get("node_ids", [])))
-            fields(j, l, ("node_ids",), {"scope_id": key}, capability)
+            log_data["node_ids"] = sorted(set(log_data.get("node_ids", [])))
+            fields(j, log_data, ("node_ids",), {"scope_id": key}, capability)
 
     # Manual boundaries are compared independently of optimizer Scope IDs.
-    ja = {tuple(sorted(s.get("marker_node_ids", []))): s for s in json_result.get("user_scopes", [])}
-    la = {tuple(sorted(s.get("marker_node_ids", []))): s for s in log_result.get("user_scopes", [])}
+    ja = {
+        tuple(sorted(s.get("marker_node_ids", []))): s
+        for s in json_result.get("user_scopes", [])
+    }
+    la = {
+        tuple(sorted(s.get("marker_node_ids", []))): s
+        for s in log_result.get("user_scopes", [])
+    }
     membership(ja, la, "user_scopes")
     for key in sorted(ja.keys() & la.keys()):
-        fields(ja[key], la[key], ("name",), {"stage": "before", "node_id": key[0]}, "user_scopes")
+        fields(
+            ja[key],
+            la[key],
+            ("name",),
+            {"stage": "before", "node_id": key[0]},
+            "user_scopes",
+        )
 
     jc = json_result["capabilities"].get("queues", "unavailable")
     lc = log_result["capabilities"].get("queues", "unavailable")
@@ -228,24 +245,24 @@ def compare_results(json_result: dict, log_result: dict) -> dict:
         js, ls = queue_map(json_result), queue_map(log_result)
         membership(js, ls, "queues")
         for key in sorted(js.keys() & ls.keys()):
-            j, l = js[key], ls[key]
-            if j is None or l is None:
+            j, log_data = js[key], ls[key]
+            if j is None or log_data is None:
                 continue
             obj = {"scope_id": key[0]}
             compared += 1
-            if len(j["tasks"]) != len(l["tasks"]):
+            if len(j["tasks"]) != len(log_data["tasks"]):
                 differences.append(
                     {
                         "capability": "queues",
                         "object": obj,
                         "field": "task_count",
                         "json": len(j["tasks"]),
-                        "log": len(l["tasks"]),
+                        "log": len(log_data["tasks"]),
                     }
                 )
             jtasks = {t["index"]: t for t in j["tasks"]}
-            ltasks = {t["index"]: t for t in l["tasks"]}
-            if len(jtasks) != len(j["tasks"]) or len(ltasks) != len(l["tasks"]):
+            ltasks = {t["index"]: t for t in log_data["tasks"]}
+            if len(jtasks) != len(j["tasks"]) or len(ltasks) != len(log_data["tasks"]):
                 incomparable.append(
                     {
                         "capability": "queues",
@@ -370,7 +387,9 @@ def _is_scope_kernel_node(node: dict | None) -> bool:
 
 
 def _sort_ids(values: set[str]) -> list[str]:
-    return sorted(values, key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
+    return sorted(
+        values, key=lambda value: (0, int(value)) if value.isdigit() else (1, value)
+    )
 
 
 def _node_label(node: dict | None) -> str | None:
@@ -408,8 +427,7 @@ def _kernel_node_ids(nodes: dict[str, dict]) -> set[str]:
     return {
         str(node_id)
         for node_id, node in nodes.items()
-        if isinstance(node, dict)
-        and str(node.get("type", "")).upper() == "KERNEL"
+        if isinstance(node, dict) and str(node.get("type", "")).upper() == "KERNEL"
     }
 
 
@@ -459,8 +477,10 @@ def _explicit_not_in_scope_ids(
             continue
         fields = (failure.get("reason_code"), failure.get("reason"))
         if any(
-            "NOT_IN_SCOPE" in str(value or "").upper().replace("-", "_").replace(" ", "_")
-            or "OUT_OF_SCOPE" in str(value or "").upper().replace("-", "_").replace(" ", "_")
+            "NOT_IN_SCOPE"
+            in str(value or "").upper().replace("-", "_").replace(" ", "_")
+            or "OUT_OF_SCOPE"
+            in str(value or "").upper().replace("-", "_").replace(" ", "_")
             for value in fields
         ):
             result.add(node_id)
@@ -493,9 +513,7 @@ def _annotate_fusion_operator_outcomes(
     structural_ids = {
         str(node_id) for node_id in (structural_node_ids or pure_node_ids)
     }
-    explicit_not_in_scope = {
-        str(node_id) for node_id in (not_in_scope_ids or set())
-    }
+    explicit_not_in_scope = {str(node_id) for node_id in (not_in_scope_ids or set())}
     excluded_not_in_scope = explicit_not_in_scope & kernel_ids
     excluded_unknown = kernel_ids - expected - structural_ids - excluded_not_in_scope
 
@@ -571,8 +589,12 @@ def _graph_semantics(
         ids = [str(value) for value in scope.get("node_ids", [])]
         if not ids:
             continue
-        members = [before_by_id.get(node_id) or after_by_id.get(node_id) for node_id in ids]
-        if len(members) == len(ids) and all(_is_scope_kernel_node(node) for node in members):
+        members = [
+            before_by_id.get(node_id) or after_by_id.get(node_id) for node_id in ids
+        ]
+        if len(members) == len(ids) and all(
+            _is_scope_kernel_node(node) for node in members
+        ):
             pure_scope_ids.add(scope_id)
             pure_node_ids.update(ids)
 
@@ -607,7 +629,7 @@ def resolve_model(
     key: str, label: str, json_result: dict | None, log_result: dict | None, mode: str
 ) -> dict:
     j = json_result or empty_result("json")
-    l = log_result or empty_result("log")
+    log_data = log_result or empty_result("log")
     active = [r for r in (json_result, log_result) if r is not None]
     diagnostics = [copy.deepcopy(i) for r in active for i in r.get("diagnostics", [])]
     sources = {}
@@ -625,15 +647,16 @@ def resolve_model(
                 if capability in ("before", "after")
                 else result["capabilities"].get(capability, "unavailable")
             )
+
         js = state(j)
         chosen = (
             j
             if mode == "json"
-            else l
+            else log_data
             if mode == "log"
             else j
             if js != "unavailable"
-            else l
+            else log_data
         )
         source = chosen["parser"] if state(chosen) != "unavailable" else "unavailable"
         sources[capability] = source
@@ -675,7 +698,7 @@ def resolve_model(
                 )
             )
     if mode == "both":
-        comparison = compare_results(j, l)
+        comparison = compare_results(j, log_data)
         if comparison["differences"]:
             diagnostics.append(
                 issue(
@@ -707,14 +730,14 @@ def resolve_model(
             "not_comparable": [],
         }
     if mode in ("both", "log") and log_result is not None:
-        _attach_event_origins(out, l)
+        _attach_event_origins(out, log_data)
     # Preserve explicit invalidation evidence omitted from the active JSON snapshot.
     # Never override a JSON node or infer INVALID from an absent node.
     if mode == "both" and sources["after"] == "json":
         present = {str(n["id"]) for n in out["after"]["nodes"]}
         invalidated = [
             copy.deepcopy(n)
-            for n in l["after"]["nodes"]
+            for n in log_data["after"]["nodes"]
             if n.get("type") == "INVALID" and str(n["id"]) not in present
         ]
         if invalidated:
@@ -752,19 +775,13 @@ def resolve_model(
     pure_node_ids = set(semantics["pure_scope_kernel_node_ids"])
     kernel_ids = _kernel_node_ids(bnodes)
     structural_kernel_ids = {
-        node_id
-        for node_id in kernel_ids
-        if _is_scope_kernel_node(bnodes.get(node_id))
+        node_id for node_id in kernel_ids if _is_scope_kernel_node(bnodes.get(node_id))
     }
     operator_kernel_ids = kernel_ids - structural_kernel_ids
-    not_in_scope_ids = _explicit_not_in_scope_ids(
-        fusion_result, operator_kernel_ids
-    )
+    not_in_scope_ids = _explicit_not_in_scope_ids(fusion_result, operator_kernel_ids)
     expected_operator_ids = operator_kernel_ids - not_in_scope_ids
     fused_kernel_ids = {
-        str(node_id)
-        for node_id in members
-        if str(node_id) in operator_kernel_ids
+        str(node_id) for node_id in members if str(node_id) in operator_kernel_ids
     }
     actual_operator_ids = fused_kernel_ids & expected_operator_ids
     expected_operator_count = (
@@ -838,13 +855,17 @@ def resolve_model(
     }
     from .options import resolve_options
 
-    out["graph_options"] = resolve_options(j, l, mode, diagnostics)
+    out["graph_options"] = resolve_options(j, log_data, mode, diagnostics)
     if fusion_result is not None:
         out["fusion_analysis"] = copy.deepcopy(fusion_result)
         _annotate_fusion_operator_outcomes(
             out["fusion_analysis"],
-            expected_ids=expected_operator_ids if expected_operator_count is not None else None,
-            actual_ids=actual_operator_ids if fused_operator_count is not None else None,
+            expected_ids=expected_operator_ids
+            if expected_operator_count is not None
+            else None,
+            actual_ids=actual_operator_ids
+            if fused_operator_count is not None
+            else None,
             kernel_ids=kernel_ids,
             pure_node_ids=pure_node_ids,
             structural_node_ids=structural_kernel_ids,
@@ -852,9 +873,7 @@ def resolve_model(
             before_by_id=bnodes,
         )
         sources["fusion_analysis"] = fusion_parser
-        coverage["fusion_analysis"] = str(
-            fusion_result.get("status") or "unavailable"
-        )
+        coverage["fusion_analysis"] = str(fusion_result.get("status") or "unavailable")
     out.update(
         sources=sources,
         coverage=coverage,
