@@ -522,8 +522,8 @@ FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ada
   if (failed(ordered)) {
     return failure();
   }
-  FailureOr<VectorizedWindow> window =
-      materializeVectorizedSegments(op, rewriter, *segments, view.extentSource, *ordered, /*apiWindowSize=*/1);
+  FailureOr<VectorizedWindow> window = materializeVectorizedSegments(op, rewriter, *segments, view.extentSource,
+                                                                     *ordered, view.apiWindowSize, view.physicalSpan);
   if (failed(window)) {
     return failure();
   }

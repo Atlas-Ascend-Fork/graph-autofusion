@@ -57,6 +57,8 @@ struct ElementwiseLocalView {
   afir::ExtentSource extentSource = afir::ExtentSource::Nominal;
   // Zero means loop over every segment and invoke the API on one element.
   unsigned apiWindowSize = 1;
+  // Equal element types and local layouts may compute padding within one span.
+  bool physicalSpan = false;
 };
 // Interpret descriptors and construct the common loop plan, without imposing
 // continuous API lane, alignment, capacity or alias requirements.

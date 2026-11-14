@@ -295,8 +295,8 @@ FailureOr<UnaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adap
   if (failed(ordered)) {
     return failure();
   }
-  FailureOr<VectorizedWindow> window =
-      materializeVectorizedSegments(op, rewriter, *segments, view.extentSource, *ordered, view.apiWindowSize);
+  FailureOr<VectorizedWindow> window = materializeVectorizedSegments(op, rewriter, *segments, view.extentSource,
+                                                                     *ordered, view.apiWindowSize, view.physicalSpan);
   if (failed(window) || window->tiles.size() != segments->tensors.size() || window->extents.size() != 1) {
     return failure();
   }

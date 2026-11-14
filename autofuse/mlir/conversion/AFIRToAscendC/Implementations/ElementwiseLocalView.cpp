@@ -23,6 +23,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/DenseSet.h"
+#include "mlir/IR/Matchers.h"
 #include <limits>
 
 using namespace mlir;
@@ -534,6 +535,7 @@ LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsig
   }
   view.vectorPlan.reset();
   view.apiWindowSize = 1;
+  view.physicalSpan = false;
   view.extentSource = ExtentSource::Nominal;
   if (whole) {
     for (Value value : values) {
@@ -605,8 +607,63 @@ LocalViewCompatibility collectCompatibleLocalTensors(Operation *op, const Operan
   return LocalViewCompatibility::Compatible;
 }
 
-LocalViewCompatibility checkLocalTensorCapacity(TensorDescAttr desc, ascendc::LocalTensorType type,
-                                                bool resourceSizedBuffer) {
+FailureOr<int64_t> localShapeCapacityBytes(Value value) {
+  auto type = dyn_cast<ascendc::LocalTensorType>(value.getType());
+  if (!type || !type.hasStaticShape()) {
+    return int64_t{-1};
+  }
+  int64_t capacity = (type.getElementTypeBitWidth() + 7) / 8;
+  for (int64_t size : type.getShape()) {
+    if (size <= 0 || capacity <= 0 || capacity > std::numeric_limits<int64_t>::max() / size) {
+      return failure();
+    }
+    capacity *= size;
+  }
+  return capacity;
+}
+
+// Reinterpreted types retain logical shapes, not allocation sizes. Measure the
+// backing storage in bytes, including subindex offsets; -1 denotes runtime size.
+FailureOr<int64_t> localStorageCapacityBytes(Value value) {
+  if (Value tied = getTiedDestination(value)) {
+    return localStorageCapacityBytes(tied);
+  }
+  if (auto cast = value.getDefiningOp<ascendc::LocalTensorReinterpretCastOp>()) {
+    return localStorageCapacityBytes(cast.getIn());
+  }
+  if (auto sub = value.getDefiningOp<ascendc::LocalTensorSubIndexOp>()) {
+    auto capacity = localStorageCapacityBytes(sub.getTensor());
+    if (failed(capacity)) {
+      return failure();
+    }
+    APInt index;
+    if (!matchPattern(sub.getIndex(), m_ConstantInt(&index))) {
+      return int64_t{-1};
+    }
+    if (index.isNegative() || index.getActiveBits() > 63) {
+      return failure();
+    }
+    if (*capacity < 0) {
+      return int64_t{-1};
+    }
+    auto type = cast<ascendc::LocalTensorType>(sub.getTensor().getType());
+    int64_t elementBytes = (type.getElementTypeBitWidth() + 7) / 8;
+    int64_t offset = index.getSExtValue();
+    if (elementBytes == 0 || offset > *capacity / elementBytes) {
+      return failure();
+    }
+    return *capacity - offset * elementBytes;
+  }
+  // At a storage origin, resource sizing overrides the logical tensor shape.
+  // Peel views first so a marker on a reinterpret cannot hide a known bound.
+  auto buffer = getBufferDescAttr(value);
+  if (buffer && buffer.getSizeFromResource()) {
+    return int64_t{-1};
+  }
+  return localShapeCapacityBytes(value);
+}
+
+LocalViewCompatibility checkLocalTensorCapacity(TensorDescAttr desc, Value value) {
   auto laneSpan = staticSpan(desc, /*useRealStrides=*/false);
   auto realSpan = staticSpan(desc, /*useRealStrides=*/true);
   const bool staticGeometry =
@@ -619,28 +676,26 @@ LocalViewCompatibility checkLocalTensorCapacity(TensorDescAttr desc, ascendc::Lo
   if (staticGeometry && !laneSpan && !realSpan) {
     return LocalViewCompatibility::UnsupportedShape;
   }
-  int64_t capacity = 1;
-  bool staticCapacity = type.hasRank();
-  if (staticCapacity) {
-    for (int64_t size : type.getShape()) {
-      if (ShapedType::isDynamic(size)) {
-        staticCapacity = false;
-        break;
-      }
-      if (size <= 0 || capacity > std::numeric_limits<int64_t>::max() / size) {
-        return LocalViewCompatibility::UnsupportedShape;
-      }
-      capacity *= size;
-    }
-  }
-  // lane 跨度（API 窗口发射寻址，含行垫整）超出形状时，再看逻辑跨度：真实步长
-  // 寻址在 LocalTensor 形状内（如广播轴步长 0 重读、垫整行 lane 跳步）且缓冲
-  // 确由资源模型的 size_from_resource 加大分配时，才视为几何合法——垫整 lane
-  // 寻址落进的加大缓冲以此为前提。非资源模型定尺（或无 buffer 描述子）的存储
-  // 分配即形状乘积，lane 超形状仍按原判据拒收。
-  if (laneSpan && staticCapacity && *laneSpan > capacity &&
-      (!resourceSizedBuffer || !realSpan || *realSpan > capacity)) {
+  auto capacity = localStorageCapacityBytes(value);
+  auto type = cast<ascendc::LocalTensorType>(value.getType());
+  int64_t elementBytes = (type.getElementTypeBitWidth() + 7) / 8;
+  // A known backing allocation is a hard bound, including subview offsets.
+  // Runtime resource sizes remain governed by the allocation contract.
+  auto requiredSpan = laneSpan ? laneSpan : realSpan;
+  if (failed(capacity) || elementBytes == 0 ||
+      (requiredSpan && *capacity >= 0 && *requiredSpan > *capacity / elementBytes)) {
     return LocalViewCompatibility::UnsupportedShape;
+  }
+  // Resource-sized tensors may exceed their logical shape only through padding.
+  // Preserve the original real-stride geometry check without treating the shape
+  // as the backing allocation size.
+  auto buffer = getBufferDescAttr(value);
+  if (*capacity < 0 && buffer && buffer.getSizeFromResource()) {
+    auto logicalCapacity = localShapeCapacityBytes(value);
+    if (failed(logicalCapacity) || (*logicalCapacity >= 0 && laneSpan && *laneSpan > *logicalCapacity / elementBytes &&
+                                    (!realSpan || *realSpan > *logicalCapacity / elementBytes))) {
+      return LocalViewCompatibility::UnsupportedShape;
+    }
   }
   return LocalViewCompatibility::Compatible;
 }
@@ -696,24 +751,33 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
   if (result != LocalViewCompatibility::Compatible) {
     return result;
   }
-  if (!view.vectorPlan->segments.empty() && !llvm::all_of(view.vectorPlan->segments.back().strides, provablyOne)) {
-    if (!allowStridedElements) {
-      return LocalViewCompatibility::UnsupportedShape;
-    }
-    // Preserve padded strides: each logical element becomes a separate API window.
-    view.apiWindowSize = 0;
-  }
   const auto destination = descriptors.back();
   const bool unequal = llvm::any_of(descriptors, [&](auto desc) { return !sameStrides(desc, destination); });
+  if (!view.vectorPlan->segments.empty() && !llvm::all_of(view.vectorPlan->segments.back().strides, provablyOne)) {
+    auto destinationType = cast<ascendc::LocalTensorType>(values.back().getType()).getElementType();
+    const bool sameElementType = llvm::all_of(values, [&](Value value) {
+      auto type = dyn_cast<ascendc::LocalTensorType>(value.getType());
+      return type && type.getElementType() == destinationType;
+    });
+    if (!unequal && sameElementType) {
+      // Legacy TensorActualSize computes the physical span, including padding.
+      // Equal domains/strides and element types keep every valid lane aligned.
+      // Scalars were excluded above; mixed-width and broadcast views cannot use this path.
+      view.physicalSpan = true;
+      view.apiWindowSize = view.vectorPlan->segments.size();
+    } else if (allowStridedElements) {
+      view.apiWindowSize = 0;
+    } else {
+      return LocalViewCompatibility::UnsupportedShape;
+    }
+  }
   for (auto [tensorIndex, value] : llvm::enumerate(values)) {
     auto desc = descriptors[tensorIndex];
     auto type = dyn_cast<ascendc::LocalTensorType>(value.getType());
     if (!type) {
       return LocalViewCompatibility::UnsupportedShape;
     }
-    const auto bufferDesc = getBufferDescAttr(value);
-    const bool resourceSized = bufferDesc && bufferDesc.getSizeFromResource();
-    result = checkLocalTensorCapacity(desc, type, resourceSized);
+    result = checkLocalTensorCapacity(desc, value);
     if (result != LocalViewCompatibility::Compatible) {
       return result;
     }

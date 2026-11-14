@@ -23,7 +23,8 @@ namespace mlir::ascend::kernel {
 
 FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuilder &rewriter,
                                                           const afir::VectorPlan &plan, afir::ExtentSource extentSource,
-                                                          ArrayRef<Value> tiles, unsigned apiWindowSize) {
+                                                          ArrayRef<Value> tiles, unsigned apiWindowSize,
+                                                          bool physicalSpan) {
   // 空 segments 表示所有向量化轴 extent 均为 1。apiWindowSize 为 1 时返回
   // 单元素窗口：不建循环，局部偏移为 0，长度为 1，与搬运侧 materializeScheduledTileIndices 一致。
   // 这会出现在广播轴切分并与外轴合为块轴的模板中：elementwise 位于 broadcast 之前，
@@ -46,6 +47,32 @@ FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuild
     }
     return afir::materializeActualSegmentExtent(op, rewriter, segment);
   };
+
+  if (physicalSpan) {
+    if (apiWindowSize != plan.segments.size() || tiles.empty()) {
+      return failure();
+    }
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value span = one;
+    Value nonempty = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
+    for (const auto &segment : plan.segments) {
+      auto extent = segmentExtent(segment);
+      auto stride = afir::materializeStrideValue(op, rewriter, segment.strides.back());
+      if (failed(extent) || failed(stride)) {
+        return failure();
+      }
+      Value positive = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, *extent, zero);
+      nonempty = rewriter.create<arith::AndIOp>(loc, nonempty, positive);
+      Value last = rewriter.create<arith::SubIOp>(loc, *extent, one);
+      Value term = rewriter.create<arith::MulIOp>(loc, last, *stride);
+      span = rewriter.create<arith::AddIOp>(loc, span, term);
+    }
+    VectorizedWindow window;
+    window.tiles.append(tiles.begin(), tiles.end());
+    window.extents.push_back(rewriter.create<arith::SelectOp>(loc, nonempty, span, zero));
+    return window;
+  }
 
   const size_t loopCount = plan.segments.empty() ? 0 : plan.segments.size() - apiWindowSize;
 

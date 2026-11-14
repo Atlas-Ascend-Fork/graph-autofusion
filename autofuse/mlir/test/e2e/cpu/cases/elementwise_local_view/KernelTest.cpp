@@ -19,6 +19,7 @@
 using namespace AscendC;
 #include "ascendc/api/utils.h"
 #include "ascendc/api/abs.h"
+#include "ascendc/api/neg.h"
 #include "ascendc/api/clipbyvalue.h"
 #include "ascendc/api/cast.h"
 #include "local_view.cpp"
@@ -98,6 +99,52 @@ TEST(MlirE2eCpuLocalView, IndependentStridesPreserveValuesAndPadding) {
         expected = operation == 0 ? std::abs(a) : operation == 1 ? a + b : std::min(std::max(a, b), c);
       }
       EXPECT_FLOAT_EQ(output.get()[index], expected) << "operation=" << operation << " index=" << index;
+    }
+  }
+}
+
+extern "C" __global__ __aicore__ void PhysicalSpanKernel(GM_ADDR input, GM_ADDR output, unsigned operation) {
+  AscendC::TPipe pipe;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> srcBuffer, dstBuffer;
+  pipe.InitBuffer(srcBuffer, 64);
+  pipe.InitBuffer(dstBuffer, 64);
+  auto src = srcBuffer.Get<float>();
+  auto dst = dstBuffer.Get<float>();
+  AscendC::GlobalTensor<float> in, out;
+  in.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(input));
+  out.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(output));
+  AscendC::DataCopy(src, in, 16);
+  AscendC::DataCopy(dst, out, 16);
+  AscendC::PipeBarrier<PIPE_ALL>();
+  if (operation == 0) {
+    neg_span(src, dst);
+  } else if (operation == 1) {
+    muls_span(src, 3.0F, dst);
+  } else {
+    mul_span(src, src, dst);
+  }
+  AscendC::PipeBarrier<PIPE_ALL>();
+  AscendC::DataCopy(out, dst, 16);
+}
+
+TEST(MlirE2eCpuLocalView, EqualLayoutsComputePhysicalSpanWithoutTouchingSuffix) {
+  auto release = [](void *ptr) { AscendC::GmFree(ptr); };
+  std::unique_ptr<float, decltype(release)> input(static_cast<float *>(AscendC::GmAlloc(64)), release);
+  std::unique_ptr<float, decltype(release)> output(static_cast<float *>(AscendC::GmAlloc(64)), release);
+  ASSERT_NE(input, nullptr);
+  ASSERT_NE(output, nullptr);
+  for (unsigned i = 0; i < 16; ++i) {
+    input.get()[i] = static_cast<float>(i) - 3.0F;
+  }
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  for (unsigned operation = 0; operation < 3; ++operation) {
+    std::fill_n(output.get(), 16, kSentinel);
+    ICPU_RUN_KF(PhysicalSpanKernel, 1, reinterpret_cast<uint8_t *>(input.get()),
+                reinterpret_cast<uint8_t *>(output.get()), operation);
+    for (unsigned i = 0; i < 16; ++i) {
+      const float x = input.get()[i];
+      const float expected = i >= 9 ? kSentinel : operation == 0 ? -x : operation == 1 ? 3.0F * x : x * x;
+      EXPECT_FLOAT_EQ(output.get()[i], expected) << "operation=" << operation << " index=" << i;
     }
   }
 }

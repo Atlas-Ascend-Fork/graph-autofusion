@@ -44,12 +44,15 @@ struct VectorizedWindow {
 // Nominal uses descriptor extents. Neither policy needs a transfer plan.
 // The substitution is performed per axis before multiplying a segment extent.
 //
+// physicalSpan requires identical layouts and element types, consumes all segments,
+// and returns one count: 1 + sum((actual extent - 1) * stride), or 0 for an empty tile.
 // apiWindowSize == 0 loops over every segment and returns a single extent of 1.
 // 空 segments 且 apiWindowSize 为 1 时返回偏移 0、extent 1 的单元素窗口，不建循环。
 // 空计划请求多段窗口、非空段数不足、tiles 数量不匹配或尺寸表达式无法物化时返回 failure。
 FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuilder &rewriter,
                                                           const afir::VectorPlan &plan, afir::ExtentSource extentSource,
-                                                          ArrayRef<Value> tiles, unsigned apiWindowSize);
+                                                          ArrayRef<Value> tiles, unsigned apiWindowSize,
+                                                          bool physicalSpan = false);
 
 // 按 `VectorTensor` 的出处把 tile 值排成 `plan.tensors` 的顺序。
 //

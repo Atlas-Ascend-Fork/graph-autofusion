@@ -20,7 +20,28 @@
   strides = [<"1">, <"1">], vectorized_axis = [0, 1],
   vectorized_strides = [<"8">, <"0">], role = <compute>>
 
+#span_src = #afir.tensor_desc<axis = [0, 1], repeats = [<"2">, <"1">], strides = [<"1">, <"0">],
+  vectorized_axis = [0, 1], vectorized_strides = [<"8">, <"0">], role = <compute>>
+#span_dst = #afir.tensor_desc<axis = [0, 1], repeats = [<"2">, <"1">], strides = [<"1">, <"0">],
+  vectorized_axis = [0, 1], vectorized_strides = [<"8">, <"0">], role = <compute>>
+
 module {
+  func.func @neg_span(%src: !ascendc.local_tensor<16xf32>, %dst: !ascendc.local_tensor<16xf32>) {
+    %r = afir.neg %src outs(%dst) {afir.operand_descs = [#span_src], afir.destination_descs = [#span_dst], afir.result_descs = [#span_dst]}
+      : !ascendc.local_tensor<16xf32>, !ascendc.local_tensor<16xf32> -> !ascendc.local_tensor<16xf32>
+    return
+  }
+  func.func @muls_span(%src: !ascendc.local_tensor<16xf32>, %scalar: f32, %dst: !ascendc.local_tensor<16xf32>) {
+    %r = afir.mul %src, %scalar outs(%dst) {afir.operand_descs = [#span_src, #afir.tensor_desc<role = <compute>>], afir.destination_descs = [#span_dst], afir.result_descs = [#span_dst]}
+      : (!ascendc.local_tensor<16xf32>, f32), !ascendc.local_tensor<16xf32> -> !ascendc.local_tensor<16xf32>
+    return
+  }
+  func.func @mul_span(%src: !ascendc.local_tensor<16xf32>, %rhs: !ascendc.local_tensor<16xf32>, %dst: !ascendc.local_tensor<16xf32>) {
+    %r = afir.mul %src, %rhs outs(%dst) {afir.operand_descs = [#span_src, #span_src], afir.destination_descs = [#span_dst], afir.result_descs = [#span_dst]}
+      : (!ascendc.local_tensor<16xf32>, !ascendc.local_tensor<16xf32>), !ascendc.local_tensor<16xf32> -> !ascendc.local_tensor<16xf32>
+    return
+  }
+
   func.func @abs_different_ub(%a: !ascendc.local_tensor<2x4x8xf32>, %dst: !ascendc.local_tensor<2x4x8xf32>, %tmp: !ascendc.local_tensor<128xui8>) {
     %r = afir.abs %a outs(%dst) tmp(%tmp) {
       afir.operand_descs = [#dense], afir.destination_descs = [#pitched], afir.result_descs = [#pitched]
