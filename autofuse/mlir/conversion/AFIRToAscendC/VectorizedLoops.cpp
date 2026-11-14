@@ -30,11 +30,11 @@ FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuild
   // 其 tile 的 vectorized_axis repeat 为 1。周围的 load 和 Duplicate 广播也按单元素处理。
   // 需要两段及以上窗口的调用方（如分段广播、RemovePad）仍失败，因为空计划不能提供
   // 各段的 shape 范围。
-  const bool singleElementWindow = plan.segments.empty();
-  if (op == nullptr || apiWindowSize == 0 || tiles.size() != plan.tensors.size()) {
+  const bool singleElementWindow = plan.segments.empty() || apiWindowSize == 0;
+  if (op == nullptr || tiles.size() != plan.tensors.size()) {
     return failure();
   }
-  if (singleElementWindow ? apiWindowSize != 1 : plan.segments.size() < apiWindowSize) {
+  if (plan.segments.empty() ? apiWindowSize > 1 : plan.segments.size() < apiWindowSize) {
     return failure();
   }
   const Location loc = op->getLoc();
@@ -47,7 +47,7 @@ FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuild
     return afir::materializeActualSegmentExtent(op, rewriter, segment);
   };
 
-  const size_t loopCount = singleElementWindow ? 0 : plan.segments.size() - apiWindowSize;
+  const size_t loopCount = plan.segments.empty() ? 0 : plan.segments.size() - apiWindowSize;
 
   // 外层各段：一段一层循环。循环上界要在建循环之前算好，否则它会落进循环体里，
   // 既支配不了循环头，也白算一遍。

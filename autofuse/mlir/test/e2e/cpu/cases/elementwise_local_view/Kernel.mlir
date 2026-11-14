@@ -13,6 +13,13 @@
   strides = [<"gm_outer">, <"gm_row">, <"gm_col">],
   vectorized_axis = [1, 2], vectorized_strides = [<"16">, <"1">], role = <compute>>
 
+#src = #afir.tensor_desc<axis = [0, 1], repeats = [<"4">, <"1">],
+  strides = [<"1">, <"1">], vectorized_axis = [0, 1],
+  vectorized_strides = [<"16">, <"0">], role = <compute>>
+#dst = #afir.tensor_desc<axis = [0, 1], repeats = [<"4">, <"1">],
+  strides = [<"1">, <"1">], vectorized_axis = [0, 1],
+  vectorized_strides = [<"8">, <"0">], role = <compute>>
+
 module {
   func.func @abs_different_ub(%a: !ascendc.local_tensor<2x4x8xf32>, %dst: !ascendc.local_tensor<2x4x8xf32>, %tmp: !ascendc.local_tensor<128xui8>) {
     %r = afir.abs %a outs(%dst) tmp(%tmp) {
@@ -33,4 +40,20 @@ module {
     return
   }
 
+  func.func @cast_padded_f16(%input: !ascendc.local_tensor<?xf16>,
+      %destination: !ascendc.local_tensor<?xf32>, %tmp: !ascendc.local_tensor<?xui8>) {
+    %result = afir.cast %input outs(%destination) tmp(%tmp) {
+      afir.operand_descs = [#src], afir.destination_descs = [#dst], afir.result_descs = [#dst]
+    } : !ascendc.local_tensor<?xf16>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xui8>
+        -> !ascendc.local_tensor<?xf32>
+    return
+  }
+  func.func @cast_padded_bf16(%input: !ascendc.local_tensor<?xbf16>,
+      %destination: !ascendc.local_tensor<?xf32>, %tmp: !ascendc.local_tensor<?xui8>) {
+    %result = afir.cast %input outs(%destination) tmp(%tmp) {
+      afir.operand_descs = [#src], afir.destination_descs = [#dst], afir.result_descs = [#dst]
+    } : !ascendc.local_tensor<?xbf16>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xui8>
+        -> !ascendc.local_tensor<?xf32>
+    return
+  }
 }

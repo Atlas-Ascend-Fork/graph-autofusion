@@ -533,6 +533,7 @@ LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsig
     return compatibility;
   }
   view.vectorPlan.reset();
+  view.apiWindowSize = 1;
   view.extentSource = ExtentSource::Nominal;
   if (whole) {
     for (Value value : values) {
@@ -648,7 +649,7 @@ LocalViewCompatibility checkLocalTensorAlignment(const ElementwiseLocalView &vie
                                                  ascendc::LocalTensorType type) {
   // Each API invocation starts on a data block. Merged inner axes do not
   // introduce new API starts and therefore need no separate alignment test.
-  for (size_t i = 0; i + 1 < view.vectorPlan->segments.size(); ++i) {
+  for (size_t i = 0; i + view.apiWindowSize < view.vectorPlan->segments.size(); ++i) {
     auto stride = view.vectorPlan->segments[i].strides[tensorIndex];
     const auto bits = type.getElementType().getIntOrFloatBitWidth();
     if (bits == 0 || kDataBlockBits % bits != 0 ||
@@ -680,7 +681,7 @@ LocalViewCompatibility checkLocalTensorAliasing(Value value, Value destinationVa
 }  // namespace
 
 LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
-                                                   ElementwiseLocalView &view) {
+                                                   ElementwiseLocalView &view, bool allowStridedElements) {
   auto result = analyzeElementwiseLocalView(op, scalarInputs, compactTail, view);
   if (result != LocalViewCompatibility::Compatible) {
     return result;
@@ -696,7 +697,11 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
     return result;
   }
   if (!view.vectorPlan->segments.empty() && !llvm::all_of(view.vectorPlan->segments.back().strides, provablyOne)) {
-    return LocalViewCompatibility::UnsupportedShape;
+    if (!allowStridedElements) {
+      return LocalViewCompatibility::UnsupportedShape;
+    }
+    // Preserve padded strides: each logical element becomes a separate API window.
+    view.apiWindowSize = 0;
   }
   const auto destination = descriptors.back();
   const bool unequal = llvm::any_of(descriptors, [&](auto desc) { return !sameStrides(desc, destination); });
@@ -712,7 +717,7 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
     if (result != LocalViewCompatibility::Compatible) {
       return result;
     }
-    if (unequal) {
+    if (unequal || view.apiWindowSize == 0) {
       result = checkLocalTensorAlignment(view, tensorIndex, type);
       if (result != LocalViewCompatibility::Compatible) {
         return result;
@@ -726,9 +731,9 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
   return LocalViewCompatibility::Compatible;
 }
 
-LocalViewCompatibility checkElementwiseLocalViews(Operation *op, bool *wholeTensor) {
+LocalViewCompatibility checkElementwiseLocalViews(Operation *op, bool *wholeTensor, bool allowStridedElements) {
   ElementwiseLocalView view;
-  auto result = prepareElementwiseLocalView(op, {}, false, view);
+  auto result = prepareElementwiseLocalView(op, {}, false, view, allowStridedElements);
   if (result == LocalViewCompatibility::Compatible && wholeTensor) {
     *wholeTensor = !view.vectorPlan;
   }

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <type_traits>
 #include <gtest/gtest.h>
 #include "kernel_operator.h"
 #include "tikicpulib.h"
@@ -19,6 +20,7 @@ using namespace AscendC;
 #include "ascendc/api/utils.h"
 #include "ascendc/api/abs.h"
 #include "ascendc/api/clipbyvalue.h"
+#include "ascendc/api/cast.h"
 #include "local_view.cpp"
 
 namespace {
@@ -98,5 +100,57 @@ TEST(MlirE2eCpuLocalView, IndependentStridesPreserveValuesAndPadding) {
       EXPECT_FLOAT_EQ(output.get()[index], expected) << "operation=" << operation << " index=" << index;
     }
   }
+}
+
+template <typename Input>
+__global__ __aicore__ void PaddedCastKernel(GM_ADDR input, GM_ADDR output) {
+  AscendC::TPipe pipe;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> srcBuffer, dstBuffer, tmpBuffer;
+  pipe.InitBuffer(srcBuffer, 128);
+  pipe.InitBuffer(dstBuffer, 128);
+  pipe.InitBuffer(tmpBuffer, 128);
+  auto src = srcBuffer.Get<Input>();
+  auto dst = dstBuffer.Get<float>();
+  auto tmp = tmpBuffer.Get<uint8_t>();
+  AscendC::GlobalTensor<Input> in;
+  AscendC::GlobalTensor<float> out;
+  in.SetGlobalBuffer(reinterpret_cast<__gm__ Input *>(input));
+  out.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(output));
+  AscendC::DataCopy(src, in, 64);
+  AscendC::DataCopy(dst, out, 32);
+  AscendC::PipeBarrier<PIPE_ALL>();
+  if constexpr (std::is_same_v<Input, half>) {
+    cast_padded_f16(src, dst, tmp);
+  } else {
+    cast_padded_bf16(src, dst, tmp);
+  }
+  AscendC::PipeBarrier<PIPE_ALL>();
+  AscendC::DataCopy(out, dst, 32);
+}
+
+template <typename Input>
+void CheckPaddedCast() {
+  auto release = [](void *ptr) { AscendC::GmFree(ptr); };
+  std::unique_ptr<Input, decltype(release)> input(static_cast<Input *>(AscendC::GmAlloc(128)), release);
+  std::unique_ptr<float, decltype(release)> output(static_cast<float *>(AscendC::GmAlloc(128)), release);
+  ASSERT_NE(input, nullptr);
+  ASSERT_NE(output, nullptr);
+  std::fill_n(input.get(), 64, static_cast<Input>(-99.0F));
+  std::fill_n(output.get(), 32, kSentinel);
+  for (unsigned row = 0; row < 4; ++row) {
+    input.get()[row * 16] = static_cast<Input>(static_cast<float>(row) - 1.5F);
+  }
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(PaddedCastKernel<Input>, 1, reinterpret_cast<uint8_t *>(input.get()),
+              reinterpret_cast<uint8_t *>(output.get()));
+  for (unsigned index = 0; index < 32; ++index) {
+    const float expected = index % 8 == 0 ? static_cast<float>(index / 8) - 1.5F : kSentinel;
+    EXPECT_FLOAT_EQ(output.get()[index], expected) << "index=" << index;
+  }
+}
+
+TEST(MlirE2eCpuLocalView, PaddedCastPreservesValuesAndPadding) {
+  CheckPaddedCast<half>();
+  CheckPaddedCast<bfloat16_t>();
 }
 }  // namespace

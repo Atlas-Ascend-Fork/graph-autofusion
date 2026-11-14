@@ -182,8 +182,8 @@ class UnaryElementwiseCapabilityProvider final : public ascend::instruction::Cap
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
     bool wholeTensor = true;
-    const elementwise::LocalViewCompatibility compatibility =
-        elementwise::checkElementwiseLocalViews(operation, &wholeTensor);
+    const elementwise::LocalViewCompatibility compatibility = elementwise::checkElementwiseLocalViews(
+        operation, &wholeTensor, mapping_->resultElementType == ResultElementRule::CastPair);
     if (compatibility == elementwise::LocalViewCompatibility::UnsupportedShape) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
@@ -267,7 +267,8 @@ struct UnaryOperandTiles {
 
 template <typename SourceOp>
 LogicalResult checkConversionLocalViews(SourceOp op) {
-  const elementwise::LocalViewCompatibility compatibility = elementwise::checkElementwiseLocalViews(op);
+  const elementwise::LocalViewCompatibility compatibility =
+      elementwise::checkElementwiseLocalViews(op, nullptr, isa<afir::CastOp>(op.getOperation()));
   if (compatibility != elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
@@ -281,7 +282,7 @@ FailureOr<UnaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adap
   tiles.source = adaptor.getInput();
   tiles.destination = adaptor.getDestination();
   elementwise::ElementwiseLocalView view;
-  if (elementwise::prepareElementwiseLocalView(op, {}, compactTail, view) !=
+  if (elementwise::prepareElementwiseLocalView(op, {}, compactTail, view, isa<afir::CastOp>(op.getOperation())) !=
       elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
@@ -295,7 +296,7 @@ FailureOr<UnaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adap
     return failure();
   }
   FailureOr<VectorizedWindow> window =
-      materializeVectorizedSegments(op, rewriter, *segments, view.extentSource, *ordered, /*apiWindowSize=*/1);
+      materializeVectorizedSegments(op, rewriter, *segments, view.extentSource, *ordered, view.apiWindowSize);
   if (failed(window) || window->tiles.size() != segments->tensors.size() || window->extents.size() != 1) {
     return failure();
   }

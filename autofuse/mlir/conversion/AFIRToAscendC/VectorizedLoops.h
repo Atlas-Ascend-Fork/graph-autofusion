@@ -44,6 +44,7 @@ struct VectorizedWindow {
 // Nominal uses descriptor extents. Neither policy needs a transfer plan.
 // The substitution is performed per axis before multiplying a segment extent.
 //
+// apiWindowSize == 0 loops over every segment and returns a single extent of 1.
 // 空 segments 且 apiWindowSize 为 1 时返回偏移 0、extent 1 的单元素窗口，不建循环。
 // 空计划请求多段窗口、非空段数不足、tiles 数量不匹配或尺寸表达式无法物化时返回 failure。
 FailureOr<VectorizedWindow> materializeVectorizedSegments(Operation *op, OpBuilder &rewriter,
