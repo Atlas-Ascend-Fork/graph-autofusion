@@ -106,7 +106,9 @@ using elementwise::kUI8;
 
 // Native Duplicate types. Mem-based ui8 additionally uses the legacy duplicate.h
 // wrapper; keep it separate from the stock API and the reg-based registration.
-constexpr uint32_t kDuplicateElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16;
+// bf16 与 f16 同为 16 位模板实参，AscendC::Duplicate 与 BroadcastCommon 的分发
+// （broadcast.h:552）都收 bfloat16_t；此前漏登导致 bf16 广播图整图回落。
+constexpr uint32_t kDuplicateElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16;
 constexpr unsigned kUInt8BitWidth = 8;
 
 // 这个 op 上有两档 implementation，判据互斥（见 `analyzeSegmentedBroadcast`），
@@ -204,7 +206,7 @@ afir::TensorDescAttr firstDescriptor(Operation *op, llvm::StringRef name) {
 // 只差在 AFIR 这一层的编号上：i8 / i64 / ui64 / ui32 在 `ElementTypes` 里没有位
 // （`elementTypeBit` 答 0），够不着也就谈不上收。
 //
-constexpr uint32_t kSegmentedElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16;
+constexpr uint32_t kSegmentedElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16;
 
 // `expression` 可证等于 `literal` 吗。证不了返回 false（保守方向：报不支持，不是算错）。
 //
@@ -552,8 +554,9 @@ FailureOr<BroadcastSegmentation> analyzeSegmentedBroadcast(Operation *op, afir::
 //
 // 元素类型：`broadcast_extend_impl.h:260` 的 `SupportBytes<T, 1, 2, 4, 8>` 收 b8/b16/b32/b64，
 // AFIR 这一层编了号的七位全在里面——bf16 也在，它只是 b16，那条 `static_assert` 不区分
-// 浮点格式。与 `kSegmentedElementTypes` 只差这一位，而那个差是真的：mem 侧那一档生成的是
-// `broadcast.h` 的包装，它的分发链没有 bf16 那一支（见那个常量上面那段）。
+// 浮点格式。mem 侧那一档生成的是
+// `broadcast.h` 的包装，其分发链的 `BroadcastCommon` 支（broadcast.h:552 的
+// `SupportType<..., bfloat16_t, ...>`）收 bf16，两张表因此都含这一位。
 //
 // 这一位比 `ascir_op_lowering_matrix.csv` 的 `reg_dtypes` 列宽，legacy 的
 // `REG_ASC_IR(Broadcast)` 两侧都没声明 bf16。按功能需求 3 的判定标准以头文件为准，证据与那道

@@ -195,6 +195,15 @@ CASES = (
         },
     ),
     Case(
+        id="load_expand_abs_fp16",
+        script="load_expand_abs_fp16.py",
+        argv=NO_PROFILING,
+        groups=("broadcast",),
+        expect={
+            "load_expand_abs_fp16": case_status.PASS,
+        },
+    ),
+    Case(
         id="load_broadcast_to_cascade",
         script="load_broadcast_to_cascade.py",
         env={"AUTOFUSE_DFX_FLAGS": "--mlir_codegen_config=fallback"},

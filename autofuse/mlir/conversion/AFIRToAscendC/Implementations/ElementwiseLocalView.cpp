@@ -387,7 +387,18 @@ bool sameStrides(TensorDescAttr lhs, TensorDescAttr rhs) {
 // Detect known invalid static geometry. Symbolic capacity is supplied by the same
 // allocation/caller contract for equal and unequal layouts; it is not inferred
 // from the logical LocalTensor shape.
-std::optional<int64_t> staticSpan(TensorDescAttr descriptor) {
+//
+// `useRealStrides` selects the stride table the span is computed from:
+//  - false: 向量化 lane 步长——API 窗口内的发射寻址（含行垫整，如 fp16 短行垫到
+//    数据块粒度），垫整缓冲由资源模型的 size_from_resource 分配保证；
+//  - true: 视图自身的逻辑步长——逻辑 tile 寻址，广播轴步长为 0（重读同一元素
+//    不扩展跨度）。步长符号化取不到字面量时返回 nullopt，由调用方按另一侧判定。
+std::optional<int64_t> staticSpan(TensorDescAttr descriptor, bool useRealStrides) {
+  // 入口挡住 axis/strides 长度不一致的描述子（手写 IR 或中间形态可能绕过方言
+  // verifier 的等长不变量）：真实步长按下标取值，长度不齐按不可判定处理。
+  if (useRealStrides && descriptor.getStrides().size() != descriptor.getAxis().size()) {
+    return std::nullopt;
+  }
   int64_t span = 1;
   for (size_t i = descriptor.getVectorizedAxis().size(); i > 0; --i) {
     auto position = axisPosition(descriptor, descriptor.getVectorizedAxis()[i - 1]);
@@ -395,11 +406,17 @@ std::optional<int64_t> staticSpan(TensorDescAttr descriptor) {
       return std::nullopt;
     }
     auto extent = getLiteralStride(descriptor.getRepeats()[*position]);
-    auto stride = getLiteralStride(descriptor.getVectorizedStrides()[i - 1]);
+    auto stride = useRealStrides ? getLiteralStride(descriptor.getStrides()[*position])
+                                 : getLiteralStride(descriptor.getVectorizedStrides()[i - 1]);
     if (failed(extent) || failed(stride) || *extent <= 0 || *stride < 0) {
       return std::nullopt;
     }
     if (*extent == 1) {
+      continue;
+    }
+    // 真实步长模式下，广播轴步长为 0 表示重读同一元素，不扩展逻辑跨度——跳过，
+    // 不能落到下面的单调守卫（0 < span 会误判为不可判定）。lane 模式保持原判定。
+    if (useRealStrides && *stride == 0) {
       continue;
     }
     if (*stride < span || *stride > (std::numeric_limits<int64_t>::max() - span) / (*extent - 1)) {
@@ -587,8 +604,10 @@ LocalViewCompatibility collectCompatibleLocalTensors(Operation *op, const Operan
   return LocalViewCompatibility::Compatible;
 }
 
-LocalViewCompatibility checkLocalTensorCapacity(TensorDescAttr desc, ascendc::LocalTensorType type) {
-  auto span = staticSpan(desc);
+LocalViewCompatibility checkLocalTensorCapacity(TensorDescAttr desc, ascendc::LocalTensorType type,
+                                                bool resourceSizedBuffer) {
+  auto laneSpan = staticSpan(desc, /*useRealStrides=*/false);
+  auto realSpan = staticSpan(desc, /*useRealStrides=*/true);
   const bool staticGeometry =
       llvm::all_of(desc.getVectorizedAxis(),
                    [&](int64_t axis) {
@@ -596,7 +615,7 @@ LocalViewCompatibility checkLocalTensorCapacity(TensorDescAttr desc, ascendc::Lo
                      return succeeded(position) && succeeded(getLiteralStride(desc.getRepeats()[*position]));
                    }) &&
       llvm::all_of(desc.getVectorizedStrides(), [](ExprAttr stride) { return succeeded(getLiteralStride(stride)); });
-  if (staticGeometry && !span) {
+  if (staticGeometry && !laneSpan && !realSpan) {
     return LocalViewCompatibility::UnsupportedShape;
   }
   int64_t capacity = 1;
@@ -613,7 +632,13 @@ LocalViewCompatibility checkLocalTensorCapacity(TensorDescAttr desc, ascendc::Lo
       capacity *= size;
     }
   }
-  if (span && staticCapacity && *span > capacity) {
+  // lane 跨度（API 窗口发射寻址，含行垫整）超出形状时，再看逻辑跨度：真实步长
+  // 寻址在 LocalTensor 形状内（如广播轴步长 0 重读、垫整行 lane 跳步）且缓冲
+  // 确由资源模型的 size_from_resource 加大分配时，才视为几何合法——垫整 lane
+  // 寻址落进的加大缓冲以此为前提。非资源模型定尺（或无 buffer 描述子）的存储
+  // 分配即形状乘积，lane 超形状仍按原判据拒收。
+  if (laneSpan && staticCapacity && *laneSpan > capacity &&
+      (!resourceSizedBuffer || !realSpan || *realSpan > capacity)) {
     return LocalViewCompatibility::UnsupportedShape;
   }
   return LocalViewCompatibility::Compatible;
@@ -681,7 +706,9 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
     if (!type) {
       return LocalViewCompatibility::UnsupportedShape;
     }
-    result = checkLocalTensorCapacity(desc, type);
+    const auto bufferDesc = getBufferDescAttr(value);
+    const bool resourceSized = bufferDesc && bufferDesc.getSizeFromResource();
+    result = checkLocalTensorCapacity(desc, type, resourceSized);
     if (result != LocalViewCompatibility::Compatible) {
       return result;
     }

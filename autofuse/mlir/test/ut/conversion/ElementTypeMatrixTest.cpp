@@ -202,13 +202,16 @@ constexpr KnownNarrowerRow kKnownNarrower[] = {
     // 再发一条半宽的 `Duplicate`），不是这条路发的 `AscendC::Duplicate`。把 `ui8` 也
     // 注册上，发出去的就是一条 legacy 从来没发过的调用——比答 unsupported 更坏。
     // mem 侧已用 DuplicateU8Op 接入包装；reg 侧仍只发标准调用。
-    {"broadcast.tensor.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16, kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16,
-     "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
+    {"broadcast.tensor.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16,
+     "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate；bf16 是合法加宽——"
+     "AscendC::Duplicate 按模板收 bfloat16_t（与 f16 同 16 位），legacy 只是没在 REG_ASC_IR 声明，"
+     "同 kOdsWiderThanLegacy 的 broadcast 行一个口径"},
     // 标量源那一档（legacy `BroadcastScalar` 的 `in.is_constant` 一支）与上面一行同一个
     // 理由、同一条收窄：reg 侧仍只发标准 `AscendC::Duplicate`，而 legacy 在 ui8 上发的是
-    // `duplicate.h` 的包装重载。两行一起删或一起留。
-    {"broadcast.scalar.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16, kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16,
-     "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
+    // `duplicate.h` 的包装重载。两行一起删或一起留。bf16 加宽同上一行口径。
+    {"broadcast.scalar.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16, "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
     // mem 档**有意**摘除 i32（连带无位的 ui32 同摘）：v1 布局对非 float 的 transpose 只给
     // 32B（4 字节整型折 8 元素），而 ConfusionTranspose 公式写死尾轴 16 元素对齐——布局
     // 与公式错位，数值必错（legacy 生产同错，其 ST 因手搓布局掩盖且无 int32 用例；实测

@@ -249,19 +249,79 @@ bool isSchedulerTiledTransferWithCompatibleView(Operation *op) {
     StringRef rhsText = rhs.getValue().getValue();
     return lhsText == rhsText || ProveExpressionsEqual(lhsText, rhsText);
   };
-  auto isBroadcastSide = [](ExprAttr repeat, ExprAttr stride) {
+  // 广播侧判据分读/写两侧。读(源)侧 stride==0 即合法广播——同一元素被重复读无害，
+  // 分块后呈 repeat==(N/内块) 且 stride 0（如中间轴 expand 的 a1T：repeat 3/a1t、
+  // stride 0，目的侧 stride 400*a1t），repeat==1 只覆盖整轴广播的特例；调度外层循环按
+  // repeat 重复这张 tile、两侧 stride 已对上内块，元素数差异由此解释。
+  // 写(目的)侧仍要求 repeat==1 && stride==0：repeat>1 且写侧 stride 0 表示 N 份 tile
+  // 全部写回同一 GM 地址（正是「第二份 expand 拷贝写回第 0 份位置」类错数据），必须
+  // 编译期拒绝而非静默放行。本函数只对带 afir.sched 的搬运生效，循环覆盖由调度构造保证。
+  auto isReadBroadcastSide = [](ExprAttr stride) { return stride.getValue().getValue() == "0"; };
+  auto isWriteBroadcastSide = [](ExprAttr repeat, ExprAttr stride) {
     return repeat.getValue().getValue() == "1" && stride.getValue().getValue() == "0";
   };
-  for (size_t axis = 0; axis < sourceTensor.getAxis().size(); ++axis) {
+  const size_t axisCount = sourceTensor.getAxis().size();
+  llvm::SmallVector<bool, 4> broadcastAxis(axisCount, false);
+  for (size_t axis = 0; axis < axisCount; ++axis) {
     if (expressionsAgree(sourceTensor.getRepeats()[axis], destinationTensor.getRepeats()[axis]) &&
         expressionsAgree(sourceTensor.getStrides()[axis], destinationTensor.getStrides()[axis])) {
       continue;
     }
-    if (isBroadcastSide(sourceTensor.getRepeats()[axis], sourceTensor.getStrides()[axis]) ||
-        isBroadcastSide(destinationTensor.getRepeats()[axis], destinationTensor.getStrides()[axis])) {
+    // 写侧违规独立拒绝：repeat>1 且 stride 0 表示 N 份 tile 全部写回同一 GM 地址，
+    // 即使读侧同轴也是广播（stride 0）也不放行——析取短路会把这类组合静默放过。
+    if (destinationTensor.getStrides()[axis].getValue().getValue() == "0") {
+      int64_t destinationRepeat = 0;
+      if (destinationTensor.getRepeats()[axis].getValue().getValue().getAsInteger(10, destinationRepeat) ||
+          destinationRepeat > 1) {
+        return false;
+      }
+    }
+    if (isReadBroadcastSide(sourceTensor.getStrides()[axis]) ||
+        isWriteBroadcastSide(destinationTensor.getRepeats()[axis], destinationTensor.getStrides()[axis])) {
+      broadcastAxis[axis] = true;
       continue;
     }
-    return false;
+  }
+  for (size_t axis = 0; axis < axisCount; ++axis) {
+    if (broadcastAxis[axis] ||
+        (expressionsAgree(sourceTensor.getRepeats()[axis], destinationTensor.getRepeats()[axis]) &&
+         expressionsAgree(sourceTensor.getStrides()[axis], destinationTensor.getStrides()[axis]))) {
+      continue;
+    }
+    // 剩下的差异轴是「内层广播压缩外层行距」：小 tile 一侧的外层 stride =
+    // 全形一侧的 stride ÷ 内层广播轴的 repeat。判据与桥接层
+    // DifferenceIsExplainedByBroadcast 一致——广播发生在更内层时外层紧凑行距
+    // 跟着缩小（合并轴模板 B0Y2 的 a0：源 (5,400)、目的 (5,1200)，内层 a1 广播
+    // repeat 3）。交叉比较：源 stride × 目的内层广播 repeat 积 = 目的 stride，
+    // 或反之；内层没有广播轴则不可解释。
+    // 与桥接层 DifferenceIsExplainedByBroadcast 同判：本轴两侧 repeat 必须相等——
+    // 行距被内层广播压缩只在「同一逻辑行被分块」时成立；repeat 不等而 stride 恰成
+    // 倍数是真实错配，不能靠交叉乘积的巧合放行、跳过元素数校验。
+    if (!expressionsAgree(sourceTensor.getRepeats()[axis], destinationTensor.getRepeats()[axis]) ||
+        std::none_of(broadcastAxis.begin() + static_cast<ptrdiff_t>(axis) + 1, broadcastAxis.end(),
+                     [](bool value) { return value; })) {
+      return false;
+    }
+    std::string sourceExpected = sourceTensor.getStrides()[axis].getValue().getValue().str();
+    std::string destinationExpected = destinationTensor.getStrides()[axis].getValue().getValue().str();
+    for (size_t inner = axis + 1; inner < axisCount; ++inner) {
+      if (!broadcastAxis[inner]) {
+        continue;
+      }
+      auto sourceProduct =
+          MultiplyExpressions(sourceExpected, destinationTensor.getRepeats()[inner].getValue().getValue());
+      auto destinationProduct =
+          MultiplyExpressions(destinationExpected, sourceTensor.getRepeats()[inner].getValue().getValue());
+      if (!sourceProduct || !destinationProduct) {
+        return false;
+      }
+      sourceExpected = sourceProduct.value();
+      destinationExpected = destinationProduct.value();
+    }
+    if (!ProveExpressionsEqual(destinationTensor.getStrides()[axis].getValue().getValue(), sourceExpected) &&
+        !ProveExpressionsEqual(sourceTensor.getStrides()[axis].getValue().getValue(), destinationExpected)) {
+      return false;
+    }
   }
   return true;
 }
