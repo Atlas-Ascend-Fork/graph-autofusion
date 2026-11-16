@@ -79,8 +79,12 @@ LogicalResult verifyMemorySpaceAgreement(Operation *op, llvm::StringRef tensorNa
 // buffer descriptor 描述存储本身，仅保存在定义点，通过 getBufferDescAttr 沿 SSA 查询。
 // operand_descs 和 arg_descs 允许标量，分别对应 op 标量输入和 ScalarData 按值参数；
 // destination 和结果仍要求存储描述，不能同时放宽。
+// `allowsWholeTensorGmViews` 专给 destination_descs：写在 rank-0 GM 整体句柄形参上的
+// 视图描述子可以带轴——它描述本次使用点对这块 GM 的分块解释（canonical 收集侧
+// recordExternalStoreDestinations 同样不把它当参数事实），不是句柄值自身的形状。
+// 带形状的目的值（片上 alloc 等）仍必须逐轴对齐。
 LogicalResult verifyDescriptorList(Operation *op, llvm::StringRef tensorName, ValueRange values,
-                                   bool allowsScalars = false) {
+                                   bool allowsScalars = false, bool allowsWholeTensorGmViews = false) {
   if (values.empty()) {
     return success();
   }
@@ -113,7 +117,11 @@ LogicalResult verifyDescriptorList(Operation *op, llvm::StringRef tensorName, Va
                                << " requires a ranked shaped value";
     }
     ArrayRef<int64_t> axis = tensorDescriptor.getAxis();
-    if (!axis.empty() && axis.size() != static_cast<size_t>(shapedType.getRank())) {
+    // rank-0 的函数形参就是 GM 整体句柄（片上值都是 alloc，不做形参），只按 BlockArgument
+    // + rank 0 判定；不看 memory space——`afir-kernel-body-signature` 会把形参空间改写成
+    // AscendC 魔数（如 `memref<f16, 22 : i32>`），那里取不到 `#afir.space<gm>`。
+    const bool wholeTensorGmHandle = allowsWholeTensorGmViews && shapedType.getRank() == 0 && isa<BlockArgument>(value);
+    if (!axis.empty() && !wholeTensorGmHandle && axis.size() != static_cast<size_t>(shapedType.getRank())) {
       return op->emitOpError() << kInvalidDescriptorDiagnostic << ": '" << tensorName << "' element " << index
                                << " axis count " << axis.size() << " must match shaped rank " << shapedType.getRank();
     }
@@ -236,7 +244,8 @@ LogicalResult mlir::afir::verifyCanonicalBufferDescriptors(Operation *op) {
 
   if (failed(verifyDescriptorList(op, kOperandDescsAttrName, partition->inputs(op), /*allowsScalars=*/true)) ||
       failed(verifyDescriptorList(op, kResultDescsAttrName, op->getResults())) ||
-      failed(verifyDescriptorList(op, kDestinationDescsAttrName, partition->destinations(op)))) {
+      failed(verifyDescriptorList(op, kDestinationDescsAttrName, partition->destinations(op),
+                                  /*allowsScalars=*/false, /*allowsWholeTensorGmViews=*/true))) {
     return failure();
   }
 

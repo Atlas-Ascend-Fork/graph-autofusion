@@ -2866,6 +2866,232 @@ TEST(ScheduleToAfirTest, WorkspaceStoreFoldsBlockScatteredRepeatsButKeepsStrides
   EXPECT_EQ(mlir::cast<mlir::MemRefType>(alloc.getResult().getType()).getShape(), (llvm::ArrayRef<int64_t>{1, 8}));
 }
 
+// expand/广播类合并轴模板（如 B0Y1：a0 与 a1T 合并成 a0a1T，expand 靠循环 + stride 0
+// 读实现）里，生产者视图沿 a0 是 stride 0 的广播读，Store 自己的 `.y` 才带输出 GM 的
+// 真实步长（a0 维 stride=行宽）。Output 节点的借用件是退化描述子（无 axis/strides）：
+// 只许它定结果类型与 indexing_maps；一旦进了 `afir.destination_descs`，下降侧
+// `getGlobalDescriptor` 拿不到 stride 表只能信 operand 的 stride 0——第二份 expand
+// 拷贝全部写回第 0 份的位置，输出后半段从未被写（2026-11-15 tc_af_torch_aten_expand_0006，
+// 精度 10000）。这条钉住：Store 的 destination 描述子必须保留自身 `.y` 的 stride 表。
+TEST(ScheduleToAfirTest, OutputBorrowedStoreKeepsItsOwnStrideTable) {
+  mlir::MLIRContext context;
+  mlir::afir::bridge::PlanInfo plan;
+  plan.name = "output_borrow_store_strides";
+
+  mlir::afir::bridge::TemplateInfo tmpl;
+  tmpl.name = "output_borrow_store_strides";
+  tmpl.original_name = tmpl.name;
+  tmpl.buffer_form = true;
+  tmpl.axes.push_back({0, "a0", "original", "2"});
+  tmpl.axes.push_back({1, "a1", "original", "8"});
+
+  // 输入与片上视图：a0 维广播（repeat 1、stride 0），一维行 8。
+  auto input = MakeWorkspaceTestTensor(mlir::afir::Space::GM, -1);
+  input.tensor.shape = {1, 8};
+  input.tensor.shape_exprs = {"1", "8"};
+  input.tensor.repeats = {"1", "8"};
+  input.tensor.strides = {"0", "1"};
+  tmpl.inputs = {{"input0", input, 0}};
+
+  auto local = MakeWorkspaceTestTensor(mlir::afir::Space::UB, 3);
+  local.tensor.shape = {1, 8};
+  local.tensor.shape_exprs = {"1", "8"};
+  local.tensor.repeats = {"1", "8"};
+  local.tensor.strides = {"0", "1"};
+
+  // Store 自身 `.y`：输出是 2×8，a0 维 stride 8——被借用件顶掉后丢失的就是这张表。
+  auto storeView = MakeWorkspaceTestTensor(mlir::afir::Space::GM, -1);
+  storeView.tensor.shape = {2, 8};
+  storeView.tensor.shape_exprs = {"2", "8"};
+  storeView.tensor.repeats = {"2", "8"};
+  storeView.tensor.strides = {"8", "1"};
+
+  // kernel 输出形参（也是 Output 借用件的来源）：GM 标量视图。
+  auto outputArg = MakeWorkspaceTestTensor(mlir::afir::Space::GM, -1);
+  outputArg.tensor.shape = {};
+  outputArg.tensor.shape_exprs = {};
+  outputArg.tensor.axis = {};
+  outputArg.tensor.repeats = {};
+  outputArg.tensor.strides = {};
+  outputArg.buffer.sizeBytesExpr = "";
+  tmpl.outputs = {{"output", outputArg, 0}};
+
+  mlir::afir::bridge::NodeInfo load;
+  load.name = "load";
+  load.type = "Load";
+  load.input_names = {"input0"};
+  load.inputs = {input};
+  load.output = local;
+  load.sched_axis = {0, 1};
+  load.loop_axis = 0;
+
+  mlir::afir::bridge::NodeInfo store;
+  store.name = "store";
+  store.type = "Store";
+  store.input_names = {"load"};
+  store.inputs = {local};
+  store.output = storeView;
+  store.output_names = {"store"};
+  store.sched_axis = {0, 1};
+  store.loop_axis = 0;
+
+  mlir::afir::bridge::NodeInfo output;
+  output.name = "output";
+  output.type = "Output";
+  output.input_names = {"store"};
+  output.inputs = {storeView};
+  output.output = outputArg;
+
+  tmpl.nodes = {load, store, output};
+  plan.templates.push_back(tmpl);
+
+  auto module = mlir::afir::bridge::BuildAfirModule(context, plan);
+  ASSERT_TRUE(module);
+  auto function = module->lookupSymbol<mlir::func::FuncOp>("output_borrow_store_strides");
+  ASSERT_TRUE(function);
+
+  mlir::afir::StoreOp storeOp;
+  function.walk([&](mlir::afir::StoreOp op) { storeOp = op; });
+  ASSERT_TRUE(storeOp);
+
+  // destination 描述子是 Store 自己的 `.y`：stride 表（输出 GM 寻址步长，a0 维 8）
+  // 必须保留，不能被 Output 借用件的退化形态顶掉。rank-0 GM 形参上的带轴视图
+  // 由 verifier 的 whole-tensor 豁免放行。
+  auto destinations = storeOp->getAttrOfType<mlir::ArrayAttr>(mlir::afir::kDestinationDescsAttrName);
+  ASSERT_TRUE(destinations);
+  ASSERT_EQ(destinations.size(), 1U);
+  auto destination = mlir::cast<mlir::afir::TensorDescAttr>(destinations[0]);
+  ASSERT_EQ(destination.getStrides().size(), 2U);
+  EXPECT_EQ(destination.getStrides()[0].getValue().getValue(), "8");
+  EXPECT_EQ(destination.getStrides()[1].getValue().getValue(), "1");
+
+  // operand 保持生产者的广播视图（a0 维 stride 0）：UB 值的使用点描述子与定义点
+  // 一致是 CanonicalBindings 的契约，GM 换表只发生在 destination 那一份。
+  auto operands = storeOp->getAttrOfType<mlir::ArrayAttr>(mlir::afir::kOperandDescsAttrName);
+  ASSERT_TRUE(operands);
+  ASSERT_EQ(operands.size(), 1U);
+  auto operand = mlir::cast<mlir::afir::TensorDescAttr>(operands[0]);
+  ASSERT_EQ(operand.getStrides().size(), 2U);
+  EXPECT_EQ(operand.getStrides()[0].getValue().getValue(), "0");
+
+  // 借用件继续管类型：destination 操作数还是 rank-0 的 GM 形参，indexing_maps 同形。
+  EXPECT_EQ(mlir::cast<mlir::MemRefType>(storeOp.getDestination().getType()).getRank(), 0);
+  auto maps = storeOp->getAttrOfType<mlir::ArrayAttr>(mlir::afir::kIndexingMapsAttrName);
+  ASSERT_TRUE(maps);
+  ASSERT_EQ(maps.size(), 2U);
+  auto destinationMap = mlir::cast<mlir::AffineMapAttr>(maps[1]).getValue();
+  EXPECT_EQ(destinationMap.getNumResults(), 0U);
+}
+
+TEST(ScheduleToAfirTest, TiledBroadcastAxisStoreViewPassesElementCountCheck) {
+  mlir::MLIRContext context;
+  mlir::afir::bridge::PlanInfo plan;
+  plan.name = "tiled_brc_store_strides";
+
+  mlir::afir::bridge::TemplateInfo tmpl;
+  tmpl.name = "tiled_brc_store_strides";
+  tmpl.original_name = tmpl.name;
+  tmpl.buffer_form = true;
+  tmpl.axes.push_back({0, "a0", "original", "5"});
+  tmpl.axes.push_back({1, "a1", "original", "3"});
+  tmpl.axes.push_back({2, "a2", "original", "8"});
+
+  // a1 在片上只占一格，分块后的读侧 repeat 为 2、stride 为 0。源侧 5×2×8
+  // 与目的侧 5×3×8 的元素数不同，verifier 必须识别分块广播，并用内层
+  // 广播解释 a0 的行距差异（8 × 3 = 24）。
+  auto local = MakeWorkspaceTestTensor(mlir::afir::Space::UB, 3);
+  local.tensor.axis = {0, 1, 2};
+  local.tensor.shape = {5, 1, 8};
+  local.tensor.shape_exprs = {"5", "1", "8"};
+  local.tensor.repeats = {"5", "2", "8"};
+  local.tensor.strides = {"8", "0", "1"};
+
+  auto input = MakeWorkspaceTestTensor(mlir::afir::Space::GM, -1);
+  input.tensor.axis = {0, 1, 2};
+  input.tensor.shape = {5, 1, 8};
+  input.tensor.shape_exprs = {"5", "1", "8"};
+  input.tensor.repeats = local.tensor.repeats;
+  input.tensor.strides = {"8", "0", "1"};
+  tmpl.inputs = {{"input0", input, 0}};
+
+  // Store 自身 `.y`：输出 5×3×8，a0 维 stride 24、a1 维 stride 8。
+  auto storeView = MakeWorkspaceTestTensor(mlir::afir::Space::GM, -1);
+  storeView.tensor.axis = {0, 1, 2};
+  storeView.tensor.shape = {5, 3, 8};
+  storeView.tensor.shape_exprs = {"5", "3", "8"};
+  storeView.tensor.repeats = {"5", "3", "8"};
+  storeView.tensor.strides = {"24", "8", "1"};
+
+  auto outputArg = MakeWorkspaceTestTensor(mlir::afir::Space::GM, -1);
+  outputArg.tensor.shape = {};
+  outputArg.tensor.shape_exprs = {};
+  outputArg.tensor.axis = {};
+  outputArg.tensor.repeats = {};
+  outputArg.tensor.strides = {};
+  outputArg.buffer.sizeBytesExpr = "";
+  tmpl.outputs = {{"output", outputArg, 0}};
+
+  mlir::afir::bridge::NodeInfo load;
+  load.name = "load";
+  load.type = "Load";
+  load.input_names = {"input0"};
+  load.inputs = {input};
+  load.output = local;
+  load.sched_axis = {0, 1, 2};
+  load.loop_axis = 0;
+
+  mlir::afir::bridge::NodeInfo store;
+  store.name = "store";
+  store.type = "Store";
+  store.input_names = {"load"};
+  store.inputs = {local};
+  store.output = storeView;
+  store.output_names = {"store"};
+  store.sched_axis = {0, 1, 2};
+  store.loop_axis = 0;
+
+  mlir::afir::bridge::NodeInfo output;
+  output.name = "output";
+  output.type = "Output";
+  output.input_names = {"store"};
+  output.inputs = {storeView};
+  output.output = outputArg;
+
+  tmpl.nodes = {load, store, output};
+  plan.templates.push_back(tmpl);
+
+  // BuildAfirModule 会校验 Store。校验通过后检查实际送入 verifier 的视图。
+  auto module = mlir::afir::bridge::BuildAfirModule(context, plan);
+  ASSERT_TRUE(module);
+  auto function = module->lookupSymbol<mlir::func::FuncOp>("tiled_brc_store_strides");
+  ASSERT_TRUE(function);
+
+  mlir::afir::StoreOp storeOp;
+  function.walk([&](mlir::afir::StoreOp op) { storeOp = op; });
+  ASSERT_TRUE(storeOp);
+
+  auto operands = storeOp->getAttrOfType<mlir::ArrayAttr>(mlir::afir::kOperandDescsAttrName);
+  ASSERT_TRUE(operands);
+  ASSERT_EQ(operands.size(), 1U);
+  auto operand = mlir::cast<mlir::afir::TensorDescAttr>(operands[0]);
+  auto destinations = storeOp->getAttrOfType<mlir::ArrayAttr>(mlir::afir::kDestinationDescsAttrName);
+  ASSERT_TRUE(destinations);
+  auto destination = mlir::cast<mlir::afir::TensorDescAttr>(destinations[0]);
+  ASSERT_EQ(operand.getAxis().size(), 3U);
+  EXPECT_EQ(operand.getAxis(), destination.getAxis());
+  ASSERT_EQ(operand.getRepeats().size(), 3U);
+  ASSERT_EQ(destination.getRepeats().size(), 3U);
+  EXPECT_EQ(operand.getRepeats()[1].getValue().getValue(), "2");
+  EXPECT_EQ(destination.getRepeats()[1].getValue().getValue(), "3");
+  ASSERT_EQ(operand.getStrides().size(), 3U);
+  EXPECT_EQ(operand.getStrides()[0].getValue().getValue(), "8");
+  EXPECT_EQ(operand.getStrides()[1].getValue().getValue(), "0");
+  ASSERT_EQ(destination.getStrides().size(), 3U);
+  EXPECT_EQ(destination.getStrides()[0].getValue().getValue(), "24");
+  EXPECT_EQ(destination.getStrides()[1].getValue().getValue(), "8");
+  EXPECT_EQ(destination.getStrides()[2].getValue().getValue(), "1");
+}
+
 }  // namespace
 
 namespace {

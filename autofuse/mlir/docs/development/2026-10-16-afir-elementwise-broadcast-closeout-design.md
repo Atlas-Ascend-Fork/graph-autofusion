@@ -681,7 +681,7 @@ hard-failure 66 不变、0 格变差。功能 6、7 仍未开工。
    |---|---|---|---|
    | `broadcast.tensor.extend_reg_base` | `BroadcastExtend` | **供** | `v35/ascendc/api_regbase/broadcast_extend_impl.h:260` 的 `static_assert(SupportBytes<T, 1, 2, 4, 8>())` 只看字节宽 |
    | `broadcast.tensor.duplicate` / `_reg_base` | `AscendC::Duplicate` | **供** | `dav_c220` 与 `dav_3510` 两份 `kernel_operator_vec_duplicate_impl.h` 的 `SupportType` 都列着 `bfloat16_t` |
-   | `broadcast.tensor.segmented` | `broadcast.h` 的包装 `Broadcast` | **不供** | `ascendc/api/broadcast.h:511` 的分发链三支都不收 bf16，落在 `else` 的 `ASSERT(false)` 上 |
+   | `broadcast.tensor.segmented` | `broadcast.h` 的包装 `Broadcast` | **供（订正）** | 原判「不供」所引的旧分发链已被 `de183a1f`（feat: Broadcast ASCIR放开DT_BF16支持）改写：现行 `ascendc/api/broadcast.h` 的 `SupportType<T, int16_t, uint16_t, half, float, bfloat16_t, int32_t, uint32_t>` 支走 `BroadcastCommon`，bf16 落在内、不再到 `ASSERT(false)` |
 
    所以 ODS 的 `AFIR_BroadcastElementTypes` 与 `kExtendElementTypes` 各开一位；mem 分段那一
    档不开，**它的 bf16 广播于是在能力层答不支持、整图干净回落**，而不是失败在 verifier 上。

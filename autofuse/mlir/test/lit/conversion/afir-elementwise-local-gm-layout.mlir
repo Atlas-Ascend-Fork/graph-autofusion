@@ -30,6 +30,13 @@
 #pitched = #afir.tensor_desc<axis = [0, 1, 2], repeats = [<"2">, <"4">, <"8">],
   strides = [<"gm_outer">, <"gm_row">, <"gm_col">],
   vectorized_axis = [1, 2], vectorized_strides = [<"16">, <"1">], role = <compute>>
+// 行垫整 lane 跨度（1+7×1+3×32=104）超出形状容量 64，但逻辑步长跨度
+// （1+7×1+3×8=32）在容量内，且缓冲由资源模型 size_from_resource 加大分配
+// （参数带 buffer_desc）——仅两者同时成立才放行；缺 buffer_desc 的裸张量按
+// 原判据拒收（expand_0015 的双广播模板形态）。
+#padded_lane_ok = #afir.tensor_desc<axis = [0, 1, 2], repeats = [<"2">, <"4">, <"8">],
+  strides = [<"32">, <"8">, <"1">],
+  vectorized_axis = [1, 2], vectorized_strides = [<"32">, <"1">], role = <compute>>
 
 module {
   func.func @abs_different_gm(%a: !ascendc.local_tensor<2x4x8xf32>, %b: !ascendc.local_tensor<2x4x8xf32>, %dst: !ascendc.local_tensor<2x4x8xf32>, %tmp: !ascendc.local_tensor<128xui8>) attributes {afir.asc_graph = #graph} {
@@ -44,6 +51,13 @@ module {
       afir.operand_descs = [#src, #dst], afir.destination_descs = [#dst], afir.result_descs = [#dst],
       afir.sched = #afir.sched<axis = [0, 1, 2], loop_axis = 0>
     } : (!ascendc.local_tensor<2x4x8xf32>, !ascendc.local_tensor<2x4x8xf32>), !ascendc.local_tensor<2x4x8xf32> -> !ascendc.local_tensor<2x4x8xf32>
+    return
+  }
+  func.func @abs_padded_lane_span(%a: !ascendc.local_tensor<2x4x8xf32> {afir.buffer_desc = #afir.buffer_desc<space = <ub>, buffer_id = 1, size_from_resource = true, life_time_axis_id = -1>}, %dst: !ascendc.local_tensor<2x4x8xf32> {afir.buffer_desc = #afir.buffer_desc<space = <ub>, buffer_id = 1, size_from_resource = true, life_time_axis_id = -1>}, %tmp: !ascendc.local_tensor<128xui8>) attributes {afir.asc_graph = #graph} {
+    %r = afir.abs %a outs(%dst) tmp(%tmp) {
+      afir.operand_descs = [#padded_lane_ok], afir.destination_descs = [#padded_lane_ok], afir.result_descs = [#padded_lane_ok],
+      afir.sched = #afir.sched<axis = [0, 1, 2], loop_axis = 0>
+    } : !ascendc.local_tensor<2x4x8xf32>, !ascendc.local_tensor<2x4x8xf32>, !ascendc.local_tensor<128xui8> -> !ascendc.local_tensor<2x4x8xf32>
     return
   }
   func.func @abs_different_ub(%a: !ascendc.local_tensor<2x4x8xf32>, %dst: !ascendc.local_tensor<2x4x8xf32>, %tmp: !ascendc.local_tensor<128xui8>) {
@@ -73,6 +87,10 @@ module {
 // CHECK-LABEL: func.func @add_different_gm
 // CHECK: ascendc.
 // CHECK-NOT: afir.add
+// CHECK-LABEL: func.func @abs_padded_lane_span
+// MEM: ascendc.abs_extend
+// REG: ascendc.abs_l2
+// CHECK-NOT: afir.abs
 // CHECK-LABEL: func.func @abs_different_ub
 // CHECK-NOT: ascendc.local_tensor.get_size
 // CHECK: scf.for

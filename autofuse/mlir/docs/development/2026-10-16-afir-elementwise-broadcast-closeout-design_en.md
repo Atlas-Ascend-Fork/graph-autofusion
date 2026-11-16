@@ -8,6 +8,13 @@
 
 ### Purpose
 
+> 2026-11-16 amendment (kept in sync with the Chinese source): the segmented mem-tier
+> broadcast implementation now supplies bf16. The source table's earlier "not supplied /
+> ASSERT(false)" verdict was written against the old `broadcast.h` dispatch chain; commit
+> `de183a1f` (feat: Broadcast ASCIR放开DT_BF16支持) has since added `bfloat16_t` to the
+> `BroadcastCommon` branch, so `kSegmentedElementTypes` now includes bf16 (validated
+> on board by the expand family bf16 cases).
+
 Close out the Autofuse MLIR elementwise and broadcast workstream by requiring graphs that legacy codegen handles on the supported mem-based and reg-base profiles to be handled by the MLIR path without fallback.
 
 ### Scope
