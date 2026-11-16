@@ -5798,11 +5798,14 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSharedIndexHintNotClobber
 // BuildEmbeddingSumGraph 同构。轴空间统一：全图共用同一 axes（表 dim0 直接落在
 // lookup 轴 id 上、repeat 换 vocab）。emb 值与静态化可参数化（统一打分的值断言用例）。
 af::AscGraph BuildEmbeddingDualGatherGraph(const int64_t emb0_value = 8L, const int64_t emb1_value = 8L,
-                                           const bool static_shapes = false) {
+                                           const bool static_shapes = false, const bool symbolic_strides = false) {
   af::AscGraph graph("embedding_dual_gather_ut_graph");
   const af::Expression vocab = graph.CreateSizeVar(1353406L);
-  const af::Expression emb0 = graph.CreateSizeVar(emb0_value);
-  const af::Expression emb1 = graph.CreateSizeVar(emb1_value);
+  // [符号步长形态] emb 由 sizevar 构成（strides=[ks2, 1]）：复刻动态前端视图，覆盖
+  // Gt(ks2, 0) 不可证、仅稠密等式证据可证的正性通路。两成员共用同一符号（成员轴
+  // 归一按同名 sizevar 等价处理）。
+  const af::Expression emb0 = symbolic_strides ? graph.CreateSizeVar("ks2") : graph.CreateSizeVar(emb0_value);
+  const af::Expression emb1 = symbolic_strides ? emb0 : graph.CreateSizeVar(emb1_value);
   const af::Expression seq = static_shapes ? graph.CreateSizeVar(128L) : graph.CreateSizeVar("ks");
   const auto seq_axis = graph.CreateAxis("seq_axis", seq);
   const auto emb_axis = graph.CreateAxis("emb_axis", emb0);
@@ -5972,6 +5975,52 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherDynamicShapeEmitsRuntimeG
   }
 }
 
+// [组 gather·符号步长] 组路径与单 gather 共享 AnalyzeIndirectLoadAccess（CollectGroup
+// AccessStats 逐成员 AND 聚合 capable）——符号步长失证同样使全组 capable 佣塌为结构
+// 回退；同一修复对组生效：成员恢复 can_use_simt_structured，SIMT 组候选的打分回到
+// 统一运行期投票（不再 base_score 结构回退）。
+TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherSymbolicStrideEmbeddingKeepsStructuredCapability) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  af::AscGraph graph = BuildEmbeddingDualGatherGraph(8L, 8L, false, true);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_EQ(score_functions.size(), graphs.size());
+  ASSERT_FALSE(graphs.empty());
+  constexpr size_t kNotFound = static_cast<size_t>(-1);
+  size_t simt_pos = kNotFound;
+  for (size_t index = 0UL; index < graphs.size(); ++index) {
+    const auto il0 = graphs[index].FindNode("indirect_load0");
+    if (il0 != nullptr && ascir::GetTemplateIdOrDefault(*il0) == ascir::TemplateId::kIndirectLoadSimt) {
+      simt_pos = index;
+    }
+  }
+  ASSERT_NE(simt_pos, kNotFound) << "symbolic-stride embedding group must keep the SIMT candidate.";
+  for (const char *member_name : {"indirect_load0", "indirect_load1"}) {
+    const auto member = graphs[simt_pos].FindNode(member_name);
+    ASSERT_NE(member, nullptr) << member_name;
+    ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
+    ASSERT_EQ(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(member, access_info), af::SUCCESS);
+    EXPECT_EQ(access_info.kind, ascgen_utils::indirect_load::IndirectLoadAccessInfo::Kind::kEmbeddingLike)
+        << member_name << " must classify as embedding via the dense-equality positivity evidence.";
+    EXPECT_TRUE(access_info.can_use_simt_structured) << member_name << " must restore the structured capability.";
+  }
+  EXPECT_NE(score_functions[simt_pos].find("size_t votes = 0UL;"), std::string::npos)
+      << "group SIMT must use the unified runtime vote for symbolic-stride embedding members.";
+  EXPECT_NE(score_functions[simt_pos].find("const size_t satisfied = member_count - votes;"), std::string::npos)
+      << "SIMT satisfied = the remaining members.";
+  EXPECT_NE(score_functions[simt_pos].find(std::string("tiling_data.") + ascgen_utils::kGroupTilingDataPlaceholder),
+            std::string::npos)
+      << "dynamic group SIMT must be runtime-scored.";
+}
+
 TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherStaticShapeFoldsUnifiedGroupScore) {
   // [统一打分·折叠物化] 全叶子常量（静态图）→ 生成期折叠为字面量分，与运行期发射同
   // 公式（同一算法的两种物化）。值断言（N=2，emb=8：slice=32B<2048、lookup=128≥32 →
@@ -6089,6 +6138,82 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, MultiGatherStaticShapeKeepsConstantG
         << "static-shape candidate[" << index << "] must keep compile-time constant scoring.";
     EXPECT_NE(score_functions[index].find("(void)tiling_data;"), std::string::npos);
   }
+}
+
+// [动态符号步长 embedding 图] 复刻 inductor 动态 shape 前端产出的视图形态：全部步长由
+// sizevar 构成（strides=[ks2, 1]、表=[ks3, ks2]），index 广播呈稠密全步长视图（源头 load
+// 尾轴零步长——payload 不变性由 IsIndexPayloadInvariantFromSources 从源头证明，与
+// BuildEmbeddingSumGraph 的零步长广播视图互补）。StaticCheckGt(ks2, 0) 无正性公理不可证，
+// 正性仅稠密等式证据（Eq(ks2, ks2)）可解——覆盖步长正性修复通路。
+af::AscGraph BuildSymbolicStrideEmbeddingSumGraph() {
+  af::AscGraph graph("symbolic_embedding_sum_ut_graph");
+  const af::Expression vocab = graph.CreateSizeVar("ks3");
+  const af::Expression emb = graph.CreateSizeVar("ks2");
+  const af::Expression seq = graph.CreateSizeVar("ks0");
+  const auto seq_axis = graph.CreateAxis("seq_axis", seq);
+  const auto emb_axis = graph.CreateAxis("emb_axis", emb);
+  const std::vector<af::AxisId> axes = {seq_axis.id, emb_axis.id};
+
+  // index 路径：源头 [seq, 1] 尾轴零步长；广播结果以稠密全步长视图描述（前端形态）。
+  af::ascir_op::Data index_data("index_data", graph);
+  index_data.y.dtype = ge::DT_INT64;
+  index_data.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  index_data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  index_data.ir_attr.SetIndex(1);
+  index_data.attr.sched.axis = axes;
+  *index_data.y.axis = axes;
+  *index_data.y.repeats = {seq, af::ops::One};
+  *index_data.y.strides = {af::sym::kSymbolOne, af::sym::kSymbolZero};
+  af::ascir_op::Load index_load("index_load");
+  index_load.x = index_data.y;
+  index_load.ir_attr.SetOffset(af::ops::Zero);
+  SetNodeView(index_load, ge::DT_INT64, axes, {seq, af::ops::One}, {af::sym::kSymbolOne, af::sym::kSymbolZero});
+  af::ascir_op::Broadcast index_broadcast("index_broadcast");
+  index_broadcast.x = index_load.y;
+  index_broadcast.attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  SetNodeView(index_broadcast, ge::DT_INT64, axes, {seq, emb}, {emb, af::sym::kSymbolOne});
+
+  // input 路径：embedding 表 [ks3, ks2] 行主序稠密，步长全符号。
+  af::ascir_op::Data table_data("table_data", graph);
+  table_data.y.dtype = ge::DT_FLOAT;
+  table_data.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  table_data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  table_data.ir_attr.SetIndex(0);
+  table_data.attr.sched.axis = axes;
+  *table_data.y.axis = axes;
+  *table_data.y.repeats = {vocab, emb};
+  *table_data.y.strides = {emb, af::sym::kSymbolOne};
+  af::ascir_op::Load table_load("table_load");
+  table_load.x = table_data.y;
+  table_load.ir_attr.SetOffset(af::ops::Zero);
+  SetNodeView(table_load, ge::DT_FLOAT, axes, {vocab, emb}, {emb, af::sym::kSymbolOne});
+
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = table_load.y;
+  indirect_load.x2 = index_broadcast.y;
+  indirect_load.ir_attr.SetAxis(0L);
+  SetNodeView(indirect_load, ge::DT_FLOAT, axes, {seq, emb}, {emb, af::sym::kSymbolOne});
+
+  // post-Reduce：sum 沿 lookup 维归约，payload 维保留稠密。
+  af::ascir_op::Sum sum("sum");
+  sum.x = indirect_load.y;
+  sum.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  sum.attr.sched.axis = axes;
+  SetNodeView(sum, ge::DT_FLOAT, axes, {af::ops::One, emb}, {af::sym::kSymbolZero, af::sym::kSymbolOne});
+  af::ascir_op::Store store("store");
+  store.x = sum.y;
+  SetNodeView(store, ge::DT_FLOAT, axes, {af::ops::One, emb}, {af::sym::kSymbolZero, af::sym::kSymbolOne});
+  af::ascir_op::Output y("y");
+  y.x = store.y;
+  y.y.dtype = ge::DT_FLOAT;
+  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.ir_attr.SetIndex(0);
+  y.attr.sched.axis = axes;
+  *y.y.axis = axes;
+  *y.y.repeats = {af::ops::One, emb};
+  *y.y.strides = {af::sym::kSymbolZero, af::sym::kSymbolOne};
+  return graph;
 }
 
 af::AscGraph BuildEmbeddingSumGraph(bool transposed_axis_order, const bool static_shapes = false) {
@@ -6258,6 +6383,64 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SingleGatherDynamicShapeEmitsUnified
     EXPECT_NE(score_functions[simt_pos].find("base_score"), std::string::npos)
         << "non-capable SIMT uses the structural fallback runtime form.";
   }
+}
+
+// [动态 embedding·符号步长] 前端动态图的步长全部由 sizevar 构成（strides=[ks2, 1]）：
+// StaticCheckGt(ks2, 0) 无正性公理恒 kUnknown，修复前 embedding_like 被一票否决，SIMT
+// 候选退化为逐元素 strided 求值（实跑 ~140µs vs 静态同图 43µs）、打分走结构回退。
+// 稠密等式证据（Eq(ks2, ks2) 可证）恢复 capable：① access_info 回到 kEmbeddingLike /
+// can_use_simt_structured；② 打分走统一运行期投票（不再 base_score 回退）；③ lowering
+// 采用 kEmbedding 策略（行内 payload 整搬、index 每行一次），动态 shape 下静态 span 不可
+// 证、offset 宽度安全回落 kUint64（与实跑包 Offset64 标签一致）。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SingleGatherSymbolicStrideEmbeddingKeepsStructuredCapability) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+  af::AscGraph graph = BuildSymbolicStrideEmbeddingSumGraph();
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_EQ(score_functions.size(), graphs.size());
+  ASSERT_FALSE(graphs.empty());
+  constexpr size_t kNotFound = static_cast<size_t>(-1);
+  size_t simt_pos = kNotFound;
+  for (size_t index = 0UL; index < graphs.size(); ++index) {
+    const auto il = graphs[index].FindNode("indirect_load");
+    ASSERT_NE(il, nullptr);
+    if (ascir::GetTemplateIdOrDefault(*il) == ascir::TemplateId::kIndirectLoadSimt) {
+      simt_pos = index;
+    }
+  }
+  ASSERT_NE(simt_pos, kNotFound) << "symbolic-stride embedding must keep the SIMT candidate.";
+  const auto indirect_load = graphs[simt_pos].FindNode("indirect_load");
+  ASSERT_NE(indirect_load, nullptr);
+  ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(indirect_load, access_info), af::SUCCESS);
+  EXPECT_EQ(access_info.kind, ascgen_utils::indirect_load::IndirectLoadAccessInfo::Kind::kEmbeddingLike)
+      << "symbolic strides must classify as embedding via the dense-equality positivity evidence.";
+  EXPECT_TRUE(access_info.can_use_simt_structured) << "dense equality must restore the structured capability.";
+  ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetLoweringMetadata(indirect_load, metadata), af::SUCCESS);
+  EXPECT_EQ(metadata.simt.policy.policy, ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding)
+      << "embedding_like access must take the kEmbedding row addressing policy.";
+  // [口径说明] 下述 offset_width 断言的是调度期 metadata 的基础宽度字段：动态恒
+  // kUint64 是设计基准，u32 加速不在此层——codegen 调用点（SimtSupportsDualOffsetBody
+  // 门控 + GenerateSimtInvocation 双发）在其上附加 u32 实例并按运行期 guard 现场选宽，
+  // metadata 字段本身保持 u64 不变。勿将本断言读作“u32 未修”。
+  EXPECT_EQ(metadata.simt.policy.offset_width, ascgen_utils::indirect_load::SimtOffsetWidth::kUint64)
+      << "dynamic spans are not statically provable; the offset width must fall back to 64-bit.";
+  EXPECT_NE(score_functions[simt_pos].find("size_t votes = 0UL;"), std::string::npos)
+      << "capable SIMT must use the unified runtime vote, not the structural fallback.";
+  EXPECT_NE(score_functions[simt_pos].find("const size_t satisfied = member_count - votes;"), std::string::npos)
+      << "N=1 SIMT satisfied = 1 - votes.";
+  EXPECT_NE(score_functions[simt_pos].find(std::string("tiling_data.") + ascgen_utils::kGroupTilingDataPlaceholder),
+            std::string::npos)
+      << "dynamic single-gather SIMT must be runtime-scored.";
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, SingleGatherStaticShapeFoldsUnifiedScore) {

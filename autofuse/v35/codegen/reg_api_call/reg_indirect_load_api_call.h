@@ -63,6 +63,15 @@ class IndirectLoadRegApiCall final : public ApiCall {
                   const std::vector<std::reference_wrapper<const Tensor>> &outputs, std::string &result) const override;
   Status Generate(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis,
                   std::string &result) const override;
+  // [双发判定唯一入口·结果缓存] 定义侧（GenerateFuncDefinition 决定发几套 body）
+  // 与调用侧（GenerateSimtInvocation 决定调用点形状）必须同答案，否则生成代码
+  // "定义一套、调用另一套"直接编译失败。prepass_active 依赖 CanUseSimtIndexPrepass
+  // （图内容 + tmp_buf_id 时机），两处独立求值存在漂移窗口（图副本改写、tmp 填充
+  // 时机差异）——首次求值缓存（-1 未算 / 0 不双发 / 1 双发），两侧物理一致。
+  // 漂移最坏退化为 body 多发一套（白定义，无编译失败），自洽优先。缓存按
+  // ApiCall 对象生命周期有效（工厂每任务新建实例，无跨任务残留；重解析随
+  // ResolveSimtMetadata 重置）。public 供 UT 直接钉死首答生效语义（P3-c）。
+  bool DecideDualOffsetBody(bool prepass_active) const;
 
  protected:
   Status ParseAttr(const ascir::NodeView &node) override;
@@ -82,8 +91,11 @@ class IndirectLoadRegApiCall final : public ApiCall {
   // 带出（首注册项）。Context 字段声明（GenerateFuncDefinition）与初始化
   // （GenerateSimt）两处按同参调用，保证字段序一致。
   // [SIMT 32 位双实例] 偏移域运行时判定可 32 位的形态才双发 body：kStrided
-  // Rank3/Axis1（gather 轴内单维、共享坐标差分路径、无 post Reduce/prepass）。
-  bool SimtSupportsDualOffsetBody() const;
+  // Rank3/Axis1（gather 轴内单维、共享坐标差分路径、无 post Reduce/prepass）；
+  // kEmbedding Rank2/Axis0（真偏移上界 guard 逐视图逐链判定，含 post Reduce
+  // 且无 prepass 的形态——prepass_active 复用 CanUseSimtIndexPrepass 结果，
+  // prepass 场景首版保守排除，第二阶段单独评估）。
+  bool SimtSupportsDualOffsetBody(bool prepass_active) const;
   std::vector<std::string> CollectSimtRuntimeSizeExprs(
       const std::string &input_dtype, const std::string &index_dtype, const std::string &offset_type,
       const TPipe &tpipe, bool use_prepass, const ascgen_utils::indirect_load::SimtIndexPrepassPlan &prepass_plan,
@@ -119,6 +131,7 @@ class IndirectLoadRegApiCall final : public ApiCall {
   ascir::TensorId output_result_tensor_id_{af::kIdNone};
   af::DataType index_dtype_{af::DT_UNDEFINED};
   ascgen_utils::indirect_load::Implementation implementation_{ascgen_utils::indirect_load::Implementation::kDefault};
+  mutable int8_t dual_offset_body_{-1};  // DecideDualOffsetBody 缓存：-1 未算 / 0 不双发 / 1 双发
 };
 }  // namespace codegen
 
