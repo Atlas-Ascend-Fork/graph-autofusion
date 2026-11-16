@@ -52,18 +52,28 @@ std::string codegen::TilingData::macros_and_includes = {  // 不却分是否cons
     "#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \\\n"
     "  struct_type filed_name;\n"};
 
-std::string codegen::TilingData::common_tiling_filed = {  // 非const模式
-    "  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);\n"
-    "  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);\n"
-    "  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);\n"
-    "  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);"};
-
 std::string codegen::TilingData::GenGenTilingDataFieldConstDefFunc() const {
   std::stringstream ss;
+  // 支持 uint16_t 类型
+  ss << "std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, uint16_t value) {" << std::endl;
+  ss << "  std::stringstream ss_mid;" << std::endl;
+  ss << "  ss_mid << \"const uint16_t \";" << std::endl;
+  ss << "  ss_mid << f_name << \" = \" << std::to_string(value) << \";\" << std::endl;" << std::endl;
+  ss << "  return ss_mid.str();" << std::endl;
+  ss << "}" << std::endl;
+
   // 支持 uint32_t 类型
   ss << "std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, uint32_t value) {" << std::endl;
   ss << "  std::stringstream ss_mid;" << std::endl;
   ss << "  ss_mid << \"const uint32_t \";" << std::endl;
+  ss << "  ss_mid << f_name << \" = \" << std::to_string(value) << \";\" << std::endl;" << std::endl;
+  ss << "  return ss_mid.str();" << std::endl;
+  ss << "}" << std::endl;
+
+  // 支持 int64_t 类型
+  ss << "std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, int64_t value) {" << std::endl;
+  ss << "  std::stringstream ss_mid;" << std::endl;
+  ss << "  ss_mid << \"const int64_t \";" << std::endl;
   ss << "  ss_mid << f_name << \" = \" << std::to_string(value) << \";\" << std::endl;" << std::endl;
   ss << "  return ss_mid.str();" << std::endl;
   ss << "}" << std::endl;
@@ -90,45 +100,16 @@ std::string codegen::TilingData::GenGenTilingDataFieldConstValueFunc() const {
   return ss.str();
 }
 
-std::string codegen::TilingData::GetCommonTilingField(bool is_group,
-                                                      const ascir::FusedScheduledResult &fused_schedule_result) {
-  std::stringstream ss;
-  std::vector<ascir::TensorId> workspace_tensor_id = GetWorkspaceTensorIdListInOneScheduleResult(fused_schedule_result);
-  std::vector<std::string> common_tiling_fileds = {"block_dim", "corenum", "ub_size", "hbm_size"};
+std::string codegen::TilingData::GenConstCommonTilingField(const std::vector<std::string> &tiling_key_fileds,
+                                                           const std::vector<ascir::TensorId> &workspace_tensor_id) {
+  // const模式
+  std::vector<std::string> common_tiling_fileds = {"block_dim"};
+  common_tiling_fileds.insert(common_tiling_fileds.end(), tiling_key_fileds.begin(), tiling_key_fileds.end());
+  common_tiling_fileds.push_back("ub_size");
   for (auto tId : workspace_tensor_id) {
     common_tiling_fileds.push_back("workspace" + std::to_string(tId));
   }
-  if (!const_mode_) {
-    // 非const模式
-    ss << common_tiling_filed << std::endl;
-    for (auto tId : workspace_tensor_id) {
-      ss << "  TILING_DATA_FIELD_DEF_T(uint64_t, workspace" << std::to_string(tId) << ");" << std::endl;
-    }
-    if (is_group || ((fused_schedule_result.node_idx_to_scheduled_results.size() == 1) &&
-                     (fused_schedule_result.node_idx_to_scheduled_results[0].size() == 1) &&
-                     (fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.size() == 1))) {
-      ss << "  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);";
-      return ss.str();
-    }
-    for (size_t i = 0U; i < fused_schedule_result.node_idx_to_scheduled_results.size(); i++) {
-      ss << "  TILING_DATA_FIELD_DEF_T(uint32_t, " << "graph" << std::to_string(i) << "_tiling_key);";
-      if (i < (fused_schedule_result.node_idx_to_scheduled_results.size() - 1U)) {
-        ss << std::endl;
-      }
-    }
-    return ss.str();
-  }
-
-  // const模式
-  if (is_group || ((fused_schedule_result.node_idx_to_scheduled_results.size() == 1) &&
-                   (fused_schedule_result.node_idx_to_scheduled_results[0].size() == 1) &&
-                   (fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.size() == 1))) {
-    common_tiling_fileds.push_back("tiling_key");
-  } else {
-    for (size_t i = 0U; i < fused_schedule_result.node_idx_to_scheduled_results.size(); i++) {
-      common_tiling_fileds.push_back("graph" + std::to_string(i) + "_tiling_key");
-    }
-  }
+  std::stringstream ss;
   uint32_t idx = 0U;
   for (auto &field : common_tiling_fileds) {
     std::string field_func_str = GetNameOfGenTilingDataFieldConstDefFunc(field);
@@ -143,8 +124,51 @@ std::string codegen::TilingData::GetCommonTilingField(bool is_group,
     field_var_defs_.push_back(field_def);
     idx++;
   }
-
   return ss.str();
+}
+
+std::string codegen::TilingData::GetCommonTilingField(bool is_group,
+                                                      const ascir::FusedScheduledResult &fused_schedule_result) {
+  std::stringstream ss;
+  std::vector<ascir::TensorId> workspace_tensor_id = GetWorkspaceTensorIdListInOneScheduleResult(fused_schedule_result);
+  // block_dim 与 tiling_key 相邻：二者在根和每个 group 结构体里都紧跟声明。
+  std::vector<std::string> tiling_key_fileds;
+  if (is_group || ((fused_schedule_result.node_idx_to_scheduled_results.size() == 1) &&
+                   (fused_schedule_result.node_idx_to_scheduled_results[0].size() == 1) &&
+                   (fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.size() == 1))) {
+    tiling_key_fileds.push_back("tiling_key");
+  } else {
+    for (size_t i = 0U; i < fused_schedule_result.node_idx_to_scheduled_results.size(); i++) {
+      tiling_key_fileds.push_back("graph" + std::to_string(i) + "_tiling_key");
+    }
+  }
+  if (!const_mode_) {
+    // 非const模式
+    bool first = true;
+    auto add_field = [&ss, &first](const std::string &field_def) {
+      if (!first) {
+        ss << std::endl;
+      }
+      ss << "  " << field_def;
+      first = false;
+    };
+    add_field("TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);");
+    for (const auto &field : tiling_key_fileds) {
+      add_field("TILING_DATA_FIELD_DEF_T(uint16_t, " + field + ");");
+    }
+    add_field("TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);");
+    for (auto tId : workspace_tensor_id) {
+      add_field("TILING_DATA_FIELD_DEF_T(uint64_t, workspace" + std::to_string(tId) + ");");
+    }
+    // 空 fused_schedule_result 时沿用历史的尾随换行（调用方会再补一个换行）。
+    if (tiling_key_fileds.empty()) {
+      ss << std::endl;
+    }
+    return ss.str();
+  }
+
+  // const模式
+  return GenConstCommonTilingField(tiling_key_fileds, workspace_tensor_id);
 }
 
 std::string codegen::TilingData::pgo_perf_struct = {
@@ -374,8 +398,10 @@ std::string codegen::TilingData::ClassBegin(const std::string &begin_kernel_name
 }
 
 std::string codegen::TilingData::DataFieldDefine(ascir::SizeVar &size) const {
+  const std::string name = std::string(size.expr.Str().get());
+  const char *field_type = ascgen_utils::IsDynamicSizeVarName(name) ? "int64_t" : "uint32_t";
   std::stringstream ss;
-  ss << "TILING_DATA_FIELD_DEF_T(uint32_t, " << std::string(size.expr.Str().get()) << ");";
+  ss << "TILING_DATA_FIELD_DEF_T(" << field_type << ", " << name << ");";
   return ss.str();
 }
 

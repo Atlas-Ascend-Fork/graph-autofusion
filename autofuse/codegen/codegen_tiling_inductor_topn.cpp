@@ -212,9 +212,16 @@ std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedSch
   ss << "  };" << std::endl;
   ss << "  bool first = true;" << std::endl;
   ss << "  emit_field(\"block_dim\", tiling_data->get_block_dim(), first); first = false;" << std::endl;
-  ss << "  emit_field(\"corenum\", tiling_data->get_corenum(), first); first = false;" << std::endl;
+  // designated initializer 必须按声明顺序：block_dim 后紧跟 tiling_key / graphN_tiling_key。
+  if (ascgen_utils::IsSingleGroup(fused_schedule_result)) {
+    ss << "  emit_field(\"tiling_key\", tiling_data->get_tiling_key(), first); first = false;" << std::endl;
+  } else {
+    for (size_t i = 0; i < fused_schedule_result.node_idx_to_scheduled_results.size(); ++i) {
+      ss << "  emit_field(\"graph" << i << "_tiling_key\", tiling_data->get_graph" << i
+         << "_tiling_key(), first); first = false;" << std::endl;
+    }
+  }
   ss << "  emit_field(\"ub_size\", tiling_data->get_ub_size(), first); first = false;" << std::endl;
-  ss << "  emit_field(\"hbm_size\", tiling_data->get_hbm_size(), first); first = false;" << std::endl;
 
   std::vector<ascir::TensorId> workspace_ids =
       ascgen_utils::GetWorkspaceTensorIdListInOneScheduleResult(fused_schedule_result);
@@ -241,17 +248,12 @@ std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedSch
 
 void TilingLib::GenReprSingleGroup(std::stringstream &ss,
                                    const ascir::FusedScheduledResult &fused_schedule_result) const {
-  ss << "  emit_field(\"tiling_key\", tiling_data->get_tiling_key(), first); first = false;" << std::endl;
   auto &sg = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0];
   GenReprScheduleGroupFields(ss, sg, "tiling_data->", "emit_field", "  ", true);
 }
 
 void TilingLib::GenReprMultiGroup(std::stringstream &ss,
                                   const ascir::FusedScheduledResult &fused_schedule_result) const {
-  for (size_t i = 0; i < fused_schedule_result.node_idx_to_scheduled_results.size(); ++i) {
-    ss << "  emit_field(\"graph" << i << "_tiling_key\", tiling_data->get_graph" << i << "_tiling_key(), first);"
-       << " first = false;" << std::endl;
-  }
   for (size_t i = 0; i < fused_schedule_result.node_idx_to_scheduled_results.size(); ++i) {
     const auto &scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[i];
     for (size_t j = 0; j < scheduled_results.size(); ++j) {
@@ -269,10 +271,8 @@ void TilingLib::GenReprMultiGroup(std::stringstream &ss,
         ss << "      sub_first = false;" << std::endl;
         ss << "    };" << std::endl;
         ss << "    emit_sub(\"block_dim\", tiling_data->" << sub_name << ".get_block_dim());" << std::endl;
-        ss << "    emit_sub(\"corenum\", tiling_data->" << sub_name << ".get_corenum());" << std::endl;
-        ss << "    emit_sub(\"ub_size\", tiling_data->" << sub_name << ".get_ub_size());" << std::endl;
-        ss << "    emit_sub(\"hbm_size\", tiling_data->" << sub_name << ".get_hbm_size());" << std::endl;
         ss << "    emit_sub(\"tiling_key\", tiling_data->" << sub_name << ".get_tiling_key());" << std::endl;
+        ss << "    emit_sub(\"ub_size\", tiling_data->" << sub_name << ".get_ub_size());" << std::endl;
         std::string field_prefix = "tiling_data->" + sub_name + ".";
         GenReprScheduleGroupFields(ss, schedule_groups[k], field_prefix, "emit_sub", "    ", false);
         ss << "    repr << std::endl << \"  }\";" << std::endl;
@@ -427,8 +427,7 @@ void TilingLib::GenTopnInitSearchTiling(std::stringstream &ss, const ascir::Fuse
     for (auto vars : GetFrontendShapeVars(fused_schedule_result)) {
       if (!(vars.IsConstExpr())) {
         std::string var_define = std::string(vars.Str().get());
-        ss << "  const uint32_t " << var_define << " = static_cast<uint32_t>(request.symbol_values[" << idx << "]);"
-           << std::endl;
+        ss << "  const int64_t " << var_define << " = request.symbol_values[" << idx << "];" << std::endl;
         TilingSetShapeDim(ss, var_define, fused_schedule_result, "search_tiling.");
         idx++;
       }

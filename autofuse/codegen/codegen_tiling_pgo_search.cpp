@@ -98,7 +98,7 @@ std::string TilingLib::GenPgoAutofuseTiling(const ascir::FusedScheduledResult &f
             "pgo_tiling.get_block_dim() > limit->aiv_num)) {"
          << std::endl;
       ss << "    OP_LOGW(OP_NAME, \"Loaded PGO block_dim %u is outside core budget [1, %u].\", "
-            "pgo_tiling.get_block_dim(), limit->aiv_num);"
+            "static_cast<unsigned>(pgo_tiling.get_block_dim()), limit->aiv_num);"
          << std::endl;
       ss << "    use_pgo_tiling = false;" << std::endl;
       ss << "  }" << std::endl;

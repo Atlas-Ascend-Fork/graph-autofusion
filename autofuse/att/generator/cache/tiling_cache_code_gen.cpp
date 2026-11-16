@@ -26,7 +26,7 @@ std::string TilingCacheCodeGen::GenHashMapTemplate() {
   std::stringstream ss;
 
   ss << "template <size_t KEY_SIZE, size_t CAPACITY, typename VALUE_TYPE, "
-        "typename KEY_TYPE = std::array<uint32_t, KEY_SIZE>>\n";
+        "typename KEY_TYPE = std::array<int64_t, KEY_SIZE>>\n";
   ss << "class FixedSizeHashMap {\n";
   ss << GenHashMapClassStructure();
   ss << GenHashMapConstructor();
@@ -170,7 +170,7 @@ std::string TilingCacheCodeGen::GenHashFunction() {
   ss << "  size_t Hash(const Key &key) const {\n";
   ss << "    size_t hash = 0;\n";
   ss << "    constexpr uint32_t kHashPrime = 0x9e3779b9;  // 黄金比例的整数表示，用于hash混合\n";
-  ss << "    if constexpr (std::is_same_v<Key, std::array<uint32_t, KEY_SIZE>>) {\n";
+  ss << "    if constexpr (std::is_same_v<Key, std::array<int64_t, KEY_SIZE>>) {\n";
   ss << "      for (const auto& value : key) {\n";
   ss << "        hash ^= value + kHashPrime + (hash << 6) + (hash >> 2);\n";
   ss << "      }\n";

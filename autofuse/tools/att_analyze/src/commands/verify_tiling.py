@@ -84,9 +84,10 @@ def validate_input_params(input_params: Dict) -> None:
     if not isinstance(dynamic_dims, list) or len(dynamic_dims) > 32:
         raise ValueError("dynamic_dims must be a list with at most 32 dimensions")
     if any(
-        not isinstance(dim, int) or not 0 < dim <= 0x7FFFFFFF for dim in dynamic_dims
+        not isinstance(dim, int) or not 0 < dim <= 0x7FFFFFFFFFFFFFFF
+        for dim in dynamic_dims
     ):
-        raise ValueError("dynamic_dims values must be in [1, 2147483647]")
+        raise ValueError("dynamic_dims values must be in [1, 9223372036854775807]")
     aiv_num = input_params.get("aiv_num", 48)
     ub_size = input_params.get("ub_size", 196608)
     if not isinstance(aiv_num, int) or not 0 < aiv_num <= 0xFFFF:
@@ -282,7 +283,7 @@ def execute_tiling(so_path: str, input_params: Dict, scene: str) -> Dict:
 
     aiv_num = input_params.get("aiv_num", 48)
     ub_size = input_params.get("ub_size", 196608)
-    dynamic_dims = [c_uint32(dim) for dim in input_params.get("dynamic_dims", [])]
+    dynamic_dims = [c_int64(dim) for dim in input_params.get("dynamic_dims", [])]
 
     tiling_buf = ctypes.create_string_buffer(tiling_size)
     ws = c_uint64(0)
@@ -296,12 +297,12 @@ def execute_tiling(so_path: str, input_params: Dict, scene: str) -> Dict:
     common_args = [c_void_p, ctypes.POINTER(c_uint64), ctypes.POINTER(bd_type)]
     if scene == "inductor" and abi["kind"] == "inductor":
         lib.AutofuseTiling.argtypes = (
-            [c_uint32] * len(dynamic_dims) + common_args + [c_void_p]
+            [c_int64] * len(dynamic_dims) + common_args + [c_void_p]
         )
         call_args = dynamic_dims + [tiling_buf, byref(ws), byref(bd), None]
     elif scene == "tf" and abi["kind"] in ("tf_static", "tf_dynamic"):
         lib.AutofuseTiling.argtypes = (
-            [c_uint32] * len(dynamic_dims) + common_args + [c_uint32, c_uint32]
+            [c_int64] * len(dynamic_dims) + common_args + [c_uint32, c_uint32]
         )
         call_args = dynamic_dims + [
             tiling_buf,

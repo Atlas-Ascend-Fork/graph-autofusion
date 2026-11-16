@@ -35,7 +35,7 @@ struct ResLimit {
   uint32_t resv[10];
 };
 constexpr ResLimit g_no_limit_res = {1, 48, 0, 192 * 1024, {}};
-extern "C" int64_t AutofuseTiling(uint32_t s2, uint32_t s3, AutofuseTilingData *tiling, uint64_t *workspaceSize,
+extern "C" int64_t AutofuseTiling(int64_t s2, int64_t s3, AutofuseTilingData *tiling, uint64_t *workspaceSize,
                                   uint32_t *blockDim, uint32_t aiv_num, uint32_t ub_size) {
   tiling->set_s2(s2);
   tiling->set_s3(s3);
@@ -50,8 +50,8 @@ extern "C" int64_t AutofuseTiling(uint32_t s2, uint32_t s3, AutofuseTilingData *
 
   return 0;
 }
-extern "C" int64_t AutofuseTilingWithConfig(const char *config_file, uint32_t s2, uint32_t s3,
-                                            AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim,
+extern "C" int64_t AutofuseTilingWithConfig(const char *config_file, int64_t s2, int64_t s3, AutofuseTilingData *tiling,
+                                            uint64_t *workspaceSize, uint32_t *blockDim,
                                             ResLimit *res_limit = nullptr) {
   const ResLimit *limit = (res_limit == nullptr) ? &g_no_limit_res : res_limit;
   tiling->set_s2(s2);

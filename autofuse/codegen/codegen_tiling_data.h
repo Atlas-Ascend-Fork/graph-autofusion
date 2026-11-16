@@ -35,7 +35,6 @@ class TilingData {
   static std::string transposeApiTilingData;
   static std::string macros_and_includes;
 
-  static std::string common_tiling_filed;
   static std::string pgo_perf_struct;
 
   std::string ClassBegin(const std::string &begin_kernel_name, const std::string &begin_class_name) const;
@@ -68,6 +67,8 @@ class TilingData {
 
   std::string GenTilingDataFieldConstDefFunc(std::string &dtype, std::string &filed_name);
   std::string GetCommonTilingField(bool is_group, const ascir::FusedScheduledResult &fused_schedule_result);
+  std::string GenConstCommonTilingField(const std::vector<std::string> &tiling_key_fileds,
+                                        const std::vector<ascir::TensorId> &workspace_tensor_id);
 
   std::string TqueOrTbufDataFieldDefine(int64_t index, const std::string &que_or_buf) const;
   std::string TqueOrTbufDataFieldConstDefine(int64_t index, const std::string &que_or_buf);

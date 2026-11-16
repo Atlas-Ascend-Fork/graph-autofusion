@@ -9,6 +9,7 @@
  */
 
 #include "gen_model_info.h"
+#include <cstdint>
 #include <fstream>
 #include <set>
 #include "common/util/mem_utils.h"
@@ -193,6 +194,8 @@ static af::Status GenerateSingleModelInfoWithContext(const af::AscGraph &graph, 
   GELOGI("[DFX]Begin to generate model info for graph %s of tiling case id %u", graph.GetName().c_str(),
          tiling_case_id);
   DURATION_GUARD(DurationType::DURATION_GEN_MODEL_INFO);
+  GE_ASSERT_TRUE(tiling_case_id <= static_cast<uint32_t>(UINT16_MAX),
+                 "tiling_case_id %u exceeds uint16 range of tiling data tiling_key", tiling_case_id);
   model_info.tiling_case_id = tiling_case_id;
   // step1: get tuningspace from compute graph
   GE_ASSERT_NOTNULL(tuning_space, "Create tuning space failed.");
@@ -220,6 +223,10 @@ af::Status CheckKeyValid(const std::vector<af::AscGraph> &graph_list) {
     for (auto &graph : graph_list) {
       GE_ASSERT_TRUE(has_set_key == (graph.GetTilingKey() >= 0),
                      "If the user has set tiling_case_id for a graph, the tiling_case_id of all graphs must be set.");
+      // GetTilingKey() 为 int64_t，负值表示未设置；tiling data 中 tiling_key 字段为 uint16_t。
+      const int64_t graph_tiling_key = graph.GetTilingKey();
+      GE_ASSERT_TRUE(graph_tiling_key < 0 || graph_tiling_key <= static_cast<int64_t>(UINT16_MAX),
+                     "User-set tiling key %ld exceeds uint16 range of tiling data tiling_key", graph_tiling_key);
     }
   }
   return af::SUCCESS;

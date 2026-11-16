@@ -726,7 +726,7 @@ TEST(GeneratorUT, OperatorCacheKeyIncludesShapeAndResources) {
   EXPECT_NE(generated.find("struct OperatorCacheKey"), std::string::npos);
   EXPECT_NE(generated.find("#pragma pack(push, 1)"), std::string::npos);
   EXPECT_NE(generated.find("#pragma pack(pop)"), std::string::npos);
-  EXPECT_NE(generated.find("std::array<uint32_t, kInputShapeSize> input_shapes;"), std::string::npos);
+  EXPECT_NE(generated.find("std::array<int64_t, kInputShapeSize> input_shapes;"), std::string::npos);
   EXPECT_NE(generated.find("uint32_t request_block_dim;"), std::string::npos);
   EXPECT_NE(generated.find("uint32_t request_ub_size;"), std::string::npos);
   EXPECT_NE(generated.find("key.input_shapes"), std::string::npos);
@@ -791,7 +791,7 @@ TEST(GeneratorUT, GroupCacheHitFallsBackToTilingOnMiss) {
 
   ASSERT_EQ(gen_impl.GenGroupCacheLookupCode(), af::SUCCESS);
   const std::string generated = gen_impl.tiling_func_.GetOutputStr();
-  EXPECT_NE(generated.find("std::array<uint32_t, kInputShapeSize> input_shapes"), std::string::npos);
+  EXPECT_NE(generated.find("std::array<int64_t, kInputShapeSize> input_shapes"), std::string::npos);
   EXPECT_NE(generated.find("if (FindGroupCache(input_shapes, tiling_data, *cache))"), std::string::npos);
   EXPECT_NE(generated.find("return true;"), std::string::npos);
   EXPECT_NE(generated.find("find no cache, turn to main tiling procedure"), std::string::npos);
@@ -1475,7 +1475,7 @@ TEST(GeneratorUT, TilingCodeGenImplPGO) {
     DoApiTiling(tiling_data);
     GeneralTiling(tiling_data);
     if (tiling_data.get_block_dim() > corenum_) {
-      OP_LOGW(OP_NAME, "Generated block_dim %u exceeds core budget %u.", tiling_data.get_block_dim(), corenum_);
+      OP_LOGW(OP_NAME, "Generated block_dim %u exceeds core budget %u.", static_cast<unsigned>(tiling_data.get_block_dim()), corenum_);
       return false;
     }
     TilingSummary(tiling_data);
@@ -1658,9 +1658,9 @@ TEST(GeneratorUT, PGOByCoreNumSerialGroupsUseMaximumBlockDim) {
   EXPECT_EQ(genImpl.GenPGOByCoreNumFusedScheduleResultsGetTilingDefine(namespace_map), af::SUCCESS);
   const std::string output = genImpl.tiling_func_.GetOutputStr();
   // This entry point emits the root candidate collection; schedule-result block_dim updates are generated separately.
-  EXPECT_NE(
-      output.find("result_block_dim = std::max(result_block_dim, tiling_data_tmp.group1_tiling_data.get_block_dim());"),
-      std::string::npos);
+  EXPECT_NE(output.find("result_block_dim = std::max(result_block_dim, static_cast<uint32_t>("
+                        "tiling_data_tmp.group1_tiling_data.get_block_dim()));"),
+            std::string::npos);
   EXPECT_EQ(output.find("result_block_dim = std::min(result_block_dim, block_dim_i);"), std::string::npos);
   EXPECT_EQ(output.find("result_block_dim += tiling_data_tmp.group1_tiling_data.get_block_dim();"), std::string::npos);
   EXPECT_NE(output.find("ret = !tiling_data_list.empty();"), std::string::npos);
