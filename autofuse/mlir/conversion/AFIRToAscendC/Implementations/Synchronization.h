@@ -13,6 +13,8 @@
 
 #include "mlir/IR/Value.h"
 #include "ascir/Dialect/Asc/IR/Asc.h"
+#include "dialect/AFIR/IR/AFIR.h"
+#include "llvm/ADT/SmallVector.h"
 #include "mlir/IR/PatternMatch.h"
 #include <optional>
 #include "mlir/Support/LogicalResult.h"
@@ -30,9 +32,27 @@ namespace mlir::ascend::kernel {
 /// 它。不要就地再建一个：两个 `TPipe` 在生成的 C++ 里是两份声明，而槽位是按 pipe
 /// 对象分配的。当前的取用点有两处——本文件的事件下降，和 `Broadcast.cpp` 的标量读同步。
 Value findFunctionPipe(Operation *anchor);
-/// Resolve the writer before this use; shared queue position alone is insufficient.
-std::optional<ascendc::HardEvent> scalarReadEvent(Operation *anchor, Value source);
-FailureOr<Value> materializeScalarRead(Operation *anchor, Value source, std::optional<ascendc::HardEvent> event,
+
+/// 收集第 inputIndex 个输入所在存储的写入流水线。
+///
+/// 不按写入者的控制流位置过滤。materializeScalarRead 连续生成 SetFlag 和 WaitFlag，
+/// 等待该流水线在同步点之前的任务完成。因此，只需确定可能写入该存储的流水线，无须证明
+/// 写入者与读取者处于同一 block、条件分支或循环迭代。同步不负责保证输入数据已初始化。
+///
+/// 写入者包含 AFIRTransferOut 时返回失败，沿用既有的不支持行为。
+/// 函数内没有写入者时，尝试按存储容器推断；仍无法确定时返回空集合。
+FailureOr<SmallVector<afir::Pipe>> analyzeScalarWriterPipes(Operation *anchor, unsigned inputIndex);
+
+/// 下降阶段仅读取 afir.scalar_read_sync；属性缺失或无效时返回空集合，由调用方报告匹配失败。
+/// 不重新分析混合 IR，避免遗漏已下降的写入者，进而少生成同步事件。
+SmallVector<ascendc::HardEvent> recordedScalarReadEvents(Operation *anchor, unsigned inputIndex);
+
+/// 能力查询优先读取属性；属性缺失时直接分析尚未下降的 AFIR 计算算子。
+/// 后者用于单独执行 --afir-select-implementation 的 lit 用例和能力探针。
+SmallVector<ascendc::HardEvent> scalarReadEvents(Operation *anchor, unsigned inputIndex);
+
+/// 逐条排空 `events` 里的事件，再读 `source` 的第 0 个元素。`events` 为空即失败。
+FailureOr<Value> materializeScalarRead(Operation *anchor, Value source, ArrayRef<ascendc::HardEvent> events,
                                        RewriterBase &rewriter);
 
 LogicalResult registerSynchronizationImplementations(ascend::instruction::ImplementationRegistry &registry,

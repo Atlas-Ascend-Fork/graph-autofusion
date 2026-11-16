@@ -64,6 +64,11 @@ void registerAscendCLoopGeneratePass();
 std::unique_ptr<Pass> createAFIRMemoryAllocatePass();
 void registerAFIRMemoryAllocatePass();
 
+// 将可能按标量读取的输入所对应的写入流水线记录为算子属性，供能力查询与下降共用。
+// 必须在资源物化之后、实现选择之前；理由与标注条件见 AFIRScalarReadSync.cpp 的文件头。
+std::unique_ptr<Pass> createAFIRScalarReadSyncPass();
+void registerAFIRScalarReadSyncPass();
+
 // Standalone entry point for ascend::instruction::createSelectImplementationPass:
 // resolves the frozen ImplementationRegistry/SelectionPolicyRegistry for the
 // af-opt-selected target from within the pass itself.

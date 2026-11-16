@@ -257,7 +257,7 @@ elementwise::LocalViewCompatibility checkBinaryLocalViews(Operation *op, ScalarO
   auto scalar = scalarTensorInput(op, form);
   if (scalar) {
     auto partition = afir::getOperandPartition(op);
-    if (!scalarReadEvent(op, partition->inputs(op)[*scalar]) || !findFunctionPipe(op)) {
+    if (scalarReadEvents(op, *scalar).empty() || !findFunctionPipe(op)) {
       return elementwise::LocalViewCompatibility::MissingInformation;
     }
   }
@@ -452,8 +452,7 @@ FailureOr<std::optional<unsigned>> materializeScalarOperand(SourceOp op, Value (
   if (!scalarIndex) {
     return scalarIndex;
   }
-  auto scalar =
-      materializeScalarRead(op, operands[*scalarIndex], scalarReadEvent(op, op->getOperand(*scalarIndex)), rewriter);
+  auto scalar = materializeScalarRead(op, operands[*scalarIndex], recordedScalarReadEvents(op, *scalarIndex), rewriter);
   if (failed(scalar)) {
     return failure();
   }

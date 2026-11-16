@@ -575,6 +575,64 @@ def test_fallback_baselines_enable_fallback():
             ), case.id
 
 
+def test_scalar_read_sync_rejects_missing_coverage():
+    from load_broadcast_scalar_read_sync import (
+        ScalarReadSyncRunner,
+        check_scalar_read_sync,
+    )
+    from support.npu_runner import NpuRunner
+
+    code = """
+    for (int tile = 0; tile < tiles; ++tile) {
+      if (first_tile) {
+        AscendC::Abs(written, source, count);
+      }
+      if (first_tile) {
+        int8_t event = pipe.FetchEventID<AscendC::HardEvent::V_S>();
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(event);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(event);
+        float scalar = read.GetValue(c0_idx);
+        AscendC::Duplicate(broadcasted, scalar, count);
+      }
+      AscendC::Mul(output, broadcasted, full, count);
+    }
+    """
+    check_scalar_read_sync(code)
+    check_scalar_read_sync(code.replace("AscendC::Abs", "AbsExtend<float>"))
+    for broken in (
+        "",  # 未接管，没有生成 kernel。
+        code.replace("V_S", "MTE2_S"),
+        code.replace("AscendC::WaitFlag<AscendC::HardEvent::V_S>(event);", ""),
+        code.replace("\n      }\n      if (first_tile) {", ""),  # 同一条件块。
+        code.replace("Duplicate(broadcasted, scalar,", "Duplicate(broadcasted, other,"),
+        code.replace("AscendC::Mul", "AscendC::Add"),
+    ):
+        try:
+            check_scalar_read_sync(broken)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("未拒绝缺失同步或未命中跨条件块路径的产物")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        artifact = (
+            Path(tmp) / "torch_compile_debug/run/torchinductor/model/autofused_case"
+        )
+        artifact.mkdir(parents=True)
+        # Inductor 的调试目录保存含 C++ 源码的 Python 文件；device/*.cpp 在编译缓存中。
+        (artifact / "asc_kernel_hash.py").write_text('kernel = r"""' + code + '"""')
+        runner = ScalarReadSyncRunner(work_dir=tmp)
+        with patch.object(NpuRunner, "report_pass") as report:
+            runner.report_pass("CASE", "mlir", None, new_artifact_count=1)
+            report.assert_called_once()
+            try:
+                runner.report_pass("CASE", "mlir", None, new_artifact_count=0)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("未拒绝旧缓存产物")
+
+
 def main() -> int:
     tests = [
         value for name, value in sorted(globals().items()) if name.startswith("test_")

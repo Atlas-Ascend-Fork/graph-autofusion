@@ -78,7 +78,9 @@ LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::Broad
     for (Value size : sizes) {
         os << ", static_cast<uint32_t>(" << emitter.getOrCreateName(size) << ")";
     }
-    os << ", " << emitter.getOrCreateName(op.getSharedTmpBuffer()) << ")";
+    // 第十个实参 `last_dim_stride` 排在 tmp buffer 之后，与包装的形参表同序。
+    os << ", " << emitter.getOrCreateName(op.getSharedTmpBuffer()) << ", static_cast<uint32_t>("
+       << emitter.getOrCreateName(op.getLastDimStride()) << "))";
 
     return success();
 }

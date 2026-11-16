@@ -239,6 +239,9 @@ struct BroadcastSegmentation {
   // 填充、窗口调用要按它传而不是按行长传。与 reg 侧 `BroadcastExtendShape::pitch` 同一个量、
   // 同一个取法（`classifyExtendSegments`），两处各算一遍。
   afir::ExprAttr pitch;
+  // 形态 B 的源行距，即源在窗口外段（非广播段）上的步长，通过 last_dim_stride 传给包装函数。
+  // 空值表示步长为 1。形态 A 不使用此字段，其源行距由两侧共有的内段长度参数表示。
+  afir::ExprAttr sourcePitch;
 };
 
 // `plan` 是不是本档收的形状；是就把判据用得上的那几项算出来。
@@ -249,9 +252,9 @@ struct BroadcastSegmentation {
 //     元素），由那一档收，两档的判据因此不重叠。
 //   - 至少一个广播段；广播段之间不相邻（相邻的在合轴那一步就并成一段了，没并上说明
 //     stride 对不上，这里不猜）。
-//   - 最内那个广播段落在最内两段之内，且那两段构成合法的两段窗口：目的地内段 stride 为 1，
-//     源要么 `(0, 1)`（形态 A）要么 `(1, 0)`（形态 B）。外段的目的地 stride 是行距，
-//     与内段 extent 不等即尾轴有填充——那时只收形态 A，按行距传窗口调用（见判据处）。
+//   - 最内广播段位于最内两段构成的窗口中。形态 A 的源步长为 (0, s)，两侧内段步长相等；
+//     形态 B 的源步长为 (s, 0)，目的地内段步长为 1，窗口外段不能是广播段。
+//     两种形态均支持行距填充，窗口调用的参数取法见下方判据说明。
 //
 // 不在收的边界里、但本档依赖的一条：切分轴（`TileInner`）恒落在第 0 段，所以带尾块修正
 // 的段 extent 只会出现在最外那一段上、只当趟数用。两段窗口里的 `dst_k` 既是一行的长度也是
@@ -310,10 +313,6 @@ FailureOr<BroadcastSegmentation> classifySegments(const afir::VectorPlan &plan) 
 
   const afir::VectorSegment &outer = plan.segments[count - 2];
   const afir::VectorSegment &inner = plan.segments[count - 1];
-  // 一行之内必须连续。这一条不放宽——它说的是「行长那一位真的是逐元素」，与行距无关。
-  if (!provablyLiteral(inner.strides[shape.destination], "1")) {
-    return failure();
-  }
   shape.broadcastIsInner = shape.broadcastSegments.back() == count - 1;
   // 行距就是次内那一位在目的地上的 stride。**此前这里要求它等于行长（稠密），不等就整个
   // 形状拒收**，而片上 tile 的尾轴行距是被补到 32B 的（f32 → 8 个元素，f16 → 16 个），
@@ -340,15 +339,41 @@ FailureOr<BroadcastSegmentation> classifySegments(const afir::VectorPlan &plan) 
   if (!provablyEqual(outer.strides[shape.destination], inner.extent)) {
     shape.pitch = outer.strides[shape.destination];
   }
-  // 形态由广播段落在窗口的哪一侧决定，不由芯片决定：
-  //   形态 A `[brc][normal]` 源是 `(0, 1)`；形态 B `[normal][brc]` 源是 `(1, 0)`。
+  // 形态 A 为 [brc][normal]，源步长为 (0, s)；形态 B 为 [normal][brc]，源步长为 (s, 0)。
+  // 两种形态均支持非单位步长，但在包装函数中使用不同的参数表示。
   //
-  // 这一条同时把「最内那个广播段必须落在最内两段之内」钉住了，所以没有单独再查一遍：
-  // 广播段更靠外的话，最内两段就都是普通段、源 stride 都不为 0，两种形态各要求其中一段
-  // 的源 stride 为 0，两条都过不去。单独查一遍的版本写过，变异验证显示它一条用例都挡不住
-  // ——不是用例有盲区，是那条判据本身冗余。
-  if (!provablyLiteral(outer.strides[shape.source], shape.broadcastIsInner ? "1" : "0") ||
-      !provablyLiteral(inner.strides[shape.source], shape.broadcastIsInner ? "0" : "1")) {
+  // 形态 A：两侧内段步长必须相等。上游合轴会剔除 extent 为 1 的轴，其 32B 对齐填充可能表现为
+  // 保留轴上的非单位步长（f32 为 8，f16 为 16）。窗口调用复制整个行距，有效元素的位置保持
+  // 不变，填充位置的值不参与计算。两侧步长不等则需要重排，不能通过整行复制实现。
+  // legacy 的 GetLatterMergedSize 同样使用目的地前一组最内轴的步长作为行距。
+  //
+  // 形态 B：源行距通过第十个实参 last_dim_stride 传递，取值与 legacy 的
+  // BroadcastGetLastDimStride 一致。src_k 必须保持为 1，才能选择 BroadcastWithStride 分支；
+  // 目的地行距仍由 pitch 表示，两者独立。
+  //
+  // 最内广播段必须位于窗口内。形态 B 还要求窗口外段不是广播段，避免将其零步长当作源行距。
+  // broadcastSegments 已按源步长可证为 0 的条件构造，可直接用于判断。
+  if (shape.broadcastIsInner) {
+    if (llvm::is_contained(shape.broadcastSegments, count - 2)) {
+      return failure();
+    }
+    // 一行之内必须逐元素连续：形态 B 的内段就是广播段，`AscendC::Broadcast<T, 2, 1>` 与
+    // `BroadcastWithStride` 写的都是连续的一行。
+    if (!provablyLiteral(inner.strides[shape.destination], "1") || !provablyLiteral(inner.strides[shape.source], "0")) {
+      return failure();
+    }
+    if (!provablyLiteral(outer.strides[shape.source], "1")) {
+      shape.sourcePitch = outer.strides[shape.source];
+    }
+    return shape;
+  }
+  if (!provablyLiteral(outer.strides[shape.source], "0") ||
+      !provablyEqual(inner.strides[shape.source], inner.strides[shape.destination])) {
+    return failure();
+  }
+  // 内段步长大于 1 时，窗口调用必须使用物理行距。若 pitch 为空，将按内段 extent 传参，
+  // 复制范围不足以覆盖有效元素；这种布局判为不支持。
+  if (!provablyLiteral(inner.strides[shape.destination], "1") && !shape.pitch) {
     return failure();
   }
   return shape;
@@ -391,13 +416,15 @@ class SegmentedBroadcastEmitter {
     return extents_[segment - shape_.windowStart];
   }
 
+  // lastDimStride 是包装函数的第十个实参，表示形态 B 的源行距；其余形态显式传入默认值 1。
   LogicalResult call(Value destination, Value source, Value sourceM, Value sourceK, Value destinationM,
-                     Value destinationK) {
+                     Value destinationK, Value lastDimStride) {
     // `src_z` / `dst_z` 恒为 0。这不是省事：包装只有在 `src_k == 1 && src_z != 0` 时才走
     // `BroadcastMiddleDim`，而那是唯一会落到 `Or` 的那条路（`broadcast.h:79` / `:88`）。
     // 本档生成的两种形态一个 `src_m == 1`、一个 `src_z == 0`，都够不着它（功能需求 7）。
-    Operation *call = rewriter_.create<ascendc::BroadcastDim3Op>(loc(), destination, source, sourceM, sourceK, zero_,
-                                                                 destinationM, destinationK, zero_, tmpBuffer_);
+    Operation *call =
+        rewriter_.create<ascendc::BroadcastDim3Op>(loc(), destination, source, sourceM, sourceK, zero_, destinationM,
+                                                   destinationK, zero_, tmpBuffer_, lastDimStride);
     return setExecutionSpec(call, executionSpec_);
   }
 
@@ -461,8 +488,18 @@ class SegmentedBroadcastEmitter {
       }
       inner = *pitch;
     }
+    // 形态 B 通过 last_dim_stride 传递源行距，src_k 保持为 1，以选择正确的包装分支。
+    // 形态 A 由 inner 同时表示两侧的行距，此处传 1。
+    Value lastDimStride = one_;
+    if (shape_.sourcePitch) {
+      FailureOr<Value> sourcePitch = afir::materializeStrideValue(op_, rewriter_, shape_.sourcePitch);
+      if (failed(sourcePitch)) {
+        return failure();
+      }
+      lastDimStride = *sourcePitch;
+    }
     return call(destination, source, shape_.broadcastIsInner ? outer : one_, shape_.broadcastIsInner ? one_ : inner,
-                outer, inner);
+                outer, inner, lastDimStride);
   }
 
   // 外层广播段的一趟：把内侧一整块复制 `extent - 1` 份。
@@ -481,7 +518,8 @@ class SegmentedBroadcastEmitter {
     }
     Value repeats = rewriter_.create<arith::SubIOp>(loc(), extentOf(segment), one_);
     Value shifted = rewriter_.create<ascendc::LocalTensorSubIndexOp>(loc(), destination.getType(), destination, *block);
-    return call(shifted, destination, one_, *block, repeats, *block);
+    // 整块复制的源是内侧刚算好的那一整块，逐元素连续，所以 `last_dim_stride` 传 1。
+    return call(shifted, destination, one_, *block, repeats, *block, one_);
   }
 
   // `[first, last)` 的每一段一层 `scf.for`，两个张量各偏移 `Σ iv × stride`。
@@ -844,7 +882,7 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
         if (!isConstantOnVectorizedAxes(firstDescriptor(operation, afir::kOperandDescsAttrName))) {
           return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
         }
-        if (!scalarReadEvent(operation, source)) {
+        if (scalarReadEvents(operation, 0).empty()) {
           return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
         }
       }
@@ -958,7 +996,7 @@ class BroadcastDuplicateConversionPattern final : public OpConversionPattern<afi
       if (!sourceType) {
         return rewriter.notifyMatchFailure(op, "source is not a target-dialect tile");
       }
-      FailureOr<Value> read = materializeScalarRead(op, source, scalarReadEvent(op, op->getOperand(0)), rewriter);
+      FailureOr<Value> read = materializeScalarRead(op, source, recordedScalarReadEvents(op, 0), rewriter);
       if (failed(read)) {
         return rewriter.notifyMatchFailure(op, "cannot synchronize scalar tensor read");
       }

@@ -204,6 +204,14 @@ CASES = (
         },
     ),
     Case(
+        id="load_broadcast_scalar_read_sync",
+        script="load_broadcast_scalar_read_sync.py",
+        argv=NO_PROFILING,
+        groups=("broadcast", "sync"),
+        expect={"load_broadcast_scalar_read_sync": case_status.PASS},
+        note="跨缓存条件块的 Abs → V_S → GetValue/Duplicate → Mul，核对生成路径及 NPU 数值",
+    ),
+    Case(
         id="load_broadcast_to_cascade",
         script="load_broadcast_to_cascade.py",
         env={"AUTOFUSE_DFX_FLAGS": "--mlir_codegen_config=fallback"},
