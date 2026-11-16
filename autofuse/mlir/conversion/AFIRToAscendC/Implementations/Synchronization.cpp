@@ -290,7 +290,7 @@ class LowerSyncAllOp final : public OpConversionPattern<SyncAllOp> {
 // 事件槽的持有者是 `TPipe`。资源物化阶段已经建了唯一的一个（`CanonicalResources.cpp`
 // 的 `ascendc.pipe`），复用它而不是再建一个——理由见头文件。
 // 按存储查找标量写入者，再根据写入者确定同步事件。VECIN 存储可能被 Vector 算子复用，
-// 仅按队列位置选择 MTE2_S 会遗漏矢量写入的同步。回溯时保留 subindex 视图的区分。
+// 仅按队列位置选择 MTE2_S 会遗漏矢量写入的同步。子视图同样回溯到容器，保守收集共享存储的写入流水线。
 namespace {
 
 // 沿张量来源回溯到存储容器，以队列或 TBuf 的 SSA 值作为存储标识。
@@ -311,6 +311,10 @@ StorageRoot getStorageRootInfo(Value value) {
   while (Operation *def = value.getDefiningOp()) {
     if (auto cast = dyn_cast<ascendc::LocalTensorReinterpretCastOp>(def)) {
       value = cast.getIn();
+    } else if (auto view = dyn_cast<ascendc::LocalTensorSubIndexOp>(def)) {
+      // alloc/deque 两侧的子视图 SSA 不同，但仍属于同一容器。偏移不改变写入流水线；
+      // 与其他共享成员一样，按容器保守同步，不能在子视图处丢失生产者和交接状态。
+      value = view.getTensor();
     } else if (auto allocated = dyn_cast<ascendc::TQueBindAllocTensorOp>(def)) {
       value = allocated.getQueue();
     } else if (auto dequeued = dyn_cast<ascendc::TQueBindDequeTensorOp>(def)) {
