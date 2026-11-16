@@ -112,16 +112,6 @@ Example passed
 
 `Example passed` 表示模型执行和输出校验通过。模型使用原始 Kernel 时也可能得到正确结果，因此仅凭该输出无法确认常量化是否生效。
 
-第 5 步已开启日志。可使用以下命令查看常量化编译、任务更新和程序校验结果：
+查看 `build/host/specialization.log` 中的常量化编译和任务更新结果，确认目标 Kernel 编译成功且对应模型任务已更新。
 
-```bash
-grep -E "specialization completed|specialization failed|HandleTaskUpdate: update task finish|Mismatch|Numerical check passed|Example passed" build/host/specialization.log
-```
-
-```bash
-grep -F "[IN_SCOPE]" build/host/specialization.log
-```
-
-先检查日志中 AddCustom 二进制的加载路径，确认来自 `../build/opp/vendors/customize`。再查看目标 Kernel 的 `specialization completed` 和对应任务的 `HandleTaskUpdate: update task finish`，分别确认常量化编译完成和任务更新完成。
-
-通过 `[IN_SCOPE]` 日志确认只选中了第二个 AddCustom，并检查只有该 Kernel 任务被更新。两次调用的 Kernel 名称相同，请按任务 ID 区分。
+通过日志中的 `[IN_SCOPE]` 标记及对应的 `taskId`，确认 Scope 范围内仅包含第二个 AddCustom。该标记仅表示任务位于 Scope 内，常量化编译是否成功仍需结合编译和任务更新结果确认。

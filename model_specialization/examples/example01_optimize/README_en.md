@@ -112,10 +112,4 @@ Example passed
 
 `Example passed` indicates that model execution and output verification passed. The original Kernel can also produce correct results, so this message alone does not confirm specialization.
 
-To inspect the log saved in step 5, run:
-
-```bash
-grep -E "specialization completed|specialization failed|HandleTaskUpdate: update task finish|Mismatch|Numerical check passed|Example passed" build/host/specialization.log
-```
-
-Check the loaded AddCustom binary path first to confirm that it comes from `../build/opp/vendors/customize`. Then check for `specialization completed` for the target Kernel and `HandleTaskUpdate: update task finish` for its task. These messages confirm compilation and task update, respectively.
+Check the compilation and task update results in `build/host/specialization.log` to confirm that the target Kernel was successfully compiled and the corresponding model task was updated.
