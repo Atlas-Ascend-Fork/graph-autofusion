@@ -1,36 +1,9 @@
 # 依赖边界
 
-## 可迁移输入
+默认报告依赖 Python 和用户提供的 SK 资产，不依赖网络服务或 AI 后端。HTML 内嵌脚本、样式和展示数据，接收者只需浏览器；维护环境 Playwright/Chromium 用于交互验收，不是用户运行依赖。
 
-`sk-model-analysis` 消费用户提供的 SK 运行结果目录。目标环境不需要携带维护侧的设计文档、测试样例或规划材料。
+JSON 路径只读取 sk_graph_origin.json、sk_graph_updated.json、sk_task_queue.json。Log 路径复用旧日志解析；scope 与融合等日志特有事实在 Both 中按明确身份补充。大 event/prof JSON 暂不进入新 Graph/DFX 主链。
 
-推荐用户输入：
+目标仓无需携带设计文档、维护测试或固定真实样例。参考事实优先来自 skill references 和结构化运行产物。发布必须包含 scripts/graph_report/assets/，不能只拷贝 Python 文件。
 
-- 包含 `sk_meta/`、日志、`kernel_meta/`、profiling/event 输出的结果根目录。
-- `sk_meta/<pid>/` 这类 model asset 根目录。
-- 单个 `model_*` 目录。
-
-主要证据文件：
-
-- `super_kernel.log`
-- `sk_scope_split.log`
-- `sk_node_detail.log`
-- `sk_fused_nodes.log`
-- `sk_device_args.log`
-- `sk_task_queue.json` as shadow validation during the compatibility period
-- `sk_event_dev_device_*.json` / `sk_prof_device_*.json`
-
-## 可迁移知识源
-
-- `references/workflow.md`
-- `references/artifact-contract.md`
-- `references/script-index.md`
-- `references/diagnosis-matrix.md`
-- `references/update-view-registry-guide.md`
-
-## 已知限制
-
-- profiling 自动根因归因仍不完整。
-- `performance-report.html` 的 event 到结构解释仍需要继续增强。
-- launch-info payload 和完整 graph writeback 细节依赖上游日志是否保留。
-- 缺少 `sk_meta`、event 或 profiling 资产时，只能生成 summary-only 或 insufficient diagnostics。
+当前局限：Log 未提供完整最终图时为部分还原；同步代际不明确时不生成确定连边；多实例 JSON 无身份时单独展示；真实耗时和自动性能归因暂不提供。

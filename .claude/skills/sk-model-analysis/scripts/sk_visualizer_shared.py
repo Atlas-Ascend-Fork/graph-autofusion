@@ -2396,9 +2396,11 @@ function attachKeyboardNav(options = {}) {
     const next = typeof options.next === 'function' ? options.next : null;
 
     window.addEventListener('keydown', (e) => {
+        if (typeof options.isActive === 'function' && !options.isActive()) return;
         const t = e.target;
-        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
         if (e.altKey || e.ctrlKey || e.metaKey) return;
+        if (typeof options.beforeAction === 'function') options.beforeAction();
 
         if (e.key === '[' && previous) {
             e.preventDefault();

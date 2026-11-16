@@ -19,6 +19,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from contextvars import ContextVar
 import copy
+import importlib.util
 import json
 import os
 import re
@@ -99,6 +100,9 @@ RE_FUNC_NAME = re.compile(r"funcName:([^,}]+)")
 RE_KERNEL_TYPE = re.compile(r"kernelType:([^,}]+)")
 RE_SCOPE_UPDATE_BEGIN = re.compile(
     r"scope update begin:\s*(?:scopeName=([^,]+),\s*)?streamCount=(\d+)"
+)
+RE_SCHEDULED_SK_FUNCTION = re.compile(
+    r"schedule scope: build finished,.*?\bskFuncName=([^,\s]+)"
 )
 RE_UPDATE_STREAM_BEGIN = re.compile(
     r"update stream begin:\s*(?:scopeName=([^,]+),\s*)?"
@@ -215,8 +219,11 @@ COUNTER_LAUNCH_STATE_MAP: dict[int, tuple[str, str]] = {
 class ParseContext:
     """Per-process source line cache for one collection run."""
 
-    def __init__(self, model_dir: Path | None = None) -> None:
+    def __init__(
+        self, model_dir: Path | None = None, *, validate_json_shadow: bool = True
+    ) -> None:
         self.model_dir = model_dir
+        self.validate_json_shadow = validate_json_shadow
         self.line_cache: dict[str, list[str]] = {}
         self.read_counts: dict[str, int] = {}
 
@@ -924,6 +931,13 @@ def write_update_libraries(
     dfx_library_payload = _annotate_dfx_library_for_output(
         report.get("dfx_library", {})
     )
+    fusion_analysis_payload = report.get("fusion_analysis")
+    if isinstance(dfx_library_payload, dict) and isinstance(
+        fusion_analysis_payload, dict
+    ):
+        # Keep this optional evidence beside runtime DFX data in the persisted
+        # artifact while retaining the sibling field in the in-memory report.
+        dfx_library_payload["fusion_analysis"] = copy.deepcopy(fusion_analysis_payload)
 
     scope_library_output.write_text(
         json.dumps(scope_library_payload, indent=2, ensure_ascii=False),
@@ -1095,6 +1109,7 @@ def _annotate_dfx_library_for_output(dfx_library: Any) -> Any:
         "payload_registry": "Device payload evidence correlated from runtime dumps and task sections.",
         "diagnostic_pc_registry": "Post-processed diagnostic PC events used by hang and crash analysis.",
         "evidence": "Human-facing confidence summary explaining why each DFX conclusion is considered trustworthy.",
+        "fusion_analysis": "Optional fusion-boundary evidence. Direct boundary counts and same-region failure evidence are kept separate.",
     }
     return payload
 
@@ -3317,8 +3332,12 @@ def _parse_update_execution_line_items(
     graph_update = {"graph_update_begin_line": None, "graph_update_end_line": None}
     current_scope: dict[str, Any] | None = None
     current_stream: dict[str, Any] | None = None
+    scheduled_function: str | None = None
 
     for line_no, line in line_items:
+        match = RE_SCHEDULED_SK_FUNCTION.search(line)
+        if match:
+            scheduled_function = match.group(1)
         if graph_update[
             "graph_update_begin_line"
         ] is None and RE_UPDATE_GRAPH_START.search(line):
@@ -3335,6 +3354,7 @@ def _parse_update_execution_line_items(
                 "begin_line": line_no,
                 "begin_detail": line.strip(),
                 "scope_name": _normalize_scope_name(match.group(1)),
+                "sk_function": scheduled_function,
                 "stream_count": int(match.group(2)),
                 "end_line": None,
                 "finish_detail": "",
@@ -3342,6 +3362,7 @@ def _parse_update_execution_line_items(
                 "streams": [],
             }
             scope_updates.append(current_scope)
+            scheduled_function = None
             current_stream = None
             continue
 
@@ -3428,6 +3449,9 @@ def _parse_update_execution_line_items(
                     "flag": extra.get("flag"),
                     "detail": line.strip(),
                     "line": line_no,
+                    "sk_function": current_scope.get("sk_function")
+                    if current_scope
+                    else None,
                 }
             )
             continue
@@ -4010,7 +4034,13 @@ def _collect_node_library_entries(
 
 
 def _sanitize_node_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in entry.items() if not str(key).startswith("_")}
+    result = {
+        key: value for key, value in entry.items() if not str(key).startswith("_")
+    }
+    context = _CURRENT_PARSE_CONTEXT.get()
+    if context is not None and not context.validate_json_shadow:
+        result["line"] = entry.get("_line_no")
+    return result
 
 
 def _entry_membership_key_sets(
@@ -4920,7 +4950,12 @@ def parse_device_task_library(model_dir: Path) -> dict[str, Any]:
                     f"0x{entry_match.group(2)}"
                 )
 
-    json_validation = _validate_device_task_library_with_json(model_dir, sections)
+    parse_context = _CURRENT_PARSE_CONTEXT.get()
+    json_validation = (
+        _validate_device_task_library_with_json(model_dir, sections)
+        if parse_context is None or parse_context.validate_json_shadow
+        else {"status": "disabled"}
+    )
     return {
         "path": str(path),
         "source_kind": "sk_device_args.log",
@@ -6057,6 +6092,106 @@ def build_node_update_registry(update_execution: dict[str, Any]) -> dict[str, An
     }
 
 
+_FUSION_ANALYSIS_MODULE: Any | None = None
+
+
+def _load_fusion_analysis_module() -> Any:
+    global _FUSION_ANALYSIS_MODULE
+    if _FUSION_ANALYSIS_MODULE is not None:
+        return _FUSION_ANALYSIS_MODULE
+    try:
+        import fusion_analysis as module
+    except ModuleNotFoundError:
+        module_path = Path(__file__).with_name("fusion_analysis.py")
+        spec = importlib.util.spec_from_file_location(
+            "sk_tools_fusion_analysis", module_path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(
+                f"Unable to load optional fusion analysis module: {module_path}"
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    _FUSION_ANALYSIS_MODULE = module
+    return module
+
+
+def _empty_fusion_analysis(model_path: Path, error: str = "") -> dict[str, Any]:
+    source_paths = {
+        name: model_path / name
+        for name in ("sk_scope_split.log", "sk_fusion_fail_reasons.log")
+    }
+    return {
+        "schema_version": "1",
+        "status": "unavailable",
+        "summary": {
+            "final_pass": None,
+            "final_region_count": 0,
+            "successful_sk_count": 0,
+            "boundary_count": 0,
+            "operator_triggered_boundary_count": 0,
+            "control_boundary_count": 0,
+            "unclassified_boundary_count": 0,
+            "failure_record_count": 0,
+            "unique_failure_node_count": 0,
+        },
+        "operator_impacts": [],
+        "boundaries": [],
+        "node_failures": [],
+        "sources": {
+            name: {
+                "path": str(path),
+                "status": "unavailable",
+                "line_range": None,
+                "line_count": 0,
+                "record_count": 0,
+                "error_count": 0,
+                "unknown_line_count": 0,
+                "sample_lines": [],
+            }
+            for name, path in source_paths.items()
+        },
+        "coverage": {"parser_error": error} if error else {},
+    }
+
+
+def _build_optional_fusion_analysis(
+    *,
+    model_path: Path,
+    model_instance: dict[str, Any],
+    model_instance_count: int,
+    raw_scope_library: dict[str, Any],
+    node_library: dict[str, Any],
+    fused_library: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        module = _load_fusion_analysis_module()
+        line_range = (
+            (model_instance["begin_line"], model_instance["end_line"])
+            if model_instance_count > 1
+            else None
+        )
+        return module.build_fusion_analysis(
+            model_path,
+            node_library=node_library,
+            scope_library=raw_scope_library,
+            fused_library=fused_library,
+            model_instance_range=line_range,
+            model_instance_id=_model_instance_id(model_instance),
+        )
+    except Exception as exc:
+        _parser_log(
+            "WARN",
+            "fusion_analysis_unavailable",
+            model_dir=model_path,
+            model_instance_id=_model_instance_id(model_instance),
+            message="optional fusion-boundary analysis failed; existing graph data remains available",
+            details={"error": str(exc)},
+        )
+        return _empty_fusion_analysis(model_path, str(exc))
+
+
 def _build_model_instance_report_from_parts(
     *,
     model_path_str: str,
@@ -6105,6 +6240,14 @@ def _build_model_instance_report_from_parts(
         super_kernel,
         dfx_evidence,
     )
+    fusion_analysis = _build_optional_fusion_analysis(
+        model_path=model_path,
+        model_instance=model_instance,
+        model_instance_count=model_instance_count,
+        raw_scope_library=raw_scope_library,
+        node_library=node_library,
+        fused_library=fused_library,
+    )
     return _validate_model_instance_report(
         model_path,
         {
@@ -6138,6 +6281,7 @@ def _build_model_instance_report_from_parts(
                 "node_update_registry": node_update_registry,
             },
             "dfx_library": dfx_library,
+            "fusion_analysis": fusion_analysis,
             "collection_error": collection_error,
         },
     )
