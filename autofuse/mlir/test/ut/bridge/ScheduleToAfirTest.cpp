@@ -669,8 +669,6 @@ TEST(ScheduleToAfirTest, TilingSpecTracksDerivedShapeVariablesIndividually) {
   EXPECT_NE(source->find("extern \"C\" bool AutofuseIsStaticShape() {\n  return false;"), std::string::npos);
   EXPECT_EQ(source->find("graph0_result0_g1_tiling_data.set_s0(s0)"), std::string::npos);
   EXPECT_NE(source->find("graph0_result0_g1_tiling_data.set_s1(s1)"), std::string::npos);
-  EXPECT_NE(source->find("limit->aiv_num > g_no_limit_res.aiv_num"), std::string::npos);
-  EXPECT_NE(source->find("limit->ub_size <= 256"), std::string::npos);
 }
 
 TEST(ScheduleToAfirTest, AggregateRejectsNonzeroStartingPlanIdentity) {
@@ -757,8 +755,8 @@ TEST(ScheduleToAfirTest, WorkspaceUint64CapacityAndOverflowExecuteGeneratedHelpe
   file << "#include <cstdint>\n#include <limits>\n"
           "struct Stage { uint32_t tiling_key = 0, s0 = 0, t = 0; };\n"
           "struct AutofuseTilingData { Stage graph0_result0_g0_tiling_data, graph0_result0_g1_tiling_data;\n"
-          " uint32_t block_dim = 0; void set_block_dim(uint32_t x) { block_dim = x; }\n"
-          " uint32_t get_block_dim() const { return block_dim; } void set_ub_size(uint32_t) {} };\n"
+          " uint32_t block_dim = 0, ub_size = 0; void set_block_dim(uint32_t x) { block_dim = x; }\n"
+          " uint32_t get_block_dim() const { return block_dim; } void set_ub_size(uint32_t x) { ub_size = x; } };\n"
           "namespace optiling { bool GetTiling(AutofuseTilingData &, int, void *) { return true; } }\n";
   file << source->substr(begin);
   file << R"cpp(
@@ -767,6 +765,7 @@ TEST(ScheduleToAfirTest, WorkspaceUint64CapacityAndOverflowExecuteGeneratedHelpe
       uint64_t size = UINT64_MAX;
       uint32_t blocks = 0;
       if (AutofuseTiling(&data, &size, &blocks, nullptr) != 0 || size != 0) return 1;
+      if (blocks != g_no_limit_res.aiv_num || data.ub_size != g_no_limit_res.ub_size - 256U) return 6;
       std::vector<AutofuseTilingData> solutions;
       std::vector<int64_t> workspaces, block_dims;
       auto limit = g_no_limit_res;
@@ -780,9 +779,28 @@ TEST(ScheduleToAfirTest, WorkspaceUint64CapacityAndOverflowExecuteGeneratedHelpe
         return 11;
       if (GenerateTopnSolutions({{{"unsupported", "1"}}}, 1, solutions, workspaces, block_dims) == 0) return 12;
       limit.ub_size = 0;
-      if (GenerateTopnSolutions({}, 1, solutions, workspaces, block_dims, &limit) == 0 || !solutions.empty() ||
-          !workspaces.empty() || !block_dims.empty())
+      // ResLimit 非零字段覆盖默认值后,ub_size=0 归一化为 g_no_limit_res 默认值,
+      // 与仅填 aiv_num=2 的上一用例等价,应正常产出唯一解而非被拒为空。
+      if (GenerateTopnSolutions({}, 1, solutions, workspaces, block_dims, &limit) != 0 || solutions.size() != 1 ||
+          workspaces.size() != 1 || block_dims.size() != 1 || block_dims[0] != 2)
         return 13;
+      limit = g_no_limit_res;
+      limit.aiv_num = 1;
+      if (AutofuseTiling(&data, &size, &blocks, &limit) != 0 || blocks != 1 ||
+          data.ub_size != g_no_limit_res.ub_size - 256U)
+        return 7;
+      limit.aiv_num = 0;
+      limit.ub_size = 4096;
+      if (AutofuseTiling(&data, &size, &blocks, &limit) != 0 || blocks != g_no_limit_res.aiv_num ||
+          data.ub_size != 4096U - 256U)
+        return 8;
+      limit.ub_size = 256;
+      if (AutofuseTiling(&data, &size, &blocks, &limit) != -1) return 9;
+      limit.ub_size = g_no_limit_res.ub_size + 1;
+      if (AutofuseTiling(&data, &size, &blocks, &limit) != -1) return 14;
+      limit.ub_size = 0;
+      limit.aiv_num = g_no_limit_res.aiv_num + 1;
+      if (AutofuseTiling(&data, &size, &blocks, &limit) != -1) return 15;
       auto &a = data.graph0_result0_g0_tiling_data;
       auto &b = data.graph0_result0_g1_tiling_data;
       a.s0 = 65536;

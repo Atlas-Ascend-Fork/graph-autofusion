@@ -84,6 +84,7 @@ module @plan0 attributes {
 // CHECK: AscendC::Adds
 // 2. 到了 kernel 入口，标量夹在两个 GM 指针中间：形参序是 input0、input1、output0。
 // CHECK: extern "C"  __global__ __aicore__ void fused_graph(__gm__ half* {{v[0-9]+}}, half {{v[0-9]+}}, __gm__ half* {{v[0-9]+}}, __gm__ uint8_t*
+// CHECK: KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 // CHECK: // -----AUTOFUSE_LAUNCH-----
 // 3. host 包装器：签名按值、调用处不 cast。
 // CHECK: extern "C" int64_t AutofuseLaunch(uint32_t blockDim, void* stream, void* input0, half input1, void* output0, void* workspace,
