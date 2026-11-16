@@ -317,6 +317,9 @@ stages:
           spec_size: '2xlarge'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
       JOB_ST_TEST_autofuse_v35_1:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_Test_autofuse_v35_1
         if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
         select: selected_by_default
@@ -328,6 +331,9 @@ stages:
           spec_size: '2xlarge'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
       JOB_ST_TEST_autofuse_v35_2:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_Test_autofuse_v35_2
         if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
         select: selected_by_default
@@ -339,6 +345,9 @@ stages:
           spec_size: '2xlarge'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
       JOB_ST_TEST_autofuse_v35_3:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_Test_autofuse_v35_3
         if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
         select: selected_by_default
@@ -403,6 +412,7 @@ stages:
           -
             name: upload
             uses: obs-upload
+            if: ${{ always() }}
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
@@ -453,7 +463,7 @@ stages:
               workspace: ${{ steps.process_checkout.outputs.path }}
               cov_mode: "report"
               ut_field: "superkernel"
-              modules: "ST_Test_Python_superkernel ST_Test_autofuse_ascendc_api ST_Test_autofuse_e2e ST_Test_autofuse_v35_1 ST_Test_autofuse_v35_2 ST_Test_autofuse_v35_3"
+              modules: "ST_Test_autofuse_framework ST_Test_Python_superkernel ST_Test_autofuse_ascendc_api ST_Test_autofuse_e2e ST_Test_autofuse_v35_1 ST_Test_autofuse_v35_2 ST_Test_autofuse_v35_3"
               source_branch: ${{ env.SOURCE_BRANCH }}
               target_branch: ${{ env.TARGET_BRANCH }}
               obs_path: ${{ env.obs_path }}
@@ -461,6 +471,7 @@ stages:
           -
             name: upload
             uses: obs-upload
+            if: ${{ always() }}
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
@@ -525,6 +536,7 @@ stages:
               bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh
           - name: upload
             uses: obs-upload
+            if: ${{ always() }}
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
