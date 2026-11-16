@@ -316,6 +316,14 @@ bool isSingletonTensorInput(Operation *op, unsigned index) {
       descriptor->getRepeats() == destination->getRepeats()) {
     return false;
   }
+  // Broadcast on outer schedule axes does not require a scalar API when the
+  // current vectorized domain itself contains only one element. Keep that case
+  // on the tensor path so the tensor and scalar implementations cannot overlap.
+  auto destinationRepeats = vectorizedRepeats(*destination);
+  if (failed(destinationRepeats) ||
+      llvm::all_of(*destinationRepeats, [](ExprAttr expr) { return isProvenEqualToLiteral(expr, "1"); })) {
+    return false;
+  }
   return llvm::all_of(descriptor->getRepeats(),
                       [](afir::ExprAttr expr) { return afir::ProveExpressionsEqual(expr.getValue().getValue(), "1"); });
 }
