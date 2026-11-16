@@ -7221,3 +7221,253 @@ TEST_F(TestOptimizerV2, FoldAlignedOuterTransposeUsesLoadAndPreservesMapping) {
     EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*load_node), ascgen_utils::template_semantic::kTranspose);
   }
 }
+
+namespace {
+// 构造 Data->Load->Broadcast->Store->Output 图，窗口轴为{z0, z1(TileInner)}，
+// z1 位于 i=1>0 触发 IsVectorizedAxisDoubleCut；input_vec_strides 为 Load 输出的向量化步长
+// 构建transpose+brc双切分图（Data→load0→broadcast→store→Output，z1为TileInner双切分轴）。
+// input_vec_strides指定load0输出窗口的vectorized_strides；为空时取"多行紧凑"形态
+// （非尾轴stride=尾轴逻辑大小，行间无padding）。multi_row=true时窗口含多行（非尾轴
+// repeats取s0），否则单行（非尾轴repeats为1）。返回load0尾轴逻辑大小表达式。
+af::Expression BuildTransposeBrcDropGraph(af::AscGraph &graph, const std::vector<af::Expression> &input_vec_strides,
+                                          const bool multi_row = false) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  graph.FindAxis(z1.id)->type = af::Axis::Type::kAxisTypeTileInner;
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.strides = {s1, af::Symbol(1)};
+  af::Expression non_tail_repeat = af::Symbol(1);
+  if (multi_row) {
+    non_tail_repeat = s0;
+  }
+  *load0.y.repeats = {non_tail_repeat, s1};
+  *load0.y.vectorized_axis = {z0.id, z1.id};
+  if (input_vec_strides.empty()) {
+    *load0.y.vectorized_strides = {s1, af::Symbol(1)};
+  } else {
+    *load0.y.vectorized_strides = input_vec_strides;
+  }
+
+  Broadcast broadcast("broadcast");
+  broadcast.x = load0.y;
+  broadcast.attr.sched.axis = {z0.id, z1.id};
+  *broadcast.y.axis = {z0.id, z1.id};
+  broadcast.y.dtype = af::DT_FLOAT;
+  *broadcast.y.strides = {s1, af::Symbol(1)};
+  *broadcast.y.repeats = {s0, s1};
+  *broadcast.y.vectorized_axis = {z0.id, z1.id};
+  *broadcast.y.vectorized_strides = {s1, af::Symbol(1)};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id};
+  store_op.x = broadcast.y;
+  *store_op.y.axis = {z0.id, z1.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.strides = {s1, af::Symbol(1)};
+  *store_op.y.repeats = {s0, s1};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+
+  return s1;
+}
+
+// 双切分+非scalar输入，但输入仅剩尾轴一行真实数据（非尾轴全广播）：src连续，不drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_KeepTemplateWhenInputSingleContiguousRow) {
+  af::AscGraph graph("brc_single_row");
+  BuildTransposeBrcDropGraph(graph, {af::Symbol(0), af::Symbol(1)});
+  bool is_need_drop = true;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_FALSE(is_need_drop);
+}
+
+// 双切分+非scalar输入，输入多行且行间存在32B对齐padding跳写（行stride不等于尾轴逻辑大小）：src不连续，drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_DropTemplateWhenInputRowsPadded) {
+  af::AscGraph graph("brc_padded_rows");
+  BuildTransposeBrcDropGraph(graph, {af::Symbol(16), af::Symbol(1)}, true);
+  bool is_need_drop = false;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_TRUE(is_need_drop);
+}
+
+// 双切分+非scalar输入，输入多行紧凑排布（行stride等于尾轴逻辑大小，无padding）：src连续，不drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_KeepTemplateWhenInputRowsCompact) {
+  af::AscGraph graph("brc_compact_rows");
+  BuildTransposeBrcDropGraph(graph, {}, true);
+  bool is_need_drop = true;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_FALSE(is_need_drop);
+}
+
+// 双切分+输入全广播（scalar形态）：维持原有不drop行为
+TEST_F(TestOptimizerV2, TransposeBrcDrop_KeepTemplateWhenInputScalar) {
+  af::AscGraph graph("brc_scalar");
+  BuildTransposeBrcDropGraph(graph, {af::Symbol(0), af::Symbol(0)});
+  bool is_need_drop = true;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_FALSE(is_need_drop);
+}
+
+// 双切分+非scalar输入，窗口内存在多根非尾轴真实数据：保守视为不连续，drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_DropTemplateWhenMultipleRealNonTailAxes) {
+  af::AscGraph graph("brc_multi_real_axes");
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto s2 = graph.CreateSizeVar("s2");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+  graph.FindAxis(z1.id)->type = af::Axis::Type::kAxisTypeTileInner;
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id, z2.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.strides = {s2, s2, af::Symbol(1)};
+  *load0.y.repeats = {af::Symbol(1), af::Symbol(1), s2};
+  *load0.y.vectorized_axis = {z0.id, z1.id, z2.id};
+  *load0.y.vectorized_strides = {af::Symbol(1), af::Symbol(1), af::Symbol(1)};
+
+  Broadcast broadcast("broadcast");
+  broadcast.x = load0.y;
+  broadcast.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *broadcast.y.axis = {z0.id, z1.id, z2.id};
+  broadcast.y.dtype = af::DT_FLOAT;
+  *broadcast.y.strides = {s1 * s2, s2, af::Symbol(1)};
+  *broadcast.y.repeats = {s0, s1, s2};
+  *broadcast.y.vectorized_axis = {z0.id, z1.id, z2.id};
+  *broadcast.y.vectorized_strides = {s1 * s2, s2, af::Symbol(1)};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id, z2.id};
+  store_op.x = broadcast.y;
+  *store_op.y.axis = {z0.id, z1.id, z2.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.strides = {s1 * s2, s2, af::Symbol(1)};
+  *store_op.y.repeats = {s0, s1, s2};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+
+  bool is_need_drop = false;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_TRUE(is_need_drop);
+}
+
+// 构建链式广播图（Data→load0→brc1→brc2→store→Output，z1为TileInner双切分轴）：
+// load0窗口为"非尾轴全广播"的单行连续形态；brc1输出窗口由brc1_contiguous决定
+// （true=多行紧凑，行stride=尾轴逻辑大小；false=行间padding跳写，行stride≠尾轴逻辑大小）。
+void BuildTransposeBrcChainedDropGraph(af::AscGraph &graph, const bool brc1_contiguous) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  graph.FindAxis(z1.id)->type = af::Axis::Type::kAxisTypeTileInner;
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.strides = {s1, af::Symbol(1)};
+  *load0.y.repeats = {af::Symbol(1), s1};
+  *load0.y.vectorized_axis = {z0.id, z1.id};
+  *load0.y.vectorized_strides = {af::Symbol(0), af::Symbol(1)};
+
+  Broadcast broadcast1("broadcast1");
+  broadcast1.x = load0.y;
+  broadcast1.attr.sched.axis = {z0.id, z1.id};
+  *broadcast1.y.axis = {z0.id, z1.id};
+  broadcast1.y.dtype = af::DT_FLOAT;
+  *broadcast1.y.strides = {s1, af::Symbol(1)};
+  *broadcast1.y.repeats = {s0, s1};
+  *broadcast1.y.vectorized_axis = {z0.id, z1.id};
+  if (brc1_contiguous) {
+    *broadcast1.y.vectorized_strides = {s1, af::Symbol(1)};
+  } else {
+    *broadcast1.y.vectorized_strides = {af::Symbol(16), af::Symbol(1)};
+  }
+
+  Broadcast broadcast2("broadcast2");
+  broadcast2.x = broadcast1.y;
+  broadcast2.attr.sched.axis = {z0.id, z1.id};
+  *broadcast2.y.axis = {z0.id, z1.id};
+  broadcast2.y.dtype = af::DT_FLOAT;
+  *broadcast2.y.strides = {s1, af::Symbol(1)};
+  *broadcast2.y.repeats = {s0, s1};
+  *broadcast2.y.vectorized_axis = {z0.id, z1.id};
+  *broadcast2.y.vectorized_strides = {s1, af::Symbol(1)};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id};
+  store_op.x = broadcast2.y;
+  *store_op.y.axis = {z0.id, z1.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.strides = {s1, af::Symbol(1)};
+  *store_op.y.repeats = {s0, s1};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+}
+
+// 链式广播下brc2的src是brc1的输出缓冲：最深load窗口连续而brc1输出不连续时，
+// 连续性按直接输入（brc1输出）判定，src不连续，模板drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_DropTemplateWhenChainedBrcInputNotContiguous) {
+  af::AscGraph graph("brc_chained_not_contiguous");
+  BuildTransposeBrcChainedDropGraph(graph, false);
+  bool is_need_drop = false;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_TRUE(is_need_drop);
+}
+
+// 链式广播且brc1输出为多行紧凑连续：brc1与brc2的直接输入均连续，不drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_KeepTemplateWhenChainedBrcInputContiguous) {
+  af::AscGraph graph("brc_chained_contiguous");
+  BuildTransposeBrcChainedDropGraph(graph, true);
+  bool is_need_drop = true;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_FALSE(is_need_drop);
+}
+
+// axis与repeats不等长（ReorderRepeats重排后可能出现的形态）：尾轴下标越出repeats范围时
+// 保守视为不连续，模板drop（且不产生越界读）
+TEST_F(TestOptimizerV2, TransposeBrcDrop_DropTemplateWhenRepeatsShorterThanAxis) {
+  af::AscGraph graph("brc_repeats_shorter");
+  const auto tail_size = BuildTransposeBrcDropGraph(graph, {}, true);
+  for (const auto &node : graph.GetAllNodes()) {
+    if (std::string(node->GetNamePtr()) != "load0") {
+      continue;
+    }
+    node->outputs[0].attr.repeats = {tail_size};
+  }
+  bool is_need_drop = false;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_TRUE(is_need_drop);
+}
+}  // namespace
