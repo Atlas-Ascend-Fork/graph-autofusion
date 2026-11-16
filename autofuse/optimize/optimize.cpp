@@ -938,6 +938,11 @@ Status Optimizer::RemoveAllZeroStrideLoopAxis(ascir::ImplGraph &owner_graph) {
 }
 
 Status Optimizer::MergeContinuousAxis(ascir::ImplGraph &impl_graph, ascir::CubeTemplateType cube_type) {
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (ascir::IsCvMBroadcast(*node)) {
+      return af::SUCCESS;
+    }
+  }
   auto all_axis = impl_graph.GetAllAxis();
   if (all_axis.size() <= 1UL || ascgen_utils::indirect_load::FindIndirectLoadNode(impl_graph) != nullptr) {
     return af::SUCCESS;

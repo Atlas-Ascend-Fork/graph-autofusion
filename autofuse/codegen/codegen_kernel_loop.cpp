@@ -1308,7 +1308,9 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       }
     }
     if (tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse &&
-        (axis.type == Axis::Type::kAxisTypeTileOuter || (tpipe.is_dynamic && !tpipe.is_conv2d && !tpipe.is_inductor))) {
+        (axis.type == Axis::Type::kAxisTypeTileOuter ||
+         (tpipe.cv_output_broadcast && axis.type == Axis::Type::kAxisTypeOriginal) ||
+         (tpipe.is_dynamic && !tpipe.is_conv2d && !tpipe.is_inductor))) {
       ss << axis.loop_size.AsArg() << " = 1;" << std::endl;
     }
     ss << "for (" << axis.AsArg() << " = 0; " << axis << " < " << axis.loop_size.Str() << "; " << axis << "++) "
@@ -1333,14 +1335,20 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       const auto &tile_inner = tiler.GetAxis(axis.split_pair_other_id);
       af::Expression actual_size = af::Symbol(tile_inner.actual_size.name.c_str());
       tpipe.tiler.actual_sizes.emplace_back(std::make_pair(tile_inner.size_expr, actual_size));
-      ss << tile_inner.actual_size.AsArg() << " = stageSize;"
-         << std::endl;  // 多轮循环不能使用curAivM * curAivN，否则奇数尾块计算有精度问题
+      if (tpipe.cv_output_broadcast) {
+        ss << tile_inner.actual_size.AsArg() << " = "
+           << (tiler.IsFrom(tile_inner.id, tpipe.cv_n_axis) ? "curAivN" : "curAivM") << ";\n";
+      } else {
+        ss << tile_inner.actual_size.AsArg() << " = stageSize;" << std::endl;
+      }
       auto ub_tensor = tpipe.GetTensor(tpipe.cube_output_tensor_id);
       GE_CHK_BOOL_RET_STATUS(ub_tensor != nullptr, af::FAILED,
                              "Codegen CV Fusion MatmulOutput UB tensor id[%ld] "
                              "not found",
                              tpipe.cube_output_tensor_id);
-      ss << ub_tensor->Str() << "_actual_size = " << tile_inner.actual_size.Str() << ";" << std::endl;
+      ss << ub_tensor->Str() << "_actual_size = "
+         << (tpipe.cv_output_broadcast ? tpipe.CvColumns(*ub_tensor) : tile_inner.actual_size.Str()) << ";"
+         << std::endl;
     }
     GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss, cache_context),
                       "Codegen generate body failed for normal loop");
@@ -1504,6 +1512,15 @@ Status Loop::Generate(const Tiler &tiler, const TPipe &tpipe, std::string &resul
   };
   reset(*this);
   stringstream ss;
+  if (tpipe.cv_output_broadcast && axis_id == af::kIdNone) {
+    for (const auto &entry : tiler.axis_map) {
+      const auto &axis = entry.second;
+      if (axis.type == Axis::Type::kAxisTypeOriginal || axis.type == Axis::Type::kAxisTypeTileInner) {
+        ss << axis.actual_size.AsArg() << " = " << (tiler.IsFrom(axis.id, tpipe.cv_n_axis) ? "curAivN" : "curAivM")
+           << ";\n";
+      }
+    }
+  }
   if (this->is_graph_has_reduce_node) {
     ss << "bool control_dis_enable_cache_a = true;" << std::endl;
   }

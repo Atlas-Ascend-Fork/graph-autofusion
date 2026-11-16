@@ -28,6 +28,7 @@
 #include "platform_context.h"
 #include "../../common/att/soc_perf_test_config.h"
 #include "ascgraph_info_complete.h"
+#include "asc_graph_utils.h"
 #if defined(FALSE)
 #pragma push_macro("FALSE")
 #undef FALSE
@@ -1723,6 +1724,38 @@ TEST_F(TestCodegenTiling, CubeCommonTilingAbiUsesUint64WorkspaceSize) {
   EXPECT_NE(common_code.find("uint64_t* workspace_size"), std::string::npos);
   EXPECT_EQ(cube_code.find("uint32_t workspace_size;"), std::string::npos);
   EXPECT_EQ(common_code.find("uint32_t* workspace_size"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, CvGeStaticBroadcastSelectorChecksRemainingUb) {
+  const std::string fixture = R"(
+#include <cstdint>
+struct ResLimit { int aiv_num; uint64_t ub_size; };
+struct AutofuseTilingData {} TilingDataValue;
+constexpr int basen_basem_align = 256;
+constexpr int basen_align = 64;
+constexpr int cube_output_type_size = 2;
+// Model the solver minimum for an FP32 full-M tile.
+constexpr int kMinVectorBytes = 128 * 16 * sizeof(float);
+int solver_calls = 0;
+int AutofuseTilingWithConfig(char *, AutofuseTilingData *, uint64_t *, uint32_t *,
+                             ResLimit *limit, uint32_t) {
+  ++solver_calls;
+  return limit->ub_size < kMinVectorBytes ? -1 : 0;
+}
+)";
+  const std::string check = R"(
+int main() {
+  constexpr int reserve = 256 + basen_basem_align * cube_output_type_size;
+  if (GenCVFusionTilingKey(nullptr, 32, reserve) != -1 || solver_calls != 0) {
+    return 1;
+  }
+  if (GenCVFusionTilingKey(nullptr, 32, reserve + kMinVectorBytes - 1) != -1 || solver_calls != 2) {
+    return 2;
+  }
+  return GenCVFusionTilingKey(nullptr, 32, reserve + kMinVectorBytes) == 0 && solver_calls == 3 ? 0 : 3;
+}
+)";
+  EXPECT_TRUE(CompileAndRunCode(fixture + this->GenCVTilingFunc({true, false}) + check));
 }
 
 TEST_F(TestCodegenTiling, CubeCommonWorkspaceOffsetExcludesSystemReserve) {
@@ -4439,6 +4472,203 @@ TEST_F(TestCodegenTiling, TestMatmulElemwiseDynamicShapeFuse) {
   EXPECT_NE(res["tiling_def_and_tiling_const"].find("std::memcpy(&tiling_data->matmul_tiling_data"), std::string::npos);
 }
 
+TEST_F(TestCodegenTiling, CvCommonOnlyAttInputExcludesCubeGroups) {
+  af::AscGraph graph("cv_common_only");
+  ascir::ShareGraph::CreateMatmulOutputBroadcastGraph(graph, ascir::CvBroadcastShapeMode::kStatic);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  for (auto &results : fused.node_idx_to_scheduled_results) {
+    results.erase(std::remove_if(results.begin(), results.end(),
+                                 [](const ascir::ScheduledResult &result) {
+                                   return result.cube_type != ascir::CubeTemplateType::kCommon;
+                                 }),
+                  results.end());
+  }
+  ASSERT_TRUE(ascgen_utils::IsCubeCommonFusedScheduled(fused));
+  ASSERT_FALSE(ascgen_utils::IsCubeUBFusedScheduled(fused));
+  const auto original = fused;
+  ASSERT_EQ(ascgen_utils::ProcessCubeFusionResultDynamic(fused), af::SUCCESS);
+  const auto host_body = this->GenCubeFusionTilingBodyInductor(original, fused, "");
+  EXPECT_NE(host_body.find("for (size_t i = 0U;"), std::string::npos);
+  EXPECT_NE(host_body.find("cv_tiling_data.fusion_mode = 1;"), std::string::npos);
+  EXPECT_EQ(host_body.find("is_cv_ub_supported_key("), std::string::npos);
+  for (const auto &results : fused.node_idx_to_scheduled_results) {
+    for (const auto &result : results) {
+      ASSERT_EQ(result.schedule_groups.size(), 1UL);
+      for (const auto &impl : result.schedule_groups[0].impl_graphs) {
+        ASSERT_FALSE(ascgen_utils::IsCubeType(impl));
+        auto tuning_space = std::make_shared<att::TuningSpace>();
+        att::AscendGraphParser parser(tuning_space);
+        EXPECT_EQ(parser.GraphParser(impl), af::SUCCESS) << impl.GetName();
+      }
+    }
+  }
+  // The conversion must not remove the kernel-side Cube group from the source.
+  ASSERT_EQ(original.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 2UL);
+  codegen::Codegen generator(codegen::CodegenOptions{});
+  codegen::CodegenResult generated;
+  ASSERT_EQ(generator.GenerateForInductor(original, generated), af::SUCCESS);
+  EXPECT_FALSE(generated.kernel.empty());
+  EXPECT_FALSE(generated.tiling.empty());
+  EXPECT_EQ(generated.tiling.find("GetCvUbStageSize("), std::string::npos);
+  EXPECT_NE(generated.kernel.find("class AutoFusionVector;"), std::string::npos);
+  EXPECT_NE(generated.kernel.find("class AutoFusionVectorDB;"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, CvNBroadcastThreeAxisGraphGeneratesKernelAndTiling) {
+  for (const auto mode : {ascir::CvBroadcastShapeMode::kStatic, ascir::CvBroadcastShapeMode::kDynamicN,
+                          ascir::CvBroadcastShapeMode::kDynamic}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    af::AscGraph graph("cv_output_broadcast_three_axes");
+    ascir::ShareGraph::CreateMatmulOutputBroadcastGraph(graph, mode);
+    optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+    ascir::FusedScheduledResult fused;
+    ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+    ASSERT_TRUE(ascgen_utils::IsCubeUBFusedScheduled(fused));
+    ASSERT_TRUE(ascir::HasCvBroadcast(fused));
+    codegen::Codegen generator(codegen::CodegenOptions{});
+    codegen::CodegenResult generated;
+    ASSERT_EQ(generator.GenerateForInductor(fused, generated), af::SUCCESS);
+    EXPECT_FALSE(generated.kernel.empty());
+    EXPECT_FALSE(generated.tiling.empty());
+    EXPECT_FALSE(generated.tiling_data.empty());
+    const auto helper = generated.tiling.find("static inline uint32_t GetCvUbStageSize(");
+    const auto selection = generated.tiling.find("const uint32_t cv_width = GetCvUbStageSize(");
+    ASSERT_NE(helper, std::string::npos);
+    ASSERT_NE(selection, std::string::npos);
+    EXPECT_LT(helper, selection);
+    EXPECT_EQ(generated.tiling.find("static inline uint32_t GetCvUbStageSize(", helper + 1UL), std::string::npos);
+    EXPECT_NE(generated.kernel.find("stageOffset + row * curAlignN"), std::string::npos);
+    EXPECT_NE(generated.kernel.find("class AutoFusionVector;"), std::string::npos);
+    EXPECT_NE(generated.kernel.find("class AutoFusionVectorDB;"), std::string::npos);
+    EXPECT_NE(generated.kernel.find("using CvUbTilingT = CVAutofuseTilingDataT<MATMUL_TILING>"), std::string::npos);
+    EXPECT_NE(generated.kernel.find("reinterpret_cast<const CvUbTilingT *>(&tiling_data->extern_tiling_data)"),
+              std::string::npos);
+    if (mode == ascir::CvBroadcastShapeMode::kStatic) {
+      codegen::CodegenResult ge_generated;
+      ASSERT_EQ(generator.Generate(fused, ge_generated), af::SUCCESS);
+      EXPECT_NE(ge_generated.kernel.find("CV_UB_CASE_ID == 0"), std::string::npos);
+      EXPECT_NE(ge_generated.kernel.find("CV_UB_CASE_ID == 1"), std::string::npos);
+      EXPECT_NE(ge_generated.kernel.find("row += cv_m_size"), std::string::npos);
+      EXPECT_NE(ge_generated.kernel.find("stage_size_type * params.cv_n_tile"), std::string::npos);
+      EXPECT_NE(ge_generated.tiling.find("#define CV_UB_CASE_ID "), std::string::npos);
+      EXPECT_NE(ge_generated.tiling.find("SelectCvBroadcastTiling"), std::string::npos);
+      EXPECT_NE(ge_generated.tiling.find("(ub_size - 256 - cube_reserve) / row_capacity"), std::string::npos);
+      const auto ge_helper = ge_generated.tiling.find("static inline uint32_t GetCvUbStageSize(");
+      const auto ge_selection = ge_generated.tiling.find("GetCvUbStageSize(data, selected_case)");
+      ASSERT_NE(ge_helper, std::string::npos);
+      ASSERT_NE(ge_selection, std::string::npos);
+      EXPECT_LT(ge_helper, ge_selection);
+    }
+  }
+}
+
+TEST_F(TestCodegenTiling, CvStaticMAndMNFullLoadGenerateKernelAndTiling) {
+  for (const bool broadcast_n : {false, true}) {
+    for (const bool chain : {false, true}) {
+      if (chain && !broadcast_n) {
+        continue;
+      }
+      SCOPED_TRACE(::testing::Message() << "broadcast_n=" << broadcast_n << ", chain=" << chain);
+      af::AscGraph graph("cv_full_m_broadcast");
+      ascir::ShareGraph::CreateMatmulOutputBroadcastGraph(graph, ascir::CvBroadcastShapeMode::kStatic, true,
+                                                          broadcast_n, chain);
+      optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+      ascir::FusedScheduledResult fused;
+      ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+      ASSERT_TRUE(ascgen_utils::IsCubeUBFusedScheduled(fused));
+      ASSERT_TRUE(ascir::HasCvBroadcast(fused));
+      codegen::Codegen generator(codegen::CodegenOptions{});
+      codegen::CodegenResult generated;
+      ASSERT_EQ(generator.GenerateForInductor(fused, generated), af::SUCCESS);
+      EXPECT_FALSE(generated.tiling.empty());
+      const auto helper = generated.tiling.find("static inline uint32_t GetCvUbStageSize(");
+      ASSERT_NE(helper, std::string::npos);
+      const auto selection = generated.tiling.find("if (GetCvUbStageSize(");
+      ASSERT_NE(selection, std::string::npos);
+      EXPECT_LT(helper, selection);
+      EXPECT_EQ(generated.tiling.find("static inline uint32_t GetCvUbStageSize(", helper + 1UL), std::string::npos);
+      EXPECT_NE(generated.kernel.find("column_begin"), std::string::npos);
+      EXPECT_NE(generated.kernel.find("vector_offset, cv_m_size, width"), std::string::npos);
+      const auto column_count = broadcast_n ? "column_count = !replicateScalar ? cv_n_size : "
+                                              "(second ? cv_n_size - split_column : split_column)"
+                                            : "column_count = curAivN";
+      EXPECT_NE(generated.kernel.find(column_count), std::string::npos);
+      EXPECT_NE(generated.tiling.find("static_cast<uint64_t>(128) *"), std::string::npos);
+      codegen::CodegenResult ge_generated;
+      ASSERT_EQ(generator.Generate(fused, ge_generated), af::SUCCESS);
+      EXPECT_NE(ge_generated.tiling.find("SelectCvBroadcastTiling"), std::string::npos);
+      EXPECT_NE(ge_generated.kernel.find("vector_offset, cv_m_size, width"), std::string::npos);
+      EXPECT_NE(ge_generated.kernel.find(column_count), std::string::npos);
+      const bool inductor_splits_nm_columns = generated.kernel.find("kSplitNmColumns = true") != std::string::npos;
+      EXPECT_EQ(inductor_splits_nm_columns, broadcast_n);
+      const bool ge_splits_nm_columns = ge_generated.kernel.find("kSplitNmColumns = true") != std::string::npos;
+      EXPECT_EQ(ge_splits_nm_columns, broadcast_n);
+      for (const auto *kernel : {&generated.kernel, &ge_generated.kernel}) {
+        EXPECT_NE(kernel->find("KernelUtils::Min(cv_n_tile, column_count - column)"), std::string::npos);
+        EXPECT_NE(kernel->find("column_begin + column"), std::string::npos);
+        if (broadcast_n) {
+          EXPECT_NE(kernel->find("column_begin = second ? split_column : 0"), std::string::npos);
+        } else {
+          EXPECT_NE(kernel->find("column_begin = offset % shapeN"), std::string::npos);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(TestCodegenTiling, CvMAndMNBroadcastWithDynamicShapeKeepsCommonOnly) {
+  for (const auto mode : {ascir::CvBroadcastShapeMode::kDynamicN, ascir::CvBroadcastShapeMode::kDynamic}) {
+    for (const bool broadcast_n : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "mode=" << static_cast<int>(mode) << ", broadcast_n=" << broadcast_n);
+      af::AscGraph graph("cv_dynamic_m_broadcast");
+      ascir::ShareGraph::CreateMatmulOutputBroadcastGraph(graph, mode, true, broadcast_n);
+      optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+      ascir::FusedScheduledResult fused;
+      ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+      EXPECT_FALSE(ascgen_utils::IsCubeUBFusedScheduled(fused));
+      EXPECT_TRUE(ascgen_utils::IsCubeCommonFusedScheduled(fused));
+    }
+  }
+}
+
+TEST_F(TestCodegenTiling, CvNBroadcastWithPaddedSideInputKeepsCommonOnly) {
+  af::AscGraph graph("cv_n_broadcast_padded_side_input");
+  ascir::ShareGraph::CreateMatmulOutputBroadcastGraph(graph, ascir::CvBroadcastShapeMode::kStatic);
+  for (const auto *name : {"data2", "load2"}) {
+    const auto node = graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    node->outputs[0].attr.strides = {af::Symbol(257), af::ops::One};
+  }
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  EXPECT_FALSE(ascgen_utils::IsCubeUBFusedScheduled(fused));
+  EXPECT_TRUE(ascgen_utils::IsCubeCommonFusedScheduled(fused));
+}
+
+TEST_F(TestCodegenTiling, CvStaticMOutputWithDynamicKDoesNotGenerateUbCandidate) {
+  af::AscGraph graph("cv_m_broadcast_dynamic_k");
+  ascir::ShareGraph::CreateMatmulOutputBroadcastGraph(graph, ascir::CvBroadcastShapeMode::kStatic, true, false);
+  const auto dynamic_k = graph.CreateSizeVar("dynamic_k");
+  for (auto &axis : graph.GetAllAxis()) {
+    if (axis->name == "k") {
+      axis->size = dynamic_k;
+    }
+  }
+  for (const auto &name : {"data", "load", "data1", "load1"}) {
+    auto node = graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    node->outputs[0].attr.repeats[(std::string(name) == "data" || std::string(name) == "load") ? 1 : 0] = dynamic_k;
+  }
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  EXPECT_FALSE(ascgen_utils::IsCubeUBFusedScheduled(fused));
+  EXPECT_TRUE(ascgen_utils::IsCubeCommonFusedScheduled(fused));
+}
+
 TEST_F(TestCodegenTiling, CvUbFragmentPaddingIsOptInAndPreservesConvAndSourceGraphs) {
   for (const bool is_conv : {false, true}) {
     for (const bool allow_fragment_padding : {false, true}) {
@@ -4467,6 +4697,28 @@ TEST_F(TestCodegenTiling, CvUbFragmentPaddingIsOptInAndPreservesConvAndSourceGra
       EXPECT_FALSE(vector.GetAllAxis()[0]->allow_oversize_axis);
     }
   }
+}
+
+TEST_F(TestCodegenTiling, NBroadCastConsumerAlignmentIsIndependentOfTheCubeFragment) {
+  af::AscGraph graph("n_broadcast_att_view");
+  const auto axis = graph.CreateAxis("nt", af::Symbol("nt"));
+  graph.GetAllAxis()[0]->type = af::Axis::kAxisTypeTileInner;
+  const auto original_align = graph.GetAllAxis()[0]->align;
+  af::ascir_op::Data data("data", graph);
+  ASSERT_EQ(ascir::SetCvBroadcastShape(graph.FindNode("data"), {af::Symbol(128), af::Symbol(256)}, axis.id),
+            af::SUCCESS);
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(graph);
+  ascir::ScheduledResult result;
+  result.cube_type = ascir::CubeTemplateType::kUBFuse;
+  result.schedule_groups.push_back(group);
+  ascir::FusedScheduledResult fused;
+  fused.node_idx_to_scheduled_results = {{result}};
+  ASSERT_EQ(ascgen_utils::CreateCVFusionResult(fused, true), af::SUCCESS);
+  const auto clone = fused.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  EXPECT_EQ(clone.GetAllAxis()[0]->align, af::Symbol(1));
+  EXPECT_FALSE(clone.GetAllAxis()[0]->allow_oversize_axis);
+  EXPECT_EQ(graph.GetAllAxis()[0]->align, original_align);
 }
 
 TEST_F(TestCodegenTiling, GeDynamicCvPreservesAllUbCandidatesAndCommonBoundary) {
@@ -4511,6 +4763,57 @@ TEST_F(TestCodegenTiling, GeDynamicCvPreservesAllUbCandidatesAndCommonBoundary) 
   EXPECT_NE(host.find("GetCvUbStageSize(tiling->tiling_data, ub_case)"), std::string::npos);
   EXPECT_NE(host.find("case 1U: return data.get_cv_stage_1_size();"), std::string::npos);
   EXPECT_NE(host.find("case 2U: return data.get_cv_stage_0_size();"), std::string::npos);
+
+  // The n-broadcast Inductor path must preserve this same candidate/key/DB
+  // mapping instead of assuming that cases 0 and 1 are the two buffer modes.
+  for (auto &impl : fused.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs) {
+    auto nodes = impl.GetAllNodes();
+    auto first = nodes.begin();
+    ASSERT_TRUE(first != nodes.end());
+    ASSERT_EQ(ascir::SetCvBroadcastShape(*first, {af::Symbol(64), af::Symbol(64)}, impl.GetAllAxis().back()->id),
+              af::SUCCESS);
+  }
+  const auto inductor_files = this->GenerateForInductor(fused);
+  const auto &inductor_host = inductor_files.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_NE(inductor_host.find("const bool non_db_cases[] = {true, true, false, false}"), std::string::npos);
+  EXPECT_NE(inductor_host.find("ub_case < 4U"), std::string::npos);
+  EXPECT_NE(inductor_host.find("get_tiling_key() - 4"), std::string::npos);
+  EXPECT_NE(inductor_host.find("GetCvUbStageSize(tiling->tiling_data, ub_case)"), std::string::npos);
+  const auto helper = inductor_host.find("static inline uint32_t GetCvUbStageSize(");
+  ASSERT_NE(helper, std::string::npos);
+  const auto helper_end = inductor_host.find("\n}\n", helper);
+  ASSERT_NE(helper_end, std::string::npos);
+  const std::string tiling_data = R"(
+#include <cstdint>
+struct AutofuseTilingData {
+  uint32_t get_cv_stage_0_size() const { return 64U; }
+  uint32_t get_cv_stage_1_size() const { return 32U; }
+};
+)";
+  const std::string check_stage_sizes = R"(
+int main() {
+  const AutofuseTilingData data{};
+  return GetCvUbStageSize(data, 0U) == 64U && GetCvUbStageSize(data, 1U) == 32U &&
+                 GetCvUbStageSize(data, 2U) == 64U && GetCvUbStageSize(data, 3U) == 32U &&
+                 GetCvUbStageSize(data, 4U) == 0U
+             ? 0
+             : 1;
+}
+)";
+  EXPECT_TRUE(
+      CompileAndRunCode(tiling_data + inductor_host.substr(helper, helper_end + 3U - helper) + check_stage_sizes));
+
+  const auto budget_guard = inductor_host.find("if (cv_cube_reserve + 256U >= limit->ub_size) {continue;}");
+  const auto budget = inductor_host.find("set_ub_size((limit->ub_size - 256U - cv_cube_reserve) / cv_row_capacity)");
+  const auto selection = inductor_host.find("(tiling->tiling_data, ub_case)) {continue;}", budget);
+  ASSERT_NE(budget_guard, std::string::npos);
+  ASSERT_NE(budget, std::string::npos);
+  ASSERT_NE(selection, std::string::npos);
+  EXPECT_LT(budget_guard, budget);
+  EXPECT_LT(budget, selection);
+  EXPECT_NE(inductor_host.find("cv_width % 32U != 0U || cv_width > INT32_MAX / cv_row_capacity", selection),
+            std::string::npos);
+  EXPECT_NE(inductor_host.find("stage_size_name = cv_width * tiling->cube_m_stage_size", selection), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, CubeTilingUsesAclrtSocName) {

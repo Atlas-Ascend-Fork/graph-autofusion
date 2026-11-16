@@ -170,6 +170,11 @@ void PartitionLoopAxes(const ascir::ImplGraph &impl_graph, const std::unordered_
 }
 
 void ReorderBroadcastAxesInner(ascir::ImplGraph &impl_graph) {
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (ascir::IsCvMBroadcast(*node)) {
+      return;  // Preserve logical M/N order for the full-M CV callback.
+    }
+  }
   optimize::GraphPropertiesCache cache(impl_graph);
   if (cache.HasReduce() || cache.HasGather() || cache.HasCube() || cache.HasTranspose() || cache.HasConcat() ||
       cache.HasSplit()) {

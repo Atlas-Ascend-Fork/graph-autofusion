@@ -10,6 +10,9 @@
 
 #include "task_generator/cube_schedule_case_generator.h"
 #include <queue>
+#include <limits>
+#include "common_utils.h"
+#include "ascgraph_info_complete.h"
 #include <unordered_set>
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
 #include "graph/symbolizer/symbolic_utils.h"
@@ -362,11 +365,160 @@ Status TopoSortByCubePriority(af::AscGraph &graph) {
 }
 bool HasBroadCastNode(const ascir::ImplGraph &impl_graph) {
   for (const auto &node : impl_graph.GetAllNodes()) {
-    if (node->attr.api.compute_type == af::ComputeType::kComputeBroadcast && !ScheduleUtils::IsScalarBrc(node)) {
+    if (node->attr.api.compute_type == af::ComputeType::kComputeBroadcast && !ScheduleUtils::IsScalarBrc(node) &&
+        ascir::GetCvBroadcastShape(*node).empty()) {
       return true;
     }
   }
   return false;
+}
+
+// Keep the final Broadcast visible to UB allocation and tiling.
+Status MarkCubeOutputBroadcast(af::AscGraph &graph, const af::AscNodePtr &load, bool &requires_common) {
+  if (load == nullptr || load->outputs().size() != 1UL || load->inputs().size() != 1UL) {
+    return af::UNSUPPORTED;
+  }
+  const auto producer = load->GetInDataAnchor(0)->GetPeerOutAnchor();
+  if (producer == nullptr || !af::ops::IsOps<af::ascir_op::Workspace>(producer->GetOwnerNode())) {
+    return af::UNSUPPORTED;
+  }
+  std::vector<af::AscNodePtr> broadcasts;
+  std::vector<af::AscNodePtr> chain;
+  constexpr int64_t kMaxBroadcastCastElementBytes = 4;
+  auto next = load;
+  while (next->GetOutDataNodesSize() == 1UL) {
+    next = std::dynamic_pointer_cast<af::AscNode>(next->GetOutDataNodes().at(0));
+    if (next == nullptr || next->outputs().size() != 1UL || next->inputs().size() != 1UL) {
+      break;
+    }
+    if (af::ops::IsOps<af::ascir_op::Cast>(next) &&
+        af::GetSizeByDataType(next->outputs[0].attr.dtype) <= kMaxBroadcastCastElementBytes) {
+      chain.push_back(next);
+      continue;
+    }
+    if (!af::ops::IsOps<af::ascir_op::Broadcast>(next)) {
+      break;
+    }
+    broadcasts.push_back(next);
+    chain.push_back(next);
+  }
+  if (broadcasts.empty()) {
+    return af::UNSUPPORTED;
+  }
+  const auto &src = load->outputs[0].attr;
+  const auto &dst = broadcasts.back()->outputs[0].attr;
+  if (src.axis.size() != 2UL || src.axis != dst.axis || src.repeats.size() != 2UL || dst.repeats.size() != 2UL) {
+    return af::UNSUPPORTED;
+  }
+  const auto eq = [](const af::Expression &lhs, const af::Expression &rhs) {
+    return af::SymbolicUtils::StaticCheckEq(lhs, rhs) == af::TriBool::kTrue;
+  };
+  bool has_broadcast = false;
+  for (size_t i = 0UL; i < 2UL; ++i) {
+    if (!eq(src.repeats[i], dst.repeats[i])) {
+      if (!eq(src.repeats[i], kSymbolOne)) {
+        return af::UNSUPPORTED;
+      }
+      has_broadcast = true;
+    }
+  }
+  if (!has_broadcast) {
+    return af::UNSUPPORTED;
+  }
+  if (!eq(src.repeats[0], dst.repeats[0])) {
+    int64_t full_m = 0;
+    int64_t full_n = 0;
+    if (!dst.repeats[0].GetConstValue(full_m) || !dst.repeats[1].GetConstValue(full_n) || full_m <= 0 ||
+        full_m > std::numeric_limits<uint16_t>::max() || full_n <= 0) {
+      requires_common = true;
+      return af::UNSUPPORTED;
+    }
+  }
+  if (std::find(broadcasts.back()->attr.sched.axis.begin(), broadcasts.back()->attr.sched.axis.end(), dst.axis[1]) ==
+      broadcasts.back()->attr.sched.axis.end()) {
+    return af::UNSUPPORTED;  // No searchable N loop remains after singleton-axis normalization.
+  }
+  if (broadcasts.size() > 1UL) {
+    for (const auto &node : chain) {
+      if (node->GetInControlNodesSize() != 0UL || node->GetOutControlNodesSize() != 0UL) {
+        return af::UNSUPPORTED;
+      }
+    }
+  }
+  // Move single-use Casts before the final Broadcast to avoid a padded [M,1] intermediate.
+  const auto final_broadcast = broadcasts.back();
+  for (const auto &node : chain) {
+    if (node == final_broadcast) {
+      break;
+    }
+    if (af::ops::IsOps<af::ascir_op::Cast>(node)) {
+      node->outputs[0].attr.axis = src.axis;
+      node->outputs[0].attr.repeats = src.repeats;
+      node->outputs[0].attr.strides = src.strides;
+    } else {
+      const auto input = node->GetInDataAnchor(0)->GetPeerOutAnchor();
+      if (ScheduleUtils::RemoveNode(graph, node, input) != af::SUCCESS ||
+          graph.FindNode(node->GetNamePtr()) != nullptr) {
+        return af::FAILED;
+      }
+    }
+  }
+  if (broadcasts.size() > 1UL && ascgen_utils::SetTemplateSemanticTransform(
+                                     final_broadcast, ascgen_utils::template_semantic::kBroadcastFold) != af::SUCCESS) {
+    return af::FAILED;
+  }
+  for (const auto &node : {load, final_broadcast}) {
+    if (ascir::SetCvBroadcastShape(node, dst.repeats, dst.axis[1], src.repeats, dst.axis[0]) != af::SUCCESS) {
+      return af::FAILED;
+    }
+  }
+  return af::SUCCESS;
+}
+
+bool IsSupportedOutputBroadcastGraph(const ascir::ImplGraph &graph) {
+  std::vector<af::Expression> shape;
+  for (const auto &node : graph.GetAllNodes()) {
+    const auto tagged_shape = ascir::GetCvBroadcastShape(*node);
+    if (!tagged_shape.empty()) {
+      shape = tagged_shape;
+      break;
+    }
+  }
+  if (shape.empty()) {
+    return true;
+  }
+  for (const auto &node : graph.GetAllNodes()) {
+    if (ScheduleUtils::IsBuffer(node) || ScheduleUtils::IsScalarLikeNode(node) || ScheduleUtils::IsScalarBrc(node) ||
+        !ascir::GetCvBroadcastShape(*node).empty()) {
+      continue;
+    }
+    if (af::ops::IsOps<af::ascir_op::Load>(node) || af::ops::IsOps<af::ascir_op::Store>(node)) {
+      // The CV callback reconstructs GM addresses from tile coordinates.
+      af::Expression offset = kSymbolZero;
+      if (node->attr.ir_attr != nullptr) {
+        (void)node->attr.ir_attr->GetAttrValue("offset", offset);
+      }
+      if (af::SymbolicUtils::StaticCheckEq(offset, kSymbolZero) != af::TriBool::kTrue) {
+        return false;
+      }
+      const auto &attr = node->outputs[0].attr;
+      if (attr.repeats.size() != 2UL || attr.strides.size() != 2UL) {
+        return false;
+      }
+      const auto eq = [](const af::Expression &lhs, const af::Expression &rhs) {
+        return af::SymbolicUtils::StaticCheckEq(lhs, rhs) == af::TriBool::kTrue;
+      };
+      if (!eq(attr.repeats[0], shape[0]) || !eq(attr.repeats[1], shape[1]) || !eq(attr.strides[0], shape[1]) ||
+          !eq(attr.strides[1], kSymbolOne)) {
+        return false;
+      }
+      continue;
+    }
+    if (node->attr.api.compute_type != af::ComputeType::kComputeElewise) {
+      return false;
+    }
+  }
+  return true;
 }
 
 Status FillInputDataAttrForCvGraph(af::AscGraph &graph) {
@@ -472,6 +624,8 @@ Status CubeFusionCaseGenerator::GenerateGeneralCase(ascir::HintGraph &graph, std
   ascir::utils::DumpGraph(optimize_graph, "after_partition");
   split_data_names_.clear();
   GE_ASSERT_SUCCESS(SplitSharedDataForCubeAndVector(optimize_graph, split_data_names_));
+  // UB eligibility needs API metadata for the Workspace and its Load/Store.
+  GE_ASSERT_SUCCESS(AscGraphInfoComplete::CompleteApiInfo(optimize_graph));
   GE_ASSERT_SUCCESS(FillInputDataAttrForCvGraph(optimize_graph));
   graphs.emplace_back(optimize_graph);
   return af::GRAPH_SUCCESS;
@@ -542,7 +696,10 @@ Status CubeFusionCaseGenerator::GeneratorUbTask(const std::vector<::ascir::ImplG
   std::vector<::ascir::ImplGraph> tmp_grouped_graphs;
   for (auto &grouped_graph : grouped_graphs) {
     ascir::ImplGraph optimize_graph((grouped_graph.GetName() + "_ub").c_str());
-    optimize_graph.CopyFrom(grouped_graph);
+    if (!optimize_graph.CopyFrom(grouped_graph)) {
+      GELOGW("Discard CV UB candidate because graph %s could not be copied.", grouped_graph.GetName().c_str());
+      return af::SUCCESS;
+    }
     if (ScheduleUtils::HasComputeType(optimize_graph, af::ComputeType::kComputeCube)) {
       tmp_grouped_graphs.emplace_back(optimize_graph);
       continue;
@@ -551,6 +708,24 @@ Status CubeFusionCaseGenerator::GeneratorUbTask(const std::vector<::ascir::ImplG
       GE_CHECK_NOTNULL(node);
       if (!af::ops::IsOps<af::ascir_op::Load>(node)) {
         continue;
+      }
+      const auto input_anchor = node->GetInDataAnchor(0);
+      if (input_anchor != nullptr && input_anchor->GetPeerOutAnchor() != nullptr &&
+          af::ops::IsOps<af::ascir_op::Workspace>(input_anchor->GetPeerOutAnchor()->GetOwnerNode())) {
+        bool requires_common = false;
+        const auto status =
+            MarkCubeOutputBroadcast(optimize_graph, std::dynamic_pointer_cast<af::AscNode>(node), requires_common);
+        if (requires_common) {
+          return af::SUCCESS;  // M broadcast without a valid full-M extent has no UB candidate.
+        }
+        if (status == af::SUCCESS) {
+          continue;  // The CV callback consumes the Cube fragment directly.
+        }
+        if (status != af::UNSUPPORTED) {
+          GELOGW("Discard CV UB candidate after broadcast rewrite failed in graph %s.",
+                 optimize_graph.GetName().c_str());
+          return af::SUCCESS;
+        }
       }
       if (node->GetOutAllNodes().size() > 1UL) {
         GELOGD("Node %s with single output and multiple refs, do not support nddma.", node->GetNamePtr());
@@ -578,11 +753,52 @@ Status CubeFusionCaseGenerator::GeneratorUbTask(const std::vector<::ascir::ImplG
       }
     }
     tmp_grouped_graphs.emplace_back(optimize_graph);
-    if (HasBroadCastNode(optimize_graph)) {
+    if (HasBroadCastNode(optimize_graph) || !IsSupportedOutputBroadcastGraph(optimize_graph)) {
       GELOGW("The graph %s still contains broadcast nodes and does not support generating ub task.",
              grouped_graph.GetName().c_str());
       return af::GRAPH_SUCCESS;
     }
+  }
+  bool m_broadcast = false;
+  for (const auto &graph : tmp_grouped_graphs) {
+    for (const auto &node : graph.GetAllNodes()) {
+      m_broadcast = m_broadcast || ascir::IsCvMBroadcast(*node);
+    }
+  }
+  if (m_broadcast) {
+    for (const auto &graph : tmp_grouped_graphs) {
+      for (const auto &axis : graph.GetAllAxis()) {
+        if (!axis->size.IsConstExpr()) {
+          return af::SUCCESS;  // Keep the unmodified Common candidate.
+        }
+      }
+      for (const auto &node : graph.GetAllNodes()) {
+        for (const auto &output : node->outputs()) {
+          for (const auto &dim : output->attr.repeats) {
+            if (!dim.IsConstExpr()) {
+              return af::SUCCESS;
+            }
+          }
+        }
+      }
+    }
+  }
+  bool n_broadcast = false;
+  size_t cube_count = 0UL;
+  size_t vector_group_count = 0UL;
+  for (const auto &tmp_graph : tmp_grouped_graphs) {
+    bool has_cube = false;
+    for (const auto &node : tmp_graph.GetAllNodes()) {
+      if (ScheduleUtils::IsCube(node)) {
+        ++cube_count;
+        has_cube = true;
+      }
+      n_broadcast = n_broadcast || !ascir::GetCvBroadcastShape(*node).empty();
+    }
+    vector_group_count += has_cube ? 0UL : 1UL;
+  }
+  if (n_broadcast && (cube_count != 1UL || vector_group_count != 1UL)) {
+    return af::GRAPH_SUCCESS;  // A callback owns one MM result and one vector domain.
   }
   for (const auto &tmp_graph : tmp_grouped_graphs) {
     ub_task.grouped_graphs.emplace_back(tmp_graph);

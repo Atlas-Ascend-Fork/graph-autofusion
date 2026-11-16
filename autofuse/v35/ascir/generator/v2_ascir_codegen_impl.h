@@ -409,6 +409,9 @@ class BroadcastAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
 
   [[nodiscard]] bool IsVectorFunctionSupported(const AscNode &node) const override {
+    if (!::ascir::GetCvBroadcastShape(node).empty()) {
+      return false;  // Keep the budgeted materialization at the CV boundary.
+    }
     AscNodeInputs node_inputs = node.inputs;
     auto vectorized_strides = node_inputs[0].attr.vectorized_strides;
     return std::all_of(vectorized_strides.begin(), vectorized_strides.end(), [](const Expression &i) {

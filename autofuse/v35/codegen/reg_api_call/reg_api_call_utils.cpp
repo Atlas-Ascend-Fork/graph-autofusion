@@ -24,12 +24,13 @@ constexpr char kCompactPddingMode[] = "AscendC::PaddingMode::Compact";
 namespace codegen {
 CvApi2DParams BuildCvApi2DParams(const TPipe &tpipe, const Tensor &input, const Tensor &output) {
   CvApi2DParams params;
-  params.first_dim = "curAivM";
-  params.last_dim = "curAivN";
+  params.first_dim = tpipe.CvRows(output);
+  params.last_dim = tpipe.IsCvNarrowTensor(output) ? "1" : "curAivN";
   params.output_stride = GenBlockAlignNExpr(output, params.last_dim);
   const bool input_is_cube_output =
       tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse && input.id == tpipe.cube_output_tensor_id;
-  params.input_stride = input_is_cube_output ? "curAlignN" : GenBlockAlignNExpr(input, params.last_dim);
+  const auto input_width = tpipe.cv_n_batch ? tpipe.CvColumns(input) : params.last_dim;
+  params.input_stride = input_is_cube_output ? "curAlignN" : GenBlockAlignNExpr(input, input_width);
   params.valid_size = params.first_dim + " * " + params.last_dim;
   params.output_compute_size = params.first_dim + " * " + params.output_stride;
   params.input_compute_size = params.first_dim + " * " + params.input_stride;

@@ -42,6 +42,48 @@ using namespace af::ops;
 using namespace af::ascir_op;
 using namespace codegen;
 
+TEST(CodegenKernel, NBroadCastCallbackUsesCubeOffsetAndCompletesEveryVectorTile) {
+  af::AscGraph graph("cv_output_broadcast_callback");
+  const auto m = graph.CreateAxis("m", af::Symbol(128));
+  const auto n = graph.CreateAxis("n", af::Symbol(256));
+  Data data("data", graph);
+  Load load("load");
+  graph.AddNode(load);
+  load.x = data.y;
+  auto node = graph.FindNode("load");
+  node->outputs[0].attr.dtype = ge::DT_FLOAT16;
+  node->outputs[0].attr.axis = {m.id, n.id};
+  node->outputs[0].attr.repeats = {af::Symbol(128), af::Symbol(1)};
+  node->outputs[0].attr.strides = {af::Symbol(1), af::Symbol(0)};
+  node->outputs[0].attr.mem.tensor_id = 0;
+  Kernel kernel("cv_output_broadcast_callback");
+  ASSERT_EQ(kernel.tiler.AddAxis(m), af::SUCCESS);
+  ASSERT_EQ(kernel.tiler.AddAxis(n), af::SUCCESS);
+  ASSERT_EQ(kernel.tpipe.AddTensor(node->outputs[0]), af::SUCCESS);
+  kernel.tpipe.cv_fusion_type = ascir::CubeTemplateType::kUBFuse;
+  kernel.tpipe.cube_output_tensor_id = 0;
+  kernel.tpipe.cv_output_broadcast = true;
+  kernel.tpipe.cv_n_axis = n.id;
+  kernel.tpipe.cv_n_size_expr = "t->n";
+  kernel.tpipe.cv_n_tile_expr = "t->nt";
+  std::stringstream ss;
+  ASSERT_EQ(kernel.GenerateVecFuncOfCVFusion(ss, false, false, true, true, "CvNBroadcastCase"), af::SUCCESS);
+  const auto text = ss.str();
+  EXPECT_NE(text.find("row < curAivM"), std::string::npos);
+  EXPECT_NE(text.find("stageOffset + row * curAlignN"), std::string::npos);
+  EXPECT_NE(text.find("(offset / shapeN + row) * cv_n_size + column"), std::string::npos);
+  EXPECT_NE(text.find("column += cv_n_tile"), std::string::npos);
+  EXPECT_NE(text.find("auto_fusion_vector_stage1(vector_offset, 1, width"), std::string::npos);
+  EXPECT_NE(text.find("auto_fusion_vector_stage2(vector_offset, 1, width"), std::string::npos);
+  EXPECT_NE(text.find("if (stage == 2 ||"), std::string::npos);
+  EXPECT_EQ(text.find("src_stage_offset"), std::string::npos);
+  EXPECT_EQ(text.find("buf_n_broadcast_row"), std::string::npos);
+  std::stringstream address;
+  ASSERT_EQ(kernel.InitCVFusionAddr(address, false, true, true, false, "CvNBroadcastCase"), af::SUCCESS);
+  EXPECT_NE(address.str().find("kConstTilingData.tiling_data.n"), std::string::npos);
+  EXPECT_NE(address.str().find("t.tiling_data.nt"), std::string::npos);
+}
+
 namespace {
 std::string ToString(const af::Expression &e) {
   return std::string(e.Serialize().get());

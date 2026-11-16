@@ -40,6 +40,8 @@ enum class IndirectLoadOutputPostType : uint32_t {
   kModifiedBesselK0Sum,
 };
 
+enum class CvBroadcastShapeMode { kStatic, kDynamicN, kDynamic };
+
 struct ShareGraph {
   static af::ComputeGraphPtr LoadLog2StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ModFusedGraph(size_t dims_size);
@@ -177,6 +179,8 @@ struct ShareGraph {
   static af::ComputeGraphPtr LoadLeBoolStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadBitwiseBoolStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadCompareCastSumStoreFusedGraph(size_t dims_size);
+  static void CreateMatmulOutputBroadcastGraph(af::AscGraph &graph, CvBroadcastShapeMode mode, bool broadcast_m = false,
+                                               bool broadcast_n = true, bool broadcast_chain = false);
   static af::ComputeGraphPtr LoadMatmulElewiseBrcFusedGraph(bool is_dynamic = false);
   static af::ComputeGraphPtr LoadBatchMatmulElewiseBrcFusedGraph(bool is_dynamic = false);
   static af::ComputeGraphPtr LoadMatmulCompareScalarFusedGraph();

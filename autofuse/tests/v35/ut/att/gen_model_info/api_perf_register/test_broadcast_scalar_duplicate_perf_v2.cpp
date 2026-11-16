@@ -1,10 +1,10 @@
 /**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under terms and
- * CANN Open Software License Agreement Version 2.0 of the License.
- * Please refer to the License for details. You should not use this file except in compliance with the License.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
@@ -83,6 +83,16 @@ TEST(BroadcastScalarDuplicatePerfV2, ScalarDuplicateSymbolicCountDividesByVector
   ASSERT_EQ(ascendcapi_v2::AddVfInstructPerf(kDuplicate, kFloat32, repeat_time, 1U, acc), af::SUCCESS);
   Expr expected = ascendcapi_v2::GetVfCost(acc);
   EXPECT_EQ(iter->second, expected);
+
+  // A fixed-rank BroadcastExtend still has scalar shape metadata. Its single
+  // source element is loaded by the vector pipeline, independently of graph rank.
+  node.broadcast_node_params.const_rank = 1;
+  ASSERT_EQ(api->GetPerfFunc()({input}, {output}, node, perf), af::SUCCESS);
+  VfCostAccumulator vector_acc;
+  ASSERT_EQ(ascendcapi_v2::AddVfInstructPerf(kLoad, kFloat32, CreateExpr(1), 1U, vector_acc), af::SUCCESS);
+  ASSERT_EQ(ascendcapi_v2::AddVfInstructPerf(kUpdateMask, kFloat32, repeat_time, 1U, vector_acc), af::SUCCESS);
+  ASSERT_EQ(ascendcapi_v2::AddVfInstructPerf(kStore, kFloat32, repeat_time, 1U, vector_acc), af::SUCCESS);
+  EXPECT_EQ(perf.pipe_res.at(PipeType::AIV_VEC), ascendcapi_v2::GetVfCost(vector_acc));
 }
 }  // namespace
 }  // namespace att

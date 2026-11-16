@@ -9,6 +9,7 @@
  */
 #include "vec_func_call.h"
 
+#include <algorithm>
 #include <sstream>
 #include "ascir_node_param/ascir_node_param.h"
 #include "ascir_ops.h"
@@ -177,7 +178,15 @@ void CreateVFCall(const TPipe &tpipe, const std::string &vf_call_name, const std
   ss << vf_call_name << "(";
   CreateTensorAddr(outputs, output_ub_offsets, {}, ss);
   CreateTensorAddr(inputs, input_ub_offsets, tensors_scalar, ss);
-  CreateDimAndStrideParmas(tpipe, merge_info, ss);
+  if (tpipe.cv_output_broadcast && !outputs.empty() &&
+      std::all_of(outputs.begin(), outputs.end(), [&tpipe](const Tensor &tensor) {
+        return tpipe.IsCvNarrowTensor(tensor) ||
+               (tpipe.cv_m_broadcast && tpipe.IsCvSingletonAxis(tensor, tpipe.cv_m_axis));
+      })) {
+    ss << tpipe.CvRows(outputs.front()) << ", " << tpipe.CvColumns(outputs.front()) << ", curAlignN";
+  } else {
+    CreateDimAndStrideParmas(tpipe, merge_info, ss);
+  }
   for (const auto &param : arange_params) {
     ss << ", " << param.offset << ", " << param.base << ", " << param.step;
     for (const auto &stride : param.logical_strides) {

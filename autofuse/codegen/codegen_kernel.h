@@ -326,6 +326,16 @@ class Tiler : public Code {
   bool enable_group_parallel_ = false;
 };
 
+struct CommonMRowBroadcast {
+  ascir::TensorId output_id{af::kIdNone};
+  int64_t columns{0};
+
+  bool AppliesTo(ascir::TensorId id) const {
+    return columns > 0 && output_id == id;
+  }
+  std::string VectorAlignmentCondition() const;
+};
+
 class TPipe : public Variable {
  public:
   const Tiler &tiler;
@@ -334,6 +344,7 @@ class TPipe : public Variable {
   map<ascir::MergeScopeId, MergeScope> merge_scopes;
   map<ascir::QueId, TQue> ques;
   std::shared_ptr<const CommonQueueSplitPlan> common_queue_split_plan;
+  CommonMRowBroadcast common_m_row_broadcast;
   map<ascir::BufId, TBuf> bufs;
   std::set<ascir::QueId> load_store_qids;
   std::set<ascir::QueId> non_load_store_qids;
@@ -343,6 +354,20 @@ class TPipe : public Variable {
   bool is_inductor{false};
   bool is_dynamic{false};
   bool is_conv2d{false};
+  bool cv_output_broadcast{false};
+  bool cv_m_broadcast{false};
+  bool cv_n_batch{false};
+  bool cv_split_nm_columns{false};
+  bool cv_broadcast_n{true};
+  ascir::AxisId cv_m_axis{af::kIdNone};
+  std::string cv_m_size_expr;
+  bool IsCvSingletonAxis(const Tensor &tensor, ascir::AxisId axis) const;
+  std::string CvRows(const Tensor &tensor) const;
+  std::string CvColumns(const Tensor &tensor) const;
+  ascir::AxisId cv_n_axis{af::kIdNone};
+  std::string cv_n_size_expr;
+  std::string cv_n_tile_expr;
+  bool IsCvNarrowTensor(const Tensor &tensor) const;
   ascir::TensorId cube_output_tensor_id = af::kIdNone;
   ascir::TensorId cube_output_que_id = af::kIdNone;
   std::vector<ascir::BufId> contiguous_buf_ids;
@@ -534,10 +559,11 @@ class Kernel {
   static Status GenGeDynamicCvUbFuncs(const ascir::FusedScheduledResult &fused_schedule_result, size_t graph_id,
                                       size_t result_id, const CodegenConfig &config, bool use_list_tensor,
                                       std::stringstream &ss, std::stringstream &calls,
-                                      std::unordered_set<const std::string *> &kernel_file_ptr);
+                                      std::unordered_set<const std::string *> &kernel_file_ptr,
+                                      bool launch_decouple = false);
   Status GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_no_db_flag, bool is_conv2d,
                                    bool is_dynamic = false, bool is_inductor = false,
-                                   const std::string &callback_name = "");
+                                   const std::string &callback_name = "", bool static_inductor_shape = false);
   // launch_decouple：rtLaunch 运行时形态判定（与 fusion_mode_runtime 同口径，排除
   // conv2d）；缺省 false 走 legacy constexpr 形态（GE 路径不受影响）。
   Status InitCVFusionAddr(std::stringstream &result, bool vector_no_db_flag, bool is_dynamic = false,
@@ -620,6 +646,7 @@ class Kernel {
   static Status GenCommonVectorImpl(const ascir::FusedScheduledResult &fused, const ascir::ImplGraph &graph,
                                     const CodegenConfig &config, size_t index, bool enable_group_parallel,
                                     bool use_list_tensor, ascir::TensorId cube_output_id,
+                                    const std::vector<ascir::ScheduleGroup> &groups,
                                     const CommonOutputReusePlan *direct_output, const std::string &workspace_override,
                                     std::stringstream &ss, std::stringstream &calls,
                                     std::unordered_set<const std::string *> &kernel_files);

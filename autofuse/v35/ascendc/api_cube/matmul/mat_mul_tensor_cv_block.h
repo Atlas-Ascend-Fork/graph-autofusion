@@ -26,7 +26,7 @@ namespace Block {
 // retaining the original L0C stride when slicing the second half of M.
 template <typename TensorUB, typename TensorL0C>
 __aicore__ inline void CopyTensorCVL0CToUB(const TensorUB &dst, const TensorL0C &src, uint64_t m, uint64_t n,
-                                           bool splitM) {
+                                           bool splitM, bool replicateScalar = false) {
   using OutType = asc::te::get_attribute_element_type<typename TensorUB::element_type *>;
   auto copy = asc::te::make_copy(asc::te::copy_l0c_to_ub{});
   if (!splitM) {
@@ -36,62 +36,73 @@ __aicore__ inline void CopyTensorCVL0CToUB(const TensorUB &dst, const TensorL0C 
     return;
   }
   if constexpr (AscendC::Std::is_same_v<OutType, float>) {
-    auto splitCopy = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Tile::CopyL0C2UBTraitSplitM{});
-    asc::te::copy(splitCopy.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::enable_update}), dst, src);
-  } else {
-    // M/FIX hard events cover the complete tile; a unit-flag pair cannot describe two M slices.
-    const uint64_t firstM = CeilDiv(m, uint64_t{2});
-    asc::te::copy(copy.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::disable, 0}), dst, src,
-                  asc::te::make_coord(0UL, 0UL), asc::te::make_coord(0UL, 0UL), asc::te::make_shape(firstM, n));
-    if (m > 1) {
-      asc::te::copy(copy.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::disable, 1}), dst, src,
-                    asc::te::make_coord(0UL, 0UL), asc::te::make_coord(firstM, 0UL),
-                    asc::te::make_shape(m - firstM, n));
+    if (!replicateScalar) {
+      auto splitCopy = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Tile::CopyL0C2UBTraitSplitM{});
+      asc::te::copy(splitCopy.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::enable_update}), dst, src);
+      return;
     }
+  }
+  const uint64_t firstM = CeilDiv(m, uint64_t{2});
+  asc::te::copy(copy.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::disable, 0}), dst, src,
+                asc::te::make_coord(0UL, 0UL), asc::te::make_coord(0UL, 0UL), asc::te::make_shape(firstM, n));
+  if (m > 1 || replicateScalar) {
+    // NM broadcast gives both AIVs the same L0C row.
+    const uint64_t srcRow = replicateScalar ? 0UL : firstM;
+    const uint64_t rows = replicateScalar ? 1UL : m - firstM;
+    asc::te::copy(copy.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::disable, 1}), dst, src,
+                  asc::te::make_coord(0UL, 0UL), asc::te::make_coord(srcRow, 0UL), asc::te::make_shape(rows, n));
   }
 }
 
-// Quantized output is copied in two M slices. Hard events keep both copies inside
-// one L0C lifetime, while FP32 continues to use the native MMAD/Fixpipe unit flag.
+// Explicit M/FIX events cover two transfers from one MMAD tile. Ordinary FP32
+// copies continue to pair the native MMAD and Fixpipe unit flags.
 template <typename OutType>
 class TensorCVL0CSync {
  public:
   __aicore__ inline TensorCVL0CSync() {
     if ASCEND_IS_AIC {
       if constexpr (!AscendC::Std::is_same_v<OutType, float>) {
-        AscendC::SetFlag<AscendC::HardEvent::FIX_M>(0);
-        AscendC::SetFlag<AscendC::HardEvent::FIX_M>(1);
+        EnableExplicitEvents();
       }
     }
   }
 
   __aicore__ inline ~TensorCVL0CSync() {
     if ASCEND_IS_AIC {
-      if constexpr (!AscendC::Std::is_same_v<OutType, float>) {
-        AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(1);
-      }
+      WaitForOutput(0);
+      WaitForOutput(1);
+    }
+  }
+
+  __aicore__ inline void EnableExplicitEvents() {
+    if (!explicitEvents_) {
+      AscendC::SetFlag<AscendC::HardEvent::FIX_M>(0);
+      AscendC::SetFlag<AscendC::HardEvent::FIX_M>(1);
+      explicitEvents_ = true;
     }
   }
 
   __aicore__ inline void WaitForOutput(uint16_t slot) {
-    if constexpr (!AscendC::Std::is_same_v<OutType, float>) {
+    if (explicitEvents_) {
       AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(slot);
     }
   }
 
   __aicore__ inline void WaitForMmad(uint16_t slot) {
-    if constexpr (!AscendC::Std::is_same_v<OutType, float>) {
+    if (explicitEvents_) {
       AscendC::SetFlag<AscendC::HardEvent::M_FIX>(slot);
       AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(slot);
     }
   }
 
   __aicore__ inline void ReleaseOutput(uint16_t slot) {
-    if constexpr (!AscendC::Std::is_same_v<OutType, float>) {
+    if (explicitEvents_) {
       AscendC::SetFlag<AscendC::HardEvent::FIX_M>(slot);
     }
   }
+
+ private:
+  bool explicitEvents_{false};
 };
 
 // CV needs a dtype-aware output copy that native BlockMmad does not expose as a policy.
@@ -196,7 +207,12 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
 
   template <typename TensorA, typename TensorB, typename TensorBias, typename TensorC>
   __aicore__ inline void operator()(TensorA &gmA, TensorB &gmB, TensorBias &gmBias, TensorC &tensorC,
-                                    TupleShape &tileShape) {
+                                    TupleShape &tileShape, bool replicateScalar = false) {
+    if constexpr (AscendC::Std::is_same_v<CType, float>) {
+      if (replicateScalar) {
+        l0cSync_.EnableExplicitEvents();
+      }
+    }
     uint64_t curM = asc::te::get<MNK_M>(tileShape);
     uint64_t curN = asc::te::get<MNK_N>(tileShape);
     uint64_t curK = asc::te::get<MNK_K>(tileShape);
@@ -250,7 +266,8 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
             bool initCmatrix = iter0 == 0 && iter1 == 0 && !isBias_;
             bool isFinalK = iter0 + 1 == kL1Iter && iter1 + 1 == kL0Iter;
             uint8_t unitFlag = isFinalK ? FINAL_ACCUMULATION : NON_FINAL_ACCUMULATION;
-            Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag, initCmatrix);
+            Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag, initCmatrix,
+                    replicateScalar);
             Gemm::UnLockM(l0BufferId + L0_BUFFER_ID_BASE);
           }
           l0PingPong_++;
@@ -261,7 +278,7 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
       l0cSync_.WaitForMmad(l0cSlot);
       uint16_t slot = (ubDB_ > 1) ? static_cast<uint16_t>(cvPingPong_ & 0x1) : 0U;
       Sync::WaitForVector<Sync::SYNC_MODE_INTRA, PIPE_FIX>(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + slot, splitM_);
-      CopyOutFromL0C2UB(tensorC, tensorL0C, tileN, curM, slot);
+      CopyOutFromL0C2UB(tensorC, tensorL0C, tileN, curM, slot, replicateScalar);
       Sync::NotifyVector<Sync::SYNC_MODE_INTRA, PIPE_FIX>(Sync::FIXPIPE_AIC_READY_FLAG_BASE + slot, splitM_);
       cvPingPong_++;
       l0cSync_.ReleaseOutput(l0cSlot);
@@ -360,7 +377,7 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
 
   template <typename TensorUB, typename TensorL0C>
   __aicore__ inline void CopyOutFromL0C2UB(TensorUB &tensorC, TensorL0C &tensorL0C, uint64_t tileN, uint64_t curM,
-                                           uint16_t slotIdx) {
+                                           uint16_t slotIdx, bool replicateScalar) {
     using TensorUbType = asc::te::get_attribute_element_type<typename TensorUB::element_type *>;
     uint64_t tileNAlign = GetFixpipeRowPitch<TensorUB>(tileN);
     auto layoutUB =
@@ -369,21 +386,21 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
     const int64_t ubSlotElems = ubDB_ > 1U ? totalUbElems / DOUBLE_BUFFER_COUNT : totalUbElems;
     auto ubTensor = asc::te::make_tensor(
         asc::te::make_mem_ptr<asc::te::location::ub>(tensorC.data().get() + slotIdx * ubSlotElems), layoutUB);
-    CopyTensorCVL0CToUB(ubTensor, tensorL0C, curM, tileNAlign, splitM_);
+    CopyTensorCVL0CToUB(ubTensor, tensorL0C, curM, tileNAlign, splitM_, replicateScalar);
   }
 
   template <typename TensorA, typename TensorB, typename TensorBias, typename TensorC>
   __aicore__ inline void Compute(const TensorA &tensorAL0, const TensorB &tensorBL0, const TensorBias &tensorBiasL0,
                                  TensorC &tensorL0C, const TileShape &l0Shape, bool needBias, uint8_t unitFlag,
-                                 bool initCmatrix) {
+                                 bool initCmatrix, bool replicateScalar) {
     constexpr auto mmadAtom = asc::te::make_mmad(asc::te::mmad_operation{}, asc::te::mmad_trait_default{});
     auto curM = asc::te::get<MNK_M>(l0Shape);
     auto curN = asc::te::get<MNK_N>(l0Shape);
     auto curK0 = asc::te::get<MNK_K>(l0Shape);
     asc::te::mmad_params mmadParams{
         static_cast<uint16_t>(curM), static_cast<uint16_t>(curN), static_cast<uint16_t>(curK0),
-        (AscendC::Std::is_same_v<CType, float> ? static_cast<asc::te::unit_flag_mode>(unitFlag)
-                                               : asc::te::unit_flag_mode::disable),
+        (AscendC::Std::is_same_v<CType, float> && !replicateScalar ? static_cast<asc::te::unit_flag_mode>(unitFlag)
+                                                                   : asc::te::unit_flag_mode::disable),
         initCmatrix};
     if (needBias) {
       asc::te::mmad(mmadAtom.with(mmadParams), tensorL0C, tensorAL0, tensorBL0, tensorBiasL0);

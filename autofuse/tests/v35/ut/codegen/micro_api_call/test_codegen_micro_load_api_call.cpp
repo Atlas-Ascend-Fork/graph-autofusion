@@ -26,6 +26,98 @@ using namespace af::ops;
 using namespace af::ascir_op;
 using namespace codegen;
 
+TEST(CodegenKernel, LoadMicroApiCall_CvNBroadcastAndUnpack) {
+  af::AscGraph graph("cv_output_broadcast_load");
+  const auto m = graph.CreateAxis("m", af::Symbol(128));
+  const auto n = graph.CreateAxis("n", af::Symbol(256));
+  Data data("data", graph);
+  Load load_op("load");
+  Store store_op("store");
+  graph.AddNode(load_op);
+  graph.AddNode(store_op);
+  load_op.x = data.y;
+  store_op.x = load_op.y;
+  auto load = graph.FindNode("load");
+  auto store = graph.FindNode("store");
+  for (const auto &node : {load, store}) {
+    node->attr.sched.axis = {m.id, n.id};
+    node->attr.api.type = af::ApiType::kAPITypeCompute;
+    auto &attr = node->outputs[0].attr;
+    attr.axis = {m.id, n.id};
+    attr.repeats = {af::Symbol(128), af::Symbol(256)};
+    attr.strides = {af::Symbol(1), af::Symbol(0)};
+    attr.vectorized_axis = {m.id, n.id};
+    attr.vectorized_strides = {af::Symbol(16), af::Symbol(0)};
+    attr.dtype = af::DT_FLOAT16;
+    attr.mem.position = af::Position::kPositionVecIn;
+    attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+    attr.opt.merge_scope = af::kIdNone;
+  }
+  load->outputs[0].attr.mem.tensor_id = 0;
+  load->outputs[0].attr.que.id = 0;
+  store->outputs[0].attr.mem.tensor_id = 1;
+  store->outputs[0].attr.que.id = 1;
+
+  Tiler tiler;
+  tiler.AddAxis(m);
+  tiler.AddAxis(n);
+  TPipe tpipe("tpipe", tiler);
+  ASSERT_EQ(tpipe.CollectQues(graph), af::SUCCESS);
+  ASSERT_EQ(tpipe.AddTensor(load->outputs[0]), af::SUCCESS);
+  tpipe.cv_fusion_type = ascir::CubeTemplateType::kUBFuse;
+  std::string reg_name = "load_reg";
+  MicroApiTensor reg(store->outputs[0], reg_name);
+  TensorManager tensor_mgr;
+  ASSERT_EQ(tensor_mgr.AddTensor(reg), af::SUCCESS);
+  MicroLoadApiCall call("Load");
+  ASSERT_EQ(call.Init(load), af::SUCCESS);
+  call.AddInput(0, codegen::TensorType::UB_TENSOR);
+  call.AddOutput(1);
+  CallParam params = {"p_reg", "cv_m * curAlignN"};
+  params.max_dtype_size = "float";
+  std::string result;
+
+  // A half scalar must be splatted before unpacking for float computation.
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("LoadAlign<half, AscendC::MicroAPI::LoadDist::DIST_BRC_B16>"), std::string::npos);
+  EXPECT_NE(result.find("UnPack<uint32_t, uint16_t>"), std::string::npos);
+  EXPECT_EQ(result.find("DIST_UNPACK_B16"), std::string::npos);
+  EXPECT_LT(result.find("LoadAlign<half"), result.find("UnPack<uint32_t, uint16_t>"));
+
+  params.max_dtype_size = "half";
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_BRC_B16"), std::string::npos);
+  EXPECT_EQ(result.find("UnPack<"), std::string::npos);
+  params.max_dtype_size = "float";
+
+  auto source = tpipe.GetTensor(0);
+  ASSERT_NE(source, nullptr);
+  source->vectorized_strides = {af::Symbol(256), af::Symbol(1)};
+  // Reusing the call for a dense input must not retain its BRC distribution.
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_UNPACK_B16"), std::string::npos);
+  EXPECT_EQ(result.find("DIST_BRC"), std::string::npos);
+  EXPECT_EQ(result.find("UnPack<"), std::string::npos);
+
+  source->vectorized_strides = {af::Symbol(0), af::Symbol(0)};
+  source->axis_size[0] = af::Symbol(1);
+  // M=1 still needs to splat its single value along N.
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_BRC_B16"), std::string::npos);
+
+  source->vectorized_strides.clear();
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_UNPACK_B16"), std::string::npos);
+  EXPECT_EQ(result.find("DIST_BRC"), std::string::npos);
+
+  source->vectorized_strides = {af::Symbol(16), af::Symbol(0)};
+  tpipe.cv_fusion_type = ascir::CubeTemplateType::kDefault;
+  // This change does not enable implicit broadcast in the non-CV path.
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_UNPACK_B16"), std::string::npos);
+  EXPECT_EQ(result.find("DIST_BRC"), std::string::npos);
+}
+
 TEST(CodegenKernel, LoadMicroApiCall_Load) {
   af::AscGraph graph("test_graph");
 

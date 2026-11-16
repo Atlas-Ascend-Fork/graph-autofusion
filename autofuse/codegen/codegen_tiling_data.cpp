@@ -836,11 +836,22 @@ std::string codegen::TilingData::GenerateConst(const ascir::FusedScheduledResult
                << std::endl;
   const_gen_ss << "  uint64_t workspace_size;" << std::endl;
   const_gen_ss << "  uint32_t block_dim;" << std::endl;
-  const_gen_ss << "  ResLimit limit;" << std::endl;
-  const_gen_ss << "  limit.aiv_num = aiv_num;" << std::endl;
-  const_gen_ss << "  limit.ub_size = ub_size - 256;" << std::endl;
+  const bool ge_cv_broadcast = !is_inductor_scene && ascir::HasCvBroadcast(fused_schedule_result);
+  if (!ge_cv_broadcast) {
+    const_gen_ss << "  ResLimit limit;" << std::endl;
+    const_gen_ss << "  limit.aiv_num = aiv_num;" << std::endl;
+    const_gen_ss << "  limit.ub_size = ub_size - 256;" << std::endl;
+  }
 
-  if (IsCubeFusedScheduled(fused_schedule_result)) {
+  if (ge_cv_broadcast) {
+    global_pre_def_ss
+        << "static int64_t SelectCvBroadcastTiling(char *, int, int, AutofuseTilingData &, uint64_t &, uint32_t &, "
+           "bool &);\n";
+    const_gen_ss << "  bool non_db = false;\n"
+                 << "  const auto selected_case = SelectCvBroadcastTiling(config_file, aiv_num, ub_size, "
+                 << tiling_data_struct_name << ", workspace_size, block_dim, non_db);\n"
+                 << "  if (selected_case < 0) {return \"\";}\n";
+  } else if (IsCubeFusedScheduled(fused_schedule_result)) {
     const_gen_ss << GenCVConstTilingData(tiling_data_struct_name, is_inductor_scene);
   } else {
     const_gen_ss << "  auto ret = AutofuseTilingWithConfig(config_file, &" << tiling_data_struct_name;
@@ -877,6 +888,10 @@ std::string codegen::TilingData::GenerateConst(const ascir::FusedScheduledResult
   const_gen_ss << "  tiling_data_const_gen_result = R\"(" << g_str << ")\";" << std::endl;
 
   const_gen_ss << GenConstGenResultReplace() << std::endl;
+  if (ge_cv_broadcast) {
+    const_gen_ss << "  tiling_data_const_gen_result += \"\\n#define CV_UB_CASE_ID \" + "
+                    "std::to_string(selected_case) + \"\\n\";\n";
+  }
 
   // CV-specific const tiling data replacement
   if (IsCubeFusedScheduled(fused_schedule_result) && is_inductor_scene) {

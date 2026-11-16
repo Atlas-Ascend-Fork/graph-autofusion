@@ -553,6 +553,11 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
     return af::FAILED;
   }
   bool is_nddma_generated = false;
+  for (const auto &node : new_case.GetAllNodes()) {
+    if (!ascir::GetCvBroadcastShape(*node).empty()) {
+      return af::FAILED;  // The Cube result is supplied by UB, never by a GM NDDMA load.
+    }
+  }
   GE_ASSERT_SUCCESS(ProcessTransposeNodes(new_case, is_nddma_generated));
   bool is_transpose_nddma_generated = is_nddma_generated;
   GE_ASSERT_SUCCESS(ProcessSliceNodes(new_case, is_nddma_generated));

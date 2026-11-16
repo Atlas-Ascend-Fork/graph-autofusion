@@ -194,7 +194,8 @@ std::string GenCvUbFuseRowStride(const TPipe &tpipe, const Tensor &ub_tensor) {
   if (Tensor::DtypeName(ub_tensor.dtype, dtype_name) != af::SUCCESS) {
     return "curAivN";
   }
-  return "KernelUtils::BlkAlign<" + dtype_name + ">(curAivN)";
+  const auto width = tpipe.cv_n_batch ? tpipe.CvColumns(ub_tensor) : "curAivN";
+  return "KernelUtils::BlkAlign<" + dtype_name + ">(" + width + ")";
 }
 
 std::string GenCvUbFuseAddrOffset(const TPipe &tpipe, const Tensor &ub_tensor) {
@@ -206,6 +207,10 @@ std::string GenCvUbFuseAddrOffset(const TPipe &tpipe, const Tensor &ub_tensor) {
     enable_n_offset = !IsStrideZero(strides[strides.size() - 1U]);
   } else if (strides.size() == 1U && IsStrideZero(strides[0])) {
     enable_m_offset = false;
+    enable_n_offset = false;
+  }
+  if (tpipe.cv_n_batch && tpipe.IsCvNarrowTensor(ub_tensor)) {
+    enable_m_offset = !tpipe.IsCvSingletonAxis(ub_tensor, tpipe.cv_m_axis);
     enable_n_offset = false;
   }
 
@@ -511,6 +516,11 @@ Status VFLoop::GenerateBody(const TPipe &tpipe, const TensorManager &tensor_mgr,
         const MicroApiTensor *reg_tensor_ptr = tensor_mgr.GetTensor(body.call_->GetOutputTensorIdByIndex(0));
         const Tensor *ub_tensor_ptr = tpipe.GetTensor(body.call_->GetInputTensorIdByIndex(0));
         ub_offset = GetUbAddrOffset(tpipe, reg_tensor_ptr, ub_tensor_ptr);
+        const auto &row = tpipe.common_m_row_broadcast;
+        if (row.AppliesTo(ub_tensor_ptr->id)) {
+          ub_offset = "(" + row.VectorAlignmentCondition() + " ? (" + ub_offset + ") % " + std::to_string(row.columns) +
+                      " : (" + ub_offset + "))";
+        }
       } else if (body.call_->GetMicroApiName() == "Store") {
         const Tensor *ub_tensor_ptr = tpipe.GetTensor(body.call_->GetOutputTensorIdByIndex(0));
         const MicroApiTensor *reg_tensor_ptr = tensor_mgr.GetTensor(body.call_->GetOutputTensorIdByIndex(1));

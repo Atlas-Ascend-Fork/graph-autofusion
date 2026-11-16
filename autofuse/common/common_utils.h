@@ -90,6 +90,7 @@ inline constexpr char kNddmaTranspose[] = "NDDMA.Transpose";
 inline constexpr char kNddmaBroadcast[] = "NDDMA.Broadcast";
 inline constexpr char kNddmaCast[] = "NDDMA.Cast";
 inline constexpr char kLoadToNddma[] = "LoadToNDDMA";
+inline constexpr char kBroadcastFold[] = "BroadcastFold";
 inline constexpr char kOutputReuse[] = "OutputReuse";
 inline constexpr char kPointwiseRecompute[] = "Pointwise/Recompute";
 inline constexpr char kReduceCommon[] = "Reduce/Common";
@@ -113,6 +114,7 @@ inline constexpr char kUbExtendMixed[] = "UB/Extend/Mixed";
 inline constexpr char kBroadcastScalar[] = "Broadcast.Scalar";
 inline constexpr char kBroadcastTail[] = "Broadcast.Tail";
 inline constexpr char kBroadcastNonTail[] = "Broadcast.NonTail";
+inline constexpr char kCommonBroadcastRowAdaptive[] = "Broadcast.RowViewAdaptive";
 inline constexpr char kSoftmaxAr[] = "Softmax/AR";
 inline constexpr char kAr[] = "AR";
 inline constexpr char kRa[] = "RA";
@@ -346,6 +348,9 @@ const std::vector<af::Expression> &GetFrontendShapeVars(const ascir::FusedSchedu
 // Return the frontend static-shape judgment for the external ABI.  Internal
 // tiling-data generation must continue to use IsStaticSchedResult().
 bool IsFrontendStaticSchedResult(const ascir::FusedScheduledResult &fused_schedule_result);
+inline bool UseCvNRowBatch(const ascir::FusedScheduledResult &result) {
+  return ascir::HasCvBroadcast(result) && !ascir::HasCvMBroadcast(result);
+}
 af::Status ScalarValuePreProcess(const std::string &ori_value, const std::string &dtype,
                                  std::string &after_pre_pro_value);
 void MergeBrcAxisRepeats(const std::vector<af::Expression> &input0_repeats,  // 输入0的vector_repeats, 带广播

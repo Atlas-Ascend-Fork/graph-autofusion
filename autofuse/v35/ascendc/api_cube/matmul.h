@@ -194,9 +194,11 @@ __global__ __aicore__ void mat_mul_v3(
   } else if constexpr (API_LEVEL == MAT_MUL_TENSOR_LEVEL) {
     GET_TILING_DATA_WITH_STRUCT(MatMulV3BasicTilingData, tilingData, tilingGM);
 #ifdef CV_UB_FUSION
-    MatmulV3Advanced::MatMulTensorCVKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
-                                           FULL_LOAD, L0C2OUT_MODEL, AutoFusionVector>(aGM, bGM, biasGM, cGM,
-                                                                                       workspaceGM, tilingData, param);
+    MatmulV3Advanced::MatMulTensorCVKernel<
+        DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC, FULL_LOAD, L0C2OUT_MODEL, AutoFusionVector,
+        MatmulV3Advanced::CvNmColumnSplit<AutoFusionVector>::value && FULL_LOAD == MAT_MUL_NO_FULL_LOAD &&
+            MODEL == MAT_MUL_BASIC && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY>(aGM, bGM, biasGM, cGM, workspaceGM,
+                                                                           tilingData, param);
 #else
     MatmulV3Advanced::MatMulTensorCommonKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
                                                MODEL, FULL_LOAD, L0C2OUT_MODEL>(aGM, bGM, biasGM, cGM, workspaceGM,

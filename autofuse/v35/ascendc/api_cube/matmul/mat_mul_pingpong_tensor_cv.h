@@ -28,7 +28,8 @@ namespace Blaze {
 namespace Epilogue {
 namespace Block {
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DispatchPolicy_, typename FusionOp_>
+template <typename DataTypeOut_, typename DataTypeIn_, typename DispatchPolicy_, typename FusionOp_,
+          bool DistributeScalar = false>
 class BlockEpilogueTensorCV {
  public:
   using DataTypeOut = DataTypeOut_;
@@ -64,14 +65,14 @@ class BlockEpilogueTensorCV {
   }
 
   __aicore__ inline void Run(BlockShape const &blockShape, int64_t dstOffset, bool splitM, int64_t baseM, int64_t baseN,
-                             uint64_t ubDB = 1) {
+                             uint64_t ubDB = 1, bool replicateScalar = false) {
     int64_t curM = asc::te::get<Gemm::MNK_M>(blockShape);
     if (baseM != 0) {
       curM = Gemm::Min(curM, baseM);
     }
     const int64_t halfBlockShapeM = Gemm::CeilDiv(curM, AscendC::GetTaskRation());
     int64_t blockShapeM = curM;
-    if (splitM) {
+    if (splitM && !replicateScalar) {
       blockShapeM =
           (static_cast<uint64_t>(curM) & 1UL) > 0UL ? (halfBlockShapeM - AscendC::GetSubBlockIdx()) : halfBlockShapeM;
     }
@@ -104,10 +105,15 @@ class BlockEpilogueTensorCV {
         int64_t loop = 0;
         while (stageOffset < inputSize) {
           const int64_t offset = dstOffset + nIdx * curBaseN + loop * stageCapacity / blockShapeNAlign * n +
-                                 halfBlockShapeM * n * (AscendC::GetSubBlockIdx() & 0x1);
+                                 (replicateScalar ? 0 : halfBlockShapeM * n * (AscendC::GetSubBlockIdx() & 0x1));
           const int64_t stageSize = Gemm::Min(stageCapacity, inputSize - stageOffset);
-          fusionOp_(offset, stageSize / blockShapeNAlign, tileN, n, m, blockShapeNAlign, stageSize, stageOffset,
-                    CUBE_OUT_VECTOR_IN);
+          if constexpr (DistributeScalar) {
+            fusionOp_(offset, stageSize / blockShapeNAlign, tileN, n, m, blockShapeNAlign, stageSize, stageOffset,
+                      CUBE_OUT_VECTOR_IN, replicateScalar);
+          } else {
+            fusionOp_(offset, stageSize / blockShapeNAlign, tileN, n, m, blockShapeNAlign, stageSize, stageOffset,
+                      CUBE_OUT_VECTOR_IN);
+          }
           fusionOp_(offset, stageSize / blockShapeNAlign, tileN, n, m, blockShapeNAlign, stageSize, stageOffset,
                     ONLY_VECTOR_IN);
           stageOffset += stageSize;
@@ -121,8 +127,9 @@ class BlockEpilogueTensorCV {
   }
 
   __aicore__ inline void operator()(BlockShape const &blockShape, int64_t dstOffset = 0, bool splitM = false,
-                                    int64_t baseM = 0, int64_t baseN = 0, uint64_t ubDB = 1) {
-    Run(blockShape, dstOffset, splitM, baseM, baseN, ubDB);
+                                    int64_t baseM = 0, int64_t baseN = 0, uint64_t ubDB = 1,
+                                    bool replicateScalar = false) {
+    Run(blockShape, dstOffset, splitM, baseM, baseN, ubDB, replicateScalar);
   }
 
  private:
@@ -140,7 +147,7 @@ class BlockEpilogueTensorCV {
 namespace MatmulV3Advanced {
 
 // Keep the native Tensor MMAD and scheduler, with batch coordinates shared by MMAD and CV epilogue.
-template <class ProblemShape, class BlockMmad, class BlockEpilogue, class BlockScheduler>
+template <class ProblemShape, class BlockMmad, class BlockEpilogue, class BlockScheduler, bool DistributeScalar = false>
 class TensorCVKernel {
  public:
   using NativeKernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
@@ -171,7 +178,7 @@ class TensorCVKernel {
     }
   }
 
-  __aicore__ inline void operator()(Params const &params) {
+  __aicore__ inline void operator()(Params const &params, bool splitNmColumns = false) {
     int64_t coreIdx = AscendC::GetBlockIdx();
     if ASCEND_IS_AIV {
       coreIdx /= AscendC::GetTaskRation();
@@ -190,7 +197,7 @@ class TensorCVKernel {
       blockMmad.Init(params.mmadParams);
     }
     Blaze::Gemm::SetHF32(params.schParams.isHf32);
-    Process(params, scheduler, blockMmad, epilogue, coreIdx);
+    Process(params, scheduler, blockMmad, epilogue, coreIdx, splitNmColumns);
     Blaze::Gemm::UnsetHF32(params.schParams.isHf32);
   }
 
@@ -210,7 +217,7 @@ class TensorCVKernel {
   }
 
   __aicore__ inline void Process(Params const &params, BlockScheduler &scheduler, BlockMmad &blockMmad,
-                                 BlockEpilogue &epilogue, int64_t coreIdx) {
+                                 BlockEpilogue &epilogue, int64_t coreIdx, bool splitNmColumns) {
     const int64_t m = asc::te::get<Blaze::Gemm::MNK_M>(params.problemShape);
     const int64_t n = asc::te::get<Blaze::Gemm::MNK_N>(params.problemShape);
     const int64_t k = asc::te::get<Blaze::Gemm::MNK_K>(params.problemShape);
@@ -248,6 +255,8 @@ class TensorCVKernel {
       auto tileB = asc::te::squeeze<0>(subB);
       auto tileBias = gmBias.slice(AscendC::MakeCoord(0L, coordN), AscendC::MakeShape(1L, shapeN));
       ProblemShape validShape{shapeM, shapeN, k, asc::te::get<Blaze::Gemm::MNK_B>(shape)};
+      const bool replicateScalar =
+          splitNmColumns && params.mmadParams.splitM && m == 1 && n == 1 && shapeM == 1 && shapeN == 1 && batch == 1;
       auto ub =
           asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), MakeLayoutC{}(shapeM, shapeN));
       if ASCEND_IS_AIC {
@@ -256,6 +265,8 @@ class TensorCVKernel {
                                  AscendC::MakeShape(1L, AscendC::MakeShape(k, n)));
           auto matrixB = asc::te::squeeze<0>(fullB);
           blockMmad(tileA, matrixB, gmBias, ub, validShape);
+        } else if constexpr (DistributeScalar) {
+          blockMmad(tileA, tileB, tileBias, ub, validShape, replicateScalar);
         } else {
           blockMmad(tileA, tileB, tileBias, ub, validShape);
         }
@@ -263,14 +274,26 @@ class TensorCVKernel {
       if ASCEND_IS_AIV {
         const int64_t offset = (coordB * m + coordM) * n + coordN;
         epilogue(validShape, offset, params.mmadParams.splitM, params.schParams.baseM, params.schParams.baseN,
-                 params.mmadParams.ubDB);
+                 params.mmadParams.ubDB, replicateScalar);
       }
     }
   }
 };
 
+// Only callbacks that opt in carry this member. Use a type trait so the
+// template argument needs no host/device function call.
+template <typename FusionOp, typename = void>
+struct CvNmColumnSplit {
+  static constexpr bool value = false;
+};
+
+template <typename FusionOp>
+struct CvNmColumnSplit<FusionOp, decltype(void(FusionOp::kSplitNmColumns))> {
+  static constexpr bool value = FusionOp::kSplitNmColumns;
+};
+
 template <class A_TYPE, class B_TYPE, class C_TYPE, class BIAS_TYPE, class A_LAYOUT, class B_LAYOUT, class C_LAYOUT,
-          uint64_t FULL_LOAD_MODE = 0, uint64_t L0C2OUT_MODEL, typename FusionOp>
+          uint64_t FULL_LOAD_MODE = 0, uint64_t L0C2OUT_MODEL, typename FusionOp, bool DistributeScalar = false>
 __aicore__ inline void MatMulTensorCVKernel(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR cGM, GM_ADDR workspaceGM,
                                             const MatMulV3BasicTilingData &tilingData, typename FusionOp::Params *param,
                                             int64_t batch = 0) {
@@ -301,8 +324,9 @@ __aicore__ inline void MatMulTensorCVKernel(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR bi
                                                                 LayoutC, BiasType, LayoutC>,
                                   Blaze::Gemm::Block::TensorCVBlockMmad<DispatchPolicy, AType, LayoutA, BType, LayoutB,
                                                                         OutType, LayoutC, BiasType, LayoutC>>;
-  using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueTensorCV<OutType, OutType, DispatchPolicy, FusionOp>;
-  using MatmulKernel = TensorCVKernel<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
+  using BlockEpilogue =
+      Blaze::Epilogue::Block::BlockEpilogueTensorCV<OutType, OutType, DispatchPolicy, FusionOp, DistributeScalar>;
+  using MatmulKernel = TensorCVKernel<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler, DistributeScalar>;
   using Params = typename MatmulKernel::Params;
   MatmulKernel mm;
   Params params = {{tilingData.m, tilingData.n, tilingData.k, batch},
@@ -315,7 +339,12 @@ __aicore__ inline void MatMulTensorCVKernel(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR bi
                     tilingData.nBaseTailSplitCnt, tilingData.mTailMain, tilingData.nTailMain, tilingData.mmadParam,
                     static_cast<uint32_t>(tilingData.l2CacheDisable), tilingData.sliceM, tilingData.srcNdStride,
                     tilingData.innerBatch}};
-  mm(params);
+  if constexpr (DistributeScalar) {
+    // Aligned row pitch keeps the two AIV stores in disjoint DMA blocks.
+    mm(params, param->cv_n_size >= 64 && param->cv_n_size % 32 == 0);
+  } else {
+    mm(params);
+  }
 }
 
 }  // namespace MatmulV3Advanced
