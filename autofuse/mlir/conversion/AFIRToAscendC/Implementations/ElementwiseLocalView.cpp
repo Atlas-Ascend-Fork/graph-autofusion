@@ -648,7 +648,7 @@ FailureOr<int64_t> localStorageCapacityBytes(Value value) {
     if (!matchPattern(sub.getIndex(), m_ConstantInt(&index))) {
       return int64_t{-1};
     }
-    if (index.isNegative() || index.getActiveBits() > 63) {
+    if (index.isNegative() || index.getActiveBits() > std::numeric_limits<int64_t>::digits) {
       return failure();
     }
     if (*capacity < 0) {
@@ -741,6 +741,56 @@ LocalViewCompatibility checkLocalTensorAliasing(Value value, Value destinationVa
   return LocalViewCompatibility::Compatible;
 }
 
+LocalViewCompatibility selectLocalApiWindow(ArrayRef<Value> values, bool unequal, bool allowStridedElements,
+                                            ElementwiseLocalView &view) {
+  if (!view.vectorPlan->segments.empty() && !llvm::all_of(view.vectorPlan->segments.back().strides, provablyOne)) {
+    auto destinationType = cast<ascendc::LocalTensorType>(values.back().getType()).getElementType();
+    const bool sameElementType = llvm::all_of(values, [&](Value value) {
+      auto type = dyn_cast<ascendc::LocalTensorType>(value.getType());
+      return type && type.getElementType() == destinationType;
+    });
+    if (!unequal && sameElementType) {
+      // Legacy TensorActualSize computes the physical span, including padding.
+      // Equal domains/strides and element types keep every valid lane aligned.
+      // Scalars were excluded above; mixed-width and broadcast views cannot use this path.
+      view.physicalSpan = true;
+      view.apiWindowSize = view.vectorPlan->segments.size();
+    } else if (allowStridedElements) {
+      view.apiWindowSize = 0;
+    } else {
+      return LocalViewCompatibility::UnsupportedShape;
+    }
+  }
+  return LocalViewCompatibility::Compatible;
+}
+
+LocalViewCompatibility checkLocalTensorAccesses(ArrayRef<TensorDescAttr> descriptors, ArrayRef<Value> values,
+                                                bool unequal, const ElementwiseLocalView &view) {
+  const auto destination = descriptors.back();
+  for (auto [tensorIndex, value] : llvm::enumerate(values)) {
+    auto desc = descriptors[tensorIndex];
+    auto type = dyn_cast<ascendc::LocalTensorType>(value.getType());
+    if (!type) {
+      return LocalViewCompatibility::UnsupportedShape;
+    }
+    auto result = checkLocalTensorCapacity(desc, value);
+    if (result != LocalViewCompatibility::Compatible) {
+      return result;
+    }
+    if (unequal || view.apiWindowSize == 0) {
+      result = checkLocalTensorAlignment(view, tensorIndex, type);
+      if (result != LocalViewCompatibility::Compatible) {
+        return result;
+      }
+      result = checkLocalTensorAliasing(value, values.back(), desc, destination);
+      if (result != LocalViewCompatibility::Compatible) {
+        return result;
+      }
+    }
+  }
+  return LocalViewCompatibility::Compatible;
+}
+
 }  // namespace
 
 LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
@@ -761,46 +811,11 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
   }
   const auto destination = descriptors.back();
   const bool unequal = llvm::any_of(descriptors, [&](auto desc) { return !sameStrides(desc, destination); });
-  if (!view.vectorPlan->segments.empty() && !llvm::all_of(view.vectorPlan->segments.back().strides, provablyOne)) {
-    auto destinationType = cast<ascendc::LocalTensorType>(values.back().getType()).getElementType();
-    const bool sameElementType = llvm::all_of(values, [&](Value value) {
-      auto type = dyn_cast<ascendc::LocalTensorType>(value.getType());
-      return type && type.getElementType() == destinationType;
-    });
-    if (!unequal && sameElementType) {
-      // Legacy TensorActualSize computes the physical span, including padding.
-      // Equal domains/strides and element types keep every valid lane aligned.
-      // Scalars were excluded above; mixed-width and broadcast views cannot use this path.
-      view.physicalSpan = true;
-      view.apiWindowSize = view.vectorPlan->segments.size();
-    } else if (allowStridedElements) {
-      view.apiWindowSize = 0;
-    } else {
-      return LocalViewCompatibility::UnsupportedShape;
-    }
+  result = selectLocalApiWindow(values, unequal, allowStridedElements, view);
+  if (result != LocalViewCompatibility::Compatible) {
+    return result;
   }
-  for (auto [tensorIndex, value] : llvm::enumerate(values)) {
-    auto desc = descriptors[tensorIndex];
-    auto type = dyn_cast<ascendc::LocalTensorType>(value.getType());
-    if (!type) {
-      return LocalViewCompatibility::UnsupportedShape;
-    }
-    result = checkLocalTensorCapacity(desc, value);
-    if (result != LocalViewCompatibility::Compatible) {
-      return result;
-    }
-    if (unequal || view.apiWindowSize == 0) {
-      result = checkLocalTensorAlignment(view, tensorIndex, type);
-      if (result != LocalViewCompatibility::Compatible) {
-        return result;
-      }
-      result = checkLocalTensorAliasing(value, values.back(), desc, destination);
-      if (result != LocalViewCompatibility::Compatible) {
-        return result;
-      }
-    }
-  }
-  return LocalViewCompatibility::Compatible;
+  return checkLocalTensorAccesses(descriptors, values, unequal, view);
 }
 
 LocalViewCompatibility checkElementwiseLocalViews(Operation *op, bool *wholeTensor, bool allowStridedElements) {
