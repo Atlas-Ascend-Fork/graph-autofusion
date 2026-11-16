@@ -2261,6 +2261,31 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceRejectsElementwiseFanout) 
   EXPECT_TRUE(score_functions.empty());
 }
 
+TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceAllowsElementwiseFanoutToTwoStores) {
+  auto graph = BuildPostReduceGraph("RAA", false, OutputPostTopology::kSum, false, true);
+  const auto elementwise = graph.FindNode("post_reduce_elementwise");
+  ASSERT_NE(elementwise, nullptr);
+  const auto attr = elementwise->outputs[0].attr;
+  af::ascir_op::Store second_store("post_reduce_store2");
+  SetNodeView(second_store, af::DT_FLOAT16, attr.axis, attr.repeats, attr.strides);
+  second_store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  graph.AddNode(second_store);
+  af::ascir_op::Output second_output("post_reduce_output2");
+  second_output.ir_attr.SetIndex(1);
+  SetNodeView(second_output, af::DT_FLOAT16, attr.axis, attr.repeats, attr.strides);
+  graph.AddNode(second_output);
+  const auto store2 = graph.FindNode("post_reduce_store2");
+  const auto output2 = graph.FindNode("post_reduce_output2");
+  ASSERT_EQ(af::GraphUtils::AddEdge(elementwise->GetOutDataAnchor(0), store2->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(store2->GetOutDataAnchor(0), output2->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(elementwise->GetOutDataNodesSize(), 2UL);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
+}
+
 TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceSkipsCommonZeroStrideAxes) {
   for (const std::string suffix : {"RBR", "BRA"}) {
     auto graph = BuildPostReduceGraph(suffix);

@@ -832,6 +832,63 @@ void BuildSimtPostReduceGraph(ILTestGraph &g, bool add_parallel_output = false) 
   }
 }
 
+// Build the producer-sharing post-reduce shape: IL -> shared Abs -> square Mul -> fake Reduce,
+// while the shared value also feeds post Add(shared, reduce) -> Store.  This is the shape where
+// the local target must be the shared value rather than the square node.
+void BuildSimtSharedPostReduceGraph(ILTestGraph &g) {
+  BuildSimtPostReduceGraph(g);
+  const auto il = g.graph.FindNode("indirect_load");
+  const auto output_transform = g.graph.FindNode("output_transform");
+  const auto reduce = g.graph.FindNode("reduce");
+  const auto addend_load = g.graph.FindNode("addend_load");
+  ASSERT_NE(il, nullptr);
+  ASSERT_NE(output_transform, nullptr);
+  ASSERT_NE(reduce, nullptr);
+  ASSERT_NE(addend_load, nullptr);
+
+  Abs shared("shared_abs");
+  Mul square("square_abs");
+  g.graph.AddNode(shared);
+  g.graph.AddNode(square);
+  const auto shared_node = g.graph.FindNode("shared_abs");
+  const auto square_node = g.graph.FindNode("square_abs");
+  ASSERT_NE(shared_node, nullptr);
+  ASSERT_NE(square_node, nullptr);
+  for (const auto &node : {shared_node, square_node}) {
+    node->attr.sched = il->attr.sched;
+    node->outputs[0].attr = il->outputs[0].attr;
+    node->outputs[0].attr.mem.tensor_id = node == shared_node ? 20 : 21;
+    node->outputs[0].attr.mem.reuse_id = node->outputs[0].attr.mem.tensor_id;
+    node->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+    node->outputs[0].attr.mem.hardware = af::MemHardware::kMemHardwareUB;
+    node->outputs[0].attr.mem.position = af::Position::kPositionVecOut;
+    node->outputs[0].attr.que.id = node == shared_node ? 20 : 21;
+    node->outputs[0].attr.que.depth = 2;
+    node->outputs[0].attr.que.buf_num = 2;
+    node->attr.api.compute_type = af::ComputeType::kComputeElewise;
+    node->attr.api.type = af::ApiType::kAPITypeCompute;
+    node->attr.api.unit = af::ComputeUnit::kUnitVector;
+    ASSERT_EQ(SetTemplateRole(node, TemplateRole::kSimtInlineTransform), af::SUCCESS);
+  }
+  ASSERT_EQ(af::GraphUtils::ReplaceEdgeSrc(il->GetOutDataAnchor(0), output_transform->GetInDataAnchor(0),
+                                           shared_node->GetOutDataAnchor(0)),
+            af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(il->GetOutDataAnchor(0), shared_node->GetInDataAnchor(0)), af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(shared_node->GetOutDataAnchor(0), square_node->GetInDataAnchor(0)), af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(shared_node->GetOutDataAnchor(0), square_node->GetInDataAnchor(1)), af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::RemoveEdge(output_transform->GetOutDataAnchor(0), reduce->GetInDataAnchor(0)), af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(square_node->GetOutDataAnchor(0), reduce->GetInDataAnchor(0)), af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::RemoveEdge(addend_load->GetOutDataAnchor(0), output_transform->GetInDataAnchor(1)),
+            af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(reduce->GetOutDataAnchor(0), output_transform->GetInDataAnchor(1)), af::SUCCESS);
+  const auto store = g.graph.FindNode("store");
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(af::GraphUtils::ReplaceEdgeSrc(reduce->GetOutDataAnchor(0), store->GetInDataAnchor(0),
+                                           output_transform->GetOutDataAnchor(0)),
+            af::SUCCESS);
+  ASSERT_EQ(af::AscGraphUtils::GetComputeGraph(g.graph)->TopologicalSorting(), af::SUCCESS);
+}
+
 // ======================== Template annotation ========================
 
 void AnnotateSimdTemplate(af::AscGraph &graph, Implementation implementation = Implementation::kDefault) {
@@ -2611,6 +2668,48 @@ TEST(IndirectLoadApiCallTest, SimtIndexPrepassPlanFitsTmpDemandGuardsDrift) {
   // 重建 plan 本身不可行：回退。
   plan.eligible = false;
   EXPECT_FALSE(SimtIndexPrepassPlanFitsTmpDemand(plan, reserved));
+}
+
+TEST(IndirectLoadApiCallTest, SharedPostReduceLocalTargetAndTpipeRedirect) {
+  ILTestGraph g("simt_shared_post_reduce");
+  BuildSimtSharedPostReduceGraph(g);
+  AnnotateSimtTemplate(g.graph);
+  const auto il = g.graph.FindNode("indirect_load");
+  const auto shared = g.graph.FindNode("shared_abs");
+  const auto square = g.graph.FindNode("square_abs");
+  const auto output_transform = g.graph.FindNode("output_transform");
+  ASSERT_NE(il, nullptr);
+  ASSERT_NE(shared, nullptr);
+  ASSERT_NE(square, nullptr);
+  ASSERT_NE(output_transform, nullptr);
+  ASSERT_EQ(SetTemplateRole(output_transform, TemplateRole::kSimtInlineTransform), af::SUCCESS);
+
+  EXPECT_EQ(GetSimtPostReduceLocalProducer(il), shared);
+  EXPECT_NE(GetSimtPostReduceLocalProducer(il), square);
+  EXPECT_FALSE(ShouldSkipTpipeTensorCollection(shared));
+
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  tpipe.CollectQues(g.graph);
+  const auto redirected_id = shared->outputs[0].attr.mem.tensor_id;
+
+  IndirectLoadRegApiCall call("IndirectLoadRegApiCall");
+  ASSERT_EQ(call.Init(il), af::SUCCESS);
+  ApiTensor x1, x2;
+  x1.id = il->inputs[0].attr.mem.tensor_id;
+  x2.id = il->inputs[1].attr.mem.tensor_id;
+  call.inputs.push_back(&x1);
+  call.inputs.push_back(&x2);
+  for (const char *name :
+       {"x_load", "idx_load", "indirect_load", "shared_abs", "square_abs", "output_transform", "reduce", "store"}) {
+    const auto node = g.graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    tpipe.AddTensor(*node->outputs()[0]);
+  }
+  ASSERT_NE(tpipe.GetTensor(redirected_id), nullptr);
+  EXPECT_EQ(call.outputs.size(), 1UL);
+  EXPECT_EQ(call.outputs[0].id, redirected_id);
 }
 
 TEST(IndirectLoadApiCallTest, InitSimtPostReduceSucceeds) {

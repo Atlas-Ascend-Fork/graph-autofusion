@@ -242,7 +242,7 @@ PostReduceChain FindPostReduceChain(const af::AscNodePtr &node) {
 
   af::AscNodePtr reduce;
   for (size_t index = 0UL; index < pending.size(); ++index) {
-    const auto &current = pending[index];
+    const auto current = pending[index];
     if (current->attr.api.compute_type == af::ComputeType::kComputeReduce) {
       if (reduce == nullptr) {
         reduce = current;
@@ -328,6 +328,52 @@ af::AscNodePtr GetPostReduceInputProducer(const af::AscNodePtr &node) {
   return FindPostReduceChain(node).input_producer;
 }
 
+af::AscNodePtr GetSimtPostReduceLocalProducer(const af::AscNodePtr &node) {
+  const auto chain = FindPostReduceChain(node);
+  const auto reduce = chain.reduce;
+  const auto input_producer = chain.input_producer;
+  if (reduce == nullptr) {
+    return nullptr;
+  }
+  // Materialize the shared pre-reduction value when the normalization tail
+  // consumes it as well. A scalar evaluator cannot expose intermediate values
+  // through the single UB target reserved for the reduction input.
+  std::unordered_set<const af::AscNode *> tail;
+  std::vector<af::AscNodePtr> tail_nodes{reduce};
+  for (size_t i = 0UL; i < tail_nodes.size(); ++i) {
+    const auto current = tail_nodes[i];
+    if (!tail.emplace(current.get()).second) {
+      continue;
+    }
+    for (const auto &out : current->GetOutDataNodes()) {
+      const auto next = std::dynamic_pointer_cast<af::AscNode>(out);
+      if (next != nullptr) {
+        tail_nodes.emplace_back(next);
+      }
+    }
+  }
+  auto local_producer = input_producer;
+  auto boundary = input_producer;
+  while (boundary != nullptr && boundary != node) {
+    for (const auto &out : boundary->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out);
+      if (consumer != nullptr && consumer != reduce && tail.count(consumer.get()) != 0UL) {
+        local_producer = boundary;
+      }
+    }
+    const auto producer = GetInputProducer(boundary, 0UL);
+    bool same_producer = producer != nullptr;
+    for (size_t i = 1UL; i < boundary->inputs.Size() && same_producer; ++i) {
+      same_producer = GetInputProducer(boundary, i) == producer;
+    }
+    if (!same_producer) {
+      break;
+    }
+    boundary = producer;
+  }
+  return local_producer;
+}
+
 bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node) {
   const TemplateBehavior behavior = GetTemplateBehavior(node);
   const af::AscNodePtr consumer = GetOnlyOutputConsumer(node);
@@ -349,7 +395,7 @@ bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node) {
       if (candidate == nullptr || !af::ops::IsOps<af::ascir_op::IndirectLoad>(candidate)) {
         continue;
       }
-      const auto post_reduce_producer = GetPostReduceInputProducer(candidate);
+      const auto post_reduce_producer = GetSimtPostReduceLocalProducer(candidate);
       if (post_reduce_producer != nullptr && post_reduce_producer->GetName() == node->GetName()) {
         return false;
       }
@@ -1313,7 +1359,7 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   NodeSet output_set;
   af::AscNodePtr output_root;
   if (simt.has_post_reduce) {
-    output_root = GetPostReduceInputProducer(indirect_load);
+    output_root = GetSimtPostReduceLocalProducer(indirect_load);
     GE_ASSERT_NOTNULL(output_root, "IndirectLoad post Reduce input has no producer.");
     GE_ASSERT_SUCCESS(CollectSimtLoweringBackwardNodes(output_root, indirect_load, output_set));
   }

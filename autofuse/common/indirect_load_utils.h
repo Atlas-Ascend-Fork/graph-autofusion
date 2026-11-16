@@ -474,6 +474,8 @@ TemplateBehavior GetTemplateBehavior(const af::AscNodePtr &node);
 TemplateRole GetTemplateRole(const af::AscNodePtr &node);
 af::AscNodePtr GetPostReduceConsumer(const af::AscNodePtr &node);
 af::AscNodePtr GetPostReduceInputProducer(const af::AscNodePtr &node);
+// Returns the SIMT/normal materialization boundary, which may precede the Reduce input.
+af::AscNodePtr GetSimtPostReduceLocalProducer(const af::AscNodePtr &node);
 // Returns the terminal tensor ID of a chain whose API emission is skipped.
 ascir::TensorId FindSkippedChainResultTensor(const af::AscNodePtr &root);
 bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node);
