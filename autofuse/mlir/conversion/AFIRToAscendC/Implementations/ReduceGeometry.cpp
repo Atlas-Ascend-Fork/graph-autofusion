@@ -166,28 +166,27 @@ LogicalResult proveReduceLayout(MLIRContext *context, afir::TensorDescAttr input
   return proveReduceDestinationLayout(context, destination, axesById, plan, diagnostic);
 }
 
-// 能力查询和改写共用布局判据，失败原因写入 diagnostic。
-// RA 限单根 R 轴；AR 限至多两根 R 轴，以满足 ReduceInit 的后缀填充方式。
-// AR 多 A 轴须连续，且仅最外有效 A 轴可有尾块。
-LogicalResult checkKeptAxisTails(Operation *op, func::FuncOp func, afir::AscGraphAttrGroupsAttr graph,
-                                 const llvm::DenseMap<int64_t, afir::AxisAttr> &axesById, const afir::ReducePlan &plan,
-                                 std::string *diagnostic) {
-  // Once an outer A can contain multiple rows, each inner A must retain its
+// Flattened rows must form a prefix of the nominal rows. The innermost R
+// padding is handled separately by ReduceInit and is not part of this check.
+LogicalResult checkFlattenedAxisTails(Operation *op, func::FuncOp func, afir::AscGraphAttrGroupsAttr graph,
+                                      const llvm::DenseMap<int64_t, afir::AxisAttr> &axesById, ArrayRef<int64_t> axes,
+                                      std::string *diagnostic) {
+  // Once an outer axis can contain multiple rows, each inner axis must retain its
   // nominal extent so the flattened rows remain contiguous.
   bool hasOuterRows = false;
-  for (int64_t axisId : plan.first.axes) {
+  for (int64_t axisId : axes) {
     auto extent = graphExtentOf(axesById, axisId);
     if (!extent) {
-      return failLayout(diagnostic, "missing kept-axis extent");
+      return failLayout(diagnostic, "missing flattened-axis extent");
     }
     if (hasOuterRows) {
       auto expression = afir::Expression::Parse(extent.getValue().getValue().str());
       if (!expression) {
-        return failLayout(diagnostic, "cannot prove inner kept-axis extent");
+        return failLayout(diagnostic, "cannot prove inner flattened-axis extent");
       }
       auto symbols = afir::detail::ExpressionAccess::GetFreeSymbols(expression.value());
       if (!symbols) {
-        return failLayout(diagnostic, "cannot resolve inner kept-axis symbols");
+        return failLayout(diagnostic, "cannot resolve inner flattened-axis symbols");
       }
       for (auto axis : graph.getAxes()) {
         if (!axis.getSize() || !llvm::is_contained(symbols.value(), axis.getSize().getValue().getValue().str())) {
@@ -197,7 +196,7 @@ LogicalResult checkKeptAxisTails(Operation *op, func::FuncOp func, afir::AscGrap
             (axis.getAxisType() == afir::AxisType::TileInner || axis.getAxisType() == afir::AxisType::BlockInner) &&
             axis.getSplitPairOtherId() >= 0;
         if (splitInner || afir::findAxisValue(func, op, axis.getId(), afir::AxisValueRole::ActualSize)) {
-          return failLayout(diagnostic, "inner kept-axis tail may leave gaps between valid rows");
+          return failLayout(diagnostic, "inner flattened-axis tail may leave gaps between valid rows");
         }
       }
     }
@@ -217,9 +216,6 @@ LogicalResult checkReduceLayout(Operation *op, const afir::ReducePlan &plan, int
       return failLayout(diagnostic, "AFIR reduce RA layout currently requires a single reduced axis");
     }
     return success();
-  }
-  if (plan.last.axes.size() > 2) {
-    return failLayout(diagnostic, "AFIR reduce AR layout currently supports at most two reduced axes");
   }
   auto operandDescs = op->getAttrOfType<ArrayAttr>(afir::kOperandDescsAttrName);
   auto destinationDescs = op->getAttrOfType<ArrayAttr>(afir::kDestinationDescsAttrName);
@@ -242,7 +238,12 @@ LogicalResult checkReduceLayout(Operation *op, const afir::ReducePlan &plan, int
   for (afir::AxisAttr axis : graph.getAxes()) {
     axesById.try_emplace(axis.getId(), axis);
   }
-  if (failed(checkKeptAxisTails(op, func, graph, axesById, plan, diagnostic))) {
+  // ReduceInit clears the innermost padding and a suffix of each flattened R
+  // row. Inner R tails would create holes between valid blocks, which that
+  // suffix cannot describe. Check the R prefix rather than limiting its rank.
+  if (failed(checkFlattenedAxisTails(op, func, graph, axesById, plan.first.axes, diagnostic)) ||
+      failed(checkFlattenedAxisTails(op, func, graph, axesById, ArrayRef<int64_t>(plan.last.axes).drop_back(),
+                                     diagnostic))) {
     return failure();
   }
   return proveReduceLayout(op->getContext(), input, destination, axesById, plan, alignNum, diagnostic);
