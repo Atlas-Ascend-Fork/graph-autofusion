@@ -51,10 +51,11 @@ module {
 
 // -----
 
-// 第二片：只违反「源的 stride 形态」。
+// 第二个片段：验证形态 A 两侧内段步长必须相等的约束。
 //
-// 目的地是稠密的（外段 stride 8 == 内段 extent 8），但源在内段上的 stride 是 2 而不是 1
-// ——两轴 API 读的是一段连续的源，跨着读表达不了。
+// 目的地是稠密的（外段 stride 8 == 内段 extent 8、内段 stride 1），而源在内段上的 stride 是 2。
+// 两侧步长不等时需要重排，整行复制无法实现源步长为 2、目的地步长为 1 的映射。
+// 两侧步长相等的填充布局已支持，正例见 `afir-broadcast-inner-pitch.mlir`。
 #gappy_src = #afir.tensor_desc<axis = [0, 1], repeats = [#afir.expr<"1">, #afir.expr<"8">],
                                strides = [#afir.expr<"0">, #afir.expr<"2">], vectorized_axis = [0, 1],
                                vectorized_strides = [#afir.expr<"0">, #afir.expr<"2">], role = <compute>>
@@ -76,10 +77,104 @@ module {
   }
 }
 
-// 两片都要报出来，少一条就说明对应那条判据没人挡着。
+// -----
+
+// 第三个片段：验证形态 B 的窗口外段不能是广播段的约束。
+//
+// 三段 `[normal 4][brc 3][brc 2]`：最内那一段是广播段（形态 B），而窗口外段也是——两段之间
+// 目的地有填充（`3 != 1 × 2`），无法合并。源在这两段上的 stride 均为 0；若将外段步长作为源
+// 行距传给 `last_dim_stride`，会产生错误结果，因此根据段类型直接判为不支持。
+//
+// 本片段于 2026-11-15 新增：此前由形态 B 外段步长必须为字面量 1 的限制排除该布局，放宽为
+// 任意源行距后，需要单独检查此约束。
+#adjbrc_src = #afir.tensor_desc<axis = [0, 1, 2], repeats = [#afir.expr<"4">, #afir.expr<"1">, #afir.expr<"1">],
+                                strides = [#afir.expr<"1">, #afir.expr<"0">, #afir.expr<"0">],
+                                vectorized_axis = [0, 1, 2],
+                                vectorized_strides = [#afir.expr<"1">, #afir.expr<"0">, #afir.expr<"0">],
+                                role = <compute>>
+#adjbrc_dst = #afir.tensor_desc<axis = [0, 1, 2], repeats = [#afir.expr<"4">, #afir.expr<"3">, #afir.expr<"2">],
+                                strides = [#afir.expr<"6">, #afir.expr<"2">, #afir.expr<"1">],
+                                vectorized_axis = [0, 1, 2],
+                                vectorized_strides = [#afir.expr<"12">, #afir.expr<"3">, #afir.expr<"1">],
+                                role = <compute>>
+
+module {
+  func.func @broadcast_window_outer_is_broadcast(%src: !ascendc.local_tensor<?xf32>,
+                                                 %dst: !ascendc.local_tensor<?xf32>,
+                                                 %tmp: !ascendc.local_tensor<?xui8>) {
+    %result = afir.broadcast %src outs(%dst) tmp(%tmp) {
+      afir.operand_descs = [#adjbrc_src],
+      afir.destination_descs = [#adjbrc_dst],
+      afir.result_descs = [#adjbrc_dst]
+    } : !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xui8>
+        -> !ascendc.local_tensor<?xf32>
+    return
+  }
+}
+
+// -----
+
+// 第四个片段：验证形态 B 的行内元素必须连续的约束。
+//
+// 形态 B `[normal 4][brc 2]`，源行距为 8（已支持），但目的地在广播那一位上的 stride 是
+// 2 而不是 1——`AscendC::Broadcast<T, 2, 1>` 与 `BroadcastWithStride` 写出去的都是连续的一行，
+// 不支持行内跨步写入。
+#rowgap_src = #afir.tensor_desc<axis = [0, 1], repeats = [#afir.expr<"4">, #afir.expr<"1">],
+                                strides = [#afir.expr<"1">, #afir.expr<"0">], vectorized_axis = [0, 1],
+                                vectorized_strides = [#afir.expr<"8">, #afir.expr<"0">], role = <compute>>
+#rowgap_dst = #afir.tensor_desc<axis = [0, 1], repeats = [#afir.expr<"4">, #afir.expr<"2">],
+                                strides = [#afir.expr<"2">, #afir.expr<"1">], vectorized_axis = [0, 1],
+                                vectorized_strides = [#afir.expr<"16">, #afir.expr<"2">], role = <compute>>
+
+module {
+  func.func @broadcast_row_not_contiguous(%src: !ascendc.local_tensor<?xf32>,
+                                          %dst: !ascendc.local_tensor<?xf32>,
+                                          %tmp: !ascendc.local_tensor<?xui8>) {
+    %result = afir.broadcast %src outs(%dst) tmp(%tmp) {
+      afir.operand_descs = [#rowgap_src],
+      afir.destination_descs = [#rowgap_dst],
+      afir.result_descs = [#rowgap_dst]
+    } : !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xui8>
+        -> !ascendc.local_tensor<?xf32>
+    return
+  }
+}
+
+// -----
+
+// 第五个片段：验证内段步长大于 1 时必须取得物理行距的约束。
+//
+// 形态 A `[brc 4][normal 2]`，两侧内段 stride 均为 8（已支持），但目的地外段 stride
+// 是 2，等于内段 extent，无法取得用于替换窗口参数的行距，调用将按 2 传参。包含填充的一行需要
+// `2 × 8 = 16` 个元素的空间，而行距仅为 2，无法按整行复制正确实现，因此判为不支持。
+#norow_src = #afir.tensor_desc<axis = [0, 1], repeats = [#afir.expr<"1">, #afir.expr<"2">],
+                               strides = [#afir.expr<"0">, #afir.expr<"1">], vectorized_axis = [0, 1],
+                               vectorized_strides = [#afir.expr<"0">, #afir.expr<"8">], role = <compute>>
+#norow_dst = #afir.tensor_desc<axis = [0, 1], repeats = [#afir.expr<"4">, #afir.expr<"2">],
+                               strides = [#afir.expr<"2">, #afir.expr<"1">], vectorized_axis = [0, 1],
+                               vectorized_strides = [#afir.expr<"2">, #afir.expr<"8">], role = <compute>>
+
+module {
+  func.func @broadcast_inner_pitch_without_row_pitch(%src: !ascendc.local_tensor<?xf32>,
+                                                     %dst: !ascendc.local_tensor<?xf32>,
+                                                     %tmp: !ascendc.local_tensor<?xui8>) {
+    %result = afir.broadcast %src outs(%dst) tmp(%tmp) {
+      afir.operand_descs = [#norow_src],
+      afir.destination_descs = [#norow_dst],
+      afir.result_descs = [#norow_dst]
+    } : !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xui8>
+        -> !ascendc.local_tensor<?xf32>
+    return
+  }
+}
+
+// 五个片段均应报告不支持，以确认各项约束均被检查。
 //
 // 2026-10-26 从三片减到两片：原第二片是「形态 B 带填充」，它已经收了（正例在
 // `afir-broadcast-tail-pitch-inner-brc.mlir`）。那一片当初的理由是「两侧要对上的是另一对
 // 数，不是生成同一个行距能解决的」——前半句对、后半句不必要：形态 B 的源那一位恒是字面量 1，
 // 只换目的地那一边就对，数值在 CPU 模拟器上验过。
-// CHECK-COUNT-2: no supported
+//
+// 2026-11-15 扩展为五个片段：支持源行距和内段填充后（正例见 `afir-broadcast-source-pitch.mlir`
+// 与 `afir-broadcast-inner-pitch.mlir`），为新增的三项约束分别补充负例。
+// CHECK-COUNT-5: no supported

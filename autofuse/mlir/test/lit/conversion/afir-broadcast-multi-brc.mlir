@@ -118,11 +118,11 @@ module {
 // kernel 文本侧：每一条调用的第三个实参都是 `1`（两趟都落 `BroadcastFirstDim`），
 // 所以整条路上没有 `Or`。
 // CPP-LABEL: void broadcast_two_brc(
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c3_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c3_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));
 // CPP: AscendC::PipeBarrier<PIPE_V>();
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c192_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(v{{[0-9]+}}), static_cast<uint32_t>(c192_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c192_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(v{{[0-9]+}}), static_cast<uint32_t>(c192_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));
 
 // CPP-LABEL: void broadcast_five_segment(
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c2_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c2_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));
 // CPP: AscendC::PipeBarrier<PIPE_V>();
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c64_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(v{{[0-9]+}}), static_cast<uint32_t>(c64_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c64_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(v{{[0-9]+}}), static_cast<uint32_t>(c64_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));

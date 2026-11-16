@@ -166,7 +166,7 @@ bool hasRankOneTernaryTiles(const TernaryTensorTypes &types) {
 bool hasMissingScalarInputInformation(Operation *operation) {
   for (unsigned index : {kSource0InputIndex, kSource1InputIndex}) {
     if (elementwise::isSingletonTensorInput(operation, index) &&
-        (!scalarReadEvent(operation, operation->getOperand(index)) || !findFunctionPipe(operation))) {
+        (scalarReadEvents(operation, index).empty() || !findFunctionPipe(operation))) {
       return true;
     }
   }
@@ -325,7 +325,7 @@ FailureOr<SmallVector<unsigned>> materializeScalarInputs(SourceOp op, TernaryOpe
     if (!elementwise::isSingletonTensorInput(op, index)) {
       continue;
     }
-    auto scalar = materializeScalarRead(op, *sources[index], scalarReadEvent(op, op->getOperand(index)), rewriter);
+    auto scalar = materializeScalarRead(op, *sources[index], recordedScalarReadEvents(op, index), rewriter);
     if (failed(scalar)) {
       return failure();
     }

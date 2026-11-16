@@ -80,4 +80,4 @@ module {
 
 // kernel 文本侧的同一件事。这一条比 IR 那几条结实：它不关心中间产生了哪些常量，
 // 只要求传给包装的那两个 `k` 就是行距。
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c16_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c16_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c16_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c16_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));

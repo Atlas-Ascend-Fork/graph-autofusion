@@ -57,6 +57,11 @@ def AscendC_BroadcastL2Op : VectorOp<"broadcast_l2", "Broadcast", [AttrSizedOper
 // 六个尺寸都留着而不是把恒为 0 的 `src_z` / `dst_z` 省掉：其余扩展 op 一律照抄 C++ 形参表，
 // 省掉一个就得在 emitter 里补一个字面量 0，把「生成的是什么」拆到两个文件里去读。
 //
+// last_dim_stride 是包装函数的第十个形参（broadcast.h:547，默认值为 1），表示形态 B 的源行距。
+// legacy 的 BroadcastOneAxis / BroadcastTwoAxis 通过 BroadcastGetLastDimStride 计算并显式传入
+// 此参数。大于 1 时，包装函数使用 BroadcastWithStride，先将源数据按步长整理为连续布局再广播。
+// 形态 A 和外层整块复制显式传入 1。ODS 保留该参数，使生成调用与 C++ 形参表一一对应。
+//
 // 扩展头写 `["broadcast.h", "duplicate.h"]`：包装的 `(1,1) -> (A,B)` 那一支调 `Duplicate`。
 // 前导 `utils.h`：`BroadcastFirstDim` 用了 `KernelUtils::BlkSize` 与 `MAX_REPEAT_TIME`，
 // 两个都只有它声明。两个头的次序与字典序一致，满足 AddKernelIncludes 那一层的约束。
@@ -68,7 +73,8 @@ def AscendC_BroadcastDim3Op
         AscendC_LocalTensor:$src,
         AnyType:$srcM, AnyType:$srcK, AnyType:$srcZ,
         AnyType:$dstM, AnyType:$dstK, AnyType:$dstZ,
-        AscendC_LocalTensor:$sharedTmpBuffer
+        AscendC_LocalTensor:$sharedTmpBuffer,
+        AnyType:$lastDimStride
     );
     let extraClassDeclaration = extraClassDeclarationBase
         # ApiExtensionHeader<["broadcast.h", "duplicate.h"], ["utils.h"]>.decl

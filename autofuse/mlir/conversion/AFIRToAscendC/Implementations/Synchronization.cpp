@@ -23,6 +23,9 @@
 #include <optional>
 #include <utility>
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
+
 using namespace mlir::afir;
 
 namespace mlir::ascend::kernel {
@@ -286,14 +289,39 @@ class LowerSyncAllOp final : public OpConversionPattern<SyncAllOp> {
 
 // 事件槽的持有者是 `TPipe`。资源物化阶段已经建了唯一的一个（`CanonicalResources.cpp`
 // 的 `ascendc.pipe`），复用它而不是再建一个——理由见头文件。
-// Query the last writer at the use, not the queue position: vector operations may
-// reuse VECIN queue storage. Keep member subindices distinct when matching views.
+// 按存储查找标量写入者，再根据写入者确定同步事件。VECIN 存储可能被 Vector 算子复用，
+// 仅按队列位置选择 MTE2_S 会遗漏矢量写入的同步。回溯时保留 subindex 视图的区分。
 namespace {
 
-Value getStorageRoot(Value value) {
+// 沿张量来源回溯到存储容器，以队列或 TBuf 的 SSA 值作为存储标识。
+// 写入者和读取者分别通过 alloc_tensor / deque_tensor 或 get_tensor 取得张量，得到的 SSA 值
+// 不同，不能直接用张量值匹配。回溯到容器后，才能找到写入者并根据其 trait 确定流水线。
+//
+// 同一队列的多个成员会归为同一存储，因此可能额外等待其他成员的写入。这种保守处理会增加
+// 同步开销，但可以避免遗漏必要的同步。
+// handedOver 表示张量是否通过 deque_tensor 或 tbuf.get_tensor 获取，仅用于 containerPipe
+// 的兜底判断。alloc_tensor 只申请张量，不表示其中已有有效数据。
+struct StorageRoot {
+  Value value;
+  bool handedOver = false;
+};
+
+StorageRoot getStorageRootInfo(Value value) {
+  StorageRoot root;
   while (Operation *def = value.getDefiningOp()) {
     if (auto cast = dyn_cast<ascendc::LocalTensorReinterpretCastOp>(def)) {
       value = cast.getIn();
+    } else if (auto allocated = dyn_cast<ascendc::TQueBindAllocTensorOp>(def)) {
+      value = allocated.getQueue();
+    } else if (auto dequeued = dyn_cast<ascendc::TQueBindDequeTensorOp>(def)) {
+      value = dequeued.getQueue();
+      root.handedOver = true;
+    } else if (auto dequeuedPos = dyn_cast<ascendc::TQueBindDequeTensorPosOp>(def)) {
+      value = dequeuedPos.getQueue();
+      root.handedOver = true;
+    } else if (auto buffer = dyn_cast<ascendc::TBufGetTensorOp>(def)) {
+      value = buffer.getBuffer();
+      root.handedOver = true;
     } else if (isa<afir::AFIRDestinationStyleInterface>(def)) {
       auto partition = afir::getOperandPartition(def);
       if (failed(partition) || partition->destinationCount != 1) {
@@ -304,97 +332,177 @@ Value getStorageRoot(Value value) {
       break;
     }
   }
-  return value;
+  root.value = value;
+  return root;
 }
 
-struct WriterEventLookup {
-  bool matched = false;
-  std::optional<ascendc::HardEvent> event;
-};
-
-WriterEventLookup findWriterEvent(Operation *anchor, Value target) {
-  for (Operation *writer = anchor->getPrevNode(); writer; writer = writer->getPrevNode()) {
-    if (!isa<afir::AFIRDestinationStyleInterface>(writer)) {
-      continue;
-    }
-    auto partition = afir::getOperandPartition(writer);
-    if (failed(partition)) {
-      continue;
-    }
-    for (Value destination : partition->destinations(writer)) {
-      if (getStorageRoot(destination) != target) {
-        continue;
-      }
-      if (writer->hasTrait<OpTrait::AFIRTransferIn>()) {
-        return {true, ascendc::HardEvent::MTE2_S};
-      }
-      if (writer->hasTrait<OpTrait::AFIRTransferOut>()) {
-        return {true, std::nullopt};
-      }
-      return {true, ascendc::HardEvent::V_S};
-    }
-  }
-  return {};
+Value getStorageRoot(Value value) {
+  return getStorageRootInfo(value).value;
 }
 
-std::optional<ascendc::HardEvent> findProducerEvent(Value source) {
-  Value current = source;
-  while (Operation *producer = current.getDefiningOp()) {
-    if (auto cast = dyn_cast<ascendc::LocalTensorReinterpretCastOp>(producer)) {
-      current = cast.getIn();
-    } else if (auto view = dyn_cast<ascendc::LocalTensorSubIndexOp>(producer)) {
-      current = view.getTensor();
-    } else if (producer->getName().getDialectNamespace() == "afir") {
-      auto partition = afir::getOperandPartition(producer);
-      if (failed(partition) || partition->destinationCount != 1) {
-        return std::nullopt;
-      }
-      current = partition->destinations(producer)[0];
-    } else {
-      break;
-    }
+// 根据写入者的 trait 确定流水线。TransferOut 由调用方判为不支持，沿用既有行为。
+afir::Pipe writerPipe(Operation *writer) {
+  if (writer->hasTrait<OpTrait::AFIRTransferIn>()) {
+    return afir::Pipe::TransferIn;
   }
-  if (auto deque = current.getDefiningOp<ascendc::TQueBindDequeTensorOp>()) {
-    if (auto queue = dyn_cast<ascendc::QueueType>(deque.getQueue().getType())) {
-      if (queue.getPosition() == ascendc::TPosition::VECIN) {
-        return ascendc::HardEvent::MTE2_S;
-      }
-      return std::nullopt;
-    }
-    if (auto queBind = dyn_cast<ascendc::QueBindType>(deque.getQueue().getType())) {
-      if (queBind.getSrcPosition() == ascendc::TPosition::VECIN) {
-        return ascendc::HardEvent::MTE2_S;
-      }
+  if (writer->hasTrait<OpTrait::AFIRTransferOut>()) {
+    return afir::Pipe::TransferOut;
+  }
+  return afir::Pipe::Vector;
+}
+
+// 仅在函数内找不到写入者时，按容器类型和位置推断流水线，兼容外部写入或手工构造的 IR 片段。
+// VECIN 对应搬入流水线，TBuf 对应矢量流水线，与 legacy 的 position 判据一致。
+//
+// 不能优先使用此规则：VECIN 存储也可能被 Vector 算子复用。此时必须根据实际写入者选择 V_S，
+// 按位置选择 MTE2_S 会遗漏矢量写入的同步。
+//
+// handedOver 还要求张量来自已有数据的获取操作。刚由 alloc_tensor 申请且没有写入者的存储
+// 继续判为不支持，避免把未初始化的数据当作可读取的标量。
+// afir-singleton-queue-producers.mlir 的 UNKNOWN 用例覆盖这一限制。
+std::optional<afir::Pipe> containerPipe(const StorageRoot &root) {
+  Value storage = root.value;
+  if (!root.handedOver) {
+    return std::nullopt;
+  }
+  if (auto queue = dyn_cast<ascendc::QueueType>(storage.getType())) {
+    if (queue.getPosition() == ascendc::TPosition::VECIN) {
+      return afir::Pipe::TransferIn;
     }
     return std::nullopt;
   }
-  if (current.getDefiningOp<ascendc::TBufGetTensorOp>()) {
-    return ascendc::HardEvent::V_S;
+  if (auto queBind = dyn_cast<ascendc::QueBindType>(storage.getType())) {
+    if (queBind.getSrcPosition() == ascendc::TPosition::VECIN) {
+      return afir::Pipe::TransferIn;
+    }
+    return std::nullopt;
+  }
+  if (isa<ascendc::TBufType>(storage.getType())) {
+    return afir::Pipe::Vector;
   }
   return std::nullopt;
 }
 
-}  // namespace
-
-std::optional<ascendc::HardEvent> scalarReadEvent(Operation *anchor, Value source) {
-  Value target = getStorageRoot(source);
-  WriterEventLookup writer = findWriterEvent(anchor, target);
-  if (writer.matched) {
-    return writer.event;
+std::optional<ascendc::HardEvent> toScalarReadEvent(afir::Pipe pipe) {
+  if (pipe == afir::Pipe::TransferOut) {
+    return std::nullopt;
   }
-  return findProducerEvent(source);
+  return toHardEvent(pipe, afir::Pipe::Scalar);
 }
 
-FailureOr<Value> materializeScalarRead(Operation *anchor, Value source, std::optional<ascendc::HardEvent> event,
+SmallVector<ascendc::HardEvent> toScalarReadEvents(ArrayRef<afir::Pipe> pipes) {
+  SmallVector<ascendc::HardEvent> events;
+  for (afir::Pipe pipe : pipes) {
+    std::optional<ascendc::HardEvent> event = toScalarReadEvent(pipe);
+    if (!event) {
+      // 任一流水线无法映射时，整体判为不支持，避免只生成部分必要的同步。
+      return {};
+    }
+    events.push_back(*event);
+  }
+  return events;
+}
+
+}  // namespace
+
+FailureOr<SmallVector<afir::Pipe>> analyzeScalarWriterPipes(Operation *anchor, unsigned inputIndex) {
+  FailureOr<afir::OperandPartition> partition = afir::getOperandPartition(anchor);
+  if (failed(partition) || inputIndex >= partition->inputCount) {
+    return failure();
+  }
+  Value source = partition->inputs(anchor)[inputIndex];
+  if (!isa<ascendc::LocalTensorType>(source.getType())) {
+    return failure();
+  }
+  auto func = anchor->getParentOfType<func::FuncOp>();
+  if (!func) {
+    return failure();
+  }
+  StorageRoot root = getStorageRootInfo(source);
+  Value target = root.value;
+  SmallVector<afir::Pipe> pipes;
+  bool transferOut = false;
+  // 遍历整个函数，不按写入者与读取者的相对位置过滤，原因见头文件中的排空语义说明。
+  // 兄弟 scf.if、循环体和程序序上位于 anchor 之后的写入者都纳入分析。
+  func.walk([&](Operation *writer) {
+    if (writer == anchor || !isa<afir::AFIRDestinationStyleInterface>(writer)) {
+      return;
+    }
+    FailureOr<afir::OperandPartition> writerPartition = afir::getOperandPartition(writer);
+    if (failed(writerPartition)) {
+      return;
+    }
+    for (Value destination : writerPartition->destinations(writer)) {
+      if (getStorageRoot(destination) != target) {
+        continue;
+      }
+      afir::Pipe pipe = writerPipe(writer);
+      transferOut |= pipe == afir::Pipe::TransferOut;
+      if (!llvm::is_contained(pipes, pipe)) {
+        pipes.push_back(pipe);
+      }
+      break;
+    }
+  });
+  if (transferOut) {
+    return failure();
+  }
+  if (pipes.empty()) {
+    if (std::optional<afir::Pipe> container = containerPipe(root)) {
+      pipes.push_back(*container);
+    }
+  }
+  // 按流水线枚举值排序，使属性中的顺序不受算子排列影响，便于稳定比较和 lit 检查。
+  llvm::sort(pipes,
+             [](afir::Pipe lhs, afir::Pipe rhs) { return static_cast<uint32_t>(lhs) < static_cast<uint32_t>(rhs); });
+  return pipes;
+}
+
+SmallVector<ascendc::HardEvent> recordedScalarReadEvents(Operation *anchor, unsigned inputIndex) {
+  auto recorded = anchor->getAttrOfType<ArrayAttr>(afir::kScalarReadSyncAttrName);
+  if (!recorded || inputIndex >= recorded.size()) {
+    return {};
+  }
+  auto entry = dyn_cast<ArrayAttr>(recorded[inputIndex]);
+  if (!entry) {
+    return {};
+  }
+  SmallVector<afir::Pipe> pipes;
+  for (Attribute pipe : entry) {
+    auto attribute = dyn_cast<afir::PipeAttr>(pipe);
+    if (!attribute) {
+      return {};
+    }
+    pipes.push_back(attribute.getValue());
+  }
+  return toScalarReadEvents(pipes);
+}
+
+SmallVector<ascendc::HardEvent> scalarReadEvents(Operation *anchor, unsigned inputIndex) {
+  if (anchor->hasAttr(afir::kScalarReadSyncAttrName)) {
+    return recordedScalarReadEvents(anchor, inputIndex);
+  }
+  FailureOr<SmallVector<afir::Pipe>> pipes = analyzeScalarWriterPipes(anchor, inputIndex);
+  if (failed(pipes)) {
+    return {};
+  }
+  return toScalarReadEvents(*pipes);
+}
+
+FailureOr<Value> materializeScalarRead(Operation *anchor, Value source, ArrayRef<ascendc::HardEvent> events,
                                        RewriterBase &rewriter) {
   auto type = dyn_cast<ascendc::LocalTensorType>(source.getType());
   Value pipe = findFunctionPipe(anchor);
-  if (!type || !event || !pipe) {
+  if (!type || events.empty() || !pipe) {
     return failure();
   }
-  Value id = rewriter.create<ascendc::TPipeFetchEventIDOp>(anchor->getLoc(), rewriter.getIntegerType(8), pipe, *event);
-  rewriter.create<ascendc::SetFlagOp>(anchor->getLoc(), *event, id);
-  rewriter.create<ascendc::WaitFlagOp>(anchor->getLoc(), *event, id);
+  // 每条流水线依次生成 FetchEventID、SetFlag、WaitFlag，不交叠事件的等待区间。
+  // FetchEventID 不占用事件槽；同类型事件若交叠，可能复用同一事件号，导致死锁或同步失效。
+  for (ascendc::HardEvent event : events) {
+    Value id = rewriter.create<ascendc::TPipeFetchEventIDOp>(anchor->getLoc(), rewriter.getIntegerType(8), pipe, event);
+    rewriter.create<ascendc::SetFlagOp>(anchor->getLoc(), event, id);
+    rewriter.create<ascendc::WaitFlagOp>(anchor->getLoc(), event, id);
+  }
   Value zero = rewriter.create<arith::ConstantIndexOp>(anchor->getLoc(), 0);
   return rewriter.create<ascendc::LocalTensorGetValueOp>(anchor->getLoc(), type.getElementType(), source, zero)
       .getResult();

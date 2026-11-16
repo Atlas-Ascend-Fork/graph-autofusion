@@ -98,6 +98,9 @@ void addAFIRMaterialization(OpPassManager &passManager) {
   // 同步必须先于实现选择：此 pass 产生 AFIR 同步算子（V -> V 屏障），需先选实现再下降。
   // 旧路径在 conversion 内、实现选择后运行，当时只产生 AscendC 算子。
   passManager.addPass(createAFIRPipelineSyncPass());
+  // 提前分析标量读取的同步来源并记录为属性，避免在下降阶段的混合 IR 中遗漏写入者。
+  // 必须在资源物化之后、实现选择之前，见 AFIRScalarReadSync.cpp 的文件头。
+  passManager.addPass(createAFIRScalarReadSyncPass());
   // 缓存守卫只包围算子计算，资源生命周期操作和同步边仍须每轮执行。
   // 因此在资源物化和同步插入之后添加守卫，见 ExecConditionPass.cpp。
   passManager.addPass(afir::createAFIRExecConditionPass());

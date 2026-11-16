@@ -161,7 +161,7 @@ module @plan0 attributes {
 
 // kernel 文本侧：一条 `Broadcast`，第三个实参是 `1`。
 // CPP: DataCopyPadExtend<float>(
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(v{{[0-9]+}}), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(v{{[0-9]+}}), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));
 // CPP: DataCopyPadExtend<float>(
 
 // 选中的是分段那一档，不是 `Duplicate` 那一档——源不是一个值，选错会静默把源的第 0 个
