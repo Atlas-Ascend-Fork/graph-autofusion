@@ -206,6 +206,12 @@ MLIR 这边也有这条路（`DataMovementMapping::Api::DataCopyPadExtend`），
 
 ### 需求 1：`afir.broadcast` 常量源一档的 conversion 实现
 
+> 2026-11-13 补：本节说的是**源为一块 tile** 的那一支（legacy `BroadcastScalar` 的第三支）。
+> 源为**裸标量**的那一支（legacy 第一支 `in.is_constant`，bridge 对 ASCIR `Scalar` /
+> `IndexExpr` 节点的产物）当时没有建模，ODS 层面连表达都表达不出来，后由
+> `2026-11-13-afir-broadcast-scalar-source-design.md` 补齐：另注册
+> `broadcast.scalar.duplicate{,_reg_base}` 两个 implementation，与本节这两个判据互斥。
+
 1. **行为**：源张量在所有向量化轴上 repeat 均为 1 时，发
    `AscendC::Duplicate(dst[0], src.GetValue(0), count)`，前置一对标量读事件。
 2. **输入**：`afir.broadcast`，一个输入、一个 destination、mem 侧另有一块 tmp buffer；
