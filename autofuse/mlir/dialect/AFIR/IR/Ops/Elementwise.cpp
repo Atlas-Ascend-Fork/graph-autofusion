@@ -234,7 +234,8 @@ static bool verifyBroadcastOuterStrides(Operation *op, ArrayRef<int64_t> sourceS
     return llvm::any_of(broadcastAxes, [&](size_t broadcastAxis) { return broadcastAxis > axis; });
   };
   for (size_t axis = 0; axis < destinationShape.size(); ++axis) {
-    if (sourceShape[axis] != destinationShape[axis] ||
+    // A shared unit axis never advances either address, so its strides need not agree.
+    if (sourceShape[axis] != destinationShape[axis] || (sourceShape[axis] == 1 && destinationShape[axis] == 1) ||
         sourceDescriptor.getStrides()[axis] == destinationDescriptor.getStrides()[axis]) {
       continue;
     }

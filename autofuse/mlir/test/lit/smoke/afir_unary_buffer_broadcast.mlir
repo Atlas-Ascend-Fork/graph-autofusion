@@ -143,3 +143,14 @@ func.func private @broadcast_outer_pitch_must_match_inner_extent(
   } : memref<8x1xf32>, memref<8x8xf32> -> memref<8x8xf32>
   return
 }
+
+// -----
+
+// Ignoring the shared unit axis must not skip the invalid pitch on axis 1.
+#src = #afir.tensor_desc<axis = [0, 1, 2], repeats = [#afir.expr<"1">, #afir.expr<"8">, #afir.expr<"1">], strides = [#afir.expr<"1">, #afir.expr<"1">, #afir.expr<"0">], role = <compute>>
+#dst = #afir.tensor_desc<axis = [0, 1, 2], repeats = [#afir.expr<"1">, #afir.expr<"8">, #afir.expr<"8">], strides = [#afir.expr<"72">, #afir.expr<"9">, #afir.expr<"1">], role = <compute>>
+func.func @unit_axis_does_not_hide_invalid_outer_pitch(%src: memref<1x8x1xf32>, %dst: memref<1x8x8xf32>) {
+  // expected-error @+1 {{destination outer stride must equal source stride multiplied by later broadcast extents}}
+  %r = afir.exp %src outs(%dst) {afir.operand_descs = [#src], afir.destination_descs = [#dst], afir.result_descs = [#dst]} : memref<1x8x1xf32>, memref<1x8x8xf32> -> memref<1x8x8xf32>
+  return
+}
