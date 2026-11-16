@@ -81,6 +81,7 @@ llvm::ArrayRef<AFIRBridgeOpMapping> getAFIRBridgeableOperations();
   M("Nddma", afir::NddmaOp, BridgeOpForm::Both)                                             \
   M("Broadcast", afir::BroadcastOp, BridgeOpForm::Both)                                     \
   M("RemovePad", afir::RemovePadOp, BridgeOpForm::Both)                                     \
+  M("Ub2ub", afir::Ub2ubOp, BridgeOpForm::Both)                                             \
   M("Transpose", afir::TransposeOp, BridgeOpForm::Both)                                     \
   M("Pad", afir::PadOp, BridgeOpForm::Both)                                                 \
   M("Cast", afir::CastOp, BridgeOpForm::Both)                                               \

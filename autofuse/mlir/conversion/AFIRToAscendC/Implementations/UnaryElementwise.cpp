@@ -94,6 +94,10 @@ constexpr uint32_t kFloatElementTypes = kF16 | kF32;
 constexpr uint32_t kAbsRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kBF16;
 // `neg`：legacy 两侧都收 i16，原先注册处漏了。
 constexpr uint32_t kNegElementTypes = kF16 | kF32 | kI16 | kI32;
+// `ub2ub`：legacy 两侧共九种（reg 侧多一个 i64），这里是其中 AFIR 的 `ElementTypes`
+// 有位的那六种。`i8` / `ui32` / `ui64` / `i64` 没有位（`elementTypeBit` 答 0），够不着
+// 也就谈不上收；两侧都没有 bf16，所以这里也不能有。
+constexpr uint32_t kUb2ubElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16;
 
 // 结果元素类型与输入的关系。绝大多数是 `Same`；`Uint8Predicate` 是输入浮点、结果一个
 // 字节真值的那一类（isnan / isfinite / isinf）；`CastPair` 只有 `afir.cast`——它的输入
@@ -729,6 +733,16 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
                                                       kFloatAndI32ElementTypes)) ||
       failed(registerUnary<SqrtOp, ascendc::SqrtL2Op>(registry, "sqrt.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                       kFloatElementTypes))) {
+    return failure();
+  }
+
+  // `afir.ub2ub`：两侧供给表给的是同一个 `AscendC::DataCopy`，count 经
+  // `KernelUtils::BlkAlign<T>` 抬到 32B 对齐（矩阵 tier D0，`Ub2ubApiCall`）。目标 op 与
+  // `afir.pad` 没补位那一支共用——那条退化形态发的就是同一句调用，形参表逐字相同，所以
+  // 这里不另造一份 implementation，走一元 elementwise 那条三实参的路。
+  // `BlkAlign` 出自 autofuse 自己的 `utils.h`，所以家族是 `Shared` 而不是 `Any`。
+  if (failed(registerUnary<Ub2ubOp, ascendc::DataCopyBlkAlignedOp>(registry, "ub2ub.tensor", ApiFamily::Shared,
+                                                                   ResultElementRule::Same, kUb2ubElementTypes))) {
     return failure();
   }
 
