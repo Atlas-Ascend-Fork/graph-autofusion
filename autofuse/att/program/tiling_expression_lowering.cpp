@@ -17,6 +17,9 @@ using Op = TilingProgramIROpcode;
 using Type = TilingProgramIRValueType;
 using Status = TilingExpressionStatus;
 using ValueStatus = TilingProgramValueStatus;
+constexpr uint32_t kTilingTernaryFirstArgumentIndex = 0;
+constexpr uint32_t kTilingTernarySecondArgumentIndex = 1;
+constexpr uint32_t kTilingTernaryThirdArgumentIndex = 2;
 TilingExpressionLoweringError Error(Status status, uint32_t node = UINT32_MAX) {
   return {status, node, {}};
 }
@@ -69,10 +72,11 @@ TilingExpressionLoweringError ValidateNode(const TilingProgramIRExpressionDefini
       break;
     case Kind::kConditional:
       canonical.arg_count = kTilingTernaryArity;
-      if (node.arg_count != kTilingTernaryArity || type(0) != Type::kBoolean || type(1) != type(2)) {
+      if (node.arg_count != kTilingTernaryArity || type(kTilingTernaryFirstArgumentIndex) != Type::kBoolean ||
+          type(kTilingTernarySecondArgumentIndex) != type(kTilingTernaryThirdArgumentIndex)) {
         return Error(Status::kInvalidProgram, id);
       }
-      actual = type(1);
+      actual = type(kTilingTernarySecondArgumentIndex);
       break;
     case Kind::kOperation: {
       canonical.arg_count = node.arg_count;
@@ -87,7 +91,8 @@ TilingExpressionLoweringError ValidateNode(const TilingProgramIRExpressionDefini
         actual = Type::kBoolean;
         break;
       }
-      if (node.arg_count == kTilingTernaryArity && type(1) != type(2)) {
+      if (node.arg_count == kTilingTernaryArity &&
+          type(kTilingTernarySecondArgumentIndex) != type(kTilingTernaryThirdArgumentIndex)) {
         return Error(Status::kInvalidProgram, id);
       }
       const auto status = node.arg_count == 1 ? GetTilingProgramIRUnaryType(node.opcode, type(0), &actual)
