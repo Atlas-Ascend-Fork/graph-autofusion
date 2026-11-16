@@ -113,14 +113,14 @@ module {
 // 同一件事在 kernel 文本上。第三个实参恒为 `1`（形态 A）或第五个恒为 `0`（形态 B）——
 // 这是「生成的调用落不到 `BroadcastMiddleDim` 的 `Or`」在编译期唯一钉得住的形式。
 // CPP-LABEL: void broadcast_outer_dim(
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));
 
 // CPP-LABEL: void broadcast_inner_dim(
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));
 
 // CPP-LABEL: void broadcast_outer_loop(
 // CPP: for (uint32_t
-// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}});
+// CPP: Broadcast(v{{[0-9]+}}, v{{[0-9]+}}, static_cast<uint32_t>(c1_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), static_cast<uint32_t>(c4_idx), static_cast<uint32_t>(c8_idx), static_cast<uint32_t>(c0_idx), v{{[0-9]+}}, static_cast<uint32_t>(c1_idx));
 
 // 三个 func 各选中分段那一档，不是 `Duplicate` 那一档。
 // SELECT: ascend.implementation = {id = "broadcast.tensor.segmented", kind = "ascendc_api"}

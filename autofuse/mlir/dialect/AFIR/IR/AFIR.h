@@ -107,7 +107,8 @@ class AFIRRejectUnknownAttributes : public TraitBase<ConcreteType, AFIRRejectUnk
         afir::kSchedAttrName,           afir::kAxisBindingAttrName,    afir::kSymbolicShapeAttrName,
         afir::kShapeExprAttrName,       afir::kDimSymbolsAttrName,     afir::kVarRelationsAttrName,
         afir::kShapeGuardsAttrName,     afir::kShapeAssertsAttrName,   afir::kBufferDescAttrName,
-        afir::kReductionDomainAttrName, afir::kReduceScratchRolesAttr, afir::kReduceScratchScopeAttr};
+        afir::kReductionDomainAttrName, afir::kReduceScratchRolesAttr, afir::kReduceScratchScopeAttr,
+        afir::kScalarReadSyncAttrName};
     return llvm::is_contained(known, name);
   }
 

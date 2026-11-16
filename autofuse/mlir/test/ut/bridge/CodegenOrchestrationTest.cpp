@@ -12,6 +12,7 @@
 #include "bridge/ScheduleToAfir/ScheduleToAfir.h"
 #include "optimize/optimize.h"
 #include "common/autofuse_config/auto_fuse_config.h"
+#include "common/codegen_workspace_test_utils.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "test/Support/ReduceGraphBuilder.h"
 
@@ -364,6 +365,23 @@ TEST(CodegenOrchestrationTest, ValidFixtureSucceeds) {
   EXPECT_NE(result.tiling_data.find("inline void set_s0(uint32_t value) { "
                                     "graph0_result0_g0_tiling_data.set_s0(value); }"),
             std::string::npos);
+}
+
+TEST(CodegenOrchestrationTest, WorkspaceUsesMixedAivKernelTaskType) {
+  mlir::test::ScopedEnvVar scoped_mlir_env("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;");
+  auto fused_schedule_result = BuildValidFusedScheduleResult();
+  fused_schedule_result.workspace_nodes = autofuse::tests::MakeWorkspaceFusedScheduleResult(1).workspace_nodes;
+  auto &workspace = fused_schedule_result.workspace_nodes.front()->outputs[0].attr;
+  workspace.mem.tensor_id = 5;
+  workspace.mem.position = af::Position::kPositionGM;
+  workspace.dtype = ge::DT_FLOAT16;
+  workspace.repeats = {af::ops::One};
+
+  codegen::CodegenResult result;
+  ASSERT_EQ(mlir::bridge::RunMlirCodegen(fused_schedule_result, mlir::bridge::MlirCallerScene::kInductor, "Ascend910B1",
+                                         result),
+            mlir::bridge::MlirCodegenStatus::kSucceeded);
+  EXPECT_NE(result.kernel.find("KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);"), std::string::npos);
 }
 
 TEST(CodegenOrchestrationTest, ValidFixtureDumpsEachLoweringPassResult) {

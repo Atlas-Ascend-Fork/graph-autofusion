@@ -19,6 +19,7 @@ void registerAFIRToAscendCPasses() {
   registerAFIRKernelBodySignaturePass();
   registerAscendCLoopGeneratePass();
   registerAFIRMemoryAllocatePass();
+  registerAFIRScalarReadSyncPass();
   registerAFIRSelectImplementationStandalonePass();
   registerConvertAFIRToAscendCStandalonePass();
   registerAFIRVectorFuncToRegBasePass();

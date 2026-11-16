@@ -132,6 +132,17 @@ LogicalResult mlir::printOperation(CodeEmitter& codeEmitter, func::FuncOp functi
     bindParameterNames(codeEmitter, functionOp);
     FAIL_OR(emitFunctionSignature(codeEmitter, functionOp));
     os.indent();
+    if (functionOp->hasAttr(ascendc::attr::global)) {
+        // 任务类型由桥接层决策后以模块属性 autofuse.kernel_task_type 传入,这里照单打印;
+        // 缺省(无属性)兜底 AIV_ONLY,兼容不经桥接的直跑场景。
+        // isMainFunction 现在是 emitFunctionSignature 的局部变量,此处用同一判据重算。
+        auto module = functionOp->getParentOfType<mlir::ModuleOp>();
+        auto taskTypeAttr = module ? module->getAttrOfType<mlir::StringAttr>("autofuse.kernel_task_type")
+                                   : mlir::StringAttr();
+        os << "KERNEL_TASK_TYPE_DEFAULT("
+           << (taskTypeAttr ? taskTypeAttr.getValue() : llvm::StringRef("KERNEL_TYPE_AIV_ONLY"))
+           << ");\n";
+    }
 
     Region::BlockListType& blocks = functionOp.getBlocks();
     // Create label names for basic blocks.

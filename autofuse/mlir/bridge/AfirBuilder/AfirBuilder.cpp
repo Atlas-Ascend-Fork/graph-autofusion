@@ -407,6 +407,11 @@ struct NodeBuildContext {
   // 是否位于 afir.vector_func region 内。内部值为寄存器，不挂 buffer descriptor；
   // 否则资源收集会因缺少 buffer_id 失败，见 Analysis/ResourceIds.cpp。
   bool insideVectorFunc = false;
+  // 本节点命中的 LogicalOverride 是 Output 借用（typeOnlyBorrow=true；workspace
+  // 折叠的 override 该位为 false）时为 true：resultValue 借来的退化描述子只贡献
+  // 类型与 indexing_maps；Store 写外部 GM 标量时 destination_descs 改用节点自身
+  // output 的 `.y` GM 步长表（见 `appendBufferNodeAttrs`），operand_descs 不受影响。
+  bool resultIsTypeOnlyBorrow = false;
 
   MLIRContext *context() const {
     return builder.getContext();
@@ -597,11 +602,25 @@ LogicalResult appendBufferNodeAttrs(const NodeBuildContext &nodeCtx, SmallVector
   const TensorValueDTO &resultValue = nodeCtx.resultValue;
   MLIRContext *ctx = nodeCtx.context();
   FailureOr<ArrayAttr> operandDescs = makeTensorDescArrayAttr(ctx, node.inputs);
+  // Store 写外部 GM 输出形参（rank-0 整体句柄）且结果被 Output 借用改写时，
+  // destination 描述子换用 Store 自己的 `.y`：那份 stride 表是输出 GM 的真实寻址
+  // 步长。借用件若进了 destination_descs，下降侧 getGlobalDescriptor 拿不到
+  // stride 表，只能信 operand（生产者）的 strides——广播视图的 stride 0 会传染
+  // 到输出寻址，合并轴模板（B0Y1 的 a0a1T）里 expand 的第二份拷贝写回第 0 份的
+  // 位置，输出后半段从未被写（2026-11-15 tc_af_torch_aten_expand_0006，精度
+  // 10000）。operand 侧不动：UB 值的使用点描述子必须与定义点一致
+  // （CanonicalBindings）。带形 destination（片上/内部存储）不在此列——它们的
+  // 值 rank 与轴表必须逐轴对齐；无借用与 workspace 折叠同样不受影响。
+  const bool writesExternalGmScalar =
+      nodeCtx.externalDestination && mlir::isa<mlir::MemRefType>(nodeCtx.externalDestination.getType()) &&
+      mlir::cast<mlir::MemRefType>(nodeCtx.externalDestination.getType()).getRank() == 0;
   SmallVector<TensorValueDTO, 1> destinationValues;
-  if (destinations.empty()) {
-    destinationValues.push_back(resultValue);
-  } else {
+  if (!destinations.empty()) {
     destinationValues.assign(destinations.begin(), destinations.end());
+  } else if (node.type == "Store" && nodeCtx.resultIsTypeOnlyBorrow && writesExternalGmScalar) {
+    destinationValues.push_back(node.output);
+  } else {
+    destinationValues.push_back(resultValue);
   }
   FailureOr<ArrayAttr> destinationDescs = makeTensorDescArrayAttr(ctx, destinationValues);
   if (failed(operandDescs) || failed(destinationDescs)) {
@@ -1006,8 +1025,20 @@ FailureOr<TensorValueDTO> foldBlockScatteredDestination(const NodeInfo &store, L
 }
 
 // 借用 Output 描述子，并持有为 workspace Store 新建的折叠描述子。
+//
+// Output 借用与 workspace 折叠的效力不同：前者只为把 Store 的结果类型对上 GM 签名
+// （标量 memref），描述子本身是退化的（无 axis/strides）——它绝不能进
+// `afir.destination_descs`，否则 Store 自身 `.y` 上的 GM stride 表被丢掉，下降侧
+// `getGlobalDescriptor` 只能信 operand（生产者）的 strides。生产者是广播视图时
+// stride 0 会传染到输出寻址：合并轴模板（如 B0Y1 的 a0a1T）里 expand 的第二份
+// 拷贝全部写回第 0 份的位置（2026-11-15 tc_af_torch_aten_expand_0006，精度 10000）。
+struct LogicalOverride {
+  const TensorValueDTO *dto = nullptr;
+  // true = Output 节点借用：只改类型与 indexing_maps，描述子各节点仍用自己的。
+  bool typeOnlyBorrow = false;
+};
 struct LogicalOverrides {
-  llvm::StringMap<const TensorValueDTO *> byNode;
+  llvm::StringMap<LogicalOverride> byNode;
   std::vector<std::unique_ptr<TensorValueDTO>> owned;
 };
 
@@ -1015,7 +1046,7 @@ FailureOr<LogicalOverrides> makeLogicalOverrides(const TemplateInfo &tmpl, Locat
   LogicalOverrides overrides;
   for (const auto &node : tmpl.nodes) {
     if (node.type == "Output" && node.input_names.size() == 1) {
-      overrides.byNode[node.input_names[0]] = &node.output;
+      overrides.byNode[node.input_names[0]] = {&node.output, /*typeOnlyBorrow=*/true};
       continue;
     }
     if (node.type != "Workspace" || node.input_names.size() != 1) {
@@ -1030,7 +1061,7 @@ FailureOr<LogicalOverrides> makeLogicalOverrides(const TemplateInfo &tmpl, Locat
         return failure();
       }
       overrides.owned.push_back(std::make_unique<TensorValueDTO>(std::move(*folded)));
-      overrides.byNode[producer.name] = overrides.owned.back().get();
+      overrides.byNode[producer.name] = {overrides.owned.back().get(), /*typeOnlyBorrow=*/false};
     }
   }
   return overrides;
@@ -1042,7 +1073,7 @@ struct TemplateBuildState {
   bool bufferForm;
   // region 内建的节点要少挂一样东西，见 `NodeBuildContext::insideVectorFunc`。
   bool insideVectorFunc = false;
-  llvm::StringMap<const TensorValueDTO *> logicalOverrides;
+  llvm::StringMap<LogicalOverride> logicalOverrides;
   const llvm::StringMap<Value> &externalDestinations;
   llvm::StringMap<Value> &valueMap;
 };
@@ -1436,8 +1467,10 @@ LogicalResult buildComputeNode(OpBuilder &builder, Location loc, const NodeInfo 
   }
 
   const TensorValueDTO *resultInfo = &node.output;
+  bool resultIsTypeOnlyBorrow = false;
   if (auto override = state.logicalOverrides.find(node.name); override != state.logicalOverrides.end()) {
-    resultInfo = override->second;
+    resultInfo = override->second.dto;
+    resultIsTypeOnlyBorrow = override->second.typeOnlyBorrow;
   }
   Type resultType = bufferForm ? Type(makeBufferType(builder.getContext(), *resultInfo))
                                : Type(makeTensorType(builder.getContext(), resultInfo->tensor));
@@ -1451,7 +1484,8 @@ LogicalResult buildComputeNode(OpBuilder &builder, Location loc, const NodeInfo 
       externalDestination = destination->second;
     }
   }
-  NodeBuildContext nodeCtx{builder, loc, node, operands, *resultInfo, externalDestination, state.insideVectorFunc};
+  NodeBuildContext nodeCtx{
+      builder, loc, node, operands, *resultInfo, externalDestination, state.insideVectorFunc, resultIsTypeOnlyBorrow};
   Value result = buildNodeOp(nodeCtx, cast<ShapedType>(resultType), bufferForm);
   if (!result) {
     return failure();
@@ -1461,7 +1495,7 @@ LogicalResult buildComputeNode(OpBuilder &builder, Location loc, const NodeInfo 
 }
 
 LogicalResult buildTemplateNodes(OpBuilder &builder, Location loc, const TemplateInfo &tmpl,
-                                 const llvm::StringMap<const TensorValueDTO *> &overrides,
+                                 const llvm::StringMap<LogicalOverride> &overrides,
                                  const llvm::StringMap<Value> &externalDestinations, llvm::StringMap<Value> &valueMap) {
   TemplateBuildState state{tmpl.buffer_form, /*insideVectorFunc=*/false, overrides, externalDestinations, valueMap};
   for (const auto &node : tmpl.nodes) {
@@ -1801,15 +1835,19 @@ void mapTemplateOutputs(Block *entry, const TemplateInfo &tmpl, llvm::StringMap<
 // workspace 作源时取自身 GM 视图，作汇时优先取 Store 的折叠视图。
 // memref 描述访问视图，实际分配容量由 workspace_plan 管理。
 const TensorValueDTO *workspaceValueInfo(const TemplateInfo &tmpl, const NodeInfo &node,
-                                         const llvm::StringMap<const TensorValueDTO *> &overrides) {
-  // 作汇时自身描述可能覆盖整块 GM，必须优先使用生产者视图。
+                                         const llvm::StringMap<LogicalOverride> &overrides) {
+  // 作汇时自身描述可能覆盖整块 GM，必须优先使用生产者视图。Output 的类型借用
+  // 是退化描述子，定不了 workspace 的形状；那种组合下用 Store 自己的 `.y`。
   if (node.input_names.size() == 1) {
     for (const NodeInfo &producer : tmpl.nodes) {
       if (!llvm::is_contained(producer.output_names, node.input_names.front())) {
         continue;
       }
       auto folded = overrides.find(producer.name);
-      return folded == overrides.end() ? &producer.output : folded->second;
+      if (folded == overrides.end() || folded->second.typeOnlyBorrow) {
+        return &producer.output;
+      }
+      return folded->second.dto;
     }
   }
   if (!node.output.tensor.shape.empty()) {
@@ -1819,8 +1857,8 @@ const TensorValueDTO *workspaceValueInfo(const TemplateInfo &tmpl, const NodeInf
 }
 
 LogicalResult mapTemplateWorkspaces(OpBuilder &builder, Location loc, const TemplateInfo &tmpl,
-                                    const llvm::StringMap<const TensorValueDTO *> &overrides,
-                                    llvm::StringMap<Value> &valueMap, llvm::StringMap<Value> &externalDestinations) {
+                                    const llvm::StringMap<LogicalOverride> &overrides, llvm::StringMap<Value> &valueMap,
+                                    llvm::StringMap<Value> &externalDestinations) {
   if (!tmpl.buffer_form) {
     return success();
   }

@@ -65,9 +65,12 @@ add_mlir_e2e_cpu_case(load_broadcast_segmented_store_1x5
 #   - `[2,3,5,7,1] -> [2,3,5,7,11]`：五轴、尾轴 11 × 4B = 44B（行距 48B），广播段是最内
 #     段而外面还有三段普通段 —— 覆盖「带填充的窗口调用嵌在多层循环里」，只留两段的那一格
 #     测不出外层偏移按行距算对没对。
+# 在此形态 B 用例中编入 WrapperPitchTest.cpp，直接调用包装函数，补充源行距和内段填充的数值验证。
+# 现有 E2E 构图尚未生成这两种布局，原因见该文件的说明。
 add_mlir_e2e_cpu_case(load_broadcast_segmented_store_33x1
     OUTPUT_SHAPE "[33, 5]"
     INPUT_SHAPES "[33, 1]"
+    TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/KernelTest.cpp ${CMAKE_CURRENT_SOURCE_DIR}/WrapperPitchTest.cpp
 )
 
 add_mlir_e2e_cpu_case(load_broadcast_segmented_store_2x3x5x7x1

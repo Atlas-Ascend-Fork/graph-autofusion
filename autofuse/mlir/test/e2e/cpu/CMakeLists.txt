@@ -80,6 +80,7 @@ add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_add_store" cases
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_store_direct" cases/load_store_direct)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/workspace_readback" cases/workspace_readback)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_duplicate_store" cases/load_broadcast_duplicate_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_scalar_broadcast_store" cases/load_scalar_broadcast_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_segmented_store" cases/load_broadcast_segmented_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_abs_store" cases/load_broadcast_abs_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_broadcast_add_store" cases/load_broadcast_add_store)
@@ -219,6 +220,7 @@ add_custom_target(check-e2e-cpu-nonreduce-addressing DEPENDS
     check-e2e-cpu-load_scalar_add_store_201x39
     check-e2e-cpu-load_select_store_4x48x69x2
     check-e2e-cpu-load_broadcast_duplicate_store_131
+    check-e2e-cpu-load_scalar_broadcast_store_131
     check-e2e-cpu-load_broadcast_segmented_store_1x5
     check-e2e-cpu-load_broadcast_segmented_store_8x1
     check-e2e-cpu-load_broadcast_chain_store_1x1x8)

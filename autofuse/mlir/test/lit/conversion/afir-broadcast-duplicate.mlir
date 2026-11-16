@@ -20,9 +20,11 @@
 // RUN: af-opt --afir-plan-candidate-lowering-pipeline --target=Ascend910B1 %s -o %t.mlir
 // RUN: af-opt --afir-aggregate-launch --afir-aggregate-launch-graph-name=broadcast_duplicate %t.mlir \
 // RUN:   | FileCheck %s --check-prefix=CPP
+// 选出来的必须是 tile 源那一档。`--implicit-check-not` 钉的是互斥：标量源那一档收到一块
+// tile 要答不支持，它要是也收下了，这里就会出现两个 id 里的另一个。
 // RUN: af-opt --target=Ascend910B1 --afir-kernel-body-signature --afir-materialize-tiling-params \
 // RUN:   --afir-loop-generate --afir-memory-allocate --afir-pipeline-sync --afir-select-implementation %s \
-// RUN:   | FileCheck %s --check-prefix=SELECT
+// RUN:   | FileCheck %s --check-prefix=SELECT --implicit-check-not=broadcast.scalar.duplicate
 // mem 侧的调度给一块 tmp buffer，reg 侧不给（`BroadcastAscIrCodegenImplV2` 没有
 // `CalcTmpBufSize` 覆写）。所以带 tmp 的这一份在 reg 侧选不出实现——两侧分成两个
 // implementation 的理由就是这个，不是芯片。

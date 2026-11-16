@@ -10,6 +10,14 @@
 
 Connect the constant-source afir.broadcast path through the Duplicate implementation on both backends, with bridge and lowering coverage.
 
+> Added 2026-11-13: what this record covers is the branch whose **source is a tile** (the third branch
+> of legacy's `BroadcastScalar`). The branch whose source is a **bare scalar** (legacy's first branch,
+> `in.is_constant`, which is what the bridge produces for ASCIR `Scalar` / `IndexExpr` nodes) was not
+> modelled at the time and could not even be expressed at the ODS level; it was completed later by
+> [the scalar-source design](2026-11-13-afir-broadcast-scalar-source-design_en.md), which registers
+> `broadcast.scalar.duplicate{,_reg_base}` as two further implementations whose predicates are
+> mutually exclusive with the two described here.
+
 ### Scope
 
 This page summarizes the linked Autofuse MLIR record. It introduces no new runtime

@@ -252,12 +252,18 @@ std::optional<BinaryOperandOrder> binaryOperandOrder(Operation *op, ScalarOperan
                        isa<ascendc::LocalTensorType>(inputs[1].getType()) && scalar != 1U);
 }
 
-elementwise::LocalViewCompatibility checkBinaryLocalViews(Operation *op, ScalarOperand form,
+// `allowInPlaceAnalysis` 决定标量读同步事件走哪个来源：能力查询（可能发生在计算算子尚未
+// 下降时）传 true，取 `scalarReadEvents` 的就地分析兜底；下降 pattern 的门禁传 false，只读
+// `recordedScalarReadEvents` 的属性，与 `materializeScalarOperand` 真正下降时的来源一致——
+// 否则门禁会在属性缺席、就地分析又非空时通过，而下降因属性读到空集合必然失败。
+elementwise::LocalViewCompatibility checkBinaryLocalViews(Operation *op, ScalarOperand form, bool allowInPlaceAnalysis,
                                                           bool *wholeTensor = nullptr) {
   auto scalar = scalarTensorInput(op, form);
   if (scalar) {
     auto partition = afir::getOperandPartition(op);
-    if (!scalarReadEvent(op, partition->inputs(op)[*scalar]) || !findFunctionPipe(op)) {
+    SmallVector<ascendc::HardEvent> events =
+        allowInPlaceAnalysis ? scalarReadEvents(op, *scalar) : recordedScalarReadEvents(op, *scalar);
+    if (events.empty() || !findFunctionPipe(op)) {
       return elementwise::LocalViewCompatibility::MissingInformation;
     }
   }
@@ -330,7 +336,7 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     }
     bool wholeTensor = true;
     const elementwise::LocalViewCompatibility compatibility =
-        checkBinaryLocalViews(operation, mapping_->scalarOperand, &wholeTensor);
+        checkBinaryLocalViews(operation, mapping_->scalarOperand, /*allowInPlaceAnalysis=*/true, &wholeTensor);
     if (compatibility == elementwise::LocalViewCompatibility::UnsupportedShape) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
@@ -438,7 +444,8 @@ struct BinaryOperandTiles {
 
 template <typename SourceOp>
 LogicalResult checkConversionLocalViews(SourceOp op, ScalarOperand form) {
-  const elementwise::LocalViewCompatibility compatibility = checkBinaryLocalViews(op, form);
+  const elementwise::LocalViewCompatibility compatibility =
+      checkBinaryLocalViews(op, form, /*allowInPlaceAnalysis=*/false);
   if (compatibility != elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
@@ -452,8 +459,7 @@ FailureOr<std::optional<unsigned>> materializeScalarOperand(SourceOp op, Value (
   if (!scalarIndex) {
     return scalarIndex;
   }
-  auto scalar =
-      materializeScalarRead(op, operands[*scalarIndex], scalarReadEvent(op, op->getOperand(*scalarIndex)), rewriter);
+  auto scalar = materializeScalarRead(op, operands[*scalarIndex], recordedScalarReadEvents(op, *scalarIndex), rewriter);
   if (failed(scalar)) {
     return failure();
   }

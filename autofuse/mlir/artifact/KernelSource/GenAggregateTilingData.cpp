@@ -225,5 +225,13 @@ FailureOr<OwningOpRef<ModuleOp>> mlir::ascend::kernel::runGenAggregateTilingData
   }
   attachAggregateMetadata(*entry, aggregate);
   attachPlanContracts(builder, *entry, *infos);
+  // 桥接层(ScheduleToAfir)在plan module上写的kernel任务类型属性,需要拷贝到entry module;
+  // 发射层(Func.cpp)从entry module读,不拷贝则永远走兜底AIV_ONLY,修复不生效
+  constexpr llvm::StringLiteral kKernelTaskTypeAttr = "autofuse.kernel_task_type";
+  // 任务类型取第一个 plan module:当前一次聚合只对应一套任务类型(纯AIV桥接决策),
+  // 多 plan 场景落地时需在此明确不一致时的策略。
+  if (auto taskType = planModules.front()->getAttrOfType<mlir::StringAttr>(kKernelTaskTypeAttr)) {
+    (*entry)->setAttr(kKernelTaskTypeAttr, taskType);
+  }
   return entry;
 }
