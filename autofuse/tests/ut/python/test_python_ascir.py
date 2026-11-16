@@ -182,6 +182,49 @@ class TestAscir:
             )
 
     @staticmethod
+    def test_graph_create_node_with_argmax_with_value_api():
+        ascir.utils.set_platform("3510", 1, 245760)
+        graph = ascir.HintGraph("test")
+        size = graph.create_size("size")
+        axis = graph.create_axis("axis", size)
+
+        x = ascir_api.Data(graph, dtype=ascir.dtypes.float32)
+        value, index = ascir_api.ArgmaxWithValue(
+            graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+        )
+        assert value.dtype == ascir.dtypes.float32
+        assert index.dtype == ascir.dtypes.int64
+        assert value.axis == [axis.id]
+        assert index.axis == [axis.id]
+        assert value.size == [size]
+        assert index.size == [size]
+
+        debug_str = ascir.utils.debug_str(graph)
+        assert debug_str
+
+    @staticmethod
+    def test_graph_create_node_with_argmax_with_value_int64_api():
+        # FR13：前端支持 INT64 输入，value 输出跟随输入 dtype，index 由参数指定
+        ascir.utils.set_platform("3510", 1, 245760)
+        graph = ascir.HintGraph("test_int64")
+        size = graph.create_size("size")
+        axis = graph.create_axis("axis", size)
+
+        x = ascir_api.Data(graph, dtype=ascir.dtypes.int64)
+        value, index = ascir_api.ArgmaxWithValue(
+            graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+        )
+        assert value.dtype == ascir.dtypes.int64
+        assert index.dtype == ascir.dtypes.int64
+        assert value.axis == [axis.id]
+        assert index.axis == [axis.id]
+        assert value.size == [size]
+        assert index.size == [size]
+
+        debug_str = ascir.utils.debug_str(graph)
+        assert debug_str
+
+    @staticmethod
     def test_index_expr_and_arange_api():
         ascir.utils.set_platform("3510", 1, 245760, "SOC_EMPTY")
         try:

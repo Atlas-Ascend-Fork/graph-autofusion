@@ -1603,17 +1603,48 @@ def Max(
     )
 
 
-def ArgMax(
+def Argmax(
     owner_graph: ascir.HintGraph,
     x: ascir.OpsOperatorOutput,
     *,
     axis: List[ascir.Axis],
     size: Optional[List[ascir.SizeExpr]] = None,
     stride: Optional[List[ascir.SizeExpr]] = None,
+    dtype: ascir.dtypes = ascir.dtypes.int64,
 ) -> ascir.OpsOperatorOutput:
-    return _common_in_1_out_1_normal_op(
-        "ArgMax", owner_graph, x, axis=axis, size=size, stride=stride
-    )
+    name = _generate_op_name(owner_graph, "argmax")
+    op_instance = ascir.ops.Argmax(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op_instance)
+    op_instance.attr.sched.axis = axis
+    op_instance.x = x
+    op_instance.y.dtype = dtype
+    _infer_or_set_view(op_instance.y, axis, size, stride)
+    op_instance.infer_dtype()
+    return op_instance.y
+
+
+def ArgmaxWithValue(
+    owner_graph: ascir.HintGraph,
+    x: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+    dtype: ascir.dtypes = ascir.dtypes.int64,
+) -> Tuple[ascir.OpsOperatorOutput, ascir.OpsOperatorOutput]:
+    name = _generate_op_name(owner_graph, "argmaxwithvalue")
+    op_instance = ascir.ops.ArgmaxWithValue(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op_instance)
+    op_instance.attr.sched.axis = axis
+    op_instance.x = x
+    op_instance.value.dtype = x.dtype
+    op_instance.index.dtype = dtype
+    _infer_or_set_view(op_instance.value, axis, size, stride)
+    _infer_or_set_view(op_instance.index, axis, size, stride)
+    op_instance.infer_dtype()
+    return op_instance.value, op_instance.index
 
 
 def Softmax(
@@ -1627,51 +1658,6 @@ def Softmax(
     return _common_in_1_out_1_normal_op(
         "Softmax", owner_graph, x, axis=axis, size=size, stride=stride
     )
-
-
-def ArgMaxMultiRPhase1(
-    owner_graph: ascir.HintGraph,
-    x: ascir.OpsOperatorOutput,
-    *,
-    axis: List[ascir.Axis],
-    size: Optional[List[ascir.SizeExpr]] = None,
-    stride: Optional[List[ascir.SizeExpr]] = None,
-) -> tuple:
-    """ArgMax R轴分核 Phase1: 1输入2输出（value, index）"""
-    name = _generate_op_name(owner_graph, "argmaxmultirphase1")
-    op_class = getattr(ascir.ops, "ArgMaxMultiRPhase1")
-    op_instance = op_class(name)
-    meta = _get_metadata(owner_graph)
-    meta.ops.append(op_instance)
-    op_instance.attr.sched.axis = axis
-    op_instance.x = x
-    _infer_or_set_view(op_instance.value, axis, size, stride)
-    _infer_or_set_view(op_instance.index, axis, size, stride)
-    op_instance.infer_dtype()
-    return (op_instance.value, op_instance.index)
-
-
-def ArgMaxMultiRPhase2(
-    owner_graph: ascir.HintGraph,
-    value: ascir.OpsOperatorOutput,
-    index: ascir.OpsOperatorOutput,
-    *,
-    axis: List[ascir.Axis],
-    size: Optional[List[ascir.SizeExpr]] = None,
-    stride: Optional[List[ascir.SizeExpr]] = None,
-) -> ascir.OpsOperatorOutput:
-    """ArgMax R轴分核 Phase2: 2输入1输出"""
-    name = _generate_op_name(owner_graph, "argmaxmultirphase2")
-    op_class = getattr(ascir.ops, "ArgMaxMultiRPhase2")
-    op_instance = op_class(name)
-    meta = _get_metadata(owner_graph)
-    meta.ops.append(op_instance)
-    op_instance.attr.sched.axis = axis
-    op_instance.value = value
-    op_instance.index = index
-    _infer_or_set_view(op_instance.y, axis, size, stride)
-    op_instance.infer_dtype()
-    return op_instance.y
 
 
 def Any(

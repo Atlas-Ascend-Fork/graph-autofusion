@@ -8620,8 +8620,8 @@ TEST_F(TestAscendcApiPerf, TestRemovePadEmptyInputShapes) {
   EXPECT_NE(result, af::SUCCESS);
 }
 
-// 测试 ArgMax API
-TEST_F(TestAscendcApiPerf, TestArgMax) {
+// 测试 Argmax API
+TEST_F(TestAscendcApiPerf, TestArgmax) {
   std::vector<att::TensorShapeInfo> input_shapes;
   std::vector<att::TensorShapeInfo> output_shapes;
 
@@ -8631,13 +8631,13 @@ TEST_F(TestAscendcApiPerf, TestArgMax) {
   input.dims = {CreateExpr(32), CreateExpr(64)};
   input_shapes.push_back(input);
 
-  // 构造输出形状 - ArgMax输出int64索引
+  // 构造输出形状 - Argmax输出int64索引
   att::TensorShapeInfo output;
   output.data_type = "int64";
   output.dims = {CreateExpr(32), CreateExpr(1)};
   output_shapes.push_back(output);
 
-  // 计算预期结果 - ArgMax复用ReduceMaxPerf
+  // 计算预期结果 - Argmax复用ReduceMaxPerf
   const float k = 0.0547f;
   const float h = 21.0027f;
   const int dim_product = 32 * 64;
@@ -8645,7 +8645,7 @@ TEST_F(TestAscendcApiPerf, TestArgMax) {
 
   PerfOutputInfo perf_res;
   ge::AscNodePtr node_ptr;
-  std::string op_type = "ArgMax";
+  std::string op_type = "Argmax";
   node_ptr = GraphConstructUtils::ConstructSingleOp(op_type, 1, 1);
   auto perf = GetPerfFunc(op_type);
   NodeInfo node;
@@ -8673,7 +8673,7 @@ TEST_F(TestAscendcApiPerf, TestArgMaxMultiRPhase1) {
   output.dims = {CreateExpr(64), CreateExpr(1)};
   output_shapes.push_back(output);
 
-  // 计算预期结果 - 复用ArgMaxPerf
+  // 计算预期结果 - 复用ArgmaxPerf
   const float k = 0.0547f;
   const float h = 21.0027f;
   const int dim_product = 64 * 128;
@@ -8709,7 +8709,7 @@ TEST_F(TestAscendcApiPerf, TestArgMaxMultiRPhase2) {
   output.dims = {CreateExpr(128), CreateExpr(1)};
   output_shapes.push_back(output);
 
-  // 计算预期结果 - 复用ArgMaxPerf
+  // 计算预期结果 - 复用ArgmaxPerf
   const float k = 0.0547f;
   const float h = 21.0027f;
   const int dim_product = 128 * 256;

@@ -113,6 +113,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr ScaledModifiedBesselK1StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr SphericalBesselJ0StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr NdtrStoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr ArgmaxStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr NdtriStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LogNdtrStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr NextAfterStoreFusedGraph(size_t dims_size);
@@ -265,7 +266,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr RemainderFp16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RemainderF32FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RemainderInt32FusedGraph(size_t dims_size);
-  static af::ComputeGraphPtr ArgMaxFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr ArgmaxFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr FusedBackendElewiseGraph(size_t dims_size);
 };
 }  // namespace ascir

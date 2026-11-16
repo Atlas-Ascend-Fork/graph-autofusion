@@ -80,7 +80,8 @@ __attribute__((visibility("default"))) PyObject *PyInit_autofuse(void);
   OP(RShift)                      \
   OP(Isnan)                       \
   OP(Max)                         \
-  OP(ArgMax)                      \
+  OP(Argmax)                      \
+  OP(ArgmaxWithValue)             \
   OP(Any)                         \
   OP(All)                         \
   OP(Sum)                         \

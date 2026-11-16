@@ -41,7 +41,7 @@ class AscIrCodegenImplMetaTest : public ::testing::Test {
 TEST_F(AscIrCodegenImplMetaTest, CodegenImplMeta_IsWellFormed) {
   EXPECT_CODEGEN_META(Abs, true);
   EXPECT_CODEGEN_META(All, true);
-  EXPECT_CODEGEN_META(ArgMax, true);
+  EXPECT_CODEGEN_META(Argmax, true);
   EXPECT_CODEGEN_META(ArgMaxMultiRPhase1, true);
   EXPECT_CODEGEN_META(ArgMaxMultiRPhase2, true);
   EXPECT_CODEGEN_META(Axpy, true);

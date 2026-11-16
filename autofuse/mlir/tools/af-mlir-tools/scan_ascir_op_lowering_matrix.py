@@ -120,7 +120,7 @@ FAMILIES: dict[str, set[str]] = {
         "Min",
         "Prod",
         "Sum",
-        "ArgMax",
+        "Argmax",
         "ArgMaxMultiRPhase1",
         "ArgMaxMultiRPhase2",
         "FlashSoftmax",

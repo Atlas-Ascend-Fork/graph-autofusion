@@ -18,6 +18,7 @@
 #include "schedule_utils.h"
 #include "node_cache_marker.h"
 #include "task_generator/simt_boundary_sync.h"
+#include "att/base/arch_param.h"
 
 namespace {
 bool CompareByOrderInTensorAxis(const int64_t &lhs, const int64_t &rhs, const std::vector<int64_t> &tensor_axes) {
@@ -360,7 +361,16 @@ Status Scheduler::ModifyStoreAfterReduce(ascir::NodeView &node, ascir::AxisId re
     GE_ASSERT_TRUE(index < output_attr.strides.size(), "Strides of [%s]'s output tensor not greater than [%lu].",
                    node->GetNamePtr(), index);
     output_attr.repeats[index] = reduce_block_axis->size;
-    output_attr.strides[index] = size_product;
+    if (!enable_workspace_alignment_) {
+      output_attr.strides[index] = size_product;
+      continue;
+    }
+    const auto dtype_size = ge::GetSizeByDataType(output_attr.dtype);
+    GE_ASSERT_TRUE(dtype_size > 0, "Invalid dtype size for [%s]'s output tensor.", node->GetNamePtr());
+    const auto cacheline_bytes = att::arch_param::kV2ArchHardwareConfig.cache_line_size;
+    GE_ASSERT_TRUE(cacheline_bytes % dtype_size == 0, "Unsupported dtype size[%ld] for RCore workspace alignment.",
+                   dtype_size);
+    output_attr.strides[index] = af::sym::Align(size_product, cacheline_bytes / static_cast<uint32_t>(dtype_size));
   }
   return af::SUCCESS;
 }

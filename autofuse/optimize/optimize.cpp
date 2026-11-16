@@ -16,6 +16,7 @@
 #include "ascir_ops_utils.h"
 #include "ascir_utils.h"
 #include "autoschedule/autoschedule.h"
+#include "autoschedule/schedule.h"
 #include "graph_properties_cache.h"
 #include "fused_graph/fused_graph_unfolder.h"
 #include "fused_graph/fused_graph_modifier.h"
@@ -47,6 +48,24 @@ namespace {
 const char *const kAttrAscGraph = "ascgraph";
 constexpr int64_t kInvalidNodeId = -1;
 constexpr size_t kMaxGraphNameLength = 60UL;  // 截断后的最大graph name长度
+
+bool CanAlignRCoreWorkspace(const ScheduleTask &schedule_task) {
+  if (schedule_task.reduce_type != ReduceTemplateType::kRCore) {
+    return false;
+  }
+  for (const auto &grouped_graph : schedule_task.grouped_graphs) {
+    for (const auto &node : grouped_graph.GetAllNodes()) {
+      if (node == nullptr) {
+        continue;
+      }
+      if (IsOps<Argmax>(node) || IsOps<ArgmaxWithValue>(node) || IsOps<ArgMaxMultiRPhase1>(node) ||
+          IsOps<ArgMaxMultiRPhase2>(node) || IsOps<ArgMaxMultiRPhase2WithValue>(node)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 // 截断 graph name，保留前 kMaxGraphNameLength 个字符
 std::string TruncateGraphName(const std::string &name) {
@@ -1202,7 +1221,7 @@ static Status ProcessNonReduceSchedules(const std::vector<autoschedule::AutoSche
 }
 
 Status Optimizer::InitializeScheduledResults(std::vector<ascir::ScheduledResult> &scheduled_results_cur,
-                                             ScheduleTask &schedule_task) {
+                                             const ScheduleTask &schedule_task) {
   ::ascir::ScheduledResult schedule_result;
   // [双通道打分] 结果级 score_func 是"跨 schedule result 打分"的入口（GenGetScoreFuncs →
   // scores[] → max_index），必须保留；其中的组绑定占位符由 GenGetScoreFuncs 在发射时替换，
@@ -1213,12 +1232,14 @@ Status Optimizer::InitializeScheduledResults(std::vector<ascir::ScheduledResult>
   schedule_result.semantic_name = schedule_task.semantic_name.empty()
                                       ? ascgen_utils::GetTemplateSemanticName(schedule_task.optimize_graph)
                                       : schedule_task.semantic_name;
+  schedule_result.enable_workspace_alignment = schedule_task.enable_workspace_alignment;
   scheduled_results_cur.emplace_back(schedule_result);
   return af::SUCCESS;
 }
 
 Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, ScheduleTask &schedule_task,
                                 std::vector<ascir::ScheduledResult> &scheduled_results) const {
+  schedule_task.enable_workspace_alignment = CanAlignRCoreWorkspace(schedule_task);
   size_t index = 0UL;
   std::vector<ascir::ScheduledResult> scheduled_results_cur;
   GE_ASSERT_SUCCESS(InitializeScheduledResults(scheduled_results_cur, schedule_task));
@@ -1247,8 +1268,9 @@ Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, Sc
     }
     bool is_reduce_first_stage = IsReduceFirstStage(index, schedule_task);
     std::vector<autoschedule::AutoScheduleOutput> schedule_outputs;
-    auto scheduler = autoschedule::AutoSchedule(grouped_graph, schedule_outputs, is_reduce_first_stage,
-                                                schedule_task.reduce_type, schedule_task.cube_type);
+    auto scheduler =
+        autoschedule::AutoSchedule(grouped_graph, schedule_outputs, is_reduce_first_stage, schedule_task.reduce_type,
+                                   schedule_task.cube_type, schedule_task.enable_workspace_alignment);
     const auto auto_schedule_status = scheduler.DoAutoSchedule();
     if (auto_schedule_status == af::UNSUPPORTED) {
       return af::UNSUPPORTED;

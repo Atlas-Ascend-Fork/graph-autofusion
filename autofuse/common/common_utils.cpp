@@ -29,6 +29,7 @@
 #include "common/ascir_node_param/ascir_node_param.h"
 #include "common/indirect_load_utils.h"
 #include "autofuse_config/auto_fuse_config.h"
+#include "att/base/arch_param.h"
 
 using namespace af::ascir_op;
 using namespace af::ops;
@@ -663,7 +664,7 @@ af::Expression CalculateOneWorkspaceSize(const af::AscNodePtr &workspace_nodes) 
     auto out_size = GetTensorSize(load_node->outputs[0U]);
     ws_size = af::sym::Max(ws_size, out_size);
   }
-  return ws_size;
+  return af::sym::Align(ws_size, att::arch_param::kV2ArchHardwareConfig.cache_line_size);
 }
 
 af::Expression CalculateWorkspaceSize(const std::vector<af::AscNodePtr> &workspace_nodes) {

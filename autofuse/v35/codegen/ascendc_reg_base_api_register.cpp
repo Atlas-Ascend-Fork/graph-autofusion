@@ -435,6 +435,9 @@ Register::Register() {
   const std::string kAscendcMulRegBaseStr = {
 #include "mul_reg_base.h"
   };
+  const std::string kAscendcArgmaxRegBaseStr = {
+#include "argmax_reg_base.h"
+  };
   std::unordered_map<std::string, std::string> api_to_file{
       {"cast_reg_base.h", kAscendcCastRegStr},
       {"compare_reg_base.h", kAscendcCompareRegStr},
@@ -548,6 +551,7 @@ Register::Register() {
       {"acosh_reg_base.h", kAscendcAcoshRegBaseStr},
       {"cosh_reg_base.h", kAscendcCoshRegBaseStr},
       {"mul_reg_base.h", kAscendcMulRegBaseStr},
+      {"argmax_reg_base.h", kAscendcArgmaxRegBaseStr},
   };
 
   AscendCApiRegistry::GetInstance().RegisterApi(api_to_file);

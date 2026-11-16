@@ -500,7 +500,7 @@ TEST(CodegenOrchestrationTest, ValidArgMaxSchedulePassesAttAndFailsInMlirConfig)
   mlir::test::ScopedEnvVar enabled("AUTOFUSE_DFX_FLAGS", "--mlir_codegen_config=mlir;");
   af::testing::AscGraphBuilder builder("argmax_fallback");
   builder.Loops({af::testing::Sym(16), af::testing::Sym(32)}).Data("x", 0).Load("load", "x");
-  auto graph = mlir::test::AddReduce<af::ascir_op::ArgMax>(
+  auto graph = mlir::test::AddReduce<af::ascir_op::Argmax>(
                    builder, "reduce", "load", {af::testing::Sym(16), af::testing::Sym(32)}, {1}, af::DT_INT64)
                    .Store("store", "reduce")
                    .Output("output", "store", 0, af::DT_INT64)

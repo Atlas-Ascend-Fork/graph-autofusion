@@ -318,11 +318,11 @@ TEST_F(AscIrCodegenCalcTest, ReduceFamily_ValidAndCalc) {
   EXPECT_REDUCE_VALID(Any);
   EXPECT_REDUCE_VALID(Min);
   EXPECT_REDUCE_VALID(Prod);
-  EXPECT_REDUCE_VALID(ArgMax);
+  EXPECT_REDUCE_VALID(Argmax);
 }
 
 // ArgMaxMultiRPhase1: single input x, dual outputs value/index
-TEST_F(AscIrCodegenCalcTest, ReduceFamily_ArgMaxMultiRPhase) {
+TEST_F(AscIrCodegenCalcTest, ReduceFamily_ArgmaxMultiRPhase) {
   {
     af::AscGraph graph("t_p1");
     af::Expression One = af::Symbol(1);

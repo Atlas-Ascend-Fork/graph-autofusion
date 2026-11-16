@@ -26,12 +26,14 @@ class AutoSchedule {
   explicit AutoSchedule(ascir::ImplGraph &graph, std::vector<AutoScheduleOutput> &schd_outputs,
                         bool is_reduce_first_stage = false,
                         optimize::ReduceTemplateType reduce_template = optimize::ReduceTemplateType::kDefault,
-                        ascir::CubeTemplateType cube_template = ascir::CubeTemplateType::kDefault)
+                        ascir::CubeTemplateType cube_template = ascir::CubeTemplateType::kDefault,
+                        bool enable_workspace_alignment = false)
       : graph_(graph),
         schd_outputs_(schd_outputs),
         is_reduce_first_stage_(is_reduce_first_stage),
         reduce_template_(reduce_template),
-        cube_template_(cube_template) {};
+        cube_template_(cube_template),
+        enable_workspace_alignment_(enable_workspace_alignment) {};
 
   Status DoAutoSchedule();
 
@@ -55,6 +57,7 @@ class AutoSchedule {
   bool is_reduce_first_stage_;
   optimize::ReduceTemplateType reduce_template_;
   ascir::CubeTemplateType cube_template_;
+  bool enable_workspace_alignment_;
 };
 }  // namespace optimize::autoschedule
 

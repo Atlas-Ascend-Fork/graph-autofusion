@@ -598,8 +598,8 @@ __aicore__ inline void ArgMaxWithValueExtend(const LocalTensor<T> &dst_index, co
     return;
   }
   static_assert(std::is_same_v<U, float> || std::is_same_v<U, int32_t>,
-                "ArgMaxWithValue src only support float and int32_t");
-  static_assert(std::is_same_v<T, int64_t>, "ArgMaxWithValue dst_index only support int64_t dst type");
+                "ArgmaxWithValue src only support float and int32_t");
+  static_assert(std::is_same_v<T, int64_t>, "ArgmaxWithValue dst_index only support int64_t dst type");
   static_assert(SupportType<pattern, Pattern::Reduce::AR, Pattern::Reduce::RA>(),
                 "failed to check Reduce pattern, only support AR/RA pattern!");
   uint32_t first = src_shape[0];

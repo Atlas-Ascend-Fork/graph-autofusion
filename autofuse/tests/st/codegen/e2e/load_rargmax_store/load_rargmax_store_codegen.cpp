@@ -37,7 +37,7 @@ std::vector<std::string> splitString(const std::string &input, char delimiter) {
 
 class LoadRargmaxStoreSt : public testing::Test {};
 
-TEST_F(LoadRargmaxStoreSt, reduceArgMaxTest) {
+TEST_F(LoadRargmaxStoreSt, reduceArgmaxTest) {
   bool gen_success = true;
 
   af::AscGraph test_graph("load_rargmax_store");

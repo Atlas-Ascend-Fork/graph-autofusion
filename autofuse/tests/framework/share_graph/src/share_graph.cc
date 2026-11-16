@@ -7590,6 +7590,72 @@ af::ComputeGraphPtr ShareGraph::BesselJ0StoreFusedGraph(size_t dims_size) {
                                             CreateBesselJ0StoreAscGraph);
 }
 
+/**
+ * Argmax 单算子图（v2 Reg 指令路径）：
+ *         data0
+ *           |
+ *         load0
+ *           |
+ *        Argmax
+ *           |
+ *         store
+ *           |
+ *        output0
+ * 输入 x{s0, s1}（FLOAT），归约沿 s1，输出 y{s0}（INT64 索引）。
+ */
+static void CreateArgmaxStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+  const Expression s0 = graph.CreateSizeVar("s0");
+  const Expression s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+
+  af::ascir_op::Load load1("load1");
+  load1.x = x.y;
+  load1.attr.api.compute_type = ComputeType::kComputeLoad;
+  load1.attr.api.type = af::ApiType::kAPITypeCompute;
+  load1.attr.sched.axis = {z0.id, z1.id};
+  *load1.y.axis = {z0.id, z1.id};
+  *load1.y.repeats = {s0, s1};
+  *load1.y.strides = {s1, One};
+  load1.y.dtype = af::DataType::DT_FLOAT;
+  load1.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Argmax argmax("argmax");
+  argmax.x = load1.y;
+  argmax.attr.api.compute_type = ComputeType::kComputeReduce;
+  argmax.attr.api.type = af::ApiType::kAPITypeCompute;
+  argmax.attr.sched.axis = {z0.id, z1.id};
+  *argmax.y.axis = {z0.id, z1.id};
+  *argmax.y.repeats = {s0, One};
+  *argmax.y.strides = {One, Zero};
+  argmax.y.dtype = af::DataType::DT_INT64;
+  argmax.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Store store1("store1");
+  store1.x = argmax.y;
+  store1.attr.api.compute_type = ComputeType::kComputeStore;
+  store1.attr.api.type = af::ApiType::kAPITypeCompute;
+  store1.attr.sched.axis = {z0.id, z1.id};
+  *store1.y.axis = {z0.id, z1.id};
+  *store1.y.repeats = {s0, One};
+  *store1.y.strides = {One, Zero};
+  store1.y.dtype = af::DataType::DT_INT64;
+  store1.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Output output1("output1");
+  output1.x = store1.y;
+  output1.ir_attr.SetIndex(0);
+}
+
+af::ComputeGraphPtr ShareGraph::ArgmaxStoreFusedGraph(size_t dims_size) {
+  return CreateOneInputAscGraphComputeGraph("argmax_store_test", "argmax_store", dims_size, CreateArgmaxStoreAscGraph);
+}
+
 template <typename Op>
 static void CreateUnarySpecialStoreAscGraph(af::AscGraph &graph, size_t dims_size, const char *op_name) {
   af::ascir_op::Data x("data0", graph);
@@ -14741,7 +14807,7 @@ af::ComputeGraphPtr ShareGraph::RemainderInt32FusedGraph(size_t dims_size) {
   return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_INT32, "remainder_int32_test");
 }
 
-static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
+static void CreateArgmaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   const Expression s0 = graph.CreateSizeVar(32);
   const Expression s1 = graph.CreateSizeVar(16);
   const Expression s2 = graph.CreateSizeVar(16);
@@ -14766,7 +14832,7 @@ static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   load1.y.dtype = af::DataType::DT_FLOAT;
   load1.attr.api.unit = ComputeUnit::kUnitMTE2;
 
-  af::ascir_op::ArgMax argmax("argmax");
+  af::ascir_op::Argmax argmax("argmax");
   argmax.x = load1.y;
   argmax.attr.sched.axis = {z0.id, z1.id, z2.id};
   *argmax.y.axis = {z0.id, z1.id, z2.id};
@@ -14794,7 +14860,7 @@ static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   y1.ir_attr.SetIndex(0);
 }
 
-af::ComputeGraphPtr ShareGraph::ArgMaxFusedGraph(size_t dims_size) {
+af::ComputeGraphPtr ShareGraph::ArgmaxFusedGraph(size_t dims_size) {
   auto builder = GraphBuilder("argmax_test");
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
   af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
@@ -14810,7 +14876,7 @@ af::ComputeGraphPtr ShareGraph::ArgMaxFusedGraph(size_t dims_size) {
   }
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("argmax");
-  CreateArgMaxAscGraph(sub_graph, dims_size);
+  CreateArgmaxAscGraph(sub_graph, dims_size);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);

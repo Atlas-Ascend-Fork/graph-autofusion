@@ -503,6 +503,7 @@ class Kernel {
                   const ascir::ImplGraph &graph, const std::string &workspace_buffer_arg_override = "");
   static std::string GetIncludeApiHeaderFiles(const ascir::FusedScheduledResult &fused_schedule_result,
                                               bool enable_input_view = false);
+  static bool CanSkipReduceGroupSync(const ascir::ScheduledResult &scheduled, size_t group_index);
   static std::string IncludeAndDefines(const ascir::FusedScheduledResult &fused_schedule_result,
                                        const std::string &kernel_task_type, bool use_tensor_desc = false,
                                        bool is_inductor = false);

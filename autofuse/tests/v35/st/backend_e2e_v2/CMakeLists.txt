@@ -1,3 +1,13 @@
+# -----------------------------------------------------------------------------------------------------------
+#  Copyright (c) 2026 Huawei Technologies Co., Ltd.
+#  This program is free software: you can redistribute it and/or modify it under the terms and conditions of
+#  CANN Open Software License Agreement Version 2.0 (the "License").
+#  Please refer to the License for details. You may not use this file except in compliance with the License.
+#  THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+#  INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+#  See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
 set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${ASCEND_ROOT}/tools/tikicpulib/lib)
 find_package(tikicpulib QUIET)
 
@@ -107,6 +117,7 @@ add_subdirectory(next_after_store_test)
 add_subdirectory(poly_gamma_store_test)
 add_subdirectory(zeta_store_test)
 add_subdirectory(signbit_store_test)
+add_subdirectory(argmax_store_test)
 add_subdirectory(frexp_store_test)
 add_subdirectory(shifted_chebyshev_polynomial_t_store_test)
 add_subdirectory(shifted_chebyshev_polynomial_u_store_test)

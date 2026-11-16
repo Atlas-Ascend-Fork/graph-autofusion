@@ -655,7 +655,7 @@ class MaxAscIrCodegenImpl : public AscIrCodegen {
   }
 };
 
-class ArgMaxAscIrCodegenImpl : public AscIrCodegen {
+class ArgmaxAscIrCodegenImpl : public AscIrCodegen {
  public:
   std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcReduceTmpSize(node);
@@ -664,7 +664,7 @@ class ArgMaxAscIrCodegenImpl : public AscIrCodegen {
     return "ReduceApiCall";
   }
   std::string GetApiName() const override {
-    return "ArgMax";
+    return "Argmax";
   }
   std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"reduce_init.h", "reduce.h",    "argmax.h", "compare.h",

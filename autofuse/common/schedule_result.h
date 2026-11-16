@@ -102,6 +102,7 @@ struct ScheduledResult {
   bool enable_group_parallel{false};
   CubeTemplateType cube_type{CubeTemplateType::kDefault};
   std::string semantic_name{};
+  bool enable_workspace_alignment{false};
 };
 
 struct GmTensorSizes {

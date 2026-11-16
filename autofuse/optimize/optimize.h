@@ -46,6 +46,7 @@ struct ScheduleTask {
   ::ascir::CubeTemplateType cube_type{::ascir::CubeTemplateType::kDefault};
   bool has_load_store_conversion{false};
   std::string semantic_name{};
+  bool enable_workspace_alignment{false};
 };
 
 class Optimizer {
@@ -119,7 +120,7 @@ class Optimizer {
   void RefreshGroupRelation(size_t index, const std::map<std::string, af::Expression> &var_relations,
                             ScheduleTask &schedule_task, ::ascir::ScheduledResult &schedule_result) const;
   static Status InitializeScheduledResults(std::vector<::ascir::ScheduledResult> &scheduled_results_cur,
-                                           ScheduleTask &schedule_task);
+                                           const ScheduleTask &schedule_task);
   Status AutoScheduler(const ::ascir::HintGraph &hint_graph, ScheduleTask &schedule_task,
                        std::vector<::ascir::ScheduledResult> &scheduled_results) const;
   static void TryEnableGroupParallel(::ascir::FusedScheduledResult &fused_scheduled_result);

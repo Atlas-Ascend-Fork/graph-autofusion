@@ -2017,7 +2017,7 @@ TEST_F(TestCodegenTiling, SingleGroupWorkspaceValueTest) {
   fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
   const auto code = this->GenGetWorkspaceSizeFunc("AutofuseTilingData", fused_schedule_result);
   EXPECT_NE(code.find("uint64_t ws_size = 0;"), std::string::npos);
-  EXPECT_NE(code.find("if (!CheckedWorkspaceAdd(ws_size, 600, ws_size))"), std::string::npos);
+  EXPECT_NE(code.find("if (!CheckedWorkspaceAdd(ws_size, 640, ws_size))"), std::string::npos);
   EXPECT_NE(code.find("if (!CheckedWorkspaceAlign(ws_size, 512U, ws_size))"), std::string::npos);
 }
 
@@ -2260,7 +2260,7 @@ TEST_F(TestCodegenTiling, MultiGroupWorkspaceValueTest) {
   const auto code = this->GenGetWorkspaceSizeFunc("AutofuseTilingData", fused_schedule_result);
   EXPECT_NE(code.find("uint64_t ws_size = 0;"), std::string::npos);
   EXPECT_NE(code.find("if (!CheckedWorkspaceAdd(ws_size, 1024, ws_size))"), std::string::npos);
-  EXPECT_NE(code.find("if (!CheckedWorkspaceAdd(ws_size, 1000, ws_size))"), std::string::npos);
+  EXPECT_NE(code.find("if (!CheckedWorkspaceAdd(ws_size, 1024, ws_size))"), std::string::npos);
   EXPECT_NE(code.find("if (!CheckedWorkspaceAlign(ws_size, 512U, ws_size))"), std::string::npos);
 }
 

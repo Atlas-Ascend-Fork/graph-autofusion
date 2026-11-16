@@ -39,7 +39,7 @@ using namespace af::ops;
 using namespace af::ascir_op;
 using namespace optimize::autoschedule;
 
-void Construct_ArgMax_Reduce_ARAR(af::AscGraph &graph) {
+void Construct_Argmax_Reduce_ARAR(af::AscGraph &graph) {
   auto s0 = graph.CreateSizeVar("s0");
   auto s1 = graph.CreateSizeVar("s1");
   auto s2 = graph.CreateSizeVar("s2");
@@ -75,12 +75,12 @@ void Construct_ArgMax_Reduce_ARAR(af::AscGraph &graph) {
   *abs.y.repeats = {s0, s1, s2, s3};
   *abs.y.strides = {s1 * s2 * s3, s2 * s3, s3, One};
 
-  af::ascir_op::ArgMax b0_argmax("b0_argmax");
+  af::ascir_op::Argmax b0_argmax("b0_argmax");
   b0_argmax.x = abs.y;
   b0_argmax.attr.sched.axis = {z0.id, z1.id, z2.id, z3.id};
   b0_argmax.attr.api.compute_type = af::ComputeType::kComputeReduce;
   b0_argmax.attr.api.type = af::ApiType::kAPITypeCompute;
-  b0_argmax.y.dtype = ge::DT_INT32;  // ArgMax outputs int32 indices
+  b0_argmax.y.dtype = ge::DT_INT32;  // Argmax outputs int32 indices
   *b0_argmax.y.axis = {z0.id, z1.id, z2.id, z3.id};
   *b0_argmax.y.repeats = {s0, One, s2, One};
   *b0_argmax.y.strides = {s2, Zero, One, Zero};
@@ -113,19 +113,19 @@ void Construct_ArgMax_Reduce_ARAR(af::AscGraph &graph) {
 }
 
 namespace optimize {
-class AutoSchedulerArgMaxReduceUT : public ::testing::Test {
+class AutoSchedulerArgmaxReduceUT : public ::testing::Test {
   void SetUp() override {}
 
  protected:
   optimize::Optimizer optimizer_;
-  AutoSchedulerArgMaxReduceUT() : optimizer_(optimize::OptimizerOptions{}) {};
+  AutoSchedulerArgmaxReduceUT() : optimizer_(optimize::OptimizerOptions{}) {};
 };
 
-TEST_F(AutoSchedulerArgMaxReduceUT, Autoschedule_argmax_reduce_arar_fusion_rcore) {
-  af::AscGraph graph("ArgMax_Reduce_ARAR");
-  Construct_ArgMax_Reduce_ARAR(graph);
+TEST_F(AutoSchedulerArgmaxReduceUT, Autoschedule_argmax_reduce_arar_fusion_rcore) {
+  af::AscGraph graph("Argmax_Reduce_ARAR");
+  Construct_Argmax_Reduce_ARAR(graph);
 
-  af::AscGraph except_graph("ArgMax_Reduce_ARAR_1");
+  af::AscGraph except_graph("Argmax_Reduce_ARAR_1");
   except_graph.CopyFrom(graph);
 
   std::vector<autoschedule::AutoScheduleOutput> impl_graphs;
