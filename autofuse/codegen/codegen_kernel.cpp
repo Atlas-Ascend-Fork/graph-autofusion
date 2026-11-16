@@ -3847,6 +3847,12 @@ Status Kernel::GenMulGroupKernelWithRegTilingKey(const ascir::FusedScheduledResu
     auto scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[graph_id];
     for (size_t i = 0; i < scheduled_results.size(); i++) {
       auto schedule_groups = scheduled_results[i].schedule_groups;
+      // 空 group 的 result 在 host 侧按整条 result 作废，设备侧若继续展开剩余 group 会与 host 的 key 编号错位
+      const bool has_empty_group = std::any_of(schedule_groups.begin(), schedule_groups.end(),
+                                               [](const auto &group) { return group.impl_graphs.empty(); });
+      if (has_empty_group) {
+        continue;
+      }
       auto enable_group_parallel = scheduled_results[i].enable_group_parallel;
       std::vector<std::vector<TilingFuncCall>> per_group_func_calls;
       ascir::CubeTemplateType cv_fusion_type = scheduled_results[i].cube_type;
@@ -4944,7 +4950,8 @@ Status Kernel::GenKernelFuncByTilingKey(const ascir::FusedScheduledResult &fused
   if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) && (config.is_inductor || is_dynamic)) {
     GE_ASSERT_SUCCESS(GenCVKernelFuncWithMulGroup(fused_schedule_result, config, ss, ss1, use_list_tensor));
   } else if (ascgen_utils::CanUseTilingKey(fused_schedule_result) && !config.is_inductor &&
-             !ascgen_utils::IsCubeCommonFusedScheduled(fused_schedule_result)) {
+             !ascgen_utils::IsCubeCommonFusedScheduled(fused_schedule_result) &&
+             ascgen_utils::IsTilingKeyCountWithinLimit(fused_schedule_result)) {
     GE_ASSERT_SUCCESS(GenKernelFuncWithRegTilingKey(fused_schedule_result, config, ss, ss1, use_list_tensor));
   } else {
     GE_ASSERT_SUCCESS(GenKernelFuncWithParseTilingData(fused_schedule_result, config, ss, ss1, use_list_tensor));
@@ -6867,16 +6874,18 @@ std::string Kernel::GenCvDispatchEntryForInductor(const ascir::FusedScheduledRes
     ss << "}" << std::endl;
     ss << "#endif" << std::endl;
   }
-  // tiling 尾参按值随 launch 命令搬运，无 GM tiling 缓冲与显式 H2D；
-  // 静态 const 场景形参不消费。
+  // tiling 尾参仅在动态shape场景下随launch命令搬运;静态const场景kernel读kConstTilingData， 形参整体裁剪
   ss << "extern \"C\" __global__ __aicore__ void " << entry_name << "(" << io_params;
-  ss << GM_ADDR("workspace").AsArg() << ", CVAutofuseTilingData tiling_data)" << std::endl;
+  ss << GM_ADDR("workspace").AsArg() << std::endl;
+  ss << "#ifndef INDUCTOR_CONST_TILING_DATA" << std::endl;
+  ss << ", CVAutofuseTilingData tiling_data" << std::endl;
+  ss << "#endif" << std::endl;
+  ss << ")" << std::endl;
   ss << "{" << std::endl;
   ss << "  KERNEL_TASK_TYPE_DEFAULT(" << (is_aiv_entry ? kKernelTaskTypeAIVOnly : kernel_task_type) << ");"
      << std::endl;
   ss << "#ifdef INDUCTOR_CONST_TILING_DATA" << std::endl;
   ss << "  const CVAutofuseTilingData &cv_tiling = kConstTilingData;" << std::endl;
-  ss << "  (void)tiling_data;" << std::endl;
   ss << "#else" << std::endl;
   // 值参位于 launch 参数区（非 __gm__），直接引用绑定。
   ss << "  const CVAutofuseTilingData &cv_tiling = tiling_data;" << std::endl;

@@ -874,6 +874,9 @@ codegen_e2e_st() {
   BACKEND_MOVED_TEST1_REGEX=$(build_backend_test_regex ${BACKEND_MOVED_CODEGEN_LIST})
   BACKEND_MOVED_TEST2_REGEX=$(build_backend_test_regex ${BACKEND_MOVED_TARGET_LIST})
   MAKE_TARGET_LIST_CODEGEN=$(echo "${MAKE_TARGET_LIST}" | sed 's/e2e/codegen/g')
+  if [[ "$v35_mode" != "v35" ]]; then
+    MAKE_TARGET_LIST_CODEGEN="att_program_st ${MAKE_TARGET_LIST_CODEGEN}"
+  fi
   # label 过滤会列出该 label 下全部用例(含未编译目标), 必须叠加目标名正则,
   # 主任务与 v35 任务各自只跑本模式编译过的目标
   CTEST_E2E_TEST1_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST_CODEGEN})

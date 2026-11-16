@@ -2540,6 +2540,75 @@ TEST_F(TestCodegenTiling, TestGenFindBestTilingKeyFuncForManyGroupsShouldBeLinea
   EXPECT_NE(this->GenGetTilingKeyCount(fused_schedule_result).find("return 6561;"), std::string::npos);
 }
 
+TEST_F(TestCodegenTiling, LargeTilingKeyShouldLogComponentKeysOnHost) {
+  const auto count_logs = [](const std::string &source) {
+    const std::string marker = "AllKernel Lookup end: tilingKey=";
+    size_t count = 0U;
+    size_t pos = 0U;
+    while ((pos = source.find(marker, pos)) != std::string::npos) {
+      ++count;
+      pos += marker.size();
+    }
+    return count;
+  };
+
+  const auto multi = GenTilingKeyCountResult({{10U, 10U, 10U, 10U}}, af::Symbol(1));
+  ASSERT_FALSE(ascgen_utils::IsTilingKeyCountWithinLimit(multi));
+  const auto multi_files = this->Generate(multi, {}, "", "0");
+  const auto &multi_source = multi_files.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_EQ(count_logs(multi_source), 1U);
+  EXPECT_NE(multi_source.find("result=0, group_impls=[g0_%u, g1_%u, g2_%u, g3_%u]"), std::string::npos);
+  EXPECT_NE(multi_source.find("tiling_data->graph0_result0_g0_tiling_data.tiling_key"), std::string::npos);
+  EXPECT_NE(multi_source.find("tiling_data->graph0_result0_g3_tiling_data.tiling_key"), std::string::npos);
+
+  const auto single = GenTilingKeyCountResult({{600U}}, af::Symbol(1));
+  ASSERT_FALSE(ascgen_utils::IsTilingKeyCountWithinLimit(single));
+  const auto single_files = this->Generate(single, {}, "", "0");
+  const auto &single_source = single_files.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_EQ(count_logs(single_source), 1U);
+  EXPECT_NE(single_source.find("result=0, group_impls=[g0_%u]"), std::string::npos);
+  EXPECT_NE(single_source.find("tiling_data->tiling_key"), std::string::npos);
+
+  const auto small = GenTilingKeyCountResult({{3U}}, af::Symbol(1));
+  ASSERT_TRUE(ascgen_utils::IsTilingKeyCountWithinLimit(small));
+  const auto small_files = this->Generate(small, {}, "", "0");
+  const auto &small_source = small_files.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_EQ(count_logs(small_source), 0U);
+}
+
+TEST_F(TestCodegenTiling, LargeTilingKeyComponentLogShouldSkipEmptyGroupResult) {
+  const auto count_logs = [](const std::string &source) {
+    const std::string marker = "AllKernel Lookup end: tilingKey=";
+    size_t count = 0U;
+    size_t pos = 0U;
+    while ((pos = source.find(marker, pos)) != std::string::npos) {
+      ++count;
+      pos += marker.size();
+    }
+    return count;
+  };
+
+  const auto middle_empty = GenTilingKeyCountResult({{20U, 20U}, {0U}, {20U, 20U}}, af::Symbol(1));
+  ASSERT_FALSE(ascgen_utils::IsTilingKeyCountWithinLimit(middle_empty));
+  const auto middle_files = this->Generate(middle_empty, {}, "", "0");
+  const auto &middle_source = middle_files.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_EQ(count_logs(middle_source), 2U);
+  EXPECT_NE(middle_source.find("  if (tiling_data->graph0_tiling_key == 0)"), std::string::npos);
+  EXPECT_NE(middle_source.find("  else if (tiling_data->graph0_tiling_key == 2)"), std::string::npos);
+  EXPECT_EQ(middle_source.find("tiling_data->graph0_tiling_key == 1"), std::string::npos);
+  EXPECT_NE(middle_source.find("result=2, group_impls=[g0_%u, g1_%u]"), std::string::npos);
+  EXPECT_EQ(middle_source.find("result=1, group_impls"), std::string::npos);
+
+  const auto first_empty = GenTilingKeyCountResult({{0U}, {30U, 30U}}, af::Symbol(1));
+  ASSERT_FALSE(ascgen_utils::IsTilingKeyCountWithinLimit(first_empty));
+  const auto first_files = this->Generate(first_empty, {}, "", "0");
+  const auto &first_source = first_files.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_EQ(count_logs(first_source), 1U);
+  EXPECT_NE(first_source.find("  if (tiling_data->graph0_tiling_key == 1)"), std::string::npos);
+  EXPECT_EQ(first_source.find("  else if (tiling_data->graph0_tiling_key == 1)"), std::string::npos);
+  EXPECT_NE(first_source.find("result=1, group_impls=[g0_%u, g1_%u]"), std::string::npos);
+}
+
 TEST_F(TestCodegenTiling, PgoTilingKeyCountShouldRespectLimitAndEmptyGroup) {
   enable_autofuse_pgo_ = true;
 
@@ -7034,6 +7103,112 @@ TEST_F(TestCodegenTiling, GenerateTilingForInductorCvShouldOverrideAttPgoWithout
   ASSERT_EQ(codegen.GenerateTilingForInductor(vv_result, files), af::SUCCESS);
   EXPECT_EQ(files.count(codegen::kPgoRunnerIdentify), 1U);
   EXPECT_FALSE(files.at(codegen::kPgoRunnerIdentify).empty());
+}
+
+TEST_F(TestCodegenTiling, IsTilingKeyCountWithinLimitShouldAcceptCountWithinLimit) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult();
+  fused_schedule_result.node_idx_to_scheduled_results[0].resize(1);
+  const auto impl_graph = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  auto &schedule_groups = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups;
+  schedule_groups.resize(2);
+  for (auto &schedule_group : schedule_groups) {
+    schedule_group.impl_graphs.assign(10U, impl_graph);
+  }
+
+  uint64_t tiling_key_count = 0U;
+  EXPECT_TRUE(ascgen_utils::TryCalcTilingKeyCount(fused_schedule_result, 1000U, tiling_key_count));
+  EXPECT_EQ(tiling_key_count, 100U);
+  EXPECT_TRUE(ascgen_utils::IsTilingKeyCountWithinLimit(fused_schedule_result));
+  EXPECT_TRUE(ascgen_utils::CanUseTilingKey(fused_schedule_result));
+}
+
+TEST_F(TestCodegenTiling, IsTilingKeyCountWithinLimitShouldRejectCountOverLimit) {
+  // 2组x30选择=900个key，超过护栏固定上限512，护栏应触发设备侧回落
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult();
+  fused_schedule_result.node_idx_to_scheduled_results[0].resize(1);
+  const auto impl_graph = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  auto &schedule_groups = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups;
+  schedule_groups.resize(2);
+  for (auto &schedule_group : schedule_groups) {
+    schedule_group.impl_graphs.assign(30U, impl_graph);
+  }
+
+  uint64_t tiling_key_count = 99U;
+  EXPECT_FALSE(ascgen_utils::TryCalcTilingKeyCount(fused_schedule_result, 512U, tiling_key_count));
+  EXPECT_EQ(tiling_key_count, 0U);
+  EXPECT_FALSE(ascgen_utils::IsTilingKeyCountWithinLimit(fused_schedule_result));
+  // 护栏只作用于设备侧路由, CanUseTilingKey语义不变(host侧计数/PGO路径保持真实值)
+  EXPECT_TRUE(ascgen_utils::CanUseTilingKey(fused_schedule_result));
+}
+
+TEST_F(TestCodegenTiling, IsTilingKeyCountWithinLimitShouldExemptCubeFusion) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult();
+  fused_schedule_result.node_idx_to_scheduled_results[0].resize(1);
+  const auto impl_graph = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  auto &schedule_groups = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups;
+  schedule_groups.resize(2);
+  for (auto &schedule_group : schedule_groups) {
+    schedule_group.impl_graphs.assign(30U, impl_graph);
+  }
+  fused_schedule_result.node_idx_to_scheduled_results[0][0].cube_type = ascir::CubeTemplateType::kFixpip;
+
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+  EXPECT_TRUE(ascgen_utils::IsTilingKeyCountWithinLimit(fused_schedule_result));
+}
+
+TEST_F(TestCodegenTiling, TryCalcTilingKeyCountShouldSumPerResultProduct) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult();
+  const auto impl_graph = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  auto &schedule_results = fused_schedule_result.node_idx_to_scheduled_results[0];
+  schedule_results.resize(2);
+  auto &plan0_groups = schedule_results[0].schedule_groups;
+  plan0_groups.resize(3);
+  for (auto &[idx, impl_num] : std::vector<std::pair<size_t, size_t>>{{0U, 2U}, {1U, 3U}, {2U, 4U}}) {
+    plan0_groups[idx].impl_graphs.assign(impl_num, impl_graph);
+  }
+  auto &plan1_groups = schedule_results[1].schedule_groups;
+  plan1_groups.resize(1);
+  plan1_groups[0].impl_graphs.assign(10U, impl_graph);
+
+  uint64_t tiling_key_count = 0U;
+  EXPECT_TRUE(ascgen_utils::TryCalcTilingKeyCount(fused_schedule_result, 34U, tiling_key_count));
+  EXPECT_EQ(tiling_key_count, 34U);
+  tiling_key_count = 0U;
+  EXPECT_FALSE(ascgen_utils::TryCalcTilingKeyCount(fused_schedule_result, 33U, tiling_key_count));
+}
+
+TEST_F(TestCodegenTiling, GenTilingKeyKernelTypeStaticShouldRespectCountLimit) {
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult();
+  fused_schedule_result.node_idx_to_scheduled_results[0].resize(1);
+  const auto impl_graph = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  auto &schedule_groups = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups;
+  schedule_groups.resize(2);
+  for (auto &schedule_group : schedule_groups) {
+    schedule_group.impl_graphs.assign(10U, impl_graph);
+  }
+
+  // 限内(10x10=100)：静态场景仍发射TilingKey静态查询函数，kernel_type_map正常枚举
+  const auto within_limit = this->Generate(fused_schedule_result, {}, "", "0");
+  const auto &within_limit_source = within_limit.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_NE(within_limit_source.find("GetTilingKeyForStatic"), std::string::npos);
+  EXPECT_NE(within_limit_source.find("GetTilingKeyKernelTypeForStatic"), std::string::npos);
+  EXPECT_NE(within_limit_source.find("kernel_type_map"), std::string::npos);
+
+  // 超限(30x30=900>512)：∏查表kernel_type_map替换为线性紧凑推导（按组bool数组+OR谓词），
+  // 两个静态查询函数仍发射——编译期宿主静态化流程经ctypes取其返回值写op json，
+  // 缺失会使GE运行时TilingForOneNode按tilingKey更新mix attr时查表失败
+  for (auto &schedule_group : schedule_groups) {
+    schedule_group.impl_graphs.assign(30U, impl_graph);
+  }
+  EXPECT_FALSE(ascgen_utils::IsTilingKeyCountWithinLimit(fused_schedule_result));
+  const auto over_limit = this->Generate(fused_schedule_result, {}, "", "0");
+  const auto &over_limit_source = over_limit.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_NE(over_limit_source.find("GetTilingKeyForStatic"), std::string::npos);
+  EXPECT_NE(over_limit_source.find("GetTilingKeyKernelTypeForStatic"), std::string::npos);
+  EXPECT_EQ(over_limit_source.find("kernel_type_map"), std::string::npos);
+  EXPECT_NE(over_limit_source.find("has_workspace_node"), std::string::npos);
+  EXPECT_NE(over_limit_source.find("ws_graph0_result0_g0"), std::string::npos);
+  EXPECT_NE(over_limit_source.find("ws_graph0_result0_g1"), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, SingleGroupEvaluateModeledPerfShouldUsePublicGetPerf) {

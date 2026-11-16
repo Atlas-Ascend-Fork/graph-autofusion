@@ -42,7 +42,7 @@ def test_mlir_adapters_follow_build_gate(tmp_path, mlir_enabled, run_test, proce
     no_op_commands = (
         "add_compile_options add_definitions include_directories link_directories "
         "target_compile_definitions target_include_directories "
-        "target_sources "
+        "target_sources target_compile_features set_target_properties "
         "add_dependencies install enable_testing Python3_add_library"
     ).split()
     driver.write_text(

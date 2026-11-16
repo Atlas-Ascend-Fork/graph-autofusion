@@ -306,6 +306,30 @@ def test_broadcast_codegen_cases_remain_in_e2e_suite(tmp_path):
     assert "TRACE coverage" in result.stdout
 
 
+def test_e2e_st_runs_att_program_before_coverage(tmp_path):
+    setup = autofuse_setup("e2e", "off", "on")
+    setup += r"""
+build_ascgen-dev() { mkdir -p "$AUTOFUSE_BUILD_PATH/tests"; }
+run_mlir_targets() { :; }
+"""
+    result = run_shell_main(ROOT / "scripts/test/run_autofuse_test.sh", setup, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    trace = result.stdout.splitlines()
+    program_build = next(
+        i
+        for i, line in enumerate(trace)
+        if line.startswith("TRACE make -j8 att_program_st ")
+    )
+    codegen_st = next(
+        i
+        for i, line in enumerate(trace)
+        if line.startswith("TRACE ctest ")
+        and "-L st -L codegen_e2e_st_test1 " in line
+        and "-R ^(att_program_st|" in line
+    )
+    assert program_build < codegen_st < trace.index("TRACE coverage")
+
+
 def test_all_ut_still_runs_broadcast_codegen_cases(tmp_path):
     setup = autofuse_setup("all", "on", "off")
     for helper in (

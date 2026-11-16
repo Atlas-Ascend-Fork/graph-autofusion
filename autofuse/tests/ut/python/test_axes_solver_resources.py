@@ -359,3 +359,70 @@ def test_legacy_native_keeps_no_exception_compile_contract(
     assert result.returncode == 0, result.stderr
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("equal_order", [False, True])
+@pytest.mark.parametrize("sanitize", [False, True])
+def test_program_evaluation_uses_shared_solver(
+    tmp_path, equal_order, sanitize, pgo_solver_source
+):
+    att = ROOT / "autofuse/att"
+    core = att / "core"
+    source = ""
+    for name in ("expression_helpers.inc", "scalar_helpers.inc", "axes_ceil_div.inc"):
+        source += f'#include "{core / "scalar" / name}"\n'
+    for name in ("axes_reorder_head.inc", "axes_reorder_body.inc"):
+        source += f'#include "{core / "axes_reorder" / name}"\n'
+    (tmp_path / "axes_eval_core.h").write_text(source + pgo_solver_source)
+    binary = tmp_path / "program_contract"
+    flags = (
+        [
+            "-O1",
+            "-g",
+            "-fsanitize=address,undefined,float-cast-overflow",
+            "-fno-omit-frame-pointer",
+            "-fno-sanitize-recover=all",
+        ]
+        if sanitize
+        else ["-O2"]
+    )
+    argv = [
+        os.environ.get("CXX", "g++"),
+        "-std=c++17",
+        *flags,
+        "-pthread",
+        f"-DAF_AXES_EQUAL_ORDER={int(equal_order)}",
+        "-DAF_AXES_EXPLICIT_EVAL=1",
+        "-I",
+        str(tmp_path),
+        "-I",
+        str(att),
+        str(Path(__file__).parent / "data/axes_program_contract.cpp"),
+        *[
+            str(att / "program" / name)
+            for name in (
+                "tiling_program_value.cpp",
+                "tiling_expression.cpp",
+                "tiling_stage.cpp",
+                "axes_program_evaluation.cpp",
+            )
+        ],
+        "-o",
+        str(binary),
+    ]
+    built = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    assert built.returncode == 0, built.stdout + built.stderr
+    environment = os.environ.copy()
+    if sanitize:
+        environment.update(
+            ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",
+            UBSAN_OPTIONS="halt_on_error=1",
+        )
+    result = subprocess.run(
+        [str(binary)], capture_output=True, text=True, timeout=60, env=environment
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        result.stdout.strip()
+        == "program_bindings=ok search_and_pgo=ok concurrent_contexts=ok"
+    )

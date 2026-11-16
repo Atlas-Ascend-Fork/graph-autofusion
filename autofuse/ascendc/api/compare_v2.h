@@ -915,15 +915,16 @@ inline __aicore__ void CastTensorToHalfNormal(const AscendC::LocalTensor<int32_t
 inline __aicore__ void CalcWeightedTensorNormal(const AscendC::LocalTensor<half> &dst,
                                                 const AscendC::LocalTensor<half> &src,
                                                 const AscendC::LocalTensor<uint32_t> &inner_dup, const uint32_t mask,
-                                                const uint32_t repeat_times, const half weight0, const half weight1,
-                                                const uint8_t dst_stride) {
+                                                const uint32_t repeat_times, const half weight0, const half weight1) {
   AscendC::PipeBarrier<PIPE_V>();
   AscendC::LocalTensor<half> inner_dup_tmp = inner_dup.ReinterpretCast<half>();
   AscendC::Duplicate(inner_dup_tmp, weight0, inner_dup_tmp.GetSize());
   uint64_t mask_half[2] = {uint64_t(0x5555555555555555), uint64_t(0x5555555555555555)};
   AscendC::Duplicate(inner_dup_tmp, weight1, mask_half, repeat_times, 1, 8);
   AscendC::PipeBarrier<PIPE_V>();
-  BinaryRepeatParams repeat_params = {1, 1, 1, dst_stride, dst_stride, dst_stride};
+  // PairReduceSum packs each repeat into a four-block intermediate row.
+  constexpr uint8_t reduced_repeat_stride = ONE_REPEAT_BYTE_SIZE / 2 / ONE_BLK_SIZE;
+  BinaryRepeatParams repeat_params = {1, 1, 1, reduced_repeat_stride, reduced_repeat_stride, reduced_repeat_stride};
   AscendC::Mul(src, src, inner_dup_tmp, mask * 2, repeat_times, repeat_params);
   AscendC::PipeBarrier<PIPE_V>();
   AscendC::PairReduceSum(dst, src, repeat_times, mask * 2, 1, 1, 4);
@@ -986,8 +987,8 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
     // bit
     CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
     // step 4. calculate the weighted values of sign bit and sum them up
-    CalcWeightedTensorNormal(sign_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(8), half(2),
-                             dst_stride);
+    CalcWeightedTensorNormal(sign_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(8),
+                             half(2));
     // step 5. get the value bits of src0 and src1
     AscendC::Duplicate(inner_dup, uint32_t(0x7FFFFFFF), inner_dup.GetSize());
     AscendC::LocalTensor<uint16_t> src0_tmp = src0.ReinterpretCast<uint16_t>();
@@ -1014,7 +1015,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
 
     // step 8. calculate the weighted values of value bits and sum them up.
     CalcWeightedTensorNormal(value_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(4),
-                             half(1), dst_stride);
+                             half(1));
     // step 9. sum up the results of sign bit and value bits, change the result into 0/1
     repeat_params = {1, 1, 1, 1, 4, 4};
     AscendC::PipeBarrier<PIPE_V>();
@@ -1069,7 +1070,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
       CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
       // step 4. calculate the weighted values of sign bit and sum them up
       CalcWeightedTensorNormal(sign_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(8),
-                               half(2), dst_stride);
+                               half(2));
       // step 5. get the value bits of src0 and src1
       AscendC::Duplicate(inner_dup, uint32_t(0x7FFFFFFF), inner_dup.GetSize());
       AscendC::PipeBarrier<PIPE_V>();
@@ -1099,7 +1100,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
 
       // step 8. calculate the weighted values of value bits and sum them up.
       CalcWeightedTensorNormal(value_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(4),
-                               half(1), dst_stride);
+                               half(1));
       // step 9. sum up the results of sign bit and value bits, change the result into 0/1
       repeat_params = {1, 1, 1, 2, 4, 4};
       AscendC::PipeBarrier<PIPE_V>();
@@ -1154,7 +1155,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
       CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
       // step 4. calculate the weighted values of sign bit and sum them up
       CalcWeightedTensorNormal(sign_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(8),
-                               half(2), dst_stride);
+                               half(2));
       // step 5. get the value bits of src0 and src1
       AscendC::Duplicate(inner_dup, uint32_t(0x7FFFFFFF), inner_dup.GetSize());
       AscendC::PipeBarrier<PIPE_V>();
@@ -1184,7 +1185,7 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
 
       // step 8. calculate the weighted values of value bits and sum them up.
       CalcWeightedTensorNormal(value_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(4),
-                               half(1), dst_stride);
+                               half(1));
       // step 9. sum up the results of sign bit and value bits, change the result into 0/1
       repeat_params = {1, 1, 1, 2, 4, 4};
       AscendC::PipeBarrier<PIPE_V>();

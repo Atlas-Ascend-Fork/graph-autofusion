@@ -546,9 +546,9 @@ class Kernel {
   static std::string GenKernelFuncCallForInductor(const ascir::FusedScheduledResult &fused_schedule_result);
   // Inductor CV rtLaunch 分派入口（launch_decouple 开启时替代 AutofuseLaunch，由
   // pyautofuse codegen_bin 入口驱动）：
-  // extern "C" __global__ 入口函数体内承载原 host 侧位域解码/分发树，tiling 末参为
-  // CVAutofuseTilingData 按值入参（随 launch 命令搬运至参数区，VV 值参同款；静态 const
-  // 场景读 kConstTilingData），模板经引用直吃该值参（无视图 memcpy 中转）。is_aiv_entry=true
+  // extern "C" __global__ 入口函数体内承载原 host 侧位域解码/分发树，tiling 末参按值
+  // 仅在动态形态下存在，随 launch 命令搬运至参数区并供运行期分发；静态 const 场景读
+  // kConstTilingData。模板经引用直吃该值参（无视图 memcpy 中转）。is_aiv_entry=true
   // 时生成 AIV 入口（KERNEL_TYPE_AIV_ONLY），否则生成 MIX 入口（kernel_task_type 标注）。
   // 双 bin 拆分谓词为编译单元归属（AIV bin 含核内不可达死分支，由 AF_AIV_UNIT 宏裁剪）。
   static std::string GenCvDispatchEntryForInductor(const ascir::FusedScheduledResult &fused_schedule_result,

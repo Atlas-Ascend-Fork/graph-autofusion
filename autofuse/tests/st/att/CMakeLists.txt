@@ -28,6 +28,7 @@ file(GLOB SOURCES
         ${TC_DIR}/att_st_test/att_test.cpp
         ${TC_DIR}/test_expr/*.cpp
         ${TC_DIR}/source_mirror/generator/solver_pass_gen/axes_reorder_solver_gen/*.cpp
+        ${TC_DIR}/source_mirror/generator/test_inductor_topn_trial.cpp
         ${TC_DIR}/solver_pass_gen/general_solver_gen/*.cpp
         ${TC_DIR}/solver_pass/general_solver/*.cpp
         ${TC_DIR}/solver_pass_manager/*.cpp
@@ -129,3 +130,12 @@ add_dependencies(att_st ascir_builtin_ops)
 
 add_test(NAME att_st COMMAND att_st --gtest_output=xml:${CMAKE_INSTALL_PREFIX}/report/st/att_st.xml)
 set_tests_properties(att_st PROPERTIES LABELS "st;att_st")
+
+# The split Program has no graph producer yet. Exercise its host contract in
+# the codegen phase of the E2E ST job, which publishes ST coverage.
+file(GLOB ATT_PROGRAM_TEST_SOURCES CONFIGURE_DEPENDS "${CODE_ROOT_DIR}/tests/common/att/program/*.cpp")
+add_executable(att_program_st ${ATT_PROGRAM_TEST_SOURCES})
+target_link_libraries(att_program_st PRIVATE att GTest::gtest GTest::gtest_main)
+add_test(NAME att_program_st COMMAND att_program_st
+    --gtest_output=xml:${CMAKE_INSTALL_PREFIX}/report/st/att_program_st.xml)
+set_tests_properties(att_program_st PROPERTIES LABELS "st;codegen_e2e_st_test1;att_program_st")

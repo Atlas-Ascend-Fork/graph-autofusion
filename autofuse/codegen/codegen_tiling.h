@@ -405,6 +405,8 @@ class TilingLib {
   std::string GenGetTilingKeyCount(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   std::string GenGetTilingKeyForStatic() const;
   std::string GenGetTilingKeyKernelTypeForStatic(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  std::string GenGetTilingKeyKernelTypeForStaticCompact(
+      const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   // codegen_tiling_cube.cpp: Cube/CV tiling and MatMul metadata extraction.
   std::string GenCVTilingFunc() const;
   std::string GenTilingDataBlockDimAndWss() const;

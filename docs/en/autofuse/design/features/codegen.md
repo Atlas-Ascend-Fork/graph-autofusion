@@ -68,6 +68,7 @@ The actual generation logic of Host-side tiling functions resides in an external
 - Different SoC versions (e.g., 3510, 5102, 9201, 9202) differ in instruction sets and API forms. Version differences are routed to different implementations (V2 implementations) through the IR registry by SoC version; the main Codegen flow is unaware of the specific chip;
 - Adding support for a new SoC version requires providing both the ApiCall implementations and the API source template registrations of that version; templates of other versions must not be reused;
 - The AscendC API source code called in kernel files is packed into strings from source headers at build time and registered by `AscendCApiRegistry`, then inlined during generation. After an API template is updated, the Codegen module must be recompiled; otherwise the generation result still uses the old template.
+- In the multi-row int64 comparison implementation, `PairReduceSum` in `CastTensorToHalfNormal` lays out every repeat with a four-32-byte-block stride. The weighted multiply in `CalcWeightedTensorNormal` must use this compressed stride. Regression tests must include multi-row positive, negative, equal, small-inner-axis, and tail-repeat values because single-row inputs cannot expose this misalignment.
 
 ### 3.5 Other Limitations
 

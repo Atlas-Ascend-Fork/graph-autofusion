@@ -1658,6 +1658,61 @@ def test_expand_inductor_const_tiling_data_selects_const_branch_with_tiling_repr
     ]
 
 
+def _make_cv_all_stage_args():
+    return type(
+        "Args",
+        (),
+        {"stage": "all", "tiling_def_content": "struct CVAutofuseTilingData {};"},
+    )()
+
+
+def _make_cv_dispatch_entry_lines():
+    return [
+        '#include "kernel_common.h"\n',
+        'extern "C" __global__ __aicore__ void sub_graph(GM_ADDR input0, GM_ADDR workspace\n',
+        "#ifndef INDUCTOR_CONST_TILING_DATA\n",
+        ", CVAutofuseTilingData tiling_data\n",
+        "#endif\n",
+        ")\n",
+        "{\n",
+        "#ifdef INDUCTOR_CONST_TILING_DATA\n",
+        "  const CVAutofuseTilingData &cv_tiling = kConstTilingData;\n",
+        "#else\n",
+        "  const CVAutofuseTilingData &cv_tiling = tiling_data;\n",
+        "#endif\n",
+        "}\n",
+    ]
+
+
+def test_expand_inductor_const_tiling_data_keeps_cv_tiling_param_guard(
+    ascendc_compile_module,
+):
+    args = _make_cv_all_stage_args()
+    lines = _make_cv_dispatch_entry_lines()
+
+    result = ascendc_compile_module.expand_inductor_const_tiling_data(args, lines, None)
+    text = "".join(result)
+
+    assert "#ifndef INDUCTOR_CONST_TILING_DATA" in text
+    assert ", CVAutofuseTilingData tiling_data" in text
+    assert "const CVAutofuseTilingData &cv_tiling = kConstTilingData;" in text
+    # stage=all + CV 时 const 分支被物理选中（bake 流），动态绑定行删除
+    assert "cv_tiling = tiling_data;" not in text
+
+
+def test_expand_inductor_const_tiling_data_keeps_cv_param_guard_when_no_cv(
+    ascendc_compile_module,
+):
+    args = _make_device_stage_args()
+    lines = _make_cv_dispatch_entry_lines()
+
+    result = ascendc_compile_module.expand_inductor_const_tiling_data(args, lines, None)
+    text = "".join(result)
+
+    assert "#ifndef INDUCTOR_CONST_TILING_DATA" in text
+    assert ", CVAutofuseTilingData tiling_data" in text
+
+
 def _make_compile_args(host_files=None):
     return type(
         "Args",

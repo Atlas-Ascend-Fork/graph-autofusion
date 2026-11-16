@@ -2781,6 +2781,43 @@ TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimtDirectGmCallOutsideBlock
   EXPECT_EQ(generated.find("DeQue"), std::string::npos);
 }
 
+TEST_F(IndirectLoadConstructFromNodesTest, GroupedDirectGmCallConvertsGroupOffsetsAndClipsTail) {
+  for (const int64_t total : {1L, 17L, 32L, 33L, 128L, 129L}) {
+    ILTestGraph g("simt_grouped", 1L, total, 1L, total);
+    BuildSimtGraph(g);
+    AnnotateSimtTemplate(g.graph);
+    auto il = g.graph.FindNode("indirect_load");
+    ASSERT_NE(il, nullptr);
+    ASSERT_EQ(SetTemplateRole(il, TemplateRole::kSimtOp), af::SUCCESS);
+    TemplateAxes axes;
+    ASSERT_EQ(GetTemplateAxes(il, axes), af::SUCCESS);
+    for (const auto &axis : g.graph.GetAllAxis()) {
+      if (axis->type == af::Axis::kAxisTypeTileInner) {
+        axes.tile_inner_axis = axis->id;
+        axes.tile_outer_axis = axis->split_pair_other_id;
+      }
+    }
+    ASSERT_NE(axes.tile_inner_axis, af::kIdNone);
+    const int64_t group_size = std::min(32L, total);
+    g.graph.FindAxis(axes.tile_inner_axis)->size = af::Symbol(group_size);
+    g.graph.FindAxis(axes.tile_outer_axis)->size = af::Symbol((total + group_size - 1L) / group_size);
+    ASSERT_EQ(SetTemplateAxes(il, axes), af::SUCCESS);
+    Kernel kernel("simt_grouped");
+    std::string generated;
+    ASSERT_EQ(ParseGraphAndGenerateLoop(g, {"x", "idx"}, kernel, generated), af::SUCCESS);
+    if (group_size > 1L) {
+      EXPECT_NE(generated.find("simt_element_offset = static_cast<uint32_t>(block_dim_offset) * " +
+                               std::to_string(group_size) + "ULL"),
+                std::string::npos);
+      EXPECT_NE(generated.find("simt_actual_elements = simt_element_offset <"), std::string::npos);
+      EXPECT_NE(generated.find("static_cast<uint32_t>(simt_actual_elements), simt_element_offset"), std::string::npos);
+    } else {
+      EXPECT_EQ(generated.find("simt_element_offset"), std::string::npos);
+    }
+    EXPECT_EQ(generated.find("for (int z2z3Tb"), std::string::npos);
+  }
+}
+
 TEST_F(IndirectLoadConstructFromNodesTest, GeneratesSimtMultiOutputCall) {
   ILTestGraph g("simt_multi_output_call");
   BuildSimtGraph(g, true);

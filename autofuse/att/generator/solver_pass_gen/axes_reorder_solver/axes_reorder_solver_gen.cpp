@@ -485,6 +485,9 @@ std::string AxesReorderSolverGen::GenGetTilingDataUbSizeStaticFunc() {
     codes += "  double " + Str(local_buffer_tiling_vars_[i]) + " = tiling_data.get_" +
              Str(local_buffer_tiling_vars_[i]) + "();\n";
   }
+  if (codes.find("tiling_data.get_") == std::string::npos) {
+    codes += "  (void)tiling_data;\n";
+  }
   codes += "  return GetUbSizeStatic(" + GenGetStaticInputParam(HardwareDef::UB, true) + ");\n";
   codes += "}\n";
   codes += "\n";
@@ -522,6 +525,9 @@ std::string AxesReorderSolverGen::GenGetTilingDataBlockDimStatic(Expr &corenum_c
       codes += "  double " + Str(local_buffer_tiling_vars_[i]) + " = tiling_data.get_" +
                Str(local_buffer_tiling_vars_[i]) + "();\n";
     }
+  }
+  if (codes.find("tiling_data.get_") == std::string::npos) {
+    codes += "  (void)tiling_data;\n";
   }
   codes += "  return GetBlockDimStatic(" + GenGetStaticInputParam(HardwareDef::CORENUM, true) + ");\n";
   codes += "}\n";
@@ -774,12 +780,14 @@ std::string AxesReorderSolverGen::GenUBSizeCacheLineFunc() {
   std::string codes;
   codes += "bool AxesReorderSolver" + tiling_case_id_ + "::SatisfyUBSizeCacheLine(uint32_t idx) {\n";
   if (!NeedUBMultiCoreBalance()) {
+    codes += "  (void)idx;\n";
     codes += "  return false;\n";
     codes += "}\n";
     return codes;
   }
   if (enable_multicore_ub_tradeoff_) {
     codes += "  // enable multicore ub tradeoff by config\n";
+    codes += "  (void)idx;\n";
     codes += "  return true;\n";
     codes += "}\n";
     return codes;

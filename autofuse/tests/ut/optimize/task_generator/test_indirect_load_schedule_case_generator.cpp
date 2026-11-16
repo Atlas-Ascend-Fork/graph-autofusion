@@ -1815,6 +1815,54 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkRecordsWindowReuseInfoWhenFullResi
   }
 }
 
+TEST(IndirectLoadScheduleCaseGeneratorTest, StaticDirectGmSimtPrebuildsWarpGroups) {
+  for (const int64_t total : {1L, 17L, 32L, 33L, 128L, 129L}) {
+    af::AscGraph graph("simt_grouped_ut_graph");
+    const auto a = graph.CreateAxis("a", af::Symbol(total));
+    const auto table = graph.CreateAxis("table", af::Symbol(1024L));
+    af::ascir_op::Data data("data", graph);
+    data.ir_attr.SetIndex(0);
+    SetNodeView(data, af::DT_FLOAT, {table.id}, {table.size}, {af::ops::One});
+    af::ascir_op::Load load("load");
+    load.x = data.y;
+    SetNodeView(load, af::DT_FLOAT, {table.id}, {table.size}, {af::ops::One});
+    af::ascir_op::Data index("index", graph);
+    index.ir_attr.SetIndex(1);
+    SetNodeView(index, af::DT_INT32, {a.id}, {a.size}, {af::ops::One});
+    af::ascir_op::Load index_load("index_load");
+    index_load.x = index.y;
+    SetNodeView(index_load, af::DT_INT32, {a.id}, {a.size}, {af::ops::One});
+    af::ascir_op::IndirectLoad il("indirect_load");
+    il.x1 = load.y;
+    il.x2 = index_load.y;
+    il.ir_attr.SetAxis(0L);
+    SetNodeView(il, af::DT_FLOAT, {a.id}, {a.size}, {af::ops::One});
+    af::ascir_op::Store store("store");
+    store.x = il.y;
+    SetNodeView(store, af::DT_FLOAT, {a.id}, {a.size}, {af::ops::One});
+    af::ascir_op::Output output("output");
+    output.x = store.y;
+    output.ir_attr.SetIndex(0);
+    SetNodeView(output, af::DT_FLOAT, {a.id}, {a.size}, {af::ops::One});
+    optimize::IndirectLoadScheduleCaseGenerator generator;
+    std::vector<af::AscGraph> graphs;
+    std::vector<std::string> scores;
+    ASSERT_EQ(generator.Generate(graph, graphs, scores), af::SUCCESS);
+    const auto candidate = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+    ASSERT_NE(candidate, graphs.end());
+    ascgen_utils::indirect_load::TemplateAxes axes;
+    ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(candidate->FindNode("indirect_load"), axes), af::SUCCESS);
+    const auto *inner = candidate->FindAxis(axes.tile_inner_axis);
+    const auto *groups = candidate->FindAxis(axes.tile_outer_axis);
+    ASSERT_NE(inner, nullptr);
+    ASSERT_NE(groups, nullptr);
+    const int64_t group_size = std::min(32L, total);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(inner->size, af::Symbol(group_size)), af::TriBool::kTrue);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(groups->size, af::Symbol((total + group_size - 1L) / group_size)),
+              af::TriBool::kTrue);
+  }
+}
+
 TEST(IndirectLoadScheduleCaseGeneratorTest, SkRestoresWindowReuseInfoAfterPartition) {
   PlatformContextReset platform_reset;
   ge::PlatformContext::GetInstance().Reset();

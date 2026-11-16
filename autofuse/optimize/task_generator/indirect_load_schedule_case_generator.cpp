@@ -1355,11 +1355,12 @@ af::Status MergeAxesForTemplate(af::AscGraph &graph, const std::vector<af::AxisI
   return af::SUCCESS;
 }
 
-af::Status CreateFixedTileSplit(af::AscGraph &graph, af::AxisId axis_id, af::AxisId &outer_id, af::AxisId &inner_id) {
+af::Status CreateFixedTileSplit(af::AscGraph &graph, af::AxisId axis_id, af::AxisId &outer_id, af::AxisId &inner_id,
+                                int64_t group_size = 1L) {
   const auto *axis = graph.FindAxis(axis_id);
   GE_ASSERT_NOTNULL(axis, "IndirectLoad fixed tile axis %ld is not found.", axis_id);
-  const af::Expression outer_size = axis->size;
-  const af::Expression inner_size = af::sym::kSymbolOne;
+  const af::Expression inner_size = af::Symbol(group_size);
+  const af::Expression outer_size = group_size == 1L ? axis->size : af::sym::Ceiling(axis->size / inner_size);
   outer_id =
       graph.CreateAxis(axis->name + "T", ascir::Axis::Type::kAxisTypeTileOuter, outer_size, {axis_id}, af::kIdNone).id;
   inner_id =
@@ -1704,6 +1705,28 @@ af::Status FillSkWindowReuseInfo(af::AscGraph &graph, const af::AscNodePtr &indi
   return af::SUCCESS;
 }
 
+// Only a standalone direct-GM SIMT region can change the scheduling unit
+// without changing a normal scheduled consumer's UB tile or reduction window.
+// Bound the grouped extent to the existing signed block-offset domain.
+int64_t GetSimtGroupSize(const af::AscGraph &graph, const af::AscNodePtr &indirect_load, ascir::TemplateId template_id,
+                         const af::Axis &outer) {
+  int64_t total = 0L;
+  if (template_id != ascir::TemplateId::kIndirectLoadSimt ||
+      ascgen_utils::indirect_load::GetAllIndirectLoadNodes(graph).size() != 1UL ||
+      ascgen_utils::indirect_load::GetPostReduceConsumer(indirect_load) != nullptr ||
+      !outer.size.GetConstValue(total) || total <= 0L || total > std::numeric_limits<int32_t>::max()) {
+    return 1L;
+  }
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->GetType() != "Data" && node->GetType() != "Output" &&
+        !ascgen_utils::indirect_load::GetTemplateBehavior(node).uses_direct_gm_pipeline) {
+      return 1L;
+    }
+  }
+  constexpr int64_t kWarpElements = 32L;
+  return std::min(kWarpElements, total);
+}
+
 af::Status NormalizeAxesForTemplate(af::AscGraph &graph, const af::AscNodePtr &indirect_load, size_t boundary,
                                     ascir::TemplateId template_id, ascir::AxisId input_inner_axis,
                                     ascir::AxisId index_inner_axis, bool simd_index_uses_output_inner_axis = false,
@@ -1728,7 +1751,8 @@ af::Status NormalizeAxesForTemplate(af::AscGraph &graph, const af::AscNodePtr &i
     // prebuilt pair 为空后走通用 TileSplit，按 UB 容量求解 tile 内行数。
     GE_ASSERT_TRUE(inner_axis != af::kIdNone, "IndirectLoad solvable tile split requires a non-empty inner view.");
   } else {
-    GE_ASSERT_SUCCESS(CreateFixedTileSplit(graph, outer_axis, tile_outer_axis, tile_inner_axis));
+    GE_ASSERT_SUCCESS(CreateFixedTileSplit(graph, outer_axis, tile_outer_axis, tile_inner_axis,
+                                           GetSimtGroupSize(graph, indirect_load, template_id, *outer)));
   }
   std::vector<af::AxisId> vectorized_axes;
   if (inner_axis != af::kIdNone) {

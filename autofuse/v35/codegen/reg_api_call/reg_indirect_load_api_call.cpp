@@ -2381,7 +2381,36 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
     actual_size_expr = outer_tb_var + "_loop_size";
     output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
   }
-  if (!has_local_target && !has_post_reduce_ &&
+  // The fixed tile encodes elements per scheduling group. Public block
+  // offsets remain in outer-axis units; convert only at the SIMT call boundary.
+  ascgen_utils::indirect_load::TemplateAxes template_axes;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(node, template_axes));
+  int64_t group_size = 1L;
+  const auto tile = tpipe.tiler.axis_map.find(template_axes.tile_inner_axis);
+  if (tile != tpipe.tiler.axis_map.end()) {
+    int64_t fixed_size = 1L;
+    if (tile->second.size.GetConstValue(fixed_size) && fixed_size > 1L) {
+      group_size = fixed_size;
+    }
+  }
+  const bool grouped_direct_gm = !has_local_target && !has_post_reduce_ && group_size > 1L;
+  if (grouped_direct_gm) {
+    af::Expression total = af::sym::kSymbolOne;
+    for (const auto &size : logical_view_.output.sizes) {
+      total = total * size;
+    }
+    const std::string total_expr = PromoteSizeExpr(tpipe.tiler.Size(total), offset_type);
+    ss << "  const " << offset_type << " simt_element_offset = static_cast<" << offset_type << ">(block_dim_offset) * "
+       << group_size << "ULL;\n";
+    ss << "  const " << offset_type << " simt_block_elements = static_cast<" << offset_type << ">(" << outer_tb_var
+       << "_loop_size) * " << group_size << "ULL;\n";
+    ss << "  const " << offset_type << " simt_actual_elements = simt_element_offset < " << total_expr << " ? ("
+       << total_expr << " - simt_element_offset < simt_block_elements ? " << total_expr
+       << " - simt_element_offset : simt_block_elements) : 0U;\n";
+    actual_size_expr = "simt_actual_elements";
+    output_offset_expr = "simt_element_offset";
+  }
+  if (!grouped_direct_gm && !has_local_target && !has_post_reduce_ &&
       simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding && rank == 2UL && axis_ == 0L) {
     const std::string row_count_expr = PromoteSizeExpr(tpipe.tiler.Size(logical_view_.output.sizes[0]), offset_type);
     const std::string inner_size_expr = PromoteSizeExpr(tpipe.tiler.Size(logical_view_.output.sizes[1]), offset_type);

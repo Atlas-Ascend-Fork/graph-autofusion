@@ -1237,6 +1237,52 @@ bool IsSingleGroup(const ascir::FusedScheduledResult &fused_schedule_result) {
          fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.size() == 1;
 }
 
+// 注册式TilingKey扁平展开的分支数上限：key总数超限的result整体回落运行时tiling_data解析分发。
+// （栈安全余量>=2x的硬上限1000，工程默认512）
+constexpr uint64_t kMaxRegTilingKeyCount = 512U;
+
+bool TryCalcTilingKeyCount(const ascir::FusedScheduledResult &fused_schedule_result, uint64_t limit, uint64_t &count) {
+  count = 0U;
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      const auto &schedule_groups = scheduled_result.schedule_groups;
+      const bool has_empty_group = std::any_of(schedule_groups.begin(), schedule_groups.end(),
+                                               [](const auto &group) { return group.impl_graphs.empty(); });
+      if (has_empty_group) {
+        continue;
+      }
+      uint64_t per_result_count = 1U;
+      for (const auto &schedule_group : schedule_groups) {
+        const uint64_t impl_count = schedule_group.impl_graphs.size();
+        if (impl_count == 0U || per_result_count > (limit - count) / impl_count) {
+          return false;
+        }
+        per_result_count *= impl_count;
+      }
+      if (per_result_count > limit - count) {
+        return false;
+      }
+      count += per_result_count;
+    }
+  }
+  return true;
+}
+
+bool IsTilingKeyCountWithinLimit(const ascir::FusedScheduledResult &fused_schedule_result) {
+  // cube融合场景豁免：其静态路径当前必走RegTilingKey，回落正确性未验证且实际组合数
+  // 不超限，维持原行为
+  if (IsCubeFusedScheduled(fused_schedule_result)) {
+    return true;
+  }
+  uint64_t tiling_key_count = 0U;
+  if (!TryCalcTilingKeyCount(fused_schedule_result, kMaxRegTilingKeyCount, tiling_key_count)) {
+    GELOGW("Tiling key count exceeds limit %llu, fallback to parse-tiling-data dispatch.",
+           static_cast<unsigned long long>(kMaxRegTilingKeyCount));
+    return false;
+  }
+  return true;
+}
+
 bool CanUseTilingKey(const ascir::FusedScheduledResult &fused_schedule_result) {
   if (fused_schedule_result.node_idx_to_scheduled_results.size() > 1U) {
     return false;

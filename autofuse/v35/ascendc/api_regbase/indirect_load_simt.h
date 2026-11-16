@@ -857,6 +857,11 @@ __aicore__ inline void DispatchIndirectLoadSimt(__gm__ X *x, typename FusedBody:
       return;
     }
   }
+  // A tile fitting in one warp needs no additional idle warps.
+  if (actual_size <= 32U) {
+    LaunchIndirectLoadSimt<32U, X, FusedBody>(x, targets, context, actual_size, output_offset, address_policy);
+    return;
+  }
   if (actual_size <= 128U) {
     LaunchIndirectLoadSimt<128U, X, FusedBody>(x, targets, context, actual_size, output_offset, address_policy);
     return;

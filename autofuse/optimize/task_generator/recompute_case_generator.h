@@ -44,11 +44,43 @@ class RecomputeCaseGenerator : public FusionCaseGenerator {
   bool IsRecomputableAlwaysBetter() const;
   Status AnalyzeSplittablePath(ascir::HintGraph &hint_graph, const af::AscNodePtr &potential_store);
   void MergeAllPaths();
+  Status GenerateBroadcastWorkspaceTask(ascir::HintGraph &hint_graph, std::vector<ScheduleTask> &tasks);
+  Status CollectBroadcastCandidates(const ascir::HintGraph &hint_graph, ascir::ImplGraph &optimize_graph,
+                                    std::vector<af::AscNodePtr> &node_order,
+                                    std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &broadcast_candidates);
+  Status SelectBroadcastPartitions(ascir::ImplGraph &optimize_graph,
+                                   const std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &broadcast_candidates,
+                                   std::vector<af::AscNodePtr> &node_order, bool &partitioned);
   Status DoTaskGenerator(ascir::ImplGraph &impl_graph, std::vector<ScheduleTask> &tasks) const;
   Status DoGraphSplit(af::AscGraph &graph) const;
 
   bool is_static_graph_{false};
   SplitResult result_;
+};
+
+// Broadcast workspace 切分模板的打分函数生成器, 类比 ConcatScoreFunctionGenerator:
+// 按原始图非首轴(除首个 axis 外) size 乘积与 32K 阈值比较决定打分: 超阈值返回正分使本模板在
+// tiling 期与其他候选模板(默认模板/重计算模板, 空打分默认0分)竞争中优先; 未超阈值返回负分劣后给
+// 默认模板——平分时 result 序号小者胜, 本模板恒为 result0(双平台均以 tasks.empty() 守卫
+// RecomputeCaseGenerator), 返回 0 分无法落选。
+// 动态 shape 场景生成运行时代码, 从 tiling data 嵌套结构读取 size var 实际值; 嵌套结构
+// InputParams 按 schedule group 定义(仅含该 group 子图用到的 size var), 故 Generate 须在
+// PartitionByConnectivity 切分完成后调用, 逐自由符号定位实际所在 group 后生成跨 group 引用。
+class BroadcastWorkspaceScoreFunctionGenerator {
+ public:
+  BroadcastWorkspaceScoreFunctionGenerator(const ascir::HintGraph &graph,
+                                           const std::vector<ascir::ImplGraph> &grouped_graphs);
+  Status Generate(std::string &score_func);
+
+ private:
+  Status ParseNonFirstAxisProduct();
+  Status GenerateForDynamic();
+  void GenerateReturnValue(const int32_t score);
+
+  const ascir::HintGraph *graph_;
+  const std::vector<ascir::ImplGraph> *grouped_graphs_;
+  af::Expression product_;
+  std::stringstream ss_;
 };
 }  // namespace optimize
 

@@ -227,33 +227,6 @@ void GenInductorGetTilingBranch(std::stringstream &ss, uint64_t count, uint32_t 
   ss << "  }" << std::endl;
 }
 
-bool TryCalcTilingKeyCount(const ascir::FusedScheduledResult &result, uint64_t limit, uint64_t &count) {
-  count = 0U;
-  for (const auto &scheduled_results : result.node_idx_to_scheduled_results) {
-    for (const auto &scheduled_result : scheduled_results) {
-      const auto &schedule_groups = scheduled_result.schedule_groups;
-      const bool has_empty_group = std::any_of(schedule_groups.begin(), schedule_groups.end(),
-                                               [](const auto &group) { return group.impl_graphs.empty(); });
-      if (has_empty_group) {
-        continue;
-      }
-      uint64_t per_result_count = 1U;
-      for (const auto &schedule_group : schedule_groups) {
-        const uint64_t impl_count = schedule_group.impl_graphs.size();
-        if (impl_count == 0U || per_result_count > (limit - count) / impl_count) {
-          return false;
-        }
-        per_result_count *= impl_count;
-      }
-      if (per_result_count > limit - count) {
-        return false;
-      }
-      count += per_result_count;
-    }
-  }
-  return true;
-}
-
 bool CheckTilingHeadersValid(const std::map<std::string, std::string> &tiling_file_name_to_content) {
   for (const auto &pair : tiling_file_name_to_content) {
     if (pair.second == INVALID_TILING) {
@@ -551,6 +524,16 @@ bool HasWorkSpaceNode(const af::AscGraph &impl_graph) {
   return false;
 }
 
+static void GenWorkspaceFlagArray(std::stringstream &ss, size_t graph_id, size_t result_id, size_t group_id,
+                                  const std::vector<af::AscGraph> &impl_graphs) {
+  ss << "  static const bool ws_graph" << std::to_string(graph_id) << "_result" << std::to_string(result_id) << "_g"
+     << std::to_string(group_id) << "[] = {";
+  for (size_t k = 0; k < impl_graphs.size(); k++) {
+    ss << (k == 0U ? "" : ", ") << (HasWorkSpaceNode(impl_graphs[k]) ? "true" : "false");
+  }
+  ss << "};" << std::endl;
+}
+
 void CodegenTilingKeyKerneType(std::stringstream &ss, const std::vector<std::vector<bool>> &per_group_conditions,
                                std::vector<bool> &current, uint32_t depth, uint32_t &tiling_key) {
   if (per_group_conditions.size() == depth) {
@@ -800,10 +783,18 @@ std::map<std::string, std::string> TilingLib::Generate(const ascir::FusedSchedul
   ss << TilingData("Autofuse").GenerateConst(fused_schedule_result, false) << std::endl;
 
   ss << kTilingHeadCceKtTestGuard << std::endl;
+  // 门控理由：kernel_type_map按∏(各组impl数)全量枚举，与kernel路由TILING_KEY_IS分支链同源膨胀；
+  // 超限result的kernel路由虽已回落parse派发，但宿主静态化流程仍依赖这两个查询函数的返回值
+  // （编译期经ctypes取key/kernel_type写op json，GE运行时TilingForOneNode按tilingKey更新mix
+  // attr），故超限时仅将∏查表实现替换为线性紧凑推导，不跳过发射
   if (!ascgen_utils::IsJustCubeFixpip(fused_schedule_result) && CanUseTilingKey(fused_schedule_result) &&
       IsStaticSchedResult(fused_schedule_result)) {
     ss << GenGetTilingKeyForStatic();
-    ss << GenGetTilingKeyKernelTypeForStatic(fused_schedule_result);
+    if (ascgen_utils::IsTilingKeyCountWithinLimit(fused_schedule_result)) {
+      ss << GenGetTilingKeyKernelTypeForStatic(fused_schedule_result);
+    } else {
+      ss << GenGetTilingKeyKernelTypeForStaticCompact(fused_schedule_result);
+    }
   }
   ss << "#endif" << std::endl;
   const std::string entry_body = tiling_file_name_to_content[kTilingDefAndConstIdentify] + ss.str();
@@ -1767,6 +1758,50 @@ static std::string GenLocalMemorySizeCode() {
   return ss.str();
 }
 
+static bool ShouldLogTilingKeyComponents(const ascir::FusedScheduledResult &fused_schedule_result) {
+  return ascgen_utils::CanUseTilingKey(fused_schedule_result) &&
+         !ascgen_utils::IsTilingKeyCountWithinLimit(fused_schedule_result);
+}
+
+static std::string GenTilingKeyComponentLog(const ascir::FusedScheduledResult &fused_schedule_result) {
+  std::stringstream ss;
+  if (ascgen_utils::IsSingleGroup(fused_schedule_result)) {
+    ss << "  OP_LOGD(OP_NAME, \"AllKernel Lookup end: tilingKey=%ld, result=0, group_impls=[g0_%u]\", "
+          "static_cast<long>(tiling_key), tiling_data->tiling_key);"
+       << std::endl;
+    return ss.str();
+  }
+  for (size_t graph_id = 0U; graph_id < fused_schedule_result.node_idx_to_scheduled_results.size(); ++graph_id) {
+    const auto &scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[graph_id];
+    bool first_branch = true;
+    for (size_t result_id = 0U; result_id < scheduled_results.size(); ++result_id) {
+      const auto &schedule_groups = scheduled_results[result_id].schedule_groups;
+      // 空 group 的 result 在 host 编号与设备分支中均被整条作废，日志分支需保持一致，否则会打印
+      // 永远不会被路由到的分组 key，或与 host 的编号规则出现分歧
+      const bool has_empty_group = std::any_of(schedule_groups.begin(), schedule_groups.end(),
+                                               [](const auto &group) { return group.impl_graphs.empty(); });
+      if (has_empty_group) {
+        continue;
+      }
+      ss << "  " << (first_branch ? "if " : "else if ") << "(tiling_data->graph" << graph_id
+         << "_tiling_key == " << result_id << ") {" << std::endl;
+      first_branch = false;
+      ss << "    OP_LOGD(OP_NAME, \"AllKernel Lookup end: tilingKey=%ld, result=" << result_id << ", group_impls=[";
+      for (size_t group_id = 0U; group_id < schedule_groups.size(); ++group_id) {
+        ss << (group_id == 0U ? "" : ", ") << "g" << group_id << "_%u";
+      }
+      ss << "]\", static_cast<long>(tiling_key)";
+      for (size_t group_id = 0U; group_id < schedule_groups.size(); ++group_id) {
+        ss << ", tiling_data->graph" << graph_id << "_result" << result_id << "_g" << group_id
+           << "_tiling_data.tiling_key";
+      }
+      ss << ");" << std::endl;
+      ss << "  }" << std::endl;
+    }
+  }
+  return ss.str();
+}
+
 static void AppendCubeFusionInitCode(std::stringstream &ss, const std::string &shape_dim_param, bool is_ub_fused) {
   ss << "  auto tiling_data =  context->GetTilingData<CVAutofuseTilingData>();" << std::endl;
   ss << "  int64_t ws_size = 0;" << std::endl;
@@ -1983,6 +2018,9 @@ std::string TilingLib::GenNonCubeFusionTilingBody(const ascir::FusedScheduledRes
   }
   context->SetTilingKey(static_cast<uint64_t>(tiling_key));
 )";
+    if (ShouldLogTilingKeyComponents(fused_schedule_result)) {
+      ss << GenTilingKeyComponentLog(fused_schedule_result);
+    }
   }
   return ss.str();
 }
@@ -2318,6 +2356,70 @@ std::string TilingLib::GenGetTilingKeyKernelTypeForStatic(
   }
   return kernel_type.c_str();
 })" << std::endl;
+  return ss.str();
+}
+
+static void GenCompactMultiGroupKernelType(std::stringstream &ss,
+                                           const ascir::FusedScheduledResult &fused_schedule_result) {
+  for (size_t graph_id = 0; graph_id < fused_schedule_result.node_idx_to_scheduled_results.size(); graph_id++) {
+    const auto &scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[graph_id];
+    for (size_t i = 0; i < scheduled_results.size(); i++) {
+      const auto &schedule_groups = scheduled_results[i].schedule_groups;
+      ss << (i == 0U ? "  if " : "  else if ") << "(t.graph" << std::to_string(graph_id)
+         << "_tiling_key == " << std::to_string(i) << ") {" << std::endl;
+      const bool has_empty_group = std::any_of(schedule_groups.begin(), schedule_groups.end(),
+                                               [](const auto &group) { return group.impl_graphs.empty(); });
+      if (has_empty_group) {
+        ss << "    return \"\";" << std::endl;
+      } else {
+        for (size_t j = 0; j < schedule_groups.size(); j++) {
+          GenWorkspaceFlagArray(ss, graph_id, i, j, schedule_groups[j].impl_graphs);
+        }
+        ss << "    bool has_workspace_node = false;" << std::endl;
+        for (size_t j = 0; j < schedule_groups.size(); j++) {
+          const std::string field_name =
+              CamelToLowerSneak("t.graph" + std::to_string(graph_id) + "_result" + std::to_string(i) + "_g" +
+                                std::to_string(j) + "_tiling_data");
+          ss << "    if (" << field_name << ".tiling_key >= " << schedule_groups[j].impl_graphs.size() << ") {"
+             << std::endl;
+          ss << "      return \"\";" << std::endl;
+          ss << "    }" << std::endl;
+          ss << "    has_workspace_node = has_workspace_node || ws_graph" << std::to_string(graph_id) << "_result"
+             << std::to_string(i) << "_g" << std::to_string(j) << "[" << field_name << ".tiling_key];" << std::endl;
+        }
+        ss << "    return has_workspace_node ? \"" << kKernelTaskTypeMixAIVOneZero << "\" : \""
+           << kKernelTaskTypeAIVOnly << "\";" << std::endl;
+      }
+      ss << "  }" << std::endl;
+    }
+  }
+}
+
+// 与GenGetTilingKeyKernelTypeForStatic的∏查表语义一致：key非法（空组/越界/未命中）返回""，
+// 合法时按选中impl是否含Workspace节点判定mix/aiv kernel type；区别仅在于体积随Σ(各组impl数)
+// 线性而非随∏全量枚举，用于超限result，字段布局与GenMulGroupFindBestTilingKey对齐
+std::string TilingLib::GenGetTilingKeyKernelTypeForStaticCompact(
+    const ascir::FusedScheduledResult &fused_schedule_result) const {
+  std::stringstream ss;
+  ss << "extern \"C\" const char* GetTilingKeyKernelTypeForStatic()" << std::endl;
+  ss << "{" << std::endl;
+  ss << "  const auto &t = TilingDataValue;" << std::endl;
+  if (ascgen_utils::IsSingleGroup(fused_schedule_result)) {
+    const auto &impl_graphs = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+    if (impl_graphs.empty()) {
+      ss << "  return \"\";" << std::endl;
+    } else {
+      GenWorkspaceFlagArray(ss, 0U, 0U, 0U, impl_graphs);
+      ss << "  if (t.tiling_key < " << impl_graphs.size() << ") {" << std::endl;
+      ss << "    return ws_graph0_result0_g0[t.tiling_key] ? \"" << kKernelTaskTypeMixAIVOneZero << "\" : \""
+         << kKernelTaskTypeAIVOnly << "\";" << std::endl;
+      ss << "  }" << std::endl;
+    }
+  } else {
+    GenCompactMultiGroupKernelType(ss, fused_schedule_result);
+  }
+  ss << "  return \"\";" << std::endl;
+  ss << "}" << std::endl;
   return ss.str();
 }
 

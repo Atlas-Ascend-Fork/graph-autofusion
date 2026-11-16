@@ -25,6 +25,7 @@ file(GLOB_RECURSE ATT_SRCS CONFIGURE_DEPENDS
 
 target_sources(aihac_codegen PRIVATE
     ${CODE_ROOT_DIR}/att/gen_tiling_impl.cpp
+    ${CODE_ROOT_DIR}/att/program/axes_solve_runtime.cpp
     ${ATT_SRCS}
 )
 
@@ -47,3 +48,7 @@ target_include_directories(aihac_codegen PRIVATE
 
 include(${CODE_ROOT_DIR}/att/cmake/axes_solver_resources.cmake)
 target_link_libraries(aihac_codegen PRIVATE att_axes_solver_resources)
+
+include(${CODE_ROOT_DIR}/att/cmake/tiling_core.cmake)
+add_att_tiling_core(att_tiling_core)
+target_link_libraries(aihac_codegen PRIVATE att_tiling_core)

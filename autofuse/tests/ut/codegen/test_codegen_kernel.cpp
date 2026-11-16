@@ -718,10 +718,10 @@ TEST(CodegenKernel, ApiCallPreProcessUbScalarTest) {
                         "SetFlag<HardEvent::MTE2_S>(eventID);\n"
                         "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
                         "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "}\n"
                         "AscendC::PipeBarrier<PIPE_ALL>();\n"
                         "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(float));\n"
-                        "AscendC::PipeBarrier<PIPE_V>();\n"
-                        "}\n"});
+                        "AscendC::PipeBarrier<PIPE_V>();\n"});
 }
 
 TEST(CodegenKernel, ApiCallPreProcessLoadUbScalarTest) {
@@ -783,10 +783,10 @@ TEST(CodegenKernel, ApiCallPreProcessLoadUbScalarTest) {
                         "SetFlag<HardEvent::MTE2_S>(eventID);\n"
                         "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
                         "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "}\n"
                         "AscendC::PipeBarrier<PIPE_ALL>();\n"
                         "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(float));\n"
-                        "AscendC::PipeBarrier<PIPE_V>();\n"
-                        "}\n"});
+                        "AscendC::PipeBarrier<PIPE_V>();\n"});
 }
 
 TEST(CodegenKernel, ApiCallPostProcessLoadUbScalarInt64Test) {
@@ -843,11 +843,11 @@ TEST(CodegenKernel, ApiCallPostProcessLoadUbScalarInt64Test) {
                         "SetFlag<HardEvent::MTE2_S>(eventID);\n"
                         "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
                         "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "}\n"
                         "AscendC::PipeBarrier<PIPE_ALL>();\n"
                         "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(int64_t), "
                         "int64_dup_scratch_tensor);\n"
-                        "AscendC::PipeBarrier<PIPE_V>();\n"
-                        "}\n"});
+                        "AscendC::PipeBarrier<PIPE_V>();\n"});
 }
 
 TEST(CodegenKernel, Int64DupScratchAllocTest) {
@@ -5835,6 +5835,92 @@ TEST(CodegenKernel, Kernel_GenerateKernel_Multi_ScheduleGroup) {
   EXPECT_TRUE(kernel_txt.find(expect_found) != std::string::npos);
 }
 
+TEST(CodegenKernel, Kernel_GenerateKernel_Multi_ScheduleGroup_SkipsEmptyGroupResult) {
+  af::AscGraph graph("test_kernel");
+  af::ascir_op::Data x_op("x", graph);
+  x_op.ir_attr.SetIndex(0);
+  af::ascir_op::Output y_op("y");
+  y_op.ir_attr.SetIndex(0);
+  af::ascir_op::Load load_op("load");
+  af::ascir_op::Store store_op("store");
+  graph.AddNode(load_op);
+  graph.AddNode(store_op);
+  graph.AddNode(y_op);
+
+  x_op.y.dtype = ge::DT_FLOAT16;
+  load_op.x = x_op.y;
+  load_op.y.dtype = ge::DT_FLOAT16;
+  store_op.x = load_op.y;
+  store_op.y.dtype = ge::DT_FLOAT16;
+  y_op.x = store_op.y;
+  store_op.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  auto x = graph.FindNode("x");
+  auto load = graph.FindNode("load");
+  auto store = graph.FindNode("store");
+  auto output = graph.FindNode("y");
+
+  x->attr.api.unit = af::ComputeUnit::kUnitNone;
+  load->attr.api.unit = af::ComputeUnit::kUnitNone;
+  store->attr.api.unit = af::ComputeUnit::kUnitNone;
+  output->attr.api.unit = af::ComputeUnit::kUnitNone;
+
+  x->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  x->outputs[0].attr.mem.tensor_id = 0;
+  x->outputs[0].attr.opt.merge_scope = 0;
+  load->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  load->outputs[0].attr.mem.tensor_id = 1;
+  load->outputs[0].attr.buf.id = 0;
+  load->outputs[0].attr.opt.merge_scope = 0;
+  store->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  store->outputs[0].attr.mem.tensor_id = 2;
+  store->outputs[0].attr.opt.merge_scope = 0;
+
+  ::ascir::ScheduleGroup empty_result_group0 = {{af::AscGraph("empty_result_0"), af::AscGraph("empty_result_1")}};
+  ::ascir::ScheduleGroup empty_result_group1;
+  ::ascir::ScheduleGroup kept_result_group0 = {{af::AscGraph("kept_result_0"), af::AscGraph("kept_result_1")}};
+
+  ::ascir::ScheduledResult empty_result;
+  empty_result.schedule_groups.push_back(empty_result_group0);
+  empty_result.schedule_groups.push_back(empty_result_group1);
+
+  ::ascir::ScheduledResult kept_result;
+  kept_result.schedule_groups.push_back(kept_result_group0);
+
+  std::vector<::ascir::ScheduledResult> schedule_results;
+  schedule_results.push_back(empty_result);
+  schedule_results.push_back(kept_result);
+
+  for (auto &scheduled_result : schedule_results) {
+    for (auto &schedule_group : scheduled_result.schedule_groups) {
+      for (auto &impl_graph : schedule_group.impl_graphs) {
+        impl_graph.CopyFrom(graph);
+      }
+    }
+  }
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString(graph.GetName().c_str());
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.input_nodes.push_back(x);
+  fused_schedule_result.output_nodes.push_back(output);
+
+  std::stringstream ss;
+  ASSERT_EQ(codegen::Kernel::GenKernelFuncByTilingKey(fused_schedule_result, ss), af::SUCCESS);
+  const auto kernel_txt = ss.str();
+  EXPECT_NE(kernel_txt.find("TILING_KEY_IS(0)"), std::string::npos);
+  EXPECT_NE(kernel_txt.find("TILING_KEY_IS(1)"), std::string::npos);
+  EXPECT_EQ(kernel_txt.find("TILING_KEY_IS(2)"), std::string::npos);
+  EXPECT_EQ(kernel_txt.find("empty_result"), std::string::npos);
+  EXPECT_NE(kernel_txt.find("kept_result"), std::string::npos);
+
+  auto all_empty = fused_schedule_result;
+  all_empty.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs.clear();
+  std::stringstream all_empty_ss;
+  ASSERT_EQ(codegen::Kernel::GenKernelFuncByTilingKey(all_empty, all_empty_ss), af::SUCCESS);
+  EXPECT_EQ(all_empty_ss.str().find("TILING_KEY_IS"), std::string::npos);
+}
+
 TEST(CodegenKernel, Kernel_GenerateKernel_Single_ScheduleGroup) {
   af::AscGraph graph("test_kernel");
   af::ascir_op::Data x_op("x", graph);
@@ -7886,6 +7972,24 @@ TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_LaunchDecoupleDropsModeTemplat
   EXPECT_NE(declare.find("__aicore__ inline __attribute__((always_inline)) void"), std::string::npos);
   EXPECT_NE(declare.find("const CVAutofuseTilingData &t"), std::string::npos);
   EXPECT_EQ(declare.find("TILING_DATA_T t"), std::string::npos);
+}
+
+TEST_F(CodegenKernelConv2DTest, GenCvDispatch_TilingParamGuardedByConstMacro) {
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  fused_scheduled_result.fused_graph_name = af::AscendString("matmul_dusion");
+  ::ascir::ScheduledResult scheduled_result;
+  scheduled_result.cube_type = ::ascir::CubeTemplateType::kUBFuse;
+  fused_scheduled_result.node_idx_to_scheduled_results.push_back({scheduled_result});
+
+  const std::string entry =
+      codegen::Kernel::GenCvDispatchEntryForInductor(fused_scheduled_result, "KERNEL_TYPE_MIX_AIC_1_2", false);
+
+  EXPECT_NE(entry.find("#ifndef INDUCTOR_CONST_TILING_DATA"), std::string::npos);
+  EXPECT_NE(entry.find(", CVAutofuseTilingData tiling_data"), std::string::npos);
+  // 静态烧录形态去 (void)tiling_data：值参被 #ifndef 编译掉后不再需要消费标记
+  EXPECT_EQ(entry.find("(void)tiling_data"), std::string::npos);
+  EXPECT_NE(entry.find("const CVAutofuseTilingData &cv_tiling = kConstTilingData;"), std::string::npos);
+  EXPECT_NE(entry.find("const CVAutofuseTilingData &cv_tiling = tiling_data;"), std::string::npos);
 }
 
 TEST_F(CodegenKernelConv2DTest, GenCubeCommonTiling_TilingTypeArgFollowsLaunchDecouple) {

@@ -68,6 +68,7 @@ Host 侧 tiling 函数的实际生成逻辑位于外部 gen_tiling 库中，Code
 - 不同 SoC 版本（如 3510、5102、9201、9202）的指令集和 API 形态存在差异，版本差异通过 IR 注册表按 SoC 版本路由到不同的实现（V2 实现），Codegen 主流程不感知具体芯片；
 - 新增 SoC 版本支持时，需同时提供该版本的 ApiCall 实现和 API 源码模板注册，不能复用其他版本的模板；
 - Kernel 文件中调用的 AscendC API 源码由 `AscendCApiRegistry` 在构建期从源码头文件打包为字符串注册，生成时内联。API 模板更新后必须重新编译 Codegen 模块，否则生成结果仍是旧模板。
+- int64 比较的多行向量实现中，`CastTensorToHalfNormal` 的 `PairReduceSum` 将每个 repeat 的中间结果按 4 个 32B block 的步长布局。`CalcWeightedTensorNormal` 的加权乘法必须使用该压缩后的步长；回归测试需包含多行正负数、相等值、小内轴和尾部 repeat，单行输入无法暴露此类错位。
 
 ### 3.5 其他限制
 

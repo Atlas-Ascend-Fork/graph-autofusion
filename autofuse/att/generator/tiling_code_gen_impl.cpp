@@ -2572,6 +2572,9 @@ af::Status TilingCodeGenImpl::GenGetSetTilingImpl(const ModelInfo &model_info) {
   if (ws_vars.empty()) {
     tiling_func_.AddLine("    (void)tiling_data; (void)workspace_map;");
   } else {
+    if (ws_vars.find("tiling_data.get_") == std::string::npos) {
+      tiling_func_.AddLine("    (void)tiling_data;");
+    }
     tiling_func_.AddLine(ws_vars);
   }
   tiling_func_.AddLine("    return true;");
@@ -2863,15 +2866,12 @@ af::Status TilingCodeGenImpl::GenPGOTilingCase(const ModelInfo &model_info) {
                        model_info.sub_case_tag + tiling_id_str + ".\");");
   tiling_func_.AddLine("    autofuse_tiling_data_tmp = *output_tiling_data;");
 
-  if (!is_uniq_group_) {
-    tiling_func_.AddLine("    autofuse_tiling_data_tmp." + model_info.schedule_group_ident.GetItemPrefix() +
-                         "_tiling_data.set_tiling_key(" + tiling_id_str + ");");
-  } else {
-    tiling_func_.AddLine("    autofuse_tiling_data_tmp.set_tiling_key(" + tiling_id_str + ");");
-  }
-
-  tiling_func_.AddLine("    ret = (SearchAllTilingbyCaseId(tilingCaseImplPtr, tiling_data, tiling_data_list, " +
-                       tiling_id_str + "u, &autofuse_tiling_data_tmp, " +
+  // Keep trial writes private until a complete candidate is selected.
+  const std::string trial_tiling_data =
+      is_uniq_group_ ? "autofuse_tiling_data_tmp"
+                     : "autofuse_tiling_data_tmp." + model_info.schedule_group_ident.GetItemPrefix() + "_tiling_data";
+  tiling_func_.AddLine("    ret = (SearchAllTilingbyCaseId(tilingCaseImplPtr, " + trial_tiling_data +
+                       ", tiling_data_list, " + tiling_id_str + "u, &autofuse_tiling_data_tmp, " +
                        "stream, workspace_map, block_dim_vec, effective_cfg) || ret);");
   tiling_func_.AddLine("    OP_LOGD(OP_NAME, \"Finish calculating the tiling data for tiling_case_id " +
                        model_info.sub_case_tag + tiling_id_str + ".\");");

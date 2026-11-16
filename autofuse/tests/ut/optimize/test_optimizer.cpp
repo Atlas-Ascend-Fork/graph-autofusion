@@ -8697,10 +8697,19 @@ TEST_F(TestOptimizer, BrcCacheReuseOtherMem) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 3);
-  const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  // 后移 pass 将 brc3 的多轴扩展拆为单轴链, exp2->brc3 成为首轴 Brc 候选: ws 候选(打正分)与
+  // fallback 候选(空打分)共存于 scheduled results, tiling 期打分竞争
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
+  // ws 候选: 断边选点将 exp2->brc3 切分, 生产/消费两个调度组, abs2/exp2 位于生产侧单 impl 子图
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 2);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 1);
+  EXPECT_NE(
+      fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0].FindNode("exp2"),
+      nullptr);
+  // fallback 候选: 原 1 组 3 impl 结构, abs2/exp2 缓存不复用语义在该结构上验证
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 1);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs.size(), 3);
+  const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs;
   const auto &impl_graph = impl_graphs[2];
   auto abs2_result = impl_graph.FindNode("abs2");
   auto exp2_result = impl_graph.FindNode("exp2");

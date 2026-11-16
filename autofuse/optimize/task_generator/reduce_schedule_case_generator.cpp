@@ -22,6 +22,7 @@
 #include "node_utils.h"
 #include "optimize/graph_pass/softmax_pattern_fusion_pass.h"
 #include "reduce_schedule_case_generator.h"
+#include "task_generator/node_partition_utils.h"
 #include "register/op_def_factory_af.h"
 #include "base/err_msg.h"
 #include "graph/symbolizer/symbolic.h"
@@ -33,11 +34,8 @@ namespace {
 size_t TWO = 2;
 size_t NODE_COUNT_AFTER_REDUCE = 4UL;
 constexpr int64_t kBroadcastTailRepeatWorkspaceThreshold = 22500L;
+// reduce 场景首轴 B 扩展的 workspace 收益门槛(首轴须为常量并大于该阈值)
 constexpr int64_t kBroadcastFirstAxisWorkspaceThreshold = 128L;
-std::string GetNewNodeName(const af::AscNodePtr &src_node, const af::AscNodePtr &dst_node, const std::string &type,
-                           int32_t idx) {
-  return src_node->GetName() + "_to_" + dst_node->GetName() + "_" + type + "_" + to_string(idx);
-}
 
 // 打印 loop_start_end 的 [begin_idx, end_idx) 区段, tag 标识来源(FindNormLoops/AddNormLikeLoops)
 void LogNormLoops(const char *tag, const std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end,
@@ -69,32 +67,6 @@ bool IsTailRepeatProductLargeEnough(const std::vector<ascir::SizeExpr> &repeats)
   return product >= kBroadcastTailRepeatWorkspaceThreshold;
 }
 
-bool IsOnlyFirstAxisBroadcast(const af::AscNodePtr &pre_node, const af::AscNodePtr &broadcast_node) {
-  GE_ASSERT_NOTNULL(pre_node);
-  GE_ASSERT_NOTNULL(broadcast_node);
-  GE_ASSERT_TRUE(!pre_node->outputs().empty());
-  GE_ASSERT_TRUE(!broadcast_node->outputs().empty());
-  const auto &pre_repeats = pre_node->outputs[0].attr.repeats;
-  const auto &broadcast_repeats = broadcast_node->outputs[0].attr.repeats;
-  if (pre_repeats.empty() || pre_repeats.size() != broadcast_repeats.size()) {
-    return false;
-  }
-  if (af::SymbolicUtils::StaticCheckEq(pre_repeats[0], broadcast_repeats[0]) == af::TriBool::kTrue) {
-    return false;
-  }
-  int64_t broadcast_first_axis = 0L;
-  if (!broadcast_repeats[0].GetConstValue(broadcast_first_axis) ||
-      broadcast_first_axis <= kBroadcastFirstAxisWorkspaceThreshold) {
-    return false;
-  }
-  for (size_t i = 1UL; i < pre_repeats.size(); ++i) {
-    if (af::SymbolicUtils::StaticCheckEq(pre_repeats[i], broadcast_repeats[i]) != af::TriBool::kTrue) {
-      return false;
-    }
-  }
-  return true;
-}
-
 bool HasOperatorBeforeBroadcast(const af::AscNodePtr &pre_node) {
   GE_ASSERT_NOTNULL(pre_node);
   return pre_node->GetInDataNodesSize() != 0UL && !af::ops::IsOps<af::ascir_op::Load>(pre_node);
@@ -109,62 +81,15 @@ bool NeedWorkspaceBeforeBroadcast(const af::AscNodePtr &broadcast_node) {
   if (!IsOnlyFirstAxisBroadcast(pre_node, broadcast_node)) {
     return false;
   }
+  int64_t broadcast_first_axis = 0L;
+  if (!broadcast_node->outputs[0].attr.repeats[0].GetConstValue(broadcast_first_axis) ||
+      broadcast_first_axis <= kBroadcastFirstAxisWorkspaceThreshold) {
+    return false;
+  }
   if (!HasOperatorBeforeBroadcast(pre_node)) {
     return false;
   }
   return IsTailRepeatProductLargeEnough(broadcast_node->outputs[0].attr.repeats);
-}
-
-Status DoCopyAscNodeTensorAttr(const af::AscNodePtr &src_node, af::AscNodePtr &dst_node) {
-  auto op_desc = dst_node->GetOpDesc();
-  auto dst_asc_node_attr = op_desc->GetOrCreateAttrsGroup<af::AscNodeAttr>();
-  auto src_asc_node_attr = src_node->GetOpDesc()->GetOrCreateAttrsGroup<af::AscNodeAttr>();
-  if (src_asc_node_attr != nullptr && dst_asc_node_attr != nullptr) {
-    dst_asc_node_attr->sched = src_asc_node_attr->sched;
-    if (src_asc_node_attr->ir_attr) {
-      dst_asc_node_attr->ir_attr = src_asc_node_attr->ir_attr->Clone();
-    }
-  }
-  for (size_t i = 0U; i < src_node->outputs().size(); i++) {
-    GE_CHECK_NOTNULL(op_desc->MutableOutputDesc(i));
-    auto tensor_attr_group = op_desc->MutableOutputDesc(i)->GetOrCreateAttrsGroup<af::AscTensorAttr>();
-    GE_ASSERT_NOTNULL(tensor_attr_group);
-    *tensor_attr_group = src_node->outputs[i].attr;
-  }
-  return af::SUCCESS;
-}
-
-Status DoCopyAscNodeOutputTensorAttr(const af::AscNodePtr &src_node, af::AscNodePtr &dst_node,
-                                     const uint32_t src_output_index) {
-  GE_ASSERT_NOTNULL(src_node);
-  GE_ASSERT_NOTNULL(dst_node);
-  GE_ASSERT_TRUE(src_output_index < src_node->outputs().size());
-  GE_ASSERT_TRUE(!dst_node->outputs().empty());
-  auto op_desc = dst_node->GetOpDesc();
-  GE_ASSERT_NOTNULL(op_desc);
-  auto dst_asc_node_attr = op_desc->GetOrCreateAttrsGroup<af::AscNodeAttr>();
-  auto src_asc_node_attr = src_node->GetOpDesc()->GetOrCreateAttrsGroup<af::AscNodeAttr>();
-  if (src_asc_node_attr != nullptr && dst_asc_node_attr != nullptr) {
-    dst_asc_node_attr->sched = src_asc_node_attr->sched;
-    if (src_asc_node_attr->ir_attr) {
-      dst_asc_node_attr->ir_attr = src_asc_node_attr->ir_attr->Clone();
-    }
-  }
-  const auto output_desc = op_desc->MutableOutputDesc(0U);
-  GE_ASSERT_NOTNULL(output_desc);
-  auto tensor_attr_group = output_desc->GetOrCreateAttrsGroup<af::AscTensorAttr>();
-  GE_ASSERT_NOTNULL(tensor_attr_group);
-  *tensor_attr_group = src_node->outputs[src_output_index].attr;
-  return af::SUCCESS;
-}
-
-Status DoCopyWorkspaceTensorAttr(const af::AscNodePtr &src_node, af::AscNodePtr &workspace_node) {
-  GE_ASSERT_NOTNULL(src_node);
-  GE_ASSERT_NOTNULL(workspace_node);
-  GE_ASSERT_TRUE(!src_node->outputs().empty());
-  GE_ASSERT_TRUE(!workspace_node->outputs().empty());
-  workspace_node->outputs[0].attr.dtype = src_node->outputs[0].attr.dtype;
-  return af::SUCCESS;
 }
 
 const std::unordered_map<std::string, std::function<ReduceType(const char *)>> reducers = {
@@ -705,7 +630,7 @@ Status ReducePartitionCaseGenerator::GenerateBroadcastWorkspaceCase(ascir::HintG
   for (auto &broadcast_node : broadcast_nodes) {
     auto pre_node = std::dynamic_pointer_cast<af::AscNode>(broadcast_node->GetInDataNodes().at(0UL));
     GE_ASSERT_NOTNULL(pre_node);
-    GE_CHK_STATUS_RET(PartitionByNode(pre_node, broadcast_node, optimize_graph));
+    GE_CHK_STATUS_RET(PartitionByNode(pre_node, broadcast_node, optimize_graph, partition_, node_order_));
   }
   if (partition_) {
     std::sort(node_order_.begin(), node_order_.end(), [](const af::AscNodePtr &lhs, const af::AscNodePtr &rhs) {
@@ -884,7 +809,7 @@ Status ReducePartitionCaseGenerator::PartitionCitationGroups(ascir::ImplGraph &i
       af::AscNodePtr citation_node = citation.citation;
       GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticRole(source, semantic::kMultiCitation));
       GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticRole(citation_node, semantic::kMultiCitation));
-      GE_CHK_STATUS_RET(PartitionByNode(source, citation_node, impl_graph));
+      GE_CHK_STATUS_RET(PartitionByNode(source, citation_node, impl_graph, partition_, node_order_));
     }
   }
   return ge::GRAPH_SUCCESS;
@@ -950,154 +875,6 @@ Status ReducePartitionCaseGenerator::ReducePartitionPostFusion(ascir::ImplGraph 
       }
       GE_CHK_STATUS_RET(PartitionReduceNode(node, impl_graph));
     }
-  }
-  return ge::GRAPH_SUCCESS;
-}
-
-Status ReducePartitionCaseGenerator::PartitionLoadNode(af::AscNodePtr &src_load_node, af::AscNodePtr &dst_node,
-                                                       ascir::ImplGraph &impl_graph) {
-  auto load_input_node = src_load_node->GetInNodes().at(0UL);
-  auto load_input_asc_node = std::dynamic_pointer_cast<af::AscNode>(load_input_node);
-  GE_ASSERT_TRUE(af::ops::IsOps<af::ascir_op::Data>(load_input_asc_node) ||
-                 af::ops::IsOps<af::ascir_op::Workspace>(load_input_asc_node));
-  af::ascir_op::Load load(("copy_from_" + src_load_node->GetName()).c_str());
-
-  af::AscNodePtr new_load_input_node;
-  if (af::ops::IsOps<af::ascir_op::Data>(load_input_asc_node)) {
-    af::ascir_op::Data data(("copy_from_" + load_input_asc_node->GetName()).c_str());
-    new_load_input_node = impl_graph.AddNode(data);
-  } else {
-    af::ascir_op::Workspace workspace(("copy_from_" + load_input_asc_node->GetName()).c_str());
-    new_load_input_node = impl_graph.AddNode(workspace);
-  }
-  auto load_node = impl_graph.AddNode(load);
-  DoCopyAscNodeTensorAttr(load_input_asc_node, new_load_input_node);
-  DoCopyAscNodeTensorAttr(src_load_node, load_node);
-  // dst_node 的多个输入可能来自同一个 src_load_node（如 Mul 的两个输入都是同一个 Load），
-  // 需要遍历所有 peer 边逐一断开并替换，不能找到第一条就 return。
-  // new_load_input -> load_node 的边只需建一次，后续匹配的 peer 边共用这条链路。
-  bool found = false;
-  for (const auto &out_anchor : src_load_node->GetAllOutDataAnchors()) {
-    GE_CHECK_NOTNULL(out_anchor, "Out data anchor is null, node:%s.", src_load_node->GetNamePtr());
-    for (const auto &peer_in_anchor : out_anchor->GetPeerInDataAnchors()) {
-      GE_CHECK_NOTNULL(peer_in_anchor);
-      GE_CHECK_NOTNULL(peer_in_anchor->GetOwnerNodeBarePtr(), "Peer in node:%s is null", src_load_node->GetNamePtr());
-      if (peer_in_anchor->GetOwnerNodeBarePtr() == dst_node.get()) {
-        if (!found) {
-          found = true;
-          GE_CHK_STATUS_RET(
-              af::GraphUtils::AddEdge(new_load_input_node->GetOutAnchor(0UL), load_node->GetInAnchor(0UL)));
-        }
-        GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(src_load_node->GetOutAnchor(out_anchor->GetIdx()),
-                                                     dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-        GE_CHK_STATUS_RET(
-            af::GraphUtils::AddEdge(load_node->GetOutAnchor(0UL), dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-      }
-    }
-  }
-  return ge::GRAPH_SUCCESS;
-}
-
-Status ReducePartitionCaseGenerator::PartitionScalarNode(af::AscNodePtr &src_node, af::AscNodePtr &dst_node,
-                                                         ascir::ImplGraph &impl_graph) {
-  af::AscNodePtr scalar_node;
-  if (af::ops::IsOps<af::ascir_op::ScalarData>(src_node)) {
-    af::ascir_op::ScalarData scalar_data(("copy_from_" + src_node->GetName()).c_str());
-    scalar_node = impl_graph.AddNode(scalar_data);
-  } else {
-    af::ascir_op::Scalar scalar(("copy_from_" + src_node->GetName()).c_str());
-    scalar_node = impl_graph.AddNode(scalar);
-  }
-  DoCopyAscNodeTensorAttr(src_node, scalar_node);
-  // dst_node 的多个输入可能来自同一个 src_node，需要遍历所有 peer 边逐一断开并替换，不能找到第一条就 return。
-  for (const auto &out_anchor : src_node->GetAllOutDataAnchors()) {
-    GE_CHECK_NOTNULL(out_anchor, "Out data anchor is null, node:%s.", src_node->GetNamePtr());
-    for (const auto &peer_in_anchor : out_anchor->GetPeerInDataAnchors()) {
-      GE_CHECK_NOTNULL(peer_in_anchor);
-      GE_CHECK_NOTNULL(peer_in_anchor->GetOwnerNodeBarePtr(), "Peer in node:%s is null", src_node->GetNamePtr());
-      if (peer_in_anchor->GetOwnerNodeBarePtr() == dst_node.get()) {
-        GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(src_node->GetOutAnchor(out_anchor->GetIdx()),
-                                                     dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-        GE_CHK_STATUS_RET(
-            af::GraphUtils::AddEdge(scalar_node->GetOutAnchor(0UL), dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-      }
-    }
-  }
-  return ge::GRAPH_SUCCESS;
-}
-
-Status ReducePartitionCaseGenerator::PartitionDataNode(af::AscNodePtr &src_node, af::AscNodePtr &dst_node,
-                                                       ascir::ImplGraph &impl_graph) {
-  // Data 是 GM 输入占位符（kAPITypeBuffer），值直接来自 kernel 输入参数，不能走通用路径用 Store 物化
-  // （Data 直连 Store 会生成 DataCopyPadExtend(GlobalTensor, ...) 无匹配重载的非法调用）。
-  // 复制 Data 节点让 citation 侧子图重读同一 GM 输入，ir_attr 携带的输入参数 index 随属性克隆保留。
-  af::ascir_op::Data data(("copy_from_" + src_node->GetName()).c_str());
-  auto data_node = impl_graph.AddNode(data);
-  GE_CHK_STATUS_RET(DoCopyAscNodeTensorAttr(src_node, data_node));
-  // dst_node 的多个输入可能来自同一个 src_node，需要遍历所有 peer 边逐一断开并替换，不能找到第一条就 return。
-  for (const auto &out_anchor : src_node->GetAllOutDataAnchors()) {
-    GE_CHECK_NOTNULL(out_anchor, "Out data anchor is null, node:%s.", src_node->GetNamePtr());
-    for (const auto &peer_in_anchor : out_anchor->GetPeerInDataAnchors()) {
-      GE_CHECK_NOTNULL(peer_in_anchor);
-      GE_CHECK_NOTNULL(peer_in_anchor->GetOwnerNodeBarePtr(), "Peer in node:%s is null", src_node->GetNamePtr());
-      if (peer_in_anchor->GetOwnerNodeBarePtr() == dst_node.get()) {
-        GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(src_node->GetOutAnchor(out_anchor->GetIdx()),
-                                                     dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-        GE_CHK_STATUS_RET(
-            af::GraphUtils::AddEdge(data_node->GetOutAnchor(0UL), dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-      }
-    }
-  }
-  return ge::GRAPH_SUCCESS;
-}
-
-Status ReducePartitionCaseGenerator::PartitionByNode(af::AscNodePtr &src_node, af::AscNodePtr &dst_node,
-                                                     ascir::ImplGraph &impl_graph) {
-  partition_ = true;
-  node_order_.emplace_back(src_node);
-  if (ScheduleUtils::IsLoad(src_node)) {
-    return PartitionLoadNode(src_node, dst_node, impl_graph);
-  }
-  if (ScheduleUtils::IsScalarLikeNode(src_node)) {
-    return PartitionScalarNode(src_node, dst_node, impl_graph);
-  };
-  if (af::ops::IsOps<af::ascir_op::Data>(src_node)) {
-    return PartitionDataNode(src_node, dst_node, impl_graph);
-  }
-
-  for (const auto &out_anchor : src_node->GetAllOutDataAnchors()) {
-    GE_CHECK_NOTNULL(out_anchor, "Out data anchor is null, node:%s.", src_node->GetNamePtr());
-    af::ascir_op::Workspace workspace_pre(
-        GetNewNodeName(src_node, dst_node, "Workspace", out_anchor->GetIdx()).c_str());
-    af::ascir_op::Workspace workspace_post(
-        GetNewNodeName(src_node, dst_node, "Workspace", out_anchor->GetIdx()).c_str());
-    af::ascir_op::Load load(GetNewNodeName(src_node, dst_node, "Load", out_anchor->GetIdx()).c_str());
-    af::ascir_op::Store store(GetNewNodeName(src_node, dst_node, "Store", out_anchor->GetIdx()).c_str());
-    auto workspace_pre_node = impl_graph.AddNode(workspace_pre);
-    auto workspace_post_node = impl_graph.AddNode(workspace_post);
-    auto load_node = impl_graph.AddNode(load);
-    auto store_node = impl_graph.AddNode(store);
-    GE_CHK_STATUS_RET(DoCopyAscNodeOutputTensorAttr(src_node, load_node, out_anchor->GetIdx()));
-    GE_CHK_STATUS_RET(DoCopyAscNodeOutputTensorAttr(src_node, store_node, out_anchor->GetIdx()));
-    GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(store_node, workspace_pre_node));
-    GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(load_node, workspace_post_node));
-    for (const auto &peer_in_anchor : out_anchor->GetPeerInDataAnchors()) {
-      GE_CHECK_NOTNULL(peer_in_anchor);
-      GE_CHECK_NOTNULL(peer_in_anchor->GetOwnerNodeBarePtr(), "Peer in node:%s is null", src_node->GetNamePtr());
-      if (peer_in_anchor->GetOwnerNodeBarePtr() == dst_node.get()) {
-        // remove src->dst
-        GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(src_node->GetOutAnchor(out_anchor->GetIdx()),
-                                                     dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-        GE_CHK_STATUS_RET(
-            af::GraphUtils::AddEdge(load_node->GetOutAnchor(0UL), dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-      }
-    }
-    // add src->store->workspace_pre_node
-    GE_CHK_STATUS_RET(
-        af::GraphUtils::AddEdge(src_node->GetOutAnchor(out_anchor->GetIdx()), store_node->GetInAnchor(0UL)));
-    GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(store_node->GetOutAnchor(0UL), workspace_pre_node->GetInAnchor(0UL)));
-    // add workspace_post_node->load->dst
-    GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(workspace_post_node->GetOutAnchor(0UL), load_node->GetInAnchor(0UL)));
   }
   return ge::GRAPH_SUCCESS;
 }
@@ -1257,7 +1034,7 @@ Status ReducePartitionCaseGenerator::PartitionNorm(
       GELOGI("PartitionNorm: loop start=%s end=%s, partition src_node=%s -> dst(loop.end)=%s",
              loop.first->GetName().c_str(), loop.second->GetName().c_str(), src_node->GetName().c_str(),
              loop.second->GetName().c_str());
-      GE_CHK_STATUS_RET(PartitionByNode(src_node, loop.second, impl_graph));
+      GE_CHK_STATUS_RET(PartitionByNode(src_node, loop.second, impl_graph, partition_, node_order_));
     }
   }
   return ge::GRAPH_SUCCESS;

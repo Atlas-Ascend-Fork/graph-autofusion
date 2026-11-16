@@ -67,11 +67,26 @@ struct EvalContext {
   const AxesReorderSolverInput *variables = nullptr;
   const void *program = nullptr;
   void *sdk_context = nullptr;
+  void *evaluation_state = nullptr;  // Caller-owned typed Program scratch; separate from SDK state.
   EvalStatus first_error = EvalStatus::kSuccess;
   uint32_t error_expression_id = UINT32_MAX;
+  uint32_t error_stage_step = UINT32_MAX;
+  uint32_t error_instruction = UINT32_MAX;
+  uint32_t error_cache_index = UINT32_MAX;
   void ResetError() {
     first_error = EvalStatus::kSuccess;
     error_expression_id = UINT32_MAX;
+    error_stage_step = UINT32_MAX;
+    error_instruction = UINT32_MAX;
+    error_cache_index = UINT32_MAX;
+  }
+  void RecordEvaluationError(EvalStatus status, uint32_t expression_id, uint32_t step, uint32_t instruction) {
+    if (first_error == EvalStatus::kSuccess && status != EvalStatus::kSuccess) {
+      first_error = status;
+      error_expression_id = expression_id;
+      error_stage_step = step;
+      error_instruction = instruction;
+    }
   }
   void RecordError(EvalStatus status, uint32_t expression_id) {
     if (first_error == EvalStatus::kSuccess && status != EvalStatus::kSuccess) {

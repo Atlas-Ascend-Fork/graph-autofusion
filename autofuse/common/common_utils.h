@@ -389,6 +389,12 @@ inline bool ExpressEq(const af::Expression &e1, const af::Expression &e2) {
 af::ExecuteCondition GetNodeExecCondition(const af::NodePtr &node);
 bool IsNodeCacheable(const af::NodePtr &node);
 bool IsSingleGroup(const ascir::FusedScheduledResult &fused_schedule_result);
+// 计算注册式TilingKey扁平展开的分支总数是否在limit内(各result内group选择数连乘积之和,
+// 带防溢出); count回填实际总数, 超限或溢出时返回false
+bool TryCalcTilingKeyCount(const ascir::FusedScheduledResult &fused_schedule_result, uint64_t limit, uint64_t &count);
+// 注册式TilingKey分支数是否在固定上限(kMaxRegTilingKeyCount=512)内, 超限的result应
+// 回落运行时tiling_data解析分发, 防止TILING_KEY_IS笛卡尔积分支链生成超大kernel
+bool IsTilingKeyCountWithinLimit(const ascir::FusedScheduledResult &fused_schedule_result);
 bool CanUseTilingKey(const ascir::FusedScheduledResult &fused_schedule_result);
 bool IsJustCubeFixpip(const ascir::FusedScheduledResult &fused_schedule_result);
 bool IsCubeFusedScheduled(const ascir::FusedScheduledResult &fused_schedule_result);

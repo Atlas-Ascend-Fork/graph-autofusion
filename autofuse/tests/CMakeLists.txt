@@ -10,6 +10,12 @@ enable_testing()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
+# The ATT test stack uses ABI 0 even when the MDC product library uses ABI 1.
+if(MDC_COMPILE_RUNTIME AND NOT USE_CXX11_ABI STREQUAL "0")
+    get_directory_property(af_test_compile_options COMPILE_OPTIONS)
+    list(REMOVE_ITEM af_test_compile_options "-D_GLIBCXX_USE_CXX11_ABI=${USE_CXX11_ABI}")
+    set_directory_properties(PROPERTIES COMPILE_OPTIONS "${af_test_compile_options}")
+endif()
 add_compile_options(-D_GLIBCXX_USE_CXX11_ABI=0)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fstack-protector-all -Wl,-z,now")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-all -Wl,-z,now")
@@ -291,6 +297,7 @@ file(GLOB SOURCES
     ${ATT_DIR}/gen_model_info/api_tiling_gen/api/*.cpp
     ${ATT_DIR}/gen_model_info/sketch_gen/*.cpp
     ${ATT_DIR}/gen_tiling_impl.cpp
+    ${ATT_DIR}/program/axes_solve_runtime.cpp
     )
 
 
@@ -570,3 +577,14 @@ endif()
 
 include(${CODE_ROOT_DIR}/att/cmake/axes_solver_resources.cmake)
 target_link_libraries(att PRIVATE att_axes_solver_resources)
+
+include(${CODE_ROOT_DIR}/att/cmake/tiling_core.cmake)
+if(MDC_COMPILE_RUNTIME AND NOT USE_CXX11_ABI STREQUAL "0")
+    add_att_tiling_core(att_tiling_core_test)
+    target_link_libraries(att PRIVATE att_tiling_core_test)
+else()
+    if(NOT TARGET att_tiling_core)
+        add_att_tiling_core(att_tiling_core)
+    endif()
+    target_link_libraries(att PRIVATE att_tiling_core)
+endif()

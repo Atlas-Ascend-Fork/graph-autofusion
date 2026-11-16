@@ -173,6 +173,60 @@ class TestApiCompareV2UT : public testing::Test {
     AscendC::GmFree(param.src1);
   }
 
+  template <CMPMODE mode>
+  static void TensorCompareV2Int64RegressionTest(uint32_t row_size) {
+    constexpr uint32_t rows = 4;
+    const uint32_t size = rows * row_size;
+    const int64_t src0_values[] = {2, -4, -1, 0, 1, 4, 4294967296LL, -4294967296LL};
+    const int64_t src1_values[] = {-8, -5, 0, 0, 2, 4, 4294967295LL, -4294967295LL};
+    TensorCompareV2InputParam<uint8_t, int64_t> param{};
+    param.size = size;
+    param.y = static_cast<uint8_t *>(AscendC::GmAlloc(sizeof(uint8_t) * size));
+    param.exp = static_cast<bool *>(AscendC::GmAlloc(sizeof(bool) * size));
+    param.src0 = static_cast<int64_t *>(AscendC::GmAlloc(sizeof(int64_t) * size));
+    param.src1 = static_cast<int64_t *>(AscendC::GmAlloc(sizeof(int64_t) * size));
+    for (uint32_t i = 0; i < size; i++) {
+      const uint32_t index = (i + i / row_size) % 8;
+      param.src0[i] = src0_values[index];
+      param.src1[i] = src1_values[index];
+      param.exp[i] = mode == CMPMODE::GE ? param.src0[i] >= param.src1[i] : param.src0[i] > param.src1[i];
+    }
+
+    auto kernel = [&param, row_size] {
+      const uint32_t input_stride = AlignUp(row_size, ONE_BLK_SIZE / sizeof(int64_t));
+      const uint32_t output_stride = AlignUp(row_size, ONE_BLK_SIZE / sizeof(uint8_t));
+      TPipe tpipe;
+      TBuf<TPosition::VECCALC> x1buf, x2buf, ybuf, tmp;
+      tpipe.InitBuffer(x1buf, sizeof(int64_t) * rows * input_stride);
+      tpipe.InitBuffer(x2buf, sizeof(int64_t) * rows * input_stride);
+      tpipe.InitBuffer(ybuf, rows * output_stride);
+      tpipe.InitBuffer(tmp, 40 * rows * KernelUtils::Max(row_size, 32U));
+      auto lhs = x1buf.Get<int64_t>();
+      auto rhs = x2buf.Get<int64_t>();
+      auto output = ybuf.Get<uint8_t>();
+      auto scratch = tmp.Get<uint8_t>();
+      for (uint32_t row = 0; row < rows; ++row) {
+        auto lhs_row = lhs[row * input_stride];
+        auto rhs_row = rhs[row * input_stride];
+        GmToUb(lhs_row, param.src0 + row * row_size, row_size);
+        GmToUb(rhs_row, param.src1 + row * row_size, row_size);
+      }
+      CompareExtend<int64_t, mode>(output, lhs, rhs, rows, row_size, input_stride, output_stride, scratch);
+      for (uint32_t row = 0; row < rows; ++row) {
+        auto output_row = output[row * output_stride];
+        UbToGm(param.y + row * row_size, output_row, row_size);
+      }
+    };
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+    ICPU_RUN_KF(kernel, 1);
+
+    EXPECT_EQ(Valid(param.y, param.exp, param.size), 0);
+    AscendC::GmFree(param.y);
+    AscendC::GmFree(param.exp);
+    AscendC::GmFree(param.src0);
+    AscendC::GmFree(param.src1);
+  }
+
   template <CMPMODE mode, typename O, typename I>
   static void InvokeKernelWithBroadcastTensorInput(TensorCompareV2InputParam<O, I> &param, uint32_t first_axis,
                                                    uint32_t row_size, uint32_t out_stride) {
@@ -369,6 +423,26 @@ TEST_F(TestApiCompareV2UT, CompareV2_Ge_input_tensor_int32_output_uint8) {
                                                      sizeof(int32_t));
   TensorCompareV2Test<CMPMODE::GE, uint8_t, int32_t>((ONE_REPEAT_BYTE_SIZE + ONE_BLK_SIZE + sizeof(int32_t)) /
                                                      sizeof(int32_t));
+}
+
+// 场景5.1：GE-int64，覆盖多repeat的正数、负数及相等值。
+TEST_F(TestApiCompareV2UT, CompareV2_Ge_input_tensor_int64_output_uint8) {
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(4);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(16);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(32);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(40);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(100);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(128);
+}
+
+// 场景5.2：GT-int64，覆盖多repeat的正数、负数及相等值。
+TEST_F(TestApiCompareV2UT, CompareV2_Gt_input_tensor_int64_output_uint8) {
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(4);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(16);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(32);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(40);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(100);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(128);
 }
 
 // 场景5：LT-int32
