@@ -63,7 +63,7 @@ CANN 环境须提供 ASC 算子包构建和 Kernel Spec 编译能力。两个样
    cmake --build ../build/operator --target binary package -j8
    ```
 
-   将 `Ascendxxx` 替换为实际运行的 AI 处理器系列。工程已通过 `KERNEL_SPEC_MODE Normal` 开启 Kernel Spec，算子包包含 Kernel 二进制、编译资源和源码。
+   将 `Ascendxxx` 替换为实际运行的 AI 处理器系列。工程已通过 `KERNEL_SPEC_MODE Normal` 开启 Kernel Spec，算子包包含 Kernel 二进制、编译资源和源码。算子工程的编译配置方法请参见[基本流程](https://gitcode.com/cann/asc-devkit/blob/1d344f4aafdbeb747fae0f71c0c61c3f508de516/docs/zh/guide/programming_guide/advanced_programming/aclnn_operator_development/compilation_and_deployment/basic_process.md)。
 
 3. 将算子包安装到样例构建目录：
 

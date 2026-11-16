@@ -63,7 +63,7 @@ Run these commands from this example directory.
    cmake --build ../build/operator --target binary package -j8
    ```
 
-   Replace `Ascendxxx` with the actual AI processor series. The project enables Kernel Spec through `KERNEL_SPEC_MODE Normal`; the package includes the Kernel binary, compilation resources, and source.
+   Replace `Ascendxxx` with the actual AI processor series. The project enables Kernel Spec through `KERNEL_SPEC_MODE Normal`; the package includes the Kernel binary, compilation resources, and source. For compilation configuration of the operator project, see [Basic Process](https://gitcode.com/cann/asc-devkit/blob/1d344f4aafdbeb747fae0f71c0c61c3f508de516/docs/zh/guide/programming_guide/advanced_programming/aclnn_operator_development/compilation_and_deployment/basic_process.md).
 
 3. Install the package into the example build directory:
 
