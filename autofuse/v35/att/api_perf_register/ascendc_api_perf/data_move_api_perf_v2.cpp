@@ -275,6 +275,163 @@ Expr AssembleLoadBranch(const Expr &res_normal, const Expr &res_small_blk, const
   return res;
 }
 
+namespace {
+using namespace dma_calibration_v2;
+
+Expr OutsideDmaCalibrationRange(const Expr &value, const Range &range) {
+  const auto &zero = af::sym::kSymbolZero;
+  return af::sym::Max(zero, af::sym::Max(CreateExpr(range.lower) - value, value - CreateExpr(range.upper)));
+}
+
+// Use calibrated bandwidth formulas only within their measured DMA domains.
+// Loop-mode descriptors, UB gaps and other dtypes retain their existing estimates.
+af::Status SelectCalibratedDmaEstimate(const NodeDetail &node, bool is_load, Expr &cycles, PerfOutputInfo &perf) {
+  if (node.input_dtype[0] != "float32" || node.output_dtype[0] != "float32" || !node.vectorized_shape.empty() ||
+      node.input_dims.empty() || node.input_dims.size() > kCodegenDmaMaxLen) {
+    return af::SUCCESS;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const Expr cores = CreateExpr("block_dim");
+  const Expr rows = node.input_dims.size() == kCodegenDmaMaxLen ? node.input_dims.front() : af::sym::kSymbolOne;
+  const Expr width = node.input_dims.back();
+  const Expr bytes = rows * width * CreateExpr(kFloat32Bytes);
+  const auto abs_value = [&](const Expr &value) { return af::sym::Max(value, zero - value); };
+  const auto select = [&](const std::string &name, const std::vector<Expr> &violations) -> af::Status {
+    Expr violation = zero;
+    for (const auto &part : violations) {
+      if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
+        return af::SUCCESS;
+      }
+      violation = violation + part;
+    }
+    Expr fitted;
+    GE_ASSERT_SUCCESS(GetPerf({name, node.input_dtype[0], node.output_dtype[0], node.input_dims, zero}, fitted));
+    Expr result = CreateExpr((name + "_small_dma_node").c_str());
+    TernaryOp guard(CondType::K_EQ, violation, zero, fitted, cycles);
+    guard.SetVariable(result);
+    perf.ternary_ops[result] = std::move(guard);
+    cycles = result;
+    return af::SUCCESS;
+  };
+  const auto &domain = is_load ? kLoadSmallPayload : kStoreSmallPayload;
+  GE_ASSERT_SUCCESS(select(is_load ? "LoadSmallPayload" : "StoreSmallPayload",
+                           {abs_value(af::sym::Mod(width, CreateExpr(kAlignedRowElements))), abs_value(node.ub_stride),
+                            abs_value(node.gm_stride), OutsideDmaCalibrationRange(cores, domain.cores),
+                            OutsideDmaCalibrationRange(bytes, domain.bytes)}));
+  if (is_load && node.input_dims.size() == kCodegenDmaMaxLen) {
+    // Compact source rows: 128..1024 bytes, 2..18 rows and 256 B..16 KiB GM gaps.
+    // The fitted stride coefficient is zero in this domain; the legacy stride branch remains outside it.
+    GE_ASSERT_SUCCESS(select(
+        "LoadSmallPayloadCompact",
+        {abs_value(af::sym::Mod(width, CreateExpr(kAlignedRowElements))), abs_value(node.ub_stride),
+         OutsideDmaCalibrationRange(cores, kLoadSmallPayload.cores), OutsideDmaCalibrationRange(rows, kLoadCompactRows),
+         OutsideDmaCalibrationRange(width, kLoadCompactWidth),
+         OutsideDmaCalibrationRange(bytes, kLoadSmallPayload.bytes),
+         OutsideDmaCalibrationRange(node.gm_stride, kLoadCompactGap)}));
+    const Expr pitch = width + node.gm_stride;
+    // FP32 rows of 128 bytes with a dense UB destination. The sampled GM pitches
+    // are multiples of 16 KiB from 16 to 64 KiB.
+    GE_ASSERT_SUCCESS(
+        select("LoadWidePitch128B",
+               {abs_value(width - CreateExpr(kLoadWidePitchWidth)), abs_value(node.ub_stride),
+                OutsideDmaCalibrationRange(rows, kLoadWidePitchRows), OutsideDmaCalibrationRange(pitch, kLoadWidePitch),
+                abs_value(af::sym::Mod(pitch, CreateExpr(kLoadWidePitchAlignment)))}));
+    // For aligned rows without UB padding, use the measured cold bandwidth for wide GM pitches.
+    const auto outside_centered = [&](const Expr &value, int32_t center, int32_t radius) {
+      return af::sym::Max(zero, af::sym::Abs(value - CreateExpr(center)) - CreateExpr(radius));
+    };
+    // Only the two sampled row counts, 16 and 32, satisfy this guard.
+    const Expr rows_outside =
+        af::sym::Abs(af::sym::Abs(rows - CreateExpr(kLoadWideGapRowsCenter)) - CreateExpr(kLoadWideGapRowsDistance));
+    GE_ASSERT_SUCCESS(select("LoadAlignedWideGap",
+                             {af::sym::Abs(pitch - CreateExpr(kLoadWideGapPitch)), af::sym::Abs(node.ub_stride),
+                              rows_outside, outside_centered(width, kLoadWideGapWidthCenter, kLoadWideGapWidthRadius),
+                              outside_centered(cores, kLoadWideGapCoresCenter, kLoadWideGapCoresRadius),
+                              af::sym::Abs(af::sym::Mod(width, CreateExpr(kAlignedRowElements)))}));
+  }
+  return af::SUCCESS;
+}
+
+af::Status SelectAlignedSingleRowLoad(const NodeDetail &node, const Expr &block_dim, Expr &cycles,
+                                      PerfOutputInfo &perf) {
+  if (node.input_dtype[0] != "float32" || node.output_dtype[0] != "float32" ||
+      node.input_dims.size() != kCodegenDmaMaxLen || !node.vectorized_shape.empty() ||
+      af::SymbolicUtils::StaticCheckEq(node.input_dims.front(), af::sym::kSymbolOne) == af::TriBool::kFalse) {
+    return af::SUCCESS;
+  }
+
+  // A single DMA row has no stride advance. With a 32-byte aligned length,
+  // Normal and Compact both transfer the same contiguous payload.
+  // In the measured core range, the single-row load shares aggregate bandwidth.
+  const auto &row = node.input_dims.back();
+  const auto &zero = af::sym::kSymbolZero;
+  // Ternary conditions are solved as scalar expressions. All violations
+  // are nonnegative, and their sum is zero exactly in the calibrated range.
+  const Expr misalignment = af::sym::Mod(row, CreateExpr(kAlignedRowElements));
+  const Expr violation = OutsideDmaCalibrationRange(node.input_dims.front(), {1, 1}) +
+                         OutsideDmaCalibrationRange(row, kLoadSingleRowWidth) +
+                         OutsideDmaCalibrationRange(block_dim, kLoadSingleRowCores) +
+                         af::sym::Max(misalignment, zero - misalignment);
+  if (af::SymbolicUtils::StaticCheckGt(violation, zero) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+
+  Expr fitted;
+  GE_ASSERT_SUCCESS(GetPerf(
+      {kMoveGmToUb + "AlignedSingleRow", node.input_dtype[0], node.output_dtype[0], {row}, af::sym::kSymbolZero},
+      fitted));
+  Expr result = CreateExpr("load_aligned_single_row_node");
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, cycles);
+  guard.SetVariable(result);
+  perf.ternary_ops[result] = std::move(guard);
+  cycles = result;
+  return af::SUCCESS;
+}
+af::Status SelectAlignedDenseLoad(const NodeDetail &node, Expr &cycles, PerfOutputInfo &perf) {
+  if (node.input_dtype[0] != "float32" || node.output_dtype[0] != "float32" || !node.vectorized_shape.empty()) {
+    return af::SUCCESS;
+  }
+  // Static unit axes do not advance either address and codegen removes them.
+  std::vector<Expr> dims;
+  for (const auto &dim : node.input_dims) {
+    if (af::SymbolicUtils::StaticCheckEq(dim, af::sym::kSymbolOne) != af::TriBool::kTrue) {
+      dims.emplace_back(dim);
+    }
+  }
+  if (dims.empty() || dims.size() > kCodegenDmaMaxLen) {
+    return af::SUCCESS;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const Expr cores = CreateExpr("block_dim");
+  const Expr bytes =
+      (dims.size() == kCodegenDmaMaxLen ? dims.front() * dims.back() : dims.back()) * CreateExpr(kFloat32Bytes);
+  // Zero-gap rows must have no implicit DMA-block padding. Use the same payload
+  // range for a packed descriptor and its flattened representation.
+  const Expr dma_block_elements = CreateExpr(static_cast<size_t>(kAlignedRowElements));
+  Expr violation = zero;
+  for (const auto &part :
+       {af::sym::Abs(af::sym::Mod(dims.back(), dma_block_elements)), af::sym::Abs(node.ub_stride),
+        af::sym::Abs(node.gm_stride), OutsideDmaCalibrationRange(cores, kLoadAlignedDensePayload.cores),
+        OutsideDmaCalibrationRange(bytes, kLoadAlignedDensePayload.bytes)}) {
+    if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
+      return af::SUCCESS;
+    }
+    violation = violation + part;
+  }
+  // Joint normal/disabled-L2 calibration of zero-gap Pad Load, with frozen coefficients.
+  // The flattened and multi-row descriptors share the same measured bandwidth.
+  Expr fitted;
+  GE_ASSERT_SUCCESS(
+      GetPerf({"LoadAlignedDensePayload", node.input_dtype[0], node.output_dtype[0], dims, zero}, fitted));
+  Expr result = CreateExpr("LoadAlignedDensePayload_small_dma_node");
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, cycles);
+  guard.SetVariable(result);
+  perf.ternary_ops[result] = std::move(guard);
+  cycles = result;
+  return af::SUCCESS;
+}
+}  // namespace
+
 af::Status LoadPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
   Expr res_normal;
   Expr res_small_blk;
@@ -310,18 +467,21 @@ af::Status LoadPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
                             res_stride_single_core));
   GE_ASSERT_SUCCESS(GetLoadCase(node_info, blk, use_case));
   GE_ASSERT_SUCCESS(AppendCacheLineConfig(node_info, CacheLineDirection::kGmToUb, perf.cache_line_config));
-  const Expr multi_core_branch =
-      AssembleLoadBranch(res_normal, res_small_blk, res_stride, blk, use_case, "load_node", perf);
+  Expr multi_core_branch = AssembleLoadBranch(res_normal, res_small_blk, res_stride, blk, use_case, "load_node", perf);
   const Expr single_core_branch =
       AssembleLoadBranch(res_normal_single_core, res_small_blk_single_core, res_stride_single_core, blk, use_case,
                          "load_single_core_node", perf);
   // block_dim==1时切换单核参数公式；block_dim为tiling求解变量，条件以三元表达式进入求解
+  const Expr block_dim = CreateExpr("block_dim");
+  GE_ASSERT_SUCCESS(SelectCalibratedDmaEstimate(node_info, true, multi_core_branch, perf));
+  GE_ASSERT_SUCCESS(SelectAlignedSingleRowLoad(node_info, block_dim, multi_core_branch, perf));
+  GE_ASSERT_SUCCESS(SelectAlignedDenseLoad(node_info, multi_core_branch, perf));
   Expr res = CreateExpr("load_core_case_node");
   std::shared_ptr<IfCase> single_core_case = std::make_shared<IfCase>(single_core_branch);
   GE_ASSERT_NOTNULL(single_core_case);
   std::shared_ptr<IfCase> multi_core_case = std::make_shared<IfCase>(multi_core_branch);
   GE_ASSERT_NOTNULL(multi_core_case);
-  TernaryOp ternary_op = TernaryOp(CondType::K_EQ, CreateExpr("block_dim"), CreateExpr(kSingleCoreBlockDim),
+  TernaryOp ternary_op = TernaryOp(CondType::K_EQ, block_dim, CreateExpr(kSingleCoreBlockDim),
                                    std::move(single_core_case), std::move(multi_core_case));
   ternary_op.SetVariable(res);
   perf.ternary_ops[res] = ternary_op;
@@ -349,19 +509,28 @@ af::Status StorePerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
                                         : 0U)},
               res_stride));
   GE_ASSERT_SUCCESS(AppendCacheLineConfig(node_info, CacheLineDirection::kUbToGm, perf.cache_line_config));
+  GE_ASSERT_SUCCESS(SelectCalibratedDmaEstimate(node_info, false, res_normal, perf));
   perf.pipe_res[PipeType::AIV_MTE3] = res_normal + res_stride;
   return af::SUCCESS;
 }
 
 af::Status ExpandBlockLen(const NodeDetail &node_info, PerfOutputInfo &perf, std::vector<Expr> &dims) {
-  // 满足gm非连续且搬运小于cache line，扩展每次搬运数据量到cache line
+  // NDDMA models sub-cache-line strided transfers through the padded payload.
+  // Ordinary Load retains its own stride term after payload expansion.
   StaticExpandResult static_res;
+  const auto cacheline_padded = CreateExpr("load_cacheline_padded");
+  auto set_cacheline_marker = [&perf, &cacheline_padded](const Expr &value) {
+    auto marker = TernaryOp(value);
+    marker.SetVariable(cacheline_padded);
+    perf.ternary_ops[cacheline_padded] = std::move(marker);
+  };
 
   if (TryInitStaticExpand(node_info, dims, static_res) == af::SUCCESS) {
     // 存在非连续并且block_len较小，无法并包，考虑将block_len对齐到cache line大小
     // 原有行为：block_len_ref是局部拷贝，赋值不反映到dims
     const int32_t block_len_bytes = static_res.blk_len_val * static_res.data_type_size_val;
     if ((block_len_bytes < static_res.cache_line_size) && (static_res.stride_val > 0)) {
+      set_cacheline_marker(CreateExpr(1));
       if (IsFlattenedCodegenShape(node_info, dims)) {
         dims.emplace_back(static_res.cache_line_ele_num);
       } else {
@@ -378,6 +547,7 @@ af::Status ExpandBlockLen(const NodeDetail &node_info, PerfOutputInfo &perf, std
     if (is_small_block_len_checker.IsConstExpr()) {
       is_small_block_len_checker.GetConstValue(is_small_block_len);
       block_len_ref_actual = is_small_block_len ? std::move(cache_line_ele_num) : std::move(block_len_ref_actual);
+      set_cacheline_marker(is_small_block_len ? CreateExpr(1) : CreateExpr(0));
     } else {
       Expr res = CreateExpr("block_len");
       auto normal_case = std::make_shared<IfCase>(block_len_ref_actual);
@@ -389,6 +559,13 @@ af::Status ExpandBlockLen(const NodeDetail &node_info, PerfOutputInfo &perf, std
       ternary_op.SetVariable(res);
       perf.ternary_ops[res] = ternary_op;
       block_len_ref_actual = res;
+      // Keep the marker semantics identical to the static path: 1 means the
+      // block length was padded to a cache line, so the stride residual is
+      // removed by LoadStoreStrideV2Func.
+      auto marker =
+          TernaryOp(CondType::K_EQ, is_small_block_len_checker, CreateExpr(false), CreateExpr(0), CreateExpr(1));
+      marker.SetVariable(cacheline_padded);
+      perf.ternary_ops[cacheline_padded] = std::move(marker);
     }
     if (IsFlattenedCodegenShape(node_info, dims)) {
       dims.emplace_back(block_len_ref_actual);
@@ -446,6 +623,10 @@ af::Status NddmaPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
   Expr res_normal;
   Expr res_stride;
   GELOGD("Dma with nddma: %s", node_info.ToString().c_str());
+  const auto cacheline_padded = CreateExpr("load_cacheline_padded");
+  auto marker = TernaryOp(CreateExpr(0));
+  marker.SetVariable(cacheline_padded);
+  perf.ternary_ops[cacheline_padded] = std::move(marker);
   std::vector<Expr> dims{node_info.input_dims};
   // 将block_len先扩展到cache line再计算性能
   GE_ASSERT_TRUE(!dims.empty(), "Check node input dims failed, node[%s]", node_info.ToString().c_str());

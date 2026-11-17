@@ -34,9 +34,11 @@
 #include "tiling_data_gen/tiling_data_generator.h"
 #include "base/att_const_values.h"
 #include "base/base_types.h"
+#include "gen_model_info/api_perf_register/v1/perf_param_v1.h"
 #include "autofuse_config/auto_fuse_config.h"
 #include "util/base_types_printer.h"
 #include "util/duration.h"
+#include "v35/att/api_perf_register/perf_param_v2.h"
 #include "generator/solver_pass_gen/axes_reorder_solver/axes_reorder_solver_gen.h"
 
 const std::string op_name = "OpTest";
@@ -175,6 +177,33 @@ ScheduleResultSourceCase MakeTwoGroupScheduleResultSourceCase(const bool enable_
   return test_case;
 }
 }  // namespace
+
+TEST(GeneratorUT, LowUbPrefersObjectiveForTwoSingleBlockCandidatesInSingleGroup) {
+  TilingCodeGenConfig config;
+  TilingModelInfo model_infos{CreateModelInfo()};
+  TilingScheduleConfigTableV1 v1_config;
+  TilingScheduleConfigTableV2 v2_config;
+  model_infos.front().tiling_schedule_config_table = &v2_config;
+  ScoreFuncs score_funcs;
+  const std::string guard = "tmp_tiling.get_block_dim() != 1U || tiling_data.get_block_dim() != 1U";
+
+  MockHighPerfTilingCodeGenImpl single_group("test", config, model_infos, score_funcs, true);
+  ASSERT_EQ(single_group.GenSelectBetterTilingBasedOnObjAndUbRatio(), af::SUCCESS);
+  const auto source = single_group.tiling_func_.GetOutputStr();
+  EXPECT_NE(source.find("!IsEqual(cur_ub_ratio, ub_ratio) && (" + guard + ")"), std::string::npos);
+  EXPECT_NE(source.find("if (cur_obj < obj)"), std::string::npos);
+
+  MockHighPerfTilingCodeGenImpl multi_group("test", config, model_infos, score_funcs, false);
+  ASSERT_EQ(multi_group.GenSelectBetterTilingBasedOnObjAndUbRatio(), af::SUCCESS);
+  EXPECT_EQ(multi_group.tiling_func_.GetOutputStr().find(guard), std::string::npos);
+
+  model_infos.front().tiling_schedule_config_table = &v1_config;
+  MockHighPerfTilingCodeGenImpl v1_single_group("test", config, model_infos, score_funcs, true);
+  ASSERT_EQ(v1_single_group.GenSelectBetterTilingBasedOnObjAndUbRatio(), af::SUCCESS);
+  const auto v1_source = v1_single_group.tiling_func_.GetOutputStr();
+  EXPECT_EQ(v1_source.find(guard), std::string::npos);
+  EXPECT_NE(v1_source.find("&& !IsEqual(cur_ub_ratio, ub_ratio))"), std::string::npos);
+}
 
 TEST(GeneratorUT, GenUpdatePerfAddsSerializedEdgeToNonParallelObjective) {
   const auto test_case = MakeTwoGroupScheduleResultSourceCase(false);
@@ -2031,6 +2060,77 @@ TEST(GeneratorUT, DISABLED_GenGetScheduleResultPGOSuccess) {
             std::string::npos);
   EXPECT_EQ(tiling_func_output.find("ArrangeBlockOffsetsAscGraph0Result0(tiling_data, tiling_data.get_block_dim());"),
             std::string::npos);
+}
+
+TEST(GeneratorUT, InductorPgoCollectsWorkspaceFromAllGroupsOfEachCandidate) {
+  TilingCodeGenConfig config;
+  config.tiling_data_type_name = "AutofuseTilingData";
+  config.is_inductor_scene = true;
+  TilingModelInfo models(2);
+  models[1].schedule_group_ident.group_id = 1;
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, models, {}, false);
+  const std::map<size_t, std::pair<std::string, std::string>> groups{{0, {"ScheduleGroup0", "group0"}},
+                                                                     {1, {"ScheduleGroup1", "group1"}}};
+  const std::map<std::string, std::set<std::string>> hardware{{"group0", {"block_dim"}}, {"group1", {"block_dim"}}};
+
+  ASSERT_EQ(gen_impl.GenPGOGetScheduleResult(0, 0, groups, hardware), af::SUCCESS);
+  EXPECT_EQ(gen_impl.tiling_func_.GetOutputStr().find("CollectPgoWorkspace"), std::string::npos);
+  gen_impl.tiling_func_.Reset();
+
+  gen_impl.workspace_tensor_id_set_[0][0] = {1, 2};
+  ASSERT_EQ(gen_impl.GenPGOGetScheduleResult(0, 0, groups, hardware), af::SUCCESS);
+  const auto code = gen_impl.tiling_func_.GetOutputStr();
+  for (const auto *index : {"0", "1"}) {
+    const auto begin = code.find(std::string("for (size_t candidate_index = candidate_begin_index") + index);
+    ASSERT_NE(begin, std::string::npos);
+    const auto reset = code.find("workspace_map.clear();", begin);
+    const auto group0 = code.find("ScheduleGroup0::CollectPgoWorkspace(tiling_data.group0_tiling_data", reset);
+    const auto group1 = code.find("ScheduleGroup1::CollectPgoWorkspace(tiling_data.group1_tiling_data", group0);
+    const auto write = code.find("tiling_data.set_workspace1(0U);", group1);
+    const auto size = code.find("GetWorkspaceSize(tiling_data, workspaceSizeTmp)", begin);
+    ASSERT_NE(size, std::string::npos);
+    EXPECT_LT(reset, group0);
+    EXPECT_LT(group0, group1);
+    EXPECT_LT(group1, write);
+    EXPECT_LT(write, size);
+  }
+}
+
+TEST(GeneratorUT, InductorPgoByCoreNumCollectsWorkspaceBeforeAppendingCandidate) {
+  TilingCodeGenConfig config;
+  config.tiling_data_type_name = "AutofuseTilingData";
+  config.is_inductor_scene = true;
+  TilingModelInfo models(2);
+  models[1].schedule_group_ident.group_id = 1;
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, models, {}, false);
+  const std::map<size_t, std::pair<std::string, std::string>> groups{{0, {"ScheduleGroup0", "group0"}},
+                                                                     {1, {"ScheduleGroup1", "group1"}}};
+  const std::map<std::string, std::set<std::string>> hardware{{"group0", {"block_dim"}}, {"group1", {"block_dim"}}};
+
+  gen_impl.GenPGOByCoreNumGetScheduleResult(0, 0, groups, hardware, {});
+  EXPECT_EQ(gen_impl.tiling_func_.GetOutputStr().find("CollectPgoWorkspace"), std::string::npos);
+  gen_impl.tiling_func_.Reset();
+
+  gen_impl.workspace_tensor_id_set_[0][0] = {1, 2};
+  gen_impl.GenPGOByCoreNumGetScheduleResult(0, 0, groups, hardware, {});
+  const auto code = gen_impl.tiling_func_.GetOutputStr();
+  const auto begin = code.find("for (auto &candidate : tiling_data_list_tmp2)");
+  ASSERT_NE(begin, std::string::npos);
+  EXPECT_NE(code.find("bool candidate_workspace_valid = true;", begin), std::string::npos);
+  const auto reset = code.find("workspace_map.clear();", begin);
+  const auto group0 = code.find("ScheduleGroup0::CollectPgoWorkspace(tiling_data.group0_tiling_data", reset);
+  const auto group1 = code.find("ScheduleGroup1::CollectPgoWorkspace(tiling_data.group1_tiling_data", group0);
+  const auto reject = code.find("continue;", group1);
+  const auto write = code.find("tiling_data.set_workspace1(0U);", reject);
+  const auto append = code.find("tiling_data_list.push_back(std::move(candidate));", begin);
+  ASSERT_NE(append, std::string::npos);
+  EXPECT_LT(reset, group0);
+  EXPECT_LT(group0, group1);
+  EXPECT_LT(group1, reject);
+  EXPECT_LT(reject, write);
+  EXPECT_LT(write, append);
+  EXPECT_NE(code.find("if (!candidate_workspace_valid)", begin), std::string::npos);
+  EXPECT_EQ(code.find("tiling_data_list.insert"), std::string::npos);
 }
 
 TEST(GeneratorUT, GenPGOGetScheduleResultSetsCurrentGroupVarRelationsBeforeSearch) {

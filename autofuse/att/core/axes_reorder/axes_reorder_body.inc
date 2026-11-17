@@ -1762,28 +1762,53 @@ inline void AxesReorderSolver::FindBetterSolutionByUpperBlockDim(double next_upp
 }
 
 #if AF_AXES_EQUAL_ORDER
-bool AxesReorderSolver::AutoTuning(const bool is_trade_off, const bool enable_equal_order) {
-  OP_LOGI(OP_NAME, "Start auto tuning, is_trade_off:%d, enable_equal_order:%d, input:%s", is_trade_off, enable_equal_order,
-    input_.DebugString().c_str());
+inline bool AxesReorderSolver::TuneCoreCounts(bool enable_equal_order) {
 #else
-bool AxesReorderSolver::AutoTuning(const bool is_trade_off) {
-  OP_LOGI(OP_NAME, "Start auto tuning, is_trade_off:%d, input:%s", is_trade_off, input_.DebugString().c_str());
+inline bool AxesReorderSolver::TuneCoreCounts() {
 #endif
-
-  if (is_trade_off) {
-    OP_LOGD(OP_NAME,"Do not auto tuning, as is_trade_off is %d.", is_trade_off);
-    return true;
-  }
-  if (input_.corenum_threshold > 1.0f || input_.ub_threshold < 0.0f) {
-    OP_LOGD(OP_NAME,"Do not auto tuning, as corenum_threshold is invalid:%f.", input_.corenum_threshold);
-    return true;
+#if AF_AXES_EQUAL_ORDER
+  if (!TuneNeighboringCoreCounts(enable_equal_order)) {
+#else
+  if (!TuneNeighboringCoreCounts()) {
+#endif
+    return false;
   }
   auto current_perf = AF_AXES_GET_PERF();
-  if (current_perf < input_.perf_threshold) {
-    OP_LOGD(OP_NAME, "Do not auto tuning, as current_perf:%lf is less than threshold:%lf, input:%s.", current_perf,
-            input_.perf_threshold, input_.DebugString().c_str());
-    return true;
+  double used_cores = 0.0;
+  (void)AF_AXES_CAL_USED_CORE_NUM(used_cores);
+  const auto block_dim = static_cast<uint32_t>(Ceiling(used_cores));
+  TilingVariable tiling_vars[AF_AXES_BACKUP_SIZE(input_.tiling_vars_size)];
+  TilingVariable pure_mc_vars[AF_AXES_BACKUP_SIZE(input_.pure_mc_vars_size)];
+  TilingVariable local_buffer_vars[AF_AXES_BACKUP_SIZE(input_.local_buffer_vars_size)];
+  // Preserve the local optimum while probing other basins of piecewise API costs.
+  SaveInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
+  for (uint32_t budget = block_dim / 2U; budget > 0U; budget /= 2U) {
+#if AF_AXES_EQUAL_ORDER
+    if (GetMaxBlockDimTiling(budget, enable_equal_order)) {
+#else
+    if (GetMaxBlockDimTiling(budget)) {
+#endif
+      const auto perf = AF_AXES_GET_PERF();
+      if (perf < current_perf) {
+        current_perf = perf;
+        SaveInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
+      }
+    }
+    RestoreInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
   }
+  return true;
+}
+
+#if AF_AXES_EQUAL_ORDER
+bool AxesReorderSolver::TuneNeighboringCoreCounts(const bool enable_equal_order) {
+  OP_LOGI(OP_NAME, "Start neighboring core search, enable_equal_order:%d, input:%s", enable_equal_order,
+    input_.DebugString().c_str());
+#else
+bool AxesReorderSolver::TuneNeighboringCoreCounts() {
+  OP_LOGI(OP_NAME, "Start neighboring core search, input:%s", input_.DebugString().c_str());
+#endif
+
+  auto current_perf = AF_AXES_GET_PERF();
 
   // 使能自动融合
   double got_block_dim = 0.0;
@@ -1890,6 +1915,15 @@ bool AxesReorderSolver::AutoTuning(const bool is_trade_off) {
   return true;
 }
 
+inline TilingVariable *AxesReorderSolver::FindWorkloadBalanceVar(TilingVariable *const *vars) const {
+  for (uint32_t i = 0U; i < input_.local_buffer_vars_size; ++i) {
+    if (vars[i]->mc_related) {
+      return vars[i];
+    }
+  }
+  return nullptr;
+}
+
 inline bool AxesReorderSolver::WorkloadBalance() {
   OP_LOGD(OP_NAME, "Begin to calculate core num for workload balance, input:%s.", input_.DebugString().c_str());
   int64_t used_corenum = 0;
@@ -1900,22 +1934,12 @@ inline bool AxesReorderSolver::WorkloadBalance() {
   double diff = static_cast<double>(used_corenum) - tmp_corenum;
   double initial_diff = static_cast<double>(used_corenum) - tmp_corenum;
   constexpr double EPS = 1e-6;
-  bool related = false;
-  uint32_t num_vars = input_.local_buffer_vars_size;
   auto *vars = input_.ordered_local_buffer_vars;
-  uint32_t index = num_vars - 1;
-  for (uint32_t i = 0; i < num_vars; i++) {
-    if (vars[i]->mc_related) {
-      related = true;
-      index = i;
-      break;
-    }
-  }
-  if (!related) {
+  auto *var = FindWorkloadBalanceVar(vars);
+  if (var == nullptr) {
     return true;
   }
 
-  auto &var = vars[index];
   double tmp_vars = var->value;
   OP_LOGD(OP_NAME, "Tmp_vars %f Diff is: %lf, input: %s.", tmp_vars, diff, input_.DebugString().c_str());
   int64_t left = var->prompt_align;
@@ -1952,30 +1976,84 @@ inline bool AxesReorderSolver::WorkloadBalance() {
           (initial_diff - fine_diff): ((initial_diff - fine_diff) / initial_diff), input_.DebugString().c_str());
   return true;
 }
-// is_trade_off 描述:表示是否使能根据ub占用率/多核占用率双阈值调优的策略
-//              使用说明：默认打开，关闭场景：1)Vector重型算子 2)att_enable_multicore_ub_tradeoff开启
-// is_block_loop_auto_tune 描述：表示多核调优时是否根据性能公式权衡核数和核内循环
-//                         使用说明：默认关闭，通过att_enable_multicore_ub_tradeoff=true打开
-// enable_auto_tune 描述：表示是否使能自动核数调优
-//                  使用说明：默认开启，通过att_accuracy_level=0关闭
-// enable_equal_order 描述：表示是否使能同优先级切分
+bool AxesReorderSolver::AutoTuning(bool has_threshold_seed, bool enable_equal_order) {
+  if (input_.corenum_threshold > 1.0f || input_.ub_threshold < 0.0f) {
+    OP_LOGD(OP_NAME, "Do not auto tuning, as corenum_threshold is invalid:%f.", input_.corenum_threshold);
+    return enable_equal_order || WorkloadBalance();
+  }
+  const auto current_perf = AF_AXES_GET_PERF();
+  if (current_perf < input_.perf_threshold) {
+    OP_LOGD(OP_NAME, "Do not auto tuning, as current_perf:%lf is less than threshold:%lf, input:%s.", current_perf,
+            input_.perf_threshold, input_.DebugString().c_str());
+    return enable_equal_order || WorkloadBalance();
+  }
+
+  const auto search_and_balance = [this, enable_equal_order]() {
+    const auto core_num = input_.core_num;
+#if AF_AXES_EQUAL_ORDER
+    if (!TuneCoreCounts(enable_equal_order)) {
+#else
+    if (!TuneCoreCounts()) {
+#endif
+      return false;
+    }
+    input_.core_num = core_num;
+    return enable_equal_order || WorkloadBalance();
+  };
+  auto *balance_var =
+      has_threshold_seed && !enable_equal_order ? FindWorkloadBalanceVar(input_.ordered_local_buffer_vars) : nullptr;
+  if (balance_var == nullptr) {
+    return search_and_balance();
+  }
+
+  // Balance only changes the value of this variable. Restore it before searching from the original seed.
+  const auto raw_value = balance_var->value;
+  if (!WorkloadBalance()) {
+    return false;
+  }
+  const auto initial_perf = AF_AXES_GET_PERF();
+  const auto ub_threshold = input_.ub_threshold;
+  const auto corenum_threshold = input_.corenum_threshold;
+  TilingVariable tiling_vars[AF_AXES_BACKUP_SIZE(input_.tiling_vars_size)];
+  TilingVariable pure_mc_vars[AF_AXES_BACKUP_SIZE(input_.pure_mc_vars_size)];
+  TilingVariable local_buffer_vars[AF_AXES_BACKUP_SIZE(input_.local_buffer_vars_size)];
+  SaveInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
+  balance_var->value = raw_value;
+  if (!search_and_balance()) {
+    return false;
+  }
+  if (initial_perf < AF_AXES_GET_PERF()) {
+    RestoreInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
+    input_.ub_threshold = ub_threshold;
+    input_.corenum_threshold = corenum_threshold;
+  }
+  return true;
+}
+
+// is_trade_off：初解是否使用 UB / 多核占用率双阈值；关闭时用二分求初解。
+//               它不决定后续是否下探核数或执行 WorkloadBalance。
+// is_block_loop_auto_tune：初解中是否根据性能公式权衡核数和核内循环；生成器启用双阈值时关闭该项。
+// enable_auto_tune：控制初解后的自动调优；att_accuracy_level=0 时关闭。
+// enable_core_search：控制是否允许额外核数探测；默认动态 shape 跳过探测，
+//                    自动调优开启且未启用同优先级切分时仍保留 WorkloadBalance。
+// enable_equal_order：是否启用同优先级切分。
 #if AF_AXES_EXPLICIT_EVAL
 bool AxesReorderSolver::Run(const bool is_trade_off, const bool is_block_loop_auto_tune, const bool enable_auto_tune,
-                            const bool enable_equal_order) {
+                            const bool enable_equal_order, const bool enable_core_search) {
   eval_context_.ResetError();
   is_empty_tensor_ = false;
   try {
-    return RunImpl(is_trade_off, is_block_loop_auto_tune, enable_auto_tune, enable_equal_order);
+    return RunImpl(is_trade_off, is_block_loop_auto_tune, enable_auto_tune, enable_equal_order, enable_core_search);
   } catch (const EvalAbort &) {
     return false;
   }
 }
 
 bool AxesReorderSolver::RunImpl(const bool is_trade_off, const bool is_block_loop_auto_tune,
-                                const bool enable_auto_tune, const bool enable_equal_order)
+                                const bool enable_auto_tune, const bool enable_equal_order, const bool enable_core_search)
 #else
 bool AxesReorderSolver::Run(const bool is_trade_off, const bool is_block_loop_auto_tune,
-                            const bool enable_auto_tune, const bool enable_equal_order)
+                            const bool enable_auto_tune, const bool enable_equal_order, const bool enable_core_search)
 #endif
 {
   // Check empty tensor case: when the upper_bound of any axis is 0, return success directly
@@ -1997,6 +2075,7 @@ bool AxesReorderSolver::Run(const bool is_trade_off, const bool is_block_loop_au
 #else
   bool solved = GetTiling(is_trade_off, is_block_loop_auto_tune, false);
 #endif
+  const bool has_threshold_seed = solved && is_trade_off;
   if (!solved && is_trade_off) {
 #if AF_AXES_EQUAL_ORDER
     solved = GetTiling(false, is_block_loop_auto_tune, false, enable_equal_order);
@@ -2020,22 +2099,14 @@ bool AxesReorderSolver::Run(const bool is_trade_off, const bool is_block_loop_au
             input_.DebugString().c_str());
     return true;
   }
-  // hi-perf level设置为1，支持自动调优
-  auto save_core_num = input_.core_num;
-#if AF_AXES_EQUAL_ORDER
-  if (!AutoTuning(is_trade_off, enable_equal_order)) {
-    OP_LOGD(OP_NAME, "Do not need auto tuning, is_trade_off: %d, enable_equal_order: %d, input: %s.", is_trade_off,
-            enable_equal_order, input_.DebugString().c_str());
-#else
-  if (!AutoTuning(is_trade_off)) {
-    OP_LOGD(OP_NAME, "Do not need auto tuning, is_trade_off: %d, input: %s.", is_trade_off,
-            input_.DebugString().c_str());
-#endif
-    return false;
+  // Core probes must not undo an effective Reduce Store penalty; a ratio of one is unrestricted.
+  if (!enable_core_search ||
+      (has_threshold_seed && input_.preserve_reduce_store_penalty_seed && input_.corenum_threshold < 1.0)) {
+    return enable_equal_order || WorkloadBalance();
   }
-  // 负载均衡的逻辑，当前仅考虑单核场景，后续优化
-  input_.core_num = save_core_num;
-  if (!enable_equal_order && !WorkloadBalance()) {
+  if (!AutoTuning(has_threshold_seed, enable_equal_order)) {
+    OP_LOGD(OP_NAME, "Do not need auto tuning, is_trade_off: %d, enable_equal_order: %d, input: %s.",
+            is_trade_off, enable_equal_order, input_.DebugString().c_str());
     return false;
   }
   return true;

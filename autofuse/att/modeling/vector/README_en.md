@@ -2,6 +2,7 @@
 
 Follow the categories in `autofuse/codegen/api_call/`: `broadcast/`, `concat/`, `elewise/`, `gather/`, `reduce/`, `transpose/`.
 Place `cast` under `elewise/cast/` and add other elementwise API models under `elewise/` as needed.
+`vf/` records modeling additions for fused vector instructions and the shared startup cost.
 Archive datacopy load/store models under mte2/mte3 respectively; `utils` contains shared utilities, not model categories.
 
 ## Content to Add

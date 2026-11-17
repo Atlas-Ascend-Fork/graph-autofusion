@@ -308,6 +308,9 @@ af::Status LoadStoreStrideV2Func(const std::map<std::string, float> &param_map, 
   Expr stride_used = LimitedStrideUpperBound(stride * GetDataTypeSizeExpr(param_map), upper_val);
   stride_used = af::sym::Min(stride_used, upper_val);
   res = af::sym::Mul(k, af::sym::Mul(block_count, stride_used));
+  if (ParseOptionalFloatParam(param_map, "cacheline_padded", 0.0f) > 0.0f) {
+    res = af::sym::Mul(res, af::sym::Sub(CreateExpr(1), CreateExpr("load_cacheline_padded")));
+  }
   GELOGD(
       "LoadStoreStrideV2: dims[%s], k=%s, block_count=%s, block_count_idx=%d, "
       "stride_used=%s, data_type_size=%s, loop_mode_dim_count=%d, res=%s",

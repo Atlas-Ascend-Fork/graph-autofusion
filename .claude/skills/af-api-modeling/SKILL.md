@@ -15,7 +15,7 @@ description: Use when graph-autofusion 用户需要对单个 AscendC API 做上�
 | --- | --- | --- |
 | 1 | API 源码定位，输入与逻辑分支分析，编写上板验证代码（bench） | 已完善，见下文 |
 | 2 | 编写运行工具（编译、读用例、批量运行、数据采集） | 已完善，见下文 |
-| 3 | 设计测试用例（`tools/cases.csv`）并调用工具实测 | 已完善（用例文件就绪，实测需目标设备） |
+| 3 | 设计测试用例（`autofuse/tools/modeling/<category>/<api>/cases.csv`）并调用工具实测 | 已完善（用例文件就绪，实测需目标设备） |
 | 4 | 根据实测数据拟合各分支公式 a*repeat+b | 已完善，见下文 |
 | 5 | 编写 API 的 perf 计算代码并归档 modeling | 已完善，见下文 |
 
@@ -23,14 +23,16 @@ description: Use when graph-autofusion 用户需要对单个 AscendC API 做上�
 
 ## 通用约定
 
+下文以 `<tool>` 指 `autofuse/tools/modeling/<category>/<api>/`，向量类工具使用 `vector` 分类。
+
 - 归档位置：`autofuse/att/modeling/`，按其 README.md 分类定位 API 目录（如 vector/elewise/isinf/）；
   已有目录复用，无则按归档约定新建（design.md / cases.csv / results/）。
-- 上板验证与工具代码放 `<api 目录>/tools/`：
+- 上板验证与工具代码放 `autofuse/tools/modeling/<category>/<api>/`：
   `<api>_perf_bench.asc`（bench 主体）、`CMakeLists.txt`、`README.md`、`run_bench.py`（运行工具）。
 - 目标形态：dav-3510（`__NPU_ARCH__ == 3510`，Ascend 950PR/950DT 系列）。
 - 公式形态：`cycles_per_call = a * repeat_time + b`；`repeat_time = ceil(count / repeat_elm)`，
   `repeat_elm = GetVecLen() / sizeof(SrcT)`（v35 GetVecLen()=256B，fp32=64、fp16=128）。
-- 参考实例：`autofuse/att/modeling/vector/elewise/isinf/tools/`（IsInf，首个完整样例）。
+- 参考实例：`autofuse/tools/modeling/vector/isinf/`（IsInf，首个完整样例）。
 
 ## 第一步：API 源码定位与上板验证代码
 
@@ -63,7 +65,7 @@ description: Use when graph-autofusion 用户需要对单个 AscendC API 做上�
 
 ### 1.3 编写上板验证代码
 
-在 `<api 目录>/tools/` 下新建三个文件。以 IsInf 为参考实例。
+在 `autofuse/tools/modeling/<category>/<api>/` 下新建三个文件。以 IsInf 为参考实例。
 
 `<api>_perf_bench.asc` 结构（kernel + host 同文件）：
 
@@ -142,7 +144,7 @@ cmake -DCMAKE_ASC_RUN_MODE=cpu -DCMAKE_ASC_ARCHITECTURES=dav-3510 .. && make -j8
 
 ## 第二步：运行工具（编译、传参、运行、采集）
 
-`<api 目录>/tools/run_bench.py`，标准库实现，职责：
+`autofuse/tools/modeling/<category>/<api>/run_bench.py`，标准库实现，职责：
 
 1. **编译**：调用 cmake/make，`--run-mode {npu,cpu}` 决定 `CMAKE_ASC_RUN_MODE`，
    构建目录按模式区分（`build/`、`build_cpu/`），`--skip-build` 复用已有产物。
@@ -151,7 +153,7 @@ cmake -DCMAKE_ASC_RUN_MODE=cpu -DCMAKE_ASC_ARCHITECTURES=dav-3510 .. && make -j8
    （供确认是否为目标形态并作为归档环境证据）；命令不存在或执行失败时
    不阻断，默认按 `--arch`（dav-3510）继续。
 2. **用例来源（cases.csv，第三步测试用例设计的落点）**：
-   - 用例定义在 `<api 目录>/tools/cases.csv`，列：`combo,count,repeat,loop_count`，入参全部显式写出。
+   - 用例定义在 `autofuse/tools/modeling/<category>/<api>/cases.csv`，列：`combo,count,repeat,loop_count`，入参全部显式写出。
      `repeat` 为该用例的 repeat_time（`ceil(count/repeat_elm)`），写入是为了一眼看懂覆盖点。
    - 用例设计规则：每个分支（combo）约 8 个用例，取对齐点 `count = rt * repeat_elm`，
      rt 覆盖 `1,2,4,8,16,32,64,128`；`loop_count` 固定为 1（计时循环内单次 API 调用，
@@ -208,7 +210,7 @@ cmake -DCMAKE_ASC_RUN_MODE=cpu -DCMAKE_ASC_ARCHITECTURES=dav-3510 .. && make -j8
 # cpu 仿真跑通全链路（本机可测，只看 VERIFY；mini 用例另建 csv）
 python3 run_bench.py --run-mode cpu --cases mini_cases.csv
 
-# 目标设备实测全量用例（读 tools/cases.csv，npu 模式自动经 msprof 开启 profiling）
+# 目标设备实测全量用例（读工具目录下的 cases.csv，npu 模式自动经 msprof 开启 profiling）
 python3 run_bench.py --output samples.csv
 ```
 
@@ -223,23 +225,23 @@ python3 run_bench.py --output samples.csv
 
 ## 第三步：测试用例设计与实测
 
-用例设计落点为 `tools/cases.csv`（每分支约 8 例、loop_count=1），由 run_bench.py 读取执行；
+用例设计落点为 `autofuse/tools/modeling/<category>/<api>/cases.csv`（每分支约 8 例、loop_count=1），由 run_bench.py 读取执行；
 设计规则、校验与实测判定见「第二步」中「用例来源（cases.csv，第三步测试用例设计的落点）」、
 「运行采集」与「实测判定」小节。周期实测需 dav-3510 目标设备，非目标设备只做编译与
 CPU 仿真正确性验证。
 
 ## 第四步：拟合各分支公式（fit_curve.py）
 
-`<api 目录>/tools/fit_curve.py`，标准库实现，职责：
+`autofuse/tools/modeling/<category>/<api>/fit_curve.py`，标准库实现，职责：
 
-1. **读取**：`--result`（默认 `tools/samples.csv`），取 `loop_count, repeat, measured_cycles`
+1. **读取**：`--result`（默认 `<tool>/samples.csv`），取 `loop_count, repeat, measured_cycles`
    三列按 `combo` 分组；`measured_cycles` 为空或非正的行跳过（0 值占位数据禁止参与拟合），
    校验缺列与非法 `loop_count`。
 2. **拟合**（`fit_linear(samples)`，样本为多组 `(loop_count, repeat, measured_cycles)`）：
    - 先归一化 `y = measured_cycles / loop_count`（单次 API 调用周期）；
    - 再对 `y = a * repeat + b` 做最小二乘，闭式解求 a、b 最优值；
    - 输出 R2、逐点预测值与残差；repeat 全相同（分母为 0）、有效样本不足 2 个时拒绝拟合。
-3. **输出**：`--report`（默认 `tools/report.md`），**总是生成并保留**（数据无效也落盘说明状态，
+3. **输出**：`--report`（默认 `<tool>/report.md`），**总是生成并保留**（数据无效也落盘说明状态，
    不得删除）：
    - 按 combo（源码分支）分组，**每种分支独立一节、各有一组拟合结果**；
    - 汇总表列出各 combo 的有效/无效样本数、a、b、公式、R2、状态；
@@ -250,7 +252,7 @@ CPU 仿真正确性验证。
 用法示例：
 
 ```bash
-python3 fit_curve.py                          # 读 tools/samples.csv，写 tools/report.md
+python3 fit_curve.py                          # 读 <tool>/samples.csv，写 <tool>/report.md
 python3 fit_curve.py --result r.csv --report report.md
 ```
 
@@ -263,7 +265,7 @@ python3 fit_curve.py --result r.csv --report report.md
 
 ## 第五步：perf 计算代码编写与归档
 
-输入：`tools/report.md` 各分支拟合出的 a、b + 第一步的源码分支梳理。
+输入：`<tool>/report.md` 各分支拟合出的 a、b + 第一步的源码分支梳理。
 产出：API 的 perf 计算代码（实测简化公式直落）、samples.csv 回填、design.md 与 results 归档。
 
 ### 5.1 定位 perf 代码链路
@@ -298,7 +300,7 @@ python3 fit_curve.py --result r.csv --report report.md
   重复计费是本步骤最常见错误。
 - `repeat_time`、`call_count` 的计算必须与 bench/用例口径一致（同一 `repeat_elm`、
   同一 cal_count 来源），否则公式对不上实测。
-- 常数命名 `k{Api}{Branch}A/B`，注释必须指向 `tools/report.md` 并注明数据环境
+- 常数命名 `k{Api}{Branch}A/B`，注释必须指向 `<tool>/report.md` 并注明数据环境
   （设备形态、CANN 版本、拟合日期），保证可追溯。
 - 分支维度与第一步梳理一致：IsInf 的 codegen 实际路径输出恒 bool，按 input_dtype 分支；
   若 API 存在多分支组合，每个源码分支一组常数，未实测分支不得使用其他分支常数冒充
@@ -309,7 +311,7 @@ python3 fit_curve.py --result r.csv --report report.md
 
 ### 5.3 回填 model_predict_cycles
 
-perf 代码定稿后，将 `tools/samples.csv` 的 `model_predict_cycles` 列按**同一组 a、b**
+perf 代码定稿后，将 `<tool>/samples.csv` 的 `model_predict_cycles` 列按**同一组 a、b**
 （与 perf 代码常数完全一致）计算 `a * repeat + b` 回填，完成两阶段流程闭环：
 - 回填值与 perf 代码必须同源（同一 report.md 拟合值），禁止手工微调；
 - 用一次性 python 脚本（内联或临时文件）读写 csv 完成，不引入常驻工具；
@@ -321,22 +323,22 @@ perf 代码定稿后，将 `tools/samples.csv` 的 `model_predict_cycles` 列按
    （`autofuse/tests/ut/att/testcase/gen_model_info/api_perf_register/` 与 v35 对应目录，
    用 af-test-developer 技能执行 `sh build.sh -u --module=autofuse_framework -j 8`）；
    新增用例覆盖：各分支 dtype 的 repeat_time 展开、call_count>1、参数无效回退路径。
-2. **design.md 更新**：公式章节改为实测拟合公式（引用 `tools/report.md`），
+2. **design.md 更新**：公式章节改为实测拟合公式（引用 `<tool>/report.md`），
    保留理论推算（MicroAPI 计数）作为对照，说明 a、b 与理论值的差异及来源
    （如 b 含测量口径开销、表项 latency 为标称值等）。
  3. **归档**：将 `tools` 中的输出结果汇总，按 `autofuse/att/modeling/README.md`
     的模型归档约定生成对应目录和文件（`<model>/design.md`、`<model>/cases.csv`、
     `<model>/results/<platform>/<run_id>/{manifest.json,samples.csv,report.md}`）：
-    - `cases.csv`、`samples.csv` **直接复制** `tools/` 下对应文件
-      （`tools/cases.csv -> <model>/cases.csv`，
-      `tools/samples.csv -> <model>/results/<platform>/<run_id>/samples.csv`），
+    - `cases.csv`、`samples.csv` **直接复制** `<tool>` 下对应文件
+      （`<tool>/cases.csv -> <model>/cases.csv`，
+      `<tool>/samples.csv -> <model>/results/<platform>/<run_id>/samples.csv`），
       不手工重写内容；
-    - `report.md` 直接读取 `tools/report.md` 中的拟合结果**总结输出**：
+    - `report.md` 直接读取 `<tool>/report.md` 中的拟合结果**总结输出**：
       提取各分支的 a、b、R2、残差等拟合结论，整理为归档格式
-      （误差分析、结论及限制）；不重新拟合，不得引入 `tools/report.md`
+      （误差分析、结论及限制）；不重新拟合，不得引入 `<tool>/report.md`
       之外的数据（mock/占位数据的拟合结果禁止归档）；
     - `manifest.json` 记录环境（npu-smi 设备信息）、CANN 版本、执行命令及
-      原始证据索引（关联 `tools/profiling/{run_id}/`，原始数据不入库）；
+      原始证据索引（关联 `<tool>/profiling/{run_id}/`，原始数据不入库）；
       `<run_id>` 与 profiling 批次一致，`<platform>` 为设备形态（如 dav-3510）。
  4. **跨特性检查**：perf 公式变更影响 ATT 整体估算，读
     `docs/guidelines/cross_feature_check.md` 确认对 SuperKernel、E2E 测试无连带影响。

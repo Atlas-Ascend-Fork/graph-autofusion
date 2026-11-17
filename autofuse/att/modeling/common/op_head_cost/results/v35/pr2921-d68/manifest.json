@@ -1,0 +1,48 @@
+{
+  "platform": "Ascend 950 / v35",
+  "cann_toolkit": "9.3.0",
+  "npu_arch": "dav-3510",
+  "product_revision": "d68f40efd13e551d3b9548e8f6c80098a7b2cf0e",
+  "case_inventory": "../../../cases.csv",
+  "external_document_revision": "0753bc41b635ff905d3147b8a0c431bbe943df8c",
+  "archived_domain_fit": "20261109-cycle-bridge-search/core-cycle-wall-calibration-v1/head-domain-analysis.json",
+  "archived_domain_fit_sha256": "25c16572dc488f8f9bb60939a540559a63bf6fde01ddfde967ec976f8eea5586",
+  "original_benches": {
+    "bridge": {
+      "run_id": "core-cycle-wall-calibration-v1",
+      "reproduction": "../../../../../../../tools/modeling/op_head_cost/README.md",
+      "build_sha256": {
+        "core_launch.asc": "a5651f4749b85b7d5af8e7d87808ce9bc57d265ad0728a5374a42ffdacdddf3c",
+        "CMakeLists.txt": "3675b0212020188aabd3896421279cafbf39821a1b2422a32d580d03daa179dd",
+        "protocol.json": "233a8a95b8cb56c88cf400442469bc3e35ca2402bbaa8b10682b23d84834af1a",
+        "build/core_launch": "4f44bf0b7be48932e0349cebad243ade38ef7679182e7fcd04151e004d6f002d"
+      },
+      "raw_op_summary_sha256": {
+        "profile-p1/PROF_000001_20261110024857501_00989735LGDFRRBE/mindstudio_profiler_output/op_summary_20261110024905.csv": "f376b9d7b5bc306d0b5a943b9bedddd787c5d985f925734d6002ffc96e3c2e8b",
+        "profile-p2/PROF_000001_20261110025013258_00998199OINHIDCM/mindstudio_profiler_output/op_summary_20261110025022.csv": "95d9e4ad8df48458817e95739e23d86d53ac760d5bd569f0a44320a8abe32f02",
+        "profile-p3/PROF_000001_20261110025129932_01006369PMEGBGHC/mindstudio_profiler_output/op_summary_20261110025140.csv": "2314ca683e4a8c2e56f7bda87168cafa643d108695c2c67da680d1e53e952662",
+        "profile-p4/PROF_000001_20261110025345477_01021569KEBJIHRE/mindstudio_profiler_output/op_summary_20261110025354.csv": "28ac7e3f07e7bcfd8ce12fe872f681325d387bcbbb779b3edb95f6bc6a6232d9"
+      },
+      "raw_op_summary_location": "Original experiment run directories; raw profiler output is not committed"
+    },
+    "head": {
+      "run_id": "core-head-independent-v1",
+      "reproduction": "../../../../../../../tools/modeling/op_head_cost/README.md",
+      "build_sha256": {
+        "core_launch.asc": "dd6e79153171907f540499aa97cef9a45f3b94de35d0e9da266d8bc6d65ace57",
+        "CMakeLists.txt": "3675b0212020188aabd3896421279cafbf39821a1b2422a32d580d03daa179dd",
+        "protocol.json": "1cfca4fbadf504501c0b3ac4eeb6b448c4d864e54915773ebb7218788fb9b3ca",
+        "build/core_launch": "7f100d04b1e29114cdc10172370370f5c34b4f235bfcdc9c7f1d7fac3700ebd8"
+      },
+      "raw_op_summary_sha256": {
+        "profile-p1/PROF_000001_20261110014136222_00576475BDPLEHBL/mindstudio_profiler_output/op_summary_20261110014146.csv": "96ff5d1e8d82f4381c038a8e4fbfc58779dd64c6176028b1d440fbf2d307b7cb",
+        "profile-p2/PROF_000001_20261110014351616_00592126JDPFELJL/mindstudio_profiler_output/op_summary_20261110014400.csv": "3b3f4b60631e0c3460c7538ba6f93713609ff0d458be192695b586c93107c2d6",
+        "profile-p3/PROF_000001_20261110014607425_00607494KNQHBAAJ/mindstudio_profiler_output/op_summary_20261110014617.csv": "fe5ebc63c4cb3755a7807a33e2451227f2a85b391ad07c1dabd51cd0a9d68fde",
+        "profile-p4/PROF_000001_20261110014824084_00622996HCNALORL/mindstudio_profiler_output/op_summary_20261110014833.csv": "096c2fdc815cd188b58169ffc1916832b9436157d097b5c7a69fc243090b5d04"
+      },
+      "raw_op_summary_location": "Original experiment run directories; raw profiler output is not committed"
+    }
+  },
+  "path_convention": "Local paths are relative to this manifest. External evidence paths are relative to the caller-supplied evidence root, indexed by source_root.",
+  "source_root": "external_evidence"
+}

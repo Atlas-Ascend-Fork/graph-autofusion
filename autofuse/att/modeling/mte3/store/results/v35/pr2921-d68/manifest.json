@@ -1,0 +1,18 @@
+{
+  "product_revision": "d68f40efd13e551d3b9548e8f6c80098a7b2cf0e",
+  "platform": "Ascend 950 / v35",
+  "raw_profiling": "External; use per-source index and checksum",
+  "case_inventory": "../../../cases.csv",
+  "sources": {
+    "S01": {
+      "source": "20261109-small-dma-generalization/small-tile-contiguous-load-v1/fit-screen.json",
+      "sha256": "a518a39e76e9f448b60fe750b9045590745a00f6a9a98f620f1a97d213918df1",
+      "metric": "MTE3 API slope from 4/16 repeated calls",
+      "source_root": "external_evidence",
+      "historical_reproduction": "small-tile-contiguous-store-v1/run.sh; summarize.py",
+      "reproduction": "../../../../../../../tools/modeling/dma/README.md"
+    }
+  },
+  "external_document_revision": "0753bc41b635ff905d3147b8a0c431bbe943df8c",
+  "path_convention": "Local paths are relative to this manifest. External evidence paths are relative to the caller-supplied evidence root, indexed by source_root."
+}

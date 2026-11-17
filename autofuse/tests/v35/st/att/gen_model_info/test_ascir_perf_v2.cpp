@@ -25,6 +25,8 @@
 #include "ascir/generator/v2_ascir_att_impl.h"
 #include "graph_construct_utils.h"
 #include "api_perf_register/utils/api_perf_utils.h"
+#include "v35/att/api_perf_register/ascendc_regbase_perf.h"
+#include "v35/att/api_perf_register/nddma_model.h"
 #include "../../../att/gen_model_info/api_perf_register/nddma_test_utils.h"
 
 using namespace att;
@@ -1202,9 +1204,9 @@ TEST_F(STestAscirPerfV2, TestGetOpHeadCostValid) {
   PerfParamTableV2 perf_param_table_v2;
   auto head_cost = perf_param_table_v2.GetOpHeadCost();
   EXPECT_TRUE(head_cost.IsConstExpr());
-  uint64_t head_cost_val = 0L;
+  double head_cost_val = 0.0;
   EXPECT_TRUE(head_cost.GetConstValue(head_cost_val));
-  EXPECT_EQ(head_cost_val, 0);
+  EXPECT_DOUBLE_EQ(head_cost_val, 22.059531283);
 }
 
 TEST_F(STestAscirPerfV2, TestAbsV2) {
@@ -2492,5 +2494,165 @@ TEST_F(STestAscirPerfV2, TestReorderGmStrideByTransposeNddmaMultipleCases) {
       std::cout << static_cast<int32_t>(pipe_res.first) << " PERF=" << Str(pipe_res.second) << std::endl;
     }
     EXPECT_EQ(result, af::SUCCESS) << "Test case failed: " << tc.description;
+  }
+}
+
+namespace {
+struct StTransposePerfResult {
+  std::string pipe_expr;
+  std::string ternary_expr;
+  PerfOutputInfo perf;
+};
+
+StTransposePerfResult GetStTransposePerfExpr(uint32_t total_dim, uint32_t inner_dim,
+                                             const std::vector<Expr> &output_dims,
+                                             const std::vector<Expr> &outer_loop_axes,
+                                             const std::vector<Expr> &input_strides, bool valid = true,
+                                             const std::string &dtype = kFloat16) {
+  auto api = ApiPerfFactory::Instance().Create("TransposeV2");
+  EXPECT_NE(api, nullptr);
+  NodeDetail node_info;
+  node_info.input_dtype = {dtype};
+  node_info.input_dims = output_dims;
+  node_info.transpose_node_params.valid = valid;
+  node_info.transpose_node_params.total_dim = total_dim;
+  node_info.transpose_node_params.inner_dim = inner_dim;
+  node_info.transpose_node_params.output_dims = output_dims;
+  node_info.transpose_node_params.outer_loop_axes = outer_loop_axes;
+  node_info.transpose_node_params.input_strides = input_strides;
+  PerfOutputInfo perf_res;
+  EXPECT_EQ(ascendcperf_v2::TransposePerf(node_info, perf_res), af::SUCCESS);
+  std::string ternary_expr;
+  if (!perf_res.ternary_ops.empty()) {
+    ternary_expr = perf_res.ternary_ops.begin()->second.GetTernaryOpStr();
+  }
+  return {Str(perf_res.pipe_res[PipeType::AIV_VEC]), ternary_expr, perf_res};
+}
+
+bool GetStTransposeConstantValue(Expr value, double &result) {
+  value.Simplify();
+  if (value.GetExprType() == af::ExprType::kExprConstantInteger) {
+    int64_t integer = 0;
+    if (!value.GetConstValue(integer)) {
+      return false;
+    }
+    result = static_cast<double>(integer);
+    return true;
+  }
+  return value.IsConstExpr() && value.GetConstValue(result);
+}
+
+double EvaluateStTransposeCycles(const StTransposePerfResult &result,
+                                 std::vector<std::pair<Expr, Expr>> bindings = {}) {
+  Expr cycles = result.perf.pipe_res.at(PipeType::AIV_VEC);
+  for (size_t pass = 0U; pass <= result.perf.ternary_ops.size(); ++pass) {
+    for (const auto &item : result.perf.ternary_ops) {
+      auto choice = item.second.DeepCopyIfCase();
+      choice->Replace(bindings);
+      bool resolved = true;
+      while (!choice->IsLeaf()) {
+        const auto equal = choice->GetCondType() == CondType::K_GE
+                               ? af::SymbolicUtils::StaticCheckLe(choice->GetCondRight(), choice->GetCondLeft())
+                               : af::SymbolicUtils::StaticCheckEq(choice->GetCondLeft(), choice->GetCondRight());
+        if (equal == af::TriBool::kUnknown) {
+          resolved = false;
+          break;
+        }
+        choice = equal == af::TriBool::kTrue ? choice->GetChoiceA() : choice->GetChoiceB();
+      }
+      double value = 0.0;
+      if (resolved && GetStTransposeConstantValue(choice->GetExpr(), value)) {
+        bindings.emplace_back(item.first, CreateExpr(value));
+      }
+    }
+    Expr current = cycles.Replace(bindings);
+    current.Simplify();
+    double value = 0.0;
+    if (GetStTransposeConstantValue(current, value)) {
+      return value;
+    }
+  }
+  ADD_FAILURE() << "Unresolved transpose performance: " << result.pipe_expr;
+  return 0.0;
+}
+
+double GetStNddmaConstCycles(Expr cycles) {
+  cycles.Simplify();
+  double value = 0.0;
+  EXPECT_TRUE(cycles.GetConstValue(value));
+  return value;
+}
+}  // namespace
+
+TEST_F(STestAscirPerfV2, StTransposeBankPeriodAndShortTail) {
+  const auto evaluate = [](const Expr &stride) {
+    return GetStTransposePerfExpr(3, 1, {CreateExpr(19), CreateExpr(1), CreateExpr(280)}, {},
+                                  {CreateExpr(1), CreateExpr(6720), stride}, true, kFloat32);
+  };
+  EXPECT_FALSE(evaluate(CreateExpr(24)).pipe_expr.empty());
+  EXPECT_FALSE(evaluate(CreateExpr(40)).pipe_expr.empty());
+  EXPECT_FALSE(evaluate(CreateExpr(56)).pipe_expr.empty());
+  EXPECT_FALSE(evaluate(CreateExpr(32)).pipe_expr.empty());
+  EXPECT_FALSE(evaluate(CreateExpr(23)).ternary_expr.empty());
+  EXPECT_FALSE(evaluate(CreateExpr("transpose_stride")).ternary_expr.empty());
+
+  const auto tail = GetStTransposePerfExpr(3, 1, {CreateExpr(24), CreateExpr(1), CreateExpr(72)}, {},
+                                           {CreateExpr(1), CreateExpr(4032), CreateExpr(56)}, true, kFloat32);
+  EXPECT_FALSE(tail.pipe_expr.empty());
+
+  const Expr lanes = CreateExpr("st_tail_lanes");
+  const Expr stride = CreateExpr("st_tail_stride");
+  const auto make3d = [](const Expr &t, const Expr &p) {
+    return GetStTransposePerfExpr(3, 1, {CreateExpr(2), CreateExpr(3), t}, {}, {CreateExpr(1), CreateExpr(32), p}, true,
+                                  kFloat32);
+  };
+  for (const auto &sample :
+       {std::make_pair(7, 96), std::make_pair(8, 96), std::make_pair(9, 96), std::make_pair(7, 97)}) {
+    const auto t = CreateExpr(sample.first);
+    const auto p = CreateExpr(sample.second);
+    EXPECT_NEAR(EvaluateStTransposeCycles(make3d(lanes, stride), {{lanes, t}, {stride, p}}),
+                EvaluateStTransposeCycles(make3d(t, p)), 1e-6);
+  }
+  const auto make2d = [](const Expr &t, const Expr &p) {
+    return GetStTransposePerfExpr(2, 1, {CreateExpr(30), t}, {}, {CreateExpr(1), p}, true, kFloat32);
+  };
+  EXPECT_NEAR(EvaluateStTransposeCycles(make2d(CreateExpr(8), CreateExpr(32))),
+              EvaluateStTransposeCycles(make2d(CreateExpr(8), CreateExpr(32))), 1e-6);
+}
+
+TEST_F(STestAscirPerfV2, StNddmaPaddedAndSparseInputs) {
+  {
+    NddmaDescriptorInfo descriptor;
+    descriptor.output_dims = {CreateExpr(10), CreateExpr(64), CreateExpr(39)};
+    descriptor.input_strides = {CreateExpr(2496), CreateExpr(1), CreateExpr(64)};
+    descriptor.output_strides = {CreateExpr(2496), CreateExpr(39), CreateExpr(1)};
+    descriptor.vectorized_axis = {0, 1, 2};
+    NddmaModelResult result;
+    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(52), result), af::SUCCESS);
+    EXPECT_TRUE(result.selected);
+    EXPECT_GT(GetStNddmaConstCycles(result.cycles), 0.0);
+  }
+  {
+    NddmaDescriptorInfo descriptor;
+    descriptor.output_dims = {CreateExpr(19), CreateExpr(385)};
+    descriptor.input_strides = {CreateExpr(1), CreateExpr(19)};
+    descriptor.output_strides = {CreateExpr(392), CreateExpr(1)};
+    descriptor.vectorized_axis = {0, 1};
+    NddmaModelResult result;
+    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(54), result), af::SUCCESS);
+    EXPECT_TRUE(result.selected);
+    EXPECT_GT(GetStNddmaConstCycles(result.cycles), 0.0);
+    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(57), result), af::SUCCESS);
+  }
+  {
+    NddmaDescriptorInfo descriptor;
+    descriptor.output_dims = {CreateExpr(512), CreateExpr(2), CreateExpr(4), CreateExpr(2)};
+    descriptor.input_strides = {CreateExpr(1), CreateExpr(512), CreateExpr(65536), CreateExpr(2097152)};
+    descriptor.output_strides = {CreateExpr(16), CreateExpr(8), CreateExpr(2), CreateExpr(1)};
+    descriptor.vectorized_axis = {0, 1, 2, 3};
+    NddmaModelResult result;
+    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(52), result), af::SUCCESS);
+    EXPECT_TRUE(result.selected);
+    EXPECT_GT(GetStNddmaConstCycles(result.cycles), 0.0);
   }
 }

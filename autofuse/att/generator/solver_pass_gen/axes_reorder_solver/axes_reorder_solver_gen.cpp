@@ -1508,7 +1508,7 @@ std::string AxesReorderSolverGen::GenSolverRunInvoke(const std::string &class_na
     run_block_loop_trade_off_by_perf = "runtime_enable_block_loop_trade_off_by_perf";
   }
   std::string run_args = run_multicore_ub_tradeoff + ", " + run_block_loop_trade_off_by_perf + ", " + high_perf_val +
-                         enable_equal_order_arg;
+                         enable_equal_order_arg + (enable_core_search_ ? "" : ", false");
   codes += "    if (!solver.Run(" + run_args + ")) {\n";
   GELOGI(
       "[DFX] Gen solver func, high_perf_val: %s, hit_pattern: %d, high_perf_: %d, multicore_ub_tradeoff:%d, "
@@ -1658,6 +1658,13 @@ std::string AxesReorderSolverGen::GenSolverFuncImpl() {
     codes += "    }\n";
   }
   codes += GenPendingSearchConfigOverride();
+  if (tiling_schedule_config_.is_penalty_config && !enable_multicore_ub_tradeoff_ && !enable_group_parallel_) {
+    codes += "    input.preserve_reduce_store_penalty_seed = ";
+    if (enable_autofuse_pgo_) {
+      codes += "PgoConfig::Instance().need_change_solver_run != 1 && ";
+    }
+    codes += (enable_autofuse_pgo_ || is_inductor_scene_) ? "pending_search_cfg_ == nullptr;\n" : "true;\n";
+  }
   codes += "    " + class_name + " solver(input);\n";
   codes += GenSolverRunInvoke(class_name);
   codes += GenEmptyTensorCheckInSolver();

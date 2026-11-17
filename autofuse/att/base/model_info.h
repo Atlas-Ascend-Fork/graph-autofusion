@@ -281,6 +281,18 @@ class TilingScheduleConfigTable {
 
   // 新增：是否启用Reduce分核Store地址冲突惩罚功能
   [[nodiscard]] virtual bool IsCoreNumThresholdPenaltyEnable() const = 0;
+
+  // Compare two single-block candidates by objective when both fall below the UB threshold.
+  [[nodiscard]] virtual bool PreferObjectiveForLowUbSingleBlock() const {
+    return false;
+  }
+
+  // When candidates straddle the UB utilization threshold, prefer higher utilization only if
+  // their objective gap divided by the smaller objective is within this limit.
+  // A negative limit retains the absolute-only comparison.
+  [[nodiscard]] virtual double GetCrossUbThresholdMaxRelativeCostGap() const {
+    return -1.0;
+  }
 };
 
 struct TilingCaseIdent {
