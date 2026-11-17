@@ -39,7 +39,9 @@ namespace optimize {
 // 链形状识别index语义(地址计算协议), 交换index广播链会破坏其取数正确性。
 //
 // 时序依赖: 必须注册在BroadcastBackwardPass(公共广播后移)之后, 避免两个pass对同一
-// broadcast的改写竞争; 在调度之前执行, 保证对齐pass看到的是交换后的最终结构。
+// broadcast的改写竞争; 必须注册在ContinuesBroadcastOptimizationPass(连续brc合并)之后,
+// 否则load->cast->brc->brc会被本pass先交换为load->brc->cast->brc, 中间的cast打断brc链,
+// 连续broadcast无法合并; 在调度之前执行, 保证对齐pass看到的是交换后的最终结构。
 class SwapCastBroadcastPass final : public BaseGraphPass {
  public:
   SwapCastBroadcastPass() = default;
