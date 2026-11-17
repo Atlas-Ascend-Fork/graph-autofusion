@@ -96,9 +96,14 @@ class SkOptimizerTaskReorderTest : public testing::Test {
 
   std::vector<SuperKernelBaseNode *> BuildEarlyNotifyTasks(
       const std::vector<SuperKernelBaseNode *> &taskNodes,
-      const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes, bool *usedEarlyEvents = nullptr) {
+      const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes, bool *usedEarlyEvents = nullptr,
+      SuperKernelBaseNode **tailEvent = nullptr) {
     bool used = false;
-    auto tasks = optimizer->BuildTaskListWithEarlyEvents(taskNodes, eventNodes, used);
+    SuperKernelBaseNode *fallbackEvent = nullptr;
+    auto tasks = optimizer->BuildTaskListWithEarlyEvents(taskNodes, eventNodes, used, fallbackEvent);
+    if (tailEvent != nullptr) {
+      *tailEvent = fallbackEvent;
+    }
     if (usedEarlyEvents != nullptr) {
       *usedEarlyEvents = used;
     }
@@ -405,9 +410,10 @@ TEST_F(SkOptimizerTaskReorderTest, FrontResetWithMissingOwnerFallsBackToTail) {
   events.push_back(std::move(graph->graphMap[notify->GetNodeId()]));
   bool early = true;
   const auto tasks = BuildEarlyNotifyTasks({owner, other}, events, &early);
-  EXPECT_FALSE(early);
-  EXPECT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{1401, 1402, 1403, 1404}));
-  EXPECT_TRUE(owner->sendToNodeId.empty());
+  EXPECT_TRUE(early);
+  EXPECT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{1401, 1404, 1402, 1403}));
+  EXPECT_EQ(owner->sendToNodeId.count(notify->GetNodeId()), 1U);
+  EXPECT_EQ(owner->sendToNodeId.count(reset->GetNodeId()), 0U);
 }
 
 TEST_F(SkOptimizerTaskReorderTest, FrontResetFollowsWaitAtStreamTail) {
@@ -562,7 +568,7 @@ TEST_F(SkOptimizerTaskReorderTest, WaitTail_ReleasesBeforeUnrelatedStream) {
   EXPECT_EQ(notify->GetPreNodeId(), INVALID_TASK_ID);
 }
 
-TEST_F(SkOptimizerTaskReorderTest, MissingNotifyOwner_FallsBackForAllEvents) {
+TEST_F(SkOptimizerTaskReorderTest, MissingNotifyOwner_OnlyMissingStreamFallsBack) {
   auto *owner = CreateKernelNode(1371, 2);
   auto *other = CreateKernelNode(1372, 3);
   auto *ownedNotify = CreateNotifyNode(1373, 2);
@@ -571,10 +577,35 @@ TEST_F(SkOptimizerTaskReorderTest, MissingNotifyOwner_FallsBackForAllEvents) {
   eventNodes.push_back(std::move(graph->graphMap[ownedNotify->GetNodeId()]));
   eventNodes.push_back(std::move(graph->graphMap[unknownNotify->GetNodeId()]));
 
-  auto tasks = BuildEarlyNotifyTasks({owner, other}, eventNodes);
-  EXPECT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{1371, 1372, 1373, 1374}));
-  EXPECT_EQ(owner->sendToNodeId.count(ownedNotify->GetNodeId()), 0U);
+  bool early = false;
+  auto tasks = BuildEarlyNotifyTasks({owner, other}, eventNodes, &early);
+  EXPECT_TRUE(early);
+  EXPECT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{1371, 1373, 1372, 1374}));
+  EXPECT_EQ(owner->sendToNodeId.count(ownedNotify->GetNodeId()), 1U);
   EXPECT_EQ(ownedNotify->GetPreNodeId(), INVALID_TASK_ID);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, MissingResetOwner_OnlyMissingStreamFallsBack) {
+  auto *owner = CreateKernelNode(1375, 2);
+  auto *other = CreateKernelNode(1376, 3);
+  auto *missingReset = CreateResetNode(1377, 9);
+  auto *ownedNotify = CreateNotifyNode(1378, 2);
+  std::vector<std::unique_ptr<SuperKernelBaseNode>> eventNodes;
+  eventNodes.push_back(std::move(graph->graphMap[missingReset->GetNodeId()]));
+  eventNodes.push_back(std::move(graph->graphMap[ownedNotify->GetNodeId()]));
+
+  bool early = false;
+  SuperKernelBaseNode *tailEvent = nullptr;
+  auto tasks = BuildEarlyNotifyTasks({owner, other}, eventNodes, &early, &tailEvent);
+  ASSERT_TRUE(early);
+  ASSERT_EQ(tailEvent, missingReset);
+  EXPECT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{1375, 1378, 1376, 1377}));
+  EXPECT_EQ(owner->sendToNodeId.count(ownedNotify->GetNodeId()), 1U);
+  EXPECT_EQ(owner->sendToNodeId.count(missingReset->GetNodeId()), 0U);
+
+  optimizer->ConnectStreamTailKernelsToEvent({owner, other}, tailEvent);
+  EXPECT_EQ(owner->sendToNodeId.count(missingReset->GetNodeId()), 1U);
+  EXPECT_EQ(other->sendToNodeId.count(missingReset->GetNodeId()), 1U);
 }
 
 TEST_F(SkOptimizerTaskReorderTest, Schedule_WaitTailDoesNotJoinUnrelatedStream) {
