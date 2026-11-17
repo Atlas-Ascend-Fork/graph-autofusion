@@ -221,6 +221,13 @@ endfunction()
 add_indirect_load_e2e_case(indirect_load_rank2_axis1_simd 2 1 1 1 0 0 3 5 8 1 1 4 6 1 1)
 mark_indirect_load_static_shape(indirect_load_rank2_axis1_simd)
 
+# 动态 shape 尾轴稠密 gather（rank=2/axis=1，无 IL_STATIC_SHAPE）：调度期为全部模板
+# 候选生成分数函数，尾轴窗口口径在动态 shape 下发射运行期条件表达式（窗口整驻 UB 且
+# lookup 密度折算覆盖窗口字节时取整行窗口字节）。动态 SIMD kernel 的既有数值问题与
+# 分数口径无关（候选分数生成本身在调度期完成），用例选择 SIMT 模板承载端到端校验。
+add_indirect_load_e2e_case(indirect_load_rank2_axis1_dynamic_simt 2 1 1 1 0 1 2 3 5 8 1 1 4 6 1 1)
+mark_indirect_load_codegen_and_e2e(indirect_load_rank2_axis1_dynamic_simt IL_EXPECT_SIMT=1 IL_EXPECT_SIMT_FLAT_TILING)
+
 add_indirect_load_e2e_case(indirect_load_rank3_axis1_float_int64_gather 3 1 0 0 1 0 7 16 31 10 1 16 31 10 1)
 mark_indirect_load_static_shape(indirect_load_rank3_axis1_float_int64_gather)
 mark_indirect_load_implementation(indirect_load_rank3_axis1_float_int64_gather 1)

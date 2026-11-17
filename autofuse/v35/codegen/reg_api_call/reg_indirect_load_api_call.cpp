@@ -2012,6 +2012,20 @@ Status IndirectLoadRegApiCall::ResolveSimtMetadata(const ascir::NodeView &node,
   return af::SUCCESS;
 }
 
+std::string IndirectLoadRegApiCall::SimtDefinitionSuffix() const {
+  // Post-reduce and GM-output evaluators of the same node have different
+  // Context layouts and must not share type names or guards. Dual-offset
+  // (_u64/_u32) body emission appends its width suffix after this route
+  // suffix, so all variants stay distinct in one source file.
+  std::string suffix = has_post_reduce_ ? "_post_reduce" : "_gm_output";
+  if (simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding) {
+    // kEmbedding dual-offset tests assert plain <node>_u64/_u32 names and the
+    // embedding Context layout carries no runtime output-inner size field.
+    suffix = "";
+  }
+  return suffix;
+}
+
 bool IndirectLoadRegApiCall::SimtSupportsDualOffsetBody(bool prepass_active) const {
   // 仅动态（uint64）形态双发：静态 shape 已由常量求值直接判 uint32，双发只会
   // 产生一套冗余的同类型 body 与恒真的运行时判定。
@@ -2089,9 +2103,11 @@ Status IndirectLoadRegApiCall::GenerateFuncDefinition(const TPipe &tpipe, const 
   std::string input_dtype;
   GE_ASSERT_SUCCESS(Tensor::DtypeName(input_tensor->dtype, input_dtype));
   const std::string valid_node_name = ascgen_utils::GenValidName(node_name);
-  const std::string context_name = kSimtContextNamePrefix + valid_node_name;
-  const std::string body_name = kSimtBodyNamePrefix + valid_node_name;
-  const std::string body_guard = kSimtBodyGuardPrefix + valid_node_name;
+  const std::string definition_suffix = SimtDefinitionSuffix();
+  const std::string definition_name = valid_node_name + definition_suffix;
+  const std::string context_name = kSimtContextNamePrefix + definition_name;
+  const std::string body_name = kSimtBodyNamePrefix + definition_name;
+  const std::string body_guard = kSimtBodyGuardPrefix + definition_name;
   std::string index_dtype;
   GE_ASSERT_SUCCESS(Tensor::DtypeName(index_dtype_, index_dtype));
   GELOGI(
@@ -2125,7 +2141,7 @@ Status IndirectLoadRegApiCall::GenerateFuncDefinition(const TPipe &tpipe, const 
       input_dtype, index_dtype, offset_type, tpipe, use_prepass, prepass_plan, idx_inner_expr);
   // Context 由所有偏移宽度的 Body 共享，且同名节点可能在多个 impl 中重复发射。
   // 独立保护 Context，不能只保护下方循环中的 Body 定义。
-  const std::string context_guard = kSimtContextGuardPrefix + valid_node_name;
+  const std::string context_guard = kSimtContextGuardPrefix + definition_name;
   ss << "#ifndef " << context_guard << std::endl;
   ss << "#define " << context_guard << std::endl;
   GE_ASSERT_SUCCESS(GenerateSimtContextDefinition(context_name, simt_gm_tensors_,
@@ -2349,7 +2365,8 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
     const ascgen_utils::indirect_load::SimtIndexPrepassPlan *prepass_plan, std::stringstream &ss) const {
   const size_t rank = logical_view_.input.sizes.size();
   const std::string offset_type = GetSimtOffsetType(simt_policy_);
-  const std::string body_name = kSimtBodyNamePrefix + ascgen_utils::GenValidName(node_name);
+  const std::string definition_name = ascgen_utils::GenValidName(node_name) + SimtDefinitionSuffix();
+  const std::string body_name = kSimtBodyNamePrefix + definition_name;
   std::string actual_size_expr;
   std::string output_offset_expr;
   // 局部目标（UB）：post Reduce 合成链（单 gather）或多 gather 组员的 value 直写链——
@@ -2699,7 +2716,9 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
   std::string input_dtype;
   GE_ASSERT_SUCCESS(Tensor::DtypeName(input.dtype, input_dtype));
   const std::string valid_node_name = ascgen_utils::GenValidName(node_name);
-  const std::string context_name = kSimtContextNamePrefix + valid_node_name;
+  const std::string definition_suffix = SimtDefinitionSuffix();
+  const std::string definition_name = valid_node_name + definition_suffix;
+  const std::string context_name = kSimtContextNamePrefix + definition_name;
   // [SIMT index 闭包预计算] 判定与计划：Context 的表字段、Index() 表读形态与调用点
   // pre-pass 发射共用同一位点，避免形态漂移。
   ascgen_utils::indirect_load::SimtIndexPrepassPlan prepass_plan;

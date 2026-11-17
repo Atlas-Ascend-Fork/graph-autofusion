@@ -37,6 +37,10 @@ namespace optimize {
 namespace {
 constexpr int64_t kIndirectLoadSimtDcacheSize = 32 * 1024;
 constexpr int64_t kEmbeddingSimdPayloadBytesThreshold = 2048;
+// 尾轴稠密 gather 窗口口径的触及粒度（字节，cache line 级）：单窗口 lookup 次数按该粒度
+// 折算触及字节，折算值不低于窗口字节视为高密度（窗口驻留 staging 的读取放大有界）；
+// 低于该密度时逐元素 SIMT 直读更优，维持 input_slice_bytes 口径不变。
+constexpr int64_t kDenseWindowLineBytes = 64;
 constexpr int64_t kEmbeddingSimdLookupCountThreshold = 32;
 constexpr int32_t kEmbeddingFastPathScore = 2;
 constexpr int32_t kEmbeddingAlternateFastPathScore = 1;
@@ -3618,6 +3622,27 @@ bool IsNormRegionDag(const af::AscNodePtr &indirect_load) {
   return reduce_count >= 1 && seen_store;
 }
 
+// 动态尾轴且 index 不收敛时，SK 候选改为分段兜底形态：全量窗口及 inline
+// 模板的 UB 驻留需求无法在编译期按运行期 R 验证，分段形态由 tiling 承载 R 轴切分。
+// 静态尾轴继续使用既有 UB 判定；收敛 index 的分片窗口不受此门禁影响。仅对
+// Norm Region DAG 重定向，保证分段归约语义；其他图形态保持原路径。
+bool IsSkRedirectRequiredForDynamicTail(const af::AscGraph &graph, const af::AscNodePtr &indirect_load) {
+  if (ascgen_utils::indirect_load::IsIndexSourceConverged(indirect_load)) {
+    return false;  // 收敛分片形态：窗口按分片装载，与全载可行性无关
+  }
+  const auto outputs = indirect_load->outputs();
+  int64_t tail = 0;
+  if (outputs.empty() || outputs[0] == nullptr || outputs[0]->attr.repeats.empty() ||
+      outputs[0]->attr.repeats.back().GetConstValue(tail)) {
+    return false;  // 静态尾轴：维持 IsSkWindowUbInfeasible/IsSimtUbInfeasible 既有判定
+  }
+  // 仅稳定 Softmax Pattern 需要全载 R 的 SoftmaxAR 兜底；其他 Norm DAG（例如
+  // gather+sum+transpose）保留原 SK 模板选择，避免扩大既有模板契约。
+  softmax_pattern::MatchResult softmax_match;
+  return IsNormRegionDag(indirect_load) &&
+         softmax_pattern::FindDirectPostSoftmaxPattern(graph, indirect_load, softmax_match);
+}
+
 // [SK段SIMT化·复合Norm] Norm 链分段化。通用调度对含 Reduce 的连通图按 R 轴切
 // loop，Reduce/多消费者节点输出的下游若与其同分量，跨 loop 引用（codegen
 // ConnectApiCallInputs 在单 loop 的 tensor_calls 中找不到生产者）。且连通性分区
@@ -3721,10 +3746,15 @@ af::Status PartitionNormReduceBoundaries(af::AscGraph &graph, const af::AscNodeP
 }
 
 af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_load, ascir::TemplateId template_id,
-                          bool &is_candidate_legal, bool has_live_candidate = true) {
+                          bool &is_candidate_legal, bool has_live_candidate = true,
+                          bool *sk_dynamic_redirect_rejected = nullptr, bool suppress_sk_redirect = false) {
   GELOGD("[IndirectLoad] Apply graph pass for node[%s], template_id[%d].", indirect_load->GetNamePtr(),
          static_cast<int32_t>(template_id));
   is_candidate_legal = true;
+  // [动态重定向回退信号] 分段重定向候选被校验拒绝时由调用方（Generate）回退常规
+  // SK 候选；sk_dynamic_redirect_fired 仅在拒绝源自动态尾轴重定向时置位（静态窗口
+  // 超限的 SK 全载候选必然被 StaticUbTemplateFilter 淘汰，回退无价值）。
+  bool sk_dynamic_redirect_fired = false;
   const auto value_dtype = indirect_load->inputs()[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype;
   const bool is_64bit_value = value_dtype == af::DT_INT64 || value_dtype == af::DT_UINT64;
   const bool is_1byte_value = value_dtype == af::DT_INT8 || value_dtype == af::DT_UINT8 || value_dtype == af::DT_BOOL;
@@ -3754,10 +3784,18 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
     // 门禁放宽：SIMT 候选可能因布局校验被拒（如 mean(dim=-2) 中间轴归约，
     // IsSimtUbInfeasible 只看尾轴 UB 下界无法覆盖）——前序 SIMD/SIMT 候选均不可行时
     // SK 是最后活路，此时即使 SIMT 的 UB 下界可行也必须重定向。
-    if (IsSkWindowUbInfeasible(indirect_load) && IsNormRegionDag(indirect_load) &&
-        (IsSimtUbInfeasible(graph, indirect_load) || !has_live_candidate)) {
+    // 动态尾轴（非收敛 index + 尾轴运行期符号）也需重定向；分段候选为任意
+    // 运行期 R 提供可解的 UB 兜底，小 R 仍保留可行的 inline 候选。
+    // suppress_sk_redirect 置位时跳过重定向走常规 SK 路径，供 Generate 在分段
+    // 候选被校验拒绝后回退重试。
+    const bool window_redirect = !suppress_sk_redirect && IsSkWindowUbInfeasible(indirect_load);
+    const bool dynamic_tail_redirect =
+        !suppress_sk_redirect && IsSkRedirectRequiredForDynamicTail(graph, indirect_load);
+    if ((window_redirect || dynamic_tail_redirect) && IsNormRegionDag(indirect_load) &&
+        (IsSimtUbInfeasible(graph, indirect_load) || !has_live_candidate || dynamic_tail_redirect)) {
       GELOGI("[IndirectLoad] SK candidate redirects IL to SIMT (window exceeds UB), node[%s].",
              indirect_load->GetNamePtr());
+      sk_dynamic_redirect_fired = dynamic_tail_redirect;
       // 先 Norm 边界化再 output 边界：闭包按 IL 下游数据流计算，output 边界插入后
       // IL 直接消费者变为边界 store，Norm 链被隔断在闭包之外（生产 9.28 复验：
       // 边界 0 个、分区 0 子图、has_none_graph）。Norm 边界先行，IL 直连 Norm 链首，
@@ -3787,6 +3825,9 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
   if (!is_candidate_legal) {
     GELOGI("[IndirectLoad] Reject template[%d] for node[%s]: post-reduce or region validation failed.",
            static_cast<int32_t>(template_id), indirect_load->GetNamePtr());
+    if (sk_dynamic_redirect_fired && sk_dynamic_redirect_rejected != nullptr) {
+      *sk_dynamic_redirect_rejected = true;
+    }
     return af::SUCCESS;
   }
   GE_ASSERT_SUCCESS(AnnotateTemplate(indirect_load, template_id, analysis));
@@ -3808,6 +3849,9 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
   GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
   if (!metadata_supported) {
     is_candidate_legal = false;
+  }
+  if (!is_candidate_legal && sk_dynamic_redirect_fired && sk_dynamic_redirect_rejected != nullptr) {
+    *sk_dynamic_redirect_rejected = true;
   }
   return af::SUCCESS;
 }
@@ -4777,7 +4821,24 @@ enum class GroupCandidateForm {
 struct MemberScoreLeaves {
   af::Expression slice_bytes;    // info.input_slice_bytes（payload 后缀字节）
   af::Expression lookup_extent;  // info.index_varying_extent（gather 侧 lookup 次数）
+  // 尾轴窗口口径（info.has_tail_window 时有效）：结构回退平局在该形态下以整行窗口为
+  // staging 单位替代退化为 dtype 字节的 input_slice_bytes；has_tail_window 为"已填充"
+  // 哨兵，false 时两表达式不消费。capable（embedding）路径恒为非尾轴成员，不消费。
+  bool has_tail_window = false;
+  af::Expression window_bytes;         // info.window_bytes（单窗口 staging 字节）
+  af::Expression window_lookup_count;  // info.window_lookup_count（单窗口 lookup 次数）
 };
+
+// 打分叶子的单一构造点：保证窗口口径在单 gather 与组路径间一致填充。
+MemberScoreLeaves MakeMemberScoreLeaves(const ascgen_utils::indirect_load::IndirectLoadAccessInfo &info) {
+  MemberScoreLeaves leaves;
+  leaves.slice_bytes = info.input_slice_bytes;
+  leaves.lookup_extent = info.index_varying_extent;
+  leaves.has_tail_window = info.has_tail_window;
+  leaves.window_bytes = info.window_bytes;
+  leaves.window_lookup_count = info.window_lookup_count;
+  return leaves;
+}
 
 struct GroupAccessStats {
   size_t member_count = 0UL;     // 成员总数 N
@@ -4803,7 +4864,7 @@ GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &memb
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(member, info));
     stats.simd_embedding_capable = stats.simd_embedding_capable && info.can_use_simd_embedding;
     stats.simt_structured_capable = stats.simt_structured_capable && info.can_use_simt_structured;
-    stats.members.emplace_back(MemberScoreLeaves{info.input_slice_bytes, info.index_varying_extent});
+    stats.members.emplace_back(MakeMemberScoreLeaves(info));
     int64_t slice_bytes = 0L;
     if (!info.input_slice_bytes.GetConstValue(slice_bytes)) {
       stats.all_static = false;
@@ -5073,6 +5134,30 @@ std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vecto
                                   mixed_minority_penalty);
 }
 
+// 结构回退平局的有效 payload（静态可折算路径）：尾轴窗口形态且窗口可整驻 UB（含
+// 预留）、lookup 密度按 cache line 折算覆盖窗口字节时，取整行窗口字节（SIMD dense
+// facade 的真实 staging 单位）；否则取 input_slice_bytes（含尾轴退化的 dtype 字节，
+// 保持既有行为）。动态窗口叶交由运行期发射的同式条件表达式判定。
+bool TryGetMemberTiePayload(const MemberScoreLeaves &member, const bool use_window_payload, const int64_t ub_size,
+                            int64_t &tie_payload) {
+  int64_t slice_bytes = 0L;
+  if (!member.slice_bytes.GetConstValue(slice_bytes)) {
+    return false;
+  }
+  tie_payload = slice_bytes;
+  if (!use_window_payload || !member.has_tail_window) {
+    return true;
+  }
+  int64_t window_bytes = 0L;
+  int64_t lookup_count = 0L;
+  if (member.window_bytes.GetConstValue(window_bytes) && window_bytes > 0L &&
+      member.window_lookup_count.GetConstValue(lookup_count) && lookup_count > 0L &&
+      window_bytes + kIndirectLoadUbReservedBytes <= ub_size && lookup_count * kDenseWindowLineBytes >= window_bytes) {
+    tie_payload = window_bytes;
+  }
+  return true;
+}
+
 // —— 结构回退（能力门控不满足——图结构属性，与 shape 无关） ——
 // strided 让位 / 0 分 + Softmax 加分 + ×4 与平局加分（静态按平均 payload、动态
 // SIMD +1——历史非 capable 行为；组/单 gather 同口径）。
@@ -5080,9 +5165,15 @@ std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vecto
 // [动静态对齐] 原实现：静态按 avg_payload 给平局分、动态固定 SIMD +1，同一张非 embedding 图
 // 会得到相反倾向。现在两条分支统一为「运行期算 avg_payload」，与静态口径完全一致；
 // 另外 strided 让位（simd_lowers_to_strided）时 SIMD 不再拿平局加分，确保 SIMT 严格胜出。
+// [尾轴窗口口径] 尾轴 gather 的 input_slice_bytes 恒为 dtype 字节（无 payload 后缀），
+// 平局的「staging 单位 ≥ 2KB 偏 SIMD」判据在该形态退化为恒偏 SIMT。窗口口径把该形态
+// 的有效 payload 修正为整行窗口字节（SIMD dense facade 的真实 staging 单位），启用条件：
+// SIMD 未退化 strided（strided 逐元素组装无窗口经济性，且让位契约要求 SIMT 严格胜出时
+// 两侧口径维持 input_slice_bytes）+ 平台 UB 可得 + 窗口可整驻 UB + lookup 密度折算
+// 覆盖窗口字节。静态/动态同式（动态叶运行期判定），非尾轴成员行为不变。
 std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const bool simd_lowers_to_strided,
                                             const bool softmax_bonus, const std::vector<MemberScoreLeaves> &members,
-                                            const af::AscGraph &candidate_graph) {
+                                            const af::AscGraph &candidate_graph, const int64_t ub_size) {
   const bool is_simd = form == GroupCandidateForm::kSimd;
   const bool is_simt = form == GroupCandidateForm::kSimt;
   int32_t base_score = (simd_lowers_to_strided && is_simt) ? kSimtStridedFallbackScore : 0;
@@ -5102,15 +5193,27 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
   }
   // SIMD 让位：strided 降级形态下 SIMD 不参与平局加分（与静态同口径）
   const bool simd_yields = simd_lowers_to_strided && is_simd;
+  // 尾轴窗口口径启用条件（见函数头注释）：让位或平台 UB 缺失时整体停用，两侧平局
+  // 口径与历史行为完全一致。
+  const bool use_window_payload = !simd_lowers_to_strided && ub_size > 0L &&
+                                  std::any_of(members.begin(), members.end(),
+                                              [](const MemberScoreLeaves &member) { return member.has_tail_window; });
 
   // 结构性常量判定：只要叶子里的自由符号全是常量，就按常量折叠。
   // 不用"整棵表达式能否 GetConstValue"——const sizevar 参与的乘法不一定折叠，
   // 那会把静态图误判成动态，发射出"没有任何 t. 读取"的伪运行期函数。
+  // 窗口口径启用时，尾轴成员的窗口两叶同样参与动态性判定（窗口字节来自
+  // sizes[axis]*strides[axis]，动态 shape 下为符号叶）。
   int64_t slice_bytes_sum = 0L;
   bool has_dynamic_leaf = false;
   bool sum_known = true;
   for (const MemberScoreLeaves &member : members) {
-    for (const af::Expression &expr : {member.slice_bytes, member.lookup_extent}) {
+    std::vector<af::Expression> tie_leaves{member.slice_bytes, member.lookup_extent};
+    if (use_window_payload && member.has_tail_window) {
+      tie_leaves.emplace_back(member.window_bytes);
+      tie_leaves.emplace_back(member.window_lookup_count);
+    }
+    for (const af::Expression &expr : tie_leaves) {
       for (const auto &symbol : expr.FreeSymbols()) {
         int64_t symbol_value = 0L;
         if (!symbol.GetConstValue(symbol_value)) {
@@ -5118,12 +5221,12 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
         }
       }
     }
-    int64_t slice_bytes = 0L;
-    if (!member.slice_bytes.GetConstValue(slice_bytes)) {
+    int64_t tie_payload = 0L;
+    if (!TryGetMemberTiePayload(member, use_window_payload, ub_size, tie_payload)) {
       sum_known = false;
       continue;
     }
-    slice_bytes_sum += slice_bytes;
+    slice_bytes_sum += tie_payload;
   }
   const bool all_const = !has_dynamic_leaf;
 
@@ -5146,7 +5249,10 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
     }
     for (const MemberScoreLeaves &member : members) {
       std::string rejected_token;
-      if (!ExprMaterializable(member.slice_bytes, var_names, rejected_token)) {
+      if (!ExprMaterializable(member.slice_bytes, var_names, rejected_token) ||
+          (use_window_payload && member.has_tail_window &&
+           (!ExprMaterializable(member.window_bytes, var_names, rejected_token) ||
+            !ExprMaterializable(member.window_lookup_count, var_names, rejected_token)))) {
         GELOGI("[ScoreFunc] fallback member excluded (token[%s]); use constant tie rule.", rejected_token.c_str());
         materialized.clear();
         break;
@@ -5177,10 +5283,32 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
 
   std::ostringstream oss;
   oss << "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-      << "  const auto &t = tiling_data." << ascgen_utils::kGroupTilingDataPlaceholder << ";\n"
-      << "  const int64_t slice_sum = " << RuntimeExprToCpp(materialized[0].slice_bytes, subs);
-  for (size_t index = 1UL; index < materialized.size(); ++index) {
-    oss << " + " << RuntimeExprToCpp(materialized[index].slice_bytes, subs);
+      << "  const auto &t = tiling_data." << ascgen_utils::kGroupTilingDataPlaceholder << ";\n";
+  if (use_window_payload) {
+    // 尾轴窗口成员的有效 payload：与静态折叠（TryGetMemberTiePayload）同式的运行期
+    // 条件——窗口整驻 UB（含预留）且 lookup 密度折算覆盖窗口字节时取窗口字节，
+    // 否则回退 input_slice_bytes；非尾轴成员直接取 input_slice_bytes。
+    for (size_t index = 0UL; index < materialized.size(); ++index) {
+      const MemberScoreLeaves &member = materialized[index];
+      if (member.has_tail_window) {
+        const std::string window_text = RuntimeExprToCpp(member.window_bytes, subs);
+        oss << "  const int64_t tie_payload_" << index << " = (" << window_text << " + " << kIndirectLoadUbReservedBytes
+            << "LL <= " << ub_size << "LL && " << RuntimeExprToCpp(member.window_lookup_count, subs) << " * "
+            << kDenseWindowLineBytes << "LL >= " << window_text << ") ? " << window_text << " : "
+            << RuntimeExprToCpp(member.slice_bytes, subs) << ";\n";
+      } else {
+        oss << "  const int64_t tie_payload_" << index << " = " << RuntimeExprToCpp(member.slice_bytes, subs) << ";\n";
+      }
+    }
+    oss << "  const int64_t slice_sum = tie_payload_0";
+    for (size_t index = 1UL; index < materialized.size(); ++index) {
+      oss << " + tie_payload_" << index;
+    }
+  } else {
+    oss << "  const int64_t slice_sum = " << RuntimeExprToCpp(materialized[0].slice_bytes, subs);
+    for (size_t index = 1UL; index < materialized.size(); ++index) {
+      oss << " + " << RuntimeExprToCpp(materialized[index].slice_bytes, subs);
+    }
   }
   oss << ";\n"
       << "  const int64_t avg_payload = slice_sum / " << static_cast<int64_t>(materialized.size()) << "LL;\n"
@@ -5197,9 +5325,9 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
          "static_cast<long long>(avg_payload), base_score, tie_bonus);\n"
       << "  return base_score * 4 + tie_bonus;\n"
       << "}\n";
-  GELOGI("[ScoreFunc] fallback graph[%s] runtime=1 form=%d members=%zu base=%d simd_yields=%d",
+  GELOGI("[ScoreFunc] fallback graph[%s] runtime=1 form=%d members=%zu base=%d simd_yields=%d use_window=%d",
          candidate_graph.GetName().c_str(), static_cast<int32_t>(form), materialized.size(), base_score,
-         static_cast<int32_t>(simd_yields));
+         static_cast<int32_t>(simd_yields), static_cast<int32_t>(use_window_payload));
   return oss.str();
 }
 
@@ -5242,7 +5370,8 @@ std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const Template
   // 能力门控不满足：strided 让位 / 0 分的常量回退（组 SIMD 候选退化到逐元素 strided
   // facade 时偏好 SIMT——strided 的逐元素标量组装 offsets + 逐元素重排劣于 SIMT 标量
   // 直读；kSimtStridedFallbackScore 让位语义）。
-  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, stats.members, candidate_graph);
+  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, stats.members, candidate_graph,
+                                         stats.ub_size);
 }
 
 // [单 gather 统一打分] 与组路径同一算法（N=1：vote → SIMD 满足 = votes / SIMT 满足
@@ -5270,11 +5399,14 @@ std::string GenerateScoreFunc(const TemplateCase &template_case,
     softmax_bonus = norm_info.kind == ascgen_utils::norm::NormInfo::Kind::kSoftmaxDedicated;
   }
   if (capable) {
-    const std::vector<MemberScoreLeaves> members{{access_info.input_slice_bytes, access_info.index_varying_extent}};
+    const std::vector<MemberScoreLeaves> members{MakeMemberScoreLeaves(access_info)};
     return EmitUnifiedScoreFunc(form, members, candidate_graph, softmax_bonus, false, 0L, false, false);
   }
-  const std::vector<MemberScoreLeaves> members{{access_info.input_slice_bytes, access_info.index_varying_extent}};
-  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, members, candidate_graph);
+  int64_t ub_size = 0L;
+  (void)TryGetIndirectLoadPlatformUbSize(ub_size);
+  const std::vector<MemberScoreLeaves> members{MakeMemberScoreLeaves(access_info)};
+  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, members, candidate_graph,
+                                         ub_size);
 }
 
 // ==================== 调度期组候选 UB 可行性预估（硬下界，保守放行） ====================
@@ -5700,7 +5832,7 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     }
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
     GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
-    const af::AscNodePtr candidate_indirect_load = candidate_graph.FindNode(indirect_load_name.c_str());
+    af::AscNodePtr candidate_indirect_load = candidate_graph.FindNode(indirect_load_name.c_str());
     GE_ASSERT_NOTNULL(candidate_indirect_load, "Failed to find copied IndirectLoad node[%s].",
                       indirect_load_name.c_str());
     GE_ASSERT_SUCCESS(
@@ -5714,9 +5846,13 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     // 归一化，被分段 tiling 切 R 且无跨 tile 合并协议会产生精度错误，而原始链是
     // Norm Region DAG，可按 SK 分段形态正确归约（重定向见 ApplyGraphPass）；窗口
     // 可行时维持规范化，SIMD/SIMT 候选不受影响仍走 SoftmaxAR 内联路径。
+    // 动态尾轴的 SK 候选同样不规范化；符号 R 的 SoftmaxAR 全载形态无法静态
+    // 验证，重定向后的分段形态负责兜底。
     bool softmax_normalized = false;
     const bool keep_softmax_pattern_for_sk_redirect =
-        template_id == ascir::TemplateId::kIndirectLoadSK && IsSkWindowUbInfeasible(candidate_indirect_load);
+        template_id == ascir::TemplateId::kIndirectLoadSK &&
+        (IsSkWindowUbInfeasible(candidate_indirect_load) ||
+         IsSkRedirectRequiredForDynamicTail(candidate_graph, candidate_indirect_load));
     if (!keep_softmax_pattern_for_sk_redirect) {
       GE_ASSERT_SUCCESS(
           softmax_pattern::NormalizeDirectPostSoftmax(candidate_graph, candidate_indirect_load, softmax_normalized));
@@ -5728,8 +5864,36 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
              static_cast<int32_t>(template_id), candidate_indirect_load->GetNamePtr());
     }
     bool is_candidate_legal = false;
-    GE_ASSERT_SUCCESS(
-        ApplyGraphPass(candidate_graph, candidate_indirect_load, template_id, is_candidate_legal, !graphs.empty()));
+    bool sk_dynamic_redirect_rejected = false;
+    GE_ASSERT_SUCCESS(ApplyGraphPass(candidate_graph, candidate_indirect_load, template_id, is_candidate_legal,
+                                     !graphs.empty(), &sk_dynamic_redirect_rejected));
+    if (!is_candidate_legal && sk_dynamic_redirect_rejected) {
+      // [动态重定向回退] 分段候选被布局/metadata 校验拒绝时，基于原图重新生成常规
+      // SK 全载候选：保持改动前的编译下限（小 R launch 期 tiling 可行，大 R 运行期
+      // 行为与改动前一致），避免重定向使零候选升级为整图编译失败。回退图先规范化
+      // softmax（重定向路径为保留原始 Pattern 链跳过了规范化，常规 SK 依赖规范化产物）。
+      GELOGW("[IndirectLoad] Dynamic-tail segmented candidate rejected for node[%s], retry plain SK candidate.",
+             indirect_load_name.c_str());
+      ascir::ImplGraph fallback_graph(graph.GetName().c_str());
+      GE_ASSERT_TRUE(fallback_graph.CopyFrom(graph), "Failed to copy graph [%s] for SK fallback.",
+                     graph.GetName().c_str());
+      const af::AscNodePtr fallback_il = fallback_graph.FindNode(indirect_load_name.c_str());
+      GE_ASSERT_NOTNULL(fallback_il, "Failed to find copied IndirectLoad node[%s] in SK fallback graph.",
+                        indirect_load_name.c_str());
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetImplementation(
+          fallback_il, ascgen_utils::indirect_load::Implementation::kDefault));
+      bool fallback_softmax_normalized = false;
+      GE_ASSERT_SUCCESS(
+          softmax_pattern::NormalizeDirectPostSoftmax(fallback_graph, fallback_il, fallback_softmax_normalized));
+      bool fallback_legal = false;
+      GE_ASSERT_SUCCESS(ApplyGraphPass(fallback_graph, fallback_il, template_id, fallback_legal, !graphs.empty(),
+                                       nullptr, /*suppress_sk_redirect=*/true));
+      if (fallback_legal) {
+        candidate_graph = std::move(fallback_graph);
+        candidate_indirect_load = fallback_il;
+        is_candidate_legal = true;
+      }
+    }
     if (!is_candidate_legal) {
       GELOGW("[IndirectLoad] Skip illegal template candidate[%d] for node[%s].", static_cast<int32_t>(template_id),
              candidate_indirect_load->GetNamePtr());

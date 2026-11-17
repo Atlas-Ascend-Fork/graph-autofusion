@@ -1156,7 +1156,8 @@ build_backend() {
                       expm1_test_e2e_v2 \
                       rand_store_test_e2e_v2 \
                       randn_store_test_e2e_v2 \
-                      load_cast_brc_realign_test_e2e_v2"
+                      load_cast_brc_realign_test_e2e_v2 \
+                      indirect_load_rank2_axis1_dynamic_simt_e2e_v2"
   fi
   if [[ "X${v35_mode}" = "Xv35" && -n "${v35_shard}" ]]; then
     MAKE_TARGET_LIST=$(shard_target_list "${MAKE_TARGET_LIST}" "${v35_shard}")

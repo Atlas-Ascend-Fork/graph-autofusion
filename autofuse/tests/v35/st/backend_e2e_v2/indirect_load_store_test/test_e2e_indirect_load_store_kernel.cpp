@@ -457,6 +457,11 @@ TEST(E2EIndirectLoadStore, GeneratedKernelMatchesReference) {
   }
 #endif
 #endif
+#elif defined(IL_EXPECT_SIMT_FLAT_TILING)
+  // KeepOnlyTemplate(SIMT) 单候选时 tiling 结构为 SIMT 扁平布局，无竞标 case 字段；
+  // tiling_key 即该候选的 key（单候选时为 0）。仅 SIMT 单选的扁平结构用例声明此宏，
+  // 竞标结构（SIMD/SK 单选）与 IL_EXPECT_SIMT 组合仍走 graph0_tiling_key 断言。
+  ASSERT_EQ(tiling_data.tiling_key, IL_TILING_KEY);
 #elif !defined(IL_EXPECT_SIMT) || IL_EXPECT_SIMT
   ASSERT_EQ(tiling_data.graph0_tiling_key, IL_TILING_KEY);
 #endif

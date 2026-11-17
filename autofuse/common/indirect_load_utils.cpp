@@ -790,6 +790,18 @@ af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateL
   info.kind = embedding_like ? IndirectLoadAccessInfo::Kind::kEmbeddingLike : IndirectLoadAccessInfo::Kind::kGeneric;
   info.can_use_simt_structured = embedding_like;
   info.can_use_simd_embedding = IsSimdEmbeddingAccess(logical_view, info);
+  // 尾轴 gather 的整行窗口口径：SIMD dense facade 以外层坐标固定的整行窗口为 staging
+  // 单位，供结构回退平局按真实 staging 经济性评分。仅窗口 stride 静态可证为正时填充
+  // （动态 stride 保守不启用）；index 沿 axis 维零 stride 时单窗口仅 1 个有效 lookup，
+  // 计 0 保持既有 SIMT 倾向。
+  if (axis_index + 1UL == rank && input_axis_stride_is_positive) {
+    info.has_tail_window = true;
+    info.window_bytes = input.sizes[axis_index] * input.strides[axis_index] * dtype_bytes;
+    info.window_lookup_count =
+        af::SymbolicUtils::StaticCheckEq(index.strides[axis_index], af::sym::kSymbolZero) == af::TriBool::kTrue
+            ? af::sym::kSymbolZero
+            : index.sizes[axis_index];
+  }
   // [SK窗口可行性] 源头收敛：视图层证据（inner 轴零 stride）或生产链回溯的源头
   // 视图证据。源头收敛时 gather 引用成组（按行/列），SK 行窗口只需装载被引用
   // 分片；源头不收敛（逐元素独立引用）时 SK 窗口必须覆盖 axis 维全部，退化为

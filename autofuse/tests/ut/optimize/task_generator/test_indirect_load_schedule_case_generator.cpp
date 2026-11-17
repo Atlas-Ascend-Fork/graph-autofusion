@@ -6651,3 +6651,155 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SubstituteGroupTilingDataPlaceholder
   EXPECT_EQ(drifted.find("tiling_data.graph0_result0_g0_tiling_data"), std::string::npos)
       << "must bind the given prefix, not a positional default.";
 }
+
+// ===== 尾轴稠密 gather 的结构回退平局窗口口径 =====
+// 图形态：input [rows, window] fp32、index/output [rows, lookups]，gather axis=1（尾轴，
+// 无 payload 后缀）。静态版用带值 sizevar（生成期折叠），动态版用无值 sizevar（运行期
+// 形态）。窗口口径：窗口整驻 UB 且 lookup 密度折算覆盖窗口字节时，平局 payload 取整行
+// 窗口字节（SIMD dense facade 的 staging 单位），否则维持 input_slice_bytes（dtype 字节）。
+af::AscGraph BuildTailDenseGatherGraph(const bool dynamic_shape, const int64_t rows_value, const int64_t window_value,
+                                       const int64_t lookups_value) {
+  af::AscGraph graph("indirect_load_tail_window_ut_graph");
+  const af::Expression rows = dynamic_shape ? graph.CreateSizeVar("tw_rows") : graph.CreateSizeVar(rows_value);
+  const af::Expression window = dynamic_shape ? graph.CreateSizeVar("tw_window") : graph.CreateSizeVar(window_value);
+  const af::Expression lookups = dynamic_shape ? graph.CreateSizeVar("tw_lookups") : graph.CreateSizeVar(lookups_value);
+  const auto in0 = graph.CreateAxis("tw_in0", rows);
+  const auto in1 = graph.CreateAxis("tw_in1", window);
+  const auto out0 = graph.CreateAxis("tw_out0", rows);
+  const auto out1 = graph.CreateAxis("tw_out1", lookups);
+  const std::vector<af::AxisId> input_axes = {in0.id, in1.id};
+  const std::vector<af::AxisId> output_axes = {out0.id, out1.id};
+  const std::vector<af::Expression> input_repeats = {rows, window};
+  const std::vector<af::Expression> input_strides = {window, af::sym::kSymbolOne};
+  const std::vector<af::Expression> output_repeats = {rows, lookups};
+  const std::vector<af::Expression> output_strides = {lookups, af::sym::kSymbolOne};
+
+  af::ascir_op::Data input("x", graph);
+  input.ir_attr.SetIndex(0);
+  SetNodeView(input, af::DT_FLOAT, input_axes, input_repeats, input_strides);
+  af::ascir_op::Load input_load("input_load");
+  input_load.x = input.y;
+  SetNodeView(input_load, af::DT_FLOAT, input_axes, input_repeats, input_strides);
+  af::ascir_op::Data index("index", graph);
+  index.ir_attr.SetIndex(1);
+  SetNodeView(index, af::DT_INT64, output_axes, output_repeats, output_strides);
+  af::ascir_op::Load index_load("index_load");
+  index_load.x = index.y;
+  SetNodeView(index_load, af::DT_INT64, output_axes, output_repeats, output_strides);
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = input_load.y;
+  indirect_load.x2 = index_load.y;
+  indirect_load.ir_attr.SetAxis(1);
+  SetNodeView(indirect_load, af::DT_FLOAT, output_axes, output_repeats, output_strides);
+  af::ascir_op::Store store("store");
+  store.x = indirect_load.y;
+  SetNodeView(store, af::DT_FLOAT, output_axes, output_repeats, output_strides);
+  af::ascir_op::Output y("y");
+  y.x = store.y;
+  y.ir_attr.SetIndex(0);
+  SetNodeView(y, af::DT_FLOAT, output_axes, output_repeats, output_strides);
+  return graph;
+}
+
+void SetTailWindowPlatform(const int64_t ub_size) {
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = ub_size;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+}
+
+// 大窗口高密度尾轴 gather（[1024,16384]→[1024,4096]，窗口 64KB 整驻 UB、密度
+// 4096*64B≥64KB）：平局 payload 取窗口字节，SIMD 压过 SIMT（历史口径下 SIMT 恒胜）。
+TEST(IndirectLoadScheduleCaseGeneratorTest, TailDenseWindowFitsUbPrefersSimd) {
+  PlatformContextReset platform_reset;
+  SetTailWindowPlatform(253952);
+  auto graph = BuildTailDenseGatherGraph(false, 1024, 16384, 4096);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_EQ(score_functions.size(), 4UL);
+  EXPECT_EQ(score_functions[0], score_functions[1]);
+  const int32_t simd_score = ParseScore(score_functions[0]);
+  const int32_t simt_score = ParseScore(score_functions[2]);
+  ASSERT_NE(simd_score, kRuntimeScoreSentinel);
+  ASSERT_NE(simt_score, kRuntimeScoreSentinel);
+  EXPECT_GT(simd_score, simt_score);
+}
+
+// 大窗口低密度尾轴 gather（每行仅 8 次 lookup，密度折算 512B < 64KB 窗口）：staging
+// 读取放大无界，维持 input_slice_bytes 口径，SIMT 保持胜出。
+TEST(IndirectLoadScheduleCaseGeneratorTest, TailSparseGatherKeepsSimtPreference) {
+  PlatformContextReset platform_reset;
+  SetTailWindowPlatform(253952);
+  auto graph = BuildTailDenseGatherGraph(false, 1024, 16384, 8);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_EQ(score_functions.size(), 4UL);
+  const int32_t simd_score = ParseScore(score_functions[0]);
+  const int32_t simt_score = ParseScore(score_functions[2]);
+  ASSERT_NE(simd_score, kRuntimeScoreSentinel);
+  ASSERT_NE(simt_score, kRuntimeScoreSentinel);
+  EXPECT_GT(simt_score, simd_score);
+}
+
+// 窗口超出 UB（1MB > 253952B）：无法单趟整驻，维持 input_slice_bytes 口径，SIMT 胜出。
+TEST(IndirectLoadScheduleCaseGeneratorTest, TailDenseWindowBeyondUbKeepsSimtPreference) {
+  PlatformContextReset platform_reset;
+  SetTailWindowPlatform(253952);
+  auto graph = BuildTailDenseGatherGraph(false, 8, 262144, 65536);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_EQ(score_functions.size(), 4UL);
+  const int32_t simd_score = ParseScore(score_functions[0]);
+  const int32_t simt_score = ParseScore(score_functions[2]);
+  ASSERT_NE(simd_score, kRuntimeScoreSentinel);
+  ASSERT_NE(simt_score, kRuntimeScoreSentinel);
+  EXPECT_GT(simt_score, simd_score);
+}
+
+// 平台 UB 不可得：窗口口径整体停用，尾轴平局维持历史口径（SIMT 胜出）。
+TEST(IndirectLoadScheduleCaseGeneratorTest, TailDenseWindowWithoutPlatformKeepsSimtPreference) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  auto graph = BuildTailDenseGatherGraph(false, 1024, 16384, 4096);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_EQ(score_functions.size(), 4UL);
+  const int32_t simd_score = ParseScore(score_functions[0]);
+  const int32_t simt_score = ParseScore(score_functions[2]);
+  ASSERT_NE(simd_score, kRuntimeScoreSentinel);
+  ASSERT_NE(simt_score, kRuntimeScoreSentinel);
+  EXPECT_GT(simt_score, simd_score);
+}
+
+// 动态 shape 尾轴 gather：窗口两叶为符号，发射运行期条件式有效 payload（与静态折叠
+// 同式），文本含 avg_payload 与窗口驻留/密度判定常量。
+TEST(IndirectLoadScheduleCaseGeneratorTest, TailDenseDynamicWindowEmitsRuntimeTiePayload) {
+  PlatformContextReset platform_reset;
+  SetTailWindowPlatform(253952);
+  auto graph = BuildTailDenseGatherGraph(true, 0, 0, 0);
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  ASSERT_EQ(score_functions.size(), 4UL);
+  const int32_t simd_score = ParseScore(score_functions[0]);
+  const int32_t simt_score = ParseScore(score_functions[2]);
+  EXPECT_EQ(simd_score, kRuntimeScoreSentinel);
+  EXPECT_EQ(simt_score, kRuntimeScoreSentinel);
+  EXPECT_NE(score_functions[0].find("avg_payload"), std::string::npos);
+  EXPECT_NE(score_functions[2].find("avg_payload"), std::string::npos);
+  EXPECT_NE(score_functions[0].find("tie_payload_0"), std::string::npos);
+  EXPECT_NE(score_functions[2].find("tie_payload_0"), std::string::npos);
+  EXPECT_NE(score_functions[0].find(" * 64LL >= "), std::string::npos);
+  EXPECT_NE(score_functions[0].find(" + 32768LL <= 253952LL"), std::string::npos);
+}

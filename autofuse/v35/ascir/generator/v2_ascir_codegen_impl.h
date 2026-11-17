@@ -3899,6 +3899,31 @@ bool IsWindowIterAxis(const AscNode &node, af::AxisId axis_id, const std::vector
   return false;
 }
 
+// [SIMD offsets 单次调用驻留] SIMD 模板的 offsets buffer 在 API 内按 base 递增复用
+// （dense/register-gather 与 gather-api 的 offsets 走寄存器寻址，降级 strided 时逐元素
+// 组装 offsets），单次调用驻留 = 排除串行循环轴（多核 block 切分轴与每核 tile_outer
+// 轮次轴）后的输出元素积，用调度后的轴 size（含 tiling 变量）计算。输出视图的逻辑
+// repeats 恒为全输出元素数，对大输出（4B × 元素数 >> 平台 UB）会把 SIMD 候选在
+// StaticUbTemplateFilter 与 tiling 求解器两侧同时误杀（单算子同机制 MTE 路径可跑即
+// 证明实际驻留远小于该上界）。轴信息不可解析时返回 false，调用方回退逻辑 repeats。
+bool TryCalcIndirectLoadSimdOffsetsSize(const AscNode &node, const std::vector<af::AxisId> &axis_ids,
+                                        Expression &offset_size) {
+  Expression size = Symbol(sizeof(uint32_t));
+  for (const af::AxisId axis_id : axis_ids) {
+    const auto *axis = FindNodeOwnerAxis(node, axis_id);
+    if (axis == nullptr) {
+      return false;
+    }
+    if (axis->type == af::Axis::Type::kAxisTypeBlockOuter || axis->type == af::Axis::Type::kAxisTypeBlockInner ||
+        axis->type == af::Axis::Type::kAxisTypeTileOuter) {
+      continue;  // 串行循环计数轴（多核分块/每核 tile 轮次），不进入单次调用驻留
+    }
+    size = size * axis->size;
+  }
+  offset_size = size;
+  return true;
+}
+
 bool CalcIndirectLoadSkTmpSize(const AscNode &node, const Expression &offset_size, Expression &tmp_size) {
   constexpr uint32_t kUbBlockAlignBytes = 32U;
   auto inputs = node.inputs;
@@ -3990,11 +4015,17 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
     const bool has_window_iter_axes = template_id == ::ascir::TemplateId::kIndirectLoadSK &&
                                       !logical_view.window_iter_axes.empty() && y.axis.size() == y.repeats.size();
     Expression offset_size = Symbol(sizeof(uint32_t));
-    for (size_t dim = 0UL; dim < y.repeats.size(); ++dim) {
-      if (has_window_iter_axes && IsWindowIterAxis(node, y.axis[dim], logical_view.window_iter_axes)) {
-        continue;
+    if (template_id == ::ascir::TemplateId::kIndirectLoadSimd && y.axis.size() == y.repeats.size() &&
+        TryCalcIndirectLoadSimdOffsetsSize(node, y.axis, offset_size)) {
+      // SIMD offsets 按单次调用驻留计算（见 TryCalcIndirectLoadSimdOffsetsSize 注释）；
+      // dense 与降级 strided 的单次调用元素集相同，公式对两形态一致成立。
+    } else {
+      for (size_t dim = 0UL; dim < y.repeats.size(); ++dim) {
+        if (has_window_iter_axes && IsWindowIterAxis(node, y.axis[dim], logical_view.window_iter_axes)) {
+          continue;
+        }
+        offset_size = offset_size * y.repeats[dim];
       }
-      offset_size = offset_size * y.repeats[dim];
     }
     Expression tmp_size = offset_size;
     if (template_id == ::ascir::TemplateId::kIndirectLoadSK &&
