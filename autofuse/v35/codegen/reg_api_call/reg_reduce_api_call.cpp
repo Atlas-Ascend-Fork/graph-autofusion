@@ -195,7 +195,7 @@ Status RegReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<asc
   auto y = outputs[0].get();
 
   std::string reduce_pattern;
-  GetIsArAndPattern(y, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y, x.isAr, reduce_pattern);
   CheckReduceSpecificParamsForCodegen(
       {this->node, this->api_name_, &tpipe, &x, &y, current_axis.back(), true, is_reuse_source_ == "true"});
 

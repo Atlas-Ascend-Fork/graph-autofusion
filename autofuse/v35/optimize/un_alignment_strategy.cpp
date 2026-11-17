@@ -13,6 +13,7 @@
 #include <stack>
 #include "ascir_utils.h"
 #include "common_utils.h"
+#include "graph_utils.h"
 #include "indirect_load_utils.h"
 #include "tensor_layout_utils.h"
 #include "platform/v1/alignment_strategy.h"
@@ -180,6 +181,163 @@ bool IsTailBroadcastNode(af::AscNode &node) {
   auto is_tail_brc = ascgen_utils::ExpressEq(in_last_dim_size, af::Symbol(1)) &&
                      !ascgen_utils::ExpressEq(in_last_dim_size, out_last_dim_size);
   return is_tail_brc;
+}
+
+// 识别尾轴广播源的"逐元素 32B 槽位"布局，返回其最内层有效数据轴下标。
+// 用意：这种布局由对齐策略对退化尾轴 pad 产生（最内层有效轴 stride 恒为
+// Align(1, 32/dtype_size)），是唯一一类"BroadcastExtend 会错读、且 RemovePad 恰好能修"的
+// 非连续签名——BroadcastExtend 只按 src_shape 稠密反推源 stride，会把槽位间隙当地址；
+// 而 RemovePadApiCall 不读 descriptor 的 stride，按 SizeAlign(尾轴 extent, 32/dtype_size)
+// 重算行距，与本布局的产生公式一致，归一化才正确。其它任意跨步（如转置写 20B）连
+// RemovePad 自己都修不了，因此只认精确等值，不做宽泛的 stride != 1 判定。
+// 其内侧的轴必须全部是静态 repeat==1 的退化广播尾（发射侧按 1 处理，不占行数）；
+// repeat>1 的零 stride 中间轴会打破下方行数上界检查与发射口径的一致性，视为不命中。
+// 返回值 >= 0 为命中的数据轴下标；-1 为不命中。out_vec_repeats 带回各向量化轴的 repeat，
+// out_vec_axis 带回各向量化轴 id（供行数上界证明沿切分链回溯原轴）。
+int64_t Get32BSlotInnerAxis(const af::AscNodePtr &node, std::vector<af::Expression> &out_vec_repeats,
+                            std::vector<int64_t> &out_vec_axis) {
+  const auto inputs = node->inputs();
+  if (inputs.empty()) {
+    GELOGW("[%s] has no data input, skip 32B slot detection.", node->GetNamePtr());
+    return -1;
+  }
+  const auto &in_attr = inputs[0]->attr;
+  const auto &vec_strides = in_attr.vectorized_strides;
+  if (vec_strides.empty() || in_attr.vectorized_axis.size() != vec_strides.size()) {
+    return -1;
+  }
+  const int64_t dtype_size = af::GetSizeByDataType(in_attr.dtype);
+  const auto align_width = static_cast<int64_t>(BaseAlignmentStrategy::GetAlignWidth());
+  if (dtype_size == 0 || dtype_size < 0 || dtype_size > align_width) {
+    return -1;
+  }
+  const auto align_factor = static_cast<uint32_t>(align_width / dtype_size);
+
+  if (ScheduleUtils::GetVectorRepeats(in_attr.repeats, in_attr.axis, in_attr.vectorized_axis, out_vec_repeats) !=
+          af::SUCCESS ||
+      out_vec_repeats.size() != vec_strides.size()) {
+    return -1;
+  }
+  out_vec_axis = in_attr.vectorized_axis;
+
+  // 从尾向前跳过退化广播尾，定位最内层有效数据轴
+  int64_t inner_index = -1;
+  for (int64_t i = static_cast<int64_t>(vec_strides.size()) - 1; i >= 0; --i) {
+    if (af::SymbolicUtils::StaticCheckEq(vec_strides[static_cast<size_t>(i)], af::sym::kSymbolZero) ==
+        af::TriBool::kTrue) {
+      if (af::SymbolicUtils::StaticCheckEq(out_vec_repeats[static_cast<size_t>(i)], af::sym::kSymbolOne) !=
+          af::TriBool::kTrue) {
+        return -1;
+      }
+      continue;
+    }
+    inner_index = i;
+    break;
+  }
+  if (inner_index < 0) {
+    return -1;
+  }
+  if (af::SymbolicUtils::StaticCheckEq(vec_strides[static_cast<size_t>(inner_index)], af::Symbol(align_factor)) !=
+      af::TriBool::kTrue) {
+    return -1;
+  }
+  return inner_index;
+}
+
+// 用意：符号 tile 轴（如 nddma 模板留在向量化尾段里的 z0t）的运行时值有静态上界——
+// tiling 切分不变式保证同一原轴的各段 repeat >= 1 且乘积等于原轴 size，因此 tile 轴
+// 运行时值 <= 原轴静态 size。沿 Axis::from 切分链回溯到 Original 轴取其 size 常量即得上界。
+// 回溯不到静态常量（动态 shape 原轴、Merged 多来源轴等）时返回 false 保守放弃。
+bool GetTileAxisStaticUpperBound(af::AscGraph &graph, const int64_t axis_id, uint64_t &upper_bound) {
+  constexpr int32_t kMaxSplitChainDepth = 16;  // 防御性上限：正常切分链远短于此
+  const af::Axis *axis = graph.FindAxis(axis_id);
+  for (int32_t depth = 0; axis != nullptr && depth < kMaxSplitChainDepth; ++depth) {
+    if (axis->from.empty()) {
+      break;
+    }
+    if (axis->from.size() != 1UL) {
+      return false;  // Merged 等多来源轴：单链回溯证不出上界
+    }
+    axis = graph.FindAxis(axis->from.front());
+  }
+  if (axis == nullptr) {
+    return false;
+  }
+  int64_t bound = 0;
+  if (!axis->size.GetConstValue(bound) || bound <= 0) {
+    return false;
+  }
+  upper_bound = static_cast<uint64_t>(bound);
+  return true;
+}
+
+// 用意：GatherMask 的 repeatTimes 为 uint16，非最内合并行数必须有静态可证的上界。
+// 静态常量段直接取常量；符号 tile 段取其原轴静态 size 作上界（nddma 模板的行数段
+// 形如 z0t*3，靠原轴上界才证得 100*3 << 65535）。任一段证不出上界或乘积越界时返回
+// false 保守跳过，避免插桩后 GatherMask 静默截断。
+bool IsGatherMaskRowBoundProvable(af::AscGraph &graph, const std::vector<af::Expression> &vec_repeats,
+                                  const std::vector<int64_t> &vec_axis, const int64_t inner_axis) {
+  constexpr uint64_t kMaxRemovePadRepeatTimes = 65535UL;
+  uint64_t merged_rows = 1UL;
+  for (int64_t i = 0; i <= inner_axis; ++i) {
+    uint64_t upper_bound = 0UL;
+    int64_t repeat = 0;
+    if (vec_repeats[static_cast<size_t>(i)].GetConstValue(repeat) && repeat > 0) {
+      upper_bound = static_cast<uint64_t>(repeat);
+    } else if (!GetTileAxisStaticUpperBound(graph, vec_axis[static_cast<size_t>(i)], upper_bound)) {
+      return false;
+    }
+    merged_rows *= upper_bound;
+    if (merged_rows > kMaxRemovePadRepeatTimes) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 用意：尾轴广播（src 尾轴 size==1）的源为逐元素 32B 槽位布局且 GatherMask 行数上界可证时，
+// 需要插入 RemovePad 把源归一化成紧凑布局——否则 BroadcastExtend 按 src_shape 稠密反推
+// 读源，会把槽位间隙当地址、错读源数据。判据只读广播输入 tensor 的布局，与生产者类型无关。
+bool TailBrcSrcNeedsRemovePad(af::AscGraph &graph, const af::AscNodePtr &node) {
+  std::vector<af::Expression> in_vec_repeats;
+  std::vector<int64_t> in_vec_axis;
+  const int64_t inner_axis = Get32BSlotInnerAxis(node, in_vec_repeats, in_vec_axis);
+  if (inner_axis < 0) {
+    return false;
+  }
+  return IsGatherMaskRowBoundProvable(graph, in_vec_repeats, in_vec_axis, inner_axis);
+}
+
+// 在广播输入边上插入 RemovePad（只重接该消费边，生产者的其它消费边不动），
+// 输出紧凑布局由 SetVectorizedStridesForTensor(kNotAligned) 生成。
+af::Status InsertRemovePadBeforeBroadcast(af::AscGraph &graph, const af::AscNodePtr &broadcast_node) {
+  const auto producer = std::dynamic_pointer_cast<af::AscNode>(broadcast_node->GetInDataNodes().at(0UL));
+  if (producer == nullptr || ScheduleUtils::IsBuffer(producer) || af::ops::IsOps<af::ascir_op::RemovePad>(producer)) {
+    return af::SUCCESS;
+  }
+  const auto in_anchor = broadcast_node->GetInDataAnchor(0UL);
+  const auto out_anchor = in_anchor->GetPeerOutAnchor();
+  GE_ASSERT_NOTNULL(out_anchor);
+  const int32_t out_idx = out_anchor->GetIdx();
+  GE_ASSERT_TRUE(out_idx >= 0);
+
+  // 按消费边插入：名字需含 out_idx 和消费者名，避免同一生产者扇出多个尾轴广播时重名。
+  const std::string node_name =
+      producer->GetName() + "_remove_pad_" + std::to_string(out_idx) + "_brc_" + broadcast_node->GetName();
+  af::ascir_op::RemovePad remove_pad_op(node_name.c_str());
+  const auto remove_pad_node = graph.AddNode(remove_pad_op);
+  GE_ASSERT_NOTNULL(remove_pad_node);
+  remove_pad_node->attr = producer->attr;
+  remove_pad_node->outputs[0].attr = producer->outputs[static_cast<uint32_t>(out_idx)].attr;
+  GE_ASSERT_SUCCESS(BaseAlignmentStrategy::SetVectorizedStridesForTensor(
+      remove_pad_node, remove_pad_node->outputs[0].attr, AlignmentType::kNotAligned));
+  remove_pad_node->attr.api.compute_type = af::ComputeType::kComputeElewise;
+  remove_pad_node->attr.api.type = af::ApiType::kAPITypeCompute;
+  remove_pad_node->attr.api.unit = af::ComputeUnit::kUnitVector;
+
+  GE_ASSERT_SUCCESS(af::GraphUtils::ReplaceEdgeSrc(out_anchor, in_anchor, remove_pad_node->GetOutDataAnchor(0)));
+  GE_ASSERT_SUCCESS(af::GraphUtils::AddEdge(out_anchor, remove_pad_node->GetInDataAnchor(0)));
+  return af::SUCCESS;
 }
 
 af::Status UnAlignmentStrategy::SetAlignInfoForTailBrcNodes(AlignmentType aligned_type, af::AscNode *node,
@@ -650,20 +808,46 @@ Status UnAlignmentStrategy::ModifyIndirectLoadVectorizedStrides(ascir::ImplGraph
   return af::SUCCESS;
 }
 
+af::Status UnAlignmentStrategy::AddRemovePadForTailBroadcastSrc(af::AscGraph &impl_graph) {
+  std::vector<af::AscNodePtr> broadcast_nodes;
+  for (const auto &ge_node : impl_graph.GetAllNodes()) {
+    const auto node = std::dynamic_pointer_cast<af::AscNode>(ge_node);
+    if (node == nullptr || node->attr.api.compute_type != af::ComputeType::kComputeBroadcast) {
+      continue;
+    }
+    if (!IsTailBroadcastNode(*node)) {
+      continue;
+    }
+    const auto &in_nodes = node->GetInDataNodes();
+    if (ScheduleUtils::IsScalarLikeNode(in_nodes.at(0UL))) {
+      continue;
+    }
+    if (!TailBrcSrcNeedsRemovePad(impl_graph, node)) {
+      continue;
+    }
+    broadcast_nodes.push_back(node);
+  }
+  for (const auto &node : broadcast_nodes) {
+    GE_ASSERT_SUCCESS(InsertRemovePadBeforeBroadcast(impl_graph, node));
+  }
+  return af::SUCCESS;
+}
+
 Status UnAlignmentStrategy::ModifyVectorizedStrides(af::AscGraph &impl_graph) {
   if (ascgen_utils::indirect_load::FindIndirectLoadNode(impl_graph) != nullptr) {
-    return ModifyIndirectLoadVectorizedStrides(impl_graph);
-  }
-  bool has_transpose = false;
-  for (auto node : impl_graph.GetAllNodes()) {
-    if (af::ops::IsOps<af::ascir_op::Transpose>(node)) {
-      has_transpose = true;
-      break;
+    GE_ASSERT_SUCCESS(ModifyIndirectLoadVectorizedStrides(impl_graph));
+  } else {
+    bool has_transpose = false;
+    for (auto node : impl_graph.GetAllNodes()) {
+      if (af::ops::IsOps<af::ascir_op::Transpose>(node)) {
+        has_transpose = true;
+        break;
+      }
+    }
+    if (has_transpose) {
+      GE_ASSERT_SUCCESS(ModifyTransposeFusionVectorizedStrides(impl_graph, BaseAlignmentStrategy::GetAlignWidth()));
     }
   }
-  if (!has_transpose) {
-    return af::SUCCESS;
-  }
-  return ModifyTransposeFusionVectorizedStrides(impl_graph, BaseAlignmentStrategy::GetAlignWidth());
+  return AddRemovePadForTailBroadcastSrc(impl_graph);
 }
 }  // namespace optimize

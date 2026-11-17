@@ -22,6 +22,7 @@
 #include "schedule_utils.h"
 #include "platform_context.h"
 #include "platformv2.h"
+#include "un_alignment_strategy.h"
 
 using namespace std;
 using namespace ascir;
@@ -52,6 +53,60 @@ void ExpectCompactReduceBranchV2(const af::AscGraph &graph, const char *aligned_
   EXPECT_EQ(graph.FindNode("sum")->outputs[0].attr.vectorized_strides, compact_output_strides);
   EXPECT_EQ(graph.FindNode("scalar_broadcast")->outputs[0].attr.vectorized_strides, compact_output_strides);
   EXPECT_EQ(graph.FindNode("div")->outputs[0].attr.vectorized_strides, compact_output_strides);
+}
+
+void AddTailBrcRemovePadBroadcasts(af::ascir_op::Load &load, const std::vector<af::AxisId> &axes) {
+  af::ascir_op::Broadcast brc1("brc1");
+  brc1.x = load.y;
+  brc1.attr.sched.axis = axes;
+  brc1.attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  brc1.y.dtype = af::DT_FLOAT;
+  *brc1.y.axis = axes;
+  *brc1.y.repeats = {af::Symbol(2), af::Symbol(3), af::Symbol(5)};
+  *brc1.y.strides = {af::Symbol(15), af::Symbol(5), One};
+  *brc1.y.vectorized_axis = axes;
+
+  af::ascir_op::Broadcast brc2("brc2");
+  brc2.x = load.y;
+  brc2.attr.sched.axis = axes;
+  brc2.attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  brc2.y.dtype = af::DT_FLOAT;
+  *brc2.y.axis = axes;
+  *brc2.y.repeats = {af::Symbol(2), af::Symbol(3), af::Symbol(4)};
+  *brc2.y.strides = {af::Symbol(12), af::Symbol(4), One};
+  *brc2.y.vectorized_axis = axes;
+}
+
+af::AscGraph BuildTailBrcRemovePadGraph() {
+  af::AscGraph graph("tail_brc_remove_pad_unique_name");
+  auto z0 = graph.CreateAxis("z0", af::Symbol(2));
+  auto z1 = graph.CreateAxis("z1", af::Symbol(3));
+  auto z2 = graph.CreateAxis("z2", af::Symbol(5));
+  const std::vector<af::AxisId> axes = {z0.id, z1.id, z2.id};
+  const std::vector<af::Expression> src_repeats = {af::Symbol(2), af::Symbol(3), One};
+  const std::vector<af::Expression> src_strides = {af::Symbol(3), One, Zero};
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = af::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  *data.y.axis = axes;
+  *data.y.repeats = src_repeats;
+  *data.y.strides = src_strides;
+
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  load.attr.sched.axis = axes;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.y.dtype = af::DT_FLOAT;
+  *load.y.axis = axes;
+  *load.y.repeats = src_repeats;
+  *load.y.strides = src_strides;
+  *load.y.vectorized_axis = axes;
+  // float 退化尾轴 pad 后的 32B 槽位布局：Align(1, 32/4) == 8
+  *load.y.vectorized_strides = {af::Symbol(24), af::Symbol(8), Zero};
+
+  AddTailBrcRemovePadBroadcasts(load, axes);
+  return graph;
 }
 
 class VectorizedAlignmentUTV2 : public testing::Test {
@@ -729,5 +784,21 @@ TEST_F(VectorizedAlignmentUTV2, tail_broadcast_does_not_propagate_alignment_thro
   ASSERT_EQ(AlignmentHandler::AlignVectorizedStrides(graph), af::SUCCESS);
   ExpectCompactReduceBranchV2(graph, "broadcast");
   EXPECT_EQ(graph.FindNode("sum_0_pad"), nullptr);
+}
+
+TEST_F(VectorizedAlignmentUTV2, tail_brc_remove_pad_unique_name_for_fanout) {
+  af::AscGraph graph = BuildTailBrcRemovePadGraph();
+  optimize::UnAlignmentStrategy strategy;
+  ASSERT_EQ(strategy.ModifyVectorizedStrides(graph), af::SUCCESS);
+
+  auto rp1 = graph.FindNode("load_remove_pad_0_brc_brc1");
+  auto rp2 = graph.FindNode("load_remove_pad_0_brc_brc2");
+  ASSERT_NE(rp1, nullptr);
+  ASSERT_NE(rp2, nullptr);
+  EXPECT_NE(rp1.get(), rp2.get());
+  EXPECT_EQ(rp1->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "load");
+  EXPECT_EQ(rp2->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "load");
+  EXPECT_EQ(rp1->GetOutDataAnchor(0)->GetPeerInDataAnchors().at(0)->GetOwnerNode()->GetName(), "brc1");
+  EXPECT_EQ(rp2->GetOutDataAnchor(0)->GetPeerInDataAnchors().at(0)->GetOwnerNode()->GetName(), "brc2");
 }
 }  // namespace optimize

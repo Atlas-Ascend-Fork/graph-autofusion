@@ -338,19 +338,41 @@ static void ReplaceSSWithSwappingFirstAndLast(const std::string &first, const st
   return;
 }
 
-size_t GetAxesNumExceptZeroTail(const Tensor &src, const Tensor &dst) {
-  size_t num_axes = src.vectorized_axis.size();
-  for (; num_axes > 0; num_axes--) {
-    if (src.vectorized_strides[num_axes - 1] != 0 || dst.vectorized_strides[num_axes - 1] != 0) {
-      break;
-    }
+/*
+  生成最内层向量化轴（尾轴）的 merged size 表达式：
+  src/dst 尾轴 stride 均为 0 表示尾轴长度为 1，按 SizeAlign(1, 32/sizeof(dtype)) 对齐；
+  尾轴为首个有效轴时按 SizeAlign(axis_size, 32/sizeof(dtype)) 生成（全轴 reduce 时写 first，末态统一替换为 last）；
+  其余情况按紧邻的非零 stride 生成。
+*/
+static void GenLastAxisMergedSize(const TPipe &tpipe, const Tensor &src, const Tensor &dst, const size_t axis_index,
+                                  const std::string &dtype_name, const bool is_first, const bool is_all_axis_reduce,
+                                  const ascir::SizeExpr &last_non_zero_stride, std::stringstream &first,
+                                  std::stringstream &first_actual, std::stringstream &last,
+                                  std::stringstream &last_actual) {
+  const auto axis = tpipe.tiler.GetAxis(src.vectorized_axis[axis_index]);
+  const auto axis_size = tpipe.tiler.AxisSize(src.vectorized_axis[axis_index]);
+  if (src.vectorized_strides[axis_index] == 0 && dst.vectorized_strides[axis_index] == 0) {
+    last << " * " << KernelUtils::SizeAlign() << "(1, 32/sizeof(" << dtype_name << "))";
+    last_actual << " * " << KernelUtils::SizeAlign() << "(1, 32/sizeof(" << dtype_name << "))";
+    return;
   }
-  return num_axes;
+  if (is_first) {
+    std::stringstream &size_target = is_all_axis_reduce ? first : last;
+    std::stringstream &actual_size_target = is_all_axis_reduce ? first_actual : last_actual;
+    size_target << " * " << KernelUtils::SizeAlign() << "(" << axis_size << ", 32/sizeof(" << dtype_name << "))";
+    actual_size_target << " * " << KernelUtils::SizeAlign() << "(" << axis.actual_size << ", 32/sizeof(" << dtype_name
+                       << "))";
+    return;
+  }
+  last << " * " << tpipe.tiler.Size(last_non_zero_stride);
+  last_actual << " * " << tpipe.tiler.Size(last_non_zero_stride);
 }
+
 /*
   返回AR或者RA的fist_size和last_size；
   为了避免由于存在src[i].axis_size=1(此时strides=0)导致误判为R轴，所以在遍历过程中过滤掉了src[i].axis_size为1的情况；
   用last_not_1_axis_size_index来记录上一次的axis_size != 1的位置。
+  当src与dst的尾轴stride均为0时表示尾轴为1，此时last按SizeAlign(1, 32/sizeof(dtype))生成（对齐粒度随dtype）。
 */
 void ReduceMergedSizeCodeGen(const TPipe &tpipe, std::vector<std::string> &lines, const Tensor &src, const Tensor &dst,
                              bool is_tail) {
@@ -365,30 +387,20 @@ void ReduceMergedSizeCodeGen(const TPipe &tpipe, std::vector<std::string> &lines
   std::string dtype_name;
   Tensor::DtypeName(src.dtype, dtype_name);
   bool is_first = true;
-  const size_t num_axes =
-      GetAxesNumExceptZeroTail(src, dst);  // 从后往前过滤无效轴，防止{R, 1} + {A, B}水平融合时没有尾轴对齐
+  const size_t num_axes = src.vectorized_axis.size();
   ascir::SizeExpr lastNonZeroStride = Zero;
   size_t last_not_1_axis_size_index = 0xFFFFFFFF;
   bool isAllAxisReduce = true;
   for (size_t i = 0; i < num_axes; ++i) {
-    isAllAxisReduce = isAllAxisReduce && (dst.vectorized_strides[i] == 0);
-    const auto axis = tpipe.tiler.GetAxis(src.vectorized_axis[i]);
-    const auto axis_size = tpipe.tiler.AxisSize(src.vectorized_axis[i]);
+    isAllAxisReduce =
+        isAllAxisReduce && (src.vectorized_strides[i] != 0 || i != num_axes - 1) && (dst.vectorized_strides[i] == 0);
     if (i == num_axes - 1U) {
-      if (is_first && !isAllAxisReduce) {
-        last << " * " << KernelUtils::SizeAlign() << "(" << axis_size << ", 32/sizeof(" << dtype_name << "))";
-        last_actual << " * " << KernelUtils::SizeAlign() << "(" << axis.actual_size << ", 32/sizeof(" << dtype_name
-                    << "))";
-      } else if (is_first && isAllAxisReduce) {  // 这种情况最后会统一替换为last
-        first << " * " << KernelUtils::SizeAlign() << "(" << axis_size << ", 32/sizeof(" << dtype_name << "))";
-        first_actual << " * " << KernelUtils::SizeAlign() << "(" << axis.actual_size << ", 32/sizeof(" << dtype_name
-                     << "))";
-      } else {
-        last << " * " << tpipe.tiler.Size(lastNonZeroStride);
-        last_actual << " * " << tpipe.tiler.Size(lastNonZeroStride);
-      }
+      GenLastAxisMergedSize(tpipe, src, dst, i, dtype_name, is_first, isAllAxisReduce, lastNonZeroStride, first,
+                            first_actual, last, last_actual);
       break;
     }
+    const auto axis = tpipe.tiler.GetAxis(src.vectorized_axis[i]);
+    const auto axis_size = tpipe.tiler.AxisSize(src.vectorized_axis[i]);
     if (src.vectorized_strides[i] == 0 && dst.vectorized_strides[i] == 0) {
       continue;
     }
@@ -492,8 +504,8 @@ void ReduceMeanCodeGen(std::string &dtype_name, const TPipe &tpipe, const Tensor
   return;
 }
 
-void GetIsArAndPattern(const Tensor &y, bool &isAr, std::string &reduce_pattern) {
-  isAr = (y.vectorized_strides.back() == 0);
+void GetIsArAndPattern(const Tensor &x, const Tensor &y, bool &isAr, std::string &reduce_pattern) {
+  isAr = (x.vectorized_strides.back() != 0) && (y.vectorized_strides.back() == 0);
   std::unordered_map<bool, std::string> reduce_pattern_map = {{true, "AscendC::Pattern::Reduce::AR"},
                                                               {false, "AscendC::Pattern::Reduce::RA"}};
   reduce_pattern = reduce_pattern_map[isAr];

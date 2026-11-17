@@ -1070,6 +1070,8 @@ build_backend() {
                       abs_fma_test_e2e_v2 \
                       floordiv_mul_le_select_test_e2e_v2 \
                       tail_brc_tail_reduce_test_e2e_v2 \
+                      softmax_expanddims_add_test_e2e_v2 \
+                      tail_brc_remove_pad_test_e2e_v2 \
                       int32_logical_not_test_e2e_v2 \
                       int16_logical_not_test_e2e_v2 \
                       float_logical_not_test_e2e_v2 \

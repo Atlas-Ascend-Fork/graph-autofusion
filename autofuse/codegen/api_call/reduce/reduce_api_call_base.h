@@ -55,7 +55,7 @@ static std::map<std::string, std::pair<int, std::string>> reduce_type_map = {
     {"ReduceMean", {ReduceOpType::kMean, "Add"}},
 };
 
-void GetIsArAndPattern(const Tensor &y, bool &isAr, std::string &reduce_pattern);
+void GetIsArAndPattern(const Tensor &x, const Tensor &y, bool &isAr, std::string &reduce_pattern);
 void CheckReduceSpecificParamsForCodegen(const ReduceCodegenShadowCheckInput &input);
 void ReduceMergedSizeCodeGen(const TPipe &tpipe, std::vector<std::string> &lines, const Tensor &src, const Tensor &dst,
                              bool is_tail = false);

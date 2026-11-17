@@ -220,6 +220,100 @@ void SetAscirNodeParamsForTest(const af::AscNodePtr &node, const ascir_param::As
   ASSERT_NE(op_desc, nullptr);
   ASSERT_TRUE(op_desc->SetExtAttr("AscirNodeParams", params));
 }
+
+void SetupReduceTailAxisOneTiler(codegen::Tiler &tiler, std::vector<ascir::AxisId> &current_axis, af::Axis &z0,
+                                 af::Axis &z1, af::Axis &z2) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  af::SizeVar s2(af::Symbol("s2"));
+
+  z0 = af::Axis{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileInner, .size = s0.expr};
+  z1 = af::Axis{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s1.expr};
+  z2 = af::Axis{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeTileInner, .size = s2.expr};
+
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  tiler.AddSizeVar(af::SizeVar(s2));
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddAxis(z2);
+  current_axis.push_back(z1.id);
+}
+
+void BuildReduceTailAxisOneGraph(af::AscGraph &graph, const af::Axis &z0, const af::Axis &z1, const af::Axis &z2) {
+  af::ascir_op::Data x("x", graph);
+  af::ascir_op::Data y("y", graph);
+  af::ascir_op::Max reduce("reduce");
+  graph.AddNode(reduce);
+
+  auto nodex = graph.FindNode("x");
+  nodex->attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+  af::AscTensor tensorx = nodex->outputs[0];
+  auto nodey = graph.FindNode("y");
+  af::AscTensor tensory = nodey->outputs[0];
+
+  tensorx.attr.axis = {z0.id, z1.id, z2.id};
+  tensorx.attr.vectorized_axis = {z0.id, z2.id};
+  tensorx.attr.repeats = {z0.size, z1.size, z2.size};
+  tensorx.attr.strides = {z1.size * z2.size, z2.size, One};
+  tensorx.attr.mem.tensor_id = 1;
+  tensorx.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensorx.attr.mem.position = af::Position::kPositionVecIn;
+  tensorx.attr.opt.merge_scope = af::kIdNone;
+  tensorx.attr.buf.id = 2;
+  vector<af::Expression> vectorized_stride_x{One, Zero};
+  tensorx.attr.vectorized_strides = vectorized_stride_x;
+
+  tensory.attr.axis = {z0.id, z1.id, z2.id};
+  tensory.attr.vectorized_axis = {z0.id, z2.id};
+  tensory.attr.repeats = {One, z1.size, One};
+  tensory.attr.strides = {Zero, One, Zero};
+  tensory.attr.mem.tensor_id = 3;
+  tensory.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensory.attr.mem.position = af::Position::kPositionVecOut;
+  tensory.attr.opt.merge_scope = af::kIdNone;
+  tensory.attr.buf.id = 4;
+  vector<af::Expression> vectorized_stride_y{Zero, Zero};
+  tensory.attr.vectorized_strides = vectorized_stride_y;
+}
+
+void SetupReduceTailAxisOneTensors(codegen::TPipe &tpipe, const af::AscGraph &graph, codegen::ReduceApiCall &call,
+                                   codegen::ApiTensor &x_tensor) {
+  auto nodex = graph.FindNode("x");
+  af::AscTensor tensorx = nodex->outputs[0];
+  auto nodey = graph.FindNode("y");
+  auto reduce_node = graph.FindNode("reduce");
+  af::AscTensor tensory = nodey->outputs[0];
+
+  std::string dtype_name;
+  Tensor::DtypeName(tensory.attr.dtype, dtype_name);
+  // Setup inputs
+  std::vector<std::reference_wrapper<const Tensor>> inputs;
+  Tensor tensor1(tensorx, dtype_name);
+  tensor1.is_constant = true;
+  inputs.push_back(std::ref(tensor1));
+
+  // Setup outputs
+  std::vector<std::reference_wrapper<const Tensor>> outputs;
+  Tensor output_tensor(tensory, dtype_name);
+  outputs.push_back(std::ref(output_tensor));
+
+  codegen::ApiTensor y_tensor;
+  x_tensor.id = tensorx.attr.mem.tensor_id;
+  y_tensor.id = tensory.attr.mem.tensor_id;
+  y_tensor.reuse_id = tensory.attr.mem.reuse_id;
+
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.type = "Max";
+  call.node = reduce_node;
+  call.node_name = reduce_node->GetName();
+  y_tensor.write = &call;
+  call.inputs.push_back(&x_tensor);
+  call.outputs.push_back(y_tensor);
+
+  EXPECT_EQ(tpipe.AddTensor(tensor1), 0);
+  EXPECT_EQ(tpipe.AddTensor(output_tensor), 0);
+}
 }  // namespace
 
 TEST_F(ReduceApicallTest, ReduceApi_Test_001) {
@@ -750,6 +844,37 @@ TEST_F(ReduceApicallTest, ReduceApi_Test_All_Reduce) {
                 "z2_actual_size);\nAscendC::PipeBarrier<PIPE_V>();\nuint32_t tmp_reduce_shape[] = {first_actual, "
                 "last};\nReduceMax<float, AscendC::Pattern::Reduce::AR, false>(local_3[0], local_1[0], tmp_buf_0, "
                 "tmp_reduce_shape, true);\n}\n"});
+  // Check the result
+  EXPECT_EQ(status, af::SUCCESS);
+}
+
+TEST_F(ReduceApicallTest, ReduceApi_Test_All_Reduce_TailAxisOne) {
+  std::string api_name = "ReduceMax";
+  std::vector<ascir::AxisId> current_axis;
+  af::Axis z0;
+  af::Axis z1;
+  af::Axis z2;
+  codegen::Tiler tiler;
+  SetupReduceTailAxisOneTiler(tiler, current_axis, z0, z1, z2);
+
+  codegen::TPipe tpipe("tpipe", tiler);
+  af::AscGraph graph("test");
+  BuildReduceTailAxisOneGraph(graph, z0, z1, z2);
+
+  codegen::ApiTensor x_tensor;
+  codegen::ReduceApiCall call(api_name);
+  SetupReduceTailAxisOneTensors(tpipe, graph, call, x_tensor);
+
+  std::string result;
+  call.tmp_buf_id[-1] = 0;
+  call.tmp_buf_id[0] = 1;
+  Status status = call.Generate(tpipe, current_axis, result);
+  EXPECT_EQ(result,
+            std::string{"{\nuint32_t first = 1 * t->s0;\nuint32_t first_actual = 1 * z0_actual_size;\nuint32_t last = "
+                        "1 * KernelUtils::SizeAlign(1, 32/sizeof(float));\nuint32_t last_actual = 1 * "
+                        "KernelUtils::SizeAlign(1, 32/sizeof(float));\nuint32_t tmp_reduce_shape[] = {first_actual, "
+                        "last};\nReduceMax<float, AscendC::Pattern::Reduce::RA, false>(local_3[0], local_1[0], "
+                        "tmp_buf_0, tmp_reduce_shape, true);\n}\n"});
   // Check the result
   EXPECT_EQ(status, af::SUCCESS);
 }

@@ -41,6 +41,7 @@ class UnAlignmentStrategy : public BaseAlignmentStrategy {
   static af::Status UpdateOutputVectorizedStrides(const af::AscNodePtr &node, uint32_t continuous_tail_axis_num,
                                                   uint32_t align_width);
   static af::Status ModifyIndirectLoadVectorizedStrides(ascir::ImplGraph &impl_graph);
+  static af::Status AddRemovePadForTailBroadcastSrc(af::AscGraph &impl_graph);
 };
 
 Status GenLoadToGenNddmaNode(const af::AscNodePtr &node_load);

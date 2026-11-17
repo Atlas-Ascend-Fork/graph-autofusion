@@ -560,7 +560,7 @@ Status ReduceApiCall::Generate(...) {
 
   // 2. 判断AR/RA模式
   std::string reduce_pattern;
-  GetIsArAndPattern(y, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y, x.isAr, reduce_pattern);
 
   // 3. 生成dtype名称（ArgMax特殊处理）
   GE_CHK_STATUS_RET(GetDtypeNameForReduce(this->api_name_, x, y, dtype_name));
@@ -587,7 +587,7 @@ Status ReduceApiCall::Generate(...) {
 #### 3. AR/RA模式代码生成
 
 ```cpp
-void GetIsArAndPattern(const Tensor &y, bool &isAr, std::string &reduce_pattern) {
+void GetIsArAndPattern(const Tensor &x, const Tensor &y, bool &isAr, std::string &reduce_pattern) {
   isAr = (y.vectorized_strides.back() == 0);  // 向量化stride为0表示AR模式
 
   const std::map<bool, std::string> reduce_pattern_map = {

@@ -560,7 +560,7 @@ Status ReduceApiCall::Generate(...) {
 
   // 2. Determine AR/RA mode
   std::string reduce_pattern;
-  GetIsArAndPattern(y, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y, x.isAr, reduce_pattern);
 
   // 3. Generate dtype name (ArgMax special handling)
   GE_CHK_STATUS_RET(GetDtypeNameForReduce(this->api_name_, x, y, dtype_name));
@@ -587,7 +587,7 @@ Status ReduceApiCall::Generate(...) {
 #### 3. AR/RA Mode Code Generation
 
 ```cpp
-void GetIsArAndPattern(const Tensor &y, bool &isAr, std::string &reduce_pattern) {
+void GetIsArAndPattern(const Tensor &x, const Tensor &y, bool &isAr, std::string &reduce_pattern) {
   isAr = (y.vectorized_strides.back() == 0);  // vectorized stride of 0 means AR mode
 
   const std::map<bool, std::string> reduce_pattern_map = {
