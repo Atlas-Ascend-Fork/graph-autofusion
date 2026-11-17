@@ -83,8 +83,7 @@ af::Status GetVFNodePerf(const NodePerfInfo &node_info, const uint32_t micro_api
   throughput = throughput * api_count;
   throughput = throughput.Simplify();
   GELOGD("Got node %s input %s reg base latency %s, throughput %s, api_count %s", node_info.optype.c_str(),
-         node_info.input_dtype.c_str(), latency.Serialize().get(), throughput.Serialize().get(),
-         api_count.Serialize().get());
+         node_info.input_dtype.c_str(), latency.Str().get(), throughput.Str().get(), api_count.Str().get());
   return af::SUCCESS;
 }
 
@@ -107,8 +106,8 @@ af::Status GetVectorFunctionPerfByStrideStatus(const std::vector<NodePerfInfo> &
   res = af::sym::Add(res, vector_function_head_cost);
   res = res.Simplify();
   GELOGD("Got vector function perf %s, vector_function_head_cost %s, max_latency %s, all_micro_api_cost %s",
-         res.Serialize().get(), vector_function_head_cost.Serialize().get(), max_latency.Serialize().get(),
-         all_micro_api_cost.Serialize().get());
+         res.Str().get(), vector_function_head_cost.Str().get(), max_latency.Str().get(),
+         all_micro_api_cost.Str().get());
   return af::SUCCESS;
 }
 
@@ -163,8 +162,8 @@ af::Status VfPerfUtils::GetVfInstructDtypeMappingPerf(const std::string &vf_inst
     GELOGD(
         "Found dtype mapping perf of vf instruct [%s]: input_dtype is [%s], output_dtype is [%s], latency is [%s], "
         "throughput is [%s].",
-        vf_instruct_type.c_str(), input_dtype.c_str(), output_dtype.c_str(), latency.Serialize().get(),
-        throughput.Serialize().get());
+        vf_instruct_type.c_str(), input_dtype.c_str(), output_dtype.c_str(), latency.Str().get(),
+        throughput.Str().get());
   }
   return af::SUCCESS;
 }

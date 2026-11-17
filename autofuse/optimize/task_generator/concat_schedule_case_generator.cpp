@@ -584,13 +584,13 @@ Status ConcatFusionCaseGenerator::UpdateOffsetAttr(const af::AscNodePtr &dst_new
     const auto ir_attr = dst_new_node->attr.ir_attr->DownCastTo<af::ascir_op::Store::AscStoreIrAttrDef>();
     GE_ASSERT_NOTNULL(ir_attr);
     GE_CHK_STATUS_RET(ir_attr->SetOffset(offset), "Failed to set offset to %s", dst_new_node->GetNamePtr());
-    GELOGI("Store node: %s added, offset = %s", dst_new_node->GetName().c_str(), offset.Serialize().get());
+    GELOGI("Store node: %s added, offset = %s", dst_new_node->GetName().c_str(), offset.Str().get());
   } else if (dst_new_node->GetType() == af::ascir_op::Load::Type) {
     const auto offset = concat_dim_offsets_[index] * dst_new_node->outputs[0].attr.strides[concat_dim_];
     const auto ir_attr = dst_new_node->attr.ir_attr->DownCastTo<af::ascir_op::Load::AscLoadIrAttrDef>();
     GE_ASSERT_NOTNULL(ir_attr);
     GE_CHK_STATUS_RET(ir_attr->SetOffset(offset), "Failed to set offset to %s", dst_new_node->GetNamePtr());
-    GELOGI("Load node: %s added, offset = %s", dst_new_node->GetName().c_str(), offset.Serialize().get());
+    GELOGI("Load node: %s added, offset = %s", dst_new_node->GetName().c_str(), offset.Str().get());
   } else {
     // do nothing
   }

@@ -250,8 +250,8 @@ af::Status ExpandLoadBlockLen(const NodeDetail &node_info, PerfOutputInfo &perf,
     } else {
       dims[dims.size() - 1UL] = block_len_ref_actual;
     }
-    GELOGD("Load block len checker[%s], need_expand[%d], block_len[%s]", need_expand_checker.Serialize().get(),
-           need_expand, block_len_ref_actual.Serialize().get());
+    GELOGD("Load block len checker[%s], need_expand[%d], block_len[%s]", need_expand_checker.Str().get(), need_expand,
+           block_len_ref_actual.Str().get());
   }
   return af::SUCCESS;
 }
@@ -572,8 +572,8 @@ af::Status ExpandBlockLen(const NodeDetail &node_info, PerfOutputInfo &perf, std
     } else {
       dims[dims.size() - 1UL] = block_len_ref_actual;
     }
-    GELOGD("Block len checker[%s], is_small_block_len[%d], block_len[%s]", is_small_block_len_checker.Serialize().get(),
-           is_small_block_len, block_len_ref_actual.Serialize().get());
+    GELOGD("Block len checker[%s], is_small_block_len[%d], block_len[%s]", is_small_block_len_checker.Str().get(),
+           is_small_block_len, block_len_ref_actual.Str().get());
   }
   return af::SUCCESS;
 }
@@ -613,8 +613,8 @@ af::Status ExpandMTE3BlockLen(const NodeDetail &node_info, PerfOutputInfo &perf,
       perf.ternary_ops[res] = ternary_op;
       block_len_ref_actual = res;
     }
-    GELOGD("MTE3 Block len padding checker[%s], need_padding[%d], block_len[%s]",
-           need_padding_checker.Serialize().get(), need_padding, block_len_ref_actual.Serialize().get());
+    GELOGD("MTE3 Block len padding checker[%s], need_padding[%d], block_len[%s]", need_padding_checker.Str().get(),
+           need_padding, block_len_ref_actual.Str().get());
   }
   return af::SUCCESS;
 }

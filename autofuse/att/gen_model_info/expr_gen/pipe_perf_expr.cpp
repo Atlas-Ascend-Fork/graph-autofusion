@@ -578,7 +578,7 @@ af::Status PipePerfExpr::GetPerfExpr(std::map<PipeType, Expr> &pipe_costs,
                       node.name.c_str());
     Expr exe_var = node_exe_times.GetVariable();
     ternary_ops[exe_var] = node_exe_times;
-    GELOGD("Get node [%s] exe times %s=[%s]", node.name.c_str(), exe_var.Serialize().get(),
+    GELOGD("Get node [%s] exe times %s=[%s]", node.name.c_str(), exe_var.Str().get(),
            node_exe_times.GetTernaryOpStr().c_str());
 
     // 获取节点性能

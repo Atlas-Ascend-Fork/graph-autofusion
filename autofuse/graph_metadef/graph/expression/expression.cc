@@ -324,7 +324,7 @@ Expression::ComputeHint(T &hint) const {
     return GetConstValue(hint);
   }
   if (GetCurShapeEnvContext() == nullptr) {
-    GELOGW("Shape env is nullptr, cannot compute hint, expr: %s", Serialize().get());
+    GELOGW("Shape env is nullptr, cannot compute hint, expr: %s", Str().get());
     return false;
   }
   return GetCurShapeEnvContext()->EvaluateExpr(*this).GetConstValue(hint);

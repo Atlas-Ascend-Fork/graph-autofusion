@@ -19,8 +19,8 @@ bool ExpectSymbolEq(const Expression &e0, const Expression &e1, const char_t *fi
   bool res = ExpectSymbolBool(sym::Eq(e0, e1), file, line);
   if (res) {
     GE_ASSERT_SUCCESS(GetCurShapeEnvContext()->AppendReplacement(e0, e1),
-                      "[%s:%lld] Append symbol equivalence %s to %s failed", file, line, e0.Serialize().get(),
-                      e1.Serialize().get());
+                      "[%s:%lld] Append symbol equivalence %s to %s failed", file, line, e0.Str().get(),
+                      e1.Str().get());
   }
   return res;
 }
@@ -30,23 +30,22 @@ bool ExpectSymbolNe(const Expression &e0, const Expression &e1, const char_t *fi
   bool res = ExpectSymbolBool(sym::Ne(e0, e1), file, line);
   if (!res) {
     GE_ASSERT_SUCCESS(GetCurShapeEnvContext()->AppendReplacement(e0, e1),
-                      "[%s:%lld] Append symbol equivalence %s to %s failed", file, line, e0.Serialize().get(),
-                      e1.Serialize().get());
+                      "[%s:%lld] Append symbol equivalence %s to %s failed", file, line, e0.Str().get(),
+                      e1.Str().get());
   }
   return res;
 }
 
 bool ExpectSymbolBool(const Expression &expr, const char_t *file, const int64_t line) {
   GE_ASSERT_NOTNULL(file);
-  GE_ASSERT_TRUE(expr.IsBooleanExpr(), "Only boolean expr can be use to check symbol, expr: %s",
-                 expr.Serialize().get());
+  GE_ASSERT_TRUE(expr.IsBooleanExpr(), "Only boolean expr can be use to check symbol, expr: %s", expr.Str().get());
   if (expr.IsConstExpr()) {
     bool const_value = false;
     GE_ASSERT_TRUE(expr.GetConstValue(const_value));
     return const_value;
   }
   if (GetCurShapeEnvContext() == nullptr) {
-    GELOGW("Shape env is nullptr, cannot check symbol, expr: %s", expr.Serialize().get());
+    GELOGW("Shape env is nullptr, cannot check symbol, expr: %s", expr.Str().get());
     return false;
   }
   bool hint_value = false;
@@ -63,28 +62,27 @@ bool AssertSymbolEq(const Expression &e0, const Expression &e1, const char_t *fi
   GE_ASSERT_NOTNULL(file);
   GE_ASSERT_TRUE(AssertSymbolBool(sym::Eq(e0, e1), file, line));
   GE_ASSERT_SUCCESS(GetCurShapeEnvContext()->AppendReplacement(e0, e1),
-                    "[%s:%lld] Append symbol equivalence %s to %s failed", file, line, e0.Serialize().get(),
-                    e1.Serialize().get());
+                    "[%s:%lld] Append symbol equivalence %s to %s failed", file, line, e0.Str().get(), e1.Str().get());
   return true;
 }
 
 bool AssertSymbolBool(const Expression &expr, const char_t *file, const int64_t line) {
   GE_ASSERT_NOTNULL(file);
   GE_ASSERT_TRUE(expr.IsBooleanExpr(), "[%s:%lld] Only boolean expr can be used to assert, expr: %s", file, line,
-                 expr.Serialize().get());
+                 expr.Str().get());
   if (expr.IsConstExpr()) {
     bool const_value = false;
     GE_ASSERT_TRUE(expr.GetConstValue(const_value));
-    GE_ASSERT_TRUE(const_value, "[%s:%lld] Assert %s failed", file, line, expr.Serialize().get());
+    GE_ASSERT_TRUE(const_value, "[%s:%lld] Assert %s failed", file, line, expr.Str().get());
     return const_value;
   }
   if (GetCurShapeEnvContext() == nullptr) {
-    GELOGW("Shape env is nullptr, cannot check symbol, expr: %s", expr.Serialize().get());
+    GELOGW("Shape env is nullptr, cannot check symbol, expr: %s", expr.Str().get());
     return false;
   }
   bool hint_value = false;
   GE_ASSERT_TRUE(expr.GetHint(hint_value));
-  GE_ASSERT_TRUE(hint_value, "[%s:%lld] Assert %s failed", file, line, expr.Serialize().get());
+  GE_ASSERT_TRUE(hint_value, "[%s:%lld] Assert %s failed", file, line, expr.Str().get());
   GE_ASSERT_SUCCESS(GetCurShapeEnvContext()->AppendSymbolAssertInfo(expr.Simplify(), file, line));
   return true;
 }

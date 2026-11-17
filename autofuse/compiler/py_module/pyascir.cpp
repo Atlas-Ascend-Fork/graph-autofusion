@@ -1371,7 +1371,7 @@ template <>
 int OpsOperatorIrAttr<af::ascir_op::Load, kOffsetAttr>::_setter(PyObject *self, PyObject *value, void *closure) {
   (void)closure;
   auto v = SizeExpr::AsSizeExpr(value);
-  if ((!v.IsValid()) || (v.Serialize().get() == nullptr)) {
+  if ((!v.IsValid()) || (v.Str().get() == nullptr)) {
     return -1;
   }
   auto *attr = GetValidatedIrAttr<af::ascir_op::Load, af::ascir_op::Load::AscLoadIrAttrDef>(self, "AscLoadIrAttrDef");
@@ -1394,7 +1394,7 @@ template <>
 int OpsOperatorIrAttr<af::ascir_op::Store, kOffsetAttr>::_setter(PyObject *self, PyObject *value, void *closure) {
   (void)closure;
   auto v = SizeExpr::AsSizeExpr(value);
-  if ((!v.IsValid()) || (v.Serialize().get() == nullptr)) {
+  if ((!v.IsValid()) || (v.Str().get() == nullptr)) {
     return -1;
   }
   auto *attr =

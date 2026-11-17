@@ -231,7 +231,7 @@ ExprInfoMap ArgsManager::GetOrigVarInfos(const ModelInfo &model_info) {
       VarInfo info;
       info.is_input_var = true;
       info.do_search = false;
-      GELOGD("append extra graph %s size var %s", model_info.graph_name.c_str(), var.Serialize().get());
+      GELOGD("append extra graph %s size var %s", model_info.graph_name.c_str(), var.Str().get());
       expr_var_map.emplace(var, info);
     }
   }

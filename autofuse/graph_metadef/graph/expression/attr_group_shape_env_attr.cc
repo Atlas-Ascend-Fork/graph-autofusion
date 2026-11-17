@@ -48,8 +48,8 @@ graphStatus ShapeEnvAttr::SerializeSymbolInfo(proto::ShapeEnvAttrGroupsDef *shap
   for (const auto &iter : symbol_to_value_) {
     GE_ASSERT_TRUE(!iter.first.IsConstExpr(),
                    "Symbol in symbol_to_value of shape env attr should be a variable, but get: %s",
-                   iter.first.Serialize().get());
-    symbol_to_value_def->insert({iter.first.Serialize().get(), iter.second});
+                   iter.first.Str().get());
+    symbol_to_value_def->insert({iter.first.Str().get(), iter.second});
   }
   auto value_to_symbol_def = shape_env_group->mutable_value_to_symbol();
   GE_ASSERT_NOTNULL(value_to_symbol_def);
@@ -59,8 +59,8 @@ graphStatus ShapeEnvAttr::SerializeSymbolInfo(proto::ShapeEnvAttrGroupsDef *shap
     for (const auto &sym_iter : iter.second) {
       GE_ASSERT_TRUE(!sym_iter.IsConstExpr(),
                      "Symbol in value_to_symbol of shape env attr should be a variable, but get: %s",
-                     sym_iter.Serialize().get());
-      symbol_infos.add_symbols(sym_iter.Serialize().get());
+                     sym_iter.Str().get());
+      symbol_infos.add_symbols(sym_iter.Str().get());
     }
     value_to_symbol_def->insert({iter.first, symbol_infos});
   }
@@ -76,14 +76,14 @@ graphStatus ShapeEnvAttr::SerializeSymbolCheckInfos(proto::ShapeEnvAttrGroupsDef
   auto replacements_def = shape_env_group->mutable_replacements();
   for (const auto &iter : replacements_) {
     proto::ReplacementDef rep_def;
-    rep_def.set_replace_expr(iter.second.replace_expr.Serialize().get());
+    rep_def.set_replace_expr(iter.second.replace_expr.Str().get());
     rep_def.set_rank(iter.second.rank);
-    replacements_def->insert({iter.first.Serialize().get(), rep_def});
+    replacements_def->insert({iter.first.Str().get(), rep_def});
   }
   shape_env_group->clear_symbol_check_infos();
   for (const auto &iter : symbol_check_infos_) {
     proto::SymbolCheckInfoDef *symbol_check_info_def = shape_env_group->add_symbol_check_infos();
-    symbol_check_info_def->set_expr(iter.expr.Serialize().get());
+    symbol_check_info_def->set_expr(iter.expr.Str().get());
     symbol_check_info_def->set_file(iter.file);
     symbol_check_info_def->set_line(iter.line);
     symbol_check_info_def->set_dfx(iter.dfx_info);
@@ -91,7 +91,7 @@ graphStatus ShapeEnvAttr::SerializeSymbolCheckInfos(proto::ShapeEnvAttrGroupsDef
   shape_env_group->clear_symbol_assert_infos();
   for (const auto &iter : symbol_assert_infos_) {
     proto::SymbolCheckInfoDef *symbol_assert_info_def = shape_env_group->add_symbol_assert_infos();
-    symbol_assert_info_def->set_expr(iter.expr.Serialize().get());
+    symbol_assert_info_def->set_expr(iter.expr.Str().get());
     symbol_assert_info_def->set_file(iter.file);
     symbol_assert_info_def->set_line(iter.line);
     symbol_assert_info_def->set_dfx(iter.dfx_info);

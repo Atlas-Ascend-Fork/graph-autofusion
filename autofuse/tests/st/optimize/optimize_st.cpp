@@ -56,7 +56,7 @@ using optimize::autoschedule::AxisGroup;
 
 namespace {
 std::string ToString(const Expression &e) {
-  return std::string(e.Serialize().get());
+  return std::string(e.Str().get());
 }
 class GraphBuilder {
  public:

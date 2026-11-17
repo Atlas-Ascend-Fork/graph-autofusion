@@ -48,7 +48,7 @@ af::Status GenerateTilingExpr::GetBufConstraint(std::map<HardwareDef, Expr> &har
                     "Collect buf constraints failed.");
   for (const auto &buff : buffer_occupy) {
     hardware_cons[buff.first] = buff.second;
-    GELOGD("[DFX]Add buf constraint: %d = %s", buff.first, buff.second.Serialize().get());
+    GELOGD("[DFX]Add buf constraint: %d = %s", buff.first, buff.second.Str().get());
   }
   return af::SUCCESS;
 }
@@ -90,7 +90,7 @@ af::Status GenerateTilingExpr::GetCoreConstraint(std::map<HardwareDef, Expr> &ha
     block_dim_max_expr = af::sym::Max(block_dim_expr, block_dim_max_expr);
   }
   hardware_cons[HardwareDef::CORENUM] = block_dim_max_expr;
-  GELOGD("[DFX]Add core constraint: %d = %s", HardwareDef::CORENUM, block_dim_max_expr.Serialize().get());
+  GELOGD("[DFX]Add core constraint: %d = %s", HardwareDef::CORENUM, block_dim_max_expr.Str().get());
   return af::SUCCESS;
 }
 

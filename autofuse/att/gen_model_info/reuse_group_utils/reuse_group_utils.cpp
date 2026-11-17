@@ -141,8 +141,8 @@ af::Status ReuseGroupUtils::InitReuseScheduleGroup(const ScheduleGroupIdent &gro
     GE_ASSERT_TRUE(args_manager.Process(false), "Args manager process failed.");
     const auto &inputs = args_manager.GetInputVars();
     for (const auto &input : inputs) {
-      if (input_var_names.insert(input.Serialize().get()).second) {
-        ordered_var_names.emplace_back(input.Serialize().get());
+      if (input_var_names.insert(input.Str().get()).second) {
+        ordered_var_names.emplace_back(input.Str().get());
       }
     }
   }
@@ -154,9 +154,9 @@ af::Status ReuseGroupUtils::InitReuseScheduleGroup(const ScheduleGroupIdent &gro
   }
   for (auto &model_info : group_tiling_model_info) {
     for (const auto &arg : model_info.arg_list) {
-      input_var_names.find(arg->size->symbol_expr.Serialize().get());
+      input_var_names.find(arg->size->symbol_expr.Str().get());
       if (arg->axis_pos == AxisPosition::INNER) {
-        const auto &exp = arg->size->symbol_expr.Serialize();
+        const auto exp = arg->size->symbol_expr.Str();
         GE_ASSERT_NOTNULL(exp.get());
         reuse_schedule_groups->info.reuse_search_axes.emplace_back(exp.get());
         GELOGD("Add search reuse axis: %s for group[%s] axis_pos[%d]", exp.get(), group_ident.GetItemPrefix().c_str(),

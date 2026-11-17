@@ -2027,9 +2027,9 @@ TEST_F(TestOptimizer, optimize_with_fused_ascbacked) {
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   EXPECT_EQ(fused_scheduled_result.fused_graph_name.GetString(), fused_graph->GetName());
   ASSERT_EQ(fused_scheduled_result.origin_vars.size(), 3UL);
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[0].Serialize().get()), "s0");
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[1].Serialize().get()), "s1");
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[2].Serialize().get()), "s999");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[0].Str().get()), "s0");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[1].Str().get()), "s1");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[2].Str().get()), "s999");
   ASSERT_EQ(fused_scheduled_result.input_nodes.size(), 3UL);
   ASSERT_EQ(fused_scheduled_result.output_nodes.size(), 2UL);
   ASSERT_EQ(fused_scheduled_result.workspace_nodes.size(), 2UL);

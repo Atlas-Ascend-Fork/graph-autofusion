@@ -30,7 +30,7 @@ using namespace af::ascir_op;
 
 namespace {
 std::string ToString(const Expression &e) {
-  return std::string(e.Serialize().get());
+  return std::string(e.Str().get());
 }
 }  // namespace
 
