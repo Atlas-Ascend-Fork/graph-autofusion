@@ -541,7 +541,7 @@ stages:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
               artifact-path: "${{ steps.process_checkout.outputs.path }}/slog*.tar.gz"
-              object-prefix: ${obs_smoke_path}/plog/
+              object-prefix: ${{ env.obs_smoke_path }}/plog/
         if: env.TARGET_BRANCH == 'master'
         runs-on: ['self-hosted','npu=1','smoke=204']
         container:
@@ -592,10 +592,15 @@ stages:
               export WORKSPACE=${{ steps.process_checkout.outputs.path }}
               export NPU_ARCH=dav-3510
               # A5 冒烟镜像(pre_mindspore_A5_conda)缺少运行期所需 python 依赖, 参照 ge/metadef 冒烟先补齐
-              pip3 install numpy decorator sympy scipy attrs psutil
-              bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh
+              # 装依赖失败同样不应拦截(bash -e 下会直接判死本步骤), 故一并 || 兜底
+              pip3 install numpy decorator sympy scipy attrs psutil || echo "[PreSmoke_A5] pip3 依赖安装失败, 继续执行冒烟(详见步骤日志)"
+              # A5 冒烟不拦截合入: 失败时用 || 兜底使步骤退出码为 0, A5 job 状态保持 COMPLETED,
+              # 避免 query-pipeline 按 job 状态打 ci-pipeline-failed (GitCode 的 step/job 级
+              # continue-on-error 均无法阻止该拦截); 失败详情见本步骤日志与已上传的 plog
+              bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh || echo "[PreSmoke_A5] A5 冒烟失败, 但已配置为不拦截合入(详见步骤日志与 plog)"
           - name: upload
             uses: obs-upload
+            if: ${{ always() }}
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"

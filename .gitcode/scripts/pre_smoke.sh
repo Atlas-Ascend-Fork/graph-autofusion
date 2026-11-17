@@ -27,6 +27,13 @@ log() {
   echo "===================================================================="
 }
 
+package_slog() {
+  if [ ! -f "${WORKSPACE}/slog.tar.gz" ] && [ -d /root/ascend/log ]; then
+    tar -zcf "${WORKSPACE}/slog.tar.gz" -C /root/ascend log || true
+  fi
+}
+trap package_slog EXIT
+
 log "init test case, please wait ..."
 
 
