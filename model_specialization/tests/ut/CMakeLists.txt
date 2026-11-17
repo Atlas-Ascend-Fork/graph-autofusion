@@ -17,7 +17,6 @@ add_executable(model_specialization_utest
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/common/pattern_common.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_log.cpp
 )
-add_dependencies(model_specialization_utest model_specialization)
 
 target_include_directories(model_specialization_utest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -44,6 +43,9 @@ target_link_libraries(model_specialization_utest PRIVATE
 run_llt_test(
     TARGET model_specialization_utest
     TASK_NUM 1
+    COVERAGE_SUITE model_specialization_cpp_ut
+    COVERAGE_SOURCE_DIR ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src
+    COVERAGE_REPORT_DIR ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/coverage/cpp_ut
 )
 
 add_executable(acl_spec_optimize_ut
@@ -96,6 +98,9 @@ run_llt_test(
     TARGET acl_spec_optimize_ut
     TASK_NUM 1
     ENV_FILE "${CMAKE_CURRENT_BINARY_DIR}/model_spec_test_env.sh"
+    COVERAGE_SUITE model_specialization_cpp_ut
+    COVERAGE_SOURCE_DIR ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src
+    COVERAGE_REPORT_DIR ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/coverage/cpp_ut
 )
 
 add_dependencies(run_model_specialization_utest run_acl_spec_optimize_ut)
@@ -134,6 +139,12 @@ target_compile_definitions(compile_process_ut PRIVATE
 )
 add_dependencies(compile_process_ut compile_pool_fault_worker aclrtc_compile_worker_stub)
 target_compile_definitions(compile_process_ut PRIVATE MODEL_SPEC_TEST_TMP_DIR="${MODEL_SPEC_TEST_TMP_DIR}")
-run_llt_test(TARGET compile_process_ut TASK_NUM 1
-    ENV_FILE "${CMAKE_CURRENT_BINARY_DIR}/model_spec_test_env.sh")
+run_llt_test(
+    TARGET compile_process_ut
+    TASK_NUM 1
+    ENV_FILE "${CMAKE_CURRENT_BINARY_DIR}/model_spec_test_env.sh"
+    COVERAGE_SUITE model_specialization_cpp_ut
+    COVERAGE_SOURCE_DIR ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src
+    COVERAGE_REPORT_DIR ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/coverage/cpp_ut
+)
 add_dependencies(run_model_specialization_utest run_compile_process_ut)

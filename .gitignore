@@ -23,6 +23,7 @@ super_kernel/tests/generated/
 cov/
 super_kernel/coverage/
 multistream/coverage/
+model_specialization/coverage/
 
 # UT temporary files
 super_kernel/kernel_meta
