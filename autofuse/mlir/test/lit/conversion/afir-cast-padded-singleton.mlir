@@ -11,6 +11,15 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %t.reg.mlir | FileCheck %s
 // RUN: sed 's/<"16">/<"15">/g' %s > %t.unaligned.mlir
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %t.unaligned.mlir 2>&1 | FileCheck %s --check-prefix=REJECT
+// RUN: af-opt --afir-to-ascendc-pipeline --cse --target=Ascend910B1 %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=MEMCPP
+// RUN: af-opt --afir-to-ascendc-pipeline --cse --target=Ascend950DT_950x %t.reg.mlir | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=REGCPP
+// RUN: sed 's/xf16/xi16/g; s/xbf16/xi16/g; s/xf32/xui16/g; s/<"8">/<"16">/g' %s > %t.fallback.mlir
+// RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %t.fallback.mlir | FileCheck %s --check-prefix=FALLBACK
+// RUN: sed 's/<"8">/<"16">/g' %s > %t.equal.mlir
+// RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %t.equal.mlir | FileCheck %s --check-prefix=FALLBACK
+// RUN: sed 's/xf16/xui8/g; s/xbf16/xui8/g; s/<"16">/<"32">/g' %s > %t.scratch.mlir
+// RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %t.scratch.mlir | FileCheck %s --check-prefix=FALLBACK
+// RUN: af-opt --afir-to-ascendc-pipeline --cse --target=Ascend910B1 %s | FileCheck %s --check-prefix=ARGS
 // REJECT: 'afir.cast' op has no supported Ascend implementation
 
 // Each logical element occupies its own 32-byte block. Removing the singleton
@@ -42,25 +51,25 @@ module {
 }
 
 // CHECK-LABEL: func.func @cast_padded_f16
-// CHECK: scf.for %[[I:.*]] =
-// CHECK: %[[S:.*]] = arith.constant 16 : index
-// CHECK: %[[SI:.*]] = arith.muli %[[I]], %[[S]]
-// CHECK: %[[SRC:.*]] = ascendc.local_tensor.subindex %arg0[%[[SI]]]
-// CHECK: %[[D:.*]] = arith.constant 8 : index
-// CHECK: %[[DI:.*]] = arith.muli %[[I]], %[[D]]
-// CHECK: %[[DST:.*]] = ascendc.local_tensor.subindex %arg1[%[[DI]]]
-// CHECK: %[[ONE:.*]] = arith.constant 1 : index
-// CHECK: ascendc.cast_extend_contiguous{{(_reg_base)?}} %[[DST]], %[[SRC]], {{(%arg2, )?}}%[[ONE]]
+// CHECK-NOT: scf.for
+// CHECK: ascendc.cast_extend_strided{{(_reg_base)?}}
 // CHECK-NOT: afir.cast
-
 // CHECK-LABEL: func.func @cast_padded_bf16
-// CHECK: scf.for %[[I:.*]] =
-// CHECK: %[[S:.*]] = arith.constant 16 : index
-// CHECK: %[[SI:.*]] = arith.muli %[[I]], %[[S]]
-// CHECK: %[[SRC:.*]] = ascendc.local_tensor.subindex %arg0[%[[SI]]]
-// CHECK: %[[D:.*]] = arith.constant 8 : index
-// CHECK: %[[DI:.*]] = arith.muli %[[I]], %[[D]]
-// CHECK: %[[DST:.*]] = ascendc.local_tensor.subindex %arg1[%[[DI]]]
-// CHECK: %[[ONE:.*]] = arith.constant 1 : index
-// CHECK: ascendc.cast_extend_contiguous{{(_reg_base)?}} %[[DST]], %[[SRC]], {{(%arg2, )?}}%[[ONE]]
+// CHECK-NOT: scf.for
+// CHECK: ascendc.cast_extend_strided{{(_reg_base)?}}
 // CHECK-NOT: afir.cast
+// MEMCPP-LABEL: void cast_padded_f16
+// MEMCPP-NOT: for (
+// MEMCPP: CastExtend({{.*}}, static_cast<uint32_t>({{.*}}), static_cast<uint32_t>({{.*}}), static_cast<uint32_t>({{.*}}), static_cast<uint32_t>({{.*}}), 4U);
+// REGCPP-LABEL: void cast_padded_f16
+// REGCPP-NOT: for (
+// REGCPP: CastExtend({{.*}}, {static_cast<uint32_t>({{.*}}), static_cast<uint32_t>({{.*}})}, {static_cast<uint32_t>({{.*}}), 1U}, {static_cast<uint32_t>({{.*}}), 1U});
+// FALLBACK-LABEL: func.func @cast_padded_f16
+// FALLBACK: scf.for
+// FALLBACK: ascendc.cast_extend_contiguous
+// ARGS-LABEL: func.func @cast_padded_f16
+// ARGS-DAG: %[[ROWS:.*]] = arith.constant 4 : index
+// ARGS-DAG: %[[ONE:.*]] = arith.constant 1 : index
+// ARGS-DAG: %[[IN:.*]] = arith.constant 16 : index
+// ARGS-DAG: %[[OUT:.*]] = arith.constant 8 : index
+// ARGS: ascendc.cast_extend_strided{{.*}}%[[ROWS]], %[[ONE]], %[[IN]], %[[OUT]]

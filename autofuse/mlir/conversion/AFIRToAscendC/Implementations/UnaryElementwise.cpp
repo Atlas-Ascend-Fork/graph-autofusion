@@ -30,6 +30,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "conversion/AFIRToAscendC/Implementations/UnaryElementwise.h"
+#include "conversion/AFIRToAscendC/Implementations/CastConversion.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
 #include "target/Ascend/AscendTargetProfile.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
@@ -267,8 +268,7 @@ struct UnaryOperandTiles {
 
 template <typename SourceOp>
 LogicalResult checkConversionLocalViews(SourceOp op) {
-  const elementwise::LocalViewCompatibility compatibility =
-      elementwise::checkElementwiseLocalViews(op, nullptr, isa<afir::CastOp>(op.getOperation()));
+  const elementwise::LocalViewCompatibility compatibility = elementwise::checkElementwiseLocalViews(op);
   if (compatibility != elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
@@ -282,7 +282,7 @@ FailureOr<UnaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adap
   tiles.source = adaptor.getInput();
   tiles.destination = adaptor.getDestination();
   elementwise::ElementwiseLocalView view;
-  if (elementwise::prepareElementwiseLocalView(op, {}, compactTail, view, isa<afir::CastOp>(op.getOperation())) !=
+  if (elementwise::prepareElementwiseLocalView(op, {}, compactTail, view) !=
       elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
@@ -615,6 +615,23 @@ LogicalResult registerUnary(ImplementationRegistry &registry, llvm::StringRef id
       ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
       UnaryElementwiseMapping{family, resultElementType, castSupplyOf(family), elementTypes, TakesTmpBuffer},
       createPatternRegistration<SourceOp, TargetOp, TakesTmpBuffer, MaterializesReuseSource, ConstBlock>());
+}
+
+template <typename TargetOp, bool TakesTmpBuffer>
+LogicalResult registerCast(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family) {
+  if (failed(elementwise::checkFamilyMatchesHeader<TargetOp>(family))) {
+    return failure();
+  }
+  elementwise::recordRegisteredFamily(afir::CastOp::getOperationName(), id, family, 0U);
+  return registry.registerImplementation<afir::CastOp, UnaryElementwiseMapping, UnaryElementwiseCapabilityProvider>(
+      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
+      UnaryElementwiseMapping{family, ResultElementRule::CastPair, castSupplyOf(family), 0U, TakesTmpBuffer},
+      [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
+         std::shared_ptr<const UnaryElementwiseMapping> mapping) {
+        populateCastConversionPattern(patterns, context.typeConverter, key, mapping->family, mapping->executionSpec,
+                                      context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                                          ascend::FeatureState::Available);
+      });
 }
 
 // `afir.leaky_relu`：两张支持表上是同一个 `AscendC::LeakyRelu`、都不要 tmp buffer,
@@ -1023,7 +1040,10 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   //   - mem 侧 `CastExtend(dst, src, tmp, size)`（`cast.h`），要一块 tmp buffer
   //     （`CalcCastTmpSize`；中间要转两道的那些 dtype 对拿它装中间结果）；
   //   - reg 侧 `CastExtend(dst, src, {dims}, {out_stride}, {in_stride})`
-  //     （`cast_reg_base.h`），不要 tmp，三个数组实参由 emitter 按连续形态打字面量。
+  //     （`cast_reg_base.h`），不要 tmp，三个数组实参由 emitter 按连续或二维行步长形态输出。
+  //
+  // 非连续最内轴可按 [rows, 1] 下降；mem 侧仅使用无需额外 scratch 的安全 mask 路径。
+  // API 名称仍为 CastExtend，沿用上述 implementation 身份和 execution spec。
   //
   // 上面那三个 `ascendc.cast_l*` 不是这里的可用实现：它们生成的是标准的 `AscendC::Cast`、
   // 要一个 `RoundMode` 实参，而两份包装都是自己按 (输入, 输出) 推 `RoundMode` 的。
@@ -1031,10 +1051,10 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   // 集合传 0：`CastPair` 那一档根本不读它（见 `areElementTypesSupported`），给一个真集合
   // 只会让人以为它参与判据。0 同时是 `ElementTypeMatrixTest` 认的「这一档不按集合判」的
   // 标记，那条断言据此跳过这两个 id，并用一条反向断言盯住跳过的名单不会悄悄变长。
-  if (failed(registerUnary<afir::CastOp, ascendc::CastExtendContiguousOp, /*TakesTmpBuffer=*/true>(
-          registry, "cast.tensor.extend", ApiFamily::MemBased, ResultElementRule::CastPair, 0U)) ||
-      failed(registerUnary<afir::CastOp, ascendc::CastExtendContiguousRegBaseOp>(
-          registry, "cast.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::CastPair, 0U))) {
+  if (failed(registerCast<ascendc::CastExtendContiguousOp, /*TakesTmpBuffer=*/true>(registry, "cast.tensor.extend",
+                                                                                    ApiFamily::MemBased)) ||
+      failed(registerCast<ascendc::CastExtendContiguousRegBaseOp, /*TakesTmpBuffer=*/false>(
+          registry, "cast.tensor.extend_reg_base", ApiFamily::RegBased))) {
     return failure();
   }
 

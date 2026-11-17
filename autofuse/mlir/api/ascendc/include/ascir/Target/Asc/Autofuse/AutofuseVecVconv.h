@@ -24,6 +24,9 @@ LogicalResult printOperation(CodeEmitter& emitter, ascendc::CastExtendContiguous
 LogicalResult printOperation(CodeEmitter& emitter, ascendc::CastExtendContiguousRegBaseOp op);
 LogicalResult printOperation(CodeEmitter& emitter, ascendc::Ceil2IntExtendRegBaseOp op);
 
+LogicalResult printOperation(CodeEmitter& emitter, ascendc::CastExtendStridedOp op);
+LogicalResult printOperation(CodeEmitter& emitter, ascendc::CastExtendStridedRegBaseOp op);
+
 // 寄存器形态的一条 `Reg::Cast`（VF 里用的那个，不是上面两个 tile 级包装）。
 LogicalResult printOperation(CodeEmitter& emitter, ascendc::CastRegOp op);
 

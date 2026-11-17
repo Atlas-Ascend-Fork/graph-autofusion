@@ -149,12 +149,12 @@ TEST(MlirE2eCpuLocalView, EqualLayoutsComputePhysicalSpanWithoutTouchingSuffix) 
   }
 }
 
-template <typename Input>
+template <typename Input, unsigned Rows, unsigned InputStride, unsigned OutputStride>
 __global__ __aicore__ void PaddedCastKernel(GM_ADDR input, GM_ADDR output) {
   AscendC::TPipe pipe;
   AscendC::TBuf<AscendC::TPosition::VECCALC> srcBuffer, dstBuffer, tmpBuffer;
-  pipe.InitBuffer(srcBuffer, 128);
-  pipe.InitBuffer(dstBuffer, 128);
+  pipe.InitBuffer(srcBuffer, Rows * InputStride * sizeof(Input));
+  pipe.InitBuffer(dstBuffer, Rows * OutputStride * sizeof(float));
   pipe.InitBuffer(tmpBuffer, 128);
   auto src = srcBuffer.Get<Input>();
   auto dst = dstBuffer.Get<float>();
@@ -163,35 +163,43 @@ __global__ __aicore__ void PaddedCastKernel(GM_ADDR input, GM_ADDR output) {
   AscendC::GlobalTensor<float> out;
   in.SetGlobalBuffer(reinterpret_cast<__gm__ Input *>(input));
   out.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(output));
-  AscendC::DataCopy(src, in, 64);
-  AscendC::DataCopy(dst, out, 32);
+  AscendC::DataCopy(src, in, Rows * InputStride);
+  AscendC::DataCopy(dst, out, Rows * OutputStride);
   AscendC::PipeBarrier<PIPE_ALL>();
-  if constexpr (std::is_same_v<Input, half>) {
+  if constexpr (Rows == 257) {
+    cast_repeat_tail(src, dst, tmp);
+  } else if constexpr (InputStride == 4096) {
+    cast_wide_stride(src, dst, tmp);
+  } else if constexpr (InputStride == OutputStride) {
+    cast_equal_stride(src, dst, tmp);
+  } else if constexpr (std::is_same_v<Input, half>) {
     cast_padded_f16(src, dst, tmp);
   } else {
     cast_padded_bf16(src, dst, tmp);
   }
   AscendC::PipeBarrier<PIPE_ALL>();
-  AscendC::DataCopy(out, dst, 32);
+  AscendC::DataCopy(out, dst, Rows * OutputStride);
 }
 
-template <typename Input>
+template <typename Input, unsigned Rows = 4, unsigned InputStride = 16, unsigned OutputStride = 8>
 void CheckPaddedCast() {
   auto release = [](void *ptr) { AscendC::GmFree(ptr); };
-  std::unique_ptr<Input, decltype(release)> input(static_cast<Input *>(AscendC::GmAlloc(128)), release);
-  std::unique_ptr<float, decltype(release)> output(static_cast<float *>(AscendC::GmAlloc(128)), release);
+  std::unique_ptr<Input, decltype(release)> input(
+      static_cast<Input *>(AscendC::GmAlloc(Rows * InputStride * sizeof(Input))), release);
+  std::unique_ptr<float, decltype(release)> output(
+      static_cast<float *>(AscendC::GmAlloc(Rows * OutputStride * sizeof(float))), release);
   ASSERT_NE(input, nullptr);
   ASSERT_NE(output, nullptr);
-  std::fill_n(input.get(), 64, static_cast<Input>(-99.0F));
-  std::fill_n(output.get(), 32, kSentinel);
-  for (unsigned row = 0; row < 4; ++row) {
-    input.get()[row * 16] = static_cast<Input>(static_cast<float>(row) - 1.5F);
+  std::fill_n(input.get(), Rows * InputStride, static_cast<Input>(-99.0F));
+  std::fill_n(output.get(), Rows * OutputStride, kSentinel);
+  for (unsigned row = 0; row < Rows; ++row) {
+    input.get()[row * InputStride] = static_cast<Input>(static_cast<float>(row) - 1.5F);
   }
   AscendC::SetKernelMode(KernelMode::AIV_MODE);
-  ICPU_RUN_KF(PaddedCastKernel<Input>, 1, reinterpret_cast<uint8_t *>(input.get()),
-              reinterpret_cast<uint8_t *>(output.get()));
-  for (unsigned index = 0; index < 32; ++index) {
-    const float expected = index % 8 == 0 ? static_cast<float>(index / 8) - 1.5F : kSentinel;
+  auto kernel = PaddedCastKernel<Input, Rows, InputStride, OutputStride>;
+  ICPU_RUN_KF(kernel, 1, reinterpret_cast<uint8_t *>(input.get()), reinterpret_cast<uint8_t *>(output.get()));
+  for (unsigned index = 0; index < Rows * OutputStride; ++index) {
+    const float expected = index % OutputStride == 0 ? static_cast<float>(index / OutputStride) - 1.5F : kSentinel;
     EXPECT_FLOAT_EQ(output.get()[index], expected) << "index=" << index;
   }
 }
@@ -199,5 +207,17 @@ void CheckPaddedCast() {
 TEST(MlirE2eCpuLocalView, PaddedCastPreservesValuesAndPadding) {
   CheckPaddedCast<half>();
   CheckPaddedCast<bfloat16_t>();
+}
+
+TEST(MlirE2eCpuLocalView, PaddedCastSplitsRepeatsAndTail) {
+  CheckPaddedCast<half, 257>();
+}
+
+TEST(MlirE2eCpuLocalView, PaddedCastFallsBackForWideRepeatStride) {
+  CheckPaddedCast<half, 2, 4096, 2048>();
+}
+
+TEST(MlirE2eCpuLocalView, PaddedCastEqualStridesPreservePadding) {
+  CheckPaddedCast<half, 4, 16, 16>();
 }
 }  // namespace

@@ -54,16 +54,16 @@ module {
   }
 }
 // CHECK-LABEL: func.func @cast_logical_f16
-// CHECK: scf.for
-// CHECK: arith.constant 16 : index
-// CHECK: arith.constant 8 : index
-// CHECK: arith.constant 1 : index
-// CHECK: ascendc.cast_extend_contiguous
+// CHECK-NOT: scf.for
+// CHECK-DAG: arith.constant 16 : index
+// CHECK-DAG: arith.constant 8 : index
+// CHECK-DAG: arith.constant 1 : index
+// CHECK: ascendc.cast_extend_strided
 // CHECK-NOT: afir.cast
 // CHECK-LABEL: func.func @cast_logical_bf16
-// CHECK: scf.for
-// CHECK: arith.constant 16 : index
-// CHECK: arith.constant 8 : index
-// CHECK: arith.constant 1 : index
-// CHECK: ascendc.cast_extend_contiguous
+// CHECK-NOT: scf.for
+// CHECK-DAG: arith.constant 16 : index
+// CHECK-DAG: arith.constant 8 : index
+// CHECK-DAG: arith.constant 1 : index
+// CHECK: ascendc.cast_extend_strided
 // CHECK-NOT: afir.cast
