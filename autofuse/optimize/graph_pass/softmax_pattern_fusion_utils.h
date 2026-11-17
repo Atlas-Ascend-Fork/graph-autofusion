@@ -18,6 +18,7 @@ namespace softmax_pattern {
 
 // 稳定 Softmax Pattern 的完整匹配结果。input_anchor 是 Pattern 的原始输入
 // （同时供给 Max 和 Sub，即原始输入回流点），替换后成为专用 Softmax 节点的输入。
+// true_div_node 为除法尾节点，命中形态为 TrueDiv 或 Div（浮点输入下两者数值语义一致）。
 struct MatchResult {
   af::OutDataAnchorPtr input_anchor;
   af::AscNodePtr max_node;
@@ -29,7 +30,7 @@ struct MatchResult {
   af::AscNodePtr true_div_node;
 };
 
-// 完整稳定 Softmax 匹配：结构（TrueDiv/Exp/Sum/Sub/Max/Broadcast 链）+
+// 完整稳定 Softmax 匹配：结构（TrueDiv/Div + Exp/Sum/Sub/Max/Broadcast 链）+
 // dtype 支持 + 尾轴归约 + 布局一致 + 消费者闭合。与全图 RunPass 使用同一规则，
 // 任何一处不满足都返回 false，不做宽松匹配。
 bool MatchStableStructure(const af::AscNodePtr &true_div_node, MatchResult &pattern);

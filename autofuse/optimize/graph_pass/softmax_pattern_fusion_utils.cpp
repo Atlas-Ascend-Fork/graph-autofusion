@@ -87,7 +87,10 @@ bool IsOpsSafe(const af::AscNodePtr &node) {
 }
 
 bool MatchStableSoftmaxStructure(const af::AscNodePtr &true_div_node, MatchResult &pattern) {
-  if (!IsOpsSafe<af::ascir_op::TrueDiv>(true_div_node)) {
+  // 除法尾节点接受 TrueDiv 或 Div：浮点输入下两者均为逐元素浮点除法，数值语义一致；区别仅在
+  // 类型提升规则（TrueDiv 双符号允许 int32->float32），而 Softmax 原始输入受 dtype 门控必为浮点，
+  // 提升分支在命中本 pattern 的图内不可能出现，Div 自身白名单（fp16/fp32）也保证节点 dtype 合法。
+  if (!IsOpsSafe<af::ascir_op::TrueDiv>(true_div_node) && !IsOpsSafe<af::ascir_op::Div>(true_div_node)) {
     return false;
   }
 
