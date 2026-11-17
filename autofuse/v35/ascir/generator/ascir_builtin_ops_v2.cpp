@@ -837,19 +837,21 @@ REG_ASC_IR(Mean).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::M
 
 REG_ASC_IR(Prod).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ProdAscIrAttImplV2>(),
                                         af::ascir::AscIrImplCreator<af::ascir::ProdAscIrCodegenImplV2>(),
-                                        {{"T", TensorType{DT_FLOAT}}}});
+                                        {{"T", TensorType{DT_INT8, DT_INT16, DT_INT32, DT_INT64, DT_FLOAT}}}});
 
 REG_ASC_IR(Sigmoid).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::SigmoidAscIrAttImplV2>(),
                                            af::ascir::AscIrImplCreator<af::ascir::SigmoidAscIrCodegenImplV2>(),
                                            {{"T", TensorType{DT_FLOAT16, DT_FLOAT, DT_BF16}}}});
 
-REG_ASC_IR(Any).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::AnyAscIrAttImplV2>(),
-                                       af::ascir::AscIrImplCreator<af::ascir::AnyAscIrCodegenImplV2>(),
-                                       {{"T", TensorType{DT_FLOAT}}}});
+REG_ASC_IR(Any).Impl(v2_soc_versions,
+                     {af::ascir::AscIrImplCreator<af::ascir::AnyAscIrAttImplV2>(),
+                      af::ascir::AscIrImplCreator<af::ascir::AnyAscIrCodegenImplV2>(),
+                      {{"T", TensorType{DT_BOOL, DT_UINT8, DT_INT8, DT_INT16, DT_INT32, DT_INT64, DT_FLOAT}}}});
 
-REG_ASC_IR(All).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::AllAscIrAttImplV2>(),
-                                       af::ascir::AscIrImplCreator<af::ascir::AllAscIrCodegenImplV2>(),
-                                       {{"T", TensorType{DT_FLOAT}}}});
+REG_ASC_IR(All).Impl(v2_soc_versions,
+                     {af::ascir::AscIrImplCreator<af::ascir::AllAscIrAttImplV2>(),
+                      af::ascir::AscIrImplCreator<af::ascir::AllAscIrCodegenImplV2>(),
+                      {{"T", TensorType{DT_BOOL, DT_UINT8, DT_INT8, DT_INT16, DT_INT32, DT_INT64, DT_FLOAT}}}});
 
 REG_ASC_IR(Add).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::AddAscIrAttImplV2>(),
                                        af::ascir::AscIrImplCreator<af::ascir::AddAscIrCodegenImplV2>(),

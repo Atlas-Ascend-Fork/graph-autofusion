@@ -19,6 +19,7 @@ struct NodeDtypeRequirement {
   af::AscNodePtr node;
   std::vector<af::DataType> input_dtypes;
   std::vector<af::DataType> output_dtypes;
+  std::vector<std::vector<af::DataType>> output_cast_paths;
 };
 
 class DtypeConsistency {
@@ -32,6 +33,9 @@ class DtypeConsistency {
 
   // Process output dtype: directly modify the dtype of node's output tensor
   static af::Status ProcessOutputDtype(const NodeDtypeRequirement &req);
+
+  // Apply ASCIR codegen output cast paths when direct execution-to-output conversion cannot preserve semantics.
+  static af::Status ProcessOutputCastPath(af::AscGraph &graph, const NodeDtypeRequirement &req);
 
   // Process input dtype: insert Cast when dtype does not match
   static af::Status ProcessInputDtype(af::AscGraph &graph, const NodeDtypeRequirement &req);

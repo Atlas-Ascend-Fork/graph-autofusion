@@ -9,6 +9,8 @@
  */
 
 #include "gtest/gtest.h"
+#include <algorithm>
+#include <memory>
 #include "ascir_ops.h"
 #include "codegen_kernel.h"
 #include "utils/api_call_factory.h"
@@ -149,6 +151,331 @@ TEST_F(RegReduceApicallTest, RegReduceApi_Test_001) {
   EXPECT_NE(result.find("ReduceMaxExtend<"), std::string::npos) << result;
   EXPECT_NE(result.find("AscendC::Pattern::Reduce::AR"), std::string::npos);
   EXPECT_EQ(result.find("AscirNodeParams"), std::string::npos);
+}
+
+namespace {
+void TestBoolLogicalReduceUsesUint8ExecutionView(const std::string &api_name, bool multi_reduce = false) {
+  const bool is_any = api_name == "ReduceAny";
+
+  std::vector<ascir::AxisId> current_axis;
+  std::vector<std::reference_wrapper<const Tensor>> inputs;
+  std::vector<std::reference_wrapper<const Tensor>> outputs;
+
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  af::SizeVar s2(af::Symbol("s2"));
+
+  af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileInner, .size = s0.expr};
+  af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s1.expr};
+  af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeTileInner, .size = s2.expr};
+
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  tiler.AddSizeVar(af::SizeVar(s2));
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddAxis(z2);
+  current_axis.push_back(z1.id);
+
+  codegen::TPipe tpipe("tpipe", tiler);
+  af::AscGraph graph("test");
+  af::ascir_op::Data x("x", graph);
+  af::ascir_op::Data y("y", graph);
+  auto reduce = is_any ? std::unique_ptr<af::Operator>(std::make_unique<af::ascir_op::Any>("reduce"))
+                       : std::make_unique<af::ascir_op::All>("reduce");
+  auto reduce_node = graph.AddNode(*reduce);
+
+  auto nodex = graph.FindNode("x");
+  af::AscTensor tensorx = nodex->outputs[0];
+  auto nodey = graph.FindNode("y");
+  af::AscTensor tensory = nodey->outputs[0];
+
+  tensorx.attr.axis = {z0.id, z1.id, z2.id};
+  tensorx.attr.vectorized_axis = {z0.id, z2.id};
+  tensorx.attr.repeats = {z0.size, z1.size, z2.size};
+  tensorx.attr.strides = {z1.size * z2.size, z2.size, One};
+  tensorx.attr.mem.tensor_id = 1;
+  tensorx.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensorx.attr.mem.position = af::Position::kPositionVecIn;
+  tensorx.attr.opt.merge_scope = af::kIdNone;
+  tensorx.attr.buf.id = 2;
+  tensorx.attr.dtype = af::DT_BOOL;
+  tensorx.attr.vectorized_strides = {One, One};
+
+  tensory.attr.axis = {z0.id, z1.id, z2.id};
+  tensory.attr.vectorized_axis = {z0.id, z2.id};
+  tensory.attr.repeats =
+      multi_reduce ? std::vector<af::Expression>{One, One, One} : std::vector<af::Expression>{z0.size, One, One};
+  if (multi_reduce) {
+    tensory.attr.strides = {s0.expr, Zero, Zero};
+  } else {
+    tensory.attr.strides = {One, Zero, Zero};
+  }
+  tensory.attr.mem.tensor_id = 3;
+  tensory.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensory.attr.mem.position = af::Position::kPositionVecOut;
+  tensory.attr.opt.merge_scope = af::kIdNone;
+  tensory.attr.buf.id = 4;
+  tensory.attr.dtype = af::DT_BOOL;
+  tensory.attr.vectorized_strides = {One, Zero};
+
+  std::string dtype_name;
+  Tensor::DtypeName(tensory.attr.dtype, dtype_name);
+  Tensor tensor1(tensorx, dtype_name);
+  Tensor output_tensor(tensory, dtype_name);
+  inputs.push_back(std::ref(tensor1));
+  outputs.push_back(std::ref(output_tensor));
+
+  codegen::ApiTensor x_tensor;
+  codegen::ApiTensor y_tensor;
+  x_tensor.id = tensorx.attr.mem.tensor_id;
+  y_tensor.id = tensory.attr.mem.tensor_id;
+  y_tensor.reuse_id = tensory.attr.mem.reuse_id;
+
+  codegen::RegReduceApiCall call(api_name);
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.type = is_any ? "Max" : "Min";
+  call.node = reduce_node;
+  call.node_name = reduce_node->GetName();
+  y_tensor.write = &call;
+  call.inputs.push_back(&x_tensor);
+  call.outputs.push_back(y_tensor);
+
+  EXPECT_EQ(tpipe.AddTensor(tensor1), 0);
+  EXPECT_EQ(tpipe.AddTensor(output_tensor), 0);
+
+  std::string result;
+  call.tmp_buf_id[-1] = 0;
+  call.tmp_buf_id[0] = 1;
+  ASSERT_EQ(call.Generate(tpipe, current_axis, result), af::SUCCESS) << result;
+
+  const auto api_param = CodegenApiParam::GetNodeApiParam(reduce_node);
+  ASSERT_NE(api_param, nullptr);
+  ASSERT_EQ(api_param->template_params.size(), 3U);
+  const auto block_start = std::find(api_param->api_pre_process.begin(), api_param->api_pre_process.end(), "{\n");
+  ASSERT_NE(block_start, api_param->api_pre_process.end());
+  const auto input_view = std::find_if(block_start, api_param->api_pre_process.end(), [](const std::string &line) {
+    return line.find("_exec = ") != std::string::npos;
+  });
+  ASSERT_NE(input_view, api_param->api_pre_process.end());
+  EXPECT_EQ(std::count_if(input_view, api_param->api_pre_process.end(),
+                          [](const std::string &line) { return line.find("_exec = ") != std::string::npos; }),
+            2);
+  EXPECT_EQ(api_param->template_params[0], "uint8_t");
+  EXPECT_NE(result.find(".template ReinterpretCast<uint8_t>()"), std::string::npos) << result;
+  EXPECT_NE(result.find("ReduceInit<uint8_t, " + std::to_string(is_any ? 4 : 5)), std::string::npos) << result;
+  EXPECT_NE(result.find(api_name + "Extend<uint8_t"), std::string::npos) << result;
+  EXPECT_EQ(result.find(api_name + "Extend<bool"), std::string::npos) << result;
+}
+}  // namespace
+
+TEST_F(RegReduceApicallTest, RegReduceApi_BoolAnyUsesUint8ExecutionView) {
+  TestBoolLogicalReduceUsesUint8ExecutionView("ReduceAny");
+}
+
+TEST_F(RegReduceApicallTest, RegReduceApi_BoolAllUsesUint8ExecutionView) {
+  TestBoolLogicalReduceUsesUint8ExecutionView("ReduceAll");
+}
+
+TEST_F(RegReduceApicallTest, RegReduceApi_BoolAnyMultiReduceUsesUint8ExecutionView) {
+  TestBoolLogicalReduceUsesUint8ExecutionView("ReduceAny", true);
+}
+
+TEST_F(RegReduceApicallTest, RegReduceApi_AnyDirectIntegerDtypes) {
+  const std::vector<std::pair<ge::DataType, std::string>> cases = {
+      {ge::DT_INT8, "int8_t"}, {ge::DT_INT16, "int16_t"}, {ge::DT_INT32, "int32_t"}, {ge::DT_INT64, "int64_t"}};
+  for (const auto &dtype_case : cases) {
+    std::vector<ascir::AxisId> current_axis;
+    std::vector<std::reference_wrapper<const Tensor>> inputs;
+    std::vector<std::reference_wrapper<const Tensor>> outputs;
+
+    af::SizeVar s0(af::Symbol("s0"));
+    af::SizeVar s1(af::Symbol("s1"));
+    af::SizeVar s2(af::Symbol("s2"));
+    af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileInner, .size = s0.expr};
+    af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s1.expr};
+    af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeTileInner, .size = s2.expr};
+
+    codegen::Tiler tiler;
+    tiler.AddSizeVar(af::SizeVar(s0));
+    tiler.AddSizeVar(af::SizeVar(s1));
+    tiler.AddSizeVar(af::SizeVar(s2));
+    tiler.AddAxis(z0);
+    tiler.AddAxis(z1);
+    tiler.AddAxis(z2);
+    current_axis.push_back(z1.id);
+
+    codegen::TPipe tpipe("tpipe", tiler);
+    af::AscGraph graph("test");
+    af::ascir_op::Data x("x", graph);
+    af::ascir_op::Data y("y", graph);
+    auto reduce = std::make_unique<af::ascir_op::Any>("reduce");
+    auto reduce_node = graph.AddNode(*reduce);
+
+    auto nodex = graph.FindNode("x");
+    af::AscTensor tensorx = nodex->outputs[0];
+    auto nodey = graph.FindNode("y");
+    af::AscTensor tensory = nodey->outputs[0];
+
+    tensorx.attr.axis = {z0.id, z1.id, z2.id};
+    tensorx.attr.vectorized_axis = {z0.id, z2.id};
+    tensorx.attr.repeats = {z0.size, z1.size, z2.size};
+    tensorx.attr.strides = {z1.size * z2.size, z2.size, One};
+    tensorx.attr.mem.tensor_id = 1;
+    tensorx.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+    tensorx.attr.mem.position = af::Position::kPositionVecIn;
+    tensorx.attr.opt.merge_scope = af::kIdNone;
+    tensorx.attr.buf.id = 2;
+    tensorx.attr.dtype = dtype_case.first;
+    tensorx.attr.vectorized_strides = {One, One};
+
+    tensory.attr.axis = {z0.id, z1.id, z2.id};
+    tensory.attr.vectorized_axis = {z0.id, z2.id};
+    tensory.attr.repeats = {z0.size, One, One};
+    tensory.attr.strides = {One, Zero, Zero};
+    tensory.attr.mem.tensor_id = 3;
+    tensory.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+    tensory.attr.mem.position = af::Position::kPositionVecOut;
+    tensory.attr.opt.merge_scope = af::kIdNone;
+    tensory.attr.buf.id = 4;
+    tensory.attr.dtype = dtype_case.first;
+    tensory.attr.vectorized_strides = {One, Zero};
+
+    std::string dtype_name;
+    Tensor::DtypeName(tensory.attr.dtype, dtype_name);
+    Tensor tensor1(tensorx, dtype_name);
+    Tensor output_tensor(tensory, dtype_name);
+    inputs.push_back(std::ref(tensor1));
+    outputs.push_back(std::ref(output_tensor));
+
+    codegen::ApiTensor x_tensor;
+    codegen::ApiTensor y_tensor;
+    x_tensor.id = tensorx.attr.mem.tensor_id;
+    y_tensor.id = tensory.attr.mem.tensor_id;
+    y_tensor.reuse_id = tensory.attr.mem.reuse_id;
+
+    codegen::RegReduceApiCall call("ReduceAny");
+    call.unit = af::ComputeUnit::kUnitVector;
+    call.type = "Max";
+    call.node = reduce_node;
+    call.node_name = reduce_node->GetName();
+    y_tensor.write = &call;
+    call.inputs.push_back(&x_tensor);
+    call.outputs.push_back(y_tensor);
+
+    EXPECT_EQ(tpipe.AddTensor(tensor1), 0);
+    EXPECT_EQ(tpipe.AddTensor(output_tensor), 0);
+
+    std::string result;
+    call.tmp_buf_id[-1] = 0;
+    call.tmp_buf_id[0] = 1;
+    ASSERT_EQ(call.Generate(tpipe, current_axis, result), af::SUCCESS) << result;
+    const auto api_param = CodegenApiParam::GetNodeApiParam(reduce_node);
+    ASSERT_NE(api_param, nullptr);
+    ASSERT_EQ(api_param->template_params.size(), 3U);
+    EXPECT_EQ(api_param->template_params[0], dtype_case.second);
+    EXPECT_NE(result.find("ReduceAnyExtend<" + dtype_case.second), std::string::npos) << result;
+    EXPECT_EQ(result.find("LocalTensor<uint8_t>"), std::string::npos) << result;
+  }
+}
+
+TEST_F(RegReduceApicallTest, RegReduceApi_AllDirectIntegerDtypes) {
+  const std::vector<std::pair<ge::DataType, std::string>> cases = {
+      {ge::DT_INT8, "int8_t"}, {ge::DT_INT16, "int16_t"}, {ge::DT_INT32, "int32_t"}, {ge::DT_INT64, "int64_t"}};
+  for (const auto &dtype_case : cases) {
+    std::vector<ascir::AxisId> current_axis;
+    std::vector<std::reference_wrapper<const Tensor>> inputs;
+    std::vector<std::reference_wrapper<const Tensor>> outputs;
+
+    af::SizeVar s0(af::Symbol("s0"));
+    af::SizeVar s1(af::Symbol("s1"));
+    af::SizeVar s2(af::Symbol("s2"));
+    af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileInner, .size = s0.expr};
+    af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s1.expr};
+    af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeTileInner, .size = s2.expr};
+
+    codegen::Tiler tiler;
+    tiler.AddSizeVar(af::SizeVar(s0));
+    tiler.AddSizeVar(af::SizeVar(s1));
+    tiler.AddSizeVar(af::SizeVar(s2));
+    tiler.AddAxis(z0);
+    tiler.AddAxis(z1);
+    tiler.AddAxis(z2);
+    current_axis.push_back(z1.id);
+
+    codegen::TPipe tpipe("tpipe", tiler);
+    af::AscGraph graph("test");
+    af::ascir_op::Data x("x", graph);
+    af::ascir_op::Data y("y", graph);
+    auto reduce = std::make_unique<af::ascir_op::All>("reduce");
+    auto reduce_node = graph.AddNode(*reduce);
+
+    auto nodex = graph.FindNode("x");
+    af::AscTensor tensorx = nodex->outputs[0];
+    auto nodey = graph.FindNode("y");
+    af::AscTensor tensory = nodey->outputs[0];
+
+    tensorx.attr.axis = {z0.id, z1.id, z2.id};
+    tensorx.attr.vectorized_axis = {z0.id, z2.id};
+    tensorx.attr.repeats = {z0.size, z1.size, z2.size};
+    tensorx.attr.strides = {z1.size * z2.size, z2.size, One};
+    tensorx.attr.mem.tensor_id = 1;
+    tensorx.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+    tensorx.attr.mem.position = af::Position::kPositionVecIn;
+    tensorx.attr.opt.merge_scope = af::kIdNone;
+    tensorx.attr.buf.id = 2;
+    tensorx.attr.dtype = dtype_case.first;
+    tensorx.attr.vectorized_strides = {One, One};
+
+    tensory.attr.axis = {z0.id, z1.id, z2.id};
+    tensory.attr.vectorized_axis = {z0.id, z2.id};
+    tensory.attr.repeats = {z0.size, One, One};
+    tensory.attr.strides = {One, Zero, Zero};
+    tensory.attr.mem.tensor_id = 3;
+    tensory.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+    tensory.attr.mem.position = af::Position::kPositionVecOut;
+    tensory.attr.opt.merge_scope = af::kIdNone;
+    tensory.attr.buf.id = 4;
+    tensory.attr.dtype = dtype_case.first;
+    tensory.attr.vectorized_strides = {One, Zero};
+
+    std::string dtype_name;
+    Tensor::DtypeName(tensory.attr.dtype, dtype_name);
+    Tensor tensor1(tensorx, dtype_name);
+    Tensor output_tensor(tensory, dtype_name);
+    inputs.push_back(std::ref(tensor1));
+    outputs.push_back(std::ref(output_tensor));
+
+    codegen::ApiTensor x_tensor;
+    codegen::ApiTensor y_tensor;
+    x_tensor.id = tensorx.attr.mem.tensor_id;
+    y_tensor.id = tensory.attr.mem.tensor_id;
+    y_tensor.reuse_id = tensory.attr.mem.reuse_id;
+
+    codegen::RegReduceApiCall call("ReduceAll");
+    call.unit = af::ComputeUnit::kUnitVector;
+    call.type = "Min";
+    call.node = reduce_node;
+    call.node_name = reduce_node->GetName();
+    y_tensor.write = &call;
+    call.inputs.push_back(&x_tensor);
+    call.outputs.push_back(y_tensor);
+
+    EXPECT_EQ(tpipe.AddTensor(tensor1), 0);
+    EXPECT_EQ(tpipe.AddTensor(output_tensor), 0);
+
+    std::string result;
+    call.tmp_buf_id[-1] = 0;
+    call.tmp_buf_id[0] = 1;
+    ASSERT_EQ(call.Generate(tpipe, current_axis, result), af::SUCCESS) << result;
+    const auto api_param = CodegenApiParam::GetNodeApiParam(reduce_node);
+    ASSERT_NE(api_param, nullptr);
+    ASSERT_EQ(api_param->template_params.size(), 3U);
+    EXPECT_EQ(api_param->template_params[0], dtype_case.second);
+    EXPECT_NE(result.find("ReduceAllExtend<" + dtype_case.second), std::string::npos) << result;
+    EXPECT_EQ(result.find("LocalTensor<uint8_t>"), std::string::npos) << result;
+  }
 }
 
 TEST_F(RegReduceApicallTest, RegReduceApi_Test_002) {
@@ -974,4 +1301,138 @@ TEST_F(RegReduceApicallTest, ReduceSumInt8AndInt16DoNotRequireCast) {
     EXPECT_EQ(input_dtypes[0], dtype);
     EXPECT_EQ(output_dtypes[0], dtype);
   }
+}
+
+TEST_F(RegReduceApicallTest, ReduceProdIntegerDtypeConversions) {
+  const std::vector<std::pair<af::DataType, af::DataType>> dtype_cases = {{af::DT_INT8, af::DT_INT16},
+                                                                          {af::DT_INT16, af::DT_INT16},
+                                                                          {af::DT_INT32, af::DT_INT32},
+                                                                          {af::DT_INT64, af::DT_INT64},
+                                                                          {af::DT_FLOAT, af::DT_FLOAT}};
+
+  for (const auto &[dtype, exec_dtype] : dtype_cases) {
+    SCOPED_TRACE(::testing::Message() << "dtype=" << static_cast<int32_t>(dtype));
+    af::AscGraph graph("reduce_prod_integer_dtype");
+
+    af::ascir_op::Data data("data", graph);
+    data.y.dtype = dtype;
+
+    af::ascir_op::Prod prod("prod");
+    prod.x = data.y;
+    prod.y.dtype = dtype;
+
+    auto prod_node = graph.FindNode("prod");
+    ASSERT_NE(prod_node, nullptr);
+    auto codegen_impl = ascgen_utils::GetAscIrCodegenImpl(prod_node->GetType());
+    ASSERT_NE(codegen_impl, nullptr);
+
+    const auto [input_dtypes, output_dtypes] = codegen_impl->GetConversionDtype(*prod_node);
+    const auto output_cast_paths = codegen_impl->GetOutputConversionPath(*prod_node);
+    ASSERT_EQ(input_dtypes.size(), 1U);
+    ASSERT_EQ(output_dtypes.size(), 1U);
+    EXPECT_EQ(input_dtypes[0], exec_dtype);
+    EXPECT_EQ(output_dtypes[0], exec_dtype);
+    if (dtype == af::DT_INT8) {
+      ASSERT_EQ(output_cast_paths.size(), 1U);
+      ASSERT_EQ(output_cast_paths[0], (std::vector<af::DataType>({af::DT_UINT8, af::DT_INT8})));
+    } else {
+      EXPECT_TRUE(output_cast_paths.empty());
+    }
+  }
+}
+
+TEST_F(RegReduceApicallTest, ReduceProdUsesReuseSourceWhenSourceIsExclusive) {
+  std::vector<ascir::AxisId> current_axis;
+  std::vector<std::reference_wrapper<const Tensor>> inputs;
+  std::vector<std::reference_wrapper<const Tensor>> outputs;
+
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  af::SizeVar s2(af::Symbol("s2"));
+  af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileInner, .size = s0.expr};
+  af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s1.expr};
+  af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeTileInner, .size = s2.expr};
+
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  tiler.AddSizeVar(af::SizeVar(s2));
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddAxis(z2);
+  current_axis.push_back(z1.id);
+
+  codegen::TPipe tpipe("tpipe", tiler);
+  af::AscGraph graph("reduce_prod_no_reuse_source");
+
+  af::ascir_op::Data x("x", graph);
+  x.y.dtype = af::DT_INT16;
+
+  af::ascir_op::Prod prod("prod");
+  prod.x = x.y;
+  prod.y.dtype = af::DT_INT16;
+
+  auto prod_node = graph.FindNode("prod");
+  ASSERT_NE(prod_node, nullptr);
+
+  auto node_x = graph.FindNode("x");
+  af::AscTensor tensor_x = node_x->outputs[0];
+  tensor_x.attr.axis = {z0.id, z1.id, z2.id};
+  tensor_x.attr.vectorized_axis = {z0.id, z2.id};
+  tensor_x.attr.repeats = {z0.size, z1.size, z2.size};
+  tensor_x.attr.strides = {z1.size * z2.size, z2.size, One};
+  tensor_x.attr.mem.tensor_id = 1;
+  tensor_x.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensor_x.attr.mem.position = af::Position::kPositionVecIn;
+  tensor_x.attr.opt.merge_scope = af::kIdNone;
+  tensor_x.attr.buf.id = 2;
+  tensor_x.attr.dtype = af::DT_INT16;
+  tensor_x.attr.vectorized_strides = {One, One};
+
+  af::AscTensor tensor_y = prod_node->outputs[0];
+  tensor_y.attr.axis = {z0.id, z1.id, z2.id};
+  tensor_y.attr.vectorized_axis = {z0.id, z2.id};
+  tensor_y.attr.repeats = {z0.size, One, One};
+  tensor_y.attr.strides = {One, Zero, Zero};
+  tensor_y.attr.mem.tensor_id = 3;
+  tensor_y.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensor_y.attr.mem.position = af::Position::kPositionVecOut;
+  tensor_y.attr.opt.merge_scope = af::kIdNone;
+  tensor_y.attr.buf.id = 4;
+  tensor_y.attr.dtype = af::DT_INT16;
+  tensor_y.attr.vectorized_strides = {One, Zero};
+
+  RegReduceApiCall call("ReduceProd");
+  std::string dtype_name;
+  Tensor::DtypeName(tensor_y.attr.dtype, dtype_name);
+  Tensor input_tensor(tensor_x, dtype_name);
+  Tensor output_tensor(tensor_y, dtype_name);
+  inputs.push_back(std::ref(input_tensor));
+  outputs.push_back(std::ref(output_tensor));
+
+  codegen::ApiTensor x_tensor;
+  codegen::ApiTensor y_tensor;
+  x_tensor.id = tensor_x.attr.mem.tensor_id;
+  y_tensor.id = tensor_y.attr.mem.tensor_id;
+  y_tensor.reuse_id = tensor_y.attr.mem.reuse_id;
+
+  EXPECT_EQ(tpipe.AddTensor(input_tensor), 0);
+  EXPECT_EQ(tpipe.AddTensor(output_tensor), 0);
+
+  ASSERT_EQ(call.CallParseAttr(prod_node), af::SUCCESS);
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.type = "Prod";
+  call.node = prod_node;
+  call.node_name = prod_node->GetName();
+  y_tensor.write = &call;
+  call.inputs.push_back(&x_tensor);
+  call.outputs.push_back(y_tensor);
+
+  std::string result;
+  call.tmp_buf_id[-1] = 0;
+  call.tmp_buf_id[0] = 1;
+  ASSERT_EQ(call.Generate(tpipe, current_axis, result), af::SUCCESS) << result;
+  const auto api_param = CodegenApiParam::GetNodeApiParam(prod_node);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "AR/ReuseSrc/MultiRound");
 }

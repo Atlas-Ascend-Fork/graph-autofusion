@@ -543,11 +543,12 @@ bool IsTilerLastReduceAxis(const Tensor &tensor) {
 }
 
 void ReduceInitCodeGen(const Tensor &x, const Tensor &y, const int &type_value, std::vector<std::string> &lines,
-                       const TPipe &tpipe, const std::string &dtype_name) {
+                       const TPipe &tpipe, const std::string &dtype_name, const std::string &x_name_after_reinterpret) {
   if (x.isAr) {
     std::string is_last_axis_str = IsTilerLastReduceAxis(y) ? "true" : "false";
     std::stringstream ss;
-    ss << "ReduceInit<" << dtype_name << ", " << type_value << ", " << is_last_axis_str << ">(" << x << ", "
+    ss << "ReduceInit<" << dtype_name << ", " << type_value << ", " << is_last_axis_str << ">("
+       << (x_name_after_reinterpret.empty() ? x.Str() : x_name_after_reinterpret) << ", "
        << "first_actual" << ", last" << ", last_actual, " << tpipe.tiler.GetAxis(x.vectorized_axis.back()).actual_size
        << ");" << std::endl;
     lines.emplace_back(ss.str());

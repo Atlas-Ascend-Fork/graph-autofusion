@@ -78,6 +78,38 @@ GE defines the following Reduce operator types at the Ascend IR level, mapped to
 
 Additionally, GE has variants with a "D" suffix (ReduceSumD, ReduceMaxD, etc.), where axes information is passed via attributes rather than a second input tensor.
 
+#### Prod Data Type Support
+
+In the AscIR V2 path, Prod supports `int8`, `int16`, `int32`, `int64`, and `float32`:
+
+| Data Type | Execution Type | Description |
+|-----------|----------------|-------------|
+| `int8` | `int16` | Widens input to `int16` for execution and truncates output back to `int8` |
+| `int16` | `int16` | Direct execution |
+| `int32` | `int32` | Direct execution |
+| `int64` | `int64` | Uses the b64 dual-register branch |
+| `float32` | `float32` | Direct execution |
+
+The `int8` execution result is truncated back to `int8`. For example, `100 * 100 = 10000` is output as `16` rather than the saturated value `127`.
+
+`bool` and `uint8` are not supported in this release. `Reg::Mul` on 3510-class architectures does not support 8-bit types, so these inputs retain the existing non-fused behavior.
+
+#### Any/All Data Type Support
+
+In the AscIR V2 path, Any/All supports `bool`, `uint8`, `int8`, `int16`, `int32`, `int64`, and `float32`:
+
+| Data Type | Execution Type | Description |
+|-----------|----------------|-------------|
+| `bool` | `uint8` | Executes through zero-copy reinterpretation of the 0/1 bit pattern |
+| `uint8` | `uint8` | Direct execution |
+| `int8` | `int8` | Direct execution |
+| `int16` | `int16` | Direct execution |
+| `int32` | `int32` | Direct execution |
+| `int64` | `int64` | Uses the b64 dual-register branch |
+| `float32` | `float32` | Direct execution |
+
+Logical inputs must be in the 0/1 value range; non-bool inputs should be normalized to nonzero checks before entering Any/All. `uint16`, `uint64`, `fp16`, `bf16`, and `fp64` are not registered, so these inputs retain the existing non-fused behavior.
+
 ### 3. Computation Logic
 
 The core computation logic of Reduce operators can be uniformly described as:

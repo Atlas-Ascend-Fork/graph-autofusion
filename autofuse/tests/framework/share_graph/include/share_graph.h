@@ -175,6 +175,10 @@ struct ShareGraph {
                                                          bool mixed_index_pre = false, bool direct_index = false);
   static af::ComputeGraphPtr MatMulFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr GatherReduceStore(int64_t gather_axis, af::DataType data_type);
+  static af::ComputeGraphPtr LoadAnyReduceStoreFusedGraph(af::DataType dtype);
+  static af::ComputeGraphPtr LoadAllReduceStoreFusedGraph(af::DataType dtype);
+  static af::ComputeGraphPtr LoadProdReduceStoreFusedGraph(af::DataType dtype);
+  static af::ComputeGraphPtr LoadProdReduceStoreRaFusedGraph(af::DataType dtype);
   static af::ComputeGraphPtr LoadWhereReduceStoreFusedGraph(size_t dims_size, bool x2_scalar, bool x3_scalar);
   static af::ComputeGraphPtr LoadCompareStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadLeBoolStoreFusedGraph(size_t dims_size);

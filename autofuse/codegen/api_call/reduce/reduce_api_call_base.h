@@ -63,7 +63,8 @@ bool IsNeedMultiReduce(const Tiler &tiler, const Tensor &input, const Tensor &ou
 void ReduceMeanCodeGen(std::string &dtype_name, const TPipe &tpipe, const Tensor &src, const Tensor &dst,
                        std::vector<std::string> &lines);
 void ReduceInitCodeGen(const Tensor &x, const Tensor &y, const int &type_value, std::vector<std::string> &lines,
-                       const TPipe &tpipe, const std::string &dtype_name);
+                       const TPipe &tpipe, const std::string &dtype_name,
+                       const std::string &x_name_after_reinterpret = "");
 void ReduceDimACodeGen(const Tensor &x, const std::string &apiName, std::vector<std::string> &lines);
 Status GetDtypeNameForReduce(const std::string &api_name, const Tensor &x, const Tensor &y, std::string &dtype_name);
 void GenAccumulatedOffsetDeclForArgmax(const std::string &api_name, const Tensor &x, const Tensor &y,

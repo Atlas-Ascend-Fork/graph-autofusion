@@ -217,6 +217,14 @@ TEST_F(TestApiCast, Cast_Test_Int16_Uint8) {
   CastTest<int16_t, uint8_t, 2>({1, 128}, {0, 1}, {0, 1});
 }
 
+TEST_F(TestApiCast, Cast_Test_Int16_Uint8_TruncValues) {
+  const int16_t values[] = {-3, -1, 0, 127, 128, 255, 256, 10000};
+  const uint8_t expected[] = {253, 255, 0, 127, 128, 255, 0, 16};
+  constexpr uint32_t output_dims[] = {1, 8};
+  constexpr uint32_t strides[] = {0, 1};
+  CastTestWithExpected<int16_t, uint8_t, 2>(values, expected, 8, output_dims, strides, strides);
+}
+
 TEST_F(TestApiCast, Cast_Test_Int8_Bool) {
   CastTest<int8_t, bool, 2>({1, 128}, {0, 1}, {0, 1});
 }

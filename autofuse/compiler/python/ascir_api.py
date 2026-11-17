@@ -1733,9 +1733,38 @@ def Prod(
     size: Optional[List[ascir.SizeExpr]] = None,
     stride: Optional[List[ascir.SizeExpr]] = None,
 ) -> ascir.OpsOperatorOutput:
-    return _common_in_1_out_1_normal_op(
-        "Prod", owner_graph, x, axis=axis, size=size, stride=stride
+    if x.dtype != ascir.dtypes.int8:
+        return _common_in_1_out_1_normal_op(
+            "Prod", owner_graph, x, axis=axis, size=size, stride=stride
+        )
+
+    executed = Cast(
+        owner_graph,
+        x,
+        dtype=ascir.dtypes.int16,
+        axis=axis,
+        size=size,
+        stride=stride,
     )
+    product = _common_in_1_out_1_normal_op(
+        "Prod", owner_graph, executed, axis=axis, size=size, stride=stride
+    )
+    truncated = Cast(
+        owner_graph,
+        Cast(
+            owner_graph,
+            product,
+            dtype=ascir.dtypes.uint8,
+            axis=axis,
+            size=size,
+            stride=stride,
+        ),
+        dtype=ascir.dtypes.int8,
+        axis=axis,
+        size=size,
+        stride=stride,
+    )
+    return truncated
 
 
 def Ge(

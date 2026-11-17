@@ -225,6 +225,42 @@ class TestAscir:
         assert debug_str
 
     @staticmethod
+    def test_graph_create_node_with_prod_int8_api():
+        ascir.utils.set_platform("3510", 1, 245760)
+        try:
+            graph = ascir.HintGraph("test_prod_int8_api")
+            s0 = graph.create_size("s0")
+            axis = graph.create_axis("axis", s0)
+
+            x = ascir_api.Data(graph, dtype=ascir.dtypes.int8)
+            output = ascir_api.Prod(graph, x, axis=[axis])
+
+            assert output.dtype == ascir.dtypes.int8
+            debug_str = ascir.utils.debug_str(graph)
+            assert "data_0: Data" in debug_str
+            assert ".y: int8_t" in debug_str
+            assert "cast_0: Cast" in debug_str
+            assert ".y: int16_t" in debug_str
+            assert "prod_0: Prod" in debug_str
+            assert "cast_1: Cast" in debug_str
+            assert ".y: uint8_t" in debug_str
+            assert "cast_2: Cast" in debug_str
+            assert ".x = cast_1.y" in debug_str
+            assert ".y: int8_t" in debug_str
+
+            stored = ascir_api.Store(
+                graph,
+                output,
+                axis=[axis],
+                size=[s0],
+                stride=[ascir.SizeExpr(1)],
+            )
+            ascir_api.Output(graph, stored, dtype=ascir.dtypes.int8)
+            Autofuser(AutofuserOptions()).schedule(graph)
+        finally:
+            ascir.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
     def test_index_expr_and_arange_api():
         ascir.utils.set_platform("3510", 1, 245760, "SOC_EMPTY")
         try:
@@ -1903,9 +1939,11 @@ class TestCodeGenLoadAbsStore:
                 "#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \\\n"
                 "  struct_type filed_name;\n\n"
                 "BEGIN_TILING_DATA_DEF_T(AutofuseTilingData)\n"
-                "  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);\n"
-                "  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, z0z1z2t_size);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, z0z1z2Tb_size);\n"
                 "END_TILING_DATA_DEF_T;\n\n"
@@ -2011,9 +2049,11 @@ class TestComputeGraphInput:
                 "#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \\\n"
                 "  struct_type filed_name;\n\n"
                 "BEGIN_TILING_DATA_DEF_T(AutofuseTilingData)\n"
-                "  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);\n"
-                "  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, z0z1z2t_size);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, z0z1z2Tb_size);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, q0_size);\n"
@@ -3150,7 +3190,7 @@ class TestSizeExprErrorScenarios:
         s1 = ascir.SizeExpr(50)
         # This tests the operator in reverse - string formatting with SizeExpr
         try:
-            "invalid" % s1  # noqa: F507
+            "invalid" % s1
             # String % with SizeExpr - might work differently
         except (TypeError, AttributeError):
             # Expected - string formatting doesn't support SizeExpr

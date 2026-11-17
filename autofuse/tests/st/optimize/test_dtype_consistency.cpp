@@ -13,6 +13,7 @@
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
 #include "schedule_utils.h"
+#include "../../common/att/soc_perf_test_config.h"
 #define private public
 #include "ascir_utils.h"
 #include "optimize/graph_completeness/dtype_consistency.h"
@@ -31,7 +32,16 @@ namespace {
 
 class TestDtypeConsistencyST : public ::testing::Test {
  protected:
-  void SetUp() override {}
+  void SetUp() override {
+    ge::PlatformContext::GetInstance().Reset();
+    ASSERT_EQ(
+        att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+        af::SUCCESS);
+  }
+
+  void TearDown() override {
+    ge::PlatformContext::GetInstance().Reset();
+  }
 };
 
 // ST Test 1: Complex FP16 -> FP32 -> FP16 conversion chain with multiple operators
@@ -85,6 +95,78 @@ TEST_F(TestDtypeConsistencyST, ComplexFp16ToFp32Chain) {
   EXPECT_EQ(cast_count, 2U);
   EXPECT_TRUE(add_is_fp32);
   EXPECT_TRUE(mul_is_fp32);
+}
+
+TEST_F(TestDtypeConsistencyST, ProdInt8WidensToInt16AndWrapsOutputToInt8) {
+  auto graph = AscGraphBuilder("test_prod_int8_dtype")
+                   .Loops({Sym("s0")})
+                   .Data("data1", 0, {Sym("s0")}, {One}, af::DT_INT8)
+                   .Load("load", "data1")
+                   .Prod("prod", "load", {0})
+                   .Store("store", "prod")
+                   .Build();
+
+  std::vector<optimize::NodeDtypeRequirement> requirements;
+  ASSERT_EQ(optimize::DtypeConsistency::CollectDtypeRequirements(graph, requirements), af::SUCCESS);
+  ASSERT_EQ(optimize::DtypeConsistency::ApplyDtypeConversions(graph, requirements), af::SUCCESS);
+  ASSERT_EQ(optimize::DtypeConsistency::CancelRedundantCast(graph), af::SUCCESS);
+  ASSERT_EQ(optimize::ScheduleUtils::TopologicalSorting(graph), af::SUCCESS);
+
+  size_t cast_count = 0;
+  bool has_int8_to_int16_cast = false;
+  bool has_int16_to_uint8_cast = false;
+  bool has_uint8_to_int8_cast = false;
+  bool prod_is_int16 = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->GetType() == "Prod") {
+      prod_is_int16 = node->inputs[0].attr.dtype == af::DT_INT16 && node->outputs[0].attr.dtype == af::DT_INT16;
+    }
+    if (!IsOps<Cast>(node)) {
+      continue;
+    }
+
+    ++cast_count;
+    has_int8_to_int16_cast = has_int8_to_int16_cast ||
+                             (node->inputs[0].attr.dtype == af::DT_INT8 && node->outputs[0].attr.dtype == af::DT_INT16);
+    has_int16_to_uint8_cast = has_int16_to_uint8_cast || (node->inputs[0].attr.dtype == af::DT_INT16 &&
+                                                          node->outputs[0].attr.dtype == af::DT_UINT8);
+    has_uint8_to_int8_cast = has_uint8_to_int8_cast ||
+                             (node->inputs[0].attr.dtype == af::DT_UINT8 && node->outputs[0].attr.dtype == af::DT_INT8);
+  }
+
+  EXPECT_EQ(cast_count, 3U);
+  EXPECT_TRUE(has_int8_to_int16_cast);
+  EXPECT_TRUE(has_int16_to_uint8_cast);
+  EXPECT_TRUE(has_uint8_to_int8_cast);
+  EXPECT_TRUE(prod_is_int16);
+}
+
+TEST_F(TestDtypeConsistencyST, ProdInt8WithoutConsumerDoesNotInsertOutputCast) {
+  auto graph = AscGraphBuilder("test_prod_int8_no_consumer")
+                   .Loops({Sym("s0")})
+                   .Data("data1", 0, {Sym("s0")}, {One}, af::DT_INT8)
+                   .Load("load", "data1")
+                   .Prod("prod", "load", {0})
+                   .Build();
+
+  std::vector<optimize::NodeDtypeRequirement> requirements;
+  ASSERT_EQ(optimize::DtypeConsistency::CollectDtypeRequirements(graph, requirements), af::SUCCESS);
+  ASSERT_EQ(optimize::DtypeConsistency::ApplyDtypeConversions(graph, requirements), af::SUCCESS);
+
+  bool has_int16_to_uint8_cast = false;
+  bool has_uint8_to_int8_cast = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (!IsOps<Cast>(node)) {
+      continue;
+    }
+    has_int16_to_uint8_cast = has_int16_to_uint8_cast || (node->inputs[0].attr.dtype == af::DT_INT16 &&
+                                                          node->outputs[0].attr.dtype == af::DT_UINT8);
+    has_uint8_to_int8_cast = has_uint8_to_int8_cast ||
+                             (node->inputs[0].attr.dtype == af::DT_UINT8 && node->outputs[0].attr.dtype == af::DT_INT8);
+  }
+
+  EXPECT_FALSE(has_int16_to_uint8_cast);
+  EXPECT_FALSE(has_uint8_to_int8_cast);
 }
 
 // ST Test 2: Multi-input with different dtypes, all need FP32

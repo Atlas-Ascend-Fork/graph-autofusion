@@ -5019,6 +5019,224 @@ static void CreateLoadWhereReduceStoreAscGraph(af::AscGraph &graph, size_t dims_
   y.ir_attr.SetIndex(0);
 }
 
+static void CreateLoadAnyReduceStoreAscGraph(af::AscGraph &graph, af::DataType dtype) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+  x.attr.sched.axis = {z0.id, z1.id};
+  *x.y.axis = {z0.id, z1.id};
+  *x.y.repeats = {s0, s1};
+  *x.y.strides = {s1, One};
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.attr.api.compute_type = ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+  load.attr.sched.axis = {z0.id, z1.id};
+  *load.y.axis = {z0.id, z1.id};
+  *load.y.repeats = {s0, s1};
+  *load.y.strides = {s1, One};
+  load.attr.api.unit = ComputeUnit::kUnitMTE2;
+  load.y.dtype = dtype;
+
+  af::ascir_op::Any any("any0");
+  any.x = load.y;
+  any.attr.sched.axis = {z0.id, z1.id};
+  *any.y.axis = {z0.id, z1.id};
+  *any.y.repeats = {s0, One};
+  *any.y.strides = {One, Zero};
+  any.y.dtype = dtype;
+
+  af::ascir_op::Store store("store0");
+  store.x = any.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id};
+  *store.y.axis = {z0.id, z1.id};
+  *store.y.repeats = {s0, One};
+  *store.y.strides = {One, Zero};
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output0");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = dtype;
+  y.ir_attr.SetIndex(0);
+}
+
+static void CreateLoadAllReduceStoreAscGraph(af::AscGraph &graph, af::DataType dtype) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+  x.attr.sched.axis = {z0.id, z1.id};
+  *x.y.axis = {z0.id, z1.id};
+  *x.y.repeats = {s0, s1};
+  *x.y.strides = {s1, One};
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.attr.api.compute_type = ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+  load.attr.sched.axis = {z0.id, z1.id};
+  *load.y.axis = {z0.id, z1.id};
+  *load.y.repeats = {s0, s1};
+  *load.y.strides = {s1, One};
+  load.attr.api.unit = ComputeUnit::kUnitMTE2;
+  load.y.dtype = dtype;
+
+  af::ascir_op::All all("all0");
+  all.x = load.y;
+  all.attr.sched.axis = {z0.id, z1.id};
+  *all.y.axis = {z0.id, z1.id};
+  *all.y.repeats = {s0, One};
+  *all.y.strides = {One, Zero};
+  all.y.dtype = dtype;
+
+  af::ascir_op::Store store("store0");
+  store.x = all.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id};
+  *store.y.axis = {z0.id, z1.id};
+  *store.y.repeats = {s0, One};
+  *store.y.strides = {One, Zero};
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output0");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = dtype;
+  y.ir_attr.SetIndex(0);
+}
+
+static void CreateLoadProdReduceStoreAscGraph(af::AscGraph &graph, af::DataType dtype) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+  x.attr.sched.axis = {z0.id, z1.id};
+  *x.y.axis = {z0.id, z1.id};
+  *x.y.repeats = {s0, s1};
+  *x.y.strides = {s1, One};
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.attr.api.compute_type = ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+  load.attr.sched.axis = {z0.id, z1.id};
+  *load.y.axis = {z0.id, z1.id};
+  *load.y.repeats = {s0, s1};
+  *load.y.strides = {s1, One};
+  load.attr.api.unit = ComputeUnit::kUnitMTE2;
+  load.y.dtype = dtype;
+
+  af::ascir_op::Prod prod("prod0");
+  prod.x = load.y;
+  prod.attr.sched.axis = {z0.id, z1.id};
+  *prod.y.axis = {z0.id, z1.id};
+  *prod.y.repeats = {s0, One};
+  *prod.y.strides = {One, Zero};
+  prod.y.dtype = dtype;
+
+  af::ascir_op::Store store("store0");
+  store.x = prod.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id};
+  *store.y.axis = {z0.id, z1.id};
+  *store.y.repeats = {s0, One};
+  *store.y.strides = {One, Zero};
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output0");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = dtype;
+  y.ir_attr.SetIndex(0);
+}
+
+static void CreateLoadProdReduceStoreRaAscGraph(af::AscGraph &graph, af::DataType dtype) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto s2 = graph.CreateSizeVar("s2");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+  x.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *x.y.axis = {z0.id, z1.id, z2.id};
+  *x.y.repeats = {s0, s1, s2};
+  *x.y.strides = {s1 * s2, s2, One};
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.attr.api.compute_type = ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+  load.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *load.y.axis = {z0.id, z1.id, z2.id};
+  *load.y.repeats = {s0, s1, s2};
+  *load.y.strides = {s1 * s2, s2, One};
+  load.attr.api.unit = ComputeUnit::kUnitMTE2;
+  load.y.dtype = dtype;
+
+  af::ascir_op::Prod prod("prod0");
+  prod.x = load.y;
+  prod.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *prod.y.axis = {z0.id, z1.id, z2.id};
+  *prod.y.repeats = {s0, One, s2};
+  *prod.y.strides = {s2, Zero, One};
+  prod.y.dtype = dtype;
+
+  af::ascir_op::Store store("store0");
+  store.x = prod.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *store.y.axis = {z0.id, z1.id, z2.id};
+  *store.y.repeats = {s0, One, s2};
+  *store.y.strides = {s2, Zero, One};
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output0");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = dtype;
+  y.ir_attr.SetIndex(0);
+}
+
 static void CreateLoadWhereReduceX2IsUbscalarStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
   auto s0 = graph.CreateSizeVar("s0");
   auto s1 = graph.CreateSizeVar("s1");
@@ -10780,6 +10998,102 @@ af::ComputeGraphPtr ShareGraph::GatherReduceStore(int64_t gather_axis, af::DataT
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("gather_reduce_store_store_test");
   GatherReduceStore_BeforeAutofuse(sub_graph, gather_axis, data_type);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadAnyReduceStoreFusedGraph(af::DataType dtype) {
+  auto builder = GraphBuilder("load_logical_reduce_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_logical_reduce_store");
+  CreateLoadAnyReduceStoreAscGraph(sub_graph, dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadAllReduceStoreFusedGraph(af::DataType dtype) {
+  auto builder = GraphBuilder("load_logical_reduce_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_logical_reduce_store");
+  CreateLoadAllReduceStoreAscGraph(sub_graph, dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadProdReduceStoreFusedGraph(af::DataType dtype) {
+  auto builder = GraphBuilder("load_prod_reduce_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_prod_reduce_store");
+  CreateLoadProdReduceStoreAscGraph(sub_graph, dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadProdReduceStoreRaFusedGraph(af::DataType dtype) {
+  auto builder = GraphBuilder("load_prod_reduce_store_ra_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_prod_reduce_store_ra");
+  CreateLoadProdReduceStoreRaAscGraph(sub_graph, dtype);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);

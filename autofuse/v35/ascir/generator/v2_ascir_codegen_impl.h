@@ -628,7 +628,7 @@ class AbsAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   // 如果需要插入cast节点，返回cast的目的类型
   [[nodiscard]] std::pair<std::vector<ge::DataType>, std::vector<ge::DataType>> GetConversionDtype(
-      const AscNode &node) {
+      const AscNode &node) override {
     std::map<ge::DataType, ge::DataType> dtype_conversion_map = {{DT_BF16, DT_FLOAT}, {DT_UINT8, DT_INT16}};
     return GetConversionFromDtypeMap(node, dtype_conversion_map);
   }
@@ -2816,6 +2816,18 @@ class ProdAscIrCodegenImplV2 : public AscIrCodegenV2 {
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"reduce_init_reg_base.h", "reduce_extend_reg_base.h"};
   }
+  [[nodiscard]] std::pair<std::vector<ge::DataType>, std::vector<ge::DataType>> GetConversionDtype(
+      const AscNode &node) {
+    const std::map<ge::DataType, ge::DataType> prod_dtype_map = {{ge::DataType::DT_INT8, ge::DataType::DT_INT16}};
+    return GetConversionFromDtypeMap(node, prod_dtype_map);
+  }
+  [[nodiscard]] std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) override {
+    AscNodeOutputs node_outputs = node.outputs;
+    if (node_outputs().empty() || node_outputs[0].attr.dtype != ge::DataType::DT_INT8) {
+      return {};
+    }
+    return {{ge::DataType::DT_UINT8, ge::DataType::DT_INT8}};
+  }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "adv_api/reduce/reduce.h",
@@ -3367,6 +3379,21 @@ class MulAscIrCodegenImplV2 : public AscIrCodegenV2 {
     const std::map<ge::DataType, ge::DataType> mul_dtype_map = {{ge::DataType::DT_INT8, ge::DataType::DT_INT16},
                                                                 {ge::DataType::DT_UINT8, ge::DataType::DT_INT16}};
     return GetConversionFromDtypeMap(node, mul_dtype_map);
+  }
+  [[nodiscard]] std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) override {
+    AscNodeOutputs node_outputs = node.outputs;
+    if (node_outputs().empty() || node_outputs[0].attr.dtype != ge::DataType::DT_INT8) {
+      return {};
+    }
+    const auto first_input = node.GetInDataAnchor(0);
+    const auto first_input_owner =
+        first_input == nullptr || first_input->GetPeerOutAnchor() == nullptr
+            ? nullptr
+            : std::dynamic_pointer_cast<AscNode>(first_input->GetPeerOutAnchor()->GetOwnerNode());
+    if (first_input_owner == nullptr || first_input_owner->GetType() != "Prod") {
+      return {};
+    }
+    return {{ge::DataType::DT_UINT8, ge::DataType::DT_INT8}};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {

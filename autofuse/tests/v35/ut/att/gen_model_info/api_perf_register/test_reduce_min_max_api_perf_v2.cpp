@@ -320,7 +320,7 @@ TEST_F(UTestReduceMinMaxApiPerfV2, AscendCApiReduceSumProdMeanUseReduceBranches)
 
 TEST_F(UTestReduceMinMaxApiPerfV2, AscendCApiReduceSumMeanProdRejectUnsupportedDtypes) {
   auto float16_context = MakeRaContext(kFloat16, {CreateExpr(8), CreateExpr(64)}, true);
-  auto int16_context = MakeRaContext(kInt16, {CreateExpr(8), CreateExpr(64)}, true);
+  auto int8_context = MakeRaContext(kInt8, {CreateExpr(8), CreateExpr(64)}, true);
   auto bfloat16_context = MakeRaContext(kBfloat16, {CreateExpr(8), CreateExpr(64)}, true);
   auto uint64_context = MakeRaContext(kUInt64, {CreateExpr(8), CreateExpr(64)}, true);
 
@@ -331,9 +331,28 @@ TEST_F(UTestReduceMinMaxApiPerfV2, AscendCApiReduceSumMeanProdRejectUnsupportedD
   PerfOutputInfo uint64_prod_perf;
   EXPECT_NE(ascendcapi_v2::ReduceSumPerf(float16_context, sum_perf), af::SUCCESS);
   EXPECT_NE(ascendcapi_v2::ReduceMeanPerf(uint64_context, mean_perf), af::SUCCESS);
-  EXPECT_NE(ascendcapi_v2::ReduceProdPerf(int16_context, prod_perf), af::SUCCESS);
+  EXPECT_EQ(ascendcapi_v2::ReduceProdPerf(int8_context, prod_perf), af::SUCCESS);
   EXPECT_NE(ascendcapi_v2::ReduceMeanPerf(bfloat16_context, bfloat16_mean_perf), af::SUCCESS);
   EXPECT_NE(ascendcapi_v2::ReduceProdPerf(uint64_context, uint64_prod_perf), af::SUCCESS);
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, AscendCApiReduceProdSupportsIntegerDtypes) {
+  auto float_context = MakeArContext(kFloat32, {CreateExpr(8), CreateExpr(64)});
+  PerfOutputInfo float_perf;
+  EXPECT_EQ(ascendcapi_v2::ReduceProdPerf(float_context, float_perf), af::SUCCESS);
+  EXPECT_FALSE(PipeString(float_perf, PipeType::AIV_VEC).empty());
+
+  const std::vector<std::string> dtypes = {kInt8, kInt16, kInt32, kInt64};
+
+  for (const auto &dtype : dtypes) {
+    auto ra_context = MakeRaContext(dtype, {CreateExpr(8), CreateExpr(64)});
+    auto ar_context = MakeArContext(dtype, {CreateExpr(8), CreateExpr(64)});
+    PerfOutputInfo perf;
+    EXPECT_EQ(ascendcapi_v2::ReduceProdPerf(ra_context, perf), af::SUCCESS) << dtype;
+    EXPECT_FALSE(PipeString(perf, PipeType::AIV_VEC).empty()) << dtype;
+    EXPECT_EQ(ascendcapi_v2::ReduceProdPerf(ar_context, perf), af::SUCCESS) << dtype;
+    EXPECT_FALSE(PipeString(perf, PipeType::AIV_VEC).empty()) << dtype;
+  }
 }
 
 TEST_F(UTestReduceMinMaxApiPerfV2, AscendCApiReduceSumSupportsAscendC3510Dtypes) {
@@ -1274,22 +1293,74 @@ TEST_F(UTestReduceMinMaxApiPerfV2, AscirRegistersElementwiseMinMaxOps) {
 }
 
 TEST_F(UTestReduceMinMaxApiPerfV2, ReduceAnyAllUseLogicalReduceEntrypoints) {
-  auto any_context = MakeRaContext(kUInt8, {CreateExpr(8), CreateExpr(64)});
+  auto uint8_context = MakeRaContext(kUInt8, {CreateExpr(8), CreateExpr(64)});
+  auto bool_context = MakeRaContext(kBool, {CreateExpr(8), CreateExpr(64)});
+  const std::vector<std::string> direct_integer_dtypes = {kInt8, kInt16, kInt32, kInt64};
   auto all_context = MakeArContext(kFloat32, {CreateExpr(8), CreateExpr(64)});
+
+  PerfOutputInfo uint8_perf;
+  PerfOutputInfo all_perf;
+  PerfOutputInfo bool_perf;
+  EXPECT_EQ(ascendcapi_v2::ReduceAnyPerf(uint8_context, uint8_perf), af::SUCCESS);
+  EXPECT_EQ(ascendcapi_v2::ReduceAnyPerf(bool_context, bool_perf), af::SUCCESS);
+  EXPECT_EQ(ascendcapi_v2::ReduceAllPerf(all_context, all_perf), af::SUCCESS);
+
+  EXPECT_FALSE(PipeString(uint8_perf, PipeType::AIV_VEC).empty());
+  EXPECT_FALSE(PipeString(all_perf, PipeType::AIV_VEC).empty());
+  EXPECT_EQ(PipeString(bool_perf, PipeType::AIV_VEC), PipeString(uint8_perf, PipeType::AIV_VEC));
+  for (const auto &dtype : direct_integer_dtypes) {
+    auto context = MakeRaContext(dtype, {CreateExpr(8), CreateExpr(64)});
+    PerfOutputInfo perf;
+    EXPECT_EQ(ascendcapi_v2::ReduceAnyPerf(context, perf), af::SUCCESS);
+    EXPECT_EQ(ascendcapi_v2::ReduceAllPerf(context, perf), af::SUCCESS);
+  }
+
+  EXPECT_EQ(PipeString(uint8_perf, PipeType::AIV_VEC).find("reduce_ra_normal_align_case"), std::string::npos);
+  EXPECT_EQ(PipeString(all_perf, PipeType::AIV_VEC).find("reduce_ar_normal_align_case"), std::string::npos);
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ReduceAnyAllInt64UseB64Cost) {
+  auto ar_context = MakeArContext(kInt64, {CreateExpr(8), CreateExpr(64)});
+  auto ra_context = MakeRaContext(kInt64, {CreateExpr(8), CreateExpr(64)});
+  const std::vector<std::pair<ascendcapi_v2::ReduceApiPerfContext, std::string>> cases = {
+      {ar_context, "reduce_ar_b64_align_perf"}, {ra_context, "reduce_ra_b64_align_perf"}};
+  for (const auto &dtype_case : cases) {
+    const auto &context = dtype_case.first;
+    PerfOutputInfo any_perf;
+    PerfOutputInfo all_perf;
+    ASSERT_EQ(ascendcapi_v2::ReduceAnyPerf(context, any_perf), af::SUCCESS);
+    ASSERT_EQ(ascendcapi_v2::ReduceAllPerf(context, all_perf), af::SUCCESS);
+    ASSERT_NE(FindBreakdownItem(any_perf, "reduce_body_perf"), nullptr);
+    ASSERT_NE(FindBreakdownItem(all_perf, "reduce_body_perf"), nullptr);
+    ASSERT_NE(FindBreakdownItem(any_perf, dtype_case.second), nullptr);
+    ASSERT_NE(FindBreakdownItem(all_perf, dtype_case.second), nullptr);
+  }
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ReduceAnyAllLogicalMergeCostIsIncluded) {
+  auto context = MakeRaContext(kBool, {CreateExpr(16), CreateExpr(4)});
+  context.merge_mode = ascendcapi_v2::ReduceMergeMode::kCopy;
+  context.merge_size = CreateExpr(4);
+  context.merge_times = CreateExpr(2);
+
+  PerfOutputInfo perf;
+  EXPECT_EQ(ascendcapi_v2::ReduceAnyPerf(context, perf), af::SUCCESS);
+  ASSERT_NE(FindBreakdownItem(perf, "reduce_body_perf"), nullptr);
+  ASSERT_NE(FindBreakdownItem(perf, "reduce_merge_perf"), nullptr);
+  ASSERT_NE(FindBreakdownItem(perf, "reduce_total_perf"), nullptr);
+  EXPECT_NE(PipeString(perf, PipeType::AIV_VEC), "0");
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ReduceAnyAllRejectEmptyDtypeBeforeLogicalNormalize) {
+  auto empty_input_context = MakeRaContext(kBool, {CreateExpr(8), CreateExpr(64)});
+  empty_input_context.node_detail.input_dtype.clear();
+  auto empty_output_context = MakeRaContext(kBool, {CreateExpr(8), CreateExpr(64)});
+  empty_output_context.node_detail.output_dtype.clear();
 
   PerfOutputInfo any_perf;
   PerfOutputInfo all_perf;
-  EXPECT_EQ(ascendcapi_v2::ReduceAnyPerf(any_context, any_perf), af::SUCCESS);
-  EXPECT_EQ(ascendcapi_v2::ReduceAllPerf(all_context, all_perf), af::SUCCESS);
-
-  EXPECT_FALSE(PipeString(any_perf, PipeType::AIV_VEC).empty());
-  EXPECT_FALSE(PipeString(all_perf, PipeType::AIV_VEC).empty());
-  EXPECT_EQ(PipeString(any_perf, PipeType::AIV_VEC).find("reduce_ra_normal_align_case"), std::string::npos);
-  EXPECT_EQ(PipeString(all_perf, PipeType::AIV_VEC).find("reduce_ar_normal_align_case"), std::string::npos);
-
-  auto unsupported_context = MakeArContext(kInt64, {CreateExpr(8), CreateExpr(64)});
-  PerfOutputInfo unsupported_perf;
-  EXPECT_NE(ascendcapi_v2::ReduceAnyPerf(unsupported_context, unsupported_perf), af::SUCCESS);
+  EXPECT_NE(ascendcapi_v2::ReduceAnyPerf(empty_input_context, any_perf), af::SUCCESS);
+  EXPECT_NE(ascendcapi_v2::ReduceAllPerf(empty_output_context, all_perf), af::SUCCESS);
 }
 
 TEST_F(UTestReduceMinMaxApiPerfV2, AscirMaxMinAnyAllFallbackToElementwiseWhenReduceInfoUnknown) {

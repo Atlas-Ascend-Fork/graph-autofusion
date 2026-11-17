@@ -840,6 +840,29 @@ codegen_e2e_st() {
                         load_log2_store_test_e2e_v2 \
                         load_logicaland_store_test_e2e_v2 \
                         load_logicalor_store_test_e2e_v2 \
+                        reduce_any_bool_store_test_e2e_v2 \
+                        reduce_any_uint8_store_test_e2e_v2 \
+                        reduce_any_int8_store_test_e2e_v2 \
+                        reduce_any_int16_store_test_e2e_v2 \
+                        reduce_any_int32_store_test_e2e_v2 \
+                        reduce_any_int64_store_test_e2e_v2 \
+                        reduce_any_float_store_test_e2e_v2 \
+                        reduce_all_bool_store_test_e2e_v2 \
+                        reduce_all_uint8_store_test_e2e_v2 \
+                        reduce_all_int8_store_test_e2e_v2 \
+                        reduce_all_int16_store_test_e2e_v2 \
+                        reduce_all_int32_store_test_e2e_v2 \
+                        reduce_all_int64_store_test_e2e_v2 \
+                        reduce_all_float_store_test_e2e_v2 \
+                        reduce_prod_int8_store_test_e2e_v2 \
+                        reduce_prod_int16_store_test_e2e_v2 \
+                        reduce_prod_int32_store_test_e2e_v2 \
+                        reduce_prod_int64_store_test_e2e_v2 \
+                        reduce_prod_float_store_test_e2e_v2 \
+                        reduce_prod_int32_1025_store_test_e2e_v2 \
+                        reduce_prod_int64_1025_store_test_e2e_v2 \
+                        reduce_prod_float_1025_store_test_e2e_v2 \
+                        reduce_prod_int8_ra_store_test_e2e_v2 \
                         load_lshift_store_test_e2e_v2 \
                         load_modified_bessel_i0_store_test_e2e_v2 \
                         load_modified_bessel_i1_store_test_e2e_v2 \
