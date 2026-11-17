@@ -616,6 +616,11 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
       GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(new_case, semantic::kTransposeFold));
     }
   }
+  // SIMD indirect load 的 UB 布局契约由 RecalculateStridesFromRepeats 推导为紧致布局，
+  // 图级垫整改写 vectorized_strides 会造成生产/消费布局失配，与其余改写调用一致整体绕开。
+  if (indirect_load == nullptr) {
+    GE_ASSERT_SUCCESS(PadNddmaOutputVectorizedStrides(new_case));
+  }
   GE_ASSERT_SUCCESS(ScheduleUtils::TopologicalSorting(new_case));
   return af::SUCCESS;
 }

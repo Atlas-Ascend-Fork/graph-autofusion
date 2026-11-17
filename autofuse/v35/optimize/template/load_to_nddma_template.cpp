@@ -63,6 +63,11 @@ af::Status LoadToNddmaTemplate::Generate(const af::AscGraph &origin_graph,
     GELOGD("No load_to_nddma template generated.");
     return af::FAILED;
   }
+  // SIMD indirect load 的 UB 布局契约由 RecalculateStridesFromRepeats 推导为紧致布局，
+  // 图级垫整改写 vectorized_strides 会造成生产/消费布局失配，与 NddmaTemplate 的改写调用一致整体绕开。
+  if (ascgen_utils::indirect_load::FindIndirectLoadNode(new_case) == nullptr) {
+    GE_ASSERT_SUCCESS(PadNddmaOutputVectorizedStrides(new_case));
+  }
   GE_ASSERT_SUCCESS(ScheduleUtils::TopologicalSorting(new_case));
   return af::SUCCESS;
 }

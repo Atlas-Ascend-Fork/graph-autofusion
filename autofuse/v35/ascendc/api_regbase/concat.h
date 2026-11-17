@@ -279,6 +279,17 @@ __aicore__ inline AscendC::MicroAPI::MaskReg GenMaskReg(uint32_t block_size, uin
   return p_copy_mask;
 }
 
+// GatherMask 底层 vsqz 指令按元素位宽搬运，但部分架构（如 dav_3510）类型断言不含 bf16，
+// 用同位宽 uint16 视图调用，16bit 粒度与 GenMaskReg 生成的 mask 一致，语义等价。
+template <typename T>
+__aicore__ inline void GatherMaskByBitWidth(MicroAPI::RegTensor<T> &dst, MicroAPI::RegTensor<T> &src,
+                                            MicroAPI::MaskReg &mask) {
+  using GatherMaskT = std::conditional_t<std::is_same_v<T, bfloat16_t>, uint16_t, T>;
+  auto &dst_view = (MicroAPI::RegTensor<GatherMaskT> &)dst;
+  auto &src_view = (MicroAPI::RegTensor<GatherMaskT> &)src;
+  MicroAPI::GatherMask(dst_view, src_view, mask);
+}
+
 template <typename T, typename U>
 __aicore__ inline void ScatterInputPadded(__ubuf__ T *dst_addr, __ubuf__ T *src_addr, __ubuf__ U *index_addr,
                                           uint32_t rows, uint32_t dst_cols, uint32_t src_cols, uint32_t src_row_stride,
@@ -309,7 +320,7 @@ __aicore__ inline void ScatterInputPadded(__ubuf__ T *dst_addr, __ubuf__ T *src_
 
     for (uint16_t i = 0; i < loop_times; ++i) {
       MicroAPI::DataCopy<T, MicroAPI::PostLiteral::POST_MODE_UPDATE>(vd_src, src_addr, main_num);
-      MicroAPI::GatherMask(vd_src_unpadded, vd_src, copy_in_mask);
+      GatherMaskByBitWidth(vd_src_unpadded, vd_src, copy_in_mask);
       MicroAPI::Adds(vd_dst_index, vd_dst_index_base, static_cast<U>(i * rows_per_loop * dst_cols), p0);
       if constexpr (sizeof(T) == 1) {
         MicroAPI::Interleave(dst0, dst1, vd_src_unpadded, tmp);
@@ -320,7 +331,7 @@ __aicore__ inline void ScatterInputPadded(__ubuf__ T *dst_addr, __ubuf__ T *src_
     }
     if (tail_rows > 0) {
       MicroAPI::DataCopy(vd_src, src_addr);
-      MicroAPI::GatherMask(vd_src_unpadded, vd_src, copy_in_mask);
+      GatherMaskByBitWidth(vd_src_unpadded, vd_src, copy_in_mask);
       MicroAPI::Adds(vd_dst_index, vd_dst_index_base, static_cast<U>(loop_times * rows_per_loop * dst_cols), p1);
       if constexpr (sizeof(T) == 1) {
         MicroAPI::Interleave(dst0, dst1, vd_src_unpadded, tmp);
