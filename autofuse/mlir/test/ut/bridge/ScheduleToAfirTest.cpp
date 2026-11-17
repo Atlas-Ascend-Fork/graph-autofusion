@@ -1903,6 +1903,76 @@ TEST(ScheduleToAfirTest, BridgesEveryGraphOutputAndOrdersAbiByIoIndex) {
   EXPECT_EQ(permutation[3], 2U);
 }
 
+// Partitioned Loads may retain separate Data nodes for the same external input.
+TEST(ScheduleToAfirTest, SharedExternalInputPreservesIndependentLoads) {
+  auto graph = af::testing::AscGraphBuilder("shared_external_input")
+                   .Loops({af::testing::Sym(8), af::testing::Sym(8)})
+                   .Data("x", 0, af::DT_FLOAT16)
+                   .Data("copy_x", 0, af::DT_FLOAT16)
+                   .Load("load_x", "x")
+                   .Load("load_copy", "copy_x")
+                   .Add("add", "load_x", "load_copy")
+                   .Store("store", "add")
+                   .Output("out", "store", 0, af::DT_FLOAT16)
+                   .Build();
+  AssignTensorIds(graph);
+  graph.FindNode("load_x")->outputs()[0]->attr.vectorized_axis = {0, 1};
+  graph.FindNode("load_copy")->outputs()[0]->attr.vectorized_axis = {0, 1};
+  graph.FindNode("load_x")->outputs()[0]->attr.vectorized_strides = {af::Symbol(8), af::Symbol(1)};
+  graph.FindNode("load_copy")->outputs()[0]->attr.vectorized_strides = {af::Symbol(16), af::Symbol(1)};
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(std::move(graph));
+  ascir::ScheduledResult scheduled;
+  scheduled.schedule_groups.push_back(std::move(group));
+  ascir::FusedScheduledResult fused;
+  fused.fused_graph_name = "shared_external_input";
+  fused.node_idx_to_scheduled_results = {{scheduled}};
+  mlir::MLIRContext context;
+  auto module = mlir::afir::bridge::PlanToAfir(context, fused, scheduled, 0, 0);
+  ASSERT_TRUE(module);
+  auto function = *module->getOps<mlir::func::FuncOp>().begin();
+  ASSERT_EQ(function.getNumArguments(), 2U);  // One external input and one output.
+  llvm::SmallVector<mlir::afir::LoadOp> loads;
+  module->walk([&](mlir::afir::LoadOp load) { loads.push_back(load); });
+  ASSERT_EQ(loads.size(), 2U);
+  EXPECT_EQ(loads[0]->getOperand(0), function.getArgument(0));
+  EXPECT_EQ(loads[1]->getOperand(0), function.getArgument(0));
+  EXPECT_NE(loads[0]->getResult(0), loads[1]->getResult(0));
+  EXPECT_NE(loads[0]->getAttr("afir.result_descs"), loads[1]->getAttr("afir.result_descs"));
+  module->walk([&](mlir::afir::AddOp add) { EXPECT_NE(add.getLhs(), add.getRhs()); });
+  EXPECT_TRUE(succeeded(mlir::verify(*module)));
+}
+
+TEST(ScheduleToAfirTest, RejectsSharedExternalInputWithIncompatibleDtype) {
+  auto graph = af::testing::AscGraphBuilder("conflicting_external_input")
+                   .Loops({af::testing::Sym(8), af::testing::Sym(8)})
+                   .Data("x", 0, af::DT_FLOAT16)
+                   .Data("copy_x", 0, af::DT_FLOAT)
+                   .Load("load_x", "x")
+                   .Load("load_copy", "copy_x")
+                   .Store("store_x", "load_x")
+                   .Output("out_x", "store_x", 0, af::DT_FLOAT16)
+                   .Store("store_copy", "load_copy")
+                   .Output("out_copy", "store_copy", 1, af::DT_FLOAT)
+                   .Build();
+  AssignTensorIds(graph);
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(std::move(graph));
+  ascir::ScheduledResult scheduled;
+  scheduled.schedule_groups.push_back(std::move(group));
+  ascir::FusedScheduledResult fused;
+  fused.fused_graph_name = "conflicting_external_input";
+  fused.node_idx_to_scheduled_results = {{scheduled}};
+  mlir::MLIRContext context;
+  std::string message;
+  mlir::ScopedDiagnosticHandler handler(&context, [&](mlir::Diagnostic &diagnostic) {
+    llvm::raw_string_ostream output(message);
+    diagnostic.print(output);
+  });
+  EXPECT_FALSE(mlir::afir::bridge::PlanToAfir(context, fused, scheduled, 0, 0));
+  EXPECT_NE(message.find("incompatible external input index 0"), std::string::npos) << message;
+}
+
 // 两个 Output 节点共用同一个 io index 必须被拦下，否则 ABI 排序的键不唯一，
 // 两个输出会按发现顺序静默决定先后。
 TEST(ScheduleToAfirTest, RejectsDuplicateOutputIoIndex) {

@@ -1136,7 +1136,26 @@ mlir::LogicalResult AppendNodeIo(const af::AscNodePtr &node, NodeInfo &nodeInfo,
       tensor.by_value = isScalarData;
     }
     auto &target = nodeInfo.type == "Output" ? info.outputs : info.inputs;
-    target.insert(target.end(), std::make_move_iterator(tensors->begin()), std::make_move_iterator(tensors->end()));
+    for (IoTensor &tensor : *tensors) {
+      auto existing = std::find_if(target.begin(), target.end(), [&](const IoTensor &input) {
+        return nodeInfo.type != "Output" && input.index == tensor.index;
+      });
+      if (existing == target.end()) {
+        target.push_back(std::move(tensor));
+        continue;
+      }
+      // The index identifies the caller's argument, not a scheduled Data node.
+      // Compare the external view only; Load layouts and resource bindings remain node-local.
+      const auto &first = existing->info.tensor;
+      const auto &second = tensor.info.tensor;
+      if (existing->by_value != tensor.by_value || first.dtype != second.dtype || first.shape != second.shape ||
+          first.shape_exprs != second.shape_exprs || first.strides != second.strides ||
+          existing->info.buffer.space != tensor.info.buffer.space) {
+        return mlir::emitError(ctx.loc) << "BindingConflict: incompatible external input index " << tensor.index
+                                        << " between '" << existing->name << "' and '" << tensor.name << "'";
+      }
+      existing->aliases.push_back(tensor.name);
+    }
   }
   return mlir::success();
 }

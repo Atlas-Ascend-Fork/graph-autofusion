@@ -1812,6 +1812,9 @@ LogicalResult appendTemplateDescriptors(func::FuncOp func, OpBuilder &builder, c
 void mapTemplateInputs(Block *entry, const TemplateInfo &tmpl, llvm::StringMap<Value> &valueMap) {
   for (auto [idx, input] : llvm::enumerate(tmpl.inputs)) {
     valueMap[input.name] = entry->getArgument(idx);
+    for (const auto &alias : input.aliases) {
+      valueMap[alias] = entry->getArgument(idx);
+    }
   }
 }
 

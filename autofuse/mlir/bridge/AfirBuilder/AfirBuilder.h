@@ -430,6 +430,8 @@ struct IoTensor {
   // 必须是显式的一位，不能从 `info.tensor` 的形状全 1 反推——一个 `Data` 完全可以是
   // `[1]` 的张量，两者反推不出来。
   bool by_value = false;
+  // Additional graph references to this external argument; their consumers keep their own views.
+  std::vector<std::string> aliases = {};
 };
 
 // One impl graph -> one func.func.
