@@ -137,7 +137,7 @@ class TilingCodeGenImpl {
   af::Status GenScheduleGroupDoTiling(std::string &check_cond, const std::string &hardware_param,
                                       const std::string &schedule_result_prefix);
   void GenGetScheduleResultTail(const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
-  void GenUpdateWorkspace(const size_t asc_graph_id, const size_t impl_graph_id);
+  void GenUpdateWorkspace(const size_t asc_graph_id);
   void GenWorkspaceOffsetHelpers();
   void GenWorkspaceOffsetReset(const std::string &tiling_data_name);
   void GenWorkspaceOffsetFinalize(const std::string &tiling_data_name);
@@ -475,6 +475,8 @@ class TilingCodeGenImpl {
   af::Status GenReuseGroupTilingWrapperGetTiling(
       const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
       std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
+  // 复用组委托主组 GetTiling 只会注册主组的 workspace id，需按选中的 tiling key 补注册本组 id。
+  af::Status GenReuseGroupOwnWorkspaceRegistration();
   af::Status GenReuseGroupTilingWrapperQueries(
       const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
       std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);

@@ -6234,6 +6234,77 @@ int main() {
   ASSERT_TRUE(CompileAndRunCode(source));
 }
 
+class UpdateWorkspaceProbe : public att::HighPerfTilingCodeGenImpl {
+ public:
+  using att::HighPerfTilingCodeGenImpl::GenUpdateWorkspace;
+  using att::HighPerfTilingCodeGenImpl::HighPerfTilingCodeGenImpl;
+  void SetWorkspaceIds(const att::TensorIdSet &ids) {
+    workspace_tensor_id_set_ = ids;
+  }
+};
+
+TEST_F(TestCodegenTiling, UpdateWorkspaceEmitsAllAscGraphWorkspaceIds) {
+  att::TilingModelInfo models(1);
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  UpdateWorkspaceProbe generator("test", config, models, {}, false);
+  generator.SetWorkspaceIds({{0, {{0, {1, 2}}, {1, {22}}}}});
+  generator.tiling_func_.Reset();
+  generator.GenUpdateWorkspace(0);
+  const auto code = generator.tiling_func_.GetOutputStr();
+  EXPECT_NE(code.find("tiling_data.set_workspace22(it22->second);"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, ReuseGroupRegistersOwnWorkspaceIds) {
+  att::TilingModelInfo models(2);
+  models[0].schedule_group_ident = {2UL, 3UL, 4UL};
+  models[0].tiling_case_id = 0U;
+  models[0].workspace_size_map[16] = af::Expression::Parse("z0t_size");
+  models[1].schedule_group_ident = {2UL, 3UL, 4UL};
+  models[1].tiling_case_id = 0U;
+  models[1].workspace_size_map[17] = af::Expression::Parse("z0t_size");
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  generator.SetFinalTilingObservationMetadata(1UL, 2UL, {{"", 0}});
+  att::ReuseScheduleGroupInfo primary;
+  primary.tiling_keys = {0U};
+  std::map<att::ScheduleGroupIdent, att::ReuseScheduleGroupInfo> infos{{{2UL, 3UL, 4UL}, primary}};
+  ASSERT_EQ(generator.GenReuseGroupTilingWrapperGetTiling("Cur", "Primary", primary, infos.cbegin()), af::SUCCESS);
+  std::string source = R"(
+#include <unordered_map>
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+template<class T> T Max(T lhs, T rhs) { return lhs > rhs ? lhs : rhs; }
+struct Data { uint32_t key{0}; uint32_t z0t_size{1};
+  uint32_t get_tiling_key() const { return key; }
+  void set_tiling_key(uint32_t value) { key = value; }
+  uint32_t get_z0t_size() const { return z0t_size; } };
+using CurTilingData = Data;
+using PrimaryTilingData = Data;
+template<class TI, class TO> TO &RefToRef(TI &value) { return value; }
+namespace Primary {
+bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t) {
+  FinalTilingObservationSlotGuard guard(0U);
+  CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 0U, 0, 1}); return true;
+}
+}
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+int main() {
+  FinalTilingObservationContext context;
+  FinalTilingObservationCallGuard guard(context, true, 2U);
+  Data data; std::unordered_map<int64_t, uint64_t> workspace;
+  if (!GetTiling(data, workspace, -1)) { return 1; }
+  return workspace.count(16) == 1U && workspace.count(17) == 1U ? 0 : 2;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
 TEST_F(TestCodegenTiling, ReuseObservationStoresLogicalGroupIdentity) {
   att::TilingModelInfo models(1);
   models[0].schedule_group_ident = {2UL, 3UL, 4UL};

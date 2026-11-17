@@ -4096,15 +4096,16 @@ void TilingCodeGenImpl::GenWorkspaceOffsetFinalize(const std::string &tiling_dat
   tiling_func_.AddLine("  }");
 }
 
-void TilingCodeGenImpl::GenUpdateWorkspace(const size_t asc_graph_id, const size_t impl_graph_id) {
-  // 选中新 best 候选时，先清空本子图全部 workspace id 的占用，再写入当前候选的 size。
-  // workspace 当前不存在复用，每个 id 仅由一个候选持有，直接赋值即可：
-  // 落选候选独有的 id 会被清零，字段值始终等于选中候选各 id 的 size，
-  // FinalizeWorkspaceOffsets 计算出的偏移与 GetWorkspaceSize 按选中分支计算的总大小严格一致。
+void TilingCodeGenImpl::GenUpdateWorkspace(const size_t asc_graph_id) {
+  // 选中新 best 候选时先清零本子图全部 workspace id，再按当前 workspace_map 写回；
+  // 未出现在 map 中的 id 保持 0，FinalizeWorkspaceOffsets 据此按实际使用顺序分配偏移。
   for (const auto &tensor_id : GetAscGraphWorkspaceTensorIds(workspace_tensor_id_set_, asc_graph_id)) {
     tiling_func_.AddLine("      tiling_data.set_workspace" + std::to_string(tensor_id) + "(0U);");
   }
-  for (const auto &tensor_id : workspace_tensor_id_set_[asc_graph_id][impl_graph_id]) {
+  // kernel 侧每个 result 组都会使用自己的 workspace id，而这里只拿到当前选中 result 的
+  // workspace_map；按整个 asc graph 的 id 并集写回，未出现在 map 中的 id 保持 0（未被使用），
+  // 避免复用组自己的 id 因不在当前 impl 的 id 集合里而被漏写、最终在 Finalize 时互相别名。
+  for (const auto &tensor_id : GetAscGraphWorkspaceTensorIds(workspace_tensor_id_set_, asc_graph_id)) {
     auto tensor_id_str = to_string(tensor_id);
     tiling_func_.AddLine("      auto it" + tensor_id_str + " = workspace_map.find(" + tensor_id_str + ");");
     tiling_func_.AddLine("      if (it" + tensor_id_str + " != workspace_map.end()) {");
@@ -4247,7 +4248,7 @@ void TilingCodeGenImpl::GenBestPerfUpdateCode(const size_t asc_graph_id, const s
                        "  OP_LOGI(OP_NAME, \"Update best perf to %lf, tiling key = %u, block dim = %u\", best_perf, "
                        "static_cast<unsigned>(tiling_data.get_" +
                        tiling_key_prefix + "tiling_key()), cur_block_dim);");
-  GenUpdateWorkspace(asc_graph_id, impl_graph_id);
+  GenUpdateWorkspace(asc_graph_id);
   tiling_func_.AddLine(indent + "  return true;");
   tiling_func_.AddLine(indent + "}");
   tiling_func_.AddLine(indent + "return true;");
@@ -4798,7 +4799,7 @@ void TilingCodeGenImpl::GenPGOUpdateTilingInfo(
   for (const auto &line : GenScheduleResultBlockDimCode(graph_info)) {
     tiling_func_.AddLine(line);
   }
-  GenUpdateWorkspace(asc_graph_id, impl_graph_id);
+  GenUpdateWorkspace(asc_graph_id);
   if (enable_group_parallels_[asc_graph_id][impl_graph_id]) {
     tiling_func_.AddLine("      ArrangeBlockOffsetsAscGraph" + std::to_string(asc_graph_id) + "Result" +
                          std::to_string(impl_graph_id) + "(tiling_data, ori_block_dim);");
@@ -6129,6 +6130,41 @@ af::Status TilingCodeGenImpl::GenTiling(std::map<std::string, std::string> &tili
   return FinishGroupTiling(cur_ident, tiling_res);
 }
 
+af::Status TilingCodeGenImpl::GenReuseGroupOwnWorkspaceRegistration() {
+  std::map<uint32_t, std::vector<const ModelInfo *>> models_by_tiling_key;
+  for (const auto &model_info : tiling_model_info_) {
+    if (model_info.workspace_size_map.empty()) {
+      continue;
+    }
+    models_by_tiling_key[model_info.tiling_case_id].push_back(&model_info);
+  }
+  if (models_by_tiling_key.empty()) {
+    return af::SUCCESS;
+  }
+  tiling_func_.AddLine("  // 复用组委托主组 GetTiling 只会把主组的 workspace id 写进 workspace_map，");
+  tiling_func_.AddLine("  // 设备侧 kernel 用的是复用组自己的 workspace id；按选中的 tiling key 补注册本组 id，");
+  tiling_func_.AddLine("  // 否则未注册的 id 在 FinalizeWorkspaceOffsets 中 size 为 0，会与其它 workspace 重叠。");
+  bool first_key = true;
+  for (const auto &[tiling_key, model_infos] : models_by_tiling_key) {
+    const std::string branch = first_key ? "if" : "else if";
+    tiling_func_.AddLine("  " + branch + " (tiling_data.get_tiling_key() == " + std::to_string(tiling_key) + "U) {");
+    for (const auto *model_info : model_infos) {
+      ArgsManager args_manager(*model_info);
+      args_manager.Process(false);
+      const auto ws_vars = GenWorkspaceRelatedVars(model_info->workspace_size_map, args_manager.GetContainerMap());
+      if (!ws_vars.empty()) {
+        // 同一 tiling key 可能有多个子 case，各自会声明同名尺寸变量，必须放在独立作用域内。
+        tiling_func_.AddLine("    {");
+        tiling_func_.AddLine(ws_vars);
+        tiling_func_.AddLine("    }");
+      }
+    }
+    tiling_func_.AddLine("  }");
+    first_key = false;
+  }
+  return af::SUCCESS;
+}
+
 af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperGetTiling(
     const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
     std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter) {
@@ -6160,6 +6196,9 @@ af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperGetTiling(
                        (with_reuse_info_ ? ", cache" : "") + ");");
   tiling_func_.AddLine("  tiling_data = RefToRef<" + reuse_prefix + "TilingData, " + cur_prefix +
                        "TilingData>(reuse_tiling_data);");
+  tiling_func_.AddLine("  if (ret) {");
+  GE_ASSERT_SUCCESS(GenReuseGroupOwnWorkspaceRegistration());
+  tiling_func_.AddLine("  }");
   tiling_func_.AddLine("  if (IsFinalTilingObservationEnabled()) {");
   tiling_func_.AddLine("    ::FinalTilingSelectionSnapshot snapshot;");
   tiling_func_.AddLine("    if (ret && GetFinalTilingSelectionSnapshot(" +

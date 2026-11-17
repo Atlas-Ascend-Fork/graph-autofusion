@@ -2340,7 +2340,7 @@ TEST(GeneratorUT, GenUpdateWorkspaceDoesNotNarrowWorkspaceMapValue) {
   gen_impl.workspace_tensor_id_set_[0][0] = {1};
 
   gen_impl.tiling_func_.Reset();
-  gen_impl.GenUpdateWorkspace(0, 0);
+  gen_impl.GenUpdateWorkspace(0);
   const auto code = gen_impl.tiling_func_.GetOutputStr();
 
   EXPECT_NE(code.find("tiling_data.set_workspace1(it1->second);"), std::string::npos);
