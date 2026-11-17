@@ -809,9 +809,14 @@ mlir::LogicalResult CheckResourceCompatibility(const TensorValueDTO &first, llvm
     return mlir::failure();
   }
 
-  // Distinct queue members are packed into disjoint byte ranges by MemoryAllocate.
-  // Their GM and UB views need not agree; repeated views of one tensor still do.
-  if (first.schedule.domain == BindingDomain::Queue && first.schedule.tensorId != second.schedule.tensorId) {
+  // Layout belongs to a tensor, not to its physical allocation. Queue members
+  // occupy disjoint ranges; independent buffer tensors temporally reuse storage
+  // assigned by the scheduler. Both retain their own views in MemoryAllocate.
+  const bool independentMembers = first.schedule.tensorId >= 0 && second.schedule.tensorId >= 0 &&
+                                  first.schedule.tensorId != second.schedule.tensorId;
+  const bool timeSharedBuffer =
+      first.schedule.domain == BindingDomain::Buffer && first.buffer.reuseId == -1 && second.buffer.reuseId == -1;
+  if (independentMembers && (first.schedule.domain == BindingDomain::Queue || timeSharedBuffer)) {
     return mlir::success();
   }
 
@@ -851,7 +856,7 @@ mlir::LogicalResult CheckResourceCompatibility(const TensorValueDTO &first, llvm
 struct TemplateResourceState {
   // 记下先占位的那个是谁：冲突诊断要同时点名两边，只说后来者等于让读的人自己去猜前一个。
   std::map<ResourceKey, std::pair<std::string, const TensorValueDTO *>> resources;
-  std::map<std::pair<ResourceKey, int64_t>, std::pair<std::string, const TensorValueDTO *>> queueMembers;
+  std::map<std::pair<ResourceKey, int64_t>, std::pair<std::string, const TensorValueDTO *>> tensorMembers;
 };
 
 mlir::LogicalResult ValidateTensorResource(const TensorValueDTO &value, const std::string &owner,
@@ -867,9 +872,9 @@ mlir::LogicalResult ValidateTensorResource(const TensorValueDTO &value, const st
   if (!inserted && mlir::failed(CheckResourceCompatibility(*it->second.second, it->second.first, value, owner, loc))) {
     return mlir::failure();
   }
-  if (value.schedule.domain == BindingDomain::Queue) {
+  if (value.schedule.domain == BindingDomain::Queue || value.schedule.domain == BindingDomain::Buffer) {
     auto [member, newMember] =
-        state.queueMembers.emplace(std::make_pair(key, value.schedule.tensorId), std::make_pair(owner, &value));
+        state.tensorMembers.emplace(std::make_pair(key, value.schedule.tensorId), std::make_pair(owner, &value));
     if (!newMember) {
       return CheckResourceCompatibility(*member->second.second, member->second.first, value, owner, loc);
     }
