@@ -1137,12 +1137,15 @@ bool SuperKernelGraph::InitStreamsFromModelRI(std::vector<uint32_t> &streamTaskN
  * @return false Processing failed
  */
 bool SuperKernelGraph::ProcessAllStreamsAndTasks(const std::vector<uint32_t> &streamTaskNums) {
+  const uint32_t streamNum = static_cast<uint32_t>(streams.size());
+  headNodes.assign(streamNum, INVALID_TASK_ID);
+  tailNodes.assign(streamNum, INVALID_TASK_ID);
+  nodeSizeInStream.assign(streamNum, 0);
   if (streamTaskNums.empty()) {
     SK_LOGI("No tasks found in model runtime image, skip processing streams and tasks");
     return true;
   }
 
-  const uint32_t streamNum = static_cast<uint32_t>(streams.size());
   uint32_t maxTaskNum = *std::max_element(streamTaskNums.begin(), streamTaskNums.end());
   auto tasks = std::make_unique<aclmdlRITask[]>(maxTaskNum);
 
@@ -1153,15 +1156,25 @@ bool SuperKernelGraph::ProcessAllStreamsAndTasks(const std::vector<uint32_t> &st
       SK_LOGE("Failed to get tasks in stream %u, ret=%d", streamIdx, ret);
       return false;
     }
-    nodeSizeInStream.emplace_back(taskNum);
     SK_LOGI("Stream %u has %u tasks", streamIdx, taskNum);
 
     uint64_t preNodeId = INVALID_TASK_ID;
     for (uint32_t taskIdx = 0; taskIdx < taskNum; ++taskIdx) {
+      uint32_t isEnabled = 0;
+      ret = aclmdlRITaskGetEnabled(tasks[taskIdx], &isEnabled);
+      if (ret != ACL_SUCCESS) {
+        SK_LOGE("Failed to get enabled status for task %u in stream %u, ret=%d", taskIdx, streamIdx, ret);
+        return false;
+      }
+      if (isEnabled == 0) {
+        SK_LOGD("Skip disabled task %u in stream %u", taskIdx, streamIdx);
+        continue;
+      }
       if (!ProcessSingleTask(tasks[taskIdx], streamIdx, taskIdx, preNodeId)) {
         SK_LOGE("Failed to process task %u in stream %u", taskIdx, streamIdx);
         return false;
       }
+      ++nodeSizeInStream[streamIdx];
     }
   }
   return true;
@@ -1213,7 +1226,7 @@ bool SuperKernelGraph::ProcessSingleTask(aclmdlRITask &task, uint32_t streamIdx,
     return false;
   }
 
-  UpdateNodeRelations(nodeId, streamIdx, taskIdx, preNodeId);
+  UpdateNodeRelations(nodeId, streamIdx, preNodeId);
   return true;
 }
 
@@ -1250,26 +1263,22 @@ void SuperKernelGraph::RegisterFusibleScope(const std::unique_ptr<SuperKernelBas
  * @brief Update node relationships
  *
  * Updates the graph structure by:
- * 1. Adding the node to headNodes if it's the first task in the stream
+ * 1. Setting the stream's head node if it's the first enabled task in the stream
  * 2. Setting the next node ID for the previous node
  * 3. Updating preNodeId to current node ID
  *
  * @param nodeId Current node ID
  * @param streamIdx Stream index
- * @param taskIdx Task index within the stream
  * @param preNodeId Previous node ID (updated to current node ID)
  */
-void SuperKernelGraph::UpdateNodeRelations(uint64_t nodeId, uint32_t streamIdx, uint32_t taskIdx, uint64_t &preNodeId) {
-  if (taskIdx == 0) {
-    headNodes.push_back(nodeId);
-    tailNodes.push_back(nodeId);
+void SuperKernelGraph::UpdateNodeRelations(uint64_t nodeId, uint32_t streamIdx, uint64_t &preNodeId) {
+  if (preNodeId == INVALID_TASK_ID) {
+    headNodes[streamIdx] = nodeId;
     SK_LOGI("Stream %u: Added head node %lu", streamIdx, nodeId);
   } else {
-    tailNodes[streamIdx] = nodeId;
-  }
-  if (preNodeId != INVALID_TASK_ID) {
     graphMap[preNodeId]->SetNextNodeId(nodeId);
   }
+  tailNodes[streamIdx] = nodeId;
   preNodeId = nodeId;
 }
 

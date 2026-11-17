@@ -188,6 +188,10 @@ aclmdlRITask Model::AddTask(aclrtStream stream, const aclmdlRITaskParams &params
   owned.task.params = params;
   return &owned.task;
 }
+void Model::SetTaskEnabled(aclmdlRITask handle, bool enabled) {
+  (void)Snapshot(handle);  // Validate ownership and lifetime.
+  tasks.at(handle)->disabled = !enabled;
+}
 TaskSnapshot Model::Snapshot(aclmdlRITask handle) const {
   if (!impl_) {
     throw std::logic_error("model destroyed");
@@ -441,6 +445,11 @@ void RecordTaskUpdate(aclmdlRITask handle, const aclmdlRITaskParams &params) {
       kernel.isHostArgs = 0;
     }
   }
+}
+bool TaskEnabled(aclmdlRITask handle) {
+  auto it = tasks.find(handle);
+  // Legacy UT handles have no owned state and remain enabled.
+  return it == tasks.end() || !it->second->disabled;
 }
 void RecordDisable(aclmdlRITask handle) {
   auto it = tasks.find(handle);

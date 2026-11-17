@@ -13,6 +13,7 @@
 #include <memory>
 #include <limits>
 #include <vector>
+#include "model_fixture.h"
 
 #define private public
 #define protected public
@@ -1550,4 +1551,113 @@ TEST_F(SuperKernelGraphTest, UpdateNodeScopeBitFlags_ExceedScopeMaxReasonPropaga
   EXPECT_FALSE(updatedInnerNode->IsFusible());
   EXPECT_EQ(updatedInnerNode->GetFusionFailReason(), FusionFailReason::EXCEED_SCOPE_MAX);
   EXPECT_EQ(updatedInnerNode->GetScopeBitFlags().count(), 0);
+}
+
+TEST_F(SuperKernelGraphTest, EnabledTasksPreserveLinksForEveryDisabledPosition) {
+  sk::test::Model model;
+  auto stream = model.AddStream();
+  std::vector<aclmdlRITask> tasks;
+  for (uint32_t i = 0; i < 5; ++i) {
+    tasks.push_back(model.AddKernel(stream, "enabled_positions"));
+  }
+  // Includes all enabled, all disabled, and disabled head/middle/tail combinations.
+  for (uint32_t mask = 0; mask < 32; ++mask) {
+    SCOPED_TRACE(mask);
+    std::vector<uint64_t> expected;
+    for (uint32_t i = 0; i < tasks.size(); ++i) {
+      bool enabled = (mask & (1U << i)) != 0;
+      model.SetTaskEnabled(tasks[i], enabled);
+      if (enabled) {
+        expected.push_back(model.Snapshot(tasks[i]).id);
+      }
+    }
+    SuperKernelGraph imported(model.Handle(), *opts);
+    ASSERT_TRUE(imported.InitFromModelRI());
+    EXPECT_EQ(imported.GetSortedNodeIds(), expected);
+    ASSERT_EQ(imported.GetHeadNodes().size(), 1U);
+    ASSERT_EQ(imported.GetTailNodes().size(), 1U);
+    EXPECT_EQ(imported.GetHeadNodes()[0], expected.empty() ? INVALID_TASK_ID : expected.front());
+    EXPECT_EQ(imported.GetTailNodes()[0], expected.empty() ? INVALID_TASK_ID : expected.back());
+    EXPECT_EQ(imported.GetNodeSizeInStream(), (std::vector<uint64_t>{expected.size()}));
+    for (size_t i = 0; i < expected.size(); ++i) {
+      const auto *node = imported.GetNodeById(expected[i]);
+      ASSERT_NE(node, nullptr);
+      EXPECT_EQ(node->GetPreNodeId(), i == 0 ? INVALID_TASK_ID : expected[i - 1]);
+      EXPECT_EQ(node->GetNextNodeId(), i + 1 == expected.size() ? INVALID_TASK_ID : expected[i + 1]);
+    }
+  }
+}
+
+TEST_F(SuperKernelGraphTest, DisabledStreamsKeepBoundarySlotsAndStreamIdentity) {
+  sk::test::Model model;
+  std::vector<aclrtStream> streams;
+  std::vector<std::vector<aclmdlRITask>> tasks(3);
+  for (uint32_t s = 0; s < 3; ++s) {
+    streams.push_back(model.AddStream());
+    tasks[s].push_back(model.AddKernel(streams[s], "stream_head"));
+    tasks[s].push_back(model.AddKernel(streams[s], "stream_tail"));
+  }
+  for (uint32_t mask = 0; mask < 8; ++mask) {
+    SCOPED_TRACE(mask);
+    for (uint32_t s = 0; s < 3; ++s) {
+      for (auto task : tasks[s]) {
+        model.SetTaskEnabled(task, (mask & (1U << s)) != 0);
+      }
+    }
+    SuperKernelGraph imported(model.Handle(), *opts);
+    ASSERT_TRUE(imported.InitSKGraph());
+    EXPECT_EQ(imported.GetStreams(), streams);
+    ASSERT_EQ(imported.GetHeadNodes().size(), 3U);
+    ASSERT_EQ(imported.GetTailNodes().size(), 3U);
+    for (uint32_t s = 0; s < 3; ++s) {
+      const bool enabled = (mask & (1U << s)) != 0;
+      EXPECT_EQ(imported.GetNodeSizeInStream()[s], enabled ? 2U : 0U);
+      EXPECT_EQ(imported.GetHeadNodes()[s], enabled ? model.Snapshot(tasks[s][0]).id : INVALID_TASK_ID);
+      EXPECT_EQ(imported.GetTailNodes()[s], enabled ? model.Snapshot(tasks[s][1]).id : INVALID_TASK_ID);
+      if (enabled) {
+        ASSERT_NE(imported.GetNodeById(imported.GetHeadNodes()[s]), nullptr);
+        EXPECT_EQ(imported.GetNodeById(imported.GetHeadNodes()[s])->GetStreamIdxInGraph(), s);
+      }
+    }
+  }
+}
+
+TEST_F(SuperKernelGraphTest, ReenabledTasksRebuildCrossStreamDependencies) {
+  sk::test::Model model;
+  auto producer = model.AddStream();
+  auto consumer = model.AddStream();
+  uint64_t eventStorage = 0;
+  auto first = model.AddKernel(producer, "producer_first");
+  auto restored = model.AddKernel(producer, "producer_restored");
+  model.AddEvent(producer, ACL_MODEL_RI_TASK_EVENT_RECORD, &eventStorage);
+  model.AddEvent(consumer, ACL_MODEL_RI_TASK_EVENT_WAIT, &eventStorage);
+  auto last = model.AddKernel(consumer, "consumer");
+  for (bool enabled : {false, true}) {
+    SCOPED_TRACE(enabled);
+    model.SetTaskEnabled(restored, enabled);
+    SuperKernelGraph imported(model.Handle(), *opts);
+    ASSERT_TRUE(imported.InitSKGraph());
+    auto senderId = model.Snapshot(enabled ? restored : first).id;
+    auto receiverId = model.Snapshot(last).id;
+    const auto *sender = imported.GetNodeById(senderId);
+    const auto *receiver = imported.GetNodeById(receiverId);
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+    EXPECT_EQ(sender->sendToNodeId.count(receiverId), 1U);
+    EXPECT_EQ(receiver->receiveNodeId, (std::unordered_set<uint64_t>{senderId}));
+    EXPECT_EQ(imported.GetNodeById(model.Snapshot(restored).id) != nullptr, enabled);
+  }
+}
+
+TEST_F(SuperKernelGraphTest, EnabledQueryFailureStopsGraphImport) {
+  sk::test::Model model;
+  model.AddKernel(model.AddStream(), "query_failure");
+  SuperKernelGraph imported(model.Handle(), *opts);
+  SkUtSetTaskGetEnabledRet(ACL_ERROR_FAILURE);
+  const bool success = imported.InitFromModelRI();
+  SkUtSetTaskGetEnabledRet(ACL_SUCCESS);
+  EXPECT_FALSE(success);
+  EXPECT_TRUE(imported.GetSortedNodeIds().empty());
+  EXPECT_EQ(imported.GetHeadNodes(), (std::vector<uint64_t>{INVALID_TASK_ID}));
+  EXPECT_EQ(imported.GetTailNodes(), (std::vector<uint64_t>{INVALID_TASK_ID}));
 }

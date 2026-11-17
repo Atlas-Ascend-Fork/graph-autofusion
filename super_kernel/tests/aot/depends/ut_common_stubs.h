@@ -27,6 +27,8 @@ bool SkUtFailAclrtMallocHost();
 void SkUtSetAclmdlRIGetStreamsRet(int phase, aclError ret);
 void SkUtSetAclrtStreamGetTasksRet(int phase, aclError ret);
 void SkUtSetAclrtTaskGetTypeRet(aclError ret);
+void SkUtSetTaskGetEnabledRet(aclError ret);
+aclError SkUtGetTaskGetEnabledRet();
 void SkUtSetAclrtGetDeviceRet(aclError ret);
 void SkUtSetDeviceCount(uint32_t count);
 uint32_t SkUtGetDeviceCount();

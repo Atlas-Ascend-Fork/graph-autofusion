@@ -153,3 +153,110 @@ TEST_F(AotSystemTest, OptimizeFusedRecordRewritesExternalWaitAndReleasesSyncMemo
   model.Destroy();
   EXPECT_EQ(sk::test::OutstandingAllocations(), 0U);
 }
+
+TEST_F(AotSystemTest, OptimizeSkipsDisabledStreamsAndTasks) {
+  sk::test::Model model;
+  std::vector<aclmdlRITask> disabled;
+  for (uint32_t s = 0; s < 2; ++s) {
+    auto stream = model.AddStream();
+    disabled.push_back(model.AddKernel(stream, "disabled_stream"));
+  }
+  auto active = model.AddStream();
+  disabled.push_back(model.AddKernel(active, "disabled_head"));
+  auto first = model.AddKernel(active, "active_first");
+  disabled.push_back(model.AddKernel(active, "disabled_middle"));
+  auto second = model.AddKernel(active, "active_second");
+  disabled.push_back(model.AddKernel(active, "disabled_tail"));
+  for (auto task : disabled) {
+    ASSERT_EQ(aclmdlRITaskDisable(task), ACL_SUCCESS);
+  }
+  ASSERT_EQ(aclskOptimize(model.Handle(), nullptr), ACL_SUCCESS);
+  EXPECT_EQ(model.SuccessfulUpdates(), 1U);
+  size_t replaced = 0;
+  for (auto task : {first, second}) {
+    auto snapshot = model.Snapshot(task);
+    if (snapshot.setParamsCount != 0) {
+      ++replaced;
+      EXPECT_EQ(snapshot.function, "sk_entry_aiv");
+      EXPECT_FALSE(snapshot.disabled);
+    } else {
+      EXPECT_TRUE(snapshot.disabled);
+    }
+  }
+  EXPECT_EQ(replaced, 1U);
+  for (auto task : disabled) {
+    EXPECT_TRUE(model.Snapshot(task).disabled);
+    EXPECT_EQ(model.Snapshot(task).setParamsCount, 0U);
+  }
+}
+
+TEST_F(AotSystemTest, OptimizeAllDisabledTasksMakesNoModelUpdate) {
+  sk::test::Model model;
+  for (uint32_t s = 0; s < 3; ++s) {
+    auto task = model.AddKernel(model.AddStream(), "all_disabled");
+    ASSERT_EQ(aclmdlRITaskDisable(task), ACL_SUCCESS);
+  }
+  ASSERT_EQ(aclskOptimize(model.Handle(), nullptr), ACL_SUCCESS);
+  EXPECT_EQ(model.UpdateAttempts(), 0U);
+}
+
+TEST_F(AotSystemTest, OptimizeIncludesTaskReenabledBeforeOptimization) {
+  sk::test::Model model;
+  auto task = model.AddKernel(model.AddStream(), "reenabled");
+  ASSERT_EQ(aclmdlRITaskDisable(task), ACL_SUCCESS);
+  EXPECT_TRUE(model.Snapshot(task).disabled);
+  model.SetTaskEnabled(task, true);
+  ASSERT_EQ(aclskOptimize(model.Handle(), nullptr), ACL_SUCCESS);
+  EXPECT_EQ(model.Snapshot(task).function, "sk_entry_aiv");
+  EXPECT_EQ(model.Snapshot(task).setParamsCount, 1U);
+  EXPECT_FALSE(model.Snapshot(task).disabled);
+  EXPECT_EQ(model.SuccessfulUpdates(), 1U);
+}
+
+TEST_F(AotSystemTest, OptimizeEnabledQueryFailureDoesNotUpdateTasks) {
+  sk::test::Model model;
+  auto task = model.AddKernel(model.AddStream(), "query_failure");
+  SkUtSetTaskGetEnabledRet(ACL_ERROR_FAILURE);
+  EXPECT_EQ(aclskOptimize(model.Handle(), nullptr), ACL_ERROR_FAILURE);
+  EXPECT_EQ(model.UpdateAttempts(), 0U);
+  EXPECT_EQ(model.Snapshot(task).setParamsCount, 0U);
+  EXPECT_FALSE(model.Snapshot(task).disabled);
+}
+
+TEST_F(AotSystemTest, OptimizeCrossStreamEventsWithDisabledStreamAndBoundaryTasks) {
+  sk::test::Model model;
+  auto disabled = model.AddKernel(model.AddStream(), "disabled_stream");
+  ASSERT_EQ(aclmdlRITaskDisable(disabled), ACL_SUCCESS);
+  auto producer = model.AddStream();
+  auto consumer = model.AddStream();
+  uint64_t eventStorage = 0;
+  auto event = reinterpret_cast<aclrtEvent>(&eventStorage);
+  ASSERT_EQ(aclskScopeBegin("enabled_producer", producer), ACL_SUCCESS);
+  auto skipped = model.AddKernel(producer, "disabled_compute");
+  ASSERT_EQ(aclmdlRITaskDisable(skipped), ACL_SUCCESS);
+  model.AddKernel(producer, "enabled_compute");
+  ASSERT_EQ(aclskScopeEnd("enabled_producer", producer), ACL_SUCCESS);
+  auto record = model.AddEvent(producer, ACL_MODEL_RI_TASK_EVENT_RECORD, event);
+  auto wait = model.AddEvent(consumer, ACL_MODEL_RI_TASK_EVENT_WAIT, event);
+  ASSERT_EQ(aclskScopeBegin("enabled_consumer", consumer), ACL_SUCCESS);
+  model.AddKernel(consumer, "enabled_consumer_compute");
+  ASSERT_EQ(aclskScopeEnd("enabled_consumer", consumer), ACL_SUCCESS);
+  ASSERT_EQ(aclskOptimize(model.Handle(), nullptr), ACL_SUCCESS);
+  EXPECT_EQ(model.SuccessfulUpdates(), 1U);
+  for (auto task : {disabled, skipped}) {
+    EXPECT_TRUE(model.Snapshot(task).disabled);
+    EXPECT_EQ(model.Snapshot(task).setParamsCount, 0U);
+  }
+  for (auto task : {record, wait}) {
+    auto snapshot = model.Snapshot(task);
+    EXPECT_FALSE(snapshot.disabled);
+    EXPECT_EQ(snapshot.setParamsCount, 0U);
+    EXPECT_EQ(snapshot.syncAddress, reinterpret_cast<uintptr_t>(event));
+  }
+  for (auto stream : {producer, consumer}) {
+    const auto tasks = model.Tasks(stream);
+    EXPECT_EQ(std::count_if(tasks.begin(), tasks.end(), [](const auto &task) {
+      return !task.disabled && task.function == "sk_entry_aiv" && task.setParamsCount == 1;
+    }), 1);
+  }
+}

@@ -283,6 +283,7 @@ aclError aclmdlRITaskGetType(aclmdlRITask task, aclmdlRITaskType *type);
 aclError aclmdlRITaskGetParams(aclmdlRITask task, aclmdlRITaskParams *params);
 aclError aclmdlRITaskSetParams(aclmdlRITask task, aclmdlRITaskParams *params);
 aclError aclmdlRITaskDisable(aclmdlRITask task);
+aclError aclmdlRITaskGetEnabled(aclmdlRITask task, uint32_t *isEnabled);
 aclError aclmdlRITaskGetSeqId(aclmdlRITask task, uint32_t *id);
 aclError aclmdlRIGetTasksByStream(aclrtStream stream, aclmdlRITask *tasks, uint32_t *numTasks);
 aclError aclmdlRIKernelTaskGetAttribute(aclmdlRITask task, aclrtLaunchKernelAttrId attrId,
