@@ -204,10 +204,12 @@ Status RecomputeCaseGenerator::GenerateBroadcastWorkspaceTask(ascir::HintGraph &
   // 原始图非首轴乘积 > 32K 打正分使本模板优先, 否则打负分劣后给默认模板(平分时 result 序号小者
   // 胜, 本模板恒为 result0, 返回 0 分无法落选); 生成须在切分后进行, 以便按 size var 定位所在 group
   std::string score_func;
-  GE_CHK_STATUS_RET(BroadcastWorkspaceScoreFunctionGenerator(hint_graph, task.grouped_graphs).Generate(score_func),
-                    "Failed to generate broadcast workspace score func for graph[%s].",
-                    optimize_graph.GetName().c_str());
+  std::vector<SizeVarSet> score_group_vars;
+  GE_CHK_STATUS_RET(
+      BroadcastWorkspaceScoreFunctionGenerator(hint_graph, task.grouped_graphs).Generate(score_func, score_group_vars),
+      "Failed to generate broadcast workspace score func for graph[%s].", optimize_graph.GetName().c_str());
   task.score_func = score_func;
+  task.score_group_shape_vars = std::move(score_group_vars);
   GELOGI("Graph[%s] generate broadcast workspace task with %zu subgraph(s).", optimize_graph.GetName().c_str(),
          task.grouped_graphs.size());
   tasks.emplace_back(std::move(task));
@@ -496,7 +498,8 @@ BroadcastWorkspaceScoreFunctionGenerator::BroadcastWorkspaceScoreFunctionGenerat
     const ascir::HintGraph &graph, const std::vector<ascir::ImplGraph> &grouped_graphs)
     : graph_(&graph), grouped_graphs_(&grouped_graphs) {}
 
-Status BroadcastWorkspaceScoreFunctionGenerator::Generate(std::string &score_func) {
+Status BroadcastWorkspaceScoreFunctionGenerator::Generate(std::string &score_func,
+                                                          std::vector<SizeVarSet> &score_group_vars) {
   GE_CHK_STATUS_RET(ParseNonFirstAxisProduct());
   ss_ << "int32_t CalcScore(const AutofuseTilingData &tiling_data) {" << std::endl;
   if (product_.IsConstExpr()) {
@@ -506,11 +509,12 @@ Status BroadcastWorkspaceScoreFunctionGenerator::Generate(std::string &score_fun
     GenerateReturnValue(product_value > kNonFirstAxisProductThreshold ? kBroadcastWorkspaceSelectedScore
                                                                       : kBroadcastWorkspaceFallbackScore);
     score_func = ss_.str();
+    score_group_vars.clear();
     return af::SUCCESS;
   }
   // 动态分支: CalcScore 在 DoTiling 前调用, 求解变量不可用, 只能引用输入变量(非首轴 size var 均为
   // 输入变量), 生成运行时代码从 tiling data 嵌套结构读实际值
-  GE_CHK_STATUS_RET(GenerateForDynamic());
+  GE_CHK_STATUS_RET(GenerateForDynamic(score_group_vars));
   score_func = ss_.str();
   return af::SUCCESS;
 }
@@ -531,7 +535,7 @@ Status BroadcastWorkspaceScoreFunctionGenerator::ParseNonFirstAxisProduct() {
   return af::SUCCESS;
 }
 
-Status BroadcastWorkspaceScoreFunctionGenerator::GenerateForDynamic() {
+Status BroadcastWorkspaceScoreFunctionGenerator::GenerateForDynamic(std::vector<SizeVarSet> &score_group_vars) {
   // 嵌套结构 InputParams 按 schedule group 定义(仅含该 group 子图用到的 size var), 逐自由符号
   // 定位实际所在 group 后生成跨 group 引用; CalcScore 入参为整个 AutofuseTilingData,
   // graph0_result0_g{N}_tiling_data 任意组合均可引用(本模板恒为 result0)
@@ -539,6 +543,7 @@ Status BroadcastWorkspaceScoreFunctionGenerator::GenerateForDynamic() {
   for (size_t g = 0UL; g < grouped_graphs_->size(); ++g) {
     AscGraphInfoComplete::AppendOriginalSizeVar((*grouped_graphs_)[g], group_vars[g]);
   }
+  score_group_vars.assign(grouped_graphs_->size(), SizeVarSet{});
   std::vector<std::pair<af::Expression, af::Expression>> replacements;
   for (const auto &sym : product_.FreeSymbols()) {
     size_t group_idx = grouped_graphs_->size();
@@ -555,6 +560,8 @@ Status BroadcastWorkspaceScoreFunctionGenerator::GenerateForDynamic() {
     const std::string field =
         std::string("tiling_data.graph0_result0_g") + std::to_string(group_idx) + "_tiling_data." + sym.Str().get();
     replacements.emplace_back(sym, af::Symbol(field.c_str()));
+    // 导出绑定符号供 AutoScheduler 保活: 调度期图改写可能使符号失去该组表达式引用而被裁剪
+    score_group_vars[group_idx].insert(sym);
     GELOGD("Broadcast workspace score var [%s] located in schedule group[%zu].", sym.Str().get(), group_idx);
   }
   ss_ << "  auto non_first_axis_product = static_cast<int64_t>(" << product_.Replace(replacements).Str().get() << ");"

@@ -1237,16 +1237,10 @@ Status Optimizer::InitializeScheduledResults(std::vector<ascir::ScheduledResult>
   return af::SUCCESS;
 }
 
-Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, ScheduleTask &schedule_task,
-                                std::vector<ascir::ScheduledResult> &scheduled_results) const {
-  schedule_task.enable_workspace_alignment = CanAlignRCoreWorkspace(schedule_task);
+Status Optimizer::ScheduleGroupedGraphs(ScheduleTask &schedule_task,
+                                        std::vector<ascir::ScheduledResult> &scheduled_results_cur,
+                                        std::set<std::string> &scored_graph_names) const {
   size_t index = 0UL;
-  std::vector<ascir::ScheduledResult> scheduled_results_cur;
-  GE_ASSERT_SUCCESS(InitializeScheduledResults(scheduled_results_cur, schedule_task));
-
-  // 记录注册打分函数的nddma模板名
-  std::set<std::string> scored_graph_names;
-
   for (auto &grouped_graph : schedule_task.grouped_graphs) {
     GE_CHK_STATUS_RET(AscGraphInfoComplete::CompleteApiInfo(grouped_graph), "CompleteApiInfo failed");
     if (CanDoReMergeAxis(grouped_graph, schedule_task.reduce_type)) {
@@ -1285,15 +1279,38 @@ Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, Sc
            schedule_outputs.size());
     if (is_reduce_first_stage) {
       GE_ASSERT_SUCCESS(AppendReduceFirstStageGroup(schedule_outputs, scheduled_results_cur, index, schedule_task));
+    } else if (schedule_task.reduce_type == ReduceTemplateType::kRCore) {
+      GE_ASSERT_SUCCESS(CopyImplGraphs(schedule_outputs, scheduled_results_cur));
     } else {
-      if (schedule_task.reduce_type == ReduceTemplateType::kRCore) {
-        GE_ASSERT_SUCCESS(CopyImplGraphs(schedule_outputs, scheduled_results_cur));
-      } else {
-        GE_ASSERT_SUCCESS(
-            ProcessNonReduceSchedules(schedule_outputs, scheduled_results_cur, schedule_task, scored_graph_names));
-      }
+      GE_ASSERT_SUCCESS(
+          ProcessNonReduceSchedules(schedule_outputs, scheduled_results_cur, schedule_task, scored_graph_names));
     }
     index++;
+  }
+  return af::SUCCESS;
+}
+
+Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, ScheduleTask &schedule_task,
+                                std::vector<ascir::ScheduledResult> &scheduled_results) const {
+  schedule_task.enable_workspace_alignment = CanAlignRCoreWorkspace(schedule_task);
+  std::vector<ascir::ScheduledResult> scheduled_results_cur;
+  GE_ASSERT_SUCCESS(InitializeScheduledResults(scheduled_results_cur, schedule_task));
+
+  // 记录注册打分函数的nddma模板名
+  std::set<std::string> scored_graph_names;
+
+  // UNSUPPORTED时不打错误日志, 由上层按警告跳过该task
+  GE_CHK_STATUS_RET_NOLOG(ScheduleGroupedGraphs(schedule_task, scheduled_results_cur, scored_graph_names));
+  // [动态打分字段保活] score_func 按调度前 group 归属硬编码 tiling data 子结构字段引用, 调度期
+  // 图改写(零步长轴删除/合轴)使符号失去表达式引用后, 上方 size var 重建会裁剪对应字段, host tiling
+  // 侧编译报 no member; 将绑定符号并入对应组 runtime_shape_vars(ProcessMultiGroup 结构体字段发射
+  // 与 IsVarUsedInScheduleGroup 运行期值填充均消费该通道), 保证引用恒有效
+  for (auto &schedule_result : scheduled_results_cur) {
+    const auto &keep_vars = schedule_task.score_group_shape_vars;
+    for (size_t g = 0UL; (g < keep_vars.size()) && (g < schedule_result.schedule_groups.size()); ++g) {
+      auto &runtime_shape_vars = schedule_result.schedule_groups[g].runtime_shape_vars;
+      runtime_shape_vars.insert(runtime_shape_vars.end(), keep_vars[g].begin(), keep_vars[g].end());
+    }
   }
   scheduled_results.insert(scheduled_results.end(), scheduled_results_cur.begin(), scheduled_results_cur.end());
 

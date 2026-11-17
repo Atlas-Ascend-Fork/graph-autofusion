@@ -66,15 +66,18 @@ class RecomputeCaseGenerator : public FusionCaseGenerator {
 // 动态 shape 场景生成运行时代码, 从 tiling data 嵌套结构读取 size var 实际值; 嵌套结构
 // InputParams 按 schedule group 定义(仅含该 group 子图用到的 size var), 故 Generate 须在
 // PartitionByConnectivity 切分完成后调用, 逐自由符号定位实际所在 group 后生成跨 group 引用。
+// 调度期图改写会使绑定符号失去表达式引用而被 size var 重建裁剪(host tiling 编译报 no member),
+// 故 Generate 同时导出 group 下标对齐 grouped_graphs 的绑定符号集, 由 AutoScheduler 并入对应组
+// runtime_shape_vars 保活。
 class BroadcastWorkspaceScoreFunctionGenerator {
  public:
   BroadcastWorkspaceScoreFunctionGenerator(const ascir::HintGraph &graph,
                                            const std::vector<ascir::ImplGraph> &grouped_graphs);
-  Status Generate(std::string &score_func);
+  Status Generate(std::string &score_func, std::vector<SizeVarSet> &score_group_vars);
 
  private:
   Status ParseNonFirstAxisProduct();
-  Status GenerateForDynamic();
+  Status GenerateForDynamic(std::vector<SizeVarSet> &score_group_vars);
   void GenerateReturnValue(const int32_t score);
 
   const ascir::HintGraph *graph_;
