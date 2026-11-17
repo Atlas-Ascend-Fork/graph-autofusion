@@ -1533,6 +1533,50 @@ if ASCEND_IS_AIC {
                 assert goden_code == code_gen
 
     @staticmethod
+    @pytest.mark.parametrize(
+        "pre_kernel_type",
+        [
+            SuperKernelKernelType.KERNEL_TYPE_AIV_ONLY,
+            SuperKernelKernelType.KERNEL_TYPE_MIX_AIV_1_0,
+        ],
+    )
+    @pytest.mark.parametrize(
+        "kernel_type",
+        [
+            SuperKernelKernelType.KERNEL_TYPE_AIC_ONLY,
+            SuperKernelKernelType.KERNEL_TYPE_MIX_AIC_1_0,
+        ],
+    )
+    def test_gen_sync_and_event_code_aiv_to_aic_wait(pre_kernel_type, kernel_type):
+        with mock.patch("json.load", return_value=sub_op_add_json):
+            super_operator = SuperOperatorInfos(kernel_info, "test_aiv_to_aic_wait")
+            pre_sub_operator = SubOperatorInfos(0, info_dict, 0, {})
+            sub_operator = SubOperatorInfos(0, info_dict, 0, {})
+            super_operator.kernel_type = SuperKernelKernelType.KERNEL_TYPE_MIX_AIC_1_1
+            pre_sub_operator.kernel_type = pre_kernel_type
+            sub_operator.kernel_type = kernel_type
+            pre_sub_operator.send_event_list = []
+            sub_operator.recv_event_list = [100]
+            sub_operator.wait_block = "WaitFunc<true>(wait_addr);\n"
+
+            code_gen = gen_sync_and_event_code(
+                super_operator, pre_sub_operator, sub_operator
+            )
+
+            expected_sync = (
+                "    ffts_cross_core_sync(PIPE_FIX, "
+                "AscendC::GetffstMsg(0x0, AscendC::SYNC_AIC_FLAG));\n"
+                "    wait_flag_dev(AscendC::SYNC_AIC_FLAG);\n"
+            )
+            assert expected_sync in code_gen
+            assert code_gen.index(sub_operator.wait_block.strip()) < code_gen.index(
+                expected_sync
+            )
+            assert code_gen.index(expected_sync) < code_gen.index(
+                "// begin inter ops barrier"
+            )
+
+    @staticmethod
     def test_gen_sync_and_event_code():
         with mock.patch("json.load", return_value=sub_op_add_json):
             super_operator = SuperOperatorInfos(
