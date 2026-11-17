@@ -608,6 +608,71 @@ TEST_F(SkOptimizerTaskReorderTest, MissingResetOwner_OnlyMissingStreamFallsBack)
   EXPECT_EQ(other->sendToNodeId.count(missingReset->GetNodeId()), 1U);
 }
 
+TEST_F(SkOptimizerTaskReorderTest, MissingAllEventOwners_KeepsOriginalTailOrder) {
+  auto *aicTail = CreateKernelNode(7101, 1, SkKernelType::AIC_ONLY);
+  auto *aivTail = CreateKernelNode(7102, 2, SkKernelType::AIV_ONLY);
+  auto *reset = CreateResetNode(7103, 9);
+  auto *notify = CreateNotifyNode(7104, 9);
+  reset->SetPreNodeId(aivTail->GetNodeId());
+  notify->SetPreNodeId(aivTail->GetNodeId());
+  std::vector<std::unique_ptr<SuperKernelBaseNode>> events;
+  events.push_back(std::move(graph->graphMap[reset->GetNodeId()]));
+  events.push_back(std::move(graph->graphMap[notify->GetNodeId()]));
+
+  bool early = true;
+  SuperKernelBaseNode *tailEvent = nullptr;
+  auto tasks = BuildEarlyNotifyTasks({aicTail, aivTail}, events, &early, &tailEvent);
+  EXPECT_FALSE(early);
+  ASSERT_EQ(tailEvent, reset);
+  EXPECT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{7101, 7102, 7103, 7104}));
+  EXPECT_TRUE(aicTail->sendToNodeId.empty());
+  EXPECT_TRUE(aivTail->sendToNodeId.empty());
+  optimizer->ConnectStreamTailKernelsToEvent({aicTail, aivTail}, tailEvent);
+  EXPECT_EQ(reset->receiveNodeId.count(aicTail->GetNodeId()), 1U);
+  EXPECT_EQ(reset->receiveNodeId.count(aivTail->GetNodeId()), 1U);
+  EXPECT_TRUE(notify->receiveNodeId.empty());
+  SkTaskBuilder::SkTaskContext context;
+  ASSERT_TRUE(AnalyzeTasks(tasks, context));
+  EXPECT_EQ(context.syncInfos[0].cubSendInfo.at(2), SyncDirection::CUB_TO_VEC);
+  EXPECT_EQ(context.syncInfos[2].vecRecvInfo.at(0), SyncDirection::CUB_TO_VEC);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, MissingStreamPair_LeavesOwnedPairEarly) {
+  auto *owner = CreateKernelNode(7111, 2, SkKernelType::AIV_ONLY);
+  auto *other = CreateKernelNode(7112, 3, SkKernelType::AIC_ONLY);
+  auto *ownedReset = CreateResetNode(7113, 2);
+  auto *ownedNotify = CreateNotifyNode(7114, 2);
+  auto *missingReset = CreateResetNode(7115, 9);
+  auto *missingNotify = CreateNotifyNode(7116, 9);
+  std::vector<std::unique_ptr<SuperKernelBaseNode>> events;
+  for (auto *event : {missingReset, missingNotify, ownedReset, ownedNotify}) {
+    event->SetPreNodeId(other->GetNodeId());
+    events.push_back(std::move(graph->graphMap[event->GetNodeId()]));
+  }
+
+  bool early = false;
+  SuperKernelBaseNode *tailEvent = nullptr;
+  auto tasks = BuildEarlyNotifyTasks({owner, other}, events, &early, &tailEvent);
+  ASSERT_TRUE(early);
+  ASSERT_EQ(tailEvent, missingReset);
+  EXPECT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{7111, 7114, 7113, 7112, 7115, 7116}));
+  EXPECT_EQ(owner->sendToNodeId.count(ownedNotify->GetNodeId()), 1U);
+  EXPECT_EQ(owner->sendToNodeId.count(ownedReset->GetNodeId()), 1U);
+  EXPECT_TRUE(ownedNotify->sendToNodeId.empty());
+  EXPECT_TRUE(ownedReset->sendToNodeId.empty());
+  EXPECT_TRUE(other->sendToNodeId.empty());
+  optimizer->ConnectStreamTailKernelsToEvent({owner, other}, tailEvent);
+  EXPECT_EQ(missingReset->receiveNodeId.count(owner->GetNodeId()), 1U);
+  EXPECT_EQ(missingReset->receiveNodeId.count(other->GetNodeId()), 1U);
+  EXPECT_EQ(other->sendToNodeId.count(ownedNotify->GetNodeId()), 0U);
+  EXPECT_EQ(other->sendToNodeId.count(ownedReset->GetNodeId()), 0U);
+  std::vector<SkQueueType> queues;
+  ASSERT_TRUE(SkQueueTypeResolver(*graph).Resolve(tasks, queues));
+  EXPECT_EQ(QueueFor(tasks, queues, missingReset), QueueFor(tasks, queues, missingNotify));
+  SkTaskBuilder::SkTaskContext context;
+  ASSERT_TRUE(AnalyzeTasks(tasks, context));
+}
+
 TEST_F(SkOptimizerTaskReorderTest, Schedule_WaitTailDoesNotJoinUnrelatedStream) {
   auto *ownerKernel = CreateKernelNode(1381, 2, SkKernelType::AIV_ONLY);
   auto *ownerWait = CreateWaitNode(1382, 2);
