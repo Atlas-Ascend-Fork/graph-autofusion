@@ -85,6 +85,7 @@ using elementwise::kF16;
 using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
+using elementwise::kI64;
 using elementwise::kUI16;
 using elementwise::kUI8;
 
@@ -104,6 +105,18 @@ constexpr uint32_t kArithmeticElementTypes = kF16 | kF32 | kI16 | kI32;
 // 出来，是 `OdsElementTypesAgreeWithRegistrationsAndLegacy` 的判据二（ODS ⊆ legacy 两列并集）
 // 抓到的。两个 op 不一致的位要写在各自的注册处，不要塞进共用常量。
 constexpr uint32_t kArithmeticRegElementTypes = kArithmeticElementTypes | kUI8 | kUI16;
+
+// 比较族的元素类型集合（从注册函数里移出：该函数已超长，不再往里加行）。mem 侧 i64
+// 仅接 tensor 形态，标量形态与 `lt` 的 tensor 形态不接——compare.h 的 int64 标量重载
+// 只支持 EQ/NE，且调度的 tmp 容量未保证 TmpDupInt64 的写入空间；reg 侧收满可建模集合。
+constexpr uint32_t kCompareMemElementTypes = kF16 | kF32 | kI32;
+constexpr uint32_t kCompareMemI64TensorElementTypes = kCompareMemElementTypes | kI64;
+constexpr uint32_t kCompareRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64;
+// `logical_and` / `logical_or` / `logical_xor` 两侧共用的元素类型表：mem 侧 `REG_ASC_IR`
+// 的 `T1` 是这五个加 i64；reg 侧更宽（bf16 / i8 / ui32 / ui64 / bool），那四位 AFIR
+// 建模不出来。reg 侧多一个 ui16——它恰恰是建模得出来的那一个。
+constexpr uint32_t kLogicalElementTypes = kUI8 | kI16 | kI32 | kF16 | kF32 | kI64;
+constexpr uint32_t kLogicalRegElementTypes = kLogicalElementTypes | kUI16 | kBF16;
 
 // 调度分给这个节点的 tmp buffer 与选中的调用之间是什么关系。
 //
@@ -1131,8 +1144,7 @@ LogicalResult registerBinaryBrcInline(ImplementationRegistry &registry, llvm::St
 
 }  // namespace
 
-LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &registry,
-                                                       ascend::instruction::SelectionPolicyRegistry *) {
+LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &registry) {
   // 这四个 op 的 tensor-tensor 形态在两套 API 家族上是同一个 `AscendC::` 调用，都不要
   // tmp buffer，所以各只有一个 implementation，也不查任何 feature。标量变体才有平台差异。
   if (failed(registerBinary<AddOp, ascendc::AddL2Op>(registry, "add.tensor_tensor", ApiFamily::Any)) ||
@@ -1165,7 +1177,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
       failed(registerScalarBinary<MinimumOp, ascendc::MinsL2Op>(registry, "minimum.tensor_scalar"))) {
     return failure();
   }
+  return success();
+}
 
+LogicalResult registerBitwiseAndDivisionImplementations(ImplementationRegistry &registry) {
   // `bitwise_and`：二元一类里第一个两侧调用**不同名**的 op，形状与 `reciprocal` 那条
   // 一样——reg 侧是标准调用、不要 tmp，mem 侧走包装、要 tmp。于是两个 implementation，
   // 各自钉死一张支持表，由 `checkApiFamily` 按 target 分流。
@@ -1173,9 +1188,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   // 包装其实一次都没用那块 tmp buffer（`bitwise_and.h` 里它只是个形参），但 legacy 照旧
   // 按 `CalcDefaultTmpSize` 给它留了一块。这里跟着留：少给的话调用的实参个数就对不上。
   //
-  // 没有标量形态——legacy 两侧的 `IsNodeValid` 都明写拒绝标量输入。
+  // 没有标量形态——legacy 两侧的 `IsNodeValid` 都明写拒绝标量输入。reg 侧比 mem 多收
+  // i64（`REG_ASC_IR` 的 v2 表里有 `DT_INT64`），mem 侧没有，所以只有 reg 那行带上。
   if (failed(registerBinary<BitwiseAndOp, ascendc::BitwiseAndL2Op>(registry, "bitwise_and.tensor", ApiFamily::RegBased,
-                                                                   kUI8 | kI16 | kUI16 | kI32)) ||
+                                                                   kUI8 | kI16 | kUI16 | kI32 | kI64)) ||
       failed(registerBinary<BitwiseAndOp, ascendc::BitwiseAndExtendOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "bitwise_and.tensor.extend", ApiFamily::MemBased, kUI8 | kI16 | kUI16 | kI32))) {
     return failure();
@@ -1189,9 +1205,9 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   // 四位的转发是等价的，但生成的调用字面必须与 legacy 一致。不带 tmp，没有标量形态
   // （`IsNodeValid` 拒标量）。
   if (failed(registerBinary<BitwiseOrOp, ascendc::BitwiseOrExtendRegBaseOp>(
-          registry, "bitwise_or.tensor", ApiFamily::RegBased, kUI8 | kI16 | kUI16 | kI32)) ||
+          registry, "bitwise_or.tensor", ApiFamily::RegBased, kUI8 | kI16 | kUI16 | kI32 | kI64)) ||
       failed(registerBinary<BitwiseXorOp, ascendc::BitwiseXorExtendRegBaseOp>(
-          registry, "bitwise_xor.tensor", ApiFamily::RegBased, kUI8 | kI16 | kUI16 | kI32))) {
+          registry, "bitwise_xor.tensor", ApiFamily::RegBased, kUI8 | kI16 | kUI16 | kI32 | kI64))) {
     return failure();
   }
 
@@ -1201,7 +1217,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   //   - mem 侧要一块 tmp buffer（装 `Div` 的中间商再交给 `Floor`），reg 侧不要；
   //   - mem 侧的 legacy 注册只给了 f16 / f32，reg 侧连整数一起收。
   //
-  // 于是 id 上只差 `_reg_base` 后缀，和 `neg.tensor.extend` 那一对同一个命名法。
+  // i64 SIMT 包装对 INT64_MIN / -1 缺少溢出处理，暂不在 AFIR 接入。
   if (failed(registerBinary<FloorDivOp, ascendc::FloorDivExtendOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "floor_div.tensor.extend", ApiFamily::MemBased, kF16 | kF32)) ||
       failed(registerBinary<FloorDivOp, ascendc::FloorDivExtendRegBaseOp>(
@@ -1220,6 +1236,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
           registry, "remainder.tensor.extend_reg_base", ApiFamily::RegBased, kF16 | kF32 | kI32 | kBF16))) {
     return failure();
   }
+  return success();
+}
+
+LogicalResult registerSubDivImplementations(ImplementationRegistry &registry) {
   // `sub` / `div`：两侧都是 `BinaryApiCall`，legacy 的两个 impl 类逐行同形（连
   // `IsScalarInputSupported` / `IsInplaceSupported` 都一样），所以一起注册。
   //
@@ -1232,12 +1252,13 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   // 不要 tmp，所以是 `None`。两侧的 id 沿用 `_reg_base` 后缀那套命名。
   //
   // 元素类型：`sub` 的 mem 侧 `REG_ASC_IR` 就是算术那四个；reg 侧多收 ui8 / ui16 / bf16
-  // （都建模得出来，所以都注册上），再多的 i8 / i64 / ui32 / ui64 AFIR 这一层还没有位。
+  // / i64。i8 / ui32 / ui64 在 AFIR 这一层还没有位。
   // `div` 两侧都只有 f16 / f32。
   if (failed(registerBinary<SubOp, ascendc::SubL2Op, ScalarOperand::None, TmpBufferUse::Unused>(
           registry, "sub.tensor_tensor", ApiFamily::MemBased)) ||
-      failed(registerBinary<SubOp, ascendc::SubExtendRegBaseOp>(
-          registry, "sub.tensor_tensor.extend_reg_base", ApiFamily::RegBased, kArithmeticRegElementTypes | kBF16)) ||
+      failed(registerBinary<SubOp, ascendc::SubExtendRegBaseOp>(registry, "sub.tensor_tensor.extend_reg_base",
+                                                                ApiFamily::RegBased,
+                                                                kArithmeticRegElementTypes | kBF16 | kI64)) ||
       failed(registerBinary<DivOp, ascendc::DivL2Op, ScalarOperand::None, TmpBufferUse::Unused>(
           registry, "div.tensor_tensor", ApiFamily::MemBased, kF16 | kF32)) ||
       failed(registerBinary<DivOp, ascendc::DivExtendRegBaseOp>(registry, "div.tensor_tensor.extend_reg_base",
@@ -1263,7 +1284,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
           registry, "div.tensor_scalar.extend_reg_base", ApiFamily::RegBased, kF16 | kF32))) {
     return failure();
   }
+  return success();
+}
 
+LogicalResult registerLogicalBinaryImplementations(ImplementationRegistry &registry) {
   // `logical_and` / `logical_or`：这条路上**第一对结果 dtype 与输入无关的 op**，也是
   // 第一对同时注册了 tensor 形态与标量形态的 op。`ResultElementRule::Uint8` 那个
   // 实参就是全部的新东西——目的地恒为 `ui8`，两个输入之间照旧要同 dtype。
@@ -1278,13 +1302,9 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   //   - mem 侧的 apiName 是裸名 `LogicalAnd` 而不是 `LogicalAndExtend`——它照样走扩展头，
   //     所以 id 上仍然用 `_reg_base` 区分两侧，不按 apiName 取名。
   //
-  // 元素类型：mem 侧 `REG_ASC_IR` 的 `T1` 就是这五个。reg 侧更宽（bf16 / i8 / i64 /
-  // ui32 / ui16 / ui64 / bool），AFIR 一个都建模不出来，于是两侧写成同一个集合——
-  // 这是 AFIR 的建模上限，不是 legacy 两侧真的一样。
-  constexpr uint32_t kLogicalElementTypes = kUI8 | kI16 | kI32 | kF16 | kF32;
-  // reg 侧多一个 ui16。原先两侧共用上面那个集合，注释写的是「AFIR 建模上限，不是 legacy
-  // 两侧真的一样」——ui16 恰恰是建模得出来的那一个，于是它被一起漏掉了。
-  constexpr uint32_t kLogicalRegElementTypes = kLogicalElementTypes | kUI16 | kBF16;
+  // 元素类型：mem 侧 `REG_ASC_IR` 的 `T1` 是这五个加 i64。reg 侧更宽（bf16 / i8 /
+  // ui32 / ui64 / bool），那四位 AFIR 建模不出来，于是两侧写在同一个基础集合上——
+  // 差异是 AFIR 的建模上限，不是 legacy 两侧真的一样。
   if (failed(registerBinary<LogicalAndOp, ascendc::LogicalAndExtendOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "logical_and.tensor_tensor", ApiFamily::MemBased, kLogicalElementTypes,
           ResultElementRule::Uint8)) ||
@@ -1307,7 +1327,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
           ResultElementRule::Uint8))) {
     return failure();
   }
+  return success();
+}
 
+LogicalResult registerRegOnlyBinaryImplementations(ImplementationRegistry &registry) {
   // 第 6 批的三个二元，全是 reg-only。
   //
   // `fmod` / `mod` **指向同一个 AscendC op**：legacy 两个调度节点的 `GetApiName` 都是
@@ -1362,7 +1385,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
           registry, "hypot.tensor", ApiFamily::RegBased, kF16 | kF32 | kBF16))) {
     return failure();
   }
+  return success();
+}
 
+LogicalResult registerLogicalScalarImplementations(ImplementationRegistry &registry) {
   // 标量形态。三个而不是四个：reg 侧的 `logical_or` 一个标量都不收。
   //
   // 这不是漏了。`LogicalOrAscIrCodegenImplV2` 没有覆写 `IsScalarInputSupported`，也没有
@@ -1389,7 +1415,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
           registry, "logical_or.tensor_scalar", ApiFamily::MemBased, kLogicalElementTypes, ResultElementRule::Uint8))) {
     return failure();
   }
+  return success();
+}
 
+LogicalResult registerTrueDivPowAxpyImplementations(ImplementationRegistry &registry) {
   // `truediv`：**第一个结果 dtype 逐行不同的 op**，也是第一个 mem 侧要说出**两个**扩展头
   // 的二元 op（`scalar_div.h` + `true_div.h`，`sign` 在一元那边先兑现过前置 A）。
   //
@@ -1470,7 +1499,10 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
                                                                                kF16 | kF32))) {
     return failure();
   }
+  return success();
+}
 
+LogicalResult registerEqualityCompareImplementations(ImplementationRegistry &registry) {
   // 比较族（eq / ne / lt / le / gt / ge）：六个 op 二十四个 implementation，也是这条
   // 路上第一批「一个 AscendC def 服务六个 AFIR op」。差别只有 `CMPMODE`，所以两侧各
   // 一个 tensor-tensor 与一个 tensor-scalar 的 def，模式由模板实参给。
@@ -1485,18 +1517,12 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   //     reg 侧 `Unused`——`GetCompareSizeV2` 照样分 32 字节，而 `CompareExtend` 的签名里
   //     没有那个形参。这是 `sub` / `div` 之外第二处用上第三档的地方。
   //
-  // 元素类型两侧差得远：mem 侧 legacy 的 `T1` 是 {f16, f32, i32, i64}（`lt` 那一行连
-  // i64 都没有），reg 侧是十二个。AFIR 建模得出来的分别是三个和六个——i64 两侧都有，
-  // 但这一层的位掩码拼不出它。六个 op 在这里是同一对集合：mem 侧 `lt` 少的那个
-  // i64 本来就不在建模范围内，所以不必逐行分。
-  //
-  // 标量形态两侧六个 op 全都收（`OnlySecondInputSupportScalar`）。**swap 方向只有
-  // eq / ne 有，这一轮不接**——那是 L-4。
-  constexpr uint32_t kCompareMemElementTypes = kF16 | kF32 | kI32;
-  constexpr uint32_t kCompareRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16;
+  // mem 侧 i64 仅接 tensor-tensor 的 EQ / NE / GT / GE / LE，与 compare.h 的连续
+  // 重载一致。标量重载只接受 EQ / NE，但调度的 tmp 容量未保证 TmpDupInt64 的写入空间。
+  // 因此 mem 侧标量形态暂不接 i64。reg 侧使用独立的包装，不依赖该 tmp。
   if (failed(registerCompare<EqOp, ascendc::CompareExtendContiguousOp, ascendc::CMPMODE::EQ, ScalarOperand::None,
                              TmpBufferUse::Passed>(registry, "eq.tensor_tensor", ApiFamily::MemBased,
-                                                   kCompareMemElementTypes)) ||
+                                                   kCompareMemI64TensorElementTypes)) ||
       failed(registerCompare<EqOp, ascendc::CompareExtendContiguousRegBaseOp, ascendc::CMPMODE::EQ, ScalarOperand::None,
                              TmpBufferUse::Unused>(registry, "eq.tensor_tensor.extend_reg_base", ApiFamily::RegBased,
                                                    kCompareRegElementTypes)) ||
@@ -1508,7 +1534,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
                                                                        ApiFamily::RegBased, kCompareRegElementTypes)) ||
       failed(registerCompare<NeOp, ascendc::CompareExtendContiguousOp, ascendc::CMPMODE::NE, ScalarOperand::None,
                              TmpBufferUse::Passed>(registry, "ne.tensor_tensor", ApiFamily::MemBased,
-                                                   kCompareMemElementTypes)) ||
+                                                   kCompareMemI64TensorElementTypes)) ||
       failed(registerCompare<NeOp, ascendc::CompareExtendContiguousRegBaseOp, ascendc::CMPMODE::NE, ScalarOperand::None,
                              TmpBufferUse::Unused>(registry, "ne.tensor_tensor.extend_reg_base", ApiFamily::RegBased,
                                                    kCompareRegElementTypes)) ||
@@ -1517,8 +1543,14 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
                                                    kCompareMemElementTypes)) ||
       failed(registerCompare<NeOp, ascendc::CompareScalarExtendContiguousRegBaseOp, ascendc::CMPMODE::NE,
                              ScalarOperand::Any, TmpBufferUse::Unused>(registry, "ne.tensor_scalar.extend_reg_base",
-                                                                       ApiFamily::RegBased, kCompareRegElementTypes)) ||
-      failed(registerCompare<LtOp, ascendc::CompareExtendContiguousOp, ascendc::CMPMODE::LT, ScalarOperand::None,
+                                                                       ApiFamily::RegBased, kCompareRegElementTypes))) {
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult registerLessEqualCompareImplementations(ImplementationRegistry &registry) {
+  if (failed(registerCompare<LtOp, ascendc::CompareExtendContiguousOp, ascendc::CMPMODE::LT, ScalarOperand::None,
                              TmpBufferUse::Passed>(registry, "lt.tensor_tensor", ApiFamily::MemBased,
                                                    kCompareMemElementTypes)) ||
       failed(registerCompare<LtOp, ascendc::CompareExtendContiguousRegBaseOp, ascendc::CMPMODE::LT, ScalarOperand::None,
@@ -1532,7 +1564,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
                                                                        ApiFamily::RegBased, kCompareRegElementTypes)) ||
       failed(registerCompare<LeOp, ascendc::CompareExtendContiguousOp, ascendc::CMPMODE::LE, ScalarOperand::None,
                              TmpBufferUse::Passed>(registry, "le.tensor_tensor", ApiFamily::MemBased,
-                                                   kCompareMemElementTypes)) ||
+                                                   kCompareMemI64TensorElementTypes)) ||
       failed(registerCompare<LeOp, ascendc::CompareExtendContiguousRegBaseOp, ascendc::CMPMODE::LE, ScalarOperand::None,
                              TmpBufferUse::Unused>(registry, "le.tensor_tensor.extend_reg_base", ApiFamily::RegBased,
                                                    kCompareRegElementTypes)) ||
@@ -1541,10 +1573,16 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
                                                    kCompareMemElementTypes)) ||
       failed(registerCompare<LeOp, ascendc::CompareScalarExtendContiguousRegBaseOp, ascendc::CMPMODE::LE,
                              ScalarOperand::Rhs, TmpBufferUse::Unused>(registry, "le.tensor_scalar.extend_reg_base",
-                                                                       ApiFamily::RegBased, kCompareRegElementTypes)) ||
-      failed(registerCompare<GtOp, ascendc::CompareExtendContiguousOp, ascendc::CMPMODE::GT, ScalarOperand::None,
+                                                                       ApiFamily::RegBased, kCompareRegElementTypes))) {
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult registerGreaterEqualCompareImplementations(ImplementationRegistry &registry) {
+  if (failed(registerCompare<GtOp, ascendc::CompareExtendContiguousOp, ascendc::CMPMODE::GT, ScalarOperand::None,
                              TmpBufferUse::Passed>(registry, "gt.tensor_tensor", ApiFamily::MemBased,
-                                                   kCompareMemElementTypes)) ||
+                                                   kCompareMemI64TensorElementTypes)) ||
       failed(registerCompare<GtOp, ascendc::CompareExtendContiguousRegBaseOp, ascendc::CMPMODE::GT, ScalarOperand::None,
                              TmpBufferUse::Unused>(registry, "gt.tensor_tensor.extend_reg_base", ApiFamily::RegBased,
                                                    kCompareRegElementTypes)) ||
@@ -1556,7 +1594,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
                                                                        ApiFamily::RegBased, kCompareRegElementTypes)) ||
       failed(registerCompare<GeOp, ascendc::CompareExtendContiguousOp, ascendc::CMPMODE::GE, ScalarOperand::None,
                              TmpBufferUse::Passed>(registry, "ge.tensor_tensor", ApiFamily::MemBased,
-                                                   kCompareMemElementTypes)) ||
+                                                   kCompareMemI64TensorElementTypes)) ||
       failed(registerCompare<GeOp, ascendc::CompareExtendContiguousRegBaseOp, ascendc::CMPMODE::GE, ScalarOperand::None,
                              TmpBufferUse::Unused>(registry, "ge.tensor_tensor.extend_reg_base", ApiFamily::RegBased,
                                                    kCompareRegElementTypes)) ||
@@ -1566,6 +1604,23 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
       failed(registerCompare<GeOp, ascendc::CompareScalarExtendContiguousRegBaseOp, ascendc::CMPMODE::GE,
                              ScalarOperand::Rhs, TmpBufferUse::Unused>(registry, "ge.tensor_scalar.extend_reg_base",
                                                                        ApiFamily::RegBased, kCompareRegElementTypes))) {
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &registry,
+                                                       ascend::instruction::SelectionPolicyRegistry *) {
+  // 注册体按算子族拆成上面这组 helper；调用顺序与拆分前的单一函数完全一致。
+  if (failed(registerArithmeticBinaryImplementations(registry)) ||
+      failed(registerBitwiseAndDivisionImplementations(registry)) || failed(registerSubDivImplementations(registry)) ||
+      failed(registerLogicalBinaryImplementations(registry)) ||
+      failed(registerRegOnlyBinaryImplementations(registry)) ||
+      failed(registerLogicalScalarImplementations(registry)) ||
+      failed(registerTrueDivPowAxpyImplementations(registry)) ||
+      failed(registerEqualityCompareImplementations(registry)) ||
+      failed(registerLessEqualCompareImplementations(registry)) ||
+      failed(registerGreaterEqualCompareImplementations(registry))) {
     return failure();
   }
   return success();

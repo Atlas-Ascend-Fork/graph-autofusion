@@ -79,6 +79,7 @@ using elementwise::kF16;
 using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
+using elementwise::kI64;
 using elementwise::kUI16;
 using elementwise::kUI8;
 
@@ -502,9 +503,9 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
   // 与 `WhereAscIrCodegenImpl` 逐字相同，只有 tmp 尺寸函数换了个名字而两者互相调用),
   // 差别只在 legacy 的 `IsScalarInputSupported` 允许哪个输入是标量，而两者允许的位置相同
   // （后两个），所以两者在 AFIR 这一层完全一样——标量形态也一样，各自多两个 implementation。
-  // 两者的集合不一样：legacy 的 mem 侧相同，reg 侧只有 `Where` 多收 ui8 / ui16。
-  // i16 原先两个都漏了——ODS 有、legacy 两侧也有，只有注册处没写。
-  constexpr uint32_t kSelectionElementTypes = kF16 | kF32 | kI16 | kI32;
+  // 两者的集合不一样：legacy 的 mem 侧相同（f16 / f32 / i16 / i32 / i64），reg 侧只有
+  // `Where` 多收 ui8 / ui16。i16 原先两个都漏了——ODS 有、legacy 两侧也有，只有注册处没写。
+  constexpr uint32_t kSelectionElementTypes = kF16 | kF32 | kI16 | kI32 | kI64;
   constexpr uint32_t kWhereRegElementTypes = kSelectionElementTypes | kUI8 | kUI16 | kBF16;
   if (failed(registerSelection<SelectOp>(registry, "select", kSelectionElementTypes, kSelectionElementTypes)) ||
       failed(registerSelection<WhereOp>(registry, "where", kSelectionElementTypes, kWhereRegElementTypes))) {
@@ -520,11 +521,10 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
   // （它转发给 `Clamp`，自己开寄存器）——差别只有一条：第一个操作数是 x 而不是掩码，
   // 与另外两个输入同 dtype。所以这里不能走 `registerSelection`，`conditionIsMask` 得
   // 是 false。
-  // 只收 f16 / f32：ODS 的 `AFIR_BufferizableTernaryHomoElementwiseOp<"clip_by_value", [F16, F32]>`
-  // 与 legacy 的 mem 侧一致。原先注册处多写了 i32，ODS 本来就拒，是一句没人读的假话。
-  // reg 侧 legacy 宽得多（到 ui64），AFIR 这一层表达不出来。
+  // mem 侧只收 f16 / f32，与 legacy 的 mem 列一致；原先注册处多写了 i32，ODS 本来就拒，
+  // 是一句没人读的假话。reg 侧 legacy 宽得多（到 ui64），AFIR 建模得出来的多出 i64。
   constexpr uint32_t kClipMemElementTypes = kF16 | kF32;
-  constexpr uint32_t kClipRegElementTypes = kClipMemElementTypes | kI16 | kI32 | kUI8 | kUI16 | kBF16;
+  constexpr uint32_t kClipRegElementTypes = kClipMemElementTypes | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64;
   if (failed(registerTernary<ClipByValueOp, ascendc::ClipByValueContiguousOp, /*TakesTmpBuffer=*/true>(
           registry, "clip_by_value.tensor.extend", ApiFamily::MemBased, /*conditionIsMask=*/false,
           kClipMemElementTypes)) ||

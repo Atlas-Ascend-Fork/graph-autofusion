@@ -10,6 +10,14 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
 
+// Neither the i64 EQ scalar path (tmp capacity) nor GE (unsupported mode) may select the mem wrapper.
+// RUN: sed -e 's/f16/i64/g' -e 's/1.500000e+00 : i64/3 : i64/' %s > %t.ge.mlir
+// RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %t.ge.mlir 2>&1 | FileCheck %s --check-prefix=NO-I64-GE
+// RUN: sed 's/afir.ge %input/afir.eq %input/' %t.ge.mlir > %t.eq.mlir
+// RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %t.eq.mlir 2>&1 | FileCheck %s --check-prefix=NO-I64-EQ
+// NO-I64-GE: 'afir.ge' op has no supported Ascend implementation
+// NO-I64-EQ: 'afir.eq' op has no supported Ascend implementation
+
 // 比较族的 mem 侧。六个 op 建的是同一个 `ascendc.compare_extend_contiguous`，
 // 只有 `cmpMode` 不同——这是这条路上第一次一个 AscendC def 服务六个 AFIR op，所以
 // 这份用例的第一件事是钉住「那个属性真的跟着 AFIR op 走」：三个 op 各一个函数，

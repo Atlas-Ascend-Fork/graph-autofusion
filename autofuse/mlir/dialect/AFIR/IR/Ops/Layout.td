@@ -32,10 +32,8 @@ include "mlir/IR/CommonTypeConstraints.td"
 defvar AFIR_RemovePadElementTypes = [I16, UI16, I32, UI32, F16, F32, BF16];
 defvar AFIR_PadElementTypes = [I16, UI16, I32, UI32, F16, F32];
 
-// 转置的 dtype 口径是**两侧注册表的并集**：mem 侧六种（`ascir_builtin_ops_v1.cpp:688`）、
-// reg 侧八种含 BF16/BOOL（`ascir_builtin_ops_v2.cpp:1073`）。BOOL 是唯一不接的例外——
-// MLIR 没有 I1 元素类型通路（本方言 ODS 无 I1、ascendc Types 无 Bool），reg 侧 e2e 对
-// DT_BOOL 在 CPU 仿真上也是 `GTEST_SKIP`，接了验不了。
+// ODS 取两侧可发射类型的并集。RegBased 的 Gather 只支持 1/2/4 字节元素，
+// 因此 i64 保持拒收。BOOL 暂无 AFIR/AscendC 类型通路。
 defvar AFIR_TransposeElementTypes = [I16, UI16, I32, UI32, F16, F32, BF16];
 
 // Ub2ub 的 dtype 口径也是**两侧注册表的并集**：mem 侧九种（`ascir_builtin_ops_v1.cpp:672`）、

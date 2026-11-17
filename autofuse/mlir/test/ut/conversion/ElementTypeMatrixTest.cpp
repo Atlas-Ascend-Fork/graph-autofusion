@@ -37,7 +37,7 @@
 //
 // 比较的是能被 AFIR 建模的那个子集：哪几位算建模得出来由
 // `support/AfirElementTypes.h` 的 `AFIR_ELEMENT_TYPE_TABLE` 说，legacy 收而那张表上没有
-// 的（i8 / i64 / ui32 / ui64 / bool）在这一层表达不出来，不能拿来当差异。
+// 的（i8 / ui32 / ui64 / bool）在这一层表达不出来，不能拿来当差异。
 //
 //===----------------------------------------------------------------------===//
 
@@ -196,22 +196,49 @@ struct KnownNarrowerRow {
   llvm::StringRef reason;
 };
 constexpr KnownNarrowerRow kKnownNarrower[] = {
-    // legacy 的 `BroadcastScalar` 生成的是不带限定的 `Duplicate(dst, v, n)`，而
-    // `duplicate.h` 在全局作用域给 int8 / uint8 / int64 / uint64 各摆了一条非模板重载。
-    // 这六位里落在那四条上的只有 `ui8`：它绑的是包装（先 `ReinterpretCast<uint16_t>`
-    // 再发一条半宽的 `Duplicate`），不是这条路发的 `AscendC::Duplicate`。把 `ui8` 也
-    // 注册上，发出去的就是一条 legacy 从来没发过的调用——比答 unsupported 更坏。
-    // mem 侧已用 DuplicateU8Op 接入包装；reg 侧仍只发标准调用。
-    {"broadcast.tensor.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16,
-     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16,
-     "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate；bf16 是合法加宽——"
-     "AscendC::Duplicate 按模板收 bfloat16_t（与 f16 同 16 位），legacy 只是没在 REG_ASC_IR 声明，"
-     "同 kOdsWiderThanLegacy 的 broadcast 行一个口径"},
+    // mem 侧的 Duplicate 档**有意**摘除 i64：legacy 对 int64 的 `BroadcastScalar` 发的是
+    // 带 tmp 尾参的四参调用 `Duplicate(dst, v, n, tmp)`（`broadcast_api_call.cpp:246`，
+    // 只在 int64 / uint64 时拼那个尾巴），而这一档发的是不带尾巴的标准
+    // `AscendC::Duplicate`——把 i64 注册上就会发出一条实参个数对不上的调用。补齐 =
+    // ascendc 方言补带 tmp 尾参的形态、pattern 按 dtype 分派，然后删本行。
+    // ui8 不在此列：mem 侧已用 DuplicateU8Op 接入 duplicate.h 的包装。
+    {"broadcast.tensor.duplicate", kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kI64,
+     "i64 在 legacy mem 侧走带 tmp 尾参的四参 Duplicate，不是这一档发的三参标准调用"},
+    // 标量源那一档与上面一行同一个理由、同一条收窄（legacy `BroadcastScalar` 的
+    // `in.is_constant` 一支对 int64 同样拼 tmp 尾参）。两行一起删或一起留。
+    {"broadcast.scalar.duplicate", kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kI64,
+     "i64 在 legacy mem 侧走带 tmp 尾参的四参 Duplicate，不是这一档发的三参标准调用"},
+    // reg 侧的 Duplicate 只窄 ui8 一位：legacy 的 `BroadcastScalar` 生成的是不带限定的
+    // `Duplicate(dst, v, n)`，而 `duplicate.h` 在全局作用域给 int8 / uint8 各摆了一条
+    // 非模板重载，`ui8` 绑的是包装（先 `ReinterpretCast<uint16_t>` 再发一条半宽的
+    // `Duplicate`），不是这条路发的标准 `AscendC::Duplicate`。把 `ui8` 也注册上，发出的
+    // 就是一条 legacy 从来没发过的调用——比答 unsupported 更坏。i64 不窄：reg 侧的
+    // stock Duplicate 按 8 字节收（SupportBytes<1,2,4,8>），legacy reg 列里就有它。
+    // bf16 是合法加宽——AscendC::Duplicate 按模板收 bfloat16_t（与 f16 同 16 位），
+    // legacy 只是没在 REG_ASC_IR 声明，同 kOdsWiderThanLegacy 的 broadcast 行一个口径。
+    {"broadcast.tensor.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16 | kI64,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kI64,
+     "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
     // 标量源那一档（legacy `BroadcastScalar` 的 `in.is_constant` 一支）与上面一行同一个
     // 理由、同一条收窄：reg 侧仍只发标准 `AscendC::Duplicate`，而 legacy 在 ui8 上发的是
     // `duplicate.h` 的包装重载。两行一起删或一起留。bf16 加宽同上一行口径。
-    {"broadcast.scalar.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16,
-     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16, "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
+    {"broadcast.scalar.duplicate_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16 | kI64,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kI64,
+     "ui8 在 legacy 走 duplicate.h 的包装重载，不是标准 AscendC::Duplicate"},
+    // compare.h 的 i64 标量重载仅支持 EQ/NE，且现有调度未保证该重载的临时区容量。
+    {"eq.tensor_scalar", kF16 | kF32 | kI32, kF16 | kF32 | kI32 | kI64,
+     "i64 标量包装需要额外的临时区，现有调度无法保证容量"},
+    {"ne.tensor_scalar", kF16 | kF32 | kI32, kF16 | kF32 | kI32 | kI64,
+     "i64 标量包装需要额外的临时区，现有调度无法保证容量"},
+    {"le.tensor_scalar", kF16 | kF32 | kI32, kF16 | kF32 | kI32 | kI64, "i64 标量包装仅支持 EQ/NE"},
+    {"gt.tensor_scalar", kF16 | kF32 | kI32, kF16 | kF32 | kI32 | kI64, "i64 标量包装仅支持 EQ/NE"},
+    {"ge.tensor_scalar", kF16 | kF32 | kI32, kF16 | kF32 | kI32 | kI64, "i64 标量包装仅支持 EQ/NE"},
+    {"floor_div.tensor.extend_reg_base", kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kI64, "i64 SIMT 包装未处理 INT64_MIN / -1"},
+    {"transpose.ub_ub_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16 | kI64, "RegBased Transpose 使用不支持 8 字节元素的 Gather"},
     // mem 档**有意**摘除 i32（连带无位的 ui32 同摘）：v1 布局对非 float 的 transpose 只给
     // 32B（4 字节整型折 8 元素），而 ConfusionTranspose 公式写死尾轴 16 元素对齐——布局
     // 与公式错位，数值必错（legacy 生产同错，其 ST 因手搓布局掩盖且无 int32 用例；实测
@@ -370,7 +397,7 @@ TEST(ElementTypeMatrixTest, RegisteredElementTypesMatchTheLoweringMatrix) {
 //     ——排期的人按首因挑活，就会去改错的那一层。
 //
 // 投影到支持表上这一步是必须的，不是放宽：`load` / `store` / `cast` / `broadcast` 的
-// ODS 列表里有 i8 / i64 / ui32 / ui64 这些在 AFIR 的位表上根本没有位的类型。它们在那里
+// ODS 列表里有 i8 / ui32 / ui64 这些在 AFIR 的位表上没有位的类型。它们在那里
 // 是故意的（搬运与 cast 要能承载还没建模的 dtype），但任何位掩码都表示不出它们，所以拿它们
 // 来比就只能永远失败。
 // ODS 的元素类型列表与注册处的关系有两条判据，而且两条都有方向。
@@ -400,7 +427,7 @@ TEST(ElementTypeMatrixTest, RegisteredElementTypesMatchTheLoweringMatrix) {
 // 把那个 implementation 拆成 mem / reg 两份，而不是去删 ODS 的那一位。
 //
 // 投影到支持表上这一步是必须的，不是放宽：`load` / `store` / `cast` / `broadcast` 的
-// ODS 列表里有 i8 / i64 / ui32 / ui64 这些在 AFIR 的位表上根本没有位的类型，任何位掩码都
+// ODS 列表里有 i8 / ui32 / ui64 这些在 AFIR 的位表上没有位的类型，任何位掩码都
 // 表示不出它们，拿它们来比只能永远失败。
 TEST(ElementTypeMatrixTest, OdsElementTypesAgreeWithRegistrationsAndLegacy) {
   const llvm::StringMap<MatrixRow> matrix = readMatrix(AF_MLIR_OP_LOWERING_MATRIX_CSV);
@@ -455,9 +482,9 @@ TEST(ElementTypeMatrixTest, OdsElementTypesAgreeWithRegistrationsAndLegacy) {
         odsBits |= bit;
         continue;
       }
-      // 支持表上没有位的那些（i8 / i64 / ui32 / ui64 / i4）是故意留在 ODS 里的，跳过；
+      // 支持表上没有位的那些（i8 / ui32 / ui64 / i4）是故意留在 ODS 里的，跳过；
       // 其余一律是拼写对不上，必须红。
-      EXPECT_TRUE(part == "i8" || part == "i64" || part == "ui32" || part == "ui64" || part == "i4")
+      EXPECT_TRUE(part == "i8" || part == "ui32" || part == "ui64" || part == "i4")
           << afirOpName.str() << " 的 ODS 列表里有一个供给表认不出的拼写 `" << part.str()
           << "`：要么它该进 AFIR_ELEMENT_TYPE_TABLE / AFIR_ELEMENT_TYPE_NAMED_ONLY，"
           << "要么 MLIR 的类型记录名字变了，这条门禁的拼写前提已经不成立";

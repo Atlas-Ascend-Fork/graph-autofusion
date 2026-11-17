@@ -90,9 +90,8 @@ using elementwise::ApiFamily;
 // legacy 查的是同一个数（`kTransposeMaxDims`）：超出部分拆外层循环，不是拒绝。
 constexpr size_t kTransposeMaxWindowDims = 4;
 
-// Register the representable dtype masks for matrix checks. bf16 has its own bit;
-// ui32/i64 have none. The intentional mem i32/ui32 restriction is recorded in
-// ElementTypeMatrixTest; i64/bool rejection is covered by afir-transpose-dtype-boundaries.mlir.
+// ui32 has no registry-mask bit. The reg wrapper uses 1/2/4-byte Gather, so i64
+// stays outside the supported type predicate and is recorded as a matrix exception.
 constexpr uint32_t kTransposeMemElementTypes =
     elementwise::kF16 | elementwise::kF32 | elementwise::kI16 | elementwise::kUI16;
 constexpr uint32_t kTransposeRegElementTypes = elementwise::kF16 | elementwise::kF32 | elementwise::kI16 |

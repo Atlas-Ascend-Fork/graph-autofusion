@@ -101,6 +101,7 @@ using elementwise::kF16;
 using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
+using elementwise::kI64;
 using elementwise::kUI16;
 using elementwise::kUI8;
 
@@ -108,6 +109,10 @@ using elementwise::kUI8;
 // wrapper; keep it separate from the stock API and the reg-based registration.
 // bf16 与 f16 同为 16 位模板实参，AscendC::Duplicate 与 BroadcastCommon 的分发
 // （broadcast.h:552）都收 bfloat16_t；此前漏登导致 bf16 广播图整图回落。
+// i64 不在这里：reg 侧的 stock Duplicate 按 8 字节收（`broadcast_extend_impl.h:260`
+// SupportBytes<1,2,4,8>），在注册处按侧别补；mem 侧 legacy 对 int64 发的是带 tmp 尾参
+// 的 `Duplicate(dst, v, n, tmp)`（`broadcast_api_call.cpp:246`），不是这条路的标准调用，
+// 补齐前由 `kKnownNarrower` 钉住。
 constexpr uint32_t kDuplicateElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16;
 constexpr unsigned kUInt8BitWidth = 8;
 
@@ -146,8 +151,9 @@ struct BroadcastMapping {
   BroadcastTier tier = BroadcastTier::Duplicate;
   uint32_t elementTypes = kDuplicateElementTypes;
   // 调度给不给 tmp buffer。给了也不传给调用——legacy 只在 int64 / uint64 时才把它
-  // 接到 `Duplicate` 的参数尾巴上，而那两种 dtype 不在 `kDuplicateElementTypes` 里。
-  // 这一位存在只是为了让 `checkTmpBuffer` 与调度对得上，两侧的值不同。
+  // 接到 `Duplicate` 的参数尾巴上；reg 档收 i64 但发的是不带尾巴的标准调用，mem 档
+  // 干脆没收 i64（见 `kDuplicateElementTypes` 上的注释）。这一位存在只是为了让
+  // `checkTmpBuffer` 与调度对得上，两侧的值不同。
   bool needsTmpBuffer = false;
   BroadcastSource source = BroadcastSource::Tile;
   ascend::ExecutionSpec executionSpec{ascend::ProcessorType::AICore, ascend::AICoreUnit::Vector,
@@ -203,10 +209,10 @@ afir::TensorDescAttr firstDescriptor(Operation *op, llvm::StringRef name) {
 // `BroadcastWithCast`（i8 / ui8）、`BroadcastCommon`（其余）。所以这里不按分支收窄——
 // 收窄的理由只能是「legacy 在那个 dtype 上生成的不是这条路生成的调用」，而这里生成的就是同一条。
 //
-// 只差在 AFIR 这一层的编号上：i8 / i64 / ui64 / ui32 在 `ElementTypes` 里没有位
+// 只差在 AFIR 这一层的编号上：i8 / ui64 / ui32 在 `ElementTypes` 里没有位
 // （`elementTypeBit` 答 0），够不着也就谈不上收。
 //
-constexpr uint32_t kSegmentedElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16;
+constexpr uint32_t kSegmentedElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64;
 
 // `expression` 可证等于 `literal` 吗。证不了返回 false（保守方向：报不支持，不是算错）。
 //
@@ -599,7 +605,8 @@ FailureOr<BroadcastSegmentation> analyzeSegmentedBroadcast(Operation *op, afir::
 // 这一位比 `ascir_op_lowering_matrix.csv` 的 `reg_dtypes` 列宽，legacy 的
 // `REG_ASC_IR(Broadcast)` 两侧都没声明 bf16。按功能需求 3 的判定标准以头文件为准，证据与那道
 // 门禁上的快照见 `dialect/AFIR/IR/Ops/Broadcast.td` 的 `AFIR_BroadcastElementTypes`。
-constexpr uint32_t kExtendElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16;
+// i64 建模后补在两侧声明里（`SupportBytes<1,2,4,8>` 收 8 字节）。
+constexpr uint32_t kExtendElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64;
 
 // `constRank` 的上限，`broadcast_extend_impl.h:258` 的 `static_assert` 钉的就是这个数。
 // legacy 在生成调用之前也查同一个上限（`reg_broadcast_api_call.cpp:95`），只是它数的是
@@ -1210,6 +1217,11 @@ LogicalResult registerDuplicate(ImplementationRegistry &registry, llvm::StringRe
     return failure();
   }
   uint32_t elementTypes = kDuplicateElementTypes;
+  // reg 侧的 stock Duplicate 收 8 字节实参（SupportBytes<1,2,4,8>），i64 跟着这一侧走；
+  // mem 侧对 int64 发的是带 tmp 尾参的调用，见 kDuplicateElementTypes 上的注释。
+  if (family == ApiFamily::RegBased) {
+    elementTypes |= kI64;
+  }
   if (family == ApiFamily::MemBased) {
     if (failed(elementwise::checkFamilyMatchesHeader<ascendc::DuplicateU8Op>(family))) {
       return failure();
