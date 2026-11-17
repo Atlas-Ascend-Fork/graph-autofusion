@@ -75,6 +75,12 @@ namespace codegen {
 Status MicroLoadApiCall::Generate(const TensorManager &tensor_mng, const TPipe &tpipe, CallParam &param,
                                   string &result) {
   std::stringstream ss;
+  // A CV broadcast view needs a scalar splat before any dtype unpacking.
+  // Recompute the distribution for each generation, including reused calls.
+  this->dist_.clear();
+  if (tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse) {
+    GE_ASSERT_SUCCESS(UpdateDistModeByStrideInfo(tpipe));
+  }
   auto tensor_id = GetOutputTensorIdByIndex(0);
   GE_ASSERT_NOTNULL(tensor_mng.GetTensor(tensor_id));
 
@@ -132,25 +138,22 @@ Status MicroLoadApiCall::UpdateDistModeByStrideInfo(const TPipe &tpipe) {
   auto tensor_id = GetInputTensorIdByIndex(0);
   const Tensor *tensor_ptr = tpipe.GetTensor(tensor_id);
   GE_ASSERT_NOTNULL(tensor_ptr);
-  ascir::SizeExpr last_dim_stride = tensor_ptr->vectorized_strides.back();
-  if (af::SymbolicUtils::StaticCheckEq(last_dim_stride.Simplify(), af::sym::kSymbolZero) != af::TriBool::kTrue) {
-    // 尾轴stride不为0，默认采用DIST_NORM加载
-    return af::SUCCESS;
+  if (!tpipe.IsCvNarrowTensor(*tensor_ptr)) {
+    if (tensor_ptr->vectorized_strides.empty()) {
+      return af::SUCCESS;
+    }
+    const auto last_dim_stride = tensor_ptr->vectorized_strides.back();
+    if (af::SymbolicUtils::StaticCheckEq(last_dim_stride.Simplify(), af::sym::kSymbolZero) != af::TriBool::kTrue) {
+      return af::SUCCESS;
+    }
   }
 
-  bool is_all_zero = std::all_of(
-      tensor_ptr->vectorized_strides.begin(), tensor_ptr->vectorized_strides.end(), [](const ascir::SizeExpr &stride) {
-        return af::SymbolicUtils::StaticCheckEq(stride.Simplify(), af::sym::kSymbolZero) == af::TriBool::kTrue;
-      });
-  if (is_all_zero) {
-    // 如果stride全部为0，也是用DIST_NORM模式进行加载
-    return af::SUCCESS;
-  }
-
-  std::map<int, string> LOAD_BRC_DIST_MODE = {
+  const std::map<int, string> load_brc_dist_mode = {
       {DTYPE_SIZE_1BYTE, "DIST_BRC_B8"}, {DTYPE_SIZE_2BYTE, "DIST_BRC_B16"}, {DTYPE_SIZE_4BYTE, "DIST_BRC_B32"}};
-  auto dtype_size = ge::GetSizeByDataType(tensor_ptr->dtype);
-  this->dist_ = LOAD_BRC_DIST_MODE[dtype_size];
+  const auto dtype_size = ge::GetSizeByDataType(tensor_ptr->dtype);
+  const auto mode = load_brc_dist_mode.find(dtype_size);
+  GE_ASSERT_TRUE(mode != load_brc_dist_mode.end(), "Unsupported CV broadcast load dtype size: %d", dtype_size);
+  this->dist_ = mode->second;
   return af::SUCCESS;
 }
 

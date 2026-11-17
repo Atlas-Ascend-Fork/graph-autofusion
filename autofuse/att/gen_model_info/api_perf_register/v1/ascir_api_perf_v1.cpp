@@ -907,36 +907,36 @@ af::Status ReduceMaxApi([[maybe_unused]] const std::vector<TensorShapeInfo> &inp
 }
 
 /*
-ArgMaxapi的性能公式：
-  ArgMax的性能特征与Max类似，复用ReduceMaxPerf
+Argmaxapi的性能公式：
+  Argmax的性能特征与Max类似，复用ReduceMaxPerf
 */
-af::Status ArgMaxPerf([[maybe_unused]] const std::vector<TensorShapeInfo> &input_shapes, PerfOutputInfo &perf_res) {
+af::Status ArgmaxPerf([[maybe_unused]] const std::vector<TensorShapeInfo> &input_shapes, PerfOutputInfo &perf_res) {
   return ReduceMaxPerf(input_shapes, perf_res);
 }
 
-af::Status ArgMaxApi([[maybe_unused]] const std::vector<TensorShapeInfo> &input_shapes,
+af::Status ArgmaxApi([[maybe_unused]] const std::vector<TensorShapeInfo> &input_shapes,
                      [[maybe_unused]] const std::vector<TensorShapeInfo> &output_shapes,
                      [[maybe_unused]] const NodeInfo &node, PerfOutputInfo &perf_res) {
   GE_ASSERT_TRUE(!output_shapes.empty() && !input_shapes.empty());
-  return ArgMaxPerf(input_shapes, perf_res);
+  return ArgmaxPerf(input_shapes, perf_res);
 }
 
 /*
 ArgMaxMultiRPhase1和ArgMaxMultiRPhase2的性能公式：
-  性能特征与ArgMax类似，复用ArgMaxPerf
+  性能特征与Argmax类似，复用ArgmaxPerf
 */
 af::Status ArgMaxMultiRPhase1Api([[maybe_unused]] const std::vector<TensorShapeInfo> &input_shapes,
                                  [[maybe_unused]] const std::vector<TensorShapeInfo> &output_shapes,
                                  [[maybe_unused]] const NodeInfo &node, PerfOutputInfo &perf_res) {
   GE_ASSERT_TRUE(!output_shapes.empty() && !input_shapes.empty());
-  return ArgMaxPerf(input_shapes, perf_res);
+  return ArgmaxPerf(input_shapes, perf_res);
 }
 
 af::Status ArgMaxMultiRPhase2Api([[maybe_unused]] const std::vector<TensorShapeInfo> &input_shapes,
                                  [[maybe_unused]] const std::vector<TensorShapeInfo> &output_shapes,
                                  [[maybe_unused]] const NodeInfo &node, PerfOutputInfo &perf_res) {
   GE_ASSERT_TRUE(!input_shapes.empty());
-  return ArgMaxPerf(input_shapes, perf_res);
+  return ArgmaxPerf(input_shapes, perf_res);
 }
 
 /*
@@ -1753,7 +1753,7 @@ REGISTER_EVAL_FUNC(kRelu, ascir_v1::ReluApi);
 REGISTER_EVAL_FUNC(kReduceAll, ascir_v1::ReduceAllApi);
 REGISTER_EVAL_FUNC(kReduceAny, ascir_v1::ReduceAnyApi);
 REGISTER_EVAL_FUNC(kReduceMax, ascir_v1::ReduceMaxApi);
-REGISTER_EVAL_FUNC(kArgMax, ascir_v1::ArgMaxApi);
+REGISTER_EVAL_FUNC(kArgmax, ascir_v1::ArgmaxApi);
 REGISTER_EVAL_FUNC(kArgMaxMultiRPhase1, ascir_v1::ArgMaxMultiRPhase1Api);
 REGISTER_EVAL_FUNC(kArgMaxMultiRPhase2, ascir_v1::ArgMaxMultiRPhase2Api);
 REGISTER_EVAL_FUNC(kReduceMean, ascir_v1::ReduceMeanApi);

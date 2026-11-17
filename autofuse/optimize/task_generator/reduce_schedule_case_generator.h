@@ -19,9 +19,10 @@
 
 namespace optimize {
 
-using ReduceType = std::variant<af::ascir_op::Max, af::ascir_op::Sum, af::ascir_op::Min, af::ascir_op::Prod,
-                                af::ascir_op::Any, af::ascir_op::All, af::ascir_op::ArgMaxMultiRPhase1,
-                                af::ascir_op::ArgMaxMultiRPhase2, af::ascir_op::Softmax>;
+using ReduceType =
+    std::variant<af::ascir_op::Max, af::ascir_op::Sum, af::ascir_op::Min, af::ascir_op::Prod, af::ascir_op::Any,
+                 af::ascir_op::All, af::ascir_op::ArgMaxMultiRPhase1, af::ascir_op::ArgMaxMultiRPhase2,
+                 af::ascir_op::ArgMaxMultiRPhase2WithValue, af::ascir_op::Softmax>;
 
 class ReducePartitionCaseGenerator : public FusionCaseGenerator {
  public:
@@ -55,14 +56,15 @@ class ReducePartitionCaseGenerator : public FusionCaseGenerator {
   // 基础上补充非单输出方向的类 Norm 结构(起点, 归宿点)对
   Status AddNormLikeLoops(ascir::ImplGraph &graph,
                           std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end);
-  bool ShouldForceAllLoad(ascir::HintGraph &graph);
   Status PartitionNorm(ascir::ImplGraph &impl_graph,
                        std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end);
   void FindAllPath(const af::AscNodePtr &start, const af::AscNodePtr &end, std::vector<af::AscNodePtr> &path,
                    std::vector<std::vector<af::AscNodePtr>> &all_paths);
   static bool HasReduce(const ascir::ImplGraph &impl_graph);
-  static bool HasArgMaxReduce(const ScheduleTask &task);
+  static bool HasArgmaxReduce(const ScheduleTask &task);
+  static bool HasArgmaxMultiRAxisReduce(const ascir::ImplGraph &impl_graph);
   static bool HasMultiRAxisReduce(const ascir::ImplGraph &impl_graph);
+  bool ShouldForceAllLoad(ascir::HintGraph &graph);
   static bool IsOnlyHasOneOrLessReduce(const ascir::ImplGraph &impl_graph);
   static bool CanFullLoadReduceFuse(const ascir::ImplGraph &impl_graph);
   Status ReducePartitionMultipleCitations(ascir::ImplGraph &impl_graph);
@@ -110,7 +112,7 @@ class RMulticorePhase2Graph {
   Status PartitionByReduce(ascir::ImplGraph &impl_graph, ReduceType &phase2graph_reduce,
                            std::vector<af::AscNodePtr> &node_order);
   Status SetNodeOrder(std::vector<af::AscNodePtr> &node_order);
-  Status SetupArgMaxIndexNodes(const af::AscNodePtr &reduce_node, ascir::ImplGraph &phase2graph);
+  Status SetupArgmaxIndexNodes(const af::AscNodePtr &reduce_node, ascir::ImplGraph &phase2graph);
 };
 }  // namespace optimize
 

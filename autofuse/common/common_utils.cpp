@@ -29,6 +29,7 @@
 #include "common/ascir_node_param/ascir_node_param.h"
 #include "common/indirect_load_utils.h"
 #include "autofuse_config/auto_fuse_config.h"
+#include "att/base/arch_param.h"
 
 using namespace af::ascir_op;
 using namespace af::ops;
@@ -663,7 +664,7 @@ af::Expression CalculateOneWorkspaceSize(const af::AscNodePtr &workspace_nodes) 
     auto out_size = GetTensorSize(load_node->outputs[0U]);
     ws_size = af::sym::Max(ws_size, out_size);
   }
-  return ws_size;
+  return af::sym::Align(ws_size, att::arch_param::kV2ArchHardwareConfig.cache_line_size);
 }
 
 af::Expression CalculateWorkspaceSize(const std::vector<af::AscNodePtr> &workspace_nodes) {
@@ -1604,11 +1605,29 @@ af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_r
   }
 
   auto update_graph_axis = [allow_fragment_padding](af::AscGraph &graph) {
+    bool n_broadcast = false;
+    bool m_broadcast = false;
+    for (const auto &node : graph.GetAllNodes()) {
+      n_broadcast = n_broadcast || !ascir::GetCvBroadcastShape(*node).empty();
+      m_broadcast = m_broadcast || ascir::IsCvMBroadcast(*node);
+    }
     for (auto &ax : graph.GetAllAxis()) {
       if (ax == nullptr) {
         continue;
       }
       if (ax->type == ascir::Axis::kAxisTypeTileInner) {
+        if (m_broadcast) {
+          ax->align = af::Symbol(32);
+          ax->allow_oversize_axis = true;  // A padded N tail; logical M is never tiled.
+          continue;
+        }
+        if (n_broadcast && allow_fragment_padding) {
+          // Consumer tiles are independent of the Cube fragment. The host
+          // reserves that fragment separately for both buffer policies.
+          ax->align = af::Symbol(1);
+          ax->allow_oversize_axis = false;
+          continue;
+        }
         GELOGI("Add tile inner axis(%s) symbol align for graph(%s)", ax->name.c_str(), graph.GetName().c_str());
         // 运行时占位符（由生成 tiling 代码中 set/get_g_basen_basem_align 维护），
         // 名字必须为合法标识符：轴属性会经 AscGraph 序列化克隆（FusedGraphUnfolder::CloneAscGraphs），
@@ -1655,6 +1674,12 @@ af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_res
 }
 
 af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result, bool allow_fragment_padding) {
+  if (!IsCubeUBFusedScheduled(fused_result) && IsCubeCommonFusedScheduled(fused_result)) {
+    // Without a UB candidate, the Common vector graphs are the complete ATT
+    // input. Appending them to the original result retains its Cube groups,
+    // whose input K axes are intentionally absent from the vector tiling view.
+    return CreateCVFusionCommonResult(fused_result);
+  }
   ascir::FusedScheduledResult common_schedule_result = fused_result;
   if (ascgen_utils::IsCubeUBFusedScheduled(fused_result)) {
     GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionResult(fused_result, allow_fragment_padding));

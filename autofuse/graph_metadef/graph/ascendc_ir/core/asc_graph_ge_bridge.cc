@@ -63,8 +63,8 @@ AscNodePtr AscGraphAddAscirNodeByType(AscGraph &asc_graph, const char *op_type, 
   if (type == ascir_op::Any::Type) {
     MAKE_NODE(Any);
   }
-  if (type == ascir_op::ArgMax::Type) {
-    MAKE_NODE(ArgMax);
+  if (type == ascir_op::Argmax::Type) {
+    MAKE_NODE(Argmax);
   }
   if (type == ascir_op::ArgMaxMultiRPhase1::Type) {
     MAKE_NODE(ArgMaxMultiRPhase1);

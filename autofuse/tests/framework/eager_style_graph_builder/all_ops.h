@@ -492,22 +492,22 @@ typedef struct {
 EsApplyRotaryPosEmbOutput EsApplyRotaryPosEmb(EsbTensor *query, EsbTensor *key, EsbTensor *cos, EsbTensor *sin,
                                               int64_t layout);
 EsbTensor *EsApproximateEqual(EsbTensor *x1, EsbTensor *x2, float tolerance);
-EsbTensor *EsArgMaxD(EsbTensor *x, int64_t dimension, af::DataType dtype);
-EsbTensor *EsArgMaxGrad(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, int64_t dimension);
-EsbTensor *EsArgMaxGradD(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, EsbTensor *assist, int64_t dimension);
-EsbTensor *EsArgMaxV2(EsbTensor *x, EsbTensor *dimension, af::DataType dtype);
+EsbTensor *EsArgmaxD(EsbTensor *x, int64_t dimension, af::DataType dtype);
+EsbTensor *EsArgmaxGrad(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, int64_t dimension);
+EsbTensor *EsArgmaxGradD(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, EsbTensor *assist, int64_t dimension);
+EsbTensor *EsArgmaxV2(EsbTensor *x, EsbTensor *dimension, af::DataType dtype);
 
 typedef struct {
   EsbTensor *indices;
   EsbTensor *values;
-} EsArgMaxWithKOutput;
-EsArgMaxWithKOutput EsArgMaxWithK(EsbTensor *x, int64_t axis, bool out_max_val, int64_t topk);
+} EsArgmaxWithKOutput;
+EsArgmaxWithKOutput EsArgmaxWithK(EsbTensor *x, int64_t axis, bool out_max_val, int64_t topk);
 
 typedef struct {
   EsbTensor *indice;
   EsbTensor *values;
-} EsArgMaxWithValueOutput;
-EsArgMaxWithValueOutput EsArgMaxWithValue(EsbTensor *x, int64_t dimension, bool keep_dims);
+} EsArgmaxWithValueOutput;
+EsArgmaxWithValueOutput EsArgmaxWithValue(EsbTensor *x, int64_t dimension, bool keep_dims);
 EsbTensor *EsArgMin(EsbTensor *x, EsbTensor *dimension, af::DataType dtype);
 EsbTensor *EsArgMinD(EsbTensor *x, int64_t dimension, af::DataType dtype);
 
@@ -3924,15 +3924,15 @@ EsbTensor *EsRoiExtractor(EsbTensor **features, int64_t features_num, EsbTensor 
                           int64_t finest_scale, float roi_scale_factor, const float *spatial_scale,
                           int64_t spatial_scale_num, int64_t pooled_height, int64_t pooled_width, int64_t sample_num,
                           const char *pool_mode, bool aligned);
-EsbTensor *EsRoiPoolingGradWithArgMax(EsbTensor *grad, EsbTensor *x, EsbTensor *rois, EsbTensor *roi_actual_num,
+EsbTensor *EsRoiPoolingGradWithArgmax(EsbTensor *grad, EsbTensor *x, EsbTensor *rois, EsbTensor *roi_actual_num,
                                       EsbTensor *argmax, int64_t pooled_h, int64_t pooled_w, float spatial_scale_h,
                                       float spatial_scale_w, int64_t pool_channel);
 
 typedef struct {
   EsbTensor *y;
   EsbTensor *argmax;
-} EsRoiPoolingWithArgMaxOutput;
-EsRoiPoolingWithArgMaxOutput EsRoiPoolingWithArgMax(EsbTensor *x, EsbTensor *rois, EsbTensor *roi_actual_num,
+} EsRoiPoolingWithArgmaxOutput;
+EsRoiPoolingWithArgmaxOutput EsRoiPoolingWithArgmax(EsbTensor *x, EsbTensor *rois, EsbTensor *roi_actual_num,
                                                     int64_t pooled_h, int64_t pooled_w, float spatial_scale_h,
                                                     float spatial_scale_w, int64_t pool_channel);
 EsbTensor *EsRoll(EsbTensor *x, const int64_t *shifts, int64_t shifts_num, const int64_t *dims, int64_t dims_num);

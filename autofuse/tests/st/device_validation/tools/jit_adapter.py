@@ -29,30 +29,36 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+_SIX_ARG_TILING_RE = re.compile(
+    r'extern "C" int64_t AutofuseTiling\((uint32_t|int64_t) s0, (uint32_t|int64_t) s1'
+)
 
 
 def patch_single_operator_tiling(host_code, rows, cols):
     """Return host_impl.cpp with a 4-arg tiling entry when codegen emitted a
     6-arg ``AutofuseTiling(s0, s1, ...)`` signature.
 
-    The original 6-arg entry is renamed to ``AutofuseTilingS0S1`` and a
-    4-arg ``AutofuseTiling`` forwards the requested shape into it. The
-    injection is placed inside the split-host markers so the compiler's
-    host-source splitter accepts it.
+    Shape arguments may be ``uint32_t`` or ``int64_t`` depending on the
+    generator's SizeVar width. The original 6-arg entry is renamed to
+    ``AutofuseTilingS0S1`` and a 4-arg ``AutofuseTiling`` forwards the
+    requested shape into it. The injection is placed inside the split-host
+    markers so the compiler's host-source splitter accepts it.
     """
-    marker = 'extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1'
-    if marker not in host_code:
+    match = _SIX_ARG_TILING_RE.search(host_code)
+    if match is None:
         return host_code
-    host_code = host_code.replace(
-        marker, 'extern "C" int64_t AutofuseTilingS0S1(uint32_t s0, uint32_t s1', 1
-    )
+    s0_type, s1_type = match.group(1), match.group(2)
+    renamed = f'extern "C" int64_t AutofuseTilingS0S1({s0_type} s0, {s1_type} s1'
+    host_code = host_code[: match.start()] + renamed + host_code[match.end() :]
     adapter = (
         "struct ResLimit;\n"
-        'extern "C" int64_t AutofuseTilingS0S1(uint32_t s0, uint32_t s1, '
+        f'extern "C" int64_t AutofuseTilingS0S1({s0_type} s0, {s1_type} s1, '
         "AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim, "
         "ResLimit *res_limit);\n"
         'extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, '

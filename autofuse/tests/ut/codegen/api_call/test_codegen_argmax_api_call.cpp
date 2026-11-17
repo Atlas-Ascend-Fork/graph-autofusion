@@ -30,14 +30,14 @@ void CheckReduceTailBoolParam(const std::string &result) {
 }
 }  // namespace
 
-class ArgMaxApicallTest : public ::testing::Test {
+class ArgmaxApicallTest : public ::testing::Test {
  protected:
   void SetUp() override {}
   void TearDown() override {}
 };
 
-TEST_F(ArgMaxApicallTest, ReduceApi_Test_ArgMax) {
-  std::string api_name = "ArgMax";
+TEST_F(ArgmaxApicallTest, ReduceApi_Test_Argmax) {
+  std::string api_name = "Argmax";
 
   std::vector<ascir::AxisId> current_axis;
   std::vector<std::reference_wrapper<const Tensor>> inputs;
@@ -124,7 +124,7 @@ TEST_F(ArgMaxApicallTest, ReduceApi_Test_ArgMax) {
 
   codegen::ReduceApiCall call(api_name);
   call.unit = af::ComputeUnit::kUnitVector;
-  call.type = "ArgMax";
+  call.type = "Argmax";
   call.node = reduce_node;  // 设置Reduce节点，BuildApiParam需要有效的node
   call.node_name = reduce_node->GetName();
   y_tensor.write = &call;
@@ -143,7 +143,7 @@ TEST_F(ArgMaxApicallTest, ReduceApi_Test_ArgMax) {
   CheckReduceTailBoolParam(result);
 }
 
-TEST_F(ArgMaxApicallTest, ReduceApi_Test_ArgMaxMultiRPhase1) {
+TEST_F(ArgmaxApicallTest, ReduceApi_Test_ArgMaxMultiRPhase1) {
   std::string api_name = "ArgMaxMultiRPhase1";
 
   std::vector<ascir::AxisId> current_axis;
@@ -277,7 +277,7 @@ TEST_F(ArgMaxApicallTest, ReduceApi_Test_ArgMaxMultiRPhase1) {
   CheckReduceTailBoolParam(result);
 }
 
-TEST_F(ArgMaxApicallTest, ReduceApi_Test_ArgMaxMultiRPhase2) {
+TEST_F(ArgmaxApicallTest, ReduceApi_Test_ArgMaxMultiRPhase2) {
   std::string api_name = "ArgMaxMultiRPhase2";
 
   std::vector<ascir::AxisId> current_axis;
@@ -410,8 +410,8 @@ TEST_F(ArgMaxApicallTest, ReduceApi_Test_ArgMaxMultiRPhase2) {
   CheckReduceTailBoolParam(result);
 }
 
-TEST_F(ArgMaxApicallTest, ReduceApicallTest_ArgMax_NoNeed_MultiReduce_Int32) {
-  std::string api_name = "ArgMax";
+TEST_F(ArgmaxApicallTest, ReduceApicallTest_Argmax_NoNeed_MultiReduce_Int32) {
+  std::string api_name = "Argmax";
 
   std::vector<ascir::AxisId> current_axis;
   std::vector<std::reference_wrapper<const Tensor>> inputs;
@@ -497,7 +497,7 @@ TEST_F(ArgMaxApicallTest, ReduceApicallTest_ArgMax_NoNeed_MultiReduce_Int32) {
 
   codegen::ReduceApiCall call(api_name);
   call.unit = af::ComputeUnit::kUnitVector;
-  call.type = "ArgMax";
+  call.type = "Argmax";
   call.node = reduce_node;  // 设置Reduce节点，BuildApiParam需要有效的node
   call.node_name = reduce_node->GetName();
   y_tensor.write = &call;
@@ -516,7 +516,7 @@ TEST_F(ArgMaxApicallTest, ReduceApicallTest_ArgMax_NoNeed_MultiReduce_Int32) {
   CheckReduceTailBoolParam(result);
 }
 
-TEST_F(ArgMaxApicallTest, ReduceApicallTest_ArgMaxMultiRPhase1_NoNeed_MultiReduce_Int32) {
+TEST_F(ArgmaxApicallTest, ReduceApicallTest_ArgMaxMultiRPhase1_NoNeed_MultiReduce_Int32) {
   std::string api_name = "ArgMaxMultiRPhase1";
 
   std::vector<ascir::AxisId> current_axis;
@@ -649,7 +649,7 @@ TEST_F(ArgMaxApicallTest, ReduceApicallTest_ArgMaxMultiRPhase1_NoNeed_MultiReduc
   CheckReduceTailBoolParam(result);
 }
 
-TEST_F(ArgMaxApicallTest, ReduceApicallTest_ArgMaxMultiRPhase2_NoNeed_MultiReduce_Int32) {
+TEST_F(ArgmaxApicallTest, ReduceApicallTest_ArgMaxMultiRPhase2_NoNeed_MultiReduce_Int32) {
   std::string api_name = "ArgMaxMultiRPhase2";
 
   std::vector<ascir::AxisId> current_axis;

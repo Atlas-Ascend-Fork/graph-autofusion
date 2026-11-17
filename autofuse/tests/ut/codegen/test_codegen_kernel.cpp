@@ -19,6 +19,7 @@
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
 #include "codegen_kernel.h"
+#include "backend/backend_spec.h"
 #include "codegen_tiling_data.h"
 #include "optimize/schedule_utils.h"
 #include "codegen_api_param/codegen_api_param.h"
@@ -41,6 +42,48 @@ using namespace ge;
 using namespace af::ops;
 using namespace af::ascir_op;
 using namespace codegen;
+
+TEST(CodegenKernel, NBroadCastCallbackUsesCubeOffsetAndCompletesEveryVectorTile) {
+  af::AscGraph graph("cv_output_broadcast_callback");
+  const auto m = graph.CreateAxis("m", af::Symbol(128));
+  const auto n = graph.CreateAxis("n", af::Symbol(256));
+  Data data("data", graph);
+  Load load("load");
+  graph.AddNode(load);
+  load.x = data.y;
+  auto node = graph.FindNode("load");
+  node->outputs[0].attr.dtype = ge::DT_FLOAT16;
+  node->outputs[0].attr.axis = {m.id, n.id};
+  node->outputs[0].attr.repeats = {af::Symbol(128), af::Symbol(1)};
+  node->outputs[0].attr.strides = {af::Symbol(1), af::Symbol(0)};
+  node->outputs[0].attr.mem.tensor_id = 0;
+  Kernel kernel("cv_output_broadcast_callback");
+  ASSERT_EQ(kernel.tiler.AddAxis(m), af::SUCCESS);
+  ASSERT_EQ(kernel.tiler.AddAxis(n), af::SUCCESS);
+  ASSERT_EQ(kernel.tpipe.AddTensor(node->outputs[0]), af::SUCCESS);
+  kernel.tpipe.cv_fusion_type = ascir::CubeTemplateType::kUBFuse;
+  kernel.tpipe.cube_output_tensor_id = 0;
+  kernel.tpipe.cv_output_broadcast = true;
+  kernel.tpipe.cv_n_axis = n.id;
+  kernel.tpipe.cv_n_size_expr = "t->n";
+  kernel.tpipe.cv_n_tile_expr = "t->nt";
+  std::stringstream ss;
+  ASSERT_EQ(kernel.GenerateVecFuncOfCVFusion(ss, false, false, true, true, "CvNBroadcastCase"), af::SUCCESS);
+  const auto text = ss.str();
+  EXPECT_NE(text.find("row < curAivM"), std::string::npos);
+  EXPECT_NE(text.find("stageOffset + row * curAlignN"), std::string::npos);
+  EXPECT_NE(text.find("(offset / shapeN + row) * cv_n_size + column"), std::string::npos);
+  EXPECT_NE(text.find("column += cv_n_tile"), std::string::npos);
+  EXPECT_NE(text.find("auto_fusion_vector_stage1(vector_offset, 1, width"), std::string::npos);
+  EXPECT_NE(text.find("auto_fusion_vector_stage2(vector_offset, 1, width"), std::string::npos);
+  EXPECT_NE(text.find("if (stage == 2 ||"), std::string::npos);
+  EXPECT_EQ(text.find("src_stage_offset"), std::string::npos);
+  EXPECT_EQ(text.find("buf_n_broadcast_row"), std::string::npos);
+  std::stringstream address;
+  ASSERT_EQ(kernel.InitCVFusionAddr(address, false, true, true, false, "CvNBroadcastCase"), af::SUCCESS);
+  EXPECT_NE(address.str().find("kConstTilingData.tiling_data.n"), std::string::npos);
+  EXPECT_NE(address.str().find("t.tiling_data.nt"), std::string::npos);
+}
 
 namespace {
 std::string ToString(const af::Expression &e) {
@@ -77,6 +120,62 @@ TEST(CodegenKernel, Type_StrWillReturnTypeName) {
   codegen::Type t{"int"};
 
   EXPECT_EQ(t.Str(), "int");
+}
+
+TEST(CodegenKernel, IndependentReduceSummaryCanDeferSyncToNextGroup) {
+  const auto make_result = []() {
+    ascir::ScheduledResult result;
+    result.schedule_groups.resize(3);
+    result.var_relations[1][0]["r"] = af::Symbol(1);
+    for (size_t i = 1; i < 3; ++i) {
+      af::AscGraph graph(("group" + std::to_string(i)).c_str());
+      Workspace workspace("workspace");
+      graph.AddNode(workspace);
+      graph.FindNode("workspace")->outputs[0].attr.mem.tensor_id = static_cast<int64_t>(i);
+      result.schedule_groups[i].impl_graphs.push_back(graph);
+    }
+    return result;
+  };
+  auto result = make_result();
+  EXPECT_TRUE(Kernel::CanSkipReduceGroupSync(result, 1));
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 0));
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 2));
+  result.enable_group_parallel = true;
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = make_result();
+  result.cube_type = ascir::CubeTemplateType::kCommon;
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = make_result();
+  result.var_relations[2][1]["r"] = af::Symbol(1);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = make_result();
+  result.schedule_groups[2].impl_graphs[0].FindNode("workspace")->outputs[0].attr.mem.tensor_id = 1;
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = make_result();
+  af::AscGraph alternative("alternative");
+  Workspace shared("shared");
+  alternative.AddNode(shared);
+  alternative.FindNode("shared")->outputs[0].attr.mem.tensor_id = 2;
+  result.schedule_groups[1].impl_graphs.push_back(alternative);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = make_result();
+  Output output("visible_output");
+  result.schedule_groups[1].impl_graphs[0].AddNode(output);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = make_result();
+  result.schedule_groups[1].impl_graphs.clear();
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = make_result();
+  result.schedule_groups[1].impl_graphs[0].FindNode("workspace")->outputs[0].attr.mem.tensor_id = -1;
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = make_result();
+  auto &controlled_graph = result.schedule_groups[1].impl_graphs[0];
+  Scalar control_target("control_target");
+  controlled_graph.AddNode(control_target);
+  ASSERT_EQ(af::GraphUtils::AddEdge(controlled_graph.FindNode("workspace")->GetOutControlAnchor(),
+                                    controlled_graph.FindNode("control_target")->GetInControlAnchor()),
+            af::GRAPH_SUCCESS);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
 }
 
 TEST(CodegenKernel, Variable_StrWillReturnVarName) {
@@ -6390,6 +6489,87 @@ TEST(CodegenKernel, PackingFunctionCalls) {
   EXPECT_TRUE(result.find("if TILING_KEY_VAR == 20000004") == std::string::npos);
 }
 
+TEST(CodegenKernel, SerialVectorGroupsDoNotPackAtCompileUnitBoundary) {
+  af::AscGraph graph("packing_boundary");
+  const auto axis = graph.CreateAxis("z0", af::Symbol(128));
+  Data data("input", graph);
+  Load load_op("load");
+  Store store_op("store");
+  Output output_op("output");
+  data.ir_attr.SetIndex(0);
+  output_op.ir_attr.SetIndex(0);
+  data.y.dtype = ge::DT_FLOAT;
+  load_op.y.dtype = ge::DT_FLOAT;
+  store_op.y.dtype = ge::DT_FLOAT;
+  output_op.y.dtype = ge::DT_FLOAT;
+  graph.AddNode(load_op);
+  graph.AddNode(store_op);
+  graph.AddNode(output_op);
+  auto input = graph.FindNode("input");
+  auto load = graph.FindNode("load");
+  auto store = graph.FindNode("store");
+  auto output = graph.FindNode("output");
+  ASSERT_EQ(af::GraphUtils::AddEdge(input->GetOutDataAnchor(0), load->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(load->GetOutDataAnchor(0), store->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(store->GetOutDataAnchor(0), output->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  input->attr.api.unit = af::ComputeUnit::kUnitNone;
+  output->attr.api.unit = af::ComputeUnit::kUnitNone;
+  input->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  input->outputs[0].attr.mem.tensor_id = 0;
+  auto &tensor = load->outputs[0].attr;
+  tensor.axis = {axis.id};
+  tensor.vectorized_axis = {axis.id};
+  tensor.vectorized_strides = {One};
+  tensor.repeats = {axis.size};
+  tensor.strides = {One};
+  tensor.mem.position = af::Position::kPositionVecIn;
+  tensor.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  tensor.mem.tensor_id = 1;
+  tensor.mem.reuse_id = 0;
+  tensor.que.id = 0;
+  tensor.que.depth = 2;
+  tensor.que.buf_num = 2;
+  tensor.opt.merge_scope = af::kIdNone;
+  store->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  store->outputs[0].attr.mem.tensor_id = 2;
+
+  const auto backend_spec = optimize::BackendSpec::GetInstance();
+  ASSERT_NE(backend_spec, nullptr);
+  const auto limit = static_cast<int64_t>(backend_spec->max_group_num_per_compile_unit);
+  ASSERT_GT(limit, 0);
+  ASSERT_LE(limit, 64);
+  for (const bool is_inductor : {false, true}) {
+    for (const auto count : {limit - 1, limit, limit + 1, limit + 2, limit * 2}) {
+      ascir::FusedScheduledResult fused;
+      fused.fused_graph_name = af::AscendString("packing_boundary");
+      fused.input_nodes = {input};
+      fused.output_nodes = {output};
+      fused.node_idx_to_scheduled_results.resize(1);
+      fused.node_idx_to_scheduled_results[0].resize(1);
+      // Use the public entry's parsed-tiling branch for both compiler modes.
+      fused.node_idx_to_scheduled_results[0][0].enable_group_parallel = true;
+      auto &groups = fused.node_idx_to_scheduled_results[0][0].schedule_groups;
+      for (int64_t index = 0; index < count; ++index) {
+        af::AscGraph copy(("packing_group_" + std::to_string(index)).c_str());
+        ASSERT_TRUE(copy.CopyFrom(graph));
+        ascir::ScheduleGroup group;
+        group.impl_graphs.push_back(copy);
+        groups.push_back(std::move(group));
+      }
+      std::stringstream generated;
+      const CodegenConfig config{is_inductor, true, false};
+      ASSERT_EQ(Kernel::GenKernelFuncByTilingKey(fused, generated, false, config), af::SUCCESS);
+      const bool packed = generated.str().find("packed_functions_") != std::string::npos;
+      EXPECT_EQ(packed, !is_inductor && count > limit) << "group_count=" << count;
+      if (is_inductor) {
+        EXPECT_NE(generated.str().find("_g" + std::to_string(count - 1) + "_tiling_data"), std::string::npos);
+      } else if (count > limit) {
+        EXPECT_NE(generated.str().find("#if TILING_KEY_VAR =="), std::string::npos);
+      }
+    }
+  }
+}
+
 TEST(CodegenKernel, TPipe_AllocTmpBuf) {
   af::AscGraph graph("test");
   af::ascir_op::Data x("x", graph);
@@ -7010,9 +7190,9 @@ TEST(CodegenKernel, CalculateWorkspaceSize_Test) {
   std::vector<af::AscNodePtr> workspace_nodes = {workspace1, workspace2};
   auto ws_size = ascgen_utils::CalculateWorkspaceSize(workspace_nodes);
   EXPECT_EQ(ToString(ws_size),
-            "(Max(Max(0, (2 * Max(Max(1, s1), (s0 * s1)))), (2 * Max(Max(Max(1, s2), (s1 * s2)), (s0 * s1 * s2)))) + "
-            "Max(Max(0, (2 * Max(Max(Max(Max(1, s3), (s2 * s3)), (s0 * s1 * s2 * s3)), (s1 * s2 * s3)))), (2 * "
-            "Max(Max(1, s3), (s2 * s3)))))");
+            "((128 * Ceiling((Max(Max(0, (2 * Max(Max(1, s1), (s0 * s1)))), (2 * Max(Max(Max(1, s2), (s1 * s2)), "
+            "(s0 * s1 * s2)))) * Rational(1 , 128)))) + (128 * Ceiling((Max(Max(0, (2 * Max(Max(Max(Max(1, s3), (s2 * "
+            "s3)), (s0 * s1 * s2 * s3)), (s1 * s2 * s3)))), (2 * Max(Max(1, s3), (s2 * s3)))) * Rational(1 , 128)))))");
 }
 
 TEST(CodegenKernel, CalculateWorkspaceSize_Test2) {

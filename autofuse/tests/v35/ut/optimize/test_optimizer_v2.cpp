@@ -45,6 +45,7 @@
 #include "optimize/graph_pass/pass_runner_handler.h"
 #include "autoschedule/autoschedule.h"
 #include "base/att_const_values.h"
+#include "base/arch_param.h"
 #include "graph_pass/pow_equiv_substitution_pass.h"
 #include "optimize/graph_pass/softmax_pattern_fusion_pass.h"
 #include "template/nddma_template.h"
@@ -3813,6 +3814,261 @@ TEST_F(TestOptimizerV2, ReduceSumCrossScopeBroadcastAddMergesContinuousInnerAxes
   EXPECT_EQ(CountIndependentReduceGraphAxesWithSize(non_contiguous_result, merged_inner_size), 0UL);
 }
 
+TEST_F(TestOptimizerV2, SumRCoreWithoutArgmaxDisablesWorkspaceAlignment) {
+  for (const auto a_extent : {1, 3}) {
+    SCOPED_TRACE(a_extent);
+    auto graph = AscGraphBuilder("sum_workspace_alignment")
+                     .Loops({Sym(a_extent), Sym(129280)})
+                     .Data("data", 0, af::DT_FLOAT)
+                     .Load("load", "data")
+                     .Sum("sum", "load", {1})
+                     .Store("store", "sum")
+                     .Output("output", "store")
+                     .Build();
+    ascir::FusedScheduledResult fused_result;
+    ASSERT_EQ(optimizer.Optimize(graph, fused_result), af::SUCCESS);
+    size_t r_core_results = 0UL;
+    for (const auto &node_results : fused_result.node_idx_to_scheduled_results) {
+      for (const auto &result : node_results) {
+        if (!result.var_relations.empty()) {
+          ++r_core_results;
+          EXPECT_FALSE(result.enable_workspace_alignment);
+        }
+      }
+    }
+    EXPECT_GT(r_core_results, 0UL);
+  }
+}
+
+TEST_F(TestOptimizerV2, ArgmaxAndSumRCoreEnableWorkspaceAlignment) {
+  auto graph = AscGraphBuilder("argmax_sum_workspace_alignment")
+                   .Loops({Sym(3), Sym(129280)})
+                   .Data("data", 0, af::DT_FLOAT)
+                   .Load("load", "data")
+                   .Sum("sum", "load", {1})
+                   .Store("sum_store", "sum")
+                   .Output("sum_output", "sum_store", 0)
+                   .Op<af::ascir_op::Argmax>("argmax", {"load"}, {Sym(3), One}, {One, Zero}, af::DT_INT64)
+                   .Store("argmax_store", "argmax")
+                   .Output("argmax_output", "argmax_store", 1, af::DT_INT64)
+                   .Build();
+  ascir::FusedScheduledResult fused_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_result), af::SUCCESS);
+  size_t mixed_r_core_results = 0UL;
+  for (const auto &node_results : fused_result.node_idx_to_scheduled_results) {
+    for (const auto &result : node_results) {
+      if (result.var_relations.empty()) {
+        EXPECT_FALSE(result.enable_workspace_alignment);
+        continue;
+      }
+      ASSERT_EQ(result.var_relations.size(), 2UL);
+      ++mixed_r_core_results;
+      EXPECT_TRUE(result.enable_workspace_alignment);
+    }
+  }
+  EXPECT_GT(mixed_r_core_results, 0UL);
+}
+
+class TestOptimizerArgmaxWorkspaceV2 : public TestOptimizerV2, public ::testing::WithParamInterface<bool> {};
+
+INSTANTIATE_TEST_SUITE_P(ArgmaxVariants, TestOptimizerArgmaxWorkspaceV2, ::testing::Bool());
+
+TEST_P(TestOptimizerArgmaxWorkspaceV2, ArgmaxRCoreSingleReduceAxisWorkspaceStridesMatchStores) {
+  const std::vector<af::DataType> value_cases = {af::DT_FLOAT16, af::DT_INT32, af::DT_INT64};
+  const std::vector<af::Expression> a_cases = {Sym(1), Sym(3), Sym(33), Sym("workspace_a")};
+  for (const auto value_dtype : value_cases) {
+    SCOPED_TRACE(static_cast<int>(value_dtype));
+    for (const auto &expected_a_size : a_cases) {
+      SCOPED_TRACE(af::SymbolicUtils::ToString(expected_a_size));
+      auto graph = [&]() {
+        if (!GetParam()) {
+          return AscGraphBuilder("argmax_single_r_workspace")
+              .Loops({expected_a_size, Sym(129280)})
+              .Data("data", 0, value_dtype)
+              .Load("load", "data")
+              .Op<af::ascir_op::Argmax>("argmax", {"load"}, {expected_a_size, One}, {One, Zero}, af::DT_INT64)
+              .Store("store", "argmax")
+              .Output("output", "store", 0, af::DT_INT64)
+              .Build();
+        }
+        auto graph = AscGraphBuilder("argmax_with_value_single_r_workspace")
+                         .Loops({expected_a_size, Sym(129280)})
+                         .Data("data", 0, value_dtype)
+                         .Load("load", "data")
+                         .Build();
+        auto load = graph.FindNode("load");
+        af::ascir_op::ArgmaxWithValue argmax_op("argmax");
+        auto argmax = graph.AddNode(argmax_op);
+        argmax->attr.sched.axis = load->attr.sched.axis;
+        (void)af::GraphUtils::AddEdge(load->GetOutDataAnchor(0), argmax->GetInDataAnchor(0));
+        for (size_t i = 0UL; i < 2UL; ++i) {
+          const auto dtype = i == 0UL ? value_dtype : af::DT_INT64;
+          auto &attr = argmax->outputs[i].attr;
+          attr.dtype = dtype;
+          attr.axis = load->outputs[0].attr.axis;
+          attr.repeats = {expected_a_size, One};
+          attr.strides = {One, Zero};
+          af::ascir_op::Store store_op(("store_" + std::to_string(i)).c_str());
+          auto store = graph.AddNode(store_op);
+          store->attr.sched.axis = argmax->attr.sched.axis;
+          store->outputs[0].attr = attr;
+          (void)af::GraphUtils::AddEdge(argmax->GetOutDataAnchor(i), store->GetInDataAnchor(0));
+          af::ascir_op::Output output(("output_" + std::to_string(i)).c_str());
+          output.ir_attr.SetIndex(i);
+          auto output_node = graph.AddNode(output);
+          output_node->outputs[0].attr.dtype = dtype;
+          (void)af::GraphUtils::AddEdge(store->GetOutDataAnchor(0), output_node->GetInDataAnchor(0));
+        }
+        return graph;
+      }();
+      ascir::FusedScheduledResult fused_result;
+      ASSERT_EQ(optimizer.Optimize(graph, fused_result), af::SUCCESS);
+
+      size_t r_core_results = 0UL;
+      for (auto &node_results : fused_result.node_idx_to_scheduled_results) {
+        for (auto &result : node_results) {
+          if (result.var_relations.empty()) {
+            continue;
+          }
+          ++r_core_results;
+          EXPECT_TRUE(result.enable_workspace_alignment);
+          for (const auto &dst_relation : result.var_relations) {
+            ASSERT_LT(dst_relation.first, result.schedule_groups.size());
+            auto &phase2_group = result.schedule_groups[dst_relation.first];
+            ASSERT_FALSE(phase2_group.impl_graphs.empty());
+            for (const auto &src_relation : dst_relation.second) {
+              ASSERT_LT(src_relation.first, result.schedule_groups.size());
+              const auto &phase1_group = result.schedule_groups[src_relation.first];
+              ASSERT_FALSE(phase1_group.impl_graphs.empty());
+              const auto a_size = src_relation.second.find("A_org_size");
+              const auto r_size = src_relation.second.find("Rm_org_size");
+              ASSERT_NE(a_size, src_relation.second.end());
+              ASSERT_NE(r_size, src_relation.second.end());
+              EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(a_size->second, expected_a_size), af::TriBool::kTrue);
+              const std::vector<std::pair<af::Expression, af::Expression>> bindings = {
+                  {af::Expression::Parse("A_org_size"), a_size->second},
+                  {af::Expression::Parse("Rm_org_size"), r_size->second}};
+
+              for (auto &phase2_graph : phase2_group.impl_graphs) {
+                SCOPED_TRACE(phase2_graph.GetName());
+                size_t workspace_count = 0UL;
+                size_t index_workspace_count = 0UL;
+                for (const auto &workspace : phase2_graph.GetAllNodes()) {
+                  if (workspace->GetType() != "Workspace") {
+                    continue;
+                  }
+                  ++workspace_count;
+                  SCOPED_TRACE(workspace->GetName());
+                  const bool is_index = workspace->GetName().find("_workspace_index") != std::string::npos;
+                  index_workspace_count += is_index ? 1UL : 0UL;
+                  const auto expected_dtype = is_index ? af::DT_INT32 : value_dtype;
+                  const auto alignment =
+                      att::arch_param::kV2ArchHardwareConfig.cache_line_size / ge::GetSizeByDataType(expected_dtype);
+                  int64_t a_extent = 0;
+                  const auto expected_stride = expected_a_size.GetConstValue(a_extent)
+                                                   ? Sym((a_extent + alignment - 1) / alignment * alignment)
+                                                   : af::sym::Align(expected_a_size, alignment);
+                  const auto &workspace_attr = workspace->outputs[0].attr;
+                  EXPECT_EQ(workspace_attr.dtype, expected_dtype);
+                  ASSERT_EQ(workspace_attr.strides.size(), 2UL);
+                  ASSERT_EQ(workspace_attr.repeats.size(), 2UL);
+                  ASSERT_EQ(workspace_attr.axis.size(), 2UL);
+                  const auto workspace_stride = workspace_attr.strides[0].Replace(bindings);
+                  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(workspace_stride, expected_stride), af::TriBool::kTrue);
+                  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(workspace_attr.strides[1], One), af::TriBool::kTrue);
+                  EXPECT_EQ(
+                      af::SymbolicUtils::StaticCheckEq(workspace_attr.repeats[0].Replace(bindings), r_size->second),
+                      af::TriBool::kTrue);
+                  EXPECT_EQ(
+                      af::SymbolicUtils::StaticCheckEq(workspace_attr.repeats[1].Replace(bindings), expected_a_size),
+                      af::TriBool::kTrue);
+
+                  size_t load_count = 0UL;
+                  for (const auto &consumer : workspace->GetOutDataNodes()) {
+                    auto load = std::dynamic_pointer_cast<af::AscNode>(consumer);
+                    ASSERT_NE(load, nullptr);
+                    ASSERT_EQ(load->attr.api.compute_type, af::ComputeType::kComputeLoad);
+                    ++load_count;
+                    EXPECT_EQ(load->outputs[0].attr.dtype, expected_dtype);
+                    ASSERT_EQ(load->inputs[0].attr.repeats.size(), 2UL);
+                    ASSERT_EQ(load->inputs[0].attr.strides.size(), 2UL);
+                    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(load->inputs[0].attr.strides[0].Replace(bindings),
+                                                               expected_stride),
+                              af::TriBool::kTrue);
+                    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(load->inputs[0].attr.repeats[0].Replace(bindings),
+                                                               r_size->second),
+                              af::TriBool::kTrue);
+                    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(load->inputs[0].attr.repeats[1].Replace(bindings),
+                                                               expected_a_size),
+                              af::TriBool::kTrue);
+
+                    // The innermost split of R retains the per-element GM stride after autoscheduling.
+                    const auto &load_attr = load->outputs[0].attr;
+                    ASSERT_EQ(load_attr.axis.size(), load_attr.strides.size());
+                    bool found_r_axis = false;
+                    for (size_t i = load_attr.axis.size(); i > 0UL; --i) {
+                      auto axis = phase2_graph.FindAxis(load_attr.axis[i - 1UL]);
+                      ASSERT_NE(axis, nullptr);
+                      while (!axis->from.empty()) {
+                        ASSERT_EQ(axis->from.size(), 1UL);
+                        axis = phase2_graph.FindAxis(axis->from[0]);
+                        ASSERT_NE(axis, nullptr);
+                      }
+                      if (axis->id == workspace_attr.axis[0]) {
+                        EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(load_attr.strides[i - 1UL].Replace(bindings),
+                                                                   expected_stride),
+                                  af::TriBool::kTrue);
+                        found_r_axis = true;
+                        break;
+                      }
+                    }
+                    EXPECT_TRUE(found_r_axis);
+                  }
+                  EXPECT_EQ(load_count, 1UL);
+
+                  for (const auto &phase1_graph : phase1_group.impl_graphs) {
+                    SCOPED_TRACE(phase1_graph.GetName());
+                    auto phase1_workspace = phase1_graph.FindNode(workspace->GetName().c_str());
+                    ASSERT_NE(phase1_workspace, nullptr);
+                    auto store_anchor = phase1_workspace->GetInDataAnchor(0)->GetPeerOutAnchor();
+                    ASSERT_NE(store_anchor, nullptr);
+                    auto store = std::dynamic_pointer_cast<af::AscNode>(store_anchor->GetOwnerNode());
+                    ASSERT_NE(store, nullptr);
+                    ASSERT_EQ(store->GetType(), "Store");
+                    const auto &store_attr = store->outputs[0].attr;
+                    EXPECT_EQ(store_attr.dtype, expected_dtype);
+                    ASSERT_EQ(store_attr.repeats.size(), store_attr.strides.size());
+                    size_t r_axis_count = 0UL;
+                    auto non_r_repeats = One;
+                    for (size_t i = 0UL; i < store_attr.repeats.size(); ++i) {
+                      if (af::SymbolicUtils::StaticCheckEq(store_attr.repeats[i], r_size->second) ==
+                          af::TriBool::kTrue) {
+                        ++r_axis_count;
+                        EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(store_attr.strides[i], expected_stride),
+                                  af::TriBool::kTrue);
+                        EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(store_attr.strides[i], workspace_stride),
+                                  af::TriBool::kTrue);
+                      } else {
+                        non_r_repeats = non_r_repeats * store_attr.repeats[i];
+                      }
+                    }
+                    EXPECT_EQ(r_axis_count, 1UL);
+                    // Split A repeats may be symbolic; their product must preserve the unpadded extent.
+                    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(non_r_repeats, expected_a_size), af::TriBool::kTrue);
+                  }
+                }
+                EXPECT_EQ(workspace_count, 2UL);
+                EXPECT_EQ(index_workspace_count, 1UL);
+              }
+            }
+          }
+        }
+      }
+      EXPECT_GT(r_core_results, 0UL);
+    }
+  }
+}
+
 TEST_F(TestOptimizerV2, BackendSpec) {
   auto spec = optimize::BackendSpec::GetInstance();
   ASSERT_TRUE(spec != nullptr);
@@ -7221,3 +7477,253 @@ TEST_F(TestOptimizerV2, FoldAlignedOuterTransposeUsesLoadAndPreservesMapping) {
     EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*load_node), ascgen_utils::template_semantic::kTranspose);
   }
 }
+
+namespace {
+// 构造 Data->Load->Broadcast->Store->Output 图，窗口轴为{z0, z1(TileInner)}，
+// z1 位于 i=1>0 触发 IsVectorizedAxisDoubleCut；input_vec_strides 为 Load 输出的向量化步长
+// 构建transpose+brc双切分图（Data→load0→broadcast→store→Output，z1为TileInner双切分轴）。
+// input_vec_strides指定load0输出窗口的vectorized_strides；为空时取"多行紧凑"形态
+// （非尾轴stride=尾轴逻辑大小，行间无padding）。multi_row=true时窗口含多行（非尾轴
+// repeats取s0），否则单行（非尾轴repeats为1）。返回load0尾轴逻辑大小表达式。
+af::Expression BuildTransposeBrcDropGraph(af::AscGraph &graph, const std::vector<af::Expression> &input_vec_strides,
+                                          const bool multi_row = false) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  graph.FindAxis(z1.id)->type = af::Axis::Type::kAxisTypeTileInner;
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.strides = {s1, af::Symbol(1)};
+  af::Expression non_tail_repeat = af::Symbol(1);
+  if (multi_row) {
+    non_tail_repeat = s0;
+  }
+  *load0.y.repeats = {non_tail_repeat, s1};
+  *load0.y.vectorized_axis = {z0.id, z1.id};
+  if (input_vec_strides.empty()) {
+    *load0.y.vectorized_strides = {s1, af::Symbol(1)};
+  } else {
+    *load0.y.vectorized_strides = input_vec_strides;
+  }
+
+  Broadcast broadcast("broadcast");
+  broadcast.x = load0.y;
+  broadcast.attr.sched.axis = {z0.id, z1.id};
+  *broadcast.y.axis = {z0.id, z1.id};
+  broadcast.y.dtype = af::DT_FLOAT;
+  *broadcast.y.strides = {s1, af::Symbol(1)};
+  *broadcast.y.repeats = {s0, s1};
+  *broadcast.y.vectorized_axis = {z0.id, z1.id};
+  *broadcast.y.vectorized_strides = {s1, af::Symbol(1)};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id};
+  store_op.x = broadcast.y;
+  *store_op.y.axis = {z0.id, z1.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.strides = {s1, af::Symbol(1)};
+  *store_op.y.repeats = {s0, s1};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+
+  return s1;
+}
+
+// 双切分+非scalar输入，但输入仅剩尾轴一行真实数据（非尾轴全广播）：src连续，不drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_KeepTemplateWhenInputSingleContiguousRow) {
+  af::AscGraph graph("brc_single_row");
+  BuildTransposeBrcDropGraph(graph, {af::Symbol(0), af::Symbol(1)});
+  bool is_need_drop = true;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_FALSE(is_need_drop);
+}
+
+// 双切分+非scalar输入，输入多行且行间存在32B对齐padding跳写（行stride不等于尾轴逻辑大小）：src不连续，drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_DropTemplateWhenInputRowsPadded) {
+  af::AscGraph graph("brc_padded_rows");
+  BuildTransposeBrcDropGraph(graph, {af::Symbol(16), af::Symbol(1)}, true);
+  bool is_need_drop = false;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_TRUE(is_need_drop);
+}
+
+// 双切分+非scalar输入，输入多行紧凑排布（行stride等于尾轴逻辑大小，无padding）：src连续，不drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_KeepTemplateWhenInputRowsCompact) {
+  af::AscGraph graph("brc_compact_rows");
+  BuildTransposeBrcDropGraph(graph, {}, true);
+  bool is_need_drop = true;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_FALSE(is_need_drop);
+}
+
+// 双切分+输入全广播（scalar形态）：维持原有不drop行为
+TEST_F(TestOptimizerV2, TransposeBrcDrop_KeepTemplateWhenInputScalar) {
+  af::AscGraph graph("brc_scalar");
+  BuildTransposeBrcDropGraph(graph, {af::Symbol(0), af::Symbol(0)});
+  bool is_need_drop = true;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_FALSE(is_need_drop);
+}
+
+// 双切分+非scalar输入，窗口内存在多根非尾轴真实数据：保守视为不连续，drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_DropTemplateWhenMultipleRealNonTailAxes) {
+  af::AscGraph graph("brc_multi_real_axes");
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto s2 = graph.CreateSizeVar("s2");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+  graph.FindAxis(z1.id)->type = af::Axis::Type::kAxisTypeTileInner;
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id, z2.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.strides = {s2, s2, af::Symbol(1)};
+  *load0.y.repeats = {af::Symbol(1), af::Symbol(1), s2};
+  *load0.y.vectorized_axis = {z0.id, z1.id, z2.id};
+  *load0.y.vectorized_strides = {af::Symbol(1), af::Symbol(1), af::Symbol(1)};
+
+  Broadcast broadcast("broadcast");
+  broadcast.x = load0.y;
+  broadcast.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *broadcast.y.axis = {z0.id, z1.id, z2.id};
+  broadcast.y.dtype = af::DT_FLOAT;
+  *broadcast.y.strides = {s1 * s2, s2, af::Symbol(1)};
+  *broadcast.y.repeats = {s0, s1, s2};
+  *broadcast.y.vectorized_axis = {z0.id, z1.id, z2.id};
+  *broadcast.y.vectorized_strides = {s1 * s2, s2, af::Symbol(1)};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id, z2.id};
+  store_op.x = broadcast.y;
+  *store_op.y.axis = {z0.id, z1.id, z2.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.strides = {s1 * s2, s2, af::Symbol(1)};
+  *store_op.y.repeats = {s0, s1, s2};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+
+  bool is_need_drop = false;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_TRUE(is_need_drop);
+}
+
+// 构建链式广播图（Data→load0→brc1→brc2→store→Output，z1为TileInner双切分轴）：
+// load0窗口为"非尾轴全广播"的单行连续形态；brc1输出窗口由brc1_contiguous决定
+// （true=多行紧凑，行stride=尾轴逻辑大小；false=行间padding跳写，行stride≠尾轴逻辑大小）。
+void BuildTransposeBrcChainedDropGraph(af::AscGraph &graph, const bool brc1_contiguous) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  graph.FindAxis(z1.id)->type = af::Axis::Type::kAxisTypeTileInner;
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.strides = {s1, af::Symbol(1)};
+  *load0.y.repeats = {af::Symbol(1), s1};
+  *load0.y.vectorized_axis = {z0.id, z1.id};
+  *load0.y.vectorized_strides = {af::Symbol(0), af::Symbol(1)};
+
+  Broadcast broadcast1("broadcast1");
+  broadcast1.x = load0.y;
+  broadcast1.attr.sched.axis = {z0.id, z1.id};
+  *broadcast1.y.axis = {z0.id, z1.id};
+  broadcast1.y.dtype = af::DT_FLOAT;
+  *broadcast1.y.strides = {s1, af::Symbol(1)};
+  *broadcast1.y.repeats = {s0, s1};
+  *broadcast1.y.vectorized_axis = {z0.id, z1.id};
+  if (brc1_contiguous) {
+    *broadcast1.y.vectorized_strides = {s1, af::Symbol(1)};
+  } else {
+    *broadcast1.y.vectorized_strides = {af::Symbol(16), af::Symbol(1)};
+  }
+
+  Broadcast broadcast2("broadcast2");
+  broadcast2.x = broadcast1.y;
+  broadcast2.attr.sched.axis = {z0.id, z1.id};
+  *broadcast2.y.axis = {z0.id, z1.id};
+  broadcast2.y.dtype = af::DT_FLOAT;
+  *broadcast2.y.strides = {s1, af::Symbol(1)};
+  *broadcast2.y.repeats = {s0, s1};
+  *broadcast2.y.vectorized_axis = {z0.id, z1.id};
+  *broadcast2.y.vectorized_strides = {s1, af::Symbol(1)};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id};
+  store_op.x = broadcast2.y;
+  *store_op.y.axis = {z0.id, z1.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.strides = {s1, af::Symbol(1)};
+  *store_op.y.repeats = {s0, s1};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+}
+
+// 链式广播下brc2的src是brc1的输出缓冲：最深load窗口连续而brc1输出不连续时，
+// 连续性按直接输入（brc1输出）判定，src不连续，模板drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_DropTemplateWhenChainedBrcInputNotContiguous) {
+  af::AscGraph graph("brc_chained_not_contiguous");
+  BuildTransposeBrcChainedDropGraph(graph, false);
+  bool is_need_drop = false;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_TRUE(is_need_drop);
+}
+
+// 链式广播且brc1输出为多行紧凑连续：brc1与brc2的直接输入均连续，不drop
+TEST_F(TestOptimizerV2, TransposeBrcDrop_KeepTemplateWhenChainedBrcInputContiguous) {
+  af::AscGraph graph("brc_chained_contiguous");
+  BuildTransposeBrcChainedDropGraph(graph, true);
+  bool is_need_drop = true;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_FALSE(is_need_drop);
+}
+
+// axis与repeats不等长（ReorderRepeats重排后可能出现的形态）：尾轴下标越出repeats范围时
+// 保守视为不连续，模板drop（且不产生越界读）
+TEST_F(TestOptimizerV2, TransposeBrcDrop_DropTemplateWhenRepeatsShorterThanAxis) {
+  af::AscGraph graph("brc_repeats_shorter");
+  const auto tail_size = BuildTransposeBrcDropGraph(graph, {}, true);
+  for (const auto &node : graph.GetAllNodes()) {
+    if (std::string(node->GetNamePtr()) != "load0") {
+      continue;
+    }
+    node->outputs[0].attr.repeats = {tail_size};
+  }
+  bool is_need_drop = false;
+  EXPECT_EQ(NddmaTemplate::IsNeedDropTransposeBrcFuse(graph, is_need_drop), af::SUCCESS);
+  EXPECT_TRUE(is_need_drop);
+}
+}  // namespace

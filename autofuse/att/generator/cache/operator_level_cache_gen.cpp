@@ -134,7 +134,7 @@ af::Status OperatorLevelCacheGen::GenOperatorCacheTypes(ge::CodePrinter &code_pr
   // std::array<uint32_t, 0> is implementation-defined.
   code_printer.AddLine("#pragma pack(push, 1)");
   code_printer.AddLine("struct OperatorCacheKey {");
-  code_printer.AddLine("  std::array<uint32_t, kInputShapeSize> input_shapes;");
+  code_printer.AddLine("  std::array<int64_t, kInputShapeSize> input_shapes;");
   code_printer.AddLine("  uint32_t request_block_dim;");
   code_printer.AddLine("  uint32_t request_ub_size;");
   code_printer.AddLine("  bool operator==(const OperatorCacheKey &other) const {");
@@ -218,7 +218,7 @@ af::Status OperatorLevelCacheGen::GenInitAndQueryCacheCode(ge::CodePrinter &code
     GELOGI("Static shape detected, using empty key for operator level cache query, model[%s].",
            tiling_model_info[0].graph_name.c_str());
     code_printer.AddLine("  // 静态Shape场景：算子级缓存查询（全零 input_shapes）");
-    code_printer.AddLine("  std::array<uint32_t, kInputShapeSize> input_shapes = {};");
+    code_printer.AddLine("  std::array<int64_t, kInputShapeSize> input_shapes = {};");
     code_printer.AddLine("  const uint32_t request_block_dim = tiling_data.get_block_dim();");
     code_printer.AddLine("  const uint32_t request_ub_size = tiling_data.get_ub_size();");
     code_printer.AddLine(
@@ -228,7 +228,7 @@ af::Status OperatorLevelCacheGen::GenInitAndQueryCacheCode(ge::CodePrinter &code
   }
 
   code_printer.AddLine("  // 第一级：算子级缓存查询，收集所有原始轴");
-  std::string array_init = "  std::array<uint32_t, kInputShapeSize> input_shapes = {";
+  std::string array_init = "  std::array<int64_t, kInputShapeSize> input_shapes = {";
   for (size_t i = 0; i < var_accessors.size(); ++i) {
     if (i > 0) {
       array_init += ", ";

@@ -375,8 +375,8 @@ class TilingCase0Impl : public TilingCaseImpl {
   }
 
   bool DoTiling(AutofuseTilingData &tiling_data) {
-    OP_LOGI(OP_NAME, "Set input params for tiling case 0 of AscGraph0ScheduleResult0G0.  s2 = %u. s3 = %u.",
-            tiling_data.get_s2(), tiling_data.get_s3());
+    OP_LOGI(OP_NAME, "Set input params for tiling case 0 of AscGraph0ScheduleResult0G0.  s2 = %lld. s3 = %lld.",
+            static_cast<long long>(tiling_data.get_s2()), static_cast<long long>(tiling_data.get_s3()));
     OP_LOGI(OP_NAME,
             "Set ub_size for tiling case 0 of AscGraph0ScheduleResult0G0 to ((224 * Ceiling((Rational(1 , 8) * "
             "z0z1t_size))) + 8192)");
@@ -695,7 +695,7 @@ bool GetTilingKey(AutofuseTilingData &tiling_data, int32_t tilingCaseId = -1) {
     tilingCaseImplPtr->~TilingCaseImpl();
     if (ret) {
       OP_LOGI(OP_NAME, "[PROF]Among the templates, tiling case %s%u of graph0_result0_g0 is the best choice.",
-              sub_case_flag ? "R" : "", tiling_data.get_tiling_key());
+              sub_case_flag ? "R" : "", static_cast<unsigned>(tiling_data.get_tiling_key()));
     }
   } else {
     OP_LOGD(OP_NAME, "Calculating the tiling data for tilingCaseId %u.", tilingCaseId);
@@ -709,8 +709,8 @@ bool GetTilingKey(AutofuseTilingData &tiling_data, int32_t tilingCaseId = -1) {
     OP_LOGD(OP_NAME, "Finish calculating the tiling data for tilingCaseId %u.", tilingCaseId);
   }
   if (!ret) {
-    OP_LOGE(OP_NAME, "Set input params for tiling case 0 of AscGraph0ScheduleResult0G0.  s2 = %u. s3 = %u.",
-            tiling_data.get_s2(), tiling_data.get_s3());
+    OP_LOGE(OP_NAME, "Set input params for tiling case 0 of AscGraph0ScheduleResult0G0.  s2 = %lld. s3 = %lld.",
+            static_cast<long long>(tiling_data.get_s2()), static_cast<long long>(tiling_data.get_s3()));
     OP_LOGE(OP_NAME, "Failed to execute tiling func.");
   }
   return ret;

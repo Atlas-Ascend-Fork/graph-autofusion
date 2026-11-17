@@ -16,15 +16,15 @@ extern "C" __global__ __aicore__ void argmax_test(GM_ADDR x, GM_ADDR y, GM_ADDR 
 extern "C" int64_t AutofuseTiling(AutofuseTilingData *tiling, uint64_t *workspaceSize, uint64_t *blockDim,
                                   uint32_t aiv_num, uint32_t ub_size);
 
-class E2E_BackendArgMax_Code : public testing::Test, public testing::WithParamInterface<std::vector<int>> {};
+class E2E_BackendArgmax_Code : public testing::Test, public testing::WithParamInterface<std::vector<int>> {};
 
-TEST_P(E2E_BackendArgMax_Code, CalculateCorrect) {
+TEST_P(E2E_BackendArgmax_Code, CalculateCorrect) {
   auto test_shape = GetParam();
 
   uint64_t block_dim = 48;
 
   int test_size = test_shape[0] * test_shape[1] * test_shape[2];
-  int output_size = test_shape[0] * test_shape[1];  // ArgMax reduces the last dimension
+  int output_size = test_shape[0] * test_shape[1];  // Argmax reduces the last dimension
 
   AutofuseTilingData tiling_data;
   float *input = (float *)AscendC::GmAlloc(test_size * sizeof(float) + 32);
@@ -37,7 +37,7 @@ TEST_P(E2E_BackendArgMax_Code, CalculateCorrect) {
     input[i] = rand() / (double)RAND_MAX;
   }
 
-  // Compute expected ArgMax result (reduce on last axis)
+  // Compute expected Argmax result (reduce on last axis)
   for (int i = 0; i < test_shape[0] * test_shape[1]; i++) {
     int64_t max_idx = 0;
     float max_val = input[i * test_shape[2]];
@@ -75,5 +75,5 @@ TEST_P(E2E_BackendArgMax_Code, CalculateCorrect) {
   AscendC::GmFree(expect);
 }
 
-INSTANTIATE_TEST_SUITE_P(CalcWithDifferentShape, E2E_BackendArgMax_Code,
+INSTANTIATE_TEST_SUITE_P(CalcWithDifferentShape, E2E_BackendArgmax_Code,
                          ::testing::Values(std::vector<int>{32, 16, 16}));

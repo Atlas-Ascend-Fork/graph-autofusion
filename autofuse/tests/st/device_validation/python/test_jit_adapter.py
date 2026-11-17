@@ -31,6 +31,16 @@ struct ResLimit {
 };
 """
 
+SIX_ARG_TILING_INT64 = """
+extern "C" int64_t AutofuseTiling(int64_t s0, int64_t s1, AutofuseTilingData* tiling, uint64_t* workspaceSize, uint32_t *blockDim, ResLimit *res_limit)
+{
+ return 0;
+}
+struct ResLimit {
+  uint32_t valid_num = 0;
+};
+"""
+
 FOUR_ARG_TILING = """
 extern "C" int64_t AutofuseTiling(AutofuseTilingData* tiling, uint64_t* workspaceSize, uint32_t *blockDim, ResLimit *res_limit)
 {
@@ -47,6 +57,13 @@ class TestPatchSingleOperatorTiling:
         assert "AutofuseTiling(AutofuseTilingData *tiling," in patched
         assert "AutofuseTilingS0S1(128, 130, tiling, workspaceSize," in patched
         assert "int64_t AutofuseTiling(uint32_t s0, uint32_t s1" not in patched
+
+    @staticmethod
+    def test_rewrites_int64_shape_entry_with_matching_types():
+        patched = patch_single_operator_tiling(SIX_ARG_TILING_INT64, 128, 130)
+        assert "AutofuseTilingS0S1(int64_t s0, int64_t s1" in patched
+        assert "AutofuseTilingS0S1(128, 130, tiling, workspaceSize," in patched
+        assert "int64_t AutofuseTiling(int64_t s0, int64_t s1" not in patched
 
     @staticmethod
     def test_leaves_four_arg_entry_untouched():

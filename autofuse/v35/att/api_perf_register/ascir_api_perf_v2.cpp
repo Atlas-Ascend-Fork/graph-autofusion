@@ -9,6 +9,7 @@
  */
 #include "perf_param_v2.h"
 #include "nddma_model.h"
+#include "base/att_const_values.h"
 #include "v35/att/api_perf_register/ascir_reduce_api_perf_v2.h"
 #include "v35/att/api_perf_register/ascendc_api_perf/broadcast_api_perf_v2.h"
 #include "v35/att/api_perf_register/ascendc_regbase_perf.h"
@@ -668,6 +669,11 @@ REGISTER_EVAL_FUNC_TAG(kReduceAll, V2, ascir_reduce_v2::ReduceAllApi);
 REGISTER_EVAL_FUNC_TAG(kReduceSum, V2, ascir_reduce_v2::ReduceSumApi);
 REGISTER_EVAL_FUNC_TAG(kReduceMean, V2, ascir_reduce_v2::ReduceMeanApi);
 REGISTER_EVAL_FUNC_TAG(kReduceProd, V2, ascir_reduce_v2::ReduceProdApi);
+REGISTER_EVAL_FUNC_TAG(kArgmax, V2, ascir_reduce_v2::ArgmaxApi);
+REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase1, V2, ascir_reduce_v2::ArgMaxMultiRPhase1Api);
+REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase2, V2, ascir_reduce_v2::ArgMaxMultiRPhase2Api);
+REGISTER_EVAL_FUNC_TAG(kArgmaxWithValue, V2, ascir_reduce_v2::ArgmaxWithValueApi);
+REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase2WithValue, V2, ascir_reduce_v2::ArgMaxMultiRPhase2WithValueApi);
 REGISTER_EVAL_FUNC_TAG(kNeg, V2, ascir_v2::NegApi);
 REGISTER_EVAL_FUNC_TAG(kMean, V2, ascir_reduce_v2::MeanApi);
 REGISTER_EVAL_FUNC_TAG(kAdd, V2, ascir_v2::AddApi);
@@ -765,6 +771,18 @@ ApiPerfRegister<ApiPerf> max_api_perf_v2(ApiPerfRegisterV2(kMax, kMax + "V2", nu
 ApiPerfRegister<ApiPerf> reduce_max_api_perf_v2(ApiPerfRegisterV2(kReduceMax, kReduceMax + "V2", nullptr,
                                                                   &perf_param_table_v2,
                                                                   &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_api_perf_v2(ApiPerfRegisterV2(kArgmax, kArgmax + "V2", nullptr, &perf_param_table_v2,
+                                                              &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_multir_phase1_api_perf_v2(ApiPerfRegisterV2(
+    kArgMaxMultiRPhase1, kArgMaxMultiRPhase1 + "V2", nullptr, &perf_param_table_v2, &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_multir_phase2_api_perf_v2(ApiPerfRegisterV2(
+    kArgMaxMultiRPhase2, kArgMaxMultiRPhase2 + "V2", nullptr, &perf_param_table_v2, &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_with_value_api_perf_v2(ApiPerfRegisterV2(kArgmaxWithValue, kArgmaxWithValue + "V2",
+                                                                         nullptr, &perf_param_table_v2,
+                                                                         &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_multir_phase2_with_value_api_perf_v2(
+    ApiPerfRegisterV2(kArgMaxMultiRPhase2WithValue, kArgMaxMultiRPhase2WithValue + "V2", nullptr, &perf_param_table_v2,
+                      &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> min_api_perf_v2(ApiPerfRegisterV2(kMin, kMin + "V2", nullptr, &perf_param_table_v2,
                                                            &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> reduce_min_api_perf_v2(ApiPerfRegisterV2(kReduceMin, kReduceMin + "V2", nullptr,

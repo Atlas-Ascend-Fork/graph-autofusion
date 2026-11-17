@@ -763,6 +763,64 @@ REG_ASC_IR(Max).Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::Ma
                                        {{"T", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_INT32, DT_BF16, DT_FLOAT16,
                                                          DT_FLOAT, DT_INT64}}}});
 
+// Argmax: x(T) -> y(U)，输出索引而非归约值；v2 经 Reg 指令 ArgMaxExtend 单次调用完成 R 轴归约
+REG_ASC_IR(Argmax)
+    .Input("x", "T")
+    .Output("y", "U")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ArgmaxAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgmaxAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"U", TensorType{DT_INT64}}}});
+
+// Argmax R轴分核 Phase1: x(T) -> value(T) + index(I)，1 入 2 出；内部 index 固定 int32
+REG_ASC_IR(ArgMaxMultiRPhase1)
+    .Input("x", "T")
+    .Output("value", "T")
+    .Output("index", "I")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase1AscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase1AscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT, DT_INT32, DT_INT64}}, {"I", TensorType{DT_INT32}}}});
+
+// Argmax R轴分核 Phase2: value(T) + index(I) -> y(U)，2 入 1 出；内部 index 固定 int32，出口 int64
+REG_ASC_IR(ArgMaxMultiRPhase2)
+    .Input("value", "T")
+    .Input("index", "I")
+    .Output("y", "U")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions,
+          {af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase2AscIrAttImplV2>(),
+           af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase2AscIrCodegenImplV2>(),
+           {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"I", TensorType{DT_INT32}}, {"U", TensorType{DT_INT64}}}});
+
+// ArgmaxWithValue（前端可调用）: x(T) -> value(T) + index(U)，1 入 2 出，
+// 输出归约最大值及其索引，开放给前端构图（Python ascir.ops.ArgmaxWithValue）；
+// 复用 argmax.h 的 ArgMaxWithValueExtend Reg 实现，单次调用完成 R 轴归约，无 tmp buffer。
+REG_ASC_IR(ArgmaxWithValue)
+    .Input("x", "T")
+    .Output("value", "T")
+    .Output("index", "U")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ArgmaxWithValueAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgmaxWithValueAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT, DT_INT32, DT_INT64}}, {"U", TensorType{DT_INT64}}}});
+
+// ArgmaxWithValue R轴分核 Phase2（WithValue 变体）: value(T) + index(I) -> value(T) + index(U)，
+// 2 入 2 出，ArgmaxWithValue 分核的 Phase2 汇总算子（schedule 内部生成，不暴露前端）。
+// 内部 index 固定 int32，出口 index 为 int64。
+// 注：输入名用 value_src/index_src（与输出名区分），避免 ascir_ops 生成器对
+// "输入输出同名"（value/index 同时为输入与输出名）产生歧义。
+REG_ASC_IR(ArgMaxMultiRPhase2WithValue)
+    .Input("value_src", "T")
+    .Input("index_src", "I")
+    .Output("value", "T")
+    .Output("index", "U")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase2WithValueAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase2WithValueAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT, DT_INT32, DT_INT64}},
+                             {"I", TensorType{DT_INT32}},
+                             {"U", TensorType{DT_INT64}}}});
 REG_ASC_IR(Sum).Impl(v2_soc_versions,
                      {af::ascir::AscIrImplCreator<af::ascir::SumAscIrAttImplV2>(),
                       af::ascir::AscIrImplCreator<af::ascir::SumAscIrCodegenImplV2>(),

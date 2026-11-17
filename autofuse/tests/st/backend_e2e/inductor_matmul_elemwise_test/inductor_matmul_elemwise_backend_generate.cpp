@@ -92,6 +92,104 @@ TEST_F(TestBackendInductorMatmulElemwiseE2e, InductorMatmulElemwiseE2eCodegen) {
   }
 }
 
+TEST_F(TestBackendInductorMatmulElemwiseE2e, MatmulOutputBroadcastUsesCubeAndVectorShapes) {
+  ASSERT_EQ(att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+            af::SUCCESS);
+  using Mode = ascir::CvBroadcastShapeMode;
+  struct BroadcastCase {
+    const char *name;
+    Mode mode;
+    bool broadcast_m;
+    bool broadcast_n;
+    bool chain;
+  };
+  const BroadcastCase cases[] = {
+      {"n_static", Mode::kStatic, false, true, false}, {"n_dynamic", Mode::kDynamicN, false, true, false},
+      {"m_static", Mode::kStatic, true, false, false}, {"mn_static", Mode::kStatic, true, true, false},
+      {"mn_chain", Mode::kStatic, true, true, true},
+  };
+  for (const auto &test : cases) {
+    SCOPED_TRACE(test.name);
+    af::AscGraph graph(test.name);
+    ascir::ShareGraph::CreateMatmulOutputBroadcastGraph(graph, test.mode, test.broadcast_m, test.broadcast_n,
+                                                        test.chain);
+    optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+    ascir::FusedScheduledResult scheduled;
+    ASSERT_EQ(optimizer.Optimize(graph, scheduled), af::SUCCESS);
+    ASSERT_TRUE(ascgen_utils::IsCubeUBFusedScheduled(scheduled));
+    ASSERT_TRUE(ascgen_utils::IsCubeCommonFusedScheduled(scheduled));
+    ASSERT_TRUE(ascir::HasCvBroadcast(scheduled));
+
+    codegen::Codegen generator(codegen::CodegenOptions{});
+    codegen::CodegenResult generated;
+    const bool dynamic = test.mode != Mode::kStatic;
+    ASSERT_EQ(generator.GenerateForInductor(scheduled, generated), af::SUCCESS);
+    ASSERT_FALSE(generated.tiling_data.empty());
+    EXPECT_NE(generated.tiling.find("GetCvUbStageSize("), std::string::npos);
+    if (test.broadcast_m) {
+      EXPECT_NE(generated.tiling.find("static_cast<uint64_t>(128) *"), std::string::npos);
+      EXPECT_NE(generated.kernel.find("vector_offset, cv_m_size, width"), std::string::npos);
+    } else {
+      EXPECT_NE(generated.kernel.find("stageOffset + row * curAlignN"), std::string::npos);
+      EXPECT_NE(generated.kernel.find("curAivM - row"), std::string::npos);
+    }
+    EXPECT_EQ(generated.kernel.find("kSplitNmColumns = true") != std::string::npos,
+              test.broadcast_m && test.broadcast_n);
+
+    if (dynamic) {
+      codegen::CodegenResult rt_launch;
+      ASSERT_EQ(generator.GenerateForInductor(scheduled, rt_launch, true), af::SUCCESS);
+      EXPECT_NE(rt_launch.kernel.find("stageOffset + row * curAlignN"), std::string::npos);
+      EXPECT_NE(rt_launch.tiling.find("GetDynamicUbSize"), std::string::npos);
+    } else {
+      codegen::CodegenResult ge_generated;
+      ASSERT_EQ(generator.Generate(scheduled, ge_generated), af::SUCCESS);
+      EXPECT_NE(ge_generated.tiling.find("SelectCvBroadcastTiling"), std::string::npos);
+      EXPECT_NE(ge_generated.tiling.find("#define CV_UB_CASE_ID "), std::string::npos);
+      EXPECT_NE(ge_generated.kernel.find("CV_UB_CASE_ID =="), std::string::npos);
+      EXPECT_EQ(ge_generated.kernel.find("kSplitNmColumns = true") != std::string::npos,
+                test.broadcast_m && test.broadcast_n);
+      if (test.broadcast_m && !test.broadcast_n) {
+        EXPECT_NE(generated.kernel.find(" % 256"), std::string::npos);
+        EXPECT_NE(ge_generated.kernel.find(" % 256"), std::string::npos);
+      }
+    }
+  }
+}
+
+TEST_F(TestBackendInductorMatmulElemwiseE2e, MatmulOutputBroadcastKeepsCommonForDynamicMAndPaddedSideInput) {
+  ASSERT_EQ(att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+            af::SUCCESS);
+  using Mode = ascir::CvBroadcastShapeMode;
+  for (const bool padded_side_input : {false, true}) {
+    SCOPED_TRACE(padded_side_input);
+    af::AscGraph graph("broadcast_common");
+    const auto mode = padded_side_input ? Mode::kStatic : Mode::kDynamicN;
+    ascir::ShareGraph::CreateMatmulOutputBroadcastGraph(graph, mode, !padded_side_input);
+    if (padded_side_input) {
+      for (const auto *name : {"data2", "load2"}) {
+        const auto node = graph.FindNode(name);
+        ASSERT_NE(node, nullptr);
+        auto &strides = node->outputs[0].attr.strides;
+        ASSERT_EQ(strides.size(), 2UL);
+        strides[0] = af::Symbol(257);
+      }
+    }
+    optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+    ascir::FusedScheduledResult scheduled;
+    ASSERT_EQ(optimizer.Optimize(graph, scheduled), af::SUCCESS);
+    ASSERT_FALSE(ascgen_utils::IsCubeUBFusedScheduled(scheduled));
+    ASSERT_TRUE(ascgen_utils::IsCubeCommonFusedScheduled(scheduled));
+
+    codegen::Codegen generator(codegen::CodegenOptions{});
+    codegen::CodegenResult generated;
+    ASSERT_EQ(generator.GenerateForInductor(scheduled, generated), af::SUCCESS);
+    EXPECT_NE(generated.tiling.find("fusion_mode = 1"), std::string::npos);
+    EXPECT_EQ(generated.tiling.find("GetCvUbStageSize("), std::string::npos);
+    EXPECT_NE(generated.kernel.find("SyncAll"), std::string::npos);
+  }
+}
+
 TEST_F(TestBackendInductorMatmulElemwiseE2e, InductorBatchMatmulElemwiseE2eCodegen) {
   auto graph = ascir::ShareGraph::LoadBatchMatmulElewiseBrcFusedGraph();
   auto parts = splitString(KERNEL_SRC_LIST, ':');

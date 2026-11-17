@@ -1,7 +1,11 @@
 /**
- * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under terms of
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  */
 
 #include "broadcast_api_perf_v2.h"
@@ -57,8 +61,7 @@ af::Status BuildEqualSizePerf(const NodeDetail &node_info, PerfOutputInfo &perf)
   return SetBroadcastCost(acc, perf);
 }
 
-af::Status BuildSingleElementPerf(const NodeDetail &node_info, const BroadcastTilingInfo &tiling,
-                                  PerfOutputInfo &perf) {
+af::Status BuildSingleElementPerf(const NodeDetail &node_info, const Expr &dst_size, PerfOutputInfo &perf) {
   GE_ASSERT_TRUE(!node_info.input_dtype.empty(), "Broadcast duplicate input dtype is missing.");
   std::string helper_dtype;
   GE_ASSERT_SUCCESS(ascendcapi_v2::GetEffectiveHelperDtype(node_info.input_dtype[0], helper_dtype));
@@ -69,7 +72,7 @@ af::Status BuildSingleElementPerf(const NodeDetail &node_info, const BroadcastTi
   (void)half_vl;
   (void)block_elements;
   Expr repeat_time;
-  GE_ASSERT_SUCCESS(ascendcapi_v2::CeilDiv(tiling.dst_size, vl, repeat_time));
+  GE_ASSERT_SUCCESS(ascendcapi_v2::CeilDiv(dst_size, vl, repeat_time));
   VfCostAccumulator acc;
   GE_ASSERT_SUCCESS(ascendcapi_v2::AddVfInstructPerf(kLoad, node_info.input_dtype[0], CreateExpr(1), 1U, acc));
   GE_ASSERT_SUCCESS(ascendcapi_v2::AddVfInstructPerf(kUpdateMask, helper_dtype, repeat_time, 1U, acc));
@@ -137,12 +140,17 @@ bool IsBroadcastFallback(const NodeDetail &node_info) {
 af::Status BroadcastPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
   GE_ASSERT_TRUE(node_info.broadcast_node_params.valid, "Broadcast parameters are invalid.");
   GE_ASSERT_SUCCESS(ValidateBroadcastNodeDetail(node_info));
-  if (node_info.broadcast_node_params.is_scalar) {
+  const auto &params = node_info.broadcast_node_params;
+  if (params.is_scalar) {
+    // Scalar shape metadata uses a footprint instead of per-axis expressions.
+    // Rank one records the BroadcastExtend API, whose source is read by a vector load.
+    if (params.const_rank == 1) {
+      return BuildSingleElementPerf(node_info, params.duplicate_count, perf);
+    }
     return BuildScalarPerf(node_info, perf);
   }
   GE_ASSERT_TRUE(!node_info.input_dtype.empty() && !node_info.output_dtype.empty(),
                  "Broadcast dtype information is missing.");
-  const auto &params = node_info.broadcast_node_params;
   const auto src_inputs = MakeParamInputs(node_info.input_dims, node_info.repeats);
   const auto dst_inputs = MakeParamInputs(node_info.output_dims, node_info.output_dims);
   const Expr raw_src_size = ResolveBroadcastSize(params.src_shape, src_inputs);
@@ -154,9 +162,7 @@ af::Status BroadcastPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
     return BuildEqualSizePerf(node_info, perf);
   }
   if (raw_src_size == CreateExpr(1)) {
-    tiling.src_size = raw_src_size;
-    tiling.dst_size = raw_dst_size;
-    return BuildSingleElementPerf(node_info, tiling, perf);
+    return BuildSingleElementPerf(node_info, raw_dst_size, perf);
   }
   if (ascendcapi_v2::IsLastAxisBroadcast(tiling)) {
     const auto branch =

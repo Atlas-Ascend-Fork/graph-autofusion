@@ -567,9 +567,9 @@ void CollectSimtFusedRegionMembers(const af::AscNodePtr &indirect_load, const Re
   region.clear();
   const af::AscNodePtr index_root =
       ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kIndexTensorIndex);
-  const af::AscNodePtr output_terminal = analysis.post_reduce == nullptr
-                                             ? analysis.output_store
-                                             : ascgen_utils::indirect_load::GetInputProducer(analysis.post_reduce, 0UL);
+  const af::AscNodePtr output_terminal =
+      analysis.post_reduce == nullptr ? analysis.output_store
+                                      : ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(indirect_load);
   if (index_root == nullptr || output_terminal == nullptr) {
     return;
   }
@@ -2333,14 +2333,22 @@ af::Status ValidateReduceOutputCandidate(const af::AscNodePtr &reduce, bool &is_
     }
     const bool supported = af::ops::IsOps<af::ascir_op::Cast>(node) || af::ops::IsOps<af::ascir_op::Broadcast>(node) ||
                            ScheduleUtils::IsElewise(node);
-    if (!supported || node->GetOutDataNodesSize() != 1UL) {
+    if (!supported || node->GetOutDataNodesSize() == 0UL) {
       return af::SUCCESS;
     }
-    const auto successor = std::dynamic_pointer_cast<af::AscNode>(*node->GetOutDataNodes().begin());
-    if (successor == nullptr) {
-      return af::SUCCESS;
+    // A fused normalization may expose both the reduced statistic and the
+    // normalized payload.  The common prefix after Reduce can therefore fan
+    // out (for example, Add -> Store and Add -> Pow -> Mul -> Store).  Both
+    // branches are valid when they remain unary and terminate at Stores; do
+    // not reject the candidate merely because an intermediate node has two
+    // consumers.
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      const auto successor = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (successor == nullptr) {
+        return af::SUCCESS;
+      }
+      pending.emplace_back(successor);
     }
-    pending.emplace_back(successor);
   }
   is_valid = reached_store;
   return af::SUCCESS;
@@ -3028,17 +3036,24 @@ af::Status CollectSimtNormalScheduleNodes(const af::AscNodePtr &indirect_load, c
     }
     return af::SUCCESS;
   };
-  GE_ASSERT_SUCCESS(TraverseOutputConsumers({analysis.post_reduce}, normal_schedule_nodes, collect));
+  const auto boundary = ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(indirect_load);
+  GE_ASSERT_NOTNULL(boundary);
+  NodePath roots;
+  for (const auto &out : boundary->GetOutDataNodes()) {
+    roots.emplace_back(std::dynamic_pointer_cast<af::AscNode>(out));
+  }
+  GE_ASSERT_SUCCESS(TraverseOutputConsumers(roots, normal_schedule_nodes, collect));
 
   NodeSet normal_schedule_dependencies;
-  const auto collect_dependency = [indirect_load](const af::AscNodePtr &node) {
-    if (node == indirect_load) {
+  const auto collect_dependency = [indirect_load, boundary](const af::AscNodePtr &node) {
+    if (node == indirect_load || node == boundary) {
       return false;
     }
     return true;
   };
   TraverseInputProducers(normal_schedule_path, normal_schedule_dependencies, collect_dependency);
   normal_schedule_dependencies.erase(indirect_load.get());
+  normal_schedule_dependencies.erase(boundary.get());
   normal_schedule_nodes.insert(normal_schedule_dependencies.begin(), normal_schedule_dependencies.end());
   return af::SUCCESS;
 }
@@ -3148,7 +3163,7 @@ af::Status AnnotateSimtFanoutBranches(const af::AscNodePtr &indirect_load, const
                                       NodeSet &normal_schedule_nodes) {
   const af::AscNodePtr selected_root = analysis.post_reduce == nullptr
                                            ? analysis.output_store
-                                           : ascgen_utils::indirect_load::GetInputProducer(analysis.post_reduce, 0UL);
+                                           : ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(indirect_load);
   if (selected_root == nullptr) {
     return af::SUCCESS;
   }

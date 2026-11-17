@@ -14,6 +14,7 @@
 #include "ascir_utils.h"
 #include "indirect_load_utils.h"
 #include "schedule_utils.h"
+#include "schedule_result.h"
 #include "graph/symbolizer/symbolic_utils.h"
 
 namespace optimize::autoschedule {
@@ -490,6 +491,9 @@ Status TilingGroup::GenTilingGroup(const ascir::ImplGraph &impl_graph, AxisGroup
     }
     AxisGroup single_node_axes_group;
     GE_CHK_STATUS_RET(GenAxisGroupForSingleNode(*node, single_node_axes_group, is_reduce_fullload));
+    if (ascir::IsCvMBroadcast(*node)) {
+      n_groupset.insert(ascir::GetCvBroadcastMAxis(*node));
+    }
     n_groupset.insert(single_node_axes_group.n_group.begin(), single_node_axes_group.n_group.end());
     node_name_to_tiling_group.emplace_back(node->GetName(), single_node_axes_group);
     GELOGD("GenTilingGroup node: %s, group: %s.", node->GetName().c_str(), single_node_axes_group.ToString().c_str());

@@ -329,5 +329,55 @@ af::Status ProdApi(const std::vector<TensorShapeInfo> &input_shapes, const std::
   return HasReduceSpecificParams(node) ? ReduceProdApi(input_shapes, output_shapes, node, perf_res)
                                        : ElementwiseProdApi(input_shapes, output_shapes, node, perf_res);
 }
+
+/*
+Argmax 系算子（Argmax / ArgMaxMultiRPhase1 / ArgMaxMultiRPhase2 / ArgmaxWithValue /
+ArgMaxMultiRPhase2WithValue）的性能公式：
+  Argmax 输出索引而非归约值，成本近似 ReduceMax（值+索引双路），复用 v2 ReduceMaxPerf；
+  Phase1 在 Argmax 基础上多一路 value 输出（额外 store 开销，按输入规模线性放大）；
+  Phase2 只沿核维度 N 归约（成本 ∝ A×N，显著小于单算子 A×R）；
+  ArgmaxWithValue 与 Argmax 同构（额外多一路 value 输出），与 Phase1 成本相当；
+  ArgMaxMultiRPhase2WithValue 为 ArgmaxWithValue 分核的 Phase2（一次归约双输出，成本 ∝ A×N），
+  与 ArgMaxMultiRPhase2 成本同构；
+  因此各算子独立注册、分别建模，避免 ATT 打分直通单算子成本造成错估。
+*/
+af::Status ArgmaxPerf([[maybe_unused]] const std::vector<TensorShapeInfo> &input_shapes,
+                      [[maybe_unused]] const std::vector<TensorShapeInfo> &output_shapes,
+                      [[maybe_unused]] const NodeInfo &node, PerfOutputInfo &perf_res) {
+  NodeDetail node_info;
+  GE_ASSERT_SUCCESS(SetNodeDetail(input_shapes, output_shapes, node_info));
+  GE_ASSERT_SUCCESS(ascendcperf_v2::ReduceMaxPerf(node_info, perf_res));
+  return af::SUCCESS;
+}
+
+af::Status ArgmaxApi(const std::vector<TensorShapeInfo> &input_shapes,
+                     const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
+                     PerfOutputInfo &perf_res) {
+  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+}
+
+af::Status ArgMaxMultiRPhase1Api(const std::vector<TensorShapeInfo> &input_shapes,
+                                 const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
+                                 PerfOutputInfo &perf_res) {
+  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+}
+
+af::Status ArgMaxMultiRPhase2Api(const std::vector<TensorShapeInfo> &input_shapes,
+                                 const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
+                                 PerfOutputInfo &perf_res) {
+  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+}
+
+af::Status ArgmaxWithValueApi(const std::vector<TensorShapeInfo> &input_shapes,
+                              const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
+                              PerfOutputInfo &perf_res) {
+  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+}
+
+af::Status ArgMaxMultiRPhase2WithValueApi(const std::vector<TensorShapeInfo> &input_shapes,
+                                          const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
+                                          PerfOutputInfo &perf_res) {
+  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+}
 }  // namespace ascir_reduce_v2
 }  // namespace att

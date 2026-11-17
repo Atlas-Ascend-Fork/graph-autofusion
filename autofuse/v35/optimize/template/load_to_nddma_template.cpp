@@ -37,6 +37,11 @@ af::Status LoadToNddmaTemplate::Generate(const af::AscGraph &origin_graph,
   }
   bool is_nddma_generated = false;
   for (const auto &node : new_case.GetAllNodes()) {
+    if (!ascir::GetCvBroadcastShape(*node).empty()) {
+      return af::FAILED;  // CV tile coordinates are owned by the Cube callback.
+    }
+  }
+  for (const auto &node : new_case.GetAllNodes()) {
     GE_CHECK_NOTNULL(node);
     if (!af::ops::IsOps<af::ascir_op::Load>(node)) {
       continue;

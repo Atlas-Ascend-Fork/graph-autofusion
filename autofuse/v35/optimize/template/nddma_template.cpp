@@ -9,6 +9,7 @@
  */
 
 #include "nddma_template.h"
+#include <algorithm>
 #include <optional>
 #include <limits>
 #include <stack>
@@ -552,6 +553,11 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
     return af::FAILED;
   }
   bool is_nddma_generated = false;
+  for (const auto &node : new_case.GetAllNodes()) {
+    if (!ascir::GetCvBroadcastShape(*node).empty()) {
+      return af::FAILED;  // The Cube result is supplied by UB, never by a GM NDDMA load.
+    }
+  }
   GE_ASSERT_SUCCESS(ProcessTransposeNodes(new_case, is_nddma_generated));
   bool is_transpose_nddma_generated = is_nddma_generated;
   GE_ASSERT_SUCCESS(ProcessSliceNodes(new_case, is_nddma_generated));
@@ -764,6 +770,55 @@ af::Status NddmaTemplate::BroadcastInputNodeIsScalar(const af::AscNodePtr &node,
   return af::SUCCESS;
 }
 
+// 判定broadcast-api的src（其直接输入节点在向量化窗口内的数据块）是否连续：
+// 判定对象是广播节点直接输入（node的第output_idx个输出）的输出缓冲——链式广播下直接
+// 输入可能仍是Broadcast节点，其输出缓冲的窗口属性与更上游节点无关，因此不向上穿行：
+// ① 非尾轴全为广播（vectorized_strides全0）且尾轴stride为1：窗口内输入仅剩尾轴一行真实数据，src必然连续；
+// ② 恰有一根非尾轴有真实数据（记为pre）且尾轴stride为1且pre的stride等于尾轴逻辑大小：
+//    多行紧凑排布（行间无32B对齐padding跳写），src同样连续；
+// 其余形态（多根非尾轴真实数据，或行间存在对齐跳写）src不连续，仍需drop。
+af::Status NddmaTemplate::BroadcastInputWindowBlockIsContiguous(const af::AscNodePtr &node, const int32_t output_idx,
+                                                                bool &is_contiguous) {
+  is_contiguous = false;
+  auto &output_attr = node->outputs[static_cast<size_t>(output_idx)].attr;
+  const auto &vec_strides = output_attr.vectorized_strides;
+  GE_ASSERT_TRUE(!vec_strides.empty());
+  const size_t axis_count = vec_strides.size();
+  size_t real_non_tail_pos = axis_count;
+  for (size_t pos = 0UL; pos + 1UL < axis_count; ++pos) {
+    if (af::SymbolicUtils::StaticCheckEq(vec_strides[pos], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      continue;
+    }
+    if (real_non_tail_pos != axis_count) {
+      return af::SUCCESS;
+    }
+    real_non_tail_pos = pos;
+  }
+  if (af::SymbolicUtils::StaticCheckEq(vec_strides[axis_count - 1UL], af::sym::kSymbolOne) != af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  if (real_non_tail_pos == axis_count) {
+    is_contiguous = true;
+    return af::SUCCESS;
+  }
+  if (output_attr.vectorized_axis.size() != axis_count) {
+    return af::SUCCESS;
+  }
+  const auto tail_axis_id = output_attr.vectorized_axis[axis_count - 1UL];
+  const auto &axis_ids = output_attr.axis;
+  const auto tail_axis_it = std::find(axis_ids.begin(), axis_ids.end(), tail_axis_id);
+  GE_ASSERT_TRUE(tail_axis_it != axis_ids.end());
+  const auto tail_index = static_cast<size_t>(tail_axis_it - axis_ids.begin());
+  // axis与repeats不保证等长（ReorderRepeats重排后repeats长度可能与axis不一致）：
+  // 尾轴下标越出repeats范围时按不连续处理（保守drop），避免下标越界读
+  if (tail_index >= output_attr.repeats.size()) {
+    return af::SUCCESS;
+  }
+  const auto &tail_size = output_attr.repeats[tail_index];
+  is_contiguous = af::SymbolicUtils::StaticCheckEq(vec_strides[real_non_tail_pos], tail_size) == af::TriBool::kTrue;
+  return af::SUCCESS;
+}
+
 af::Status NddmaTemplate::IsVectorizedAxisDoubleCut(af::AscGraph &graph, const af::AscNodePtr &node,
                                                     bool &is_vectorized_axis_double_cut) {
   is_vectorized_axis_double_cut = false;
@@ -782,7 +837,9 @@ af::Status NddmaTemplate::IsVectorizedAxisDoubleCut(af::AscGraph &graph, const a
 }
 
 af::Status NddmaTemplate::IsNeedDropTransposeBrcFuse(af::AscGraph &graph, bool &is_need_drop) {
-  // broadcast-api要求输入内存连续，因此如果是双切分且输入节点不是scalar(或者vectorized_strides全为0)，则需要drop该模板。
+  // broadcast-api要求输入内存连续。双切分视图下，若输入在向量化窗口内的数据块不连续
+  // （非尾轴存在多根真实数据轴，或行间存在32B对齐padding跳写），则drop该模板；
+  // 若输入仅剩尾轴一行真实数据（非尾轴全广播），或行间无padding（多行紧凑排布），src连续，可保留模板。
   is_need_drop = false;
   for (const auto &node : graph.GetAllNodes()) {
     if (af::ops::IsOps<af::ascir_op::Broadcast>(node)) {
@@ -800,8 +857,14 @@ af::Status NddmaTemplate::IsNeedDropTransposeBrcFuse(af::AscGraph &graph, bool &
       GE_ASSERT_SUCCESS(IsVectorizedAxisDoubleCut(graph, node, is_vectorized_axis_double_cut));
       GELOGD("Node [%s] is vectorized axis double cut: %d.", node->GetNamePtr(), is_vectorized_axis_double_cut);
       if (!is_scalar && is_vectorized_axis_double_cut) {
-        is_need_drop = true;
-        break;
+        bool is_src_contiguous = false;
+        GE_ASSERT_SUCCESS(BroadcastInputWindowBlockIsContiguous(in_node, peer_out_anchor->GetIdx(), is_src_contiguous));
+        GELOGI("Transpose brc fuse: broadcast[%s] input window block contiguous[%d].", node->GetNamePtr(),
+               is_src_contiguous);
+        if (!is_src_contiguous) {
+          is_need_drop = true;
+          break;
+        }
       }
     }
   }

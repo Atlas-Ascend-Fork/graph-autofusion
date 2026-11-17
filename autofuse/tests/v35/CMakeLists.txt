@@ -55,6 +55,7 @@ target_link_libraries(codegen_st PRIVATE
 
 target_sources(codegen_st PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/st/codegen/test_codegen_broadcast_reg_api_call.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/st/codegen/test_codegen_indirect_load_simt.cpp
 )
 
 target_include_directories(codegen_st PRIVATE

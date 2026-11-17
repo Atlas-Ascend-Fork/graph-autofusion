@@ -604,9 +604,11 @@ void GenLastTwoRAxisSizeProductCode(const Tensor &x, const Tensor &y, const TPip
 }
 
 Status GetDtypeNameForReduce(const std::string &api_name, const Tensor &x, const Tensor &y, std::string &dtype_name) {
-  // ArgMax系列算子（ArgMax、ArgMaxMultiRPhase1、ArgMaxMultiRPhase2）需要使用value的类型作为模板参数
+  // Argmax系列算子（Argmax、ArgMaxMultiRPhase1、ArgMaxMultiRPhase2、ArgmaxWithValue、
+  // ArgMaxMultiRPhase2WithValue）需要使用value的类型作为模板参数
   // 而不是index的类型，因此统一使用x（inputs[0]）的dtype
-  if (api_name == "ArgMax" || api_name == "ArgMaxMultiRPhase1" || api_name == "ArgMaxMultiRPhase2") {
+  if (api_name == "Argmax" || api_name == "ArgMaxMultiRPhase1" || api_name == "ArgMaxMultiRPhase2" ||
+      api_name == "ArgmaxWithValue" || api_name == "ArgMaxMultiRPhase2WithValue") {
     GE_CHK_STATUS_RET(Tensor::DtypeName(x.dtype, dtype_name), "Codegen get data type:%d failed",
                       static_cast<int32_t>(x.dtype));
   } else {
@@ -616,10 +618,10 @@ Status GetDtypeNameForReduce(const std::string &api_name, const Tensor &x, const
   return af::SUCCESS;
 }
 
-void GenAccumulatedOffsetDeclForArgMax(const std::string &api_name, const Tensor &x, const Tensor &y,
+void GenAccumulatedOffsetDeclForArgmax(const std::string &api_name, const Tensor &x, const Tensor &y,
                                        const TPipe &tpipe, std::vector<std::string> &lines) {
-  // ArgMax 和 ArgMaxMultiRPhase1 需要在循环外声明累加的 offset 变量（使用 static 保存状态）
-  if (api_name == "ArgMax") {
+  // Argmax 和 ArgMaxMultiRPhase1 需要在循环外声明累加的 offset 变量（使用 static 保存状态）
+  if (api_name == "Argmax") {
     lines.emplace_back("static int64_t accumulated_offset = 0;\n");
   } else if (api_name == "ArgMaxMultiRPhase1") {
     // ArgMaxMultiRPhase1的初始offset = block_dim * 最后两个R轴大小的乘积

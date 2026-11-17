@@ -3209,7 +3209,7 @@ TEST(ScheduleToAfirTest, ArgMaxRCoreCandidatesRemainDisabled) {
       mlir::test::ScopedEnvVar backend("AUTOFUSE_DFX_FLAGS", std::string("--mlir_codegen_config=") + route + ";");
       af::testing::AscGraphBuilder builder("argmax_rcore_gate");
       builder.Loops({af::testing::Sym(8), af::testing::Sym(8193)}).Data("x", 0, dtype).Load("load", "x");
-      auto graph = mlir::test::AddReduce<af::ascir_op::ArgMax>(
+      auto graph = mlir::test::AddReduce<af::ascir_op::Argmax>(
                        builder, "reduce", "load", {af::testing::Sym(8), af::testing::Sym(8193)}, {1}, af::DT_INT64)
                        .Store("store", "reduce")
                        .Output("output", "store", 0, af::DT_INT64)

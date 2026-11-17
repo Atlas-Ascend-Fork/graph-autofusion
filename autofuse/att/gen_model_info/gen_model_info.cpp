@@ -9,6 +9,7 @@
  */
 
 #include "gen_model_info.h"
+#include <cstdint>
 #include <fstream>
 #include <set>
 #include "common/util/mem_utils.h"
@@ -193,6 +194,8 @@ static af::Status GenerateSingleModelInfoWithContext(const af::AscGraph &graph, 
   GELOGI("[DFX]Begin to generate model info for graph %s of tiling case id %u", graph.GetName().c_str(),
          tiling_case_id);
   DURATION_GUARD(DurationType::DURATION_GEN_MODEL_INFO);
+  GE_ASSERT_TRUE(tiling_case_id <= static_cast<uint32_t>(UINT16_MAX),
+                 "tiling_case_id %u exceeds uint16 range of tiling data tiling_key", tiling_case_id);
   model_info.tiling_case_id = tiling_case_id;
   // step1: get tuningspace from compute graph
   GE_ASSERT_NOTNULL(tuning_space, "Create tuning space failed.");
@@ -220,6 +223,10 @@ af::Status CheckKeyValid(const std::vector<af::AscGraph> &graph_list) {
     for (auto &graph : graph_list) {
       GE_ASSERT_TRUE(has_set_key == (graph.GetTilingKey() >= 0),
                      "If the user has set tiling_case_id for a graph, the tiling_case_id of all graphs must be set.");
+      // GetTilingKey() 为 int64_t，负值表示未设置；tiling data 中 tiling_key 字段为 uint16_t。
+      const int64_t graph_tiling_key = graph.GetTilingKey();
+      GE_ASSERT_TRUE(graph_tiling_key < 0 || graph_tiling_key <= static_cast<int64_t>(UINT16_MAX),
+                     "User-set tiling key %ld exceeds uint16 range of tiling data tiling_key", graph_tiling_key);
     }
   }
   return af::SUCCESS;
@@ -416,6 +423,7 @@ struct ModelGenerationContext {
   bool enable_gather_reduce_penalty{false};
   // kUBFuse 生成专用的固定 2D NDDMA 描述，不使用默认 DataCopyParams 描述。
   bool is_cv_ub_fusion{false};
+  bool enable_workspace_alignment{false};
 };
 
 static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &graph_list,
@@ -435,7 +443,7 @@ af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::v
                              bool enable_gather_reduce_penalty) {
   GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   return GenerateModelInfoWithContext(graph_list, model_info_list, options, enable_group_parallel,
-                                      {enable_gather_reduce_penalty, false}, "");
+                                      {enable_gather_reduce_penalty, false, false}, "");
 }
 
 static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &graph_list,
@@ -453,6 +461,7 @@ static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &
         ascgen_utils::NormalizeTemplateSemanticName(ascgen_utils::GetTemplateSemanticName(graph, base_semantic_name));
     model_info.tiling_case_id = tiling_key;
     model_info.enable_group_parallel = enable_group_parallel;
+    model_info.enable_workspace_alignment = context.enable_workspace_alignment;
     std::vector<AttAxisPtr> tiling_R_arg_list;
     TuningSpacePtr tuning_space = af::MakeShared<TuningSpace>();
     GE_ASSERT_NOTNULL(tuning_space, "Make tuning space failed.");
@@ -572,7 +581,8 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
     // ATT 必须与 Codegen 使用相同的 schedule result 路径，否则 raw 1D 节点会按 1D 模型评分，
     // 但 Codegen 最终生成 kUBFuse 固定 2D 描述。
     const bool is_cv_ub_fusion = schedule_result.cube_type == ascir::CubeTemplateType::kUBFuse;
-    const ModelGenerationContext context{enable_gather_reduce_penalty, is_cv_ub_fusion};
+    const ModelGenerationContext context{enable_gather_reduce_penalty, is_cv_ub_fusion,
+                                         schedule_result.enable_workspace_alignment};
     GE_ASSERT_SUCCESS(
         GenerateModelInfoWithContext(schedule_groups[schedule_group_id], model_info_list, options,
                                      out_schedule_groups.enable_group_parallel, context, schedule_result.semantic_name),

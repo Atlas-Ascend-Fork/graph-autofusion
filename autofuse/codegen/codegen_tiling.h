@@ -408,9 +408,14 @@ class TilingLib {
   std::string GenGetTilingKeyKernelTypeForStaticCompact(
       const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   // codegen_tiling_cube.cpp: Cube/CV tiling and MatMul metadata extraction.
-  std::string GenCVTilingFunc() const;
+  // Emit the shared helper before any generated CV UB selection calls it.
+  static void AppendCvUbStageSizeSelection(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                           const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                           std::stringstream &ss);
+  static std::vector<bool> GetCvUbBufferPolicies(const ::ascir::FusedScheduledResult &fused_schedule_result);
+  std::string GenCVTilingFunc(const std::vector<bool> &broadcast_policies = {}, bool batch_n_rows = false) const;
   std::string GenTilingDataBlockDimAndWss() const;
-  std::string GenTilingDataBlockDimAndWss(bool exclude_system_workspace) const;
+  std::string GenTilingDataBlockDimAndWss(bool exclude_system_workspace, bool cv_broadcast = false) const;
   std::map<std::string, std::string> GenerateCVFusionStatic(
       const ::ascir::FusedScheduledResult &fused_schedule_result,
       const ::ascir::FusedScheduledResult &elemwise_schedule_result,

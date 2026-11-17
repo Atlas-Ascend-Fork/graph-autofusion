@@ -27,6 +27,10 @@ constexpr char kRowBroadcastLoadAttr[] = "af.internal.indirect_load.row_broadcas
 // 模板轴恢复走 SIMT 归一（与原 SK 的 RestoreSkTemplateAxes 对应）。
 constexpr char kSkSegmentedSimtAttr[] = "af.internal.indirect_load.sk_segmented_simt";
 constexpr char kDcacheSizeAttr[] = "af.internal.template.dcache_size";
+constexpr char kCvNBroadcastShapeAttr[] = "af.internal.cv.n_broadcast_shape";
+constexpr char kCvNBroadcastAxisAttr[] = "af.internal.cv.n_broadcast_axis";
+constexpr char kCvBroadcastSourceShapeAttr[] = "af.internal.cv.broadcast_source_shape";
+constexpr char kCvBroadcastMAxisAttr[] = "af.internal.cv.broadcast_m_axis";
 }  // namespace
 
 namespace ascir {
@@ -46,6 +50,49 @@ enum class CubeTemplateType : int32_t {
   kL2Fuse,        // L2复用模板
 };
 
+// Record logical axes before tiling so Cube and Vector keep their respective shapes.
+inline af::Status SetCvBroadcastShape(const af::AscNodePtr &node, const std::vector<af::Expression> &shape,
+                                      af::AxisId n_axis, const std::vector<af::Expression> &source_shape = {},
+                                      af::AxisId m_axis = af::kIdNone) {
+  GE_ASSERT_NOTNULL(node);
+  GE_ASSERT_NOTNULL(node->GetOpDesc());
+  GE_ASSERT_EQ(shape.size(), 2UL);
+  GE_ASSERT_TRUE(source_shape.empty() || source_shape.size() == 2UL);
+  const auto source = source_shape.empty() ? std::vector<af::Expression>{shape[0], af::Symbol(1)} : source_shape;
+  GE_ASSERT_TRUE(node->GetOpDesc()->SetExtAttr(kCvBroadcastSourceShapeAttr, source));
+  GE_ASSERT_TRUE(node->GetOpDesc()->SetExtAttr(kCvBroadcastMAxisAttr, static_cast<int64_t>(m_axis)));
+  GE_ASSERT_TRUE(node->GetOpDesc()->SetExtAttr(kCvNBroadcastShapeAttr, shape));
+  GE_ASSERT_TRUE(node->GetOpDesc()->SetExtAttr(kCvNBroadcastAxisAttr, static_cast<int64_t>(n_axis)));
+  return af::SUCCESS;
+}
+
+inline af::AxisId GetCvBroadcastAxis(const af::AscNode &node) {
+  return node.GetOpDesc()->TryGetExtAttr(kCvNBroadcastAxisAttr, static_cast<int64_t>(af::kIdNone));
+}
+
+inline std::vector<af::Expression> GetCvBroadcastShape(const af::AscNode &node) {
+  if (node.GetOpDesc() == nullptr) {
+    return {};
+  }
+  return node.GetOpDesc()->TryGetExtAttr(kCvNBroadcastShapeAttr, std::vector<af::Expression>{});
+}
+
+inline af::AxisId GetCvBroadcastMAxis(const af::AscNode &node) {
+  return node.GetOpDesc()->TryGetExtAttr(kCvBroadcastMAxisAttr, static_cast<int64_t>(af::kIdNone));
+}
+
+inline std::vector<af::Expression> GetCvBroadcastSourceShape(const af::AscNode &node) {
+  const auto *desc = node.GetOpDescBarePtr();
+  return desc == nullptr ? std::vector<af::Expression>{}
+                         : desc->TryGetExtAttr(kCvBroadcastSourceShapeAttr, std::vector<af::Expression>{});
+}
+
+inline bool IsCvMBroadcast(const af::AscNode &node) {
+  const auto source = GetCvBroadcastSourceShape(node);
+  const auto target = GetCvBroadcastShape(node);
+  return source.size() == 2UL && target.size() == 2UL && source[0] != target[0];
+}
+
 struct ScheduledResult {
   std::vector<ScheduleGroup> schedule_groups;
   // dst -> src, <dst_groupid, <src_groupid, <dst_var_name, src_var>>>;
@@ -55,6 +102,7 @@ struct ScheduledResult {
   bool enable_group_parallel{false};
   CubeTemplateType cube_type{CubeTemplateType::kDefault};
   std::string semantic_name{};
+  bool enable_workspace_alignment{false};
 };
 
 struct GmTensorSizes {
@@ -81,6 +129,46 @@ struct FusedScheduledResult {
   std::vector<std::vector<ScheduledResult>> node_idx_to_scheduled_results;
   GmTensorSizes gm_tensor_sizes;
 };
+
+inline bool HasCvBroadcast(const FusedScheduledResult &result) {
+  for (const auto &results : result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled : results) {
+      if (scheduled.cube_type != CubeTemplateType::kUBFuse) {
+        continue;
+      }
+      for (const auto &group : scheduled.schedule_groups) {
+        for (const auto &graph : group.impl_graphs) {
+          for (const auto &node : graph.GetAllNodes()) {
+            if (!GetCvBroadcastShape(*node).empty()) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+inline bool HasCvMBroadcast(const FusedScheduledResult &result) {
+  for (const auto &results : result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled : results) {
+      if (scheduled.cube_type != CubeTemplateType::kUBFuse) {
+        continue;
+      }
+      for (const auto &group : scheduled.schedule_groups) {
+        for (const auto &graph : group.impl_graphs) {
+          for (const auto &node : graph.GetAllNodes()) {
+            if (IsCvMBroadcast(*node)) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
 
 enum class TemplateId : int64_t {
   kDefault = -1,

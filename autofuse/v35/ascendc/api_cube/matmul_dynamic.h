@@ -206,6 +206,10 @@ __aicore__ inline __attribute__((always_inline)) void mat_mul_v3(GM_ADDR aGM, GM
 }
 
 #ifdef INDUCTOR_TILING_DATA
+// Common-only kernels and explicit callbacks need not define the legacy
+// defaults, but their names must be declared when parsing these templates.
+class AutoFusionVector;
+class AutoFusionVectorDB;
 template <typename CVTilingT, int8_t API_LEVEL, int8_t A_TRANS, int8_t B_TRANS, int8_t BATCH_MODEL, int8_t MODEL,
           int8_t FULL_LOAD, int8_t L0C2OUT_MODEL, typename FusionOp = AutoFusionVector>
 #else
@@ -322,7 +326,8 @@ __aicore__ inline __attribute__((always_inline)) void mat_mul_v3_fusion(GM_ADDR 
                        MODEL == MAT_MUL_BASIC && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
     GET_TILING_DATA_WITH_STRUCT(MatMulV3BasicTilingData, tilingData, tilingGM);
     MatmulV3Advanced::MatMulTensorCVKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
-                                           MAT_MUL_NO_FULL_LOAD, MAT_MUL_ON_THE_FLY, FusionOp>(
+                                           MAT_MUL_NO_FULL_LOAD, MAT_MUL_ON_THE_FLY, FusionOp,
+                                           MatmulV3Advanced::CvNmColumnSplit<FusionOp>::value>(
         aGM, bGM, biasGM, cGM, workspaceGM, tilingData, param);
   }
 #endif
@@ -457,7 +462,8 @@ __aicore__ inline __attribute__((always_inline)) void mat_mul_v3_fusion_db(GM_AD
                        MODEL == MAT_MUL_BASIC && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
     GET_TILING_DATA_WITH_STRUCT(MatMulV3BasicTilingData, tilingData, tilingGM);
     MatmulV3Advanced::MatMulTensorCVKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
-                                           MAT_MUL_NO_FULL_LOAD, MAT_MUL_ON_THE_FLY, FusionOp>(
+                                           MAT_MUL_NO_FULL_LOAD, MAT_MUL_ON_THE_FLY, FusionOp,
+                                           MatmulV3Advanced::CvNmColumnSplit<FusionOp>::value>(
         aGM, bGM, biasGM, cGM, workspaceGM, tilingData, param);
   }
 #endif

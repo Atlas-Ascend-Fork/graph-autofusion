@@ -22,18 +22,18 @@
 #include <string>
 #include <sstream>
 
-class TestBackendArgMaxE2e : public testing::Test {};
+class TestBackendArgmaxE2e : public testing::Test {};
 
-TEST_F(TestBackendArgMaxE2e, ArgMaxE2eCodegen) {
+TEST_F(TestBackendArgmaxE2e, ArgmaxE2eCodegen) {
   bool gen_success = true;
   std::string tilig_stub = R"(
 #define REGISTER_TILING_DEFAULT(tiling)
 #define GET_TILING_DATA(t, tiling)  AutofuseTilingData t = *(AutofuseTilingData*)tiling;
 )";
 
-  // shape_info 和 ArgMaxFusedGraph入参dims_size匹配（个数相同，命名规则为s开头、编号从0开始）
+  // shape_info 和 ArgmaxFusedGraph入参dims_size匹配（个数相同，命名规则为s开头、编号从0开始）
   std::map<std::string, std::string> shape_info({{"s0", "stub_s0"}, {"s1", "stub_s1"}, {"s2", "stub_s2"}});
-  auto graph = ascir::ShareGraph::ArgMaxFusedGraph(3);
+  auto graph = ascir::ShareGraph::ArgmaxFusedGraph(3);
   std::cout << "KERNEL_SRC_LIST=" << KERNEL_SRC_LIST << std::endl;
   std::vector<std::string> parts = splitString(KERNEL_SRC_LIST, ':');
   std::string kernel_src_file_name = parts[0];       // argmax_test_tiling.cpp

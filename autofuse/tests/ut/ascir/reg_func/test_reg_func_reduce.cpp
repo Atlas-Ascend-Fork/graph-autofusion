@@ -180,9 +180,9 @@ TEST_F(CalcReduceTmpSizeTest, CalcReduceTmpSize_test_1) {
   ASSERT_EQ(result.size(), 2);
 }
 
-// 复制自 CreateGraphReduce，算子换成 ArgMax（覆盖 CalcReduceTmpSize 的 ArgMax 分支）
+// 复制自 CreateGraphReduce，算子换成 Argmax（覆盖 CalcReduceTmpSize 的 Argmax 分支）
 template <af::DataType T>
-void CreateGraphArgMax(af::AscGraph &graph, Expression &s1, Expression &s2) {
+void CreateGraphArgmax(af::AscGraph &graph, Expression &s1, Expression &s2) {
   af::Expression One = af::Symbol(1);
   af::Expression Zero = af::Symbol(0);
   auto s0 = graph.CreateSizeVar("s0");
@@ -195,7 +195,7 @@ void CreateGraphArgMax(af::AscGraph &graph, Expression &s1, Expression &s2) {
 
   Data x1("x1", graph);
   Load load1("load1");
-  af::ascir_op::ArgMax argmax0("argmax0");
+  af::ascir_op::Argmax argmax0("argmax0");
   Store store("store");
   Output y("y");
 
@@ -294,14 +294,14 @@ void CreateGraphArgMaxPhase1(af::AscGraph &graph, Expression &s1, Expression &s2
   *y.y.strides = {s1 * s2, s2, One};
 }
 
-// ArgMax 型：返回 4 个 tmp buf，生命周期序列 -1,0,1,2 是该分支独有指纹
-TEST_F(CalcReduceTmpSizeTest, CalcReduceTmpSize_WhenNodeTypeIsArgMax) {
+// Argmax 型：返回 4 个 tmp buf，生命周期序列 -1,0,1,2 是该分支独有指纹
+TEST_F(CalcReduceTmpSizeTest, CalcReduceTmpSize_WhenNodeTypeIsArgmax) {
   af::AscGraph graph("test_argmax");
   af::Expression One = af::Symbol(1);
   af::Expression Zero = af::Symbol(0);
   Expression s1;
   Expression s2;
-  CreateGraphArgMax<af::DT_FLOAT>(graph, s1, s2);
+  CreateGraphArgmax<af::DT_FLOAT>(graph, s1, s2);
   std::shared_ptr<af::AscNode> node = graph.FindNode("argmax0");
   node->inputs[0].attr.vectorized_strides = {s2, One};
   node->outputs[0].attr.vectorized_strides = {One, Zero};

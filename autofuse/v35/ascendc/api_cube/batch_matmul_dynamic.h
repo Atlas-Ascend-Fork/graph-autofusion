@@ -274,6 +274,10 @@ __aicore__ inline __attribute__((always_inline)) void batch_mat_mul_v3(GM_ADDR a
 }
 
 #ifdef INDUCTOR_TILING_DATA
+// Common-only kernels and explicit callbacks need not define the legacy
+// defaults, but their names must be declared when parsing these templates.
+class AutoFusionVector;
+class AutoFusionVectorDB;
 template <typename CVTilingT, int8_t BATCH_API_LEVEL, int8_t BATCH_A_TRANS, int8_t BATCH_B_TRANS,
           int8_t BATCH_ITER_MODEL, int8_t BMODEL, int8_t BATCH_FULL_LOAD, int8_t BATCH_L0C2OUT_MODEL,
           typename FusionOp = AutoFusionVector>

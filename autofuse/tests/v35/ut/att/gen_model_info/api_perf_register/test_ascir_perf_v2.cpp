@@ -1803,6 +1803,38 @@ TEST_F(UTestAscirPerfV2, TestGetReduceProdApiPerf) {
   EXPECT_NE(reduce_prod_ir_att_v2.GetApiPerf(), nullptr);
 }
 
+TEST_F(UTestAscirPerfV2, TestGetArgmaxApiPerf) {
+  ArgmaxAscIrAttImplV2 argmax_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(argmax_ir_att_v2.GetApiPerf()), "ArgmaxV2") == 0);
+  EXPECT_NE(argmax_ir_att_v2.GetApiPerf(), nullptr);
+}
+
+TEST_F(UTestAscirPerfV2, TestGetArgMaxMultiRPhase1ApiPerf) {
+  ArgMaxMultiRPhase1AscIrAttImplV2 phase1_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(phase1_ir_att_v2.GetApiPerf()), "ArgMaxMultiRPhase1V2") == 0);
+  EXPECT_NE(phase1_ir_att_v2.GetApiPerf(), nullptr);
+}
+
+TEST_F(UTestAscirPerfV2, TestGetArgMaxMultiRPhase2ApiPerf) {
+  ArgMaxMultiRPhase2AscIrAttImplV2 phase2_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(phase2_ir_att_v2.GetApiPerf()), "ArgMaxMultiRPhase2V2") == 0);
+  EXPECT_NE(phase2_ir_att_v2.GetApiPerf(), nullptr);
+}
+
+TEST_F(UTestAscirPerfV2, TestGetArgmaxWithValueApiPerf) {
+  ArgmaxWithValueAscIrAttImplV2 argmax_with_value_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(argmax_with_value_ir_att_v2.GetApiPerf()), "ArgmaxWithValueV2") ==
+              0);
+  EXPECT_NE(argmax_with_value_ir_att_v2.GetApiPerf(), nullptr);
+}
+
+TEST_F(UTestAscirPerfV2, TestGetArgMaxMultiRPhase2WithValueApiPerf) {
+  ArgMaxMultiRPhase2WithValueAscIrAttImplV2 phase2_with_value_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(phase2_with_value_ir_att_v2.GetApiPerf()),
+                     "ArgMaxMultiRPhase2WithValueV2") == 0);
+  EXPECT_NE(phase2_with_value_ir_att_v2.GetApiPerf(), nullptr);
+}
+
 TEST_F(UTestAscirPerfV2, TestGetRemovePadApiPerf) {
   RemovePadAscIrAttImplV2 remove_pad_ir_att_v2;
   EXPECT_NE(remove_pad_ir_att_v2.GetApiPerf(), nullptr);

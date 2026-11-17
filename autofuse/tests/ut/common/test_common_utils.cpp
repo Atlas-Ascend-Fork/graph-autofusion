@@ -22,6 +22,7 @@
 #include "codegen_api_param/codegen_api_param.h"
 #include "graph/types_af.h"
 #include "graph/tensor_af.h"
+#include "graph_utils.h"
 
 using namespace af::ops;
 using namespace af::ascir_op;
@@ -41,6 +42,48 @@ class CommonUtilsTest : public testing::Test {
   void SetUp() override {}
   void TearDown() override {}
 };
+
+TEST_F(CommonUtilsTest, WorkspaceAllocationsPreserveAlignmentAfterScalarReduction) {
+  af::AscGraph graph("workspace_alignment");
+  Workspace workspace("workspace");
+  Load load("load");
+  graph.AddNode(workspace);
+  graph.AddNode(load);
+  const auto node = graph.FindNode("workspace");
+  ASSERT_NE(node, nullptr);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  ASSERT_EQ(af::GraphUtils::AddEdge(node->GetOutDataAnchor(0), load_node->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  load_node->outputs[0].attr.dtype = ge::DT_FLOAT;
+  load_node->outputs[0].attr.strides = {af::Symbol(1)};
+  node->outputs[0].attr.mem.tensor_id = 0;
+
+  for (const auto &shape_and_bytes : std::vector<std::pair<int64_t, int64_t>>{{1, 128}, {128, 512}, {129, 640}}) {
+    load_node->outputs[0].attr.repeats = {af::Symbol(shape_and_bytes.first)};
+    int64_t bytes = 0;
+    ASSERT_TRUE(CalculateOneWorkspaceSize(node).GetConstValue(bytes));
+    EXPECT_EQ(bytes, shape_and_bytes.second);
+    ASSERT_TRUE(CalculateWorkspaceSize({node}).GetConstValue(bytes));
+    EXPECT_EQ(bytes, shape_and_bytes.second);
+    ASSERT_TRUE(CalculateWorkspaceSize({node, node}).GetConstValue(bytes));
+    EXPECT_EQ(bytes, shape_and_bytes.second);
+  }
+  const auto symbolic_size = af::Symbol("workspace_elements");
+  load_node->outputs[0].attr.repeats = {symbolic_size};
+  const auto size_expression = CalculateOneWorkspaceSize(node);
+  int64_t bytes = 0;
+  ASSERT_TRUE(size_expression.Replace({{symbolic_size, af::Symbol(129)}}).GetConstValue(bytes));
+  EXPECT_EQ(bytes, 640);
+}
+
+TEST_F(CommonUtilsTest, EmptyWorkspaceStillRequiresNoAllocation) {
+  af::AscGraph graph("empty_workspace");
+  Workspace workspace("workspace");
+  graph.AddNode(workspace);
+  int64_t bytes = -1;
+  ASSERT_TRUE(CalculateOneWorkspaceSize(graph.FindNode("workspace")).GetConstValue(bytes));
+  EXPECT_EQ(bytes, 0);
+}
 
 TEST_F(CommonUtilsTest, IsStaticSchedResultTest) {
   ascir::FusedScheduledResult static_result;

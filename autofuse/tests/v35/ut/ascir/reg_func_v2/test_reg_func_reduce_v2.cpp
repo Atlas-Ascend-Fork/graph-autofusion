@@ -325,6 +325,32 @@ TEST_F(CalcReduceTmpSizeV2Test, CalcReduceTmpSize_test_1) {
   ASSERT_EQ(result.size(), 2);
 }
 
+TEST_F(CalcReduceTmpSizeV2Test, ArgmaxInt64ValueBuffersUseEightBytes) {
+  for (const std::string type : {"ArgmaxWithValue", "ArgMaxMultiRPhase1"}) {
+    af::AscGraph graph("argmax_int64_tmp");
+    Expression s1;
+    Expression s2;
+    CreateGraphReduceWithInputMultiRefs<af::DT_INT64>(graph, s1, s2);
+    auto node = graph.FindNode("max0");
+    node->GetOpDesc()->SetType(type);
+    node->inputs[0].attr.vectorized_strides = {s2, af::Symbol(1)};
+    node->outputs[0].attr.vectorized_strides = {af::Symbol(1), af::Symbol(0)};
+    const auto result = CalcReduceTmpSizeV2(*node);
+    const af::TmpBufDesc *index_tmp = nullptr;
+    const af::TmpBufDesc *value_tmp = nullptr;
+    for (const auto &desc : result) {
+      if (desc->life_time_axis_id == 0) {
+        index_tmp = desc.get();
+      } else if (desc->life_time_axis_id == 1) {
+        value_tmp = desc.get();
+      }
+    }
+    ASSERT_NE(index_tmp, nullptr);
+    ASSERT_NE(value_tmp, nullptr);
+    EXPECT_EQ(value_tmp->size, index_tmp->size * af::Symbol(2));
+  }
+}
+
 TEST_F(CalcReduceTmpSizeV2Test, HasUpstreamBroadcastOnReduceAxis_ReturnsTrue_WhenAllBranchesHaveBroadcast) {
   af::AscGraph graph("test_all_broadcast");
   Expression s1;

@@ -242,7 +242,7 @@ PostReduceChain FindPostReduceChain(const af::AscNodePtr &node) {
 
   af::AscNodePtr reduce;
   for (size_t index = 0UL; index < pending.size(); ++index) {
-    const auto &current = pending[index];
+    const auto current = pending[index];
     if (current->attr.api.compute_type == af::ComputeType::kComputeReduce) {
       if (reduce == nullptr) {
         reduce = current;
@@ -328,6 +328,52 @@ af::AscNodePtr GetPostReduceInputProducer(const af::AscNodePtr &node) {
   return FindPostReduceChain(node).input_producer;
 }
 
+af::AscNodePtr GetSimtPostReduceLocalProducer(const af::AscNodePtr &node) {
+  const auto chain = FindPostReduceChain(node);
+  const auto reduce = chain.reduce;
+  const auto input_producer = chain.input_producer;
+  if (reduce == nullptr) {
+    return nullptr;
+  }
+  // Materialize the shared pre-reduction value when the normalization tail
+  // consumes it as well. A scalar evaluator cannot expose intermediate values
+  // through the single UB target reserved for the reduction input.
+  std::unordered_set<const af::AscNode *> tail;
+  std::vector<af::AscNodePtr> tail_nodes{reduce};
+  for (size_t i = 0UL; i < tail_nodes.size(); ++i) {
+    const auto current = tail_nodes[i];
+    if (!tail.emplace(current.get()).second) {
+      continue;
+    }
+    for (const auto &out : current->GetOutDataNodes()) {
+      const auto next = std::dynamic_pointer_cast<af::AscNode>(out);
+      if (next != nullptr) {
+        tail_nodes.emplace_back(next);
+      }
+    }
+  }
+  auto local_producer = input_producer;
+  auto boundary = input_producer;
+  while (boundary != nullptr && boundary != node) {
+    for (const auto &out : boundary->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out);
+      if (consumer != nullptr && consumer != reduce && tail.count(consumer.get()) != 0UL) {
+        local_producer = boundary;
+      }
+    }
+    const auto producer = GetInputProducer(boundary, 0UL);
+    bool same_producer = producer != nullptr;
+    for (size_t i = 1UL; i < boundary->inputs.Size() && same_producer; ++i) {
+      same_producer = GetInputProducer(boundary, i) == producer;
+    }
+    if (!same_producer) {
+      break;
+    }
+    boundary = producer;
+  }
+  return local_producer;
+}
+
 bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node) {
   const TemplateBehavior behavior = GetTemplateBehavior(node);
   const af::AscNodePtr consumer = GetOnlyOutputConsumer(node);
@@ -349,7 +395,7 @@ bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node) {
       if (candidate == nullptr || !af::ops::IsOps<af::ascir_op::IndirectLoad>(candidate)) {
         continue;
       }
-      const auto post_reduce_producer = GetPostReduceInputProducer(candidate);
+      const auto post_reduce_producer = GetSimtPostReduceLocalProducer(candidate);
       if (post_reduce_producer != nullptr && post_reduce_producer->GetName() == node->GetName()) {
         return false;
       }
@@ -518,6 +564,20 @@ bool IsContiguousSuffixImpl(const LogicalTensorView &view, size_t axis_index, bo
   return true;
 }
 
+// [动态 shape 步长正性·稠密等式证据] gather 轴步长的正性判定：优先独立证明 stride > 0；
+// 证不出时接受「轴步长 == 后缀稠密积」的等式证据（由调用点的连续性链复证）。shape 维度
+// 语义非负，等式成立时负步长不可达；步长为 0 仅当某后缀 size 为 0（空轴），该后缀迭代
+// 空间为空、行寻址不实例化，运行语义自守恒。动态 sizevar 无正性公理，StaticCheckGt 恒为
+// kUnknown——历史上一票否决 embedding_like / IsSimdEmbeddingAccess，使动态 embedding 图
+// （前端产出符号步长视图，如 strides=[ks2, 1]）整体失去 SIMT 结构化通道（同图静态可得
+// 行向量化 kernel，动态退化为逐元素标量）；静态图 Gt(0) 通常直接可证，行为不变。等式
+// 不可证时维持保守拒绝；负步长/非正 size 由布局分类 ClassifyTensorDim 上游已判
+// kIllegal、无法到达此处，不依赖本函数兜底。
+bool IsAxisStrideProvablyPositive(const af::Expression &axis_stride, const af::Expression &dense_stride) {
+  return af::SymbolicUtils::StaticCheckGt(axis_stride, af::sym::kSymbolZero) == af::TriBool::kTrue ||
+         af::SymbolicUtils::StaticCheckEq(axis_stride, dense_stride) == af::TriBool::kTrue;
+}
+
 bool IsContiguousSuffix(const LogicalTensorView &view, size_t axis_index) {
   bool has_payload = false;
   af::Expression axis_stride;
@@ -664,7 +724,7 @@ bool IsSimdEmbeddingAccess(const TemplateLogicalView &logical_view, const Indire
       return false;
     }
   }
-  return af::SymbolicUtils::StaticCheckGt(input.strides[axis], af::sym::kSymbolZero) == af::TriBool::kTrue;
+  return IsAxisStrideProvablyPositive(input.strides[axis], input_axis_stride);
 }
 }  // namespace
 
@@ -706,8 +766,15 @@ af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateL
   // dense even when their values repeat along a payload axis).
   const bool index_has_zero_stride_on_inner_axes = HasZeroStrideOnInputPayload(input, index, axis_index) ||
                                                    IsIndexPayloadInvariantFromSources(node, input, index, axis_index);
+  bool input_suffix_has_payload = false;
+  af::Expression input_axis_dense_stride;
+  IsContiguousSuffixImpl(input, axis_index, true, input_suffix_has_payload, input_axis_dense_stride);
+  // [动态 shape 正性证据] Gt(stride, 0) 不可证时以「轴步长 == 后缀稠密积」等式为正性
+  // 替代证据（见 IsAxisStrideProvablyPositive 注释）：静态图 Gt(0) 通常直接可证、行为
+  // 不变；动态符号步长（inductor 前端 strides=[ks2, 1] 形态）由 Eq(stride, dense) 解锁
+  // embedding_like，恢复 SIMT 结构化通道。
   const bool input_axis_stride_is_positive =
-      af::SymbolicUtils::StaticCheckGt(input.strides[axis_index], af::sym::kSymbolZero) == af::TriBool::kTrue;
+      IsAxisStrideProvablyPositive(input.strides[axis_index], input_axis_dense_stride);
   // An Embedding-like access must have a non-empty payload suffix after the
   // gather axis.  Without this guard, a last-axis gather vacuously satisfies
   // the zero-stride/contiguous-payload checks and is misclassified as
@@ -716,9 +783,6 @@ af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateL
   // zero-stride (broadcast), the payload-invariance proof is vacuous and the
   // index may legitimately vary along the inner axes, which the Embedding
   // address policy cannot express.
-  bool input_suffix_has_payload = false;
-  af::Expression input_axis_dense_stride;
-  IsContiguousSuffixImpl(input, axis_index, true, input_suffix_has_payload, input_axis_dense_stride);
   const bool has_payload_suffix = axis_index + 1UL < rank && input_suffix_has_payload;
   const bool embedding_like = has_payload_suffix && index_has_zero_stride_on_inner_axes &&
                               IsContiguousPayloadSuffix(input, axis_index) && IsContiguousSuffix(output, axis_index) &&
@@ -1295,7 +1359,7 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   NodeSet output_set;
   af::AscNodePtr output_root;
   if (simt.has_post_reduce) {
-    output_root = GetPostReduceInputProducer(indirect_load);
+    output_root = GetSimtPostReduceLocalProducer(indirect_load);
     GE_ASSERT_NOTNULL(output_root, "IndirectLoad post Reduce input has no producer.");
     GE_ASSERT_SUCCESS(CollectSimtLoweringBackwardNodes(output_root, indirect_load, output_set));
   }

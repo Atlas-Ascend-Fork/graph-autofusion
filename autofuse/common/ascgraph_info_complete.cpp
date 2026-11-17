@@ -163,7 +163,7 @@ static const std::map<std::string, af::ComputeType> kOpTypeToComputeType = {
 
     {Sum::Type, af::ComputeType::kComputeReduce},
     {Max::Type, af::ComputeType::kComputeReduce},
-    {ArgMax::Type, af::ComputeType::kComputeReduce},
+    {Argmax::Type, af::ComputeType::kComputeReduce},
     {Mean::Type, af::ComputeType::kComputeReduce},
     {Min::Type, af::ComputeType::kComputeReduce},
     {Prod::Type, af::ComputeType::kComputeReduce},

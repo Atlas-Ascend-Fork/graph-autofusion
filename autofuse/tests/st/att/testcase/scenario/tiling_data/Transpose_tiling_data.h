@@ -22,15 +22,16 @@ TILING_DATA_FIELD_DEF(uint32_t, z0Tb_size)
 TILING_DATA_FIELD_DEF(uint32_t, z0t_size)
 
 // definitions of HardWareParams
-TILING_DATA_FIELD_DEF(uint32_t, block_dim)
+TILING_DATA_FIELD_DEF(uint16_t, block_dim)
+TILING_DATA_FIELD_DEF(uint16_t, tiling_key)
 TILING_DATA_FIELD_DEF(uint32_t, ub_size)
 TILING_DATA_FIELD_DEF(uint32_t, workspaceSize)
 
 // definitions of InputParams
-TILING_DATA_FIELD_DEF(uint32_t, s0)
-TILING_DATA_FIELD_DEF(uint32_t, s1)
-TILING_DATA_FIELD_DEF(uint32_t, s2)
-TILING_DATA_FIELD_DEF(uint32_t, s3)
+TILING_DATA_FIELD_DEF(int64_t, s0)
+TILING_DATA_FIELD_DEF(int64_t, s1)
+TILING_DATA_FIELD_DEF(int64_t, s2)
+TILING_DATA_FIELD_DEF(int64_t, s3)
 
 // definitions of CoreParams
 // 参数：{轴}_tail_size
@@ -83,9 +84,6 @@ TILING_DATA_FIELD_DEF(uint32_t, KERNEL_INIT_BUFFER)
 // 约束：定义了Tbuf或者Queue则会生成该参数
 // 计算公式：若该内存被多个算子使用，不考虑内存复用，则大小为各个算子的总和，考虑内存复用则为峰值时刻内存
 TILING_DATA_FIELD_DEF(uint32_t, b2_size)
-
-// definitions of TilingKeyParms
-TILING_DATA_FIELD_DEF(uint32_t, tiling_key)
 
 // Transpose API Tiling结构体
 TILING_DATA_FIELD_DEF_STRUCT(ConfusionTransposeTiling, transpose_tilingData_0)

@@ -57,7 +57,7 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
   GetIsArAndPattern(y, x.isAr, reduce_pattern);
   CheckReduceSpecificParamsForCodegen({this->node, this->api_name_, &tpipe, &x, &y, current_axis.back()});
 
-  // 获取dtype_name：ArgMax系列算子使用value类型（x.dtype），其他算子使用输出类型（y.dtype）
+  // 获取dtype_name：Argmax系列算子使用value类型（x.dtype），其他算子使用输出类型（y.dtype）
   std::string dtype_name;
   GE_CHK_STATUS_RET(GetDtypeNameForReduce(this->api_name_, x, y, dtype_name),
                     "Codegen get dtype name failed for api:%s", this->api_name_.c_str());
@@ -71,8 +71,8 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
 
   ReduceInitCodeGen(x, y, type_value, api_param->api_pre_process, tpipe, dtype_name);
 
-  // 生成accumulated_offset变量声明（ArgMax和ArgMaxMultiRPhase1需要）
-  GenAccumulatedOffsetDeclForArgMax(this->api_name_, x, y, tpipe, api_param->api_pre_process);
+  // 生成accumulated_offset变量声明（Argmax和ArgMaxMultiRPhase1需要）
+  GenAccumulatedOffsetDeclForArgmax(this->api_name_, x, y, tpipe, api_param->api_pre_process);
 
   api_param->api_pre_process.emplace_back("uint32_t tmp_reduce_shape[] = {first_actual, last};\n");
 
@@ -84,7 +84,7 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
   }
 
   if (!IsNeedMultiReduce(tpipe.tiler, x, y, current_axis.back())) {
-    if (this->api_name_ == "ArgMax") {
+    if (this->api_name_ == "Argmax") {
       api_param->api_name = "ArgMaxExtend";
       api_param->template_params.emplace_back("int64_t");
       api_param->template_params.emplace_back(dtype_name);
@@ -116,9 +116,9 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
   } else {
     int64_t tmp_lifetime_0_id = GetTmpBufIdByLifeTime(0L, this->api_name_);
 
-    if (this->api_name_ == "ArgMax") {
-      // ArgMax 特殊处理：需要维护全局最大值和索引，以及累加的 offset
-      // ArgMax 有三个额外的tmp_buf：
+    if (this->api_name_ == "Argmax") {
+      // Argmax 特殊处理：需要维护全局最大值和索引，以及累加的 offset
+      // Argmax 有三个额外的tmp_buf：
       //   - desc2(life_time=0)：索引的临时存储
       //   - desc3(life_time=1)：当前迭代的value临时存储
       //   - desc4(life_time=2)：value的历史最大结果
@@ -130,14 +130,14 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
                                               ".template ReinterpretCast<int64_t>();\n");
 
       // 当前计算的value：生命周期1的 tmp_argmax_value (desc3)
-      int64_t tmp_lifetime_1_id = GetTmpBufIdByLifeTime(1L, "ArgMax");
+      int64_t tmp_lifetime_1_id = GetTmpBufIdByLifeTime(1L, "Argmax");
       api_param->api_pre_process.emplace_back("LocalTensor<" + dtype_name + "> tmp_argmax_value;\n");
       api_param->api_pre_process.emplace_back("tmp_argmax_value = " + tpipe.tmp_buf.name + "_" +
                                               std::to_string(tmp_lifetime_1_id) + ".template ReinterpretCast<" +
                                               dtype_name + ">();\n");
 
       // 历史最大value：生命周期2的 tmp_argmax_value_saved (desc4)
-      int64_t tmp_lifetime_2_id = GetTmpBufIdByLifeTime(2L, "ArgMax");
+      int64_t tmp_lifetime_2_id = GetTmpBufIdByLifeTime(2L, "Argmax");
       api_param->api_pre_process.emplace_back("LocalTensor<" + dtype_name + "> tmp_argmax_value_saved;\n");
       api_param->api_pre_process.emplace_back("tmp_argmax_value_saved = " + tpipe.tmp_buf.name + "_" +
                                               std::to_string(tmp_lifetime_2_id) + ".template ReinterpretCast<" +
@@ -155,7 +155,7 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
       api_param->cal_count = CombinedExprFactory::SymbolVar("tmp_reduce_shape");
       api_param->tmp_buf_name = tpipe.tmp_buf.name + "_" + std::to_string(id);
 
-      // 后处理段：ArgMax multi_reduce
+      // 后处理段：Argmax multi_reduce
       api_param->api_post_process.emplace_back("AscendC::PipeBarrier<PIPE_V>();\n");
       // 如果是第一次迭代，直接赋值；否则使用 UpdateMaxIndexAndValue 更新全局最大值和索引
       api_param->api_post_process.emplace_back("uint32_t temp_size_index = " + KernelUtils::SizeAlign() + "(" +
@@ -362,7 +362,7 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
 
 Status ReduceApiCall::GenDimensionParam(const CodegenApiParam &api_param, const Tiler &tiler,
                                         std::stringstream &ss) const {
-  // ArgMax 系列（ArgMaxExtend / ArgMaxWithValueExtend）最后一个布尔参数为 false（src_inner_pad 未使用），
+  // Argmax 系列（ArgMaxExtend / ArgMaxWithValueExtend）最后一个布尔参数为 false（src_inner_pad 未使用），
   // 普通 Reduce 为 true，与重构前 Generate 内直接拼接的语义保持一致
   const bool is_argmax = (api_param.api_name == "ArgMaxExtend") || (api_param.api_name == "ArgMaxWithValueExtend");
   ss << api_param.cal_count.ToStr(tiler) << ", " << (is_argmax ? "false" : "true") << ");" << std::endl;

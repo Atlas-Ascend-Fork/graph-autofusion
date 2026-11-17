@@ -862,6 +862,9 @@ codegen_e2e_st() {
                         shifted_chebyshev_polynomial_v_store_test_e2e_v2 \
                         shifted_chebyshev_polynomial_w_store_test_e2e_v2 \
                         signbit_store_test_e2e_v2 \
+                        argmax_store_test_e2e_v2 \
+                         argmax_single_row_test_e2e_v2 \
+                         argmax_ara_test_e2e_v2 \
                         spherical_bessel_j0_store_test_e2e_v2 \
                         zeta_store_test_e2e_v2"
   fi

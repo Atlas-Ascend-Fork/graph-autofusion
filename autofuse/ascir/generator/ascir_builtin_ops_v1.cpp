@@ -255,33 +255,36 @@ REG_ASC_IR(Ln)
                             af::ascir::AscIrImplCreator<af::ascir::LnAscIrCodegenImpl>(),
                             {{"T", TensorType{DT_FLOAT16, DT_FLOAT}}}});
 
-REG_ASC_IR(ArgMax)
+REG_ASC_IR(Argmax)
     .Input("x", "T")
     .Output("y", "U")
     .ComputeType(ComputeType::kComputeReduce)
-    .Impl(v1_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ReduceArgMaxAscIrAttImpl>(),
-                            af::ascir::AscIrImplCreator<af::ascir::ArgMaxAscIrCodegenImpl>(),
+    .Impl(v1_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ReduceArgmaxAscIrAttImpl>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgmaxAscIrCodegenImpl>(),
                             {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"U", TensorType{DT_INT64}}}});
 
-// ArgMax R轴分核 Phase1: 输入x，输出value和index
+// Argmax R轴分核 Phase1: 输入x，输出value和index
+// index 的 dtype 符号名与 v2 保持一致（I），仅 dtype 取值按平台不同（v1 为 INT64）。
 REG_ASC_IR(ArgMaxMultiRPhase1)
     .Input("x", "T")
     .Output("value", "T")
-    .Output("index", "U")
+    .Output("index", "I")
     .ComputeType(ComputeType::kComputeReduce)
     .Impl(v1_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ReduceArgMaxMultiRPhase1AscIrAttImpl>(),
                             af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase1AscIrCodegenImpl>(),
-                            {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"U", TensorType{DT_INT64}}}});
+                            {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"I", TensorType{DT_INT64}}}});
 
-// ArgMax R轴分核 Phase2: 输入value和index，输出最终index
+// Argmax R轴分核 Phase2: 输入value和index，输出最终index
+// 输入 index 使用 I、输出 y 使用 U，符号名与 v2 保持一致；v1 两者都为 INT64。
 REG_ASC_IR(ArgMaxMultiRPhase2)
     .Input("value", "T")
-    .Input("index", "U")
+    .Input("index", "I")
     .Output("y", "U")
     .ComputeType(ComputeType::kComputeReduce)
-    .Impl(v1_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ReduceArgMaxMultiRPhase2AscIrAttImpl>(),
-                            af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase2AscIrCodegenImpl>(),
-                            {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"U", TensorType{DT_INT64}}}});
+    .Impl(v1_soc_versions,
+          {af::ascir::AscIrImplCreator<af::ascir::ReduceArgMaxMultiRPhase2AscIrAttImpl>(),
+           af::ascir::AscIrImplCreator<af::ascir::ArgMaxMultiRPhase2AscIrCodegenImpl>(),
+           {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"I", TensorType{DT_INT64}}, {"U", TensorType{DT_INT64}}}});
 
 REG_ASC_IR(Sqrt)
     .Input("x", "T")

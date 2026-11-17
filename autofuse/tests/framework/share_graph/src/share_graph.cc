@@ -7590,6 +7590,72 @@ af::ComputeGraphPtr ShareGraph::BesselJ0StoreFusedGraph(size_t dims_size) {
                                             CreateBesselJ0StoreAscGraph);
 }
 
+/**
+ * Argmax 单算子图（v2 Reg 指令路径）：
+ *         data0
+ *           |
+ *         load0
+ *           |
+ *        Argmax
+ *           |
+ *         store
+ *           |
+ *        output0
+ * 输入 x{s0, s1}（FLOAT），归约沿 s1，输出 y{s0}（INT64 索引）。
+ */
+static void CreateArgmaxStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+  const Expression s0 = graph.CreateSizeVar("s0");
+  const Expression s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+
+  af::ascir_op::Load load1("load1");
+  load1.x = x.y;
+  load1.attr.api.compute_type = ComputeType::kComputeLoad;
+  load1.attr.api.type = af::ApiType::kAPITypeCompute;
+  load1.attr.sched.axis = {z0.id, z1.id};
+  *load1.y.axis = {z0.id, z1.id};
+  *load1.y.repeats = {s0, s1};
+  *load1.y.strides = {s1, One};
+  load1.y.dtype = af::DataType::DT_FLOAT;
+  load1.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Argmax argmax("argmax");
+  argmax.x = load1.y;
+  argmax.attr.api.compute_type = ComputeType::kComputeReduce;
+  argmax.attr.api.type = af::ApiType::kAPITypeCompute;
+  argmax.attr.sched.axis = {z0.id, z1.id};
+  *argmax.y.axis = {z0.id, z1.id};
+  *argmax.y.repeats = {s0, One};
+  *argmax.y.strides = {One, Zero};
+  argmax.y.dtype = af::DataType::DT_INT64;
+  argmax.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Store store1("store1");
+  store1.x = argmax.y;
+  store1.attr.api.compute_type = ComputeType::kComputeStore;
+  store1.attr.api.type = af::ApiType::kAPITypeCompute;
+  store1.attr.sched.axis = {z0.id, z1.id};
+  *store1.y.axis = {z0.id, z1.id};
+  *store1.y.repeats = {s0, One};
+  *store1.y.strides = {One, Zero};
+  store1.y.dtype = af::DataType::DT_INT64;
+  store1.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Output output1("output1");
+  output1.x = store1.y;
+  output1.ir_attr.SetIndex(0);
+}
+
+af::ComputeGraphPtr ShareGraph::ArgmaxStoreFusedGraph(size_t dims_size) {
+  return CreateOneInputAscGraphComputeGraph("argmax_store_test", "argmax_store", dims_size, CreateArgmaxStoreAscGraph);
+}
+
 template <typename Op>
 static void CreateUnarySpecialStoreAscGraph(af::AscGraph &graph, size_t dims_size, const char *op_name) {
   af::ascir_op::Data x("data0", graph);
@@ -11264,6 +11330,82 @@ static void CreateMatmulElewiseBrcGraph(af::AscGraph &graph, bool is_dynamic) {
   CreateMatmulGraphOutput(context, sub.y);
 }
 
+// M and N are the output axes. K belongs only to the two MatMul inputs.
+void ShareGraph::CreateMatmulOutputBroadcastGraph(af::AscGraph &graph, CvBroadcastShapeMode mode, bool broadcast_m,
+                                                  bool broadcast_n, bool broadcast_chain) {
+  const auto m = mode == CvBroadcastShapeMode::kDynamic ? graph.CreateSizeVar("m") : af::Symbol(128);
+  const auto n = mode == CvBroadcastShapeMode::kStatic ? af::Symbol(256) : graph.CreateSizeVar("n");
+  const auto k = mode == CvBroadcastShapeMode::kDynamic ? graph.CreateSizeVar("k") : af::Symbol(128);
+  const auto am = graph.CreateAxis("a0", m);
+  const auto an = graph.CreateAxis("a1", n);
+  const auto ak = graph.CreateAxis("k", k);
+  af::AscGraphUtils::GetComputeGraph(graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis = {am.id, an.id};
+  af::ascir_op::Data a("data", graph), b("data1", graph), c("data2", graph);
+  a.ir_attr.SetIndex(0);
+  b.ir_attr.SetIndex(1);
+  c.ir_attr.SetIndex(2);
+  af::ascir_op::Load load_a("load"), load_b("load1"), load_c("load2");
+  load_a.x = a.y;
+  load_b.x = b.y;
+  load_c.x = c.y;
+  af::ascir_op::MatMul mm("matmul");
+  mm.x1 = load_a.y;
+  mm.x2 = load_b.y;
+  mm.ir_attr.SetTranspose_x1(false);
+  mm.ir_attr.SetTranspose_x2(false);
+  mm.ir_attr.SetHas_relu(false);
+  mm.ir_attr.SetEnable_hf32(0);
+  mm.ir_attr.SetOffset_x(0);
+  af::ascir_op::Cast cast("cast"), cast1("cast1"), cast2("cast2"), cast3("cast3");
+  cast.x = mm.y;
+  af::ascir_op::Broadcast brc("broadcast");
+  if (broadcast_chain) {
+    af::ascir_op::Broadcast first("broadcast_m");
+    first.x = cast.y;
+    brc.x = first.y;
+  } else {
+    brc.x = cast.y;
+  }
+  cast1.x = load_c.y;
+  af::ascir_op::Mul mul("mul");
+  mul.x1 = brc.y;
+  mul.x2 = cast1.y;
+  cast2.x = mul.y;
+  cast3.x = cast2.y;
+  af::ascir_op::Store store("store");
+  store.x = cast3.y;
+  af::ascir_op::Output output("output");
+  output.ir_attr.SetIndex(0);
+  output.x = store.y;
+  for (const auto &node : graph.GetAllNodes()) {
+    node->attr.sched.axis = {am.id, an.id};
+    auto &attr = node->outputs[0].attr;
+    const auto &name = node->GetName();
+    const bool lhs = name == "data" || name == "load";
+    const bool rhs = name == "data1" || name == "load1";
+    const bool narrow = name == "matmul" || name == "cast";
+    const auto source_m = broadcast_m ? af::ops::One : m;
+    const auto source_n = broadcast_n ? af::ops::One : n;
+    attr.axis = lhs ? std::vector<int64_t>{am.id, ak.id}
+                    : (rhs ? std::vector<int64_t>{ak.id, an.id} : std::vector<int64_t>{am.id, an.id});
+    attr.repeats = lhs ? std::vector<af::Expression>{source_m, k}
+                       : (rhs ? std::vector<af::Expression>{k, source_n}
+                              : std::vector<af::Expression>{narrow ? source_m : m, narrow ? source_n : n});
+    attr.strides = lhs ? std::vector<af::Expression>{broadcast_m ? af::ops::Zero : k, af::ops::One}
+                       : (rhs ? std::vector<af::Expression>{source_n, broadcast_n ? af::ops::Zero : af::ops::One}
+                              : (narrow ? std::vector<af::Expression>{broadcast_m ? af::ops::Zero : source_n,
+                                                                      broadcast_n ? af::ops::Zero : af::ops::One}
+                                        : std::vector<af::Expression>{n, af::ops::One}));
+    if (name == "broadcast_m") {
+      attr.repeats = {m, af::ops::One};
+      attr.strides = {af::ops::One, af::ops::Zero};
+    }
+    const bool half = lhs || rhs || name == "matmul" || name == "data2" || name == "load2" || name == "cast3" ||
+                      name == "store" || name == "output";
+    attr.dtype = half ? af::DT_FLOAT16 : af::DT_FLOAT;
+  }
+}
+
 af::ComputeGraphPtr ShareGraph::LoadMatmulElewiseBrcFusedGraph(bool is_dynamic) {
   auto builder = GraphBuilder("load_matmul_elewise_brc_store_test");
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
@@ -14665,7 +14807,7 @@ af::ComputeGraphPtr ShareGraph::RemainderInt32FusedGraph(size_t dims_size) {
   return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_INT32, "remainder_int32_test");
 }
 
-static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
+static void CreateArgmaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   const Expression s0 = graph.CreateSizeVar(32);
   const Expression s1 = graph.CreateSizeVar(16);
   const Expression s2 = graph.CreateSizeVar(16);
@@ -14690,7 +14832,7 @@ static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   load1.y.dtype = af::DataType::DT_FLOAT;
   load1.attr.api.unit = ComputeUnit::kUnitMTE2;
 
-  af::ascir_op::ArgMax argmax("argmax");
+  af::ascir_op::Argmax argmax("argmax");
   argmax.x = load1.y;
   argmax.attr.sched.axis = {z0.id, z1.id, z2.id};
   *argmax.y.axis = {z0.id, z1.id, z2.id};
@@ -14718,7 +14860,7 @@ static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   y1.ir_attr.SetIndex(0);
 }
 
-af::ComputeGraphPtr ShareGraph::ArgMaxFusedGraph(size_t dims_size) {
+af::ComputeGraphPtr ShareGraph::ArgmaxFusedGraph(size_t dims_size) {
   auto builder = GraphBuilder("argmax_test");
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
   af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
@@ -14734,7 +14876,7 @@ af::ComputeGraphPtr ShareGraph::ArgMaxFusedGraph(size_t dims_size) {
   }
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("argmax");
-  CreateArgMaxAscGraph(sub_graph, dims_size);
+  CreateArgmaxAscGraph(sub_graph, dims_size);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);

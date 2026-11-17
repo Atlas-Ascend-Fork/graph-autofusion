@@ -126,6 +126,8 @@ class TilingCodeGenImpl {
   af::Status GenPGOFusedScheduleResultsGetTilingDefine(const FusedGraphNamespaceMap &namespace_map);
   af::Status GenPGOByCoreNumFusedScheduleResultsGetTilingDefine(const FusedGraphNamespaceMap &namespace_map);
   af::Status GenPGOByCoreNumSearchTilingKeyCollectTilingData(FusedGraphNamespaceMap namespace_map);
+  void GenPGOCollectAscGraphTilingData(const FusedGraphNamespaceMap &namespace_map);
+  void GenPGONormalizeBlockDim(const FusedGraphNamespaceMap &namespace_map);
   void GenGetScoreFuncs(const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map);
   af::Status GenPGOGetTilingForAll();
   void GenGetScoreFuncsCalling(const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map);
@@ -430,6 +432,9 @@ class TilingCodeGenImpl {
 
   // -----------------------以下函数生成tilingdata------------------------
   af::Status GenProtectedVars();
+  af::Status CollectBaseTilingVarSets(std::set<std::string> &input_vars_set, std::set<std::string> &hardware_vars_set,
+                                      std::set<std::string> &const_vars_set, std::set<std::string> &searchable_vars_set,
+                                      std::set<std::string> &general_post_var_set, std::set<std::string> &mem_vars_set);
   af::Status GenBaseTilingData(std::map<std::string, std::string> &type_name_to_definition);
   af::Status GenHeaderCodesHead();
   af::Status GenHeaderCodesTail();

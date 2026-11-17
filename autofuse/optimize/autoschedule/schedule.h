@@ -52,13 +52,15 @@ class Scheduler {
   explicit Scheduler(ascir::ImplGraph &graph, AxisGroup axes_group, TilingCase &tiling_case,
                      bool is_last_axis_reduce = false,
                      optimize::ReduceTemplateType reduce_template = optimize::ReduceTemplateType::kDefault,
-                     ascir::CubeTemplateType cube_template = ascir::CubeTemplateType::kDefault)
+                     ascir::CubeTemplateType cube_template = ascir::CubeTemplateType::kDefault,
+                     bool enable_workspace_alignment = false)
       : graph_(graph),
         axes_group_(std::move(axes_group)),
         tiling_case_(tiling_case),
         is_last_axis_reduce_(is_last_axis_reduce),
         reduce_template_(reduce_template),
         cube_template_(cube_template),
+        enable_workspace_alignment_(enable_workspace_alignment),
         graph_cache_(graph) {};
 
   Status DoScheduler();
@@ -119,6 +121,7 @@ class Scheduler {
   bool is_last_axis_reduce_;
   optimize::ReduceTemplateType reduce_template_;
   ascir::CubeTemplateType cube_template_;
+  bool enable_workspace_alignment_;
   IndirectLoadInfo indirect_load_info_;
   GraphPropertiesCache graph_cache_;  // 图属性缓存，避免重复遍历
 };

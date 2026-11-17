@@ -182,6 +182,49 @@ class TestAscir:
             )
 
     @staticmethod
+    def test_graph_create_node_with_argmax_with_value_api():
+        ascir.utils.set_platform("3510", 1, 245760)
+        graph = ascir.HintGraph("test")
+        size = graph.create_size("size")
+        axis = graph.create_axis("axis", size)
+
+        x = ascir_api.Data(graph, dtype=ascir.dtypes.float32)
+        value, index = ascir_api.ArgmaxWithValue(
+            graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+        )
+        assert value.dtype == ascir.dtypes.float32
+        assert index.dtype == ascir.dtypes.int64
+        assert value.axis == [axis.id]
+        assert index.axis == [axis.id]
+        assert value.size == [size]
+        assert index.size == [size]
+
+        debug_str = ascir.utils.debug_str(graph)
+        assert debug_str
+
+    @staticmethod
+    def test_graph_create_node_with_argmax_with_value_int64_api():
+        # FR13：前端支持 INT64 输入，value 输出跟随输入 dtype，index 由参数指定
+        ascir.utils.set_platform("3510", 1, 245760)
+        graph = ascir.HintGraph("test_int64")
+        size = graph.create_size("size")
+        axis = graph.create_axis("axis", size)
+
+        x = ascir_api.Data(graph, dtype=ascir.dtypes.int64)
+        value, index = ascir_api.ArgmaxWithValue(
+            graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+        )
+        assert value.dtype == ascir.dtypes.int64
+        assert index.dtype == ascir.dtypes.int64
+        assert value.axis == [axis.id]
+        assert index.axis == [axis.id]
+        assert value.size == [size]
+        assert index.size == [size]
+
+        debug_str = ascir.utils.debug_str(graph)
+        assert debug_str
+
+    @staticmethod
     def test_index_expr_and_arange_api():
         ascir.utils.set_platform("3510", 1, 245760, "SOC_EMPTY")
         try:
@@ -1860,11 +1903,9 @@ class TestCodeGenLoadAbsStore:
                 "#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \\\n"
                 "  struct_type filed_name;\n\n"
                 "BEGIN_TILING_DATA_DEF_T(AutofuseTilingData)\n"
-                "  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);\n"
-                "  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);\n"
-                "  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);\n"
-                "  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, z0z1z2t_size);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, z0z1z2Tb_size);\n"
                 "END_TILING_DATA_DEF_T;\n\n"
@@ -1970,11 +2011,9 @@ class TestComputeGraphInput:
                 "#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \\\n"
                 "  struct_type filed_name;\n\n"
                 "BEGIN_TILING_DATA_DEF_T(AutofuseTilingData)\n"
-                "  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);\n"
-                "  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);\n"
+                "  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);\n"
-                "  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);\n"
-                "  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, z0z1z2t_size);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, z0z1z2Tb_size);\n"
                 "  TILING_DATA_FIELD_DEF_T(uint32_t, q0_size);\n"
@@ -3111,7 +3150,7 @@ class TestSizeExprErrorScenarios:
         s1 = ascir.SizeExpr(50)
         # This tests the operator in reverse - string formatting with SizeExpr
         try:
-            "invalid" % s1
+            "invalid" % s1  # noqa: F507
             # String % with SizeExpr - might work differently
         except (TypeError, AttributeError):
             # Expected - string formatting doesn't support SizeExpr

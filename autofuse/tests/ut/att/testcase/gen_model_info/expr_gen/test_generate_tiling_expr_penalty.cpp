@@ -490,6 +490,38 @@ TEST_F(TestGenerateTilingExprPenalty, ApplyPenaltyConfig_BasicPenalty) {
   EXPECT_TRUE(model_info.tiling_schedule_config.is_penalty_config);
 }
 
+TEST_F(TestGenerateTilingExprPenalty, ApplyPenaltyConfig_RCoreNumPenaltyExemption) {
+  tuning_space->sub_axes.push_back(CreateSubAxis("A", AxisPosition::OUTER));
+  auto tensor = CreateTensor("workspace", {tuning_space->sub_axes.back().get()});
+  tuning_space->node_infos.push_back(CreateStoreNodeInfo("store", {tensor}));
+  GenerateTilingExpr generator(tuning_space);
+  ModelInfo model_info;
+  model_info.graph_name = "r_core_penalty_exemption";
+
+  auto r_axis = std::make_shared<AttAxis>();
+  r_axis->name = "R_split";
+  r_axis->is_reduce_split_axis = true;
+  r_axis->size = std::make_shared<SymVarInfo>(af::Symbol(128));
+  r_axis->size->data_type_size = 4;
+
+  auto a_axis = std::make_shared<AttAxis>();
+  a_axis->name = "A";
+  a_axis->axis_pos = AxisPosition::OUTER;
+  a_axis->size = std::make_shared<SymVarInfo>(af::Symbol(1));
+  a_axis->size->symbol_expr = af::Symbol(1);
+  a_axis->size->data_type_size = 4;
+  model_info.arg_list = {r_axis, a_axis};
+
+  for (const bool enable_workspace_alignment : {false, true}) {
+    SCOPED_TRACE(enable_workspace_alignment);
+    model_info.enable_workspace_alignment = enable_workspace_alignment;
+    generator.ApplyPenaltyConfigToModelInfo(model_info);
+    EXPECT_TRUE(model_info.tiling_schedule_config.is_penalty_config);
+    const auto expected_ratio = enable_workspace_alignment ? af::Symbol(1.0) : af::Symbol(1) / af::Symbol(32);
+    EXPECT_EQ(model_info.tiling_schedule_config.trade_off_config.core_num_ratio, expected_ratio);
+  }
+}
+
 // Test ApplyPenaltyConfig - No Reduce split axis
 TEST_F(TestGenerateTilingExprPenalty, ApplyPenaltyConfig_NoReduceSplitAxis) {
   GenerateTilingExpr generator(tuning_space);
