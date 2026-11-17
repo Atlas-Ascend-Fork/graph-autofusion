@@ -18,6 +18,7 @@
 #include "high_perf_tiling_code_gen_impl.h"
 #include "codegen.h"
 #include "codegen_tiling.h"
+#include "codegen_tiling_data.h"
 #include "codegen_tiling_utils.h"
 #include "codegen_tiling_cube_wrapper.h"
 #include "common_utils.h"
@@ -1533,6 +1534,71 @@ class TestCodegenTiling : public testing::Test, public codegen::TilingLib {
  protected:
   TestCodegenTiling() : codegen::TilingLib("test", "test") {}
 };
+
+namespace {
+size_t CountSubstring(const std::string &text, const std::string &pattern) {
+  size_t count = 0U;
+  size_t pos = text.find(pattern);
+  while (pos != std::string::npos) {
+    ++count;
+    pos = text.find(pattern, pos + pattern.size());
+  }
+  return count;
+}
+
+void CreateGraphWithSameNamePads(af::AscGraph &graph, bool second_pad_diff_shape) {
+  auto s0 = graph.CreateSizeVar(8);
+  auto s1 = graph.CreateSizeVar(3);
+  auto z0 = graph.CreateAxis("z0", s0);
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  for (size_t i = 0UL; i < 2UL; ++i) {
+    af::ascir_op::Pad pad("pad");
+    graph.AddNode(pad);
+    pad.x = data.y;
+    pad.y.dtype = ge::DT_FLOAT;
+    *pad.y.axis = {z0.id};
+    *pad.y.repeats = {(i == 1UL && second_pad_diff_shape) ? s1 : s0};
+  }
+}
+}  // namespace
+
+TEST_F(TestCodegenTiling, AddApiTilingDataSkipsSameIdentityAndFailsOnConflict) {
+  {
+    // 同名同属性的两个 Pad：同身份等价重复，字段只发一份，跳过成功
+    af::AscGraph graph("same_identity_pads");
+    CreateGraphWithSameNamePads(graph, false);
+    codegen::TilingData tiling_data("Autofuse", "TilingData");
+    std::stringstream ss;
+    EXPECT_EQ(tiling_data.AddApiTilingData(graph, ss, 0U), af::SUCCESS);
+    EXPECT_EQ(CountSubstring(ss.str(), "pad_tilingData_0"), 1U);
+  }
+  {
+    // 同名但 shape 不同的两个 Pad：值指纹不同，异身份撞名显性失败
+    af::AscGraph graph("conflict_identity_pads");
+    CreateGraphWithSameNamePads(graph, true);
+    codegen::TilingData tiling_data("Autofuse", "TilingData");
+    std::stringstream ss;
+    EXPECT_NE(tiling_data.AddApiTilingData(graph, ss, 0U), af::SUCCESS);
+  }
+}
+
+TEST_F(TestCodegenTiling, GenReprApiTilingFieldsSkipsSameIdentityAndFailsOnConflict) {
+  {
+    af::AscGraph graph("repr_same_identity_pads");
+    CreateGraphWithSameNamePads(graph, false);
+    std::stringstream ss;
+    EXPECT_EQ(GenReprApiTilingFields(ss, graph, 0U, "tiling_data.", true), af::SUCCESS);
+    EXPECT_EQ(CountSubstring(ss.str(), ".pad_tilingData_0 = {"), 1U);
+  }
+  {
+    af::AscGraph graph("repr_conflict_identity_pads");
+    CreateGraphWithSameNamePads(graph, true);
+    std::stringstream ss;
+    EXPECT_NE(GenReprApiTilingFields(ss, graph, 0U, "tiling_data.", true), af::SUCCESS);
+  }
+}
 
 TEST_F(TestCodegenTiling, CvRuntimeShapeMetadataGetsInitializedWithoutAnExtraSolverAxis) {
   ascir::FusedScheduledResult result;

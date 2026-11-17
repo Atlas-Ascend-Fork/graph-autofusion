@@ -600,6 +600,32 @@ af::Status GetApiTilingFieldName(const ascir::NodeView &node, std::string &field
   return af::SUCCESS;
 }
 
+// api tiling 值由节点输入/输出的 dtype、shape（repeats）和轴序（vectorized_axis）决定，
+// 与节点名无关（如 PadTiling 仅由 inputs[0] 的 shape/dtype 算出）。
+// 该指纹用于字段去重时的身份校验：指纹相同则 tiling 值必然相同，共享字段安全；
+// 同源节点的属性拷贝自同一份 attr，指纹逐字节相同，不会误判。
+std::string GenApiTilingValueFingerprint(const ascir::NodeView &node) {
+  std::ostringstream fingerprint;
+  const auto append_attr = [&fingerprint](const af::AscTensorAttr &attr) {
+    fingerprint << "dtype=" << static_cast<uint32_t>(attr.dtype) << ";repeats=";
+    for (const auto &repeat : attr.repeats) {
+      fingerprint << repeat.Str().get() << ",";
+    }
+    fingerprint << ";axis=";
+    for (const auto &axis : attr.vectorized_axis) {
+      fingerprint << axis << ",";
+    }
+    fingerprint << ";";
+  };
+  for (size_t i = 0UL; i < node->inputs().size(); ++i) {
+    append_attr(node->inputs[i].attr);
+  }
+  for (size_t i = 0UL; i < node->outputs().size(); ++i) {
+    append_attr(node->outputs[i].attr);
+  }
+  return fingerprint.str();
+}
+
 std::string GenUpdateCurPerfAndBlockByGroupHelper(bool with_log, bool use_std_max) {
   std::stringstream ss;
   const std::string max_func = use_std_max ? "std::max" : "Max";

@@ -1525,6 +1525,30 @@ TEST(GeneratorUT, TilingCodeGenImplPGO) {
   EXPECT_EQ(genImpl.tiling_func_.output_.str(), expectCode);
 }
 
+TEST(GeneratorUT, GenDoApiTilingIsolatesPerNodeInvokeAndDedupsSharedImpl) {
+  TilingCodeGenConfig config;
+  TilingModelInfo tiling_model_info;
+  ScoreFuncs score_funcs;
+  ModelInfo model_info;
+  // 同一图内两个 Pad 节点（例如对齐 pass 为多个消费者各插一个 Pad）各有一段 invoke，
+  // invoke 段内的局部变量名固定（apiPadTiling），必须各占独立作用域；类型级共享的 impl 只发一份。
+  const std::string pad_invoke =
+      "optiling::PadTiling apiPadTiling;\napiPadTiling.SaveToBuffer((void *)&tiling_data.pad_tilingData_0, "
+      "sizeof(PadTiling));";
+  const std::string shared_impl = "void SharedPadTilingImpl() {}";
+  model_info.node_name_to_api_code["pad_0"] = {pad_invoke, shared_impl, ""};
+  model_info.node_name_to_api_code["pad_1"] = {pad_invoke, shared_impl, ""};
+  tiling_model_info.push_back(model_info);
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, tiling_model_info, score_funcs, false);
+
+  ASSERT_EQ(gen_impl.GenDoApiTiling(model_info), af::SUCCESS);
+  const std::string source = gen_impl.tiling_func_.GetOutputStr();
+
+  EXPECT_EQ(CountSubstr(source, "optiling::PadTiling apiPadTiling;"), 2U);
+  EXPECT_EQ(CountSubstr(source, "{\n" + pad_invoke + "\n}"), 2U);
+  EXPECT_EQ(CountSubstr(source, shared_impl), 1U);
+}
+
 TEST(GeneratorUT, GenTilingHeadPGO) {
   TilingCodeGenConfig config;
   TilingModelInfo tiling_model_info;

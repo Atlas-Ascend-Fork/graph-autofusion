@@ -2313,7 +2313,12 @@ af::Status TilingCodeGenImpl::GenPreTiling(const ModelInfo &model_info) {
 }
 
 af::Status TilingCodeGenImpl::GenDoApiTiling(const ModelInfo &model_info) {
+  // 同类型高阶 API 的 function_impl 是类型级共享代码（与节点无关），逐节点发射会重复定义，只发一份。
+  std::set<std::string> emitted_func_impls;
   for (const auto &tiling_api_code : model_info.node_name_to_api_code) {
+    if (!emitted_func_impls.insert(tiling_api_code.second.function_impl).second) {
+      continue;
+    }
     tiling_func_.AddLine(tiling_api_code.second.function_impl);
     tiling_func_.AddLine("");
   }
@@ -2321,8 +2326,12 @@ af::Status TilingCodeGenImpl::GenDoApiTiling(const ModelInfo &model_info) {
   if (model_info.node_name_to_api_code.empty()) {
     tiling_func_.AddLine("  (void)tiling_data;");
   }
+  // 同一图内可能存在多个同类高阶 API 节点（例如对齐 pass 为多个消费者各插一个 Pad），
+  // 各节点的 function_invoke 段内变量名固定（如 apiPadTiling），必须用独立作用域隔离，否则重定义。
   for (const auto &tiling_api_code : model_info.node_name_to_api_code) {
+    tiling_func_.AddLine("{");
     tiling_func_.AddLine(tiling_api_code.second.function_invoke);
+    tiling_func_.AddLine("}");
   }
   tiling_func_.AddLine("}");
   return af::SUCCESS;

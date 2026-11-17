@@ -11,6 +11,7 @@
 #include "codegen_tiling_data.h"
 #include "codegen_kernel.h"
 #include "codegen_tiling_utils.h"
+#include <map>
 #include <sstream>
 #include <iomanip>
 
@@ -219,7 +220,8 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
               "Cube Fixpip schedule groups just one.");
     ss1 << this->ClassBegin(this->kernel_name, this->class_name) << std::endl;
     ss1 << GetCommonTilingField(false, fused_schedule_result) << std::endl;
-    this->ProcessSingleGroup(fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0], ss1);
+    GE_ASSERT_SUCCESS(
+        this->ProcessSingleGroup(fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0], ss1));
     GELOGI("TilingCaseId:ProcessSingleGroup\n");
     generate_footer();
     return ss.str();
@@ -238,13 +240,14 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
   if ((elemwise_schedule_result.node_idx_to_scheduled_results.size() == 1U) &&
       (elemwise_schedule_result.node_idx_to_scheduled_results[0].size() == 1U) &&
       (elemwise_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.size() == 1U)) {
-    this->ProcessSingleGroup(elemwise_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0], ss1);
+    GE_ASSERT_SUCCESS(
+        this->ProcessSingleGroup(elemwise_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0], ss1));
     GELOGI("TilingCaseId:ProcessSingleGroup\n");
   } else {
     for (size_t i = 0U; i < elemwise_schedule_result.node_idx_to_scheduled_results.size(); i++) {
       auto scheduled_results = elemwise_schedule_result.node_idx_to_scheduled_results[i];
       for (size_t j = 0U; j < scheduled_results.size(); j++) {
-        this->ProcessMultiGroup(j, i, scheduled_results[j].schedule_groups, ss1, ss2);
+        GE_ASSERT_SUCCESS(this->ProcessMultiGroup(j, i, scheduled_results[j].schedule_groups, ss1, ss2));
         GELOGI("TilingCaseId:ProcessMultiGroup\n");
       }
     }
@@ -511,7 +514,22 @@ std::string codegen::TilingData::ConstApiTilingDataFiledDefine(std::string &type
   return ss.str();
 }
 
-void codegen::TilingData::AddApiTilingData(const af::AscGraph &graph, std::stringstream &ss, uint32_t tiling_case_id) {
+af::Status codegen::TilingData::AddApiTilingData(const af::AscGraph &graph, std::stringstream &ss,
+                                                 uint32_t tiling_case_id) {
+  // 兜底：同一 impl graph 内若存在重名节点（例如多个消费者各自插入的同名 Pad），
+  // 由节点名派生的 api tiling 字段会重复声明，导致 host tiling 代码编译失败。
+  // 注意：const 模式下除 struct 成员外，还会为每个字段生成一份
+  // "GenTilingDataValue_<field>_<param>_field_def" 全局变量，
+  // 因此必须在调用 ConstApiTilingDataFiledDefine 之前整体跳过。
+  // 跳过仅对"同身份"的等价重复安全：身份 = 原始节点名 + tiling 类型 + tiling 值指纹
+  // （输入/输出的 dtype、repeats、轴序）。指纹相同则 tiling 值必然相同（值由 shape/dtype 决定，
+  // 与名字无关），共享字段安全；att 层 node_name_to_api_code 按节点名只保留一份 invoke。
+  // 而节点名重复（AddNode 不查重）或 GenValidName 归一化撞名（如 a/b 与 a_b）时，
+  // 名字不足以证明值相同，共享字段属运行期数据错误，必须显性失败而非静默跳过。
+  std::map<std::string, std::string> emitted_api_fields;  // field -> 节点身份
+  for (const auto &emitted_field : const_tiling_data_field) {
+    emitted_api_fields[emitted_field] = "";
+  }
   for (const auto &node : graph.GetAllNodes()) {
     std::string device_type_name;
     std::string host_type_name;
@@ -520,6 +538,18 @@ void codegen::TilingData::AddApiTilingData(const af::AscGraph &graph, std::strin
         (af::SUCCESS == GetApiTilingFieldName(node, field_name))) {
       host_type_name = "optiling::" + device_type_name;
       field_name = field_name + "_" + std::to_string(tiling_case_id);
+      const std::string node_identity =
+          node->GetName() + "|" + device_type_name + "|" + ascgen_utils::GenApiTilingValueFingerprint(node);
+      const auto emitted_iter = emitted_api_fields.find(field_name);
+      if (emitted_iter != emitted_api_fields.end()) {
+        GE_ASSERT_TRUE(emitted_iter->second == node_identity,
+                       "Duplicate api tiling field [%s] from node [%s] type [%s] conflicts with identity [%s].",
+                       field_name.c_str(), node->GetNamePtr(), device_type_name.c_str(), emitted_iter->second.c_str());
+        GELOGW("Duplicate api tiling field [%s] from node [%s], skip emitting it again.", field_name.c_str(),
+               node->GetNamePtr());
+        continue;
+      }
+      emitted_api_fields[field_name] = node_identity;
       const_tiling_data_field.push_back(field_name);
 
       if (const_mode_) {
@@ -532,6 +562,7 @@ void codegen::TilingData::AddApiTilingData(const af::AscGraph &graph, std::strin
       ConstTilingDataFieldPopBack();
     }
   }
+  return af::SUCCESS;
 }
 
 void codegen::TilingData::GetTqueAndTbufId(const af::AscGraph &graph, std::set<int64_t> &q_ids,
@@ -583,7 +614,7 @@ void codegen::TilingData::GenTqueTbufTmpBufFunc(const std::set<int64_t> &q_ids, 
   }
 }
 
-void codegen::TilingData::ProcessSingleGroup(const ascir::ScheduleGroup &schedule_group, std::stringstream &ss) {
+af::Status codegen::TilingData::ProcessSingleGroup(const ascir::ScheduleGroup &schedule_group, std::stringstream &ss) {
   std::unordered_set<std::string> size_var_names;
   std::set<int64_t> q_ids;
   std::set<int64_t> b_ids;
@@ -601,7 +632,7 @@ void codegen::TilingData::ProcessSingleGroup(const ascir::ScheduleGroup &schedul
     }
     GetTqueAndTbufId(graph, q_ids, b_ids);
     GetTmpBufName(graph, b_ids);
-    AddApiTilingData(graph, ss, i);
+    GE_ASSERT_SUCCESS(AddApiTilingData(graph, ss, i));
     GELOGI("TilingCaseId:ProcessSingleGroup, tilingcaseNum:%d\n", schedule_group.impl_graphs.size());
   }
   for (const auto &var : schedule_group.runtime_shape_vars) {
@@ -611,12 +642,12 @@ void codegen::TilingData::ProcessSingleGroup(const ascir::ScheduleGroup &schedul
     }
   }
   GenTqueTbufTmpBufFunc(q_ids, b_ids, ss);
-  return;
+  return af::SUCCESS;
 }
 
-void codegen::TilingData::ProcessMultiGroup(uint64_t pos, const int graph_id,
-                                            const std::vector<ascir::ScheduleGroup> &schedule_groups,
-                                            std::stringstream &ss1, std::stringstream &ss2) {
+af::Status codegen::TilingData::ProcessMultiGroup(uint64_t pos, const int graph_id,
+                                                  const std::vector<ascir::ScheduleGroup> &schedule_groups,
+                                                  std::stringstream &ss1, std::stringstream &ss2) {
   for (uint64_t i = 0; i < schedule_groups.size(); i++) {
     std::stringstream struct_name;
     struct_name << "AscGraph" << std::to_string(graph_id) << "Schedule";
@@ -647,7 +678,7 @@ void codegen::TilingData::ProcessMultiGroup(uint64_t pos, const int graph_id,
       }
       GetTqueAndTbufId(graph, q_ids, b_ids);
       GetTmpBufName(graph, b_ids);
-      AddApiTilingData(graph, ss2, j);
+      GE_ASSERT_SUCCESS(AddApiTilingData(graph, ss2, j));
       GELOGI("TilingCaseId:ProcessMultiGroup, i_%d, i_num:%d, j_%d, j_num:%d\n", i, schedule_groups.size(), j,
              schedule_groups[i].impl_graphs.size());
     }
@@ -662,7 +693,7 @@ void codegen::TilingData::ProcessMultiGroup(uint64_t pos, const int graph_id,
     ConstTilingDataFieldPopBack();
     ss2 << std::endl;
   }
-  return;
+  return af::SUCCESS;
 }
 
 std::string codegen::TilingData::GenStringReplaceFunc() const {

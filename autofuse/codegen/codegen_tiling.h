@@ -267,13 +267,14 @@ class TilingLib {
   void GenGroupPerfForScheduleResult(std::stringstream &ss, size_t asc_graph_id, size_t result_id,
                                      const ::ascir::ScheduledResult &sched_result) const;
   std::string GenUpdateCurPerfAndBlockByGroupHelper() const;
-  void GenReprScheduleGroupFields(std::stringstream &ss, const ::ascir::ScheduleGroup &sg,
-                                  const std::string &field_prefix, const std::string &emit_fn,
-                                  const std::string &indent, bool emit_first_arg) const;
-  void GenReprApiTilingFields(std::stringstream &ss, const ::ascir::ImplGraph &graph, size_t tiling_case_id,
-                              const std::string &field_prefix, bool top_level) const;
-  void GenReprSingleGroup(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result) const;
-  void GenReprMultiGroup(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  af::Status GenReprScheduleGroupFields(std::stringstream &ss, const ::ascir::ScheduleGroup &sg,
+                                        const std::string &field_prefix, const std::string &emit_fn,
+                                        const std::string &indent, bool emit_first_arg) const;
+  af::Status GenReprApiTilingFields(std::stringstream &ss, const ::ascir::ImplGraph &graph, size_t tiling_case_id,
+                                    const std::string &field_prefix, bool top_level) const;
+  af::Status GenReprSingleGroup(std::stringstream &ss,
+                                const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  af::Status GenReprMultiGroup(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   // codegen_tiling_pgo_search.cpp: PGO candidate traversal, tiling key and configuration persistence.
   std::string GenPgoTilingFunc(const ::ascir::FusedScheduledResult &fused_schedule_result, const std::string &tiling,
                                codegen::PgoShapeStringStream &pgo_shape_dim, bool is_inductor_scene,
