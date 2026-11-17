@@ -8184,6 +8184,35 @@ TEST_F(TestCodegenTiling, CodegenGenerateForInductorCvFusionLaunchDecoupleContro
   EXPECT_NE(rt_result.kernel.find("if (cv_tiling_data.mix_mode == 1)"), std::string::npos);
 }
 
+// PGO 开启时 CV 融合图必须保持 rtLaunch 形态，禁止任何静默降级 legacy：tiling 侧对
+// CV 图局部关闭 PGO（不产 PgoRunner/PgoDeviceSource/实测 TopN），PgoDeviceSource 只在
+// 静态非 CV 图产生、与 rtLaunch 的 AIV split marker 作用域不相交，PGO 开启与否不得
+// 影响 launch_decouple 传参。重新引入降级守卫会使本用例挂载。
+TEST_F(TestCodegenTiling, CodegenGenerateForInductorPgoKeepsCvFusionRtLaunchForm) {
+  ScopedAutofusePgoFlag pgo_flag(true);
+  auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused_schedule_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), af::SUCCESS);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+
+  codegen::CodegenResult rt_result;
+  ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, rt_result, true), af::SUCCESS);
+
+  // rtLaunch 形态契约保持：<<< 退出，extern "C" 分派入口 + AIV split 标记 + 裁剪宏标记。
+  EXPECT_EQ(rt_result.kernel.find("<<<"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("#ifndef AF_AIV_UNIT"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("_op_kernel_aiv.cpp"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("extern \"C\" __global__ __aicore__ void"), std::string::npos);
+  EXPECT_NE(rt_result.tiling.find("GetDynamicUbSize"), std::string::npos);
+
+  // CV 图不产 PGO 实测链工件：无 PgoRunner/PgoDeviceSource/实测 TopN 入口。
+  EXPECT_EQ(rt_result.tiling.find("AUTOFUSE_SPLIT_FILE_BEGIN: PgoRunner"), std::string::npos);
+  EXPECT_EQ(rt_result.tiling.find("AUTOFUSE_SPLIT_FILE_BEGIN: PgoDeviceSource"), std::string::npos);
+  EXPECT_EQ(rt_result.tiling.find("GenerateMeasuredTopnSolutions"), std::string::npos);
+}
+
 TEST_F(TestCodegenTiling, CodegenGenerateShouldNotEmitSplitMarkers) {
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")});
   codegen::Codegen codegen(codegen::CodegenOptions{});
