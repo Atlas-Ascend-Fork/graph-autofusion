@@ -406,6 +406,9 @@ MlirCodegenStatus RunMlirCodegen(const ascir::FusedScheduledResult &fused_schedu
              reason.str().c_str());
       return MlirCodegenStatus::kNotSupported;
     }
+    if (options.config == MlirCodegenConfig::kMlir) {
+      GELOGE(af::FAILED, "MLIR Codegen Result：kFailed (stage=%s)", reason.str().c_str());
+    }
     return MlirCodegenStatus::kFailed;
   };
   if (options.config == MlirCodegenConfig::kNone) {
