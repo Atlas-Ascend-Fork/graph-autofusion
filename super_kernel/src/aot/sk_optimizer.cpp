@@ -72,34 +72,8 @@ void PrintTaskNodesDetail(const std::vector<SuperKernelBaseNode *> &nodes, const
 struct EarlyBackBlockNotifyPlan {
   size_t producerIndex = 0;
   SuperKernelBaseNode *producer = nullptr;
-  SuperKernelBaseNode *reset = nullptr;
   SuperKernelBaseNode *notify = nullptr;
 };
-
-bool HasBackBlockNotifyInStream(const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
-                                uint32_t streamIdx) {
-  return std::any_of(eventNodes.begin(), eventNodes.end(), [streamIdx](const auto &eventNode) {
-    return eventNode != nullptr && eventNode->GetNodeType() == SkNodeType::NODE_NOTIFY &&
-           eventNode->GetStreamIdxInGraph() == streamIdx;
-  });
-}
-
-bool CollectFrontWaitResetNodesByStream(const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
-                                        std::unordered_map<uint32_t, SuperKernelBaseNode *> &resetsByStream) {
-  for (const auto &eventNode : eventNodes) {
-    if (eventNode == nullptr || eventNode->GetNodeType() != SkNodeType::NODE_RESET) {
-      continue;
-    }
-    const uint32_t streamIdx = eventNode->GetStreamIdxInGraph();
-    const auto result = resetsByStream.emplace(streamIdx, eventNode.get());
-    if (!result.second) {
-      SK_LOGW("early notify fallback: duplicate reset for streamIdx=%u, resetNodeId=%lu", streamIdx,
-              eventNode->GetNodeId());
-      return false;
-    }
-  }
-  return true;
-}
 
 bool CollectBackBlockNotifySources(const std::vector<SuperKernelBaseNode *> &taskNodes,
                                    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
@@ -110,10 +84,6 @@ bool CollectBackBlockNotifySources(const std::vector<SuperKernelBaseNode *> &tas
     if (taskNode != nullptr) {
       lastTaskIndexByStream[taskNode->GetStreamIdxInGraph()] = index;
     }
-  }
-  std::unordered_map<uint32_t, SuperKernelBaseNode *> resetsByStream;
-  if (!CollectFrontWaitResetNodesByStream(eventNodes, resetsByStream)) {
-    return false;
   }
   for (const auto &eventNode : eventNodes) {
     if (eventNode == nullptr) {
@@ -132,9 +102,7 @@ bool CollectBackBlockNotifySources(const std::vector<SuperKernelBaseNode *> &tas
     }
     const size_t producerIndex = streamIt->second;
     auto *producer = taskNodes[producerIndex];
-    auto resetIt = resetsByStream.find(streamIdx);
-    auto *reset = resetIt == resetsByStream.end() ? nullptr : resetIt->second;
-    earlyNotifySources.push_back({producerIndex, producer, reset, eventNode.get()});
+    earlyNotifySources.push_back({producerIndex, producer, eventNode.get()});
   }
   return true;
 }
@@ -145,9 +113,6 @@ std::vector<SuperKernelBaseNode *> BuildEarlyNotifyTaskList(
     const std::vector<EarlyBackBlockNotifyPlan> &earlyNotifySources) {
   std::vector<std::vector<SuperKernelBaseNode *>> eventsAfterTask(taskNodes.size());
   for (const auto &source : earlyNotifySources) {
-    if (source.reset != nullptr) {
-      eventsAfterTask[source.producerIndex].push_back(source.reset);
-    }
     eventsAfterTask[source.producerIndex].push_back(source.notify);
   }
   std::vector<SuperKernelBaseNode *> scheduled;
@@ -160,10 +125,6 @@ std::vector<SuperKernelBaseNode *> BuildEarlyNotifyTaskList(
     if (eventNode->GetNodeType() == SkNodeType::NODE_NOTIFY) {
       continue;
     }
-    if (eventNode->GetNodeType() == SkNodeType::NODE_RESET &&
-        HasBackBlockNotifyInStream(eventNodes, eventNode->GetStreamIdxInGraph())) {
-      continue;
-    }
     scheduled.push_back(eventNode.get());
   }
   return scheduled;
@@ -171,15 +132,8 @@ std::vector<SuperKernelBaseNode *> BuildEarlyNotifyTaskList(
 
 void ConnectEarlyNotifyDependencies(const std::vector<EarlyBackBlockNotifyPlan> &earlyNotifySources) {
   for (const auto &source : earlyNotifySources) {
-    auto *predecessor = source.producer;
-    if (source.reset != nullptr) {
-      predecessor->sendToNodeId.insert(source.reset->GetNodeId());
-      source.reset->receiveNodeId.insert(predecessor->GetNodeId());
-      source.reset->SetPreNodeId(predecessor->GetNodeId());
-      predecessor = source.reset;
-    }
-    predecessor->sendToNodeId.insert(source.notify->GetNodeId());
-    source.notify->receiveNodeId.insert(predecessor->GetNodeId());
+    source.producer->sendToNodeId.insert(source.notify->GetNodeId());
+    source.notify->receiveNodeId.insert(source.producer->GetNodeId());
   }
 }
 }  // namespace
@@ -453,11 +407,8 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
   std::vector<SuperKernelBaseNode *> tasks =
       BuildTaskListWithEarlyNotifies(reorderedTaskNodes, eventNodes, usedEarlyRelease);
   if (usedEarlyRelease) {
-    auto frontReset = std::find_if(eventNodes.begin(), eventNodes.end(), [&eventNodes](const auto &eventNode) {
-      if (eventNode == nullptr || eventNode->GetNodeType() != SkNodeType::NODE_RESET) {
-        return false;
-      }
-      return !HasBackBlockNotifyInStream(eventNodes, eventNode->GetStreamIdxInGraph());
+    auto frontReset = std::find_if(eventNodes.begin(), eventNodes.end(), [](const auto &eventNode) {
+      return eventNode != nullptr && eventNode->GetNodeType() == SkNodeType::NODE_RESET;
     });
     if (frontReset != eventNodes.end()) {
       ConnectStreamTailKernelsToEvent(reorderedTaskNodes, frontReset->get());
