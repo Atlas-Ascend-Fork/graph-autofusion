@@ -69,37 +69,6 @@ void PrintTaskNodesDetail(const std::vector<SuperKernelBaseNode *> &nodes, const
   }
 }
 
-bool HasForwardTaskRelations(const std::vector<SuperKernelBaseNode *> &tasks,
-                             const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes) {
-  std::unordered_map<uint64_t, size_t> indexById;
-  for (size_t index = 0; index < tasks.size(); ++index) {
-    if (tasks[index] == nullptr || tasks[index]->GetNodeId() == INVALID_TASK_ID ||
-        !indexById.emplace(tasks[index]->GetNodeId(), index).second) {
-      return false;
-    }
-    for (uint64_t targetId : tasks[index]->sendToNodeId) {
-      auto target = indexById.find(targetId);
-      if (target != indexById.end() && index >= target->second) {
-        return false;
-      }
-    }
-  }
-  for (const auto &eventNode : eventNodes) {
-    if (eventNode == nullptr || eventNode->GetNodeType() != SkNodeType::NODE_NOTIFY) {
-      continue;
-    }
-    const size_t notifyIndex = indexById.at(eventNode->GetNodeId());
-    for (uint64_t sourceId : eventNode->receiveNodeId) {
-      auto source = indexById.find(sourceId);
-      if (source == indexById.end() || source->second >= notifyIndex ||
-          tasks[source->second]->sendToNodeId.count(eventNode->GetNodeId()) == 0) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 struct EarlyBackBlockNotifyPlan {
   size_t producerIndex = 0;
   SuperKernelBaseNode *producer = nullptr;
@@ -372,11 +341,6 @@ std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::BuildTaskListWithEarlyN
     return buildFallbackTaskList();
   }
   std::vector<SuperKernelBaseNode *> scheduled = BuildEarlyNotifyTaskList(taskNodes, eventNodes, earlyNotifySources);
-  if (!HasForwardTaskRelations(scheduled, eventNodes)) {
-    SK_LOGW("early notify fallback: candidate task order is not topological");
-    return buildFallbackTaskList();
-  }
-
   ConnectEarlyNotifyDependencies(earlyNotifySources);
   usedEarlyRelease = true;
   return scheduled;
