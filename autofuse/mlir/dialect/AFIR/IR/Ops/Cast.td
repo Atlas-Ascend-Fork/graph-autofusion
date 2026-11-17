@@ -72,7 +72,10 @@ def AFIR_CastOp : AFIR_BufferizableCastOp<"cast", AFIR_CastElementTypes, AFIR_Ca
     (输入, 输出) 推 `RoundMode`，还替中间要转两道的那些 dtype 对开循环）。两侧同名而
     **签名完全不同**：mem 侧 `CastExtend(dst, src, tmp, size)`（`cast.h`，要一块 tmp
     buffer），reg 侧 `CastExtend(dst, src, {dims}, {out_stride}, {in_stride})`
-    （`cast_reg_base.h`，不要 tmp）。
+    （`cast_reg_base.h`，不要 tmp）。非连续最内轴可按 `[rows, 1]` 批量下降，保留
+    输入、输出各自的行步长。mem 侧使用 `CastExtend(dst, src, tmp, rows, 1,
+    inputStride, outputStride, dtypeSize)`；需要额外中间缓冲区、行步长相等或无法静态
+    证明不相等的情况保留逐元素回退。reg 侧使用二维形状和 stride 数组。
 
     合法的 (输入, 输出) 对不是元素类型列表的笛卡尔积——`f16 -> i4` 有供给而
     `f16 -> ui32` 没有，144 格里只有 46 格成立。逐行那两张表在 `Ops/Cast.cpp`，

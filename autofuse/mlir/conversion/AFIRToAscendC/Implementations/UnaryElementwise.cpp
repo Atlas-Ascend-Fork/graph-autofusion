@@ -30,6 +30,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "conversion/AFIRToAscendC/Implementations/UnaryElementwise.h"
+#include "conversion/AFIRToAscendC/Implementations/CastConversion.h"
 #include "conversion/AFIRToAscendC/VectorizedLoops.h"
 #include "target/Ascend/AscendTargetProfile.h"
 #include "dialect/AFIR/Analysis/VectorSegmentation.h"
@@ -93,6 +94,10 @@ constexpr uint32_t kFloatElementTypes = kF16 | kF32;
 constexpr uint32_t kAbsRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kBF16;
 // `neg`：legacy 两侧都收 i16，原先注册处漏了。
 constexpr uint32_t kNegElementTypes = kF16 | kF32 | kI16 | kI32;
+// `ub2ub`：legacy 两侧共九种（reg 侧多一个 i64），这里是其中 AFIR 的 `ElementTypes`
+// 有位的那六种。`i8` / `ui32` / `ui64` / `i64` 没有位（`elementTypeBit` 答 0），够不着
+// 也就谈不上收；两侧都没有 bf16，所以这里也不能有。
+constexpr uint32_t kUb2ubElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16;
 
 // 结果元素类型与输入的关系。绝大多数是 `Same`；`Uint8Predicate` 是输入浮点、结果一个
 // 字节真值的那一类（isnan / isfinite / isinf）；`CastPair` 只有 `afir.cast`——它的输入
@@ -182,8 +187,8 @@ class UnaryElementwiseCapabilityProvider final : public ascend::instruction::Cap
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
     bool wholeTensor = true;
-    const elementwise::LocalViewCompatibility compatibility =
-        elementwise::checkElementwiseLocalViews(operation, &wholeTensor);
+    const elementwise::LocalViewCompatibility compatibility = elementwise::checkElementwiseLocalViews(
+        operation, &wholeTensor, mapping_->resultElementType == ResultElementRule::CastPair);
     if (compatibility == elementwise::LocalViewCompatibility::UnsupportedShape) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
@@ -294,8 +299,8 @@ FailureOr<UnaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adap
   if (failed(ordered)) {
     return failure();
   }
-  FailureOr<VectorizedWindow> window =
-      materializeVectorizedSegments(op, rewriter, *segments, view.extentSource, *ordered, /*apiWindowSize=*/1);
+  FailureOr<VectorizedWindow> window = materializeVectorizedSegments(op, rewriter, *segments, view.extentSource,
+                                                                     *ordered, view.apiWindowSize, view.physicalSpan);
   if (failed(window) || window->tiles.size() != segments->tensors.size() || window->extents.size() != 1) {
     return failure();
   }
@@ -616,6 +621,23 @@ LogicalResult registerUnary(ImplementationRegistry &registry, llvm::StringRef id
       createPatternRegistration<SourceOp, TargetOp, TakesTmpBuffer, MaterializesReuseSource, ConstBlock>());
 }
 
+template <typename TargetOp, bool TakesTmpBuffer>
+LogicalResult registerCast(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family) {
+  if (failed(elementwise::checkFamilyMatchesHeader<TargetOp>(family))) {
+    return failure();
+  }
+  elementwise::recordRegisteredFamily(afir::CastOp::getOperationName(), id, family, 0U);
+  return registry.registerImplementation<afir::CastOp, UnaryElementwiseMapping, UnaryElementwiseCapabilityProvider>(
+      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
+      UnaryElementwiseMapping{family, ResultElementRule::CastPair, castSupplyOf(family), 0U, TakesTmpBuffer},
+      [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
+         std::shared_ptr<const UnaryElementwiseMapping> mapping) {
+        populateCastConversionPattern(patterns, context.typeConverter, key, mapping->family, mapping->executionSpec,
+                                      context.target.getFeatureState(ascend::TargetFeature::RegBasedApiFamily) ==
+                                          ascend::FeatureState::Available);
+      });
+}
+
 // `afir.leaky_relu`：两张支持表上是同一个 `AscendC::LeakyRelu`、都不要 tmp buffer,
 // 所以家族恒为 `Any`，只有一个 implementation。
 template <typename SourceOp, typename TargetOp>
@@ -711,6 +733,16 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
                                                       kFloatAndI32ElementTypes)) ||
       failed(registerUnary<SqrtOp, ascendc::SqrtL2Op>(registry, "sqrt.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                       kFloatElementTypes))) {
+    return failure();
+  }
+
+  // `afir.ub2ub`：两侧供给表给的是同一个 `AscendC::DataCopy`，count 经
+  // `KernelUtils::BlkAlign<T>` 抬到 32B 对齐（矩阵 tier D0，`Ub2ubApiCall`）。目标 op 与
+  // `afir.pad` 没补位那一支共用——那条退化形态发的就是同一句调用，形参表逐字相同，所以
+  // 这里不另造一份 implementation，走一元 elementwise 那条三实参的路。
+  // `BlkAlign` 出自 autofuse 自己的 `utils.h`，所以家族是 `Shared` 而不是 `Any`。
+  if (failed(registerUnary<Ub2ubOp, ascendc::DataCopyBlkAlignedOp>(registry, "ub2ub.tensor", ApiFamily::Shared,
+                                                                   ResultElementRule::Same, kUb2ubElementTypes))) {
     return failure();
   }
 
@@ -1022,7 +1054,10 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   //   - mem 侧 `CastExtend(dst, src, tmp, size)`（`cast.h`），要一块 tmp buffer
   //     （`CalcCastTmpSize`；中间要转两道的那些 dtype 对拿它装中间结果）；
   //   - reg 侧 `CastExtend(dst, src, {dims}, {out_stride}, {in_stride})`
-  //     （`cast_reg_base.h`），不要 tmp，三个数组实参由 emitter 按连续形态打字面量。
+  //     （`cast_reg_base.h`），不要 tmp，三个数组实参由 emitter 按连续或二维行步长形态输出。
+  //
+  // 非连续最内轴可按 [rows, 1] 下降；mem 侧仅使用无需额外 scratch 的安全 mask 路径。
+  // API 名称仍为 CastExtend，沿用上述 implementation 身份和 execution spec。
   //
   // 上面那三个 `ascendc.cast_l*` 不是这里的可用实现：它们生成的是标准的 `AscendC::Cast`、
   // 要一个 `RoundMode` 实参，而两份包装都是自己按 (输入, 输出) 推 `RoundMode` 的。
@@ -1030,10 +1065,10 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   // 集合传 0：`CastPair` 那一档根本不读它（见 `areElementTypesSupported`），给一个真集合
   // 只会让人以为它参与判据。0 同时是 `ElementTypeMatrixTest` 认的「这一档不按集合判」的
   // 标记，那条断言据此跳过这两个 id，并用一条反向断言盯住跳过的名单不会悄悄变长。
-  if (failed(registerUnary<afir::CastOp, ascendc::CastExtendContiguousOp, /*TakesTmpBuffer=*/true>(
-          registry, "cast.tensor.extend", ApiFamily::MemBased, ResultElementRule::CastPair, 0U)) ||
-      failed(registerUnary<afir::CastOp, ascendc::CastExtendContiguousRegBaseOp>(
-          registry, "cast.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::CastPair, 0U))) {
+  if (failed(registerCast<ascendc::CastExtendContiguousOp, /*TakesTmpBuffer=*/true>(registry, "cast.tensor.extend",
+                                                                                    ApiFamily::MemBased)) ||
+      failed(registerCast<ascendc::CastExtendContiguousRegBaseOp, /*TakesTmpBuffer=*/false>(
+          registry, "cast.tensor.extend_reg_base", ApiFamily::RegBased))) {
     return failure();
   }
 

@@ -30,6 +30,7 @@ add_mlir_library(AFIRToAscendC
   TilingSchema.cpp
   VectorizedLoops.cpp
   Implementations/BinaryElementwise.cpp
+  Implementations/CastConversion.cpp
   Implementations/Broadcast.cpp
   Implementations/ConstBlockTensor.cpp
   Implementations/ElementwiseApiFamily.cpp

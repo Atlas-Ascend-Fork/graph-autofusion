@@ -36,8 +36,7 @@ include "mlir/IR/OpBase.td"
 // reg 那三个实参是 `const uint32_t (&)[dim]`，`dim` 由 brace-init 的长度推出来。连续
 // 形态下 `dim` 恒为 1、两个 stride 恒为 1，所以它们不进 `arguments`——与
 // `where_contiguous` / `clipbyvalue_contiguous` 同一个办法，「连续」写进助记符里，
-// 由 emitter 把那三个字面量打出来。真要生成 2 维形态那天，改的是再建一个 op，不是给
-// 这个加操作数。
+// 由 emitter 把那三个字面量打出来。二维形态由独立的 Strided op 表达行数、列数和行步长。
 //
 // mem 侧要 `utils.h` 前导：`cast.h` 用了 `MAX_REPEAT_TIMES` / `Rational` / `Ceiling` /
 // `ConvertToUint32`，四个都只有 `utils.h` 声明（`sign` 那一对已经因为同一个 `cast.h`
@@ -59,6 +58,34 @@ def AscendC_CastExtendContiguousRegBaseOp : VectorOp<"cast_extend_contiguous_reg
 ]> {
   let description = "Call the Autofuse CastExtend wrapper on a contiguous tile (cast_reg_base.h)";
   let arguments = (ins AscendC_LocalTensor:$dst, AscendC_LocalTensor:$src, AnyType:$calCount);
+  let extraClassDeclaration =
+      extraClassDeclarationBase # ApiExtensionHeader<["cast_reg_base.h"]>.decl # [{
+    SmallVector<Value> getSrcTensors() { return {getSrc()}; }
+  }];
+}
+
+// A two-dimensional Cast window; row strides are measured in each tensor's elements.
+def AscendC_CastExtendStridedOp : VectorOp<"cast_extend_strided", "CastExtend", [
+  ApiExtensionOpInterface, OpWithDstInterface, OpWithSrcInterface
+]> {
+  let description = "Call the Autofuse CastExtend wrapper with independent row strides";
+  let arguments = (ins AscendC_LocalTensor:$dst, AscendC_LocalTensor:$src,
+                       AscendC_LocalTensor:$sharedTmpBuffer, AnyType:$rows, AnyType:$columns,
+                       AnyType:$inputStride, AnyType:$outputStride);
+  let extraClassDeclaration =
+      extraClassDeclarationBase # ApiExtensionHeader<["cast.h"], ["utils.h"]>.decl # [{
+    SmallVector<Value> getSrcTensors() { return {getSrc()}; }
+  }];
+}
+
+// A two-dimensional Cast window; row strides are measured in each tensor's elements.
+def AscendC_CastExtendStridedRegBaseOp : VectorOp<"cast_extend_strided_reg_base", "CastExtend", [
+  ApiExtensionOpInterface, OpWithDstInterface, OpWithSrcInterface
+]> {
+  let description = "Call the Autofuse CastExtend wrapper with independent row strides";
+  let arguments = (ins AscendC_LocalTensor:$dst, AscendC_LocalTensor:$src,
+                       AnyType:$rows, AnyType:$columns,
+                       AnyType:$inputStride, AnyType:$outputStride);
   let extraClassDeclaration =
       extraClassDeclarationBase # ApiExtensionHeader<["cast_reg_base.h"]>.decl # [{
     SmallVector<Value> getSrcTensors() { return {getSrc()}; }

@@ -87,7 +87,7 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsTheProductionCoverage) {
       bufferForm.insert(mapping.scheduler_name);
     }
   }
-  EXPECT_EQ(bufferForm.size(), 124u);
+  EXPECT_EQ(bufferForm.size(), 125u);
   EXPECT_FALSE(bufferForm.contains("ArgMax"));
   EXPECT_FALSE(bufferForm.contains("ArgMaxMultiRPhase1"));
   EXPECT_FALSE(bufferForm.contains(
@@ -100,9 +100,11 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsTheProductionCoverage) {
   // op（mem 侧的 `ascir_builtin_ops_v1.cpp` 不注册它）。它进侧表，但只进 reg 那一列，
   // 由下面那条按族覆盖的断言连同 `kRegOnlyElementwiseOps` 一起管。
   //
-  // `RemovePad` / `Transpose` / `Pad` 是布局变换族（2026-09-30 / 2026-10-15 / 2026-10-19）：
-  // 同一组形状契约（Transpose 放宽为同 rank 重排），另一套 lowering，见
-  // `dialect/AFIR/IR/Ops/Layout.td`。
+  // `RemovePad` / `Transpose` / `Pad` / `Ub2ub` 是布局变换族（2026-09-30 / 2026-10-15 /
+  // 2026-10-19 / 2026-11-16）：同一组形状契约（Transpose 放宽为同 rank 重排），另一套
+  // lowering，见 `dialect/AFIR/IR/Ops/Layout.td`。`Ub2ub` 两端 descriptor 逐字相同，
+  // 目标调用与 `afir.pad` 没补位那一支共用，所以它直接走一元 elementwise 的注册路径，
+  // 进侧表、由下面那条按族覆盖的断言管。
   for (llvm::StringRef name : {"Load",
                                "Store",
                                "Broadcast",
@@ -151,6 +153,7 @@ TEST(BridgeOperationRegistryTest, BufferFormSetIsTheProductionCoverage) {
                                "RemovePad",
                                "Transpose",
                                "Pad",
+                               "Ub2ub",
                                "Nddma",
                                "Sum",
                                "Max",

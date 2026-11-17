@@ -12,7 +12,7 @@
 //
 // 布局变换族（设计文档 2026-09-17 划的第 7 族）：同一批元素换一种片上摆法，逻辑形状与
 // 元素类型都不变，变的只是 descriptor 的 `vectorized_strides`。`RemovePad` / `Transpose` /
-// `Pad` 已落在本文件，`Ub2ub` 后续落进来。
+// `Pad` / `Ub2ub` 都在本文件。
 //
 //===----------------------------------------------------------------------===//
 
@@ -37,6 +37,13 @@ defvar AFIR_PadElementTypes = [I16, UI16, I32, UI32, F16, F32];
 // MLIR 没有 I1 元素类型通路（本方言 ODS 无 I1、ascendc Types 无 Bool），reg 侧 e2e 对
 // DT_BOOL 在 CPU 仿真上也是 `GTEST_SKIP`，接了验不了。
 defvar AFIR_TransposeElementTypes = [I16, UI16, I32, UI32, F16, F32, BF16];
+
+// Ub2ub 的 dtype 口径也是**两侧注册表的并集**：mem 侧九种（`ascir_builtin_ops_v1.cpp:672`）、
+// reg 侧在此之上多一个 I64（`ascir_builtin_ops_v2.cpp:936`）。两侧都没有 BF16，所以这里也
+// 不能有——ODS 声称某一位而两张支持表都不供，等于把本可以回落的图钉成 verifier 硬失败。
+// `I8` / `UI32` / `I64` / `UI64` 在 lowering 那一层的 `ElementTypes` 里没有位，
+// implementation 因此收不到它们；ODS 比 implementation 宽是对的。
+defvar AFIR_Ub2ubElementTypes = [I8, UI8, I16, UI16, I32, UI32, I64, UI64, F16, F32];
 
 // RemovePad 复用一元 bufferizable op 的形状、类型推导、verifier 和 destination-style 契约，
 // 但不是逐元素计算。AddRemovePadAfter 拷贝生产者属性，因此两端逻辑 axis / repeats 相同。
@@ -129,6 +136,36 @@ def AFIR_PadOp : AFIR_BufferizableUnaryElementwiseOp<"pad",
 
     两侧供给表共用 `PadApiCall`（矩阵 tier D1），只有一个 implementation。dtype 集与
     RemovePad 同列。本 Op 在 `compute` pipe 上执行。
+  }];
+}
+
+// Ub2ub 与 RemovePad / Pad 同样骑在 `AFIR_BufferizableUnaryElementwiseOp` 的形状契约上，
+// 而且比那两个更紧：插入它的 `ShortenVecinLifetime` / `ShortenVecoutLifetime` 直接把源张量
+// 的整份 descriptor 抄给输出、只清掉 `buf` / `que`
+// （`optimize/buffer_allocate/buf_que_allocator.cpp:946`、同文件 1030 行），所以两端的
+// axis / repeats / vectorized_strides 逐字相同，差的只是**落在哪块 UB 上**。
+//
+// 它因此不能当成无副作用的别名消掉：源那块存储是队列槽位，拷贝正是为了让槽位能提前归还；
+// 把 op 删掉，消费者就直接读着那个还没释放的槽位。destination-style 把这件事说全了——
+// 写入的那块存储既是操作数（`outs`）也是结果，消费者必须用结果值，那条 use-def 边就是
+// 「拷贝已经落地」的 happens-before；基类声明的 `MemoryEffectsOpInterface` 则让 DCE 看见
+// 这次写，不会因为「结果没人用」把它当死代码。
+def AFIR_Ub2ubOp : AFIR_BufferizableUnaryElementwiseOp<"ub2ub", AFIR_Ub2ubElementTypes> {
+  let afirStability = AFIR_Experimental;
+  let summary = "Copy an on-chip tile from one UB allocation to another";
+  let description = [{
+    把一个片上 tile 原样拷到另一块 UB 上：逻辑形状、元素类型、布局都不变，变的只是这份
+    数据存放在哪块 UB 资源上。
+
+    它解决的是**队列槽位不够用**：一张图里同时活着的 VECIN（或 VECOUT）队列超过平台给的
+    条数时，调度在压力最大的那个 Load 之后（或 Store 之前）插一条 UB 内拷贝，把数据挪到
+    一块普通 buffer 上，队列槽位随即归还，后面的搬运才排得下。两处插入点分别是
+    `BufQueAllocator::ShortenVecinLifetime` 与 `ShortenVecoutLifetime`；
+    `concat_inputs_unification_pass` 为统一 concat 输入也插同一个节点。
+
+    两侧供给表给的是同一个 `AscendC::DataCopy`，count 由 `KernelUtils::BlkAlign<T>` 抬到
+    32B 对齐（矩阵 tier D0，`Ub2ubApiCall`），所以只有一个 implementation。本 Op 在
+    `compute` pipe 上执行。
   }];
 }
 

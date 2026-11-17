@@ -11,6 +11,11 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | FileCheck %s --check-prefixes=CHECK,MEM
 // RUN: sed '/^\/\//!s/ tmp(%%tmp)//; /^\/\//!s/, %%tmp: !ascendc.local_tensor<128xui8>//; /^\/\//!s/, !ascendc.local_tensor<128xui8>//' %s > %t.reg.mlir
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %t.reg.mlir | FileCheck %s --check-prefixes=CHECK,REG
+// RUN: sed 's/size_from_resource = true/size_bytes_expr = <"256">/g' %s > %t.fixed.mlir
+// RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %t.fixed.mlir 2>&1 | FileCheck %s --check-prefix=REJECT
+// RUN: sed '/^#padded_lane_ok = /,+1s/strides = \[<"32">, <"8">, <"1">\]/strides = [<"128">, <"32">, <"1">]/' %s > %t.bad-geometry.mlir
+// RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %t.bad-geometry.mlir 2>&1 | FileCheck %s --check-prefix=REJECT
+// REJECT: 'afir.abs' op has no supported Ascend implementation
 // AbsExtend requires scratch on the mem-based family; AbsL2 takes none on the
 // reg-based family. Keep the same GM/UB descriptors in both inputs.
 

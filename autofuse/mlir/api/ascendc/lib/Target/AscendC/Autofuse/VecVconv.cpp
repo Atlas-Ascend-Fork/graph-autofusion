@@ -9,10 +9,16 @@
  */
 
 #include "ascir/Target/Asc/Autofuse/AutofuseVecVconv.h"
+#include <algorithm>
+#include <climits>
 #include "ascir/Target/Asc/Autofuse/AutofuseVecUnary.h"
 
 using namespace mlir;
 using namespace mlir::ascendc;
+
+namespace {
+constexpr unsigned kBitsPerByte = CHAR_BIT;
+} // namespace
 
 // mem 侧：`CastExtend<InT>(dst, src, tmp, static_cast<uint32_t>(count))`。显式模板实参
 // 是 `printApiExtensionUnary` 一贯的做法，取的是**源**的元素类型；`OutT` 由 dst 推出来。
@@ -41,6 +47,32 @@ LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::CastE
     os << op.getAPIName() << "(" << emitter.getOrCreateName(op.getDst()) << ", "
        << emitter.getOrCreateName(op.getSrc()) << ", {static_cast<uint32_t>("
        << emitter.getOrCreateName(op.getCalCount()) << ")}, {1U}, {1U})";
+    return success();
+}
+
+LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::CastExtendStridedOp op)
+{
+    auto& os = emitter.ostream();
+    auto inputBits = op.getSrc().getType().getElementTypeBitWidth();
+    auto outputBits = op.getDst().getType().getElementTypeBitWidth();
+    os << op.getAPIName() << "(" << emitter.getOrCreateName(op.getDst()) << ", "
+       << emitter.getOrCreateName(op.getSrc()) << ", " << emitter.getOrCreateName(op.getSharedTmpBuffer());
+    for (Value value : {op.getRows(), op.getColumns(), op.getInputStride(), op.getOutputStride()}) {
+        os << ", static_cast<uint32_t>(" << emitter.getOrCreateName(value) << ")";
+    }
+    os << ", " << (std::max(inputBits, outputBits) / kBitsPerByte) << "U)";
+    return success();
+}
+
+LogicalResult mlir::ascendc::printOperation(CodeEmitter& emitter, ascendc::CastExtendStridedRegBaseOp op)
+{
+    auto& os = emitter.ostream();
+    os << op.getAPIName() << "(" << emitter.getOrCreateName(op.getDst()) << ", "
+       << emitter.getOrCreateName(op.getSrc()) << ", {static_cast<uint32_t>("
+       << emitter.getOrCreateName(op.getRows()) << "), static_cast<uint32_t>("
+       << emitter.getOrCreateName(op.getColumns()) << ")}, {static_cast<uint32_t>("
+       << emitter.getOrCreateName(op.getOutputStride()) << "), 1U}, {static_cast<uint32_t>("
+       << emitter.getOrCreateName(op.getInputStride()) << "), 1U})";
     return success();
 }
 

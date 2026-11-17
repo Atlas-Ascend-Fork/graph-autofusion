@@ -108,7 +108,8 @@ using PrintableOpTypes = std::tuple<
     // 内联广播（brc_inline，custom emitter -- see VecBinary.cpp）
     ascendc::BinaryBrcInlineOp,
     // Type conversion operations
-    ascendc::CastExtendContiguousOp, ascendc::CastExtendContiguousRegBaseOp, ascendc::CastRegOp,
+    ascendc::CastExtendContiguousOp, ascendc::CastExtendContiguousRegBaseOp,
+    ascendc::CastExtendStridedOp, ascendc::CastExtendStridedRegBaseOp, ascendc::CastRegOp,
     ascendc::Ceil2IntExtendRegBaseOp,
     // 谓词寄存器：VF 里的一条 `Reg::Compare` 与它写进去的那个 `MaskReg` 的声明
     // （`MaskRegOp` 是上游 Basic 的 op，上游的 printer 表里没有它，见 VecCmpsel.h）。

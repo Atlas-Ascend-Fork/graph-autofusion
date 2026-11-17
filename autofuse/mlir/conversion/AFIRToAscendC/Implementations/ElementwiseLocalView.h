@@ -55,6 +55,10 @@ FailureOr<afir::TensorDescAttr> getDestinationDescriptor(Operation *op, unsigned
 struct ElementwiseLocalView {
   std::optional<afir::VectorPlan> vectorPlan;
   afir::ExtentSource extentSource = afir::ExtentSource::Nominal;
+  // Zero means loop over every segment and invoke the API on one element.
+  unsigned apiWindowSize = 1;
+  // Equal element types and local layouts may compute padding within one span.
+  bool physicalSpan = false;
 };
 // Interpret descriptors and construct the common loop plan, without imposing
 // continuous API lane, alignment, capacity or alias requirements.
@@ -64,12 +68,13 @@ LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsig
 // aligned addresses, known static bounds and conservative shared-storage checks.
 // Dynamic storage sufficiency remains the allocation/caller contract.
 LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
-                                                   ElementwiseLocalView &view);
+                                                   ElementwiseLocalView &view, bool allowStridedElements = false);
 LocalViewCompatibility checkLocalViewCompatibility(Operation *op, ArrayRef<afir::TensorDescAttr> descriptors,
                                                    bool *wholeTensor = nullptr);
 bool isSingletonTensorInput(Operation *op, unsigned index);
 bool hasSameLocalLayout(Operation *op, unsigned inputIndex);
-LocalViewCompatibility checkElementwiseLocalViews(Operation *op, bool *wholeTensor = nullptr);
+LocalViewCompatibility checkElementwiseLocalViews(Operation *op, bool *wholeTensor = nullptr,
+                                                  bool allowStridedElements = false);
 
 }  // namespace mlir::ascend::kernel::elementwise
 #endif
