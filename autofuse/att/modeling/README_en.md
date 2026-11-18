@@ -7,8 +7,6 @@ Archive model designs, test cases, and validation results. Model owners will fil
 ```text
 modeling/
 ├── README.md
-├── common/                 # shared overhead
-│   └── op_head_cost/
 ├── mte2/                   # Load models
 │   ├── README.md
 │   ├── load/
@@ -30,8 +28,6 @@ modeling/
 ```
 
 Each category README describes its modeling methods. Shared archive conventions belong in this file.
-
-Collection and fitting code lives in [Autofuse modeling tools](../../tools/modeling/README.md). See [GetOpHeadCost](common/op_head_cost/design.md) for the shared overhead model.
 
 ## Model Archives
 

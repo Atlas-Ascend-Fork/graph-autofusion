@@ -104,20 +104,3 @@ Expr res = (GetVFHeadCost() + CreateExpr(latency) + all_vf_instruct_cost) * oute
 res.Simplify();
 perf.pipe_res[PipeType::AIV_VEC] = res;
 ```
-
-## PR 2921 Additions
-
-For FP32 three-axis descriptors whose inner-axis classification is 1, when the stride is constant, 8-element
-aligned, and between 24 and 64, the bank period is computed with `gcd(stride,32)` and the Gather requests are
-computed from the actual number of vector segments `cal_count / repeat_elm`. For two-axis descriptors, or
-three-axis descriptors outside the bank path, when the first input stride is 1, the main stride is 128 B aligned,
-and the active lane count is at most 8, Gather is counted by the active lanes inside the mask. Dynamic tiles
-generate an estimate guard for the same condition. Other dimensions, dtypes, or out-of-condition descriptors keep
-the corresponding generic formula.
-
-The [additional cases](cases-pr2921.csv) and [measurement index](results/v35/pr2921-d68/report_en.md) contain the
-Gather component experiments used to separate bank-conflict and mask effects. Component estimates and the full
-Transpose template use different cycle semantics. The product domain and full-formula fallback are covered by
-`UTestAscirPerfV2.TransposeDim2Inner1ShortAlignedFp32GatherCountsActiveLanes`,
-`TransposeDim3Inner1ShortAlignedFp32GatherCountsActiveLanes`, and
-`TransposePerfUsesBankPeriodForAlignedDim3Inner1Fp32`.

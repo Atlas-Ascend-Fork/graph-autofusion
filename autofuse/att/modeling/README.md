@@ -7,8 +7,6 @@
 ```text
 modeling/
 ├── README.md
-├── common/                 # 公共开销
-│   └── op_head_cost/
 ├── mte2/                   # 搬入模型
 │   ├── README.md
 │   ├── load/
@@ -24,15 +22,12 @@ modeling/
 │   │   └── cast/
 │   ├── gather/
 │   ├── reduce/
-│   ├── transpose/
-│   └── vf/
+│   └── transpose/
 └── simt/                   # 按实际执行路径增加子模型
     └── README.md
 ```
 
 各分类 README 用于补充本类模型的建模方法。共享归档约定放在本文件中。
-
-采集与拟合代码统一放在 [Autofuse 建模工具](../../tools/modeling/README.md)。公共开销见 [GetOpHeadCost](common/op_head_cost/design.md)。
 
 ## 模型归档
 
@@ -52,5 +47,3 @@ modeling/
 记录模型与环境版本，保持预测和实测口径一致；有拟合过程时区分拟合数据与独立验证数据。
 原始日志、profiling 和二进制不入库，通过证据索引关联。
 空目录使用 `.gitkeep` 保留，有实际归档内容后移除。
-
-[v35 ATT 建模增补与验证入口](v35-att-calibration-design.md)

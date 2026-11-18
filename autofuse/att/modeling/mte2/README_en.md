@@ -10,4 +10,4 @@ Archive models for load paths such as `load/` and `nddma/`.
 
 See the [archive conventions](../README_en.md) for the model file structure.
 
-NDDMA modeling and ad-hoc tools are maintained in [autofuse/tools/modeling/nddma](../../../tools/modeling/nddma/README_en.md).
+NDDMA modeling and ad-hoc tools are maintained in [autofuse/tools/nddma](../../../tools/nddma/README_en.md).

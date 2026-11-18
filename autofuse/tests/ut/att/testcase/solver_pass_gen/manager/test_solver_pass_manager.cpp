@@ -80,28 +80,3 @@ TEST_F(TestSolverPassManager, AxesReorderInputKeepsOriginalShape) {
   EXPECT_NE(impl_code.find("m_size.value = tiling_data.get_m_size();"), std::string::npos);
   EXPECT_EQ(impl_code.find("m_size.value = (tiling_data.get_m_size()"), std::string::npos);
 }
-
-TEST_F(TestSolverPassManager, DynamicDefaultKeepsBalanceAndPgoRefinement) {
-  for (const auto shape_type : {ge::ExprType::kExprVariable, ge::ExprType::kExprConstantInteger}) {
-    const bool is_static = shape_type == ge::ExprType::kExprConstantInteger;
-    for (const bool high_precision : {false, true}) {
-      const auto model_info = CreateModelInfo(1U, shape_type);
-      ArgsManager args_manager(model_info);
-      ASSERT_TRUE(args_manager.Process(false));
-      EXPECT_EQ(args_manager.HasDynamicInputShape(), !is_static);
-
-      SolverPassManager manager(args_manager, {0}, "TilingData");
-      manager.SetHighPerfTiling(high_precision);
-      manager.SetEnableAutofusePGO(true);
-      manager.SetEnableEqualOrder(false);
-      const auto code = manager.GenAxesReorderFunc("").first;
-      const std::string enabled = high_precision ? "true" : "false";
-      const std::string core_search_arg = is_static ? "" : ", false";
-      EXPECT_NE(code.find("solver.Run(true, false, " + enabled + ", false)"), std::string::npos);
-      EXPECT_NE(code.find("solver.Run(runtime_enable_multicore_ub_tradeoff, "
-                          "runtime_enable_block_loop_trade_off_by_perf, " +
-                          enabled + ", false" + core_search_arg + ")"),
-                std::string::npos);
-    }
-  }
-}

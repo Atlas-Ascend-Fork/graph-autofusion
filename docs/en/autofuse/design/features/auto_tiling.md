@@ -230,7 +230,7 @@ The solver aims to find a feasible, near-optimal Tiling within bounded compilati
 | `MultiCoreTiling` | Multi-core splitting | Identifies `mc_related` axes and selects BlockDim using physical-core count, tail load, and UB load | Fused graphs with parallelizable outer work. Benefit is limited for small Shapes or when no axis can be distributed. |
 | Dual-threshold algorithm | LocalBuffer/MultiCore coordination | Uses `att_ub_threshold` and `att_corenum_threshold` together to trade per-core UB utilization against core utilization | Medium and large operators where UB footprint conflicts with parallelism. It is not an independent solver and depends on the first two stages. |
 | Equal-priority Tiling | Special AxesReorder branch | Jointly searches two axes of equal priority and considers alignment and dual-threshold policy | Currently for the two trailing Load/Store axes of Transpose. Only two axes are supported. |
-| `AutoTuning` | Post-solve refinement | Searches BlockDim/neighboring Tiles with bounded steps using the performance formula | The default path searches core counts for static shapes when `att_accuracy_level > 0`. Dynamic high-accuracy solving retains workload balancing. PGO threshold solves retain high-accuracy refinement. |
+| `AutoTuning` | Post-solve refinement | Searches BlockDim/neighboring Tiles with bounded steps using the performance formula | Enabled when `att_accuracy_level > 0` and multi-core UB trade-off is disabled. This is compile-time tuning, not hardware PGO. |
 | `HighPerf`/`GeneralSolver` | Experimental solver | Does not depend on axis ordering; uses LocateRegion exponential coarse tuning, FineTune linear refinement, and early stopping. It has a higher performance ceiling but greater compile-time cost and model sensitivity. | Experimental performance-focused scenarios with trusted models. It is not guaranteed in formal releases and may be removed. |
 
 These algorithms are not mutually exclusive entry points. They form a combination of solver mode, splitting stages, and specialized policies: `AxesReorder` or `HighPerf` defines the overall search, LocalBuffer/MultiCore defines the feasible resource region, and dual-threshold, equal-priority, and AutoTuning policies optimize local conflicts.
@@ -285,27 +285,6 @@ Results are numbered in stable ScheduleGroup/Case order to produce ATT tiling ke
 #### Torch/GE Paths and Boundaries
 
 Both frontend paths share the solver. GE can execute dynamic Tiling directly, whereas Inductor may enumerate and statically compile several candidates. Dynamic Shape allows multiple candidate keys, but each concrete symbolic instance must still select one result. Fusion scope, LocalBuffer binary search, dual thresholds, and caching intentionally bound compile time when the candidate space is large. HighPerf is experimental and may be removed. Equal-priority handling currently covers only two Transpose axes and cannot be generalized to arbitrary multi-axis or Cube-specific splitting.
-
-#### Algorithm Switches
-
-| Switch | Default | Effect | Scope and boundaries |
-| --- | --- | --- | --- |
-| `autofuse_att_algorithm` | `AxesReorder` | Selects the overall ATT solver: `AxesReorder`, `HighPerf`, or `Golden` | Applied while initializing `TilingCodeGenConfig`; `HighPerf`/`Golden` remain experimental |
-| `att_accuracy_level` | `1` | `0` disables post-solve auto tuning; `1` enables it | At `0`, the generated `enable_auto_tune=false` and `Run` returns the initial solution before core search |
-| `att_ub_threshold` | `20` | UB utilization threshold for the dual-threshold initial solve (percentage, 0-100) | Combined with `att_corenum_threshold` to trade per-core UB against multi-core |
-| `att_corenum_threshold` | `40` | Core utilization threshold for the dual-threshold initial solve (percentage, 0-100) | `corenum_threshold < 1.0` means the core penalty ratio is effective and affects Reduce Store seed protection |
-| `att_enable_multicore_ub_tradeoff` | `false` | Enables multi-core UB trade-off / dynamic solving | Disables Reduce Store penalty seed protection and changes the AutoTuning path |
-| `att_enable_small_shape_strategy` | `false` | Enables the small-shape fast solving strategy | Only affects candidate enumeration for small shapes; model formulas are unchanged |
-| `autofuse_enable_tiling_cache` | `false` | Enables tiling cache | Reuses solved tilings; a cache hit does not re-solve |
-| `att_profiling` | `false` | Emits ATT profiling/candidate diagnostics | Diagnostics only; candidate selection is unchanged |
-| `autofuse_enable_pgo` | Scenario-dependent | Enables PGO candidate measurement and re-solving | PGO re-solves keep core search by default and do not read the dynamic-shape skip setting |
-
-In addition to DFX switches, generated code has two internal algorithm gates that are not user options:
-
-- `enable_core_search`: the `AxesReorder` generator sets it to `true` for static shapes and `false` when any input size contains free symbols (dynamic shape). In the latter case, `Run` only performs `WorkloadBalance`. The PGO re-solve path calls `Run` with four arguments and therefore still uses the default `true`.
-- `preserve_reduce_store_penalty_seed`: set to `true` only for a Reduce split Store address-conflict penalty configuration (`is_penalty_config`) when multi-core UB trade-off, group parallel, and pending PGO search configuration are all absent. When the dual-threshold initial solve succeeds and `corenum_threshold < 1.0`, it skips extra core probes and keeps the penalty-derived seed so probing cannot reset the thresholds.
-
-These gates are written by the solver generator into `AxesReorderSolverInput` or the `Run` call arguments. They are not runtime environment variables; changing them requires updating the corresponding solver-generation conditions and UT.
 
 ### 5.4 Code Generation and TilingData
 

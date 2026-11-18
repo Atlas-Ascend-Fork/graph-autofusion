@@ -159,9 +159,6 @@ class TilingCodeGenImpl {
 
   void GenScheduleResultGetTilingCalling(const std::string &index, const std::string &ident = "");
   af::Status GenGetAllSchedulesResults(const AscGraphNamepspaceMap &namespace_map);
-  bool NeedsPgoWorkspaceCollection(size_t asc_graph_id, size_t impl_graph_id) const;
-  void GenCollectPgoWorkspace(const std::map<size_t, std::pair<std::string, std::string>> &graph_info,
-                              const std::string &indent, const std::string &on_failure);
   void GenPGOUpdateTilingInfo(const size_t asc_graph_id, const size_t impl_graph_id,
                               const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
   void GenFillOtherGroupsGetTiling(const size_t asc_graph_id, const size_t impl_graph_id,
@@ -469,7 +466,6 @@ class TilingCodeGenImpl {
   af::Status GenTemplateSemanticInfos();
   // 由tilingkey获取对应的性能公式
   af::Status GenGetPerf();
-  void GenPgoWorkspaceCollectorHead();
   // 由tilingkey获取对应的日志信息
   af::Status GenGetSummary();
   af::Status GenReuseGroupTilingWrapperGetTiling(
@@ -477,7 +473,7 @@ class TilingCodeGenImpl {
       std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
   // 复用组委托主组 GetTiling 只会注册主组的 workspace id，需按选中的 tiling key 补注册本组 id。
   af::Status GenReuseGroupOwnWorkspaceRegistration();
-  af::Status GenReuseGroupTilingWrapperQueries(
+  af::Status GenReuseGroupTilingWrapperGetPerf(
       const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
       std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
   void GenReuseGroupTilingWrapperFinalObservation(const std::string &reuse_prefix);

@@ -7,23 +7,17 @@ Licensed under the CANN Open Software License Agreement Version 2.0.
 
 这里的工具用于开发调试和问题定位，不属于 Autofuse 运行时接口。下面按“职责—输入—命令—效果”说明当前工具；参数变化以命令的 `--help` 为准。
 
-采集、拟合与复算工具见 [建模工具目录](modeling/README.md)，其中包括 [GetOpHeadCost](modeling/op_head_cost/README.md) 和 [IsInf](modeling/vector/isinf/README.md)。
-
-## MTE2 建模复验
-
-[Load / NDDMA 离线工具](modeling/mte2/README.md)支持归档误差核对和部分模型重拟合。
-
 ## NDDMA：建模与单配置预测、采集
 
-工具目录：[`modeling/nddma/`](modeling/nddma/README.md)。
+工具目录：[`nddma/`](nddma/README.md)。
 
 - 职责：Round1–5 数据采集、拟合与分析，以及 ad-hoc 单配置预测和实测。
 - 输入：shape、GM/UB stride、核数、dtype，或已有测量 CSV 和模型 JSON。
 - 使用（从仓库根目录）：
 
   ```bash
-  python3 autofuse/tools/modeling/nddma/Modeling/Data_collection/common/tools/predict_nddma_ad_hoc.py --help
-  python3 autofuse/tools/modeling/nddma/Modeling/Data_collection/common/tools/run_nddma_ad_hoc.py --help
+  python3 autofuse/tools/nddma/Modeling/Data_collection/common/tools/predict_nddma_ad_hoc.py --help
+  python3 autofuse/tools/nddma/Modeling/Data_collection/common/tools/run_nddma_ad_hoc.py --help
   ```
 
 - 效果：输出 cycles 预测、公式分项、拟合参数及测量分析结果。历史快照的 metrics 已标记无效；实际采集需要 CANN/Ascend 环境。

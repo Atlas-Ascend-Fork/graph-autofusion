@@ -2,7 +2,6 @@
 
 分类沿用 `autofuse/codegen/api_call/`：`broadcast/`、`concat/`、`elewise/`、`gather/`、`reduce/`、`transpose/`。
 `cast` 归入 `elewise/cast/`，其他逐元素 API 按需在 `elewise/` 下归档。
-`vf/` 记录融合向量指令及公共启动代价的建模补充。
 `datacopy` 的 load/store 分别归档于 mte2/mte3；`utils` 是公共工具，不作为模型分类。
 
 ## 待补充

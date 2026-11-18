@@ -1973,11 +1973,10 @@ int main() {
   EXPECT_EQ(ret, 0);
 }
 
-// 用例描述：复用tque_tbuf_case1的构图，开启DFX --att_accuracy_level=1；
-// 动态 shape 下不进行额外核数搜索，仅保留负载均衡，核数与 level0 一样不会用满 64 核。
+// 用例描述：复用tque_tbuf_case1的构图，开启DFX --att_accuracy_level=1，使能多核调优，增加使用的核数
 // 用例期望结果：
 // 1.Tiling求解成功；
-// 2.使用核数未用满；
+// 2.使用核数相较level0模式上升；
 TEST_F(STestGenConcat, auto_tuning_accuracy_level_1) {
   setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=1", 1);
   EXPECT_EQ(ConstructAutoTuneCaseGroup(), af::SUCCESS);
@@ -1988,7 +1987,7 @@ TEST_F(STestGenConcat, auto_tuning_accuracy_level_1) {
 using namespace optiling;
 void PrintResult(case0TilingData& tilingData) {
   std::cout << "====================================================" << std::endl;
-  MY_ASSERT_EQ(tilingData.get_block_dim() < 64, true);
+  MY_ASSERT_EQ(tilingData.get_block_dim() == 64, true);
   MY_ASSERT_EQ(tilingData.get_graph0_tiling_key(), 1);
   std::cout << "====================================================" << std::endl;
 }

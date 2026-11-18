@@ -116,9 +116,3 @@ perf.pipe_res[PipeType::AIV_VEC] = res;
 ```
 
 其中 `GetVFHeadCost() = 20`。`valid = false` 时回退 `RegVfPerf(kUnitVector, ...)`：`20 + 0 + 0`（kUnitVector 无表项）。
-
-## PR 2921 的补充
-
-FP32 三轴、内轴分类为 1 时，对常量且按 8 元素对齐的 stride 24–64，用 `gcd(stride,32)` 计算 bank 周期，以实际向量段数 `cal_count / repeat_elm` 计算 Gather 请求。两轴或非上述 bank 路径的三轴，在输入首 stride 为 1、主步长对齐 128 B 且有效 lane 不超过 8 时，Gather 按掩码内活跃 lane 计数。动态 tile 生成同一条件的估值 guard。其余维度、dtype 或超出条件时保留对应通用公式。
-
-[补充用例](cases-pr2921.csv)与[实测索引](results/v35/pr2921-d68/report.md)保存用于分离 bank 冲突与 mask 影响的 Gather 组件试验。组件估值与完整 Transpose 模板的 cycle 口径不同。产品域和完整公式的回退由 `UTestAscirPerfV2.TransposeDim2Inner1ShortAlignedFp32GatherCountsActiveLanes`、`TransposeDim3Inner1ShortAlignedFp32GatherCountsActiveLanes` 及 `TransposePerfUsesBankPeriodForAlignedDim3Inner1Fp32` 覆盖。
