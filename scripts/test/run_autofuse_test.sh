@@ -1183,6 +1183,7 @@ build_backend() {
                       expm1_test_e2e_v2 \
                       rand_store_test_e2e_v2 \
                       randn_store_test_e2e_v2 \
+                      randint_store_test_e2e_v2 \
                       load_cast_brc_realign_test_e2e_v2 \
                       indirect_load_rank2_axis1_dynamic_simt_e2e_v2"
   fi

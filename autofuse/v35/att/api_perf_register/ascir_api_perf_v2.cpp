@@ -1103,6 +1103,8 @@ ApiPerfRegister<ApiPerf> rand_api_perf_v2(ApiPerfRegisterV2(kRand, kUnitVector, 
                                                             &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> randn_api_perf_v2(ApiPerfRegisterV2(kRandn, kUnitVector, nullptr, &perf_param_table_v2,
                                                              &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> rand_int_api_perf_v2(ApiPerfRegisterV2(kRandInt, kUnitVector, nullptr, &perf_param_table_v2,
+                                                                &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> square_api_perf_v2(ApiPerfRegisterV2(kSquare, kSquare + "V2", nullptr, &perf_param_table_v2,
                                                               &tiling_schedule_config_table_v2));
 

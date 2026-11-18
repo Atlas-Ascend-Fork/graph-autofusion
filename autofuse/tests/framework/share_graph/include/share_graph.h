@@ -137,6 +137,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr LoadTanhBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RandStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RandnStoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RandIntStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr AddAbsScalarFusedGraph(size_t dims_size, af::DataType dtype);
   static af::ComputeGraphPtr AbsBrcAddFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr UbScalarBrcAbsAddFusedGraph(size_t dims_size);

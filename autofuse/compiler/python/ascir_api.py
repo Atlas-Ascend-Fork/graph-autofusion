@@ -2580,6 +2580,37 @@ def Randint64(
     return op.y
 
 
+def RandInt(
+    owner_graph: ascir.HintGraph,
+    x1: ascir.OpsOperatorOutput,
+    x2: ascir.OpsOperatorOutput,
+    x3: ascir.OpsOperatorOutput,
+    x4: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    """
+    RandInt - generate element-wise uniform integers: y[i] = x3[i] + Philox64(x1[i], x2[i]) % (x4[i] - x3[i]).
+    x1 seed (int64), x2 counter (int32, arange position stream), x3 low / x4 high (int64).
+    Output dtype is int64 (int32 is handled by frontend Cast).
+    """
+    name = _generate_op_name(owner_graph, "rand_int")
+    op = ascir.ops.RandInt(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op)
+    op.attr.sched.axis = axis
+    op.x1 = x1
+    op.x2 = x2
+    op.x3 = x3
+    op.x4 = x4
+    op.y.dtype = ascir.dtypes.int64
+    _infer_or_set_view(op.y, axis, size, stride)
+    op.infer_dtype()
+    return op.y
+
+
 def XorSum(
     owner_graph: ascir.HintGraph,
     x1: ascir.OpsOperatorOutput,

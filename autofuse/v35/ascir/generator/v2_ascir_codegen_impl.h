@@ -5905,6 +5905,38 @@ class RandnAscIrCodegenImplV2 : public AscIrCodegenV2 {
 };
 
 /*********************************************************************************/
+class RandIntAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcVoidTmpSizeV2(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "RandIntApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "RandInt";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"randint_reg_base.h"};
+  }
+  // 设备实现为 SIMT 逐元素 Philox + 64 位取模，按 Remainder 同款引入 SIMT 头
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "simt_api/cpp/kernel_simt_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    // x1/x3/x4 为广播标量输入，x2 为 Arange 产出的逐元素位置流，仅支持张量
+    GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node, {true, {0, 2, 3}}),
+                      "Node %s[%s] check shape consistency failed", node.GetTypePtr(), node.GetNamePtr());
+    return true;
+  }
+};
+
+/*********************************************************************************/
 class BucketizeAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {

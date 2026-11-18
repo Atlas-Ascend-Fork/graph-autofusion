@@ -528,6 +528,19 @@ REG_ASC_IR(Randn).Inputs({}).Output("y", "T").StartNode().Impl(
                       af::ascir::AscIrImplCreator<af::ascir::RandnAscIrCodegenImplV2>(),
                       {{"T", TensorType{DT_UINT32, DT_INT32}}}});
 
+// torch inductor randint64 合同：x1 seed(int64 运行时标量广播)、x2 counter(int32 Arange 位置流)、
+// x3 low/x4 high(int64 编译期标量广播)，输出仅 int64（int32 由前端 Cast 承接）
+REG_ASC_IR(RandInt)
+    .Input("x1", "T")
+    .Input("x2", "T2")
+    .Input("x3", "T")
+    .Input("x4", "T")
+    .Output("y", "T")
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::RandIntAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::RandIntAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_INT64}}, {"T2", TensorType{DT_INT32}}}});
+
 REG_ASC_IR(Workspace).Impl(v2_soc_versions,
                            {af::ascir::AscIrImplCreator<af::ascir::WorkspaceAscIrAttImplV2>(),
                             af::ascir::AscIrImplCreator<af::ascir::WorkspaceAscIrCodegenImplV2>(),

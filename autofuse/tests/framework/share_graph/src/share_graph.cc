@@ -15312,6 +15312,111 @@ af::ComputeGraphPtr ShareGraph::RandnStoreFusedGraph(size_t dims_size) {
   return compute_graph;
 }
 
+/**
+ *   data0  data1  data2  data3
+ *     |      |      |      |
+ *   load0  load1  load2  load3
+ *       \    |      |    /
+ *            RandInt
+ *               |
+ *             store
+ *               |
+ *           output0
+ */
+static void CreateRandIntStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data seed_x1("data0", graph);
+  seed_x1.ir_attr.SetIndex(0);
+  seed_x1.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Data counter_x2("data1", graph);
+  counter_x2.ir_attr.SetIndex(1);
+  counter_x2.y.dtype = af::DT_INT32;
+
+  af::ascir_op::Data low_x3("data2", graph);
+  low_x3.ir_attr.SetIndex(2);
+  low_x3.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Data high_x4("data3", graph);
+  high_x4.ir_attr.SetIndex(3);
+  high_x4.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_x1("load0");
+  load_x1.x = seed_x1.y;
+  load_x1.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_x2("load1");
+  load_x2.x = counter_x2.y;
+  load_x2.y.dtype = af::DT_INT32;
+
+  af::ascir_op::Load load_x3("load2");
+  load_x3.x = low_x3.y;
+  load_x3.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_x4("load3");
+  load_x4.x = high_x4.y;
+  load_x4.y.dtype = af::DT_INT64;
+
+  af::ascir_op::RandInt rand_int_op("rand_int");
+  rand_int_op.x1 = load_x1.y;
+  rand_int_op.x2 = load_x2.y;
+  rand_int_op.x3 = load_x3.y;
+  rand_int_op.x4 = load_x4.y;
+  rand_int_op.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Store store("store");
+  store.x = rand_int_op.y;
+  store.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Output y("output");
+  y.x = store.y;
+  y.y.dtype = af::DT_INT64;
+
+  y.ir_attr.SetIndex(0);
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+
+  // seed 为广播标量输入（对齐前端 load_seed 标量形态）：全 1 repeat + 全 0 stride，
+  // 走 ub_scalar 标量取值路径（GetValue(0) → kSeedIsScalar=true 设备重载）。
+  // 必须在 ConstructVVAscGraphAxisInfo 之后设置，否则统一轴信息会将其覆盖为 {s0, s1}
+  std::vector<af::Expression> seed_repeats(dims_size, af::sym::kSymbolOne);
+  std::vector<af::Expression> seed_strides(dims_size, af::sym::kSymbolZero);
+  *load_x1.y.repeats = seed_repeats;
+  *load_x1.y.strides = seed_strides;
+}
+
+af::ComputeGraphPtr ShareGraph::RandIntStoreFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("randint_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+  auto data1 = builder.AddNode("data1", "Data", 0, 1);
+  af::AttrUtils::SetInt(data1->GetOpDescBarePtr(), "_parent_node_index", 1);
+  auto data2 = builder.AddNode("data2", "Data", 0, 1);
+  af::AttrUtils::SetInt(data2->GetOpDescBarePtr(), "_parent_node_index", 2);
+  auto data3 = builder.AddNode("data3", "Data", 0, 1);
+  af::AttrUtils::SetInt(data3->GetOpDescBarePtr(), "_parent_node_index", 3);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 4, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(data1, 0, ascbc, 1);
+  builder.AddDataEdge(data2, 0, ascbc, 2);
+  builder.AddDataEdge(data3, 0, ascbc, 3);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("randint_store");
+  CreateRandIntStoreAscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
 static void CreateAscBackendGraphTwoInTwoOut(std::shared_ptr<af::AscGraph> &graph, const std::string &prefix,
                                              int64_t axis_num = 2) {
   auto ONE = af::Symbol(1);
