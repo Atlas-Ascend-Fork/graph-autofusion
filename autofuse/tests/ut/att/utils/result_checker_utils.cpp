@@ -191,8 +191,9 @@ bool ResultCheckerUtils::ReplaceLogMacrosGeneric(const std::string &filename) {
     return false;
   }
 
-  // 通用正则表达式：匹配 OP_LOG[D/I/W/E]
+  // 通用正则表达式：匹配 OP_LOG[D/I/W/E] 与 ATT_SEGMENT_CACHE_LOG[D/W]（分段缓存日志宏）
   std::regex pattern("#define\\s+OP_LOG([DIWE])\\([^)]*\\)");
+  std::regex segment_cache_pattern("#define\\s+ATT_SEGMENT_CACHE_LOG([DW])\\([^)]*\\)");
 
   // 级别映射
   const std::map<char, std::string> level_map = {{'D', "DEBUG"}, {'I', "INFO"}, {'W', "WARNING"}, {'E', "ERROR"}};
@@ -212,6 +213,18 @@ bool ResultCheckerUtils::ReplaceLogMacrosGeneric(const std::string &filename) {
       std::string original_line = current_line;
       current_line = replacement;
       std::cout << "Replace OP_LOG" << level_char << ": " << original_line << " -> " << current_line << std::endl;
+      modified = true;
+    } else if (std::regex_match(current_line, match, segment_cache_pattern)) {
+      char level_char = match[1].str()[0];
+      std::string level_str = level_map.at(level_char);
+
+      std::string replacement = R"(#define ATT_SEGMENT_CACHE_LOG)" + std::string(1, level_char) +
+                                R"((name, fmt, ...) printf("\n[)" + level_str + R"(][%s]" fmt, name, ##__VA_ARGS__))";
+
+      std::string original_line = current_line;
+      current_line = replacement;
+      std::cout << "Replace ATT_SEGMENT_CACHE_LOG" << level_char << ": " << original_line << " -> " << current_line
+                << std::endl;
       modified = true;
     }
   }

@@ -44,12 +44,9 @@ bool AxesReorderSolver::InitLocalBufferVars() {
   auto *vars = input_.local_buffer_vars;
   const auto size = input_.local_buffer_vars_size;
   for (uint32_t i = 0u; i < size; ++i) {
-    const uint32_t remain = std::min(4u, size - i);
-    for (uint32_t k =0u; k < remain; ++k) {
-      if (!vars[i+k]->SetValue(vars[i+k]->align)) {
-        OP_LOGW(OP_NAME, "Failed to init local buffer value.");
-        return false;
-      }
+    if (!vars[i]->SetValue(vars[i]->align)) {
+      OP_LOGW(OP_NAME, "Failed to init local buffer value.");
+      return false;
     }
   }
   return true;
@@ -77,16 +74,13 @@ bool AxesReorderSolver::SatisfyCons(ConstraintType cons_type) {
   uint32_t size = input_.all_cons_size;
   auto *cons_list = input_.all_cons;
   for (uint32_t i = 0u; i < size; ++i) {
-    const uint32_t remain = std::min(4u, size - i);
-    for (uint32_t k =0u; k < remain; ++k) {
-      auto &cons = cons_list[i+k];
+    auto &cons = cons_list[i];
     if (cons->type != cons_type) {
       continue;
     }
     if (AF_AXES_EVAL_CONSTRAINT(cons, static_cast<double>(cons->rel_hw_spec)) > 0) {
       OP_LOGD(OP_NAME, "Check eval failed, rel_hw_spec:%ld, input:%s", cons->rel_hw_spec, input_.DebugString().c_str());
       return false;
-    }
     }
   }
   return true;
@@ -95,9 +89,7 @@ bool AxesReorderSolver::SatisfyCons(TilingVariable *var, ConstraintType cons_typ
   uint32_t size = var->rel_cons_size;
   auto *cons_list = var->rel_cons;
   for (uint32_t i = 0u; i < size; ++i) {
-    const uint32_t remain = std::min(4u, size - i);
-    for (uint32_t k =0u; k < remain; ++k) {
-      auto &cons = cons_list[i+k];
+    auto &cons = cons_list[i];
     if (cons->type != cons_type) {
       continue;
     }
@@ -105,7 +97,6 @@ bool AxesReorderSolver::SatisfyCons(TilingVariable *var, ConstraintType cons_typ
       OP_LOGD(OP_NAME, "Check eval failed, rel_hw_spec:%ld, input:%s, ratio:%lf", cons->rel_hw_spec,
               input_.DebugString().c_str(), ratio);
       return false;
-    }
     }
   }
   return true;
@@ -1003,40 +994,52 @@ bool AxesReorderSolver::TuneNoTail(TilingVariable **vars, uint32_t id) {
 
 bool AxesReorderSolver::IdentifyEqualPriorityAxes(const uint32_t axes_num, uint32_t *axis_idx, int64_t &min_upper_bound,
                                                   int64_t &max_aligned) {
-  std::map<size_t, std::vector<uint32_t>> order_to_axis_indices;
-
-  for (uint32_t i = 0; i < input_.local_buffer_vars_size; ++i) {
-    auto &var = input_.local_buffer_vars[i];
-    order_to_axis_indices[var->order].push_back(i);
-  }
-  bool need_equal_priority = false;
-  uint32_t index = 0;
+  // 等价于按order升序取第一个size>=2的分组：两遍扫描找最小且计数>=2的order，零容器分配
   constexpr uint32_t kSupportMaxEqualPriorityAxes = 2;
-  for (const auto &pair : order_to_axis_indices) {
-    if (pair.second.size() < kSupportMaxEqualPriorityAxes) {
+  size_t target_order = std::numeric_limits<size_t>::max();
+  for (uint32_t i = 0; i < input_.local_buffer_vars_size; ++i) {
+    const size_t cur_order = input_.local_buffer_vars[i]->order;
+    if (cur_order >= target_order) {
       continue;
     }
-    for (const auto &id : pair.second) {
-      if (index >= axes_num) {
-        OP_LOGI(OP_NAME, "Axes num %u is not enough to identify equal priority axes, index=%u", axes_num, index);
-        break;
-      }
-      axis_idx[index++] = id;
-      auto &var = input_.local_buffer_vars[id];
-      int64_t upper = AF_AXES_EVAL_UPPER_BOUND(var);
-      upper = CeilDiv(upper, var->align) * var->align;
-      min_upper_bound = std::min(upper, min_upper_bound);
-      max_aligned = std::max(var->align, max_aligned);
-      OP_LOGI(OP_NAME, "Identified equal priority axes: axis_idx=%u, min_upper_bound=%ld, max_aligned=%ld",
-              id, min_upper_bound, max_aligned);
-      if (index >= kSupportMaxEqualPriorityAxes) {
-        need_equal_priority = true;
-        break;
+    uint32_t count = 1U;
+    for (uint32_t j = 0U; j < input_.local_buffer_vars_size; ++j) {
+      if ((j != i) && (input_.local_buffer_vars[j]->order == cur_order)) {
+        ++count;
       }
     }
-    return need_equal_priority;
+    if (count >= kSupportMaxEqualPriorityAxes) {
+      target_order = cur_order;
+    }
   }
-  return false;
+  if (target_order == std::numeric_limits<size_t>::max()) {
+    return false;
+  }
+
+  bool need_equal_priority = false;
+  uint32_t index = 0;
+  for (uint32_t i = 0; i < input_.local_buffer_vars_size; ++i) {
+    if (input_.local_buffer_vars[i]->order != target_order) {
+      continue;
+    }
+    if (index >= axes_num) {
+      OP_LOGI(OP_NAME, "Axes num %u is not enough to identify equal priority axes, index=%u", axes_num, index);
+      break;
+    }
+    axis_idx[index++] = i;
+    auto &var = input_.local_buffer_vars[i];
+    int64_t upper = AF_AXES_EVAL_UPPER_BOUND(var);
+    upper = CeilDiv(upper, var->align) * var->align;
+    min_upper_bound = std::min(upper, min_upper_bound);
+    max_aligned = std::max(var->align, max_aligned);
+    OP_LOGI(OP_NAME, "Identified equal priority axes: axis_idx=%u, min_upper_bound=%ld, max_aligned=%ld",
+            i, min_upper_bound, max_aligned);
+    if (index >= kSupportMaxEqualPriorityAxes) {
+      need_equal_priority = true;
+      break;
+    }
+  }
+  return need_equal_priority;
 }
 
 bool AxesReorderSolver::BinarySearchEqualPriorityAxes(uint32_t axis_num, uint32_t *axis_idx, int64_t lower_bound,

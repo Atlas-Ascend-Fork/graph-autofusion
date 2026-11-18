@@ -17,7 +17,7 @@ void TilingCacheCodeGen::GenConstantDefs(ge::CodePrinter &code_printer, size_t i
   // 直接定义常量值，避免optiling命名空间访问问题
   code_printer.AddLine("// ATT缓存相关常量");
   code_printer.AddLine("constexpr size_t kInputShapeSize = " + std::to_string(input_vars_size) + ";");
-  code_printer.AddLine("constexpr size_t kOperatorCacheCapacity = 128;  // 算子级缓存容量");
+  code_printer.AddLine("constexpr size_t kOperatorCacheCapacity = 10000;  // 算子级缓存容量");
   code_printer.AddLine("constexpr double kLoadFactorThreshold = 0.8;   // 负载因子阈值");
   code_printer.AddLine("");
 }

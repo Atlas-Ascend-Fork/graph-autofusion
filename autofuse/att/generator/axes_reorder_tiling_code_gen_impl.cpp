@@ -88,7 +88,6 @@ af::Status AxesReorderTilingCodeGenImpl::GenSolverBaseClass() {
   const bool is_enable_equal_order_tiling = IsAnyModelEnableEqualOrderTiling(tiling_model_info_);
   if (is_enable_equal_order_tiling) {
     RequireTranslationUnitSystemHeader("limits");
-    RequireTranslationUnitSystemHeader("map");
   }
   std::string basic_solvers_head = SolverPassManager::GenAxesReorderBaseClassesHead(is_enable_equal_order_tiling);
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver, basic_solvers_head);

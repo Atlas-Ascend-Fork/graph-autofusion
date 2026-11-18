@@ -796,4 +796,77 @@ TEST_F(TestArgListReorder, v1_micro_api_len_equals_schedule_vector_len) {
   EXPECT_EQ(tiling_schedule_config_table.GetModelTilingScheduleConfig().vector_len_size,
             tiling_schedule_config_table.GetVectorLenSize());
 }
+
+// 动态shape分段缓存：SortArgList全链路将reduce切分轴回溯到原始轴并打标
+TEST_F(TestArgListReorder, segment_cache_marks_reduce_related_origin_after_sort) {
+  auto origin = std::make_unique<SubAxis>();
+  origin->name = "origin_r";
+  origin->repeat = af::Symbol("Z");
+  origin->data_type_size = kAxisDataTypeSize;
+  auto reduce = std::make_unique<SubAxis>();
+  reduce->name = "reduce";
+  reduce->repeat = af::Symbol("R");
+  reduce->data_type_size = kAxisDataTypeSize;
+  reduce->axis_type = AxisPosition::INNER;
+  reduce->orig_axis_name = {origin->name};
+  reduce->orig_axis.emplace_back(origin.get());
+
+  auto input = std::make_shared<Tensor>();
+  auto output = std::make_shared<Tensor>();
+  input->name = "segment_reduce_input";
+  input->data_type_size = kTensorDataTypeSize;
+  input->dim_info = {reduce.get()};
+  input->repeat = {af::Symbol("R")};
+  input->stride = {af::Symbol(1, "ONE")};
+  output->name = "segment_reduce_output";
+  output->data_type_size = kTensorDataTypeSize;
+  output->dim_info = {reduce.get()};
+  output->repeat = {af::Symbol(1, "ONE")};
+  output->stride = {af::Symbol(0, "ZERO")};
+  NodeInfo node;
+  node.name = "SegmentReduce";
+  node.node_type = "SegmentReduce";
+  node.inputs = {input};
+  node.outputs = {output};
+
+  auto tuning_space = std::make_shared<TuningSpace>();
+  auto tiling_schedule_config_table = std::make_shared<TestTilingScheduleConfigTable>(128U, 256U);
+  tuning_space->tiling_schedule_config_table = tiling_schedule_config_table.get();
+  tuning_space->node_infos = {node};
+  tuning_space->sub_axes.emplace_back(std::move(origin));
+  tuning_space->sub_axes.emplace_back(std::move(reduce));
+
+  auto origin_att = MakeAttAxis("origin_r");
+  origin_att->axis_pos = AxisPosition::ORIGIN;
+  auto reduce_att = MakeAttAxis("reduce");
+  InitAttAxis(reduce_att, "reduce", af::Symbol("R"));
+  reduce_att->orig_axis.push_back(origin_att.get());
+  std::vector<AttAxisPtr> arg_list = {origin_att, reduce_att};
+
+  ArgListReorder arg_list_reorder(tuning_space);
+  std::vector<AttAxisPtr> tiling_r_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(arg_list, tiling_r_arg_list), af::SUCCESS);
+  EXPECT_TRUE(origin_att->is_reduce_related);
+  EXPECT_FALSE(origin_att->is_load_store_innermost);
+  EXPECT_FALSE(reduce_att->is_reduce_related);
+}
+
+// 动态shape分段缓存：load/store最内轴名与reduce原始轴名直接命中arg_list时分别打标
+TEST_F(TestArgListReorder, segment_cache_marks_load_store_innermost_and_direct_origin) {
+  auto tuning_space = std::make_shared<TuningSpace>();
+  auto origin_att = MakeAttAxis("origin_t");
+  origin_att->axis_pos = AxisPosition::ORIGIN;
+  auto tail_att = MakeAttAxis("t");
+  InitAttAxis(tail_att, "t", af::Symbol("T"));
+  tail_att->orig_axis.push_back(origin_att.get());
+  std::vector<AttAxisPtr> arg_list = {origin_att, tail_att};
+
+  ArgListReorder arg_list_reorder(tuning_space);
+  arg_list_reorder.load_store_inner_most_dims_.insert("t");
+  arg_list_reorder.reduce_map_.insert({"origin_t", true});
+  arg_list_reorder.MarkSegmentCacheAxes(arg_list);
+  EXPECT_TRUE(origin_att->is_load_store_innermost);
+  EXPECT_TRUE(origin_att->is_reduce_related);
+  EXPECT_FALSE(tail_att->is_load_store_innermost);
+}
 }  // namespace att

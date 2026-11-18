@@ -115,7 +115,8 @@ class TilingCodeGenImpl {
                                                 const AscGraphNamepspaceMap &asc_graph_map);
   af::Status GenFusedScheduleResultsGetTilingDefine(const FusedGraphNamespaceMap &namespace_map);
   af::Status GenFusedScheduleResultsGetTilingCoreDefine(const FusedGraphNamespaceMap &namespace_map);
-  af::Status GenFusedScheduleResultsCoreSelection(const FusedGraphNamespaceMap &namespace_map);
+  af::Status GenFusedScheduleResultsCoreSelection(const FusedGraphNamespaceMap &namespace_map, bool need_segment_cache);
+  af::Status GenFusedScheduleResultsSelectionBody(const FusedGraphNamespaceMap &namespace_map, bool with_segment_ctx);
   af::Status GenFusedScheduleResultsGetTilingObserveWrapper(const FusedGraphNamespaceMap &namespace_map);
   void GenFinalTilingSummaryForResult(size_t asc_graph_id, size_t result_id,
                                       const std::map<size_t, std::pair<std::string, std::string>> &groups);
@@ -133,9 +134,14 @@ class TilingCodeGenImpl {
   void GenGetScoreFuncsCalling(const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map);
   // 生成sche group的cache初始化部分
   void GenCacheInit();
+  // 组级GetTiling调用的cache实参：命中复用map传共享缓存；未命中的组被调方无cache形参，返回空
+  std::string GetGroupCacheCallArg(const std::string &group_prefix) const;
+  // 该组是否为复用wrapper（复用方，GetTiling无perf形参），判据与wrapper生成侧一致
+  bool IsReuseWrapperGroup(const std::string &group_prefix) const;
   void GenSetHardwareCodes(const std::string &group_prefix, const std::set<std::string> &hardware_names);
   af::Status GenScheduleGroupDoTiling(std::string &check_cond, const std::string &hardware_param,
-                                      const std::string &schedule_result_prefix);
+                                      const std::string &schedule_result_prefix, const size_t asc_graph_id,
+                                      const size_t impl_graph_id, const size_t group_id);
   void GenGetScheduleResultTail(const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
   void GenUpdateWorkspace(const size_t asc_graph_id);
   void GenWorkspaceOffsetHelpers();
@@ -196,8 +202,9 @@ class TilingCodeGenImpl {
   af::Status GenGetTilingWithCaseId(bool is_tail = false);
 
   // 辅助函数：获取GetTiling函数的参数定义字符串
-  std::string GetGetTilingParamDefines(bool use_cache, bool use_workspace, std::string &cache_define_head,
-                                       std::string &cache_define_func, std::string &cache_used) const;
+  std::string GetGetTilingParamDefines(const bool gen_cache_param, const bool use_cache, const bool use_workspace,
+                                       std::string &cache_define_head, std::string &cache_define_func,
+                                       std::string &cache_used) const;
   // 辅助函数：生成GetTiling函数签名
   void GenGetTilingFunctionSignature(const std::string &workspace_define, const std::string &cache_define_func,
                                      const std::string &cache_define_head);
@@ -213,6 +220,12 @@ class TilingCodeGenImpl {
   af::Status GenDurationCode(bool is_begin);
   // 辅助函数：生成operator level cache保存逻辑
   af::Status GenOperatorCacheSaveCode(bool need_operator_cache);
+  // 辅助函数：生成分段缓存存储与key计算函数（owner TU内，单group与多group tail共用）
+  af::Status GenSegmentCacheDefinesAndKeyFunc();
+  // 辅助函数：查询(asc_graph_id, impl_graph_id, group_id)的分段缓存扁平槽位编号
+  size_t GetSegmentGroupSlot(const size_t asc_graph_id, const size_t impl_graph_id, const size_t group_id) const;
+  // 辅助函数：是否存在force tiling case配置
+  bool HasForcedTilingCase() const;
   // 校验 force_tiling_case 配置
   af::Status ValidateForceTilingCase(const std::map<string, int32_t> &group_tiling_case_ids,
                                      int32_t min_tiling_case_size) const;
@@ -326,11 +339,13 @@ class TilingCodeGenImpl {
   // 辅助函数：生成ArrangeBlockOffsets函数声明
   void GenArrangeBlockOffsetsDeclarations(const FusedGraphNamespaceMap &namespace_map);
   // 辅助函数：生成DoGroupTiling函数的调用GetTiling部分
-  void GenDoGroupTilingGetTilingCalls(const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
+  void GenDoGroupTilingGetTilingCalls(const size_t asc_graph_id, const size_t impl_graph_id,
+                                      const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
   // 辅助函数：生成DoGroupTiling函数的失败处理部分
   void GenDoGroupTilingFailureHandler(const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
   // 辅助函数：生成Group并行场景的首次Tiling部分
-  void GenGroupParallelFirstTiling(const size_t impl_graph_id);
+  void GenGroupParallelFirstTiling(const size_t asc_graph_id, const size_t impl_graph_id,
+                                   const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
   // 辅助函数：生成Group并行场景的二次Tiling部分
   void GenGroupParallelSecondTiling(const size_t impl_graph_id,
                                     const std::map<size_t, std::pair<std::string, std::string>> &graph_info);

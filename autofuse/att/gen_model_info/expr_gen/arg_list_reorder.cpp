@@ -501,6 +501,41 @@ void ArgListReorder::RecordSpecialArgs(const NodeInfo &node, const TensorPtr &te
   }
 }
 
+// 动态shape分段缓存：将reduce轴与load/store最内切分轴回溯到原始轴，并在原始轴上打标。
+// 轴名可能直接命中原始轴（该轴未再切分），也可能命中切分轴（通过orig_axis回溯）。
+void ArgListReorder::MarkSegmentCacheAxes(const std::vector<AttAxisPtr> &arg_list) const {
+  const auto mark_axis = [](AttAxis &axis, bool is_reduce) {
+    if (is_reduce) {
+      axis.is_reduce_related = true;
+    } else {
+      axis.is_load_store_innermost = true;
+    }
+  };
+  const auto mark_by_name = [&arg_list, &mark_axis](const std::string &name, bool is_reduce) {
+    for (const auto &arg : arg_list) {
+      if (arg->name != name) {
+        continue;
+      }
+      if (arg->axis_pos == AxisPosition::ORIGIN) {
+        mark_axis(*arg, is_reduce);
+        continue;
+      }
+      for (auto *orig_axis : arg->orig_axis) {
+        if (orig_axis == nullptr) {
+          continue;
+        }
+        mark_axis(*orig_axis, is_reduce);
+      }
+    }
+  };
+  for (const auto &reduce_axis : reduce_map_) {
+    mark_by_name(reduce_axis.first, true);
+  }
+  for (const auto &innermost_axis : load_store_inner_most_dims_) {
+    mark_by_name(innermost_axis, false);
+  }
+}
+
 // 查找特殊轴，目前仅支持reduce/broadcast和最内轴，后续如果有其余特殊轴在这里扩展
 void ArgListReorder::FindSpecialArgs() {
   for (const auto &node : tuning_space_->node_infos) {
@@ -827,6 +862,7 @@ af::Status ArgListReorder::SortArgList(vector<AttAxisPtr> &arg_list, vector<AttA
     GELOGI("arg[%s], id is [%zu]", arg->name.c_str(), i);
   }
   FindSpecialArgs();
+  MarkSegmentCacheAxes(arg_list);
   // 构建最终优先级连边图
   const auto policy = prefer_reduce_tile_ ? PriorityPolicy::kInnermostFirst : PriorityPolicy::kReduceFirst;
   GE_ASSERT_SUCCESS(BuildArgListPriorityGraph(arg_list, policy), "build arg list graph failed");

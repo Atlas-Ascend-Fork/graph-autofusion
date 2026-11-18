@@ -1047,7 +1047,8 @@ build_backend() {
                     matmul_elemwise_test_e2e \
                     inductor_matmul_elemwise_test_e2e \
                     workspace_uint64_multi_reduce_test_e2e \
-                    workspace_uint64_tiling_test_e2e"
+                    workspace_uint64_tiling_test_e2e \
+                    segment_cache_tiling_test_e2e"
   if [[ "X${v35_mode}" = "Xv35" ]]; then
     # v35 专属用例（原先与主列表混编），拆分至 ST_Test_autofuse_v35_1/2/3 分片任务与主架构 ST 并行执行
     MAKE_TARGET_LIST="load_loop_mode_test_e2e_v2 \

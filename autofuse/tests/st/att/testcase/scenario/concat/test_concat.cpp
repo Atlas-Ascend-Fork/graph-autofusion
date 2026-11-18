@@ -81,7 +81,8 @@ using namespace optiling;
 int main() {
   // ========== Group 级别缓存测试 ==========
   std::cout << "\n========== Group-level cache test ==========" << std::endl;
-  AscGraph0ScheduleResult0G0::GroupLevelCache group_cache;
+  // GroupLevelCache类型由head单份生成于optiling层（PR 2674），非限定名直接使用
+  GroupLevelCache group_cache;
   // Test 1: ND = 1024，首次执行（不命中）
   std::cout << "\n--- Test 1: ND = 1024 (first execution) ---" << std::endl;
   AscGraph0ScheduleResult0G0TilingData tilingData1;

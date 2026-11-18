@@ -3924,6 +3924,24 @@ TEST_F(TestCodegenTiling, GenerateForInductorShouldContainTopnMainOutputAbi) {
   EXPECT_NE(tiling_impl.find("GetTilingDataRepr("), std::string::npos);
 }
 
+// 分段缓存开启时，AscGraph{N}::GetTiling的segment尾参是TU内部实现细节：SegmentCacheContext定义在
+// state头，不得泄漏进api头声明，否则只包含api头的TU（Inductor entry TU、外部调用方）编译报
+// unknown type name；api头按公共3参签名声明GetTiling
+TEST_F(TestCodegenTiling, SegmentCacheKeepsApiHeaderFreeOfSegmentCacheContext) {
+  codegen_func_ = att::GenTilingImplAutoFuseV3;
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::Symbol(1));
+  setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=0", 1);
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_EQ(att::AutoFuseConfig::MutableAttStrategyConfig().Init(), af::SUCCESS);
+  auto res = this->GenerateForInductor(fused_schedule_result);
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_TRUE(res.find(codegen::kTilingApiHeaderIdentify) != res.end());
+  const auto &api_header = res.at(codegen::kTilingApiHeaderIdentify);
+  EXPECT_EQ(api_header.find("SegmentCacheContext"), std::string::npos);
+  EXPECT_NE(api_header.find("bool GetTiling("), std::string::npos);
+}
+
 TEST_F(TestCodegenTiling, GenerateForInductorShouldUseGetTilingDataReprAsTilingDataValidationAid) {
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")});
   auto tiling_files = this->GenerateForInductor(fused_schedule_result);
@@ -6328,8 +6346,12 @@ struct Data { uint32_t key{0}; uint32_t get_tiling_key() const { return key; }
 using CurTilingData = Data;
 using PrimaryTilingData = Data;
 template<class TI, class TO> TO &RefToRef(TI &value) { return value; }
+// 与GenReuseGroupTilingWrapperGetTiling生成的wrapper签名对齐：cache形参恒生成（与复用数据解耦），
+// 类型为head单份生成于外层命名空间，wrapper签名用非限定名
+using GroupLevelCache = int;
 namespace Primary {
-bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t) {
+bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t, GroupLevelCache* cache = nullptr) {
+  (void)cache;
   FinalTilingObservationSlotGuard guard(0U);
   CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 0U, 0, 1}); return true;
 }
@@ -6340,7 +6362,8 @@ int main() {
   FinalTilingObservationContext context;
   FinalTilingObservationCallGuard guard(context, true, 2U);
   Data data; std::unordered_map<int64_t, uint64_t> workspace;
-  if (!GetTiling(data, workspace, -1)) { return 1; }
+  // wrapper定义的cache形参无默认值（与生成形态一致），调用显式传nullptr占位
+  if (!GetTiling(data, workspace, -1, nullptr)) { return 1; }
   const auto &snapshot = context.selections[1];
   return snapshot.valid && snapshot.graph == 2U && snapshot.result == 3U && snapshot.group == 4U ? 0 : 2;
 }

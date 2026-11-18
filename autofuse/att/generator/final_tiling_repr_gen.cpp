@@ -55,7 +55,14 @@ af::Status TilingCodeGenImpl::GenSingleGroupGetTilingCoreAlias() {
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
                       "bool GetTilingCore(" + config_.tiling_data_type_name +
                           " &tiling_data, int32_t tiling_case_id, double *perf = nullptr);");
-  tiling_func_.AddLine("  return GetTilingWithObservation(tiling_data, tiling_case_id, perf);");
+  // 分段缓存：透传收集出参（局部bool地址）而非nullptr，确保全量搜索时选中R模板的tag可被收集并在保存时读取
+  std::string segment_collect_args;
+  if (config_.enable_tiling_segment_cache) {
+    tiling_func_.AddLine("  bool segment_selected_is_sub_case = false;");
+    segment_collect_args = ", nullptr, &segment_selected_is_sub_case";
+  }
+  tiling_func_.AddLine("  return GetTilingWithObservation(tiling_data, tiling_case_id" + segment_collect_args +
+                       ", perf);");
   tiling_func_.AddLine("}");
   return af::SUCCESS;
 }

@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include "gtest/gtest.h"
 #include "gen_model_info.h"
@@ -548,6 +550,38 @@ bool IsFileContainsString(const std::string &filename, const std::string &search
   return false;
 }
 
+void WriteConcatTilingFunc(const std::string &tiling_func) {
+  std::ofstream oss;
+  oss.open("Concat_tiling_func.cpp", std::ios::out);
+  oss << "#include \"Concat_tiling_data.h\"\n";
+  oss << tiling_func;
+  oss.close();
+}
+
+void WriteConcatTilingData(const std::string &tiling_data) {
+  std::ofstream oss;
+  oss.open("Concat_tiling_data.h", std::ios::out);
+  oss << tiling_data;
+  oss.close();
+}
+
+void PrepareStubAndCompile() {
+  auto ret =
+      std::system(std::string("cp ").append(TOP_DIR).append("/tests/st/att/testcase/stub/op_log.h ./ -f").c_str());
+  EXPECT_EQ(ret, 0);
+  ret = autofuse::test::CopyStubFiles(UT_DIR, "testcase/stub/");
+  EXPECT_EQ(ret, 0);
+}
+
+void CompileAndRunConcat() {
+  auto ret = std::system(
+      "g++ -std=c++17 -ggdb3 -O0 tiling_func_main_concat.cpp Concat_tiling_func.cpp -o tiling_func_main_concat"
+      " -I ./ -DSTUB_LOG");
+  EXPECT_EQ(ret, 0);
+  ret = std::system("./tiling_func_main_concat");
+  EXPECT_EQ(ret, 0);
+}
+
 std::string GenerateConcatTilingData(const ascir::FusedScheduledResult &fused_result,
                                      const std::map<std::string, std::string> &options, const std::string &graph_name) {
   TilingCodeGenerator generator;
@@ -599,6 +633,167 @@ TEST_F(TestGenConcat, tque_tbuf_case0) {
   TestGenConcat_tque_tbuf_test(false);
 }
 
+// 动态shape分段缓存：单group场景（GetTilingWithObservation路径）att_accuracy_level=0生成、编译并运行
+void WriteSingleGroupSegmentCacheTestMain() {
+  std::ofstream oss;
+  oss.open("tiling_func_main_concat.cpp", std::ios::out);
+  const std::string kSingleGroupSegmentMain = R"(
+#include <iostream>
+#include "Concat_tiling_data.h"
+namespace optiling {
+bool GetTiling(tque_tbuf_case0TilingData &tiling_data, int32_t tiling_case_id, double *perf = nullptr);
+}
+using namespace optiling;
+
+static bool RunTilingOnce(const uint32_t b0_size, const uint32_t q0_size, const uint32_t b1_size) {
+  tque_tbuf_case0TilingData tilingData;
+  tilingData.set_b0_size(b0_size);
+  tilingData.set_q0_size(q0_size);
+  tilingData.set_b1_size(b1_size);
+  tilingData.set_block_dim(24U);
+  tilingData.set_ub_size(262144U);
+  const bool ok = GetTiling(tilingData, -1, nullptr);
+  std::cout << "segment tiling ok=" << (ok ? "true" : "false") << std::endl;
+  return ok;
+}
+
+int main() {
+  if (!RunTilingOnce(4096U, 4096U, 4096U)) {
+    return 1;
+  }
+  if (!RunTilingOnce(4097U, 4097U, 4097U)) {
+    return 1;
+  }
+  return 0;
+}
+)";
+  oss << kSingleGroupSegmentMain;
+  oss.close();
+}
+
+// 动态shape分段缓存：单group场景（GetTilingWithObservation路径）att_accuracy_level=0生成、编译并运行
+// is_inductor_scene=false覆盖GE场景；true覆盖Inductor场景（额外生成GetTilingCore别名，
+// 验证其透传segment空参，避免perf(double*)误绑到const char*参数的编译错误）
+void TestGenConcat_segment_cache_single_group(const bool is_inductor_scene) {
+  const std::string kFirstGraphName = "tque_tbuf_case0";
+  ascir::AscGraph tque_tbuf_case0(kFirstGraphName.c_str());
+  ASSERT_EQ(af::ascir::cg::BuildTqueTbufAscendGraph_single_case(tque_tbuf_case0, false), af::SUCCESS);
+  tque_tbuf_case0.SetTilingKey(0U);
+  ascir::ScheduleGroup schedule_group1;
+  std::vector<ascir::ScheduledResult> schedule_results;
+  schedule_group1.impl_graphs.emplace_back(tque_tbuf_case0);
+  GraphConstructUtils::UpdateGraphsVectorizedStride(schedule_group1.impl_graphs);
+  ascir::ScheduledResult schedule_result1;
+  schedule_result1.schedule_groups.emplace_back(schedule_group1);
+  schedule_results.emplace_back(schedule_result1);
+
+  std::map<std::string, std::string> options;
+  options.emplace(kGenConfigType, "AxesReorder");
+  // 开启动态shape分段缓存：att_accuracy_level=0
+  setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=0", 1);
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_EQ(att::AutoFuseConfig::MutableAttStrategyConfig().Init(), af::SUCCESS);
+  ascir::FusedScheduledResult fused_scheduled_result;
+  fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(schedule_results);
+  std::map<std::string, std::string> tiling_funcs;
+  auto res = GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, is_inductor_scene);
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  std::string tiling_func;
+  CombineTilings(tiling_funcs, tiling_func);
+  EXPECT_EQ(res, true);
+  // 断言单group路径的分段缓存关键生成片段
+  EXPECT_NE(tiling_func.find("uint32_t ComputeSegmentKey(const tque_tbuf_case0TilingData &tiling_data)"),
+            std::string::npos);
+  EXPECT_NE(tiling_func.find("FindSegmentCache(segment_key)"), std::string::npos);
+  EXPECT_NE(tiling_func.find("InvalidateSegmentCache(segment_key)"), std::string::npos);
+  EXPECT_NE(tiling_func.find("SaveSegmentCache(segment_key, segment_new_entry)"), std::string::npos);
+  EXPECT_NE(tiling_func.find("segment_entry->group_cases[0].case_id"), std::string::npos);
+  // 断言命中日志为DEBUG级专用宏且包含选中的result case（case id + R tag）
+  EXPECT_NE(tiling_func.find("ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] HIT key=%u, case=%u%s.\""),
+            std::string::npos);
+  EXPECT_NE(tiling_func.find("ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] MISS key=%u.\""), std::string::npos);
+  EXPECT_NE(tiling_func.find("ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] SAVE key=%u, case=%u%s.\""),
+            std::string::npos);
+  // 断言入口透传收集出参（局部bool地址）而非nullptr，保证全量搜索时R tag可被收集
+  EXPECT_NE(tiling_func.find("bool segment_selected_is_sub_case = false;"), std::string::npos);
+  EXPECT_NE(tiling_func.find("&segment_selected_is_sub_case, perf"), std::string::npos);
+  // 断言保存行判空解引用收集出参，而非指针隐式转bool
+  EXPECT_NE(
+      tiling_func.find("is_sub_case = (segment_selected_is_sub_case != nullptr) && *segment_selected_is_sub_case;"),
+      std::string::npos);
+  // 回归（PR 2674检视意见）：单group命中失败回退前恢复tiling_data——保存/恢复与多group对称。
+  // 断言进入时保存block_dim、失效后恢复（显式case求解可能已写入CORENUM映射的block_dim，
+  // 不恢复则回退后的全量搜索按被污染的核预算校验，与首次MISS路径行为不一致）
+  EXPECT_NE(tiling_func.find("const uint32_t segment_entry_block_dim = tiling_data.get_block_dim();"),
+            std::string::npos);
+  EXPECT_NE(tiling_func.find("segment_hit = false;\n        tiling_data.set_block_dim(segment_entry_block_dim);"),
+            std::string::npos);
+  if (is_inductor_scene) {
+    // 断言Inductor GetTilingCore别名透传收集出参
+    EXPECT_NE(tiling_func.find("return GetTilingWithObservation(tiling_data, tiling_case_id, nullptr, "
+                               "&segment_selected_is_sub_case, perf);"),
+              std::string::npos);
+  }
+  WriteConcatTilingFunc(tiling_func);
+  WriteConcatTilingData(GenerateConcatTilingData(fused_scheduled_result, options, kFirstGraphName));
+  PrepareStubAndCompile();
+  WriteSingleGroupSegmentCacheTestMain();
+  CompileAndRunConcat();
+}
+
+TEST_F(TestGenConcat, segment_cache_enabled_single_group_codegen) {
+  TestGenConcat_segment_cache_single_group(false);
+}
+
+TEST_F(TestGenConcat, segment_cache_enabled_single_group_inductor_codegen) {
+  TestGenConcat_segment_cache_single_group(true);
+}
+
+// 分段缓存日志不受att_profiling静音：profiling开启时OP_LOGx置空以避免日志I/O干扰耗时统计，
+// 分段缓存专用宏与Duration record同场景可观测，仅受全局日志级别控制
+TEST_F(TestGenConcat, segment_cache_log_survives_att_profiling) {
+  const std::string kFirstGraphName = "tque_tbuf_case0";
+  ascir::AscGraph tque_tbuf_case0(kFirstGraphName.c_str());
+  ASSERT_EQ(af::ascir::cg::BuildTqueTbufAscendGraph_single_case(tque_tbuf_case0, false), af::SUCCESS);
+  tque_tbuf_case0.SetTilingKey(0U);
+  ascir::ScheduleGroup schedule_group1;
+  std::vector<ascir::ScheduledResult> schedule_results;
+  schedule_group1.impl_graphs.emplace_back(tque_tbuf_case0);
+  GraphConstructUtils::UpdateGraphsVectorizedStride(schedule_group1.impl_graphs);
+  ascir::ScheduledResult schedule_result1;
+  schedule_result1.schedule_groups.emplace_back(schedule_group1);
+  schedule_results.emplace_back(schedule_result1);
+
+  std::map<std::string, std::string> options;
+  options.emplace(kGenConfigType, "AxesReorder");
+  // 非NULL日志级别下开启分段缓存与profiling，验证宏生成差异
+  setenv("ASCEND_GLOBAL_LOG_LEVEL", "1", 1);
+  setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=0;--att_profiling=true", 1);
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_EQ(att::AutoFuseConfig::MutableAttStrategyConfig().Init(), af::SUCCESS);
+  ascir::FusedScheduledResult fused_scheduled_result;
+  fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(schedule_results);
+  std::map<std::string, std::string> tiling_funcs;
+  auto res = GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, false);
+  setenv("ASCEND_GLOBAL_LOG_LEVEL", "4", 1);
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  std::string tiling_func;
+  CombineTilings(tiling_funcs, tiling_func);
+  EXPECT_EQ(res, true);
+  // att_profiling将常规INFO日志置空
+  EXPECT_NE(tiling_func.find("#define OP_LOGI(name, fmt, ...)"), std::string::npos);
+  EXPECT_EQ(tiling_func.find("#define OP_LOGI(name, fmt, ...) GELOGI"), std::string::npos);
+  // 分段缓存专用宏保持完整定义（debug/warn级别）
+  EXPECT_NE(tiling_func.find("#define ATT_SEGMENT_CACHE_LOGD(name, fmt, ...) GELOGD(\"[%s]\" fmt, name, "
+                             "##__VA_ARGS__)"),
+            std::string::npos);
+  EXPECT_NE(tiling_func.find("#define ATT_SEGMENT_CACHE_LOGW(name, fmt, ...) GELOGW(\"[%s]\" fmt, name, "
+                             "##__VA_ARGS__)"),
+            std::string::npos);
+}
+
 TEST_F(TestGenConcat, tque_tbuf_reuse_temp_buffer) {
   TestGenConcat_tque_tbuf_test(true);
 }
@@ -646,4 +841,269 @@ TEST_F(TestGenConcat, tque_tbuf_case1) {
   EXPECT_NE(tiling_data.find("q0_size"), std::string::npos);
   EXPECT_NE(tiling_data.find("q1_size"), std::string::npos);
   EXPECT_NE(tiling_data.find("q2_size"), std::string::npos);
+}
+
+// 动态shape分段缓存：att_accuracy_level=0时多result场景生成、编译并运行两次tiling
+// （首次为全量搜索+首填保存，第二次不同shape命中同分段；算子级缓存未开启）
+void WriteSegmentCacheTestMain() {
+  std::ofstream oss;
+  oss.open("tiling_func_main_concat.cpp", std::ios::out);
+  const std::string kSegmentCacheMain = R"(
+#include <iostream>
+#include "Concat_tiling_data.h"
+namespace optiling {
+bool GetTiling(case0TilingData &tiling_data, int32_t tiling_case_id, double *perf = nullptr);
+}
+using namespace optiling;
+
+static bool RunTilingOnce(const uint32_t a_size, const uint32_t nd_size, const uint32_t r_size,
+                          const uint32_t s0_size) {
+  case0TilingData tilingData;
+  tilingData.graph0_result0_g0_tiling_data.set_A(a_size);
+  tilingData.graph0_result0_g0_tiling_data.set_ND(nd_size);
+  tilingData.graph0_result0_g0_tiling_data.set_R(r_size);
+  tilingData.graph0_result1_g0_tiling_data.set_S0(s0_size);
+  tilingData.set_block_dim(24U);
+  tilingData.set_ub_size(262144U);
+  const bool ok = GetTiling(tilingData, -1, nullptr);
+  std::cout << "segment tiling ok=" << (ok ? "true" : "false") << std::endl;
+  return ok;
+}
+
+int main() {
+  if (!RunTilingOnce(4096U, 16U, 4096U, 4096U)) {
+    return 1;
+  }
+  if (!RunTilingOnce(4097U, 17U, 4097U, 4097U)) {
+    return 1;
+  }
+  return 0;
+}
+)";
+  oss << kSegmentCacheMain;
+  oss.close();
+}
+
+TEST_F(TestGenConcat, segment_cache_enabled_multi_group_codegen) {
+  const std::string kFirstGraphName = "case0";
+  ascir::AscGraph graph_0(kFirstGraphName.c_str());
+  ascir::AscGraph graph_1("case1");
+  ASSERT_EQ(af::ascir::cg::BuildTqueTbufAscendGraph_multi_case_g0(graph_0), af::SUCCESS);
+  graph_0.SetTilingKey(0U);
+  ASSERT_EQ(af::ascir::cg::BuildTqueTbufAscendGraph_multi_case_g1(graph_1), af::SUCCESS);
+  graph_1.SetTilingKey(1U);
+  ascir::ScheduleGroup schedule_group1;
+  ascir::ScheduleGroup schedule_group2;
+  schedule_group1.impl_graphs.emplace_back(graph_0);
+  schedule_group2.impl_graphs.emplace_back(graph_1);
+  GraphConstructUtils::UpdateGraphsVectorizedStride(schedule_group1.impl_graphs);
+  GraphConstructUtils::UpdateGraphsVectorizedStride(schedule_group2.impl_graphs);
+
+  ascir::ScheduledResult schedule_result1;
+  ascir::ScheduledResult schedule_result2;
+  schedule_result1.schedule_groups.emplace_back(schedule_group1);
+  schedule_result1.score_func =
+      ("int32_t CalcScore(" + kFirstGraphName + "TilingData &tiling_data) { return 1;}").c_str();
+  schedule_result2.schedule_groups.emplace_back(schedule_group2);
+  schedule_result2.score_func =
+      ("int32_t CalcScore(" + kFirstGraphName + "TilingData &tiling_data) { return 2;}").c_str();
+  std::vector<ascir::ScheduledResult> schedule_results;
+  schedule_results.emplace_back(schedule_result1);
+  schedule_results.emplace_back(schedule_result2);
+
+  std::map<std::string, std::string> options;
+  options.emplace(kGenConfigType, "AxesReorder");
+  options.emplace("enable_score_func", "1");
+  // 开启动态shape分段缓存：att_accuracy_level=0
+  setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=0", 1);
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_EQ(att::AutoFuseConfig::MutableAttStrategyConfig().Init(), af::SUCCESS);
+  ascir::FusedScheduledResult fused_scheduled_result;
+  fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(schedule_results);
+  std::map<std::string, std::string> tiling_funcs;
+  // is_inductor_scene=true：Inductor场景同样支持分段缓存（其算子级缓存默认开启，
+  // 未命中精确shape时命中分段缓存），此处覆盖Inductor路径
+  auto res = GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, true);
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  std::string tiling_func;
+  CombineTilings(tiling_funcs, tiling_func);
+  EXPECT_EQ(res, true);
+  // 断言分段缓存关键生成片段（结构/key计算/查询/失效/保存/ctx透传）
+  EXPECT_NE(tiling_func.find("struct SegmentCacheEntry"), std::string::npos);
+  EXPECT_NE(tiling_func.find("uint32_t ComputeSegmentKey(const case0TilingData &tiling_data)"), std::string::npos);
+  EXPECT_NE(tiling_func.find("FindSegmentCache(segment_key)"), std::string::npos);
+  EXPECT_NE(tiling_func.find("InvalidateSegmentCache(segment_key)"), std::string::npos);
+  EXPECT_NE(tiling_func.find("SaveSegmentCache(segment_key, segment_new_entry)"), std::string::npos);
+  EXPECT_NE(tiling_func.find("SegmentCacheContext *segment_ctx"), std::string::npos);
+  // 断言api头声明不泄漏state头类型：GetTiling按公共3参签名声明（无segment尾参）
+  EXPECT_EQ(tiling_func.find("SegmentCacheContext *segment_ctx = nullptr);"), std::string::npos);
+  // 断言命中日志为DEBUG级专用宏且包含选中的result case（各asc graph的result id）
+  EXPECT_NE(tiling_func.find("ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] HIT key=%u, result case=%u.\""),
+            std::string::npos);
+  EXPECT_NE(tiling_func.find("ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] MISS key=%u.\""), std::string::npos);
+  EXPECT_NE(tiling_func.find("ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] SAVE key=%u.\""), std::string::npos);
+  EXPECT_NE(tiling_func.find("ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] run cached result %u, ok=%d.\""),
+            std::string::npos);
+  EXPECT_NE(tiling_func.find(", SegmentCacheContext *segment_ctx)>;"), std::string::npos);
+  WriteConcatTilingFunc(tiling_func);
+  WriteConcatTilingData(GenerateConcatTilingData(fused_scheduled_result, options, kFirstGraphName));
+  PrepareStubAndCompile();
+  WriteSegmentCacheTestMain();
+  CompileAndRunConcat();
+}
+
+// 回归（PR 2674检视意见）：GE默认路径（is_inductor_scene=false、autofuse_enable_tiling_cache默认
+// 关闭、无DFX分段开关）的多group场景，组级GetTiling恒带GroupLevelCache*形参的共享类型
+// （kInputShapeSize/FixedSizeHashMap/GroupLevelCache）必须由head impl单份生成——
+// 修复前group TU各自生成类型，FinishGroupTiling按组拼接公共头时两组不同输入变量数导致
+// kInputShapeSize重定义编译失败。本用例真实编译生成产物锁定该路径
+TEST_F(TestGenConcat, multi_group_ge_default_path_group_cache_types_compiles) {
+  const std::string kFirstGraphName = "case0";
+  ascir::AscGraph graph_0(kFirstGraphName.c_str());
+  ascir::AscGraph graph_1("case1");
+  ASSERT_EQ(af::ascir::cg::BuildTqueTbufAscendGraph_multi_case_g0(graph_0), af::SUCCESS);
+  graph_0.SetTilingKey(0U);
+  ASSERT_EQ(af::ascir::cg::BuildTqueTbufAscendGraph_multi_case_g1(graph_1), af::SUCCESS);
+  graph_1.SetTilingKey(1U);
+  ascir::ScheduleGroup schedule_group1;
+  ascir::ScheduleGroup schedule_group2;
+  schedule_group1.impl_graphs.emplace_back(graph_0);
+  schedule_group2.impl_graphs.emplace_back(graph_1);
+  GraphConstructUtils::UpdateGraphsVectorizedStride(schedule_group1.impl_graphs);
+  GraphConstructUtils::UpdateGraphsVectorizedStride(schedule_group2.impl_graphs);
+
+  ascir::ScheduledResult schedule_result1;
+  ascir::ScheduledResult schedule_result2;
+  schedule_result1.schedule_groups.emplace_back(schedule_group1);
+  schedule_result1.score_func =
+      ("int32_t CalcScore(" + kFirstGraphName + "TilingData &tiling_data) { return 1;}").c_str();
+  schedule_result2.schedule_groups.emplace_back(schedule_group2);
+  schedule_result2.score_func =
+      ("int32_t CalcScore(" + kFirstGraphName + "TilingData &tiling_data) { return 2;}").c_str();
+  std::vector<ascir::ScheduledResult> schedule_results;
+  schedule_results.emplace_back(schedule_result1);
+  schedule_results.emplace_back(schedule_result2);
+
+  std::map<std::string, std::string> options;
+  options.emplace(kGenConfigType, "AxesReorder");
+  options.emplace("enable_score_func", "1");
+  // GE默认路径：不设DFX分段开关（att_accuracy_level保持默认）、is_inductor_scene=false
+  ascir::FusedScheduledResult fused_scheduled_result;
+  fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(schedule_results);
+  std::map<std::string, std::string> tiling_funcs;
+  auto res = GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, false);
+  std::string tiling_func;
+  CombineTilings(tiling_funcs, tiling_func);
+  EXPECT_EQ(res, true);
+  // 共享类型恰好一份（head单份生成，公共头无重定义）；组级GetTiling恒带cache形参
+  EXPECT_NE(tiling_func.find("using GroupLevelCache"), std::string::npos);
+  EXPECT_NE(tiling_func.find("GroupLevelCache *cache"), std::string::npos);
+  size_t k_input_shape_size_count = 0UL;
+  for (size_t pos = tiling_func.find("constexpr size_t kInputShapeSize"); pos != std::string::npos;
+       pos = tiling_func.find("constexpr size_t kInputShapeSize", pos + 1UL)) {
+    ++k_input_shape_size_count;
+  }
+  EXPECT_EQ(k_input_shape_size_count, 1UL);
+  size_t fixed_size_map_count = 0UL;
+  for (size_t pos = tiling_func.find("class FixedSizeHashMap"); pos != std::string::npos;
+       pos = tiling_func.find("class FixedSizeHashMap", pos + 1UL)) {
+    ++fixed_size_map_count;
+  }
+  EXPECT_EQ(fixed_size_map_count, 1UL);
+  WriteConcatTilingFunc(tiling_func);
+  WriteConcatTilingData(GenerateConcatTilingData(fused_scheduled_result, options, kFirstGraphName));
+  PrepareStubAndCompile();
+  WriteSegmentCacheTestMain();
+  CompileAndRunConcat();
+}
+
+// 动态shape分段缓存：group-parallel（单result多group，DoGroupTiling路径）下att_accuracy_level=0
+// 生成、编译并运行。覆盖组级GetTiling带段参数的调用序（seg_tag/seg_out位于perf的nullptr之前），
+// 修复前perf占位在前导致seg_tag(const char*)误绑到bool*参数的编译错误
+void WriteGroupParallelSegmentCacheTestMain() {
+  std::ofstream oss;
+  oss.open("tiling_func_main_concat.cpp", std::ios::out);
+  const std::string kGroupParallelMain = R"(
+#include <iostream>
+#include "Concat_tiling_data.h"
+namespace optiling {
+bool GetTiling(case0TilingData &tiling_data, int32_t tiling_case_id, double *perf = nullptr);
+}
+using namespace optiling;
+
+static bool RunTilingOnce(const uint32_t a_size, const uint32_t nd_size, const uint32_t r_size,
+                          const uint32_t s0_size) {
+  case0TilingData tilingData;
+  tilingData.graph0_result0_g0_tiling_data.set_A(a_size);
+  tilingData.graph0_result0_g0_tiling_data.set_ND(nd_size);
+  tilingData.graph0_result0_g0_tiling_data.set_R(r_size);
+  tilingData.graph0_result0_g1_tiling_data.set_S0(s0_size);
+  tilingData.set_block_dim(24U);
+  tilingData.set_ub_size(262144U);
+  const bool ok = GetTiling(tilingData, -1, nullptr);
+  std::cout << "segment tiling ok=" << (ok ? "true" : "false") << std::endl;
+  return ok;
+}
+
+int main() {
+  if (!RunTilingOnce(4096U, 16U, 4096U, 4096U)) {
+    return 1;
+  }
+  if (!RunTilingOnce(4097U, 17U, 4097U, 4097U)) {
+    return 1;
+  }
+  return 0;
+}
+)";
+  oss << kGroupParallelMain;
+  oss.close();
+}
+
+TEST_F(TestGenConcat, segment_cache_enabled_group_parallel_codegen) {
+  const std::string kFirstGraphName = "case0";
+  ascir::AscGraph graph_0(kFirstGraphName.c_str());
+  ascir::AscGraph graph_1("case1");
+  ASSERT_EQ(af::ascir::cg::BuildTqueTbufAscendGraph_multi_case_g0(graph_0), af::SUCCESS);
+  graph_0.SetTilingKey(0U);
+  ASSERT_EQ(af::ascir::cg::BuildTqueTbufAscendGraph_multi_case_g1(graph_1), af::SUCCESS);
+  graph_1.SetTilingKey(1U);
+  ascir::ScheduleGroup schedule_group1;
+  ascir::ScheduleGroup schedule_group2;
+  schedule_group1.impl_graphs.emplace_back(graph_0);
+  schedule_group2.impl_graphs.emplace_back(graph_1);
+  GraphConstructUtils::UpdateGraphsVectorizedStride(schedule_group1.impl_graphs);
+  GraphConstructUtils::UpdateGraphsVectorizedStride(schedule_group2.impl_graphs);
+
+  // 单result多group + group并行：触发DoGroupTiling生成路径
+  ascir::ScheduledResult schedule_result;
+  schedule_result.schedule_groups.emplace_back(schedule_group1);
+  schedule_result.schedule_groups.emplace_back(schedule_group2);
+  schedule_result.enable_group_parallel = true;
+  std::vector<ascir::ScheduledResult> schedule_results;
+  schedule_results.emplace_back(schedule_result);
+
+  std::map<std::string, std::string> options;
+  options.emplace(kGenConfigType, "AxesReorder");
+  // 开启动态shape分段缓存：att_accuracy_level=0
+  setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=0", 1);
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_EQ(att::AutoFuseConfig::MutableAttStrategyConfig().Init(), af::SUCCESS);
+  ascir::FusedScheduledResult fused_scheduled_result;
+  fused_scheduled_result.node_idx_to_scheduled_results.emplace_back(schedule_results);
+  std::map<std::string, std::string> tiling_funcs;
+  auto res = GenTilingImplAutoFuseV3("Concat", fused_scheduled_result, options, tiling_funcs, true);
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  std::string tiling_func;
+  CombineTilings(tiling_funcs, tiling_func);
+  EXPECT_EQ(res, true);
+  // 断言DoGroupTiling路径生成，且组级GetTiling调用中cache恒nullptr占位、段参数位于perf(nullptr)之前
+  EXPECT_NE(tiling_func.find("DoGroupTiling0("), std::string::npos);
+  EXPECT_NE(tiling_func.find("case_ids_or_keys[0], nullptr, seg_tag_0, seg_out_0, nullptr)"), std::string::npos);
+  WriteConcatTilingFunc(tiling_func);
+  WriteConcatTilingData(GenerateConcatTilingData(fused_scheduled_result, options, kFirstGraphName));
+  PrepareStubAndCompile();
+  WriteGroupParallelSegmentCacheTestMain();
+  CompileAndRunConcat();
 }
