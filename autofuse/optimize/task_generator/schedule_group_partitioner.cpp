@@ -16,6 +16,7 @@
 #include "ascir_ops.h"
 #include "ascir_utils.h"
 #include "schedule_utils.h"
+#include "task_generator/node_partition_utils.h"
 #include "util/mem_utils.h"
 #include <queue>
 #include <set>
@@ -99,6 +100,15 @@ Status ScheduleGroupGraphPartitioner::PartitionByConnectivity(const ::ascir::Imp
       GE_CHK_STATUS_RET(ScheduleUtils::RemoveUnusedAxes(sub_optimize_graph), "Failed to remove unused axes");
     }
     GE_CHK_STATUS_RET(SortSubGraphsByDependency(sub_optimize_graphs), "Failed to sort subgraphs by dependency");
+  }
+
+  // 重名检查之前先合并子图内同名的 GM 源副本: 沿用源名字的 Workspace 副本与源节点同名,
+  // 两者落在同一子图时属于冗余读而非切分出错, 合并掉才不会被 CheckDuplicateWorkspaceNodes
+  // 当成切分错误清空全部子图。真正的错误(写入者与读取者同子图)留不到这里之后: 带输入的
+  // 写入者不在合并之列, 仍会被重名检查拦下。
+  for (auto &sub_optimize_graph : sub_optimize_graphs) {
+    GE_CHK_STATUS_RET(MergeDuplicatedCopyNodesInSubGraph(sub_optimize_graph),
+                      "Failed to merge duplicated copy nodes, graph = %s", sub_optimize_graph.GetName().c_str());
   }
 
   CheckDuplicateWorkspaceNodes(sub_optimize_graphs);

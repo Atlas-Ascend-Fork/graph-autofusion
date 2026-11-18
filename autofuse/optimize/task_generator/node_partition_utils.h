@@ -42,6 +42,11 @@ Status DoCopyWorkspaceTensorAttr(const af::AscNodePtr &src_node, af::AscNodePtr 
 // partition_flag 置位表示发生切分, node_order 记录切分源节点(连通性分组种子, 与汇点种子配合使用)。
 Status PartitionByNode(af::AscNodePtr &src_node, af::AscNodePtr &dst_node, ascir::ImplGraph &impl_graph,
                        bool &partition_flag, std::vector<af::AscNodePtr> &node_order);
+
+// 合并子图内同名的 GM 源副本(多引用切分复制出的 copy_from_* 节点, 以及沿用源名字的无输入
+// Workspace 副本), 并摘除因此失去消费者的死副本。由 PartitionByConnectivity 调用, 调用时
+// 子图划分已定型。
+Status MergeDuplicatedCopyNodesInSubGraph(ascir::ImplGraph &sub_graph);
 }  // namespace optimize
 
 #endif  // ASCGEN_DEV_SRC_OPTIMIZE_TASK_GENERATOR_NODE_PARTITION_UTILS_H_
