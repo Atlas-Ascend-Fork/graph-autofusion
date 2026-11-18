@@ -957,6 +957,31 @@ bool SuperKernelKernelNode::InitNode(const SuperKernelOptionsManager *opts) {
     SK_LOGE("Failed to get copied device task args, ret=%d", rtRet);
     return false;
   }
+  switch (static_cast<uint32_t>(kernelParams.argsType)) {
+    case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
+      SK_LOGI(
+          "Kernel args comparison: nodeId=%lu, argsType=%u, hostArgs=%p, hostArgsSize=%zu, copiedDevArgs=%p, "
+          "copiedDevArgsSize=%zu",
+          nodeId, static_cast<uint32_t>(kernelParams.argsType), kernelParams.hostBuffer.hostArgs,
+          kernelParams.hostBuffer.hostArgsSize, copiedDevArgs, copiedDevArgsSize);
+      break;
+    case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
+      SK_LOGI(
+          "Kernel args comparison: nodeId=%lu, argsType=%u, deviceArgs=%p, deviceArgsSize=%zu, copiedDevArgs=%p, "
+          "copiedDevArgsSize=%zu",
+          nodeId, static_cast<uint32_t>(kernelParams.argsType), kernelParams.deviceBuffer.deviceArgs,
+          kernelParams.deviceBuffer.deviceArgsSize, copiedDevArgs, copiedDevArgsSize);
+      break;
+    case ACL_RT_KERNEL_ARGS_ARRAY:
+      SK_LOGI("Kernel args comparison: nodeId=%lu, argsType=%u, argsArray=%p, copiedDevArgs=%p, copiedDevArgsSize=%zu",
+              nodeId, static_cast<uint32_t>(kernelParams.argsType), static_cast<void *>(kernelParams.argsArray),
+              copiedDevArgs, copiedDevArgsSize);
+      break;
+    default:
+      SK_LOGE("Unsupported kernel argsType in args comparison: nodeId=%lu, argsType=%u", nodeId,
+              static_cast<uint32_t>(kernelParams.argsType));
+      break;
+  }
 
   if (!GetScopeKernelInfo(kernelParams, copiedDevArgs, &scopeKernelInfo)) {
     SK_LOGE("Failed to get scope kernel information for kernel node %lu", nodeId);
