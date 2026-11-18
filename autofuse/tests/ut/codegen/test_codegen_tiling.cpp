@@ -4203,6 +4203,7 @@ TEST_F(TestCodegenTiling, FinalTilingUsesSelectedCaseAndStructuredPipeInterface)
 }
 
 TEST_F(TestCodegenTiling, SplitHeaderGenerateForInductorShouldEmitHeaderKeysAndCppIncludes) {
+  enable_autofuse_pgo_ = false;
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")});
   auto tiling_files = this->GenerateForInductor(fused_schedule_result);
 
@@ -4248,6 +4249,36 @@ TEST_F(TestCodegenTiling, SplitHeaderGenerateForInductorShouldEmitHeaderKeysAndC
     EXPECT_NE(solver.find("#include \"autofuse_tiling_func_log.h\""), std::string::npos);
     EXPECT_NE(solver.find("#include \"autofuse_tiling_func_solver.h\""), std::string::npos);
     EXPECT_EQ(solver.find("#include \"autofuse_tiling_func_common.h\""), std::string::npos);
+  }
+}
+
+TEST_F(TestCodegenTiling, SplitHeaderInductorFixpipShouldNotReferencePgoHeader) {
+  enable_autofuse_pgo_ = false;
+  codegen_func_ = att::GenTilingImplAutoFuseV3;
+  for (const bool is_dynamic : {false, true}) {
+    SCOPED_TRACE(is_dynamic);
+    af::AscGraph graph("fixpip_matmul");
+    CreateMatmulGraph(graph, is_dynamic);
+    ascir::ScheduledResult scheduled_result;
+    scheduled_result.cube_type = ascir::CubeTemplateType::kFixpip;
+    scheduled_result.schedule_groups.resize(1U);
+    scheduled_result.schedule_groups[0].impl_graphs.push_back(graph);
+    ascir::FusedScheduledResult fused_schedule_result;
+    fused_schedule_result.fused_graph_name = af::AscendString(graph.GetName().c_str());
+    fused_schedule_result.input_nodes = {graph.FindNode("data0"), graph.FindNode("data1")};
+    fused_schedule_result.output_nodes = {graph.FindNode("output")};
+    fused_schedule_result.node_idx_to_scheduled_results = {{scheduled_result}};
+    ASSERT_TRUE(ascgen_utils::IsJustCubeFixpip(fused_schedule_result));
+
+    const auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+    EXPECT_EQ(tiling_files.count(codegen::kTilingPgoHeaderIdentify), 0U);
+    ASSERT_NE(tiling_files.find(codegen::kTilingDefAndConstIdentify), tiling_files.end());
+    const auto &entry = tiling_files.at(codegen::kTilingDefAndConstIdentify);
+    EXPECT_NE(entry.find("extern \"C\" int64_t AutofuseTiling("), std::string::npos);
+    EXPECT_NE(entry.find("CallCubeTiling("), std::string::npos);
+    for (const auto &[key, source] : tiling_files) {
+      EXPECT_EQ(source.find(codegen::kTilingPgoHeaderInclude), std::string::npos) << key;
+    }
   }
 }
 
