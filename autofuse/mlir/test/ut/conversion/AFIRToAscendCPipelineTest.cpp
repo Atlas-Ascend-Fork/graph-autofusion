@@ -398,5 +398,76 @@ TEST(AFIRToAscendCPipelineTest, DeclaredDependentDialectsCoverTheRealPipeline) {
   ExpectDeclaredDialectsCoverPipeline(createAFIRPlanCandidateLoweringPipelineStandalonePass(), full);
 }
 
+// Exercise the shared lit fixtures inside the LLT process, including dtype conversions.
+TEST(AFIRToAscendCPipelineTest, SingletonTrueDivLowersAllTypesAndDirections) {
+  MLIRContext context;
+  LoadPlanCandidateDialects(context);
+  auto module = parseSourceFile<ModuleOp>(
+      std::string(AF_MLIR_CONVERSION_TEST_DIR) + "/afir-truediv-singleton-broadcast.mlir", &context);
+  ASSERT_TRUE(module);
+  auto session = createAFIRToAscendCPipelineSession(context, CreateAscend910B1Profile());
+  ASSERT_TRUE(succeeded(session));
+  PassManager manager(&context);
+  ASSERT_TRUE(succeeded(addAFIRToAscendCPipeline(manager, *session)));
+  ASSERT_TRUE(succeeded(manager.run(*module)));
+  unsigned functions = 0;
+  for (auto function : module->getOps<func::FuncOp>()) {
+    SCOPED_TRACE(function.getName().str());
+    unsigned divisions = 0;
+    unsigned duplicates = 0;
+    Value quotient;
+    function.walk([&](Operation *op) {
+      EXPECT_NE(op->getName().getStringRef(), "afir.truediv");
+      if (op->getName().getStringRef() == "arith.divf") {
+        ++divisions;
+        EXPECT_TRUE(op->getResult(0).getType().isF32());
+        quotient = op->getResult(0);
+        bool reverse = function.getName().contains("reverse") || function.getName() == "scalar_div_singleton";
+        Value scalar = op->getOperand(reverse ? 1 : 0);
+        if (function.getName().contains("f16") || function.getName().contains("i32")) {
+          ASSERT_NE(scalar.getDefiningOp(), nullptr);
+          scalar = scalar.getDefiningOp()->getOperand(0);
+        }
+        ASSERT_NE(scalar.getDefiningOp(), nullptr);
+        EXPECT_EQ(scalar.getDefiningOp()->getName().getStringRef(), "ascendc.local_tensor.get_value");
+      }
+      if (op->getName().getStringRef() == "ascendc.duplicate_l2") {
+        ++duplicates;
+        Value value = op->getOperand(1);
+        if (function.getName().contains("f16")) {
+          ASSERT_NE(value.getDefiningOp(), nullptr);
+          EXPECT_EQ(value.getDefiningOp()->getName().getStringRef(), "arith.truncf");
+          value = value.getDefiningOp()->getOperand(0);
+        }
+        EXPECT_EQ(value, quotient);
+      }
+    });
+    EXPECT_EQ(divisions, 1U);
+    EXPECT_EQ(duplicates, 1U);
+    ++functions;
+  }
+  EXPECT_EQ(functions, 6U);
+}
+
+TEST(AFIRToAscendCPipelineTest, SingletonTrueDivRejectsUnknownWriter) {
+  MLIRContext context;
+  LoadPlanCandidateDialects(context);
+  auto module = parseSourceFile<ModuleOp>(
+      std::string(AF_MLIR_CONVERSION_TEST_DIR) + "/afir-truediv-singleton-broadcast.mlir", &context);
+  ASSERT_TRUE(module);
+  module->walk([](afir::TrueDivOp op) {
+    auto function = op->getParentOfType<func::FuncOp>();
+    if (function.getName() == "singleton_truediv") {
+      op->setOperand(0, function.getArgument(0));
+    }
+  });
+  auto session = createAFIRToAscendCPipelineSession(context, CreateAscend910B1Profile());
+  ASSERT_TRUE(succeeded(session));
+  PassManager manager(&context);
+  ASSERT_TRUE(succeeded(addAFIRToAscendCPipeline(manager, *session)));
+  ScopedDiagnosticHandler handler(&context, [](Diagnostic &) { return success(); });
+  EXPECT_TRUE(failed(manager.run(*module)));
+}
+
 }  // namespace
 }  // namespace mlir::afir
