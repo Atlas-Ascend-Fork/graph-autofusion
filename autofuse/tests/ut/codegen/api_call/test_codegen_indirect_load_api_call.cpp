@@ -1157,7 +1157,184 @@ TEST(IndirectLoadApiCallTest, GenerateSimdRejectsInputOutputDtypeMismatch) {
   GenerateSimdCallFromGraph(g, ge::DT_FLOAT16, Implementation::kDefault, result, ge::DT_FLOAT, false);
 }
 
-// ==================== SIMT Init + GenerateFuncDefinition =============
+// ==================== SIMD offsets tmp allocation (CalcTmpBufSize) ====================
+// 免分配与 codegen 非 strided 发射配对断言，双向锁定。
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeDenseSimdSkipsOffsetsTmpAndCodegenConsumesNone) {
+  // 静态 dense（register-gather facade）：最终形态可证明非 strided，免分配 offsets tmp。
+  ILTestGraph g("simd_gate_dense", 2, 8, 2, 8);
+  BuildSimdGraph(g, ge::DT_FLOAT16);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(GetLoweringMetadata(il_node, metadata), af::SUCCESS);
+  EXPECT_NE(metadata.simd.fallback, SimdFallback::kStrided);
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  EXPECT_TRUE(impl.CalcTmpBufSize(*il_node).empty());
+  // 配对一致性：同形态 codegen 发射 dense facade，不引用 API 级 tmp。
+  ILTestGraph gen("simd_gate_dense_gen", 2, 8, 2, 8);
+  std::string result;
+  GenerateSimdCallFromGraph(gen, ge::DT_FLOAT16, Implementation::kDefault, result);
+  EXPECT_NE(result.find("IndirectLoadSimd<half, int32_t, 2, 1>"), std::string::npos);
+  EXPECT_EQ(result.find("IndirectLoadSimdStrided"), std::string::npos);
+  EXPECT_EQ(result.find("tmp_buf_0"), std::string::npos);
+}
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeDenseGatherApiSkipsOffsetsTmp) {
+  // gather-api 实现的 dense 形态同样不消费 offsets tmp，门禁口径与 facade 选择解耦。
+  ILTestGraph g("simd_gate_gather_api", 2, 8, 2, 8);
+  BuildSimdGraph(g, ge::DT_FLOAT16);
+  AnnotateSimdTemplate(g.graph, Implementation::kGatherApi);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(GetLoweringMetadata(il_node, metadata), af::SUCCESS);
+  EXPECT_EQ(metadata.simd.fallback, SimdFallback::kGatherApi);
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  EXPECT_TRUE(impl.CalcTmpBufSize(*il_node).empty());
+  ILTestGraph gen("simd_gate_gather_api_gen", 2, 8, 2, 8);
+  std::string result;
+  GenerateSimdCallFromGraph(gen, ge::DT_FLOAT16, Implementation::kGatherApi, result);
+  EXPECT_NE(result.find("IndirectLoadSimdGatherApi<half, int32_t, 2, 1>"), std::string::npos);
+  EXPECT_EQ(result.find("tmp_buf_0"), std::string::npos);
+}
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeDynamicDenseSimdSkipsOffsetsTmp) {
+  // 动态 shape 符号 strides 可证连续：dense facade 免分配。
+  ILTestGraph g("simd_gate_dynamic_dense");
+  BuildSimdGraph(g, ge::DT_FLOAT16);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  EXPECT_TRUE(impl.CalcTmpBufSize(*il_node).empty());
+}
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeStridedFallbackKeepsOffsetsTmp) {
+  // metadata fallback=strided：保留 tmp，codegen 发射 strided 并消费。
+  ILTestGraph g("simd_gate_strided_meta");
+  BuildSimdGraph(g, ge::DT_FLOAT16, true);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(GetLoweringMetadata(il_node, metadata), af::SUCCESS);
+  EXPECT_EQ(metadata.simd.fallback, SimdFallback::kStrided);
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  const auto bufs = impl.CalcTmpBufSize(*il_node);
+  EXPECT_FALSE(bufs.empty());
+  ILTestGraph gen("simd_gate_strided_gen");
+  std::string result;
+  GenerateSimdCallFromGraph(gen, ge::DT_FLOAT16, Implementation::kDefault, result, ge::DT_UNDEFINED, true, true);
+  EXPECT_NE(result.find("IndirectLoadSimdStrided"), std::string::npos);
+  EXPECT_NE(result.find("tmp_buf_0"), std::string::npos);
+}
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeDelayedPaddingKeepsOffsetsTmp) {
+  // metadata 定格 dense 后对齐才引入 padding：必须按最终视图保留 tmp（盲删回归锚点）。
+  ILTestGraph g("simd_gate_delayed_padding");
+  BuildSimdGraph(g, ge::DT_FLOAT16);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(GetLoweringMetadata(il_node, metadata), af::SUCCESS);
+  EXPECT_NE(metadata.simd.fallback, SimdFallback::kStrided);
+  SetPaddedVectorizedViews(g);
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  const auto bufs = impl.CalcTmpBufSize(*il_node);
+  EXPECT_FALSE(bufs.empty());
+  // 配对一致性：同形态 codegen 兜底降级 strided，消费 tmp_buf。
+  ILTestGraph gen("simd_gate_delayed_padding_gen");
+  std::string result;
+  GenerateSimdCallFromGraph(gen, ge::DT_FLOAT16, Implementation::kDefault, result, ge::DT_UNDEFINED, true, false, true);
+  EXPECT_NE(result.find("IndirectLoadSimdStrided"), std::string::npos);
+  EXPECT_NE(result.find("tmp_buf_0"), std::string::npos);
+}
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeIndexOnlyPaddingKeepsOffsetsTmp) {
+  // 索引视图单独被 pad：与输出的判定对称，同样保留 tmp。
+  ILTestGraph g("simd_gate_index_padding");
+  BuildSimdGraph(g, ge::DT_FLOAT16);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  const auto idx_node = g.graph.FindNode("idx_load");
+  ASSERT_NE(idx_node, nullptr);
+  idx_node->outputs[0].attr.vectorized_axis = {g.padded_row_axis, g.padded_tail_axis};
+  idx_node->outputs[0].attr.vectorized_strides = {g.s3 * af::Symbol(2), af::Symbol(3)};
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  const auto bufs = impl.CalcTmpBufSize(*il_node);
+  EXPECT_FALSE(bufs.empty());
+}
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeMissingMetadataKeepsOffsetsTmp) {
+  // lowering metadata 缺失（codegen 期会刷新重算，两期结论可能漂移）：保守保留。
+  ILTestGraph g("simd_gate_no_metadata", 2, 8, 2, 8);
+  BuildSimdGraph(g, ge::DT_FLOAT16);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  EXPECT_FALSE(HasLoweringMetadata(il_node));
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  const auto bufs = impl.CalcTmpBufSize(*il_node);
+  EXPECT_FALSE(bufs.empty());
+}
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeStaleNonDenseViewKeepsOffsetsTmp) {
+  // metadata 过期（view attr 已非 dense）：按当前视图保留。
+  ILTestGraph g("simd_gate_stale_view", 2, 8, 2, 8);
+  BuildSimdGraph(g, ge::DT_FLOAT16);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  bool metadata_supported = false;
+  ASSERT_EQ(FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  TemplateLogicalView view;
+  ASSERT_EQ(GetTemplateLogicalView(il_node, view), af::SUCCESS);
+  view.index.strides = {g.s3 * af::Symbol(2), af::sym::kSymbolOne};
+  ASSERT_EQ(ClassifyIndirectLoadLayout(view.index, view.index), af::SUCCESS);
+  ASSERT_EQ(SetTemplateLogicalView(il_node, view), af::SUCCESS);
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  const auto bufs = impl.CalcTmpBufSize(*il_node);
+  EXPECT_FALSE(bufs.empty());
+}
+
+TEST(IndirectLoadApiCallTest, CalcTmpBufSizeSkTemplateKeepsTmpBeyondGate) {
+  // SK 的 tmp 含输入缓存与 offsets，不受本门禁影响。
+  ILTestGraph g("sk_gate_keep", 2, 8, 2, 8);
+  BuildSimdGraph(g, ge::DT_FLOAT16);
+  AnnotateSimdTemplate(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  ASSERT_EQ(::ascir::SetTemplateId(il_node, ::ascir::TemplateId::kIndirectLoadSK), af::SUCCESS);
+  af::ascir::IndirectLoadAscIrCodegenImplV2 impl;
+  const auto bufs = impl.CalcTmpBufSize(*il_node);
+  EXPECT_FALSE(bufs.empty());
+}
+
+// ==================== SIMT Init + GenerateFuncDefinition ====================
+
 void GenerateSimtFuncDefinitionFromGraph(ILTestGraph &g, std::string &definition) {
   Tiler tiler;
   SetupTiler(g.graph, tiler);

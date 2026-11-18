@@ -3926,13 +3926,9 @@ bool IsWindowIterAxis(const AscNode &node, af::AxisId axis_id, const std::vector
   return false;
 }
 
-// [SIMD offsets 单次调用驻留] SIMD 模板的 offsets buffer 在 API 内按 base 递增复用
-// （dense/register-gather 与 gather-api 的 offsets 走寄存器寻址，降级 strided 时逐元素
-// 组装 offsets），单次调用驻留 = 排除串行循环轴（多核 block 切分轴与每核 tile_outer
-// 轮次轴）后的输出元素积，用调度后的轴 size（含 tiling 变量）计算。输出视图的逻辑
-// repeats 恒为全输出元素数，对大输出（4B × 元素数 >> 平台 UB）会把 SIMD 候选在
-// StaticUbTemplateFilter 与 tiling 求解器两侧同时误杀（单算子同机制 MTE 路径可跑即
-// 证明实际驻留远小于该上界）。轴信息不可解析时返回 false，调用方回退逻辑 repeats。
+// [SIMD offsets 单次调用驻留] offsets 在 API 内按批次复用，驻留为排除串行循环轴
+// （block 切分/每核 tile 轮次）后的元素积。逻辑 repeats 按全输出元素计会把大输出
+// 的 SIMD 候选误杀（实际驻留远小于该上界）。轴不可解析时回退逻辑 repeats。
 bool TryCalcIndirectLoadSimdOffsetsSize(const AscNode &node, const std::vector<af::AxisId> &axis_ids,
                                         Expression &offset_size) {
   Expression size = Symbol(sizeof(uint32_t));
@@ -4026,6 +4022,13 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
     }
     if (template_id != ::ascir::TemplateId::kIndirectLoadSimd && template_id != ::ascir::TemplateId::kIndirectLoadSK) {
       // SIMD uses an offsets buffer, SK uses an input cache and offsets buffer, while SIMT accesses GM directly.
+      return {};
+    }
+    // dense/register-gather/gather-api 的 offsets 走寄存器寻址，不消费 API 级 tmp；
+    // 最终形态可证明非 strided 时不分配（判定见 SimdOffsetsTmpRequired，保守保留）。
+    // SK 的 tmp 含输入缓存，不受影响。
+    if (template_id == ::ascir::TemplateId::kIndirectLoadSimd &&
+        !::ascgen_utils::indirect_load::SimdOffsetsTmpRequired(node)) {
       return {};
     }
     auto node_outputs = node.outputs;

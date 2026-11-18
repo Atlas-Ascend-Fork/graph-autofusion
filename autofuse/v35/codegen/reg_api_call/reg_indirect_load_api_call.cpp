@@ -2307,7 +2307,7 @@ Status IndirectLoadRegApiCall::GenerateSimd(const TPipe &tpipe, const std::vecto
   // （RegGather RunReuse）线性稠密读写与 padded 视图布局冲突（index 按窗口线性读越过
   // 真实数据 → 越界读表 AIC 341；strided 解释稠密数据 → 数值错乱），强制降级 strided
   // facade（按视图 strides 逐行寻址，行内 pad 由 ReduceInit OptImpl 清中性值）。SIMD
-  // 模板的 tmp 恒分配（CalcTmpBufSize 只判模板），降级无 tmp 缺口。
+  // 模板在内存规划期按相同最终视图判定 tmp 需求，可能降级时保留缓冲。
   {
     // codegen::Tensor 直接持有 axis/axis_size/axis_strides 与向量化视图字段，
     // axis_size 即视图轴宽（Tiler::TensorActualSize 同源）。判定与 lowering 期同向

@@ -479,6 +479,44 @@ struct IndirectLoadLoweringMetadata {
   SimtLoweringMetadata simt;
 };
 
+// SIMD 模板仅 strided 降级时消费 API 级 offsets tmp，dense 形态走寄存器寻址。
+// 供 CalcTmpBufSize 决定是否分配；信息缺失保守保留（漏判踩断言，误判白分配）。
+inline bool SimdOffsetsTmpRequired(const af::AscNode &node) {
+  const auto op_desc = node.GetOpDesc();
+  if (op_desc == nullptr) {
+    return true;
+  }
+  auto node_inputs = node.inputs;
+  if (static_cast<size_t>(node_inputs.Size()) <= kIndexTensorIndex) {
+    return true;
+  }
+  auto node_outputs = node.outputs;
+  if (node_outputs().empty()) {
+    return true;
+  }
+  // metadata 缺失/非法：两期结论可能漂移，保守保留。
+  const auto metadata = op_desc->TryGetExtAttr(kLoweringMetadataAttr, IndirectLoadLoweringMetadata{});
+  if (metadata.version != 1U || metadata.axis < 0L || metadata.outer_axis == af::kIdNone ||
+      metadata.simd.fallback == SimdFallback::kStrided) {
+    return true;
+  }
+  // 防御 metadata 过期：当前视图非 dense 即保留。
+  const auto logical_view = op_desc->TryGetExtAttr(kTemplateLogicalViewAttr, TemplateLogicalView{});
+  if (logical_view.input.kind != IndirectLoadLayoutKind::kDense ||
+      logical_view.index.kind != IndirectLoadLayoutKind::kDense) {
+    return true;
+  }
+  // 与 GenerateSimd 兜底降级同判据：输出与索引两视图都判。
+  const auto &output_attr = node_outputs[0].attr;
+  if (MayHaveVectorizedPadding(output_attr.axis, output_attr.repeats, output_attr.vectorized_axis,
+                               output_attr.vectorized_strides)) {
+    return true;
+  }
+  const auto &index_attr = node_inputs[kIndexTensorIndex].attr;
+  return MayHaveVectorizedPadding(index_attr.axis, index_attr.repeats, index_attr.vectorized_axis,
+                                  index_attr.vectorized_strides);
+}
+
 TemplateBehavior GetTemplateBehavior(const af::AscNodePtr &node);
 TemplateRole GetTemplateRole(const af::AscNodePtr &node);
 af::AscNodePtr GetPostReduceConsumer(const af::AscNodePtr &node);

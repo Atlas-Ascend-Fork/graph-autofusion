@@ -674,6 +674,21 @@ void BufQueAllocator::InitTensorReuseInfo(const ascir::NodeView &node, const af:
   }
 }
 
+// [IndirectLoad 输入队列单缓冲] IL 的输入队列（gather 窗口/索引）驻留大，
+// 双缓冲会把大窗口 SIMD 候选挤出 UB 静态过滤。降单缓冲以牺牲 load/compute
+// 重叠换取候选存活。仅判结构信号（消费者含 IndirectLoad），不读会跨图
+// 丢失的 ext attr；SIMT 输入走 direct GM 不产生队列，命中即蕴含 SIMD/SK。
+static bool IsIndirectLoadQueueInput(const af::AscTensor &output) {
+  for (const auto &input : output.anchor.GetPeerInDataAnchorsPtr()) {
+    GE_ASSERT_NOTNULL(input);
+    const auto peer_node = std::dynamic_pointer_cast<af::AscNode>(input->GetOwnerNode());
+    if (peer_node != nullptr && IsOps<IndirectLoad>(peer_node)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void BufQueAllocator::InitTensorLifeTime(const ascir::NodeView &node, const af::AscTensor *output,
                                          TensorInfo &tensor_info, bool is_node_cached, bool is_cube_none_db) {
   tensor_info.life_start = node->GetOpDescBarePtr()->GetId();
@@ -695,7 +710,7 @@ void BufQueAllocator::InitTensorLifeTime(const ascir::NodeView &node, const af::
     return;
   }
   if (output->attr.mem.position == af::Position::kPositionVecIn) {
-    tensor_info.buf_num = is_node_cached ? 1 : kDbBufNum;
+    tensor_info.buf_num = (is_node_cached || IsIndirectLoadQueueInput(*output)) ? 1 : kDbBufNum;
   } else if (output->attr.mem.position == af::Position::kPositionVecOut) {
     tensor_info.buf_num = (is_node_cached && !tensor_info.is_reusable) ? 1 : kDbBufNum;
   } else {
