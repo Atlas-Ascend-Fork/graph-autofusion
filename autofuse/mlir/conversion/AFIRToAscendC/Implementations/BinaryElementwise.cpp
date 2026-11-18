@@ -193,6 +193,7 @@ struct BinaryElementwiseMapping {
   uint32_t resultIndex = 0;
   ascend::ExecutionSpec executionSpec{ascend::ProcessorType::AICore, ascend::AICoreUnit::Vector,
                                       ascend::ExecutionModel::SIMD, ascend::InstructionForm::MemoryBased};
+  bool singletonBroadcast = false;
 };
 
 // 两个输入 + 一个目的地的类型，按生成顺序取出来而不是按 AFIR 操作数顺序：`lhs`
@@ -254,6 +255,34 @@ std::optional<unsigned> scalarTensorInput(Operation *op, ScalarOperand form) {
   return std::nullopt;
 }
 
+// The scalar/scalar overload in true_div.h computes one quotient and duplicates
+// it. A singleton tensor plus an SSA scalar has the same semantics.
+std::optional<unsigned> singletonTrueDivInput(Operation *op) {
+  if (!isa<afir::TrueDivOp>(op)) {
+    return std::nullopt;
+  }
+  auto partition = afir::getOperandPartition(op);
+  if (failed(partition) || partition->inputCount != 2 || partition->destinationCount != 1) {
+    return std::nullopt;
+  }
+  auto inputs = partition->inputs(op);
+  auto destination = dyn_cast<ascendc::LocalTensorType>(partition->destinations(op)[0].getType());
+  if (!destination) {
+    return std::nullopt;
+  }
+  for (unsigned index = 0; index < 2; ++index) {
+    auto type = dyn_cast<ascendc::LocalTensorType>(inputs[index].getType());
+    if (type && inputs[1 - index].getType() == type.getElementType() &&
+        isSupportedElementType(kF16 | kF32 | kI32, type.getElementType()) &&
+        afir::elementwise::matchesResultElementRule(type.getElementType(), destination.getElementType(),
+                                                    ResultElementRule::SameOrF32ForI32) &&
+        elementwise::isSingletonTensorInput(op, index)) {
+      return index;
+    }
+  }
+  return std::nullopt;
+}
+
 std::optional<BinaryOperandOrder> binaryOperandOrder(Operation *op, ScalarOperand form) {
   auto partition = afir::getOperandPartition(op);
   if (failed(partition) || partition->inputCount != kBinaryInputCount) {
@@ -272,6 +301,11 @@ std::optional<BinaryOperandOrder> binaryOperandOrder(Operation *op, ScalarOperan
 elementwise::LocalViewCompatibility checkBinaryLocalViews(Operation *op, ScalarOperand form, bool allowInPlaceAnalysis,
                                                           bool *wholeTensor = nullptr) {
   auto scalar = scalarTensorInput(op, form);
+  if (form != ScalarOperand::None) {
+    if (auto singleton = singletonTrueDivInput(op)) {
+      scalar = singleton;
+    }
+  }
   if (scalar) {
     auto partition = afir::getOperandPartition(op);
     SmallVector<ascendc::HardEvent> events =
@@ -346,6 +380,9 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
                                   const ascend::instruction::QueryContext &context) const override {
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+    }
+    if (singletonTrueDivInput(operation).has_value() != mapping_->singletonBroadcast) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
     }
     bool wholeTensor = true;
     const elementwise::LocalViewCompatibility compatibility =
@@ -643,6 +680,9 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
     if (!adaptor.getDestination()) {
       return rewriter.notifyMatchFailure(op, "buffer-form binary elementwise op requires a destination");
     }
+    if (auto singleton = singletonTrueDivInput(op)) {
+      return rewriteSingletonBroadcast(op, adaptor, *singleton, rewriter);
+    }
     const std::optional<BinaryOperandOrder> order = binaryOperandOrder(op, ScalarOperand::Any);
     if (!order) {
       return rewriter.notifyMatchFailure(op, "the selected implementation expects one tile and one scalar");
@@ -677,6 +717,57 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
   }
 
  private:
+  Value materializeSingletonQuotient(Location location, MutableArrayRef<Value> operands,
+                                     ConversionPatternRewriter &rewriter) const {
+    Type inputType = operands[0].getType();
+    for (Value &operand : operands) {
+      if (inputType.isInteger(32)) {
+        operand = rewriter.create<arith::SIToFPOp>(location, rewriter.getF32Type(), operand);
+      } else if (inputType.isF16()) {
+        operand = rewriter.create<arith::ExtFOp>(location, rewriter.getF32Type(), operand);
+      }
+    }
+    Value quotient = rewriter.create<arith::DivFOp>(location, operands[0], operands[1]);
+    if (inputType.isF16()) {
+      quotient = rewriter.create<arith::TruncFOp>(location, inputType, quotient);
+    }
+    return quotient;
+  }
+
+  LogicalResult rewriteSingletonBroadcast(SourceOp op, OpAdaptor adaptor, unsigned singleton,
+                                          ConversionPatternRewriter &rewriter) const {
+    elementwise::ElementwiseLocalView view;
+    if (elementwise::prepareElementwiseLocalView(op, {singleton}, compactTail_, view) !=
+            elementwise::LocalViewCompatibility::Compatible ||
+        !view.vectorPlan) {
+      return failure();
+    }
+    Value operands[] = {adaptor.getLhs(), adaptor.getRhs()};
+    // Capture the source before any output write, including when storage is shared.
+    auto scalar = materializeScalarRead(op, operands[singleton], recordedScalarReadEvents(op, singleton), rewriter);
+    if (failed(scalar)) {
+      return failure();
+    }
+    operands[singleton] = *scalar;
+    Value quotient = materializeSingletonQuotient(op.getLoc(), operands, rewriter);
+    auto ordered = orderTilesForPlan(*view.vectorPlan, operands, adaptor.getDestination());
+    if (failed(ordered)) {
+      return failure();
+    }
+    auto window = materializeVectorizedSegments(op, rewriter, *view.vectorPlan, view.extentSource, *ordered,
+                                                /*apiWindowSize=*/1);
+    if (failed(window) || window->tiles.size() != 1 || window->extents.size() != 1) {
+      return failure();
+    }
+    auto duplicate =
+        rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), window->tiles.front(), quotient, window->extents.front());
+    if (failed(setExecutionSpec(duplicate, mapping_->executionSpec))) {
+      return failure();
+    }
+    rewriter.replaceOp(op, adaptor.getDestination());
+    return success();
+  }
+
   ImplementationKey key_;
   std::shared_ptr<const BinaryElementwiseMapping> mapping_;
   bool compactTail_;
@@ -951,15 +1042,17 @@ LogicalResult registerScalarBinary(ImplementationRegistry &registry, llvm::Strin
 template <typename SourceOp, typename TargetOp, TmpBufferUse Tmp>
 LogicalResult registerScalarBinaryDirection(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family,
                                             uint32_t elementTypes,
-                                            ResultElementRule resultElementType = ResultElementRule::Same) {
+                                            ResultElementRule resultElementType = ResultElementRule::Same,
+                                            bool singletonBroadcast = false) {
   if (failed(elementwise::checkFamilyMatchesHeader<TargetOp>(family))) {
     return failure();
   }
   elementwise::recordRegisteredFamily(SourceOp::getOperationName(), id, family, elementTypes);
+  BinaryElementwiseMapping mapping{family, ScalarOperand::Any, resultElementType, elementTypes,
+                                   schedulerGivesTmpBuffer(Tmp)};
+  mapping.singletonBroadcast = singletonBroadcast;
   return registry.registerImplementation<SourceOp, BinaryElementwiseMapping, BinaryElementwiseCapabilityProvider>(
-      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
-      BinaryElementwiseMapping{family, ScalarOperand::Any, resultElementType, elementTypes,
-                               schedulerGivesTmpBuffer(Tmp)},
+      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()}, mapping,
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const BinaryElementwiseMapping> mapping) {
         patterns.add<BinaryScalarDirectionConversionPattern<SourceOp, TargetOp, Tmp>>(
@@ -1440,6 +1533,12 @@ LogicalResult registerTrueDivPowAxpyImplementations(ImplementationRegistry &regi
   // 标量形态只有 mem 侧：v2 的 `IsScalarInputSupported` 对 TrueDiv 返回 false（矩阵
   // `reg_scalar = no`），reg 侧接了就是死代码。mem 侧生成 `TrueDivExtends<T, U, LATTER>`，
   // 三个模板实参——`U` 即使与 `T` 相同也要写出来，否则方向那一位会落到 `U` 的位置上。
+  if (failed(registerScalarBinaryDirection<TrueDivOp, ascendc::TrueDivExtendsOp, TmpBufferUse::Passed>(
+          registry, "truediv.singleton_scalar.duplicate", ApiFamily::MemBased, kF16 | kF32 | kI32,
+          ResultElementRule::SameOrF32ForI32,
+          /*singletonBroadcast=*/true))) {
+    return failure();
+  }
   if (failed(registerBinary<TrueDivOp, ascendc::TrueDivExtendOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "truediv.tensor_tensor.extend", ApiFamily::MemBased, kF16 | kF32 | kI32,
           ResultElementRule::SameOrF32ForI32)) ||

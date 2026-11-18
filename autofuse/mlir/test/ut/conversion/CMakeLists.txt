@@ -38,5 +38,6 @@ add_afir_gtest(AFIRToAscendCTest
 # 将 legacy 对照表路径传给 ElementTypeMatrixTest，用于核对注册的元素类型。
 # 测试运行于构建目录，不按当前工作目录猜测数据路径。
 target_compile_definitions(AFIRToAscendCTest PRIVATE
+  AF_MLIR_CONVERSION_TEST_DIR="${MLIR_CODE_ROOT_DIR}/test/lit/conversion"
   AF_MLIR_OP_LOWERING_MATRIX_CSV="${MLIR_CODE_ROOT_DIR}/docs/guides/ascir_op_lowering_matrix.csv"
 )
