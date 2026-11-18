@@ -678,36 +678,7 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
       return rewriter.notifyMatchFailure(op, "buffer-form binary elementwise op requires a destination");
     }
     if (auto singleton = singletonTrueDivInput(op)) {
-      elementwise::ElementwiseLocalView view;
-      if (elementwise::prepareElementwiseLocalView(op, {*singleton}, compactTail_, view) !=
-              elementwise::LocalViewCompatibility::Compatible ||
-          !view.vectorPlan) {
-        return failure();
-      }
-      Value operands[] = {adaptor.getLhs(), adaptor.getRhs()};
-      // Capture the source before any output write, including when storage is shared.
-      auto scalar = materializeScalarRead(op, operands[*singleton], recordedScalarReadEvents(op, *singleton), rewriter);
-      if (failed(scalar)) {
-        return failure();
-      }
-      operands[*singleton] = *scalar;
-      Value quotient = rewriter.create<arith::DivFOp>(op.getLoc(), operands[0], operands[1]);
-      auto ordered = orderTilesForPlan(*view.vectorPlan, operands, adaptor.getDestination());
-      if (failed(ordered)) {
-        return failure();
-      }
-      auto window = materializeVectorizedSegments(op, rewriter, *view.vectorPlan, view.extentSource, *ordered,
-                                                  /*apiWindowSize=*/1);
-      if (failed(window) || window->tiles.size() != 1 || window->extents.size() != 1) {
-        return failure();
-      }
-      auto duplicate = rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), window->tiles.front(), quotient,
-                                                               window->extents.front());
-      if (failed(setExecutionSpec(duplicate, mapping_->executionSpec))) {
-        return failure();
-      }
-      rewriter.replaceOp(op, adaptor.getDestination());
-      return success();
+      return rewriteSingletonBroadcast(op, adaptor, *singleton, rewriter);
     }
     const std::optional<BinaryOperandOrder> order = binaryOperandOrder(op, ScalarOperand::Any);
     if (!order) {
@@ -743,6 +714,40 @@ class BinaryScalarDirectionConversionPattern final : public OpConversionPattern<
   }
 
  private:
+  LogicalResult rewriteSingletonBroadcast(SourceOp op, OpAdaptor adaptor, unsigned singleton,
+                                          ConversionPatternRewriter &rewriter) const {
+    elementwise::ElementwiseLocalView view;
+    if (elementwise::prepareElementwiseLocalView(op, {singleton}, compactTail_, view) !=
+            elementwise::LocalViewCompatibility::Compatible ||
+        !view.vectorPlan) {
+      return failure();
+    }
+    Value operands[] = {adaptor.getLhs(), adaptor.getRhs()};
+    // Capture the source before any output write, including when storage is shared.
+    auto scalar = materializeScalarRead(op, operands[singleton], recordedScalarReadEvents(op, singleton), rewriter);
+    if (failed(scalar)) {
+      return failure();
+    }
+    operands[singleton] = *scalar;
+    Value quotient = rewriter.create<arith::DivFOp>(op.getLoc(), operands[0], operands[1]);
+    auto ordered = orderTilesForPlan(*view.vectorPlan, operands, adaptor.getDestination());
+    if (failed(ordered)) {
+      return failure();
+    }
+    auto window = materializeVectorizedSegments(op, rewriter, *view.vectorPlan, view.extentSource, *ordered,
+                                                /*apiWindowSize=*/1);
+    if (failed(window) || window->tiles.size() != 1 || window->extents.size() != 1) {
+      return failure();
+    }
+    auto duplicate =
+        rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), window->tiles.front(), quotient, window->extents.front());
+    if (failed(setExecutionSpec(duplicate, mapping_->executionSpec))) {
+      return failure();
+    }
+    rewriter.replaceOp(op, adaptor.getDestination());
+    return success();
+  }
+
   ImplementationKey key_;
   std::shared_ptr<const BinaryElementwiseMapping> mapping_;
   bool compactTail_;
