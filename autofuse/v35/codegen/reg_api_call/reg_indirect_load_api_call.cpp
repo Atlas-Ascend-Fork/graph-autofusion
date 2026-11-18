@@ -1899,6 +1899,21 @@ af::Status ResolveSimtNodes(const std::vector<std::string> &node_names, const Si
   return af::SUCCESS;
 }
 
+// [strided GM 目标寻址] SimtOutputChainMetadata → SimtOutputChain 的纯字段转换：
+// ParseAttr（单 gather 链）与 fused 组 store 链共用，字段集中一处避免两份复制漂移
+// （nodes 需 node_map 上下文，由调用方自行解析）。
+SimtOutputChain MakeSimtOutputChain(const ascgen_utils::indirect_load::SimtOutputChainMetadata &metadata) {
+  SimtOutputChain chain;
+  chain.result_tensor_id = metadata.result_tensor_id;
+  chain.target_tensor_id = metadata.target_tensor_id;
+  chain.dtype = metadata.dtype;
+  chain.local_target = metadata.local_target;
+  chain.target_sizes = metadata.target_sizes;
+  chain.target_strides = metadata.target_strides;
+  chain.target_offset = metadata.target_offset;
+  return chain;
+}
+
 }  // namespace
 
 Status IndirectLoadRegApiCall::ParseAttr(const ascir::NodeView &node) {
@@ -1983,15 +1998,8 @@ Status IndirectLoadRegApiCall::ResolveSimtMetadata(const ascir::NodeView &node,
                    "IndirectLoad SIMT output Load[%s] metadata is duplicated.", load.node_name.c_str());
   }
   for (const auto &chain_metadata : metadata.output_chains) {
-    SimtOutputChain chain;
+    SimtOutputChain chain = MakeSimtOutputChain(chain_metadata);
     GE_ASSERT_SUCCESS(ResolveSimtNodes(chain_metadata.node_names, node_map, chain.nodes));
-    chain.result_tensor_id = chain_metadata.result_tensor_id;
-    chain.target_tensor_id = chain_metadata.target_tensor_id;
-    chain.dtype = chain_metadata.dtype;
-    chain.local_target = chain_metadata.local_target;
-    chain.target_sizes = chain_metadata.target_sizes;
-    chain.target_strides = chain_metadata.target_strides;
-    chain.target_offset = chain_metadata.target_offset;
     output_chains_.emplace_back(std::move(chain));
   }
   GE_ASSERT_TRUE(!output_chains_.empty(), "IndirectLoad SIMT output chains are empty.");
@@ -2816,6 +2824,26 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
         chain.target_tensor_id = store_iter->second->outputs()[0]->attr.mem.tensor_id;
         chain.dtype = store_inputs[0]->attr.dtype;
         chain.local_target = false;
+        // [strided GM 目标寻址] 补全 store 终端的目标视图元数据（与单 gather
+        // CollectSimtOutputChainBuilds 同构），供 Store 侧按目标 strides/offset 铺排。
+        const auto &store_target_attr = store_iter->second->outputs()[0]->attr;
+        chain.target_sizes = store_target_attr.repeats;
+        chain.target_strides = store_target_attr.strides;
+        af::Expression merge_store_offset = af::ops::Zero;
+        if (store_iter->second->attr.ir_attr != nullptr) {
+          (void)store_iter->second->attr.ir_attr->GetAttrValue("offset", merge_store_offset);
+        }
+        chain.target_offset = merge_store_offset;
+        // [检视意见·显性失败] 目标视图元数据缺失（空 target_sizes）或秩不一致
+        // （sizes/strides 不等长）时拒绝发射：BuildSimtStoreTargetOffsetExpr 对空/失配
+        // 视图静默回退 flat output_index——对 strided 目标即修复前的错位形态；跨度
+        // guard 按target_sizes.size() 索引 target_strides，失配是 host 侧越界。真实
+        // 流程该视图由 op-desc 先行填充（非空），缺失即上游异常——在首次消费处显性
+        // 暴露，而非静默错算或仅对双发降级。
+        GE_ASSERT_TRUE(!chain.target_sizes.empty() && chain.target_strides.size() == chain.target_sizes.size(),
+                       "IndirectLoad fused register-merge store[%s] target view metadata is missing or "
+                       "rank-inconsistent (sizes=%zu, strides=%zu).",
+                       store_name.c_str(), chain.target_sizes.size(), chain.target_strides.size());
         merge_chains.emplace_back(std::move(chain));
       }
       // side GM load 发现 + 寻址分类（当前图，与调度期门控同一分类函数——非 GM load 的
@@ -2965,6 +2993,13 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
     // 字段传入；FusedCtx 先于 FusedBody 发射，故收集先行；空跑输出丢弃，正式发射复用
     // 同一注册表查找）。offset_type 只影响丢弃的引用串包装，不影响收集条目（键为 tiler
     // 表达式），此处取首成员位宽。
+    // [strided GM 目标寻址] 转 codegen 侧链结构（BuildSimtStoreTargetOffsetExpr 消费；
+    // 空链（非 register_merge 形态）为空向量，不产生任何发射）。
+    std::vector<SimtOutputChain> merge_store_chains;
+    merge_store_chains.reserve(merge_chains.size());
+    for (const auto &merge_chain : merge_chains) {
+      merge_store_chains.emplace_back(MakeSimtOutputChain(merge_chain));
+    }
     SimtRuntimeSizeRegistry fused_runtime_sizes;
     {
       const std::string collect_offset_type = GetSimtOffsetType(members.front().policy);
@@ -2994,6 +3029,13 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
         GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(emission_nodes, merge_load_map, &scratch_offsets,
                                                  members.front().logical_view, "output_index", "output_index", tpipe,
                                                  fused_runtime_sizes, collect_offset_type, scratch_values, scratch));
+        // [strided GM 目标寻址] 空跑 Store 目标偏移表达式：目标视图的运行期尺寸/步长符号
+        // 在此登记进 FusedCtx 注册表（正式发射按同一条目内联或引用 context 字段）。
+        std::map<std::pair<size_t, std::string>, std::string> scratch_store_coords;
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          (void)BuildSimtStoreTargetOffsetExpr(merge_store_chains[i], members.front().logical_view, tpipe,
+                                               collect_offset_type, fused_runtime_sizes, scratch_store_coords, scratch);
+        }
       }
       if (!merge_info.register_merge && !members.front().logical_view.output.sizes.empty()) {
         // [SIMT 动态 shape] L3 Store 行宽（output inner size）在 FusedBody 静态方法体内
@@ -3033,6 +3075,9 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
         }
       }
     }
+    // [strided GM 目标寻址] 目标视图元数据的空/秩一致性在 merge_chains 构建处已显式
+    // 断言（register_merge 分支，见构建点注释）——此处不再需要"空则退 u64 单体"的
+    // 降级防御：guard 逐链计 target 跨度时元数据必已完备。
     // [L3 调用形态与表达式同分支绑定] 判据与 codegen_kernel_loop 的提升判据同源
     // （GetPostReduceConsumer）：无共享 Reduce 的 L3（组路径 boundary=rank、整空间合并轴、
     // 恒提升）——一次调用覆盖整核，与 L2 同形态（block_dim_offset 单位=元素、actual_size=
@@ -3261,8 +3306,19 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
             "OffsetType local_index, const FusedCtx"
          << body_suffix << "& context, const OutputPack& o) {\n";
       if (merge_info.register_merge) {
+        // [strided GM 目标寻址] 复用单 gather 的目标偏移表达式（BuildSimtStoreTargetOffsetExpr）：
+        // 稠密零偏移目标退化为 output_index（行为不变）；cat 等非连续输出视图（目标行距 !=
+        // 逻辑稠密行距）按目标 strides/offset 坐标分解铺排，修复 flat 连续写导致的
+        // 行号漂移（读写错位）。坐标表逐变体独立，store_coord_N 命名不跨变体冲突。
+        std::map<std::pair<size_t, std::string>, std::string> store_coordinates;
+        std::vector<std::string> merge_store_exprs(merge_chains.size());
         for (size_t i = 0; i < merge_chains.size(); ++i) {
-          ss << "      t.out" << i << "[output_index] = o.out" << i << ";\n";
+          merge_store_exprs[i] =
+              BuildSimtStoreTargetOffsetExpr(merge_store_chains[i], members.front().logical_view, tpipe,
+                                             body_offset_type, fused_runtime_sizes, store_coordinates, ss);
+        }
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          ss << "      t.out" << i << "[" << merge_store_exprs[i] << "] = o.out" << i << ";\n";
         }
       } else {
         // L3：UB 局部目标行对齐寻址（与单 gather GenerateSimtOutputsEvaluator 的 local target
