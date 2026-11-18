@@ -404,14 +404,16 @@ bool SuperKernelOptimizer::Update(SuperKernelScopeInfo &scopeInfo, SuperKernelGr
   return true;
 }
 
-// Schedule task-stream nodes for super-kernel launch.
-bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernelGraph &graph, SkTaskBuilder &builder) {
+bool SuperKernelOptimizer::PrepareScheduleTasks(const SuperKernelScopeInfo &scopeInfo,
+                                                std::vector<SuperKernelBaseNode *> &reorderedTaskNodes,
+                                                std::vector<SuperKernelBaseNode *> &tasks,
+                                                std::string &skFuncName) const {
   const auto &taskNodes = scopeInfo.GetExtInfo().filteredNodes;
   if (taskNodes.empty()) {
     SK_LOGE("no tasks for super kernel optimization: scope has 0 nodes for optimization");
     return false;
   }
-  std::vector<SuperKernelBaseNode *> reorderedTaskNodes = ReorderWaitNodesForTaskBuild(taskNodes);
+  reorderedTaskNodes = ReorderWaitNodesForTaskBuild(taskNodes);
   if (reorderedTaskNodes.size() != taskNodes.size()) {
     SK_LOGE("task reorder produced invalid size: originalCount=%zu, reorderedCount=%zu", taskNodes.size(),
             reorderedTaskNodes.size());
@@ -423,18 +425,30 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
     return false;
   }
 
-  std::string skFuncName = GetSkFuncName(reorderedTaskNodes, scopeInfo.GetScopeId(), scopeInfo.GetExtInfo().scopeName);
+  skFuncName = GetSkFuncName(reorderedTaskNodes, scopeInfo.GetScopeId(), scopeInfo.GetExtInfo().scopeName);
   PrintTaskNodesDetail(reorderedTaskNodes, "reordered task nodes");
 
   const auto &eventNodes = scopeInfo.GetExtInfo().eventNodes;
   bool usedEarlyEvents = false;
   SuperKernelBaseNode *tailEvent = nullptr;
-  std::vector<SuperKernelBaseNode *> tasks =
-      BuildTaskListWithEarlyEvents(reorderedTaskNodes, eventNodes, usedEarlyEvents, tailEvent);
+  tasks = BuildTaskListWithEarlyEvents(reorderedTaskNodes, eventNodes, usedEarlyEvents, tailEvent);
   if (tailEvent != nullptr) {
     ConnectStreamTailKernelsToEvent(reorderedTaskNodes, tailEvent);
   }
 
+  return true;
+}
+
+// Schedule task-stream nodes for super-kernel launch.
+bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernelGraph &graph, SkTaskBuilder &builder) {
+  std::vector<SuperKernelBaseNode *> reorderedTaskNodes;
+  std::vector<SuperKernelBaseNode *> tasks;
+  std::string skFuncName;
+  if (!PrepareScheduleTasks(scopeInfo, reorderedTaskNodes, tasks, skFuncName)) {
+    return false;
+  }
+
+  const auto &eventNodes = scopeInfo.GetExtInfo().eventNodes;
   SkTaskIR taskIR;
   SkTaskLowering lowering(opts, graph);
   if (!lowering.Run(skFuncName, tasks, scopeInfo.GetScopeId(), scopeInfo.GetScopeCoreInfo(), taskIR)) {
