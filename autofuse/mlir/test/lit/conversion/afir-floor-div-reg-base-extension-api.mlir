@@ -11,6 +11,14 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
+// The i64 SIMT wrapper needs an overflow guard before AFIR can select it.
+// The rejection lands at implementation selection, not the op verifier: the
+// buffer-form element-type list is not a parse-time operand constraint, so the
+// op builds and then fails to select — the intended clean-fallback behavior.
+// RUN: sed 's/xi32/xi64/g' %s > %t.i64.mlir
+// RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %t.i64.mlir 2>&1 | FileCheck %s --check-prefix=NO-I64
+// NO-I64: 'afir.floor_div' op has no supported Ascend implementation
+
 // 检查 reg-based floor_div_reg_base.h 包装，不接收 tmp buffer，
 // 因为 Div 和 Truncate 在寄存器中完成。整数支持仅在 reg 侧；mem 侧只注册 f16 / f32。
 // ODS 为两侧并集，i32 应仅选择 reg 侧实现。

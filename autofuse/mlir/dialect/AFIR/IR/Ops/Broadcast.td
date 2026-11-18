@@ -26,7 +26,7 @@ include "mlir/IR/CommonTypeConstraints.td"
 // 还取决于 legacy 未限定 Duplicate 的绑定，需单独核对 kDuplicateElementTypes 后再开放。
 // ODS 比 legacy 注册表更宽的情况由 ElementTypeMatrixTest 的 kOdsWiderThanLegacy 记录，
 // 判定依据是实际头文件的能力，而不是仅比较 REG_ASC_IR 的声明。
-defvar AFIR_BroadcastElementTypes = [I8, UI8, I16, UI16, I32, UI32, UI64, F16, F32, BF16];
+defvar AFIR_BroadcastElementTypes = [I8, UI8, I16, UI16, I32, UI32, I64, UI64, F16, F32, BF16];
 
 // Keep the logical and buffer forms on the same ODS element-type constraint.
 // TensorOrMemRef permits the two storage forms while preserving the canonical

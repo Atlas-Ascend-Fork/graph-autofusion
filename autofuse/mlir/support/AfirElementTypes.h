@@ -65,7 +65,8 @@ enum class AfirElementTypeKind : uint8_t {
   M(I32, 3, "i32", "int32", 4, DT_INT32, SignlessInteger, 32)     \
   M(UI8, 4, "ui8", "uint8", 1, DT_UINT8, UnsignedInteger, 8)      \
   M(UI16, 5, "ui16", "uint16", 2, DT_UINT16, UnsignedInteger, 16) \
-  M(BF16, 6, "bf16", "bfloat16", 2, DT_BF16, BFloat16, 16)
+  M(BF16, 6, "bf16", "bfloat16", 2, DT_BF16, BFloat16, 16)        \
+  M(I64, 7, "i64", "int64", 8, DT_INT64, SignlessInteger, 64)
 
 // legacy 叫得出名字、但 AFIR 这一层还没建模的元素类型。列依次是 CSV / BUILDER / BYTES / GE，
 // 含义与上面那张表同名的列一样。
@@ -88,7 +89,6 @@ enum class AfirElementTypeKind : uint8_t {
 // 格今天就是这样），比缺名字更难查一层。
 #define AFIR_ELEMENT_TYPE_NAMED_ONLY(M)                  \
   M("i8", "int8", 1, DT_INT8, SignlessInteger, 8)        \
-  M("i64", "int64", 8, DT_INT64, SignlessInteger, 64)    \
   M("ui32", "uint32", 4, DT_UINT32, UnsignedInteger, 32) \
   M("ui64", "uint64", 8, DT_UINT64, UnsignedInteger, 64)
 

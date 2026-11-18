@@ -319,9 +319,9 @@ class AFIR_BufferizableTernaryHomoElementwiseOp<string mnemonic, list<Type> elem
 // Unary Operations
 //===----------------------------------------------------------------------===//
 
-// 两侧的并集：mem 侧 legacy 收 {f16, f32, i32}，reg 侧多收 i16 / ui8。ODS 是并集，
+// 两侧的并集：mem 侧 legacy 收 {f16, f32, i32}，reg 侧多收 i16 / ui8 / i64。ODS 是并集，
 // 「这一侧供不供得出来」由注册处的集合说（`ElementTypeMatrixTest` 盯着它不比 legacy 窄）。
-defvar AFIR_AbsElementTypes = [UI8, I16, I32, F16, F32, BF16];
+defvar AFIR_AbsElementTypes = [UI8, I16, I32, F16, F32, BF16, I64];
 
 def AFIR_AbsOp : AFIR_BufferizableUnaryElementwiseOp<"abs", AFIR_AbsElementTypes> {
   let afirStability = AFIR_Experimental;
@@ -1046,7 +1046,7 @@ def AFIR_ReluOp : AFIR_BufferizableUnaryElementwiseOp<"relu", [I32, F16, F32]> {
 // dtype 表去掉了 I16：`NegExtend` 的 `@tparam` 只声称 int32_t / float / half，两张
 // 支持表的包装都是这一份。ODS 收下 I16 而 lowering 接不住，表现是 bridge 建得出来、
 // 走到 SelectImplementation 才报「没有可用实现」——比在这里就拒掉晚，也更难看懂。
-def AFIR_NegOp : AFIR_BufferizableUnaryElementwiseOp<"neg", [I16, I32, F16, F32, BF16]> {
+def AFIR_NegOp : AFIR_BufferizableUnaryElementwiseOp<"neg", [I16, I32, F16, F32, BF16, I64]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise negation of a tile";
   let description = [{
@@ -1093,7 +1093,7 @@ def AFIR_GeluOp : AFIR_BufferizableUnaryElementwiseOp<"gelu", [F16, F32]> {
   }];
 }
 
-def AFIR_SignOp : AFIR_BufferizableUnaryElementwiseOp<"sign", [F16, F32, I32, UI8, BF16]> {
+def AFIR_SignOp : AFIR_BufferizableUnaryElementwiseOp<"sign", [F16, F32, I32, UI8, BF16, I64]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise sign of a tile";
   let description = [{
@@ -1145,8 +1145,8 @@ class AFIR_BufferizableLogicalNotOp<string mnemonic, list<Type> inputTypes, list
 
 // 输入列表是两侧的并集里 AFIR 建模得出来的那些：mem 侧 legacy 的 `kLogicalNotTypePairs`
 // 是 {f16, f32, ui8, i16, i32}，reg 侧那一版多出 i8 / i64 / bf16 / ui16 / ui32 / ui64 /
-// bool，其中 `ui16` 建得出来，其余建不出来。结果列表只多一个 `ui8`，它已经在里面了。
-def AFIR_LogicalNotOp : AFIR_BufferizableLogicalNotOp<"logical_not", [UI8, UI16, I16, I32, F16, F32, BF16],
+// bool，其中 `ui16` / `i64` 建得出来，其余建不出来。结果列表只多一个 `ui8`，它已经在里面了。
+def AFIR_LogicalNotOp : AFIR_BufferizableLogicalNotOp<"logical_not", [UI8, UI16, I16, I32, F16, F32, BF16, I64],
                                                       [UI8, UI16, I16, I32, F16, F32, BF16]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise logical negation of a tile";
@@ -1170,7 +1170,7 @@ def AFIR_LogicalNotOp : AFIR_BufferizableLogicalNotOp<"logical_not", [UI8, UI16,
 // step 4。`bitwise_not`：逐位非。与 `afir.bitwise_and` 共用同一张元素类型集合
 // （`AFIR_BitwiseElementTypes`，定义在下面二元那一段），只有 reg 一侧——legacy 的
 // `BitwiseNotAscIrCodegenImplV2` 只在 v2 那张表上注册。
-def AFIR_BitwiseNotOp : AFIR_BufferizableUnaryElementwiseOp<"bitwise_not", [UI8, I16, UI16, I32]> {
+def AFIR_BitwiseNotOp : AFIR_BufferizableUnaryElementwiseOp<"bitwise_not", [UI8, I16, UI16, I32, I64]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise bitwise NOT of a tile";
   let description = [{
@@ -1252,8 +1252,8 @@ def AFIR_AddOp : AFIR_BufferizableBinaryElementwiseOp<"add", AFIR_AddElementType
     并行工作线。
   }];
 }
-def AFIR_SubOp : AFIR_BufferizableBinaryElementwiseOp<"sub", [F16, F32, I16, I32, UI8, UI16, BF16],
-                                                      [F16, F32, I16, I32, UI8, UI16, BF16],
+def AFIR_SubOp : AFIR_BufferizableBinaryElementwiseOp<"sub", [F16, F32, I16, I32, UI8, UI16, BF16, I64],
+                                                      [F16, F32, I16, I32, UI8, UI16, BF16, I64],
                                                       /*resultRule=*/"Same", /*scalarOperand=*/"any"> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise difference of two tiles";
@@ -1381,7 +1381,7 @@ def AFIR_PowOp : AFIR_BufferizableBinaryElementwiseOp<"pow", [F16, F32, I16, I32
     但那要 L-4 的 swap 方向，这一轮只接 tensor-tensor。本 Op 在 `compute` pipe 上执行。
   }];
 }
-defvar AFIR_BitwiseElementTypes = [UI8, I16, UI16, I32];
+defvar AFIR_BitwiseElementTypes = [UI8, I16, UI16, I32, I64];
 
 def AFIR_BitwiseAndOp : AFIR_BufferizableBinaryElementwiseOp<"bitwise_and", AFIR_BitwiseElementTypes,
                                                              AFIR_BitwiseElementTypes> {
@@ -1606,7 +1606,7 @@ def AFIR_RemainderOp : AFIR_BufferizableBinaryElementwiseOp<"remainder", [F16, F
 // 交换）。但不是四个 implementation 都有：reg 侧的 `logical_or` 一个标量都不收。
 // 理由与名字都在 `BinaryElementwise.cpp` 注册处——ODS 写的是两侧的并集。
 class AFIR_LogicalBinaryOp<string mnemonic> :
-    AFIR_BufferizableBinaryElementwiseOp<mnemonic, [UI8, UI16, I16, I32, F16, F32, BF16], [UI8],
+    AFIR_BufferizableBinaryElementwiseOp<mnemonic, [UI8, UI16, I16, I32, F16, F32, BF16, I64], [UI8],
                                          /*resultRule=*/"Uint8", /*scalarOperand=*/"any"> {
   let afirStability = AFIR_Experimental;
 }
@@ -1702,7 +1702,7 @@ def AFIR_AxpyOp : AFIR_BufferizableBinaryElementwiseOp<"axpy", [F16, F32, BF16],
 // `scalarOperand` 由实例传：那两个是 `"any"`，其余四个留默认 `"rhs"`。这与 legacy 的
 // `IsScalarInputSupportedIfExchangeInputs` 只覆写在 Eq / Ne 上是同一条判据。
 class AFIR_CompareOp<string mnemonic, string scalarOperand = "rhs"> :
-    AFIR_BufferizableBinaryElementwiseOp<mnemonic, [F16, F32, I16, I32, UI8, UI16, BF16], [UI8],
+    AFIR_BufferizableBinaryElementwiseOp<mnemonic, [F16, F32, I16, I32, UI8, UI16, BF16, I64], [UI8],
                                          /*resultRule=*/"Uint8", scalarOperand> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise " # mnemonic # " comparison of two tiles";
@@ -1734,9 +1734,10 @@ def AFIR_GeOp : AFIR_CompareOp<"ge">;
 // `clip_by_value(x, min, max)`：逐元素夹到 [min, max]。三个输入与结果同 dtype，所以走
 // homo 那一档——三元躯干的操作数名 `condition` / `input1` / `input2` 在这个 op 上读作
 // x / min / max。
-// mem 侧 legacy 只收 f16 / f32，reg 侧到 ui16。ODS 取并集，两侧各自收哪些写在注册处。
+// mem 侧 legacy 只收 f16 / f32，reg 侧到 ui64（AFIR 建模得出来的多出 i64）。ODS 取并集，
+// 两侧各自收哪些写在注册处。
 def AFIR_ClipByValueOp :
-    AFIR_BufferizableTernaryHomoElementwiseOp<"clip_by_value", [F16, F32, I16, I32, UI8, UI16, BF16],
+    AFIR_BufferizableTernaryHomoElementwiseOp<"clip_by_value", [F16, F32, I16, I32, UI8, UI16, BF16, I64],
                                               /*scalarInputs=*/1>;
 
 // step 3。`fma(x1, x2, x3) = x1 * x2 + x3`。三个输入与结果同 dtype，所以与

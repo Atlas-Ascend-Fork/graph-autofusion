@@ -1,0 +1,107 @@
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+#include <algorithm>
+#include <gtest/gtest.h>
+
+#include "autofuse_tiling_data.h"
+#include "test/e2e/cpu/cases/load_mask_select_i64_store/LoadMaskSelectI64StoreCase.h"
+#include "tikicpulib.h"
+
+extern "C" __global__ __aicore__ void AF_MLIR_E2E_CPU_KERNEL_SYMBOL(GM_ADDR input0, GM_ADDR input1, GM_ADDR input2,
+                                                                    GM_ADDR output, GM_ADDR workspace,
+                                                                    AutofuseTilingData tilingData);
+extern "C" int64_t AutofuseE2eInitTiling(AutofuseTilingData *tiling, uint64_t *workspaceSize, uint32_t *blockDim);
+
+namespace {
+using mlir::afir::load_mask_select_i64_store::GetShapeConfig;
+using mlir::afir::load_mask_select_i64_store::kInputShapes;
+using mlir::afir::load_mask_select_i64_store::kOutputShapes;
+
+// 分配与 tiling 的失败路径抽成 helper：TEST 主体的 nbnc 行数受 codecheck 超大函数
+// 规则约束（<=50），三个 i64 e2e 用例共用同一段样板。
+void *GmAllocChecked(size_t bytes, const char *what) {
+  void *memory = AscendC::GmAlloc(bytes);
+  if (memory == nullptr) {
+    ADD_FAILURE() << "allocation failed: " << what;
+  }
+  return memory;
+}
+
+bool InitTilingAndWorkspace(AutofuseTilingData &tiling, uint32_t *blockDim, void **workspace) {
+  uint64_t workspaceSize = 0;
+  if (AutofuseE2eInitTiling(&tiling, &workspaceSize, blockDim) != 0) {
+    ADD_FAILURE() << "ATT tiling failed";
+    return false;
+  }
+  if (workspaceSize > 0U) {
+    *workspace = AscendC::GmAlloc(workspaceSize);
+    if (*workspace == nullptr) {
+      ADD_FAILURE() << "workspace allocation failed";
+      return false;
+    }
+  }
+  return true;
+}
+}  // namespace
+
+TEST(MlirE2eCpu, LoadMaskSelectI64StoreCalculatesCorrectResult) {
+  const uint32_t input_element_count = GetShapeConfig(kInputShapes, 0).element_count;
+  const uint32_t output_element_count = GetShapeConfig(kOutputShapes, 0).element_count;
+  // 输入 i64、输出一个字节的真值，两边按各自的元素宽度分配。
+  auto *mask = static_cast<uint8_t *>(GmAllocChecked(input_element_count * sizeof(uint8_t), "mask"));
+  auto *onTrue = static_cast<int64_t *>(GmAllocChecked(input_element_count * sizeof(int64_t), "onTrue"));
+  auto *onFalse = static_cast<int64_t *>(GmAllocChecked(input_element_count * sizeof(int64_t), "onFalse"));
+  auto *output = static_cast<int64_t *>(GmAllocChecked(output_element_count * sizeof(int64_t), "output"));
+  if (mask == nullptr || onTrue == nullptr || onFalse == nullptr || output == nullptr) {
+    AscendC::GmFree(mask);
+    AscendC::GmFree(onTrue);
+    AscendC::GmFree(onFalse);
+    AscendC::GmFree(output);
+    return;
+  }
+
+  // 掩码真假各半；两个分支取不同的带符号大数，选错分支或 i64 折半搬运都立刻反映到等号上。
+  for (uint32_t index = 0; index < input_element_count; ++index) {
+    mask[index] = ((index % 2U) == 0U) ? 1U : 0U;
+    onTrue[index] = 0x1A2B3C4D5E6F7080LL - static_cast<int64_t>(index);
+    onFalse[index] = -(static_cast<int64_t>(index) + 1LL);
+  }
+  std::fill_n(output, output_element_count, int64_t{0});
+
+  AutofuseTilingData tilingData{};
+  uint32_t blockDim = 0;
+  void *workspace = nullptr;
+  if (!InitTilingAndWorkspace(tilingData, &blockDim, &workspace)) {
+    AscendC::GmFree(mask);
+    AscendC::GmFree(onTrue);
+    AscendC::GmFree(onFalse);
+    AscendC::GmFree(output);
+    return;
+  }
+
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(AF_MLIR_E2E_CPU_KERNEL_SYMBOL, blockDim, reinterpret_cast<uint8_t *>(mask),
+              reinterpret_cast<uint8_t *>(onTrue), reinterpret_cast<uint8_t *>(onFalse),
+              reinterpret_cast<uint8_t *>(output), reinterpret_cast<uint8_t *>(workspace), tilingData);
+
+  for (uint32_t index = 0; index < output_element_count; ++index) {
+    const int64_t expected = mask[index] != 0U ? onTrue[index] : onFalse[index];
+    EXPECT_EQ(output[index], expected) << "index=" << index;
+  }
+
+  AscendC::GmFree(mask);
+  AscendC::GmFree(onTrue);
+  AscendC::GmFree(onFalse);
+  AscendC::GmFree(output);
+  if (workspace != nullptr) {
+    AscendC::GmFree(workspace);
+  }
+}

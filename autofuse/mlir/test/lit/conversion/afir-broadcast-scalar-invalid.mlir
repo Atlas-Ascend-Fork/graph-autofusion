@@ -36,16 +36,16 @@ func.func @broadcast_scalar_element_type_mismatch(%destination: !ascendc.local_t
 #compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
 
 // 二：ODS 收的是「元素类型在 `AFIR_BroadcastElementTypes` 表里的标量」，不是「任何标量」。
-// `i64` 不在那张表里（表里有 `ui64`、没有 `i64`），所以这一条由 ODS 拦。
+// f64 标量不在类型表里。目的地使用合法的 f16，单独验证标量操作数约束。
 // 这一格钉的是放开的范围：把约束写成 `AnyType` 的话它会全绿。
-func.func @broadcast_scalar_element_type_not_in_table(%destination: !ascendc.local_tensor<?xi64>) {
-  %scalar = arith.constant 2 : i64
+func.func @broadcast_scalar_element_type_not_in_table(%destination: !ascendc.local_tensor<?xf16>) {
+  %scalar = arith.constant 2.000000e+00 : f64
   // expected-error @+1 {{op operand #0 must be}}
   %result = afir.broadcast %scalar outs(%destination) {
     afir.operand_descs = [#scalar_src],
     afir.destination_descs = [#compute_desc],
     afir.result_descs = [#compute_desc]
-  } : i64, !ascendc.local_tensor<?xi64> -> !ascendc.local_tensor<?xi64>
+  } : f64, !ascendc.local_tensor<?xf16> -> !ascendc.local_tensor<?xf16>
   return
 }
 

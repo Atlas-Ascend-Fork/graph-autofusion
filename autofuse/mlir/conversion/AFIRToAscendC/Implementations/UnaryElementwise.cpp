@@ -75,6 +75,7 @@ using elementwise::kF16;
 using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
+using elementwise::kI64;
 using elementwise::kUI16;
 using elementwise::kUI8;
 
@@ -90,8 +91,8 @@ using elementwise::kUI8;
 // 这 16 处照了出来。缺省实参因此去掉：集合是每个 op 自己的事实，不该有缺省。
 constexpr uint32_t kFloatAndI32ElementTypes = kF16 | kF32 | kI32;
 constexpr uint32_t kFloatElementTypes = kF16 | kF32;
-// `abs` 的 reg 侧：legacy 比 mem 侧多收 i16 / ui8。
-constexpr uint32_t kAbsRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kBF16;
+// `abs` 的 reg 侧：legacy 比 mem 侧多收 i16 / ui8 / i64。
+constexpr uint32_t kAbsRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kBF16 | kI64;
 // `neg`：legacy 两侧都收 i16，原先注册处漏了。
 constexpr uint32_t kNegElementTypes = kF16 | kF32 | kI16 | kI32;
 // `ub2ub`：legacy 两侧共九种（reg 侧多一个 i64），这里是其中 AFIR 的 `ElementTypes`
@@ -759,12 +760,12 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   }
 
   // 两侧都只有包装，签名也一样，只有扩展头不同——id 用 `extend` / `extend_reg_base`
-  // 区分，说的是支持表，不是芯片。
+  // 区分，说的是支持表，不是芯片。reg 侧多收 bf16 / i64。
   if (failed(registerUnary<NegOp, ascendc::NegExtendOp>(registry, "neg.tensor.extend", ApiFamily::MemBased,
                                                         ResultElementRule::Same, kNegElementTypes)) ||
       failed(registerUnary<NegOp, ascendc::NegExtendRegBaseOp>(registry, "neg.tensor.extend_reg_base",
                                                                ApiFamily::RegBased, ResultElementRule::Same,
-                                                               kNegElementTypes | kBF16))) {
+                                                               kNegElementTypes | kBF16 | kI64))) {
     return failure();
   }
 
@@ -800,12 +801,12 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   // 这是第一个声明两个业务头的 op：包装按 dtype 分流，f16 / f32 直接转发
   // `AscendC::Sign`，其余先 `Cast`，所以 `cast.h` 与 `sign*.h` 两个都要。
   //
-  // reg 侧多收 ui8；i64 / bf16 它也收，但 AFIR 建模不出来。
+  // reg 侧多收 ui8 / bf16 / i64。
   if (failed(registerUnary<afir::SignOp, ascendc::SignExtendOp, /*TakesTmpBuffer=*/true>(
           registry, "sign.tensor.extend", ApiFamily::MemBased, ResultElementRule::Same, kF16 | kF32 | kI32)) ||
       failed(registerUnary<afir::SignOp, ascendc::SignExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
           registry, "sign.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same,
-          kF16 | kF32 | kI32 | kUI8 | kBF16))) {
+          kF16 | kF32 | kI32 | kUI8 | kBF16 | kI64))) {
     return failure();
   }
 
@@ -1094,15 +1095,15 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   //
   // 两侧的名字也不是同一个：mem 侧是裸名 `LogicalNot`（不带 `Extend` 后缀，也不是
   // `AscendC::LogicalNot`——包装是全局函数），reg 侧才叫 `LogicalNotExtend`。
-  // 收的元素类型 mem 侧 {f16, f32, ui8, i16, i32}，reg 侧多一个 ui16（它还收 i8 / i64 /
-  // ui32 / ui64 / bf16 / bool，AFIR 建模不出来）。那块常量是 `half`。
+  // 收的元素类型 mem 侧 {f16, f32, ui8, i16, i32}，reg 侧多 ui16 / bf16 / i64（它还收
+  // i8 / ui32 / ui64 / bool，AFIR 建模不出来）。那块常量是 `half`。
   if (failed(registerUnary<afir::LogicalNotOp, ascendc::LogicalNotExtendOp, /*TakesTmpBuffer=*/true,
                            /*MaterializesReuseSource=*/false, ConstBlockOnes::F16>(
           registry, "logical_not.tensor.extend", ApiFamily::MemBased, ResultElementRule::Same,
           kF16 | kF32 | kUI8 | kI16 | kI32)) ||
       failed(registerUnary<afir::LogicalNotOp, ascendc::LogicalNotExtendRegBaseOp>(
           registry, "logical_not.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Uint8,
-          kF16 | kF32 | kUI8 | kUI16 | kI16 | kI32 | kBF16))) {
+          kF16 | kF32 | kUI8 | kUI16 | kI16 | kI32 | kBF16 | kI64))) {
     return failure();
   }
 
@@ -1116,7 +1117,7 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   // `BitwiseNotExtend(dst, src, count)`（`api_regbase/bitwise_not.h`），不带 tmp。
   // legacy 另有一条走 `MicroAPI::Not` 的 VF 融合路，本 Op 不建模那一条。
   return registerUnary<afir::BitwiseNotOp, ascendc::BitwiseNotExtendRegBaseOp>(
-      registry, "bitwise_not.tensor", ApiFamily::RegBased, ResultElementRule::Same, kUI8 | kI16 | kUI16 | kI32);
+      registry, "bitwise_not.tensor", ApiFamily::RegBased, ResultElementRule::Same, kUI8 | kI16 | kUI16 | kI32 | kI64);
 }
 
 }  // namespace mlir::ascend::kernel
