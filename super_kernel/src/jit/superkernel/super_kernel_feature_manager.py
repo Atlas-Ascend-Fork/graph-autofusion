@@ -174,7 +174,7 @@ class SuperKernelFeatureManager:
 
     def unregister_feature(self, feature_name: str) -> None:
         if feature_name not in self._support_features_instances:
-            raise KeyError(f"feature {feature_name} does not exists")
+            raise KeyError(f"feature {feature_name} does not exist")
 
         self._support_features_instances.pop(feature_name)
 

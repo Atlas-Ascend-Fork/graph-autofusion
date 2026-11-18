@@ -631,7 +631,7 @@ void SuperKernelOptionsManager::ParseOptions(const aclskOptions *options) {
   }
   SK_LOGI("Options nums: %d", static_cast<int>(options->numOptions));
   if (options->numOptions > 0 && options->options == nullptr) {
-    SK_LOGW("aclskOptions options is nullptr while numOptions is %zu", options->numOptions);
+    SK_LOGW("aclskOptions options are nullptr while numOptions is %zu", options->numOptions);
     return;
   }
   std::unordered_set<aclskOptionType> parsedTypes;
