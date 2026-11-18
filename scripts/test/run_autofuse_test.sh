@@ -824,6 +824,7 @@ codegen_e2e_st() {
                         i1e_store_test_e2e_v2 \
                         indirect_load_broadcast_elements_sk_test_e2e_v2 \
                         indirect_load_broadcast_index_where_simt_test_e2e_v2 \
+                        indirect_load_graph_hint_dy_gather_slice_e2e_v2 \
                         indirect_load_graph_hint_embedding_slice_e2e_v2 \
                         indirect_load_rank3_axis1_torch_gather_frontend_e2e_v2 \
                         indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_e2e_v2 \
