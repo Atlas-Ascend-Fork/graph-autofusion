@@ -10,7 +10,7 @@
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 
 // RUN: af-opt --afir-select-implementation --target=Ascend910B1 %s | FileCheck %s --check-prefix=SELECT
-// SELECT-COUNT-2: id = "truediv.singleton_scalar.duplicate"
+// SELECT-COUNT-6: id = "truediv.singleton_scalar.duplicate"
 // RUN: sed 's/repeats = \[\#afir.expr<"1">\]/repeats = [#afir.expr<"2">]/' %s > %t.invalid.mlir
 // RUN: not af-opt --afir-to-ascendc-pipeline --target=Ascend910B1 %t.invalid.mlir 2>&1 | FileCheck %s --check-prefix=INVALID
 // INVALID: no supported Ascend implementation
@@ -75,6 +75,116 @@ func.func @scalar_div_singleton(%seed: !ascendc.local_tensor<1xf32>,
 // CHECK: %[[QUOTIENT:.*]] = arith.divf %{{.*}}, %[[VALUE]] : f32
 // CHECK: ascendc.duplicate_l2 %{{.*}}, %[[QUOTIENT]],
 // CPP-LABEL: void scalar_div_singleton
+// CPP: .GetValue(
+// CPP: /
+// CPP: AscendC::Duplicate(
+
+func.func @singleton_truediv_f16(%seed: !ascendc.local_tensor<1xf16>,
+                              %dst: !ascendc.local_tensor<257xf16>,
+                              %tmp: !ascendc.local_tensor<32xui8>, %divisor: f16) {
+  %pipe = ascendc.pipe
+  %queue = ascendc.queue : <vecin, 2>
+  %one = ascendc.que_bind.alloc_tensor %queue : !ascendc.queue<vecin, 2>, !ascendc.local_tensor<1xf16>
+  %value = afir.neg %seed outs(%one) {afir.operand_descs = [#one], afir.destination_descs = [#one],
+                                      afir.result_descs = [#one]}
+      : !ascendc.local_tensor<1xf16>, !ascendc.local_tensor<1xf16> -> !ascendc.local_tensor<1xf16>
+  %result = afir.truediv %value, %divisor outs(%dst) tmp(%tmp) {
+      afir.operand_descs = [#one, #scalar], afir.destination_descs = [#full], afir.result_descs = [#full]
+  } : (!ascendc.local_tensor<1xf16>, f16), !ascendc.local_tensor<257xf16>, !ascendc.local_tensor<32xui8>
+      -> !ascendc.local_tensor<257xf16>
+  return
+}
+// CHECK-LABEL: func.func @singleton_truediv_f16
+// CHECK: ascendc.wait_flag
+// CHECK: ascendc.local_tensor.get_value
+// CHECK: %[[L:.*]] = arith.extf
+// CHECK: %[[R:.*]] = arith.extf
+// CHECK: %[[Q:.*]] = arith.divf %[[L]], %[[R]] : f32
+// CHECK: %[[OUT:.*]] = arith.truncf %[[Q]] : f32 to f16
+// CHECK: ascendc.duplicate_l2 %{{.*}}, %[[OUT]],
+// CPP-LABEL: void singleton_truediv_f16
+// CPP: .GetValue(
+// CPP: /
+// CPP: AscendC::Duplicate(
+
+func.func @singleton_truediv_f16_reverse(%seed: !ascendc.local_tensor<1xf16>,
+                              %dst: !ascendc.local_tensor<257xf16>,
+                              %tmp: !ascendc.local_tensor<32xui8>, %divisor: f16) {
+  %pipe = ascendc.pipe
+  %queue = ascendc.queue : <vecin, 2>
+  %one = ascendc.que_bind.alloc_tensor %queue : !ascendc.queue<vecin, 2>, !ascendc.local_tensor<1xf16>
+  %value = afir.neg %seed outs(%one) {afir.operand_descs = [#one], afir.destination_descs = [#one],
+                                      afir.result_descs = [#one]}
+      : !ascendc.local_tensor<1xf16>, !ascendc.local_tensor<1xf16> -> !ascendc.local_tensor<1xf16>
+  %result = afir.truediv %divisor, %value outs(%dst) tmp(%tmp) {
+      afir.operand_descs = [#scalar, #one], afir.destination_descs = [#full], afir.result_descs = [#full]
+  } : (f16, !ascendc.local_tensor<1xf16>), !ascendc.local_tensor<257xf16>, !ascendc.local_tensor<32xui8>
+      -> !ascendc.local_tensor<257xf16>
+  return
+}
+// CHECK-LABEL: func.func @singleton_truediv_f16_reverse
+// CHECK: ascendc.wait_flag
+// CHECK: ascendc.local_tensor.get_value
+// CHECK: %[[L:.*]] = arith.extf
+// CHECK: %[[R:.*]] = arith.extf
+// CHECK: %[[Q:.*]] = arith.divf %[[L]], %[[R]] : f32
+// CHECK: %[[OUT:.*]] = arith.truncf %[[Q]] : f32 to f16
+// CHECK: ascendc.duplicate_l2 %{{.*}}, %[[OUT]],
+// CPP-LABEL: void singleton_truediv_f16_reverse
+// CPP: .GetValue(
+// CPP: /
+// CPP: AscendC::Duplicate(
+
+func.func @singleton_truediv_i32(%seed: !ascendc.local_tensor<1xi32>,
+                              %dst: !ascendc.local_tensor<257xf32>,
+                              %tmp: !ascendc.local_tensor<32xui8>, %divisor: i32) {
+  %pipe = ascendc.pipe
+  %queue = ascendc.queue : <vecin, 2>
+  %one = ascendc.que_bind.alloc_tensor %queue : !ascendc.queue<vecin, 2>, !ascendc.local_tensor<1xi32>
+  %value = afir.neg %seed outs(%one) {afir.operand_descs = [#one], afir.destination_descs = [#one],
+                                      afir.result_descs = [#one]}
+      : !ascendc.local_tensor<1xi32>, !ascendc.local_tensor<1xi32> -> !ascendc.local_tensor<1xi32>
+  %result = afir.truediv %value, %divisor outs(%dst) tmp(%tmp) {
+      afir.operand_descs = [#one, #scalar], afir.destination_descs = [#full], afir.result_descs = [#full]
+  } : (!ascendc.local_tensor<1xi32>, i32), !ascendc.local_tensor<257xf32>, !ascendc.local_tensor<32xui8>
+      -> !ascendc.local_tensor<257xf32>
+  return
+}
+// CHECK-LABEL: func.func @singleton_truediv_i32
+// CHECK: ascendc.wait_flag
+// CHECK: ascendc.local_tensor.get_value
+// CHECK: %[[L:.*]] = arith.sitofp
+// CHECK: %[[R:.*]] = arith.sitofp
+// CHECK: %[[Q:.*]] = arith.divf %[[L]], %[[R]] : f32
+// CHECK: ascendc.duplicate_l2 %{{.*}}, %[[Q]],
+// CPP-LABEL: void singleton_truediv_i32
+// CPP: .GetValue(
+// CPP: /
+// CPP: AscendC::Duplicate(
+
+func.func @singleton_truediv_i32_reverse(%seed: !ascendc.local_tensor<1xi32>,
+                              %dst: !ascendc.local_tensor<257xf32>,
+                              %tmp: !ascendc.local_tensor<32xui8>, %divisor: i32) {
+  %pipe = ascendc.pipe
+  %queue = ascendc.queue : <vecin, 2>
+  %one = ascendc.que_bind.alloc_tensor %queue : !ascendc.queue<vecin, 2>, !ascendc.local_tensor<1xi32>
+  %value = afir.neg %seed outs(%one) {afir.operand_descs = [#one], afir.destination_descs = [#one],
+                                      afir.result_descs = [#one]}
+      : !ascendc.local_tensor<1xi32>, !ascendc.local_tensor<1xi32> -> !ascendc.local_tensor<1xi32>
+  %result = afir.truediv %divisor, %value outs(%dst) tmp(%tmp) {
+      afir.operand_descs = [#scalar, #one], afir.destination_descs = [#full], afir.result_descs = [#full]
+  } : (i32, !ascendc.local_tensor<1xi32>), !ascendc.local_tensor<257xf32>, !ascendc.local_tensor<32xui8>
+      -> !ascendc.local_tensor<257xf32>
+  return
+}
+// CHECK-LABEL: func.func @singleton_truediv_i32_reverse
+// CHECK: ascendc.wait_flag
+// CHECK: ascendc.local_tensor.get_value
+// CHECK: %[[L:.*]] = arith.sitofp
+// CHECK: %[[R:.*]] = arith.sitofp
+// CHECK: %[[Q:.*]] = arith.divf %[[L]], %[[R]] : f32
+// CHECK: ascendc.duplicate_l2 %{{.*}}, %[[Q]],
+// CPP-LABEL: void singleton_truediv_i32_reverse
 // CPP: .GetValue(
 // CPP: /
 // CPP: AscendC::Duplicate(
