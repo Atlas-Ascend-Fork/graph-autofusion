@@ -42,8 +42,30 @@ log "init test case, please wait ..."
 # ==============================
 
 source /usr/local/Ascend/cann/set_env.sh
+
+# compile 阶段跳过(仅改 docs/md 等文件, build.sh 返回 200)时若产出 empty.run 占位包,
+# 以其作为显式跳过标记; arm_run_url 为空不是跳过信号, 而是 compile 产出链异常
+# (输出引用断链/未上传), 按失败处理, 避免"冒烟没跑"被误报为跳过。
+if [ "$(basename "${arm_run_url:-}")" = "empty.run" ]; then
+  echo "[PreSmoke] Compile stage skipped (empty.run placeholder), no need to execute smoke test task"
+  exit 0
+fi
+if [ -z "${arm_run_url:-}" ]; then
+  echo "[PreSmoke] ERROR: arm_run_url is empty (compile artifact missing, not an empty.run skip marker)" >&2
+  exit 1
+fi
+
 arm_package=$(basename "${arm_run_url}")
-wget -nv ${arm_run_url} && chmod 777 ${arm_package}
+echo "Downloading ${arm_package} from ${arm_run_url}"
+if ! wget -nv --tries=3 --timeout=60 "${arm_run_url}"; then
+  echo "[PreSmoke] ERROR: failed to download ${arm_package} from ${arm_run_url}" >&2
+  exit 1
+fi
+if [ ! -s "${arm_package}" ]; then
+  echo "[PreSmoke] ERROR: downloaded ${arm_package} is empty (url: ${arm_run_url})" >&2
+  exit 1
+fi
+chmod 777 "${arm_package}"
 /opt/conda/envs/python39/bin/python3 -m pip install packaging
 /opt/conda/envs/python39/bin/python3 -m pip install build
 /opt/conda/envs/python39/bin/python3 -m pip install 'setuptools>=68,<80'
