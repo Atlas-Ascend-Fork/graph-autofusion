@@ -11,6 +11,7 @@
 #include "ascendc_ir.h"
 #include "ascir_ops.h"
 #include "ascir_utils.h"
+#include "common_utils.h"
 
 #include "gtest/gtest.h"
 #include "ascendc_ir_def.h"
@@ -940,6 +941,150 @@ TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_aligned_broadcast_add) {
   EXPECT_EQ(add_node->inputs[0].anchor.GetOwnerNodeBarePtr(), pad_node.get());
 }
 
+TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_two_consumers_unique_name) {
+  af::AscGraph graph("compact_reduce_pad_for_two_consumers_unique_name");
+  auto rows = af::Symbol(8);
+  auto cols = af::Symbol(11);
+  auto row_axis = graph.CreateAxis("row", rows);
+  auto col_axis = graph.CreateAxis("col", cols);
+  std::vector<af::AxisId> axes = {row_axis.id, col_axis.id};
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  af::ascir_op::Load reduce_load("reduce_load");
+  reduce_load.x = data.y;
+  SetTwoDimNodeAttr(reduce_load, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Sum reduce_sum("reduce_sum");
+  reduce_sum.x = reduce_load.y;
+  SetTwoDimNodeAttr(reduce_sum, ge::DT_FLOAT, af::ComputeType::kComputeReduce, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Load aligned_load("aligned_load");
+  aligned_load.x = data.y;
+  SetTwoDimNodeAttr(aligned_load, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols},
+                    {cols * af::Symbol(2), One});
+  af::ascir_op::Broadcast broadcast("broadcast");
+  broadcast.x = aligned_load.y;
+  SetTwoDimNodeAttr(broadcast, ge::DT_FLOAT, af::ComputeType::kComputeBroadcast, axes, {rows, cols},
+                    {cols * af::Symbol(2), One});
+  af::ascir_op::Add add1("add1");
+  add1.x1 = reduce_sum.y;
+  add1.x2 = broadcast.y;
+  SetTwoDimNodeAttr(add1, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Store store1("store1");
+  store1.x = add1.y;
+  SetTwoDimNodeAttr(store1, ge::DT_FLOAT, af::ComputeType::kComputeStore, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Add add2("add2");
+  add2.x1 = reduce_sum.y;
+  add2.x2 = broadcast.y;
+  SetTwoDimNodeAttr(add2, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Store store2("store2");
+  store2.x = add2.y;
+  SetTwoDimNodeAttr(store2, ge::DT_FLOAT, af::ComputeType::kComputeStore, axes, {rows, cols}, {cols, One});
+
+  ASSERT_EQ(AlignmentHandler::AlignVectorizedStrides(graph), af::SUCCESS);
+
+  std::vector<std::string> pad_names;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->GetType() == "Pad") {
+      pad_names.push_back(node->GetName());
+    }
+  }
+  ASSERT_EQ(pad_names.size(), 2U) << "should insert one Pad per consumer";
+  std::set<std::string> unique_names(pad_names.begin(), pad_names.end());
+  EXPECT_EQ(unique_names.size(), pad_names.size()) << "pad node names must be unique";
+
+  std::set<std::string> field_names;
+  for (const auto &name : pad_names) {
+    field_names.insert(ascgen_utils::GenValidName(name + "_tilingData"));
+  }
+  EXPECT_EQ(field_names.size(), pad_names.size());
+
+  // 同源双胞胎的 tiling 值指纹相同（属性拷贝自同一份 reduce_attr），身份校验可安全跳过。
+  std::set<std::string> fingerprints;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->GetType() == "Pad") {
+      fingerprints.insert(ascgen_utils::GenApiTilingValueFingerprint(node));
+    }
+  }
+  EXPECT_EQ(fingerprints.size(), 1U) << "same-source pads must share identical value fingerprint";
+}
+
+TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_normalized_name_conflict) {
+  af::AscGraph graph("compact_reduce_pad_for_normalized_name_conflict");
+  auto rows = af::Symbol(8);
+  auto cols = af::Symbol(11);
+  auto row_axis = graph.CreateAxis("row", rows);
+  auto col_axis = graph.CreateAxis("col", cols);
+  std::vector<af::AxisId> axes = {row_axis.id, col_axis.id};
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  // 节点名 sum.x 与 sum_x 不同，但 GenValidName 归一化后派生出同一字段前缀 sum_x，
+  // 旧命名会撞出相同的 tiling 字段；GenUniqueNodeName 需按派生字段名避让。
+  af::ascir_op::Load load0("load0");
+  load0.x = data.y;
+  SetTwoDimNodeAttr(load0, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Sum sum0("sum.x");
+  sum0.x = load0.y;
+  SetTwoDimNodeAttr(sum0, ge::DT_FLOAT, af::ComputeType::kComputeReduce, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Load aligned_load0("aligned_load0");
+  aligned_load0.x = data.y;
+  SetTwoDimNodeAttr(aligned_load0, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols},
+                    {cols * af::Symbol(2), One});
+  af::ascir_op::Broadcast broadcast0("broadcast0");
+  broadcast0.x = aligned_load0.y;
+  SetTwoDimNodeAttr(broadcast0, ge::DT_FLOAT, af::ComputeType::kComputeBroadcast, axes, {rows, cols},
+                    {cols * af::Symbol(2), One});
+  af::ascir_op::Add add0("add0");
+  add0.x1 = sum0.y;
+  add0.x2 = broadcast0.y;
+  SetTwoDimNodeAttr(add0, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Store store0("store0");
+  store0.x = add0.y;
+  SetTwoDimNodeAttr(store0, ge::DT_FLOAT, af::ComputeType::kComputeStore, axes, {rows, cols}, {cols, One});
+
+  af::ascir_op::Load load1("load1");
+  load1.x = data.y;
+  SetTwoDimNodeAttr(load1, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Sum sum1("sum_x");
+  sum1.x = load1.y;
+  SetTwoDimNodeAttr(sum1, ge::DT_FLOAT, af::ComputeType::kComputeReduce, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Load aligned_load1("aligned_load1");
+  aligned_load1.x = data.y;
+  SetTwoDimNodeAttr(aligned_load1, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols},
+                    {cols * af::Symbol(2), One});
+  af::ascir_op::Broadcast broadcast1("broadcast1");
+  broadcast1.x = aligned_load1.y;
+  SetTwoDimNodeAttr(broadcast1, ge::DT_FLOAT, af::ComputeType::kComputeBroadcast, axes, {rows, cols},
+                    {cols * af::Symbol(2), One});
+  af::ascir_op::Add add1("add1");
+  add1.x1 = sum1.y;
+  add1.x2 = broadcast1.y;
+  SetTwoDimNodeAttr(add1, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Store store1("store1");
+  store1.x = add1.y;
+  SetTwoDimNodeAttr(store1, ge::DT_FLOAT, af::ComputeType::kComputeStore, axes, {rows, cols}, {cols, One});
+
+  ASSERT_EQ(AlignmentHandler::AlignVectorizedStrides(graph), af::SUCCESS);
+
+  std::vector<std::string> pad_names;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->GetType() == "Pad") {
+      pad_names.push_back(node->GetName());
+    }
+  }
+  ASSERT_EQ(pad_names.size(), 2U);
+  std::set<std::string> unique_names(pad_names.begin(), pad_names.end());
+  EXPECT_EQ(unique_names.size(), pad_names.size()) << "pad node names must be unique";
+
+  std::set<std::string> field_names;
+  for (const auto &name : pad_names) {
+    field_names.insert(ascgen_utils::GenValidName(name + "_tilingData"));
+  }
+  EXPECT_EQ(field_names.size(), pad_names.size()) << "normalized tiling field names must be unique";
+}
+
 TEST_F(VectorizedAlignmentUT, scalar_reduce_skips_pad_for_aligned_broadcast_add) {
   af::AscGraph graph("scalar_reduce_skips_pad_for_aligned_broadcast_add");
   auto rows = af::Symbol(8);
@@ -997,6 +1142,42 @@ TEST_F(VectorizedAlignmentUT, non_compact_sum_skips_compact_reduce_pad) {
   af::InDataAnchorPtr reduce_input;
   af::OutDataAnchorPtr reduce_output;
   EXPECT_FALSE(strategy.AccessFindCompactReduceInput(graph.FindNode("add"), reduce_input, reduce_output));
+}
+
+TEST_F(VectorizedAlignmentUT, api_tiling_value_fingerprint_reflects_shape_and_source) {
+  af::AscGraph graph("api_tiling_value_fingerprint_reflects_shape_and_source");
+  auto rows = af::Symbol(8);
+  auto cols = af::Symbol(11);
+  auto row_axis = graph.CreateAxis("row", rows);
+  auto col_axis = graph.CreateAxis("col", cols);
+  std::vector<af::AxisId> axes = {row_axis.id, col_axis.id};
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  SetTwoDimNodeAttr(load, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols}, {cols, One});
+
+  // 不同 shape 的两个 Pad：tiling 值必然不同，指纹必须可区分
+  af::ascir_op::Pad pad_a("pad_a");
+  pad_a.x = load.y;
+  SetTwoDimNodeAttr(pad_a, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Pad pad_b("pad_b");
+  pad_b.x = load.y;
+  SetTwoDimNodeAttr(pad_b, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols * af::Symbol(2)},
+                    {cols * af::Symbol(2), One});
+
+  const auto fingerprint_a = ascgen_utils::GenApiTilingValueFingerprint(graph.FindNode("pad_a"));
+  const auto fingerprint_b = ascgen_utils::GenApiTilingValueFingerprint(graph.FindNode("pad_b"));
+  EXPECT_NE(fingerprint_a, fingerprint_b) << "pads with different shapes must have different fingerprints";
+
+  // 属性拷贝自同一来源（对齐 pass 的插法）：指纹相同
+  af::ascir_op::Pad pad_c("pad_c");
+  pad_c.x = load.y;
+  graph.FindNode("pad_c")->outputs[0].attr = graph.FindNode("pad_a")->outputs[0].attr;
+  const auto fingerprint_c = ascgen_utils::GenApiTilingValueFingerprint(graph.FindNode("pad_c"));
+  EXPECT_EQ(fingerprint_a, fingerprint_c) << "pads copied from the same attr must share the fingerprint";
 }
 
 }  // namespace optimize

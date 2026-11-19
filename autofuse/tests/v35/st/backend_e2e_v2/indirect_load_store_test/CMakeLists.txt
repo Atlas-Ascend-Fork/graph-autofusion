@@ -1,4 +1,4 @@
-﻿function(mark_indirect_load_codegen_and_e2e test_name)
+function(mark_indirect_load_codegen_and_e2e test_name)
     target_compile_definitions(${test_name}_codegen_v2 PRIVATE ${ARGN})
     target_compile_definitions(${test_name}_e2e_v2 PRIVATE ${ARGN})
 endfunction()

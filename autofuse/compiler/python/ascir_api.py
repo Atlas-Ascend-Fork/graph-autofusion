@@ -1733,9 +1733,38 @@ def Prod(
     size: Optional[List[ascir.SizeExpr]] = None,
     stride: Optional[List[ascir.SizeExpr]] = None,
 ) -> ascir.OpsOperatorOutput:
-    return _common_in_1_out_1_normal_op(
-        "Prod", owner_graph, x, axis=axis, size=size, stride=stride
+    if x.dtype != ascir.dtypes.int8:
+        return _common_in_1_out_1_normal_op(
+            "Prod", owner_graph, x, axis=axis, size=size, stride=stride
+        )
+
+    executed = Cast(
+        owner_graph,
+        x,
+        dtype=ascir.dtypes.int16,
+        axis=axis,
+        size=size,
+        stride=stride,
     )
+    product = _common_in_1_out_1_normal_op(
+        "Prod", owner_graph, executed, axis=axis, size=size, stride=stride
+    )
+    truncated = Cast(
+        owner_graph,
+        Cast(
+            owner_graph,
+            product,
+            dtype=ascir.dtypes.uint8,
+            axis=axis,
+            size=size,
+            stride=stride,
+        ),
+        dtype=ascir.dtypes.int8,
+        axis=axis,
+        size=size,
+        stride=stride,
+    )
+    return truncated
 
 
 def Ge(
@@ -2545,6 +2574,37 @@ def Randint64(
     op.offset = offset
     op.low = low
     op.high = high
+    op.y.dtype = ascir.dtypes.int64
+    _infer_or_set_view(op.y, axis, size, stride)
+    op.infer_dtype()
+    return op.y
+
+
+def RandInt(
+    owner_graph: ascir.HintGraph,
+    x1: ascir.OpsOperatorOutput,
+    x2: ascir.OpsOperatorOutput,
+    x3: ascir.OpsOperatorOutput,
+    x4: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+) -> ascir.OpsOperatorOutput:
+    """
+    RandInt - generate element-wise uniform integers: y[i] = x3[i] + Philox64(x1[i], x2[i]) % (x4[i] - x3[i]).
+    x1 seed (int64), x2 counter (int32, arange position stream), x3 low / x4 high (int64).
+    Output dtype is int64 (int32 is handled by frontend Cast).
+    """
+    name = _generate_op_name(owner_graph, "rand_int")
+    op = ascir.ops.RandInt(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op)
+    op.attr.sched.axis = axis
+    op.x1 = x1
+    op.x2 = x2
+    op.x3 = x3
+    op.x4 = x4
     op.y.dtype = ascir.dtypes.int64
     _infer_or_set_view(op.y, axis, size, stride)
     op.infer_dtype()

@@ -111,7 +111,7 @@ void ExpressionHandle(const af::AscNodeAttr *asc_node_attr, const std::string &n
   if (ir_attr->GetAttrValue(name, value) == GRAPH_FAILED) {
     return;
   }
-  value_string = value.Serialize().get();
+  value_string = value.Str().get();
 }
 
 using handle_ptr = void (*)(const af::AscNodeAttr *asc_node_attr, const std::string &name, std::string &value_string);

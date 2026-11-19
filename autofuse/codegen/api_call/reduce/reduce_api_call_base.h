@@ -55,7 +55,7 @@ static std::map<std::string, std::pair<int, std::string>> reduce_type_map = {
     {"ReduceMean", {ReduceOpType::kMean, "Add"}},
 };
 
-void GetIsArAndPattern(const Tensor &y, bool &isAr, std::string &reduce_pattern);
+void GetIsArAndPattern(const Tensor &x, const Tensor &y, bool &isAr, std::string &reduce_pattern);
 void CheckReduceSpecificParamsForCodegen(const ReduceCodegenShadowCheckInput &input);
 void ReduceMergedSizeCodeGen(const TPipe &tpipe, std::vector<std::string> &lines, const Tensor &src, const Tensor &dst,
                              bool is_tail = false);
@@ -63,7 +63,8 @@ bool IsNeedMultiReduce(const Tiler &tiler, const Tensor &input, const Tensor &ou
 void ReduceMeanCodeGen(std::string &dtype_name, const TPipe &tpipe, const Tensor &src, const Tensor &dst,
                        std::vector<std::string> &lines);
 void ReduceInitCodeGen(const Tensor &x, const Tensor &y, const int &type_value, std::vector<std::string> &lines,
-                       const TPipe &tpipe, const std::string &dtype_name);
+                       const TPipe &tpipe, const std::string &dtype_name,
+                       const std::string &x_name_after_reinterpret = "");
 void ReduceDimACodeGen(const Tensor &x, const std::string &apiName, std::vector<std::string> &lines);
 Status GetDtypeNameForReduce(const std::string &api_name, const Tensor &x, const Tensor &y, std::string &dtype_name);
 void GenAccumulatedOffsetDeclForArgmax(const std::string &api_name, const Tensor &x, const Tensor &y,

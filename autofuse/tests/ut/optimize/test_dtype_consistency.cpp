@@ -42,6 +42,8 @@
 #include "runtime_stub.h"
 
 #include "codegen.h"
+#include "../../common/att/soc_perf_test_config.h"
+#include "asc_graph_builder.h"
 #include "optimize/graph_pass/pass_utils.h"
 
 using namespace ge;
@@ -55,6 +57,9 @@ class TestDtypeConsistency : public ::testing::Test {
     ge::PlatformContext::GetInstance().Reset();
     auto stub_v1 = std::make_shared<RuntimeStub>();
     RuntimeStub::SetInstance(stub_v1);
+    ASSERT_EQ(
+        att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocEmpty),
+        af::SUCCESS);
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
   }
 
@@ -793,6 +798,129 @@ TEST_F(TestDtypeConsistency, OutputDtypeDirectlyModified) {
   EXPECT_TRUE(store_input_is_fp16);
 }
 
+TEST_F(TestDtypeConsistency, ProdInt8WidensToInt16AndWrapsOutputToInt8) {
+  auto graph = af::testing::AscGraphBuilder("test_prod_int8_output_cast_path")
+                   .Loops({af::testing::Sym("s0")})
+                   .Data("data0", 0, {af::testing::Sym("s0")}, {af::ops::One}, ge::DT_INT8)
+                   .Load("load0", "data0")
+                   .Prod("prod", "load0", {0})
+                   .Store("store0", "prod")
+                   .Output("output0", "store0", 0, ge::DT_INT8)
+                   .Build();
+
+  std::vector<optimize::NodeDtypeRequirement> requirements;
+  EXPECT_EQ(optimize::DtypeConsistency::CollectDtypeRequirements(graph, requirements), af::SUCCESS);
+  EXPECT_EQ(optimize::DtypeConsistency::ApplyDtypeConversions(graph, requirements), af::SUCCESS);
+  EXPECT_EQ(optimize::DtypeConsistency::CancelRedundantCast(graph), af::SUCCESS);
+
+  bool has_int8_to_int16_cast = false;
+  bool has_int16_to_uint8_cast = false;
+  bool has_uint8_to_int8_cast = false;
+  bool prod_is_int16 = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->GetType() == "Prod") {
+      prod_is_int16 = node->inputs[0].attr.dtype == ge::DT_INT16 && node->outputs[0].attr.dtype == ge::DT_INT16;
+    }
+    if (!af::ops::IsOps<Cast>(node)) {
+      continue;
+    }
+
+    has_int8_to_int16_cast = has_int8_to_int16_cast ||
+                             (node->inputs[0].attr.dtype == ge::DT_INT8 && node->outputs[0].attr.dtype == ge::DT_INT16);
+    has_int16_to_uint8_cast = has_int16_to_uint8_cast || (node->inputs[0].attr.dtype == ge::DT_INT16 &&
+                                                          node->outputs[0].attr.dtype == ge::DT_UINT8);
+    has_uint8_to_int8_cast = has_uint8_to_int8_cast ||
+                             (node->inputs[0].attr.dtype == ge::DT_UINT8 && node->outputs[0].attr.dtype == ge::DT_INT8);
+  }
+
+  EXPECT_TRUE(has_int8_to_int16_cast);
+  EXPECT_TRUE(has_int16_to_uint8_cast);
+  EXPECT_TRUE(has_uint8_to_int8_cast);
+  EXPECT_TRUE(prod_is_int16);
+}
+
+TEST_F(TestDtypeConsistency, ProdInt8WithoutConsumerSkipsOutputCastPath) {
+  auto graph = af::testing::AscGraphBuilder("test_prod_int8_no_output_consumer")
+                   .Loops({af::testing::Sym("s0")})
+                   .Data("data0", 0, {af::testing::Sym("s0")}, {af::ops::One}, ge::DT_INT8)
+                   .Load("load0", "data0")
+                   .Prod("prod", "load0", {0})
+                   .Build();
+
+  std::vector<optimize::NodeDtypeRequirement> requirements;
+  EXPECT_EQ(optimize::DtypeConsistency::CollectDtypeRequirements(graph, requirements), af::SUCCESS);
+  EXPECT_EQ(optimize::DtypeConsistency::ApplyDtypeConversions(graph, requirements), af::SUCCESS);
+
+  bool has_output_wrap_cast = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (!af::ops::IsOps<Cast>(node)) {
+      continue;
+    }
+    has_output_wrap_cast = has_output_wrap_cast ||
+                           (node->inputs[0].attr.dtype == ge::DT_INT16 && node->outputs[0].attr.dtype == ge::DT_UINT8);
+  }
+
+  EXPECT_FALSE(has_output_wrap_cast);
+}
+
+TEST_F(TestDtypeConsistency, ProdInt8EpilogueMulKeepsWrapOutputPath) {
+  auto graph = af::testing::AscGraphBuilder("test_prod_int8_epilogue_mul")
+                   .Loops({af::testing::Sym("s0")})
+                   .Data("data0", 0, {af::testing::Sym("s0")}, {af::ops::One}, ge::DT_INT8)
+                   .Load("load0", "data0")
+                   .Prod("prod", "load0", {0})
+                   .Mul("mul", "prod", "prod")
+                   .Store("store0", "mul")
+                   .Output("output0", "store0", 0, ge::DT_INT8)
+                   .Build();
+
+  std::vector<optimize::NodeDtypeRequirement> requirements;
+  EXPECT_EQ(optimize::DtypeConsistency::CollectDtypeRequirements(graph, requirements), af::SUCCESS);
+  EXPECT_EQ(optimize::DtypeConsistency::ApplyDtypeConversions(graph, requirements), af::SUCCESS);
+  EXPECT_EQ(optimize::DtypeConsistency::CancelRedundantCast(graph), af::SUCCESS);
+
+  bool has_int16_to_uint8_cast = false;
+  bool has_uint8_to_int8_cast = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (!af::ops::IsOps<Cast>(node)) {
+      continue;
+    }
+    has_int16_to_uint8_cast = has_int16_to_uint8_cast || (node->inputs[0].attr.dtype == ge::DT_INT16 &&
+                                                          node->outputs[0].attr.dtype == ge::DT_UINT8);
+    has_uint8_to_int8_cast = has_uint8_to_int8_cast ||
+                             (node->inputs[0].attr.dtype == ge::DT_UINT8 && node->outputs[0].attr.dtype == ge::DT_INT8);
+  }
+
+  EXPECT_TRUE(has_int16_to_uint8_cast);
+  EXPECT_TRUE(has_uint8_to_int8_cast);
+}
+
+TEST_F(TestDtypeConsistency, MulInt8DoesNotWrapOutputWithoutProd) {
+  auto graph = af::testing::AscGraphBuilder("test_mul_int8_without_prod")
+                   .Loops({af::testing::Sym("s0")})
+                   .Data("data0", 0, {af::testing::Sym("s0")}, {af::ops::One}, ge::DT_INT8)
+                   .Load("load0", "data0")
+                   .Mul("mul", "load0", "load0")
+                   .Store("store0", "mul")
+                   .Output("output0", "store0", 0, ge::DT_INT8)
+                   .Build();
+
+  std::vector<optimize::NodeDtypeRequirement> requirements;
+  EXPECT_EQ(optimize::DtypeConsistency::CollectDtypeRequirements(graph, requirements), af::SUCCESS);
+  EXPECT_EQ(optimize::DtypeConsistency::ApplyDtypeConversions(graph, requirements), af::SUCCESS);
+
+  bool has_output_wrap_cast = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (!af::ops::IsOps<Cast>(node)) {
+      continue;
+    }
+    has_output_wrap_cast = has_output_wrap_cast ||
+                           (node->inputs[0].attr.dtype == ge::DT_INT16 && node->outputs[0].attr.dtype == ge::DT_UINT8);
+  }
+
+  EXPECT_FALSE(has_output_wrap_cast);
+}
+
 // Test 14: Multiple outputs with different dtype requirements
 TEST_F(TestDtypeConsistency, MultipleOutputsWithDifferentDtypes) {
   af::AscGraph graph("test_multiple_outputs");
@@ -851,6 +979,45 @@ TEST_F(TestDtypeConsistency, MultipleOutputsWithDifferentDtypes) {
   }
   EXPECT_EQ(cast_fp16_to_fp32_count, 1U);  // Load 后面一个
   EXPECT_EQ(cast_fp32_to_fp16_count, 1U);  // Store1 前面一个
+}
+
+TEST_F(TestDtypeConsistency, MultipleOutputsWithMultipleCastPath) {
+  using af::ops::One;
+
+  auto graph =
+      af::testing::AscGraphBuilder("test_multiple_outputs_cast_path")
+          .Loops({af::testing::Sym(16)})
+          .Data("data0", 0, {af::testing::Sym(16)}, {One}, ge::DT_INT16)
+          .Load("load0", "data0", {af::testing::Sym(16)}, {One})
+          .Split("split", "load0",
+                 {{ge::DT_INT16, {}, {af::testing::Sym(16)}, {One}}, {ge::DT_INT16, {}, {af::testing::Sym(16)}, {One}}})
+          .Store("store0", "split:0")
+          .Store("store1", "split:1")
+          .Output("output0", "store0", 0, ge::DT_INT16)
+          .Output("output1", "store1", 0, ge::DT_INT8)
+          .Build();
+
+  auto split_node = graph.FindNode("split");
+  ASSERT_NE(split_node, nullptr);
+  optimize::NodeDtypeRequirement requirement{
+      split_node, {ge::DT_INT16}, {ge::DT_INT16, ge::DT_INT16}, {{}, {ge::DT_UINT8, ge::DT_INT8}}};
+  EXPECT_EQ(optimize::DtypeConsistency::ProcessOutputCastPath(graph, requirement), af::SUCCESS);
+
+  ASSERT_FALSE(split_node->GetOutDataAnchor(1)->GetPeerInDataAnchors().empty());
+  auto first_cast_node = std::dynamic_pointer_cast<af::AscNode>(
+      (*split_node->GetOutDataAnchor(1)->GetPeerInDataAnchors().begin())->GetOwnerNode());
+  ASSERT_NE(first_cast_node, nullptr);
+  EXPECT_TRUE(af::ops::IsOps<Cast>(first_cast_node));
+  EXPECT_EQ(first_cast_node->inputs[0].attr.dtype, ge::DT_INT16);
+  EXPECT_EQ(first_cast_node->outputs[0].attr.dtype, ge::DT_UINT8);
+
+  ASSERT_FALSE(first_cast_node->GetOutDataAnchor(0)->GetPeerInDataAnchors().empty());
+  auto second_cast_node = std::dynamic_pointer_cast<af::AscNode>(
+      (*first_cast_node->GetOutDataAnchor(0)->GetPeerInDataAnchors().begin())->GetOwnerNode());
+  ASSERT_NE(second_cast_node, nullptr);
+  EXPECT_TRUE(af::ops::IsOps<Cast>(second_cast_node));
+  EXPECT_EQ(second_cast_node->inputs[0].attr.dtype, ge::DT_UINT8);
+  EXPECT_EQ(second_cast_node->outputs[0].attr.dtype, ge::DT_INT8);
 }
 
 // Test 15: All dtypes already match, no conversion needed

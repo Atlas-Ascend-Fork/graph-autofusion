@@ -519,7 +519,7 @@ graphStatus AscNodeDeserializeUtils::DeserializeAttrGroupsDef(
 graphStatus ExpressionSerializer::Serialize(const AnyValue &av, GeIrAttrDef &def) {
   Expression expression;
   GE_ASSERT_GRAPH_SUCCESS(av.GetValue(expression));
-  def.set_expression(expression.Serialize().get());
+  def.set_expression(expression.Str().get());
   return GRAPH_SUCCESS;
 }
 

@@ -9,9 +9,13 @@
  */
 
 #include <gtest/gtest.h>
+#include <map>
+#include <utility>
+#include <vector>
 #include "graph/symbolizer/symbolic.h"
 
 #include "ascendc_ir.h"
+#include "ascir_ops.h"
 #include "ascir_registry.h"
 #include "ascir_utils.h"
 #define private public
@@ -53,6 +57,42 @@ TEST(UnsupportedAscIrRegistration, HasExpectedDefinitionAndImplementations) {
   ASSERT_NE(att, nullptr);
   EXPECT_EQ(att->GetApiPerf(), nullptr);
   EXPECT_EQ(att->GetAscendCApiPerfTable(), nullptr);
+}
+
+TEST(ReduceAscIrRegistration, SupportsExpectedV35Dtypes) {
+  const std::vector<af::DataType> expected_dtypes = {af::DT_BOOL,  af::DT_UINT8, af::DT_INT8, af::DT_INT16,
+                                                     af::DT_INT32, af::DT_INT64, af::DT_FLOAT};
+  const std::vector<std::pair<std::string, std::vector<af::DataType>>> reduce_dtypes = {
+      {"Prod", {af::DT_INT8, af::DT_INT16, af::DT_INT32, af::DT_INT64, af::DT_FLOAT}},
+      {"Any", expected_dtypes},
+      {"All", expected_dtypes}};
+  const std::map<std::string,
+                 af::Status (*)(const std::vector<af::DataType> &, std::vector<af::DataType> &, const std::string &)>
+      infer_dtype_functions = {{"Prod", af::ascir_op::Prod::InferDataType},
+                               {"Any", af::ascir_op::Any::InferDataType},
+                               {"All", af::ascir_op::All::InferDataType}};
+
+  const auto &registry = ascir::AscirRegistry::GetInstance().GetAll();
+  for (const auto &expected : reduce_dtypes) {
+    const auto iter = registry.find(expected.first);
+    ASSERT_NE(iter, registry.end()) << expected.first;
+
+    const auto &soc_to_store = iter->second.GetSocToDataTypeSymbolStore();
+    ASSERT_FALSE(soc_to_store.empty()) << expected.first;
+    const auto &named_symbols = soc_to_store.begin()->second.GetNamedSymbols();
+    const auto symbol_iter = named_symbols.find("T");
+    ASSERT_NE(symbol_iter, named_symbols.end()) << expected.first;
+    ASSERT_NE(symbol_iter->second, nullptr) << expected.first;
+
+    for (const auto dtype : expected.second) {
+      std::vector<af::DataType> output_dtypes;
+      const auto input_dtypes = std::vector<af::DataType>{dtype};
+      const auto infer_dtype = infer_dtype_functions.at(expected.first);
+      EXPECT_EQ(infer_dtype(input_dtypes, output_dtypes, "3510"), af::SUCCESS) << expected.first;
+      ASSERT_EQ(output_dtypes.size(), 1U);
+      EXPECT_EQ(output_dtypes[0], dtype) << expected.first;
+    }
+  }
 }
 
 TEST_F(AscendGraphDumpUT, test_dump_when_env_not_set) {

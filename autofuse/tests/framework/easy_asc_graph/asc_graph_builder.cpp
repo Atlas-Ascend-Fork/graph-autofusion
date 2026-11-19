@@ -506,6 +506,8 @@ template AscGraphBuilder &AscGraphBuilder::Reduce<ascir_op::Max>(const std::stri
 
 template AscGraphBuilder &AscGraphBuilder::Reduce<ascir_op::Sum>(const std::string &, const std::string &,
                                                                  const std::vector<size_t> &);
+template AscGraphBuilder &AscGraphBuilder::Reduce<ascir_op::Prod>(const std::string &, const std::string &,
+                                                                  const std::vector<size_t> &);
 
 AscGraphBuilder &AscGraphBuilder::Cast(const std::string &name, const std::string &input, DataType dtype) {
   auto &input_tensor = GetInputOutputTensor(input);

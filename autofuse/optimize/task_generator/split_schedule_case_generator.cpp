@@ -210,7 +210,7 @@ Status SplitFusionCaseGenerator::ReplaceWithLoad(::ascir::ImplGraph &owner_graph
   for (auto peer_in_anchor : split_out_anchor->GetPeerInDataAnchors()) {
     GELOGI("Store node: %s added, peer_node = %s:%d, offset = %s", load_node->GetName().c_str(),
            peer_in_anchor->GetOwnerNode()->GetName().c_str(), peer_in_anchor->GetIdx(),
-           offsets_[out_index].Serialize().get());
+           offsets_[out_index].Str().get());
     GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(split_out_anchor, peer_in_anchor), "Failed to RemoveEdge");
     GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(load_node->GetOutDataAnchor(0), peer_in_anchor), "Failed to AddEdge");
   }

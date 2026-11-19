@@ -2027,9 +2027,9 @@ TEST_F(TestOptimizer, optimize_with_fused_ascbacked) {
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   EXPECT_EQ(fused_scheduled_result.fused_graph_name.GetString(), fused_graph->GetName());
   ASSERT_EQ(fused_scheduled_result.origin_vars.size(), 3UL);
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[0].Serialize().get()), "s0");
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[1].Serialize().get()), "s1");
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[2].Serialize().get()), "s999");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[0].Str().get()), "s0");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[1].Str().get()), "s1");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[2].Str().get()), "s999");
   ASSERT_EQ(fused_scheduled_result.input_nodes.size(), 3UL);
   ASSERT_EQ(fused_scheduled_result.output_nodes.size(), 2UL);
   ASSERT_EQ(fused_scheduled_result.workspace_nodes.size(), 2UL);
@@ -8714,6 +8714,93 @@ TEST_F(TestOptimizer, BrcCacheReuseOtherMem) {
   auto abs2_result = impl_graph.FindNode("abs2");
   auto exp2_result = impl_graph.FindNode("exp2");
   EXPECT_NE(abs2_result->outputs[0].attr.buf.id, exp2_result->outputs[0].attr.buf.id);
+}
+
+// PR2920 动态打分字段保活: 生产侧 load0/abs0/ws_store 视图 [1,s1,s2] 的 z2 维全零步长(z1 稠密
+// 不触发全 0 守卫), 调度期 RemoveAllZeroStrideLoopAxis 删除 z2 轴后 s2 失去生产侧全部表达式引用,
+// 被 size var 重建裁剪; 而打分函数按调度前归属硬编码引用 graph0_result0_g0_tiling_data.s2——修复前
+// g0 子结构体缺 s2 字段, host tiling 侧编译报 no member 's2'。修复将打分绑定符号并入对应组
+// runtime_shape_vars, 保证结构体字段存在(ProcessMultiGroup)且运行期值被填充(TilingSetShapeDim)。
+TEST_F(TestOptimizer, BroadcastWorkspaceDynamicScoreKeepsPrunedShapeVar) {
+  af::AscGraph graph("brc_ws_dynamic_score_keep");
+  const af::Expression s0 = af::Symbol("s0");
+  const af::Expression s1 = af::Symbol("s1");
+  const af::Expression s2 = af::Symbol("s2");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+
+  Data x0("x0", graph);
+  x0.ir_attr.SetIndex(0);
+  x0.y.dtype = af::DT_FLOAT16;
+
+  Load load0("load0");
+  load0.x = x0.y;
+  load0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *load0.y.axis = {z0.id, z1.id, z2.id};
+  *load0.y.repeats = {af::sym::kSymbolOne, s1, s2};
+  *load0.y.strides = {af::sym::kSymbolZero, af::sym::kSymbolOne, af::sym::kSymbolZero};
+  load0.y.dtype = af::DT_FLOAT16;
+
+  Abs abs0("abs0");
+  abs0.x = load0.y;
+  abs0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *abs0.y.axis = {z0.id, z1.id, z2.id};
+  *abs0.y.repeats = {af::sym::kSymbolOne, s1, s2};
+  *abs0.y.strides = {af::sym::kSymbolZero, af::sym::kSymbolOne, af::sym::kSymbolZero};
+  abs0.y.dtype = af::DT_FLOAT16;
+
+  Broadcast brc0("brc0");
+  brc0.x = abs0.y;
+  brc0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *brc0.y.axis = {z0.id, z1.id, z2.id};
+  *brc0.y.repeats = {s0, s1, s2};
+  *brc0.y.strides = {s1 * s2, s2, af::sym::kSymbolOne};
+  brc0.y.dtype = af::DT_FLOAT16;
+
+  Store store0("store0");
+  store0.x = brc0.y;
+  store0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *store0.y.axis = {z0.id, z1.id, z2.id};
+  *store0.y.repeats = {s0, s1, s2};
+  *store0.y.strides = {s1 * s2, s2, af::sym::kSymbolOne};
+  store0.y.dtype = af::DT_FLOAT16;
+
+  Output y0("y0");
+  y0.x = store0.y;
+  y0.ir_attr.SetIndex(0);
+
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  // ws 候选恒为 result0, 默认模板为 result1
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  // 动态打分: 非首轴乘积 s1*s2, s1/s2 按调度前归属均绑定生产侧 g0
+  const std::string score_func(ws_result.score_func.GetString());
+  EXPECT_NE(score_func.find("tiling_data.graph0_result0_g0_tiling_data.s1"), std::string::npos) << score_func;
+  EXPECT_NE(score_func.find("tiling_data.graph0_result0_g0_tiling_data.s2"), std::string::npos) << score_func;
+  // 回归断言: s2 虽在调度后失去生产侧表达式引用, 仍须保活于 g0 的 runtime_shape_vars
+  const auto &runtime_shape_vars = ws_result.schedule_groups[0].runtime_shape_vars;
+  auto keep_it = std::find_if(runtime_shape_vars.begin(), runtime_shape_vars.end(),
+                              [](const af::Expression &var) { return std::string(var.Str().get()) == "s2"; });
+  EXPECT_NE(keep_it, runtime_shape_vars.end()) << "score-referenced var s2 pruned by scheduler";
+
+  // codegen 全链: g0 子结构体发射 s2 字段, host tiling 代码填充运行期值
+  codegen::CodegenResult generated;
+  const std::map<std::string, std::string> shape_info = {{"s0", "4"}, {"s1", "4096"}, {"s2", "16"}};
+  ASSERT_EQ(codegen::Codegen(codegen::CodegenOptions{}).Generate(shape_info, fused_scheduled_result, generated),
+            af::SUCCESS);
+  const std::string &tiling_data = generated.tiling_data;
+  const std::string g0_struct_begin = "BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult0G0TilingData)";
+  const auto g0_begin = tiling_data.find(g0_struct_begin);
+  ASSERT_NE(g0_begin, std::string::npos) << tiling_data;
+  const auto g0_end = tiling_data.find("BEGIN_TILING_DATA_DEF_T(", g0_begin + g0_struct_begin.size());
+  const std::string g0_struct_block =
+      tiling_data.substr(g0_begin, (g0_end == std::string::npos ? tiling_data.size() : g0_end) - g0_begin);
+  EXPECT_NE(g0_struct_block.find("TILING_DATA_FIELD_DEF_T(int64_t, s2);"), std::string::npos) << g0_struct_block;
+  EXPECT_NE(generated.tiling.find("graph0_result0_g0_tiling_data.set_s2(s2)"), std::string::npos) << generated.tiling;
 }
 
 TEST_F(TestOptimizer, SliceSliceConcatD) {

@@ -1746,6 +1746,9 @@ extern "C" __global__ __aicore__ void IL_USER_EMBEDDING_SLICE_KERNEL_NAME(GM_ADD
 #elif defined(IL_GRAPH_HINT_EMBEDDING_SLICE)
 extern "C" __global__ __aicore__ void autofused_to_copy_embedding_slice_161da55df6362966862381c5d053b7e7(
     GM_ADDR input0, GM_ADDR input1, GM_ADDR output, GM_ADDR workspace, GM_ADDR tiling);
+#elif defined(IL_GRAPH_HINT_DY_GATHER_SLICE)
+extern "C" __global__ __aicore__ void autofused_dy_gather_slice(GM_ADDR input0, GM_ADDR input1, GM_ADDR output,
+                                                                GM_ADDR workspace, GM_ADDR tiling);
 #elif defined(IL_GRAPH_HINT_SIMD_REPRO)
 extern "C" __global__ __aicore__ void indirect_load_graph_hint_simd_repro(GM_ADDR input0, GM_ADDR input1,
                                                                           GM_ADDR output, GM_ADDR workspace,
@@ -2123,6 +2126,69 @@ TEST(E2EIndirectLoadGraphHintEmbeddingSlice, GeneratedKernelMatchesReference) {
       EXPECT_FLOAT_EQ(output.get()[offset], table.get()[table_offset]) << "row=" << row << ", column=" << column;
     }
   }
+}
+#elif defined(IL_GRAPH_HINT_DY_GATHER_SLICE)
+// Dynamic-shape tail-axis gather. The index source is physically [s0, s5, s76] but the kernel
+// reads it through a cross-dim sliced view [s0, columns, s76] (stride0 = s5*s76, non-continuous);
+// the table is physically [s0, s5, s86], read as [s0, columns, s86]. Semantics:
+// out[i,j,k] = exp(table_view[i,j, index_view[i,j,k]]), index values in [0, s86).
+constexpr int32_t kGraphHintDyGatherS0 = 37;
+constexpr int32_t kGraphHintDyGatherS5 = 520;
+constexpr int32_t kGraphHintDyGatherS76 = 76;
+constexpr int32_t kGraphHintDyGatherS86 = 86;
+constexpr int32_t kGraphHintDyGatherColumns = 512;
+
+TEST(E2EIndirectLoadGraphHintDyGatherSlice, GeneratedKernelMatchesReference) {
+  constexpr int64_t index_count =
+      static_cast<int64_t>(kGraphHintDyGatherS0) * kGraphHintDyGatherS5 * kGraphHintDyGatherS76;
+  constexpr int64_t table_count =
+      static_cast<int64_t>(kGraphHintDyGatherS0) * kGraphHintDyGatherS5 * kGraphHintDyGatherS86;
+  constexpr int64_t output_count =
+      static_cast<int64_t>(kGraphHintDyGatherS0) * kGraphHintDyGatherColumns * kGraphHintDyGatherS76;
+  auto index = indirect_load_test::AllocGmBuffer<int32_t>(index_count);
+  auto table = indirect_load_test::AllocGmBuffer<float>(table_count);
+  auto output = indirect_load_test::AllocGmBuffer<float>(output_count);
+  ASSERT_TRUE(index && table && output);
+
+  // Fill the whole physical index buffer; the kernel only reads the sliced first `columns` rows.
+  for (int32_t i = 0; i < kGraphHintDyGatherS0; ++i) {
+    for (int32_t j = 0; j < kGraphHintDyGatherS5; ++j) {
+      for (int32_t k = 0; k < kGraphHintDyGatherS76; ++k) {
+        const int64_t offset = (static_cast<int64_t>(i) * kGraphHintDyGatherS5 + j) * kGraphHintDyGatherS76 + k;
+        index.get()[offset] = (i * 31 + j * 7 + k * 13) % kGraphHintDyGatherS86;
+      }
+    }
+  }
+  for (int64_t t = 0; t < table_count; ++t) {
+    table.get()[t] = static_cast<float>(t % 65) * 0.25F - 8.0F;
+  }
+  std::fill_n(output.get(), output_count, 0.0F);
+
+  AutofuseTilingData tiling_data{};
+  uint64_t workspace_size = 0U;
+  uint32_t block_dim = 48U;
+  ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
+  void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
+  ASSERT_TRUE(workspace_size == 0U || workspace != nullptr);
+
+  indirect_load_test::RunKernel(autofused_dy_gather_slice, block_dim, reinterpret_cast<uint8_t *>(workspace),
+                                reinterpret_cast<uint8_t *>(&tiling_data), index.get(), table.get(), output.get());
+
+  for (int32_t i = 0; i < kGraphHintDyGatherS0; ++i) {
+    for (int32_t j = 0; j < kGraphHintDyGatherColumns; ++j) {
+      for (int32_t k = 0; k < kGraphHintDyGatherS76; ++k) {
+        const int64_t output_offset =
+            (static_cast<int64_t>(i) * kGraphHintDyGatherColumns + j) * kGraphHintDyGatherS76 + k;
+        const int64_t index_offset = (static_cast<int64_t>(i) * kGraphHintDyGatherS5 + j) * kGraphHintDyGatherS76 + k;
+        const int32_t selected = index.get()[index_offset];
+        const int64_t table_offset =
+            (static_cast<int64_t>(i) * kGraphHintDyGatherS5 + j) * kGraphHintDyGatherS86 + selected;
+        EXPECT_FLOAT_EQ(output.get()[output_offset], std::exp(table.get()[table_offset]))
+            << "i=" << i << ", j=" << j << ", k=" << k;
+      }
+    }
+  }
+  if (workspace != nullptr) AscendC::GmFree(workspace);
 }
 #elif defined(IL_GRAPH_HINT_SIMD_REPRO)
 constexpr int32_t kGraphHintSimdRows = 30;

@@ -2060,6 +2060,49 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimdRegionMetadataAndSimtRejectsMult
   ExpectAxisNames(simd_graph, logical_view.output.axis_ids, {"y0", "y1"});
 }
 
+TEST(IndirectLoadScheduleCaseGeneratorTest, DirectPostReduceKeepsParallelSimtOutputRoles) {
+  auto graph = BuildPostReduceGraph("ARR");
+  const auto il = graph.FindNode("indirect_load");
+  ASSERT_NE(il, nullptr);
+  const auto view = il->outputs[0].attr;
+  af::ascir_op::Abs abs("parallel_abs");
+  SetNodeView(abs, af::DT_FLOAT16, view.axis, view.repeats, view.strides);
+  SetVectorApi(abs);
+  af::ascir_op::Store abs_store("parallel_abs_store");
+  SetNodeView(abs_store, af::DT_FLOAT16, view.axis, view.repeats, view.strides);
+  af::ascir_op::Store raw_store("parallel_raw_store");
+  SetNodeView(raw_store, af::DT_FLOAT16, view.axis, view.repeats, view.strides);
+  graph.AddNode(abs);
+  graph.AddNode(abs_store);
+  graph.AddNode(raw_store);
+  const auto abs_node = graph.FindNode("parallel_abs");
+  const auto abs_store_node = graph.FindNode("parallel_abs_store");
+  const auto raw_store_node = graph.FindNode("parallel_raw_store");
+  ASSERT_EQ(af::GraphUtils::AddEdge(il->GetOutDataAnchor(0), abs_node->GetInDataAnchor(0)), af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(abs_node->GetOutDataAnchor(0), abs_store_node->GetInDataAnchor(0)), af::SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(il->GetOutDataAnchor(0), raw_store_node->GetInDataAnchor(0)), af::SUCCESS);
+  for (const auto &entry : std::vector<std::pair<const char *, af::AscNodePtr>>{
+           {"parallel_abs_output", abs_store_node}, {"parallel_raw_output", raw_store_node}}) {
+    af::ascir_op::Output output(entry.first);
+    output.ir_attr.SetIndex(entry.second == abs_store_node ? 1 : 2);
+    SetNodeView(output, af::DT_FLOAT16, view.axis, view.repeats, view.strides);
+    graph.AddNode(output);
+    ASSERT_EQ(
+        af::GraphUtils::AddEdge(entry.second->GetOutDataAnchor(0), graph.FindNode(entry.first)->GetInDataAnchor(0)),
+        af::SUCCESS);
+  }
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> scores;
+  ASSERT_EQ(generator.Generate(graph, graphs, scores), af::SUCCESS);
+  const auto candidate = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_NE(candidate, graphs.end());
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(candidate->FindNode("parallel_abs")),
+            ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(candidate->FindNode("sum")),
+            ascgen_utils::indirect_load::TemplateRole::kNone);
+}
+
 TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceMetadataCoversReduceAxisLayouts) {
   const std::vector<std::pair<std::string, std::string>> layouts = {
       {"R", "RRR"}, {"AR", "ARR"}, {"RA", "RRA"}, {"ARA", "ARA"}};

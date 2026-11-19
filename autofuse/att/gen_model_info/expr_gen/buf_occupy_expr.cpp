@@ -38,7 +38,7 @@ af::Status BufOccupyExpr::GetCoTensorSizeExpr(const std::vector<std::vector<Tens
       if (IsValid(align) && !(align == 1)) {
         tensor_size_expr = af::sym::Mul(af::sym::Ceiling(af::sym::Div(tensor_size_expr, align)), align);
       }
-      GELOGD("Get tensor [%s] size : [%s]", tensor->name.c_str(), tensor_size_expr.Serialize().get());
+      GELOGD("Get tensor [%s] size : [%s]", tensor->name.c_str(), tensor_size_expr.Str().get());
       GE_ASSERT_TRUE(IsValid(tensor_size_expr), "Tensor [%s] has no expr.", tensor->name.c_str());
       if (IsValid(total_size)) {
         total_size = af::sym::Add(total_size, tensor_size_expr);
@@ -76,7 +76,7 @@ af::Status BufOccupyExpr::GetOccupInContainer(ContainerPtr &container, Expr &occ
       tensor_size_expr =
           af::sym::Mul(af::sym::Ceiling(af::sym::Div(tensor_size_expr, container->align)), container->align);
     }
-    GELOGD("Get tensor [%s] size : [%s]", tensor->name.c_str(), tensor_size_expr.Serialize().get());
+    GELOGD("Get tensor [%s] size : [%s]", tensor->name.c_str(), tensor_size_expr.Str().get());
     GE_ASSERT_TRUE(IsValid(tensor_size_expr), "Tensor [%s] has no expr.", tensor->name.c_str());
     if (IsValid(occup_per_tensor)) {
       occup_per_tensor = af::sym::Max(occup_per_tensor, tensor_size_expr);

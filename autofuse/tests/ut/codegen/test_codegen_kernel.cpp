@@ -87,7 +87,7 @@ TEST(CodegenKernel, NBroadCastCallbackUsesCubeOffsetAndCompletesEveryVectorTile)
 
 namespace {
 std::string ToString(const af::Expression &e) {
-  return std::string(e.Serialize().get());
+  return std::string(e.Str().get());
 }
 
 template <typename BuildDownstream>

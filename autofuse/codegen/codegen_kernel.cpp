@@ -1960,9 +1960,10 @@ std::string TPipe::AllocTmpBuf(const TBuf &buf, const bool with_define) const {
 
 static bool IsNextNodeSupportScalar(const ascir::NodeView &node) {
   std::set<std::string> support_ub_scalar_nodes = {
-      Load::Type,    Store::Type,   Div::Type,       TrueDiv::Type,    Mul::Type,       Add::Type,         Sub::Type,
-      Minimum::Type, Maximum::Type, LogicalOr::Type, LogicalAnd::Type, Broadcast::Type, ClipByValue::Type, Eq::Type,
-      Ne::Type,      Gt::Type,      Lt::Type,        Ge::Type,         Le::Type,        Pow::Type,         Where::Type};
+      Load::Type,        Store::Type,   Div::Type,     TrueDiv::Type,   Mul::Type,        Add::Type,
+      Sub::Type,         Minimum::Type, Maximum::Type, LogicalOr::Type, LogicalAnd::Type, Broadcast::Type,
+      ClipByValue::Type, Eq::Type,      Ne::Type,      Gt::Type,        Lt::Type,         Ge::Type,
+      Le::Type,          Pow::Type,     Where::Type,   RandInt::Type};
   return support_ub_scalar_nodes.count(node->GetType()) > 0U;
 }
 

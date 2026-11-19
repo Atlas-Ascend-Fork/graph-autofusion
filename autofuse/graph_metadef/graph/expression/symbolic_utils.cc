@@ -58,14 +58,14 @@ std::string SymbolicUtils::AsNumerDenomToString(const Expression &x) {
 }
 
 TriBool SymbolicUtils::StaticCheckBool(const Expression &expr) {
-  GE_ASSERT_TRUE(expr.IsBooleanExpr(), "Only boolean expr can do static check, expr: %s", expr.Serialize().get());
+  GE_ASSERT_TRUE(expr.IsBooleanExpr(), "Only boolean expr can do static check, expr: %s", expr.Str().get());
   bool value = false;
   if (expr.IsConstExpr()) {
     GE_ASSERT_TRUE(expr.GetConstValue(value));
     return value ? TriBool::kTrue : TriBool::kFalse;
   }
   if (GetCurShapeEnvContext() == nullptr) {
-    GELOGW("Shape env is nullptr, cannot do static check, expr: %s", expr.Serialize().get());
+    GELOGW("Shape env is nullptr, cannot do static check, expr: %s", expr.Str().get());
     return TriBool::kUnknown;
   }
   if (GetCurShapeEnvContext()->HasSymbolInfo(expr) == TriBool::kTrue) {

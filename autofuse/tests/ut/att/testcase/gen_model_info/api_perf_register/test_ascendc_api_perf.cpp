@@ -936,38 +936,32 @@ TEST_F(UTestAscendcApiPerf, TestCompareAscir) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp(op_type, 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
   op_type = kEq;
   perf = GetPerfFunc(op_type);
   result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
   op_type = kNe;
   perf = GetPerfFunc(op_type);
   result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
   op_type = kGt;
   perf = GetPerfFunc(op_type);
   result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
   op_type = kLe;
   perf = GetPerfFunc(op_type);
   result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
   op_type = kLt;
   perf = GetPerfFunc(op_type);
   result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
 }
 
 TEST_F(UTestAscendcApiPerf, TestCompareInt64Ascir) {
@@ -998,14 +992,12 @@ TEST_F(UTestAscendcApiPerf, TestCompareInt64Ascir) {
   perf = GetPerfFunc(op_type);
   result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
   op_type = kNe;
   perf = GetPerfFunc(op_type);
   result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
   op_type = kGt;
   perf = GetPerfFunc(op_type);
   result = perf(input_shapes, output_shapes, node, perf_res);

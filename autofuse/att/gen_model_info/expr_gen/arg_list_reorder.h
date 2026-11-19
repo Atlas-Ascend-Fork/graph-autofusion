@@ -267,6 +267,7 @@ class ArgListReorder {
                       bool is_broadcast);
   void RecordSpecialArgs(const NodeInfo &node, const TensorPtr &tensor, size_t id,
                          const std::vector<TensorPtr> &output_tensors, std::set<std::string> &reduce_axis_ori_axes_set);
+  void MarkSegmentCacheAxes(const std::vector<AttAxisPtr> &arg_list) const;
 };
 
 }  // namespace att

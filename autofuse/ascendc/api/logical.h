@@ -10,6 +10,17 @@
 #ifndef __ASCENDC_API_LOGICAL_H__
 #define __ASCENDC_API_LOGICAL_H__
 
+template <typename T>
+inline __aicore__ void CastInt64LogicalInput(const LocalTensor<half> &dst, const LocalTensor<T> &src,
+                                             const LocalTensor<float> &tmp, const uint32_t size) {
+  Cast(tmp, src, RoundMode::CAST_RINT, size);
+  Abs(tmp, tmp, size);
+  Mins(tmp, tmp, 1.0f, size);
+  AscendC::PipeBarrier<PIPE_V>();
+  Cast(dst, tmp, RoundMode::CAST_NONE, size);
+  AscendC::PipeBarrier<PIPE_V>();
+}
+
 template <typename T, void (*ApiCall)(const LocalTensor<half> &dstLocal, const LocalTensor<half> &src0Local,
                                       const LocalTensor<half> &src1Local, uint64_t mask, const uint8_t repeatTimes,
                                       const BinaryRepeatParams &repeatParams)>
@@ -52,14 +63,8 @@ inline __aicore__ void Int64LogicalCommon(const LocalTensor<uint8_t> &dst, const
 
   uint32_t cal_size = 0;
   for (; cal_size + max_repeat_size < size; cal_size += max_repeat_size) {
-    Cast(cast_float_src1, src1[cal_size], RoundMode::CAST_NONE, max_repeat_size);
-    Cast(cast_float_src2, src2[cal_size], RoundMode::CAST_NONE, max_repeat_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(cast_half_src1, cast_float_src1, RoundMode::CAST_RINT, max_repeat_size);
-    Cast(cast_half_src2, cast_float_src2, RoundMode::CAST_RINT, max_repeat_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
+    CastInt64LogicalInput(cast_half_src1, src1[cal_size], cast_float_src1, max_repeat_size);
+    CastInt64LogicalInput(cast_half_src2, src2[cal_size], cast_float_src2, max_repeat_size);
     ApiCall(cast_half_src1, cast_half_src1, cast_half_src2, ONE_REPEAT_HALF_SIZE, max_repeat, repeat_params);
     Cast(dst[cal_size], cast_half_src1, RoundMode::CAST_NONE, max_repeat_size);
   }
@@ -68,14 +73,8 @@ inline __aicore__ void Int64LogicalCommon(const LocalTensor<uint8_t> &dst, const
     uint32_t repeat = (size - cal_size) / ONE_REPEAT_HALF_SIZE;
     uint32_t repeat_size = repeat * ONE_REPEAT_HALF_SIZE;
 
-    Cast(cast_float_src1, src1[cal_size], RoundMode::CAST_RINT, repeat_size);
-    Cast(cast_float_src2, src2[cal_size], RoundMode::CAST_RINT, repeat_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(cast_half_src1, cast_float_src1, RoundMode::CAST_NONE, repeat_size);
-    Cast(cast_half_src2, cast_float_src2, RoundMode::CAST_NONE, repeat_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
+    CastInt64LogicalInput(cast_half_src1, src1[cal_size], cast_float_src1, repeat_size);
+    CastInt64LogicalInput(cast_half_src2, src2[cal_size], cast_float_src2, repeat_size);
     ApiCall(cast_half_src1, cast_half_src1, cast_half_src2, ONE_REPEAT_HALF_SIZE, repeat, repeat_params);
     Cast(dst[cal_size], cast_half_src1, RoundMode::CAST_NONE, repeat_size);
     cal_size += repeat_size;
@@ -85,14 +84,8 @@ inline __aicore__ void Int64LogicalCommon(const LocalTensor<uint8_t> &dst, const
     repeat_params.blockNumber = (size - cal_size + ONE_BLK_HALF_NUM - 1) / ONE_BLK_HALF_NUM;
     uint32_t left_size = size - cal_size;
 
-    Cast(cast_float_src1, src1[cal_size], RoundMode::CAST_RINT, left_size);
-    Cast(cast_float_src2, src2[cal_size], RoundMode::CAST_RINT, left_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(cast_half_src1, cast_float_src1, RoundMode::CAST_NONE, left_size);
-    Cast(cast_half_src2, cast_float_src2, RoundMode::CAST_NONE, left_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
+    CastInt64LogicalInput(cast_half_src1, src1[cal_size], cast_float_src1, left_size);
+    CastInt64LogicalInput(cast_half_src2, src2[cal_size], cast_float_src2, left_size);
     ApiCall(cast_half_src1, cast_half_src1, cast_half_src2, repeat_params.blockNumber * ONE_BLK_HALF_NUM, 1,
             repeat_params);
     Cast(dst[cal_size], cast_half_src1, RoundMode::CAST_NONE, left_size);
@@ -233,16 +226,12 @@ inline __aicore__ void Int64LogicalCommonScalarExtend(const LocalTensor<uint8_t>
   max_repeat = max_repeat > MAX_REPEAT_TIME ? MAX_REPEAT_TIME : max_repeat;
   const uint32_t max_repeat_size = max_repeat * ONE_REPEAT_HALF_SIZE;
 
-  half cast_half_src2 = ScalarCast<float, half, RoundMode::CAST_ODD>((float)src2);
+  float normalized_src2 = src2 == static_cast<T>(0) ? 0.0f : 1.0f;
+  half cast_half_src2 = ScalarCast<float, half, RoundMode::CAST_ODD>(normalized_src2);
 
   uint32_t cal_size = 0;
   for (; cal_size + max_repeat_size < size; cal_size += max_repeat_size) {
-    Cast(cast_float_src1, src1[cal_size], RoundMode::CAST_NONE, max_repeat_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(cast_half_src1, cast_float_src1, RoundMode::CAST_RINT, max_repeat_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
+    CastInt64LogicalInput(cast_half_src1, src1[cal_size], cast_float_src1, max_repeat_size);
     ApiCall(cast_half_src1, cast_half_src1, cast_half_src2, ONE_REPEAT_HALF_SIZE, max_repeat, repeat_params);
     Cast(dst[cal_size], cast_half_src1, RoundMode::CAST_NONE, max_repeat_size);
   }
@@ -251,12 +240,7 @@ inline __aicore__ void Int64LogicalCommonScalarExtend(const LocalTensor<uint8_t>
     uint32_t repeat = (size - cal_size) / ONE_REPEAT_HALF_SIZE;
     uint32_t repeat_size = repeat * ONE_REPEAT_HALF_SIZE;
 
-    Cast(cast_float_src1, src1[cal_size], RoundMode::CAST_RINT, repeat_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(cast_half_src1, cast_float_src1, RoundMode::CAST_NONE, repeat_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
+    CastInt64LogicalInput(cast_half_src1, src1[cal_size], cast_float_src1, repeat_size);
     ApiCall(cast_half_src1, cast_half_src1, cast_half_src2, ONE_REPEAT_HALF_SIZE, repeat, repeat_params);
     Cast(dst[cal_size], cast_half_src1, RoundMode::CAST_NONE, repeat_size);
     cal_size += repeat_size;
@@ -266,12 +250,7 @@ inline __aicore__ void Int64LogicalCommonScalarExtend(const LocalTensor<uint8_t>
     repeat_params.blockNumber = (size - cal_size + ONE_BLK_HALF_NUM - 1) / ONE_BLK_HALF_NUM;
     uint32_t left_size = size - cal_size;
 
-    Cast(cast_float_src1, src1[cal_size], RoundMode::CAST_RINT, left_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(cast_half_src1, cast_float_src1, RoundMode::CAST_NONE, left_size);
-
-    AscendC::PipeBarrier<PIPE_V>();
+    CastInt64LogicalInput(cast_half_src1, src1[cal_size], cast_float_src1, left_size);
     ApiCall(cast_half_src1, cast_half_src1, cast_half_src2, repeat_params.blockNumber * ONE_BLK_HALF_NUM, 1,
             repeat_params);
     Cast(dst[cal_size], cast_half_src1, RoundMode::CAST_NONE, left_size);

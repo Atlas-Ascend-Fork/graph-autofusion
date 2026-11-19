@@ -38,11 +38,11 @@ class PassRunnerV2 final : public BasePassRunner {
     this->RegisterPass<DuplicateElewiseCsePass>();
     this->RegisterPass<RedundantBroadcastEliminatePass>();
     this->RegisterPass<BroadcastBackwardPass>();
-    this->RegisterPass<SwapCastBroadcastPass>();
     this->RegisterPass<ScalarBroadcastOptimizationPass>();
     this->RegisterPass<MaskedFillInputReorderPass>();
     this->RegisterPass<ExpandDimsForAllReducePass>();
     this->RegisterPass<ContinuesBroadcastOptimizationPass>();
+    this->RegisterPass<SwapCastBroadcastPass>();
     this->RegisterPass<GatherToLoadPass>();
     this->RegisterPass<SplitConcatOptimizationPass>();
   }

@@ -184,6 +184,11 @@ class AscIrCodegen {
     return conversion_dtype;
   }
 
+  virtual std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) {
+    (void)node;
+    return {};
+  }
+
   virtual bool IsNodeValid(const AscNode &node) const {
     (void)node;
     return true;

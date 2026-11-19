@@ -2465,3 +2465,101 @@ TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsReusedQue) {
   EXPECT_EQ(graph.FindNode("load")->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
   EXPECT_EQ(graph.FindNode("load_reuse")->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
 }
+
+// ===== workspace 的 GM 身份 =====
+static af::AscGraph MakeWorkspaceWriterGraph(const std::string &graph_name, const std::string &ws_name) {
+  af::AscGraph graph(graph_name.c_str());
+  const af::Expression s0 = graph.CreateSizeVar(16);
+  auto z0 = graph.CreateAxis("z0", s0);
+
+  af::ascir_op::Data data("data0", graph);
+  data.ir_attr.SetIndex(0);
+  data.y.dtype = ge::DT_FLOAT;
+
+  af::ascir_op::Load load("w_load");
+  load.x = data.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load.y.dtype = ge::DT_FLOAT;
+  *load.y.axis = {z0.id};
+  *load.y.repeats = {s0};
+  *load.y.strides = {af::ops::One};
+
+  af::ascir_op::Store store("w_store");
+  store.x = load.y;
+  store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  store.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  store.y.dtype = ge::DT_FLOAT;
+  *store.y.axis = {z0.id};
+  *store.y.repeats = {s0};
+  *store.y.strides = {af::ops::One};
+
+  af::ascir_op::Workspace workspace(ws_name.c_str());
+  workspace.x = store.y;
+  workspace.y.dtype = ge::DT_FLOAT;
+  (void)graph.AddNode(workspace);
+  return graph;
+}
+
+static af::AscGraph MakeWorkspaceReaderGraph(const std::string &graph_name, const std::string &ws_name) {
+  af::AscGraph graph(graph_name.c_str());
+  const af::Expression s0 = graph.CreateSizeVar(16);
+  auto z0 = graph.CreateAxis("z0", s0);
+
+  af::ascir_op::Workspace workspace(ws_name.c_str());
+  workspace.y.dtype = ge::DT_FLOAT;
+  (void)graph.AddNode(workspace);
+
+  af::ascir_op::Load load("r_load");
+  load.x = workspace.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load.y.dtype = ge::DT_FLOAT;
+  *load.y.axis = {z0.id};
+  *load.y.repeats = {s0};
+  *load.y.strides = {af::ops::One};
+
+  af::ascir_op::Store store("r_store");
+  store.x = load.y;
+  store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  store.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  store.y.dtype = ge::DT_FLOAT;
+  *store.y.axis = {z0.id};
+  *store.y.repeats = {s0};
+  *store.y.strides = {af::ops::One};
+
+  af::ascir_op::Output output("output0");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  return graph;
+}
+
+static int64_t WorkspaceTensorId(const af::AscGraph &graph, const std::string &name) {
+  const auto node = graph.FindNode(name.c_str());
+  if (node == nullptr) {
+    return af::kIdNone;
+  }
+  return node->outputs[0].attr.mem.tensor_id;
+}
+
+// workspace 的 GM 身份就是节点名: 跨 impl_graph 同名即同一块, 拿到同一个 tensor_id;
+// 改个名字就是另一块 GM(tiling 按 tensor_id 给每个 id 一段互不相交的偏移)。
+// 多引用切分复制 workspace 时必须沿用源名字, 否则读者读到的是谁也没写过的那一段。
+TEST_F(BufQueAllocatorUT, WorkspaceIdentityIsNodeName) {
+  auto same_name = MakeFusedScheduledResultWithGraphs(
+      {MakeWorkspaceWriterGraph("ws_writer", "max_Workspace"), MakeWorkspaceReaderGraph("ws_reader", "max_Workspace")});
+  BufQueAllocator same_name_allocator;
+  ASSERT_EQ(same_name_allocator.AllocateForIoNodes(same_name), ge::GRAPH_SUCCESS);
+  const auto &same_name_graphs = same_name.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  const int64_t writer_id = WorkspaceTensorId(same_name_graphs[0], "max_Workspace");
+  EXPECT_NE(writer_id, af::kIdNone);
+  EXPECT_EQ(WorkspaceTensorId(same_name_graphs[1], "max_Workspace"), writer_id);
+
+  auto renamed = MakeFusedScheduledResultWithGraphs({MakeWorkspaceWriterGraph("ws_writer2", "max_Workspace"),
+                                                     MakeWorkspaceReaderGraph("ws_reader2", "copy_of_max_Workspace")});
+  BufQueAllocator renamed_allocator;
+  ASSERT_EQ(renamed_allocator.AllocateForIoNodes(renamed), ge::GRAPH_SUCCESS);
+  const auto &renamed_graphs = renamed.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  EXPECT_NE(WorkspaceTensorId(renamed_graphs[1], "copy_of_max_Workspace"),
+            WorkspaceTensorId(renamed_graphs[0], "max_Workspace"));
+}

@@ -73,6 +73,10 @@ struct AttAxis {
   // 分核轴类型标记（用于Store冲突检测）
   bool is_reduce_split_axis{false};     // 该轴是否是Reduce分核轴
   bool is_broadcast_split_axis{false};  // 该轴是否是Broadcast分核轴
+
+  // 动态shape分段缓存标记（打在原始轴上，用于生成侧收集分段key公式的轴变量）
+  bool is_reduce_related{false};        // 该原始轴是否是Reduce轴（含分块/分tile两种来源）
+  bool is_load_store_innermost{false};  // 该原始轴是否是load/store节点最内切分轴
 };
 
 using AttAxisPtr = std::shared_ptr<AttAxis>;

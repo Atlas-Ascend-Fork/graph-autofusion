@@ -892,7 +892,8 @@ TEST(GeneratorUT, ReuseGroupStateHeaderKeepsGroupNamespacesAndForwardDeclaration
   EXPECT_NE(api_header.find("struct AscGraph0ScheduleResult0G1TilingData;"), std::string::npos);
   EXPECT_NE(api_header.find("int32_t tiling_case_id, AutofuseTilingData* output_tiling_data"), std::string::npos);
   EXPECT_NE(state_header.find("#include <unordered_map>"), std::string::npos);
-  EXPECT_NE(state_header.find("AscGraph0ScheduleResult0G0::GroupLevelCache* cache"), std::string::npos);
+  // 类型由head单份生成于optiling层，wrapper声明用非限定名（组前缀限定解析不到，PR 2674流水线修复）
+  EXPECT_NE(state_header.find("GroupLevelCache* cache"), std::string::npos);
   EXPECT_EQ(state_header.find("#include \"autofuse_tiling_func_"), std::string::npos);
   EXPECT_NE(tiling_res.at(kTilingScheduleGroupTailIdentify).find("#include <cfloat>"), std::string::npos);
   const auto &reuse_source = tiling_res.at("asc_graph0_schedule_result0_g1");
@@ -1088,16 +1089,185 @@ TEST(GeneratorUT, WorkspaceReuseRelationIsOmittedFromGroupCache) {
 
   const auto &primary_source = tiling_res.at("asc_graph0_schedule_result0_g0");
   const auto &reuse_source = tiling_res.at("asc_graph0_schedule_result0_g1");
-  EXPECT_EQ(primary_source.find("GroupLevelCache"), std::string::npos);
-  EXPECT_EQ(reuse_source.find("GroupLevelCache"), std::string::npos);
-  EXPECT_EQ(primary_source.find("* cache"), std::string::npos);
-  EXPECT_EQ(reuse_source.find("* cache"), std::string::npos);
+  // 类型定义恒生成于state头（组级GetTiling恒带GroupLevelCache*形参，与复用数据解耦），
+  // 但无复用关系存活时组源不生成Find/Save函数、无缓存行为
+  const auto &group_cache_state_header = tiling_res.at(kTilingStateHeaderIdentify);
+  EXPECT_NE(group_cache_state_header.find("using GroupLevelCache"), std::string::npos);
+  EXPECT_NE(primary_source.find("GroupLevelCache *cache"), std::string::npos);
+  EXPECT_NE(reuse_source.find("GroupLevelCache* cache"), std::string::npos);
+  EXPECT_EQ(primary_source.find("FindGroupCache"), std::string::npos);
+  EXPECT_EQ(reuse_source.find("FindGroupCache"), std::string::npos);
 
   const auto &tail_source = tiling_res.at(kTilingScheduleGroupTailIdentify);
-  EXPECT_EQ(tail_source.find("AscGraph0ScheduleResult0G0::GroupLevelCache"), std::string::npos);
-  EXPECT_EQ(tail_source.find("AscGraph0ScheduleResult0G0_Cache"), std::string::npos);
-  EXPECT_EQ(tail_source.find("AscGraph0ScheduleResult0G1::GroupLevelCache"), std::string::npos);
-  EXPECT_EQ(tail_source.find("AscGraph0ScheduleResult0G1_Cache"), std::string::npos);
+  // tail侧不生成缓存对象声明（无复用关系存活）；类型定义在组TU内恒生成
+  EXPECT_EQ(tail_source.find("AscGraph0ScheduleResult0G0_Cache;"), std::string::npos);
+  EXPECT_EQ(tail_source.find("AscGraph0ScheduleResult0G1_Cache;"), std::string::npos);
+}
+
+// 回归：group-parallel + 组间复用时，组级cache不启用（拆独立修复，见PR 2674检视意见）但
+// 调用侧仍须与被调方按组条件生成的签名配对：复用对端点组（本例G0/G1均端点）以nullptr占位
+// cache形参，段参数对位不受影响；GetScheduleResult0内的result级组级缓存为base既有行为，
+// 不在本回归范围
+TEST(GeneratorUT, GroupParallelReuseCachePlaceholderInsideDoGroupTiling) {
+  TilingModelInfo primary_group{CreateModelInfo()};
+  TilingModelInfo reuse_group{CreateModelInfo()};
+  primary_group[0].schedule_group_ident = {0UL, 0UL, 0UL};
+  reuse_group[0].schedule_group_ident = {0UL, 0UL, 1UL};
+  ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 0UL}, primary_group), af::SUCCESS);
+  ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 1UL}, reuse_group), af::SUCCESS);
+  auto shared_reuse_group = primary_group[0].reuse_schedule_group;
+  shared_reuse_group->schedule_group_to_info[{0UL, 0UL, 1UL}] = reuse_group[0].reuse_schedule_group->info;
+  reuse_group[0].reuse_schedule_group = shared_reuse_group;
+  primary_group[0].enable_group_parallel = true;
+  reuse_group[0].enable_group_parallel = true;
+
+  FusedParsedScheduleResult fused_schedule_result;
+  auto &schedule_result = fused_schedule_result[0UL][0UL];
+  schedule_result.asc_graph_id = 0UL;
+  schedule_result.impl_graph_id = 0UL;
+  schedule_result.groups_tiling_model_info[0UL] = primary_group;
+  schedule_result.groups_tiling_model_info[1UL] = reuse_group;
+  TilingCodeGenConfig config;
+  config.type = TilingImplType::HIGH_PERF;
+  config.tiling_data_type_name = "AutofuseTilingData";
+  config.is_autofuse = true;
+  config.is_inductor_scene = true;
+  std::map<std::string, std::string> tiling_res;
+
+  TilingCodeGenerator generator;
+  ASSERT_EQ(generator.GenTilingCode(op_name, fused_schedule_result, config, tiling_res), af::SUCCESS);
+
+  const auto &tail_source = tiling_res.at(kTilingScheduleGroupTailIdentify);
+  const size_t do_tiling_pos = tail_source.find("bool DoGroupTiling0(");
+  ASSERT_NE(do_tiling_pos, std::string::npos) << tail_source;
+  // 限定DoGroupTiling0函数体（到GetScheduleResult0为止），result级组级缓存在后者作用域内为base既有行为
+  const size_t get_schedule_pos = tail_source.find("bool GetScheduleResult0(", do_tiling_pos);
+  ASSERT_NE(get_schedule_pos, std::string::npos) << tail_source;
+  const std::string do_tiling_body = tail_source.substr(do_tiling_pos, get_schedule_pos - do_tiling_pos);
+  // DoGroupTiling作用域内不声明组级缓存变量
+  EXPECT_EQ(do_tiling_body.find("GroupLevelCache"), std::string::npos);
+  // 普通组（G0）与复用wrapper（G1）的cache槽同nullptr占位（本用例is_inductor_scene构图下att_accuracy_level
+  // DFX链路不生效、无段参数生成；seg参数对位由ReuseGroupSegmentCacheGroupParallelKeepsCachePlaceholder
+  // Aligned用例在enable=1下覆盖）：普通组带尾部perf占位，wrapper无perf形参直接收尾
+  EXPECT_NE(do_tiling_body.find("case_ids_or_keys[0], nullptr, nullptr)"), std::string::npos);
+  EXPECT_NE(do_tiling_body.find("case_ids_or_keys[1], nullptr)"), std::string::npos);
+}
+
+// 构造两对复用组：G0->G1无workspace（缓存对存活），G2->G3带workspace（复用对被过滤，但wrapper仍带cache形参），
+// 叠加分段缓存开启，覆盖"未命中复用map的组须显式nullptr占位、段参数不错位"的调用序
+static FusedParsedScheduleResult BuildReuseAndWorkspaceFilteredGroups(const bool enable_group_parallel) {
+  TilingModelInfo primary_group{CreateModelInfo()};
+  TilingModelInfo reuse_group{CreateModelInfo()};
+  TilingModelInfo filtered_primary{CreateModelInfo()};
+  TilingModelInfo filtered_reuse{CreateModelInfo()};
+  primary_group[0].schedule_group_ident = {0UL, 0UL, 0UL};
+  reuse_group[0].schedule_group_ident = {0UL, 0UL, 1UL};
+  filtered_primary[0].schedule_group_ident = {0UL, 0UL, 2UL};
+  filtered_reuse[0].schedule_group_ident = {0UL, 0UL, 3UL};
+  filtered_primary[0].workspace_size_map[1] = CreateExpr(1);
+  filtered_reuse[0].workspace_size_map[0] = CreateExpr(1);
+  // IsScheduleResultEnableParallel读取ModelInfo.enable_group_parallel，与ParsedScheduleResult标志同步设置
+  primary_group[0].enable_group_parallel = enable_group_parallel;
+  reuse_group[0].enable_group_parallel = enable_group_parallel;
+  filtered_primary[0].enable_group_parallel = enable_group_parallel;
+  filtered_reuse[0].enable_group_parallel = enable_group_parallel;
+  EXPECT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 0UL}, primary_group), af::SUCCESS);
+  EXPECT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 1UL}, reuse_group), af::SUCCESS);
+  EXPECT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 2UL}, filtered_primary), af::SUCCESS);
+  EXPECT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 3UL}, filtered_reuse), af::SUCCESS);
+  auto shared_reuse_group = primary_group[0].reuse_schedule_group;
+  shared_reuse_group->schedule_group_to_info[{0UL, 0UL, 1UL}] = reuse_group[0].reuse_schedule_group->info;
+  reuse_group[0].reuse_schedule_group = shared_reuse_group;
+  auto filtered_shared_reuse_group = filtered_primary[0].reuse_schedule_group;
+  filtered_shared_reuse_group->schedule_group_to_info[{0UL, 0UL, 3UL}] = filtered_reuse[0].reuse_schedule_group->info;
+  filtered_reuse[0].reuse_schedule_group = filtered_shared_reuse_group;
+
+  FusedParsedScheduleResult fused_schedule_result;
+  auto &schedule_result = fused_schedule_result[0UL][0UL];
+  schedule_result.asc_graph_id = 0UL;
+  schedule_result.impl_graph_id = 0UL;
+  schedule_result.groups_tiling_model_info[0UL] = primary_group;
+  schedule_result.groups_tiling_model_info[1UL] = reuse_group;
+  schedule_result.groups_tiling_model_info[2UL] = filtered_primary;
+  schedule_result.groups_tiling_model_info[3UL] = filtered_reuse;
+  schedule_result.enable_group_parallel = enable_group_parallel;
+  return fused_schedule_result;
+}
+
+TEST(GeneratorUT, ReuseGroupSegmentCacheKeepsCachePlaceholderAligned) {
+  const auto fused_schedule_result = BuildReuseAndWorkspaceFilteredGroups(false);
+  // 开启动态shape分段缓存：att_accuracy_level=0
+  setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=0", 1);
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_EQ(att::AutoFuseConfig::MutableAttStrategyConfig().Init(), af::SUCCESS);
+  TilingCodeGenConfig config;
+  config.type = TilingImplType::HIGH_PERF;
+  config.tiling_data_type_name = "AutofuseTilingData";
+  config.is_autofuse = true;
+  config.is_inductor_scene = true;
+  std::map<std::string, std::string> tiling_res;
+  TilingCodeGenerator generator;
+  ASSERT_EQ(generator.GenTilingCode(op_name, fused_schedule_result, config, tiling_res), af::SUCCESS);
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+
+  // 存活对wrapper头声明带cache默认值，供省略cache实参的调用兜底（如PGO/Inductor的候选筛选路径）
+  const auto &state_header = tiling_res.at(kTilingStateHeaderIdentify);
+  EXPECT_NE(state_header.find("GroupLevelCache* cache = nullptr"), std::string::npos);
+  // 定义恒带cache形参（与复用数据解耦）：被过滤对（任一端依赖workspace）的wrapper同样带cache形参，
+  // 未启用时body走(void)cache，行为不受影响
+  const auto &filtered_reuse_source = tiling_res.at("asc_graph0_schedule_result0_g3");
+  EXPECT_NE(filtered_reuse_source.find("* cache"), std::string::npos);
+
+  const auto &tail_source = tiling_res.at(kTilingScheduleGroupTailIdentify);
+  // 存活复用对：被复用方G0与复用方wrapper G1共享Group级缓存，cache实参后段参数位置对齐
+  EXPECT_NE(tail_source.find("seg_case_id_0, &AscGraph0ScheduleResult0G0_Cache, seg_tag_0, seg_out_0"),
+            std::string::npos);
+  EXPECT_NE(tail_source.find("seg_case_id_1, &AscGraph0ScheduleResult0G0_Cache, seg_tag_1, seg_out_1"),
+            std::string::npos);
+  // 被过滤组（G2/G3）：定义恒带cache形参，调用以nullptr占位，段参数对齐不错位
+  EXPECT_NE(tail_source.find("seg_case_id_2, nullptr, seg_tag_2, seg_out_2"), std::string::npos);
+  EXPECT_NE(tail_source.find("seg_case_id_3, nullptr, seg_tag_3, seg_out_3"), std::string::npos);
+  // 仅存活复用对的被复用方声明缓存对象
+  EXPECT_NE(tail_source.find("GroupLevelCache AscGraph0ScheduleResult0G0_Cache;"), std::string::npos);
+  EXPECT_EQ(tail_source.find("AscGraph0ScheduleResult0G2_Cache;"), std::string::npos);
+}
+
+TEST(GeneratorUT, ReuseGroupSegmentCacheGroupParallelKeepsCachePlaceholderAligned) {
+  const auto fused_schedule_result = BuildReuseAndWorkspaceFilteredGroups(true);
+  // 开启动态shape分段缓存：att_accuracy_level=0
+  setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=0", 1);
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_EQ(att::AutoFuseConfig::MutableAttStrategyConfig().Init(), af::SUCCESS);
+  TilingCodeGenConfig config;
+  config.type = TilingImplType::HIGH_PERF;
+  config.tiling_data_type_name = "AutofuseTilingData";
+  config.is_autofuse = true;
+  config.is_inductor_scene = true;
+  std::map<std::string, std::string> tiling_res;
+  TilingCodeGenerator generator;
+  ASSERT_EQ(generator.GenTilingCode(op_name, fused_schedule_result, config, tiling_res), af::SUCCESS);
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+
+  const auto &tail_source = tiling_res.at(kTilingScheduleGroupTailIdentify);
+  // 普通端点组（G0）带perf形参：cache槽nullptr占位，段参数位于占位与尾部perf之间
+  EXPECT_NE(tail_source.find("case_ids_or_keys[0], nullptr, seg_tag_0, seg_out_0, nullptr"), std::string::npos);
+  // 无关普通组（G2，复用对被workspace过滤）：定义恒带cache形参，调用同nullptr占位
+  EXPECT_NE(tail_source.find("case_ids_or_keys[2], nullptr, seg_tag_2, seg_out_2, nullptr"), std::string::npos);
+  // 端点复用wrapper（G1）无perf形参：cache占位后以段参数收尾，不带尾部nullptr（否则多实参）
+  EXPECT_NE(tail_source.find("case_ids_or_keys[1], nullptr, seg_tag_1, seg_out_1)"), std::string::npos);
+  // 无关复用wrapper（G3，被过滤）：同nullptr占位，段参数收尾
+  EXPECT_NE(tail_source.find("case_ids_or_keys[3], nullptr, seg_tag_3, seg_out_3)"), std::string::npos);
+  EXPECT_EQ(tail_source.find("seg_tag_1, seg_out_1, nullptr"), std::string::npos);
+  EXPECT_EQ(tail_source.find("seg_tag_3, seg_out_3, nullptr"), std::string::npos);
+
+  // 配对校验（防"调用侧占位与被调方签名错位"回归）：定义恒带cache形参——
+  // 端点组G0与无关组G2的组TU签名均含cache形参，调用侧占位与签名形态彻底解耦
+  const auto &g0_source = tiling_res.at("asc_graph0_schedule_result0_g0");
+  const auto &g2_source = tiling_res.at("asc_graph0_schedule_result0_g2");
+  EXPECT_NE(g0_source.find("GroupLevelCache *cache"), std::string::npos);
+  EXPECT_NE(g2_source.find("GroupLevelCache *cache"), std::string::npos);
 }
 
 TEST(GeneratorUT, ReuseGroupPgoCopiesPrimaryGroupTiling) {
@@ -1405,7 +1575,8 @@ TEST(GeneratorUT, AxesReorderSolverHeaderRegistersOnlyDirectStandardHeaders) {
       {"algorithm", "array", "map", "memory", "set", "unordered_map"});
   const auto &solver_source = tiling_res.at(kTilingSolverIdentify);
   EXPECT_NE(solver_source.find("#include <limits>"), std::string::npos);
-  EXPECT_NE(solver_source.find("#include <map>"), std::string::npos);
+  // equal order 路径的 IdentifyEqualPriorityAxes 改为两遍扫描后不再使用 std::map
+  EXPECT_EQ(solver_source.find("#include <map>"), std::string::npos);
   EXPECT_NE(solver_source.find("lcm(info.var_a->align, info.var_b->align)"), std::string::npos);
   EXPECT_EQ(solver_source.find("::lcm(info.var_a->align, info.var_b->align)"), std::string::npos);
 }
@@ -1494,6 +1665,30 @@ TEST(GeneratorUT, TilingCodeGenImplPGO) {
   virtual bool SetWorkspaceSize(TilingData &tiling_data, std::unordered_map<int64_t, uint64_t> &workspace_map) { (void)tiling_data; (void)workspace_map; return true; }
 )rawliteral";
   EXPECT_EQ(genImpl.tiling_func_.output_.str(), expectCode);
+}
+
+TEST(GeneratorUT, GenDoApiTilingIsolatesPerNodeInvokeAndDedupsSharedImpl) {
+  TilingCodeGenConfig config;
+  TilingModelInfo tiling_model_info;
+  ScoreFuncs score_funcs;
+  ModelInfo model_info;
+  // 同一图内两个 Pad 节点（例如对齐 pass 为多个消费者各插一个 Pad）各有一段 invoke，
+  // invoke 段内的局部变量名固定（apiPadTiling），必须各占独立作用域；类型级共享的 impl 只发一份。
+  const std::string pad_invoke =
+      "optiling::PadTiling apiPadTiling;\napiPadTiling.SaveToBuffer((void *)&tiling_data.pad_tilingData_0, "
+      "sizeof(PadTiling));";
+  const std::string shared_impl = "void SharedPadTilingImpl() {}";
+  model_info.node_name_to_api_code["pad_0"] = {pad_invoke, shared_impl, ""};
+  model_info.node_name_to_api_code["pad_1"] = {pad_invoke, shared_impl, ""};
+  tiling_model_info.push_back(model_info);
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, tiling_model_info, score_funcs, false);
+
+  ASSERT_EQ(gen_impl.GenDoApiTiling(model_info), af::SUCCESS);
+  const std::string source = gen_impl.tiling_func_.GetOutputStr();
+
+  EXPECT_EQ(CountSubstr(source, "optiling::PadTiling apiPadTiling;"), 2U);
+  EXPECT_EQ(CountSubstr(source, "{\n" + pad_invoke + "\n}"), 2U);
+  EXPECT_EQ(CountSubstr(source, shared_impl), 1U);
 }
 
 TEST(GeneratorUT, GenTilingHeadPGO) {
@@ -2216,7 +2411,7 @@ TEST(GeneratorUT, GenUpdateWorkspaceDoesNotNarrowWorkspaceMapValue) {
   gen_impl.workspace_tensor_id_set_[0][0] = {1};
 
   gen_impl.tiling_func_.Reset();
-  gen_impl.GenUpdateWorkspace(0, 0);
+  gen_impl.GenUpdateWorkspace(0);
   const auto code = gen_impl.tiling_func_.GetOutputStr();
 
   EXPECT_NE(code.find("tiling_data.set_workspace1(it1->second);"), std::string::npos);

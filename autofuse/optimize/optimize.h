@@ -47,6 +47,11 @@ struct ScheduleTask {
   bool has_load_store_conversion{false};
   std::string semantic_name{};
   bool enable_workspace_alignment{false};
+  // [动态打分字段保活] score_func 按调度前 group 归属硬编码 tiling data 子结构字段引用(下标对齐
+  // grouped_graphs); 调度期图改写(零步长轴删除/合轴)会使符号失去表达式引用而被 size var 重建裁剪,
+  // AutoScheduler 据此将其并入对应组 runtime_shape_vars 保活(结构体字段存在 + 运行期值填充),
+  // 否则 host tiling 侧编译报 no member。
+  std::vector<SizeVarSet> score_group_shape_vars{};
 };
 
 class Optimizer {
@@ -121,6 +126,11 @@ class Optimizer {
                             ScheduleTask &schedule_task, ::ascir::ScheduledResult &schedule_result) const;
   static Status InitializeScheduledResults(std::vector<::ascir::ScheduledResult> &scheduled_results_cur,
                                            const ScheduleTask &schedule_task);
+  // 遍历task内各分组图做调度前预处理并执行auto schedule: cube图走ProcessCubeSchedules; 任一图
+  // 不支持时返回af::UNSUPPORTED由上层跳过该task; 组序号仅在非cube路径下递增, 供reduce first stage判定
+  Status ScheduleGroupedGraphs(ScheduleTask &schedule_task,
+                               std::vector<::ascir::ScheduledResult> &scheduled_results_cur,
+                               std::set<std::string> &scored_graph_names) const;
   Status AutoScheduler(const ::ascir::HintGraph &hint_graph, ScheduleTask &schedule_task,
                        std::vector<::ascir::ScheduledResult> &scheduled_results) const;
   static void TryEnableGroupParallel(::ascir::FusedScheduledResult &fused_scheduled_result);

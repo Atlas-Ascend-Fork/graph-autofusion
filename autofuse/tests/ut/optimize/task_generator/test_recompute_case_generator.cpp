@@ -684,7 +684,12 @@ TEST_F(RecomputeCaseGeneratorTest, TestBroadcastWorkspaceScoreDynamicNonFirstAxi
   // 动态分支按表达式引擎实际打印形式做子串断言, 避免与常量折叠/括号细节耦合
   EXPECT_NE(tasks[0].score_func.find("tiling_data.graph0_result0_g0_tiling_data.s1"), std::string::npos);
   EXPECT_NE(tasks[0].score_func.find("return non_first_axis_product > 32768 ? 1 : -1;"), std::string::npos);
+  // 绑定导出(保活前提): s1 按调度前归属绑定 g0, 供 AutoScheduler 并入对应组 runtime_shape_vars
+  ASSERT_EQ(tasks[0].score_group_shape_vars.size(), 2UL);
+  EXPECT_EQ(tasks[0].score_group_shape_vars[0].count(s1), 1UL);
+  EXPECT_TRUE(tasks[0].score_group_shape_vars[1].empty());
   EXPECT_EQ(tasks[1].score_func, "");
+  EXPECT_TRUE(tasks[1].score_group_shape_vars.empty());
 }
 
 // 一维图(仅首轴 B 轴)非首轴为空集, 空乘积记 1 恒不超过阈值: 生成常量负分劣后

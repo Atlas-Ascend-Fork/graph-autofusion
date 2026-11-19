@@ -415,12 +415,6 @@ Status Codegen::Generate(const ascir::FusedScheduledResult &fused_schedule_resul
 Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_schedule_result, CodegenResult &result,
                                     bool launch_decouple) const {
   GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
-  // PGO 开启时守卫降级 legacy：rtLaunch 形态的 PgoDeviceSource 含 AIV split marker，
-  // PGO sidecar 单文件编译链暂无法消费，待 rtLaunch PGO 适配落地后放开。
-  if (launch_decouple && tiling_lib_.IsInductorPgoEnabled()) {
-    GELOGW("rtLaunch codegen_bin does not support Inductor PGO yet; fall back to legacy codegen");
-    launch_decouple = false;
-  }
 #ifdef ENABLE_AUTOFUSE_MLIR
   const auto mlir_status = mlir::bridge::RunMlirCodegen(fused_schedule_result, mlir::bridge::MlirCallerScene::kInductor,
                                                         soc_version_, result);

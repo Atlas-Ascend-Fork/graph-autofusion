@@ -3039,8 +3039,12 @@ af::Status CollectSimtNormalScheduleNodes(const af::AscNodePtr &indirect_load, c
   const auto boundary = ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(indirect_load);
   GE_ASSERT_NOTNULL(boundary);
   NodePath roots;
-  for (const auto &out : boundary->GetOutDataNodes()) {
-    roots.emplace_back(std::dynamic_pointer_cast<af::AscNode>(out));
+  if (boundary == indirect_load) {
+    roots.emplace_back(analysis.post_reduce);
+  } else {
+    for (const auto &out : boundary->GetOutDataNodes()) {
+      roots.emplace_back(std::dynamic_pointer_cast<af::AscNode>(out));
+    }
   }
   GE_ASSERT_SUCCESS(TraverseOutputConsumers(roots, normal_schedule_nodes, collect));
 

@@ -35,8 +35,7 @@ void CheckComparePerfContains(const std::string &op_type, const std::vector<att:
   auto perf = GetPerfFunc(op_type);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Serialize().get()).find("compare_node") !=
-              std::string::npos);
+  EXPECT_TRUE(std::string(perf_res.pipe_res[PipeType::AIV_VEC].Str().get()).find("compare_node") != std::string::npos);
 }
 
 void CheckComparePerfValue(const std::string &op_type, const std::vector<att::TensorShapeInfo> &input_shapes,

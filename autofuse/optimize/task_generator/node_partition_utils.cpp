@@ -13,6 +13,8 @@
 #include "graph/symbolizer/symbolic_utils.h"
 #include "ascir_ops.h"
 #include "schedule_utils.h"
+#include <algorithm>
+#include <map>
 
 namespace optimize {
 namespace {
@@ -32,10 +34,15 @@ Status PartitionLoadNode(af::AscNodePtr &src_load_node, af::AscNodePtr &dst_node
 
   af::AscNodePtr new_load_input_node;
   if (af::ops::IsOps<af::ascir_op::Data>(load_input_asc_node)) {
+    // Data 的 GM 身份是 ir_attr 里的输入参数 index，随属性克隆保留，改名不影响寻址。
     af::ascir_op::Data data(("copy_from_" + load_input_asc_node->GetName()).c_str());
     new_load_input_node = impl_graph.AddNode(data);
   } else {
-    af::ascir_op::Workspace workspace(("copy_from_" + load_input_asc_node->GetName()).c_str());
+    // Workspace 没有 index 这样的身份属性，它的 GM 身份就是节点名：BufQueAllocator 按
+    // 名字分配 tensor_id，tiling 再按 tensor_id 给每个 id 一段互不相交的 workspace 偏移。
+    // 副本改名会多分出一块谁也没写过的 GM，所以副本必须沿用源 workspace 的名字。
+    // 同一子图内由此产生的同名无输入副本，由 MergeDuplicatedCopyNodesInSubGraph 合并。
+    af::ascir_op::Workspace workspace(load_input_asc_node->GetName().c_str());
     new_load_input_node = impl_graph.AddNode(workspace);
   }
   auto load_node = impl_graph.AddNode(load);
@@ -167,6 +174,41 @@ Status PartitionGenericNode(af::AscNodePtr &src_node, af::AscNodePtr &dst_node, 
   }
   return ge::GRAPH_SUCCESS;
 }
+
+// 可以在同一子图内合并的 GM 源副本：
+//   - `copy_from_*`: 多引用切分复制出的 Data / ScalarData / Scalar 副本；
+//   - 无输入的 Workspace: workspace 的 GM 身份就是节点名(BufQueAllocator 按名字分配
+//     tensor_id)，所以 Workspace 副本沿用源名字、认不出 `copy_from_` 前缀。同名即同一块
+//     GM，同一子图里重复读没有意义。带输入的那个是写入者，不在此列。
+bool IsMergeableGmSourceCopy(const af::AscNodePtr &node) {
+  if (node->GetName().rfind("copy_from_", 0U) == 0U) {
+    return true;
+  }
+  return af::ops::IsOps<af::ascir_op::Workspace>(node) && (node->GetInDataNodesSize() == 0UL);
+}
+
+// 失去消费者之后可以摘掉的副本。`copy_from_*` 判据同上; 无输入的 Workspace 另加一条
+// 「子图里还有同名节点」: 副本是被合并掉的那一份, 基准那一份仍在, 所以同名节点必然不止
+// 一个。缺了这一条就会连带摘掉本来就孤立的 workspace 节点——那不是本次切分造出来的，
+// 由图自己的悬挂节点清理负责。
+bool IsRemovableDeadGmSourceCopy(const ascir::ImplGraph &sub_graph, const af::AscNodePtr &node) {
+  if (!node->GetOutDataNodes().empty()) {
+    return false;
+  }
+  if (node->GetName().rfind("copy_from_", 0U) == 0U) {
+    return true;
+  }
+  if (!IsMergeableGmSourceCopy(node)) {
+    return false;
+  }
+  size_t same_name = 0UL;
+  for (const auto &other : sub_graph.GetAllNodes()) {
+    if (other->GetName() == node->GetName()) {
+      ++same_name;
+    }
+  }
+  return same_name > 1UL;
+}
 }  // namespace
 
 Status DoCopyAscNodeTensorAttr(const af::AscNodePtr &src_node, af::AscNodePtr &dst_node) {
@@ -263,4 +305,57 @@ Status PartitionByNode(af::AscNodePtr &src_node, af::AscNodePtr &dst_node, ascir
   }
   return PartitionGenericNode(src_node, dst_node, impl_graph);
 }
+
+// 手工注释：合并子图内同名的比如copy_from_scalar节点，避免codegen阶段检测失败
+// 合并同一子图内的同名 copy_from_* 副本: 同一子图即同一连通分量/同一 kernel, 同名同类型
+// 副本必然同源, 保留 id 最小者为基准, 其余副本的消费者改接到基准后摘除整节点; 副本摘除后
+// 其输入副本(Data/Workspace)可能失去唯一消费者, 循环摘除直至无死副本。
+// 由 PartitionByConnectivity 在子图划分定型后、CheckDuplicateWorkspaceNodes 之前逐子图
+// 调用: 沿用源名字的 Workspace 副本与源节点同名, 落在同一子图时先合并掉才不会被重名检查
+// 当成切分出错。合并只摘除冗余副本, 不改变子图归属, 因此不影响连通性。
+Status MergeDuplicatedCopyNodesInSubGraph(ascir::ImplGraph &sub_graph) {
+  std::map<std::pair<std::string, std::string>, std::vector<af::AscNodePtr>> copies_by_key;
+  for (const auto &node : sub_graph.GetAllNodes()) {
+    if (!IsMergeableGmSourceCopy(node)) {
+      continue;
+    }
+    copies_by_key[std::make_pair(node->GetName(), node->GetType())].push_back(node);
+  }
+  for (auto &item : copies_by_key) {
+    std::vector<af::AscNodePtr> &copies = item.second;
+    if (copies.size() <= 1UL) {
+      continue;
+    }
+    std::sort(copies.begin(), copies.end(), [](const af::AscNodePtr &lhs, const af::AscNodePtr &rhs) {
+      return lhs->GetOpDescBarePtr()->GetId() < rhs->GetOpDescBarePtr()->GetId();
+    });
+    const af::AscNodePtr &canonical = copies.front();
+    for (size_t i = 1UL; i < copies.size(); ++i) {
+      GELOGI("Merge duplicated copy node [%s](id=%lld) into [%s](id=%lld), sub graph [%s].", copies[i]->GetNamePtr(),
+             copies[i]->GetOpDescBarePtr()->GetId(), canonical->GetNamePtr(), canonical->GetOpDescBarePtr()->GetId(),
+             sub_graph.GetName().c_str());
+      GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(sub_graph, copies[i], canonical->GetOutDataAnchor(0UL)),
+                        "Merge duplicated copy node [%s] failed.", copies[i]->GetName().c_str());
+    }
+  }
+  bool has_removed = false;
+  do {
+    has_removed = false;
+    std::vector<af::AscNodePtr> dead_copies;
+    for (const auto &node : sub_graph.GetAllNodes()) {
+      if (IsRemovableDeadGmSourceCopy(sub_graph, node)) {
+        dead_copies.push_back(node);
+      }
+    }
+    for (const auto &node : dead_copies) {
+      GELOGD("Remove dead copy node [%s](id=%lld), sub graph [%s].", node->GetNamePtr(),
+             node->GetOpDescBarePtr()->GetId(), sub_graph.GetName().c_str());
+      GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(sub_graph, node, node->GetOutDataAnchor(0UL)),
+                        "Remove dead copy node [%s] failed.", node->GetName().c_str());
+      has_removed = true;
+    }
+  } while (has_removed);
+  return af::SUCCESS;
+}
+
 }  // namespace optimize

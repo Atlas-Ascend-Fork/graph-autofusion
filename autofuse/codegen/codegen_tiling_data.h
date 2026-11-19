@@ -43,10 +43,11 @@ class TilingData {
   std::string StructDataFiledDefine(const std::string &type_name, const std::string &filed_name) const;
   std::string ClassEnd() const;
   std::string ClassRegister();
-  void ProcessSingleGroup(const ascir::ScheduleGroup &schedule_group, std::stringstream &ss);
-  void ProcessMultiGroup(uint64_t pos, const int graph_id, const std::vector<ascir::ScheduleGroup> &schedule_groups,
-                         std::stringstream &ss1, std::stringstream &ss2);
-  void AddApiTilingData(const af::AscGraph &graph, std::stringstream &ss, uint32_t tiling_case_id);
+  af::Status ProcessSingleGroup(const ascir::ScheduleGroup &schedule_group, std::stringstream &ss);
+  af::Status ProcessMultiGroup(uint64_t pos, const int graph_id,
+                               const std::vector<ascir::ScheduleGroup> &schedule_groups, std::stringstream &ss1,
+                               std::stringstream &ss2);
+  af::Status AddApiTilingData(const af::AscGraph &graph, std::stringstream &ss, uint32_t tiling_case_id);
 
  private:
   std::string ConstApiTilingDataFiledDefine(std::string &type_name, std::string &field_name,

@@ -11,6 +11,8 @@
 #include "codegen_tiling.h"
 #include "codegen_tiling_data.h"
 
+#include <map>
+
 #include "common_utils.h"
 
 namespace codegen {
@@ -123,9 +125,9 @@ extern "C" void ClearTopnPgoContext() {
 )";
 }
 
-void TilingLib::GenReprScheduleGroupFields(std::stringstream &ss, const ascir::ScheduleGroup &sg,
-                                           const std::string &field_prefix, const std::string &emit_fn,
-                                           const std::string &indent, bool emit_first_arg) const {
+af::Status TilingLib::GenReprScheduleGroupFields(std::stringstream &ss, const ascir::ScheduleGroup &sg,
+                                                 const std::string &field_prefix, const std::string &emit_fn,
+                                                 const std::string &indent, bool emit_first_arg) const {
   std::unordered_set<std::string> seen_vars;
   std::set<int64_t> q_ids;
   std::set<int64_t> b_ids;
@@ -144,7 +146,7 @@ void TilingLib::GenReprScheduleGroupFields(std::stringstream &ss, const ascir::S
     }
     codegen::TilingData::GetTqueAndTbufId(graph, q_ids, b_ids);
     codegen::TilingData::GetTmpBufName(graph, b_ids);
-    GenReprApiTilingFields(ss, graph, gi, field_prefix, emit_first_arg);
+    GE_ASSERT_SUCCESS(GenReprApiTilingFields(ss, graph, gi, field_prefix, emit_first_arg));
   }
   for (auto q_id : q_ids) {
     if (q_id >= 0) {
@@ -158,18 +160,35 @@ void TilingLib::GenReprScheduleGroupFields(std::stringstream &ss, const ascir::S
          << first_arg << std::endl;
     }
   }
+  return af::SUCCESS;
 }
 
-void TilingLib::GenReprApiTilingFields(std::stringstream &ss, const ascir::ImplGraph &graph, size_t tiling_case_id,
-                                       const std::string &field_prefix, bool top_level) const {
+af::Status TilingLib::GenReprApiTilingFields(std::stringstream &ss, const ascir::ImplGraph &graph,
+                                             size_t tiling_case_id, const std::string &field_prefix,
+                                             bool top_level) const {
   const std::string indent = top_level ? "  " : "    ";
   const std::string first_flag = top_level ? "first" : "sub_first";
+  // 与 AddApiTilingData 保持一致：重名字段只发一次 repr，避免生成重复的 designated initializer。
+  // 与其相同，跳过仅对"同身份"（原始节点名 + tiling 类型 + tiling 值指纹）的等价重复安全；
+  // 异源节点共享字段属运行期数据错误，显性失败而非静默跳过。
+  std::map<std::string, std::string> emitted_api_fields;  // field -> 节点身份
   for (const auto &node : graph.GetAllNodes()) {
     std::string device_type_name;
     std::string api_field_name;
     if (af::SUCCESS == GetApiTilingTypeName(node, device_type_name) &&
         af::SUCCESS == GetApiTilingFieldName(node, api_field_name)) {
       api_field_name = api_field_name + "_" + std::to_string(tiling_case_id);
+      const std::string node_identity =
+          node->GetName() + "|" + device_type_name + "|" + ascgen_utils::GenApiTilingValueFingerprint(node);
+      const auto emitted_iter = emitted_api_fields.find(api_field_name);
+      if (emitted_iter != emitted_api_fields.end()) {
+        GE_ASSERT_TRUE(emitted_iter->second == node_identity,
+                       "Duplicate repr api tiling field [%s] from node [%s] type [%s] conflicts with identity [%s].",
+                       api_field_name.c_str(), node->GetNamePtr(), device_type_name.c_str(),
+                       emitted_iter->second.c_str());
+        continue;
+      }
+      emitted_api_fields[api_field_name] = node_identity;
       ss << indent << "{" << std::endl;
       ss << indent << "  if (!" << first_flag << ") { repr << \",\"; }" << std::endl;
       ss << indent << "  repr << std::endl << \"" << indent << "." << api_field_name << " = {\";" << std::endl;
@@ -187,6 +206,7 @@ void TilingLib::GenReprApiTilingFields(std::stringstream &ss, const ascir::ImplG
       ss << indent << "}" << std::endl;
     }
   }
+  return af::SUCCESS;
 }
 
 std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
@@ -232,9 +252,9 @@ std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedSch
   }
 
   if (ascgen_utils::IsSingleGroup(fused_schedule_result)) {
-    GenReprSingleGroup(ss, fused_schedule_result);
+    GE_ASSERT_SUCCESS(GenReprSingleGroup(ss, fused_schedule_result));
   } else {
-    GenReprMultiGroup(ss, fused_schedule_result);
+    GE_ASSERT_SUCCESS(GenReprMultiGroup(ss, fused_schedule_result));
   }
 
   ss << "  repr << std::endl << \"}\";" << std::endl;
@@ -246,14 +266,15 @@ std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedSch
   return ss.str();
 }
 
-void TilingLib::GenReprSingleGroup(std::stringstream &ss,
-                                   const ascir::FusedScheduledResult &fused_schedule_result) const {
+af::Status TilingLib::GenReprSingleGroup(std::stringstream &ss,
+                                         const ascir::FusedScheduledResult &fused_schedule_result) const {
   auto &sg = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0];
-  GenReprScheduleGroupFields(ss, sg, "tiling_data->", "emit_field", "  ", true);
+  GE_ASSERT_SUCCESS(GenReprScheduleGroupFields(ss, sg, "tiling_data->", "emit_field", "  ", true));
+  return af::SUCCESS;
 }
 
-void TilingLib::GenReprMultiGroup(std::stringstream &ss,
-                                  const ascir::FusedScheduledResult &fused_schedule_result) const {
+af::Status TilingLib::GenReprMultiGroup(std::stringstream &ss,
+                                        const ascir::FusedScheduledResult &fused_schedule_result) const {
   for (size_t i = 0; i < fused_schedule_result.node_idx_to_scheduled_results.size(); ++i) {
     const auto &scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[i];
     for (size_t j = 0; j < scheduled_results.size(); ++j) {
@@ -274,13 +295,14 @@ void TilingLib::GenReprMultiGroup(std::stringstream &ss,
         ss << "    emit_sub(\"tiling_key\", tiling_data->" << sub_name << ".get_tiling_key());" << std::endl;
         ss << "    emit_sub(\"ub_size\", tiling_data->" << sub_name << ".get_ub_size());" << std::endl;
         std::string field_prefix = "tiling_data->" + sub_name + ".";
-        GenReprScheduleGroupFields(ss, schedule_groups[k], field_prefix, "emit_sub", "    ", false);
+        GE_ASSERT_SUCCESS(GenReprScheduleGroupFields(ss, schedule_groups[k], field_prefix, "emit_sub", "    ", false));
         ss << "    repr << std::endl << \"  }\";" << std::endl;
         ss << "    first = false;" << std::endl;
         ss << "  }" << std::endl;
       }
     }
   }
+  return af::SUCCESS;
 }
 
 std::string TilingLib::GenUpdateCurPerfAndBlockByGroupHelper() const {

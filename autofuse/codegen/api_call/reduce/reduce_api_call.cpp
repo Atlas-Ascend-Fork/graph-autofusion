@@ -54,7 +54,7 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
   int64_t id = GetTmpBufIdByLifeTime(-1L, this->api_name_);
 
   std::string reduce_pattern;
-  GetIsArAndPattern(y, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y, x.isAr, reduce_pattern);
   CheckReduceSpecificParamsForCodegen({this->node, this->api_name_, &tpipe, &x, &y, current_axis.back()});
 
   // 获取dtype_name：Argmax系列算子使用value类型（x.dtype），其他算子使用输出类型（y.dtype）

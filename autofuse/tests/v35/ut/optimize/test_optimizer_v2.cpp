@@ -3412,11 +3412,12 @@ TEST_F(TestOptimizerV2, LoadGEWhereTransposeCase) {
   EXPECT_EQ(impl_graphs[3].scheduled_graph.GetName(), "gen_nddma_B0X3Y0_nddma");
   for (auto node : impl_graphs[3].scheduled_graph.GetAllNodes()) {
     if (node->GetType() == "Nddma") {
-      EXPECT_EQ(att::Str(node->outputs[0].attr.vectorized_strides[0]), "(8 * Ceiling((Rational(513 , 2) * z3t_size)))");
+      // 次内维行距图级垫整：z2 轴 38 -> Align(38, 8)=40（fp32 粒度），外层 z1(54)*40=2160
+      EXPECT_EQ(att::Str(node->outputs[0].attr.vectorized_strides[0]), "(2160 * z3t_size)");
     }
     if (node->GetType() == att::kGe) {
-      EXPECT_EQ(att::Str(node->outputs[0].attr.vectorized_strides[0]),
-                "(32 * Ceiling((Rational(513 , 8) * z3t_size)))");
+      // GE(uint8) 垫整粒度 32：z2 轴 38 -> Align(38, 32)=64，外层 z1(54)*64=3456
+      EXPECT_EQ(att::Str(node->outputs[0].attr.vectorized_strides[0]), "(3456 * z3t_size)");
     }
   }
 }
@@ -7476,6 +7477,146 @@ TEST_F(TestOptimizerV2, FoldAlignedOuterTransposeUsesLoadAndPreservesMapping) {
     EXPECT_EQ(load_node->outputs[0].attr.vectorized_strides, transposed.vectorized_strides);
     EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*load_node), ascgen_utils::template_semantic::kTranspose);
   }
+}
+
+TEST_F(TestOptimizerV2, PadNddmaOutputVectorizedStridesForStaticUnalignedInnerAxis) {
+  af::AscGraph graph("pad_nddma_output");
+  auto z0 = graph.CreateAxis("z0", af::Symbol(52));
+  auto z1 = graph.CreateAxis("z1", af::Symbol(89));
+
+  Data data("data", graph);
+  data.y.dtype = af::DT_FLOAT;
+  data.ir_attr.SetIndex(0);
+
+  Load load("load");
+  load.x = data.y;
+  load.y.dtype = af::DT_FLOAT;
+  load.attr.sched.axis = {z0.id, z1.id};
+  *load.y.axis = {z0.id, z1.id};
+  *load.y.repeats = {af::Symbol(52), af::Symbol(89)};
+  *load.y.strides = {af::Symbol(89), One};
+  *load.y.vectorized_axis = {z0.id, z1.id};
+  *load.y.vectorized_strides = {af::Symbol(89), One};
+
+  auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  ASSERT_EQ(PadNddmaOutputVectorizedStrides(graph), af::SUCCESS);
+  // 89 * 4 = 356B 非 32B 对齐，内层行宽补齐到 96
+  EXPECT_EQ(load_node->outputs[0].attr.vectorized_strides, (std::vector<af::Expression>{af::Symbol(96), One}));
+}
+
+TEST_F(TestOptimizerV2, KeepNddmaOutputVectorizedStridesWhenInnerAxisSymbolic) {
+  af::AscGraph graph("pad_nddma_output_dynamic");
+  auto z0 = graph.CreateAxis("z0", af::Symbol(52));
+  auto z1 = graph.CreateAxis("z1", graph.CreateSizeVar("dynamic_tail"));
+
+  Data data("data", graph);
+  data.y.dtype = af::DT_FLOAT;
+  data.ir_attr.SetIndex(0);
+
+  Load load("load");
+  load.x = data.y;
+  load.y.dtype = af::DT_FLOAT;
+  load.attr.sched.axis = {z0.id, z1.id};
+  *load.y.axis = {z0.id, z1.id};
+  *load.y.repeats = {af::Symbol(52), z1.size};
+  *load.y.strides = {z1.size, One};
+  *load.y.vectorized_axis = {z0.id, z1.id};
+  *load.y.vectorized_strides = {z1.size, One};
+
+  auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  const auto original = load_node->outputs[0].attr.vectorized_strides;
+  ASSERT_EQ(PadNddmaOutputVectorizedStrides(graph), af::SUCCESS);
+  // 符号 stride 无法静态判定，保持原样，避免误伤动态 shape
+  EXPECT_EQ(load_node->outputs[0].attr.vectorized_strides, original);
+}
+
+TEST_F(TestOptimizerV2, KeepNddmaOutputVectorizedStridesWhenOuterAxisDiscontinuous) {
+  af::AscGraph graph("pad_nddma_output_outer_discontinuous");
+  auto z0 = graph.CreateAxis("z0", af::Symbol(52));
+  auto z1 = graph.CreateAxis("z1", af::Symbol(2));
+  auto z2 = graph.CreateAxis("z2", af::Symbol(89));
+
+  Data data("data", graph);
+  data.y.dtype = af::DT_FLOAT;
+  data.ir_attr.SetIndex(0);
+
+  Load load("load");
+  load.x = data.y;
+  load.y.dtype = af::DT_FLOAT;
+  load.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *load.y.axis = {z0.id, z1.id, z2.id};
+  *load.y.repeats = {af::Symbol(52), af::Symbol(2), af::Symbol(89)};
+  *load.y.strides = {af::Symbol(400), af::Symbol(89), One};
+  *load.y.vectorized_axis = {z0.id, z1.id, z2.id};
+  // 外层 400 为 batch/slice 跳变，非紧致连续值（2*89=178）
+  *load.y.vectorized_strides = {af::Symbol(400), af::Symbol(89), One};
+
+  auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  const auto original = load_node->outputs[0].attr.vectorized_strides;
+  ASSERT_EQ(PadNddmaOutputVectorizedStrides(graph), af::SUCCESS);
+  // 外层非稠密时不可按垫整后跨距重写，放弃该节点垫整，保持原样
+  EXPECT_EQ(load_node->outputs[0].attr.vectorized_strides, original);
+}
+
+TEST_F(TestOptimizerV2, PadNddmaOutputVectorizedStridesWithDenseOuterAxis) {
+  af::AscGraph graph("pad_nddma_output_dense_outer");
+  auto z0 = graph.CreateAxis("z0", af::Symbol(52));
+  auto z1 = graph.CreateAxis("z1", af::Symbol(2));
+  auto z2 = graph.CreateAxis("z2", af::Symbol(89));
+
+  Data data("data", graph);
+  data.y.dtype = af::DT_FLOAT;
+  data.ir_attr.SetIndex(0);
+
+  Load load("load");
+  load.x = data.y;
+  load.y.dtype = af::DT_FLOAT;
+  load.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *load.y.axis = {z0.id, z1.id, z2.id};
+  *load.y.repeats = {af::Symbol(52), af::Symbol(2), af::Symbol(89)};
+  *load.y.strides = {af::Symbol(2) * af::Symbol(89), af::Symbol(89), One};
+  *load.y.vectorized_axis = {z0.id, z1.id, z2.id};
+  // 紧致连续布局：次内维 89 非对齐触发垫整，外层为稠密乘积 2*89
+  *load.y.vectorized_strides = {af::Symbol(2) * af::Symbol(89), af::Symbol(89), One};
+
+  auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  ASSERT_EQ(PadNddmaOutputVectorizedStrides(graph), af::SUCCESS);
+  // 89 * 4 = 356B 非 32B 对齐，次内维垫整到 96，外层按垫整后行距重写为 2*96
+  EXPECT_EQ(load_node->outputs[0].attr.vectorized_strides,
+            (std::vector<af::Expression>{af::Symbol(2) * af::Symbol(96), af::Symbol(96), One}));
+}
+
+TEST_F(TestOptimizerV2, PadNddmaOutputVectorizedStridesKeepBroadcastZeroStride) {
+  af::AscGraph graph("pad_nddma_output_broadcast_outer");
+  auto z0 = graph.CreateAxis("z0", af::Symbol(52));
+  auto z1 = graph.CreateAxis("z1", af::Symbol(2));
+  auto z2 = graph.CreateAxis("z2", af::Symbol(89));
+
+  Data data("data", graph);
+  data.y.dtype = af::DT_FLOAT;
+  data.ir_attr.SetIndex(0);
+
+  Load load("load");
+  load.x = data.y;
+  load.y.dtype = af::DT_FLOAT;
+  load.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *load.y.axis = {z0.id, z1.id, z2.id};
+  *load.y.repeats = {af::Symbol(52), af::Symbol(2), af::Symbol(89)};
+  *load.y.strides = {af::ops::Zero, af::Symbol(89), One};
+  *load.y.vectorized_axis = {z0.id, z1.id, z2.id};
+  // 外层为广播零 stride 轴，次内维 89 非对齐触发垫整
+  *load.y.vectorized_strides = {af::ops::Zero, af::Symbol(89), One};
+
+  auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  ASSERT_EQ(PadNddmaOutputVectorizedStrides(graph), af::SUCCESS);
+  // 广播零 stride 轴保持为零，次内维垫整到 96
+  EXPECT_EQ(load_node->outputs[0].attr.vectorized_strides,
+            (std::vector<af::Expression>{af::ops::Zero, af::Symbol(96), One}));
 }
 
 namespace {

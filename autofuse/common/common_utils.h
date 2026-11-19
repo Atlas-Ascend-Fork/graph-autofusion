@@ -326,6 +326,7 @@ std::vector<ascir::TensorId> GetWorkspaceTensorIdListInOneGraph(
 
 af::Status GetApiTilingTypeName(const ascir::NodeView &node, std::string &type_name);
 af::Status GetApiTilingFieldName(const ascir::NodeView &node, std::string &field_name);
+std::string GenApiTilingValueFingerprint(const ascir::NodeView &node);
 void GetApiExtractDupSet(const ascir::ImplGraph &graph,
                          std::set<std::pair<std::string, std::string>> &pre_api_extract_dup, uint32_t &total_blk_num);
 int32_t CalcReservedTmpBufSizeForAscGraph(const ascir::ImplGraph &graph);

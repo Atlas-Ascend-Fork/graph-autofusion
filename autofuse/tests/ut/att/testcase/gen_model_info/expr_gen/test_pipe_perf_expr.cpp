@@ -477,7 +477,7 @@ TEST_F(TestPipePerfExpr, case_get_perf_for_loop) {
   }
 
   // 验证 contrib 变量
-  const auto &pipe_vec_cost = std::string(pipe_costs[PipeType::AIV_VEC].Serialize().get());
+  const auto pipe_vec_cost = std::string(pipe_costs[PipeType::AIV_VEC].Str().get());
   EXPECT_NE(pipe_vec_cost.find("eq_Eq_AIV_VEC_contrib"), std::string::npos);
   VerifyContribVar(exe_times);
 

@@ -100,7 +100,7 @@ class SolverPassManager : public InputOutputSettersMixin<SolverPassManager>,
     std::stringstream ss;
     ss << "EnableTradeOff:" << enable_multicore_ub_tradeoff_ << ",EnableAutofusePGO:" << enable_autofuse_pgo_
        << ",PGO Step Max:" << pgo_step_max_ << ",HighPerfTiling:" << enable_high_perf_
-       << ",EnableEqualOrder:" << enable_equal_order_ << ",ReservedUbSize:" << reserved_ub_size_.Serialize().get()
+       << ",EnableEqualOrder:" << enable_equal_order_ << ",ReservedUbSize:" << reserved_ub_size_.Str().get()
        << ",CoreNumThreshold:" << corenum_threshold_ << ",UBThreshold:" << ub_threshold_
        << ",TilingDataSubName:" << GetTilingDataSubGroupItemName() << ",CaseId:" << case_id_
        << ",SubCaseTag:" << sub_case_tag_ << std::endl;

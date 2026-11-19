@@ -413,7 +413,7 @@ TEST_F(TestAxesReorderSolverGen, GenEqualOrderAndAxisOrderRemainCanonical) {
   EXPECT_NE(equal_order_code.find("IdentifyEqualPriorityAxes"), std::string::npos);
   EXPECT_NE(equal_order_code.find("solved_axes[canonical_idx]"), std::string::npos);
   const std::string identify_code = SolverMethod("IdentifyEqualPriorityAxes");
-  EXPECT_NE(identify_code.find("if (pair.second.size() < kSupportMaxEqualPriorityAxes)"), std::string::npos);
+  EXPECT_NE(identify_code.find("if (count >= kSupportMaxEqualPriorityAxes)"), std::string::npos);
 
   Expr axis0 = CreateExpr("axis0");
   Expr axis1 = CreateExpr("axis1");

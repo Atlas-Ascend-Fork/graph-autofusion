@@ -299,9 +299,10 @@ struct EntryTranslationUnitOptions {
 
 EntryTranslationUnitOptions GetInductorEntryTranslationUnitOptions(
     const ascir::FusedScheduledResult &fused_schedule_result, bool is_cv, bool enable_pgo_runtime) {
+  // Pure Cube Fixpip skips ATT tiling and does not emit a PGO header.
   return {true,
           is_cv,
-          true,
+          !ascgen_utils::IsJustCubeFixpip(fused_schedule_result),
           enable_pgo_runtime,
           enable_pgo_runtime || EntryWorkspaceUsesSolver(fused_schedule_result),
           !ascgen_utils::IsSingleGroup(fused_schedule_result),

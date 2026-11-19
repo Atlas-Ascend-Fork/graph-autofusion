@@ -113,7 +113,7 @@ Status RegArgmaxApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<asc
   auto y = outputs[0].get();
 
   std::string reduce_pattern;
-  GetIsArAndPattern(y, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y, x.isAr, reduce_pattern);
   valid_r_expr_ = GetArgmaxValidRExpr(tpipe, x, y);
 
   std::string value_dtype_name;
@@ -250,7 +250,7 @@ Status RegArgMaxPhase1ApiCall::BuildApiParam(const TPipe &tpipe, const std::vect
   GE_ASSERT_TRUE(y_index.dtype == ge::DT_INT32, "ArgMaxMultiRPhase1 index output must be int32");
 
   std::string reduce_pattern;
-  GetIsArAndPattern(y_value, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y_value, x.isAr, reduce_pattern);
   valid_r_expr_ = GetArgmaxValidRExpr(tpipe, x, y_value);
 
   std::string value_dtype_name;
@@ -437,7 +437,7 @@ Status RegArgmaxWithValueApiCall::BuildApiParam(
   auto y_index = outputs[1].get();
 
   std::string reduce_pattern;
-  GetIsArAndPattern(y_value, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y_value, x.isAr, reduce_pattern);
   valid_r_expr_ = GetArgmaxValidRExpr(tpipe, x, y_value);
 
   std::string value_dtype_name;

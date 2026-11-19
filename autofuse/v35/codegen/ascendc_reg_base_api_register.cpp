@@ -327,6 +327,9 @@ Register::Register() {
   const std::string kAscendcRandomRegBaseStr = {
 #include "random_reg_base.h"
   };
+  const std::string kAscendcRandIntRegBaseStr = {
+#include "randint_reg_base.h"
+  };
   const std::string kAscendcSignBitRegBaseStr = {
 #include "signbit_reg_base.h"
   };
@@ -515,6 +518,7 @@ Register::Register() {
       {"bucketize_reg_base.h", kAscendcBucketizeRegBaseStr},
       {"polygamma_reg_base.h", kAscendcPolyGammaRegBaseStr},
       {"random_reg_base.h", kAscendcRandomRegBaseStr},
+      {"randint_reg_base.h", kAscendcRandIntRegBaseStr},
       {"signbit_reg_base.h", kAscendcSignBitRegBaseStr},
       {"frexp_reg_base.h", kAscendcFrexpRegBaseStr},
       {"shifted_chebyshev_polynomial_utils_reg_base.h", kAscendcShiftedChebyshevPolynomialUtilsRegBaseStr},

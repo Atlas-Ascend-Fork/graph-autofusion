@@ -628,7 +628,7 @@ class AbsAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   // 如果需要插入cast节点，返回cast的目的类型
   [[nodiscard]] std::pair<std::vector<ge::DataType>, std::vector<ge::DataType>> GetConversionDtype(
-      const AscNode &node) {
+      const AscNode &node) override {
     std::map<ge::DataType, ge::DataType> dtype_conversion_map = {{DT_BF16, DT_FLOAT}, {DT_UINT8, DT_INT16}};
     return GetConversionFromDtypeMap(node, dtype_conversion_map);
   }
@@ -2816,6 +2816,18 @@ class ProdAscIrCodegenImplV2 : public AscIrCodegenV2 {
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"reduce_init_reg_base.h", "reduce_extend_reg_base.h"};
   }
+  [[nodiscard]] std::pair<std::vector<ge::DataType>, std::vector<ge::DataType>> GetConversionDtype(
+      const AscNode &node) {
+    const std::map<ge::DataType, ge::DataType> prod_dtype_map = {{ge::DataType::DT_INT8, ge::DataType::DT_INT16}};
+    return GetConversionFromDtypeMap(node, prod_dtype_map);
+  }
+  [[nodiscard]] std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) override {
+    AscNodeOutputs node_outputs = node.outputs;
+    if (node_outputs().empty() || node_outputs[0].attr.dtype != ge::DataType::DT_INT8) {
+      return {};
+    }
+    return {{ge::DataType::DT_UINT8, ge::DataType::DT_INT8}};
+  }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "adv_api/reduce/reduce.h",
@@ -3368,6 +3380,21 @@ class MulAscIrCodegenImplV2 : public AscIrCodegenV2 {
                                                                 {ge::DataType::DT_UINT8, ge::DataType::DT_INT16}};
     return GetConversionFromDtypeMap(node, mul_dtype_map);
   }
+  [[nodiscard]] std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) override {
+    AscNodeOutputs node_outputs = node.outputs;
+    if (node_outputs().empty() || node_outputs[0].attr.dtype != ge::DataType::DT_INT8) {
+      return {};
+    }
+    const auto first_input = node.GetInDataAnchor(0);
+    const auto first_input_owner =
+        first_input == nullptr || first_input->GetPeerOutAnchor() == nullptr
+            ? nullptr
+            : std::dynamic_pointer_cast<AscNode>(first_input->GetPeerOutAnchor()->GetOwnerNode());
+    if (first_input_owner == nullptr || first_input_owner->GetType() != "Prod") {
+      return {};
+    }
+    return {{ge::DataType::DT_UINT8, ge::DataType::DT_INT8}};
+  }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "basic_api/kernel_operator_vec_binary_intf.h",
@@ -3899,6 +3926,27 @@ bool IsWindowIterAxis(const AscNode &node, af::AxisId axis_id, const std::vector
   return false;
 }
 
+// [SIMD offsets 单次调用驻留] offsets 在 API 内按批次复用，驻留为排除串行循环轴
+// （block 切分/每核 tile 轮次）后的元素积。逻辑 repeats 按全输出元素计会把大输出
+// 的 SIMD 候选误杀（实际驻留远小于该上界）。轴不可解析时回退逻辑 repeats。
+bool TryCalcIndirectLoadSimdOffsetsSize(const AscNode &node, const std::vector<af::AxisId> &axis_ids,
+                                        Expression &offset_size) {
+  Expression size = Symbol(sizeof(uint32_t));
+  for (const af::AxisId axis_id : axis_ids) {
+    const auto *axis = FindNodeOwnerAxis(node, axis_id);
+    if (axis == nullptr) {
+      return false;
+    }
+    if (axis->type == af::Axis::Type::kAxisTypeBlockOuter || axis->type == af::Axis::Type::kAxisTypeBlockInner ||
+        axis->type == af::Axis::Type::kAxisTypeTileOuter) {
+      continue;  // 串行循环计数轴（多核分块/每核 tile 轮次），不进入单次调用驻留
+    }
+    size = size * axis->size;
+  }
+  offset_size = size;
+  return true;
+}
+
 bool CalcIndirectLoadSkTmpSize(const AscNode &node, const Expression &offset_size, Expression &tmp_size) {
   constexpr uint32_t kUbBlockAlignBytes = 32U;
   auto inputs = node.inputs;
@@ -3976,6 +4024,13 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
       // SIMD uses an offsets buffer, SK uses an input cache and offsets buffer, while SIMT accesses GM directly.
       return {};
     }
+    // dense/register-gather/gather-api 的 offsets 走寄存器寻址，不消费 API 级 tmp；
+    // 最终形态可证明非 strided 时不分配（判定见 SimdOffsetsTmpRequired，保守保留）。
+    // SK 的 tmp 含输入缓存，不受影响。
+    if (template_id == ::ascir::TemplateId::kIndirectLoadSimd &&
+        !::ascgen_utils::indirect_load::SimdOffsetsTmpRequired(node)) {
+      return {};
+    }
     auto node_outputs = node.outputs;
     const auto &y = node_outputs[0].attr;
     ascgen_utils::indirect_load::TemplateLogicalView logical_view;
@@ -3990,11 +4045,17 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
     const bool has_window_iter_axes = template_id == ::ascir::TemplateId::kIndirectLoadSK &&
                                       !logical_view.window_iter_axes.empty() && y.axis.size() == y.repeats.size();
     Expression offset_size = Symbol(sizeof(uint32_t));
-    for (size_t dim = 0UL; dim < y.repeats.size(); ++dim) {
-      if (has_window_iter_axes && IsWindowIterAxis(node, y.axis[dim], logical_view.window_iter_axes)) {
-        continue;
+    if (template_id == ::ascir::TemplateId::kIndirectLoadSimd && y.axis.size() == y.repeats.size() &&
+        TryCalcIndirectLoadSimdOffsetsSize(node, y.axis, offset_size)) {
+      // SIMD offsets 按单次调用驻留计算（见 TryCalcIndirectLoadSimdOffsetsSize 注释）；
+      // dense 与降级 strided 的单次调用元素集相同，公式对两形态一致成立。
+    } else {
+      for (size_t dim = 0UL; dim < y.repeats.size(); ++dim) {
+        if (has_window_iter_axes && IsWindowIterAxis(node, y.axis[dim], logical_view.window_iter_axes)) {
+          continue;
+        }
+        offset_size = offset_size * y.repeats[dim];
       }
-      offset_size = offset_size * y.repeats[dim];
     }
     Expression tmp_size = offset_size;
     if (template_id == ::ascir::TemplateId::kIndirectLoadSK &&
@@ -5840,6 +5901,38 @@ class RandnAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {"adv_api/math/philox.h"};
+  }
+};
+
+/*********************************************************************************/
+class RandIntAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcVoidTmpSizeV2(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "RandIntApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "RandInt";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"randint_reg_base.h"};
+  }
+  // 设备实现为 SIMT 逐元素 Philox + 64 位取模，按 Remainder 同款引入 SIMT 头
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "simt_api/cpp/kernel_simt_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    // x1/x3/x4 为广播标量输入，x2 为 Arange 产出的逐元素位置流，仅支持张量
+    GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node, {true, {0, 2, 3}}),
+                      "Node %s[%s] check shape consistency failed", node.GetTypePtr(), node.GetNamePtr());
+    return true;
   }
 };
 

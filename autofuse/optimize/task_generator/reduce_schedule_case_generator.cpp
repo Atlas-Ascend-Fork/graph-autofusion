@@ -194,9 +194,13 @@ bool HasDataEdgeBetween(const af::AscNodePtr &src_node, const af::AscNodePtr &ds
 
 // 获取 post 侧 workspace(输出连向 load 的 workspace)所供给的 load, 按 workspace 名索引:
 // ws_pre 与 ws_post 同名标识同一 workspace 缓冲, store 链凭 ws_pre 的名字索引到 post 侧
-// 供给的 load, 对应的 ws_post 可由该 load 的输入生产者结构定位
-std::map<std::string, af::AscNodePtr> GetPostWorkspaceLoadMap(const ascir::ImplGraph &impl_graph) {
-  std::map<std::string, af::AscNodePtr> post_ws_load_map;
+// 供给的 load, 对应的 ws_post 可由该 load 的输入生产者结构定位。
+// 同一个名字可能对应多个 load: 多引用切分(PartitionLoadNode)为 workspace 读取节点的每个
+// 额外引用都复制一份 ws_post, 复制件沿用源节点名(保持 GM 身份), 于是原 ws_post 与各复制件
+// 同名、各自接到不同的 load。value 用 vector 而不是单值, 否则后出现的 load 会覆盖先出现的,
+// 使其余 load 在连通判断里凭空消失。
+std::map<std::string, std::vector<af::AscNodePtr>> GetPostWorkspaceLoadMap(const ascir::ImplGraph &impl_graph) {
+  std::map<std::string, std::vector<af::AscNodePtr>> post_ws_load_map;
   for (const auto &node : impl_graph.GetAllNodes()) {
     if (!af::ops::IsOps<af::ascir_op::Workspace>(node)) {
       continue;
@@ -208,7 +212,7 @@ std::map<std::string, af::AscNodePtr> GetPostWorkspaceLoadMap(const ascir::ImplG
     af::AscNodePtr load_node =
         std::dynamic_pointer_cast<af::AscNode>(out_anchor->GetPeerInDataAnchors().at(0UL)->GetOwnerNode());
     if (load_node != nullptr && af::ops::IsOps<af::ascir_op::Load>(load_node)) {
-      post_ws_load_map[node->GetName()] = load_node;
+      post_ws_load_map[node->GetName()].emplace_back(load_node);
     }
   }
   return post_ws_load_map;
@@ -216,11 +220,11 @@ std::map<std::string, af::AscNodePtr> GetPostWorkspaceLoadMap(const ascir::ImplG
 
 // 连通判断: 从 from 出发沿数据边双向(输入/输出方向)搜索 target; 遇到 pre_workspace(输入侧
 // workspace)时视作与其同名 post_workspace 连通, 即允许越过切分从 pre 侧继续到 post 侧
-// (由同名 workspace 供给的 load 承接); 反向不成立——到达 post_workspace 后不再跳回 pre 侧,
-// 视作到头。excluded 非空时该节点不可经过(用于排除多输入节点自身, 避免绕经它使另一侧输入
-// 也被误判为连通)
+// (由同名 workspace 供给的 load 承接, 一个名字可能对应多个 load, 逐一视作连通); 反向不
+// 成立——到达 post_workspace 后不再跳回 pre 侧, 视作到头。excluded 非空时该节点不可经过
+// (用于排除多输入节点自身, 避免绕经它使另一侧输入也被误判为连通)
 bool IsConnectedThroughWorkspace(const af::NodePtr &from, const af::NodePtr &target,
-                                 const std::map<std::string, af::AscNodePtr> &post_ws_load_map,
+                                 const std::map<std::string, std::vector<af::AscNodePtr>> &post_ws_load_map,
                                  const af::NodePtr &excluded) {
   if (from == nullptr || target == nullptr) {
     return false;
@@ -250,7 +254,9 @@ bool IsConnectedThroughWorkspace(const af::NodePtr &from, const af::NodePtr &tar
     if (af::ops::IsOps<af::ascir_op::Workspace>(current)) {
       const auto load_iter = post_ws_load_map.find(current->GetName());
       if (load_iter != post_ws_load_map.cend()) {
-        push_node(load_iter->second);
+        for (const auto &peer_load : load_iter->second) {
+          push_node(peer_load);
+        }
       }
     }
   }
@@ -277,56 +283,6 @@ bool HasConsumerInGraph(const af::AscNodePtr &node, const std::set<const af::Nod
   return false;
 }
 
-// 手工注释：合并子图内同名的比如copy_from_scalar节点，避免codegen阶段检测失败
-// 合并同一子图内的同名 copy_from_* 副本(在 PartitionByConnectivity 划分子图之后逐子图执行):
-// 同一子图即同一连通分量/同一 kernel, 同名同类型副本必然同源, 保留 id 最小者为基准, 其余
-// 副本的消费者改接到基准后摘除整节点; 副本摘除后其输入副本(Data/Workspace)可能失去唯一
-// 消费者, 循环摘除直至无死副本。子图划分已定型, 该合并不影响连通性。
-Status MergeDuplicatedCopyNodesInSubGraph(ascir::ImplGraph &sub_graph) {
-  std::map<std::pair<std::string, std::string>, std::vector<af::AscNodePtr>> copies_by_key;
-  for (const auto &node : sub_graph.GetAllNodes()) {
-    if (node->GetName().rfind("copy_from_", 0U) != 0U) {
-      continue;
-    }
-    copies_by_key[std::make_pair(node->GetName(), node->GetType())].push_back(node);
-  }
-  for (auto &item : copies_by_key) {
-    std::vector<af::AscNodePtr> &copies = item.second;
-    if (copies.size() <= 1UL) {
-      continue;
-    }
-    std::sort(copies.begin(), copies.end(), [](const af::AscNodePtr &lhs, const af::AscNodePtr &rhs) {
-      return lhs->GetOpDescBarePtr()->GetId() < rhs->GetOpDescBarePtr()->GetId();
-    });
-    const af::AscNodePtr &canonical = copies.front();
-    for (size_t i = 1UL; i < copies.size(); ++i) {
-      GELOGI("Merge duplicated copy node [%s](id=%lld) into [%s](id=%lld), sub graph [%s].", copies[i]->GetNamePtr(),
-             copies[i]->GetOpDescBarePtr()->GetId(), canonical->GetNamePtr(), canonical->GetOpDescBarePtr()->GetId(),
-             sub_graph.GetName().c_str());
-      GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(sub_graph, copies[i], canonical->GetOutDataAnchor(0UL)),
-                        "Merge duplicated copy node [%s] failed.", copies[i]->GetName().c_str());
-    }
-  }
-  bool has_removed = false;
-  do {
-    has_removed = false;
-    std::vector<af::AscNodePtr> dead_copies;
-    for (const auto &node : sub_graph.GetAllNodes()) {
-      if (node->GetName().rfind("copy_from_", 0U) == 0U && node->GetOutDataNodes().empty()) {
-        dead_copies.push_back(node);
-      }
-    }
-    for (const auto &node : dead_copies) {
-      GELOGD("Remove dead copy node [%s](id=%lld), sub graph [%s].", node->GetNamePtr(),
-             node->GetOpDescBarePtr()->GetId(), sub_graph.GetName().c_str());
-      GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(sub_graph, node, node->GetOutDataAnchor(0UL)),
-                        "Remove dead copy node [%s] failed.", node->GetName().c_str());
-      has_removed = true;
-    }
-  } while (has_removed);
-  return af::SUCCESS;
-}
-
 }  // namespace
 
 bool IsV2PlatformForArgmaxRCore();
@@ -345,10 +301,6 @@ Status ReducePartitionCaseGenerator::GeneratorGeneralTask(ascir::HintGraph &opti
     if (task.grouped_graphs.empty()) {
       GELOGW("Graph[%s] has no subgraphs after partition, skip task", graph.GetName().c_str());
       continue;
-    }
-    // 子图划分完成后, 在各自子图内合并重复的 copy_from_* 副本(子图已定型, 不影响连通性)
-    for (auto &grouped_graph : task.grouped_graphs) {
-      GE_CHK_STATUS_RET(MergeDuplicatedCopyNodesInSubGraph(grouped_graph), "Failed to merge duplicated copy nodes");
     }
     tasks.emplace_back(std::move(task));
   }
@@ -931,7 +883,7 @@ std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> ReducePartitionCaseGenera
 // 补充非单输出方向的类 Norm 结构, 追加到 loop_start_end
 Status ReducePartitionCaseGenerator::AddNormLikeLoops(
     ascir::ImplGraph &graph, std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end) {
-  const std::map<std::string, af::AscNodePtr> post_ws_load_map = GetPostWorkspaceLoadMap(graph);
+  const std::map<std::string, std::vector<af::AscNodePtr>> post_ws_load_map = GetPostWorkspaceLoadMap(graph);
   if (post_ws_load_map.empty()) {
     return ge::GRAPH_SUCCESS;
   }
@@ -943,33 +895,36 @@ Status ReducePartitionCaseGenerator::AddNormLikeLoops(
     if (load_iter == post_ws_load_map.cend()) {
       continue;
     }
-    // 被 workspace 切分的节点对: {pre_workspace 的输入, post_workspace 的输出}
+    // 被 workspace 切分的节点对: {pre_workspace 的输入, post_workspace 的输出}。多引用
+    // 切分会让同一个 pre_workspace 名下挂着多个 post_workspace/load(各自接到不同的消费
+    // 分支), 逐一探测, 不能只取第一个。
     const af::AscNodePtr node_before_workspace = std::dynamic_pointer_cast<af::AscNode>(node->GetInDataNodes().at(0UL));
-    const af::AscNodePtr node_after_workspace = load_iter->second;
     GE_ASSERT_NOTNULL(node_before_workspace);
-    GE_ASSERT_NOTNULL(node_after_workspace);
-    // 从 node_after_workspace 出发沿输出方向找多输入节点
-    std::set<af::Node *> visited{node_after_workspace.get()};
-    std::vector<af::AscNodePtr> pending{node_after_workspace};
-    while (!pending.empty()) {
-      const af::AscNodePtr current = pending.back();
-      pending.pop_back();
-      for (const auto &out_node : current->GetOutDataNodes()) {
-        const af::AscNodePtr out_asc_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
-        GE_ASSERT_NOTNULL(out_asc_node);
-        if (!visited.insert(out_asc_node.get()).second) {
-          continue;
-        }
-        pending.emplace_back(out_asc_node);
-        if (out_asc_node->GetInDataNodesSize() <= 1UL) {
-          continue;
-        }
-        // 多输入节点与 node_before_workspace 连通的输入节点, 与该多输入节点组成类 Norm 环路
-        for (const auto &in_node : out_asc_node->GetInDataNodes()) {
-          const af::AscNodePtr connected_input = std::dynamic_pointer_cast<af::AscNode>(in_node);
-          GE_ASSERT_NOTNULL(connected_input);
-          if (IsConnectedThroughWorkspace(connected_input, node_before_workspace, post_ws_load_map, out_asc_node)) {
-            loop_start_end.emplace_back(connected_input, out_asc_node);
+    for (const af::AscNodePtr &node_after_workspace : load_iter->second) {
+      GE_ASSERT_NOTNULL(node_after_workspace);
+      // 从 node_after_workspace 出发沿输出方向找多输入节点
+      std::set<af::Node *> visited{node_after_workspace.get()};
+      std::vector<af::AscNodePtr> pending{node_after_workspace};
+      while (!pending.empty()) {
+        const af::AscNodePtr current = pending.back();
+        pending.pop_back();
+        for (const auto &out_node : current->GetOutDataNodes()) {
+          const af::AscNodePtr out_asc_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
+          GE_ASSERT_NOTNULL(out_asc_node);
+          if (!visited.insert(out_asc_node.get()).second) {
+            continue;
+          }
+          pending.emplace_back(out_asc_node);
+          if (out_asc_node->GetInDataNodesSize() <= 1UL) {
+            continue;
+          }
+          // 多输入节点与 node_before_workspace 连通的输入节点, 与该多输入节点组成类 Norm 环路
+          for (const auto &in_node : out_asc_node->GetInDataNodes()) {
+            const af::AscNodePtr connected_input = std::dynamic_pointer_cast<af::AscNode>(in_node);
+            GE_ASSERT_NOTNULL(connected_input);
+            if (IsConnectedThroughWorkspace(connected_input, node_before_workspace, post_ws_load_map, out_asc_node)) {
+              loop_start_end.emplace_back(connected_input, out_asc_node);
+            }
           }
         }
       }

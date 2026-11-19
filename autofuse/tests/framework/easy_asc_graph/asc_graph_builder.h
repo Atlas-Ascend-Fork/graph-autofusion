@@ -130,6 +130,10 @@ class AscGraphBuilder {
     return Reduce<ascir_op::Sum>(name, input, reduce_axes);
   }
 
+  AscGraphBuilder &Prod(const std::string &name, const std::string &input, const std::vector<size_t> &reduce_axes) {
+    return Reduce<ascir_op::Prod>(name, input, reduce_axes);
+  }
+
   AscGraphBuilder &Transpose(const std::string &name, const std::string &input, const std::vector<int64_t> &axes);
 
   AscGraphBuilder &Concat(const std::string &name, const std::vector<std::string> &inputs);

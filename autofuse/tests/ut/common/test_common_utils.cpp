@@ -844,6 +844,35 @@ TEST_F(CommonUtilsTest, GenValidNameTest) {
   EXPECT_EQ(ret3, std::string{"ab_c_d"});
 }
 
+TEST_F(CommonUtilsTest, GenApiTilingValueFingerprintReflectsShapeAndSource) {
+  af::AscGraph graph("fingerprint_graph");
+  Data data_op("data", graph);
+  Pad pad_a("pad_a");
+  const auto pad_a_node = graph.AddNode(pad_a);
+  ASSERT_NE(pad_a_node, nullptr);
+  pad_a.x = data_op.y;
+  pad_a.y.dtype = ge::DT_FLOAT;
+  *pad_a.y.repeats = {af::Symbol(8)};
+
+  Pad pad_b("pad_b");
+  const auto pad_b_node = graph.AddNode(pad_b);
+  ASSERT_NE(pad_b_node, nullptr);
+  pad_b.x = data_op.y;
+  pad_b.y.dtype = ge::DT_FLOAT;
+  *pad_b.y.repeats = {af::Symbol(8), af::Symbol(11)};
+
+  // shape 不同：tiling 值必然不同，指纹必须可区分
+  EXPECT_NE(GenApiTilingValueFingerprint(pad_a_node), GenApiTilingValueFingerprint(pad_b_node));
+
+  // 属性拷贝自同一来源（对齐 pass 的插法）：指纹相同
+  Pad pad_c("pad_c");
+  const auto pad_c_node = graph.AddNode(pad_c);
+  ASSERT_NE(pad_c_node, nullptr);
+  pad_c.x = data_op.y;
+  pad_c_node->outputs[0].attr = pad_a_node->outputs[0].attr;
+  EXPECT_EQ(GenApiTilingValueFingerprint(pad_a_node), GenApiTilingValueFingerprint(pad_c_node));
+}
+
 TEST_F(CommonUtilsTest, CalcReservedTmpBufSizeForAscGraphTest) {
   af::AscGraph graph("test_graph");
   Data x_op1("x1", graph);

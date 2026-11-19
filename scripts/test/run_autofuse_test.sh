@@ -824,6 +824,7 @@ codegen_e2e_st() {
                         i1e_store_test_e2e_v2 \
                         indirect_load_broadcast_elements_sk_test_e2e_v2 \
                         indirect_load_broadcast_index_where_simt_test_e2e_v2 \
+                        indirect_load_graph_hint_dy_gather_slice_e2e_v2 \
                         indirect_load_graph_hint_embedding_slice_e2e_v2 \
                         indirect_load_rank3_axis1_torch_gather_frontend_e2e_v2 \
                         indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_e2e_v2 \
@@ -840,6 +841,29 @@ codegen_e2e_st() {
                         load_log2_store_test_e2e_v2 \
                         load_logicaland_store_test_e2e_v2 \
                         load_logicalor_store_test_e2e_v2 \
+                        reduce_any_bool_store_test_e2e_v2 \
+                        reduce_any_uint8_store_test_e2e_v2 \
+                        reduce_any_int8_store_test_e2e_v2 \
+                        reduce_any_int16_store_test_e2e_v2 \
+                        reduce_any_int32_store_test_e2e_v2 \
+                        reduce_any_int64_store_test_e2e_v2 \
+                        reduce_any_float_store_test_e2e_v2 \
+                        reduce_all_bool_store_test_e2e_v2 \
+                        reduce_all_uint8_store_test_e2e_v2 \
+                        reduce_all_int8_store_test_e2e_v2 \
+                        reduce_all_int16_store_test_e2e_v2 \
+                        reduce_all_int32_store_test_e2e_v2 \
+                        reduce_all_int64_store_test_e2e_v2 \
+                        reduce_all_float_store_test_e2e_v2 \
+                        reduce_prod_int8_store_test_e2e_v2 \
+                        reduce_prod_int16_store_test_e2e_v2 \
+                        reduce_prod_int32_store_test_e2e_v2 \
+                        reduce_prod_int64_store_test_e2e_v2 \
+                        reduce_prod_float_store_test_e2e_v2 \
+                        reduce_prod_int32_1025_store_test_e2e_v2 \
+                        reduce_prod_int64_1025_store_test_e2e_v2 \
+                        reduce_prod_float_1025_store_test_e2e_v2 \
+                        reduce_prod_int8_ra_store_test_e2e_v2 \
                         load_lshift_store_test_e2e_v2 \
                         load_modified_bessel_i0_store_test_e2e_v2 \
                         load_modified_bessel_i1_store_test_e2e_v2 \
@@ -1024,7 +1048,8 @@ build_backend() {
                     matmul_elemwise_test_e2e \
                     inductor_matmul_elemwise_test_e2e \
                     workspace_uint64_multi_reduce_test_e2e \
-                    workspace_uint64_tiling_test_e2e"
+                    workspace_uint64_tiling_test_e2e \
+                    segment_cache_tiling_test_e2e"
   if [[ "X${v35_mode}" = "Xv35" ]]; then
     # v35 专属用例（原先与主列表混编），拆分至 ST_Test_autofuse_v35_1/2/3 分片任务与主架构 ST 并行执行
     MAKE_TARGET_LIST="load_loop_mode_test_e2e_v2 \
@@ -1047,6 +1072,8 @@ build_backend() {
                       abs_fma_test_e2e_v2 \
                       floordiv_mul_le_select_test_e2e_v2 \
                       tail_brc_tail_reduce_test_e2e_v2 \
+                      softmax_expanddims_add_test_e2e_v2 \
+                      tail_brc_remove_pad_test_e2e_v2 \
                       int32_logical_not_test_e2e_v2 \
                       int16_logical_not_test_e2e_v2 \
                       float_logical_not_test_e2e_v2 \
@@ -1156,6 +1183,7 @@ build_backend() {
                       expm1_test_e2e_v2 \
                       rand_store_test_e2e_v2 \
                       randn_store_test_e2e_v2 \
+                      randint_store_test_e2e_v2 \
                       load_cast_brc_realign_test_e2e_v2"
   fi
   if [[ "X${v35_mode}" = "Xv35" && -n "${v35_shard}" ]]; then

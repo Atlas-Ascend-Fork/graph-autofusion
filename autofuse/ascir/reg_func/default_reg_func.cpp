@@ -110,7 +110,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcBinaryApiTmpSize(const AscNode &nod
   bool is_ub_scalar = true;
   for (uint32_t i = 0; i < node_inputs[1].attr.repeats.size(); i++) {
     GELOGD("Node %s[%s] input[%u] repeat[%u] is : %s", node.GetTypePtr(), node.GetNamePtr(), 1, i,
-           node_inputs[1].attr.repeats[i].Serialize().get());
+           node_inputs[1].attr.repeats[i].Str().get());
     if (SymbolicUtils::StaticCheckEq(node_inputs[1].attr.repeats[i], sym::kSymbolOne) != TriBool::kTrue) {
       is_ub_scalar = false;
       break;

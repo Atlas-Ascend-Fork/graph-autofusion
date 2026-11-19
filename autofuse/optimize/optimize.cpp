@@ -908,12 +908,149 @@ Status Optimizer::GetNonContinuousAxisPairBySpecialRule(ascir::ImplGraph &impl_g
   return af::SUCCESS;
 }
 
+// ===== [删轴后退化全归约补偿] =====
+// 独立于 GraphPass 期的 ExpandDimsForAllReducePass（该 pass 保持原样，本处不改动）：
+// pass 在删轴前判定，广播轴（src == dst == 0）不计入归约轴，覆盖不了"删轴后才退化为纯 R"
+// 的图；本组函数在 RemoveAllZeroStrideLoopAxis 删轴完成后就地复检补轴。判定口径与 pass 的
+// IsAllReduce 一致，但建轴与同步方式按删轴后场景独立设计（见各函数注释）。
+
+// 判定 reduce 节点的全部 sched 轴是否均为归约轴（src != dst && dst == 0）。
+static bool IsDegeneratedAllReduce(af::AscNode &node) {
+  std::vector<ascir::AxisId> axes;
+  if (ScheduleUtils::GetLoopAxis(node, axes) != af::SUCCESS) {
+    GELOGE(af::FAILED, "Get loop axis failed, node:[%s].", node.GetNamePtr());
+    return false;
+  }
+  std::vector<ascir::SizeExpr> src_strides;
+  std::vector<ascir::SizeExpr> dst_strides = node.outputs[0].attr.strides;
+  if (ScheduleUtils::GetReduceInputStrides(node, src_strides) != af::SUCCESS) {
+    GELOGE(af::FAILED, "Get reduce input strides failed, node:[%s].", node.GetNamePtr());
+    return false;
+  }
+  GE_ASSERT_TRUE((src_strides.size() == dst_strides.size()),
+                 "The output dim cnt [%zu] of reduce mismatch with input dim cnt [%zu].", dst_strides.size(),
+                 src_strides.size());
+  GE_ASSERT_TRUE((src_strides.size() == axes.size()),
+                 "The input dim cnt [%zu] of reduce mismatch with reduce axes cnt [%zu].", src_strides.size(),
+                 axes.size());
+  std::vector<ascir::AxisId> reduce_axes;
+  for (size_t i = 0UL; i < src_strides.size(); ++i) {
+    if (src_strides[i] != dst_strides[i] && dst_strides[i] == 0) {
+      reduce_axes.push_back(axes[i]);
+    }
+  }
+  return reduce_axes.size() == axes.size();
+}
+
+// 计算节点（非 buffer）的 sched 轴是否与 Reduce 节点完全一致。比对范围与删轴循环的更新
+// 范围对齐：删轴只更新非 buffer 节点，Workspace/Constant 等 buffer 节点的 sched 轴不被
+// 删轴更新（保持原样或为空），不参与一致性判定；计算节点 sched 轴真分歧（多轴空间图，
+// 如 concat）时返回 false。
+static bool ComputeNodesShareSchedAxis(const af::AscGraph &graph, const std::vector<ascir::AxisId> &ref_axis_ids) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (ScheduleUtils::IsBuffer(node)) {
+      continue;
+    }
+    if (node->attr.sched.axis != ref_axis_ids) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 将计算节点（非 buffer）的 sched 轴与输出视图同步到补轴后的轴空间：sched 轴与视图
+// axis 整体替换为补轴列表，strides/repeats 头插（repeat=1，stride 按原首轴推算）。
+// 仅同步非 buffer 节点——与删轴循环的更新范围一致，buffer 节点视图保持原样且旧 id
+// 因追加建轴仍有效。
+static Status SyncViewsAfterExpandDims(ascir::ImplGraph &owner_graph, const std::vector<ascir::AxisId> &old_axis_ids,
+                                       const std::vector<ascir::AxisId> &new_axis_ids) {
+  for (const auto &node : owner_graph.GetAllNodes()) {
+    if (ScheduleUtils::IsBuffer(node)) {
+      continue;
+    }
+    auto cur_axis_ids = node->attr.sched.axis;
+    GE_ASSERT_TRUE(!cur_axis_ids.empty() && cur_axis_ids == old_axis_ids,
+                   "Expand dims for degenerated all reduce failed node:%s, Axis id mismatches with reduce.",
+                   node->GetNamePtr());
+    node->attr.sched.axis = new_axis_ids;
+    for (const auto output_attr : node->outputs()) {
+      output_attr->attr.axis = new_axis_ids;
+      GE_ASSERT_TRUE(output_attr->attr.strides.size() == old_axis_ids.size(),
+                     "Expand dims for degenerated all reduce failed node:%s, Strides mismatches with reduce.",
+                     node->GetNamePtr());
+      GE_ASSERT_TRUE(output_attr->attr.repeats.size() == old_axis_ids.size(),
+                     "Expand dims for degenerated all reduce failed node:%s, Repeats mismatches with reduce.",
+                     node->GetNamePtr());
+      if (output_attr->attr.strides[0UL] == 0) {
+        output_attr->attr.strides.insert(output_attr->attr.strides.begin(), One);
+      } else {
+        output_attr->attr.strides.insert(output_attr->attr.strides.begin(),
+                                         af::sym::Mul(output_attr->attr.repeats[0UL], output_attr->attr.strides[0UL]));
+      }
+      output_attr->attr.repeats.insert(output_attr->attr.repeats.begin(), One);
+    }
+  }
+  return af::SUCCESS;
+}
+
+// 删轴后退化全归约补偿：命中全归约 reduce 时在 sched 轴最前补 size=1 的 axis_1d 并同步
+// 计算节点，保证下游 GenTilingGroup 的 y_group 非空，否则 GenTilingCase 枚举空集导致
+// "No valid tiling cases"。与 pass 的差异（按删轴后场景独立设计）：
+// 1. 追加建轴（id 取轴池尾，不重排既有轴 id）：buffer 节点视图仍引用旧 id 且不被本次
+//    同步改写，重排会使这些引用悬空；
+// 2. 同步范围与删轴循环一致，仅非 buffer 节点。
+static Status ExpandDimsForDegeneratedAllReduce(ascir::ImplGraph &owner_graph) {
+  std::vector<ascir::AxisId> old_axis_ids;
+  std::vector<ascir::AxisId> new_axis_ids;
+  for (const auto &node : owner_graph.GetAllNodes()) {
+    if (node->attr.api.compute_type != af::ComputeType::kComputeReduce) {
+      continue;
+    }
+    if (!IsDegeneratedAllReduce(*node)) {
+      GELOGD("[ExpandDimsAllReduce] Graph[%s] reduce node[%s] is not degenerated all-reduce, skip.",
+             owner_graph.GetName().c_str(), node->GetNamePtr());
+      continue;
+    }
+    old_axis_ids = node->attr.sched.axis;
+    if (!ComputeNodesShareSchedAxis(owner_graph, old_axis_ids)) {
+      GELOGW(
+          "[ExpandDimsAllReduce] Graph[%s] degenerated to all reduce but compute nodes have different sched "
+          "axes, skip expand dims.",
+          owner_graph.GetName().c_str());
+      return af::SUCCESS;
+    }
+    auto &expand_axis = owner_graph.CreateAxis("axis_1d", One);
+    GELOGI(
+        "[ExpandDimsAllReduce] Graph[%s] reduce node[%s] is degenerated all-reduce, sched axis[%s], "
+        "expand size-1 axis[axis_1d](id:%ld) at first.",
+        owner_graph.GetName().c_str(), node->GetNamePtr(), af::ViewMemberToString(old_axis_ids).c_str(),
+        expand_axis.id);
+    new_axis_ids.push_back(expand_axis.id);
+    new_axis_ids.insert(new_axis_ids.end(), old_axis_ids.begin(), old_axis_ids.end());
+    break;
+  }
+  if (new_axis_ids.empty()) {
+    GELOGD("[ExpandDimsAllReduce] Graph[%s] has no degenerated all-reduce reduce node, nothing to expand.",
+           owner_graph.GetName().c_str());
+    return af::SUCCESS;
+  }
+  GE_CHK_STATUS_RET(SyncViewsAfterExpandDims(owner_graph, old_axis_ids, new_axis_ids),
+                    "Sync views after expand dims failed, graph:[%s].", owner_graph.GetName().c_str());
+  GELOGI("[ExpandDimsAllReduce] Graph[%s] expand axis[axis_1d] done, new sched axis[%s].",
+         owner_graph.GetName().c_str(), af::ViewMemberToString(new_axis_ids).c_str());
+  return af::SUCCESS;
+}
+
 Status Optimizer::RemoveAllZeroStrideLoopAxis(ascir::ImplGraph &owner_graph) {
   if (ScheduleUtils::HasComputeType(owner_graph, af::ComputeType::kComputeGather)) {
+    GELOGD("[RemoveZeroStride] Graph[%s] contains gather node, skip removing zero-stride loop axis.",
+           owner_graph.GetName().c_str());
     return af::SUCCESS;
   }
   std::unordered_set<size_t> zero_stride_axis_indices = IdentifyZeroStrideAxisIndices(owner_graph);
   if (zero_stride_axis_indices.empty()) {
+    GELOGD("[RemoveZeroStride] Graph[%s] has no all-graph zero-stride loop axis, nothing to remove.",
+           owner_graph.GetName().c_str());
     return af::SUCCESS;
   }
 
@@ -953,6 +1090,17 @@ Status Optimizer::RemoveAllZeroStrideLoopAxis(ascir::ImplGraph &owner_graph) {
       output->attr.repeats = new_repeats;
     }
   }
+
+  // [删轴后退化全归约补偿] 删除全图零 stride 广播轴后，剩余 sched 轴可能全部是 Reduce 的
+  // 归约轴（纯 R 图）。GraphPass 期的 ExpandDimsForAllReducePass 在删轴前判定，广播轴
+  // （src == dst == 0）不计入归约轴，无法覆盖删轴后才退化为纯 R 的图；此处删除完成后
+  // 就地复检并补 axis_1d（追加建轴，不重排既有轴 id），保证下游 GenTilingGroup 的
+  // y_group 非空，否则 GenTilingCase 枚举空集导致 "No valid tiling cases"。复检仅在本次
+  // 确实删除过轴（删除集合非空）时到达，且非全归约/无 Reduce 图内为 no-op；比对与同步
+  // 范围与删轴循环一致（跳过全部 buffer 节点），计算节点 sched 轴真分歧（多轴空间图）时
+  // 跳过补偿，保持既有调度行为。
+  GE_ASSERT_SUCCESS(ExpandDimsForDegeneratedAllReduce(owner_graph),
+                    "Expand dims for degenerated all reduce failed, graph:[%s].", owner_graph.GetName().c_str());
   return af::SUCCESS;
 }
 
@@ -1237,16 +1385,10 @@ Status Optimizer::InitializeScheduledResults(std::vector<ascir::ScheduledResult>
   return af::SUCCESS;
 }
 
-Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, ScheduleTask &schedule_task,
-                                std::vector<ascir::ScheduledResult> &scheduled_results) const {
-  schedule_task.enable_workspace_alignment = CanAlignRCoreWorkspace(schedule_task);
+Status Optimizer::ScheduleGroupedGraphs(ScheduleTask &schedule_task,
+                                        std::vector<ascir::ScheduledResult> &scheduled_results_cur,
+                                        std::set<std::string> &scored_graph_names) const {
   size_t index = 0UL;
-  std::vector<ascir::ScheduledResult> scheduled_results_cur;
-  GE_ASSERT_SUCCESS(InitializeScheduledResults(scheduled_results_cur, schedule_task));
-
-  // 记录注册打分函数的nddma模板名
-  std::set<std::string> scored_graph_names;
-
   for (auto &grouped_graph : schedule_task.grouped_graphs) {
     GE_CHK_STATUS_RET(AscGraphInfoComplete::CompleteApiInfo(grouped_graph), "CompleteApiInfo failed");
     if (CanDoReMergeAxis(grouped_graph, schedule_task.reduce_type)) {
@@ -1285,15 +1427,38 @@ Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, Sc
            schedule_outputs.size());
     if (is_reduce_first_stage) {
       GE_ASSERT_SUCCESS(AppendReduceFirstStageGroup(schedule_outputs, scheduled_results_cur, index, schedule_task));
+    } else if (schedule_task.reduce_type == ReduceTemplateType::kRCore) {
+      GE_ASSERT_SUCCESS(CopyImplGraphs(schedule_outputs, scheduled_results_cur));
     } else {
-      if (schedule_task.reduce_type == ReduceTemplateType::kRCore) {
-        GE_ASSERT_SUCCESS(CopyImplGraphs(schedule_outputs, scheduled_results_cur));
-      } else {
-        GE_ASSERT_SUCCESS(
-            ProcessNonReduceSchedules(schedule_outputs, scheduled_results_cur, schedule_task, scored_graph_names));
-      }
+      GE_ASSERT_SUCCESS(
+          ProcessNonReduceSchedules(schedule_outputs, scheduled_results_cur, schedule_task, scored_graph_names));
     }
     index++;
+  }
+  return af::SUCCESS;
+}
+
+Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, ScheduleTask &schedule_task,
+                                std::vector<ascir::ScheduledResult> &scheduled_results) const {
+  schedule_task.enable_workspace_alignment = CanAlignRCoreWorkspace(schedule_task);
+  std::vector<ascir::ScheduledResult> scheduled_results_cur;
+  GE_ASSERT_SUCCESS(InitializeScheduledResults(scheduled_results_cur, schedule_task));
+
+  // 记录注册打分函数的nddma模板名
+  std::set<std::string> scored_graph_names;
+
+  // UNSUPPORTED时不打错误日志, 由上层按警告跳过该task
+  GE_CHK_STATUS_RET_NOLOG(ScheduleGroupedGraphs(schedule_task, scheduled_results_cur, scored_graph_names));
+  // [动态打分字段保活] score_func 按调度前 group 归属硬编码 tiling data 子结构字段引用, 调度期
+  // 图改写(零步长轴删除/合轴)使符号失去表达式引用后, 上方 size var 重建会裁剪对应字段, host tiling
+  // 侧编译报 no member; 将绑定符号并入对应组 runtime_shape_vars(ProcessMultiGroup 结构体字段发射
+  // 与 IsVarUsedInScheduleGroup 运行期值填充均消费该通道), 保证引用恒有效
+  for (auto &schedule_result : scheduled_results_cur) {
+    const auto &keep_vars = schedule_task.score_group_shape_vars;
+    for (size_t g = 0UL; (g < keep_vars.size()) && (g < schedule_result.schedule_groups.size()); ++g) {
+      auto &runtime_shape_vars = schedule_result.schedule_groups[g].runtime_shape_vars;
+      runtime_shape_vars.insert(runtime_shape_vars.end(), keep_vars[g].begin(), keep_vars[g].end());
+    }
   }
   scheduled_results.insert(scheduled_results.end(), scheduled_results_cur.begin(), scheduled_results_cur.end());
 

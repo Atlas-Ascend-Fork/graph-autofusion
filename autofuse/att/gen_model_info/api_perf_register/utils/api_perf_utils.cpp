@@ -573,7 +573,7 @@ af::Status GetDmaParams(const vector<Expr> &dims, Expr &outer_repeat, vector<Exp
   if (static_cast<int32_t>(dims.size()) <= supported_max_dma_len) {
     used_dims = dims;
     outer_repeat = af::sym::kSymbolOne;
-    GELOGD("Got outer loop %s, used dims %s", outer_repeat.Serialize().get(), GetVecString(used_dims).c_str());
+    GELOGD("Got outer loop %s, used dims %s", outer_repeat.Str().get(), GetVecString(used_dims).c_str());
   } else {
     size_t dim_size = dims.size();
     outer_repeat = accumulate(dims.begin(), (dims.end() - supported_max_dma_len - 1), CreateExpr(1),
@@ -840,8 +840,8 @@ af::Status SetStride(const TensorShapeInfo &shape_info, NodeDetail &node_info, c
                      bool need_swap) {
   auto gm_stride_result = CalculateStride(shape_info, false, node_info, supported_max_dma_len, need_swap);
   auto ub_stride_result = CalculateStride(shape_info, true, node_info, supported_max_dma_len, need_swap);
-  node_info.gm_stride = (gm_stride_result.stride.Serialize() == nullptr) ? CreateExpr(0) : gm_stride_result.stride;
-  node_info.ub_stride = (ub_stride_result.stride.Serialize() == nullptr) ? CreateExpr(0) : ub_stride_result.stride;
+  node_info.gm_stride = (gm_stride_result.stride.Str() == nullptr) ? CreateExpr(0) : gm_stride_result.stride;
+  node_info.ub_stride = (ub_stride_result.stride.Str() == nullptr) ? CreateExpr(0) : ub_stride_result.stride;
   // 保存 gm_stride 的 block_count_idx，用于性能函数计算
   node_info.block_count_idx = gm_stride_result.block_count_idx;
   // 合并ternary_ops到node_info
@@ -1060,7 +1060,7 @@ af::Status GetOuterParams(const vector<Expr> &dims, Expr &outer_repeat, vector<E
     }
     outer_repeat = accumulate(dims.begin(), (dims.end() - dma_max_len), CreateExpr(1),
                               [](Expr a, Expr b) { return af::sym::Mul(a, b); });
-    GELOGD("Got outer loop %s, used dims %s", outer_repeat.Serialize().get(), GetVecString(used_dims).c_str());
+    GELOGD("Got outer loop %s, used dims %s", outer_repeat.Str().get(), GetVecString(used_dims).c_str());
   }
   return af::SUCCESS;
 }

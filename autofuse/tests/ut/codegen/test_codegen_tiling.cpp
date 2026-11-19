@@ -18,6 +18,7 @@
 #include "high_perf_tiling_code_gen_impl.h"
 #include "codegen.h"
 #include "codegen_tiling.h"
+#include "codegen_tiling_data.h"
 #include "codegen_tiling_utils.h"
 #include "codegen_tiling_cube_wrapper.h"
 #include "common_utils.h"
@@ -1533,6 +1534,71 @@ class TestCodegenTiling : public testing::Test, public codegen::TilingLib {
  protected:
   TestCodegenTiling() : codegen::TilingLib("test", "test") {}
 };
+
+namespace {
+size_t CountSubstring(const std::string &text, const std::string &pattern) {
+  size_t count = 0U;
+  size_t pos = text.find(pattern);
+  while (pos != std::string::npos) {
+    ++count;
+    pos = text.find(pattern, pos + pattern.size());
+  }
+  return count;
+}
+
+void CreateGraphWithSameNamePads(af::AscGraph &graph, bool second_pad_diff_shape) {
+  auto s0 = graph.CreateSizeVar(8);
+  auto s1 = graph.CreateSizeVar(3);
+  auto z0 = graph.CreateAxis("z0", s0);
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  for (size_t i = 0UL; i < 2UL; ++i) {
+    af::ascir_op::Pad pad("pad");
+    graph.AddNode(pad);
+    pad.x = data.y;
+    pad.y.dtype = ge::DT_FLOAT;
+    *pad.y.axis = {z0.id};
+    *pad.y.repeats = {(i == 1UL && second_pad_diff_shape) ? s1 : s0};
+  }
+}
+}  // namespace
+
+TEST_F(TestCodegenTiling, AddApiTilingDataSkipsSameIdentityAndFailsOnConflict) {
+  {
+    // 同名同属性的两个 Pad：同身份等价重复，字段只发一份，跳过成功
+    af::AscGraph graph("same_identity_pads");
+    CreateGraphWithSameNamePads(graph, false);
+    codegen::TilingData tiling_data("Autofuse", "TilingData");
+    std::stringstream ss;
+    EXPECT_EQ(tiling_data.AddApiTilingData(graph, ss, 0U), af::SUCCESS);
+    EXPECT_EQ(CountSubstring(ss.str(), "pad_tilingData_0"), 1U);
+  }
+  {
+    // 同名但 shape 不同的两个 Pad：值指纹不同，异身份撞名显性失败
+    af::AscGraph graph("conflict_identity_pads");
+    CreateGraphWithSameNamePads(graph, true);
+    codegen::TilingData tiling_data("Autofuse", "TilingData");
+    std::stringstream ss;
+    EXPECT_NE(tiling_data.AddApiTilingData(graph, ss, 0U), af::SUCCESS);
+  }
+}
+
+TEST_F(TestCodegenTiling, GenReprApiTilingFieldsSkipsSameIdentityAndFailsOnConflict) {
+  {
+    af::AscGraph graph("repr_same_identity_pads");
+    CreateGraphWithSameNamePads(graph, false);
+    std::stringstream ss;
+    EXPECT_EQ(GenReprApiTilingFields(ss, graph, 0U, "tiling_data.", true), af::SUCCESS);
+    EXPECT_EQ(CountSubstring(ss.str(), ".pad_tilingData_0 = {"), 1U);
+  }
+  {
+    af::AscGraph graph("repr_conflict_identity_pads");
+    CreateGraphWithSameNamePads(graph, true);
+    std::stringstream ss;
+    EXPECT_NE(GenReprApiTilingFields(ss, graph, 0U, "tiling_data.", true), af::SUCCESS);
+  }
+}
 
 TEST_F(TestCodegenTiling, CvRuntimeShapeMetadataGetsInitializedWithoutAnExtraSolverAxis) {
   ascir::FusedScheduledResult result;
@@ -3858,6 +3924,24 @@ TEST_F(TestCodegenTiling, GenerateForInductorShouldContainTopnMainOutputAbi) {
   EXPECT_NE(tiling_impl.find("GetTilingDataRepr("), std::string::npos);
 }
 
+// 分段缓存开启时，AscGraph{N}::GetTiling的segment尾参是TU内部实现细节：SegmentCacheContext定义在
+// state头，不得泄漏进api头声明，否则只包含api头的TU（Inductor entry TU、外部调用方）编译报
+// unknown type name；api头按公共3参签名声明GetTiling
+TEST_F(TestCodegenTiling, SegmentCacheKeepsApiHeaderFreeOfSegmentCacheContext) {
+  codegen_func_ = att::GenTilingImplAutoFuseV3;
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")}, af::Symbol(1));
+  setenv("AUTOFUSE_DFX_FLAGS", "--att_accuracy_level=0", 1);
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_EQ(att::AutoFuseConfig::MutableAttStrategyConfig().Init(), af::SUCCESS);
+  auto res = this->GenerateForInductor(fused_schedule_result);
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  att::AutoFuseConfig::MutableAttStrategyConfig().Reset();
+  ASSERT_TRUE(res.find(codegen::kTilingApiHeaderIdentify) != res.end());
+  const auto &api_header = res.at(codegen::kTilingApiHeaderIdentify);
+  EXPECT_EQ(api_header.find("SegmentCacheContext"), std::string::npos);
+  EXPECT_NE(api_header.find("bool GetTiling("), std::string::npos);
+}
+
 TEST_F(TestCodegenTiling, GenerateForInductorShouldUseGetTilingDataReprAsTilingDataValidationAid) {
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")});
   auto tiling_files = this->GenerateForInductor(fused_schedule_result);
@@ -4119,6 +4203,7 @@ TEST_F(TestCodegenTiling, FinalTilingUsesSelectedCaseAndStructuredPipeInterface)
 }
 
 TEST_F(TestCodegenTiling, SplitHeaderGenerateForInductorShouldEmitHeaderKeysAndCppIncludes) {
+  enable_autofuse_pgo_ = false;
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")});
   auto tiling_files = this->GenerateForInductor(fused_schedule_result);
 
@@ -4164,6 +4249,36 @@ TEST_F(TestCodegenTiling, SplitHeaderGenerateForInductorShouldEmitHeaderKeysAndC
     EXPECT_NE(solver.find("#include \"autofuse_tiling_func_log.h\""), std::string::npos);
     EXPECT_NE(solver.find("#include \"autofuse_tiling_func_solver.h\""), std::string::npos);
     EXPECT_EQ(solver.find("#include \"autofuse_tiling_func_common.h\""), std::string::npos);
+  }
+}
+
+TEST_F(TestCodegenTiling, SplitHeaderInductorFixpipShouldNotReferencePgoHeader) {
+  enable_autofuse_pgo_ = false;
+  codegen_func_ = att::GenTilingImplAutoFuseV3;
+  for (const bool is_dynamic : {false, true}) {
+    SCOPED_TRACE(is_dynamic);
+    af::AscGraph graph("fixpip_matmul");
+    CreateMatmulGraph(graph, is_dynamic);
+    ascir::ScheduledResult scheduled_result;
+    scheduled_result.cube_type = ascir::CubeTemplateType::kFixpip;
+    scheduled_result.schedule_groups.resize(1U);
+    scheduled_result.schedule_groups[0].impl_graphs.push_back(graph);
+    ascir::FusedScheduledResult fused_schedule_result;
+    fused_schedule_result.fused_graph_name = af::AscendString(graph.GetName().c_str());
+    fused_schedule_result.input_nodes = {graph.FindNode("data0"), graph.FindNode("data1")};
+    fused_schedule_result.output_nodes = {graph.FindNode("output")};
+    fused_schedule_result.node_idx_to_scheduled_results = {{scheduled_result}};
+    ASSERT_TRUE(ascgen_utils::IsJustCubeFixpip(fused_schedule_result));
+
+    const auto tiling_files = this->GenerateForInductor(fused_schedule_result);
+    EXPECT_EQ(tiling_files.count(codegen::kTilingPgoHeaderIdentify), 0U);
+    ASSERT_NE(tiling_files.find(codegen::kTilingDefAndConstIdentify), tiling_files.end());
+    const auto &entry = tiling_files.at(codegen::kTilingDefAndConstIdentify);
+    EXPECT_NE(entry.find("extern \"C\" int64_t AutofuseTiling("), std::string::npos);
+    EXPECT_NE(entry.find("CallCubeTiling("), std::string::npos);
+    for (const auto &[key, source] : tiling_files) {
+      EXPECT_EQ(source.find(codegen::kTilingPgoHeaderInclude), std::string::npos) << key;
+    }
   }
 }
 
@@ -6168,6 +6283,82 @@ int main() {
   ASSERT_TRUE(CompileAndRunCode(source));
 }
 
+class UpdateWorkspaceProbe : public att::HighPerfTilingCodeGenImpl {
+ public:
+  using att::HighPerfTilingCodeGenImpl::GenUpdateWorkspace;
+  using att::HighPerfTilingCodeGenImpl::HighPerfTilingCodeGenImpl;
+  void SetWorkspaceIds(const att::TensorIdSet &ids) {
+    workspace_tensor_id_set_ = ids;
+  }
+};
+
+TEST_F(TestCodegenTiling, UpdateWorkspaceEmitsAllAscGraphWorkspaceIds) {
+  att::TilingModelInfo models(1);
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  UpdateWorkspaceProbe generator("test", config, models, {}, false);
+  generator.SetWorkspaceIds({{0, {{0, {1, 2}}, {1, {22}}}}});
+  generator.tiling_func_.Reset();
+  generator.GenUpdateWorkspace(0);
+  const auto code = generator.tiling_func_.GetOutputStr();
+  EXPECT_NE(code.find("tiling_data.set_workspace22(it22->second);"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, ReuseGroupRegistersOwnWorkspaceIds) {
+  att::TilingModelInfo models(2);
+  models[0].schedule_group_ident = {2UL, 3UL, 4UL};
+  models[0].tiling_case_id = 0U;
+  models[0].workspace_size_map[16] = af::Expression::Parse("z0t_size");
+  models[1].schedule_group_ident = {2UL, 3UL, 4UL};
+  models[1].tiling_case_id = 0U;
+  models[1].workspace_size_map[17] = af::Expression::Parse("z0t_size");
+  att::TilingCodeGenConfig config;
+  config.tiling_data_type_name = "Data";
+  att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  generator.SetFinalTilingObservationMetadata(1UL, 2UL, {{"", 0}});
+  att::ReuseScheduleGroupInfo primary;
+  primary.tiling_keys = {0U};
+  std::map<att::ScheduleGroupIdent, att::ReuseScheduleGroupInfo> infos{{{2UL, 3UL, 4UL}, primary}};
+  ASSERT_EQ(generator.GenReuseGroupTilingWrapperGetTiling("Cur", "Primary", primary, infos.cbegin()), af::SUCCESS);
+  std::string source = R"(
+#include <unordered_map>
+#define CheckCachedLogLevel(level) true
+#define ATT_FINAL_TILING_LOGI(op, fmt, value) (void)0
+#define OP_NAME "test"
+)" + att::final_tiling::GenFinalTilingLogHelpers(false) +
+                       R"(
+template<class T> T Max(T lhs, T rhs) { return lhs > rhs ? lhs : rhs; }
+struct Data { uint32_t key{0}; uint32_t z0t_size{1};
+  uint32_t get_tiling_key() const { return key; }
+  void set_tiling_key(uint32_t value) { key = value; }
+  uint32_t get_z0t_size() const { return z0t_size; } };
+using CurTilingData = Data;
+using PrimaryTilingData = Data;
+// 多组场景组级 GetTiling 恒带 GroupLevelCache* 形参（与复用数据解耦）；
+// 本测试只校验 workspace id 注册，cache 不参与，前置声明补齐即可编译。
+struct GroupLevelCache;
+template<class TI, class TO> TO &RefToRef(TI &value) { return value; }
+namespace Primary {
+// 生成器对多组场景的组级 GetTiling 恒带 GroupLevelCache* 形参（与复用数据解耦），
+// wrapper 转发时透传 cache；本测试只校验 workspace id 注册，cache 直通 nullptr。
+bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t, GroupLevelCache *) {
+  FinalTilingObservationSlotGuard guard(0U);
+  CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 0U, 0, 1}); return true;
+}
+}
+)" + generator.tiling_func_.GetOutputStr() +
+                       R"(
+int main() {
+  FinalTilingObservationContext context;
+  FinalTilingObservationCallGuard guard(context, true, 2U);
+  Data data; std::unordered_map<int64_t, uint64_t> workspace;
+  if (!GetTiling(data, workspace, -1, nullptr)) { return 1; }
+  return workspace.count(16) == 1U && workspace.count(17) == 1U ? 0 : 2;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
 TEST_F(TestCodegenTiling, ReuseObservationStoresLogicalGroupIdentity) {
   att::TilingModelInfo models(1);
   models[0].schedule_group_ident = {2UL, 3UL, 4UL};
@@ -6191,8 +6382,12 @@ struct Data { uint32_t key{0}; uint32_t get_tiling_key() const { return key; }
 using CurTilingData = Data;
 using PrimaryTilingData = Data;
 template<class TI, class TO> TO &RefToRef(TI &value) { return value; }
+// 与GenReuseGroupTilingWrapperGetTiling生成的wrapper签名对齐：cache形参恒生成（与复用数据解耦），
+// 类型为head单份生成于外层命名空间，wrapper签名用非限定名
+using GroupLevelCache = int;
 namespace Primary {
-bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t) {
+bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t, GroupLevelCache* cache = nullptr) {
+  (void)cache;
   FinalTilingObservationSlotGuard guard(0U);
   CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 0U, 0, 1}); return true;
 }
@@ -6203,7 +6398,8 @@ int main() {
   FinalTilingObservationContext context;
   FinalTilingObservationCallGuard guard(context, true, 2U);
   Data data; std::unordered_map<int64_t, uint64_t> workspace;
-  if (!GetTiling(data, workspace, -1)) { return 1; }
+  // wrapper定义的cache形参无默认值（与生成形态一致），调用显式传nullptr占位
+  if (!GetTiling(data, workspace, -1, nullptr)) { return 1; }
   const auto &snapshot = context.selections[1];
   return snapshot.valid && snapshot.graph == 2U && snapshot.result == 3U && snapshot.group == 4U ? 0 : 2;
 }
@@ -8045,6 +8241,35 @@ TEST_F(TestCodegenTiling, CodegenGenerateForInductorCvFusionLaunchDecoupleContro
   EXPECT_EQ(rt_result.kernel.find("int8_t MIX_MODE"), std::string::npos);
   EXPECT_EQ(rt_result.kernel.find("if constexpr (MIX_MODE"), std::string::npos);
   EXPECT_NE(rt_result.kernel.find("if (cv_tiling_data.mix_mode == 1)"), std::string::npos);
+}
+
+// PGO 开启时 CV 融合图必须保持 rtLaunch 形态，禁止任何静默降级 legacy：tiling 侧对
+// CV 图局部关闭 PGO（不产 PgoRunner/PgoDeviceSource/实测 TopN），PgoDeviceSource 只在
+// 静态非 CV 图产生、与 rtLaunch 的 AIV split marker 作用域不相交，PGO 开启与否不得
+// 影响 launch_decouple 传参。重新引入降级守卫会使本用例挂载。
+TEST_F(TestCodegenTiling, CodegenGenerateForInductorPgoKeepsCvFusionRtLaunchForm) {
+  ScopedAutofusePgoFlag pgo_flag(true);
+  auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph();
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused_schedule_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), af::SUCCESS);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused_schedule_result));
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+
+  codegen::CodegenResult rt_result;
+  ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, rt_result, true), af::SUCCESS);
+
+  // rtLaunch 形态契约保持：<<< 退出，extern "C" 分派入口 + AIV split 标记 + 裁剪宏标记。
+  EXPECT_EQ(rt_result.kernel.find("<<<"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("#ifndef AF_AIV_UNIT"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("_op_kernel_aiv.cpp"), std::string::npos);
+  EXPECT_NE(rt_result.kernel.find("extern \"C\" __global__ __aicore__ void"), std::string::npos);
+  EXPECT_NE(rt_result.tiling.find("GetDynamicUbSize"), std::string::npos);
+
+  // CV 图不产 PGO 实测链工件：无 PgoRunner/PgoDeviceSource/实测 TopN 入口。
+  EXPECT_EQ(rt_result.tiling.find("AUTOFUSE_SPLIT_FILE_BEGIN: PgoRunner"), std::string::npos);
+  EXPECT_EQ(rt_result.tiling.find("AUTOFUSE_SPLIT_FILE_BEGIN: PgoDeviceSource"), std::string::npos);
+  EXPECT_EQ(rt_result.tiling.find("GenerateMeasuredTopnSolutions"), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, CodegenGenerateShouldNotEmitSplitMarkers) {

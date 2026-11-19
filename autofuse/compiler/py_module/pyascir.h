@@ -154,6 +154,7 @@ __attribute__((visibility("default"))) PyObject *PyInit_autofuse(void);
   OP(Ceil2Int)                    \
   OP(Rand)                        \
   OP(Randn)                       \
+  OP(RandInt)                     \
   OP(RoundToInt)                  \
   OP(Square)                      \
   OP(Sinh)                        \

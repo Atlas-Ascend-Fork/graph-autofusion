@@ -257,7 +257,7 @@ PyGetSetDef SizeExpr::getseters[] = {{"expression",
                                         PY_ASSERT_NOTNULL(obj);
                                         PY_ASSERT_NOTNULL(obj->expression);
                                         // 返回 expression的可读str而非裸指针
-                                        return PyUnicode_FromString(obj->expression->Serialize().get());
+                                        return PyUnicode_FromString(obj->expression->Str().get());
                                       },
                                       nullptr, "Expression string", nullptr},
                                      {nullptr}};
