@@ -73,7 +73,7 @@ The following functions are shared by SuperKernel and regular operators, or tigh
 | ascendc_compile_base.gen_spk_kernel_call | Same as above |super_kernel_gen_entry_code.py|
 | ascendc_compile_base.split_spk_kernel_objs | Same as above |super_kernel_gen_entry_code.py |
 | ascendc_compile_base.super_kernel_gen_entry | Same as above |super_kernel_gen_entry_code.py|
-| ascendc_compile_base.gen_file_header | Same as above ps: generates dual page table global variables (implementation only supports v220, need consider macro isolation for different chip versions, can reference ascendc_compile_gen_code.gen_global_isolation_macro) and only supports split_mode=1, dual page table takes effect |super_kernel_gen_entry_code.py|
+| ascendc_compile_base.gen_file_header | Same as above. Note: generates dual page table global variables (implementation only supports v220, need consider macro isolation for different chip versions, can reference ascendc_compile_gen_code.gen_global_isolation_macro) and only supports split_mode=1, dual page table takes effect |super_kernel_gen_entry_code.py|
 | ascendc_compile_base.gen_system_run_cfg | Same as above |super_kernel_gen_entry_code.py|
 | ascendc_compile_base.localize_symbol_of_sk | Link all SuperKernel binaries |super_kernel_compile.py|
 | ascendc_compile_base.gen_super_kernel_compile_info | Generate SuperKernel compile info |super_kernel_compile.py|
