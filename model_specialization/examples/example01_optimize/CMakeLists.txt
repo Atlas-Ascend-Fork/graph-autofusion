@@ -24,6 +24,10 @@ endif()
 add_executable(demo main.cpp)
 target_compile_definitions(demo PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
 target_compile_options(demo PRIVATE -Wall -Wextra -Werror)
-target_include_directories(demo PRIVATE ${MODEL_ROOT}/src $ENV{ASCEND_HOME_PATH}/include ${OPP_VENDOR_PATH}/op_api/include)
+target_include_directories(demo PRIVATE
+    ${MODEL_ROOT}/include/model_specialization
+    $ENV{ASCEND_HOME_PATH}/include
+    ${OPP_VENDOR_PATH}/op_api/include
+)
 target_link_directories(demo PRIVATE $ENV{ASCEND_HOME_PATH}/lib64)
 target_link_libraries(demo PRIVATE ${MODEL_SPECIALIZATION_LIBRARY} ${CUSTOM_OPAPI_LIBRARY} nnopbase ascendcl acl_rt)
