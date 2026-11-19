@@ -1786,17 +1786,26 @@ class AiryAiAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class ErfinvAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::string GetApiCallName() const override {
     return "UnaryApiCall";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "Erfinv";
+    return "ErfinvExtend";
   }
   [[nodiscard]] std::string GetSimtScalarApiName() const override {
     return "Erfinv";
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"erfinv_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "simt_api/cpp/kernel_simt_utils.h",
+        "simt_api/math_functions.h",
+    };
   }
   [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
     GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),

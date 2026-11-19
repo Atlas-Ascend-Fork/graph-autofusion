@@ -11,9 +11,11 @@
 #include <cmath>
 #include <random>
 #include <algorithm>
+#include <vector>
 #include "gtest/gtest.h"
 #include "boost/math/special_functions/erf.hpp"
 #include "tikicpulib.h"
+#include "simt_api/math_functions.h"
 #include "test_api_utils.h"
 #include "api_regbase/erfinv.h"
 
@@ -42,7 +44,7 @@ class TestApiErfinv : public testing::Test {
     LocalTensor<T> l_dst = dstBuf.Get<T>();
 
     GmToUb(l_src, param.src, param.size);
-    AscendC::Erfinv<T>(l_dst, l_src, param.size);
+    ErfinvExtend<T>(l_dst, l_src, param.size);
     UbToGm(param.dst, l_dst, param.size);
   }
 
@@ -109,7 +111,7 @@ class TestApiErfinv : public testing::Test {
   }
 
   template <typename T>
-  static uint32_t Valid(T *dst, T *exp, size_t comp_size) {
+  static uint32_t Valid(T *dst, T *exp, size_t comp_size, double tol = 1e-4) {
     uint32_t diff_count = 0;
     for (uint32_t i = 0; i < comp_size; i++) {
       if (std::isnan(exp[i])) {
@@ -120,7 +122,7 @@ class TestApiErfinv : public testing::Test {
         if (dst[i] != exp[i]) {
           diff_count++;
         }
-      } else if (std::abs(dst[i] - exp[i]) > 1e-4) {
+      } else if (std::abs(dst[i] - exp[i]) > tol) {
         diff_count++;
       }
     }
@@ -137,6 +139,36 @@ class TestApiErfinv : public testing::Test {
     auto kernel = [&param] { InvokeTensorKernel(param); };
 
     // 调用kernel
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+    ICPU_RUN_KF(kernel, 1);
+
+    uint32_t diff_count = Valid<T>(param.dst, param.exp, param.size);
+    EXPECT_EQ(diff_count, 0);
+  }
+
+  template <typename T>
+  static void CreateNearBoundaryTensorInput(TensorInputParam<T> &param) {
+    param.dst = static_cast<T *>(AscendC::GmAlloc(sizeof(T) * param.size));
+    param.exp = static_cast<T *>(AscendC::GmAlloc(sizeof(T) * param.size));
+    param.src = static_cast<T *>(AscendC::GmAlloc(sizeof(T) * param.size));
+
+    const std::vector<T> inputs = {T(0.0f),     T(0.5f),       T(-0.5f),      T(0.9f),    T(-0.9f),
+                                   T(0.99f),    T(-0.99f),     T(0.999f),     T(-0.999f), T(0.9999f),
+                                   T(-0.9999f), T(0.9998279f), T(-0.9998279f)};
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      param.src[i] = inputs[i];
+      param.exp[i] = static_cast<T>(boost::math::erf_inv(static_cast<double>(inputs[i])));
+    }
+  }
+
+  template <typename T>
+  static void MainNearBoundaryTest(const int32_t size) {
+    TensorInputParam<T> param{};
+    param.size = size;
+    CreateNearBoundaryTensorInput(param);
+
+    auto kernel = [&param] { InvokeTensorKernel(param); };
+
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
     ICPU_RUN_KF(kernel, 1);
 
@@ -166,6 +198,10 @@ TEST_F(TestApiErfinv, Erfinv_Special_Success) {
 
 TEST_F(TestApiErfinv, Erfinv_Float_256_Success) {
   MainTest<float>(256);
+}
+
+TEST_F(TestApiErfinv, Erfinv_NearBoundary_Success) {
+  MainNearBoundaryTest<float>(13);
 }
 
 }  // namespace af
