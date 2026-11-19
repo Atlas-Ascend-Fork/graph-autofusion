@@ -84,9 +84,15 @@ Status RemovePadApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::A
   std::string y_last_axis_size = GetLastAxisSize(tpipe, y, is_last_axis_align);
   std::string non_last_axis_size = GetNonLastAxisMergeSize(tpipe, x, is_last_axis_align);
 
+  std::string src_row_pitch = KernelUtils::SizeAlign() + "(" + x_last_axis_size + ", 32 / sizeof(" + dtype_name + "))";
+  const size_t axis_num = x.vectorized_axis.size();
+  if (!is_last_axis_align && axis_num > 1UL && x.vectorized_strides.size() >= axis_num &&
+      x.vectorized_strides[axis_num - 2UL] != af::sym::kSymbolZero) {
+    src_row_pitch = tpipe.tiler.Size(x.vectorized_strides[axis_num - 2UL]);
+  }
+
   ss << "RemovePadExtend(" << y << "[" << tpipe.tiler.TensorVectorizedOffset(current_axis, y) << "], " << x << "["
-     << tpipe.tiler.TensorVectorizedOffset(current_axis, x) << "], " << y_last_axis_size << ", "
-     << KernelUtils::SizeAlign() << "(" << x_last_axis_size << ", 32 / sizeof(" << dtype_name << "))"
+     << tpipe.tiler.TensorVectorizedOffset(current_axis, x) << "], " << y_last_axis_size << ", " << src_row_pitch
      << ", " << non_last_axis_size << ");" << std::endl;
 
   result = ss.str();
