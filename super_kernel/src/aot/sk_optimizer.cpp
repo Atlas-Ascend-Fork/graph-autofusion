@@ -78,63 +78,54 @@ struct EarlyEventPlan {
 
 bool CollectEarlyEvents(const std::vector<SuperKernelBaseNode *> &taskNodes,
                         const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
-                        std::vector<EarlyEventPlan> &plans, std::vector<SuperKernelBaseNode *> &tailEvents) {
+                        std::vector<EarlyEventPlan> &plans) {
   std::unordered_map<uint32_t, size_t> lastTaskIndexByStream;
   for (size_t index = 0; index < taskNodes.size(); ++index) {
     if (taskNodes[index] != nullptr) {
       lastTaskIndexByStream[taskNodes[index]->GetStreamIdxInGraph()] = index;
     }
   }
-  std::unordered_set<SuperKernelBaseNode *> fallbackEvents;
-  // Place notifies before resets in the task list without adding a dependency between them.
-  for (const auto type : {SkNodeType::NODE_NOTIFY, SkNodeType::NODE_RESET}) {
-    for (const auto &event : eventNodes) {
-      if (event == nullptr) {
-        SK_LOGW("early event fallback: null event node");
-        return false;
-      }
-      if (event->GetNodeType() != type) {
-        continue;
-      }
-      const auto it = lastTaskIndexByStream.find(event->GetStreamIdxInGraph());
-      if (it == lastTaskIndexByStream.end()) {
-        SK_LOGW("early event fallback: no source for eventId=%lu, streamIdx=%u", event->GetNodeId(),
-                event->GetStreamIdxInGraph());
-        fallbackEvents.insert(event.get());
-        continue;
-      }
-      plans.push_back({it->second, taskNodes[it->second], event.get()});
-    }
-  }
+  plans.reserve(eventNodes.size());
   for (const auto &event : eventNodes) {
-    if (event != nullptr && fallbackEvents.count(event.get()) != 0U) {
-      tailEvents.push_back(event.get());
+    if (event == nullptr) {
+      SK_LOGE("cannot schedule early events: null event node");
+      return false;
     }
+    const auto type = event->GetNodeType();
+    const auto streamIdx = event->GetStreamIdxInGraph();
+    if (type != SkNodeType::NODE_NOTIFY && type != SkNodeType::NODE_RESET) {
+      SK_LOGE("cannot schedule early event: unsupported type=%d, eventId=%lu, streamIdx=%u", static_cast<int>(type),
+              event->GetNodeId(), streamIdx);
+      return false;
+    }
+    const auto it = lastTaskIndexByStream.find(streamIdx);
+    if (it == lastTaskIndexByStream.end()) {
+      SK_LOGE("cannot schedule early event: missing owner, eventId=%lu, streamIdx=%u", event->GetNodeId(), streamIdx);
+      return false;
+    }
+    plans.push_back({it->second, taskNodes[it->second], event.get()});
   }
   return true;
 }
 
-std::vector<SuperKernelBaseNode *> BuildEarlyEventTaskList(
-    const std::vector<SuperKernelBaseNode *> &taskNodes,
-    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes, const std::vector<EarlyEventPlan> &plans,
-    const std::vector<SuperKernelBaseNode *> &tailEvents) {
-  std::vector<std::vector<SuperKernelBaseNode *>> eventsAfterTask(taskNodes.size());
-  const std::unordered_set<SuperKernelBaseNode *> tailEventSet(tailEvents.begin(), tailEvents.end());
-  for (const auto &plan : plans) {
-    eventsAfterTask[plan.producerIndex].push_back(plan.event);
+std::vector<SuperKernelBaseNode *> BuildEarlyEventTaskList(const std::vector<SuperKernelBaseNode *> &taskNodes,
+                                                           const std::vector<EarlyEventPlan> &plans) {
+  // Each task index has a bucket for custom events to insert after that task. The bucket may be empty.
+  std::vector<std::vector<SuperKernelBaseNode *>> tasksWithTrailingCustomEvents(taskNodes.size());
+  // Preserve the relative order within each type and place notifies before resets for the same owner.
+  for (const auto type : {SkNodeType::NODE_NOTIFY, SkNodeType::NODE_RESET}) {
+    for (const auto &plan : plans) {
+      if (plan.event->GetNodeType() == type) {
+        tasksWithTrailingCustomEvents[plan.producerIndex].push_back(plan.event);
+      }
+    }
   }
   std::vector<SuperKernelBaseNode *> scheduled;
-  scheduled.reserve(taskNodes.size() + eventNodes.size());
+  scheduled.reserve(taskNodes.size() + plans.size());
   for (size_t index = 0; index < taskNodes.size(); ++index) {
     scheduled.push_back(taskNodes[index]);
-    scheduled.insert(scheduled.end(), eventsAfterTask[index].begin(), eventsAfterTask[index].end());
-  }
-  for (const auto &event : eventNodes) {
-    if (event->GetNodeType() != SkNodeType::NODE_NOTIFY && event->GetNodeType() != SkNodeType::NODE_RESET) {
-      scheduled.push_back(event.get());
-    } else if (tailEventSet.count(event.get()) != 0U) {
-      scheduled.push_back(event.get());
-    }
+    scheduled.insert(scheduled.end(), tasksWithTrailingCustomEvents[index].begin(),
+                     tasksWithTrailingCustomEvents[index].end());
   }
   return scheduled;
 }
@@ -263,65 +254,21 @@ std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::ReorderWaitNodesForTask
   return reorderedTaskNodes;
 }
 
-void SuperKernelOptimizer::ConnectStreamTailKernelsToEvent(const std::vector<SuperKernelBaseNode *> &taskNodes,
-                                                           SuperKernelBaseNode *eventNode) const {
-  if (eventNode == nullptr) {
-    return;
-  }
-
-  std::unordered_map<uint32_t, SuperKernelBaseNode *> lastKernelByStream;
-  for (auto *node : taskNodes) {
-    if (node != nullptr && node->GetNodeType() == SkNodeType::NODE_KERNEL) {
-      lastKernelByStream[node->GetStreamIdxInGraph()] = node;
-    }
-  }
-
-  const uint64_t eventNodeId = eventNode->GetNodeId();
-  for (const auto &[streamIdx, kernel] : lastKernelByStream) {
-    kernel->sendToNodeId.insert(eventNodeId);
-    eventNode->receiveNodeId.insert(kernel->GetNodeId());
-    SK_LOGI("connect stream tail kernel to event: streamIdx=%u, kernelNodeId=%lu, eventNodeId=%lu", streamIdx,
-            kernel->GetNodeId(), eventNodeId);
-  }
-}
-
-std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::BuildTaskListWithEarlyEvents(
+bool SuperKernelOptimizer::BuildTaskListWithEarlyEvents(
     const std::vector<SuperKernelBaseNode *> &taskNodes,
-    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes, bool &usedEarlyEvents,
-    SuperKernelBaseNode *&tailEvent) const {
-  usedEarlyEvents = false;
-  tailEvent = nullptr;
-
-  const auto buildFallbackTaskList = [&taskNodes, &eventNodes]() {
-    std::vector<SuperKernelBaseNode *> tasks = taskNodes;
-    tasks.reserve(taskNodes.size() + eventNodes.size());
-    for (const auto &eventNode : eventNodes) {
-      tasks.push_back(eventNode.get());
-    }
-    return tasks;
-  };
-
+    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+    std::vector<SuperKernelBaseNode *> &tasks) const {
+  if (eventNodes.empty()) {
+    tasks = taskNodes;
+    return true;
+  }
   std::vector<EarlyEventPlan> plans;
-  std::vector<SuperKernelBaseNode *> tailEvents;
-  if (!CollectEarlyEvents(taskNodes, eventNodes, plans, tailEvents)) {
-    if (!eventNodes.empty()) {
-      tailEvent = eventNodes.front().get();
-    }
-    return buildFallbackTaskList();
+  if (!CollectEarlyEvents(taskNodes, eventNodes, plans)) {
+    return false;
   }
-  if (plans.empty()) {
-    if (!eventNodes.empty()) {
-      tailEvent = eventNodes.front().get();
-    }
-    return buildFallbackTaskList();
-  }
-  std::vector<SuperKernelBaseNode *> scheduled = BuildEarlyEventTaskList(taskNodes, eventNodes, plans, tailEvents);
+  tasks = BuildEarlyEventTaskList(taskNodes, plans);
   ConnectEarlyEventDependencies(plans);
-  usedEarlyEvents = true;
-  if (!tailEvents.empty()) {
-    tailEvent = tailEvents.front();
-  }
-  return scheduled;
+  return true;
 }
 
 bool SuperKernelOptimizer::ShouldReorderWaitNodesForTaskBuild() const {
@@ -429,11 +376,9 @@ bool SuperKernelOptimizer::PrepareScheduleTasks(const SuperKernelScopeInfo &scop
   PrintTaskNodesDetail(reorderedTaskNodes, "reordered task nodes");
 
   const auto &eventNodes = scopeInfo.GetExtInfo().eventNodes;
-  bool usedEarlyEvents = false;
-  SuperKernelBaseNode *tailEvent = nullptr;
-  tasks = BuildTaskListWithEarlyEvents(reorderedTaskNodes, eventNodes, usedEarlyEvents, tailEvent);
-  if (tailEvent != nullptr) {
-    ConnectStreamTailKernelsToEvent(reorderedTaskNodes, tailEvent);
+  if (!BuildTaskListWithEarlyEvents(reorderedTaskNodes, eventNodes, tasks)) {
+    SK_LOGE("failed to prepare synthetic events: scopeId=%u", scopeInfo.GetScopeId());
+    return false;
   }
 
   return true;

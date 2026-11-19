@@ -59,12 +59,9 @@ class SuperKernelOptimizer {
   bool ShouldReorderWaitNodesForTaskBuild() const;
   std::vector<SuperKernelBaseNode *> ReorderWaitNodesForTaskBuild(
       const std::vector<SuperKernelBaseNode *> &taskNodes) const;
-  void ConnectStreamTailKernelsToEvent(const std::vector<SuperKernelBaseNode *> &taskNodes,
-                                       SuperKernelBaseNode *eventNode) const;
-  std::vector<SuperKernelBaseNode *> BuildTaskListWithEarlyEvents(
-      const std::vector<SuperKernelBaseNode *> &taskNodes,
-      const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes, bool &usedEarlyEvents,
-      SuperKernelBaseNode *&tailEvent) const;
+  bool BuildTaskListWithEarlyEvents(const std::vector<SuperKernelBaseNode *> &taskNodes,
+                                    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+                                    std::vector<SuperKernelBaseNode *> &tasks) const;
   bool PrepareScheduleTasks(const SuperKernelScopeInfo &scopeInfo,
                             std::vector<SuperKernelBaseNode *> &reorderedTaskNodes,
                             std::vector<SuperKernelBaseNode *> &tasks, std::string &skFuncName) const;
