@@ -9,7 +9,9 @@
  */
 #include "feature_manager.h"
 
+#include <algorithm>
 #include <limits>
+#include <thread>
 #include <vector>
 #include "gtest/gtest.h"
 
@@ -21,11 +23,12 @@ class FeatureManagerSt : public testing::Test {
  protected:
   FeatureManager manager;
   aclmdlRISpecOptions options{};
+  const uint64_t defaultJobs = std::max<uint64_t>(1, std::thread::hardware_concurrency() * 7ULL / 10);
 };
 
 TEST_F(FeatureManagerSt, DefaultsAndModelLevelSwitches) {
   ASSERT_TRUE(manager.Init(nullptr));
-  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), 1U);
+  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), defaultJobs);
   EXPECT_FALSE(manager.Get<Feature::ENABLE_SK>());
   EXPECT_TRUE(manager.Get<Feature::BASIC_COMPILE_OPTIONS>("addcustom").empty());
   EXPECT_TRUE(manager.Get<Feature::SK_COMPILE_OPTIONS>("addcustom").empty());
@@ -33,9 +36,20 @@ TEST_F(FeatureManagerSt, DefaultsAndModelLevelSwitches) {
   options.jobs = std::numeric_limits<uint64_t>::max();
   options.enableSK = true;
   ASSERT_TRUE(manager.Init(&options));
-  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), options.jobs);
+  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), defaultJobs);
   EXPECT_TRUE(manager.Get<Feature::ENABLE_SK>());
   EXPECT_EQ(manager.Get<Feature::SK_COMPILE_OPTIONS>("addcustom"), (Arguments{"--enable-super-kernel"}));
+}
+
+TEST_F(FeatureManagerSt, AutomaticAndExplicitJobsCanBeReinitialized) {
+  for (int64_t jobs : {int64_t{0}, int64_t{-1}, int64_t{-2}, std::numeric_limits<int64_t>::min()}) {
+    options.jobs = static_cast<uint64_t>(jobs);
+    ASSERT_TRUE(manager.Init(&options));
+    EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), defaultJobs) << jobs;
+  }
+  options.jobs = 1;
+  ASSERT_TRUE(manager.Init(&options));
+  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), 1U);
 }
 
 TEST_F(FeatureManagerSt, PublicApiInitializesAndQueriesMultipleKernels) {
@@ -126,7 +140,7 @@ TEST_F(FeatureManagerSt, FailedReinitializationPreservesAllPreviousFeatures) {
             (Arguments{"--enable-super-kernel", "-D__ASCENDC_SUPER_KERNEL_DEBUG__"}));
 
   ASSERT_TRUE(manager.Init(nullptr));
-  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), 1U);
+  EXPECT_EQ(manager.Get<Feature::COMPILE_JOBS>(), defaultJobs);
   EXPECT_FALSE(manager.Get<Feature::ENABLE_SK>());
   EXPECT_TRUE(manager.Get<Feature::BASIC_COMPILE_OPTIONS>("add").empty());
   EXPECT_TRUE(manager.Get<Feature::SK_COMPILE_OPTIONS>("add").empty());

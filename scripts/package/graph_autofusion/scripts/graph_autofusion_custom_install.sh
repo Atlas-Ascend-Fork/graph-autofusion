@@ -340,6 +340,12 @@ custom_install() {
         create_stub_softlink "$common_parse_dir/share/info/graph_autofusion/lib64/stub" "linux/$arch_name"
     fi
 
+    local worker_path="${common_parse_dir}/${arch_name}-linux/lib64/aclrtc_compile_worker"
+    if ! chmod 755 "${worker_path}"; then
+        log "ERROR" "failed to set compile worker executable permission: ${worker_path}"
+        return 1
+    fi
+
     if [ "$hetero_arch" != "y" ]; then
         log "INFO" "install graph_autofusion extension module begin..."
         graph_autofusion_install_package "${PYTHON_GRAPH_AUTOFUSION_WHL}" "${WHL_INSTALL_DIR_PATH}"

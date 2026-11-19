@@ -46,7 +46,7 @@ struct aclmdlRISpecSKFeature {
 };
 
 struct aclmdlRISpecOptions {
-  uint64_t jobs;  // Accepted but not yet honoured: kernels are always compiled serially.
+  uint64_t jobs;  // 并行数；0 或负数转换值默认使用 CPU 核数的 70%，至少为 1。
   uint64_t specCompileOptionCount;
   aclmdlRISpecCompileOption *specCompileOptions;
   bool enableSK;

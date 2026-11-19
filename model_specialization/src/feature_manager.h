@@ -17,6 +17,8 @@
 
 namespace model_spec {
 
+uint64_t GetCompileWorkerLimit();
+
 enum class Feature : uint32_t {
   COMPILE_JOBS = 0,
   ENABLE_SK = 1,

@@ -8,13 +8,27 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "feature_manager.h"
+#include <algorithm>
+#include <limits>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
 namespace model_spec {
+
+uint64_t GetCompileWorkerLimit() {
+  constexpr uint64_t COMPILE_CPU_PERCENT = 70;
+  constexpr uint64_t FULL_PERCENT = 100;
+  return std::max<uint64_t>(1, std::thread::hardware_concurrency() * COMPILE_CPU_PERCENT / FULL_PERCENT);
+}
+
 namespace {
 void InitModelLevelOptions(const aclmdlRISpecOptions *options, uint64_t &compileJobs, bool &enableSk) {
-  compileJobs = options == nullptr || options->jobs == 0 ? 1 : options->jobs;
+  compileJobs = options == nullptr ? 0 : options->jobs;
+  // jobs 是无符号字段，负数赋值后的转换值超过 int64_t 正数范围。
+  if (compileJobs == 0 || compileJobs > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    compileJobs = GetCompileWorkerLimit();
+  }
   enableSk = options != nullptr && options->enableSK;
 }
 }  // namespace

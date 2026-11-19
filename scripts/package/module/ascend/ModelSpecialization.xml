@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Copyright (c) 2026 Huawei Technologies Co., Ltd.
+This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+CANN Open Software License Agreement Version 2.0 (the "License").
+Please refer to the License for details. You may not use this file except in compliance with the License.
+THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+See LICENSE in the root of the software repository for the full text of the License.
+-->
+
+<block name="ModelSpecialization" copy_type="delivery" src_path="" dst_path="" install_path="" install_own="$username:$usergroup" install_mod="550" install_type="all">
+    <dir_info value="ModelSpecialization">
+        <path value="$(TARGET_ENV)/include/model_specialization"/>
+    </dir_info>
+
+    <file_info value="model_specialization_lib" dst_path="$(TARGET_ENV)/lib64" install_path="$(TARGET_ENV)/lib64" install_mod="755">
+        <file value="libmodel_specialization.so" file_type="shared"/>
+        <file value="aclrtc_compile_worker"/>
+    </file_info>
+    <file_info value="model_specialization_include" dst_path="$(TARGET_ENV)/include/model_specialization" install_path="$(TARGET_ENV)/include/model_specialization" install_mod="644">
+        <file value="aclmodel_specialization.h"/>
+    </file_info>
+</block>
