@@ -1196,3 +1196,33 @@ lit `afir-scalar-input-kernel-arg.mlir`、bridge UT 两条、conversion UT 四�
   ⇒ 所有 op 的两两依赖约束都保持；`CheckDeclarationOrderIsEmittable` 把这个前提钉住了。
 - 比较族六个 op 的 `CMPMODE` 映射**每个都被钉过一次**：mem 侧 lit 钉 EQ / LT / GE，
   reg 侧 lit 钉 NE / GT / LE，合起来六个 op → 六个模式的对应关系无一遗漏。
+
+
+## 2026-11-19 补充：dtype 第二波（i8 / ui32 / ui64）扩表后的遗留清单
+
+上游：dtype 第二波扩表 PR（i8 / ui32 / ui64 升入 `AFIR_ELEMENT_TYPE_TABLE`，位 8/9/10）。
+本节只记扩表后**仍未接进 MLIR** 的组合与原因；已接部分见该 PR 描述。判据口径与
+`ElementTypeMatrixTest` 一致：「挂起」= ODS 收、legacy 供、注册不收、选择层干净回落。
+
+### 能力缺口（CANN 调用 / 包装不支持，需机制才能补）
+
+| 组合 | 原因 | 补齐路径 |
+|---|---|---|
+| Mul 的 i8/ui8（tensor）、i8/ui8/ui32（scalar） | 连续 `Mul` / `Muls` 无对应 SupportType（`kernel_operator_vec_binary_*.h`） | 建 `MulExtendRegBaseOp` 包装（照 Sub 先例）或等 CANN 扩类型域 |
+| Adds / Maxs / Mins 的 ui16/ui32（标量） | 同上三张 static_assert 表 | 同上，或标量形态走 micro/SIMT 路（需查 legacy 标量实际发射） |
+| Fma 的 i8/i16/ui8/bf16 | `AscendC::Fma` 仅 half/float；legacy 先 `GetConversionDtype` cast 再调 | elementwise 建输入 cast 机制 |
+| FloorDiv 的 i8/ui8/i64 | 包装分派无 int8/uint8 分支；i64 SIMT 未处理 INT64_MIN/-1 | 改包装加分支 / i64 溢出处理（需评审） |
+| Broadcast duplicate 档的 i8（两侧）、mem 侧 ui64/i64 | `duplicate.h` 1 字节重载未接线；mem 四参尾参形态未建 | `DuplicateI8Op` 照 `DuplicateU8Op` 先例；方言补带 tmp 尾参形态 |
+| Transpose mem 侧 i32/ui32、reg 侧 i64 | v1 布局与公式错位（legacy 生产同错）；Gather 无 8 字节 | 布局/公式口径对齐（独立 bug 修复） |
+
+### 拆行缺口（Any/Shared 单行只能收两列交集，存量）
+
+exp / ln / sqrt 的 reg 侧 bf16，relu 的 reg 侧 ui8/i64，ub2ub 的 reg 侧 i64，axpy 的 reg
+侧 bf16/i64/ui64（axpy 另被家族判据挡住：reg 行要求 `_reg_base` 头而 `axpy.h` 是中立名）。
+补齐路径统一为「拆 mem/reg 两行」；axpy 需先扩 `headersMatchFamily`。
+
+### 机制类
+
+- reduce（Max/Min/Sum）的 i8 等 reg 侧类型：MLIR reduce 只有 mem 契约，接 reg 侧 = 新建
+  整条 reg reduce 实现（方言 op + ApiCall + pattern），与 Ub2ub/Concat 同级独立任务。
+- 比较族 mem 标量 i64：`compare.h` 的 i64 标量重载仅 EQ/NE 且需额外临时区。

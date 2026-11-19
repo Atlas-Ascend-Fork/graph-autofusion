@@ -19,3 +19,13 @@ func.func @valid_shapes(%ranked: tensor<2x3x4xf32>, %unit: tensor<1x4xf32>, %dyn
 // CHECK: afir.add
 // CHECK: afir.add
 // CHECK: afir.sum
+
+func.func @pow_integer_types(%i8: tensor<4xi8>, %ui32: tensor<4xui32>) -> (tensor<4xi8>, tensor<4xui32>) {
+  %0 = afir.pow %i8, %i8 : (tensor<4xi8>, tensor<4xi8>) -> tensor<4xi8>
+  %1 = afir.pow %ui32, %ui32 : (tensor<4xui32>, tensor<4xui32>) -> tensor<4xui32>
+  return %0, %1 : tensor<4xi8>, tensor<4xui32>
+}
+
+// CHECK-LABEL: func.func @pow_integer_types
+// CHECK: afir.pow {{.*}} -> tensor<4xi8>
+// CHECK: afir.pow {{.*}} -> tensor<4xui32>

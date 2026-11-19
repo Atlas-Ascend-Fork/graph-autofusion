@@ -150,6 +150,11 @@ add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_logical_not_stor
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_store" cases/load_eq_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_i64_store" cases/load_eq_i64_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_reg_base_store" cases/load_eq_reg_base_store)
+# dtype 第二波（i8 / ui32 / ui64，reg 侧）：加法拆行、sub 包装、比较常量、floor_div 无符号支。
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_add_ui32_reg_base_store" cases/load_add_ui32_reg_base_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_sub_ui64_reg_base_store" cases/load_sub_ui64_reg_base_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_i8_reg_base_store" cases/load_eq_i8_reg_base_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_floor_div_ui32_reg_base_store" cases/load_floor_div_ui32_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_select_store" cases/load_eq_select_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_mask_select_store" cases/load_mask_select_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_mask_select_i64_store" cases/load_mask_select_i64_store)

@@ -321,7 +321,7 @@ class AFIR_BufferizableTernaryHomoElementwiseOp<string mnemonic, list<Type> elem
 
 // 两侧的并集：mem 侧 legacy 收 {f16, f32, i32}，reg 侧多收 i16 / ui8 / i64。ODS 是并集，
 // 「这一侧供不供得出来」由注册处的集合说（`ElementTypeMatrixTest` 盯着它不比 legacy 窄）。
-defvar AFIR_AbsElementTypes = [UI8, I16, I32, F16, F32, BF16, I64];
+defvar AFIR_AbsElementTypes = [UI8, I16, I32, F16, F32, BF16, I64, I8];
 
 def AFIR_AbsOp : AFIR_BufferizableUnaryElementwiseOp<"abs", AFIR_AbsElementTypes> {
   let afirStability = AFIR_Experimental;
@@ -1032,7 +1032,7 @@ def AFIR_FloorToIntOp : AFIR_BufferizableUnaryElementwiseOp<"floor_to_int", [F16
   }];
 }
 
-def AFIR_ReluOp : AFIR_BufferizableUnaryElementwiseOp<"relu", [I32, F16, F32]> {
+def AFIR_ReluOp : AFIR_BufferizableUnaryElementwiseOp<"relu", [I32, F16, F32, UI8, I64]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise rectified linear unit of a tile";
   let description = [{
@@ -1046,7 +1046,7 @@ def AFIR_ReluOp : AFIR_BufferizableUnaryElementwiseOp<"relu", [I32, F16, F32]> {
 // dtype 表去掉了 I16：`NegExtend` 的 `@tparam` 只声称 int32_t / float / half，两张
 // 支持表的包装都是这一份。ODS 收下 I16 而 lowering 接不住，表现是 bridge 建得出来、
 // 走到 SelectImplementation 才报「没有可用实现」——比在这里就拒掉晚，也更难看懂。
-def AFIR_NegOp : AFIR_BufferizableUnaryElementwiseOp<"neg", [I16, I32, F16, F32, BF16, I64]> {
+def AFIR_NegOp : AFIR_BufferizableUnaryElementwiseOp<"neg", [I16, I32, F16, F32, BF16, I64, I8]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise negation of a tile";
   let description = [{
@@ -1146,7 +1146,8 @@ class AFIR_BufferizableLogicalNotOp<string mnemonic, list<Type> inputTypes, list
 // 输入列表是两侧的并集里 AFIR 建模得出来的那些：mem 侧 legacy 的 `kLogicalNotTypePairs`
 // 是 {f16, f32, ui8, i16, i32}，reg 侧那一版多出 i8 / i64 / bf16 / ui16 / ui32 / ui64 /
 // bool，其中 `ui16` / `i64` 建得出来，其余建不出来。结果列表只多一个 `ui8`，它已经在里面了。
-def AFIR_LogicalNotOp : AFIR_BufferizableLogicalNotOp<"logical_not", [UI8, UI16, I16, I32, F16, F32, BF16, I64],
+def AFIR_LogicalNotOp : AFIR_BufferizableLogicalNotOp<"logical_not",
+                                                      [UI8, UI16, I16, I32, F16, F32, BF16, I64, I8, UI32, UI64],
                                                       [UI8, UI16, I16, I32, F16, F32, BF16]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise logical negation of a tile";
@@ -1170,7 +1171,8 @@ def AFIR_LogicalNotOp : AFIR_BufferizableLogicalNotOp<"logical_not", [UI8, UI16,
 // step 4。`bitwise_not`：逐位非。与 `afir.bitwise_and` 共用同一张元素类型集合
 // （`AFIR_BitwiseElementTypes`，定义在下面二元那一段），只有 reg 一侧——legacy 的
 // `BitwiseNotAscIrCodegenImplV2` 只在 v2 那张表上注册。
-def AFIR_BitwiseNotOp : AFIR_BufferizableUnaryElementwiseOp<"bitwise_not", [UI8, I16, UI16, I32, I64]> {
+def AFIR_BitwiseNotOp : AFIR_BufferizableUnaryElementwiseOp<"bitwise_not",
+                                                              [UI8, I16, UI16, I32, I64, I8, UI32, UI64]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise bitwise NOT of a tile";
   let description = [{
@@ -1232,7 +1234,7 @@ def AFIR_LeakyReluOp : AFIR_BufferizableUnaryElementwiseOp<"leaky_relu", [F16, F
 // Binary Operations
 //===----------------------------------------------------------------------===//
 
-defvar AFIR_AddElementTypes = [I16, I32, F16, F32, BF16];
+defvar AFIR_AddElementTypes = [I16, I32, F16, F32, BF16, UI8, UI16, I64, I8, UI32, UI64];
 
 def AFIR_AddOp : AFIR_BufferizableBinaryElementwiseOp<"add", AFIR_AddElementTypes, AFIR_AddElementTypes,
                                                       /*resultRule=*/"Same", /*scalarOperand=*/"any"> {
@@ -1252,8 +1254,8 @@ def AFIR_AddOp : AFIR_BufferizableBinaryElementwiseOp<"add", AFIR_AddElementType
     并行工作线。
   }];
 }
-def AFIR_SubOp : AFIR_BufferizableBinaryElementwiseOp<"sub", [F16, F32, I16, I32, UI8, UI16, BF16, I64],
-                                                      [F16, F32, I16, I32, UI8, UI16, BF16, I64],
+def AFIR_SubOp : AFIR_BufferizableBinaryElementwiseOp<"sub", [F16, F32, I16, I32, UI8, UI16, BF16, I64, I8, UI32, UI64],
+                                                      [F16, F32, I16, I32, UI8, UI16, BF16, I64, I8, UI32, UI64],
                                                       /*resultRule=*/"Same", /*scalarOperand=*/"any"> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise difference of two tiles";
@@ -1279,7 +1281,9 @@ def AFIR_SubOp : AFIR_BufferizableBinaryElementwiseOp<"sub", [F16, F32, I16, I32
 // Mul / Maximum / Minimum 的 tensor-tensor 形态在两套家族上是同一个 `AscendC::` 调用，
 // 都不要 tmp buffer。对照表把它们列成 D1 是因为标量变体两侧共用一个扩展头
 // （`scalar_mul.h` / `scalar_maximum.h` / `scalar_minimum.h`），那条路在 E3。
-def AFIR_MulOp : AFIR_BufferizableBinaryElementwiseOp<"mul", [F16, F32, I16, I32, BF16], [F16, F32, I16, I32, BF16],
+def AFIR_MulOp : AFIR_BufferizableBinaryElementwiseOp<"mul",
+                                                      [F16, F32, I16, I32, UI8, BF16, I64, I8, UI32, UI64],
+                                                      [F16, F32, I16, I32, UI8, BF16, I64, I8, UI32, UI64],
                                                       /*resultRule=*/"Same", /*scalarOperand=*/"any"> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise product of two tiles";
@@ -1300,7 +1304,9 @@ def AFIR_DivOp : AFIR_BufferizableBinaryElementwiseOp<"div", [F16, F32], [F16, F
     元素类型两侧都只有 f16 / f32，是这一批里少见的两侧相等。
   }];
 }
-def AFIR_MinimumOp : AFIR_BufferizableBinaryElementwiseOp<"minimum", [I16, I32, F16, F32, BF16], [I16, I32, F16, F32, BF16],
+def AFIR_MinimumOp : AFIR_BufferizableBinaryElementwiseOp<"minimum",
+                                                      [I16, I32, F16, F32, BF16, UI8, UI16, I64, I8, UI32, UI64],
+                                                      [I16, I32, F16, F32, BF16, UI8, UI16, I64, I8, UI32, UI64],
                                                           /*resultRule=*/"Same", /*scalarOperand=*/"any"> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise minimum of two tiles";
@@ -1308,7 +1314,9 @@ def AFIR_MinimumOp : AFIR_BufferizableBinaryElementwiseOp<"minimum", [I16, I32, 
     逐元素取较小值。其余与 `afir.mul` 相同；单实现 `minimum.tensor_tensor`。
   }];
 }
-def AFIR_MaximumOp : AFIR_BufferizableBinaryElementwiseOp<"maximum", [I16, I32, F16, F32, BF16], [I16, I32, F16, F32, BF16],
+def AFIR_MaximumOp : AFIR_BufferizableBinaryElementwiseOp<"maximum",
+                                                      [I16, I32, F16, F32, BF16, UI8, UI16, I64, I8, UI32, UI64],
+                                                      [I16, I32, F16, F32, BF16, UI8, UI16, I64, I8, UI32, UI64],
                                                           /*resultRule=*/"Same", /*scalarOperand=*/"any"> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise maximum of two tiles";
@@ -1359,8 +1367,9 @@ def AFIR_TrueDivOp : AFIR_BufferizableBinaryElementwiseOp<"truediv", [F16, F32, 
 // 原先它是 `AFIR_BinaryMathOp`（tensor-only，没有 buffer 形态），与 `truediv` /
 // `gelu` / `sign` 同一类。换基类的先例是 `4b2f2588`；手写的 `verify()` 与
 // `AFIR_INFER_BROADCAST(PowOp)` 两处一起删（见 `Ops/Elementwise.cpp`）。
-def AFIR_PowOp : AFIR_BufferizableBinaryElementwiseOp<"pow", [F16, F32, I16, I32, UI8, UI16, BF16],
-                                                      [F16, F32, I16, I32, UI8, UI16, BF16],
+def AFIR_PowOp : AFIR_BufferizableBinaryElementwiseOp<"pow",
+                                                      [F16, F32, I16, I32, UI8, UI16, BF16, I8, UI32],
+                                                      [F16, F32, I16, I32, UI8, UI16, BF16, I8, UI32],
                                                       /*resultRule=*/"Same", /*scalarOperand=*/"any"> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise power of two tiles";
@@ -1369,8 +1378,7 @@ def AFIR_PowOp : AFIR_BufferizableBinaryElementwiseOp<"pow", [F16, F32, I16, I32
 
     元素类型是两侧的并集，而这一对**差得比前面任何一对都远**：mem 侧 legacy 的
     `REG_ASC_IR(Pow)` 只给了 {i32, f16, f32}，reg 侧那一版是 {i8, ui8, ui16, ui32,
-    i16, i32, f16, f32, bf16}。i8 / ui32 / bf16 AFIR 建模不出来，剩下的都收进来了，
-    于是这里比 `bitwise_and` 那一族还宽一档（多了 f16 / f32）。分档是 lowering 的事。
+    i16, i32, f16, f32, bf16}。输入与结果使用同一 dtype 列表，平台差异由 lowering 处理。
 
     两侧都走包装、**都叫裸名 `Pow`**（不是 `PowExtend`）、都要一块 tmp buffer，只有
     扩展头不同（`pow.h` vs `pow_reg_base.h`）——与 `afir.remainder` 同形。注意
@@ -1381,7 +1389,7 @@ def AFIR_PowOp : AFIR_BufferizableBinaryElementwiseOp<"pow", [F16, F32, I16, I32
     但那要 L-4 的 swap 方向，这一轮只接 tensor-tensor。本 Op 在 `compute` pipe 上执行。
   }];
 }
-defvar AFIR_BitwiseElementTypes = [UI8, I16, UI16, I32, I64];
+defvar AFIR_BitwiseElementTypes = [UI8, I16, UI16, I32, I64, I8, UI32, UI64];
 
 def AFIR_BitwiseAndOp : AFIR_BufferizableBinaryElementwiseOp<"bitwise_and", AFIR_BitwiseElementTypes,
                                                              AFIR_BitwiseElementTypes> {
@@ -1436,7 +1444,8 @@ def AFIR_BitwiseXorOp : AFIR_BufferizableBinaryElementwiseOp<"bitwise_xor", AFIR
 // `Sub` 的 `reg_dtypes` 有 bf16，`FloorDiv` 的没有。两者 reg 侧共用
 // `kArithmeticRegElementTypes` 那个常量，2026-10-20 往那个常量上加 `| kBF16` 时把这里一起
 // 放宽了；常量已改回不带 bf16，bf16 写在 `sub` 自己的注册处。
-def AFIR_FloorDivOp : AFIR_BufferizableBinaryElementwiseOp<"floor_div", [F16, F32, I16, I32, UI8, UI16]> {
+def AFIR_FloorDivOp : AFIR_BufferizableBinaryElementwiseOp<"floor_div",
+                                                                [F16, F32, I16, I32, UI8, UI16, I8, I64, UI32, UI64]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise floor division of two tiles";
   let description = [{
@@ -1468,7 +1477,7 @@ def AFIR_FmodOp : AFIR_BufferizableBinaryElementwiseOp<"fmod", [F16, F32, BF16]>
   }];
 }
 
-def AFIR_ModOp : AFIR_BufferizableBinaryElementwiseOp<"mod", [F16, F32, BF16, I16, UI8]> {
+def AFIR_ModOp : AFIR_BufferizableBinaryElementwiseOp<"mod", [F16, F32, BF16, I16, UI8, I8]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise modulo of two tiles";
   let description = [{
@@ -1599,14 +1608,15 @@ def AFIR_RemainderOp : AFIR_BufferizableBinaryElementwiseOp<"remainder", [F16, F
 // （reg 侧还收 `bool`，AFIR 不建模）。四个包装的 `dst` 也都写死 `LocalTensor<uint8_t>`。
 //
 // 输入集合是两侧的交集规则：mem 侧 `REG_ASC_IR` 给的就是这五个，reg 侧更宽
-// （bf16 / i8 / i64 / ui32 / ui16 / ui64 / bool），AFIR 建模不出来。分档是 lowering 的事，
-// 各 implementation 各说各的一半。
+// （bf16 / i8 / i64 / ui32 / ui16 / ui64 / bool），第二波扩表后只剩 bool 建模不出来。
+// 分档是 lowering 的事，各 implementation 各说各的一半。
 //
 // 有标量形态，哪一边都可以（矩阵 mem 侧两个都是 `2nd+swap(2nd)`，两个 op 都可
 // 交换）。但不是四个 implementation 都有：reg 侧的 `logical_or` 一个标量都不收。
 // 理由与名字都在 `BinaryElementwise.cpp` 注册处——ODS 写的是两侧的并集。
 class AFIR_LogicalBinaryOp<string mnemonic> :
-    AFIR_BufferizableBinaryElementwiseOp<mnemonic, [UI8, UI16, I16, I32, F16, F32, BF16, I64], [UI8],
+    AFIR_BufferizableBinaryElementwiseOp<mnemonic, [UI8, UI16, I16, I32, F16, F32, BF16, I64, I8, UI32, UI64],
+                                         [UI8],
                                          /*resultRule=*/"Uint8", /*scalarOperand=*/"any"> {
   let afirStability = AFIR_Experimental;
 }
@@ -1651,7 +1661,9 @@ def AFIR_LogicalXorOp : AFIR_LogicalBinaryOp<"logical_xor"> {
 // 同类但常量的建法相反：`AxpyExtend` 的形参是 `const float alpha`，不跟 `T` 走，
 // 所以那个常量恒建 f32；`LeakyRelu` 的是 `const T&`，得跟着 tile 的元素类型建。
 // 照抄另一个就会在 f16 上错——一边让 `T` 推不出来，一边多一次舍入。
-def AFIR_AxpyOp : AFIR_BufferizableBinaryElementwiseOp<"axpy", [F16, F32, BF16], [F16, F32, BF16],
+def AFIR_AxpyOp : AFIR_BufferizableBinaryElementwiseOp<"axpy",
+                                                      [F16, F32, BF16, I64, UI64],
+                                                      [F16, F32, BF16, I64, UI64],
                                                        /*resultRule=*/"Same", /*scalarOperand=*/"none",
                                                        /*extraAttrs=*/(ins F32Attr:$alpha)> {
   let afirStability = AFIR_Experimental;
@@ -1702,7 +1714,8 @@ def AFIR_AxpyOp : AFIR_BufferizableBinaryElementwiseOp<"axpy", [F16, F32, BF16],
 // `scalarOperand` 由实例传：那两个是 `"any"`，其余四个留默认 `"rhs"`。这与 legacy 的
 // `IsScalarInputSupportedIfExchangeInputs` 只覆写在 Eq / Ne 上是同一条判据。
 class AFIR_CompareOp<string mnemonic, string scalarOperand = "rhs"> :
-    AFIR_BufferizableBinaryElementwiseOp<mnemonic, [F16, F32, I16, I32, UI8, UI16, BF16, I64], [UI8],
+    AFIR_BufferizableBinaryElementwiseOp<mnemonic, [F16, F32, I16, I32, UI8, UI16, BF16, I64, I8, UI32, UI64],
+                                         [UI8],
                                          /*resultRule=*/"Uint8", scalarOperand> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise " # mnemonic # " comparison of two tiles";
@@ -1737,7 +1750,8 @@ def AFIR_GeOp : AFIR_CompareOp<"ge">;
 // mem 侧 legacy 只收 f16 / f32，reg 侧到 ui64（AFIR 建模得出来的多出 i64）。ODS 取并集，
 // 两侧各自收哪些写在注册处。
 def AFIR_ClipByValueOp :
-    AFIR_BufferizableTernaryHomoElementwiseOp<"clip_by_value", [F16, F32, I16, I32, UI8, UI16, BF16, I64],
+    AFIR_BufferizableTernaryHomoElementwiseOp<"clip_by_value",
+                                              [F16, F32, I16, I32, UI8, UI16, BF16, I64, I8, UI32, UI64],
                                               /*scalarInputs=*/1>;
 
 // step 3。`fma(x1, x2, x3) = x1 * x2 + x3`。三个输入与结果同 dtype，所以与
@@ -1747,11 +1761,8 @@ def AFIR_ClipByValueOp :
 // `scalarInputs` 不给：legacy 的 `FmaAscIrCodegenImplV2::IsNodeValid` 用
 // `!IsNodeHasScalarInput(node)` 明确拒标量，`adv_api/math/fma.h` 里也没有标量重载。
 //
-// 元素类型取 legacy `REG_ASC_IR(Fma)` 的 `T` 去掉 i8（AFIR 的那张表里没有这一位）。
-// 其中 bf16 / i16 / ui8 在 legacy 侧会被 `dtype_consistency` 按
-// `GetConversionDtype` 先换成 f32 / f16 再生成 `Fma`，但「这个节点类型收哪几种」是注册处
-// 与对照表比对的那一列，照 `REG_ASC_IR` 写——比 legacy 窄才是真损失。
-def AFIR_FmaOp : AFIR_BufferizableTernaryHomoElementwiseOp<"fma", [F16, F32, I16, UI8, BF16]> {
+// i8 需要 legacy 的 dtype_consistency 插入转换；直接调用 AscendC::Fma 会触发类型断言。
+def AFIR_FmaOp : AFIR_BufferizableTernaryHomoElementwiseOp<"fma", [F16, F32, I16, UI8, BF16, I8]> {
   let afirStability = AFIR_Experimental;
   let summary = "Element-wise fused multiply-add of three tiles";
   let description = [{

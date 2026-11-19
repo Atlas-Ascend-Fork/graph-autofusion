@@ -80,7 +80,10 @@ using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
 using elementwise::kI64;
+using elementwise::kI8;
 using elementwise::kUI16;
+using elementwise::kUI32;
+using elementwise::kUI64;
 using elementwise::kUI8;
 
 constexpr unsigned kSource0InputIndex = 1;
@@ -506,7 +509,7 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
   // 两者的集合不一样：legacy 的 mem 侧相同（f16 / f32 / i16 / i32 / i64），reg 侧只有
   // `Where` 多收 ui8 / ui16。i16 原先两个都漏了——ODS 有、legacy 两侧也有，只有注册处没写。
   constexpr uint32_t kSelectionElementTypes = kF16 | kF32 | kI16 | kI32 | kI64;
-  constexpr uint32_t kWhereRegElementTypes = kSelectionElementTypes | kUI8 | kUI16 | kBF16;
+  constexpr uint32_t kWhereRegElementTypes = kSelectionElementTypes | kUI8 | kUI16 | kBF16 | kI8 | kUI32 | kUI64;
   if (failed(registerSelection<SelectOp>(registry, "select", kSelectionElementTypes, kSelectionElementTypes)) ||
       failed(registerSelection<WhereOp>(registry, "where", kSelectionElementTypes, kWhereRegElementTypes))) {
     return failure();
@@ -522,9 +525,10 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
   // 与另外两个输入同 dtype。所以这里不能走 `registerSelection`，`conditionIsMask` 得
   // 是 false。
   // mem 侧只收 f16 / f32，与 legacy 的 mem 列一致；原先注册处多写了 i32，ODS 本来就拒，
-  // 是一句没人读的假话。reg 侧 legacy 宽得多（到 ui64），AFIR 建模得出来的多出 i64。
+  // 是一句没人读的假话。reg 侧 legacy 宽得多（到 ui64），第二波扩表后把 i8 / ui32 / ui64 一并接入。
   constexpr uint32_t kClipMemElementTypes = kF16 | kF32;
-  constexpr uint32_t kClipRegElementTypes = kClipMemElementTypes | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64;
+  constexpr uint32_t kClipRegElementTypes =
+      kClipMemElementTypes | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64;
   if (failed(registerTernary<ClipByValueOp, ascendc::ClipByValueContiguousOp, /*TakesTmpBuffer=*/true>(
           registry, "clip_by_value.tensor.extend", ApiFamily::MemBased, /*conditionIsMask=*/false,
           kClipMemElementTypes)) ||
@@ -549,18 +553,12 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
     return failure();
   }
 
-  // step 3。`fma` 与 clip 族同形——三个输入同 dtype，所以 `conditionIsMask` 是 false
-  // （躯干那一位在这个 op 上读作 x1，不是掩码）——差别有两条，都不在这条 pattern 上：
-  //
-  //   1. 可用实现是标准调用 `AscendC::Fma`，所以 target op 是 `FmaL2Op`（不声明
-  //      `ApiExtensionOpInterface`、进 `kIsStockCall`），与 `hypot` 同一种情况；
-  //   2. tmp 在 count 之前。这条 pattern 建的是 `(dst, 三个源, count, tmp)`，而
-  //      `FmaL2Op` 的 `arguments` 正是按它声明的，真实次序由 emitter 打
-  //      （`Autofuse/VecTernary.h`）。所以这里不需要新 pattern。
-  //
-  // 只有 reg 一侧（`REG_ASC_IR(Fma)` 只在 v2 那张表上），标量形态一个都没有
-  // （`IsNodeValid` 里的 `!IsNodeHasScalarInput`）。元素类型取 legacy 的 `T` 去掉 i8。
-  constexpr uint32_t kFmaElementTypes = kF16 | kF32 | kI16 | kUI8 | kBF16;
+  // `AscendC::Fma`（adv_api/math/fma.h）对 T 的 static_assert 只收 half / float；
+  // i8 / i16 / ui8 / bf16 直接实例化会在 device 编译期断言失败。legacy 对这四种走
+  // `GetConversionDtype` 先 cast 成 f16 / f32 再调；AFIR 这一侧没有输入 dtype 转换机制，
+  // 所以注册只收 f16 / f32，其余四位挂在 `kKnownNarrower`。比 legacy 窄是真损失；
+  // 恢复口径 = 给 elementwise 建输入 cast 路径，或等 fma 头扩展类型域。
+  constexpr uint32_t kFmaElementTypes = kF16 | kF32;
   return registerTernary<FmaOp, ascendc::FmaL2Op, /*TakesTmpBuffer=*/true>(registry, "fma.tensor", ApiFamily::RegBased,
                                                                            /*conditionIsMask=*/false, kFmaElementTypes);
 }

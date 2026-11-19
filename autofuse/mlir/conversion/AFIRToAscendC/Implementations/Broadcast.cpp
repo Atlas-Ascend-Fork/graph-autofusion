@@ -102,7 +102,10 @@ using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
 using elementwise::kI64;
+using elementwise::kI8;
 using elementwise::kUI16;
+using elementwise::kUI32;
+using elementwise::kUI64;
 using elementwise::kUI8;
 
 // Native Duplicate types. Mem-based ui8 additionally uses the legacy duplicate.h
@@ -237,10 +240,9 @@ FailureOr<afir::VectorPlan> duplicateRows(Operation *op) {
 // `BroadcastWithCast`（i8 / ui8）、`BroadcastCommon`（其余）。所以这里不按分支收窄——
 // 收窄的理由只能是「legacy 在那个 dtype 上生成的不是这条路生成的调用」，而这里生成的就是同一条。
 //
-// 只差在 AFIR 这一层的编号上：i8 / ui64 / ui32 在 `ElementTypes` 里没有位
-// （`elementTypeBit` 答 0），够不着也就谈不上收。
-//
-constexpr uint32_t kSegmentedElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64;
+// i8 / ui64 / ui32 在第二波扩表后拿到位，本档随之接入；legacy reg 列里的 bool 仍建模不出来。
+constexpr uint32_t kSegmentedElementTypes =
+    kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64;
 
 // `expression` 可证等于 `literal` 吗。证不了返回 false（保守方向：报不支持，不是算错）。
 //
@@ -678,7 +680,7 @@ FailureOr<BroadcastSegmentation> analyzeSegmentedBroadcast(Operation *op, afir::
 // `REG_ASC_IR(Broadcast)` 两侧都没声明 bf16。按功能需求 3 的判定标准以头文件为准，证据与那道
 // 门禁上的快照见 `dialect/AFIR/IR/Ops/Broadcast.td` 的 `AFIR_BroadcastElementTypes`。
 // i64 建模后补在两侧声明里（`SupportBytes<1,2,4,8>` 收 8 字节）。
-constexpr uint32_t kExtendElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64;
+constexpr uint32_t kExtendElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64;
 
 // `constRank` 的上限，`broadcast_extend_impl.h:258` 的 `static_assert` 钉的就是这个数。
 // legacy 在生成调用之前也查同一个上限（`reg_broadcast_api_call.cpp:95`），只是它数的是
@@ -1314,16 +1316,20 @@ LogicalResult registerDuplicate(ImplementationRegistry &registry, llvm::StringRe
     return failure();
   }
   uint32_t elementTypes = kDuplicateElementTypes;
-  // reg 侧的 stock Duplicate 收 8 字节实参（SupportBytes<1,2,4,8>），i64 跟着这一侧走；
-  // mem 侧对 int64 发的是带 tmp 尾参的调用，见 kDuplicateElementTypes 上的注释。
+  // reg 侧的 stock Duplicate 按字节宽收实参（SupportBytes<1,2,4,8>），i64 / ui32 / ui64
+  // 跟着这一侧走；mem 侧对 int64 / uint64 发的是带 tmp 尾参的调用（broadcast_api_call.cpp
+  // 的 `BroadcastScalar` 只在这两个 dtype 拼 tmp 尾参），见 kDuplicateElementTypes 上的注释。
+  // i8 两侧都不进本档：duplicate.h 给 int8 / uint8 摆的是包装重载，本档发的是标准
+  // `AscendC::Duplicate`，i8 上的广播由 segmented / extend 档（broadcast.h 的包装分发）
+  // 覆盖。
   if (family == ApiFamily::RegBased) {
-    elementTypes |= kI64;
+    elementTypes |= kI64 | kUI32 | kUI64;
   }
   if (family == ApiFamily::MemBased) {
     if (failed(elementwise::checkFamilyMatchesHeader<ascendc::DuplicateU8Op>(family))) {
       return failure();
     }
-    elementTypes |= kUI8;
+    elementTypes |= kUI8 | kUI32;
   }
   elementwise::recordRegisteredFamily(afir::BroadcastOp::getOperationName(), id, family, elementTypes);
   return registry.registerImplementation<afir::BroadcastOp, BroadcastMapping, BroadcastCapabilityProvider>(

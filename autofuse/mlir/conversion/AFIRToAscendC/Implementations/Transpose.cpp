@@ -90,12 +90,14 @@ using elementwise::ApiFamily;
 // legacy 查的是同一个数（`kTransposeMaxDims`）：超出部分拆外层循环，不是拒绝。
 constexpr size_t kTransposeMaxWindowDims = 4;
 
-// ui32 has no registry-mask bit. The reg wrapper uses 1/2/4-byte Gather, so i64
-// stays outside the supported type predicate and is recorded as a matrix exception.
+// The reg wrapper uses 1/2/4-byte Gather: ui32 (4 bytes) joined with the second
+// wave dtype table, while i64 (8 bytes) stays outside the supported type predicate
+// and is recorded as a matrix exception.
 constexpr uint32_t kTransposeMemElementTypes =
     elementwise::kF16 | elementwise::kF32 | elementwise::kI16 | elementwise::kUI16;
 constexpr uint32_t kTransposeRegElementTypes = elementwise::kF16 | elementwise::kF32 | elementwise::kI16 |
-                                               elementwise::kI32 | elementwise::kUI16 | elementwise::kBF16;
+                                               elementwise::kI32 | elementwise::kUI16 | elementwise::kBF16 |
+                                               elementwise::kUI32;
 
 struct TransposeMapping {
   ApiFamily family = ApiFamily::RegBased;
