@@ -200,6 +200,34 @@ afir::TensorDescAttr firstDescriptor(Operation *op, llvm::StringRef name) {
   return dyn_cast<afir::TensorDescAttr>(descriptors[0]);
 }
 
+constexpr int64_t kDataBlockBits = 32 * 8;
+constexpr size_t kMinimumDuplicateSegments = 2;
+constexpr size_t kBroadcastWindowSegmentCount = 2;
+
+// Duplicate consumes a scalar, so only the destination participates in its row loops.
+FailureOr<afir::VectorPlan> duplicateRows(Operation *op) {
+  afir::VectorTensor dst{afir::VectorTensor::Side::Destination, 0,
+                         firstDescriptor(op, afir::kDestinationDescsAttrName)};
+  auto rows = afir::collapseVectorizedAxes(op, {dst});
+  if (failed(rows) || rows->segments.size() < kMinimumDuplicateSegments ||
+      !afir::provablyOne(rows->segments.back().strides.front())) {
+    return failure();
+  }
+  auto type = cast<ShapedType>(cast<afir::BroadcastOp>(op).getDestination().getType());
+  // The mem-based ui8 wrapper uses GetSize() rather than count: it cannot fill a subrow.
+  if (type.getElementType().isUnsignedInteger(kUInt8BitWidth)) {
+    return failure();
+  }
+  for (const auto &segment : llvm::drop_end(rows->segments)) {
+    auto stride = segment.strides.front();
+    if (!afir::ProveExpressionMultipleOf(stride.getValue().getValue(),
+                                         kDataBlockBits / type.getElementTypeBitWidth())) {
+      return failure();
+    }
+  }
+  return rows;
+}
+
 //===----------------------------------------------------------------------===//
 // 分段广播（功能需求 3 / 4）
 //===----------------------------------------------------------------------===//
@@ -258,7 +286,8 @@ struct BroadcastSegmentation {
 //     元素），由那一档收，两档的判据因此不重叠。
 //   - 至少一个广播段；广播段之间不相邻（相邻的在合轴那一步就并成一段了，没并上说明
 //     stride 对不上，这里不猜）。
-//   - 最内广播段位于最内两段构成的窗口中。形态 A 的源步长为 (0, s)，两侧内段步长相等；
+//   - 两侧布局相同的连续物理行可包含多个尾段（包括行末对齐填充）；否则窗口限于最内两段。形态 A 的源步长为 (0,
+//   s)，两侧内段步长相等；
 //     形态 B 的源步长为 (s, 0)，目的地内段步长为 1，窗口外段不能是广播段。
 //     两种形态均支持行距填充，窗口调用的参数取法见下方判据说明。
 //
@@ -267,7 +296,7 @@ struct BroadcastSegmentation {
 // 行与行的间距（`BroadcastFirstDim` 的 `dst_inner_offset`），尾块上行长变短、行距不变——
 // 切分轴真落到内侧的段上就是静默算错。这条不变量由 `getTileInnerAxis` 的 `front()` 保证，
 // 那里的注释写着放宽它之前要回来补什么。
-FailureOr<BroadcastSegmentation> classifySegments(const afir::VectorPlan &plan) {
+FailureOr<BroadcastSegmentation> identifyBroadcastSegments(const afir::VectorPlan &plan) {
   BroadcastSegmentation shape;
   std::optional<unsigned> source;
   std::optional<unsigned> destination;
@@ -317,6 +346,37 @@ FailureOr<BroadcastSegmentation> classifySegments(const afir::VectorPlan &plan) 
   // 之积），所以两段之间有填充也走对地址；填充位一起复制，那些位置本来就是 don't care。
   shape.windowStart = std::min(shape.broadcastSegments.front(), count - 2);
 
+  return shape;
+}
+
+FailureOr<BroadcastSegmentation> classifyPhysicalSuffix(const afir::VectorPlan &plan, BroadcastSegmentation shape,
+                                                        int64_t blockElements) {
+  const size_t count = plan.segments.size();
+  const afir::VectorSegment &outer = plan.segments[count - 2];
+  const afir::VectorSegment &inner = plan.segments[count - 1];
+  const size_t lastBroadcast = shape.broadcastSegments.back();
+  // Treat the non-broadcast suffix as one physical row only when both sides
+  // have the same layout, including the aligned padding after the last axis.
+  auto *context = inner.extent.getContext();
+  auto aligned = afir::alignUpExpr(context, inner.extent, blockElements);
+  if (failed(aligned) || !afir::provablyOne(inner.strides[shape.destination]) ||
+      !provablyEqual(outer.strides[shape.destination], *aligned)) {
+    return failure();
+  }
+  for (size_t i = count - 1; i > lastBroadcast; --i) {
+    const auto &segment = plan.segments[i];
+    if (!provablyEqual(segment.strides[shape.source], segment.strides[shape.destination]) ||
+        (i < count - 1 && !afir::provablyContiguous(context, plan.segments[i - 1].strides[shape.destination],
+                                                    segment.strides[shape.destination], segment.extent))) {
+      return failure();
+    }
+  }
+  shape.pitch = plan.segments[lastBroadcast].strides[shape.destination];
+  return shape;
+}
+
+FailureOr<BroadcastSegmentation> classifyBroadcastWindow(const afir::VectorPlan &plan, BroadcastSegmentation shape) {
+  const size_t count = plan.segments.size();
   const afir::VectorSegment &outer = plan.segments[count - 2];
   const afir::VectorSegment &inner = plan.segments[count - 1];
   shape.broadcastIsInner = shape.broadcastSegments.back() == count - 1;
@@ -383,6 +443,17 @@ FailureOr<BroadcastSegmentation> classifySegments(const afir::VectorPlan &plan) 
     return failure();
   }
   return shape;
+}
+
+FailureOr<BroadcastSegmentation> classifySegments(const afir::VectorPlan &plan, int64_t blockElements) {
+  auto shape = identifyBroadcastSegments(plan);
+  if (failed(shape)) {
+    return failure();
+  }
+  if (shape->broadcastSegments.back() < plan.segments.size() - kBroadcastWindowSegmentCount) {
+    return classifyPhysicalSuffix(plan, *shape, blockElements);
+  }
+  return classifyBroadcastWindow(plan, *shape);
 }
 
 // 把分段形态落成调用。
@@ -466,10 +537,10 @@ class SegmentedBroadcastEmitter {
     return emitBlockCopy(segment, innerDestination);
   }
 
-  // 最内那个广播段与它的邻段：一条两段调用。
+  // 最内那个广播段与其物理行构成 API 窗口。
   LogicalResult emitWindowCall(Value source, Value destination) {
     const size_t count = plan_.segments.size();
-    Value outer = extentOf(count - 2);
+    Value outer = extentOf(std::min(count - 2, shape_.broadcastSegments.back()));
     Value inner = extentOf(count - 1);
     //   形态 A `[brc K][normal Z]` → `Broadcast(dst, src, 1, Z, 0, K, Z, 0, tmp)` → `BroadcastFirstDim`
     //   形态 B `[normal M][brc K]` → `Broadcast(dst, src, M, 1, 0, M, K, 0, tmp)` → 原生 `Broadcast<T,2,1>`
@@ -584,7 +655,8 @@ FailureOr<BroadcastSegmentation> analyzeSegmentedBroadcast(Operation *op, afir::
     return failure();
   }
   plan = std::move(*collapsed);
-  return classifySegments(plan);
+  auto type = cast<ShapedType>(op->getOperand(0).getType());
+  return classifySegments(plan, kDataBlockBits / type.getElementTypeBitWidth());
 }
 
 //===----------------------------------------------------------------------===//
@@ -852,6 +924,27 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
     return queryTensorContract(operation, *plan);
   }
 
+  CapabilitySupport queryDuplicateContract(Operation *operation, const TransferPlan &plan, bool scalarSource) const {
+    // 这两条只对 tile 源成立。标量源在描述子列表里占一格、但那一格不描述任何事实
+    // （`AFIRVerifierUtils.cpp` 里 `verifyDescriptorList` 的 `allowsScalars` 一支），
+    // 所以没有轴可查；它也不从 tile 读值，没有要同步的事件。
+    if (!scalarSource) {
+      // 这一档的判据：源在每一根向量化轴上都是 1。
+      if (!isConstantOnVectorizedAxes(firstDescriptor(operation, afir::kOperandDescsAttrName))) {
+        return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
+      }
+      if (scalarReadEvents(operation, 0).empty()) {
+        return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+      }
+    }
+    // A contiguous tile uses one Duplicate. Otherwise only fill contiguous rows, never their gaps.
+    if (plan.kind == afir::TransferPlanKind::Scheduled && failed(afir::localTileIsSingleSegment(operation)) &&
+        failed(duplicateRows(operation))) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
+    }
+    return CapabilitySupport::supported();
+  }
+
   CapabilitySupport queryTensorContract(Operation *operation, const TransferPlan &plan) const {
     FailureOr<afir::OperandPartition> partition = afir::getOperandPartition(operation);
     if (failed(partition) || partition->inputCount != 1 || partition->destinationCount != 1) {
@@ -881,30 +974,7 @@ class BroadcastCapabilityProvider final : public ascend::instruction::Capability
     }
 
     if (mapping_->tier == BroadcastTier::Duplicate) {
-      // 这两条只对 tile 源成立。标量源在描述子列表里占一格、但那一格不描述任何事实
-      // （`AFIRVerifierUtils.cpp` 里 `verifyDescriptorList` 的 `allowsScalars` 一支），
-      // 所以没有轴可查；它也不从 tile 读值，没有要同步的事件。
-      if (!scalarSource) {
-        // 这一档的判据：源在每一根向量化轴上都是 1。
-        if (!isConstantOnVectorizedAxes(firstDescriptor(operation, afir::kOperandDescsAttrName))) {
-          return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
-        }
-        if (scalarReadEvents(operation, 0).empty()) {
-          return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
-        }
-      }
-      // 这一档生成的是一次覆盖整块 tile 的填充，长度取 `materializeScheduledLocalSpan`，
-      // 而那是首末元素之间的物理跨度（`1 + Σ (actual − 1) × stride`），不是元素个数。
-      // 多段的 tile 上跨度大于元素数，差额正是行间填充；按跨度填会写进填充区，碰到并排
-      // 摆在 UB 上的下一个张量。单段且局部 stride 为 1 时两者相等，所以必须同时检查。
-      //
-      // 这条判据不能照搬到 `DataMovement.cpp`。 那边走 `DataCopyPadExtend`，两侧行距
-      // 是显式参数，缝隙本来就跳得过去，所以它不设这道闸——同一个形状在那边支持、在这里
-      // 不支持，差别来自生成的是哪条 API，不是 tile 的几何。
-      if (plan.kind == afir::TransferPlanKind::Scheduled && failed(afir::localTileIsSingleSegment(operation))) {
-        return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
-      }
-      return CapabilitySupport::supported();
+      return queryDuplicateContract(operation, plan, scalarSource);
     }
 
     // 分段的两档。判不了的形态一律报不支持、整图回落 legacy，不猜测生成。
@@ -972,8 +1042,46 @@ class BroadcastDuplicateConversionPattern final : public OpConversionPattern<afi
     Value destination = adaptor.getDestination();
     const bool scalarSource = mapping_->source == BroadcastSource::Scalar;
     Value count;
-    if (plan->kind == TransferPlanKind::Scheduled) {
-      FailureOr<Value> span = materializeScheduledLocalSpan(op, rewriter, *plan);
+    const bool rowWise = plan->kind == TransferPlanKind::Scheduled && failed(afir::localTileIsSingleSegment(op));
+    if (failed(materializeContiguousView(op, rewriter, *plan, scalarSource, rowWise, source, destination, count))) {
+      return failure();
+    }
+    auto scalar = readScalar(op, source, scalarSource, rewriter);
+    if (failed(scalar)) {
+      return failure();
+    }
+
+    if (rowWise) {
+      auto rows = duplicateRows(op);
+      if (failed(rows)) {
+        return failure();
+      }
+      auto window = materializeVectorizedSegments(op, rewriter, *rows, ExtentSource::Actual, {destination}, 1);
+      if (failed(window)) {
+        return failure();
+      }
+      destination = window->tiles.front();
+      count = window->extents.front();
+    }
+    Operation *targetOp;
+    if (scalar->getType().isUnsignedInteger(kUInt8BitWidth)) {
+      targetOp = rewriter.create<ascendc::DuplicateU8Op>(op.getLoc(), destination, *scalar, count);
+    } else {
+      targetOp = rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), destination, *scalar, count);
+    }
+    if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
+      return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
+    }
+    rewriter.replaceOp(op, rowWise ? adaptor.getDestination() : destination);
+    return success();
+  }
+
+ private:
+  LogicalResult materializeContiguousView(afir::BroadcastOp op, ConversionPatternRewriter &rewriter,
+                                          const TransferPlan &plan, bool scalarSource, bool rowWise, Value &source,
+                                          Value &destination, Value &count) const {
+    if (!rowWise && plan.kind == TransferPlanKind::Scheduled) {
+      FailureOr<Value> span = materializeScheduledLocalSpan(op, rewriter, plan);
       if (failed(span)) {
         return rewriter.notifyMatchFailure(op, "cannot materialize the scheduled local span");
       }
@@ -987,17 +1095,19 @@ class BroadcastDuplicateConversionPattern final : public OpConversionPattern<afi
       }
       destination =
           rewriter.create<ascendc::LocalTensorSubIndexOp>(op.getLoc(), destination.getType(), destination, zeroOffset);
-    } else {
+    } else if (!rowWise) {
       count = rewriter.create<ascendc::LocalTensorGetSizeOp>(op.getLoc(), rewriter.getI32Type(), destination);
     }
 
-    Value scalar;
-    Type elementType;
+    return success();
+  }
+
+  FailureOr<Value> readScalar(afir::BroadcastOp op, Value source, bool scalarSource,
+                              ConversionPatternRewriter &rewriter) const {
     if (scalarSource) {
       // 直接当实参：没有 tile 可读，也就没有要同步的事件。对应的 legacy 分支见
       // `BroadcastSource` 的注释。
-      scalar = source;
-      elementType = source.getType();
+      return source;
     } else {
       auto sourceType = dyn_cast<ascendc::LocalTensorType>(source.getType());
       if (!sourceType) {
@@ -1007,23 +1117,10 @@ class BroadcastDuplicateConversionPattern final : public OpConversionPattern<afi
       if (failed(read)) {
         return rewriter.notifyMatchFailure(op, "cannot synchronize scalar tensor read");
       }
-      scalar = *read;
-      elementType = sourceType.getElementType();
+      return *read;
     }
-    Operation *targetOp;
-    if (elementType.isUnsignedInteger(kUInt8BitWidth)) {
-      targetOp = rewriter.create<ascendc::DuplicateU8Op>(op.getLoc(), destination, scalar, count);
-    } else {
-      targetOp = rewriter.create<ascendc::DuplicateL2Op>(op.getLoc(), destination, scalar, count);
-    }
-    if (failed(setExecutionSpec(targetOp, mapping_->executionSpec))) {
-      return rewriter.notifyMatchFailure(op, "invalid AscendC execution spec mapping");
-    }
-    rewriter.replaceOp(op, destination);
-    return success();
   }
 
- private:
   ImplementationKey key_;
   std::shared_ptr<const BroadcastMapping> mapping_;
 };

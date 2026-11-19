@@ -50,6 +50,17 @@ add_custom_target(check-legacy-inductor-transpose-python-st
 )
 set_property(GLOBAL APPEND PROPERTY AFIR_GTEST_CHECK_TARGETS_st check-legacy-inductor-transpose-python-st)
 
+# Run real AFIR lowering in the ST process so its execution contributes to ST coverage.
+add_afir_gtest(BroadcastLoweringSt
+  SOURCES bridge/BroadcastLoweringSt.cpp
+  LIBS AFIRToAscendC MLIRAscUtils MLIRParser MLIRPass ascendc_api_headers
+  LABELS "st;mlir_st;broadcast_lowering_st"
+  COMMENT "Running broadcast layout system tests"
+)
+target_compile_definitions(BroadcastLoweringSt PRIVATE
+  AF_BROADCAST_FIXTURE_DIR="${MLIR_CODE_ROOT_DIR}/test/lit/conversion"
+)
+
 # Collect the check-* drivers registered by add_afir_gtest() above.
 get_property(AF_ST_CHECK_TARGETS GLOBAL PROPERTY AFIR_GTEST_CHECK_TARGETS_st)
 
