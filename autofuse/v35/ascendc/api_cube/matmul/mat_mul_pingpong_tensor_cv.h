@@ -93,13 +93,13 @@ class BlockEpilogueTensorCV {
       const int64_t inputSize = blockShapeM * blockShapeNAlign;
       const uint16_t slot = enablePp ? static_cast<uint16_t>(cvPingPong_ & 1UL) : 0U;
 
-      Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG + slot);
+      const int64_t stageM = Gemm::Min(cubeMStageRows_, blockShapeM);
+      const int64_t stageCapacity = stageM * blockShapeNAlign;
+      WaitForCubeReady(stageCapacity, slot);
       AscendC::LocalTensor<DataTypeIn> ubLocal{AscendC::TPosition::VECIN, 0,
                                                AscendC::TOTAL_UB_SIZE / sizeof(DataTypeIn)};
       cLocal_ = ubLocal[slot * ubHalfElems];
 
-      const int64_t stageM = Gemm::Min(cubeMStageRows_, blockShapeM);
-      const int64_t stageCapacity = stageM * blockShapeNAlign;
       if (stageCapacity > 0) {
         int64_t stageOffset = 0;
         int64_t loop = 0;
@@ -133,6 +133,15 @@ class BlockEpilogueTensorCV {
   }
 
  private:
+  __aicore__ inline void WaitForCubeReady(int64_t stageCapacity, uint16_t slot) {
+    if (stageCapacity > 0) {
+      Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG + slot);
+    } else {
+      // No vector/store events connect V to MTE3 on an empty stage. Order ready and ACK on the same pipe.
+      Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIC_SYNC_AIV_FLAG + slot);
+    }
+  }
+
   AscendC::LocalTensor<DataTypeIn> cLocal_{AscendC::TPosition::VECIN, 0, AscendC::TOTAL_UB_SIZE / sizeof(DataTypeIn)};
   FusionOp fusionOp_;
   ProblemShape problemShape_{};

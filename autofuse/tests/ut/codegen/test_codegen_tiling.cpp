@@ -7979,6 +7979,45 @@ int main() {
   }
 }
 
+TEST_F(TestCodegenTiling, StreamKIdleCubeStillNotifiesPairedVectors) {
+  for (const bool is_batch : {false, true}) {
+    for (const bool is_device : {false, true}) {
+      std::stringstream helpers;
+      codegen::AppendCvSafetyMixModeHelperDefs(helpers, is_batch, is_device);
+      const std::string source =
+          "#include <cstdint>\n#include <initializer_list>\n#define __aicore__\n" + helpers.str() + R"(
+int main() {
+  for (const int64_t base : {4097, 4098, 2101249, 2101250, 28673, 28674, 2125825, 2125826}) {
+    for (const int64_t trans : {0, 16, 64, 80}) {
+      const int64_t key = base + trans;
+      if (is_cv_safety_fusion_mode(key) != 1) { continue; }
+      for (const uint32_t used : {1U, 4U, 27U}) {
+        for (const uint32_t extra : {0U, 1U, 5U}) {
+          const uint32_t launch = used + extra;
+          const uint32_t admitted = is_cv_safety_blockidx_scheduled_mode(key) ? launch : used;
+          uint32_t computes = 0;
+          uint32_t notifications = 0;
+          for (uint32_t block = 0; block < launch; ++block) {
+            if (block >= admitted) { continue; }
+            // Native Stream-K notifies paired AIVs even when this AIC has no MM task.
+            if (block < used) { ++computes; }
+            ++notifications;
+          }
+          if (computes != used || notifications != launch) { return 1; }
+        }
+      }
+    }
+  }
+  for (const int64_t key : {0, 1, 2, 8193, 12289, 16449, 2097153, 2097154}) {
+    if (is_cv_safety_blockidx_scheduled_mode(key)) { return 2; }
+  }
+  return 0;
+})";
+      ASSERT_TRUE(CompileAndRunCode(source));
+    }
+  }
+}
+
 TEST_F(TestCodegenTiling, InductorCvDispatchUsesCompileTimePlatformAndShapeSelection) {
   for (const bool is_batch : {false, true}) {
     for (const bool is_dynamic : {false, true}) {
