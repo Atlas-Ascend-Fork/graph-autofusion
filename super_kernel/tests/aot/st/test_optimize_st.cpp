@@ -255,8 +255,10 @@ TEST_F(AotSystemTest, OptimizeCrossStreamEventsWithDisabledStreamAndBoundaryTask
   }
   for (auto stream : {producer, consumer}) {
     const auto tasks = model.Tasks(stream);
-    EXPECT_EQ(std::count_if(tasks.begin(), tasks.end(), [](const auto &task) {
-      return !task.disabled && task.function == "sk_entry_aiv" && task.setParamsCount == 1;
-    }), 1);
+    EXPECT_EQ(std::count_if(tasks.begin(), tasks.end(),
+                            [](const auto &task) {
+                              return !task.disabled && task.function == "sk_entry_aiv" && task.setParamsCount == 1;
+                            }),
+              1);
   }
 }
