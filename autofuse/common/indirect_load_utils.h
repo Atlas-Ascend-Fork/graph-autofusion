@@ -156,15 +156,6 @@ struct IndirectLoadAccessInfo {
   int64_t axis = -1L;
   af::Expression input_slice_bytes;
   af::Expression index_varying_extent;
-  // 尾轴（axis == rank-1）gather 的整行窗口口径：该形态下 gather 轴后无 payload 后缀，
-  // input_slice_bytes 退化为 dtype 字节，而 SIMD dense facade 的实际 staging 单位是
-  // 外层坐标固定时 gather 轴方向的整行窗口（sizes[axis]*strides[axis]*dtype）。
-  // has_tail_window 是"已填充"哨兵（Expression 默认构造 IsValid 恒真，不能作哨兵，
-  // 见 window_outer_count 注释）；非尾轴或窗口 stride 不可证为正时为 false，消费方
-  // 按 input_slice_bytes 口径处理，行为不变。
-  bool has_tail_window = false;
-  af::Expression window_bytes;         // 单窗口 staging 字节
-  af::Expression window_lookup_count;  // 单窗口 lookup 次数（index 沿 axis 零 stride 时为 0）
   bool can_use_simt_structured = false;
   // SIMD uses a contiguous payload suffix and a zero-stride index suffix.
   // This is stricter than the generalized SIMT structured-layout condition.

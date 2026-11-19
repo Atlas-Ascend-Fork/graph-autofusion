@@ -6334,9 +6334,14 @@ struct Data { uint32_t key{0}; uint32_t z0t_size{1};
   uint32_t get_z0t_size() const { return z0t_size; } };
 using CurTilingData = Data;
 using PrimaryTilingData = Data;
+// 多组场景组级 GetTiling 恒带 GroupLevelCache* 形参（与复用数据解耦）；
+// 本测试只校验 workspace id 注册，cache 不参与，前置声明补齐即可编译。
+struct GroupLevelCache;
 template<class TI, class TO> TO &RefToRef(TI &value) { return value; }
 namespace Primary {
-bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t) {
+// 生成器对多组场景的组级 GetTiling 恒带 GroupLevelCache* 形参（与复用数据解耦），
+// wrapper 转发时透传 cache；本测试只校验 workspace id 注册，cache 直通 nullptr。
+bool GetTiling(Data &, std::unordered_map<int64_t, uint64_t> &, int32_t, GroupLevelCache *) {
   FinalTilingObservationSlotGuard guard(0U);
   CommitCurrentFinalTilingSelection({true, 0U, 0U, 0U, 0U, 0, 1}); return true;
 }
@@ -6347,7 +6352,7 @@ int main() {
   FinalTilingObservationContext context;
   FinalTilingObservationCallGuard guard(context, true, 2U);
   Data data; std::unordered_map<int64_t, uint64_t> workspace;
-  if (!GetTiling(data, workspace, -1)) { return 1; }
+  if (!GetTiling(data, workspace, -1, nullptr)) { return 1; }
   return workspace.count(16) == 1U && workspace.count(17) == 1U ? 0 : 2;
 }
 )";
