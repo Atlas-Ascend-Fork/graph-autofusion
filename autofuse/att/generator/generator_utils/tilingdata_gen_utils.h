@@ -30,11 +30,12 @@ class TilingDataGenUtils {
   }
   template <typename Container>
   static void WriteTilingDataElement(ge::CodePrinter &printer, std::set<std::string> &tiling_data_vars,
-                                     const Container &var_names) {
+                                     const Container &var_names,
+                                     const std::set<std::string> &dynamic_size_var_names = {}) {
     for (const auto &var_name : var_names) {
       const auto iter = tiling_data_vars.find(var_name);
       if (iter == tiling_data_vars.end()) {
-        AddElementDefinition(printer, GetFieldType(var_name), var_name);
+        AddElementDefinition(printer, GetFieldType(var_name, dynamic_size_var_names), var_name);
         tiling_data_vars.insert(var_name);
       }
     }
@@ -48,7 +49,9 @@ class TilingDataGenUtils {
       tiling_data_vars.insert(var_name);
     }
   }
-  static std::string GetFieldType(const std::string &var_name);
+  // 命中 frontend 动态符号集合的字段（shape 值）为 int64_t，与 host AutofuseTiling 形参一致。
+  static std::string GetFieldType(const std::string &var_name,
+                                  const std::set<std::string> &dynamic_size_var_names = {});
   static void AddElementDefinition(ge::CodePrinter &printer, const std::string &type_name, const std::string &var_name);
   static void AddStructElementDefinition(ge::CodePrinter &printer, const std::string &type_name,
                                          const std::string &var_name);

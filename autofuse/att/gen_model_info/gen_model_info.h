@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <stdint.h>
 
 #include "base/model_info.h"
@@ -21,6 +22,17 @@
 #include "autofuse_config/auto_fuse_config.h"
 
 namespace att {
+struct ModelInfoSetupContext {
+  const ascir::FusedScheduledResult &schedule_results;
+  const ascir::ScheduledResult &schedule_result;
+  const std::vector<af::AscGraph> &group_graphs;
+  const std::map<std::string, std::string> &all_graph_score_funcs;
+  const std::set<std::string> &dynamic_size_var_names;
+  size_t asc_graph_id;
+  size_t impl_graph_id;
+  size_t schedule_group_id;
+};
+
 af::Status GenerateModelInfo(const af::AscGraph &graph, ModelInfo &model_info, TuningSpacePtr &tuning_space,
                              const uint32_t tiling_case_id = 0U);
 af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::vector<ModelInfo> &model_info_list);

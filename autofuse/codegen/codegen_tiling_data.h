@@ -11,6 +11,7 @@
 #ifndef __CODEGEN_TILING_DATA_H__
 #define __CODEGEN_TILING_DATA_H__
 
+#include <set>
 #include <string>
 
 #include "ascir.h"
@@ -87,6 +88,9 @@ class TilingData {
   std::vector<std::string> field_var_defs_;
 
   bool const_mode_ = false;  // const模式下生成字段都为const的，且有初值
+  // 前端动态 shape 符号（GetFrontendShapeVars + !IsConstExpr）。命中该集合的字段宽 int64_t，
+  // 与 host AutofuseTiling 的 int64 形参保持一致。
+  std::set<std::string> dynamic_size_var_names_;
 };
 };  // namespace codegen
 

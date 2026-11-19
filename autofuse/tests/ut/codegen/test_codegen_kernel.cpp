@@ -4856,7 +4856,7 @@ TEST_F(CodegenCommonOutputReuse, RetainsCubeOnlyDimensionForFullRuntimeInputRang
   CommonOutputReusePlan::PreserveShapeVars(fused, derived);
   EXPECT_EQ(group.runtime_shape_vars.size(), 1U);
   const auto header = TilingData("Autofuse").Generate(fused, false);
-  EXPECT_NE(header.find("TILING_DATA_FIELD_DEF_T(uint32_t, k);"), std::string::npos);
+  EXPECT_NE(header.find("TILING_DATA_FIELD_DEF_T(int64_t, k);"), std::string::npos);
   const auto derived_header = TilingData("Autofuse").Generate(derived, false);
   EXPECT_EQ(derived_header, header);
   vec.CreateSizeVar("k");

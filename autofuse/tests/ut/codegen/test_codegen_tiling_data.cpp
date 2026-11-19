@@ -38,6 +38,64 @@ std::string WithoutFinalTilingMetadata(std::string value) {
   }
   return value;
 }
+
+const char kMultiGroupTilingDataExpected[] = R"rawliteral(#ifndef __TestKernel_Tiling_Data_H__
+#define __TestKernel_Tiling_Data_H__
+#include <stdint.h>
+#include "kernel_tiling/kernel_tiling.h"
+#define BEGIN_TILING_DATA_DEF_T(name) struct name {
+#define TILING_DATA_FIELD_DEF_T(type, name) \
+  type name; \
+  inline void set_##name(type value) { name = value; } \
+  inline type get_##name() const { return name; } \
+  inline type* get_addr_##name() {return &name;}
+#define END_TILING_DATA_DEF_T };
+#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \
+  struct_type filed_name;
+
+BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult0G0TilingData)
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
+  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
+  TILING_DATA_FIELD_DEF_T(int64_t, s0);
+  TILING_DATA_FIELD_DEF_T(int64_t, s1);
+  TILING_DATA_FIELD_DEF_T(int64_t, s2);
+END_TILING_DATA_DEF_T;
+
+BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult1G0TilingData)
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
+  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
+  TILING_DATA_FIELD_DEF_T(int64_t, s0);
+  TILING_DATA_FIELD_DEF_T(int64_t, s1);
+  TILING_DATA_FIELD_DEF_T(int64_t, s2);
+END_TILING_DATA_DEF_T;
+
+BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult1G1TilingData)
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
+  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
+  TILING_DATA_FIELD_DEF_T(int64_t, s0);
+  TILING_DATA_FIELD_DEF_T(int64_t, s1);
+  TILING_DATA_FIELD_DEF_T(int64_t, s2);
+END_TILING_DATA_DEF_T;
+
+BEGIN_TILING_DATA_DEF_T(TestKernelTilingData)
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, graph0_tiling_key);
+  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
+  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult0G0TilingData, graph0_result0_g0_tiling_data);
+  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult1G0TilingData, graph0_result1_g0_tiling_data);
+  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult1G1TilingData, graph0_result1_g1_tiling_data);
+END_TILING_DATA_DEF_T;
+
+using AutofuseTilingData = TestKernelTilingData;
+struct AutofuseTilingDataPerf {
+  AutofuseTilingData tiling_data;
+  double best_perf;
+};
+#endif
+)rawliteral";
 }  // namespace
 
 class TestCodegenTilingData : public testing::Test, public codegen::TilingData {
@@ -51,11 +109,6 @@ TEST_F(TestCodegenTilingData, ClassBegin) {
 
 TEST_F(TestCodegenTilingData, ClassEnd) {
   EXPECT_EQ(this->ClassEnd(), "END_TILING_DATA_DEF_T;");
-}
-
-TEST_F(TestCodegenTilingData, DataFieldDefine) {
-  af::SizeVar s0(af::Symbol("s0"));
-  EXPECT_EQ(this->DataFieldDefine(s0), "TILING_DATA_FIELD_DEF_T(int64_t, s0);");
 }
 
 TEST_F(TestCodegenTilingData, ClassRegister) {
@@ -84,6 +137,8 @@ TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingData) {
 
   ascir::FusedScheduledResult fused_schedule_result;
   fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("s0"), af::Symbol("s1"), af::Symbol("s2")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
   const std::string test_res = R"rawliteral(#ifndef __TestKernel_Tiling_Data_H__
 #define __TestKernel_Tiling_Data_H__
 #include <stdint.h>
@@ -117,6 +172,53 @@ struct AutofuseTilingDataPerf {
   EXPECT_EQ(WithoutFinalTilingMetadata(this->Generate(fused_schedule_result)), test_res);
 }
 
+TEST_F(TestCodegenTilingData, GenerateFrontendKsSizeVarUsesInt64) {
+  af::AscGraph graph("test_graph_ks");
+  graph.CreateSizeVar("ks0");
+  graph.CreateSizeVar("ks1");
+
+  std::vector<ascir::ImplGraph> impl_graphs{graph};
+  std::vector<ascir::ScheduledResult> schedule_results;
+  ascir::ScheduledResult schedule_result;
+  ascir::ScheduleGroup schedule_group;
+  schedule_group.impl_graphs = impl_graphs;
+  schedule_result.schedule_groups.push_back(schedule_group);
+  schedule_results.push_back(schedule_result);
+
+  ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("ks0"), af::Symbol("ks1")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
+
+  const std::string result = this->Generate(fused_schedule_result);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(int64_t, ks0);"), std::string::npos);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(int64_t, ks1);"), std::string::npos);
+  EXPECT_EQ(result.find("TILING_DATA_FIELD_DEF_T(uint32_t, ks0);"), std::string::npos);
+}
+
+TEST_F(TestCodegenTilingData, GenerateFollowsFrontendShapeVarSet) {
+  af::AscGraph graph("test_graph_frontend_set");
+  graph.CreateSizeVar("rows");      // 前端 ABI 符号，非 s/ks 命名，命中集合 → int64_t
+  graph.CreateSizeVar("z0t_size");  // 派生字段，不在集合内 → uint32_t
+
+  std::vector<ascir::ImplGraph> impl_graphs{graph};
+  std::vector<ascir::ScheduledResult> schedule_results;
+  ascir::ScheduledResult schedule_result;
+  ascir::ScheduleGroup schedule_group;
+  schedule_group.impl_graphs = impl_graphs;
+  schedule_result.schedule_groups.push_back(schedule_group);
+  schedule_results.push_back(schedule_result);
+
+  ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("rows")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
+
+  const std::string result = this->Generate(fused_schedule_result);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(int64_t, rows);"), std::string::npos);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(uint32_t, z0t_size);"), std::string::npos);
+}
+
 TEST_F(TestCodegenTilingData, GenerateWorkspaceFieldsShouldUseUint64) {
   auto fused_schedule_result = autofuse::tests::MakeWorkspaceFusedScheduleResult(2UL);
   const auto result = this->Generate(fused_schedule_result);
@@ -146,9 +248,7 @@ TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingDataWithTranspose) {
   af::ascir_op::Transpose transpose_op("Transpose");
   graph1.AddNode(transpose_op);
 
-  std::vector<ascir::ImplGraph> impl_graphs;
-  impl_graphs.push_back(graph0);
-  impl_graphs.push_back(graph1);
+  std::vector<ascir::ImplGraph> impl_graphs{graph0, graph1};
 
   std::vector<ascir::ScheduledResult> schedule_results;
   ascir::ScheduledResult schedule_result;
@@ -158,6 +258,8 @@ TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingDataWithTranspose) {
   schedule_results.push_back(schedule_result);
   ascir::FusedScheduledResult fused_schedule_result;
   fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("s0"), af::Symbol("s1"), af::Symbol("s2")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
   const std::string test_res = R"rawliteral(#ifndef __TestKernel_Tiling_Data_H__
 #define __TestKernel_Tiling_Data_H__
 #include <stdint.h>
@@ -658,63 +760,9 @@ TEST_F(TestCodegenTilingData, MultiGroupGenerateTilingData) {
 
   ascir::FusedScheduledResult fused_schedule_result;
   fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
-  const std::string test_res = R"rawliteral(#ifndef __TestKernel_Tiling_Data_H__
-#define __TestKernel_Tiling_Data_H__
-#include <stdint.h>
-#include "kernel_tiling/kernel_tiling.h"
-#define BEGIN_TILING_DATA_DEF_T(name) struct name {
-#define TILING_DATA_FIELD_DEF_T(type, name) \
-  type name; \
-  inline void set_##name(type value) { name = value; } \
-  inline type get_##name() const { return name; } \
-  inline type* get_addr_##name() {return &name;}
-#define END_TILING_DATA_DEF_T };
-#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \
-  struct_type filed_name;
-
-BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult0G0TilingData)
-  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(int64_t, s0);
-  TILING_DATA_FIELD_DEF_T(int64_t, s1);
-  TILING_DATA_FIELD_DEF_T(int64_t, s2);
-END_TILING_DATA_DEF_T;
-
-BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult1G0TilingData)
-  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(int64_t, s0);
-  TILING_DATA_FIELD_DEF_T(int64_t, s1);
-  TILING_DATA_FIELD_DEF_T(int64_t, s2);
-END_TILING_DATA_DEF_T;
-
-BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult1G1TilingData)
-  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(int64_t, s0);
-  TILING_DATA_FIELD_DEF_T(int64_t, s1);
-  TILING_DATA_FIELD_DEF_T(int64_t, s2);
-END_TILING_DATA_DEF_T;
-
-BEGIN_TILING_DATA_DEF_T(TestKernelTilingData)
-  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint16_t, graph0_tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult0G0TilingData, graph0_result0_g0_tiling_data);
-  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult1G0TilingData, graph0_result1_g0_tiling_data);
-  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult1G1TilingData, graph0_result1_g1_tiling_data);
-END_TILING_DATA_DEF_T;
-
-using AutofuseTilingData = TestKernelTilingData;
-struct AutofuseTilingDataPerf {
-  AutofuseTilingData tiling_data;
-  double best_perf;
-};
-#endif
-)rawliteral";
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("s0"), af::Symbol("s1"), af::Symbol("s2")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
+  const std::string test_res = kMultiGroupTilingDataExpected;
   EXPECT_EQ(WithoutFinalTilingMetadata(this->Generate(fused_schedule_result)), test_res);
 }
 

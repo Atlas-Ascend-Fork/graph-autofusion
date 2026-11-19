@@ -29,6 +29,29 @@ TEST_F(TilingDataGenUtilsUnitTest, NeedWrittenTilingDataFalse) {
   EXPECT_FALSE(TilingDataGenUtils::NeedWrittenTilingData(tiling_data_vars, var_names));
 }
 
+TEST_F(TilingDataGenUtilsUnitTest, GetFieldTypeWithoutDynamicSetStaysUint32) {
+  // 动态宽度只由前端符号集合决定，未提供集合时不再按 s/ks 命名推断。
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("block_dim"), "uint16_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("graph0_tiling_key"), "uint16_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("s0"), "uint32_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("ks0"), "uint32_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("z0t_size"), "uint32_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("b0_size"), "uint32_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("ks0_size"), "uint32_t");
+}
+
+TEST_F(TilingDataGenUtilsUnitTest, GetFieldTypeFollowsFrontendShapeVarSet) {
+  const std::set<std::string> dynamic_names{"rows", "ks0"};
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("rows", dynamic_names), "int64_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("ks0", dynamic_names), "int64_t");
+  // 集合非空时以其为准：不在集合中的符号与派生字段保持 uint32_t。
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("s0", dynamic_names), "uint32_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("z0t_size", dynamic_names), "uint32_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("z0t_loop_num", dynamic_names), "uint32_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("block_dim", dynamic_names), "uint16_t");
+  EXPECT_EQ(TilingDataGenUtils::GetFieldType("graph0_tiling_key", dynamic_names), "uint16_t");
+}
+
 TEST_F(TilingDataGenUtilsUnitTest, WriteTilingDataElementTrue) {
   ge::CodePrinter printer;
   std::set<std::string> tiling_data_vars;

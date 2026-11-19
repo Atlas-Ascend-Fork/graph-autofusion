@@ -11,6 +11,7 @@
 #include "common_utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -755,6 +756,16 @@ const std::vector<af::Expression> &GetFrontendShapeVars(const ascir::FusedSchedu
     return fused_schedule_result.frontend_shape_vars;
   }
   return fused_schedule_result.origin_vars;
+}
+
+void CollectDynamicSizeVarNames(const ascir::FusedScheduledResult &fused_schedule_result,
+                                std::set<std::string> &dynamic_size_var_names) {
+  dynamic_size_var_names.clear();
+  for (const auto &var : GetFrontendShapeVars(fused_schedule_result)) {
+    if (!var.IsConstExpr()) {
+      dynamic_size_var_names.emplace(var.Str().get());
+    }
+  }
 }
 
 bool IsFrontendStaticSchedResult(const ascir::FusedScheduledResult &fused_schedule_result) {

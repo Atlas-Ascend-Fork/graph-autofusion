@@ -130,6 +130,10 @@ std::string codegen::TilingData::GenConstCommonTilingField(const std::vector<std
 
 std::string codegen::TilingData::GetCommonTilingField(bool is_group,
                                                       const ascir::FusedScheduledResult &fused_schedule_result) {
+  if (!is_group) {
+    // 前端 ABI 动态符号集合需在 ProcessSingleGroup/ProcessMultiGroup 的字段定义之前就绪。
+    ascgen_utils::CollectDynamicSizeVarNames(fused_schedule_result, dynamic_size_var_names_);
+  }
   std::stringstream ss;
   std::vector<ascir::TensorId> workspace_tensor_id = GetWorkspaceTensorIdListInOneScheduleResult(fused_schedule_result);
   // block_dim 与 tiling_key 相邻：二者在根和每个 group 结构体里都紧跟声明。
@@ -402,7 +406,9 @@ std::string codegen::TilingData::ClassBegin(const std::string &begin_kernel_name
 
 std::string codegen::TilingData::DataFieldDefine(ascir::SizeVar &size) const {
   const std::string name = std::string(size.expr.Str().get());
-  const char *field_type = ascgen_utils::IsDynamicSizeVarName(name) ? "int64_t" : "uint32_t";
+  // 是否动态以前端 ABI 符号集合（GetFrontendShapeVars + !IsConstExpr）为准，不再按命名推断。
+  const bool is_dynamic = dynamic_size_var_names_.count(name) != 0U;
+  const char *field_type = is_dynamic ? "int64_t" : "uint32_t";
   std::stringstream ss;
   ss << "TILING_DATA_FIELD_DEF_T(" << field_type << ", " << name << ");";
   return ss.str();

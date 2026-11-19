@@ -450,6 +450,8 @@ class TilingCodeGenImpl {
   af::Status CollectBaseTilingVarSets(std::set<std::string> &input_vars_set, std::set<std::string> &hardware_vars_set,
                                       std::set<std::string> &const_vars_set, std::set<std::string> &searchable_vars_set,
                                       std::set<std::string> &general_post_var_set, std::set<std::string> &mem_vars_set);
+  // 汇总 tiling_model_info_ 中携带的前端动态符号集合（fusion 级并集），供字段类型判定使用。
+  std::set<std::string> GetDynamicSizeVarNames() const;
   af::Status GenBaseTilingData(std::map<std::string, std::string> &type_name_to_definition);
   af::Status GenHeaderCodesHead();
   af::Status GenHeaderCodesTail();
