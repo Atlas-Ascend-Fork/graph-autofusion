@@ -53,8 +53,13 @@ def test_hopcroft_karp_rejects_invalid_node_count(node_count):
 
 def test_hopcroft_karp_rejects_out_of_range_edges():
     matcher = HopcroftKarp(2)
+    node_limit = len(matcher.adjacency_list_)
     for edge in [(-1, 1), (0, 100), (100, 0)]:
-        with pytest.raises(ValueError):
+        pattern = (
+            rf"Hopcroft-Karp edge endpoint out of range: "
+            rf"from={edge[0]}, to={edge[1]}, valid range=\[0, {node_limit}\)"
+        )
+        with pytest.raises(ValueError, match=pattern):
             matcher._add_edge(*edge, 1)
 
 

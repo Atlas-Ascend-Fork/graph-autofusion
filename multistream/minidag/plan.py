@@ -59,7 +59,12 @@ class StreamPlan:
                 "node does not belong to the graph used to create this plan"
             )
         if index < 0 or index >= len(self._stream_ids):
-            raise ValueError("node index is out of range for this plan")
+            if not self._stream_ids:
+                raise ValueError(f"node index {index} is out of range for empty plan")
+            raise ValueError(
+                f"node index {index} is out of range [0, {len(self._stream_ids)}) "
+                "for this plan"
+            )
         return index
 
     def get_stream_id(self, node: DAGNode) -> int:

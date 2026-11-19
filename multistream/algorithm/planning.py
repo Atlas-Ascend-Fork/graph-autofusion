@@ -105,7 +105,7 @@ def _build_effective_costs(
             continue
         matched_indices.add(node._index)
         logger.info(
-            "Use profiling cost for %s: time=%f, cube=%d, vec=%d",
+            "Use profiling cost for %s: time=%f us, cube=%d, vec=%d",
             node._name,
             profile.execution_time,
             profile.cube_block_num,

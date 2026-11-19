@@ -8,7 +8,7 @@ Multistream 是基于 MiniDAG 的纯 Python 多流规划模块。调用方将算
 
 ## 环境准备与安装
 
-`pyproject.toml` 中声明的 Python 版本要求为 3.7 及以上，不依赖第三方 Python 运行时包，也不包含自身的 C/C++ 扩展。在仓库根目录执行：
+`pyproject.toml` 中声明的 Python 版本要求为 3.7 及以上（仅适用于独立使用本组件；主仓构建要求 >= 3.8.0，建议 >= 3.9，详见 [docs/zh/build.md](../docs/zh/build.md)），不依赖第三方 Python 运行时包，也不包含自身的 C/C++ 扩展。在仓库根目录执行：
 
 ```bash
 python3 -m pip install ./multistream

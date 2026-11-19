@@ -168,6 +168,18 @@ def test_weighted_failures_log_the_cpp_wording_where_found(caplog, monkeypatch):
 
     # These three checks return a failure value instead of raising, like C++.
     solver = _solver(graph, [[0, 1, 2]])
+    state = solver._new_streaming_state()
+    limit = solver.options.physical_stream_limit
+    with pytest.raises(
+        RuntimeError,
+        match=rf"candidate physical stream -1 is out of range \[0, {limit}\)",
+    ):
+        solver._apply_unit_to_stream(0, -1, state)
+    with pytest.raises(
+        RuntimeError,
+        match=r"candidate physical stream 1 is out of range \(no active streams\)",
+    ):
+        solver._apply_unit_to_stream(0, 1, state)
     solver._build_unit_dependency_graph()
     caplog.clear()
     assert solver._remove_unit_from_stream(0, solver._new_streaming_state()) == -1

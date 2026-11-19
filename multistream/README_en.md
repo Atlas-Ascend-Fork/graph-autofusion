@@ -8,7 +8,7 @@ The module supports two base merge strategies: `LOAD_BALANCE` and `MAIN_STREAM`.
 
 ## Environment and Installation
 
-`pyproject.toml` requires Python 3.7 or later. The package has no third-party Python runtime dependencies and contains no C/C++ extensions of its own. Run the following command from the repository root:
+`pyproject.toml` requires Python 3.7 or later (for standalone use of this component; the main repository build requires >= 3.8.0 and recommends >= 3.9, see [docs/en/build.md](../docs/en/build.md)). The package has no third-party Python runtime dependencies and contains no C/C++ extensions of its own. Run the following command from the repository root:
 
 ```bash
 python3 -m pip install ./multistream

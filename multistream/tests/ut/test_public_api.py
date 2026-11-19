@@ -208,6 +208,11 @@ def test_internal_package_has_no_bare_asserts_or_third_party_dependencies():
 
 def test_cost_of_rejects_out_of_range_index():
     graph = multistream.DAGGraph("g")
-    node = graph.add_node("n", "Op")
-    with pytest.raises(IndexError):
-        _cost_of(node, [])
+    first = graph.add_node("n0", "Op")
+    second = graph.add_node("n1", "Op")
+    with pytest.raises(
+        IndexError, match=r"node cost index 0 is out of range \(costs is empty\)"
+    ):
+        _cost_of(first, [])
+    with pytest.raises(IndexError, match=r"node cost index 1 is out of range \[0, 1\)"):
+        _cost_of(second, [multistream.NodeCost()])
