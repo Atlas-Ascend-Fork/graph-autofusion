@@ -103,6 +103,7 @@ using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
 using elementwise::kUI16;
+using elementwise::kUI32;
 
 // UB 的访问粒度，也是 `removepad.h` 里那条整除的除数。与 bridge 的
 // `kTmpBufferAlignmentBytes` 使用同一个常量，不是芯片判别。
@@ -114,7 +115,7 @@ constexpr int64_t kUbAccessGranularityBytes = 32;
 // ODS 的 `AFIR_RemovePadElementTypes` 比这里宽是对的：那是 op 收什么。
 // bf16 在这一条上两侧都有（`mem_dtypes` 与 `reg_dtypes` 都列着它），所以它与那 36 个
 // reg 侧独有的位不同——这个包装两张支持表共用一份，加在这里不会对任何一侧说假话。
-constexpr uint32_t kRemovePadElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16;
+constexpr uint32_t kRemovePadElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16 | kBF16 | kUI32;
 
 struct RemovePadMapping {
   ApiFamily family = ApiFamily::Shared;

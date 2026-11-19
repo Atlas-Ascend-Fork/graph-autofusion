@@ -27,7 +27,7 @@ include "mlir/IR/CommonTypeConstraints.td"
 // 两侧 legacy 可用实现均未声明 bf16，因此不在 ODS 中开放；ElementTypeMatrixTest
 // 检查 ODS、注册实现与 legacy 的一致性。计算族的 bf16 支持不能直接推广到选择族。
 defvar AFIR_SelectElementTypes = [I16, I32, I64, F16, F32];
-defvar AFIR_WhereElementTypes = [UI8, UI16, I16, I32, I64, F16, F32, BF16];
+defvar AFIR_WhereElementTypes = [UI8, UI16, I16, I32, I64, F16, F32, BF16, I8, UI32, UI64];
 
 // `scalarInputs = 1`：`then` / `else` 各自可以是标量（`where.h` 的场景 1/2/3），`mask` 不行
 // ——三个标量重载的 `mask` 都是 `LocalTensor<uint8_t>`。

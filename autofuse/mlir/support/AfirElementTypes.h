@@ -66,7 +66,10 @@ enum class AfirElementTypeKind : uint8_t {
   M(UI8, 4, "ui8", "uint8", 1, DT_UINT8, UnsignedInteger, 8)      \
   M(UI16, 5, "ui16", "uint16", 2, DT_UINT16, UnsignedInteger, 16) \
   M(BF16, 6, "bf16", "bfloat16", 2, DT_BF16, BFloat16, 16)        \
-  M(I64, 7, "i64", "int64", 8, DT_INT64, SignlessInteger, 64)
+  M(I64, 7, "i64", "int64", 8, DT_INT64, SignlessInteger, 64)     \
+  M(I8, 8, "i8", "int8", 1, DT_INT8, SignlessInteger, 8)          \
+  M(UI32, 9, "ui32", "uint32", 4, DT_UINT32, UnsignedInteger, 32) \
+  M(UI64, 10, "ui64", "uint64", 8, DT_UINT64, UnsignedInteger, 64)
 
 // legacy 叫得出名字、但 AFIR 这一层还没建模的元素类型。列依次是 CSV / BUILDER / BYTES / GE，
 // 含义与上面那张表同名的列一样。
@@ -87,10 +90,10 @@ enum class AfirElementTypeKind : uint8_t {
 //
 // 这里缺一行的后果是报出 `scheduler dtype value N is not modeled by AFIR`（bool 那 4
 // 格今天就是这样），比缺名字更难查一层。
-#define AFIR_ELEMENT_TYPE_NAMED_ONLY(M)                  \
-  M("i8", "int8", 1, DT_INT8, SignlessInteger, 8)        \
-  M("ui32", "uint32", 4, DT_UINT32, UnsignedInteger, 32) \
-  M("ui64", "uint64", 8, DT_UINT64, UnsignedInteger, 64)
+//
+// 2026-11 第二波扩表后 i8 / ui32 / ui64 移入建模表；bool（MLIR i1，AscendC 侧占一整
+// 字节）接替它们成为这里的唯一成员——机制（命名 / 字节宽度 / 拒收诊断）不落空。
+#define AFIR_ELEMENT_TYPE_NAMED_ONLY(M) M("bool", "bool", 1, DT_BOOL, SignlessInteger, 1)
 
 /// 两张表共用的那几列，展开成数据。`csvSpelling` / `builderSpelling` / `byteWidth` /
 /// `kind` / `width` 的含义与表上同名的列一样；`bit` 只有建模得出来的那几位有，另一张表

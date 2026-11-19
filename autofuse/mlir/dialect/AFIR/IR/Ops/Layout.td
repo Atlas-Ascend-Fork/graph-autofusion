@@ -27,20 +27,21 @@ include "mlir/IR/CommonTypeConstraints.td"
 
 // 元素类型取 legacy 两侧支持表的那一份，两侧逐字相同
 // （`ascir_builtin_ops_v1.cpp:163` 与 `ascir_builtin_ops_v2.cpp:558` 共用同一个 `TensorType`）。
-// `ui32` 与 `bf16` 在 lowering 那一层的 `ElementTypes` 里没有位，所以 implementation 收不到
-// 它们；ODS 比 implementation 宽是对的——这里说的是 op 收什么，不是某个 implementation 生成什么。
+// `ui32` 第二波扩表后已建模并由 implementation 收下；`bf16` 两侧 legacy 都不供，
+// 仅 ODS 不收。ODS 比 implementation 宽仍是对的——这里说的是 op 收什么，不是某个
+// implementation 生成什么。
 defvar AFIR_RemovePadElementTypes = [I16, UI16, I32, UI32, F16, F32, BF16];
 defvar AFIR_PadElementTypes = [I16, UI16, I32, UI32, F16, F32];
 
-// ODS 取两侧可发射类型的并集。RegBased 的 Gather 只支持 1/2/4 字节元素，
-// 因此 i64 保持拒收。BOOL 暂无 AFIR/AscendC 类型通路。
-defvar AFIR_TransposeElementTypes = [I16, UI16, I32, UI32, F16, F32, BF16];
+// ODS 取两侧可发射类型的并集（reg 侧 legacy 收 i64）。i64 的实现层收窄
+// （RegBased Gather 不支持 8 字节）由 kKnownNarrower 钉住：ODS 收、选不中、干净回落。
+defvar AFIR_TransposeElementTypes = [I16, UI16, I32, UI32, F16, F32, BF16, I64];
 
 // Ub2ub 的 dtype 口径也是**两侧注册表的并集**：mem 侧九种（`ascir_builtin_ops_v1.cpp:672`）、
 // reg 侧在此之上多一个 I64（`ascir_builtin_ops_v2.cpp:936`）。两侧都没有 BF16，所以这里也
 // 不能有——ODS 声称某一位而两张支持表都不供，等于把本可以回落的图钉成 verifier 硬失败。
-// `I8` / `UI32` / `I64` / `UI64` 在 lowering 那一层的 `ElementTypes` 里没有位，
-// implementation 因此收不到它们；ODS 比 implementation 宽是对的。
+// `I8` / `UI32` / `UI64` 第二波扩表后在位、implementation 已随之收下；`I64` 是第一波
+// 接入的。ODS 与 implementation 现在逐位一致。
 defvar AFIR_Ub2ubElementTypes = [I8, UI8, I16, UI16, I32, UI32, I64, UI64, F16, F32];
 
 // RemovePad 复用一元 bufferizable op 的形状、类型推导、verifier 和 destination-style 契约，

@@ -138,3 +138,20 @@ func.func @lt_scalar_first_operand(%input: !ascendc.local_tensor<?xf16>,
       -> !ascendc.local_tensor<?xui8>
   return
 }
+
+// -----
+
+#input_desc = #afir.tensor_desc<axis = [0], role = <input>>
+#compute_desc = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// The reg-based Add tensor API accepts ui32, but the Adds scalar API does not.
+func.func @add_ui32_scalar_unsupported(%input: !ascendc.local_tensor<?xui32>, %scalar: ui32,
+                                      %destination: !ascendc.local_tensor<?xui32>) {
+  // expected-error @+1 {{has no supported Ascend implementation}}
+  %result = afir.add %input, %scalar outs(%destination) {
+    afir.operand_descs = [#input_desc, #input_desc],
+    afir.destination_descs = [#compute_desc],
+    afir.result_descs = [#compute_desc]
+  } : (!ascendc.local_tensor<?xui32>, ui32), !ascendc.local_tensor<?xui32> -> !ascendc.local_tensor<?xui32>
+  return
+}

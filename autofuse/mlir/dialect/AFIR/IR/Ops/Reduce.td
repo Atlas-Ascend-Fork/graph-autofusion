@@ -60,9 +60,9 @@ class AFIR_ReduceOp<string mnemonic, list<Type> types> : AFIR_BaseOp<mnemonic,
 }
 
 // ODS 保留各 op 的元素类型白名单，具体实现支持由 lowering 能力查询判断。
-def AFIR_MaxOp : AFIR_ReduceOp<"max", [F16, F32, BF16]>;
-def AFIR_MinOp : AFIR_ReduceOp<"min", [F16, F32, BF16]>;
-def AFIR_SumOp : AFIR_ReduceOp<"sum", [I32, F32, BF16]>;
+def AFIR_MaxOp : AFIR_ReduceOp<"max", [F16, F32, I16, I32, UI8, BF16, I8, I64]>;
+def AFIR_MinOp : AFIR_ReduceOp<"min", [F16, F32, I16, I32, UI8, BF16, I8, I64]>;
+def AFIR_SumOp : AFIR_ReduceOp<"sum", [I32, F32, F16, I16, BF16, I8, I64]>;
 def AFIR_MeanOp : AFIR_ReduceOp<"mean", [F32, BF16]>;
 def AFIR_ProdOp : AFIR_ReduceOp<"prod", [F32, BF16]>;
 def AFIR_AnyOp : AFIR_ReduceOp<"any", [F32, BF16]>;

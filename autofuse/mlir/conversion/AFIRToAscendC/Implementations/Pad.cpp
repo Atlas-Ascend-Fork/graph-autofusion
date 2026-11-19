@@ -92,10 +92,11 @@ using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
 using elementwise::kUI16;
+using elementwise::kUI32;
 
-// 与 `kRemovePadElementTypes` 同一列：legacy 两侧供给表的 dtype 集相同，`ui32` / `bf16`
-// 在 `ElementTypes` 里没有位（`elementTypeBit` 答 0），够不着也就谈不上收。
-constexpr uint32_t kPadElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16;
+// 与 `kRemovePadElementTypes` 同一列：legacy 两侧供给表的 dtype 集相同，`ui32` 在第二波
+// 扩表后接入；`bf16` 两侧供给表都没有。
+constexpr uint32_t kPadElementTypes = kF16 | kF32 | kI16 | kI32 | kUI16 | kUI32;
 
 struct PadMapping {
   ApiFamily family = ApiFamily::Shared;

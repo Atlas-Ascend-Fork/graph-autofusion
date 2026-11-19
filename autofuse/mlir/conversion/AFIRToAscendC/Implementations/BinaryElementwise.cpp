@@ -86,7 +86,10 @@ using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
 using elementwise::kI64;
+using elementwise::kI8;
 using elementwise::kUI16;
+using elementwise::kUI32;
+using elementwise::kUI64;
 using elementwise::kUI8;
 
 constexpr unsigned kBinaryInputCount = 2;
@@ -104,6 +107,8 @@ constexpr uint32_t kArithmeticElementTypes = kF16 | kF32 | kI16 | kI32;
 // 两侧都不供的类型——两份拷贝（这里和 ODS）同时错，所以「ODS == 注册处」那种等号判据照不
 // 出来，是 `OdsElementTypesAgreeWithRegistrationsAndLegacy` 的判据二（ODS ⊆ legacy 两列并集）
 // 抓到的。两个 op 不一致的位要写在各自的注册处，不要塞进共用常量。
+// 例外：`floor_div` 的 reg 行不含这里的 ui8——`FloorDivExtend` 分派没有 uint8_t 分支
+// （见注册处注释），所以它在自己的注册处单写集合，不用这个共用常量。
 constexpr uint32_t kArithmeticRegElementTypes = kArithmeticElementTypes | kUI8 | kUI16;
 
 // 比较族的元素类型集合（从注册函数里移出：该函数已超长，不再往里加行）。mem 侧 i64
@@ -111,12 +116,15 @@ constexpr uint32_t kArithmeticRegElementTypes = kArithmeticElementTypes | kUI8 |
 // 只支持 EQ/NE，且调度的 tmp 容量未保证 TmpDupInt64 的写入空间；reg 侧收满可建模集合。
 constexpr uint32_t kCompareMemElementTypes = kF16 | kF32 | kI32;
 constexpr uint32_t kCompareMemI64TensorElementTypes = kCompareMemElementTypes | kI64;
-constexpr uint32_t kCompareRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64;
+// 第二波扩表（i8 / ui32 / ui64）后 reg 侧收满可建模集合；legacy reg 列还多一个 bool，
+// 仍建模不出来。
+constexpr uint32_t kCompareRegElementTypes =
+    kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64;
 // `logical_and` / `logical_or` / `logical_xor` 两侧共用的元素类型表：mem 侧 `REG_ASC_IR`
-// 的 `T1` 是这五个加 i64；reg 侧更宽（bf16 / i8 / ui32 / ui64 / bool），那四位 AFIR
-// 建模不出来。reg 侧多一个 ui16——它恰恰是建模得出来的那一个。
+// 的 `T1` 是这五个加 i64。reg 侧更宽，i8 / ui32 / ui64 在第二波扩表后建模并接入，
+// 只剩 bool 仍建模不出来；reg 侧还多一个 ui16。
 constexpr uint32_t kLogicalElementTypes = kUI8 | kI16 | kI32 | kF16 | kF32 | kI64;
-constexpr uint32_t kLogicalRegElementTypes = kLogicalElementTypes | kUI16 | kBF16;
+constexpr uint32_t kLogicalRegElementTypes = kLogicalElementTypes | kUI16 | kBF16 | kI8 | kUI32 | kUI64;
 
 // 调度分给这个节点的 tmp buffer 与选中的调用之间是什么关系。
 //
@@ -1028,7 +1036,8 @@ LogicalResult registerCompare(ImplementationRegistry &registry, llvm::StringRef 
 }
 
 // 标量右操作数的一类。`Adds` / `Muls` / `Maxs` / `Mins` 两张支持表上是同一个调用、
-// 都不要 tmp buffer，所以家族恒为 `Any`。
+// 都不要 tmp buffer，所以主行保持 `Any`；reg 侧更宽的集合在注册处另起 `extend_reg_base`
+// 行。Level 2 标量 API 的 dtype 白名单比 tensor-tensor 窄。
 template <typename SourceOp, typename TargetOp>
 LogicalResult registerScalarBinary(ImplementationRegistry &registry, llvm::StringRef id) {
   // `Any`：这四个 op 的标量格两侧都是 `2nd+swap(2nd)`，而且都可交换——标量在左生成的是
@@ -1239,11 +1248,30 @@ LogicalResult registerBinaryBrcInline(ImplementationRegistry &registry, llvm::St
 
 LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &registry) {
   // 这四个 op 的 tensor-tensor 形态在两套 API 家族上是同一个 `AscendC::` 调用，都不要
-  // tmp buffer，所以各只有一个 implementation，也不查任何 feature。标量变体才有平台差异。
+  // tmp buffer，也不查任何 feature。dtype 供给两侧不同（mem 只收 f16/f32/i16/i32）：
+  // 主行保持 `Any`、只收两列交集（与拆行前逐字相同）；reg 侧多出的位（含第二波扩表的
+  // i8/ui32/ui64）放在拆出的 `extend_reg_base` 行。两行的 dtype 集合**互斥**——reg 行
+  // 刻意不收交集里的任何一位——所以任何 target 上至多一行可选，选择层不需要优先级，
+  // 与 tensor/scalar 形态靠操作数形态互斥同一条设计。reg 集合里的 ui16 只有 `Mul`
+  // 没有——`REG_ASC_IR(Mul)` 不声明 DT_UINT16，其余三个都收；交集位不在 reg 行的窄
+  // 由 `kKnownNarrower` 钉住。收窄依据是 CANN 头的 static_assert，不是实测：
+  // `kernel_operator_vec_binary_scalar_impl.h` 里 Adds(L252)/Muls(L306)/Maxs(L348)/
+  // Mins(L390) 四张 SupportType 表——Adds/Maxs/Mins 无 ui16/ui32，Muls 另无 8 位；
+  // 连续 `Mul`（`kernel_operator_vec_binary_continuous_impl.h` 的 MulImpl）同样无 8 位。
   if (failed(registerBinary<AddOp, ascendc::AddL2Op>(registry, "add.tensor_tensor", ApiFamily::Any)) ||
       failed(registerBinary<MulOp, ascendc::MulL2Op>(registry, "mul.tensor_tensor", ApiFamily::Any)) ||
       failed(registerBinary<MaximumOp, ascendc::MaxL2Op>(registry, "maximum.tensor_tensor", ApiFamily::Any)) ||
-      failed(registerBinary<MinimumOp, ascendc::MinL2Op>(registry, "minimum.tensor_tensor", ApiFamily::Any))) {
+      failed(registerBinary<MinimumOp, ascendc::MinL2Op>(registry, "minimum.tensor_tensor", ApiFamily::Any)) ||
+      failed(registerBinary<AddOp, ascendc::AddL2Op>(registry, "add.tensor_tensor.reg_base", ApiFamily::RegBased,
+                                                     kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64)) ||
+      failed(registerBinary<MulOp, ascendc::MulL2Op>(registry, "mul.tensor_tensor.reg_base", ApiFamily::RegBased,
+                                                     kBF16 | kI64 | kUI32 | kUI64)) ||
+      failed(registerBinary<MaximumOp, ascendc::MaxL2Op>(registry, "maximum.tensor_tensor.reg_base",
+                                                         ApiFamily::RegBased,
+                                                         kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64)) ||
+      failed(registerBinary<MinimumOp, ascendc::MinL2Op>(registry, "minimum.tensor_tensor.reg_base",
+                                                         ApiFamily::RegBased,
+                                                         kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64))) {
     return failure();
   }
 
@@ -1267,7 +1295,15 @@ LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &re
   if (failed(registerScalarBinary<AddOp, ascendc::AddsL2Op>(registry, "add.tensor_scalar")) ||
       failed(registerScalarBinary<MulOp, ascendc::MulsL2Op>(registry, "mul.tensor_scalar")) ||
       failed(registerScalarBinary<MaximumOp, ascendc::MaxsL2Op>(registry, "maximum.tensor_scalar")) ||
-      failed(registerScalarBinary<MinimumOp, ascendc::MinsL2Op>(registry, "minimum.tensor_scalar"))) {
+      failed(registerScalarBinary<MinimumOp, ascendc::MinsL2Op>(registry, "minimum.tensor_scalar")) ||
+      failed(registerBinary<AddOp, ascendc::AddsL2Op, ScalarOperand::Any>(
+          registry, "add.tensor_scalar.reg_base", ApiFamily::RegBased, kUI8 | kBF16 | kI64 | kI8 | kUI64)) ||
+      failed(registerBinary<MulOp, ascendc::MulsL2Op, ScalarOperand::Any>(registry, "mul.tensor_scalar.reg_base",
+                                                                          ApiFamily::RegBased, kBF16 | kI64 | kUI64)) ||
+      failed(registerBinary<MaximumOp, ascendc::MaxsL2Op, ScalarOperand::Any>(
+          registry, "maximum.tensor_scalar.reg_base", ApiFamily::RegBased, kUI8 | kBF16 | kI64 | kI8 | kUI64)) ||
+      failed(registerBinary<MinimumOp, ascendc::MinsL2Op, ScalarOperand::Any>(
+          registry, "minimum.tensor_scalar.reg_base", ApiFamily::RegBased, kUI8 | kBF16 | kI64 | kI8 | kUI64))) {
     return failure();
   }
   return success();
@@ -1283,8 +1319,9 @@ LogicalResult registerBitwiseAndDivisionImplementations(ImplementationRegistry &
   //
   // 没有标量形态——legacy 两侧的 `IsNodeValid` 都明写拒绝标量输入。reg 侧比 mem 多收
   // i64（`REG_ASC_IR` 的 v2 表里有 `DT_INT64`），mem 侧没有，所以只有 reg 那行带上。
-  if (failed(registerBinary<BitwiseAndOp, ascendc::BitwiseAndL2Op>(registry, "bitwise_and.tensor", ApiFamily::RegBased,
-                                                                   kUI8 | kI16 | kUI16 | kI32 | kI64)) ||
+  if (failed(registerBinary<BitwiseAndOp, ascendc::BitwiseAndL2Op>(
+          registry, "bitwise_and.tensor", ApiFamily::RegBased,
+          kUI8 | kI16 | kUI16 | kI32 | kI64 | kI8 | kUI32 | kUI64)) ||
       failed(registerBinary<BitwiseAndOp, ascendc::BitwiseAndExtendOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "bitwise_and.tensor.extend", ApiFamily::MemBased, kUI8 | kI16 | kUI16 | kI32))) {
     return failure();
@@ -1298,9 +1335,11 @@ LogicalResult registerBitwiseAndDivisionImplementations(ImplementationRegistry &
   // 四位的转发是等价的，但生成的调用字面必须与 legacy 一致。不带 tmp，没有标量形态
   // （`IsNodeValid` 拒标量）。
   if (failed(registerBinary<BitwiseOrOp, ascendc::BitwiseOrExtendRegBaseOp>(
-          registry, "bitwise_or.tensor", ApiFamily::RegBased, kUI8 | kI16 | kUI16 | kI32 | kI64)) ||
+          registry, "bitwise_or.tensor", ApiFamily::RegBased,
+          kUI8 | kI16 | kUI16 | kI32 | kI64 | kI8 | kUI32 | kUI64)) ||
       failed(registerBinary<BitwiseXorOp, ascendc::BitwiseXorExtendRegBaseOp>(
-          registry, "bitwise_xor.tensor", ApiFamily::RegBased, kUI8 | kI16 | kUI16 | kI32 | kI64))) {
+          registry, "bitwise_xor.tensor", ApiFamily::RegBased,
+          kUI8 | kI16 | kUI16 | kI32 | kI64 | kI8 | kUI32 | kUI64))) {
     return failure();
   }
 
@@ -1311,10 +1350,17 @@ LogicalResult registerBitwiseAndDivisionImplementations(ImplementationRegistry &
   //   - mem 侧的 legacy 注册只给了 f16 / f32，reg 侧连整数一起收。
   //
   // i64 SIMT 包装对 INT64_MIN / -1 缺少溢出处理，暂不在 AFIR 接入。
+  // ui32 / ui64 走 `FloorDivUintImplVF` 的无符号除法分支，没有 INT_MIN / -1 这一格，
+  // 第二波扩表后接入。i8 与 ui8 同样不接：`FloorDivExtend` 的分派里既没有 int8_t 分支、
+  // 也没有 uint8_t 分支（int16 / int32 一支、uint16 / 32 / 64 一支、half / float 一支），
+  // 实例化后静默空算，比 i64 的溢出更隐蔽。ui8 是存量问题（此前注册集合一直含它），
+  // 本波第一次把这张分派表读进注释，顺带把它钉住；i8 / i64 / ui8 三位都由
+  // `kKnownNarrower` 钉住。
   if (failed(registerBinary<FloorDivOp, ascendc::FloorDivExtendOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "floor_div.tensor.extend", ApiFamily::MemBased, kF16 | kF32)) ||
       failed(registerBinary<FloorDivOp, ascendc::FloorDivExtendRegBaseOp>(
-          registry, "floor_div.tensor.extend_reg_base", ApiFamily::RegBased, kArithmeticRegElementTypes))) {
+          registry, "floor_div.tensor.extend_reg_base", ApiFamily::RegBased,
+          kArithmeticElementTypes | kUI16 | kUI32 | kUI64))) {
     return failure();
   }
 
@@ -1345,13 +1391,13 @@ LogicalResult registerSubDivImplementations(ImplementationRegistry &registry) {
   // 不要 tmp，所以是 `None`。两侧的 id 沿用 `_reg_base` 后缀那套命名。
   //
   // 元素类型：`sub` 的 mem 侧 `REG_ASC_IR` 就是算术那四个；reg 侧多收 ui8 / ui16 / bf16
-  // / i64。i8 / ui32 / ui64 在 AFIR 这一层还没有位。
+  // / i64。i8 / ui32 / ui64 在第二波扩表后都已在位并随本行接入。
   // `div` 两侧都只有 f16 / f32。
   if (failed(registerBinary<SubOp, ascendc::SubL2Op, ScalarOperand::None, TmpBufferUse::Unused>(
           registry, "sub.tensor_tensor", ApiFamily::MemBased)) ||
-      failed(registerBinary<SubOp, ascendc::SubExtendRegBaseOp>(registry, "sub.tensor_tensor.extend_reg_base",
-                                                                ApiFamily::RegBased,
-                                                                kArithmeticRegElementTypes | kBF16 | kI64)) ||
+      failed(registerBinary<SubOp, ascendc::SubExtendRegBaseOp>(
+          registry, "sub.tensor_tensor.extend_reg_base", ApiFamily::RegBased,
+          kArithmeticRegElementTypes | kBF16 | kI64 | kI8 | kUI32 | kUI64)) ||
       failed(registerBinary<DivOp, ascendc::DivL2Op, ScalarOperand::None, TmpBufferUse::Unused>(
           registry, "div.tensor_tensor", ApiFamily::MemBased, kF16 | kF32)) ||
       failed(registerBinary<DivOp, ascendc::DivExtendRegBaseOp>(registry, "div.tensor_tensor.extend_reg_base",
@@ -1413,8 +1459,9 @@ LogicalResult registerLogicalBinaryImplementations(ImplementationRegistry &regis
       // 只有 reg 侧：legacy 的 mem 侧（`ascir_builtin_ops_v1.cpp`）不注册 `LogicalXor`,
       // 所以没有 `.tensor_tensor` 那一半，也没有标量那一半。
       //
-      // dtype 用 `kLogicalElementTypes` 而不是 reg 那个更宽的集合：legacy 的
-      // `REG_ASC_IR(LogicalXor)` 域里没有 ui16。
+      // dtype 与上面两个同一份 reg 集合：v2 的 `REG_ASC_IR(LogicalXor)` 逐字声明了
+      // ui16 / bf16 / i64（以及第二波接入的 i8 / ui32 / ui64），域与 And / Or 相同。
+      // 早先「Xor 域里没有 ui16」的说法与 legacy 注册表不符，已按 v2 表更正。
       failed(registerBinary<LogicalXorOp, ascendc::LogicalXorExtendRegBaseOp>(
           registry, "logical_xor.tensor_tensor.extend_reg_base", ApiFamily::RegBased, kLogicalRegElementTypes,
           ResultElementRule::Uint8))) {
@@ -1428,10 +1475,12 @@ LogicalResult registerRegOnlyBinaryImplementations(ImplementationRegistry &regis
   //
   // `fmod` / `mod` **指向同一个 AscendC op**：legacy 两个调度节点的 `GetApiName` 都是
   // `FmodExtend`、头都是 `fmod_reg_base.h`，与 `gelu`（两张支持表同一个调用）同一种情况。
+  // `mod` 的 i8 不涉除法溢出：`FmodSimtCompute` 走 float 中介的 `fmodf`，i8 值域在 float
+  // 里精确可表，INT8_MIN % -1 结果为 0。
   if (failed(registerBinary<FmodOp, ascendc::FmodExtendRegBaseOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "fmod.tensor.extend_reg_base", ApiFamily::RegBased, kF16 | kF32 | kBF16)) ||
       failed(registerBinary<ModOp, ascendc::FmodExtendRegBaseOp, ScalarOperand::None, TmpBufferUse::Passed>(
-          registry, "mod.tensor.extend_reg_base", ApiFamily::RegBased, kF16 | kF32 | kBF16 | kI16 | kUI8)) ||
+          registry, "mod.tensor.extend_reg_base", ApiFamily::RegBased, kF16 | kF32 | kBF16 | kI16 | kUI8 | kI8)) ||
       // `next_after` 只收 f32：`REG_ASC_IR(NextAfter)` 的域只有 `DT_FLOAT`。
       failed(registerBinary<NextAfterOp, ascendc::NextAfterExtendRegBaseOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "next_after.tensor.extend_reg_base", ApiFamily::RegBased, kF32))) {
@@ -1565,7 +1614,7 @@ LogicalResult registerTrueDivPowAxpyImplementations(ImplementationRegistry &regi
           registry, "pow.tensor_tensor", ApiFamily::MemBased, kF16 | kF32 | kI32)) ||
       failed(registerBinary<PowOp, ascendc::PowRegBaseOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "pow.tensor_tensor.extend_reg_base", ApiFamily::RegBased,
-          kArithmeticElementTypes | kUI8 | kUI16 | kBF16))) {
+          kArithmeticElementTypes | kUI8 | kUI16 | kBF16 | kI8 | kUI32))) {
     return failure();
   }
 
@@ -1580,7 +1629,7 @@ LogicalResult registerTrueDivPowAxpyImplementations(ImplementationRegistry &regi
           registry, "pow.tensor_scalar", ApiFamily::MemBased, kF16 | kF32 | kI32)) ||
       failed(registerScalarBinaryInPlace<PowOp, ascendc::PowRegBaseOp, TmpBufferUse::Passed>(
           registry, "pow.tensor_scalar.extend_reg_base", ApiFamily::RegBased,
-          kArithmeticElementTypes | kUI8 | kUI16 | kBF16))) {
+          kArithmeticElementTypes | kUI8 | kUI16 | kBF16 | kI8 | kUI32))) {
     return failure();
   }
 

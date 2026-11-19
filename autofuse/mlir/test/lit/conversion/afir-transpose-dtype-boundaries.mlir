@@ -7,11 +7,12 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // Reuse the valid reg-base graph so these failures isolate the dtype boundary.
-// i64 is declared by legacy but its 8-byte base case is outside this MLIR implementation.
+// i64 is declared by legacy; its 8-byte base case is outside this MLIR implementation.
+// Second-wave convention: ODS accepts it (legacy supplies it), so the graph dies at
+// implementation selection — the intended clean fallback — instead of the op verifier.
 // Bool is likewise not a migrated numeric path; do not count the legacy skipped test as coverage.
 // RUN: sed 's/bf16/i64/g' %S/afir-transpose-reg-base-bf16.mlir | not af-opt --afir-select-implementation --target=Ascend950DT_950x 2>&1 | FileCheck %s --check-prefix=I64
 // RUN: sed 's/bf16/i1/g' %S/afir-transpose-reg-base-bf16.mlir | not af-opt --afir-select-implementation --target=Ascend950DT_950x 2>&1 | FileCheck %s --check-prefix=BOOL
-// I64: error: 'afir.transpose' op operand #0 must be
-// I64-SAME: but got 'memref<?x?x?x16x8xi64>'
+// I64: error: 'afir.transpose' op has no supported Ascend implementation
 // BOOL: error: 'afir.transpose' op operand #0 must be
 // BOOL-SAME: but got 'memref<?x?x?x16x8xi1>'

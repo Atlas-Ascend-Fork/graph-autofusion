@@ -73,3 +73,35 @@ must follow the linked record; creating this page does not establish new passes.
 - The summary does not claim full translation or fresh implementation validation.
 - Source implementation requirements, limitations and evidence remain unchanged.
 - The companion is included with its source in the PR bilingual file check.
+
+
+## 2026-11-19 Addendum: remaining gaps after the second dtype wave (i8 / ui32 / ui64)
+
+Upstream: the second dtype wave PR (i8 / ui32 / ui64 promoted into `AFIR_ELEMENT_TYPE_TABLE`,
+bits 8/9/10). This section lists only the combinations still NOT wired into MLIR and why;
+the accepted parts are in that PR's description. Criteria follow `ElementTypeMatrixTest`:
+"deferred" = ODS accepts, legacy supplies, registration does not, selection falls back cleanly.
+
+### Capability gaps (CANN call / wrapper does not support; needs a mechanism)
+
+| Combination | Reason | Path to closure |
+|---|---|---|
+| Mul i8/ui8 (tensor), i8/ui8/ui32 (scalar) | contiguous `Mul` / `Muls` lack the SupportType entries (`kernel_operator_vec_binary_*.h`) | add a `MulExtendRegBaseOp` wrapper (Sub precedent) or wait for CANN type widening |
+| Adds / Maxs / Mins ui16/ui32 (scalar) | the three static_assert tables in the same header | same, or route scalar forms through micro/SIMT (verify what legacy emits) |
+| Fma i8/i16/ui8/bf16 | `AscendC::Fma` accepts half/float only; legacy casts via `GetConversionDtype` first | build an input-cast mechanism for elementwise |
+| FloorDiv i8/ui8/i64 | wrapper dispatch has no int8/uint8 branch; i64 SIMT lacks INT64_MIN/-1 handling | extend the wrapper / overflow handling (needs review) |
+| Broadcast duplicate tier i8 (both sides), mem ui64/i64 | duplicate.h 1-byte overload not wired; mem four-arg tail form not built | `DuplicateI8Op` (DuplicateU8Op precedent); new tmp-tail dialect form |
+| Transpose mem i32/ui32, reg i64 | v1 layout vs formula mismatch (legacy broken in production too); Gather lacks 8-byte | layout/formula alignment (standalone bug fix) |
+
+### Split-row gaps (Any/Shared single row can only take the two-column intersection; pre-existing)
+
+exp / ln / sqrt reg bf16; relu reg ui8/i64; ub2ub reg i64; axpy reg bf16/i64/ui64 (axpy is
+additionally blocked by the family rule: reg rows require a `_reg_base` header, `axpy.h` is
+neutral). Uniform closure path: split into mem/reg rows; axpy needs `headersMatchFamily` widened.
+
+### Mechanism-level
+
+- reduce (Max/Min/Sum) reg-side types incl. i8: MLIR reduce is mem-contract only; taking the
+  reg side means a whole new reg reduce implementation (dialect op + ApiCall + pattern), a
+  standalone task on par with Ub2ub/Concat.
+- compare mem scalar i64: compare.h i64 scalar overloads support EQ/NE only and need extra scratch.

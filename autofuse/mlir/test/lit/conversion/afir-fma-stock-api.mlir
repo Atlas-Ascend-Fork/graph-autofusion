@@ -7,6 +7,10 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=IR
+// RUN: sed 's/xf32/xi8/g' %s > %t.i8.mlir
+// RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %t.i8.mlir 2>&1 | FileCheck %s --check-prefix=NO-I8
+// NO-I8: 'afir.fma' op has no supported Ascend implementation
+
 // RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %s | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=CPP
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET

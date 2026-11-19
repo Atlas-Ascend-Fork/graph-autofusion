@@ -76,7 +76,10 @@ using elementwise::kF32;
 using elementwise::kI16;
 using elementwise::kI32;
 using elementwise::kI64;
+using elementwise::kI8;
 using elementwise::kUI16;
+using elementwise::kUI32;
+using elementwise::kUI64;
 using elementwise::kUI8;
 
 // 这条路本来只有一个全局判据，收 {f16, f32, i32}。改成每个 implementation 各说各的之后，
@@ -91,14 +94,16 @@ using elementwise::kUI8;
 // 这 16 处照了出来。缺省实参因此去掉：集合是每个 op 自己的事实，不该有缺省。
 constexpr uint32_t kFloatAndI32ElementTypes = kF16 | kF32 | kI32;
 constexpr uint32_t kFloatElementTypes = kF16 | kF32;
-// `abs` 的 reg 侧：legacy 比 mem 侧多收 i16 / ui8 / i64。
-constexpr uint32_t kAbsRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kBF16 | kI64;
+// `abs` 的 reg 侧：legacy 比 mem 侧多收 i16 / ui8 / i64 / i8（第二波扩表接入）。
+constexpr uint32_t kAbsRegElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kBF16 | kI64 | kI8;
+// `bitwise_not` 只有 reg 侧一行注册,集合具名以便注册行不超宽(kI8/ui32/ui64 为第二波扩表接入)。
+constexpr uint32_t kBitwiseNotRegElementTypes = kUI8 | kI16 | kUI16 | kI32 | kI64 | kI8 | kUI32 | kUI64;
 // `neg`：legacy 两侧都收 i16，原先注册处漏了。
 constexpr uint32_t kNegElementTypes = kF16 | kF32 | kI16 | kI32;
 // `ub2ub`：legacy 两侧共九种（reg 侧多一个 i64），这里是其中 AFIR 的 `ElementTypes`
 // 有位的那六种。`i8` / `ui32` / `ui64` / `i64` 没有位（`elementTypeBit` 答 0），够不着
 // 也就谈不上收；两侧都没有 bf16，所以这里也不能有。
-constexpr uint32_t kUb2ubElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16;
+constexpr uint32_t kUb2ubElementTypes = kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kI8 | kUI32 | kUI64;
 
 // 结果元素类型与输入的关系。绝大多数是 `Same`；`Uint8Predicate` 是输入浮点、结果一个
 // 字节真值的那一类（isnan / isfinite / isinf）；`CastPair` 只有 `afir.cast`——它的输入
@@ -765,7 +770,7 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
                                                         ResultElementRule::Same, kNegElementTypes)) ||
       failed(registerUnary<NegOp, ascendc::NegExtendRegBaseOp>(registry, "neg.tensor.extend_reg_base",
                                                                ApiFamily::RegBased, ResultElementRule::Same,
-                                                               kNegElementTypes | kBF16 | kI64))) {
+                                                               kNegElementTypes | kBF16 | kI64 | kI8))) {
     return failure();
   }
 
@@ -1095,15 +1100,15 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   //
   // 两侧的名字也不是同一个：mem 侧是裸名 `LogicalNot`（不带 `Extend` 后缀，也不是
   // `AscendC::LogicalNot`——包装是全局函数），reg 侧才叫 `LogicalNotExtend`。
-  // 收的元素类型 mem 侧 {f16, f32, ui8, i16, i32}，reg 侧多 ui16 / bf16 / i64（它还收
-  // i8 / ui32 / ui64 / bool，AFIR 建模不出来）。那块常量是 `half`。
+  // 收的元素类型 mem 侧 {f16, f32, ui8, i16, i32}，reg 侧多 ui16 / bf16 / i64，以及第二波
+  // 扩表接入的 i8 / ui32 / ui64（只剩 bool 仍建模不出来）。那块常量是 `half`。
   if (failed(registerUnary<afir::LogicalNotOp, ascendc::LogicalNotExtendOp, /*TakesTmpBuffer=*/true,
                            /*MaterializesReuseSource=*/false, ConstBlockOnes::F16>(
           registry, "logical_not.tensor.extend", ApiFamily::MemBased, ResultElementRule::Same,
           kF16 | kF32 | kUI8 | kI16 | kI32)) ||
       failed(registerUnary<afir::LogicalNotOp, ascendc::LogicalNotExtendRegBaseOp>(
           registry, "logical_not.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Uint8,
-          kF16 | kF32 | kUI8 | kUI16 | kI16 | kI32 | kBF16 | kI64))) {
+          kF16 | kF32 | kUI8 | kUI16 | kI16 | kI32 | kBF16 | kI64 | kI8 | kUI32 | kUI64))) {
     return failure();
   }
 
@@ -1117,7 +1122,7 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   // `BitwiseNotExtend(dst, src, count)`（`api_regbase/bitwise_not.h`），不带 tmp。
   // legacy 另有一条走 `MicroAPI::Not` 的 VF 融合路，本 Op 不建模那一条。
   return registerUnary<afir::BitwiseNotOp, ascendc::BitwiseNotExtendRegBaseOp>(
-      registry, "bitwise_not.tensor", ApiFamily::RegBased, ResultElementRule::Same, kUI8 | kI16 | kUI16 | kI32 | kI64);
+      registry, "bitwise_not.tensor", ApiFamily::RegBased, ResultElementRule::Same, kBitwiseNotRegElementTypes);
 }
 
 }  // namespace mlir::ascend::kernel
