@@ -10,6 +10,7 @@
 #include "ascendc_ir.h"
 #include "graph/symbolizer/symbolic_utils.h"
 #include "reduce_reuse_utils.h"
+#include "arg_reduce_utils.h"
 
 namespace af {
 namespace ascir {
@@ -113,13 +114,13 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcReduceTmpSizeV2(const AscNode &node
     if (isAr) {
       a_in_ub_exp = GetAlignSize(a_in_ub_exp);
     }
-    const bool is_argmax =
-        node.GetType() == "Argmax" || node.GetType() == "ArgmaxWithValue" || node.GetType() == "ArgMaxMultiRPhase1";
-    Expression ub_size =
-        GetByteSize(a_in_ub_exp, is_argmax && node_inputs[0].attr.dtype == ge::DT_INT64 ? ge::DT_INT64 : ge::DT_FLOAT);
+    const bool is_arg_reduce =
+        ascgen_utils::IsArgReduceFrontend(node.GetType()) || ascgen_utils::IsArgReducePhase1(node.GetType());
+    Expression ub_size = GetByteSize(
+        a_in_ub_exp, is_arg_reduce && node_inputs[0].attr.dtype == ge::DT_INT64 ? ge::DT_INT64 : ge::DT_FLOAT);
     Expression index_ub_size = GetByteSize(a_in_ub_exp, ge::DT_INT32);
-    if (node.GetType() == "Argmax") {
-      // Argmax multi_reduce（R 轴分块累加）需要 4 个 loop 级 tmp（index 统一 int32）：
+    if (ascgen_utils::IsArgReduceIndexFrontend(node.GetType())) {
+      // ArgReduce multi_reduce（R 轴分块累加）需要 4 个 loop 级 tmp（index 统一 int32）：
       //   life_time=0: 当前 tile 的 index
       //   life_time=1: 当前 tile 的 value
       //   life_time=2: 历史最大 value
@@ -132,16 +133,16 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcReduceTmpSizeV2(const AscNode &node
       tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc4));
       TmpBufDesc desc5 = {index_ub_size, 3};
       tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc5));
-    } else if (node.GetType() == "ArgmaxWithValue") {
-      // ArgmaxWithValue 在 R 轴被切成多个 tile 时，需要 loop 级 tmp 暂存当前 tile 的 index/value，
-      // 再与 int32 index 累加器做 ArgmaxMergeRound。
+    } else if (ascgen_utils::IsArgReduceWithValueFrontend(node.GetType())) {
+      // ArgReduceWithValue 在 R 轴被切成多个 tile 时，需要 loop 级 tmp 暂存当前 tile 的 index/value，
+      // 再与 int32 index 累加器做 ArgReduceMergeRound。
       TmpBufDesc desc2 = {index_ub_size, 0};
       tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc2));
       TmpBufDesc desc3 = {ub_size, 1};
       tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc3));
       TmpBufDesc desc4 = {index_ub_size, 2};
       tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc4));
-    } else if (node.GetType() == "ArgMaxMultiRPhase1") {
+    } else if (ascgen_utils::IsArgReducePhase1(node.GetType())) {
       // Phase1：当前 tile 的 int32 index 与 value（累加器直接写 int32 输出）。
       TmpBufDesc desc2 = {index_ub_size, 0};
       tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc2));

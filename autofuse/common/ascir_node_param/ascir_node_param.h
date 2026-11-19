@@ -102,6 +102,22 @@ struct ReduceNodeParams {
   ReduceParamExprs exprs;
 };
 
+struct ArgmaxNodeParams {
+  bool valid{false};
+  bool is_ar{false};
+  bool is_phase2{false};
+  bool with_value{false};
+  bool has_tile_merge{false};
+  bool has_index_cast{false};
+  bool has_accumulate{false};
+  std::vector<ge::Expression> src_shape;
+  ge::Expression valid_extent;
+  ge::Expression valid_a{ge::Symbol(0U)};
+};
+
+// Both directions have the same shape/loop contract. Keep the original type for source/ABI compatibility.
+using ArgReduceNodeParams = ArgmaxNodeParams;
+
 struct VectorFuncNodeParams {
   bool is_double_loop{false};
   std::vector<ge::Expression> all_strides;
@@ -163,9 +179,9 @@ struct TransposeNodeParams {
   std::vector<ge::Expression> output_strides;
 };
 
-using AnySpecificParams =
-    std::variant<std::monostate, ReduceNodeParams, VectorFuncNodeParams, CastNodeParams, BroadcastNodeParams,
-                 CompareNodeParams, WhereNodeParams, UnaryBitWidthChangeNodeParams, TransposeNodeParams>;
+using AnySpecificParams = std::variant<std::monostate, ReduceNodeParams, VectorFuncNodeParams, CastNodeParams,
+                                       BroadcastNodeParams, CompareNodeParams, WhereNodeParams,
+                                       UnaryBitWidthChangeNodeParams, TransposeNodeParams, ArgmaxNodeParams>;
 
 struct AscirNodeParams {
   // 扩展属性载荷版本，用于后续兼容。

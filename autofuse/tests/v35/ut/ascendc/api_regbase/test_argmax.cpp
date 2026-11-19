@@ -9,12 +9,15 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <type_traits>
 #include <vector>
 #include "gtest/gtest.h"
+#include "gtest/gtest-spi.h"
 #include "tikicpulib.h"
 #include "test_api_utils.h"
 #include "api_regbase/argmax.h"
@@ -33,14 +36,15 @@ constexpr uint32_t AlignBlock(uint32_t bytes) {
 template <typename T, bool isRa>
 void FillInput(T *src, uint32_t columns, bool special = false, uint32_t rows = kRows) {
   for (uint32_t row = 0; row < rows; ++row) {
+    const uint32_t scenario = row % kRows;
     for (uint32_t column = 0; column < columns; ++column) {
       T value = static_cast<T>(column);
-      if (row == 1) {
+      if (scenario == 1) {
         value = static_cast<T>(-3);
-      } else if (row == 2) {
+      } else if (scenario == 2) {
         const uint32_t second = columns > 1 ? columns - 2 : 0;
         value = column == std::min(5U, columns - 1) || column == second ? static_cast<T>(99) : static_cast<T>(-100);
-      } else if (row == 3) {
+      } else if (scenario == 3) {
         value = static_cast<T>(-static_cast<int64_t>(column));
         const uint32_t first = std::min(5U, columns - 1);
         const uint32_t second = std::max(first, columns > 1 ? columns - 2 : 0);
@@ -55,24 +59,24 @@ void FillInput(T *src, uint32_t columns, bool special = false, uint32_t rows = k
           }
         }
       } else if constexpr (std::is_same_v<T, float>) {
-        if (row == 4) {
+        if (scenario == 4) {
           value = column % 2 == 0 ? -0.0F : 0.0F;
-        } else if (row == 5) {
+        } else if (scenario == 5) {
           value = column == 0 ? 0.0F : -0.0F;
         }
       }
       if constexpr (std::is_same_v<T, float>) {
         if (special) {
-          if (row == 0) {
+          if (scenario == 0) {
             value = std::numeric_limits<float>::quiet_NaN();
-          } else if (row == 1) {
+          } else if (scenario == 1) {
             value = column == 1 || column == columns - 1 ? std::numeric_limits<float>::quiet_NaN()
                                                          : std::numeric_limits<float>::infinity();
-          } else if (row == 2) {
+          } else if (scenario == 2) {
             value = -std::numeric_limits<float>::infinity();
-          } else if (row == 3) {
+          } else if (scenario == 3) {
             value = column == columns - 1 ? std::numeric_limits<float>::infinity() : 1.0F;
-          } else if (row == 4) {
+          } else if (scenario == 4) {
             value = column == columns - 1 ? std::numeric_limits<float>::quiet_NaN() : 1.0F;
           }
         }
@@ -91,46 +95,49 @@ bool IsLarger(T current, T best) {
 }
 
 template <typename T, bool isRa>
-void RunArgmax(uint32_t columns, bool special = false) {
-  T *src = static_cast<T *>(GmAlloc(sizeof(T) * kRows * columns));
-  int32_t *index = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * (kRows + 2)));
-  std::fill_n(index, kRows + 2, static_cast<int32_t>(-1));
-  FillInput<T, isRa>(src, columns, special);
+void RunArgmax(uint32_t columns, bool special = false, uint32_t validR = 0, uint32_t rows = kRows) {
+  const uint32_t validColumns = validR == 0 ? columns : validR;
+  SCOPED_TRACE(::testing::Message() << "A=" << rows << " R=" << columns << " validR=" << validR
+                                    << " special=" << special);
+  T *src = static_cast<T *>(GmAlloc(sizeof(T) * rows * columns));
+  int32_t *index = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * (rows + 2)));
+  std::fill_n(index, rows + 2, static_cast<int32_t>(-1));
+  FillInput<T, isRa>(src, columns, special, rows);
 
   auto kernel = [=] {
     TPipe pipe;
     TBuf<TPosition::VECCALC> srcBuf, indexBuf;
-    pipe.InitBuffer(srcBuf, AlignBlock(sizeof(T) * kRows * columns));
-    pipe.InitBuffer(indexBuf, AlignBlock(sizeof(int32_t) * (kRows + 2)));
+    pipe.InitBuffer(srcBuf, AlignBlock(sizeof(T) * rows * columns));
+    pipe.InitBuffer(indexBuf, AlignBlock(sizeof(int32_t) * (rows + 2)));
     LocalTensor<T> srcLocal = srcBuf.Get<T>();
     LocalTensor<int32_t> indexLocal = indexBuf.Get<int32_t>();
-    GmToUb(srcLocal, src, kRows * columns);
+    GmToUb(srcLocal, src, rows * columns);
     // Nonzero high bits expose partial int64 stores; guard both ends of dst.
-    GmToUb(indexLocal, index, kRows + 2);
-    uint32_t srcShape[] = {isRa ? columns : kRows, isRa ? kRows : columns};
+    GmToUb(indexLocal, index, rows + 2);
+    uint32_t srcShape[] = {isRa ? columns : rows, isRa ? rows : columns};
     if constexpr (isRa) {
-      ArgMaxExtend<T, Pattern::Reduce::RA>(indexLocal[1], srcLocal, srcShape, false);
+      ArgMaxExtend<T, Pattern::Reduce::RA>(indexLocal[1], srcLocal, srcShape, false, validR);
     } else {
-      ArgMaxExtend<T, Pattern::Reduce::AR>(indexLocal[1], srcLocal, srcShape, false);
+      ArgMaxExtend<T, Pattern::Reduce::AR>(indexLocal[1], srcLocal, srcShape, false, validR);
     }
-    UbToGm(index, indexLocal, kRows + 2);
+    UbToGm(index, indexLocal, rows + 2);
   };
 
   SetKernelMode(KernelMode::AIV_MODE);
   ICPU_RUN_KF(kernel, 1);
   EXPECT_EQ(index[0], static_cast<int32_t>(-1));
-  EXPECT_EQ(index[kRows + 1], static_cast<int32_t>(-1));
-  for (uint32_t row = 0; row < kRows; ++row) {
+  EXPECT_EQ(index[rows + 1], static_cast<int32_t>(-1));
+  for (uint32_t row = 0; row < rows; ++row) {
     T best = src[isRa ? row : row * columns];
     uint32_t bestIndex = 0;
-    for (uint32_t column = 1; column < columns; ++column) {
-      T current = src[isRa ? column * kRows + row : row * columns + column];
+    for (uint32_t column = 1; column < validColumns; ++column) {
+      T current = src[isRa ? column * rows + row : row * columns + column];
       if (IsLarger(current, best)) {
         best = current;
         bestIndex = column;
       }
     }
-    EXPECT_EQ(index[row + 1], static_cast<int32_t>(bestIndex));
+    EXPECT_EQ(index[row + 1], static_cast<int32_t>(bestIndex)) << "row=" << row;
   }
   GmFree(src);
   GmFree(index);
@@ -139,46 +146,8 @@ void RunArgmax(uint32_t columns, bool special = false) {
 // ArgMaxWithValueExtend（前端，1 入 2 出 value+index）：验证 value 为最大值、index 为首个最大位置。
 // int64 value 走 ArgMaxWithValueExtend（static_assert 已放开 int64），非 ArgMaxExtend。
 template <typename T, bool isRa>
-void RunArgmaxWithValue(uint32_t columns, bool special = false, uint32_t validR = 0, uint32_t rows = kRows,
-                        uint32_t indexBase = 0) {
-  const uint32_t validColumns = validR == 0 ? columns : validR;
-  T *src = static_cast<T *>(GmAlloc(sizeof(T) * rows * columns));
-  int32_t *index = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * (rows + 2)));
-  T *value = static_cast<T *>(GmAlloc(sizeof(T) * (rows + 2)));
-  std::fill_n(index, rows + 2, static_cast<int32_t>(-1));
-  std::fill_n(value, rows + 2, static_cast<T>(-1));
-  FillInput<T, isRa>(src, columns, special, rows);
-
-  auto kernel = [=] {
-    TPipe pipe;
-    TBuf<TPosition::VECCALC> srcBuf, indexBuf, valueBuf;
-    pipe.InitBuffer(srcBuf, AlignBlock(sizeof(T) * rows * columns));
-    pipe.InitBuffer(indexBuf, AlignBlock(sizeof(int32_t) * (rows + 2)));
-    pipe.InitBuffer(valueBuf, AlignBlock(sizeof(T) * (rows + 2)));
-    LocalTensor<T> srcLocal = srcBuf.Get<T>();
-    LocalTensor<int32_t> indexLocal = indexBuf.Get<int32_t>();
-    LocalTensor<T> valueLocal = valueBuf.Get<T>();
-    GmToUb(srcLocal, src, rows * columns);
-    GmToUb(indexLocal, index, rows + 2);
-    GmToUb(valueLocal, value, rows + 2);
-    uint32_t srcShape[] = {isRa ? columns : rows, isRa ? rows : columns};
-    if constexpr (isRa) {
-      ArgMaxWithValueExtend<T, Pattern::Reduce::RA>(indexLocal[1], valueLocal[1], srcLocal, LocalTensor<uint8_t>(),
-                                                    srcShape, false, indexBase, validR);
-    } else {
-      ArgMaxWithValueExtend<T, Pattern::Reduce::AR>(indexLocal[1], valueLocal[1], srcLocal, LocalTensor<uint8_t>(),
-                                                    srcShape, false, indexBase, validR);
-    }
-    UbToGm(index, indexLocal, rows + 2);
-    UbToGm(value, valueLocal, rows + 2);
-  };
-
-  SetKernelMode(KernelMode::AIV_MODE);
-  ICPU_RUN_KF(kernel, 1);
-  EXPECT_EQ(index[0], static_cast<int32_t>(-1));
-  EXPECT_EQ(index[rows + 1], static_cast<int32_t>(-1));
-  EXPECT_EQ(value[0], static_cast<T>(-1));
-  EXPECT_EQ(value[rows + 1], static_cast<T>(-1));
+void VerifyArgmaxWithValueRows(uint32_t rows, uint32_t columns, uint32_t validColumns, uint32_t indexBase, const T *src,
+                               const T *value, const int32_t *index) {
   for (uint32_t row = 0; row < rows; ++row) {
     T best = src[isRa ? row : row * columns];
     uint32_t bestIndex = 0;
@@ -202,8 +171,58 @@ void RunArgmaxWithValue(uint32_t columns, bool special = false, uint32_t validR 
     } else {
       EXPECT_EQ(value[row + 1], best);
     }
-    EXPECT_EQ(index[row + 1], static_cast<int32_t>(bestIndex + indexBase));
+    EXPECT_EQ(index[row + 1], static_cast<int32_t>(bestIndex + indexBase)) << "row=" << row;
   }
+}
+
+template <typename T, bool isRa>
+void RunArgmaxWithValue(uint32_t columns, bool special = false, uint32_t validR = 0, uint32_t rows = kRows,
+                        uint32_t indexBase = 0, bool minimum = false) {
+  const uint32_t validColumns = validR == 0 ? columns : validR;
+  SCOPED_TRACE(::testing::Message() << "A=" << rows << " R=" << columns << " validR=" << validR
+                                    << " indexBase=" << indexBase << " special=" << special);
+  T *src = static_cast<T *>(GmAlloc(sizeof(T) * rows * columns));
+  int32_t *index = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * (rows + 2)));
+  T *value = static_cast<T *>(GmAlloc(sizeof(T) * (rows + 2)));
+  std::fill_n(index, rows + 2, static_cast<int32_t>(-1));
+  std::fill_n(value, rows + 2, static_cast<T>(-1));
+  FillInput<T, isRa>(src, columns, special, rows);
+  if (minimum) {
+    const T lowest = std::is_same_v<T, float> ? -std::numeric_limits<T>::infinity() : std::numeric_limits<T>::lowest();
+    std::fill_n(src, rows * columns, lowest);
+  }
+
+  auto kernel = [=] {
+    TPipe pipe;
+    TBuf<TPosition::VECCALC> srcBuf, indexBuf, valueBuf;
+    pipe.InitBuffer(srcBuf, AlignBlock(sizeof(T) * rows * columns));
+    pipe.InitBuffer(indexBuf, AlignBlock(sizeof(int32_t) * (rows + 2)));
+    pipe.InitBuffer(valueBuf, AlignBlock(sizeof(T) * (rows + 2)));
+    LocalTensor<T> srcLocal = srcBuf.Get<T>();
+    LocalTensor<int32_t> indexLocal = indexBuf.Get<int32_t>();
+    LocalTensor<T> valueLocal = valueBuf.Get<T>();
+    GmToUb(srcLocal, src, rows * columns);
+    GmToUb(indexLocal, index, rows + 2);
+    GmToUb(valueLocal, value, rows + 2);
+    uint32_t srcShape[] = {isRa ? columns : rows, isRa ? rows : columns};
+    if constexpr (isRa) {
+      ArgMaxWithValueExtend<T, Pattern::Reduce::RA>(indexLocal[1], valueLocal[1], srcLocal, srcShape, false, indexBase,
+                                                    validR);
+    } else {
+      ArgMaxWithValueExtend<T, Pattern::Reduce::AR>(indexLocal[1], valueLocal[1], srcLocal, srcShape, false, indexBase,
+                                                    validR);
+    }
+    UbToGm(index, indexLocal, rows + 2);
+    UbToGm(value, valueLocal, rows + 2);
+  };
+
+  SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1);
+  EXPECT_EQ(index[0], static_cast<int32_t>(-1));
+  EXPECT_EQ(index[rows + 1], static_cast<int32_t>(-1));
+  EXPECT_EQ(value[0], static_cast<T>(-1));
+  EXPECT_EQ(value[rows + 1], static_cast<T>(-1));
+  VerifyArgmaxWithValueRows<T, isRa>(rows, columns, validColumns, indexBase, src, value, index);
   GmFree(src);
   GmFree(index);
   GmFree(value);
@@ -214,6 +233,171 @@ void RunWithValueTypeMatrix() {
   RunArgmaxWithValue<float, isRa>(67);
   RunArgmaxWithValue<int32_t, isRa>(67);
   RunArgmaxWithValue<int64_t, isRa>(67);
+}
+
+template <typename T>
+T MakeAccumulateSourceValue(uint32_t tile, uint32_t r, uint32_t a, uint32_t dimR,
+                            const std::array<uint32_t, 3U> &valid) {
+  T value = static_cast<T>(-100 + static_cast<int32_t>((r * 7U + a) % 31U));
+  if (r >= valid[tile]) {
+    return std::numeric_limits<T>::max();
+  }
+  if (a % 10U == 0U) {
+    value = tile == a % 3U && r == valid[tile] - 1U ? T(100) : value;
+  } else if (a % 10U == 1U) {
+    value = r == 0U || r == valid[tile] - 1U ? T(100) : value;
+  }
+  if constexpr (std::is_same_v<T, float>) {
+    if (r >= valid[tile] || (a % 10U == 2U && (r == 1U || r == valid[tile] - 1U)) ||
+        (a % 10U == 3U && tile > 0U && r == valid[tile] - 1U)) {
+      uint32_t bits = 0x7fc00001U + tile * dimR + r;
+      std::copy_n(reinterpret_cast<const char *>(&bits), sizeof(value), reinterpret_cast<char *>(&value));
+    } else if (a % 10U == 4U) {
+      value = tile == 0U ? -0.0F : 0.0F;
+    } else if (a % 10U == 5U) {
+      value = tile == 0U ? 0.0F : -0.0F;
+    } else if (a % 10U == 6U) {
+      value = -std::numeric_limits<float>::infinity();
+    } else if (a % 10U == 7U) {
+      value = std::numeric_limits<float>::infinity();
+    }
+  }
+  return value;
+}
+
+template <typename T, bool isRa>
+void FillAccumulateSource(uint32_t dimA, uint32_t dimR, const std::array<uint32_t, 3U> &valid, std::vector<T> &source) {
+  for (uint32_t tile = 0; tile < 3U; ++tile) {
+    for (uint32_t a = 0; a < dimA; ++a) {
+      for (uint32_t r = 0; r < dimR; ++r) {
+        source[tile * dimR * dimA + (isRa ? r * dimA + a : a * dimR + r)] =
+            MakeAccumulateSourceValue<T>(tile, r, a, dimR, valid);
+      }
+    }
+  }
+}
+
+template <typename T, bool isRa>
+void LaunchAccumulateKernel(uint32_t dimA, uint32_t dimR, uint32_t guard, uint32_t outputSize, bool reverseBases,
+                            const std::array<uint32_t, 3U> &valid, T *input, T *observedInput, T *values,
+                            int32_t *indices, T *temporaryValues, int32_t *temporaryIndices) {
+  auto kernel = [=] {
+    TPipe pipe;
+    TBuf<TPosition::VECCALC> srcBuf, valueBuf, indexBuf, tmpValueBuf, tmpIndexBuf;
+    pipe.InitBuffer(srcBuf, AlignBlock(sizeof(T) * dimR * dimA));
+    pipe.InitBuffer(valueBuf, AlignBlock(sizeof(T) * outputSize));
+    pipe.InitBuffer(indexBuf, AlignBlock(sizeof(int32_t) * outputSize));
+    pipe.InitBuffer(tmpValueBuf, AlignBlock(sizeof(T) * outputSize));
+    pipe.InitBuffer(tmpIndexBuf, AlignBlock(sizeof(int32_t) * outputSize));
+    auto src = srcBuf.Get<T>();
+    auto value = valueBuf.Get<T>();
+    auto index = indexBuf.Get<int32_t>();
+    auto tmpValue = tmpValueBuf.Get<T>();
+    auto tmpIndex = tmpIndexBuf.Get<int32_t>();
+    GmToUb(value, values, outputSize);
+    GmToUb(index, indices, outputSize);
+    GmToUb(tmpValue, values, outputSize);
+    GmToUb(tmpIndex, indices, outputSize);
+    const uint32_t shape[] = {isRa ? dimR : dimA, isRa ? dimA : dimR};
+    using PatternT = std::conditional_t<isRa, Pattern::Reduce::RA, Pattern::Reduce::AR>;
+    for (uint32_t tile = 0; tile < 3U; ++tile) {
+      GmToUb(src, input + tile * dimR * dimA, dimR * dimA);
+      const uint32_t base = 73U + (reverseBases ? 2U - tile : tile) * dimR;
+      ArgMaxWithValueAccumulateExtend<T, PatternT>(index[guard], value[guard], src, tmpIndex[guard], tmpValue[guard],
+                                                   shape, base, valid[tile], tile == 0U);
+      UbToGm(observedInput + tile * dimR * dimA, src, dimR * dimA);
+      UbToGm(values + tile * outputSize, value, outputSize);
+      UbToGm(indices + tile * outputSize, index, outputSize);
+    }
+    UbToGm(temporaryValues, tmpValue, outputSize);
+    UbToGm(temporaryIndices, tmpIndex, outputSize);
+  };
+  SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1);
+}
+
+template <typename T, bool isRa>
+void VerifyAccumulateRow(uint32_t round, uint32_t a, uint32_t dimA, uint32_t dimR, uint32_t guard, uint32_t outputSize,
+                         bool reverseBases, const std::array<uint32_t, 3U> &valid, const std::vector<T> &source,
+                         const T *values, const int32_t *indices) {
+  auto at = [&](uint32_t tile, uint32_t r, uint32_t col) -> const T & {
+    return source[tile * dimR * dimA + (isRa ? r * dimA + col : col * dimR + r)];
+  };
+  T best = at(0, 0, a);
+  uint32_t bestIndex = 73U + (reverseBases ? 2U : 0U) * dimR;
+  for (uint32_t tile = 0; tile <= round; ++tile) {
+    const uint32_t base = 73U + (reverseBases ? 2U - tile : tile) * dimR;
+    for (uint32_t r = 0; r < valid[tile]; ++r) {
+      const T candidate = at(tile, r, a);
+      bool equal = candidate == best;
+      if constexpr (std::is_same_v<T, float>) {
+        equal = equal || (std::isnan(candidate) && std::isnan(best));
+      }
+      if (IsLarger(candidate, best) || (equal && base + r < bestIndex)) {
+        best = candidate;
+        bestIndex = base + r;
+      }
+    }
+  }
+  const uint32_t offset = round * outputSize + guard + a;
+  EXPECT_EQ(indices[offset], static_cast<int32_t>(bestIndex)) << "round=" << round << " a=" << a;
+  EXPECT_EQ(std::memcmp(&values[offset], &best, sizeof(T)), 0) << "round=" << round << " a=" << a;
+}
+
+template <typename T, bool isRa>
+void VerifyAccumulateTiles(uint32_t dimA, uint32_t dimR, uint32_t guard, uint32_t outputSize, bool reverseBases,
+                           const std::array<uint32_t, 3U> &valid, const std::vector<T> &source, const T *values,
+                           const int32_t *indices, const T *temporaryValues, const int32_t *temporaryIndices) {
+  if (isRa && dimA % (GetVecLen() / sizeof(T)) == 0U) {
+    for (uint32_t i = 0; i < outputSize; ++i) {
+      EXPECT_EQ(temporaryValues[i], T(999));
+      EXPECT_EQ(temporaryIndices[i], -999);
+    }
+  }
+  for (uint32_t round = 0; round < 3U; ++round) {
+    for (uint32_t a = 0; a < dimA; ++a) {
+      VerifyAccumulateRow<T, isRa>(round, a, dimA, dimR, guard, outputSize, reverseBases, valid, source, values,
+                                   indices);
+    }
+    for (uint32_t i = 0; i < guard; ++i) {
+      for (uint32_t offset : {round * outputSize + i, round * outputSize + guard + dimA + i}) {
+        EXPECT_EQ(values[offset], T(999));
+        EXPECT_EQ(indices[offset], -999);
+      }
+    }
+  }
+}
+
+template <typename T, bool isRa>
+void RunAccumulateTiles(uint32_t dimA, uint32_t dimR, bool reverseBases = false) {
+  SCOPED_TRACE(::testing::Message() << "RA=" << isRa << " A=" << dimA << " R=" << dimR << " reverse=" << reverseBases);
+  constexpr uint32_t rounds = 3U;
+  const std::array<uint32_t, 3U> valid = {dimR, dimR > 1U ? dimR - 1U : 1U, std::min(3U, dimR)};
+  const uint32_t guard = GetVecLen() / sizeof(T);
+  const uint32_t outputSize = dimA + 2U * guard;
+  std::vector<T> source(rounds * dimR * dimA);
+  FillAccumulateSource<T, isRa>(dimA, dimR, valid, source);
+  T *input = static_cast<T *>(GmAlloc(sizeof(T) * source.size()));
+  std::copy(source.begin(), source.end(), input);
+  T *observedInput = static_cast<T *>(GmAlloc(sizeof(T) * source.size()));
+  T *values = static_cast<T *>(GmAlloc(sizeof(T) * outputSize * rounds));
+  int32_t *indices = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * outputSize * rounds));
+  T *temporaryValues = static_cast<T *>(GmAlloc(sizeof(T) * outputSize));
+  int32_t *temporaryIndices = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * outputSize));
+  std::fill_n(values, outputSize * rounds, T(999));
+  std::fill_n(indices, outputSize * rounds, -999);
+  LaunchAccumulateKernel<T, isRa>(dimA, dimR, guard, outputSize, reverseBases, valid, input, observedInput, values,
+                                  indices, temporaryValues, temporaryIndices);
+  EXPECT_EQ(std::memcmp(input, source.data(), sizeof(T) * source.size()), 0);
+  EXPECT_EQ(std::memcmp(observedInput, source.data(), sizeof(T) * source.size()), 0);
+  VerifyAccumulateTiles<T, isRa>(dimA, dimR, guard, outputSize, reverseBases, valid, source, values, indices,
+                                 temporaryValues, temporaryIndices);
+  GmFree(input);
+  GmFree(observedInput);
+  GmFree(values);
+  GmFree(indices);
+  GmFree(temporaryValues);
+  GmFree(temporaryIndices);
 }
 
 template <bool isRa>
@@ -754,6 +938,19 @@ TEST(TestApiArgmax, RAVectorRowsAndValidR) {
   }
 }
 
+TEST(TestApiArgmax, RAVectorKeepFirstWinner) {
+  // Full-R ARA tiles after layout conversion: ties, signed zeros and first/later NaNs.
+  // Include single-row R and a masked physical tail, plus nonzero global index bases.
+  for (uint32_t rows : {16U, 64U, 65U}) {
+    for (uint32_t columns : {1U, 2U, 32U}) {
+      RunArgmaxWithValue<float, true>(columns, true, 0, rows, 97);
+      RunArgmaxWithValue<int32_t, true>(columns, true, 0, rows, 97);
+      RunArgmaxWithValue<int64_t, true>(columns, true, 0, rows, 97);
+    }
+    RunArgmaxWithValue<float, true>(33, true, 32, rows, 97);
+  }
+}
+
 TEST(TestApiArgmax, WithValueARBoundaries) {
   RunWithValueBoundaries<false>();
 }
@@ -772,6 +969,68 @@ TEST(TestApiArgmax, ARBoundaries) {
 
 TEST(TestApiArgmax, RABoundaries) {
   RunBoundaries<true>();
+}
+
+TEST(TestApiArgmax, SinglePassRowBoundaryMatrix) {
+  // Exercise the shared AR scanner at both sides of the aligned-load boundary.
+  for (uint32_t columns : {1U, 31U, 32U, 33U, 63U, 64U, 65U, 127U, 128U, 129U, 2048U}) {
+    RunArgmaxWithValue<float, false>(columns, false, 0, 1);
+  }
+  for (uint32_t columns : {33U, 65U, 129U, 2048U}) {
+    RunArgmaxWithValue<int64_t, false>(columns, false, 0, 1);
+  }
+  // Physical R is aligned, but only three lanes are valid; poisoned tail lanes must not win.
+  RunArgmaxWithValue<float, false>(8U, true, 3U, 1);
+
+  // Narrow RA rows use the shared gather scanner, including exact VL and partial-VL cases.
+  for (uint32_t columns : {1U, 2U, 3U, 6U, 7U, 31U, 32U, 33U, 63U, 64U, 65U, 129U}) {
+    RunArgmaxWithValue<float, true>(columns, false, 0, 16);
+  }
+}
+
+TEST(TestApiArgmax, SinglePassMasksInactiveLanesNearIndexLimit) {
+  constexpr uint32_t base = static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) - 3U;
+  RunArgmaxWithValue<float, false>(8U, false, 3U, kRows, base, true);
+  RunArgmaxWithValue<int32_t, false>(8U, false, 3U, kRows, base, true);
+  RunArgmaxWithValue<int64_t, false>(8U, false, 3U, kRows, base, true);
+}
+
+TEST(TestApiArgmax, RAVectorIndexOnly) {
+  // Full A vectors select the RA branch; repeat scenarios in every vector block.
+  for (uint32_t rows : {64U, 128U}) {
+    for (uint32_t columns : {1U, 3U, 65U}) {
+      RunArgmax<float, true>(columns, false, 0, rows);
+      RunArgmax<int32_t, true>(columns, false, 0, rows);
+      RunArgmax<float, true>(columns, true, 0, rows);
+      // Physical padding includes a larger numeric value and a trailing NaN.
+      RunArgmax<float, true>(columns + 1, false, columns, rows);
+      RunArgmax<int32_t, true>(columns + 1, false, columns, rows);
+      RunArgmax<float, true>(columns + 1, true, columns, rows);
+    }
+  }
+}
+
+TEST(TestApiArgmax, RAVectorWithValue) {
+  for (uint32_t rows : {64U, 128U}) {
+    for (uint32_t columns : {1U, 3U, 65U}) {
+      RunArgmaxWithValue<float, true>(columns, false, 0, rows);
+      RunArgmaxWithValue<int32_t, true>(columns, false, 0, rows);
+      RunArgmaxWithValue<float, true>(columns, true, 0, rows);
+      RunArgmaxWithValue<float, true>(columns + 1, false, columns, rows, 97);
+      RunArgmaxWithValue<int32_t, true>(columns + 1, false, columns, rows, 97);
+      RunArgmaxWithValue<float, true>(columns + 1, true, columns, rows, 97);
+    }
+  }
+}
+
+TEST(TestApiArgmax, RAVectorWithValueInt64) {
+  // int64 values use 32 lanes; indices remain int32 with guarded output stores.
+  for (uint32_t rows : {32U, 64U}) {
+    for (uint32_t columns : {1U, 3U, 65U}) {
+      RunArgmaxWithValue<int64_t, true>(columns, false, 0, rows);
+      RunArgmaxWithValue<int64_t, true>(columns + 1, false, columns, rows, 97);
+    }
+  }
 }
 
 TEST(TestApiArgmax, WithValueARValidRBoundaries) {
@@ -864,48 +1123,6 @@ TEST(TestApiArgmax, Phase2DualPitch) {
   }
 }
 
-// ArgMaxMultiRPhase2Extend（单输出）沿核维度 N 按 value 选优、输出全局 index：
-// 覆盖 float/int32 值类型（含并列取最小 index）。
-TEST(TestApiArgmax, Phase2SingleOutput) {
-  constexpr uint32_t dimN = 2;
-  constexpr uint32_t dimA = 8;
-  float *valueSrc = static_cast<float *>(GmAlloc(sizeof(float) * dimN * dimA));
-  int32_t *indexSrc = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * dimN * dimA));
-  int32_t *indexDst = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * dimA));
-  std::fill_n(indexDst, dimA, static_cast<int32_t>(-1));
-  // 核0 value=1；核1 value=2（胜）；indexSrc 为各核全局 index
-  for (uint32_t a = 0; a < dimA; ++a) {
-    valueSrc[0 * dimA + a] = 1.0F;
-    valueSrc[1 * dimA + a] = 2.0F;
-    indexSrc[0 * dimA + a] = static_cast<int32_t>(a);
-    indexSrc[1 * dimA + a] = static_cast<int32_t>(dimA + a);
-  }
-  auto kernel = [=] {
-    TPipe pipe;
-    TBuf<TPosition::VECCALC> valueSrcBuf, indexSrcBuf, indexDstBuf;
-    pipe.InitBuffer(valueSrcBuf, AlignBlock(sizeof(float) * dimN * dimA));
-    pipe.InitBuffer(indexSrcBuf, AlignBlock(sizeof(int32_t) * dimN * dimA));
-    pipe.InitBuffer(indexDstBuf, AlignBlock(sizeof(int32_t) * dimA));
-    LocalTensor<float> valueSrcLocal = valueSrcBuf.Get<float>();
-    LocalTensor<int32_t> indexSrcLocal = indexSrcBuf.Get<int32_t>();
-    LocalTensor<int32_t> indexDstLocal = indexDstBuf.Get<int32_t>();
-    GmToUb(valueSrcLocal, valueSrc, dimN * dimA);
-    GmToUb(indexSrcLocal, indexSrc, dimN * dimA);
-    // 本用例 value/index 按同一行跨度 dimA 排布，故两个跨度都传 dimA
-    uint32_t srcShape[] = {dimN, dimA, dimA};
-    ArgMaxMultiRPhase2Extend<float>(indexDstLocal, valueSrcLocal, indexSrcLocal, srcShape);
-    UbToGm(indexDst, indexDstLocal, dimA);
-  };
-  SetKernelMode(KernelMode::AIV_MODE);
-  ICPU_RUN_KF(kernel, 1);
-  for (uint32_t a = 0; a < dimA; ++a) {
-    EXPECT_EQ(indexDst[a], static_cast<int32_t>(dimA + a)) << "a=" << a;
-  }
-  GmFree(valueSrc);
-  GmFree(indexSrc);
-  GmFree(indexDst);
-}
-
 // ArgmaxMergeRound 跨 tile 合并：覆盖值更新、index 平局，镜像 codegen 右值调用形态。
 // 无 VL slack，覆盖同宽/混宽的完整 VL、尾块及小 A，验证合并与确定性语义。
 TEST(TestApiArgmax, MergeRoundCrossTile) {
@@ -922,53 +1139,45 @@ TEST(TestApiArgmax, MergeRoundCrossTile) {
 // （__simd_vf__：A 进 lane、标量走 N，完整 VL 连续加载，尾块 masked Gather）。
 // 源 buffer 只按 32B 对齐分配，不能依赖额外 VL slack。
 
-// Phase2 向量化（单输出）：value float/int32 × index int32
+// Phase2 向量化（单输出）：value float/int32/int64 × index int32
 template <typename T>
-void RunPhase2VectorSingle(uint32_t dimN, uint32_t aSize) {
-  const uint32_t valueStep = 32U / sizeof(T);
-  const uint32_t indexStep = 32U / sizeof(int32_t);
-  const uint32_t dimAValue = (aSize + valueStep - 1U) / valueStep * valueStep;
-  const uint32_t dimAIndex = (aSize + indexStep - 1U) / indexStep * indexStep;
-  T *valueSrc = static_cast<T *>(GmAlloc(sizeof(T) * dimN * dimAValue));
-  int32_t *indexSrc = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * dimN * dimAIndex));
-  int32_t *indexDst = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * dimAIndex));
-  std::fill_n(indexDst, dimAIndex, static_cast<int32_t>(-1));
-
-  const T padValue = std::is_same_v<T, float> ? static_cast<T>(1.0e30F) : std::numeric_limits<T>::max();
-  for (uint32_t n = 0; n < dimN; ++n) {
-    for (uint32_t a = 0; a < dimAValue; ++a) {
-      valueSrc[n * dimAValue + a] = padValue;
-    }
-    for (uint32_t a = 0; a < dimAIndex; ++a) {
-      indexSrc[n * dimAIndex + a] = static_cast<int32_t>(-1000);
-    }
-  }
-  for (uint32_t a = 0; a < aSize; ++a) {
+void FillPhase2VectorSingleSource(uint32_t dimN, uint32_t aSize, uint32_t dimAValue, uint32_t dimAIndex, T *valueSrc,
+                                  int32_t *indexSrc) {
+  if (dimN != 0U) {
+    const T padValue = std::is_same_v<T, float> ? static_cast<T>(1.0e30F) : std::numeric_limits<T>::max();
     for (uint32_t n = 0; n < dimN; ++n) {
-      valueSrc[n * dimAValue + a] = static_cast<T>(n + 1);
-      indexSrc[n * dimAIndex + a] = static_cast<int32_t>(n * 1000 + a);
+      for (uint32_t a = 0; a < dimAValue; ++a) {
+        valueSrc[n * dimAValue + a] = padValue;
+      }
+      for (uint32_t a = 0; a < dimAIndex; ++a) {
+        indexSrc[n * dimAIndex + a] = static_cast<int32_t>(-1000);
+      }
     }
-    valueSrc[(a % dimN) * dimAValue + a] = static_cast<T>(dimN + 1);
+    for (uint32_t a = 0; a < aSize; ++a) {
+      for (uint32_t n = 0; n < dimN; ++n) {
+        valueSrc[n * dimAValue + a] = static_cast<T>(n + 1);
+        indexSrc[n * dimAIndex + a] = static_cast<int32_t>(n * 1000 + a);
+      }
+      valueSrc[(a % dimN) * dimAValue + a] = static_cast<T>(dimN + 1);
+      if (a % 3U == 0U && dimN > 1U) {
+        valueSrc[a] = valueSrc[(dimN - 1U) * dimAValue + a] = static_cast<T>(dimN + 1);
+        indexSrc[a] = static_cast<int32_t>(10000U + a);
+        indexSrc[(dimN - 1U) * dimAIndex + a] = static_cast<int32_t>(a);
+      }
+    }
+  } else {
+    FAIL() << "dimN must be positive.";
   }
+}
 
-  auto kernel = [=] {
-    TPipe pipe;
-    TBuf<TPosition::VECCALC> vSrcBuf, iSrcBuf, iDstBuf;
-    pipe.InitBuffer(vSrcBuf, AlignBlock(sizeof(T) * dimN * dimAValue));
-    pipe.InitBuffer(iSrcBuf, AlignBlock(sizeof(int32_t) * dimN * dimAIndex));
-    pipe.InitBuffer(iDstBuf, AlignBlock(sizeof(int32_t) * dimAIndex));
-    LocalTensor<T> vSrcLocal = vSrcBuf.Get<T>();
-    LocalTensor<int32_t> iSrcLocal = iSrcBuf.Get<int32_t>();
-    LocalTensor<int32_t> iDstLocal = iDstBuf.Get<int32_t>();
-    GmToUb(vSrcLocal, valueSrc, dimN * dimAValue);
-    GmToUb(iSrcLocal, indexSrc, dimN * dimAIndex);
-    uint32_t srcShape[] = {dimN, dimAValue, dimAIndex};
-    ArgMaxMultiRPhase2VectorExtend<T>(iDstLocal, vSrcLocal, iSrcLocal, srcShape, aSize);
-    UbToGm(indexDst, iDstLocal, dimAIndex);
-  };
+TEST(TestApiArgmax, Phase2VectorSourceRejectsZeroRowsBeforeAccess) {
+  EXPECT_FATAL_FAILURE(FillPhase2VectorSingleSource<float>(0U, 1U, 1U, 1U, nullptr, nullptr), "dimN");
+  EXPECT_FATAL_FAILURE(FillPhase2VectorSingleSource<int64_t>(0U, 1U, 1U, 1U, nullptr, nullptr), "dimN");
+}
 
-  SetKernelMode(KernelMode::AIV_MODE);
-  ICPU_RUN_KF(kernel, 1);
+template <typename T>
+void VerifyPhase2VectorSingle(uint32_t dimN, uint32_t aSize, uint32_t dimAValue, uint32_t dimAIndex, const T *valueSrc,
+                              const int32_t *indexSrc, const int32_t *indexDst) {
   for (uint32_t a = 0; a < aSize; ++a) {
     T best = valueSrc[a];
     int32_t bestIndex = indexSrc[a];
@@ -982,6 +1191,45 @@ void RunPhase2VectorSingle(uint32_t dimN, uint32_t aSize) {
     }
     EXPECT_EQ(indexDst[a], bestIndex) << "single vec A=" << aSize << " a=" << a;
   }
+  for (uint32_t a = aSize; a < dimAIndex; ++a) {
+    EXPECT_EQ(indexDst[a], -1) << "single vec padding A=" << aSize << " a=" << a;
+  }
+}
+
+template <typename T>
+void RunPhase2VectorSingle(uint32_t dimN, uint32_t aSize) {
+  ASSERT_GT(dimN, 0U);
+  const uint32_t valueStep = 32U / sizeof(T);
+  const uint32_t indexStep = 32U / sizeof(int32_t);
+  const uint32_t dimAValue = (aSize + valueStep - 1U) / valueStep * valueStep;
+  const uint32_t dimAIndex = (aSize + indexStep - 1U) / indexStep * indexStep;
+  T *valueSrc = static_cast<T *>(GmAlloc(sizeof(T) * dimN * dimAValue));
+  int32_t *indexSrc = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * dimN * dimAIndex));
+  int32_t *indexDst = static_cast<int32_t *>(GmAlloc(sizeof(int32_t) * dimAIndex));
+  std::fill_n(indexDst, dimAIndex, static_cast<int32_t>(-1));
+
+  FillPhase2VectorSingleSource<T>(dimN, aSize, dimAValue, dimAIndex, valueSrc, indexSrc);
+
+  auto kernel = [=] {
+    TPipe pipe;
+    TBuf<TPosition::VECCALC> vSrcBuf, iSrcBuf, iDstBuf;
+    pipe.InitBuffer(vSrcBuf, AlignBlock(sizeof(T) * dimN * dimAValue));
+    pipe.InitBuffer(iSrcBuf, AlignBlock(sizeof(int32_t) * dimN * dimAIndex));
+    pipe.InitBuffer(iDstBuf, AlignBlock(sizeof(int32_t) * dimAIndex));
+    LocalTensor<T> vSrcLocal = vSrcBuf.Get<T>();
+    LocalTensor<int32_t> iSrcLocal = iSrcBuf.Get<int32_t>();
+    LocalTensor<int32_t> iDstLocal = iDstBuf.Get<int32_t>();
+    GmToUb(vSrcLocal, valueSrc, dimN * dimAValue);
+    GmToUb(iSrcLocal, indexSrc, dimN * dimAIndex);
+    GmToUb(iDstLocal, indexDst, dimAIndex);
+    uint32_t srcShape[] = {dimN, dimAValue, dimAIndex};
+    ArgMaxMultiRPhase2VectorExtend<T>(iDstLocal, vSrcLocal, iSrcLocal, srcShape, aSize);
+    UbToGm(indexDst, iDstLocal, dimAIndex);
+  };
+
+  SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1);
+  VerifyPhase2VectorSingle<T>(dimN, aSize, dimAValue, dimAIndex, valueSrc, indexSrc, indexDst);
 
   GmFree(valueSrc);
   GmFree(indexSrc);
@@ -1069,11 +1317,13 @@ TEST(TestApiArgmax, Phase2VectorSingleOutput) {
   for (uint32_t aSize : {1U, 3U, 6U, 8U, 9U, 10U}) {
     RunPhase2VectorSingle<float>(dimN, aSize);
     RunPhase2VectorSingle<int32_t>(dimN, aSize);
+    RunPhase2VectorSingle<int64_t>(dimN, aSize);
   }
   // 混宽大 A：触发多 step 分块 + 尾块
   for (uint32_t aSize : {20U, 31U, 32U, 33U, 63U, 64U, 65U}) {
     RunPhase2VectorSingle<float>(dimN, aSize);
     RunPhase2VectorSingle<int32_t>(dimN, aSize);
+    RunPhase2VectorSingle<int64_t>(dimN, aSize);
   }
   // 多 vlSize 分块 + 尾块；65 已由上面的边界组合覆盖。
   RunPhase2VectorSingle<int32_t>(dimN, 136U);
@@ -1180,6 +1430,247 @@ TEST(TestApiArgmax, Phase2WithValueMixedWidthValidA) {
   for (uint32_t dimN : {2U, 3U}) {
     for (uint32_t dimA : {1U, 3U, 9U, 33U}) {
       RunPhase2MixedWidthValidA<int64_t>(dimN, dimA);
+    }
+  }
+}
+
+TEST(TestApiArgmax, AccumulateRaFullVectors) {
+  for (uint32_t dimA : {64U, 128U, 512U}) {
+    for (uint32_t dimR : {1U, 3U, 4U, 7U, 55U}) {
+      RunAccumulateTiles<float, true>(dimA, dimR);
+    }
+  }
+}
+
+TEST(TestApiArgmax, AccumulateRaEarlierGlobalIndices) {
+  RunAccumulateTiles<float, true>(128U, 7U, true);
+}
+
+TEST(TestApiArgmax, AccumulateLayoutFallbacks) {
+  for (uint32_t dimA : {1U, 13U, 65U}) {
+    RunAccumulateTiles<float, true>(dimA, 7U);
+    RunAccumulateTiles<float, true>(dimA, 7U, true);
+    RunAccumulateTiles<float, false>(dimA, 7U);
+    RunAccumulateTiles<float, false>(dimA, 8U);
+  }
+}
+
+TEST(TestApiArgmax, AccumulateIntegerWidths) {
+  RunAccumulateTiles<int32_t, true>(128U, 7U);
+  RunAccumulateTiles<int64_t, true>(64U, 7U);
+  RunAccumulateTiles<int64_t, true>(13U, 7U, true);
+  RunAccumulateTiles<int64_t, false>(13U, 7U);
+}
+
+template <typename T>
+T MakePitchedSourceValue(uint32_t r, uint32_t a, uint32_t rows, uint32_t scenario) {
+  T v = static_cast<T>(r + a);
+  if constexpr (std::is_same_v<T, int64_t>) {
+    v += (static_cast<int64_t>(1) << 40);
+  }
+  if (scenario == 1U) {
+    v = r == std::min(3U, rows - 1U) || r == rows - 1U ? static_cast<T>(99) : static_cast<T>(-3);
+  } else if (scenario == 2U) {
+    v = std::numeric_limits<T>::lowest();
+  } else if (scenario == 3U) {
+    v = r == std::min(2U, rows - 1U) ? std::numeric_limits<T>::max() : static_cast<T>(-4);
+    if constexpr (std::is_same_v<T, float>) {
+      if (r == std::min(2U, rows - 1U) || r == rows - 1U) {
+        const uint32_t bits = 0x7FC01234U;
+        std::copy_n(reinterpret_cast<const char *>(&bits), sizeof(v), reinterpret_cast<char *>(&v));
+      }
+    }
+  } else if (scenario == 4U) {
+    v = r % 2U == 0U ? static_cast<T>(-0.0F) : static_cast<T>(0.0F);
+  } else if (scenario == 5U) {
+    v = static_cast<T>(-static_cast<int64_t>(r));
+    if constexpr (std::is_same_v<T, float>) {
+      v = -std::numeric_limits<float>::infinity();
+    }
+  }
+  return v;
+}
+
+template <typename T>
+void FillPitchedSource(T *source, uint32_t pitch, uint32_t logicalA, uint32_t rows, uint32_t scenario) {
+  for (uint32_t r = 0; r < rows; ++r) {
+    for (uint32_t a = 0; a < logicalA; ++a) {
+      source[r * pitch + a] = MakePitchedSourceValue<T>(r, a, rows, scenario);
+    }
+  }
+}
+
+template <typename T>
+void RunPitchedArgmaxApi(int api, const LocalTensor<int32_t> &indexLocal, const LocalTensor<T> &valueLocal,
+                         const LocalTensor<T> &sourceLocal, const LocalTensor<int32_t> &temporaryIndexLocal,
+                         const LocalTensor<T> &temporaryValueLocal, const uint32_t *shape, uint32_t firstBase,
+                         uint32_t secondBase, uint32_t rows, uint32_t logicalA) {
+  if (api == 0) {
+    if constexpr (!std::is_same_v<T, int64_t>) {
+      ArgMaxExtend<T, Pattern::Reduce::RA>(indexLocal[1], sourceLocal, shape, false, rows, logicalA);
+    }
+  } else if (api == 1) {
+    ArgMaxWithValueExtend<T, Pattern::Reduce::RA>(indexLocal[1], valueLocal[1], sourceLocal, shape, false, firstBase,
+                                                  rows, logicalA);
+  } else if (api == 2) {
+    ArgMaxWithValueExtend<T, Pattern::Reduce::RA>(indexLocal[1], valueLocal[1], sourceLocal, LocalTensor<uint8_t>(),
+                                                  shape, false, firstBase, rows, logicalA);
+  } else {
+    ArgMaxWithValueAccumulateExtend<T, Pattern::Reduce::RA>(indexLocal[1], valueLocal[1], sourceLocal,
+                                                            temporaryIndexLocal[1], temporaryValueLocal[1], shape,
+                                                            firstBase, rows, true, logicalA);
+  }
+}
+
+template <typename T>
+void LaunchPitchedKernel(int api, T *source, T *value, T *temporaryValue, T *firstValue, int32_t *index,
+                         int32_t *temporaryIndex, int32_t *firstIndex, uint32_t pitch, uint32_t logicalA, uint32_t rows,
+                         uint32_t sourceCount, uint32_t sourceBytes, uint32_t valueSlots, uint32_t indexSlots,
+                         uint32_t firstBase, uint32_t secondBase) {
+  auto kernel = [=] {
+    TPipe pipe;
+    TBuf<TPosition::VECCALC> sourceBuf, indexBuf, valueBuf, temporaryIndexBuf, temporaryValueBuf;
+    pipe.InitBuffer(sourceBuf, sourceBytes);
+    pipe.InitBuffer(indexBuf, indexSlots * sizeof(int32_t));
+    pipe.InitBuffer(valueBuf, valueSlots * sizeof(T));
+    pipe.InitBuffer(temporaryIndexBuf, indexSlots * sizeof(int32_t));
+    pipe.InitBuffer(temporaryValueBuf, valueSlots * sizeof(T));
+    // Place the final logical element at the end of the allocation: no final-row or VL slack.
+    auto sourceLocal = sourceBuf.Get<T>()[sourceBytes / sizeof(T) - sourceCount];
+    auto indexLocal = indexBuf.Get<int32_t>();
+    auto valueLocal = valueBuf.Get<T>();
+    auto temporaryIndexLocal = temporaryIndexBuf.Get<int32_t>();
+    auto temporaryValueLocal = temporaryValueBuf.Get<T>();
+    GmToUb(sourceLocal, source, sourceCount);
+    GmToUb(indexLocal, index, indexSlots);
+    GmToUb(valueLocal, value, valueSlots);
+    GmToUb(temporaryIndexLocal, temporaryIndex, indexSlots);
+    GmToUb(temporaryValueLocal, temporaryValue, valueSlots);
+    uint32_t shape[] = {rows, pitch};
+    RunPitchedArgmaxApi<T>(api, indexLocal, valueLocal, sourceLocal, temporaryIndexLocal, temporaryValueLocal, shape,
+                           firstBase, secondBase, rows, logicalA);
+    if (api == 3) {
+      UbToGm(firstIndex, indexLocal, indexSlots);
+      UbToGm(firstValue, valueLocal, valueSlots);
+      ArgMaxWithValueAccumulateExtend<T, Pattern::Reduce::RA>(indexLocal[1], valueLocal[1], sourceLocal,
+                                                              temporaryIndexLocal[1], temporaryValueLocal[1], shape,
+                                                              secondBase, rows, false, logicalA);
+    }
+    UbToGm(index, indexLocal, indexSlots);
+    UbToGm(value, valueLocal, valueSlots);
+    UbToGm(temporaryIndex, temporaryIndexLocal, indexSlots);
+    UbToGm(temporaryValue, temporaryValueLocal, valueSlots);
+  };
+  SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1);
+}
+
+template <typename T>
+void VerifyPitchedResults(const T *source, const T *value, const T *temporaryValue, const T *firstValue,
+                          const int32_t *index, const int32_t *temporaryIndex, const int32_t *firstIndex,
+                          uint32_t pitch, uint32_t logicalA, uint32_t rows, int api, uint32_t firstBase,
+                          uint32_t secondBase, uint32_t valueSlots, uint32_t indexSlots, T sentinel) {
+  constexpr int32_t indexSentinel = -91;
+  for (uint32_t a = 0; a < logicalA; ++a) {
+    uint32_t winner = 0U;
+    for (uint32_t r = 1; r < rows; ++r) {
+      if (IsLarger(source[r * pitch + a], source[winner * pitch + a])) {
+        winner = r;
+      }
+    }
+    const T expected = source[winner * pitch + a];
+    const uint32_t base = api == 0 ? 0U : (api == 3 ? std::min(firstBase, secondBase) : firstBase);
+    EXPECT_EQ(index[a + 1U], static_cast<int32_t>(base + winner));
+    if (api != 0) {
+      EXPECT_EQ(std::memcmp(&value[a + 1U], &expected, sizeof(T)), 0);
+    }
+    if (api == 3) {
+      EXPECT_EQ(firstIndex[a + 1U], static_cast<int32_t>(firstBase + winner));
+      EXPECT_EQ(std::memcmp(&firstValue[a + 1U], &expected, sizeof(T)), 0);
+      EXPECT_EQ(temporaryIndex[a + 1U], static_cast<int32_t>(secondBase + winner));
+      EXPECT_EQ(std::memcmp(&temporaryValue[a + 1U], &expected, sizeof(T)), 0);
+    }
+  }
+  // Every allocated output/tmp padding element is a checked sentinel, not unused oversized output.
+  for (uint32_t i = 0; i < indexSlots; ++i) {
+    if (i == 0U || i > logicalA) {
+      EXPECT_EQ(index[i], indexSentinel);
+      EXPECT_EQ(temporaryIndex[i], indexSentinel);
+    }
+  }
+  for (uint32_t i = 0; i < valueSlots; ++i) {
+    if (i == 0U || i > logicalA) {
+      EXPECT_EQ(value[i], sentinel);
+      EXPECT_EQ(temporaryValue[i], sentinel);
+    }
+  }
+}
+
+template <typename T>
+void RunPitchedArgmaxValidA(uint32_t pitch, uint32_t logicalA, uint32_t rows, uint32_t scenario, int api,
+                            bool reverseBase) {
+  SCOPED_TRACE(::testing::Message() << "pitch=" << pitch << " validA=" << logicalA << " R=" << rows
+                                    << " scenario=" << scenario << " api=" << api << " reverse=" << reverseBase);
+  const uint32_t sourceCount = (rows - 1U) * pitch + logicalA;
+  const uint32_t sourceBytes = AlignBlock(sourceCount * sizeof(T));
+  const uint32_t valueSlots = AlignBlock((logicalA + 2U) * sizeof(T)) / sizeof(T);
+  const uint32_t indexSlots = AlignBlock((logicalA + 2U) * sizeof(int32_t)) / sizeof(int32_t);
+  const T sentinel = static_cast<T>(-73);
+  constexpr int32_t indexSentinel = -91;
+  T *source = static_cast<T *>(GmAlloc(sourceCount * sizeof(T)));
+  T *value = static_cast<T *>(GmAlloc(valueSlots * sizeof(T)));
+  T *temporaryValue = static_cast<T *>(GmAlloc(valueSlots * sizeof(T)));
+  T *firstValue = static_cast<T *>(GmAlloc(valueSlots * sizeof(T)));
+  int32_t *index = static_cast<int32_t *>(GmAlloc(indexSlots * sizeof(int32_t)));
+  int32_t *temporaryIndex = static_cast<int32_t *>(GmAlloc(indexSlots * sizeof(int32_t)));
+  int32_t *firstIndex = static_cast<int32_t *>(GmAlloc(indexSlots * sizeof(int32_t)));
+  std::fill_n(source, sourceCount, std::numeric_limits<T>::max());
+  FillPitchedSource<T>(source, pitch, logicalA, rows, scenario);
+  std::fill_n(value, valueSlots, sentinel);
+  std::fill_n(temporaryValue, valueSlots, sentinel);
+  std::fill_n(index, indexSlots, indexSentinel);
+  std::fill_n(temporaryIndex, indexSlots, indexSentinel);
+  const uint32_t firstBase = reverseBase ? 137U : 7U;
+  const uint32_t secondBase = reverseBase ? 7U : 137U;
+  LaunchPitchedKernel<T>(api, source, value, temporaryValue, firstValue, index, temporaryIndex, firstIndex, pitch,
+                         logicalA, rows, sourceCount, sourceBytes, valueSlots, indexSlots, firstBase, secondBase);
+  VerifyPitchedResults<T>(source, value, temporaryValue, firstValue, index, temporaryIndex, firstIndex, pitch, logicalA,
+                          rows, api, firstBase, secondBase, valueSlots, indexSlots, sentinel);
+  GmFree(source);
+  GmFree(value);
+  GmFree(temporaryValue);
+  GmFree(firstValue);
+  GmFree(index);
+  GmFree(temporaryIndex);
+  GmFree(firstIndex);
+}
+
+TEST(TestApiArgmax, PitchedValidAExactSourceFloat) {
+  for (const uint32_t pitch : {4U, 8U, 16U, 64U, 128U}) {
+    for (const uint32_t rows : {1U, 7U, 65U, 129U}) {
+      for (uint32_t scenario = 0; scenario < 6U; ++scenario) {
+        for (int api = 0; api < 4; ++api) {
+          RunPitchedArgmaxValidA<float>(pitch, 1U, rows, scenario, api, false);
+          if (api == 3) {
+            RunPitchedArgmaxValidA<float>(pitch, 1U, rows, scenario, api, true);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(TestApiArgmax, PitchedValidAExactSourceIntegerWidths) {
+  for (const uint32_t pitch : {4U, 8U, 16U, 64U}) {
+    for (const uint32_t logicalA : {1U, 3U}) {
+      for (uint32_t scenario = 0; scenario < 6U; ++scenario) {
+        for (int api = 0; api < 4; ++api) {
+          RunPitchedArgmaxValidA<int32_t>(pitch, logicalA, 65U, scenario, api, true);
+          if (api != 0) {
+            RunPitchedArgmaxValidA<int64_t>(pitch, logicalA, 65U, scenario, api, true);
+          }
+        }
+      }
     }
   }
 }

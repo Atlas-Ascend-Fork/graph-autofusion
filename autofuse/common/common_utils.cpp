@@ -9,6 +9,7 @@
  */
 
 #include "common_utils.h"
+#include "arg_reduce_utils.h"
 
 #include <algorithm>
 #include <cctype>
@@ -502,9 +503,9 @@ std::string RefineTemplateSemanticName(const std::string &base_name, const af::A
     AppendReduceApiFeatures(graph, features);
     if (refined.rfind(semantic::kReduceRCore, 0U) == 0U) {
       for (const auto &node : graph.GetAllNodes()) {
-        if (af::ops::IsOps<af::ascir_op::ArgMaxMultiRPhase1>(node)) {
+        if (IsArgReducePhase1(node->GetType())) {
           AppendSemanticPart(features, semantic::kPhase1);
-        } else if (af::ops::IsOps<af::ascir_op::ArgMaxMultiRPhase2>(node)) {
+        } else if (IsArgReducePhase2(node->GetType())) {
           AppendSemanticPart(features, semantic::kPhase2);
         }
       }

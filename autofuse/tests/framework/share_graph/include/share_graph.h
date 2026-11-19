@@ -114,6 +114,10 @@ struct ShareGraph {
   static af::ComputeGraphPtr SphericalBesselJ0StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr NdtrStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ArgmaxStoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr ArgminStoreFusedGraph(size_t dims_size, af::DataType dtype = af::DT_FLOAT,
+                                                   bool ra = false);
+  static af::ComputeGraphPtr ArgminWithValueStoreFusedGraph(size_t dims_size, af::DataType dtype = af::DT_FLOAT,
+                                                            bool ra = false);
   static af::ComputeGraphPtr NdtriStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LogNdtrStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr NextAfterStoreFusedGraph(size_t dims_size);

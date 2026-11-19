@@ -4175,6 +4175,7 @@ TensorShapeInfo MakeLoadStrideTestShape(const std::vector<Expr> &dims, const std
   }
   return shape;
 }
+
 }  // namespace
 
 TEST_F(UTestAscirPerfV2, LoadContiguousStrideStaticUnitAxes) {

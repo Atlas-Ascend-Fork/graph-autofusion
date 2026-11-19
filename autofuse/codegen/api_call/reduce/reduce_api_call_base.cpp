@@ -21,6 +21,7 @@
 #include "common/checker.h"
 #include "common/ge_common/debug/log.h"
 #include "common_utils.h"
+#include "arg_reduce_utils.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "api_call/utils/api_call_factory.h"
 #include "api_call/utils/api_call_utils.h"
@@ -620,8 +621,7 @@ Status GetDtypeNameForReduce(const std::string &api_name, const Tensor &x, const
   // Argmax系列算子（Argmax、ArgMaxMultiRPhase1、ArgMaxMultiRPhase2、ArgmaxWithValue、
   // ArgMaxMultiRPhase2WithValue）需要使用value的类型作为模板参数
   // 而不是index的类型，因此统一使用x（inputs[0]）的dtype
-  if (api_name == "Argmax" || api_name == "ArgMaxMultiRPhase1" || api_name == "ArgMaxMultiRPhase2" ||
-      api_name == "ArgmaxWithValue" || api_name == "ArgMaxMultiRPhase2WithValue") {
+  if (ascgen_utils::IsArgReduceType(api_name)) {
     GE_CHK_STATUS_RET(Tensor::DtypeName(x.dtype, dtype_name), "Codegen get data type:%d failed",
                       static_cast<int32_t>(x.dtype));
   } else {

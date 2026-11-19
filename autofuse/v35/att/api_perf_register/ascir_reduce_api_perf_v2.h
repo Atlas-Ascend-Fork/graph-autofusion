@@ -58,6 +58,8 @@ af::Status ProdApi(const std::vector<TensorShapeInfo> &input_shapes, const std::
                    const NodeInfo &node, PerfOutputInfo &perf_res);
 af::Status ArgmaxApi(const std::vector<TensorShapeInfo> &input_shapes,
                      const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node, PerfOutputInfo &perf_res);
+af::Status ArgminApi(const std::vector<TensorShapeInfo> &input_shapes,
+                     const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node, PerfOutputInfo &perf_res);
 af::Status ArgMaxMultiRPhase1Api(const std::vector<TensorShapeInfo> &input_shapes,
                                  const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
                                  PerfOutputInfo &perf_res);

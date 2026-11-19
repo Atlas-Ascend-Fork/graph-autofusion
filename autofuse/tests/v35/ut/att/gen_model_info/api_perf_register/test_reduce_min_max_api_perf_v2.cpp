@@ -30,6 +30,7 @@
 #include "../../../../../ut/att/testcase/gen_model_info/api_perf_register/runtime_stub.h"
 #include "tests/ut/common/ascir_reduce_test_helpers.h"
 #include "soc_perf_test_config.h"
+#include "v35/att/api_perf_register/ascir_reduce_api_perf_v2.h"
 
 using namespace att;
 using namespace af::sym;
@@ -1398,4 +1399,399 @@ TEST_F(UTestReduceMinMaxApiPerfV2, MinAscirUsesMinAttImpl) {
   auto att_impl = af::ascir::AscirRegistry::GetInstance().GetIrAttImpl("3510", "Min");
   ASSERT_NE(att_impl, nullptr);
   EXPECT_STREQ(reinterpret_cast<const char *>(att_impl->GetApiPerf()), "MinV2");
+}
+
+namespace {
+PerfOutputInfo ArgReduceTestCost(bool ar, int64_t a, int64_t r, bool phase2 = false, bool with_value = false,
+                                 const std::string &dtype = kFloat32, int64_t valid = 0, bool accumulate = false,
+                                 int64_t valid_a = 0, bool is_min = false) {
+  NodeInfo node;
+  auto &params = node.argmax_node_params;
+  params.valid = true;
+  params.is_ar = ar;
+  params.is_phase2 = phase2;
+  params.with_value = with_value;
+  params.has_accumulate = accumulate;
+  params.src_shape =
+      ar ? std::vector<Expr>{CreateExpr(a), CreateExpr(r)} : std::vector<Expr>{CreateExpr(r), CreateExpr(a)};
+  if (phase2) {
+    params.src_shape.emplace_back(CreateExpr(a));
+  }
+  params.valid_extent = CreateExpr(valid == 0 ? (phase2 ? a : r) : valid);
+  params.valid_a = CreateExpr(valid_a);
+  const auto input = MakeTensorShape(dtype, dtype == kInt64 ? 8U : 4U, params.src_shape, {});
+  PerfOutputInfo perf;
+  const auto evaluate = is_min ? ascir_reduce_v2::ArgminApi : ascir_reduce_v2::ArgmaxApi;
+  EXPECT_EQ(evaluate({input}, {}, node, perf), af::SUCCESS);
+  return perf;
+}
+
+void ExpectArgReduceCycles(const PerfOutputInfo &perf, int64_t instruction_cycles, int64_t max_latency = 8) {
+  // Assert independently counted instructions under the CURRENT table, not a measured hardware latency.
+  auto expected = VfPerfUtils::GetVFHeadCost() + CreateExpr(max_latency + instruction_cycles);
+  expected.Simplify();
+  EXPECT_EQ(PipeString(perf, PipeType::AIV_VEC), Str(expected));
+}
+}  // namespace
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxArSinglePassAllDtypesAndAlignment) {
+  // f32 VF setup: five Duplicate + Arange (2 cycles) + UpdateMask = 8.
+  // Full row: 2 Duplicate + 5 Select + 3 reductions + 5 comparisons + 2 And (4) + Or (2)
+  // + Add (2) + index Store = 24. Each later block: GE/NE/Or/Duplicate/two Select = 7.
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 256, 2048), 8 + 256 * (24 + 31 * 7));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 32), 8 + 2 * (24 + 2));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 64), 8 + 2 * 24);
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 32, false, true), 8 + 2 * (24 + 2 + 4));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 64, false, true), 8 + 2 * (24 + 4));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 96), 8 + 2 * (24 + 7 + 4));
+  // i32: setup 2 Duplicate + Arange + UpdateMask = 5; row 12, later block 4.
+  // The final candidate mask And remains necessary for integer input.
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 32, false, false, kInt32), 5 + 2 * (12 + 2));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 64, false, false, kInt32), 5 + 2 * 12);
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, false, kInt32), 5 + 2 * (12 + 31 * 4));
+  // Unaligned AR still scans once. LoadUnAlignPre is a zero-cost placeholder under the current table.
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 65), 8 + 2 * (24 + 7 + 4));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 65, false, false, kInt32), 5 + 2 * (12 + 4 + 4));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 65, false, false, kFloat32, 32), 8 + 2 * (24 + 2));
+  // b64 VL=32: only ReduceMax/EQ/ReduceMin/DeInterleave/Store contribute per row (5), GE per update (1).
+  // Other b64 table entries remain missing; do not substitute b32 instruction costs.
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 64, false, false, kInt64), 2 * (5 + 1));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 64, false, true, kInt64), 2 * (5 + 1 + 1));
+  ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 65, false, true, kInt64), 2 * (5 + 2 + 1));
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxArSinglePassValidRAndWithValue) {
+  // Physical R=2048 stays aligned; validR determines first-partial, full updates and final partial load.
+  for (const auto &dtype : {kFloat32, kInt32}) {
+    const int64_t init = dtype == kFloat32 ? 8 : 5;
+    const int64_t row = dtype == kFloat32 ? 24 : 12;
+    const int64_t update = dtype == kFloat32 ? 7 : 4;
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, false, dtype, 1), init + 2 * (row + 2));
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, false, dtype, 32), init + 2 * (row + 2));
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, false, dtype, 64), init + 2 * row);
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, false, dtype, 65), init + 2 * (row + update + 4));
+    // WithValue: Adds (2), UpdateMask (1), one value Store (1); source Gather/barrier cost zero.
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, true, dtype, 32), init + 2 * (row + 2 + 4));
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, true, dtype, 65), init + 2 * (row + update + 4 + 4));
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, true, dtype), init + 2 * (row + 31 * update + 4));
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, 2048, false, false, dtype, 4096), init + 2 * (row + 31 * update));
+  }
+  // b64 validR tail and clamping use the same single-pass kernel, aligned or unaligned storage.
+  for (const int64_t storage_r : {64, 65}) {
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, storage_r, false, true, kInt64, 1), 2 * (5 + 1));
+    ExpectArgReduceCycles(ArgReduceTestCost(true, 2, storage_r, false, true, kInt64, 33), 2 * (5 + 1 + 1));
+  }
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxArSymbolicAlignmentAndFirstPartial) {
+  for (const auto &dtype : {kFloat32, kInt32, kInt64}) {
+    NodeInfo node;
+    auto &params = node.argmax_node_params;
+    params.valid = true;
+    params.is_ar = true;
+    params.src_shape = {CreateExpr(2), CreateExpr("r")};
+    params.valid_extent = CreateExpr(0);
+    const auto input = MakeTensorShape(dtype, dtype == kInt64 ? 8U : 4U, params.src_shape, {});
+    PerfOutputInfo perf;
+    ASSERT_EQ(ascir_reduce_v2::ArgmaxApi({input}, {}, node, perf), af::SUCCESS);
+    bool found_alignment = false;
+    bool found_first_partial = false;
+    for (const auto &entry : perf.ternary_ops) {
+      const auto branch = entry.second.DeepCopyIfCase();
+      ASSERT_NE(branch, nullptr);
+      if (Str(entry.first).find("arg_reduce_ar_aligned") != std::string::npos) {
+        found_alignment = true;
+        EXPECT_EQ(branch->GetCondType(), CondType::K_EQ);
+        EXPECT_EQ(branch->GetCondLeft(), af::sym::Mod(CreateExpr("r"), CreateExpr(dtype == kInt64 ? 4 : 8)));
+        EXPECT_EQ(branch->GetCondRight(), CreateExpr(0));
+      }
+      if (Str(entry.first).find("arg_reduce_row_first_partial") != std::string::npos) {
+        found_first_partial = true;
+        EXPECT_EQ(branch->GetCondType(), CondType::K_EQ);
+        EXPECT_EQ(branch->GetCondLeft(), af::sym::Floor(CreateExpr("r") / CreateExpr(dtype == kInt64 ? 32 : 64)));
+        EXPECT_EQ(branch->GetCondRight(), CreateExpr(0));
+        EXPECT_EQ(branch->GetChoiceA()->GetExpr(), CreateExpr(2));
+        EXPECT_EQ(branch->GetChoiceB()->GetExpr(), CreateExpr(0));
+      }
+    }
+    EXPECT_TRUE(found_alignment);
+    EXPECT_TRUE(found_first_partial);
+  }
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxRaFullAndPartialColumnsCountAllR) {
+  // Five-dimensional target: outer A=4*8 calls, core descriptor R=2048, A=32*16.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 512, 2048), 8 * (4 + 7 * 2047));
+  // A=65: two column blocks, 254 updates, 128 partial-row masks/aranges; no final Adds(indexBase).
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 65, 128), 2 * 3 + 254 * 7 + 128 * 3);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 64, 1), 4);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 64, 3, false, false, kInt32), 4 + 4 * 2);
+  auto short_r = ArgReduceTestCost(false, 512, 1024);
+  EXPECT_NE(PipeString(short_r, PipeType::AIV_VEC), PipeString(ArgReduceTestCost(false, 512, 2048), PipeType::AIV_VEC));
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxPhase2CountsIndexLoadsAndMergeMasked) {
+  // Two A blocks (one partial), N=4: UpdateMask 2+4+4, Arange 4+4, 6 merges * 19, 2 stores.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 65, 4, true), 10 + 16 + 6 * 19 + 2, 4);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 65, 4, true, true), 10 + 16 + 6 * 19 + 4, 4);
+  // Mixed-width Phase2, A=32: all int32 input rows are gathered, Interleave each row, DeInterleave once.
+  // The existing table lacks b64 Select; leave that limitation visible, without borrowing b32 costs.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 32, 4, true, false, kInt64), 4 + 8 + 9 + 4 + 1 + 1 + 1);
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxRaPartialColumnGateBoundaries) {
+  // Partial columns: one mask, initial index Duplicate and index Store = 3 cycles/block;
+  // each partial source row adds UpdateMask + Arange = 3, each f32/i32 update costs 7/4.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 1, 2), 3 + 2 * 3 + 7);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 31, 62), 3 + 62 * 3 + 61 * 7);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 32, 64), 3 + 64 * 3 + 63 * 7);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 63, 64), 3 + 64 * 3 + 63 * 7);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 65, 65), 2 * 3 + 65 * 3 + 128 * 7);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 31, 62, false, true, kInt32), 3 + 62 * 3 + 61 * 4 + 1);
+  // Crossing validR<=2*A (while R<=VL) or validR<=VL chooses row-gather.
+  // Row-gather: setup 8, row body 24; each block's Arange/Muls/Adds adds 6 cycles.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 1, 3), 8 + 24 + 6);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 31, 63), 8 + 31 * (24 + 6));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 32, 65), 8 + 32 * (24 + 12 + 7 + 2));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 63, 65), 8 + 63 * (24 + 12 + 7 + 2));
+  // The gate uses validR, not storage R: both predicates must hold.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 32, 129, false, false, kFloat32, 64), 3 + 64 * 3 + 63 * 7);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 32, 129, false, false, kFloat32, 65), 8 + 32 * (24 + 12 + 7 + 2));
+  // b64 VL=32: partial-column mask/arange/duplicate/select have no b64 entries;
+  // only GE updates, int32 index Store and DeInterleave contribute.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 16, 32, false, true, kInt64), 2 + 31 + 1);
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 16, 33, false, true, kInt64), 16 * (5 + 1 + 1));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 33, 65, false, true, kInt64), 2 * (2 + 64 + 1));
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxRaRowGatherSinglePassAndOriginalValue) {
+  // A=13, R=129: three blocks (18 offset cycles), two updates (14), tail mask/select (2).
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 13, 129), 8 + 13 * (24 + 18 + 14 + 2));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 13, 129, false, false, kInt32), 5 + 13 * (12 + 18 + 8 + 2));
+  // Original-value recovery adds two Adds (4), Muls (2), mask (1), and one Store (1) per row.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 13, 129, false, true), 8 + 13 * (24 + 18 + 14 + 2 + 8));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 13, 129, false, true, kInt32), 5 + 13 * (12 + 18 + 8 + 2 + 8));
+  // validR=64 still exceeds 2*A: one gathered block, no subsequent tail-mask/select.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 13, 129, false, true, kFloat32, 64), 8 + 13 * (24 + 6 + 8));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 13, 129, false, true, kInt64), 13 * (5 + 4 + 1));
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxRaColumnGroupsCountUpdatesAndIndexBaseOnce) {
+  // Per vector: Duplicate index + Adds indexBase + Store. Updates cost 7/4 for float32/int32.
+  for (const int64_t a : {64, 128, 192, 256, 512}) {
+    const int64_t columns = a / 64;
+    for (const int64_t r : {1, 3, 4, 65}) {
+      ExpectArgReduceCycles(ArgReduceTestCost(false, a, r), columns * (4 + (r - 1) * 7));
+      ExpectArgReduceCycles(ArgReduceTestCost(false, a, r, false, false, kInt32), columns * (4 + (r - 1) * 4));
+    }
+  }
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 128, 65, false, true), 2 * (5 + 64 * 7));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 128, 65, false, false, kFloat32, 3), 2 * (4 + 2 * 7));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 128, 65, false, false, kFloat32, 4), 2 * (4 + 3 * 7));
+  // b64 full columns use the same 4/1-group dispatch; missing b64 entries remain zero.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 128, 5, false, true, kInt64), 4 * (2 + 4 + 1));
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 96, 5, false, true, kInt64), 3 * (2 + 4 + 1));
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxWithValueRecoversRowSourceAndStoresColumnWinner) {
+  auto base = ArgReduceTestCost(true, 4, 128);
+  auto with_value = ArgReduceTestCost(true, 4, 128, false, true);
+  auto delta = ResolvedPipeExpr(with_value, PipeType::AIV_VEC) - ResolvedPipeExpr(base, PipeType::AIV_VEC);
+  delta.Simplify();
+  EXPECT_EQ(Str(delta), "16");
+  base = ArgReduceTestCost(false, 128, 4);
+  with_value = ArgReduceTestCost(false, 128, 4, false, true);
+  delta = ResolvedPipeExpr(with_value, PipeType::AIV_VEC) - ResolvedPipeExpr(base, PipeType::AIV_VEC);
+  delta.Simplify();
+  EXPECT_EQ(Str(delta), "2");
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxMissingParamsFailsInsteadOfReusingReduceMax) {
+  NodeInfo node;
+  PerfOutputInfo perf;
+  EXPECT_NE(ascir_reduce_v2::ArgmaxApi({}, {}, node, perf), af::SUCCESS);
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxAccumulateCountsHistoryInsideTheSameVf) {
+  // Current table: a float MergeMasked is 19 cycles; history kLoad is zero.
+  // Preserve one VF head and the existing two stores, including R<4.
+  for (int64_t r : {1, 3, 4, 55}) {
+    auto base = ArgReduceTestCost(false, 512, r, false, true);
+    auto fused = ArgReduceTestCost(false, 512, r, false, true, kFloat32, 0, true);
+    auto delta = ResolvedPipeExpr(fused, PipeType::AIV_VEC) - ResolvedPipeExpr(base, PipeType::AIV_VEC);
+    delta.Simplify();
+    EXPECT_EQ(delta, CreateExpr(8 * 19));
+  }
+  // i32 MergeMasked costs 9 table cycles, with no float NaN instructions.
+  auto base = ArgReduceTestCost(false, 128, 7, false, true, kInt32);
+  auto fused = ArgReduceTestCost(false, 128, 7, false, true, kInt32, 0, true);
+  auto delta = ResolvedPipeExpr(fused, PipeType::AIV_VEC) - ResolvedPipeExpr(base, PipeType::AIV_VEC);
+  delta.Simplify();
+  EXPECT_EQ(delta, CreateExpr(2 * 9));
+  // Wrapper fallback calls the same reduction; standalone Copy/MergeRound remain outside this model.
+  for (const auto &dtype : {kFloat32, kInt32, kInt64}) {
+    for (const bool ar : {true, false}) {
+      for (const int64_t a : {13, 65}) {
+        EXPECT_EQ(PipeString(ArgReduceTestCost(ar, a, 129, false, true, dtype, 0, true), PipeType::AIV_VEC),
+                  PipeString(ArgReduceTestCost(ar, a, 129, false, true, dtype), PipeType::AIV_VEC));
+      }
+    }
+  }
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxValidAChargesLogicalRowsAndForcesGather) {
+  for (const auto &dtype : {kFloat32, kInt32, kInt64}) {
+    for (const bool with_value : {false, true}) {
+      for (const bool accumulate : {false, true}) {
+        for (const int64_t pitch : {4, 8, 16, 64, 128}) {
+          for (const int64_t r : {7, 65, 129}) {
+            const auto logical = ArgReduceTestCost(false, pitch, r, false, with_value, dtype, 0, accumulate, 1);
+            const auto row = ArgReduceTestCost(false, 1, r, false, with_value, dtype, 0, accumulate);
+            EXPECT_EQ(ResolvedPipeExpr(logical, PipeType::AIV_VEC), ResolvedPipeExpr(row, PipeType::AIV_VEC));
+          }
+        }
+      }
+    }
+  }
+  // R=1 would otherwise select the column path. validA<physicalA must force row-gather even at full VL.
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 64, 1, false, false, kFloat32, 0, false, 1), 8 + 24 + 6);
+  // Original-value recovery: two Adds (4), Muls (2), UpdateMask (1), Store (1).
+  ExpectArgReduceCycles(ArgReduceTestCost(false, 16, 1, false, true, kFloat32, 0, true, 1), 8 + 24 + 6 + 8);
+  for (const int64_t valid_a : {0, 16, 17}) {
+    EXPECT_EQ(PipeString(ArgReduceTestCost(false, 16, 7, false, true, kFloat32, 0, false, valid_a), PipeType::AIV_VEC),
+              PipeString(ArgReduceTestCost(false, 16, 7, false, true), PipeType::AIV_VEC));
+  }
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxSymbolicValidAIsPreservedInDispatch) {
+  NodeInfo node;
+  auto &params = node.argmax_node_params;
+  params.valid = true;
+  params.src_shape = {CreateExpr(7), CreateExpr("physical_a")};
+  params.valid_extent = CreateExpr(7);
+  params.valid_a = CreateExpr("logical_a");
+  PerfOutputInfo perf;
+  const auto input = MakeTensorShape(kFloat32, 4U, params.src_shape, {});
+  ASSERT_EQ(ascir_reduce_v2::ArgmaxApi({input}, {}, node, perf), af::SUCCESS);
+  bool found_valid_a = false;
+  for (const auto &entry : perf.ternary_ops) {
+    if (Str(entry.first).find("arg_reduce_ra_valid_a") != std::string::npos) {
+      const auto branch = entry.second.DeepCopyIfCase();
+      ASSERT_NE(branch, nullptr);
+      EXPECT_EQ(branch->GetCondRight(), CreateExpr("physical_a"));
+      found_valid_a = true;
+    }
+  }
+  EXPECT_TRUE(found_valid_a);
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgmaxSymbolicRaRetainsRuntimeDispatch) {
+  NodeInfo node;
+  auto &params = node.argmax_node_params;
+  params.valid = true;
+  params.src_shape = {CreateExpr("r"), CreateExpr("a")};
+  params.valid_extent = CreateExpr(0);  // API default: use the symbolic storage R.
+  const auto input = MakeTensorShape(kFloat32, 4U, params.src_shape, {});
+  PerfOutputInfo perf;
+  ASSERT_EQ(ascir_reduce_v2::ArgmaxApi({input}, {}, node, perf), af::SUCCESS);
+  bool found_dispatch = false;
+  bool found_partial = false;
+  bool found_short = false;
+  bool found_wide = false;
+  for (const auto &entry : perf.ternary_ops) {
+    const auto branch = entry.second.DeepCopyIfCase();
+    ASSERT_NE(branch, nullptr);
+    if (Str(entry.first).find("arg_reduce_ra_full_columns") != std::string::npos) {
+      found_dispatch = true;
+      EXPECT_EQ(branch->GetCondType(), CondType::K_EQ);
+      EXPECT_EQ(branch->GetCondLeft(), af::sym::Mod(CreateExpr("a"), CreateExpr(64)));
+      EXPECT_EQ(branch->GetCondRight(), CreateExpr(0));
+      EXPECT_NE(Str(branch->GetChoiceA()->GetExpr()), Str(branch->GetChoiceB()->GetExpr()));
+    }
+    if (Str(entry.first).find("arg_reduce_ra_partial_columns") != std::string::npos) {
+      found_partial = true;
+      EXPECT_EQ(branch->GetCondType(), CondType::K_LE);
+      EXPECT_EQ(branch->GetCondLeft(), CreateExpr(64));
+      EXPECT_EQ(branch->GetCondRight(), CreateExpr("a"));
+    }
+    if (Str(entry.first).find("arg_reduce_ra_short_r") != std::string::npos) {
+      found_short = true;
+      EXPECT_EQ(branch->GetCondType(), CondType::K_LE);
+      EXPECT_EQ(branch->GetCondLeft(), CreateExpr("r"));
+      EXPECT_EQ(branch->GetCondRight(), CreateExpr(64));
+    }
+    if (Str(entry.first).find("arg_reduce_ra_short_wide") != std::string::npos) {
+      found_wide = true;
+      EXPECT_EQ(branch->GetCondType(), CondType::K_LE);
+      EXPECT_EQ(branch->GetCondLeft(), CreateExpr("r"));
+      EXPECT_EQ(branch->GetCondRight(), CreateExpr(2) * CreateExpr("a"));
+    }
+  }
+  EXPECT_TRUE(found_dispatch);
+  EXPECT_TRUE(found_partial);
+  EXPECT_TRUE(found_short);
+  EXPECT_TRUE(found_wide);
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgminRegistersItsOwnCallbackForEveryPhase) {
+  const auto maximum = ApiPerfFactory::Instance().Create(kArgmax + "V2");
+  ASSERT_NE(maximum, nullptr);
+  for (const auto &type :
+       {kArgmin, kArgminWithValue, kArgMinMultiRPhase1, kArgMinMultiRPhase2, kArgMinMultiRPhase2WithValue}) {
+    SCOPED_TRACE(type);
+    const auto minimum = ApiPerfFactory::Instance().Create(type + "V2");
+    ASSERT_NE(minimum, nullptr);
+    EXPECT_EQ(minimum->GetPerfFunc(), &ascir_reduce_v2::ArgminApi);
+    EXPECT_NE(minimum->GetPerfFunc(), &ascir_reduce_v2::ArgmaxApi);
+    EXPECT_EQ(minimum->GetTilingScheduleConfigTable(), maximum->GetTilingScheduleConfigTable());
+    const auto impl = af::ascir::AscirRegistry::GetInstance().GetIrAttImpl(soc_perf_test::kV35NpuArch, type.c_str());
+    ASSERT_NE(impl, nullptr);
+    EXPECT_STREQ(reinterpret_cast<const char *>(impl->GetApiPerf()), (type + "V2").c_str());
+  }
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgminKeepsSharedInstructionCountsAcrossLayoutsTailsAndDtypes) {
+  for (const auto &dtype : {kFloat32, kInt32, kInt64}) {
+    for (int mode : {0, 1, 2}) {
+      const bool ar = mode == 0, phase2 = mode == 2;
+      for (const bool with_value : {false, true}) {
+        for (int64_t a : {1, 31, 32, 33, 63, 64, 65, 128, 256}) {
+          for (int64_t r : {1, 3, 32, 33, 64, 65, 129}) {
+            const auto maximum = ArgReduceTestCost(ar, a, r, phase2, with_value, dtype);
+            const auto minimum = ArgReduceTestCost(ar, a, r, phase2, with_value, dtype, 0, false, 0, true);
+            EXPECT_EQ(ResolvedPipeExpr(minimum, PipeType::AIV_VEC), ResolvedPipeExpr(maximum, PipeType::AIV_VEC))
+                << dtype << " mode=" << mode << " A=" << a << " R=" << r;
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, ArgminSymbolicRowsRetainAlignmentAndFirstPartialChoices) {
+  for (const auto &dtype : {kFloat32, kInt32, kInt64}) {
+    NodeInfo node;
+    auto &params = node.argmax_node_params;
+    params.valid = true;
+    params.is_ar = true;
+    params.with_value = true;
+    params.src_shape = {CreateExpr(2), CreateExpr("r")};
+    params.valid_extent = CreateExpr(0);
+    const auto input = MakeTensorShape(dtype, dtype == kInt64 ? 8U : 4U, params.src_shape, {});
+    PerfOutputInfo minimum;
+    ASSERT_EQ(ascir_reduce_v2::ArgminApi({input}, {}, node, minimum), af::SUCCESS);
+    bool first_partial = false;
+    for (const auto &entry : minimum.ternary_ops) {
+      if (Str(entry.first).find("arg_reduce_row_first_partial") != std::string::npos) {
+        const auto choice = entry.second.DeepCopyIfCase();
+        ASSERT_NE(choice, nullptr);
+        EXPECT_EQ(choice->GetCondLeft(), Floor(CreateExpr("r") / CreateExpr(dtype == kInt64 ? 32 : 64)));
+        EXPECT_EQ(choice->GetCondType(), CondType::K_EQ);
+        EXPECT_EQ(choice->GetChoiceA()->GetExpr(), CreateExpr(2));
+        EXPECT_EQ(choice->GetChoiceB()->GetExpr(), CreateExpr(0));
+        first_partial = true;
+      }
+    }
+    EXPECT_TRUE(first_partial);
+  }
 }

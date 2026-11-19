@@ -80,6 +80,23 @@ class TilingScheduleConfigTableV2 : public TilingScheduleConfigTable {
     return true;
   }
 };
+// ArgReduce has expensive index tracking and small outputs. Compare compute costs rather
+// than excluding useful core counts through output cacheline/UB occupancy heuristics.
+class ArgReduceTilingScheduleConfigTableV2 : public TilingScheduleConfigTableV2 {
+ public:
+  [[nodiscard]] bool IsEnableCacheLineCheck() const override {
+    return false;
+  }
+  [[nodiscard]] TradeOffConfig GetTradeOffConfig() const override {
+    return TradeOffConfig{false};
+  }
+  [[nodiscard]] double GetPerfEffectVal() const override {
+    return 0.0;
+  }
+  [[nodiscard]] TilingScheduleConfigPriority GetConfigPriority() const override {
+    return TilingScheduleConfigPriority::kHeavyOpPriority;
+  }
+};
 extern const std::string kParamV2Info;
 inline const std::string kNddma = "Nddma";
 }  // namespace att

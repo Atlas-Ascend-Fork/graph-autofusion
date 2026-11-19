@@ -10,15 +10,24 @@
 
 #include "v35/att/api_perf_register/ascir_reduce_api_perf_v2.h"
 
+#include <algorithm>
 #include <memory>
 #include "ascir_node_param/ascir_node_param.h"
 #include "codegen_api_param/codegen_api_param.h"
 #include "v35/att/api_perf_register/ascendc_api_perf/reduce_api_perf_v2.h"
 #include "v35/att/api_perf_register/ascendc_regbase_perf.h"
+#include "api_perf_register/utils/vf_perf_utils.h"
 
 namespace att {
 namespace ascir_reduce_v2 {
 namespace {
+constexpr int64_t kPerfFactorTwo = 2;
+constexpr int64_t kPerfFactorThree = 3;
+constexpr int64_t kBlockBytes = 32;
+constexpr size_t kReduceDimPairCount = 2U;
+constexpr size_t kPhase2ShapeRank = 3U;
+constexpr size_t kPhase2ColumnsDimIndex = 2U;
+
 void SetReduceDims(const Expr &first, const Expr &last, ascendcapi_v2::ReducePattern pattern, NodeDetail &node_detail) {
   node_detail.input_dims = {first, last};
   node_detail.output_dims = {pattern == ascendcapi_v2::ReducePattern::kRA ? last : first};
@@ -26,7 +35,7 @@ void SetReduceDims(const Expr &first, const Expr &last, ascendcapi_v2::ReducePat
 
 void MergeReduceDimsByLastAxis(ascendcapi_v2::ReducePattern pattern, NodeDetail &node_detail) {
   auto &in_dims = node_detail.input_dims;
-  if (in_dims.size() <= 2U) {
+  if (in_dims.size() <= kReduceDimPairCount) {
     return;
   }
   Expr first = CreateExpr(1);
@@ -144,8 +153,8 @@ af::Status BuildReduceContext(const std::vector<TensorShapeInfo> &input_shapes,
   } else {
     MergeReduceDimsByLastAxis(context.pattern, context.node_detail);
   }
-  GE_ASSERT_TRUE(context.node_detail.input_dims.size() == 2U, "Reduce dims must be {first,last}, node[%s].",
-                 node.name.c_str());
+  GE_ASSERT_TRUE(context.node_detail.input_dims.size() == kReduceDimPairCount,
+                 "Reduce dims must be {first,last}, node[%s].", node.name.c_str());
   GE_ASSERT_SUCCESS(TryGetReuseSource(node, context.is_reuse_source),
                     "Reduce reuse-source branch is unknown, node[%s].", node.name.c_str());
   context.merge_size =
@@ -330,54 +339,380 @@ af::Status ProdApi(const std::vector<TensorShapeInfo> &input_shapes, const std::
                                        : ElementwiseProdApi(input_shapes, output_shapes, node, perf_res);
 }
 
-/*
-Argmax 系算子（Argmax / ArgMaxMultiRPhase1 / ArgMaxMultiRPhase2 / ArgmaxWithValue /
-ArgMaxMultiRPhase2WithValue）的性能公式：
-  Argmax 输出索引而非归约值，成本近似 ReduceMax（值+索引双路），复用 v2 ReduceMaxPerf；
-  Phase1 在 Argmax 基础上多一路 value 输出（额外 store 开销，按输入规模线性放大）；
-  Phase2 只沿核维度 N 归约（成本 ∝ A×N，显著小于单算子 A×R）；
-  ArgmaxWithValue 与 Argmax 同构（额外多一路 value 输出），与 Phase1 成本相当；
-  ArgMaxMultiRPhase2WithValue 为 ArgmaxWithValue 分核的 Phase2（一次归约双输出，成本 ∝ A×N），
-  与 ArgMaxMultiRPhase2 成本同构；
-  因此各算子独立注册、分别建模，避免 ATT 打分直通单算子成本造成错估。
-*/
-af::Status ArgmaxPerf([[maybe_unused]] const std::vector<TensorShapeInfo> &input_shapes,
-                      [[maybe_unused]] const std::vector<TensorShapeInfo> &output_shapes,
-                      [[maybe_unused]] const NodeInfo &node, PerfOutputInfo &perf_res) {
-  NodeDetail node_info;
-  GE_ASSERT_SUCCESS(SetNodeDetail(input_shapes, output_shapes, node_info));
-  GE_ASSERT_SUCCESS(ascendcperf_v2::ReduceMaxPerf(node_info, perf_res));
+namespace {
+af::Status GetArgReduceRepeatReciprocal(const std::string &dtype, Expr &inv_vl) {
+  int32_t repeat_elements = 0;
+  GE_ASSERT_TRUE(kRptEleMap.at(dtype).GetConstValue(repeat_elements), "Arg-reduce repeat elements must be constant.");
+  // Preserve Max(repeat_elements, 1), using an exact rational rather than a symbolic divisor.
+  inv_vl = af::sym::Rational(1, std::max(repeat_elements, 1));
+  return af::SUCCESS;
+}
+
+Expr SelectArgReduceCost(const std::string &name, const Expr &lhs, const Expr &rhs, const Expr &yes, const Expr &no,
+                         PerfOutputInfo &perf, CondType condition = CondType::K_EQ) {
+  const auto check = condition == CondType::K_LE ? af::SymbolicUtils::StaticCheckLe(lhs, rhs)
+                                                 : af::SymbolicUtils::StaticCheckEq(lhs, rhs);
+  if (check != af::TriBool::kUnknown) {
+    return check == af::TriBool::kTrue ? yes : no;
+  }
+  Expr result;
+  GetPerfVar(name, result, perf.ternary_ops);
+  TernaryOp choice(condition, lhs, rhs, yes, no);
+  choice.SetVariable(result);
+  perf.ternary_ops[result] = choice;
+  return result;
+}
+
+af::Status AddArgReduceRowFloatCost(const std::string &dtype, const Expr &a, const Expr &updates, Expr &latency,
+                                    Expr &cost) {
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDuplicate, kInt32, latency, cost, CreateExpr(kPerfFactorTwo)));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kSelect, kInt32, latency, cost, a));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kNe, dtype, latency, cost, updates + CreateExpr(kPerfFactorThree) * a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kNe, kInt32, latency, cost, a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kReduceMax, kInt32, latency, cost, a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMaskOr, dtype, latency, cost, updates + a));
+  return af::SUCCESS;
+}
+
+af::Status AddArgReduceRowValueCost(const ascir_param::ArgmaxNodeParams &params, const std::string &dtype,
+                                    const std::string &index_dtype, const Expr &a, Expr &latency, Expr &cost) {
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kAdds, index_dtype, latency, cost,
+                                                   params.is_ar ? a : CreateExpr(kPerfFactorTwo) * a));
+  if (!params.is_ar) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMuls, index_dtype, latency, cost, a));
+  }
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kUpdateMask, dtype, latency, cost, a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLoad, dtype, latency, cost, a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kStore, dtype, latency, cost, a));
+  // Reg::LocalMemBar<VEC_STORE, VEC_STORE>; no exact performance-table entry.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, dtype, latency, cost, a));
+  return af::SUCCESS;
+}
+
+af::Status AddArgReduceRowFinalCost(const std::string &dtype, const std::string &index_dtype, const Expr &a,
+                                    const Expr &updates, Expr &latency, Expr &cost, bool is_min) {
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kSelect, index_dtype, latency, cost, updates + a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(is_min ? kReduceMin : kReduceMax, dtype, latency, cost, a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kEq, dtype, latency, cost, a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kAdd, index_dtype, latency, cost, a));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kReduceMin, index_dtype, latency, cost, a));
+  // Final Eq is masked by validLaneMask even for integer values.
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kMaskAnd, dtype, latency, cost, a + (dtype == kFloat32 ? a : CreateExpr(0))));
+  return af::SUCCESS;
+}
+
+af::Status ArgReduceRowCost(const ascir_param::ArgReduceNodeParams &params, const std::string &dtype, const Expr &a,
+                            const Expr &valid_r, bool aligned, PerfOutputInfo &perf, Expr &result, bool is_min) {
+  const Expr zero = CreateExpr(0);
+  const Expr one = CreateExpr(1);
+  const Expr two = CreateExpr(kPerfFactorTwo);
+  Expr inv_vl;
+  GE_ASSERT_SUCCESS(GetArgReduceRepeatReciprocal(dtype, inv_vl));
+  const std::string index_dtype = dtype == kInt64 ? kInt64 : kInt32;
+  const bool fp32 = dtype == kFloat32;
+  const Expr blocks = af::sym::Ceiling(valid_r * inv_vl);
+  const Expr updates = a * af::sym::Max(blocks - one, zero);
+  const Expr first_partial =
+      SelectArgReduceCost("arg_reduce_row_first_partial", af::sym::Floor(valid_r * inv_vl), zero, a, zero, perf);
+  const Expr partial_loads = a * (blocks - af::sym::Floor(valid_r * inv_vl));
+  const Expr tail = partial_loads - first_partial;
+  Expr latency = zero;
+  Expr cost = zero;
+  // CreateMask<T, ALL> once per VF; no exact performance-table entry.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, dtype, latency, cost, one));
+  // low, per-row rowMaxBcast, and float nanValue once per VF.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDuplicate, dtype, latency, cost, one + a + (fp32 ? one : zero)));
+  // bigReg, per-row bestBlock, and each update's currentIndex.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDuplicate, index_dtype, latency, cost, one + a + updates));
+  // One source pass. ArgmaxLoadBlock's UB Gather is a load, not register Gather2.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLoad, dtype, latency, cost, a * blocks));
+  if (params.is_ar && !aligned) {
+    // Reg::LoadUnAlignPre, separate from LoadUnAlign (kLoad) and CreateMask.
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kPlaceholder, dtype, latency, cost, a * af::sym::Floor(valid_r * inv_vl)));
+  }
+  // validLaneMask once per VF, then only a subsequent partial block needs UpdateMask.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kUpdateMask, dtype, latency, cost, one + tail));
+  // laneIndex once per VF; AR gathers partial blocks, RA gathers every source block.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kArange, index_dtype, latency, cost,
+                                                   one + (params.is_ar ? partial_loads : a * blocks)));
+  if (!params.is_ar) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMuls, index_dtype, latency, cost, a * blocks));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kAdds, index_dtype, latency, cost, a * blocks));
+  }
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(is_min ? kLe : kGe, dtype, latency, cost, updates));
+  // First-block/tail selects, update selects, and float finiteValue/rowMax selects.
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kSelect, dtype, latency, cost, a + tail + updates + (fp32 ? two * a : zero)));
+  // Update's bestBlock and the final candidate; float nanFlag is counted separately below.
+  GE_ASSERT_SUCCESS(AddArgReduceRowFinalCost(dtype, index_dtype, a, updates, latency, cost, is_min));
+  if (fp32) {
+    GE_ASSERT_SUCCESS(AddArgReduceRowFloatCost(dtype, a, updates, latency, cost));
+  }
+  if (params.with_value) {
+    GE_ASSERT_SUCCESS(AddArgReduceRowValueCost(params, dtype, index_dtype, a, latency, cost));
+  }
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kStore, kInt32, latency, cost, a));
+  if (dtype == kInt64) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDeInterleave, kInt32, latency, cost, a));
+  }
+  result = VfPerfUtils::GetVFHeadCost() + latency + cost;
+  result.Simplify();
+  return af::SUCCESS;
+}
+
+// argmax.h: ArgmaxRaFullVectorImpl, ArgmaxRaVectorImpl or ArgMaxMultiRPhase2VectorImpl.
+af::Status AddArgReducePhase2ColumnCost(const std::string &dtype, const std::string &index_dtype, const Expr &a,
+                                        const Expr &inv_vl, const Expr &columns, const Expr &merges, const Expr &r,
+                                        Expr &latency, Expr &cost, bool is_min) {
+  const Expr one = CreateExpr(1);
+  const Expr two = CreateExpr(kPerfFactorTwo);
+  const Expr three = CreateExpr(kPerfFactorThree);
+  const Expr partial_value = (columns - af::sym::Floor(a * inv_vl)) * r;
+  // b64 values use 32 lanes; every int32 index load is partial (32 < 64 lanes).
+  const Expr partial_index = dtype == kInt64 ? columns * r : partial_value;
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLoad, kInt32, latency, cost, columns * r));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kUpdateMask, dtype, latency, cost, partial_value));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kUpdateMask, kInt32, latency, cost, partial_index));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kArange, index_dtype, latency, cost, partial_value));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kArange, kInt32, latency, cost, partial_index));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLt, index_dtype, latency, cost, merges));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kEq, dtype, latency, cost, merges));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(is_min ? kLt : kGt, dtype, latency, cost, merges));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kMaskAnd, dtype, latency, cost, merges * (dtype == kFloat32 ? three : one)));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kMaskOr, dtype, latency, cost, merges * (dtype == kFloat32 ? three : one)));
+  if (dtype == kFloat32) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kNe, dtype, latency, cost, two * merges));
+    // Reg::Not(MaskReg); kNot describes vector data, not mask registers.
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, dtype, latency, cost, merges));
+  }
+  if (dtype == kInt64) {
+    // indexAllMask creation, then one zero32 initialization per VF.
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, kInt32, latency, cost, one));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDuplicate, kInt32, latency, cost, one));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kInterleave, kInt32, latency, cost, columns * r));
+  }
+  return af::SUCCESS;
+}
+
+af::Status AddArgReduceRaColumnCost(const ascir_param::ArgmaxNodeParams &params, const std::string &dtype,
+                                    const std::string &index_dtype, const Expr &a, const Expr &inv_vl,
+                                    const Expr &columns, const Expr &merges, const Expr &history, const Expr &r,
+                                    bool full_columns, bool aligned, Expr &latency, Expr &cost, bool is_min) {
+  const Expr one = CreateExpr(1);
+  const Expr two = CreateExpr(kPerfFactorTwo);
+  const Expr three = CreateExpr(kPerfFactorThree);
+  if (!full_columns) {
+    // ArgmaxLoadRow: a partial column block creates its own mask and offsets on every R load.
+    const Expr partial = (columns - af::sym::Floor(a * inv_vl)) * r;
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kUpdateMask, dtype, latency, cost, partial));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kArange, index_dtype, latency, cost, partial));
+    if (!aligned) {
+      // First R row uses LoadAlign; subsequent full column blocks use LoadUnAlignPre + LoadUnAlign.
+      GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(
+          kPlaceholder, dtype, latency, cost, af::sym::Floor(a * inv_vl) * af::sym::Max(r - one, CreateExpr(0))));
+    }
+  }
+  // A-vector groups have independent destinations and visit R in order.
+  // Only historical accumulation requires MergeMasked.
+  const Expr masked_merges = history;
+  const Expr updates = merges;
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDuplicate, index_dtype, latency, cost, columns + updates));
+  if (params.has_accumulate && full_columns) {
+    // Same VF: two history loads and one MergeMasked, no temporary stores,
+    // Copy/MergeRound VF head, or reload of the current tile result.
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLoad, dtype, latency, cost, history));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLoad, kInt32, latency, cost, history));
+    if (dtype == kInt64) {
+      // ArgmaxLoadIndexBlock widens a masked 32-lane int32 load.
+      GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kUpdateMask, kInt32, latency, cost, history));
+      GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kArange, kInt32, latency, cost, history));
+      GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDuplicate, kInt32, latency, cost, history));
+      GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kInterleave, kInt32, latency, cost, history));
+    }
+  }
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(is_min ? kLe : kGe, dtype, latency, cost, updates));
+  if (full_columns) {
+    // Full-vector indices start local; partial-column indices already include indexBase in Duplicate.
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kAdds, index_dtype, latency, cost, columns));
+  }
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLt, index_dtype, latency, cost, masked_merges));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kEq, dtype, latency, cost, masked_merges));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(is_min ? kLt : kGt, dtype, latency, cost, masked_merges));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMaskAnd, dtype, latency, cost,
+                                                   masked_merges * (dtype == kFloat32 ? three : one)));
+  if (dtype == kFloat32) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kNe, dtype, latency, cost, updates + two * masked_merges));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMaskOr, dtype, latency, cost, updates + three * masked_merges));
+    // Reg::Not(MaskReg) in ArgmaxMergeMasked; no mask-register Not entry.
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, dtype, latency, cost, masked_merges));
+  } else {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMaskOr, dtype, latency, cost, masked_merges));
+  }
+  return af::SUCCESS;
+}
+
+af::Status ArgReduceColumnCost(const ascir_param::ArgReduceNodeParams &params, const std::string &dtype, const Expr &a,
+                               const Expr &r, bool full_columns, bool aligned, Expr &result, bool is_min) {
+  const Expr one = CreateExpr(1);
+  Expr inv_vl;
+  GE_ASSERT_SUCCESS(GetArgReduceRepeatReciprocal(dtype, inv_vl));
+  const Expr columns = af::sym::Ceiling(a * inv_vl);
+  const Expr merges = columns * af::sym::Max(r - one, CreateExpr(0));
+  // firstTile is a runtime loop condition. Charge the steady-state (non-first)
+  // path for every nominal invocation, conservatively overcounting the first.
+  const Expr history = params.has_accumulate && !params.is_phase2 && full_columns ? columns : CreateExpr(0);
+  const std::string index_dtype = dtype == kInt64 ? kInt64 : kInt32;
+  Expr latency = CreateExpr(0);
+  Expr cost = CreateExpr(0);
+  if (params.is_phase2 || !full_columns) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kUpdateMask, dtype, latency, cost, columns));
+  } else {
+    // Full-VL RA: aGroups=4 when A%(4*VL)==0, otherwise 1. Both issue C=A/VL groups of instructions.
+    // Grouping changes head parallelism; no empirical throughput multiplier is applied.
+    // Reg::CreateMask<T, ALL> has no exact performance-table entry.
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, dtype, latency, cost, one));
+  }
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLoad, dtype, latency, cost, columns * r));
+  if (params.is_phase2) {
+    GE_ASSERT_SUCCESS(
+        AddArgReducePhase2ColumnCost(dtype, index_dtype, a, inv_vl, columns, merges, r, latency, cost, is_min));
+  } else {
+    GE_ASSERT_SUCCESS(AddArgReduceRaColumnCost(params, dtype, index_dtype, a, inv_vl, columns, merges, history, r,
+                                               full_columns, aligned, latency, cost, is_min));
+  }
+  // Each ordinary update and historical MergeMasked selects value/index once: merges + history.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kSelect, dtype, latency, cost, merges + history));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kSelect, index_dtype, latency, cost, merges + history));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kStore, kInt32, latency, cost, columns));
+  if (dtype == kInt64) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDeInterleave, kInt32, latency, cost, columns));
+  }
+  if (params.with_value) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kStore, dtype, latency, cost, columns));
+    // Reg::LocalMemBar<VEC_STORE, VEC_STORE>; no exact performance-table entry.
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, dtype, latency, cost, columns));
+  }
+  result = VfPerfUtils::GetVFHeadCost() + latency + cost;
+  result.Simplify();
+  return af::SUCCESS;
+}
+af::Status ArgReduceRaCost(const ascir_param::ArgReduceNodeParams &params, const std::string &dtype, const Expr &a,
+                           const Expr &valid, const Expr &physical_a, PerfOutputInfo &perf_res, Expr &result,
+                           bool is_min) {
+  const Expr zero = CreateExpr(0);
+  const Expr vl = kRptEleMap.at(dtype);
+  GE_ASSERT_TRUE(vl != zero, "Argmax repeat elements must be nonzero.");
+  Expr vector_cost;
+  Expr partial_aligned_cost;
+  Expr partial_unaligned_cost;
+  Expr gather_cost;
+  GE_ASSERT_SUCCESS(ArgReduceColumnCost(params, dtype, a, valid, true, true, vector_cost, is_min));
+  GE_ASSERT_SUCCESS(ArgReduceColumnCost(params, dtype, a, valid, false, true, partial_aligned_cost, is_min));
+  GE_ASSERT_SUCCESS(ArgReduceColumnCost(params, dtype, a, valid, false, false, partial_unaligned_cost, is_min));
+  GE_ASSERT_SUCCESS(ArgReduceRowCost(params, dtype, a, valid, false, perf_res, gather_cost, is_min));
+  const Expr partial_cost = SelectArgReduceCost("arg_reduce_ra_aligned",
+                                                af::sym::Mod(a, CreateExpr(kBlockBytes) / kDataTypeSizeMap.at(dtype)),
+                                                zero, partial_aligned_cost, partial_unaligned_cost, perf_res);
+  // Non-full RA: A>=VL || (validR<=VL && validR<=2*A), exactly as both API entry points.
+  const Expr short_wide = SelectArgReduceCost("arg_reduce_ra_short_wide", valid, CreateExpr(kPerfFactorTwo) * a,
+                                              partial_cost, gather_cost, perf_res, CondType::K_LE);
+  const Expr short_r =
+      SelectArgReduceCost("arg_reduce_ra_short_r", valid, vl, short_wide, gather_cost, perf_res, CondType::K_LE);
+  const Expr nonfull =
+      SelectArgReduceCost("arg_reduce_ra_partial_columns", vl, a, partial_cost, short_r, perf_res, CondType::K_LE);
+  result = SelectArgReduceCost("arg_reduce_ra_full_columns", af::sym::Mod(a, vl), zero, vector_cost, nonfull, perf_res);
+  if (params.valid_a != zero) {
+    // Gather strides use physical_a; output and instruction counts use logical a.
+    result = SelectArgReduceCost("arg_reduce_ra_valid_a", a, physical_a, result, gather_cost, perf_res);
+  }
+  return af::SUCCESS;
+}
+}  // namespace
+
+af::Status ArgReducePerf(const std::vector<TensorShapeInfo> &input_shapes,
+                         [[maybe_unused]] const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
+                         PerfOutputInfo &perf_res, bool is_min) {
+  const auto &params = node.argmax_node_params;
+  GE_ASSERT_TRUE(params.valid && params.src_shape.size() == (params.is_phase2 ? kPhase2ShapeRank : kReduceDimPairCount),
+                 "Missing Argmax codegen params, node[%s].", node.name.c_str());
+  GE_ASSERT_TRUE(!input_shapes.empty());
+  const auto &dtype = input_shapes[0].data_type;
+  GE_ASSERT_TRUE(dtype == kFloat32 || dtype == kInt32 || dtype == kInt64);
+  const Expr zero = CreateExpr(0);
+  const Expr bound = params.is_phase2 ? af::sym::Min(params.src_shape[1], params.src_shape[kPhase2ColumnsDimIndex])
+                                      : params.src_shape[params.is_ar ? 1U : 0U];
+  const Expr valid = SelectArgReduceCost("arg_reduce_valid_extent", params.valid_extent, zero, bound,
+                                         af::sym::Min(params.valid_extent, bound), perf_res);
+  const Expr physical_a = params.src_shape[params.is_ar ? 0U : 1U];
+  Expr a = params.is_phase2 ? valid : physical_a;
+  if (!params.is_phase2 && params.valid_a != zero) {
+    a = SelectArgReduceCost("arg_reduce_valid_a", params.valid_a, zero, physical_a,
+                            af::sym::Min(params.valid_a, physical_a), perf_res);
+  }
+  const Expr r = params.is_phase2 ? params.src_shape[0] : valid;
+  Expr result;
+  if (params.is_phase2) {
+    GE_ASSERT_SUCCESS(ArgReduceColumnCost(params, dtype, a, r, false, true, result, is_min));
+  } else if (params.is_ar) {
+    Expr aligned_cost;
+    Expr unaligned_cost;
+    GE_ASSERT_SUCCESS(ArgReduceRowCost(params, dtype, a, valid, true, perf_res, aligned_cost, is_min));
+    GE_ASSERT_SUCCESS(ArgReduceRowCost(params, dtype, a, valid, false, perf_res, unaligned_cost, is_min));
+    result = SelectArgReduceCost("arg_reduce_ar_aligned",
+                                 af::sym::Mod(bound, CreateExpr(kBlockBytes) / kDataTypeSizeMap.at(dtype)), zero,
+                                 aligned_cost, unaligned_cost, perf_res);
+  } else {
+    GE_ASSERT_SUCCESS(ArgReduceRaCost(params, dtype, a, valid, physical_a, perf_res, result, is_min));
+  }
+  // One core VF call. Outer invocation counts belong to ATT's caller.
+  // Full-VL RA Accumulate includes history loads/merge in this VF. Layout fallback
+  // Copy/MergeRound and frontend index CastExtend are still NOT included.
+  // Nominal tile extents approximate the last outer-loop tail; no additional execution multiplier is applied here.
+  // kLoad/placeholder table entries are currently zero; this is instruction accounting, not calibrated memory timing.
+  result.Simplify();
+  perf_res.pipe_res[PipeType::AIV_VEC] = result;
   return af::SUCCESS;
 }
 
 af::Status ArgmaxApi(const std::vector<TensorShapeInfo> &input_shapes,
                      const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
                      PerfOutputInfo &perf_res) {
-  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+  return ArgReducePerf(input_shapes, output_shapes, node, perf_res, false);
 }
 
 af::Status ArgMaxMultiRPhase1Api(const std::vector<TensorShapeInfo> &input_shapes,
                                  const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
                                  PerfOutputInfo &perf_res) {
-  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+  return ArgReducePerf(input_shapes, output_shapes, node, perf_res, false);
 }
 
 af::Status ArgMaxMultiRPhase2Api(const std::vector<TensorShapeInfo> &input_shapes,
                                  const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
                                  PerfOutputInfo &perf_res) {
-  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+  return ArgReducePerf(input_shapes, output_shapes, node, perf_res, false);
 }
 
 af::Status ArgmaxWithValueApi(const std::vector<TensorShapeInfo> &input_shapes,
                               const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
                               PerfOutputInfo &perf_res) {
-  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+  return ArgReducePerf(input_shapes, output_shapes, node, perf_res, false);
 }
 
 af::Status ArgMaxMultiRPhase2WithValueApi(const std::vector<TensorShapeInfo> &input_shapes,
                                           const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
                                           PerfOutputInfo &perf_res) {
-  return ArgmaxPerf(input_shapes, output_shapes, node, perf_res);
+  return ArgReducePerf(input_shapes, output_shapes, node, perf_res, false);
+}
+
+af::Status ArgminApi(const std::vector<TensorShapeInfo> &input_shapes,
+                     const std::vector<TensorShapeInfo> &output_shapes, const NodeInfo &node,
+                     PerfOutputInfo &perf_res) {
+  return ArgReducePerf(input_shapes, output_shapes, node, perf_res, true);
 }
 }  // namespace ascir_reduce_v2
 }  // namespace att

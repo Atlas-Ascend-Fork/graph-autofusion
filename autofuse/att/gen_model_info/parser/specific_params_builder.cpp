@@ -10,10 +10,13 @@
 
 #include "specific_params_builder.h"
 
+#include <array>
+
 #include "ascir_node_param/ascir_node_param.h"
 #include "ascir_node_param/ascir_param_builder.h"
 #include "base/att_const_values.h"
 #include "common/checker.h"
+#include "arg_reduce_utils.h"
 
 namespace att {
 namespace {
@@ -73,6 +76,61 @@ af::Status FillTransposeParams(const ascir_param::AscirNodeParams &params, NodeI
   return af::SUCCESS;
 }
 
+af::Status FillArgReduceParams(const ascir_param::AscirNodeParams &params, NodeInfo &node_info) {
+  const auto *argmax = ascir_param::GetSpecificParams<ascir_param::ArgReduceNodeParams>(params);
+  GE_ASSERT_NOTNULL(argmax, "Arg-reduce specific params are null, node[%s].", node_info.name.c_str());
+  node_info.argmax_node_params = *argmax;
+  return af::SUCCESS;
+}
+
+bool IsVectorFuncNodeType(const std::string &node_type) {
+  return node_type == kVectorFunc;
+}
+
+bool IsCastNodeType(const std::string &node_type) {
+  return node_type == kCast || node_type == kCeil2Int;
+}
+
+bool IsBroadcastNodeType(const std::string &node_type) {
+  return node_type == kBroadcast;
+}
+
+bool IsCompareNodeType(const std::string &node_type) {
+  return node_type == kGe || node_type == kEq || node_type == kNe || node_type == kGt || node_type == kLe ||
+         node_type == kLt;
+}
+
+bool IsWhereNodeType(const std::string &node_type) {
+  return node_type == kWhere || node_type == kSelect;
+}
+
+bool IsUnaryBitWidthChangeNodeType(const std::string &node_type) {
+  return node_type == kIsnan || node_type == kIsFinite || node_type == kIsInf;
+}
+
+bool IsTransposeNodeType(const std::string &node_type) {
+  return node_type == kTranspose;
+}
+
+using FillParamsFunc = af::Status (*)(const ascir_param::AscirNodeParams &params, NodeInfo &node_info);
+
+struct SpecificParamsFiller {
+  bool (*matches)(const std::string &node_type);
+  FillParamsFunc fill;
+};
+
+constexpr std::array<SpecificParamsFiller, 9U> kSpecificParamsFillers = {{
+    {ascgen_utils::IsArgReduceType, FillArgReduceParams},
+    {ascir_param::IsReduceParamSupported, FillReduceParams},
+    {IsVectorFuncNodeType, FillVectorFuncParams},
+    {IsCastNodeType, FillCastParams},
+    {IsBroadcastNodeType, FillBroadcastParams},
+    {IsCompareNodeType, FillCompareParams},
+    {IsWhereNodeType, FillWhereParams},
+    {IsUnaryBitWidthChangeNodeType, FillUnaryBitWidthChangeParams},
+    {IsTransposeNodeType, FillTransposeParams},
+}};
+
 }  // namespace
 
 af::Status FillSpecificParams(const af::AscNodePtr &ge_node, NodeInfo &node_info) {
@@ -86,30 +144,10 @@ af::Status FillSpecificParams(const af::AscNodePtr &ge_node, NodeInfo &node_info
   }
   GE_ASSERT_TRUE(params->status == ascir_param::ParamBuildStatus::kBuilt, "Build ascir node params failed, node[%s].",
                  node_info.name.c_str());
-  if (ascir_param::IsReduceParamSupported(node_info.node_type)) {
-    return FillReduceParams(*params, node_info);
-  }
-  if (node_info.node_type == kVectorFunc) {
-    return FillVectorFuncParams(*params, node_info);
-  }
-  if (node_info.node_type == kCast || node_info.node_type == kCeil2Int) {
-    return FillCastParams(*params, node_info);
-  }
-  if (node_info.node_type == kBroadcast) {
-    return FillBroadcastParams(*params, node_info);
-  }
-  if (node_info.node_type == kGe || node_info.node_type == kEq || node_info.node_type == kNe ||
-      node_info.node_type == kGt || node_info.node_type == kLe || node_info.node_type == kLt) {
-    return FillCompareParams(*params, node_info);
-  }
-  if (node_info.node_type == kWhere || node_info.node_type == kSelect) {
-    return FillWhereParams(*params, node_info);
-  }
-  if (node_info.node_type == kIsnan || node_info.node_type == kIsFinite || node_info.node_type == kIsInf) {
-    return FillUnaryBitWidthChangeParams(*params, node_info);
-  }
-  if (node_info.node_type == kTranspose) {
-    return FillTransposeParams(*params, node_info);
+  for (const auto &filler : kSpecificParamsFillers) {
+    if (filler.matches(node_info.node_type)) {
+      return filler.fill(*params, node_info);
+    }
   }
   return af::SUCCESS;
 }

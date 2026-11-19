@@ -1647,6 +1647,50 @@ def ArgmaxWithValue(
     return op_instance.value, op_instance.index
 
 
+def Argmin(  # noqa: N802 - public ASCIR API uses operator names
+    owner_graph: ascir.HintGraph,
+    x: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+    dtype: ascir.dtypes = ascir.dtypes.int64,
+) -> ascir.OpsOperatorOutput:
+    name = _generate_op_name(owner_graph, "argmin")
+    op_instance = ascir.ops.Argmin(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op_instance)
+    op_instance.attr.sched.axis = axis
+    op_instance.x = x
+    op_instance.y.dtype = dtype
+    _infer_or_set_view(op_instance.y, axis, size, stride)
+    op_instance.infer_dtype()
+    return op_instance.y
+
+
+def ArgminWithValue(  # noqa: N802 - public ASCIR API uses operator names
+    owner_graph: ascir.HintGraph,
+    x: ascir.OpsOperatorOutput,
+    *,
+    axis: List[ascir.Axis],
+    size: Optional[List[ascir.SizeExpr]] = None,
+    stride: Optional[List[ascir.SizeExpr]] = None,
+    dtype: ascir.dtypes = ascir.dtypes.int64,
+) -> Tuple[ascir.OpsOperatorOutput, ascir.OpsOperatorOutput]:
+    name = _generate_op_name(owner_graph, "argminwithvalue")
+    op_instance = ascir.ops.ArgminWithValue(name)
+    meta = _get_metadata(owner_graph)
+    meta.ops.append(op_instance)
+    op_instance.attr.sched.axis = axis
+    op_instance.x = x
+    op_instance.value.dtype = x.dtype
+    op_instance.index.dtype = dtype
+    _infer_or_set_view(op_instance.value, axis, size, stride)
+    _infer_or_set_view(op_instance.index, axis, size, stride)
+    op_instance.infer_dtype()
+    return op_instance.value, op_instance.index
+
+
 def Softmax(
     owner_graph: ascir.HintGraph,
     x: ascir.OpsOperatorOutput,

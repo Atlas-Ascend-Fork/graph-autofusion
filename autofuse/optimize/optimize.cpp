@@ -29,6 +29,7 @@
 #include "indirect_load_utils.h"
 #include "schedule_utils.h"
 #include "common_utils.h"
+#include "arg_reduce_utils.h"
 #include "v35/optimize/partition/vector_func_partitioner.h"
 #include "node_utils.h"
 #include "optimize/graph_pass/pass_runner_handler.h"
@@ -59,8 +60,7 @@ bool CanAlignRCoreWorkspace(const ScheduleTask &schedule_task) {
       if (node == nullptr) {
         continue;
       }
-      if (IsOps<Argmax>(node) || IsOps<ArgmaxWithValue>(node) || IsOps<ArgMaxMultiRPhase1>(node) ||
-          IsOps<ArgMaxMultiRPhase2>(node) || IsOps<ArgMaxMultiRPhase2WithValue>(node)) {
+      if (ascgen_utils::IsArgReduceType(node->GetType())) {
         return true;
       }
     }

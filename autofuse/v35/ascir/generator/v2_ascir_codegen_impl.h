@@ -15,6 +15,7 @@
 #include <set>
 #include "ascendc_ir.h"
 #include "indirect_load_utils.h"
+#include "arg_reduce_utils.h"
 #include "reg_func/default_reg_func.h"
 #include "reg_func/default_reg_func_v2.h"
 #include "symbolizer/symbolic_utils.h"
@@ -6103,19 +6104,24 @@ class UnsupportedAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
 };
 
-class ArgmaxAscIrCodegenImplV2 : public AscIrCodegenV2 {
+class ArgReduceAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcReduceTmpSizeV2(node);
   }
   [[nodiscard]] std::string GetApiCallName() const override {
-    return "RegArgmaxApiCall";
+    return call_name_;
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "Argmax";
+    return api_name_;
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
-    return {"argmax_reg_base.h", "cast_reg_base.h"};
+    return {"arg_reduce_common_reg_base.h",
+            "arg_reduce_core_reg_base.h",
+            "arg_reduce_merge_reg_base.h",
+            "arg_reduce_reg_base.h",
+            ascgen_utils::IsArgMinType(api_name_) ? "argmin_reg_base.h" : "argmax_reg_base.h",
+            "cast_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -6129,118 +6135,63 @@ class ArgmaxAscIrCodegenImplV2 : public AscIrCodegenV2 {
                    node.GetNamePtr());
     return true;
   }
+
+ protected:
+  ArgReduceAscIrCodegenImplV2(const char *api_name, const char *call_name)
+      : api_name_(api_name), call_name_(call_name) {}
+
+ private:
+  // Registry constructors below supply string literals with static lifetime.
+  const char *api_name_;
+  const char *call_name_;
 };
 
-class ArgMaxMultiRPhase1AscIrCodegenImplV2 : public AscIrCodegenV2 {
+class ArgmaxAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
  public:
-  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
-    return CalcReduceTmpSizeV2(node);
-  }
-  [[nodiscard]] std::string GetApiCallName() const override {
-    return "RegArgMaxPhase1ApiCall";
-  }
-  [[nodiscard]] std::string GetApiName() const override {
-    return "ArgMaxMultiRPhase1";
-  }
-  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
-    return {"argmax_reg_base.h", "cast_reg_base.h"};
-  }
-  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
-    return {
-        "adv_api/reduce/reduce.h",
-        "basic_api/kernel_operator_vec_binary_intf.h",
-        "basic_api/reg_compute/kernel_reg_compute_intf.h",
-    };
-  }
-  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
-    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
-                   node.GetNamePtr());
-    return true;
-  }
+  ArgmaxAscIrCodegenImplV2() : ArgReduceAscIrCodegenImplV2("Argmax", "RegArgmaxApiCall") {}
+};
+class ArgMaxMultiRPhase1AscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMaxMultiRPhase1AscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMaxMultiRPhase1", "RegArgMaxPhase1ApiCall") {}
+};
+class ArgMaxMultiRPhase2AscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMaxMultiRPhase2AscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMaxMultiRPhase2", "RegArgMaxPhase2ApiCall") {}
+};
+class ArgmaxWithValueAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgmaxWithValueAscIrCodegenImplV2() : ArgReduceAscIrCodegenImplV2("ArgmaxWithValue", "RegArgmaxWithValueApiCall") {}
+};
+class ArgMaxMultiRPhase2WithValueAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMaxMultiRPhase2WithValueAscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMaxMultiRPhase2WithValue", "RegArgMaxPhase2WithValueApiCall") {}
 };
 
-class ArgMaxMultiRPhase2AscIrCodegenImplV2 : public AscIrCodegenV2 {
+class ArgminAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
  public:
-  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
-    return CalcReduceTmpSizeV2(node);
-  }
-  [[nodiscard]] std::string GetApiCallName() const override {
-    return "RegArgMaxPhase2ApiCall";
-  }
-  [[nodiscard]] std::string GetApiName() const override {
-    return "ArgMaxMultiRPhase2";
-  }
-  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
-    return {"argmax_reg_base.h", "cast_reg_base.h"};
-  }
-  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
-    return {
-        "adv_api/reduce/reduce.h",
-        "basic_api/kernel_operator_vec_binary_intf.h",
-        "basic_api/reg_compute/kernel_reg_compute_intf.h",
-    };
-  }
-  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
-    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
-                   node.GetNamePtr());
-    return true;
-  }
+  ArgminAscIrCodegenImplV2() : ArgReduceAscIrCodegenImplV2("Argmin", "RegArgminApiCall") {}
 };
-
-class ArgmaxWithValueAscIrCodegenImplV2 : public AscIrCodegenV2 {
+class ArgMinMultiRPhase1AscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
  public:
-  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
-    return CalcReduceTmpSizeV2(node);
-  }
-  [[nodiscard]] std::string GetApiCallName() const override {
-    return "RegArgmaxWithValueApiCall";
-  }
-  [[nodiscard]] std::string GetApiName() const override {
-    return "ArgmaxWithValue";
-  }
-  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
-    return {"argmax_reg_base.h", "cast_reg_base.h"};
-  }
-  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
-    return {
-        "adv_api/reduce/reduce.h",
-        "basic_api/kernel_operator_vec_binary_intf.h",
-        "basic_api/reg_compute/kernel_reg_compute_intf.h",
-    };
-  }
-  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
-    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
-                   node.GetNamePtr());
-    return true;
-  }
+  ArgMinMultiRPhase1AscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMinMultiRPhase1", "RegArgMinPhase1ApiCall") {}
 };
-
-class ArgMaxMultiRPhase2WithValueAscIrCodegenImplV2 : public AscIrCodegenV2 {
+class ArgMinMultiRPhase2AscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
  public:
-  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
-    return CalcReduceTmpSizeV2(node);
-  }
-  [[nodiscard]] std::string GetApiCallName() const override {
-    return "RegArgMaxPhase2WithValueApiCall";
-  }
-  [[nodiscard]] std::string GetApiName() const override {
-    return "ArgMaxMultiRPhase2WithValue";
-  }
-  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
-    return {"argmax_reg_base.h", "cast_reg_base.h"};
-  }
-  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
-    return {
-        "adv_api/reduce/reduce.h",
-        "basic_api/kernel_operator_vec_binary_intf.h",
-        "basic_api/reg_compute/kernel_reg_compute_intf.h",
-    };
-  }
-  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
-    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
-                   node.GetNamePtr());
-    return true;
-  }
+  ArgMinMultiRPhase2AscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMinMultiRPhase2", "RegArgMinPhase2ApiCall") {}
+};
+class ArgminWithValueAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgminWithValueAscIrCodegenImplV2() : ArgReduceAscIrCodegenImplV2("ArgminWithValue", "RegArgminWithValueApiCall") {}
+};
+class ArgMinMultiRPhase2WithValueAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMinMultiRPhase2WithValueAscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMinMultiRPhase2WithValue", "RegArgMinPhase2WithValueApiCall") {}
 };
 }  // namespace ascir
 }  // namespace af

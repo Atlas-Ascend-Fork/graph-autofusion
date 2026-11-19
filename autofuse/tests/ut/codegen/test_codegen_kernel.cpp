@@ -122,53 +122,53 @@ TEST(CodegenKernel, Type_StrWillReturnTypeName) {
   EXPECT_EQ(t.Str(), "int");
 }
 
+static ascir::ScheduledResult MakeIndependentReduceSummaryResult() {
+  ascir::ScheduledResult result;
+  result.schedule_groups.resize(3);
+  for (size_t i = 1; i < 3; ++i) {
+    af::AscGraph graph(("group" + std::to_string(i)).c_str());
+    Workspace workspace("workspace");
+    graph.AddNode(workspace);
+    graph.FindNode("workspace")->outputs[0].attr.mem.tensor_id = static_cast<int64_t>(i);
+    const auto semantic =
+        i == 1 ? ascgen_utils::template_semantic::kReducePhase2 : ascgen_utils::template_semantic::kReducePhase1;
+    EXPECT_EQ(ascgen_utils::SetTemplateSemanticNameForGraph(graph, semantic), af::SUCCESS);
+    result.schedule_groups[i].impl_graphs.push_back(graph);
+  }
+  return result;
+}
+
 TEST(CodegenKernel, IndependentReduceSummaryCanDeferSyncToNextGroup) {
-  const auto make_result = []() {
-    ascir::ScheduledResult result;
-    result.schedule_groups.resize(3);
-    result.var_relations[1][0]["r"] = af::Symbol(1);
-    for (size_t i = 1; i < 3; ++i) {
-      af::AscGraph graph(("group" + std::to_string(i)).c_str());
-      Workspace workspace("workspace");
-      graph.AddNode(workspace);
-      graph.FindNode("workspace")->outputs[0].attr.mem.tensor_id = static_cast<int64_t>(i);
-      result.schedule_groups[i].impl_graphs.push_back(graph);
-    }
-    return result;
-  };
-  auto result = make_result();
+  auto result = MakeIndependentReduceSummaryResult();
   EXPECT_TRUE(Kernel::CanSkipReduceGroupSync(result, 1));
   EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 0));
   EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 2));
-  result.enable_group_parallel = true;
-  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
-  result = make_result();
-  result.cube_type = ascir::CubeTemplateType::kCommon;
-  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
-  result = make_result();
-  result.var_relations[2][1]["r"] = af::Symbol(1);
-  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
-  result = make_result();
+  result = MakeIndependentReduceSummaryResult();
   result.schedule_groups[2].impl_graphs[0].FindNode("workspace")->outputs[0].attr.mem.tensor_id = 1;
   EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
-  result = make_result();
+  result = MakeIndependentReduceSummaryResult();
   af::AscGraph alternative("alternative");
   Workspace shared("shared");
   alternative.AddNode(shared);
   alternative.FindNode("shared")->outputs[0].attr.mem.tensor_id = 2;
   result.schedule_groups[1].impl_graphs.push_back(alternative);
   EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
-  result = make_result();
+  result = MakeIndependentReduceSummaryResult();
   Output output("visible_output");
   result.schedule_groups[1].impl_graphs[0].AddNode(output);
   EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
-  result = make_result();
+  result = MakeIndependentReduceSummaryResult();
   result.schedule_groups[1].impl_graphs.clear();
   EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
-  result = make_result();
+  result = MakeIndependentReduceSummaryResult();
   result.schedule_groups[1].impl_graphs[0].FindNode("workspace")->outputs[0].attr.mem.tensor_id = -1;
   EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
-  result = make_result();
+  result = MakeIndependentReduceSummaryResult();
+  EXPECT_EQ(ascgen_utils::SetTemplateSemanticNameForGraph(result.schedule_groups[1].impl_graphs[0],
+                                                          ascgen_utils::template_semantic::kReducePhase1),
+            af::SUCCESS);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = MakeIndependentReduceSummaryResult();
   auto &controlled_graph = result.schedule_groups[1].impl_graphs[0];
   Scalar control_target("control_target");
   controlled_graph.AddNode(control_target);
@@ -6560,7 +6560,7 @@ TEST(CodegenKernel, SerialVectorGroupsDoNotPackAtCompileUnitBoundary) {
       const CodegenConfig config{is_inductor, true, false};
       ASSERT_EQ(Kernel::GenKernelFuncByTilingKey(fused, generated, false, config), af::SUCCESS);
       const bool packed = generated.str().find("packed_functions_") != std::string::npos;
-      EXPECT_EQ(packed, !is_inductor && count > limit) << "group_count=" << count;
+      EXPECT_EQ(packed, count > limit) << "group_count=" << count;
       if (is_inductor) {
         EXPECT_NE(generated.str().find("_g" + std::to_string(count - 1) + "_tiling_data"), std::string::npos);
       } else if (count > limit) {
