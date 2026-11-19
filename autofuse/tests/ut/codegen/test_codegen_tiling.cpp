@@ -7488,14 +7488,61 @@ TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldExportPrivateContextAb
   EXPECT_NE(result.tiling.find("PgoConfig::Instance().batch_callback = batch_callback"), std::string::npos);
 }
 
-TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldRejectDynamicShape) {
+TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldKeepDynamicShapeWithoutPgo) {
   ScopedAutofusePgoFlag pgo_flag(true);
-  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0"), af::Symbol("s1")});
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol("s0")}, af::Symbol("s0"));
+  ASSERT_FALSE(ascgen_utils::IsStaticSchedResult(fused_schedule_result));
   codegen::Codegen codegen(codegen::CodegenOptions{});
-  codegen::CodegenResult result;
+  codegen::Codegen non_pgo_codegen(codegen);
+  non_pgo_codegen.tiling_lib_.DisableInductorPgo();
 
-  EXPECT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), af::FAILED);
-  EXPECT_EQ(result.tiling.find("AUTOFUSE_SPLIT_FILE_BEGIN: PgoRunner"), std::string::npos);
+  for (const bool launch_decouple : {false, true}) {
+    SCOPED_TRACE(launch_decouple);
+    codegen::CodegenResult result;
+    ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, result, launch_decouple), af::SUCCESS);
+    EXPECT_TRUE(GetSplitContent(result.tiling, "PgoRunner").empty());
+    EXPECT_TRUE(GetSplitContent(result.tiling, "PgoDeviceSource").empty());
+    EXPECT_NE(result.tiling.find("GenerateTopnSolutions"), std::string::npos);
+    EXPECT_EQ(result.tiling.find("SetTopnPgoContext"), std::string::npos);
+    codegen::CodegenResult non_pgo_result;
+    ASSERT_EQ(non_pgo_codegen.GenerateForInductor(fused_schedule_result, non_pgo_result, launch_decouple), af::SUCCESS);
+    EXPECT_EQ(result.tiling_data, non_pgo_result.tiling_data);
+    EXPECT_EQ(result.tiling, non_pgo_result.tiling);
+    EXPECT_EQ(result.kernel, non_pgo_result.kernel);
+    EXPECT_TRUE(codegen.tiling_lib_.IsInductorPgoEnabled());
+  }
+}
+
+TEST_F(TestCodegenTiling, GenerateTilingForInductorDynamicShouldPreservePgoForFollowingStaticOnSameObject) {
+  ScopedAutofusePgoFlag pgo_flag(true);
+  auto dynamic_result = this->GenBasicFusedScheduleResult({af::Symbol("s0")}, af::Symbol("s0"));
+  auto static_result = this->GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
+  static_result.node_idx_to_scheduled_results[0].resize(1);
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  const auto original_codegen_func = codegen.tiling_lib_.codegen_func_;
+
+  for (size_t iteration = 0U; iteration < 2U; ++iteration) {
+    SCOPED_TRACE(iteration);
+    codegen.tiling_lib_.codegen_func_ = [](const std::string &op_name,
+                                           const ascir::FusedScheduledResult &scheduled_result,
+                                           std::map<std::string, std::string> &options,
+                                           std::map<std::string, std::string> &files, bool is_inductor_scene) {
+      EXPECT_TRUE(is_inductor_scene);
+      EXPECT_EQ(options[att::kInternalEnableAutofusePgo], "false");
+      return att::GenTilingImplAutoFuseV3(op_name, scheduled_result, options, files, is_inductor_scene);
+    };
+    std::map<std::string, std::string> files;
+    ASSERT_EQ(codegen.GenerateTilingForInductor(dynamic_result, files), af::SUCCESS);
+    EXPECT_EQ(files.count(codegen::kPgoRunnerIdentify), 0U);
+    EXPECT_TRUE(codegen.tiling_lib_.IsInductorPgoEnabled());
+
+    codegen.tiling_lib_.codegen_func_ = original_codegen_func;
+    codegen::CodegenResult static_code;
+    ASSERT_EQ(codegen.GenerateForInductor(static_result, static_code), af::SUCCESS);
+    AssertSchemeAContract(static_code);
+    EXPECT_TRUE(codegen.tiling_lib_.IsInductorPgoEnabled());
+    EXPECT_STREQ(std::getenv("AUTOFUSE_FLAGS"), "--autofuse_enable_pgo=true");
+  }
 }
 
 TEST_F(TestCodegenTiling, GenerateForInductorPgoTrueShouldAcceptStaticMultiGroup) {
