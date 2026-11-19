@@ -27,6 +27,7 @@ add_executable(test_ascir_st
     reg_func/test_reg_func_unsupported.cpp
     reg_func_v2/test_reg_func_sin_v2.cpp
     code_dumper/code_dumper_unittest.cc
+    ascir_utils/ascir_utils_st.cpp
 )
 
 target_include_directories(test_ascir_st PRIVATE
