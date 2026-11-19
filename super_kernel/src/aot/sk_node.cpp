@@ -101,33 +101,40 @@ const char *FusionFailReasonDetail(FusionFailReason reason) {
   }
 }
 
+bool AppendKernelArgsToLog(std::ostream &log, const aclmdlRIKernelTaskParams &kernelParams, bool includePlaceholders) {
+  const auto argsType = static_cast<uint32_t>(kernelParams.argsType);
+  log << ", argsType=" << argsType;
+  switch (argsType) {
+    case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
+      log << ", hostArgs=" << kernelParams.hostBuffer.hostArgs
+          << ", hostArgsSize=" << kernelParams.hostBuffer.hostArgsSize;
+      if (includePlaceholders) {
+        log << ", placeHolderArray=" << kernelParams.hostBuffer.placeHolderArray
+            << ", placeHolderNum=" << kernelParams.hostBuffer.placeHolderNum;
+      }
+      return true;
+    case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
+      log << ", deviceArgs=" << kernelParams.deviceBuffer.deviceArgs
+          << ", deviceArgsSize=" << kernelParams.deviceBuffer.deviceArgsSize;
+      return true;
+    case ACL_RT_KERNEL_ARGS_ARRAY:
+      log << ", argsArray=" << kernelParams.argsArray;
+      return true;
+    default:
+      return false;
+  }
+}
+
 void LogKernelArgsComparison(uint64_t nodeId, const aclmdlRIKernelTaskParams &kernelParams, void *copiedDevArgs,
                              size_t copiedDevArgsSize) {
-  switch (static_cast<uint32_t>(kernelParams.argsType)) {
-    case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
-      SK_LOGI(
-          "Kernel args comparison: nodeId=%lu, argsType=%u, hostArgs=%p, hostArgsSize=%zu, copiedDevArgs=%p, "
-          "copiedDevArgsSize=%zu",
-          nodeId, static_cast<uint32_t>(kernelParams.argsType), kernelParams.hostBuffer.hostArgs,
-          kernelParams.hostBuffer.hostArgsSize, copiedDevArgs, copiedDevArgsSize);
-      break;
-    case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
-      SK_LOGI(
-          "Kernel args comparison: nodeId=%lu, argsType=%u, deviceArgs=%p, deviceArgsSize=%zu, copiedDevArgs=%p, "
-          "copiedDevArgsSize=%zu",
-          nodeId, static_cast<uint32_t>(kernelParams.argsType), kernelParams.deviceBuffer.deviceArgs,
-          kernelParams.deviceBuffer.deviceArgsSize, copiedDevArgs, copiedDevArgsSize);
-      break;
-    case ACL_RT_KERNEL_ARGS_ARRAY:
-      SK_LOGI("Kernel args comparison: nodeId=%lu, argsType=%u, argsArray=%p, copiedDevArgs=%p, copiedDevArgsSize=%zu",
-              nodeId, static_cast<uint32_t>(kernelParams.argsType), static_cast<void *>(kernelParams.argsArray),
-              copiedDevArgs, copiedDevArgsSize);
-      break;
-    default:
-      SK_LOGE("Unsupported kernel argsType in args comparison: nodeId=%lu, argsType=%u", nodeId,
-              static_cast<uint32_t>(kernelParams.argsType));
-      break;
+  std::ostringstream oss;
+  if (!AppendKernelArgsToLog(oss, kernelParams, false)) {
+    SK_LOGE("Unsupported kernel argsType in args comparison: nodeId=%lu, argsType=%u", nodeId,
+            static_cast<uint32_t>(kernelParams.argsType));
+    return;
   }
+  SK_LOGI("Kernel args comparison: nodeId=%lu%s, copiedDevArgs=%p, copiedDevArgsSize=%zu", nodeId, oss.str().c_str(),
+          copiedDevArgs, copiedDevArgsSize);
 }
 
 }  // namespace
@@ -870,26 +877,11 @@ void SuperKernelBaseNode::LogNodeUpdateResult(const aclmdlRITaskParams *paramsTo
       const auto &kernelParams = paramsToLog->kernelTaskParams;
       oss << ", opInfoPtr=" << paramsToLog->opInfoPtr << ", opInfoSize=" << paramsToLog->opInfoSize
           << ", funcHandle=" << kernelParams.funcHandle
-          << ", numBlocks=" << static_cast<uint32_t>(kernelParams.numBlocks)
-          << ", argsType=" << static_cast<uint32_t>(kernelParams.argsType);
-      switch (static_cast<uint32_t>(kernelParams.argsType)) {
-        case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
-          oss << ", hostArgs=" << kernelParams.hostBuffer.hostArgs
-              << ", hostArgsSize=" << kernelParams.hostBuffer.hostArgsSize
-              << ", placeHolderArray=" << kernelParams.hostBuffer.placeHolderArray
-              << ", placeHolderNum=" << kernelParams.hostBuffer.placeHolderNum;
-          break;
-        case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
-          oss << ", deviceArgs=" << kernelParams.deviceBuffer.deviceArgs
-              << ", deviceArgsSize=" << kernelParams.deviceBuffer.deviceArgsSize;
-          break;
-        case ACL_RT_KERNEL_ARGS_ARRAY:
-          oss << ", argsArray=" << kernelParams.argsArray;
-          break;
-        default:
-          SK_LOGE("Unsupported kernel argsType in node update result: nodeId=%lu, argsType=%u", nodeId,
-                  static_cast<uint32_t>(kernelParams.argsType));
-          return;
+          << ", numBlocks=" << static_cast<uint32_t>(kernelParams.numBlocks);
+      if (!AppendKernelArgsToLog(oss, kernelParams, true)) {
+        SK_LOGE("Unsupported kernel argsType in node update result: nodeId=%lu, argsType=%u", nodeId,
+                static_cast<uint32_t>(kernelParams.argsType));
+        return;
       }
       break;
     }
