@@ -163,6 +163,137 @@ std::vector<std::vector<int64_t>> MergeContinuousPairs(const std::vector<std::pa
   return continuous_ids;
 }
 
+// gather 图合轴约束：向量化点落在 tile 内轴（TILE_IN）上，而 host 侧 tiling data 生成
+// 要求 inner 轴只能追溯到唯一原始轴（tiling_data_generator.cpp 的
+// AddAxesTailSizeAndLoopNum）。因此 MERGED 轴（from 含多个原始轴）不能作为 tile 切分
+// 对象，否则 GenTilingData 断言失败、融合算子编译失败（afError）。
+// gather 特殊分支（attr_axis/params_size 判定见 AutoSchedule::GenTilingCase）只为
+// y_group 中「首个轴之外」的轴生成 tiling case，所以允许最外层连续组参与合轴——它对应
+// y_group 首轴并被跳过；其余连续组保持原始轴，保证候选 tile 轴都是 ORIGINAL。若唯一的
+// 连续组覆盖全部循环轴，则保留该组最内层原始轴作为 tile 候选（整组合并会使 y_group
+// 只剩被跳过的 MERGED 首轴）；最外层组未从首轴开始时整体不合轴。
+std::vector<std::vector<int64_t>> LimitContinuousGroupsForGather(
+    const std::vector<std::vector<int64_t>> &merged_axis_indexes, const int64_t axis_count) {
+  if (merged_axis_indexes.empty() || merged_axis_indexes.front().front() != 0) {
+    return {};
+  }
+  std::vector<int64_t> outermost_group = merged_axis_indexes.front();
+  if (merged_axis_indexes.size() == 1UL && axis_count > 0 && outermost_group.back() == axis_count - 1) {
+    if (outermost_group.size() <= 2UL) {
+      return {};
+    }
+    outermost_group.pop_back();
+  }
+  return {outermost_group};
+}
+
+struct GatherParams {
+  bool has_gather = false;
+  int64_t attr_axis = -1;
+  int64_t param_size = -1;
+};
+
+GatherParams GetGatherParamsForMerge(ascir::ImplGraph &impl_graph) {
+  GatherParams info;
+  info.has_gather = ScheduleUtils::GetGatherParams(impl_graph, info.attr_axis, info.param_size);
+  return info;
+}
+
+std::vector<std::vector<int64_t>> MergedGroups(ascir::ImplGraph &impl_graph,
+                                               const std::vector<std::pair<int64_t, int64_t>> &potential_axis_idx,
+                                               const GatherParams &gather_info) {
+  auto merged_groups = MergeContinuousPairs(potential_axis_idx);
+  if (!gather_info.has_gather) {
+    return merged_groups;
+  }
+  // GenTilingCase 仅在 gather 特殊分支跳过 y_group 首轴；1 维 params 且 axis==0 时走
+  // 通用分支并遍历全部 y 轴，任何 MERGED 轴都可能被切为 TILE_IN，因此不合轴。
+  if (gather_info.attr_axis == gather_info.param_size - 1 && gather_info.attr_axis == 0) {
+    return {};
+  }
+  int64_t loop_axis_count = 0;
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (!ScheduleUtils::IsBuffer(node)) {
+      loop_axis_count = static_cast<int64_t>(node->attr.sched.axis.size());
+      break;
+    }
+  }
+  return LimitContinuousGroupsForGather(merged_groups, loop_axis_count);
+}
+
+bool HasCvMBroadcast(const ascir::ImplGraph &impl_graph) {
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (ascir::IsCvMBroadcast(*node)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+af::Status GetPotentialAxisPairs(ascir::ImplGraph &impl_graph,
+                                 const std::set<std::pair<int64_t, int64_t>> &non_continuous_pair,
+                                 std::vector<std::pair<int64_t, int64_t>> &potential_axis_idx) {
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (!ScheduleUtils::IsBuffer(node)) {
+      auto axis_ids = node->attr.sched.axis;
+      potential_axis_idx.reserve(axis_ids.size() - 1);
+      for (size_t i = 0UL; i < axis_ids.size() - 1; ++i) {
+        potential_axis_idx.emplace_back(i, i + 1);
+      }
+      break;
+    }
+  }
+  // 剔除根据规则产生的不连续轴(后续reduce和brc考虑放规则里, 减少全局判断耗时
+  potential_axis_idx.erase(
+      std::remove_if(potential_axis_idx.begin(), potential_axis_idx.end(),
+                     [&non_continuous_pair](const auto &pair) { return non_continuous_pair.count(pair) > 0; }),
+      potential_axis_idx.end());
+  // 剩下的根据全图repeat/stride判断是否连续
+  for (auto it = potential_axis_idx.rbegin(); it != potential_axis_idx.rend();) {
+    if (!IsAxisContinuous(impl_graph, it->first, it->second)) {
+      auto normal_it = it.base();
+      ++it;
+      potential_axis_idx.erase(normal_it - 1);
+    } else {
+      ++it;
+    }
+  }
+  return af::SUCCESS;
+}
+
+af::Status ApplyMergedAxisGroups(ascir::ImplGraph &impl_graph,
+                                 const std::vector<std::vector<int64_t>> &merged_axis_indexes,
+                                 std::vector<af::AxisPtr> &new_merged_axes) {
+  std::map<std::vector<af::AxisId>, af::AxisId> from_id_to_merged_id;
+  for (auto node : impl_graph.GetAllNodes()) {
+    if (ScheduleUtils::IsBuffer(node)) {
+      continue;
+    }
+    std::vector<af::AxisId> node_merged_id;
+    for (const auto &from_idx : merged_axis_indexes) {
+      std::vector<af::AxisId> from_ids;
+      for (const int64_t index : from_idx) {
+        from_ids.emplace_back(node->attr.sched.axis[index]);
+      }
+      auto iter = from_id_to_merged_id.find(from_ids);
+      if (iter == from_id_to_merged_id.end()) {
+        auto merged_axis = impl_graph.MergeAxis(from_ids);
+        new_merged_axes.push_back(merged_axis);
+        node_merged_id.push_back(merged_axis->id);
+        from_id_to_merged_id[from_ids] = merged_axis->id;
+      } else {
+        node_merged_id.push_back(iter->second);
+      }
+    }
+    for (auto axis_id : node_merged_id) {
+      GELOGD("Apply merged axis id [%ld] to node:[%s].", axis_id, node->GetNamePtr());
+      GE_ASSERT_TRUE(impl_graph.ApplyMerge(node, axis_id), "Failed to apply merged axis id %ld to node:[%s].", axis_id,
+                     node->GetNamePtr());
+    }
+  }
+  return af::SUCCESS;
+}
+
 std::unordered_set<size_t> IdentifyZeroStrideAxisIndices(const ascir::ImplGraph &owner_graph) {
   std::vector<bool> is_zero_stride_axis;
   bool include_reduce = false;
@@ -1112,83 +1243,24 @@ Status Optimizer::RemoveAllZeroStrideLoopAxis(ascir::ImplGraph &owner_graph) {
 }
 
 Status Optimizer::MergeContinuousAxis(ascir::ImplGraph &impl_graph, ascir::CubeTemplateType cube_type) {
-  for (const auto &node : impl_graph.GetAllNodes()) {
-    if (ascir::IsCvMBroadcast(*node)) {
-      return af::SUCCESS;
-    }
+  if (HasCvMBroadcast(impl_graph)) {
+    return af::SUCCESS;
   }
   auto all_axis = impl_graph.GetAllAxis();
   if (all_axis.size() <= 1UL || ascgen_utils::indirect_load::FindIndirectLoadNode(impl_graph) != nullptr) {
     return af::SUCCESS;
   }
-  // concat等场景,会有多套轴, 只能先用循环轴的index来生成潜在连续组, 后续根据连续组会找到多个连续轴
-  std::vector<std::pair<int64_t, int64_t>> potential_axis_idx;
-  for (const auto &node : impl_graph.GetAllNodes()) {
-    if (!ScheduleUtils::IsBuffer(node)) {
-      auto axis_ids = node->attr.sched.axis;
-      potential_axis_idx.reserve(axis_ids.size() - 1);
-      for (size_t i = 0UL; i < axis_ids.size() - 1; ++i) {
-        potential_axis_idx.emplace_back(i, i + 1);
-      }
-      break;
-    }
-  }
-
-  // 剔除根据规则产生的不连续轴(后续reduce和brc考虑放规则里, 减少全局判断耗时
+  const GatherParams gather_info = GetGatherParamsForMerge(impl_graph);
   std::set<std::pair<int64_t, int64_t>> non_continuous_pair;
   GE_ASSERT_SUCCESS(GetNonContinuousAxisPairBySpecialRule(impl_graph, non_continuous_pair));
-  potential_axis_idx.erase(
-      std::remove_if(potential_axis_idx.begin(), potential_axis_idx.end(),
-                     [&non_continuous_pair](const auto &pair) { return non_continuous_pair.count(pair) > 0; }),
-      potential_axis_idx.end());
-
-  // 剩下的根据全图repeat/stride判断是否连续
-  for (auto it = potential_axis_idx.rbegin(); it != potential_axis_idx.rend();) {
-    if (!IsAxisContinuous(impl_graph, it->first, it->second)) {
-      auto normal_it = it.base();
-      ++it;
-      potential_axis_idx.erase(normal_it - 1);
-    } else {
-      ++it;
-    }
-  }
-  // 现根据id合并pair
-  std::vector<std::vector<int64_t>> merged_axis_indexes = MergeContinuousPairs(potential_axis_idx);
-  std::map<std::vector<af::AxisId>, af::AxisId> from_id_to_merged_id;
+  std::vector<std::pair<int64_t, int64_t>> potential_axis_idx;
+  GE_ASSERT_SUCCESS(GetPotentialAxisPairs(impl_graph, non_continuous_pair, potential_axis_idx));
+  auto merged_axis_indexes = MergedGroups(impl_graph, potential_axis_idx, gather_info);
   std::vector<af::AxisPtr> new_merged_axes;
-  // Do merge
-  for (auto node : impl_graph.GetAllNodes()) {
-    if (ScheduleUtils::IsBuffer(node)) {
-      continue;
-    }
-    std::vector<af::AxisId> node_merged_id;
-    for (const auto &from_idx : merged_axis_indexes) {
-      std::vector<af::AxisId> from_ids;
-      for (const int64_t index : from_idx) {
-        from_ids.emplace_back(node->attr.sched.axis[index]);
-      }
-      auto iter = from_id_to_merged_id.find(from_ids);
-      if (iter == from_id_to_merged_id.end()) {
-        auto merged_axis = impl_graph.MergeAxis(from_ids);
-        new_merged_axes.push_back(merged_axis);
-        node_merged_id.push_back(merged_axis->id);
-        from_id_to_merged_id[from_ids] = merged_axis->id;
-      } else {
-        node_merged_id.push_back(iter->second);
-      }
-    }
-    for (auto axis_id : node_merged_id) {
-      GELOGD("Apply merged axis id [%ld] to node:[%s].", axis_id, node->GetNamePtr());
-      GE_ASSERT_TRUE(impl_graph.ApplyMerge(node, axis_id), "Failed to apply merged axis id %ld to node:[%s].", axis_id,
-                     node->GetNamePtr());
-    }
-  }
+  GE_ASSERT_SUCCESS(ApplyMergedAxisGroups(impl_graph, merged_axis_indexes, new_merged_axes));
 
   // TTODO 需要考虑删轴等操作,后续优化
-  int64_t attr_axis = -1;
-  int64_t param_size = -1;
-  bool has_gather = ScheduleUtils::GetGatherParams(impl_graph, attr_axis, param_size);
-  if ((!has_gather) && (cube_type != ascir::CubeTemplateType::kUBFuse)) {
+  if ((!gather_info.has_gather) && (cube_type != ascir::CubeTemplateType::kUBFuse)) {
     // 此处合轴后的轴可以认为是original的
     for (const auto &axis : new_merged_axes) {
       axis->type = af::Axis::Type::kAxisTypeOriginal;
@@ -1199,7 +1271,6 @@ Status Optimizer::MergeContinuousAxis(ascir::ImplGraph &impl_graph, ascir::CubeT
     }
     GE_ASSERT_SUCCESS(ScheduleUtils::RemoveUnusedAxes(impl_graph), "Failed to remove unused axes");
   }
-
   return af::SUCCESS;
 }
 

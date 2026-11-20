@@ -38,6 +38,7 @@
 #include "ascgraph_info_complete.h"
 #include "schedule_result.h"
 #include "attribute_group/attr_group_shape_env.h"
+#include "autoschedule/autoschedule.h"
 #include "autoschedule/tiling_group.h"
 #include "expression/testcase/source_stub.h"
 #include "util/mem_utils.h"
@@ -2952,14 +2953,60 @@ TEST_F(TestOptimizer, TailAxisSliceDoNotMerge) {
   EXPECT_EQ(new_axis[1]->size, s3);
 }
 
-TEST_F(TestOptimizer, MergeAxesGather) {
-  af::AscGraph graph("LoadAbsStore");
+void ExpectOnlyMergedAxis(af::AscGraph &graph, const size_t merged_index, const af::Expression &merged_size) {
+  const auto axes = graph.GetAllAxis();
+  ASSERT_EQ(axes.size(), merged_index + 1UL);
+  for (size_t i = 0UL; i < axes.size(); ++i) {
+    EXPECT_EQ(axes[i]->type, i == merged_index ? af::Axis::Type::kAxisTypeMerged : af::Axis::Type::kAxisTypeOriginal);
+  }
+  EXPECT_EQ(axes[merged_index]->size, merged_size);
+}
+
+void ExpectNoMergedAxis(af::AscGraph &graph, const size_t expected_count) {
+  const auto axes = graph.GetAllAxis();
+  ASSERT_EQ(axes.size(), expected_count);
+  for (const auto &axis : axes) {
+    EXPECT_NE(axis->type, af::Axis::Type::kAxisTypeMerged) << "axis[" << axis->name << "] should stay original";
+  }
+}
+
+void AddGatherAbsStoreOutput(af::AscGraph &graph, af::ascir_op::Gather &gather, const std::vector<af::AxisId> &axes,
+                             const std::vector<af::Expression> &repeats, const std::vector<af::Expression> &strides) {
+  af::ascir_op::Abs abs("abs");
+  graph.AddNode(abs);
+  abs.x = gather.y;
+  abs.attr.api.compute_type = af::ComputeType::kComputeElewise;
+  abs.attr.sched.axis = axes;
+  abs.y.dtype = gather.y.dtype;
+  *abs.y.axis = axes;
+  *abs.y.repeats = repeats;
+  *abs.y.strides = strides;
+
+  af::ascir_op::Store store("store");
+  graph.AddNode(store);
+  store.x = abs.y;
+  store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  store.attr.sched.axis = axes;
+  store.y.dtype = gather.y.dtype;
+  *store.y.axis = axes;
+  *store.y.repeats = repeats;
+  *store.y.strides = strides;
+
+  af::ascir_op::Output y("y");
+  graph.AddNode(y);
+  y.x = store.y;
+  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = gather.y.dtype;
+  y.ir_attr.SetIndex(0);
+}
+
+af::Expression BuildGatherMultiDimIndexGraph(af::AscGraph &graph) {
   auto s0 = graph.CreateSizeVar("s0");
   auto s1 = graph.CreateSizeVar("s1");
   auto s2 = graph.CreateSizeVar("s2");
   auto s3 = graph.CreateSizeVar("s3");
   auto s4 = graph.CreateSizeVar("s4");
-
   auto z0 = graph.CreateAxis("z0", s0);
   auto z1 = graph.CreateAxis("z1", s1);
   auto z2 = graph.CreateAxis("z2", s2);
@@ -2970,72 +3017,85 @@ TEST_F(TestOptimizer, MergeAxesGather) {
   data0.y.dtype = ge::DT_FLOAT;
   data0.attr.api.compute_type = af::ComputeType::kComputeInvalid;
   data0.attr.api.type = af::ApiType::kAPITypeBuffer;
-  data0.ir_attr.SetIndex(0);
   data0.attr.sched.axis = {z0.id, z1.id, z2.id};
   *data0.y.axis = {z0.id, z1.id, z2.id};
   *data0.y.repeats = {s0, s1, s2};
   *data0.y.strides = {s1 * s2, s2, One};
 
   af::ascir_op::Data data1("data1", graph);
-  data1.y.dtype = ge::DT_FLOAT;
+  data1.y.dtype = ge::DT_INT32;
   data1.attr.api.compute_type = af::ComputeType::kComputeInvalid;
   data1.attr.api.type = af::ApiType::kAPITypeBuffer;
-  data1.ir_attr.SetIndex(1);
   data1.attr.sched.axis = {z3.id, z4.id};
   *data1.y.axis = {z3.id, z4.id};
   *data1.y.repeats = {s3, s4};
   *data1.y.strides = {s4, One};
 
   af::ascir_op::Gather gather("gather");
-  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
+  graph.AddNode(gather);
   gather.x1 = data0.y;
   gather.x2 = data1.y;
+  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
   gather.ir_attr.SetAxis(2);
   gather.attr.sched.axis = {z0.id, z1.id, z3.id, z4.id};
   gather.y.dtype = ge::DT_FLOAT;
   *gather.y.axis = {z0.id, z1.id, z3.id, z4.id};
   *gather.y.repeats = {s0, s1, s3, s4};
   *gather.y.strides = {s1 * s3 * s4, s3 * s4, s4, One};
-
-  af::ascir_op::Abs abs("abs");
-  abs.attr.api.compute_type = af::ComputeType::kComputeElewise;
-  abs.x = gather.y;
-  abs.attr.sched.axis = {z0.id, z1.id, z3.id, z4.id};
-  abs.y.dtype = ge::DT_FLOAT;
-  *abs.y.axis = {z0.id, z1.id, z3.id, z4.id};
-  *abs.y.repeats = {s0, s1, s3, s4};
-  *abs.y.strides = {s1 * s3 * s4, s3 * s4, s4, One};
-
-  af::ascir_op::Store store("store");
-  store.attr.api.compute_type = af::ComputeType::kComputeElewise;
-  store.x = abs.y;
-  store.attr.sched.axis = {z0.id, z1.id, z3.id, z4.id};
-  store.y.dtype = ge::DT_FLOAT;
-  *store.y.axis = {z0.id, z1.id, z3.id, z4.id};
-  *store.y.repeats = {s0, s1, s3, s4};
-  *store.y.strides = {s1 * s3 * s4, s3 * s4, s4, One};
-
-  af::ascir_op::Output y("y");
-  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
-  y.attr.api.type = af::ApiType::kAPITypeBuffer;
-  y.x = store.y;
-  y.attr.api.type = af::ApiType::kAPITypeBuffer;
-  y.y.dtype = ge::DT_FLOAT;
-  y.ir_attr.SetIndex(0);
-
-  ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
-
-  auto new_axis = graph.GetAllAxis();
-  EXPECT_EQ(new_axis[5]->size, s0 * s1);
-  EXPECT_EQ(new_axis[6]->size, s3 * s4);
+  AddGatherAbsStoreOutput(graph, gather, {z0.id, z1.id, z3.id, z4.id}, {s0, s1, s3, s4},
+                          {s1 * s3 * s4, s3 * s4, s4, One});
+  return s0 * s1;
 }
 
-TEST_F(TestOptimizer, MergeAxesGatherOnlyOneDim) {
-  af::AscGraph graph("LoadAbsStore");
+void BuildGatherOneDimParamsAxis0Graph(af::AscGraph &graph) {
   auto s0 = graph.CreateSizeVar("s0");
   auto s1 = graph.CreateSizeVar("s1");
   auto s2 = graph.CreateSizeVar("s2");
+  auto s3 = graph.CreateSizeVar("s3");
+  auto s4 = graph.CreateSizeVar("s4");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+  auto z3 = graph.CreateAxis("z3", s3);
+  auto z4 = graph.CreateAxis("z4", s4);
 
+  af::ascir_op::Data data0("data0", graph);
+  data0.y.dtype = ge::DT_FLOAT;
+  data0.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  data0.attr.api.type = af::ApiType::kAPITypeBuffer;
+  data0.attr.sched.axis = {z0.id};
+  *data0.y.axis = {z0.id};
+  *data0.y.repeats = {s0};
+  *data0.y.strides = {One};
+
+  af::ascir_op::Data data1("data1", graph);
+  data1.y.dtype = ge::DT_INT32;
+  data1.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  data1.attr.api.type = af::ApiType::kAPITypeBuffer;
+  data1.attr.sched.axis = {z1.id, z2.id, z3.id, z4.id};
+  *data1.y.axis = {z1.id, z2.id, z3.id, z4.id};
+  *data1.y.repeats = {s1, s2, s3, s4};
+  *data1.y.strides = {s2 * s3 * s4 * af::Symbol(2), s3 * s4 * af::Symbol(2), s4, One};
+
+  af::ascir_op::Gather gather("gather");
+  graph.AddNode(gather);
+  gather.x1 = data0.y;
+  gather.x2 = data1.y;
+  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
+  gather.ir_attr.SetAxis(0);
+  gather.attr.sched.axis = {z1.id, z2.id, z3.id, z4.id};
+  gather.y.dtype = ge::DT_FLOAT;
+  *gather.y.axis = {z1.id, z2.id, z3.id, z4.id};
+  *gather.y.repeats = {s1, s2, s3, s4};
+  *gather.y.strides = {s2 * s3 * s4 * af::Symbol(2), s3 * s4 * af::Symbol(2), s4, One};
+  AddGatherAbsStoreOutput(graph, gather, {z1.id, z2.id, z3.id, z4.id}, {s1, s2, s3, s4},
+                          {s2 * s3 * s4 * af::Symbol(2), s3 * s4 * af::Symbol(2), s4, One});
+}
+
+void BuildGatherSingleDimIndexGraph(af::AscGraph &graph) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto s2 = graph.CreateSizeVar("s2");
   auto z0 = graph.CreateAxis("z0", s0);
   auto z1 = graph.CreateAxis("z1", s1);
   auto z2 = graph.CreateAxis("z2", s2);
@@ -3061,48 +3121,69 @@ TEST_F(TestOptimizer, MergeAxesGatherOnlyOneDim) {
   *data1.y.strides = {s2, One};
 
   af::ascir_op::Gather gather("gather");
-  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
+  graph.AddNode(gather);
   gather.x1 = data0.y;
   gather.x2 = data1.y;
+  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
   gather.ir_attr.SetAxis(2);
   gather.attr.sched.axis = {z1.id, z2.id};
   gather.y.dtype = ge::DT_FLOAT;
   *gather.y.axis = {z1.id, z2.id};
   *gather.y.repeats = {s1, s2};
   *gather.y.strides = {s2, One};
+  AddGatherAbsStoreOutput(graph, gather, {z1.id, z2.id}, {s1, s2}, {s2, One});
+}
 
-  af::ascir_op::Abs abs("abs");
-  abs.attr.api.compute_type = af::ComputeType::kComputeElewise;
-  abs.x = gather.y;
-  abs.attr.sched.axis = {z1.id, z2.id};
-  abs.y.dtype = ge::DT_FLOAT;
-  *abs.y.axis = {z1.id, z2.id};
-  *abs.y.repeats = {s1, s2};
-  *abs.y.strides = {s2, One};
-
-  af::ascir_op::Store store("store");
-  store.attr.api.compute_type = af::ComputeType::kComputeElewise;
-  store.x = abs.y;
-  store.attr.sched.axis = {z1.id, z2.id};
-  store.y.dtype = ge::DT_FLOAT;
-  *store.y.axis = {z1.id, z2.id};
-  *store.y.repeats = {s1, s2};
-  *store.y.strides = {s2, One};
-
-  af::ascir_op::Output y("y");
-  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
-  y.attr.api.type = af::ApiType::kAPITypeBuffer;
-  y.x = store.y;
-  y.attr.api.type = af::ApiType::kAPITypeBuffer;
-  y.y.dtype = ge::DT_FLOAT;
-  y.ir_attr.SetIndex(0);
+TEST_F(TestOptimizer, MergeAxesGather) {
+  af::AscGraph graph("LoadAbsStore");
+  const auto merged_size = BuildGatherMultiDimIndexGraph(graph);
+  ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
+  ExpectOnlyMergedAxis(graph, 5UL, merged_size);
+}
+TEST_F(TestOptimizer, MergeAxesGatherOnlyOneDim) {
+  af::AscGraph graph("LoadAbsStore");
+  BuildGatherSingleDimIndexGraph(graph);
+  ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
+  ExpectNoMergedAxis(graph, 3UL);
+}
+// 910B 回归：二维动态索引 gather 合轴后，调度器的 TILE_IN 轴必须只挂单一原始轴。
+// host tiling data 生成要求 inner 轴可追溯到唯一原始轴，TILE_IN 挂在 MERGED 轴上会
+// 触发 GenTilingData 断言，融合算子编译失败（afError）。
+TEST_F(TestOptimizer, GatherMultiDimIndexKeepsTileInnerOnOriginalAxis) {
+  af::AscGraph graph("GatherMultiDimIndex");
+  BuildGatherMultiDimIndexGraph(graph);
 
   ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
 
-  auto new_axis = graph.GetAllAxis();
-  EXPECT_EQ(new_axis[3]->size, s1 * s2);
-}
+  std::vector<optimize::autoschedule::AutoScheduleOutput> results;
+  optimize::autoschedule::AutoSchedule schedule(graph, results);
+  ASSERT_EQ(schedule.DoAutoSchedule(), af::SUCCESS);
+  ASSERT_FALSE(results.empty());
 
+  size_t tile_inner_count = 0UL;
+  for (auto &result : results) {
+    for (const auto &axis : result.scheduled_graph.GetAllAxis()) {
+      if (axis == nullptr || axis->type != af::Axis::Type::kAxisTypeTileInner) {
+        continue;
+      }
+      ++tile_inner_count;
+      ASSERT_EQ(axis->from.size(), 1UL) << "TILE_IN axis[" << axis->name << "] has multi from_axis";
+      const af::Axis *parent = result.scheduled_graph.FindAxis(axis->from.front());
+      ASSERT_NE(parent, nullptr) << "TILE_IN axis[" << axis->name << "] parent not found";
+      EXPECT_EQ(parent->type, af::Axis::Type::kAxisTypeOriginal)
+          << "TILE_IN axis[" << axis->name << "] must attach to an ORIGINAL axis";
+    }
+  }
+  EXPECT_GT(tile_inner_count, 0UL);
+}
+// 910B 回归：1 维 params 且 gather axis==0 的图会走 GenTilingCase 通用分支（不跳过
+// y_group 首轴），任何 MERGED 轴都可能被切为 TILE_IN，因此 gather 图在此形态下不应合轴。
+TEST_F(TestOptimizer, MergeAxesGatherOneDimParamsAxis0DoesNotMerge) {
+  af::AscGraph graph("GatherOneDimParamsAxis0");
+  BuildGatherOneDimParamsAxis0Graph(graph);
+  ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
+  ExpectNoMergedAxis(graph, 5UL);
+}
 TEST_F(TestOptimizer, CompleteGatherApiInfoSetsDcacheSize) {
   constexpr int64_t kSimtDcacheSize = 40 * 1024;
   ge::PlatformContext::GetInstance().SetPlatform("3510");
