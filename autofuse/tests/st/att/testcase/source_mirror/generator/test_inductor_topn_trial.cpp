@@ -56,10 +56,12 @@ class TrialCodeGenerator : public HighPerfTilingCodeGenImpl {
  public:
   using HighPerfTilingCodeGenImpl::HighPerfTilingCodeGenImpl;
   using TilingCodeGenImpl::GenCopyPgoReuseSelection;
+  using TilingCodeGenImpl::GenerateInputParamsAndTiling;
   using TilingCodeGenImpl::GenPGOByCoreNumGetAllSchedulesResults;
   using TilingCodeGenImpl::GenPGOByCoreNumGetScheduleResult;
   using TilingCodeGenImpl::GenPGOCollectWorkspaceSizes;
   using TilingCodeGenImpl::GenPGOFusedScheduleResultsGetTilingDefine;
+  using TilingCodeGenImpl::GenPGOGetAllSchedulesResults;
   using TilingCodeGenImpl::GenPGOGetScheduleResultPerGroup;
   using TilingCodeGenImpl::GenPGOTilingCase;
   using TilingCodeGenImpl::GenRestoreReuseTilingKey;
@@ -69,6 +71,10 @@ class TrialCodeGenerator : public HighPerfTilingCodeGenImpl {
   using TilingCodeGenImpl::ObtainInnerParams;
   using TilingCodeGenImpl::TryGenPGOByCoreNumReuseTiling;
 
+  void SetSegmentCache(bool enabled) {
+    config_.enable_tiling_segment_cache = enabled;
+  }
+
   void SetWorkspaceIds() {
     workspace_tensor_id_set_[0][0] = {3, 4, 7};
   }
@@ -77,6 +83,134 @@ class TrialCodeGenerator : public HighPerfTilingCodeGenImpl {
     return tiling_func_.GetOutputStr();
   }
 };
+
+constexpr char kScheduleBaselinePreamble[] = R"cpp(
+#include <array>
+#include <cassert>
+#include <cfloat>
+#include <cstdint>
+
+#define OP_LOGD(...)
+#define OP_LOGW(...)
+
+  struct GroupTiling {
+    uint32_t key = 2;
+    uint32_t tile = 32;
+    void set_tiling_key(uint32_t value) {
+      key = value;
+    }
+  };
+
+  struct CaseSolver {
+    bool GetTiling(GroupTiling &data) const {
+      data.tile = succeeds ? 64 : 0;
+      return succeeds;
+    }
+    bool succeeds = false;
+  };
+  using TilingCaseImplPtr = CaseSolver *;
+
+  CaseSolver *GetTilingImplPtr(int32_t case_id, uint32_t) {
+    static CaseSolver solver;
+    solver.succeeds = case_id == 0;
+    return &solver;
+  }
+
+  [[maybe_unused]] CaseSolver *GetSelectedTilingImplPtr(uint32_t case_id, uint32_t cores, const char *) {
+    return GetTilingImplPtr(case_id, cores);
+  }
+
+  bool SolveExplicitCase(GroupTiling &tiling_data, int32_t tiling_case_id) {
+    const uint32_t corenum = 50;
+    [[maybe_unused]] const char *segment_sub_case_tag = nullptr;
+    bool ret = false;
+    if (tiling_case_id == -1) {
+      return true;
+)cpp";
+
+constexpr char kScheduleBaselineTypesAndMain[] = R"cpp(
+  return ret;
+  }
+
+  struct AutofuseTilingData {
+    int32_t result = 0;
+    GroupTiling g0{1, 0};
+    void set_graph0_tiling_key(int32_t value) {
+      result = value;
+    }
+  };
+
+  struct Baseline {
+    int32_t result;
+    bool operator()(uint32_t, int32_t case_id, AutofuseTilingData &data, double &, double &best, uint32_t &,
+                    void * = nullptr) const {
+      assert(data.result == result && case_id == -1 && best == -1.0);
+      data.g0 = {2, 32U + static_cast<uint32_t>(result)};
+      best = 20;
+      return result != 2;
+    }
+  };
+  const std::array<Baseline, 3> kScheduleResultFunctions{{{0}, {1}, {2}}};
+
+  namespace AscGraph0 {
+  [[maybe_unused]] bool GetTiling(AutofuseTilingData &data, int32_t case_id, void *, void * = nullptr) {
+    (void)SolveExplicitCase(data.g0, case_id);
+    return true;  // A different schedule result succeeded.
+  }
+  }  // namespace AscGraph0
+
+  struct Search {
+    int32_t result;
+    bool operator()(uint32_t &seen, uint32_t, int32_t case_id, const AutofuseTilingData &data, double &, double &best,
+                    uint32_t &, void *, uint64_t, void *, void *) const {
+      assert(result != 2 && data.result == result && case_id == -1 && best == 10);
+      assert(data.g0.key == 2 && data.g0.tile == 32U + static_cast<uint32_t>(result));
+      seen |= 1U << result;
+      return true;
+    }
+  };
+  const std::array<Search, 3> kScheduleResultFunctionsPGO{{{0}, {1}, {2}}};
+
+  int main() {
+    GroupTiling g0;
+    assert(!SolveExplicitCase(g0, 1) && g0.key == 2 && g0.tile == 32);
+    assert(SolveExplicitCase(g0, 0) && g0.key == 0 && g0.tile == 64);
+
+    uint32_t tiling_data_list = 0;
+    const AutofuseTilingData tiling_data{};
+    const uint32_t ori_block_dim = 50;
+    const int32_t tiling_case_id = -1;
+    double cur_perf = 0;
+    double best_perf = 10;
+    uint32_t cur_block_dim = 1;
+    void *stream = nullptr;
+    uint64_t workspaceSize = 0;
+    void *block_dim_vec = nullptr;
+    void *search_cfg = nullptr;
+)cpp";
+
+constexpr char kScheduleBaselineAssertions[] = R"cpp(
+  assert(has_valid_tiling &&tiling_data_list == 3U);
+  }
+)cpp";
+
+TEST_P(PgoTrialTest, ScheduleBaselineKeepsGroupCaseAndParametersTogether) {
+  TilingCodeGenConfig config{};
+  config.is_inductor_scene = true;
+  const TilingModelInfo models;
+  const ScoreFuncs scores;
+  TrialCodeGenerator generator("ScheduleBaseline", config, models, scores, false);
+  generator.SetSegmentCache(GetParam());
+  ASSERT_EQ(generator.GenerateInputParamsAndTiling(), af::SUCCESS);
+  const auto explicit_case = generator.Source();
+  generator.GenPGOGetAllSchedulesResults(0, {{0, {}}, {1, {}}, {2, {}}});
+  const auto baseline = generator.Source().substr(explicit_case.size());
+
+  std::ostringstream program;
+  program << kScheduleBaselinePreamble << explicit_case << kScheduleBaselineTypesAndMain << baseline
+          << kScheduleBaselineAssertions;
+  RunGeneratedSource("schedule_baseline", program.str());
+}
 
 TEST_P(PgoTrialTest, FailedCaseDoesNotPolluteFollowingGroup) {
   TilingCodeGenConfig config{};

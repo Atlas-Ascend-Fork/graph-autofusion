@@ -2724,9 +2724,13 @@ af::Status TilingCodeGenImpl::GenerateInputParamsAndTiling() {
     GE_ASSERT_SUCCESS(GenDurationBeginCode(TilingFuncDurationType::TILING_FUNC_DURATION_DOTILING, "    "),
                       "Generate begin code!");
   }
-  tiling_func_.AddLine(std::string("    ret = tilingCaseImplPtr->GetTiling(tiling_data") +
+  tiling_func_.AddLine("    auto trial_tiling = tiling_data;");
+  tiling_func_.AddLine(std::string("    ret = tilingCaseImplPtr->GetTiling(trial_tiling") +
                        (hardware_has_ub_ ? ", ub_ratio" : "") + ");");
-  tiling_func_.AddLine("    tiling_data.set_tiling_key(tiling_case_id);");
+  tiling_func_.AddLine("    if (ret) {");
+  tiling_func_.AddLine("      trial_tiling.set_tiling_key(tiling_case_id);");
+  tiling_func_.AddLine("      tiling_data = trial_tiling;");
+  tiling_func_.AddLine("    }");
   tiling_func_.AddLine(
       "    OP_LOGD(OP_NAME, \"Finish calculating the tiling data for tiling_case_id %u.\", tiling_case_id);");
   if (is_uniq_group_) {
@@ -4985,7 +4989,6 @@ bool TilingCodeGenImpl::TryGenPGOByCoreNumReuseTiling(size_t asc_graph_id, size_
 void TilingCodeGenImpl::GenPgoCoreResultTail(size_t asc_graph_id, size_t impl_graph_id,
                                              const std::map<size_t, std::pair<std::string, std::string>> &graph_info,
                                              uint32_t group_index) {
-  tiling_func_.AddLine("  const size_t candidate_count_before = tiling_data_list.size();");
   tiling_func_.AddLine("  for (auto &candidate : tiling_data_list_tmp" + std::to_string(group_index) + ") {");
   tiling_func_.AddLine("    auto &tiling_data = candidate.tiling_data;");
   if (enable_group_parallels_[asc_graph_id][impl_graph_id]) {
@@ -5872,12 +5875,15 @@ void TilingCodeGenImpl::GenPGOGetAllSchedulesResults(const size_t asc_graph_id,
   tiling_func_.AddLine("    tilingTmp = tiling_data;");
   tiling_func_.AddLine("    tilingTmp.set_" + tiling_key_prefix + "tiling_key(index);");
   tiling_func_.AddLine("    cur_perf = DBL_MAX;");
-  std::string segment_null_args;
-  if (config_.enable_tiling_segment_cache) {
-    segment_null_args = ", nullptr";
-  }
-  tiling_func_.AddLine("    if (!AscGraph" + std::to_string(asc_graph_id) + "::GetTiling(tilingTmp, index, nullptr" +
-                       segment_null_args + ")) {");
+  // The schedule index selects the result. Each group in that result chooses its own case.
+  tiling_func_.AddLine("    double baseline_perf = DBL_MAX;");
+  tiling_func_.AddLine("    double baseline_best_perf = -1.0;");
+  tiling_func_.AddLine("    uint32_t baseline_block_dim = 1U;");
+  const std::string segment_null_arg = config_.enable_tiling_segment_cache ? ", nullptr" : "";
+  tiling_func_.AddLine(
+      "    if (!kScheduleResultFunctions[index](ori_block_dim, -1, tilingTmp, baseline_perf, baseline_best_perf, "
+      "baseline_block_dim" +
+      segment_null_arg + ")) {");
   tiling_func_.AddLine("      OP_LOGW(OP_NAME, \"Skip invalid PGO schedule result candidate.\");");
   tiling_func_.AddLine("      continue;");
   tiling_func_.AddLine("    }");

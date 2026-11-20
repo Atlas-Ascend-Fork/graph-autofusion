@@ -2049,7 +2049,8 @@ TEST(GeneratorUT, PGOGetAllSchedulesResultsDoesNotPushGraphTilingTmpOutsideSched
   genImpl.GenPGOGetAllSchedulesResults(0, namespace_map);
 
   const std::string tiling_func_output = genImpl.tiling_func_.GetOutputStr();
-  EXPECT_NE(tiling_func_output.find("if (!AscGraph0::GetTiling(tilingTmp, index, nullptr)) {"), std::string::npos);
+  EXPECT_NE(tiling_func_output.find("kScheduleResultFunctions[index](ori_block_dim, -1, tilingTmp,"),
+            std::string::npos);
   EXPECT_NE(tiling_func_output.find("cur_perf = DBL_MAX;"), std::string::npos);
   EXPECT_NE(tiling_func_output.find("continue;"), std::string::npos);
   EXPECT_EQ(tiling_func_output.find("tiling_perf.tiling_data = tilingTmp;"), std::string::npos);
@@ -2274,24 +2275,32 @@ TEST(GeneratorUT, InductorPgoCollectsWorkspaceFromAllGroupsOfEachCandidate) {
   const std::map<std::string, std::set<std::string>> hardware{{"group0", {"block_dim"}}, {"group1", {"block_dim"}}};
 
   ASSERT_EQ(gen_impl.GenPGOGetScheduleResult(0, 0, groups, hardware), af::SUCCESS);
-  EXPECT_EQ(gen_impl.tiling_func_.GetOutputStr().find("CollectPgoWorkspace"), std::string::npos);
+  constexpr char kCollector[] = "CollectPGOWorkspaceSizesForResult0";
+  EXPECT_EQ(gen_impl.tiling_func_.GetOutputStr().find(kCollector), std::string::npos);
   gen_impl.tiling_func_.Reset();
 
   gen_impl.workspace_tensor_id_set_[0][0] = {1, 2};
   ASSERT_EQ(gen_impl.GenPGOGetScheduleResult(0, 0, groups, hardware), af::SUCCESS);
   const auto code = gen_impl.tiling_func_.GetOutputStr();
+  const auto collect = code.find(std::string("static bool ") + kCollector);
+  ASSERT_NE(collect, std::string::npos);
+  const auto reset = code.find("workspace_map.clear();", collect);
+  const auto group0 = code.find("switch (candidate.graph0_result0_g0_tiling_data.get_tiling_key())", reset);
+  const auto group1 = code.find("switch (candidate.graph0_result0_g1_tiling_data.get_tiling_key())", group0);
+  ASSERT_LT(reset, group0);
+  ASSERT_LT(group0, group1);
   for (const auto *index : {"0", "1"}) {
     const auto begin = code.find(std::string("for (size_t candidate_index = candidate_begin_index") + index);
     ASSERT_NE(begin, std::string::npos);
-    const auto reset = code.find("workspace_map.clear();", begin);
-    const auto group0 = code.find("ScheduleGroup0::CollectPgoWorkspace(tiling_data.group0_tiling_data", reset);
-    const auto group1 = code.find("ScheduleGroup1::CollectPgoWorkspace(tiling_data.group1_tiling_data", group0);
-    const auto write = code.find("tiling_data.set_workspace1(0U);", group1);
+    EXPECT_LT(group1, begin);
+    const auto rebuild = code.find(std::string("if (!") + kCollector + "(tiling_data, workspace_map))", begin);
+    const auto reject = code.find(
+        std::string("valid_candidates[candidate_index - candidate_begin_index") + index + "] = false;", rebuild);
+    const auto write = code.find("tiling_data.set_workspace1(0U);", reject);
     const auto size = code.find("GetWorkspaceSize(tiling_data, workspaceSizeTmp)", begin);
     ASSERT_NE(size, std::string::npos);
-    EXPECT_LT(reset, group0);
-    EXPECT_LT(group0, group1);
-    EXPECT_LT(group1, write);
+    EXPECT_LT(rebuild, reject);
+    EXPECT_LT(reject, write);
     EXPECT_LT(write, size);
   }
 }
@@ -2308,7 +2317,8 @@ TEST(GeneratorUT, InductorPgoByCoreNumCollectsWorkspaceBeforeAppendingCandidate)
   const std::map<std::string, std::set<std::string>> hardware{{"group0", {"block_dim"}}, {"group1", {"block_dim"}}};
 
   gen_impl.GenPGOByCoreNumGetScheduleResult(0, 0, groups, hardware, {});
-  EXPECT_EQ(gen_impl.tiling_func_.GetOutputStr().find("CollectPgoWorkspace"), std::string::npos);
+  constexpr char kCollect[] = "if (!CollectPGOWorkspaceSizesForResult0(tiling_data, workspace_map))";
+  EXPECT_EQ(gen_impl.tiling_func_.GetOutputStr().find(kCollect), std::string::npos);
   gen_impl.tiling_func_.Reset();
 
   gen_impl.workspace_tensor_id_set_[0][0] = {1, 2};
@@ -2316,20 +2326,14 @@ TEST(GeneratorUT, InductorPgoByCoreNumCollectsWorkspaceBeforeAppendingCandidate)
   const auto code = gen_impl.tiling_func_.GetOutputStr();
   const auto begin = code.find("for (auto &candidate : tiling_data_list_tmp2)");
   ASSERT_NE(begin, std::string::npos);
-  EXPECT_NE(code.find("bool candidate_workspace_valid = true;", begin), std::string::npos);
-  const auto reset = code.find("workspace_map.clear();", begin);
-  const auto group0 = code.find("ScheduleGroup0::CollectPgoWorkspace(tiling_data.group0_tiling_data", reset);
-  const auto group1 = code.find("ScheduleGroup1::CollectPgoWorkspace(tiling_data.group1_tiling_data", group0);
-  const auto reject = code.find("continue;", group1);
+  const auto rebuild = code.find(kCollect, begin);
+  const auto reject = code.find("continue;", rebuild);
   const auto write = code.find("tiling_data.set_workspace1(0U);", reject);
   const auto append = code.find("tiling_data_list.push_back(std::move(candidate));", begin);
   ASSERT_NE(append, std::string::npos);
-  EXPECT_LT(reset, group0);
-  EXPECT_LT(group0, group1);
-  EXPECT_LT(group1, reject);
+  EXPECT_LT(rebuild, reject);
   EXPECT_LT(reject, write);
   EXPECT_LT(write, append);
-  EXPECT_NE(code.find("if (!candidate_workspace_valid)", begin), std::string::npos);
   EXPECT_EQ(code.find("tiling_data_list.insert"), std::string::npos);
 }
 
