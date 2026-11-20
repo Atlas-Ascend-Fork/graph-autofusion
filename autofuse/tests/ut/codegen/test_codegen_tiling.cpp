@@ -8044,6 +8044,98 @@ TEST_F(TestCodegenTiling, InductorBatchMatmulDispatchShouldKeepReachableBasicFal
   }
 }
 
+TEST_F(TestCodegenTiling, InductorRtLaunchDispatchShouldPruneTensorOnlyBasicModes) {
+  for (const bool is_dynamic : {false, true}) {
+    SCOPED_TRACE(is_dynamic);
+    auto graph = ascir::ShareGraph::LoadMatmulElewiseBrcFusedGraph(is_dynamic);
+    optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+    ascir::FusedScheduledResult fused;
+    ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+    const auto entry = codegen::Kernel::GenCvDispatchEntryForInductor(fused, "KERNEL_TYPE_MIX_AIC_1_2", false);
+    ASSERT_FALSE(entry.empty());
+
+    // 平台/转置 constexpr 守卫存在（守卫宏由 tiling 头提供）。
+    EXPECT_NE(entry.find("if constexpr (!CV_MM_DISPATCH_SUPPORTED(API, MD, FL, LO))"), std::string::npos);
+    for (const auto &at_bt : {"(0, 0)", "(0, 1)", "(1, 0)", "(1, 1)"}) {
+      EXPECT_NE(entry.find(std::string("if constexpr (!CV_TRANSPOSE_SUPPORTED") + at_bt + ")"), std::string::npos)
+          << at_bt;
+    }
+    for (const auto &arm : {"A_TRANS == 0 && B_TRANS == 0", "A_TRANS == 0 && B_TRANS == 1",
+                            "A_TRANS == 1 && B_TRANS == 0", "A_TRANS == 1 && B_TRANS == 1"}) {
+      EXPECT_NE(entry.find(arm), std::string::npos) << arm;
+    }
+
+    // Tensor-only 模式 api_level=1 不发射（门控见 IsCvTensorOnlyMode），api_level=2 保留。
+    const std::vector<std::string> tensor_only = {"5, 0, 0", "6, 0, 0", "1, 0, 0", "1, 0, 2",
+                                                  "7, 0, 0", "7, 0, 2", "0, 2, 1", "0, 2, 2"};
+    for (const auto &strategy : tensor_only) {
+      EXPECT_EQ(entry.find("_DISPATCH_MATMUL(1, " + strategy + ","), std::string::npos) << strategy;
+      EXPECT_NE(entry.find("_DISPATCH_MATMUL(2, " + strategy + ","), std::string::npos) << strategy;
+    }
+
+    // Basic 平台可达模式保留 api_level=1 发射（实例化由平台守卫设备编译期裁剪）；
+    // K=0/ToMul/ToMultiMul 与 offset_x 无关，仅 api_level=1 存在。
+    const std::vector<std::string> retained = {
+        "0, 0, 0, MatMulV3BasicTilingData",    "0, 1, 0, MatMulV3BasicTilingData",
+        "0, 2, 0, MatMulV3BasicTilingData",    "0, 0, 1, MatMulV3BasicTilingData",
+        "0, 0, 2, MatMulV3BasicTilingData",    "2, 0, 0, MatMulV3KEqZeroBasicTilingData",
+        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulToVectorBasicTilingData"};
+    for (const auto &strategy : retained) {
+      EXPECT_NE(entry.find("_DISPATCH_MATMUL(1, " + strategy + ");"), std::string::npos) << strategy;
+    }
+    EXPECT_NE(entry.find("_DISPATCH_MATMUL(2, 0, 0, 0, MatMulV3BasicTilingData);"), std::string::npos);
+
+    // Basic-only 平台（offset_x=avoid）恢复 api_level=1 的 Tensor-only 模式发射。
+    SetScheduledMatmulOffset(fused, 0x80);
+    const auto basic_entry = codegen::Kernel::GenCvDispatchEntryForInductor(fused, "KERNEL_TYPE_MIX_AIC_1_2", false);
+    for (const auto &strategy : tensor_only) {
+      EXPECT_NE(basic_entry.find("_DISPATCH_MATMUL(1, " + strategy + ","), std::string::npos) << strategy;
+    }
+  }
+}
+
+TEST_F(TestCodegenTiling, InductorRtLaunchBatchDispatchShouldPruneTensorOnlyBasicModes) {
+  for (const bool is_dynamic : {false, true}) {
+    SCOPED_TRACE(is_dynamic);
+    auto graph = ascir::ShareGraph::LoadBatchMatmulElewiseBrcFusedGraph(is_dynamic);
+    optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+    ascir::FusedScheduledResult fused;
+    ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+    const auto entry = codegen::Kernel::GenCvDispatchEntryForInductor(fused, "KERNEL_TYPE_MIX_AIC_1_2", false);
+    ASSERT_FALSE(entry.empty());
+
+    EXPECT_NE(entry.find("if constexpr (!CV_BMM_DISPATCH_SUPPORTED(API, BMODEL, FL, LO, ITER))"), std::string::npos);
+    EXPECT_NE(entry.find("if constexpr (!CV_TRANSPOSE_SUPPORTED(1, 1))"), std::string::npos);
+    EXPECT_NE(entry.find("BATCH_A_TRANS == 1 && BATCH_B_TRANS == 1"), std::string::npos);
+
+    // Stream-K 仅 api_level=2 发射（Basic-only 平台经 offset_x=avoid 恢复）。
+    for (const auto &strategy : {"1, 0, 0, 0", "1, 0, 2, 0"}) {
+      EXPECT_EQ(entry.find(std::string("_DISPATCH_BATCH_MATMUL(1, ") + strategy + ","), std::string::npos);
+      EXPECT_NE(entry.find(std::string("_DISPATCH_BATCH_MATMUL(2, ") + strategy + ","), std::string::npos);
+    }
+
+    const std::vector<std::string> retained = {
+        "0, 0, 0, 0, BatchMatMulV3BasicTilingData",          "0, 1, 0, 0, BatchMatMulV3BasicTilingData",
+        "0, 2, 0, 0, BatchMatMulV3BasicTilingData",          "0, 0, 0, 1, BatchMatMulV3IterBatchBasicTilingData",
+        "0, 0, 2, 1, BatchMatMulV3IterBatchBasicTilingData", "0, 0, 0, 3, BatchMatMulV3MergeBatchBasicTilingData",
+        "0, 0, 0, 2, BatchMatMulToMulBasicTilingData",       "2, 0, 0, 0, MatMulV3KEqZeroBasicTilingData"};
+    for (const auto &strategy : retained) {
+      EXPECT_NE(entry.find("_DISPATCH_BATCH_MATMUL(1, " + strategy + ");"), std::string::npos) << strategy;
+    }
+    // HIGH_LEVEL（api_level=0）与 Tensor 基本模式保留。
+    EXPECT_NE(entry.find("_DISPATCH_BATCH_MATMUL(0, 0, 0, 0, 0, BatchMatMulV3TilingData);"), std::string::npos);
+    EXPECT_NE(entry.find("_DISPATCH_BATCH_MATMUL(2, 0, 0, 0, 0, BatchMatMulV3BasicTilingData);"), std::string::npos);
+    // BroadcastBatch（ITER=kBroadcastBatchModel=5）有原生 Common 实现，与 legacy
+    // AutofuseLaunch 同口径发射 api_level=2 分支，缺失时该 key 落兜底静默空跑。
+    EXPECT_NE(entry.find("_DISPATCH_BATCH_MATMUL(2, 0, 0, 0, 5, BatchMatMulV3TilingData);"), std::string::npos);
+
+    SetScheduledMatmulOffset(fused, 0x80);
+    const auto basic_entry = codegen::Kernel::GenCvDispatchEntryForInductor(fused, "KERNEL_TYPE_MIX_AIC_1_2", false);
+    EXPECT_NE(basic_entry.find("_DISPATCH_BATCH_MATMUL(1, 1, 0, 0, 0,"), std::string::npos);
+    EXPECT_NE(basic_entry.find("_DISPATCH_BATCH_MATMUL(1, 1, 0, 2, 0,"), std::string::npos);
+  }
+}
+
 TEST_F(TestCodegenTiling, BroadcastBatchUsesCommonPayloadAndRejectsUbDispatch) {
   for (const bool is_dynamic : {false, true}) {
     SCOPED_TRACE(is_dynamic);

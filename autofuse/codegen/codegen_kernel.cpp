@@ -44,6 +44,12 @@ namespace {
 constexpr uint32_t kFuncIdBegin = 20000000U;
 constexpr int kTensorApiLevel = 2;
 constexpr int kBroadcastBatchModel = 5;
+// tiling key 位域 MODEL/FULL_LOAD 维取值，与 v35 头文件 MAT_MUL_* 宏同值。
+constexpr int kStreamKModel = 1;      // MAT_MUL_STREAM_K
+constexpr int kSliceModel = 5;        // MAT_MUL_SLICE
+constexpr int kBasicSplitKModel = 6;  // MAT_MUL_BASIC_SPLIT_K
+constexpr int kSkSplitKModel = 7;     // MAT_MUL_SK_SPLIT_K
+constexpr int kBFullLoad = 2;         // MAT_MUL_B_FULL_LOAD
 constexpr const char kInputTensorDescName[] = "input_tensor_desc";
 constexpr const char kOutputTensorDescName[] = "output_tensor_desc";
 // int64/uint64 的 Duplicate 需要额外的临时空间，统一使用这个生成的张量名。
@@ -7410,7 +7416,8 @@ const std::vector<CvDispatchBranch> &GetCvMatmulDispatchBranches() {
 }
 
 const std::vector<CvDispatchBranch> &GetCvBatchDispatchBranches() {
-  // 同上：api_level=2 分支不可缺。
+  // 同上：api_level=2 分支不可缺。BroadcastBatch（ITER=kBroadcastBatchModel）有原生
+  // Common 实现但无 CV UB epilogue，仅 api_level=2 的 key 可达。
   static const std::vector<CvDispatchBranch> branches = {{0, 0, 0, 0, 0, "BatchMatMulV3TilingData"},
                                                          {1, 0, 0, 0, 0, "BatchMatMulV3BasicTilingData"},
                                                          {1, 0, 1, 0, 0, "BatchMatMulV3BasicTilingData"},
@@ -7423,6 +7430,7 @@ const std::vector<CvDispatchBranch> &GetCvBatchDispatchBranches() {
                                                          {1, 0, 0, 0, 3, "BatchMatMulV3MergeBatchBasicTilingData"},
                                                          {1, 0, 0, 0, 2, "BatchMatMulToMulBasicTilingData"},
                                                          {1, 2, 0, 0, 0, "MatMulV3KEqZeroBasicTilingData"},
+                                                         {2, 0, 0, 0, 5, "BatchMatMulV3TilingData"},
                                                          {2, 0, 0, 0, 0, "BatchMatMulV3BasicTilingData"},
                                                          {2, 0, 1, 0, 0, "BatchMatMulV3BasicTilingData"},
                                                          {2, 0, 2, 0, 0, "BatchMatMulV3BasicTilingData"},
@@ -7432,50 +7440,38 @@ const std::vector<CvDispatchBranch> &GetCvBatchDispatchBranches() {
                                                          {2, 0, 0, 2, 1, "BatchMatMulV3IterBatchBasicTilingData"}};
   return branches;
 }
-}  // namespace
 
-std::string Kernel::GenCvDispatchEntryForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
-                                                  const std::string &kernel_task_type, bool is_aiv_entry) {
-  std::string graph_name = CamelToLowerSneak(GenValidName(fused_schedule_result.fused_graph_name.GetString()));
-  const std::string entry_name = is_aiv_entry ? graph_name + "_aiv" : graph_name;
-  const bool is_static = IsStaticSchedResult(fused_schedule_result);
-  bool is_batch = false;
-  // 图已知转置（-1=未知时保守发射全部 4 路）：tiling key 转置位与算子
-  // transpose/adj 属性一致，非匹配分支永不可达。
-  int graph_at = -1;
-  int graph_bt = -1;
-  {
-    bool is_conv = false;
-    std::string input_type;
-    std::string output_type;
-    ascgen_utils::MatMulAttr matmul_attr;
-    if (ascgen_utils::GetCubeInfo(fused_schedule_result, is_batch, is_conv, input_type, output_type, matmul_attr) ==
-        af::SUCCESS) {
-      graph_at = matmul_attr.transpose_x1 != 0 ? 1 : 0;
-      graph_bt = matmul_attr.transpose_x2 != 0 ? 1 : 0;
-    }
+// Tensor-only 模式发射门控：这些模式的 key 在 Tensor 平台只以 api_level=2 出现，
+// Basic-only 平台（offset_x=avoid）才回落 api_level=1。
+bool IsCvTensorOnlyMode(const CvDispatchBranch &branch, bool is_batch) {
+  if (is_batch) {
+    return branch.model == kStreamKModel;  // Stream-K
   }
-  std::string io_params;
-  std::string io_args;
-  GE_ASSERT_SUCCESS(GenCvEntryIoParamsAndArgs(fused_schedule_result, io_params, io_args), "Gen CV entry io failed");
+  // Slice/Basic-Split-K/Stream-K/SK-Split-K 及 B-full-load 的 1V1/1V2 fixpipe
+  return branch.model == kStreamKModel || branch.model == kSliceModel || branch.model == kBasicSplitKModel ||
+         branch.model == kSkSplitKModel ||
+         (branch.model == 0 && branch.full_load == kBFullLoad && branch.l0c2out_model != 0);
+}
 
-  std::stringstream ss;
-  // 动态链 noinline 包装（文件作用域，双入口经宏守卫去重）：防止全部分派点
-  // always_inline 扁平化进入口形成巨型单函数导致编译时间放大。
-  {
-    const std::string mode_args = is_batch ? "ITER, BMODEL, FL, LO" : "MD, FL, LO";
-    const std::string template_batch_args = is_batch ? "ITER, BMODEL" : "0, MD";
-    const std::string dyn_guard = graph_name + "_dyn_launch_defined";
-    ss << "#ifndef " << dyn_guard << std::endl;
-    ss << "#define " << dyn_guard << std::endl;
-    ss << "template <int8_t API, int8_t AT, int8_t BT, int8_t T4, int8_t T5, int8_t FL, int8_t LO>" << std::endl;
-    ss << "__aicore__ __attribute__((noinline)) void " << graph_name << "_dyn_launch(" << io_params
-       << GM_ADDR("workspace").AsArg() << ", const CVAutofuseTilingData &t) {" << std::endl;
-    ss << "  " << graph_name << "<API, AT, BT, T4, T5, FL, LO>(" << io_args << "workspace, t);" << std::endl;
-    ss << "}" << std::endl;
-    ss << "#endif" << std::endl;
-  }
-  // tiling 尾参仅在动态shape场景下随launch命令搬运;静态const场景kernel读kConstTilingData， 形参整体裁剪
+// 动态链 noinline 包装（文件作用域，双入口经宏守卫去重）：防止全部分派点
+// always_inline 扁平化进入口形成巨型单函数导致编译时间放大。
+void AppendCvEntryDynLaunchWrapper(std::stringstream &ss, const std::string &graph_name, const std::string &io_params,
+                                   const std::string &io_args) {
+  const std::string dyn_guard = graph_name + "_dyn_launch_defined";
+  ss << "#ifndef " << dyn_guard << std::endl;
+  ss << "#define " << dyn_guard << std::endl;
+  ss << "template <int8_t API, int8_t AT, int8_t BT, int8_t T4, int8_t T5, int8_t FL, int8_t LO>" << std::endl;
+  ss << "__aicore__ __attribute__((noinline)) void " << graph_name << "_dyn_launch(" << io_params
+     << GM_ADDR("workspace").AsArg() << ", const CVAutofuseTilingData &t) {" << std::endl;
+  ss << "  " << graph_name << "<API, AT, BT, T4, T5, FL, LO>(" << io_args << "workspace, t);" << std::endl;
+  ss << "}" << std::endl;
+  ss << "#endif" << std::endl;
+}
+
+// 入口签名与 tiling 形参：tiling 尾参仅在动态shape场景下随launch命令搬运；静态const场景
+// kernel 读 kConstTilingData，形参整体裁剪。位域解码段由 GenCvEntryTemplateArgsDecoding 发射。
+void AppendCvEntrySignature(std::stringstream &ss, const std::string &entry_name, const std::string &io_params,
+                            const std::string &kernel_task_type, bool is_aiv_entry, bool is_batch) {
   ss << "extern \"C\" __global__ __aicore__ void " << entry_name << "(" << io_params;
   ss << GM_ADDR("workspace").AsArg() << std::endl;
   ss << "#ifndef INDUCTOR_CONST_TILING_DATA" << std::endl;
@@ -7492,48 +7488,49 @@ std::string Kernel::GenCvDispatchEntryForInductor(const ascir::FusedScheduledRes
   ss << "  const CVAutofuseTilingData &cv_tiling = tiling_data;" << std::endl;
   ss << "#endif" << std::endl;
   ss << GenCvEntryTemplateArgsDecoding(is_batch, "cv_tiling.extern_tiling_data", "(&cv_tiling)");
+}
 
-  const std::string dispatch_name = is_batch ? "_DISPATCH_BATCH_MATMUL" : "_DISPATCH_MATMUL";
-  const std::string launch_single_name = is_batch ? "_LAUNCH_BATCH_MATMUL" : "_LAUNCH_MATMUL";
-
-  // 静态 const：解码值为 constexpr，直接作模板实参单点实例化；#else 保留
-  // 动态回退全表分派（经 noinline 包装）。
-  {
-    const std::string unified_dyn_args = io_args + "workspace, cv_tiling";
-    const std::string unified_const_args = io_args + "workspace, kConstTilingData";
-    if (is_static) {
-      ss << "#ifdef INDUCTOR_CONST_TILING_DATA" << std::endl;
-      ss << "  #define _KERNEL_ARGS " << unified_const_args << std::endl;
-      ss << "#else" << std::endl;
-      ss << "  #define _KERNEL_ARGS " << unified_dyn_args << std::endl;
-      ss << "#endif" << std::endl;
-    }
-    const std::string unified_args_expr = is_static ? "_KERNEL_ARGS)" : (unified_dyn_args + ")");
-    const std::string mode_args = is_batch ? "ITER, BMODEL, FL, LO" : "MD, FL, LO";
-    const std::string template_batch_args = is_batch ? "ITER, BMODEL" : "0, MD";
-    const std::string direct_tpl_args = is_batch ? "BATCH_API_LEVEL, BATCH_A_TRANS, BATCH_B_TRANS, BATCH_ITER_MODEL, "
-                                                   "BMODEL, BATCH_FULL_LOAD, BATCH_L0C2OUT_MODEL"
-                                                 : "API_LEVEL, A_TRANS, B_TRANS, 0, MODEL, FULL_LOAD, L0C2OUT_MODEL";
-    if (is_static) {
-      ss << "#ifdef INDUCTOR_CONST_TILING_DATA" << std::endl;
-      ss << "  " << graph_name << "<" << direct_tpl_args << ">(" << unified_args_expr << ";" << std::endl;
-      ss << "#else" << std::endl;
-    }
-    // 动态链经文件作用域的 noinline 包装模板调用（见入口前发射）。
-    ss << "  #define " << launch_single_name << "(MATMUL_TILING, API, AT, BT, " << mode_args << ") \\" << std::endl;
-    ss << "    do { \\" << std::endl;
-    ss << "      " << graph_name << "_dyn_launch<API, AT, BT, " << template_batch_args << ", FL, LO>("
-       << unified_args_expr << "; \\" << std::endl;
-    ss << "    } while(0)" << std::endl;
+// 静态 const：解码值为 constexpr，直接作模板实参单点实例化；#else 保留动态回退全表分派
+// （经 noinline 包装）。_LAUNCH 单发宏定义动态链包装调用（见入口前发射）。
+void AppendCvEntryLaunchMacros(std::stringstream &ss, const std::string &graph_name, const std::string &io_args,
+                               bool is_batch, bool is_static, const std::string &launch_single_name) {
+  const std::string unified_dyn_args = io_args + "workspace, cv_tiling";
+  const std::string unified_const_args = io_args + "workspace, kConstTilingData";
+  if (is_static) {
+    ss << "#ifdef INDUCTOR_CONST_TILING_DATA" << std::endl;
+    ss << "  #define _KERNEL_ARGS " << unified_const_args << std::endl;
+    ss << "#else" << std::endl;
+    ss << "  #define _KERNEL_ARGS " << unified_dyn_args << std::endl;
+    ss << "#endif" << std::endl;
   }
+  const std::string unified_args_expr = is_static ? "_KERNEL_ARGS)" : (unified_dyn_args + ")");
+  const std::string mode_args = is_batch ? "ITER, BMODEL, FL, LO" : "MD, FL, LO";
+  const std::string template_batch_args = is_batch ? "ITER, BMODEL" : "0, MD";
+  const std::string direct_tpl_args = is_batch ? "BATCH_API_LEVEL, BATCH_A_TRANS, BATCH_B_TRANS, BATCH_ITER_MODEL, "
+                                                 "BMODEL, BATCH_FULL_LOAD, BATCH_L0C2OUT_MODEL"
+                                               : "API_LEVEL, A_TRANS, B_TRANS, 0, MODEL, FULL_LOAD, L0C2OUT_MODEL";
+  if (is_static) {
+    ss << "#ifdef INDUCTOR_CONST_TILING_DATA" << std::endl;
+    ss << "  " << graph_name << "<" << direct_tpl_args << ">(" << unified_args_expr << ";" << std::endl;
+    ss << "#else" << std::endl;
+  }
+  ss << "  #define " << launch_single_name << "(MATMUL_TILING, API, AT, BT, " << mode_args << ") \\" << std::endl;
+  ss << "    do { \\" << std::endl;
+  ss << "      " << graph_name << "_dyn_launch<API, AT, BT, " << template_batch_args << ", FL, LO>("
+     << unified_args_expr << "; \\" << std::endl;
+  ss << "    } while(0)" << std::endl;
+}
 
-  // _DISPATCH 宏：转置维运行时分派；AIV 入口死分支由 AF_AIV_UNIT 裁剪。
+// _DISPATCH 宏：平台能力与转置维均经 if constexpr 编译期裁剪（守卫宏由 tiling 头的
+// AppendCvPlatformSelectionDefs 提供，转置语义含 adj/unit-N 规整），不可达分支不
+// 实例化包装与图模板；AIV 入口死分支另由 AF_AIV_UNIT 裁剪。
+void AppendCvEntryDispatchMacro(std::stringstream &ss, bool is_batch, const std::string &dispatch_name,
+                                const std::string &launch_single_name) {
   const std::string &a_trans = is_batch ? "BATCH_A_TRANS" : "A_TRANS";
   const std::string &b_trans = is_batch ? "BATCH_B_TRANS" : "B_TRANS";
-  auto append_dispatch_mode_branches = [&ss, &launch_single_name](const std::string &suffix_args, int at, int bt) {
-    ss << "        " << launch_single_name << "(MATMUL_TILING, API, " << at << ", " << bt << suffix_args << "); \\"
-       << std::endl;
-  };
+  const char *platform_guard =
+      is_batch ? "CV_BMM_DISPATCH_SUPPORTED(API, BMODEL, FL, LO, ITER)" : "CV_MM_DISPATCH_SUPPORTED(API, MD, FL, LO)";
+  const std::string &suffix_args = is_batch ? ", ITER, BMODEL, FL, LO" : ", MD, FL, LO";
   ss << "  #define " << dispatch_name << "(";
   if (is_batch) {
     ss << "API, BMODEL, FL, LO, ITER, MATMUL_TILING) \\" << std::endl;
@@ -7541,28 +7538,36 @@ std::string Kernel::GenCvDispatchEntryForInductor(const ascir::FusedScheduledRes
     ss << "API, MD, FL, LO, MATMUL_TILING) \\" << std::endl;
   }
   ss << "    do { \\" << std::endl;
+  ss << "      if constexpr (!" << platform_guard << ") { return; } else { \\" << std::endl;
   bool first_trans_branch = true;
   for (int at = 0; at < 2; at++) {
     for (int bt = 0; bt < 2; bt++) {
-      // 图已知转置裁剪（见 graph_at 注释）。
-      if (graph_at >= 0 && (at != graph_at || bt != graph_bt)) {
-        continue;
-      }
-      const std::string &suffix_args = is_batch ? ", ITER, BMODEL, FL, LO" : ", MD, FL, LO";
       ss << "      " << (first_trans_branch ? "if" : "else if") << " (" << a_trans << " == " << at << " && " << b_trans
          << " == " << bt << ") { \\" << std::endl;
       first_trans_branch = false;
-      append_dispatch_mode_branches(suffix_args, at, bt);
+      ss << "        if constexpr (!CV_TRANSPOSE_SUPPORTED(" << at << ", " << bt << ")) { return; } else { \\"
+         << std::endl;
+      ss << "        " << launch_single_name << "(MATMUL_TILING, API, " << at << ", " << bt << suffix_args << "); \\"
+         << std::endl;
+      ss << "        } \\" << std::endl;
       ss << "      } \\" << std::endl;
     }
   }
+  ss << "      } \\" << std::endl;
   ss << "    } while(0)" << std::endl;
   ss << std::endl;
+}
 
-  // 外层 if-else 链（matmul 29 / batch 19 分支，含 api_level=2 层）。
+// 外层 if-else 链（含 api_level=2 层）：Tensor-only 模式发射门控见 IsCvTensorOnlyMode；
+// api_level=1 的基本模式实例化由 _DISPATCH 宏的平台守卫在设备编译期裁剪。
+void AppendCvEntryModeChain(std::stringstream &ss, bool is_batch, bool avoid_tensor_api, bool is_static,
+                            const std::string &dispatch_name, const std::string &launch_single_name) {
   const auto &branches = is_batch ? GetCvBatchDispatchBranches() : GetCvMatmulDispatchBranches();
   size_t branch_idx = 0;
   for (const auto &branch : branches) {
+    if (IsCvTensorOnlyMode(branch, is_batch) && branch.api_level != kTensorApiLevel && !avoid_tensor_api) {
+      continue;
+    }
     ss << "  " << (branch_idx == 0 ? "if" : "} else if") << " (";
     if (is_batch) {
       ss << "BATCH_API_LEVEL == " << branch.api_level << " && BMODEL == " << branch.model
@@ -7586,11 +7591,44 @@ std::string Kernel::GenCvDispatchEntryForInductor(const ascir::FusedScheduledRes
   ss << "  #undef " << dispatch_name << std::endl;
   if (is_static) {
     ss << "#endif" << std::endl;
-  }
-  if (is_static) {
     ss << "  #undef _KERNEL_ARGS" << std::endl;
   }
   ss << "}" << std::endl;
+}
+}  // namespace
+
+std::string Kernel::GenCvDispatchEntryForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
+                                                  const std::string &kernel_task_type, bool is_aiv_entry) {
+  std::string graph_name = CamelToLowerSneak(GenValidName(fused_schedule_result.fused_graph_name.GetString()));
+  const std::string entry_name = is_aiv_entry ? graph_name + "_aiv" : graph_name;
+  const bool is_static = IsStaticSchedResult(fused_schedule_result);
+  bool is_batch = false;
+  // Tensor-only 模式发射门控：tiling 按平台能力返回 Tensor 或 Basic key（Basic-only 经
+  // offset_x 编码），Stream-K/SK-Split-K/Slice/Split-K 及 B-full-load 1V1/1V2 在 Tensor
+  // 平台仅出现在 api_level=2 的 key 中。
+  bool avoid_tensor_api = false;
+  {
+    bool is_conv = false;
+    std::string input_type;
+    std::string output_type;
+    ascgen_utils::MatMulAttr matmul_attr;
+    if (ascgen_utils::GetCubeInfo(fused_schedule_result, is_batch, is_conv, input_type, output_type, matmul_attr) ==
+        af::SUCCESS) {
+      avoid_tensor_api = is_conv || matmul_attr.offset_x == kAvoidTensorApiOffset;
+    }
+  }
+  std::string io_params;
+  std::string io_args;
+  GE_ASSERT_SUCCESS(GenCvEntryIoParamsAndArgs(fused_schedule_result, io_params, io_args), "Gen CV entry io failed");
+
+  std::stringstream ss;
+  const std::string dispatch_name = is_batch ? "_DISPATCH_BATCH_MATMUL" : "_DISPATCH_MATMUL";
+  const std::string launch_single_name = is_batch ? "_LAUNCH_BATCH_MATMUL" : "_LAUNCH_MATMUL";
+  AppendCvEntryDynLaunchWrapper(ss, graph_name, io_params, io_args);
+  AppendCvEntrySignature(ss, entry_name, io_params, kernel_task_type, is_aiv_entry, is_batch);
+  AppendCvEntryLaunchMacros(ss, graph_name, io_args, is_batch, is_static, launch_single_name);
+  AppendCvEntryDispatchMacro(ss, is_batch, dispatch_name, launch_single_name);
+  AppendCvEntryModeChain(ss, is_batch, avoid_tensor_api, is_static, dispatch_name, launch_single_name);
   return ss.str();
 }
 
