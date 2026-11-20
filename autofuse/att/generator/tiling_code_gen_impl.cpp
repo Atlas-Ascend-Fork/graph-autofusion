@@ -655,10 +655,11 @@ af::Status TilingCodeGenImpl::FinishGeneratedHeaders(
 template <typename Container>
 inline void SetTilingDefinition(const Container &var_names, const std::string &param_name,
                                 std::set<std::string> &tiling_data_vars,
-                                std::map<std::string, std::string> &type_name_to_definition) {
+                                std::map<std::string, std::string> &type_name_to_definition,
+                                const std::set<std::string> &dynamic_size_var_names) {
   ge::CodePrinter dumper;
   if (TilingDataGenUtils::NeedWrittenTilingData(var_names, tiling_data_vars)) {
-    TilingDataGenUtils::WriteTilingDataElement(dumper, tiling_data_vars, var_names);
+    TilingDataGenUtils::WriteTilingDataElement(dumper, tiling_data_vars, var_names, dynamic_size_var_names);
     type_name_to_definition[param_name] += dumper.GetOutputStr();
   }
 }
@@ -883,7 +884,16 @@ af::Status TilingCodeGenImpl::CollectBaseTilingVarSets(std::set<std::string> &in
   return af::SUCCESS;
 }
 
+std::set<std::string> TilingCodeGenImpl::GetDynamicSizeVarNames() const {
+  std::set<std::string> dynamic_size_var_names;
+  for (const auto &model_info : tiling_model_info_) {
+    dynamic_size_var_names.insert(model_info.dynamic_size_var_names.begin(), model_info.dynamic_size_var_names.end());
+  }
+  return dynamic_size_var_names;
+}
+
 af::Status TilingCodeGenImpl::GenBaseTilingData(std::map<std::string, std::string> &type_name_to_definition) {
+  const std::set<std::string> dynamic_size_var_names = GetDynamicSizeVarNames();
   std::set<std::string> tiling_data_vars;
   std::set<std::string> input_vars_set;
   std::set<std::string> searchable_vars_set;
@@ -900,7 +910,7 @@ af::Status TilingCodeGenImpl::GenBaseTilingData(std::map<std::string, std::strin
       input_vars_set.insert(const_var);
     }
   }
-  SetTilingDefinition(input_vars_set, "InputParams", tiling_data_vars, type_name_to_definition);
+  SetTilingDefinition(input_vars_set, "InputParams", tiling_data_vars, type_name_to_definition, dynamic_size_var_names);
   // HardWareParams 中 block_dim 与 tiling_key 相邻声明，与非 ATT 结构体保持一致
   std::vector<std::string> hardware_write_order;
   if (hardware_vars_set.count("block_dim") != 0U) {
@@ -912,10 +922,13 @@ af::Status TilingCodeGenImpl::GenBaseTilingData(std::map<std::string, std::strin
       hardware_write_order.emplace_back(var_name);
     }
   }
-  SetTilingDefinition(hardware_write_order, "HardWareParams", tiling_data_vars, type_name_to_definition);
-  SetTilingDefinition(searchable_vars_set, "BaseParams", tiling_data_vars, type_name_to_definition);
-  SetTilingDefinition(general_post_var_set, "GeneralParams", tiling_data_vars, type_name_to_definition);
-  SetTilingDefinition(mem_vars_set, "MemoryParams", tiling_data_vars, type_name_to_definition);
+  SetTilingDefinition(hardware_write_order, "HardWareParams", tiling_data_vars, type_name_to_definition,
+                      dynamic_size_var_names);
+  SetTilingDefinition(searchable_vars_set, "BaseParams", tiling_data_vars, type_name_to_definition,
+                      dynamic_size_var_names);
+  SetTilingDefinition(general_post_var_set, "GeneralParams", tiling_data_vars, type_name_to_definition,
+                      dynamic_size_var_names);
+  SetTilingDefinition(mem_vars_set, "MemoryParams", tiling_data_vars, type_name_to_definition, dynamic_size_var_names);
   return af::SUCCESS;
 }
 
@@ -1038,6 +1051,7 @@ af::Status TilingCodeGenImpl::CollectStructCopyVars(std::set<std::string> &tilin
 }
 
 af::Status TilingCodeGenImpl::GenStructCopyDef() {
+  const std::set<std::string> dynamic_size_var_names = GetDynamicSizeVarNames();
   std::set<std::string> tiling_data_vars;
   // 获取所有的var name和复用var的映射关系
   std::map<std::string, std::string> var_names_to_reuse_var_name;
@@ -1052,7 +1066,7 @@ af::Status TilingCodeGenImpl::GenStructCopyDef() {
   for (const auto &var : tiling_data_vars) {
     // 如果没有复用，则定义该变量
     std::string reuse_var = var;
-    const std::string copy_type = TilingDataGenUtils::GetFieldType(var);
+    const std::string copy_type = TilingDataGenUtils::GetFieldType(var, dynamic_size_var_names);
     const auto &iter = var_names_to_reuse_var_name.find(var);
     if (iter == var_names_to_reuse_var_name.end()) {
       AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kState, "  " + copy_type + " " + var + ";");
@@ -3746,7 +3760,7 @@ af::Status TilingCodeGenImpl::GenHeaderCodesSummaryBody() {
     auto scope_names = GetHardwareNames(args_manager.GetTotalHardwareCons(config_.do_variable_replace));
     fixed_var_name.insert(scope_names.begin(), scope_names.end());
   }
-  TilingDataGenUtils::WriteTilingDataElement(dumper, keep_uniq, fixed_var_name);
+  TilingDataGenUtils::WriteTilingDataElement(dumper, keep_uniq, fixed_var_name, GetDynamicSizeVarNames());
   // add struct tiling data
   std::map<std::string, std::string> struct_set;
   for (const auto &model_info : tiling_model_info_) {

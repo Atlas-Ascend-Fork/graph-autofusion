@@ -82,6 +82,8 @@ __attribute__((visibility("default"))) PyObject *PyInit_autofuse(void);
   OP(Max)                         \
   OP(Argmax)                      \
   OP(ArgmaxWithValue)             \
+  OP(Argmin)                      \
+  OP(ArgminWithValue)             \
   OP(Any)                         \
   OP(All)                         \
   OP(Sum)                         \

@@ -557,12 +557,51 @@ bool GroupGraphContainsIndirectLoad(const std::vector<af::AscGraph> &graphs, con
   return false;
 }
 
+void FillModelInfoList(att::TilingModelInfo &model_info_list, const ModelInfoSetupContext &context) {
+  const auto &runtime_shape_vars =
+      context.schedule_result.schedule_groups[context.schedule_group_id].runtime_shape_vars;
+  for (auto &model_info : model_info_list) {
+    model_info.dynamic_size_var_names = context.dynamic_size_var_names;
+    // These dimensions describe runtime guards, not searchable axes. Keep
+    // them as input parameters so tiling caches also preserve their values.
+    for (const auto &var : runtime_shape_vars) {
+      if (std::find(model_info.sizes.begin(), model_info.sizes.end(), var) == model_info.sizes.end()) {
+        model_info.sizes.push_back(var);
+      }
+    }
+    model_info.schedule_group_ident.asc_graph_id = context.asc_graph_id;
+    model_info.schedule_group_ident.impl_graph_id = context.impl_graph_id;
+    model_info.schedule_group_ident.group_id = context.schedule_group_id;
+    model_info.input_nodes = context.schedule_results.input_nodes;
+    model_info.output_nodes = context.schedule_results.output_nodes;
+    FilterOutputAliasWorkspace(model_info);
+    auto it = context.all_graph_score_funcs.find(model_info.graph_name);
+    if (it != context.all_graph_score_funcs.end()) {
+      model_info.score_func = it->second;
+    } else if (!context.all_graph_score_funcs.empty() &&
+               GroupGraphContainsIndirectLoad(context.group_graphs, model_info.graph_name)) {
+      // [静默失效诊断] IL 图的打分函数已注入（graph_name_to_score_funcs 非空）
+      // 但本图名未命中——键漂移（跨 pass 改名/过滤未同步）会使候选竞标退化到默认
+      // 分且无任何日志。门控：仅含 IndirectLoad 节点的图触发（map 为全融合结果全局，
+      // 非 IL 图不注入打分函数，未命中是常态，不告警）。显性暴露而非静默吞掉。
+      GELOGW(
+          "[ScoreFunc] IL graph[%s] (semantic[%s]) has no score func entry but %zu entries exist (first key: %s) — "
+          "key drift detected, runtime scoring may be silently disabled for this graph.",
+          model_info.graph_name.c_str(), model_info.semantic_name.c_str(), context.all_graph_score_funcs.size(),
+          context.all_graph_score_funcs.begin()->first.c_str());
+    }
+  }
+}
+
 af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscGraph>> &schedule_groups,
                                           const std::map<std::string, std::string> &all_graph_score_funcs,
                                           const ascir::FusedScheduledResult &schedule_results,
                                           const std::map<std::string, std::string> &options,
                                           att::ParsedScheduleResult &out_schedule_groups, size_t asc_graph_id,
                                           size_t impl_graph_id) {
+  // 前端 ABI 动态符号集合：codegen 与 ATT 统一按该集合决定 tiling data 字段宽度。
+  std::set<std::string> dynamic_size_var_names;
+  ascgen_utils::CollectDynamicSizeVarNames(schedule_results, dynamic_size_var_names);
   // 第三层表示schedule_group_id
   for (size_t schedule_group_id = 0UL; schedule_group_id < schedule_groups.size(); schedule_group_id++) {
     auto &model_info_list = out_schedule_groups.groups_tiling_model_info[schedule_group_id];
@@ -587,36 +626,11 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
         GenerateModelInfoWithContext(schedule_groups[schedule_group_id], model_info_list, options,
                                      out_schedule_groups.enable_group_parallel, context, schedule_result.semantic_name),
         "Get model info failed, impl graph id = %ld, group id = %ld.", impl_graph_id, schedule_group_id);
-    for (auto &model_info : model_info_list) {
-      // These dimensions describe runtime guards, not searchable axes. Keep
-      // them as input parameters so tiling caches also preserve their values.
-      for (const auto &var : schedule_result.schedule_groups[schedule_group_id].runtime_shape_vars) {
-        if (std::find(model_info.sizes.begin(), model_info.sizes.end(), var) == model_info.sizes.end()) {
-          model_info.sizes.push_back(var);
-        }
-      }
-      model_info.schedule_group_ident.asc_graph_id = asc_graph_id;
-      model_info.schedule_group_ident.impl_graph_id = impl_graph_id;
-      model_info.schedule_group_ident.group_id = schedule_group_id;
-      model_info.input_nodes = schedule_results.input_nodes;
-      model_info.output_nodes = schedule_results.output_nodes;
-      FilterOutputAliasWorkspace(model_info);
-      auto it = all_graph_score_funcs.find(model_info.graph_name);
-      if (it != all_graph_score_funcs.end()) {
-        model_info.score_func = it->second;
-      } else if (!all_graph_score_funcs.empty() &&
-                 GroupGraphContainsIndirectLoad(schedule_groups[schedule_group_id], model_info.graph_name)) {
-        // [静默失效诊断] IL 图的打分函数已注入（graph_name_to_score_funcs 非空）
-        // 但本图名未命中——键漂移（跨 pass 改名/过滤未同步）会使候选竞标退化到默认
-        // 分且无任何日志。门控：仅含 IndirectLoad 节点的图触发（map 为全融合结果全局，
-        // 非 IL 图不注入打分函数，未命中是常态，不告警）。显性暴露而非静默吞掉。
-        GELOGW(
-            "[ScoreFunc] IL graph[%s] (semantic[%s]) has no score func entry but %zu entries exist (first key: %s) — "
-            "key drift detected, runtime scoring may be silently disabled for this graph.",
-            model_info.graph_name.c_str(), model_info.semantic_name.c_str(), all_graph_score_funcs.size(),
-            all_graph_score_funcs.begin()->first.c_str());
-      }
-    }
+    const ModelInfoSetupContext setup_context{
+        schedule_results,      schedule_result,        schedule_groups[schedule_group_id],
+        all_graph_score_funcs, dynamic_size_var_names, asc_graph_id,
+        impl_graph_id,         schedule_group_id};
+    FillModelInfoList(model_info_list, setup_context);
     const auto &ident = model_info_list[0].schedule_group_ident;
     GELOGI(
         "[DFX]End to gen model info for %s tiling_case size %zu, graph name %s.", ident.GetItemPrefix().c_str(),

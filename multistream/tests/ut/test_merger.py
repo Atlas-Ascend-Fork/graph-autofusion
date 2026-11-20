@@ -63,8 +63,14 @@ def test_load_balance_spreads_diamond_while_main_stream_collapses(caplog):
     )
     assert load == [0, 1]
     assert main == [0, 0]
-    assert any("kLoadBalance" in record.getMessage() for record in caplog.records)
-    assert any("kMainStream" in record.getMessage() for record in caplog.records)
+    assert any(
+        "Use LoadBalance strategy." in record.getMessage() for record in caplog.records
+    )
+    assert any(
+        "Use MainStream strategy." in record.getMessage() for record in caplog.records
+    )
+    assert not any("kLoadBalance" in record.getMessage() for record in caplog.records)
+    assert not any("kMainStream" in record.getMessage() for record in caplog.records)
 
 
 def test_empty_single_and_repeated_routes():
@@ -211,6 +217,14 @@ def test_merge_failures_log_the_cpp_wording_where_found(caplog, monkeypatch):
         assert first_error(action, ValueError) == ("merger.py", message)
 
     solver = _StreamMergeSolver(graph, [[0, 1, 2]], StreamMergeOptions())
+    with pytest.raises(
+        RuntimeError, match=r"candidate physical stream -1 is out of range \[0, 1\)"
+    ):
+        solver._apply_load(0, -1, [-1], [0], [[0]], 1)
+    with pytest.raises(
+        RuntimeError, match=r"candidate physical stream 2 is out of range \[0, 1\)"
+    ):
+        solver._apply_main(0, 2, [-1], [[0]], 1)
     unassigned = ("merger.py", "Try to remove unassigned unit 0.")
     assert (
         first_error(lambda: solver._remove_load(0, [-1], [], []), RuntimeError)

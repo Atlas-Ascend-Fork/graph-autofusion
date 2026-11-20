@@ -834,6 +834,55 @@ REG_ASC_IR(ArgMaxMultiRPhase2WithValue)
                             {{"T", TensorType{DT_FLOAT, DT_INT32, DT_INT64}},
                              {"I", TensorType{DT_INT32}},
                              {"U", TensorType{DT_INT64}}}});
+// Min shares the arg-reduce geometry, index representation and temporary-buffer contract.
+REG_ASC_IR(Argmin)
+    .Input("x", "T")
+    .Output("y", "U")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ArgminAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgminAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"U", TensorType{DT_INT64}}}});
+
+REG_ASC_IR(ArgMinMultiRPhase1)
+    .Input("x", "T")
+    .Output("value", "T")
+    .Output("index", "I")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ArgMinMultiRPhase1AscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgMinMultiRPhase1AscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT, DT_INT32, DT_INT64}}, {"I", TensorType{DT_INT32}}}});
+
+REG_ASC_IR(ArgMinMultiRPhase2)
+    .Input("value", "T")
+    .Input("index", "I")
+    .Output("y", "U")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions,
+          {af::ascir::AscIrImplCreator<af::ascir::ArgMinMultiRPhase2AscIrAttImplV2>(),
+           af::ascir::AscIrImplCreator<af::ascir::ArgMinMultiRPhase2AscIrCodegenImplV2>(),
+           {{"T", TensorType{DT_FLOAT, DT_INT32}}, {"I", TensorType{DT_INT32}}, {"U", TensorType{DT_INT64}}}});
+
+REG_ASC_IR(ArgminWithValue)
+    .Input("x", "T")
+    .Output("value", "T")
+    .Output("index", "U")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ArgminWithValueAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgminWithValueAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT, DT_INT32, DT_INT64}}, {"U", TensorType{DT_INT64}}}});
+
+REG_ASC_IR(ArgMinMultiRPhase2WithValue)
+    .Input("value_src", "T")
+    .Input("index_src", "I")
+    .Output("value", "T")
+    .Output("index", "U")
+    .ComputeType(ComputeType::kComputeReduce)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::ArgMinMultiRPhase2WithValueAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::ArgMinMultiRPhase2WithValueAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_FLOAT, DT_INT32, DT_INT64}},
+                             {"I", TensorType{DT_INT32}},
+                             {"U", TensorType{DT_INT64}}}});
+
 REG_ASC_IR(Sum).Impl(v2_soc_versions,
                      {af::ascir::AscIrImplCreator<af::ascir::SumAscIrAttImplV2>(),
                       af::ascir::AscIrImplCreator<af::ascir::SumAscIrCodegenImplV2>(),

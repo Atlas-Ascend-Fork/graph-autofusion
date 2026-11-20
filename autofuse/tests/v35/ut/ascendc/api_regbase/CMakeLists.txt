@@ -26,6 +26,7 @@ add_library(test_regbase_ascendc OBJECT
     ./test_reduce_init.cpp
     ./test_reduce_extend.cpp
     ./test_argmax.cpp
+    ./test_argmin.cpp
     ./test_add.cpp
     ./test_airy_ai.cpp
     ./test_bitwise_and.cpp

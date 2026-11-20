@@ -7,6 +7,8 @@ add_executable(optimize_st
         ${OPTIMIZE_TEST_FILES}
         ${CODE_ROOT_DIR}/common/autofuse_backend_spec_api.cpp
         ${CODE_ROOT_DIR}/tests/framework/easy_asc_graph/asc_graph_builder.cpp
+        # Schedule 校验契约由 UT 维护，ST 复用同一组用例以保证 ST 增量覆盖率覆盖失败分支。
+        ${CODE_ROOT_DIR}/tests/ut/optimize/test_schedule_graph_validator.cpp
 )
 
 if (ENABLE_ASAN)
@@ -33,6 +35,7 @@ set(ASCGEN_COMMON_LINK_OPTION
 
 target_include_directories(optimize_st PRIVATE
         ${CODE_ROOT_DIR}/../../..
+        ${CODE_ROOT_DIR}/optimize
         ${CODE_ROOT_DIR}/tests/framework/easy_asc_graph
         ${CODE_ROOT_DIR}/tests/depends/runtime/src
         ${ASCEND_INSTALL_PATH}/x86_64-linux/include/acl/error_codes

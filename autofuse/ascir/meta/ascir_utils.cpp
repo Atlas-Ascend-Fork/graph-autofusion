@@ -16,6 +16,7 @@
 #include <set>
 #include <algorithm>
 #include <optional>
+#include <cstdint>
 #include <unistd.h>
 #include "google/protobuf/text_format.h"
 #include "google/protobuf/io/zero_copy_stream_impl.h"
@@ -37,6 +38,10 @@
 
 namespace {
 constexpr int32_t DUMP_ID_WIDTH = 5;
+constexpr size_t MAX_DUMP_FILE_NAME_LENGTH = 255U;
+constexpr size_t DUMP_FILE_NAME_HASH_LENGTH = 16U;
+constexpr uint64_t FNV_OFFSET_BASIS = 1469598103934665603ULL;
+constexpr uint64_t FNV_PRIME = 1099511628211ULL;
 std::string SanitizeFileName(const std::string &name) {
   std::string result;
   result.reserve(name.length());
@@ -53,6 +58,29 @@ std::string SanitizeFileName(const std::string &name) {
 std::string FormatDumpIndex(uint64_t index) {
   std::ostringstream ss;
   ss << std::setw(DUMP_ID_WIDTH) << std::setfill('0') << index;
+  return ss.str();
+}
+
+uint64_t GetStableDumpFileHash(const std::string &name) {
+  uint64_t hash = FNV_OFFSET_BASIS;
+  for (const char c : name) {
+    hash = (hash ^ static_cast<unsigned char>(c)) * FNV_PRIME;
+  }
+  return hash;
+}
+
+std::string LimitDumpFileName(const std::string &name) {
+  if (name.size() <= MAX_DUMP_FILE_NAME_LENGTH) {
+    return name;
+  }
+
+  const size_t hash_text_length = MAX_DUMP_FILE_NAME_LENGTH - DUMP_FILE_NAME_HASH_LENGTH - 2U;
+  const size_t head_length = hash_text_length / 2U;
+  const size_t tail_length = hash_text_length - head_length;
+  const uint64_t hash = GetStableDumpFileHash(name);
+  std::ostringstream ss;
+  ss << name.substr(0U, head_length) << "_" << std::hex << std::setw(DUMP_FILE_NAME_HASH_LENGTH) << std::setfill('0')
+     << hash << "_" << name.substr(name.size() - tail_length);
   return ss.str();
 }
 
@@ -730,7 +758,7 @@ static void DumpGraphText(const Graph &graph, const string &suffix, const uint32
 
   std::string base_name = "ascgraph_" + FormatDumpIndex(g_current_fused_graph_dump_index) + "_" + graph.GetName() +
                           "_" + suffix + "_" + std::to_string(graph_id) + ".txt";
-  std::string file_name = prefix + SanitizeFileName(base_name);
+  std::string file_name = prefix + LimitDumpFileName(SanitizeFileName(base_name));
   std::ofstream f_stream(file_name);
   if (f_stream.is_open()) {
     f_stream << dump_asc_graph << std::endl;
@@ -746,7 +774,7 @@ static void DumpComputeGraphImpl(const af::ComputeGraphPtr &compute_graph, const
   }
   std::string base_name = "ge_onnx_" + FormatDumpIndex(g_current_onnx_dump_index) + "_" + compute_graph->GetName() +
                           "_" + suffix + ".pbtxt";
-  std::string file_name = prefix + SanitizeFileName(base_name);
+  std::string file_name = prefix + LimitDumpFileName(SanitizeFileName(base_name));
   af::Model model("GE", "");
   model.SetGraph(compute_graph);
   af::onnx::ModelProto model_proto;
@@ -828,7 +856,7 @@ void DumpPyCode(const af::AscGraph &graph) {
     return;
   }
   const std::string base_name = "py_code_" + graph.GetName() + ".py";
-  std::string file_name = prefix + SanitizeFileName(base_name);
+  std::string file_name = prefix + LimitDumpFileName(SanitizeFileName(base_name));
   af::ascir::PythonCodeDumper dumper;
   (void)dumper.Dump(graph, file_name);
 }

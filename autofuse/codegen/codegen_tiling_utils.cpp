@@ -123,6 +123,10 @@ void AppendCvSafetyAivOnlyModeDef(std::stringstream &ss, bool is_batch, bool is_
 void AppendCvSafetyBlockIdxScheduledModeDef(std::stringstream &ss, bool is_batch, bool is_device) {
   ss << "static inline " << (is_device ? "__aicore__ " : "")
      << "constexpr bool is_cv_safety_blockidx_scheduled_mode(int64_t tiling_key) {" << std::endl;
+  // Native Stream-K must notify paired AIVs even on AICs with no MM task.
+  // Keep every launched AIC in the native mixed kernel without changing its usedCoreNum.
+  ss << "    const int64_t model = (tiling_key >> 12) & 0xF;" << std::endl;
+  ss << "    if ((model == 1 || model == 7) && is_cv_safety_mix_mode(tiling_key)) { return true; }" << std::endl;
   if (is_batch) {
     ss << "    if ((tiling_key & ~0xF0LL) == " << kTensorBroadcastBatchTilingKey << "LL) {" << std::endl;
     ss << "      return true;" << std::endl;
@@ -209,8 +213,8 @@ void AppendCvPlatformSelectionDefs(std::stringstream &ss, bool avoid_tensor_api,
 
 void AppendCvSafetyMixModeHelperDefs(std::stringstream &ss, bool is_batch, bool is_device) {
   AppendCvSafetyAivOnlyModeDef(ss, is_batch, is_device);
-  AppendCvSafetyBlockIdxScheduledModeDef(ss, is_batch, is_device);
   AppendCvSafetyMixModeDef(ss, is_batch, is_device);
+  AppendCvSafetyBlockIdxScheduledModeDef(ss, is_batch, is_device);
   ss << "static inline " << (is_device ? "__aicore__ " : "")
      << "constexpr int is_cv_safety_fusion_mode(int64_t tiling_key) {\n"
         "  return is_cv_safety_aiv_only_mode(tiling_key) ? 2 : (is_cv_safety_mix_mode(tiling_key) ? 1 : 0);\n"

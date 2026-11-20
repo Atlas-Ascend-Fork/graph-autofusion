@@ -889,6 +889,15 @@ codegen_e2e_st() {
                         argmax_store_test_e2e_v2 \
                          argmax_single_row_test_e2e_v2 \
                          argmax_ara_test_e2e_v2 \
+                          argmax_ara_allload_test_e2e_v2 \
+                          argmin_store_test_e2e_v2 \
+                          argmin_rcore_i32_test_e2e_v2 \
+                          argmin_allload_test_e2e_v2 \
+                          argmin_value_test_e2e_v2 \
+                          argmin_value_i32_test_e2e_v2 \
+                          argmin_value_rcore_i64_test_e2e_v2 \
+                          argmin_value_ra_i64_test_e2e_v2 \
+                          argmin_value_ra_rcore_test_e2e_v2 \
                         spherical_bessel_j0_store_test_e2e_v2 \
                         zeta_store_test_e2e_v2"
   fi

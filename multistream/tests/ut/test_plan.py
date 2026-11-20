@@ -121,6 +121,19 @@ def test_stream_plan_is_read_only_and_checks_node_identity():
     foreign = multistream.DAGGraph("foreign").add_node("n0", "Op")
     with pytest.raises(ValueError):
         plan.get_stream_id(foreign)
+    empty_plan = multistream.StreamPlan([], 0)
+    with pytest.raises(
+        ValueError, match=r"node index 0 is out of range for empty plan"
+    ):
+        empty_plan.get_stream_id(foreign)
+    one_plan = multistream.StreamPlan([0], 1)
+    foreign_second = multistream.DAGGraph("foreign2")
+    foreign_second.add_node("n0", "Op")
+    second_node = foreign_second.add_node("n1", "Op")
+    with pytest.raises(
+        ValueError, match=r"node index 1 is out of range \[0, 1\) for this plan"
+    ):
+        one_plan.get_stream_id(second_node)
 
 
 def test_required_count_and_base_offset_are_self_consistent(diamond_graph):

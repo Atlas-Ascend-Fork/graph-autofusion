@@ -198,7 +198,11 @@ def _cost_of(node: Any, costs: Sequence[NodeCost]) -> NodeCost:
 
     index = getattr(node, "_index", -1)
     if not isinstance(index, int) or index < 0 or index >= len(costs):
-        raise IndexError("node cost index is out of range")
+        if not costs:
+            raise IndexError(
+                f"node cost index {index!r} is out of range (costs is empty)"
+            )
+        raise IndexError(f"node cost index {index!r} is out of range [0, {len(costs)})")
     return costs[index]
 
 

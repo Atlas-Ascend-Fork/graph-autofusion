@@ -29,6 +29,7 @@
 #include "indirect_load_utils.h"
 #include "schedule_utils.h"
 #include "common_utils.h"
+#include "arg_reduce_utils.h"
 #include "v35/optimize/partition/vector_func_partitioner.h"
 #include "node_utils.h"
 #include "optimize/graph_pass/pass_runner_handler.h"
@@ -38,6 +39,7 @@
 #include "pre_process/pre_process.h"
 #include "static_ub_template_filter.h"
 #include "common/l2_cache_hint_manager.h"
+#include "schedule_graph_validator.h"
 
 using namespace ascir;
 using namespace optimize;
@@ -58,8 +60,7 @@ bool CanAlignRCoreWorkspace(const ScheduleTask &schedule_task) {
       if (node == nullptr) {
         continue;
       }
-      if (IsOps<Argmax>(node) || IsOps<ArgmaxWithValue>(node) || IsOps<ArgMaxMultiRPhase1>(node) ||
-          IsOps<ArgMaxMultiRPhase2>(node) || IsOps<ArgMaxMultiRPhase2WithValue>(node)) {
+      if (ascgen_utils::IsArgReduceType(node->GetType())) {
         return true;
       }
     }
@@ -465,7 +466,13 @@ void FilterComplexTilingDataScoreFuncs(std::vector<::ascir::ScheduledResult> &sc
   }
 }
 
+/**
+ * @brief 执行 Schedule 阶段的图契约校验及既有输出元数据检查。
+ *
+ * 新增校验必须在后续图重写、轴索引和 Codegen 前执行，失败状态沿原有 Optimize 链路返回。
+ */
 Status CheckGraphValidity(const af::AscGraph &graph) {
+  GE_CHK_STATUS_RET(ValidateScheduleGraph(graph), "%s", GetScheduleValidationError().c_str());
   for (const auto &node : graph.GetAllNodes()) {
     if (ScheduleUtils::IsBuffer(node)) {
       continue;

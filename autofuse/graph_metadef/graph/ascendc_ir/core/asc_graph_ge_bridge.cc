@@ -72,6 +72,21 @@ AscNodePtr AscGraphAddAscirNodeByType(AscGraph &asc_graph, const char *op_type, 
   if (type == ascir_op::ArgMaxMultiRPhase2::Type) {
     MAKE_NODE(ArgMaxMultiRPhase2);
   }
+  if (type == ascir_op::Argmin::Type) {
+    MAKE_NODE(Argmin);
+  }
+  if (type == ascir_op::ArgminWithValue::Type) {
+    MAKE_NODE(ArgminWithValue);
+  }
+  if (type == ascir_op::ArgMinMultiRPhase1::Type) {
+    MAKE_NODE(ArgMinMultiRPhase1);
+  }
+  if (type == ascir_op::ArgMinMultiRPhase2::Type) {
+    MAKE_NODE(ArgMinMultiRPhase2);
+  }
+  if (type == ascir_op::ArgMinMultiRPhase2WithValue::Type) {
+    MAKE_NODE(ArgMinMultiRPhase2WithValue);
+  }
   if (type == ascir_op::Asin::Type) {
     MAKE_NODE(Asin);
   }

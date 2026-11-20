@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "common/checker.h"
+#include "arg_reduce_utils.h"
 #include "common/ge_common/debug/log.h"
 
 namespace ascir_param {
@@ -565,6 +566,14 @@ af::Status BuildAndRegisterAscirNodeParams(const AscirParamBuildContext &ctx) {
 
 af::Status EnrichAscirNodeParams(const AscirParamSourceContext &source) {
   GE_ASSERT_NOTNULL(source.node);
+  const auto &type = source.node->GetType();
+  if (ascgen_utils::IsArgReduceType(type)) {
+    auto params = std::make_shared<AscirNodeParams>();
+    params->api_name = type;
+    params->status = ParamBuildStatus::kBuilt;
+    params->specific_params = ArgReduceNodeParams{};
+    return RegisterAscirNodeParams(source.node, params);
+  }
   if (source.node->GetType() == kVectorFunc) {
     return RegisterVectorFuncAscirNodeParams(source.node);
   }

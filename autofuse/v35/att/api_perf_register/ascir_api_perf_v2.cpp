@@ -21,6 +21,7 @@ constexpr int32_t kMaxDmaLen = 4;
 constexpr int32_t kMaxNddmaLen = 5;
 PerfParamTableV2 perf_param_table_v2;
 TilingScheduleConfigTableV2 tiling_schedule_config_table_v2;
+ArgReduceTilingScheduleConfigTableV2 arg_reduce_tiling_schedule_config_table_v2;
 
 std::vector<int64_t> GetNddmaVectorizedAxis(const af::AscNodePtr &node) {
   if (node == nullptr || node->outputs().empty()) {
@@ -674,6 +675,11 @@ REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase1, V2, ascir_reduce_v2::ArgMaxMultiRPha
 REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase2, V2, ascir_reduce_v2::ArgMaxMultiRPhase2Api);
 REGISTER_EVAL_FUNC_TAG(kArgmaxWithValue, V2, ascir_reduce_v2::ArgmaxWithValueApi);
 REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase2WithValue, V2, ascir_reduce_v2::ArgMaxMultiRPhase2WithValueApi);
+REGISTER_EVAL_FUNC_TAG(kArgmin, V2, ascir_reduce_v2::ArgminApi);
+REGISTER_EVAL_FUNC_TAG(kArgMinMultiRPhase1, V2, ascir_reduce_v2::ArgminApi);
+REGISTER_EVAL_FUNC_TAG(kArgMinMultiRPhase2, V2, ascir_reduce_v2::ArgminApi);
+REGISTER_EVAL_FUNC_TAG(kArgminWithValue, V2, ascir_reduce_v2::ArgminApi);
+REGISTER_EVAL_FUNC_TAG(kArgMinMultiRPhase2WithValue, V2, ascir_reduce_v2::ArgminApi);
 REGISTER_EVAL_FUNC_TAG(kNeg, V2, ascir_v2::NegApi);
 REGISTER_EVAL_FUNC_TAG(kMean, V2, ascir_reduce_v2::MeanApi);
 REGISTER_EVAL_FUNC_TAG(kAdd, V2, ascir_v2::AddApi);
@@ -772,17 +778,34 @@ ApiPerfRegister<ApiPerf> reduce_max_api_perf_v2(ApiPerfRegisterV2(kReduceMax, kR
                                                                   &perf_param_table_v2,
                                                                   &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> argmax_api_perf_v2(ApiPerfRegisterV2(kArgmax, kArgmax + "V2", nullptr, &perf_param_table_v2,
-                                                              &tiling_schedule_config_table_v2));
-ApiPerfRegister<ApiPerf> argmax_multir_phase1_api_perf_v2(ApiPerfRegisterV2(
-    kArgMaxMultiRPhase1, kArgMaxMultiRPhase1 + "V2", nullptr, &perf_param_table_v2, &tiling_schedule_config_table_v2));
-ApiPerfRegister<ApiPerf> argmax_multir_phase2_api_perf_v2(ApiPerfRegisterV2(
-    kArgMaxMultiRPhase2, kArgMaxMultiRPhase2 + "V2", nullptr, &perf_param_table_v2, &tiling_schedule_config_table_v2));
+                                                              &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_multir_phase1_api_perf_v2(
+    ApiPerfRegisterV2(kArgMaxMultiRPhase1, kArgMaxMultiRPhase1 + "V2", nullptr, &perf_param_table_v2,
+                      &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_multir_phase2_api_perf_v2(
+    ApiPerfRegisterV2(kArgMaxMultiRPhase2, kArgMaxMultiRPhase2 + "V2", nullptr, &perf_param_table_v2,
+                      &arg_reduce_tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> argmax_with_value_api_perf_v2(ApiPerfRegisterV2(kArgmaxWithValue, kArgmaxWithValue + "V2",
                                                                          nullptr, &perf_param_table_v2,
-                                                                         &tiling_schedule_config_table_v2));
+                                                                         &arg_reduce_tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> argmax_multir_phase2_with_value_api_perf_v2(
     ApiPerfRegisterV2(kArgMaxMultiRPhase2WithValue, kArgMaxMultiRPhase2WithValue + "V2", nullptr, &perf_param_table_v2,
-                      &tiling_schedule_config_table_v2));
+                      &arg_reduce_tiling_schedule_config_table_v2));
+// Min uses the same loop/workspace geometry and schedule policy, with direction-specific compute instructions.
+ApiPerfRegister<ApiPerf> argmin_api_perf_v2(ApiPerfRegisterV2(kArgmin, kArgmin + "V2", nullptr, &perf_param_table_v2,
+                                                              &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmin_phase1_api_perf_v2(ApiPerfRegisterV2(kArgMinMultiRPhase1, kArgMinMultiRPhase1 + "V2",
+                                                                     nullptr, &perf_param_table_v2,
+                                                                     &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmin_phase2_api_perf_v2(ApiPerfRegisterV2(kArgMinMultiRPhase2, kArgMinMultiRPhase2 + "V2",
+                                                                     nullptr, &perf_param_table_v2,
+                                                                     &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmin_with_value_api_perf_v2(ApiPerfRegisterV2(kArgminWithValue, kArgminWithValue + "V2",
+                                                                         nullptr, &perf_param_table_v2,
+                                                                         &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmin_phase2_with_value_api_perf_v2(
+    ApiPerfRegisterV2(kArgMinMultiRPhase2WithValue, kArgMinMultiRPhase2WithValue + "V2", nullptr, &perf_param_table_v2,
+                      &arg_reduce_tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> min_api_perf_v2(ApiPerfRegisterV2(kMin, kMin + "V2", nullptr, &perf_param_table_v2,
                                                            &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> reduce_min_api_perf_v2(ApiPerfRegisterV2(kReduceMin, kReduceMin + "V2", nullptr,

@@ -14,6 +14,10 @@ template <typename T>
 inline __aicore__ void RemovePadExtend(const LocalTensor<T> &dst, const LocalTensor<T> &src,
                                        const uint64_t last_axis_actual_size, const uint64_t last_axis_size,
                                        const uint64_t non_last_axis_merge) {
+  if (last_axis_size == last_axis_actual_size) {
+    AscendC::Adds(dst, src, static_cast<T>(0), static_cast<uint32_t>(non_last_axis_merge * last_axis_actual_size));
+    return;
+  }
   uint64_t rsvd_cnt = 0;
   uint8_t mask = 7;
   AscendC::GatherMaskParams params;

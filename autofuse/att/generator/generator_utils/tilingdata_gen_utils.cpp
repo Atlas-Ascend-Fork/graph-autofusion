@@ -8,14 +8,15 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "generator_utils/tilingdata_gen_utils.h"
-#include "common_utils.h"
 
 namespace att {
-std::string TilingDataGenUtils::GetFieldType(const std::string &var_name) {
+std::string TilingDataGenUtils::GetFieldType(const std::string &var_name,
+                                             const std::set<std::string> &dynamic_size_var_names) {
   if (var_name == "block_dim" || var_name == "tiling_key") {
     return "uint16_t";
   }
-  if (ascgen_utils::IsDynamicSizeVarName(var_name)) {
+  // 是否动态以前端 ABI 符号集合（GetFrontendShapeVars + !IsConstExpr）为准，不再按命名推断。
+  if (dynamic_size_var_names.count(var_name) != 0U) {
     return "int64_t";
   }
   const std::string tiling_key_suffix = "_tiling_key";

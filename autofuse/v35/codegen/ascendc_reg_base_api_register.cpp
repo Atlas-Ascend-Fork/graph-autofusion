@@ -441,6 +441,21 @@ Register::Register() {
   const std::string kAscendcArgmaxRegBaseStr = {
 #include "argmax_reg_base.h"
   };
+  const std::string kAscendcArgminRegBaseStr = {
+#include "argmin_reg_base.h"
+  };
+  const std::string kAscendcArgReduceRegBaseStr = {
+#include "arg_reduce_reg_base.h"
+  };
+  const std::string kAscendcArgReduceCommonRegBaseStr = {
+#include "arg_reduce_common_reg_base.h"
+  };
+  const std::string kAscendcArgReduceCoreRegBaseStr = {
+#include "arg_reduce_core_reg_base.h"
+  };
+  const std::string kAscendcArgReduceMergeRegBaseStr = {
+#include "arg_reduce_merge_reg_base.h"
+  };
   std::unordered_map<std::string, std::string> api_to_file{
       {"cast_reg_base.h", kAscendcCastRegStr},
       {"compare_reg_base.h", kAscendcCompareRegStr},
@@ -555,6 +570,11 @@ Register::Register() {
       {"acosh_reg_base.h", kAscendcAcoshRegBaseStr},
       {"cosh_reg_base.h", kAscendcCoshRegBaseStr},
       {"mul_reg_base.h", kAscendcMulRegBaseStr},
+      {"argmin_reg_base.h", kAscendcArgminRegBaseStr},
+      {"arg_reduce_reg_base.h", kAscendcArgReduceRegBaseStr},
+      {"arg_reduce_common_reg_base.h", kAscendcArgReduceCommonRegBaseStr},
+      {"arg_reduce_core_reg_base.h", kAscendcArgReduceCoreRegBaseStr},
+      {"arg_reduce_merge_reg_base.h", kAscendcArgReduceMergeRegBaseStr},
       {"argmax_reg_base.h", kAscendcArgmaxRegBaseStr},
   };
 

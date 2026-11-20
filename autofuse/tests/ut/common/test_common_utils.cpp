@@ -92,6 +92,25 @@ TEST_F(CommonUtilsTest, IsStaticSchedResultTest) {
   EXPECT_EQ(IsStaticSchedResult({static_result}), true);
 }
 
+TEST_F(CommonUtilsTest, CollectDynamicSizeVarNamesSkipsConstants) {
+  ascir::FusedScheduledResult result;
+  result.frontend_shape_vars = {af::Symbol("ks0"), af::ops::One, af::Symbol("rows")};
+  result.frontend_shape_vars_collected = true;
+
+  std::set<std::string> names;
+  CollectDynamicSizeVarNames(result, names);
+  EXPECT_EQ(names, (std::set<std::string>{"ks0", "rows"}));
+}
+
+TEST_F(CommonUtilsTest, CollectDynamicSizeVarNamesFallsBackToOriginVars) {
+  ascir::FusedScheduledResult result;
+  result.origin_vars = {af::Symbol("ks0"), af::ops::One};
+
+  std::set<std::string> names;
+  CollectDynamicSizeVarNames(result, names);
+  EXPECT_EQ(names, (std::set<std::string>{"ks0"}));
+}
+
 TEST_F(CommonUtilsTest, FrontendShapeVarsTakePrecedenceOverImplVars) {
   ascir::FusedScheduledResult result;
   result.frontend_shape_vars = {af::Symbol("ks0"), af::Symbol("ks1"), af::Symbol("ks2"), af::Symbol("ks10")};

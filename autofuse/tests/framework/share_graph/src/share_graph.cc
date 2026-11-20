@@ -9,6 +9,8 @@
  */
 
 #include "share_graph.h"
+#include <functional>
+#include <type_traits>
 #include "graph/utils/graph_utils.h"
 #include "graph/debug/ge_op_types.h"
 #include "ascendc_ir.h"
@@ -7401,18 +7403,20 @@ af::ComputeGraphPtr ShareGraph::LoadTanhStoreFusedGraph(size_t dims_size) {
   return compute_graph;
 }
 
-static af::ComputeGraphPtr CreateOneInputAscGraphComputeGraph(const std::string &graph_name,
-                                                              const std::string &sub_graph_name, size_t dims_size,
-                                                              void (*create_sub_graph)(af::AscGraph &, size_t)) {
+static af::ComputeGraphPtr CreateOneInputAscGraphComputeGraph(
+    const std::string &graph_name, const std::string &sub_graph_name, size_t dims_size,
+    const std::function<void(af::AscGraph &, size_t)> &create_sub_graph, int output_count = 1) {
   auto builder = GraphBuilder(graph_name);
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
   af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
 
-  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
-  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, output_count);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, output_count, 0);
 
   builder.AddDataEdge(data0, 0, ascbc, 0);
-  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  for (int i = 0; i < output_count; ++i) {
+    builder.AddDataEdge(ascbc, i, netoutput, i);
+  }
   auto one_input_compute_graph = builder.GetGraph();
   if (one_input_compute_graph == nullptr) {
     return nullptr;
@@ -7821,16 +7825,22 @@ af::ComputeGraphPtr ShareGraph::BesselJ0StoreFusedGraph(size_t dims_size) {
  *        output0
  * 输入 x{s0, s1}（FLOAT），归约沿 s1，输出 y{s0}（INT64 索引）。
  */
-static void CreateArgmaxStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+template <typename Op>
+static void CreateArgmaxStoreAscGraph(af::AscGraph &graph, size_t dims_size, af::DataType dtype = af::DT_FLOAT,
+                                      bool ra = false) {
   const Expression s0 = graph.CreateSizeVar("s0");
   const Expression s1 = graph.CreateSizeVar("s1");
   auto One = Symbol(1);
   auto Zero = Symbol(0);
   auto z0 = graph.CreateAxis("z0", s0);
   auto z1 = graph.CreateAxis("z1", s1);
+  const std::vector<Expression> out_repeats = ra ? std::vector<Expression>{One, s1} : std::vector<Expression>{s0, One};
+  const std::vector<Expression> out_strides =
+      ra ? std::vector<Expression>{Zero, One} : std::vector<Expression>{One, Zero};
 
   af::ascir_op::Data x("data0", graph);
   x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
 
   af::ascir_op::Load load1("load1");
   load1.x = x.y;
@@ -7840,17 +7850,17 @@ static void CreateArgmaxStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
   *load1.y.axis = {z0.id, z1.id};
   *load1.y.repeats = {s0, s1};
   *load1.y.strides = {s1, One};
-  load1.y.dtype = af::DataType::DT_FLOAT;
+  load1.y.dtype = dtype;
   load1.attr.api.unit = ComputeUnit::kUnitMTE2;
 
-  af::ascir_op::Argmax argmax("argmax");
+  Op argmax(std::is_same_v<Op, af::ascir_op::Argmin> ? "argmin" : "argmax");
   argmax.x = load1.y;
   argmax.attr.api.compute_type = ComputeType::kComputeReduce;
   argmax.attr.api.type = af::ApiType::kAPITypeCompute;
   argmax.attr.sched.axis = {z0.id, z1.id};
   *argmax.y.axis = {z0.id, z1.id};
-  *argmax.y.repeats = {s0, One};
-  *argmax.y.strides = {One, Zero};
+  *argmax.y.repeats = out_repeats;
+  *argmax.y.strides = out_strides;
   argmax.y.dtype = af::DataType::DT_INT64;
   argmax.attr.api.unit = ComputeUnit::kUnitVector;
 
@@ -7860,8 +7870,8 @@ static void CreateArgmaxStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
   store1.attr.api.type = af::ApiType::kAPITypeCompute;
   store1.attr.sched.axis = {z0.id, z1.id};
   *store1.y.axis = {z0.id, z1.id};
-  *store1.y.repeats = {s0, One};
-  *store1.y.strides = {One, Zero};
+  *store1.y.repeats = out_repeats;
+  *store1.y.strides = out_strides;
   store1.y.dtype = af::DataType::DT_INT64;
   store1.attr.api.unit = ComputeUnit::kUnitMTE2;
 
@@ -7871,7 +7881,82 @@ static void CreateArgmaxStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
 }
 
 af::ComputeGraphPtr ShareGraph::ArgmaxStoreFusedGraph(size_t dims_size) {
-  return CreateOneInputAscGraphComputeGraph("argmax_store_test", "argmax_store", dims_size, CreateArgmaxStoreAscGraph);
+  return CreateOneInputAscGraphComputeGraph(
+      "argmax_store_test", "argmax_store", dims_size,
+      [](af::AscGraph &graph, size_t dims) { CreateArgmaxStoreAscGraph<af::ascir_op::Argmax>(graph, dims); });
+}
+
+static void SetArgminParentDtypes(const af::ComputeGraphPtr &graph, af::DataType dtype, bool with_value) {
+  const auto data = graph->FindNode("data0")->GetOpDesc();
+  const auto asc = graph->FindNode("ascbc")->GetOpDesc();
+  const auto output = graph->FindNode("netoutput1")->GetOpDesc();
+  data->MutableOutputDesc(0)->SetDataType(dtype);
+  asc->MutableInputDesc(0)->SetDataType(dtype);
+  asc->MutableOutputDesc(0)->SetDataType(with_value ? dtype : af::DT_INT64);
+  output->MutableInputDesc(0)->SetDataType(with_value ? dtype : af::DT_INT64);
+  if (with_value) {
+    asc->MutableOutputDesc(1)->SetDataType(af::DT_INT64);
+    output->MutableInputDesc(1)->SetDataType(af::DT_INT64);
+  }
+}
+
+af::ComputeGraphPtr ShareGraph::ArgminStoreFusedGraph(size_t dims_size, af::DataType dtype, bool ra) {
+  auto graph = CreateOneInputAscGraphComputeGraph(
+      "argmin_store_test", "argmin_store", dims_size, [dtype, ra](af::AscGraph &subgraph, size_t dims) {
+        CreateArgmaxStoreAscGraph<af::ascir_op::Argmin>(subgraph, dims, dtype, ra);
+      });
+  if (graph != nullptr) {
+    SetArgminParentDtypes(graph, dtype, false);
+  }
+  return graph;
+}
+
+static void CreateArgminWithValueStoreAscGraph(af::AscGraph &graph, size_t dims_size, af::DataType dtype, bool ra) {
+  af::ascir_op::Data data("data0", graph);
+  data.ir_attr.SetIndex(0);
+  data.y.dtype = dtype;
+  af::ascir_op::Load load("load0");
+  load.x = data.y;
+  load.y.dtype = dtype;
+  af::ascir_op::ArgminWithValue reduce("argmin_value");
+  reduce.x = load.y;
+  reduce.value.dtype = dtype;
+  reduce.index.dtype = af::DT_INT64;
+  af::ascir_op::Store value_store("store_value"), index_store("store_index");
+  value_store.x = reduce.value;
+  value_store.y.dtype = dtype;
+  index_store.x = reduce.index;
+  index_store.y.dtype = af::DT_INT64;
+  af::ascir_op::Output value_out("output0"), index_out("output1");
+  value_out.x = value_store.y;
+  value_out.y.dtype = dtype;
+  value_out.ir_attr.SetIndex(0);
+  index_out.x = index_store.y;
+  index_out.y.dtype = af::DT_INT64;
+  index_out.ir_attr.SetIndex(1);
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+  const auto input = graph.FindNode("load0")->outputs[0].attr;
+  for (const char *name : {"argmin_value", "store_value", "store_index", "output0", "output1"}) {
+    for (auto output : graph.FindNode(name)->outputs()) {
+      output->attr.repeats = ra ? std::vector<Expression>{af::Symbol(1), input.repeats[1]}
+                                : std::vector<Expression>{input.repeats[0], af::Symbol(1)};
+      output->attr.strides = ra ? std::vector<Expression>{af::Symbol(0), af::Symbol(1)}
+                                : std::vector<Expression>{af::Symbol(1), af::Symbol(0)};
+    }
+  }
+}
+
+af::ComputeGraphPtr ShareGraph::ArgminWithValueStoreFusedGraph(size_t dims_size, af::DataType dtype, bool ra) {
+  auto graph = CreateOneInputAscGraphComputeGraph(
+      "argmin_value_store_test", "argmin_value_store", dims_size,
+      [dtype, ra](af::AscGraph &subgraph, size_t dims) {
+        CreateArgminWithValueStoreAscGraph(subgraph, dims, dtype, ra);
+      },
+      2);
+  if (graph != nullptr) {
+    SetArgminParentDtypes(graph, dtype, true);
+  }
+  return graph;
 }
 
 template <typename Op>

@@ -35,13 +35,8 @@ class TestBackendArgmaxStoreE2e : public testing::Test {
   }
 };
 
-#ifdef ARGMAX_ARA
-TEST_F(TestBackendArgmaxStoreE2e, GenerateAraCommon) {
-#else
-TEST_F(TestBackendArgmaxStoreE2e, GenerateRCoreOnly) {
-#endif
+static void OptimizeArgmaxStoreGraph(ascir::FusedScheduledResult &fused_result) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
-  ascir::FusedScheduledResult fused_result;
   fused_result.node_idx_to_scheduled_results.emplace_back();
 #if defined(ARGMAX_SINGLE_ROW) || defined(ARGMAX_ARA)
   af::testing::AscGraphBuilder builder("argmax_store_test");
@@ -71,13 +66,20 @@ TEST_F(TestBackendArgmaxStoreE2e, GenerateRCoreOnly) {
 #else
   ASSERT_EQ(optimizer.Optimize(ascir::ShareGraph::ArgmaxStoreFusedGraph(2), fused_result), 0);
 #endif
+}
+
+static void SelectArgmaxStoreTemplate(ascir::FusedScheduledResult &fused_result) {
   ASSERT_EQ(fused_result.node_idx_to_scheduled_results.size(), 1U);
   auto &schedules = fused_result.node_idx_to_scheduled_results.front();
 #ifdef ARGMAX_ARA
-  // Keep all ordinary Common candidates; the generated tiling selects the real path later.
+  // Isolate the requested template so the E2E cannot silently select a different reduce family.
   schedules.erase(std::remove_if(schedules.begin(), schedules.end(),
                                  [](const ascir::ScheduledResult &schedule) {
-                                   return schedule.semantic_name != ascgen_utils::template_semantic::kReduceCommon;
+#ifdef ARGMAX_ARA_ALLLOAD
+                                   return schedule.semantic_name != ascgen_utils::template_semantic::kReduceAllLoad;
+#else
+                                    return schedule.semantic_name != ascgen_utils::template_semantic::kReduceCommon;
+#endif
                                  }),
                   schedules.end());
   ASSERT_FALSE(schedules.empty());
@@ -94,12 +96,19 @@ TEST_F(TestBackendArgmaxStoreE2e, GenerateRCoreOnly) {
   ASSERT_TRUE(schedules.front().enable_workspace_alignment);
 #endif
 #endif
+}
 
+static void GenerateArgmaxStoreFiles(const ascir::FusedScheduledResult &fused_result) {
   codegen::Codegen codegen(codegen::CodegenOptions{});
   codegen::CodegenResult result;
 #ifdef ARGMAX_ARA
   ASSERT_EQ(codegen.Generate({}, fused_result, result), 0);
-  ASSERT_NE(result.kernel.find("ArgMaxWithValueExtend<float, AscendC::Pattern::Reduce::RA>"), std::string::npos);
+#ifdef ARGMAX_ARA_ALLLOAD
+  ASSERT_NE(result.kernel.find("ArgMaxExtend<float, AscendC::Pattern::Reduce::RA>"), std::string::npos);
+#else
+  ASSERT_NE(result.kernel.find("ArgMaxWithValueAccumulateExtend<float, AscendC::Pattern::Reduce::RA>"),
+            std::string::npos);
+#endif
 #else
   ASSERT_EQ(codegen.Generate({{"s0", "stub_s0"}, {"s1", "stub_s1"}}, fused_result, result), 0);
 #endif
@@ -118,4 +127,17 @@ TEST_F(TestBackendArgmaxStoreE2e, GenerateRCoreOnly) {
   tiling.close();
   tiling_data.close();
   ASSERT_TRUE(kernel && tiling && tiling_data);
+}
+
+#ifdef ARGMAX_ARA_ALLLOAD
+TEST_F(TestBackendArgmaxStoreE2e, GenerateAraAllLoad) {
+#elif defined(ARGMAX_ARA)
+TEST_F(TestBackendArgmaxStoreE2e, GenerateAraCommon) {
+#else
+TEST_F(TestBackendArgmaxStoreE2e, GenerateRCoreOnly) {
+#endif
+  ascir::FusedScheduledResult fused_result;
+  ASSERT_NO_FATAL_FAILURE(OptimizeArgmaxStoreGraph(fused_result));
+  ASSERT_NO_FATAL_FAILURE(SelectArgmaxStoreTemplate(fused_result));
+  ASSERT_NO_FATAL_FAILURE(GenerateArgmaxStoreFiles(fused_result));
 }

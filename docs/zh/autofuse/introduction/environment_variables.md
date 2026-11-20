@@ -63,6 +63,7 @@ export AUTOFUSE_FLAGS="--enable_autofuse=true;--autofuse_enable_pass=reduce,conc
 | 控制项 | 适用场景 | 作用、取值与使用约束 |
 | :----- | :------- | :------------------- |
 | `--codegen_compile_debug` | GE 路径、Inductor 路径 | 控制是否保留融合算子生成过程中的中间文件。取值为 `true` 或 `false`，默认值为 `false`；开启后保留 Kernel、Tiling、CMake 工程、编译结果并生成融合图 Dump。 |
+| `--codegen_compile_debug` 文件名策略 | GE 路径、Inductor 路径 | 融合图 Dump 文件名超过 255 字节时，自动压缩为“头信息 + 稳定哈希 + 尾信息”，避免文件系统单文件名超限导致落盘失败。 |
 | `--debug_dir` | GE 路径、Inductor 路径 | 指定融合过程中 AscGraph Dump 图的保存路径。取值为有效目录路径，未指定时保存到当前执行目录。需要先开启 `--codegen_compile_debug=true`，且执行用户需要具备目标路径的读、写和执行权限。 |
 | `--autofuse_att_algorithm` | GE 路径、Inductor 路径 | 选择 Auto Tiling 求解算法。取值为 `AxesReorder`（默认）或试验性的 `HighPerf`。`HighPerf` 不保证一定获得更好的执行性能；非法值恢复为默认值。 |
 | `--att_accuracy_level` | GE 路径、Inductor 路径 | 控制 Auto Tiling 算法的求解精度。取值为 `1`（高精度求解）或 `0`（低精度求解），默认值为 `1`。高精度求解可能得到更优的 Tiling，但会增加 Tiling 执行时间；非法值恢复为默认值。 |

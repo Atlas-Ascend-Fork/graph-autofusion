@@ -11,8 +11,7 @@
 #ifndef __COMMON_UTILS_H__
 #define __COMMON_UTILS_H__
 
-#include <algorithm>
-#include <cctype>
+#include <set>
 #include <string>
 #include <vector>
 #include "graph/symbolizer/symbolic.h"
@@ -31,14 +30,6 @@ enum class SimtAddressPolicy : int64_t;
 
 const string INVALID_TILING = "invalid_tiling";
 constexpr int32_t NOT_SUPPORT_BRC_INLINE = -1;
-
-// Dynamic shape SizeVar naming convention shared by codegen and ATT (e.g. s0, s1, ...).
-inline bool IsDynamicSizeVarName(const std::string &name) {
-  if (name.size() < 2U || name.front() != 's') {
-    return false;
-  }
-  return std::all_of(name.begin() + 1, name.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
-}
 
 // [统一打分组绑定] 任务生成侧在 CalcScore 内引用本组 tiling data 子结构的占位符。
 // ATT 发射 CalcScore（GenCalcScore——model_info.score_func 逐候选竞标路径）时按本
@@ -346,6 +337,10 @@ bool IsDataCopyAxisContinuous(const af::Expression &cur_gm_stride, const af::Exp
 // was introduced may only have origin_vars; keep that as a compatibility
 // fallback for legacy callers and unit fixtures.
 const std::vector<af::Expression> &GetFrontendShapeVars(const ascir::FusedScheduledResult &fused_schedule_result);
+// Collect the dynamic (non-constant) frontend ABI symbols. Tiling data fields whose name is in this
+// set carry shape values and must use int64_t, matching the host AutofuseTiling parameters.
+void CollectDynamicSizeVarNames(const ascir::FusedScheduledResult &fused_schedule_result,
+                                std::set<std::string> &dynamic_size_var_names);
 // Return the frontend static-shape judgment for the external ABI.  Internal
 // tiling-data generation must continue to use IsStaticSchedResult().
 bool IsFrontendStaticSchedResult(const ascir::FusedScheduledResult &fused_schedule_result);

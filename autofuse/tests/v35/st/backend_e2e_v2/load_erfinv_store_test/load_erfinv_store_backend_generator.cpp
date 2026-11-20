@@ -64,15 +64,25 @@ TEST_F(TestBackendLoadErfinvStoreE2e, LoadErfinvStoreE2eCodegen) {
     EXPECT_EQ(erfinv_optimizer.Optimize(graph, erfinv_fused_result), 0);
     codegen::CodegenResult erfinv_result;
     EXPECT_EQ(erfinv_codegen.Generate(erfinv_shape_info, erfinv_fused_result, erfinv_result), 0);
-    EXPECT_NE(erfinv_result.kernel.find("Erfinv"), std::string::npos);
-    const auto erfinv_call_begin = erfinv_result.kernel.find("Erfinv(local_");
+    EXPECT_NE(erfinv_result.kernel.find("ErfinvExtend"), std::string::npos);
+    EXPECT_NE(erfinv_result.kernel.find("ErfinvSimtCompute"), std::string::npos);
+    EXPECT_NE(erfinv_result.tiling.find("40960"), std::string::npos);
+    const auto erfinv_call_begin = erfinv_result.kernel.find("ErfinvExtend(local_");
     ASSERT_NE(erfinv_call_begin, std::string::npos);
     const auto erfinv_call_end = erfinv_result.kernel.find(';', erfinv_call_begin);
     ASSERT_NE(erfinv_call_end, std::string::npos);
     // Store may need scratch even though the Erfinv call does not.
     EXPECT_EQ(erfinv_result.kernel.substr(erfinv_call_begin, erfinv_call_end - erfinv_call_begin).find("tmp_buf_"),
               std::string::npos);
-    erfinv_kernel_stream << erfinv_tiling_stub << RemoveSubDirInclude(erfinv_result.kernel);
+    // RemoveSubDirInclude 会删掉 SIMT 头文件，但 ErfinvSimtCompute 依赖 erfinvf 声明，需要补回。
+    const std::string simt_math_include = "#include \"simt_api/math_functions.h\"";
+    EXPECT_NE(erfinv_result.kernel.find(simt_math_include), std::string::npos);
+    std::string erfinv_kernel = RemoveSubDirInclude(erfinv_result.kernel);
+    const std::string kernel_operator_include = "#include \"kernel_operator.h\"";
+    const auto kernel_operator_pos = erfinv_kernel.find(kernel_operator_include);
+    ASSERT_NE(kernel_operator_pos, std::string::npos);
+    erfinv_kernel.insert(kernel_operator_pos + kernel_operator_include.size(), "\n" + simt_math_include);
+    erfinv_kernel_stream << erfinv_tiling_stub << erfinv_kernel;
     erfinv_tiling_stream << erfinv_result.tiling;
     erfinv_data_stream << erfinv_result.tiling_data;
   } catch (...) {

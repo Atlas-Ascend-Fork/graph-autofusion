@@ -12,6 +12,8 @@
 #define ATT_MODEL_INFO_H
 #include <memory>
 #include <map>
+#include <set>
+#include <string>
 #include "base/arch_param.h"
 #include "base/base_types.h"
 #include "base/perf_breakdown.h"
@@ -330,6 +332,9 @@ struct ModelInfo {
   TilingScheduleConfig tiling_schedule_config;            // Model 级别的 Tiling 调度配置
   bool is_enable_equal_order_tiling{false};               // 使能等order tiling算法
   std::vector<RuntimeReorderRule> runtime_reorder_rules;  // 运行时按shape调整单模板内轴优先级
+  // 前端动态 shape 符号（GetFrontendShapeVars + !IsConstExpr）。命中该集合的 tiling data 字段为
+  // int64_t，与 host AutofuseTiling 形参一致。
+  std::set<std::string> dynamic_size_var_names;
 };
 
 using TilingModelInfo = std::vector<ModelInfo>;

@@ -183,6 +183,7 @@ struct NodeInfo {
   std::vector<NodeInfo> sub_nodes_infos;
   ascir_param::VectorFuncNodeParams vector_func_params;
   ascir_param::ReduceNodeParams reduce_specific_params;
+  ascir_param::ArgmaxNodeParams argmax_node_params;
   ascir_param::CastNodeParams cast_node_params;
   ascir_param::BroadcastNodeParams broadcast_node_params;
   ascir_param::CompareNodeParams compare_node_params;

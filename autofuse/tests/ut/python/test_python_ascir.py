@@ -225,6 +225,60 @@ class TestAscir:
         assert debug_str
 
     @staticmethod
+    def test_graph_create_node_with_argmin_api():
+        ascir.utils.set_platform("3510", 1, 245760)
+        try:
+            for dtype in (ascir.dtypes.float32, ascir.dtypes.int32):
+                graph = ascir.HintGraph("argmin_api")
+                size = graph.create_size("size")
+                axis = graph.create_axis("axis", size)
+                x = ascir_api.Data(graph, dtype=dtype)
+                index = ascir_api.Argmin(
+                    graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+                )
+                assert index.dtype == ascir.dtypes.int64
+                assert index.axis == [axis.id]
+                assert index.size == [size]
+                assert "Argmin" in ascir.utils.debug_str(graph)
+        finally:
+            ascir.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
+    def test_graph_create_node_with_argmin_with_value_api():
+        ascir.utils.set_platform("3510", 1, 245760)
+        try:
+            for dtype in (ascir.dtypes.float32, ascir.dtypes.int32, ascir.dtypes.int64):
+                graph = ascir.HintGraph("argmin_value_api")
+                size = graph.create_size("size")
+                axis = graph.create_axis("axis", size)
+                x = ascir_api.Data(graph, dtype=dtype)
+                value, index = ascir_api.ArgminWithValue(
+                    graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+                )
+                assert value.dtype == dtype
+                assert index.dtype == ascir.dtypes.int64
+                assert value.axis == index.axis == [axis.id]
+                assert value.size == index.size == [size]
+                assert "ArgminWithValue" in ascir.utils.debug_str(graph)
+        finally:
+            ascir.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
+    def test_argmin_rejects_unregistered_input_dtype():
+        ascir.utils.set_platform("3510", 1, 245760)
+        try:
+            graph = ascir.HintGraph("argmin_invalid_dtype")
+            size = graph.create_size("size")
+            axis = graph.create_axis("axis", size)
+            x = ascir_api.Data(graph, dtype=ascir.dtypes.int64)
+            with pytest.raises(Exception, match="dtype"):
+                ascir_api.Argmin(
+                    graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+                )
+        finally:
+            ascir.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
     def test_graph_create_node_with_prod_int8_api():
         ascir.utils.set_platform("3510", 1, 245760)
         try:

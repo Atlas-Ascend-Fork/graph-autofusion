@@ -9,7 +9,10 @@
  */
 
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <filesystem>
 #include <map>
+#include <string>
 #include <utility>
 #include <vector>
 #include "graph/symbolizer/symbolic.h"
@@ -34,6 +37,32 @@ class AscendGraphDumpUT : public testing::Test {
 };
 
 namespace af {
+TEST_F(AscendGraphDumpUT, DumpGraphLimitsLongFileName) {
+  unsetenv("AUTOFUSE_DFX_FLAGS");
+  setenv("AUTOFUSE_DFX_FLAGS", "codegen_compile_debug=true", 1);
+  ::ascir::utils::ResetDumpConfig();
+  ASSERT_TRUE(::ascir::utils::IsCodegenCompileEnabled());
+  const std::string long_name(300U, 'g');
+  AscGraph graph(long_name.c_str());
+  ::ascir::utils::DumpGraph(graph, std::string(200U, 's'));
+
+  size_t max_file_name_length = 0U;
+  size_t dump_file_count = 0U;
+  std::error_code error_code;
+  for (const auto &entry : std::filesystem::recursive_directory_iterator("./autofuse_compile_debug", error_code)) {
+    if (error_code) {
+      break;
+    }
+    const std::string file_name = entry.path().filename().string();
+    if ((file_name.rfind("ascgraph_", 0UL) == 0UL) || (file_name.rfind("ge_onnx_", 0UL) == 0UL)) {
+      ++dump_file_count;
+      max_file_name_length = std::max(max_file_name_length, file_name.length());
+    }
+  }
+  EXPECT_GT(dump_file_count, 0U);
+  EXPECT_EQ(max_file_name_length, 255U);
+}
+
 TEST(UnsupportedAscIrRegistration, HasExpectedDefinitionAndImplementations) {
   const auto &registry = ascir::AscirRegistry::GetInstance().GetAll();
   const auto iter = registry.find("Unsupported");

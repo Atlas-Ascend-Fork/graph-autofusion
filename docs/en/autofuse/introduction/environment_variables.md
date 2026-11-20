@@ -59,6 +59,7 @@ export AUTOFUSE_FLAGS="--enable_autofuse=true;--autofuse_enable_pass=reduce,conc
 | Option | Applicable Paths | Purpose, values, and usage constraints |
 | :--- | :--- | :--- |
 | `--codegen_compile_debug` | GE path, Inductor path | Controls whether intermediate files and debug artifacts are retained. Accepts `true` or `false`; default: `false`. When enabled, Kernel, Tiling, CMake projects, compilation results, and fusion-graph dumps are retained. none. |
+| `--codegen_compile_debug` naming | GE path, Inductor path | Fusion-graph dump file names longer than 255 bytes are shortened to head content, a stable hash, and tail content, preventing failures caused by the file system's single-filename limit. |
 | `--debug_dir` | GE path, Inductor path | Specifies the directory for AscGraph dump files. Accepts a valid directory path; defaults to the current execution directory. requires `--codegen_compile_debug=true` and read, write, and execute permissions on the path. |
 | `--autofuse_att_algorithm` | GE path, Inductor path | Selects the Auto Tiling algorithm. Accepts `AxesReorder` (default) or experimental `HighPerf`. `HighPerf` does not guarantee better performance; invalid values fall back to the default. |
 | `--att_accuracy_level` | GE path, Inductor path | Controls Auto Tiling solving accuracy. Accepts `1` for high-accuracy solving or `0` for low-accuracy solving; default: `1`. high-accuracy solving may find better Tiling but takes longer; invalid values fall back to the default. |

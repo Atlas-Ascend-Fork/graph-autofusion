@@ -2064,8 +2064,17 @@ Status Kernel::JudgeIsLoadLinkStoreAndVec(const ascir::NodeView &node, Tensor &t
 
 Status Kernel::ParseOptimizeInfo(const ascir::NodeView &node, const ascir::TensorView &tensor) {
   // 如果是reduce节点，强制设置是非ub_scalar场景
-  std::set<std::string> force_non_ub_scalar = {Max::Type, Sum::Type, Min::Type,    Mean::Type,           Prod::Type,
-                                               Any::Type, All::Type, Argmax::Type, ArgmaxWithValue::Type};
+  std::set<std::string> force_non_ub_scalar = {Max::Type,
+                                               Sum::Type,
+                                               Min::Type,
+                                               Mean::Type,
+                                               Prod::Type,
+                                               Any::Type,
+                                               All::Type,
+                                               Argmax::Type,
+                                               ArgmaxWithValue::Type,
+                                               Argmin::Type,
+                                               ArgminWithValue::Type};
   ascir::TensorId id = tensor.attr.mem.tensor_id;
   auto tensor_ptr = this->tpipe.GetTensor(id);
   GE_CHK_BOOL_RET_STATUS(tensor_ptr != nullptr, af::FAILED, "Check[Param] tensor_ptr is nullptr");
@@ -3203,6 +3212,15 @@ af::Expression StripV1RepeatCap(af::Expression size) {
   }
   return size;
 }
+
+bool NeedSyncAll(bool need_sync_all, const ascir::ScheduledResult &scheduled, size_t group_index) {
+  return need_sync_all && !Kernel::CanSkipReduceGroupSync(scheduled, group_index);
+}
+
+std::string GroupTilingFieldName(size_t graph_id, size_t result_index, size_t group_index) {
+  return "t.graph" + std::to_string(graph_id) + "_result" + std::to_string(result_index) + "_g" +
+         std::to_string(group_index) + "_tiling_data";
+}
 }  // namespace
 
 Status Kernel::ParseGraph(const ascir::ImplGraph &graph, const ascir::FusedScheduledResult &fused_schedule_result,
@@ -4031,17 +4049,25 @@ Status Kernel::GenSingleGroupKernelWithRegTilingKey(const ascir::FusedScheduledR
 }
 
 bool Kernel::CanSkipReduceGroupSync(const ascir::ScheduledResult &scheduled, size_t group_index) {
-  if (scheduled.cube_type != ascir::CubeTemplateType::kDefault || scheduled.enable_group_parallel ||
-      group_index >= scheduled.schedule_groups.size() || group_index + 1U >= scheduled.schedule_groups.size() ||
-      scheduled.var_relations.count(group_index) == 0U || scheduled.var_relations.count(group_index + 1U) != 0U) {
+  if (group_index >= scheduled.schedule_groups.size() || group_index + 1U >= scheduled.schedule_groups.size()) {
+    return false;
+  }
+  const auto has_template_semantic = [](const ascir::ScheduleGroup &group, const std::string &semantic) {
+    return !group.impl_graphs.empty() &&
+           std::all_of(group.impl_graphs.begin(), group.impl_graphs.end(), [&semantic](const auto &graph) {
+             const auto actual = ascgen_utils::GetTemplateSemanticName(graph);
+             return actual == semantic || actual.rfind(semantic + "/", 0U) == 0U ||
+                    actual.rfind(semantic + "+", 0U) == 0U;
+           });
+  };
+  if (!has_template_semantic(scheduled.schedule_groups[group_index], ascgen_utils::template_semantic::kReducePhase2) ||
+      !has_template_semantic(scheduled.schedule_groups[group_index + 1U],
+                             ascgen_utils::template_semantic::kReducePhase1)) {
     return false;
   }
   std::set<int64_t> current_workspaces;
   std::set<int64_t> next_workspaces;
   const auto collect = [](const ascir::ScheduleGroup &group, std::set<int64_t> &workspaces) {
-    if (group.impl_graphs.empty()) {
-      return false;
-    }
     for (const auto &graph : group.impl_graphs) {
       for (const auto &node : graph.GetAllNodes()) {
         if (node == nullptr || !node->GetInControlNodes().empty() || !node->GetOutControlNodes().empty() ||
@@ -4119,12 +4145,9 @@ Status Kernel::GenMulGroupKernelWithRegTilingKey(const ascir::FusedScheduledResu
                               "Codegen generate kernel for %s failed", schedule_graphs[k].GetName().c_str());
             ss << tmp;
           }
-          std::string filed_name = "t.graph" + std::to_string(graph_id) + "_result" + std::to_string(i) + "_g" +
-                                   std::to_string(j) + "_tiling_data";
-          bool need_sync_all = kernel.has_workspace_node && j != schedule_groups.size() - 1;
-          if (need_sync_all && CanSkipReduceGroupSync(scheduled_results[i], j)) {
-            need_sync_all = false;
-          }
+          std::string filed_name = GroupTilingFieldName(graph_id, i, j);
+          const bool need_sync_all =
+              NeedSyncAll(kernel.has_workspace_node && j != schedule_groups.size() - 1, scheduled_results[i], j);
           std::string func_call;
           if (ascgen_utils::IsCubeType(schedule_graphs[k])) {
             func_calls.emplace_back(kernel.GenCubeTilingFuncCall(schedule_graphs[k]), kernel.has_workspace_node, true);
@@ -4509,12 +4532,9 @@ Status Kernel::GenMulGroupKernelWithParseTilingData(const ascir::FusedScheduledR
         GE_CHK_STATUS_RET(kernel.GenerateKernelByNode(schedule_graphs[k], ss, kernel_file_ptr, false),
                           "Gen api headers failed");
 
-        std::string filed_name = "t.graph" + std::to_string(graph_id) + "_result" + std::to_string(i) + "_g" +
-                                 std::to_string(j) + "_tiling_data";
-        bool need_sync_all = kernel.has_workspace_node && j != schedule_groups.size() - 1;
-        if (need_sync_all && CanSkipReduceGroupSync(scheduled_results[i], j)) {
-          need_sync_all = false;
-        }
+        std::string filed_name = GroupTilingFieldName(graph_id, i, j);
+        const bool need_sync_all =
+            NeedSyncAll(kernel.has_workspace_node && j != schedule_groups.size() - 1, scheduled_results[i], j);
         if (ascgen_utils::IsCubeType(schedule_graphs[k])) {
           func_calls.emplace_back(kernel.GenCubeTilingFuncCall(schedule_graphs[k]));
         } else if (cv_fusion_type == ascir::CubeTemplateType::kUBFuse) {
@@ -4538,10 +4558,8 @@ Status Kernel::GenMulGroupKernelWithParseTilingData(const ascir::FusedScheduledR
         per_group_func_calls.emplace_back(std::move(func_calls));
       }
     }
-    const bool use_compile_unit_limit =
-        support_parallel_compile || ascgen_utils::IsCubeFusedScheduled(fused_schedule_result);
-    auto max_group_per_compile_unit = GetMaxGroupPerCompileUnit(enable_parallel_compile && use_compile_unit_limit);
-    if (per_group_func_calls.size() <= static_cast<size_t>(max_group_per_compile_unit)) {
+    auto max_group_per_compile_unit = GetMaxGroupPerCompileUnit(enable_parallel_compile);
+    if (!enable_group_parallel || per_group_func_calls.size() <= static_cast<size_t>(max_group_per_compile_unit)) {
       AppendFuncCall(ss1, per_group_func_calls.cbegin(), per_group_func_calls.cend());
     } else {
       const auto kernel_args = PackingFuncArgs("const AutofuseTilingData", fused_schedule_result, use_list_tensor);
@@ -4855,9 +4873,9 @@ Status Kernel::GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fu
           GE_CHK_STATUS_RET(kernel.GenerateKernelByNode(schedule_graphs[k], ss, kernel_file_ptr, true),
                             "Gen api headers failed");
 
-          std::string filed_name = "t.graph" + std::to_string(graph_id) + "_result" + std::to_string(i) + "_g" +
-                                   std::to_string(j) + "_tiling_data";
-          bool need_sync_all = kernel.has_workspace_node && j != schedule_groups.size() - 1;
+          std::string filed_name = GroupTilingFieldName(graph_id, i, j);
+          const bool need_sync_all =
+              NeedSyncAll(kernel.has_workspace_node && j != schedule_groups.size() - 1, scheduled_results[i], j);
           if (ascgen_utils::IsCubeType(schedule_graphs[k])) {
             func_calls.emplace_back(kernel.GenCubeTilingFuncCall(schedule_graphs[k], true, fusion_mode_runtime));
           } else if (cv_fusion_type == ascir::CubeTemplateType::kUBFuse) {
@@ -4886,7 +4904,7 @@ Status Kernel::GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fu
         }
       }
       auto max_group_per_compile_unit = GetMaxGroupPerCompileUnit(enable_parallel_compile);
-      if (per_group_func_calls.size() <= static_cast<size_t>(max_group_per_compile_unit) || !enable_group_parallel) {
+      if (per_group_func_calls.size() <= static_cast<size_t>(max_group_per_compile_unit)) {
         AppendFuncCall(ss1, per_group_func_calls.cbegin(), per_group_func_calls.cend());
       } else {
         const auto kernel_args = PackingFuncArgs("const AutofuseTilingData", fused_schedule_result, use_list_tensor);

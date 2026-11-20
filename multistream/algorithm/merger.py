@@ -46,6 +46,18 @@ def _is_load_balance_strategy(strategy: object) -> bool:
     return False
 
 
+def _validate_candidate_stream(candidate: int, active: int) -> None:
+    if candidate < 0 or candidate >= active:
+        if active <= 0:
+            raise RuntimeError(
+                f"candidate physical stream {candidate} is out of range "
+                "(no active streams)"
+            )
+        raise RuntimeError(
+            f"candidate physical stream {candidate} is out of range [0, {active})"
+        )
+
+
 def _compare_double(lhs: float, rhs: float) -> int:
     diff = lhs - rhs
     if abs(diff) <= K_MERGE_IMPROVE_EPS:
@@ -274,11 +286,11 @@ class _StreamMergeSolver:
         self._build_units_by_earliest_level()
         strategy = self.options.strategy
         if _is_load_balance_strategy(strategy):
-            logger.info("Use kLoadBalance strategy.")
+            logger.info("Use LoadBalance strategy.")
             return self._solve_load_balance()
         self._build_global_level_loads()
         self._build_unit_solo_mass()
-        logger.info("Use kMainStream strategy.")
+        logger.info("Use MainStream strategy.")
         return self._solve_main_stream()
 
     def _build_node_order(self) -> None:
@@ -677,8 +689,7 @@ class _StreamMergeSolver:
             sizes.append(0)
             loads.append([0] * (self.max_level + 1))
             active += 1
-        if candidate < 0 or candidate >= active:
-            raise RuntimeError("candidate physical stream is out of range")
+        _validate_candidate_stream(candidate, active)
         assignment[uid] = candidate
         unit = self.unit_profiles[uid]
         sizes[candidate] += unit.size
@@ -697,8 +708,7 @@ class _StreamMergeSolver:
         if candidate == active:
             loads.append([0] * (self.max_level + 1))
             active += 1
-        if candidate < 0 or candidate >= active:
-            raise RuntimeError("candidate physical stream is out of range")
+        _validate_candidate_stream(candidate, active)
         assignment[uid] = candidate
         for level, count in enumerate(self.unit_profiles[uid].level_hist):
             loads[candidate][level] += count

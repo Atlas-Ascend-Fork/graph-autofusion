@@ -15,3 +15,5 @@ backend_e2e_st_test(argmax_ara_test
     TEST_SRC ../test_e2e_argmax_store_kernel.cpp)
 target_compile_definitions(argmax_ara_test_codegen_v2 PRIVATE ARGMAX_ARA)
 target_compile_definitions(argmax_ara_test_e2e_v2 PRIVATE ARGMAX_ARA)
+
+add_subdirectory(allload)

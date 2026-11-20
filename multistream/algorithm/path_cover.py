@@ -83,10 +83,12 @@ class HopcroftKarp:
             self._add_edge(i + node_count, self.sink_node_, 1)
 
     def _add_edge(self, frm: int, to: int, cap: int) -> None:
-        if not (0 <= frm < len(self.adjacency_list_)) or not (
-            0 <= to < len(self.adjacency_list_)
-        ):
-            raise ValueError("Hopcroft-Karp edge endpoint out of range")
+        node_limit = len(self.adjacency_list_)
+        if not (0 <= frm < node_limit) or not (0 <= to < node_limit):
+            raise ValueError(
+                f"Hopcroft-Karp edge endpoint out of range: "
+                f"from={frm}, to={to}, valid range=[0, {node_limit})"
+            )
         edge_index = len(self.edges_)
         self.edges_.append(_Edge(frm, to, cap, 0))
         self.edges_.append(_Edge(to, frm, 0, 0))

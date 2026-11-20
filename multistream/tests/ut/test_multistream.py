@@ -139,7 +139,7 @@ def test_real_profiling_changes_stream_grouping_and_logs(tmp_path, caplog):
     plain_logs = [record.getMessage() for record in caplog.records]
     assert plain_ids == (0, 0, 1, 1)
     assert plain.get_required_stream_count() == 2
-    assert "Use kLoadBalance strategy." in plain_logs
+    assert "Use LoadBalance strategy." in plain_logs
     assert (
         "graph real_profiling_split requested strategy=LoadBalance, "
         "used implementation=LoadBalance, "
@@ -179,7 +179,12 @@ def test_real_profiling_changes_stream_grouping_and_logs(tmp_path, caplog):
         "used implementation=WeightedLoadBalance, "
         "reason=profiling samples matched participating nodes."
     ) in profile_logs
-    assert not any("Use kLoadBalance strategy." in message for message in profile_logs)
+    assert any(
+        message.startswith("Use profiling cost for a: time=")
+        and " us, cube=1, vec=0" in message
+        for message in profile_logs
+    )
+    assert not any("Use LoadBalance strategy." in message for message in profile_logs)
     # The profiling overlay is private to this allocation; the source graph is unchanged.
     assert all(node.get_node_cost().execution_time == -1.0 for node in nodes)
 
