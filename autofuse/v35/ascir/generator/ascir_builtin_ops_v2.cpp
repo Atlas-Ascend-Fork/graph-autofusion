@@ -518,15 +518,29 @@ REG_ASC_IR(Output).Impl(v2_soc_versions,
                          {{"T", TensorType{DT_INT8, DT_UINT8, DT_INT16, DT_UINT16, DT_INT32, DT_UINT32, DT_INT64,
                                            DT_UINT64, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_BOOL}}}});
 
-REG_ASC_IR(Rand).Inputs({}).Output("y", "T").StartNode().Impl(
-    v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::RandAscIrAttImplV2>(),
-                      af::ascir::AscIrImplCreator<af::ascir::RandAscIrCodegenImplV2>(),
-                      {{"T", TensorType{DT_FLOAT}}}});
+REG_ASC_IR(Rand)
+    .OptionalInput("seed", "TS")
+    .OptionalInput("offset", "TO")
+    .Output("y", "T")
+    .StartNode()
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::RandAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::RandSeedOffsetAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_UINT32, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_BF16}},
+                             {"TS", TensorType{DT_INT64}},
+                             {"TO", TensorType{DT_INT32}}}});
 
-REG_ASC_IR(Randn).Inputs({}).Output("y", "T").StartNode().Impl(
-    v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::RandnAscIrAttImplV2>(),
-                      af::ascir::AscIrImplCreator<af::ascir::RandnAscIrCodegenImplV2>(),
-                      {{"T", TensorType{DT_UINT32, DT_INT32}}}});
+REG_ASC_IR(Randn)
+    .OptionalInput("seed", "TS")
+    .OptionalInput("offset", "TO")
+    .Output("y", "T")
+    .StartNode()
+    .ComputeType(ComputeType::kComputeElewise)
+    .Impl(v2_soc_versions, {af::ascir::AscIrImplCreator<af::ascir::RandnAscIrAttImplV2>(),
+                            af::ascir::AscIrImplCreator<af::ascir::RandSeedOffsetAscIrCodegenImplV2>(),
+                            {{"T", TensorType{DT_UINT32, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_BF16}},
+                             {"TS", TensorType{DT_INT64}},
+                             {"TO", TensorType{DT_INT32}}}});
 
 // torch inductor randint64 合同：x1 seed(int64 运行时标量广播)、x2 counter(int32 Arange 位置流)、
 // x3 low/x4 high(int64 编译期标量广播)，输出仅 int64（int32 由前端 Cast 承接）

@@ -117,6 +117,11 @@ bool CollectInputDtypes(const af::AscNodePtr &node, std::vector<af::DataType> &i
           return false;
         }
         break;
+      case af::IrInputType::kIrInputOptional:
+        if (count != 0U && !ProcessRequiredInput(node, index, count, input_dtypes)) {
+          return false;
+        }
+        break;
       default:
         PyErr_Format(PyExc_TypeError, "%s %s unsupported input type %ld at ir index %zu", op_desc->GetNamePtr(),
                      op_desc->GetTypePtr(), static_cast<int64_t>(ir_input_type), ir_input_index);

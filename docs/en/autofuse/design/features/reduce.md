@@ -842,6 +842,41 @@ SubAxis *FindAAxis(NodeInfo &node_info) {
 | ATT | `att/util/att_utils.cpp` | `CollectReduceAxisNames` |
 | ATT | `att/gen_model_info/expr_gen/generate_tiling_expr.cpp` | `FindAAxis` |
 
+## Rand/Randn Operator Description
+
+### 1. Input and Output Contract
+
+`Rand` and `Randn` add optional `seed` and `offset` inputs in the v35 path to replace the legacy fixed random stream:
+
+- `seed`: `int64`, which can be a compile-time scalar, runtime scalar, or per-element tensor; scalar broadcast is the main path;
+- `offset`: `int32`, which must be a per-element tensor representing the linear index of the output element, for example `rand(2,3)` maps to `[0,1,2,3,4,5]`;
+- both inputs must be connected together or omitted together; connecting only one is rejected by `IsNodeValid`.
+
+The output dtypes of both operators are identical. Both the legacy and new signatures support:
+
+| Signature | Rand path | Randn path |
+|-----------|-----------|-------------|
+| Legacy, 0 inputs | Fixed key/counter raw-word or uniform SIMT path | Fixed key/counter raw-word or normal SIMT path |
+| New, seed+offset | Per-element SIMT uniform path | Per-element SIMT normal path |
+
+The supported output dtypes are `uint32`, `int32`, `fp16`, `bf16`, and `fp32`. Neither the legacy nor new signature supports `fp64`.
+
+### 2. Legacy Graph Compatibility and Dtype Semantics
+
+- A legacy graph without `seed`/`offset` keeps the legacy signature, `inputs()` remains empty, and `StartNode` semantics are unchanged;
+- A graph with `seed`/`offset` uses the new signature, with `seed` using an independent `int64` sym and `offset` using an independent `int32` sym, not shared with the output dtype sym;
+- The Python frontend `Rand`/`Randn` add `seed=None, offset=None` optional parameters; when omitted, input anchors are not connected, preserving legacy graph compatibility;
+- Dtype validation is shared by the legacy and new signatures to avoid behavior differences between Rand and Randn.
+
+### 3. Test and Verification Scope
+
+E2E tests use the same dtype variant set for Rand and Randn, covering `uint32`, `int32`, `fp16`, `bf16`, and `fp32`, and verify:
+
+1. The fixed random stream is unchanged when `seed`/`offset` are omitted;
+2. The per-element random stream matches the golden result when `seed`/`offset` are connected;
+3. Graph validation fails when only one optional input is connected;
+4. Legacy and new graphs remain compatible in dtype inference, serialization, and the Python frontend path.
+
 ## Related Links
 
 - Back to [AutoFuse Architecture Introduction](../../introduction/architecture.md)

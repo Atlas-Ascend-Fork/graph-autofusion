@@ -67,10 +67,12 @@ class GraphBuilder {
   std::string node_type_;
 };
 
-static void ConstructVVAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size) {
-  std::vector<int64_t> axis;
-  std::vector<af::Expression> repeats;
-  std::vector<af::Expression> strides;
+static void ConstructVVAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size, std::vector<int64_t> &axis_ids,
+                                        std::vector<af::Expression> &axis_strides,
+                                        std::vector<af::Expression> &repeats) {
+  axis_ids.clear();
+  axis_strides.clear();
+  repeats.clear();
   auto ONE = Symbol(1);
 
   // 构造符号、轴信息
@@ -79,26 +81,45 @@ static void ConstructVVAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size) {
     std::string axis_str = "z" + std::to_string(i);
     const auto sym_s = Symbol(sym_str.c_str());
     auto axis_z = graph.CreateAxis(axis_str.c_str(), sym_s);
-    axis.push_back(axis_z.id);
+    axis_ids.push_back(axis_z.id);
     repeats.push_back(sym_s);
-    strides.push_back(ONE);
+    axis_strides.push_back(ONE);
   }
   // 计算每个轴的stride
   for (int i = dims_size - 2; i >= 0; i--) {
-    strides[i] = af::sym::Mul(repeats[i + 1], strides[i + 1]);
+    axis_strides[i] = af::sym::Mul(repeats[i + 1], axis_strides[i + 1]);
   }
   // 将原始轴信息设置到图中所有节点上
   for (auto node : graph.GetAllNodes()) {
     if (af::ops::IsOps<af::ascir_op::Scalar>(node)) {
       continue;
     }
-    node->attr.sched.axis = axis;
+    node->attr.sched.axis = axis_ids;
     for (auto output_attr : node->outputs()) {
-      output_attr->attr.axis = axis;
+      output_attr->attr.axis = axis_ids;
       output_attr->attr.repeats = repeats;
-      output_attr->attr.strides = strides;
+      output_attr->attr.strides = axis_strides;
     }
   }
+}
+
+static void ConstructVVAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size) {
+  std::vector<int64_t> axis_ids;
+  std::vector<af::Expression> axis_strides;
+  std::vector<af::Expression> repeats;
+  ConstructVVAscGraphAxisInfo(graph, dims_size, axis_ids, axis_strides, repeats);
+}
+
+static void SetArangeVectorizedLayout(af::ascir_op::Arange &arange, const std::vector<int64_t> &axis_ids,
+                                      const std::vector<af::Expression> &axis_strides) {
+  std::vector<af::AxisId> vectorized_axes;
+  std::vector<af::Expression> vectorized_strides;
+  for (size_t i = 0UL; i < axis_ids.size(); ++i) {
+    vectorized_axes.push_back(axis_ids[i]);
+    vectorized_strides.push_back(axis_strides[i]);
+  }
+  *arange.y.vectorized_axis = vectorized_axes;
+  *arange.y.vectorized_strides = vectorized_strides;
 }
 
 static void ConstructVVConstAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size, vector<int> dims) {
@@ -15500,6 +15521,116 @@ af::ComputeGraphPtr ShareGraph::RandIntStoreFusedGraph(size_t dims_size) {
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
   af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
   return compute_graph;
+}
+
+static void CreateRandSeedStoreAscGraph(af::AscGraph &graph, size_t dims_size, ge::DataType dtype) {
+  af::ascir_op::Data seed("data0", graph);
+  seed.ir_attr.SetIndex(0);
+  seed.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_seed("load0");
+  load_seed.x = seed.y;
+  load_seed.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Arange arange("arange", graph);
+  arange.ir_attr.SetBase(af::sym::kSymbolZero);
+  arange.ir_attr.SetStep(af::sym::kSymbolOne);
+  arange.attr.api.compute_type = af::ComputeType::kComputeElewise;
+  arange.attr.api.type = af::ApiType::kAPITypeCompute;
+  arange.attr.api.unit = af::ComputeUnit::kUnitVector;
+
+  af::ascir_op::Rand rand_op("rand");
+  rand_op.seed = load_seed.y;
+  rand_op.offset = arange.y;
+  rand_op.y.dtype = dtype;
+
+  af::ascir_op::Store store("store");
+  store.x = rand_op.y;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output");
+  y.x = store.y;
+  y.ir_attr.SetIndex(0);
+
+  std::vector<int64_t> axis_ids;
+  std::vector<af::Expression> axis_strides;
+  std::vector<af::Expression> repeats;
+  ConstructVVAscGraphAxisInfo(graph, dims_size, axis_ids, axis_strides, repeats);
+  SetArangeVectorizedLayout(arange, axis_ids, axis_strides);
+  arange.y.dtype = af::DT_INT32;
+}
+
+static void CreateRandnSeedStoreAscGraph(af::AscGraph &graph, size_t dims_size, ge::DataType dtype) {
+  af::ascir_op::Data seed("data0", graph);
+  seed.ir_attr.SetIndex(0);
+  seed.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_seed("load0");
+  load_seed.x = seed.y;
+  load_seed.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Arange arange("arange", graph);
+  arange.ir_attr.SetBase(af::sym::kSymbolZero);
+  arange.ir_attr.SetStep(af::sym::kSymbolOne);
+  arange.attr.api.compute_type = af::ComputeType::kComputeElewise;
+  arange.attr.api.type = af::ApiType::kAPITypeCompute;
+  arange.attr.api.unit = af::ComputeUnit::kUnitVector;
+
+  af::ascir_op::Randn randn_op("randn");
+  randn_op.seed = load_seed.y;
+  randn_op.offset = arange.y;
+  randn_op.y.dtype = dtype;
+
+  af::ascir_op::Store store("store");
+  store.x = randn_op.y;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output");
+  y.x = store.y;
+  y.ir_attr.SetIndex(0);
+
+  std::vector<int64_t> axis_ids;
+  std::vector<af::Expression> axis_strides;
+  std::vector<af::Expression> repeats;
+  ConstructVVAscGraphAxisInfo(graph, dims_size, axis_ids, axis_strides, repeats);
+  SetArangeVectorizedLayout(arange, axis_ids, axis_strides);
+  arange.y.dtype = af::DT_INT32;
+}
+
+static af::ComputeGraphPtr CreateSeedStoreFusedGraph(size_t dims_size, const std::string &name, ge::DataType dtype,
+                                                     bool is_rand) {
+  auto builder = GraphBuilder(name);
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph(name.c_str());
+  if (is_rand) {
+    CreateRandSeedStoreAscGraph(sub_graph, dims_size, dtype);
+  } else {
+    CreateRandnSeedStoreAscGraph(sub_graph, dims_size, dtype);
+  }
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::RandSeedStoreFusedGraph(size_t dims_size, af::DataType dtype) {
+  return CreateSeedStoreFusedGraph(dims_size, "rand_seed_store_test", dtype, true);
+}
+
+af::ComputeGraphPtr ShareGraph::RandnSeedStoreFusedGraph(size_t dims_size, af::DataType dtype) {
+  return CreateSeedStoreFusedGraph(dims_size, "randn_seed_store_test", dtype, false);
 }
 
 static void CreateAscBackendGraphTwoInTwoOut(std::shared_ptr<af::AscGraph> &graph, const std::string &prefix,

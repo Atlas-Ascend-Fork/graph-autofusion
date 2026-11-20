@@ -65,6 +65,19 @@ class AscGraphUtils {
   static graphStatus DeserializeFromBinary(const std::string &to_be_deserialized, AscGraph &out_asc_graph);
   static graphStatus DeserializeFromReadable(const std::string &to_be_deserialized, AscGraph &out_asc_graph);
   static graphStatus DeserializeFromProto(const ascendc_ir::proto::AscGraphDef &asc_graph_def, AscGraph &asc_graph);
+
+ private:
+  static graphStatus DeserializeGraphAttr(const AscGraph &asc_graph,
+                                          const ascendc_ir::proto::AscGraphDef &asc_graph_def,
+                                          const std::string &graph_name);
+  static graphStatus DeserializeNodeOutputAttrs(const OpDescPtr &op_desc,
+                                                const ascendc_ir::proto::AscNodeDef &asc_node_def);
+  static graphStatus DeserializeNodeInputAttrs(const AscNodePtr &asc_node, const OpDescPtr &op_desc,
+                                               const ascendc_ir::proto::AscNodeDef &asc_node_def,
+                                               const AscGraph &asc_graph);
+  static graphStatus DeserializeNodeDefinition(const AscNodePtr &asc_node,
+                                               const ascendc_ir::proto::AscGraphDef &asc_graph_def,
+                                               const int64_t node_index, const AscGraph &asc_graph);
 };
 class AscNodeSerializeUtils {
  public:

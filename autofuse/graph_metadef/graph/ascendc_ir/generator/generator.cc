@@ -90,13 +90,29 @@ std::string TryGenIrAttrClass(const AscIrDef &def, std::stringstream &ss) {
   ss << "  " << derived_class_name << " &ir_attr;" << std::endl;
   return derived_class_name;
 };
+
+std::string DataTypeToSerialString(const DataType data_type);
+std::string TensorTypeToCode(const TensorType &tensor_type);
+const IRDataTypeSymbolStore &GetFirstDataTypeSymbolStore(const AscIrDef &ir_def);
+
 void GenIrInputAndOutputDef(const AscIrDef &def, std::stringstream &ss) {
   const auto &input_defs = def.GetInputDefs();
+  const auto &symbols = GetFirstDataTypeSymbolStore(def).GetNamedSymbols();
   for (const auto &input_def : input_defs) {
     if (input_def.second == IrInputType::kIrInputDynamic) {
       ss << "    this->DynamicInputRegister(\"" << input_def.first << "\", 0U, true);" << std::endl;
     } else if (input_def.second == IrInputType::kIrInputOptional) {
-      ss << "    this->OptionalInputRegister(\"" << input_def.first << "\");" << std::endl;
+      const auto &symbol_name = def.GetInputIrSymName(input_def.first);
+      if (symbol_name.empty()) {
+        ss << "    this->OptionalInputRegister(\"" << input_def.first << "\");" << std::endl;
+      } else {
+        ss << "    this->OptionalInputRegister(\"" << input_def.first << "\", \"" << symbol_name << "\");" << std::endl;
+        const auto symbol = symbols.find(symbol_name);
+        if ((symbol != symbols.end()) && (symbol->second != nullptr)) {
+          ss << "    this->DataTypeRegister(\"" << symbol_name << "\", "
+             << TensorTypeToCode(symbol->second->GetTensorType()) << ");" << std::endl;
+        }
+      }
     } else {
       ss << "    this->InputRegister(\"" << input_def.first << "\");" << std::endl;
     }
@@ -111,7 +127,6 @@ void GenIrInputAndOutputDef(const AscIrDef &def, std::stringstream &ss) {
     }
   }
 }
-// 初始化列表中初始化的成员依赖构造函数中的ir信息确定之后再次进行赋值
 void GenOutTensorInitDef(const AscIrDef &def, std::stringstream &ss) {
   const auto &output_defs = def.GetOutputDefs();
   for (const auto &output_def : output_defs) {
@@ -156,6 +171,14 @@ void GenConstructorDef(const AscIrDef &def, const std::string &attr_class, std::
   }
 }
 
+bool IsSocOrderedTensorListStore(const AscIrDef &ir_def) {
+  const auto &soc_to_sym_store = ir_def.GetSocToDataTypeSymbolStore();
+  if (!soc_to_sym_store.empty()) {
+    return soc_to_sym_store.begin()->second.IsSupportOrderedSymbolicInferDtype();
+  }
+  return false;
+}
+
 std::string DataTypeToSerialString(const DataType data_type) {
   auto res = TypeUtils::DataTypeToSerialString(data_type);
   if (res == "DT_BFLOAT16") {  // 历史原因，DT_BF16的string表达是DT_BFLOAT16，所以我们需要特殊处理一下
@@ -184,14 +207,6 @@ const IRDataTypeSymbolStore &GetFirstDataTypeSymbolStore(const AscIrDef &ir_def)
     return soc_to_sym_store.begin()->second;
   }
   return ir_def.GetDataTypeSymbolStore();
-}
-
-bool IsSocOrderedTensorListStore(const AscIrDef &ir_def) {
-  const auto &soc_to_sym_store = ir_def.GetSocToDataTypeSymbolStore();
-  if (!soc_to_sym_store.empty()) {
-    return soc_to_sym_store.begin()->second.IsSupportOrderedSymbolicInferDtype();
-  }
-  return false;
 }
 
 class SymbolProcessor {
@@ -280,6 +295,29 @@ class SymbolProcessor {
   std::string input_arg_name_{"input_dtypes"};
   std::map<std::string, std::map<string, SymDtype *>> name_to_soc_to_sym_dtype_;
 };
+
+static bool HasOnlyOptionalInputs(const AscIrDef &def) {
+  const auto &input_defs = def.GetInputDefs();
+  return !input_defs.empty() && std::all_of(input_defs.begin(), input_defs.end(), [](const auto &input_def) {
+    return input_def.second == IrInputType::kIrInputOptional;
+  });
+}
+
+static void AppendArgsSizeAssertion(std::stringstream &ss, const AscIrDef &def) {
+  const auto &input_defs = def.GetInputDefs();
+  const bool all_optional_inputs = HasOnlyOptionalInputs(def);
+  if (!all_optional_inputs) {
+    ss << "    GE_ASSERT_EQ(input_dtypes.size(), " << input_defs.size() << "U);" << std::endl;
+    return;
+  }
+
+  ss << "    const auto input_dtype_count = input_dtypes.size();" << std::endl;
+  ss << "    if (input_dtype_count != 0U && input_dtype_count != " << input_defs.size() << "U) {" << std::endl;
+  ss << "      GELOGE(af::FAILED, \"Expected 0 or %zu input dtypes, but got %zu\", " << input_defs.size()
+     << "U, input_dtype_count);" << std::endl;
+  ss << "      return af::FAILED;" << std::endl;
+  ss << "    }" << std::endl;
+}
 
 class OutputHandler {
  public:
@@ -1156,7 +1194,7 @@ class InferDtypeCodeGenerator {
 
   void GenerateArgsSizeAssertion(std::stringstream &ss) {
     ss << "    // 校验入参容器的元素个数是否合法" << std::endl;
-    ss << "    GE_ASSERT_EQ(input_dtypes.size(), " << def_.GetInputDefs().size() << "U);" << std::endl;
+    AppendArgsSizeAssertion(ss, def_);
     ss << "    GE_ASSERT_TRUE(expect_output_dtypes.empty() || expect_output_dtypes.size() == "
        << def_.GetOutputDefs().size() << "U);" << std::endl;
     ss << std::endl;
@@ -1164,6 +1202,11 @@ class InferDtypeCodeGenerator {
 
   Status GenerateSymbolProcessing(std::stringstream &ss) {
     if (is_soc_ordered_dtype_infer_) {
+      if (!def_.GetInputDefs().empty() &&
+          std::any_of(def_.GetInputDefs().begin(), def_.GetInputDefs().end(),
+                      [](const auto &input_def) { return input_def.second == IrInputType::kIrInputOptional; })) {
+        GE_ASSERT_TRUE(false, "Ordered dtype inference with optional inputs is not supported");
+      }
       SocOrderedSymbolProcessor ordered_symbol_processor(def_);
       GE_ASSERT_SUCCESS(ordered_symbol_processor.PreProcessSymbol(ss));
       GE_ASSERT_SUCCESS(ordered_symbol_processor.InstanceSymbol(ss));
@@ -1174,6 +1217,11 @@ class InferDtypeCodeGenerator {
       return SUCCESS;
     }
     if (is_ordered_dtype_infer_) {
+      if (!def_.GetInputDefs().empty() &&
+          std::any_of(def_.GetInputDefs().begin(), def_.GetInputDefs().end(),
+                      [](const auto &input_def) { return input_def.second == IrInputType::kIrInputOptional; })) {
+        GE_ASSERT_TRUE(false, "Ordered dtype inference with optional inputs is not supported");
+      }
       OrderedSymbolProcessor ordered_symbol_processor(def_);
       GE_ASSERT_SUCCESS(ordered_symbol_processor.PreProcessSymbol(ss));
       GE_ASSERT_SUCCESS(ordered_symbol_processor.InstanceSymbol(ss));
@@ -1184,10 +1232,17 @@ class InferDtypeCodeGenerator {
       return SUCCESS;
     }
     ss << "    // 校验同sym的输入的dtype是否在注册范围内并且一致" << std::endl;
+    const bool has_only_optional_inputs = HasOnlyOptionalInputs(def_);
+    if (has_only_optional_inputs) {
+      ss << "    if (!input_dtypes.empty()) {" << std::endl;
+    }
     SymbolProcessor symbol_processor(def_);
     symbol_processor.GenSocVersionCallFunc();
     for (const auto &sym : GetFirstDataTypeSymbolStore(def_).GetNamedSymbols()) {
       symbol_processor.ProcessSymbol(sym, ss);
+    }
+    if (has_only_optional_inputs) {
+      ss << "    }" << std::endl;
     }
     ss << std::endl;
     return SUCCESS;
@@ -1249,7 +1304,7 @@ class InferDtypeWithNoCheckCodeGenerator {
 
   void GenerateArgsSizeAssertion(std::stringstream &ss) const {
     ss << "    // 校验入参容器的元素个数是否合法" << std::endl;
-    ss << "    GE_ASSERT_EQ(input_dtypes.size(), " << def_.GetInputDefs().size() << "U);" << std::endl;
+    AppendArgsSizeAssertion(ss, def_);
     ss << "    GE_ASSERT_TRUE(expect_output_dtypes.empty());" << std::endl;
 
     ss << std::endl;
@@ -1257,9 +1312,16 @@ class InferDtypeWithNoCheckCodeGenerator {
 
   Status GenerateSymbolProcessing(std::stringstream &ss) const {
     ss << "    // 校验同sym的输入的dtype是否一致" << std::endl;
+    const bool has_only_optional_inputs = HasOnlyOptionalInputs(def_);
+    if (has_only_optional_inputs) {
+      ss << "    if (!input_dtypes.empty()) {" << std::endl;
+    }
     SymbolProcessor symbol_processor(def_);
     for (const auto &sym : GetFirstDataTypeSymbolStore(def_).GetNamedSymbols()) {
       symbol_processor.ProcessSymbolWithNoCheck(sym, ss);
+    }
+    if (has_only_optional_inputs) {
+      ss << "    }" << std::endl;
     }
     ss << std::endl;
     return SUCCESS;
@@ -1409,7 +1471,7 @@ class FunctionGenerator {
   virtual void Gen(std::stringstream &ss, const bool has_optional_input) const {
     GenDefinition(ss, has_optional_input);
 
-    GenInstantiation(ss);
+    GenInstantiation(ss, NeedGraphInInstantiation(has_optional_input));
     ss << std::endl;
 
     if (GenConnectInputs(ss, has_optional_input)) {
@@ -1438,7 +1500,7 @@ class FunctionGenerator {
   }
 
   virtual void GenDefinition(std::stringstream &ss, const bool has_optional_input) const;
-  virtual void GenInstantiation(std::stringstream &ss) const;
+  virtual void GenInstantiation(std::stringstream &ss, const bool graph_used_in_instantiation) const;
   virtual bool GenConnectInputs(std::stringstream &ss, const bool has_optional_input) const;
   virtual bool GenAttrAssignment(std::stringstream &ss) const;
   virtual void GenSchedInfo(std::stringstream &ss) const {
@@ -1501,11 +1563,15 @@ class FunctionGenerator {
  protected:
   const AscIrDef &def_;
 
- private:
   static bool NeedConnectByInputArgs(const bool has_optional_input,
                                      const std::pair<std::string, IrInputType> &input_def) {
     return ((has_optional_input || (input_def.second != IrInputType::kIrInputOptional)) &&
             (input_def.second != IrInputType::kIrInputDynamic));
+  }
+
+ private:
+  bool NeedGraphInInstantiation(const bool has_optional_input) const {
+    return def_.IsStartNode() && (def_.GetInputDefs().empty() || !has_optional_input);
   }
 };
 
@@ -1514,10 +1580,14 @@ void ascir::FunctionGenerator::GenDefinition(std::stringstream &ss, const bool h
   std::vector<std::pair<std::string, IrInputType>> empty_input_defs;
 
   if (def_.IsStartNode()) {
-    //  由于历史原因，IsStartNode()（例如Data）仍然带有输入定义，但是这种输入实际是不连边的。
-    //  但是为了最小化修改，当前先不修改Data的定义，后续需要做调整，对与StartNode类型，不定义输入，
-    //  或者认为没有输入的op就是start node，在定义IR时不需要再显式指定start node标记
-    input_defs = &empty_input_defs;
+    if (has_optional_input) {
+      input_defs = &def_.GetInputDefs();
+    } else {
+      //  由于历史原因，IsStartNode()（例如Data）仍然可能带有输入定义，但是这些输入实际是不连边的。
+      //  但是为了最小化修改，当前先不修改Data的定义，后续需要做调整，对与StartNode类型，不定义输入，
+      //  或者认为没有输入的op就是start node，在定义IR时不需要再显式指定start node标记
+      input_defs = &empty_input_defs;
+    }
   } else {
     input_defs = &def_.GetInputDefs();
   }
@@ -1530,6 +1600,7 @@ void ascir::FunctionGenerator::GenDefinition(std::stringstream &ss, const bool h
     }
   };
   const auto &output_defs = def_.GetOutputDefs();
+  const bool graph_used_in_instantiation = NeedGraphInInstantiation(has_optional_input);
   ss << "inline ";
   if (output_defs.size() > 1U) {
     ss << "std::tuple<";
@@ -1538,14 +1609,14 @@ void ascir::FunctionGenerator::GenDefinition(std::stringstream &ss, const bool h
   } else {
     ss << "af::AscOpOutput " << def_.GetType() << "(const char* name";
   }
-  if (!input_defs->empty()) {
+  if (graph_used_in_instantiation) {
+    ss << ", af::AscGraph &graph";
+  } else {
     for (const auto &input_def : *input_defs) {
       if (NeedConnectByInputArgs(has_optional_input, input_def)) {
         ss << ", const af::AscOpOutput &" << input_def.first << "_in";
       }
     }
-  } else {
-    ss << ", af::AscGraph &graph";
   }
   const auto &attr_defs = def_.GetAttrDefs();
   for (const auto &attr_def : attr_defs) {
@@ -1553,8 +1624,8 @@ void ascir::FunctionGenerator::GenDefinition(std::stringstream &ss, const bool h
   }
   ss << ") {" << std::endl;
 }
-void ascir::FunctionGenerator::GenInstantiation(std::stringstream &ss) const {
-  if (def_.IsStartNode()) {
+void ascir::FunctionGenerator::GenInstantiation(std::stringstream &ss, const bool graph_used_in_instantiation) const {
+  if (graph_used_in_instantiation) {
     ss << "  const auto &op_ptr = std::make_shared<af::ascir_op::" << def_.GetType() << ">(name, graph);" << std::endl;
   } else {
     ss << "  const auto &op_ptr = std::make_shared<af::ascir_op::" << def_.GetType() << ">(name);" << std::endl;
@@ -1564,11 +1635,21 @@ void ascir::FunctionGenerator::GenInstantiation(std::stringstream &ss) const {
   ss << "  desc->SetExtAttr(RELATED_OP, op_ptr);" << std::endl;
 }
 bool ascir::FunctionGenerator::GenConnectInputs(std::stringstream &ss, const bool has_optional_input) const {
-  // 这里与GenFunctionDefinition同理，后续删除
-  if (def_.IsStartNode()) {
-    return false;
-  }
   const auto &input_defs = def_.GetInputDefs();
+  if (def_.IsStartNode()) {
+    if (!has_optional_input) {
+      // 这里与GenDefinition同理，传统StartNode的输入定义不参与连接，后续删除。
+      return false;
+    }
+    bool connected = false;
+    for (const auto &input_def : input_defs) {
+      if (NeedConnectByInputArgs(has_optional_input, input_def)) {
+        ss << "  op." << input_def.first << " = " << input_def.first << "_in;" << std::endl;
+        connected = true;
+      }
+    }
+    return connected;
+  }
   if (!input_defs.empty()) {
     for (const auto &input_def : input_defs) {
       if (NeedConnectByInputArgs(has_optional_input, input_def)) {
@@ -1599,13 +1680,20 @@ class StartNodeFuncGenerator : public FunctionGenerator {
     FunctionGenerator::Gen(ss, has_optional_input);
   }
   void GenDefinition(std::stringstream &ss, const bool has_optional_input) const override {
-    (void)has_optional_input;
     // inline ascir::ops::OpType OpType
     ss << "inline "
        << "af::AscOpOutput " << ' ' << def_.GetType() << "(const char *name, af::AscGraph &graph, ge::DataType dt"
        << ", const std::vector<af::AxisId> &axis_ids"
        << ", const std::vector<af::Expression> &repeats"
        << ", const std::vector<af::Expression> &strides";
+
+    if (has_optional_input) {
+      for (const auto &input_def : def_.GetInputDefs()) {
+        if (NeedConnectByInputArgs(has_optional_input, input_def)) {
+          ss << ", const af::AscOpOutput &" << input_def.first << "_in";
+        }
+      }
+    }
 
     const auto &attr_defs = def_.GetAttrDefs();
     for (const auto &attr_def : attr_defs) {
@@ -1621,6 +1709,10 @@ class StartNodeFuncGenerator : public FunctionGenerator {
     ss << "  *op." << output_name << ".repeats = repeats;" << std::endl;
     ss << "  *op." << output_name << ".strides = strides;" << std::endl;
     return true;
+  }
+
+  void GenInstantiation(std::stringstream &ss, const bool) const override {
+    FunctionGenerator::GenInstantiation(ss, true);
   }
 };
 
@@ -1664,11 +1756,18 @@ class ContiguousStartNodeFuncGenerator : FunctionGenerator {
     FunctionGenerator::Gen(ss, has_optional_input);
   }
   void GenDefinition(std::stringstream &ss, const bool has_optional_input) const override {
-    (void)has_optional_input;
     ss << "inline "
        << "af::AscOpOutput" << " Contiguous" << def_.GetType()
        << "(const char *name, af::AscGraph &graph, ge::DataType dt"
        << ", const std::vector<af::Axis> &axes";
+
+    if (has_optional_input) {
+      for (const auto &input_def : def_.GetInputDefs()) {
+        if (NeedConnectByInputArgs(has_optional_input, input_def)) {
+          ss << ", const af::AscOpOutput &" << input_def.first << "_in";
+        }
+      }
+    }
     const auto &attr_defs = def_.GetAttrDefs();
     for (const auto &attr_def : attr_defs) {
       ss << ", const " << attr_def.asc_ir_type << " &" << attr_def.name;
@@ -1680,6 +1779,10 @@ class ContiguousStartNodeFuncGenerator : FunctionGenerator {
     ss << "  op." << output_name << ".dtype = dt;" << std::endl;
     ss << "  op." << output_name << ".SetContiguousView(axes);" << std::endl;
     return true;
+  }
+
+  void GenInstantiation(std::stringstream &ss, const bool) const override {
+    FunctionGenerator::GenInstantiation(ss, true);
   }
 };
 

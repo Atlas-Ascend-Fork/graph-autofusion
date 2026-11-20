@@ -84,6 +84,13 @@ void AscIrDef::Init(const char *type, const char *def_file_path, int64_t line) c
 const std::vector<std::pair<std::string, IrInputType>> &AscIrDef::GetInputDefs() const {
   return impl_->input_defs;
 }
+
+const std::string &AscIrDef::GetInputIrSymName(const std::string &ir_name) const {
+  static const std::string kEmptySymbol;
+  const auto iter = impl_->input_name_to_sym_name.find(ir_name);
+  return iter == impl_->input_name_to_sym_name.end() ? kEmptySymbol : iter->second;
+}
+
 const std::vector<std::pair<std::string, IrOutputType>> &AscIrDef::GetOutputDefs() const {
   return impl_->output_defs;
 }

@@ -10,8 +10,11 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
 #include "graph/ascendc_ir/ascendc_ir_core/ascendc_ir_def.h"
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
+#include "ascir_ops.h"
 #include "graph/compute_graph.h"
 #include "graph/utils/graph_utils.h"
 
@@ -180,6 +183,78 @@ TEST(AscGraphUtilsInsertNodeTest, RejectsInsertNodeFromAnotherGraph) {
 
   EXPECT_NE(AscGraphUtils::InsertNodeBefore(consumer->GetInDataAnchor(0), inserted), GRAPH_SUCCESS);
   EXPECT_EQ(consumer->GetInDataAnchor(0)->GetPeerOutAnchor(), producer->GetOutDataAnchor(0));
+}
+
+TEST(AscGraphUtilsSerializeTest, PreservesDisconnectedOptionalInputs) {
+  AscGraph graph("disconnected_optional_inputs");
+  auto size_var = graph.CreateSizeVar("s0");
+  auto axis = graph.CreateAxis("z0", size_var);
+  const auto one = Symbol(1);
+
+  ascir_op::Rand rand_op("rand");
+  graph.AddNode(rand_op);
+  *rand_op.y.axis = {axis.id};
+  *rand_op.y.repeats = {size_var};
+  *rand_op.y.strides = {one};
+  rand_op.y.dtype = DT_FLOAT;
+
+  std::string serialized_graph;
+  ASSERT_EQ(AscGraphUtils::SerializeToReadable(graph, serialized_graph), GRAPH_SUCCESS);
+
+  AscGraph deserialized_graph("deserialized");
+  ASSERT_EQ(AscGraphUtils::DeserializeFromReadable(serialized_graph, deserialized_graph), GRAPH_SUCCESS);
+
+  const auto rand = deserialized_graph.FindNode("rand");
+  ASSERT_NE(rand, nullptr);
+  const auto op_desc = rand->GetOpDesc();
+  ASSERT_NE(op_desc, nullptr);
+  ASSERT_EQ(op_desc->GetIrInputs().size(), 2U);
+  EXPECT_EQ(op_desc->GetIrInputs()[0].second, IrInputType::kIrInputOptional);
+  EXPECT_EQ(op_desc->GetIrInputs()[1].second, IrInputType::kIrInputOptional);
+
+  std::map<size_t, std::pair<size_t, size_t>> input_ranges;
+  ASSERT_EQ(OpDescUtils::GetIrInputRawDescRange(op_desc, input_ranges), GRAPH_SUCCESS);
+  EXPECT_EQ(input_ranges.size(), 2U);
+  ASSERT_EQ(op_desc->GetAllInputsSize(), 2U);
+  EXPECT_EQ(op_desc->GetInputDesc("seed").GetDataType(), DT_UNDEFINED);
+  EXPECT_EQ(op_desc->GetInputDesc("seed").GetFormat(), FORMAT_RESERVED);
+  EXPECT_EQ(op_desc->GetInputDesc("offset").GetDataType(), DT_UNDEFINED);
+  EXPECT_EQ(op_desc->GetInputDesc("offset").GetFormat(), FORMAT_RESERVED);
+  EXPECT_EQ(rand->inputs.Size(), 0U);
+}
+
+TEST(AscGraphUtilsSerializeTest, PreservesOptionalInputAnchorIndexes) {
+  AscGraph graph("optional_input_anchor_indexes");
+  auto size_var = graph.CreateSizeVar("s0");
+  auto axis = graph.CreateAxis("z0", size_var);
+  const auto one = Symbol(1);
+
+  ascir_op::Rand offset("offset");
+  graph.AddNode(offset);
+  *offset.y.axis = {axis.id};
+  *offset.y.repeats = {one};
+  *offset.y.strides = {one};
+  offset.y.dtype = DT_INT32;
+
+  ascir_op::Rand rand_op("rand");
+  graph.AddNode(rand_op);
+  *rand_op.y.axis = {axis.id};
+  *rand_op.y.repeats = {size_var};
+  *rand_op.y.strides = {one};
+  rand_op.y.dtype = DT_FLOAT;
+  rand_op.offset = offset.y;
+  std::string serialized_graph;
+  ASSERT_EQ(AscGraphUtils::SerializeToReadable(graph, serialized_graph), GRAPH_SUCCESS);
+
+  AscGraph deserialized_graph("deserialized");
+  ASSERT_EQ(AscGraphUtils::DeserializeFromReadable(serialized_graph, deserialized_graph), GRAPH_SUCCESS);
+
+  const auto rand = deserialized_graph.FindNode("rand");
+  ASSERT_NE(rand, nullptr);
+  EXPECT_EQ(rand->GetInDataAnchor(0)->GetPeerOutAnchor(), nullptr);
+  const auto offset_peer = rand->GetInDataAnchor(1)->GetPeerOutAnchor();
+  ASSERT_NE(offset_peer, nullptr);
+  EXPECT_EQ(offset_peer->GetOwnerNodeBarePtr()->GetName(), "offset");
 }
 
 }  // namespace af

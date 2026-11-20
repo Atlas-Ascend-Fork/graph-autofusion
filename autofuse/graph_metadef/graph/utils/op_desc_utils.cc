@@ -19,6 +19,7 @@
 #include "graph/compute_graph.h"
 #include "graph/ge_context.h"
 #include "graph/op_desc.h"
+#include "normal_graph/op_desc_impl.h"
 #include "graph/utils/graph_utils.h"
 #include "graph/utils/node_utils.h"
 #include "graph/type/sym_dtype.h"

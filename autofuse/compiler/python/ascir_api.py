@@ -2466,11 +2466,13 @@ def Rand(
     axis: List[ascir.Axis],
     size: Optional[List[ascir.SizeExpr]] = None,
     stride: Optional[List[ascir.SizeExpr]] = None,
+    seed: Optional[ascir.OpsOperatorOutput] = None,
+    offset: Optional[ascir.OpsOperatorOutput] = None,
 ) -> ascir.OpsOperatorOutput:
     """
     Rand - generate uniform random numbers using PhiloxRandom algorithm.
     Uses fixed philoxKey = {0, 0} and philoxCounter = {0, 0, 0, 0} for continuous mode.
-    Supports float data type.
+    Supports uint32, int32, float16, bfloat16 and float data types with or without seed/offset.
     """
     meta = _get_metadata(owner_graph)
     name = _generate_op_name(owner_graph, "rand")
@@ -2480,6 +2482,11 @@ def Rand(
     # Set dtype and view, then infer
     rand_op.y.dtype = dtype
     _infer_or_set_view(rand_op.y, axis, size, stride)
+    if (seed is None) != (offset is None):
+        raise ValueError("Rand seed/offset must be provided together")
+    if seed is not None:
+        rand_op.seed = seed
+        rand_op.offset = offset
     rand_op.infer_dtype()
 
     return rand_op.y
@@ -2492,11 +2499,13 @@ def Randn(
     axis: List[ascir.Axis],
     size: Optional[List[ascir.SizeExpr]] = None,
     stride: Optional[List[ascir.SizeExpr]] = None,
+    seed: Optional[ascir.OpsOperatorOutput] = None,
+    offset: Optional[ascir.OpsOperatorOutput] = None,
 ) -> ascir.OpsOperatorOutput:
     """
     Randn - generate normal random numbers using PhiloxRandom algorithm.
     Uses fixed philoxKey = {0, 0} and philoxCounter = {0, 0, 0, 0} for continuous mode.
-    Supports uint32_t and int32_t data types.
+    Supports uint32, int32, float16, bfloat16 and float data types with or without seed/offset.
     """
     meta = _get_metadata(owner_graph)
     name = _generate_op_name(owner_graph, "randn")
@@ -2506,6 +2515,11 @@ def Randn(
     # Set dtype and view, then infer
     randn_op.y.dtype = dtype
     _infer_or_set_view(randn_op.y, axis, size, stride)
+    if (seed is None) != (offset is None):
+        raise ValueError("Randn seed/offset must be provided together")
+    if seed is not None:
+        randn_op.seed = seed
+        randn_op.offset = offset
     randn_op.infer_dtype()
 
     return randn_op.y

@@ -248,6 +248,7 @@ class AscIrDef {
   void Init(const char *type, const char *def_file_path, int64_t line) const;
 
   const std::vector<std::pair<std::string, IrInputType>> &GetInputDefs() const;
+  const std::string &GetInputIrSymName(const std::string &ir_name) const;
   const std::vector<std::pair<std::string, IrOutputType>> &GetOutputDefs() const;
   bool HasDynamicOutput() const;
   void AppendInput(const string &name, IrInputType type) const;
