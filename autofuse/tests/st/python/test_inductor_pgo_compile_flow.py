@@ -184,3 +184,69 @@ def test_inductor_host_link_includes_acl_runtime(ascendc_compile_module, tmp_pat
     ascendc_compile_module.build_host_output(args, os.fspath(tmp_path))
 
     assert "acl_rt" in captured["link_libraries"]
+
+
+def _long_graph_name(op_count=80, md5="20fd52a523aa877ef4c42f6134c141de"):
+    ops = ["op{}".format(i) for i in range(op_count)]
+    return "autofused_{}_{}".format("_".join(ops), md5)
+
+
+def _make_rt_launch_kernel_impl(aiv_key):
+    return "\n".join(
+        [
+            "// common part + MIX entry",
+            'extern "C" __global__ void graph() {}',
+            f"// AUTOFUSE_SPLIT_FILE_BEGIN: {aiv_key}",
+            'extern "C" __global__ void graph_aiv() {}',
+            f"// AUTOFUSE_SPLIT_FILE_END: {aiv_key}",
+        ]
+    )
+
+
+def test_long_graph_name_compile_writes_fitting_source_names(
+    compile_adapter_module, tmp_path
+):
+    graph_name = _long_graph_name()
+    aiv_key = f"{graph_name}_op_kernel_aiv.cpp"
+    output_file = tmp_path / "tiling.so"
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    argv = [
+        f"--output_file={output_file}",
+        f"--output_path={build_dir}",
+        f"--graph_name={graph_name}",
+        "--soc_version=Ascend910B",
+    ]
+    captured = []
+
+    def fake_main(args):
+        captured.append(args)
+
+    compile_adapter_module.ascendc_compile.main = fake_main
+
+    # host 侧：split 源与 PGO device 源文件名都需裁剪后才能落盘。
+    compile_adapter_module.host_compile(
+        "struct AutofuseTilingData {};", _make_scheme_a_host_impl(), argv
+    )
+    host_args = captured[-1]
+    host_paths = [*host_args.host_files, host_args.pgo_runner_file]
+    for path in host_paths:
+        base_name = os.path.basename(path)
+        assert os.path.exists(path)
+        assert len((base_name + ".o").encode()) <= 255
+        assert "_cut" in base_name
+
+    # device 侧：含 AIV 双 bin 单元，主/AIV 源文件名都需裁剪后才能落盘。
+    compile_adapter_module.kernel_compile(
+        "struct AutofuseTilingData {};",
+        _make_rt_launch_kernel_impl(aiv_key),
+        argv,
+    )
+    device_args = captured[-1]
+    for path in (device_args.device_files, device_args.device_files_aiv):
+        base_name = os.path.basename(path)
+        assert os.path.exists(path)
+        assert len((base_name + ".o").encode()) <= 255
+        assert "_cut" in base_name
+    assert device_args.device_files.endswith("_op_kernel.cpp")
+    assert device_args.device_files_aiv.endswith("_op_kernel_aiv.cpp")
