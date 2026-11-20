@@ -134,6 +134,12 @@ process so production binary-cache references stay valid.
 `KernelSpec` describes kernel types, ratios, and compiler capabilities. `SetKernelBindings`
 overrides external binary bindings and must be called before Optimize first consumes that binary.
 `AddTask` accepts only non-kernel tasks; callers must keep referenced external addresses valid.
+The model fixture's `aclmdlRITaskGetEnabled` queries the disabled state of registered tasks;
+task enumeration retains disabled tasks. `Model::SetTaskEnabled` only constructs re-enabled
+test inputs and does not imply that a corresponding public Runtime API exists.
+These tests verify SK's adaptation to future queries that return actual task states; they do
+not imply that the placeholder implementation in Runtime PR 6257 can already report disabled tasks.
+
 The model fixture supports AIC/AIV/MIX metadata, record/wait/reset events, and memory wait/write.
 Tests run serially; fixtures do not provide general device simulation or concurrent Runtime state.
 

@@ -179,11 +179,12 @@ class SuperKernelGraph {
   bool ProcessAllStreamsAndTasks(const std::vector<uint32_t> &streamTaskNums);
   bool ProcessSingleTask(aclmdlRITask &task, uint32_t streamIdx, uint32_t taskIdx, uint64_t &preNodeId);
   void RegisterFusibleScope(const std::unique_ptr<SuperKernelBaseNode> &node);
-  void UpdateNodeRelations(uint64_t nodeId, uint32_t streamIdx, uint32_t taskIdx, uint64_t &preNodeId);
+  void UpdateNodeRelations(uint64_t nodeId, uint32_t streamIdx, uint64_t &preNodeId);
   std::unordered_map<uint64_t, std::unique_ptr<SuperKernelBaseNode>> graphMap;
   uint64_t maxNodeId_ = 0;
   std::unordered_map<uint64_t, EventInfos> eventToNodes;
   std::unordered_map<uint64_t, MemoryInfos> memoryToNodes;
+  // Indexed by streams; empty streams have INVALID_TASK_ID in both boundary vectors.
   std::vector<uint64_t> headNodes;
   std::vector<uint64_t> tailNodes;
   std::vector<uint64_t> nodeSizeInStream;

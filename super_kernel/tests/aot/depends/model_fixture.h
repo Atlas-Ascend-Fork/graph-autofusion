@@ -68,6 +68,8 @@ class Model {
   aclmdlRITask AddEvent(aclrtStream stream, aclmdlRITaskType type, aclrtEvent event);
   // Non-kernel task parameters are copied; referenced external addresses stay caller-owned.
   aclmdlRITask AddTask(aclrtStream stream, const aclmdlRITaskParams &params);
+  // Test input control for retained tasks; does not model a Runtime enable API.
+  void SetTaskEnabled(aclmdlRITask task, bool enabled);
   TaskSnapshot Snapshot(aclmdlRITask task) const;
   std::vector<TaskSnapshot> Tasks(aclrtStream stream) const;
   // Stream creation order, then launch order within each stream.

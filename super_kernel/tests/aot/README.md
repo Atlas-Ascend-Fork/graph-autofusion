@@ -112,6 +112,10 @@ UT 保留 `collect_coverage_data`。直接配置过滤器时使用
 `KernelSpec` 描述核类型、比例和编译器 capability，
 `SetKernelBindings` 覆盖外部二进制绑定，必须在首次 Optimize 消费该 binary 之前设置。
 `AddTask` 只接受非 kernel 任务；其中引用的外部地址由调用方保持有效。
+模型夹具的 `aclmdlRITaskGetEnabled` 查询已登记任务的 disabled 状态；枚举保留禁用任务。
+`Model::SetTaskEnabled` 仅用于构造重新启用的测试输入，不代表已存在对应 Runtime 公共接口。
+这些用例验证 SK 对未来真实状态查询的适配，不代表 Runtime PR 6257 的占位实现已能返回 disabled。
+
 当前模型夹具提供 AIC/AIV/MIX 元数据、record/wait/reset 事件与内存 wait/write，
 用例串行运行，不提供通用设备模拟或并发 Runtime 状态。
 

@@ -201,3 +201,26 @@ TEST(AotModelFixture, ArgsArrayRecordingDoesNotInterpretArrayAsBuffer) {
   EXPECT_EQ(params.kernelTaskParams.args, nullptr);
   EXPECT_EQ(params.kernelTaskParams.argsSize, 0U);
 }
+
+TEST(AotModelFixture, EnabledQueryTracksRetainedTaskStateAndPreservesOutputOnFailure) {
+  sk::test::Model model;
+  auto stream = model.AddStream();
+  auto task = model.AddKernel(stream, "enable_query");
+  uint32_t enabled = 9;
+  ASSERT_EQ(aclmdlRITaskGetEnabled(task, &enabled), ACL_SUCCESS);
+  EXPECT_EQ(enabled, 1U);
+  ASSERT_EQ(aclmdlRITaskDisable(task), ACL_SUCCESS);
+  ASSERT_EQ(aclmdlRITaskGetEnabled(task, &enabled), ACL_SUCCESS);
+  EXPECT_EQ(enabled, 0U);
+  aclmdlRITask enumerated = nullptr;
+  uint32_t count = 1;
+  ASSERT_EQ(aclmdlRIGetTasksByStream(stream, &enumerated, &count), ACL_SUCCESS);
+  EXPECT_EQ(enumerated, task);
+  model.SetTaskEnabled(task, true);
+  ASSERT_EQ(aclmdlRITaskGetEnabled(task, &enabled), ACL_SUCCESS);
+  EXPECT_EQ(enabled, 1U);
+  enabled = 9;
+  EXPECT_NE(aclmdlRITaskGetEnabled(nullptr, &enabled), ACL_SUCCESS);
+  EXPECT_EQ(enabled, 9U);
+  EXPECT_NE(aclmdlRITaskGetEnabled(task, nullptr), ACL_SUCCESS);
+}
