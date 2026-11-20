@@ -5386,6 +5386,18 @@ class MatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
               "matmul.h"};
     }
   }
+  std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, bool is_cv_fusion) const override {
+    if (is_cv_fusion) {
+      return LoadApiHeaderFiles(is_dynamic);
+    }
+    return {"mat_mul_tiling_key.h",
+            "matmul_include_headers.h",
+            "mat_mul_tensor_include_headers.h",
+            "mat_mul_pingpong_basic_cmct.h",
+            "mat_mul_tensor_common_scheduler.h",
+            "mat_mul_tensor_common.h",
+            "matmul.h"};
+  }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "utils/std/algorithm.h",
@@ -5428,6 +5440,18 @@ class BatchMatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
               "mat_mul_pingpong_tensor_cv.h",     "mat_mul_tensor_common_scheduler.h",
               "mat_mul_tensor_common.h",          "batch_matmul.h"};
     }
+  }
+  std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, bool is_cv_fusion) const override {
+    if (is_cv_fusion) {
+      return LoadApiHeaderFiles(is_dynamic);
+    }
+    return {"batch_mat_mul_v3_tiling_key.h",
+            "batch_matmul_include_headers.h",
+            "mat_mul_tensor_include_headers.h",
+            "mat_mul_pingpong_basic_cmct.h",
+            "mat_mul_tensor_common_scheduler.h",
+            "mat_mul_tensor_common.h",
+            "batch_matmul.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {

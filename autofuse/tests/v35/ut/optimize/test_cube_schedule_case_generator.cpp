@@ -378,6 +378,93 @@ TEST_F(CubeScheduleCaseGeneratorTest, Test_Just_Matmul_Store) {
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
 }
 
+static void AddSecondCubeOutput(af::AscGraph &graph, bool shared_store) {
+  const auto cube = graph.FindNode("matmul");
+  const auto original_store = graph.FindNode("store");
+  ASSERT_NE(cube, nullptr);
+  ASSERT_NE(original_store, nullptr);
+  auto writeback = original_store;
+  if (!shared_store) {
+    Store store2("store2");
+    graph.AddNode(store2);
+    ASSERT_EQ(af::GraphUtils::AddEdge(cube->GetOutDataAnchor(0), graph.FindNode("store2")->GetInDataAnchor(0)),
+              af::GRAPH_SUCCESS);
+    store2.attr.sched = original_store->attr.sched;
+    store2.attr.api = original_store->attr.api;
+    store2.y.dtype = original_store->outputs[0].attr.dtype;
+    *store2.y.axis = original_store->outputs[0].attr.axis;
+    *store2.y.repeats = original_store->outputs[0].attr.repeats;
+    *store2.y.strides = original_store->outputs[0].attr.strides;
+    store2.ir_attr.SetOffset(af::ops::Zero);
+    writeback = graph.FindNode("store2");
+  }
+  Output output2("output2");
+  graph.AddNode(output2);
+  ASSERT_EQ(af::GraphUtils::AddEdge(writeback->GetOutDataAnchor(0), graph.FindNode("output2")->GetInDataAnchor(0)),
+            af::GRAPH_SUCCESS);
+  output2.y.dtype = original_store->outputs[0].attr.dtype;
+  output2.ir_attr.SetIndex(1);
+}
+
+TEST_F(CubeScheduleCaseGeneratorTest, MultipleCubeOutputsRequireVectorWriteback) {
+  for (const bool shared_store : {false, true}) {
+    SCOPED_TRACE(shared_store);
+    af::AscGraph graph("matmul_two_outputs");
+    ConstructJustMatMul(graph);
+    ASSERT_NO_FATAL_FAILURE(AddSecondCubeOutput(graph, shared_store));
+    const auto original_store = graph.FindNode("store");
+    std::vector<ScheduleTask> tasks;
+    optimize::CubeFusionCaseGenerator generator;
+    ASSERT_EQ(generator.GeneratorTask(graph, tasks, OptimizerOptions{}), af::SUCCESS);
+    bool has_common = false;
+    for (const auto &task : tasks) {
+      if (shared_store) {
+        ASSERT_NE(task.optimize_graph.FindNode("store_for_output2"), nullptr);
+      }
+      EXPECT_NE(task.cube_type, ascir::CubeTemplateType::kFixpip);
+      if (task.cube_type == ascir::CubeTemplateType::kCommon) {
+        has_common = true;
+        EXPECT_GT(task.grouped_graphs.size(), 1U);
+        const auto first = *task.optimize_graph.FindNode("output")->GetInDataNodes().begin();
+        const auto second = *task.optimize_graph.FindNode("output2")->GetInDataNodes().begin();
+        EXPECT_NE(first, second);
+        EXPECT_EQ(*first->GetInDataNodes().begin(), *second->GetInDataNodes().begin());
+      }
+    }
+    EXPECT_TRUE(has_common);
+    // Candidate normalization must not modify the caller's graph.
+    EXPECT_EQ(original_store->GetOutDataNodes().size(), shared_store ? 2U : 1U);
+  }
+}
+
+TEST_F(CubeScheduleCaseGeneratorTest, SharedCubeStorePreservesControlEdges) {
+  af::AscGraph graph("matmul_shared_store_control");
+  ConstructJustMatMul(graph);
+  ASSERT_NO_FATAL_FAILURE(AddSecondCubeOutput(graph, true));
+  const auto original_store = graph.FindNode("store");
+  ASSERT_EQ(
+      af::GraphUtils::AddEdge(graph.FindNode("data0")->GetOutControlAnchor(), original_store->GetInControlAnchor()),
+      af::GRAPH_SUCCESS);
+  ASSERT_EQ(
+      af::GraphUtils::AddEdge(original_store->GetOutControlAnchor(), graph.FindNode("output2")->GetInControlAnchor()),
+      af::GRAPH_SUCCESS);
+  // Check control preservation independently of connectivity-based candidate grouping.
+  std::vector<ScheduleTask> controlled_tasks;
+  optimize::CubeFusionCaseGenerator controlled_generator;
+  ASSERT_EQ(controlled_generator.GeneratorTask(graph, controlled_tasks, OptimizerOptions{}), af::SUCCESS);
+  ASSERT_FALSE(controlled_tasks.empty());
+  for (const auto &candidate : controlled_tasks) {
+    const auto copy = candidate.optimize_graph.FindNode("store_for_output2");
+    ASSERT_NE(copy, nullptr);
+    EXPECT_EQ(copy->attr.name, copy->GetName());
+    ASSERT_EQ(copy->GetInControlNodes().size(), 1U);
+    ASSERT_EQ(copy->GetOutControlNodes().size(), 1U);
+    EXPECT_EQ((*copy->GetInControlNodes().begin())->GetName(), "data0");
+    EXPECT_EQ((*copy->GetOutControlNodes().begin())->GetName(), "output2");
+  }
+  EXPECT_EQ(original_store->GetOutDataNodes().size(), 2U);
+}
+
 TEST_F(CubeScheduleCaseGeneratorTest, Test_MatMul_Add_Store) {
   af::AscGraph graph("matmul_add_store");
   ConstructMatMulAndAdd(graph);

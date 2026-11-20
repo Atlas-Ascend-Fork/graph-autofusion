@@ -199,6 +199,10 @@ class AscIrCodegen {
     (void)node;
     return 0;
   }
+
+  virtual std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, [[maybe_unused]] bool is_cv_fusion) const {
+    return LoadApiHeaderFiles(is_dynamic);
+  }
 };
 
 class AscIrAtt {

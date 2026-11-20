@@ -153,7 +153,62 @@ Status UpdateHintGraphAttr(const ::ascir::ImplGraph &graph) {
   return af::SUCCESS;
 }
 
+// Give every graph output its own Store/GM destination before Cube/Vector partitioning.
+Status SplitSharedCubeStores(ascir::ImplGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (!ScheduleUtils::IsStore(node)) {
+      continue;
+    }
+    const auto input_anchor = node->GetInDataAnchor(0);
+    GE_ASSERT_NOTNULL(input_anchor);
+    GE_ASSERT_NOTNULL(input_anchor->GetPeerOutAnchor());
+    const auto producer = std::dynamic_pointer_cast<af::AscNode>(input_anchor->GetPeerOutAnchor()->GetOwnerNode());
+    if (producer == nullptr || !ScheduleUtils::IsCube(producer)) {
+      continue;
+    }
+    const auto out_anchor = node->GetOutDataAnchor(0);
+    GE_ASSERT_NOTNULL(out_anchor);
+    std::vector<af::InDataAnchorPtr> consumers;
+    for (const auto &peer : out_anchor->GetPeerInDataAnchors()) {
+      if (af::ops::IsOps<af::ascir_op::Output>(peer->GetOwnerNode())) {
+        consumers.push_back(peer);
+      }
+    }
+    std::sort(consumers.begin(), consumers.end(), [](const auto &lhs, const auto &rhs) {
+      return lhs->GetOwnerNode()->GetName() < rhs->GetOwnerNode()->GetName();
+    });
+    for (size_t i = 1U; i < consumers.size(); ++i) {
+      const auto &consumer = consumers[i];
+      GE_ASSERT_NOTNULL(consumer);
+      std::string name = node->GetName() + "_for_" + consumer->GetOwnerNode()->GetName();
+      const auto base_name = name;
+      size_t suffix = 0U;
+      while (graph.FindNode(name.c_str()) != nullptr) {
+        name = base_name + "_" + std::to_string(++suffix);
+      }
+      af::ascir_op::Store store(name.c_str());
+      auto copy = graph.AddNode(store);
+      GE_ASSERT_NOTNULL(copy);
+      copy->attr = node->attr;
+      copy->attr.name = name;
+      copy->outputs[0].attr = node->outputs[0].attr;
+      copy->outputs[0].attr.mem.tensor_id = af::kIdNone;
+      GE_ASSERT_GRAPH_SUCCESS(
+          af::GraphUtils::AddEdge(node->GetInDataAnchor(0)->GetPeerOutAnchor(), copy->GetInDataAnchor(0)));
+      GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::CopyInCtrlEdges(node, copy));
+      GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::CopyOutCtrlEdges(node, copy));
+      GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::RemoveEdge(out_anchor, consumer));
+      GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(copy->GetOutDataAnchor(0), consumer));
+    }
+  }
+  return af::SUCCESS;
+}
+
 bool IsCubeFixpip(const af::AscNodePtr &cube_node) {
+  // The native Cube API writes one C tensor. Multiple stores need the existing Vector copy stage.
+  if (cube_node->GetOutDataNodes().size() != 1U) {
+    return false;
+  }
   for (auto out_node : cube_node->GetOutNodes()) {
     GE_ASSERT_NOTNULL(out_node);
     auto out_asc_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
@@ -542,11 +597,89 @@ Status FillInputDataAttrForCvGraph(af::AscGraph &graph) {
   }
   return af::SUCCESS;
 }
+
+Status RewriteCubeConsumerInput(const af::AscNodePtr &node, const af::AscNodePtr &cube_node,
+                                const af::AscNodePtr &load_node) {
+  for (const auto &out_anchor : node->GetAllOutDataAnchors()) {
+    GE_CHK_BOOL_EXEC(out_anchor != nullptr,
+                     REPORT_INNER_ERR_MSG("E18888", "out data anchor is null, node:%s.", node->GetName().c_str());
+                     return af::GRAPH_FAILED, "[Check][Param] Out data anchor is null, node:%s",
+                            node->GetName().c_str());
+    for (const auto &peer_in_anchor : out_anchor->GetPeerInDataAnchors()) {
+      GE_CHECK_NOTNULL(peer_in_anchor);
+      GE_CHK_BOOL_EXEC(peer_in_anchor->GetOwnerNodeBarePtr() != nullptr,
+                       REPORT_INNER_ERR_MSG("E18888", "Peer in node:%s is null", node->GetName().c_str());
+                       return af::GRAPH_FAILED, "Peer in node:%s is null", node->GetName().c_str());
+      if (peer_in_anchor->GetOwnerNodeBarePtr()->GetName() == cube_node->GetName()) {
+        // remove src->dst
+        GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(node->GetOutAnchor(out_anchor->GetIdx()),
+                                                     cube_node->GetInAnchor(peer_in_anchor->GetIdx())));
+        // load->dst
+        GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(load_node->GetOutAnchor(out_anchor->GetIdx()),
+                                                  cube_node->GetInAnchor(peer_in_anchor->GetIdx())));
+        break;  // 这里加的break可能会导致add两个输入都来自cube时切图只切了一半
+      }
+    }
+  }
+  return af::SUCCESS;
+}
+
+Status PartitionCubeOutputs(ascir::ImplGraph &optimize_graph, const af::AscNodePtr &node) {
+  bool first = true;
+  af::AscNodePtr workspace_pre_node;
+  af::AscNodePtr workspace_post_node;
+  af::AscNodePtr load_node;
+  af::AscNodePtr store_node;
+  af::ascir_op::Workspace workspace_pre(GetNewNodeName(node, "Workspace").c_str());
+  af::ascir_op::Workspace workspace_post(GetNewNodeName(node, "Workspace").c_str());
+  af::ascir_op::Load load(("Cube_Load_" + GetNewNodeName(node, "Load")).c_str());
+  af::ascir_op::Store store(GetNewNodeName(node, "Store").c_str());
+  for (const auto &cube_output_node : node->GetOutNodes()) {
+    GE_CHECK_NOTNULL(cube_output_node);
+    af::AscNodePtr cube_node = std::dynamic_pointer_cast<af::AscNode>(cube_output_node);
+    GE_ASSERT_NOTNULL(cube_node);
+    if (first) {
+      workspace_pre_node = optimize_graph.AddNode(workspace_pre);
+      GE_ASSERT_NOTNULL(workspace_pre_node);
+      workspace_post_node = optimize_graph.AddNode(workspace_post);
+      GE_ASSERT_NOTNULL(workspace_post_node);
+      load_node = optimize_graph.AddNode(load);
+      GE_ASSERT_NOTNULL(load_node);
+      store_node = optimize_graph.AddNode(store);
+      GE_ASSERT_NOTNULL(store_node);
+      GE_CHK_STATUS_RET(DoCopyAscNodeTensorAttr(node, cube_node, load_node));
+      GE_CHK_STATUS_RET(DoCopyAscNodeTensorAttr(node, store_node));
+      GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(store_node, workspace_pre_node));
+      GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(load_node, workspace_post_node));
+    }
+    GE_ASSERT_SUCCESS(RewriteCubeConsumerInput(node, cube_node, load_node));
+    if (first) {
+      // add src->store->workspace_pre_node
+      GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(node->GetOutAnchor(0UL), store_node->GetInAnchor(0UL)));
+      GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(store_node->GetOutAnchor(0UL), workspace_pre_node->GetInAnchor(0UL)));
+      // add workspace_post_node->load
+      GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(workspace_post_node->GetOutAnchor(0UL), load_node->GetInAnchor(0UL)));
+    }
+    first = false;
+  }
+  return af::SUCCESS;
+}
+
+Status CompleteCvPartitionGraph(ascir::ImplGraph &optimize_graph,
+                                std::vector<std::pair<std::string, std::string>> &split_data_names) {
+  split_data_names.clear();
+  GE_ASSERT_SUCCESS(SplitSharedDataForCubeAndVector(optimize_graph, split_data_names));
+  // UB eligibility needs API metadata for the Workspace and its Load/Store.
+  GE_ASSERT_SUCCESS(AscGraphInfoComplete::CompleteApiInfo(optimize_graph));
+  GE_ASSERT_SUCCESS(FillInputDataAttrForCvGraph(optimize_graph));
+  return af::SUCCESS;
+}
 }  // namespace
 
 Status CubeFusionCaseGenerator::GenerateGeneralCase(ascir::HintGraph &graph, std::vector<ascir::ImplGraph> &graphs) {
   ascir::ImplGraph optimize_graph(graph.GetName().c_str());
   optimize_graph.CopyFrom(graph);
+  GE_ASSERT_SUCCESS(SplitSharedCubeStores(optimize_graph));
 
   for (const auto &node : optimize_graph.GetAllNodes()) {
     GE_ASSERT_NOTNULL(node);
@@ -562,71 +695,11 @@ Status CubeFusionCaseGenerator::GenerateGeneralCase(ascir::HintGraph &graph, std
     }
     node_order_.emplace_back(node);
     partition_ = true;
-    bool first = true;
-    af::AscNodePtr workspace_pre_node;
-    af::AscNodePtr workspace_post_node;
-    af::AscNodePtr load_node;
-    af::AscNodePtr store_node;
-    af::ascir_op::Workspace workspace_pre(GetNewNodeName(node, "Workspace").c_str());
-    af::ascir_op::Workspace workspace_post(GetNewNodeName(node, "Workspace").c_str());
-    af::ascir_op::Load load(("Cube_Load_" + GetNewNodeName(node, "Load")).c_str());
-    af::ascir_op::Store store(GetNewNodeName(node, "Store").c_str());
-    for (const auto &cube_output_node : node->GetOutNodes()) {
-      GE_CHECK_NOTNULL(cube_output_node);
-      af::AscNodePtr cube_node = std::dynamic_pointer_cast<af::AscNode>(cube_output_node);
-      GE_ASSERT_NOTNULL(cube_node);
-      if (first) {
-        workspace_pre_node = optimize_graph.AddNode(workspace_pre);
-        GE_ASSERT_NOTNULL(workspace_pre_node);
-        workspace_post_node = optimize_graph.AddNode(workspace_post);
-        GE_ASSERT_NOTNULL(workspace_post_node);
-        load_node = optimize_graph.AddNode(load);
-        GE_ASSERT_NOTNULL(load_node);
-        store_node = optimize_graph.AddNode(store);
-        GE_ASSERT_NOTNULL(store_node);
-        GE_CHK_STATUS_RET(DoCopyAscNodeTensorAttr(node, cube_node, load_node));
-        GE_CHK_STATUS_RET(DoCopyAscNodeTensorAttr(node, store_node));
-        GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(store_node, workspace_pre_node));
-        GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(load_node, workspace_post_node));
-      }
-      for (const auto &out_anchor : node->GetAllOutDataAnchors()) {
-        GE_CHK_BOOL_EXEC(out_anchor != nullptr,
-                         REPORT_INNER_ERR_MSG("E18888", "out data anchor is null, node:%s.", node->GetName().c_str());
-                         return af::GRAPH_FAILED, "[Check][Param] Out data anchor is null, node:%s",
-                                node->GetName().c_str());
-        for (const auto &peer_in_anchor : out_anchor->GetPeerInDataAnchors()) {
-          GE_CHECK_NOTNULL(peer_in_anchor);
-          GE_CHK_BOOL_EXEC(peer_in_anchor->GetOwnerNodeBarePtr() != nullptr,
-                           REPORT_INNER_ERR_MSG("E18888", "Peer in node:%s is null", node->GetName().c_str());
-                           return af::GRAPH_FAILED, "Peer in node:%s is null", node->GetName().c_str());
-          if (peer_in_anchor->GetOwnerNodeBarePtr()->GetName() == cube_node->GetName()) {
-            // remove src->dst
-            GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(node->GetOutAnchor(out_anchor->GetIdx()),
-                                                         cube_node->GetInAnchor(peer_in_anchor->GetIdx())));
-            // load->dst
-            GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(load_node->GetOutAnchor(out_anchor->GetIdx()),
-                                                      cube_node->GetInAnchor(peer_in_anchor->GetIdx())));
-            break;  // 这里加的break可能会导致add两个输入都来自cube时切图只切了一半
-          }
-        }
-      }
-      if (first) {
-        // add src->store->workspace_pre_node
-        GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(node->GetOutAnchor(0UL), store_node->GetInAnchor(0UL)));
-        GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(store_node->GetOutAnchor(0UL), workspace_pre_node->GetInAnchor(0UL)));
-        // add workspace_post_node->load
-        GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(workspace_post_node->GetOutAnchor(0UL), load_node->GetInAnchor(0UL)));
-      }
-      first = false;
-    }
+    GE_ASSERT_SUCCESS(PartitionCubeOutputs(optimize_graph, node));
   }
   ascir::utils::DumpGraph(graph, "before_partition");
   ascir::utils::DumpGraph(optimize_graph, "after_partition");
-  split_data_names_.clear();
-  GE_ASSERT_SUCCESS(SplitSharedDataForCubeAndVector(optimize_graph, split_data_names_));
-  // UB eligibility needs API metadata for the Workspace and its Load/Store.
-  GE_ASSERT_SUCCESS(AscGraphInfoComplete::CompleteApiInfo(optimize_graph));
-  GE_ASSERT_SUCCESS(FillInputDataAttrForCvGraph(optimize_graph));
+  GE_ASSERT_SUCCESS(CompleteCvPartitionGraph(optimize_graph, split_data_names_));
   graphs.emplace_back(optimize_graph);
   return af::GRAPH_SUCCESS;
 }

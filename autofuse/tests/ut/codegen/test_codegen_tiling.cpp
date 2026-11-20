@@ -4158,6 +4158,10 @@ TEST_F(TestCodegenTiling, SingleGroupFinalTilingEmitsRuntimeObservation) {
   EXPECT_TRUE(has_observe_begin);
   EXPECT_TRUE(has_observe_reset);
   EXPECT_TRUE(has_runtime_emitter_call);
+
+  const auto inductor_files = this->GenerateForInductor(fused_schedule_result);
+  const auto &entry = inductor_files.at(codegen::kTilingDefAndConstIdentify);
+  EXPECT_NE(entry.find("optiling::EmitFinalTilingByCase("), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, FinalTilingUsesSelectedCaseAndStructuredPipeInterface) {
@@ -4276,10 +4280,109 @@ TEST_F(TestCodegenTiling, SplitHeaderInductorFixpipShouldNotReferencePgoHeader) 
     const auto &entry = tiling_files.at(codegen::kTilingDefAndConstIdentify);
     EXPECT_NE(entry.find("extern \"C\" int64_t AutofuseTiling("), std::string::npos);
     EXPECT_NE(entry.find("CallCubeTiling("), std::string::npos);
+    EXPECT_EQ(entry.find("optiling::GetTiling("), std::string::npos);
+    EXPECT_NE(entry.find("tiling->cv_tiling_data.fusion_mode = 1;"), std::string::npos);
+    EXPECT_NE(entry.find("*blockDim = cube_block_dim;"), std::string::npos);
+    EXPECT_NE(entry.find("*workspaceSize = static_cast<uint64_t>(ws_size);"), std::string::npos);
+    const auto tiling_data = codegen::TilingData("Autofuse").Generate(fused_schedule_result, true);
+    EXPECT_NE(tiling_data.find("struct CVAutofuseTilingData {"), std::string::npos);
+    EXPECT_NE(tiling_data.find("matmul_tiling_data[MATMUL_TILING_DATA_STORAGE_SIZE]"), std::string::npos);
     for (const auto &[key, source] : tiling_files) {
       EXPECT_EQ(source.find(codegen::kTilingPgoHeaderInclude), std::string::npos) << key;
+      EXPECT_EQ(source.find("optiling::EmitFinalTilingByCase("), std::string::npos) << key;
+      EXPECT_EQ(source.find("optiling::GetTilingCore("), std::string::npos) << key;
     }
   }
+}
+
+TEST_F(TestCodegenTiling, CubeCallBindsOperandEdgesInsteadOfAllBoundaryInputs) {
+  af::AscGraph graph("cube_operand_binding");
+  CreateMatmulGraph(graph, false);
+  graph.FindNode("data0")->outputs[0].attr.mem.tensor_id = 11;
+  graph.FindNode("data1")->outputs[0].attr.mem.tensor_id = 22;
+  codegen::Kernel kernel("cube_operand_binding");
+  kernel.tpipe.is_inductor = true;
+  kernel.tpipe.cv_fusion_type = ascir::CubeTemplateType::kFixpip;
+  kernel.inputs.emplace_back(codegen::GM_ADDR("unused"));
+  kernel.inputs.emplace_back(codegen::GM_ADDR("rhs"));
+  kernel.inputs.emplace_back(codegen::GM_ADDR("lhs"));
+  kernel.input_tensors = {99, 22, 11};
+  kernel.outputs.emplace_back(codegen::GM_ADDR("result"));
+  auto call = kernel.GenCubeTilingFuncCall(graph);
+  EXPECT_NE(call.find(">(lhs, rhs, nullptr, nullptr, result, "), std::string::npos);
+  EXPECT_EQ(call.find("unused"), std::string::npos);
+
+  // Both native slots remain present when the operands share one GM tensor.
+  graph.FindNode("data1")->outputs[0].attr.mem.tensor_id = 11;
+  call = kernel.GenCubeTilingFuncCall(graph);
+  EXPECT_NE(call.find(">(lhs, lhs, nullptr, nullptr, result, "), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, InductorFixpipShouldUseNativeCubeWithoutVectorCallbacks) {
+  for (const bool is_dynamic : {false, true}) {
+    SCOPED_TRACE(is_dynamic);
+    af::AscGraph graph("fixpip_native");
+    CreateMatmulGraph(graph, is_dynamic);
+    optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+    ascir::FusedScheduledResult fused;
+    ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+    ASSERT_TRUE(ascgen_utils::IsJustCubeFixpip(fused));
+    codegen::Codegen generator(codegen::CodegenOptions{});
+    codegen::CodegenResult result;
+    ASSERT_EQ(generator.GenerateForInductor(fused, result), af::SUCCESS);
+    EXPECT_NE(result.tiling_data.find("struct CVAutofuseTilingData {"), std::string::npos);
+    EXPECT_NE(result.kernel.find("const CVTilingT &tilingGM"), std::string::npos);
+    EXPECT_EQ(result.kernel.find("mat_mul_v3_fusion"), std::string::npos);
+    EXPECT_EQ(result.kernel.find("CV_FUSION_ADDR"), std::string::npos);
+    EXPECT_EQ(result.kernel.find("class TensorCVBlockMmad"), std::string::npos);
+    EXPECT_NE(result.kernel.find("#define ASCENDC_TPL_KERNEL"), std::string::npos);
+  }
+}
+
+TEST_F(TestCodegenTiling, InductorFixpipBmmViewMaterializesBeforeNativeCall) {
+  af::AscGraph graph("fixpip_bmm_view");
+  af::ascir_op::BatchMatMul matmul("batch_matmul");
+  CreateBatchMatmulFusedPrefix(graph, matmul);
+  af::ascir_op::Store store("store");
+  store.x = matmul.y;
+  store.attr.sched.axis = matmul.attr.sched.axis;
+  *store.y.axis = *matmul.y.axis;
+  *store.y.repeats = *matmul.y.repeats;
+  *store.y.strides = *matmul.y.strides;
+  store.y.dtype = ge::DT_FLOAT;
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.y.dtype = ge::DT_FLOAT;
+  output.ir_attr.SetIndex(0);
+  for (const auto &name : {"data1", "load1"}) {
+    graph.FindNode(name)->outputs[0].attr.strides = {af::Symbol(32), af::Symbol(64), af::Symbol(1)};
+  }
+  optimize::AscGraphInfoComplete::CompleteApiInfo(graph);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  ASSERT_TRUE(ascgen_utils::IsJustCubeFixpip(fused));
+  ASSERT_NE(codegen::FindBmmInputView(fused), nullptr);
+  codegen::Codegen generator(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  ASSERT_EQ(generator.GenerateForInductor(fused, result), af::SUCCESS);
+  const auto declaration = result.kernel.find("GM_ADDR cv_bmm_input = ");
+  const auto materialize = result.kernel.find("CvMaterializeBmmInput<", declaration);
+  const auto native_call = result.kernel.find("batch_mat_mul_v3<", materialize);
+  ASSERT_NE(declaration, std::string::npos);
+  ASSERT_NE(materialize, std::string::npos);
+  ASSERT_NE(native_call, std::string::npos);
+  EXPECT_LT(declaration, materialize);
+  EXPECT_LT(materialize, native_call);
+  EXPECT_NE(result.kernel.find("if constexpr (MIX_MODE == 0) {"), std::string::npos);
+  EXPECT_NE(result.kernel.find("KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2)"), std::string::npos);
+  const auto &entry = result.tiling;
+  const auto reset = entry.find("tiling->cv_tiling_data = {};");
+  const auto call = entry.find("if (!CallCubeTiling(", reset);
+  ASSERT_NE(reset, std::string::npos);
+  ASSERT_NE(call, std::string::npos);
+  EXPECT_LT(reset, call);
+  EXPECT_EQ(entry.find("tiling->cv_tiling_data = {};", call), std::string::npos);
 }
 
 TEST_F(TestCodegenTiling, SplitHeaderApiTilingSourceShouldIncludeApiHeaders) {

@@ -21,6 +21,10 @@
 using namespace ascgen_utils;
 
 namespace {
+bool ShouldProcessDynamicCubeResult(const ascir::FusedScheduledResult &result, bool is_inductor) {
+  return is_inductor && ascgen_utils::IsCubeFusedScheduled(result) && !ascgen_utils::IsJustCubeFixpip(result);
+}
+
 void AppendCVAutofuseCommonTilingFields(std::stringstream &ss) {
   ss << "    union {\n";
   ss << "        CVAutofuseExternTilingData extern_tiling_data;\n";
@@ -39,7 +43,8 @@ void AppendCVAutofuseCommonTilingFields(std::stringstream &ss) {
 codegen::TilingData::TilingData(const std::string &kernel, const std::string &name_class)
     : class_name(name_class), kernel_name(kernel) {}
 
-std::string codegen::TilingData::macros_and_includes = {  // 不却分是否const
+std::string codegen::TilingData::macros_and_includes = {
+    // 不却分是否const
     "#include <stdint.h>\n"
     "#include <vector>\n"
     "#include \"kernel_tiling/kernel_tiling.h\"\n"
@@ -216,7 +221,7 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
     ss << pgo_perf_struct;
     ss << "#endif" << std::endl;
   };
-  if (ascgen_utils::IsJustCubeFixpip(fused_schedule_result)) {
+  if (ascgen_utils::IsJustCubeFixpip(fused_schedule_result) && !is_inductor) {
     GE_ASSERT(fused_schedule_result.node_idx_to_scheduled_results.size() == 1U, "Cube Fixpip results just one.");
     GE_ASSERT(fused_schedule_result.node_idx_to_scheduled_results[0].size() == 1U,
               "Cube Fixpip scheduled_results just one.");
@@ -231,7 +236,7 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
     return ss.str();
   }
   ascir::FusedScheduledResult elemwise_schedule_result = fused_schedule_result;
-  if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) && is_inductor) {
+  if (ShouldProcessDynamicCubeResult(fused_schedule_result, is_inductor)) {
     GE_ASSERT_SUCCESS(ascgen_utils::ProcessCubeFusionResultDynamic(elemwise_schedule_result));
   } else {
     GE_ASSERT_SUCCESS(ProcessCubeFusionResult(elemwise_schedule_result));

@@ -127,6 +127,8 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
   using DispatchPolicy = MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, KernelSchedule_>;
   using TupleShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
   using TileShape = asc::te::shape<int64_t, int64_t, int64_t>;
+  // A/B share each L1 slot; reserve native BT/L0/L0C namespaces with the same stage capacities.
+  using BufferIds = Gemm::BufferIdLayout<QUADRUPLE_BUFFER_COUNT, QUADRUPLE_BUFFER_COUNT, DOUBLE_BUFFER_COUNT>;
 
   static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
   static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
@@ -262,13 +264,13 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
           auto tensorBiasL0 = asc::te::get<2>(l0TensorTuple);
 
           {
-            Gemm::LockM(l0BufferId + L0_BUFFER_ID_BASE);
+            Gemm::LockM(BufferIds::L0BufferId(l0BufferId));
             bool initCmatrix = iter0 == 0 && iter1 == 0 && !isBias_;
             bool isFinalK = iter0 + 1 == kL1Iter && iter1 + 1 == kL0Iter;
             uint8_t unitFlag = isFinalK ? FINAL_ACCUMULATION : NON_FINAL_ACCUMULATION;
             Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag, initCmatrix,
                     replicateScalar);
-            Gemm::UnLockM(l0BufferId + L0_BUFFER_ID_BASE);
+            Gemm::UnLockM(BufferIds::L0BufferId(l0BufferId));
           }
           l0PingPong_++;
         }
@@ -303,7 +305,7 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
 
     auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
 
-    Gemm::LockMte2(l1BufferId + L1_BUFFER_ID_BASE);
+    Gemm::LockMte2(BufferIds::L1ADataBufferId(l1BufferId));
 
     auto layoutAL1 = MakeLayoutAL1{}(curM, curKL1);
     auto tensorAL1 =
@@ -324,7 +326,7 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
       asc::te::copy(copyGM2L1, tensorBiasL1, tensorBias);
     }
 
-    Gemm::UnLockMte2(l1BufferId + L1_BUFFER_ID_BASE);
+    Gemm::UnLockMte2(BufferIds::L1ADataBufferId(l1BufferId));
 
     return AscendC::Std::make_tuple(tensorAL1, tensorBL1, tensorBiasL1);
   }
@@ -340,8 +342,8 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
     auto curN = asc::te::get<MNK_N>(l0Shape);
     auto curK0 = asc::te::get<MNK_K>(l0Shape);
 
-    Gemm::LockMte1(l1BufferId + L1_BUFFER_ID_BASE);
-    Gemm::LockMte1(l0BufferId + L0_BUFFER_ID_BASE);
+    Gemm::LockMte1(BufferIds::L1ADataBufferId(l1BufferId));
+    Gemm::LockMte1(BufferIds::L0BufferId(l0BufferId));
 
     auto copyL12L0A = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
     auto layoutAL0 =
@@ -369,8 +371,8 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
       asc::te::copy(copyL12BT, tensorBiasL0, tensorBiasL1);
     }
 
-    Gemm::UnLockMte1(l1BufferId + L1_BUFFER_ID_BASE);
-    Gemm::UnLockMte1(l0BufferId + L0_BUFFER_ID_BASE);
+    Gemm::UnLockMte1(BufferIds::L1ADataBufferId(l1BufferId));
+    Gemm::UnLockMte1(BufferIds::L0BufferId(l0BufferId));
 
     return AscendC::Std::make_tuple(tensorAL0, tensorBL0, tensorBiasL0);
   }

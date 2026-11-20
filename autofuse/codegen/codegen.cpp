@@ -21,6 +21,7 @@
 #include "ascir_node_param/ascir_param_builder.h"
 #include "codegen_kernel.h"
 #include "codegen_tiling_data.h"
+#include "codegen_tiling_utils.h"
 #include "ascir_utils.h"
 #include "common_utils.h"
 #include "common/ge_common/debug/log.h"
@@ -559,6 +560,10 @@ Status Codegen::GenerateKernel(const ascir::FusedScheduledResult &fused_schedule
          static_cast<int32_t>(use_list_tensor));
   std::stringstream ss;
   std::string kernel_task_type = GetKernelTaskType(fused_schedule_result);
+  if (is_inductor && FindBmmInputView(fused_schedule_result) != nullptr) {
+    // A native BMM may need the existing AIV input materialization prologue.
+    kernel_task_type = kKernelTaskTypeMixAICOneTwo;
+  }
   ss << Kernel::IncludeAndDefines(fused_schedule_result, kernel_task_type, use_list_tensor, is_inductor);
   GE_CHK_STATUS_RET(
       Kernel::GenKernelFuncByTilingKey(fused_schedule_result, ss, use_list_tensor, config, kernel_task_type),

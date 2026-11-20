@@ -133,10 +133,22 @@ constexpr CubeFormat format_y = CubeFormat::ND;
     op.Init(aGM, bGM, cGM, biasGM, offsetWGM, user, &tilingData, &pipe);             \
     op.Process();                                                                    \
   } while (0)
+#ifdef INDUCTOR_TILING_DATA
+template <typename CVTilingT, int8_t BATCH_API_LEVEL, int8_t BATCH_A_TRANS, int8_t BATCH_B_TRANS,
+          int8_t BATCH_ITER_MODEL, int8_t BMODEL, int8_t BATCH_FULL_LOAD, int8_t BATCH_L0C2OUT_MODEL>
+#else
 template <int8_t BATCH_API_LEVEL, int8_t BATCH_A_TRANS, int8_t BATCH_B_TRANS, int8_t BATCH_ITER_MODEL, int8_t BMODEL,
           int8_t BATCH_FULL_LOAD, int8_t BATCH_L0C2OUT_MODEL>
+#endif
+#ifdef INDUCTOR_TILING_DATA
+__aicore__ inline __attribute__((always_inline)) void batch_mat_mul_v3(
+#else
 __global__ __aicore__ void batch_mat_mul_v3(
-#ifdef CV_UB_FUSION
+#endif
+#ifdef INDUCTOR_TILING_DATA
+    GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR offsetWGM, GM_ADDR cGM, GM_ADDR workspaceGM,
+    const CVTilingT &tilingGM)
+#elif defined(CV_UB_FUSION)
     GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR offsetWGM, GM_ADDR cGM, GM_ADDR workspaceGM, GM_ADDR tilingGM,
     AutoFusionVector::Params *param)
 #else
@@ -160,7 +172,7 @@ __global__ __aicore__ void batch_mat_mul_v3(
 #endif
 
   REGISTER_TILING_DEFAULT(BatchMatMulV3TilingData);
-#if (defined(CV_UB_FUSION) || defined(CV_SAFETY_FUSION))
+#if (defined(INDUCTOR_TILING_DATA) || defined(CV_UB_FUSION) || defined(CV_SAFETY_FUSION))
 #else
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 #endif
