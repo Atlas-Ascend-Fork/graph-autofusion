@@ -862,6 +862,7 @@ codegen_e2e_st() {
                         reduce_prod_float_store_test_e2e_v2 \
                         reduce_prod_int32_1025_store_test_e2e_v2 \
                         reduce_prod_int64_1025_store_test_e2e_v2 \
+                        reduce_prod_int64_129800_store_test_e2e_v2 \
                         reduce_prod_float_1025_store_test_e2e_v2 \
                         reduce_prod_int8_ra_store_test_e2e_v2 \
                         load_lshift_store_test_e2e_v2 \

@@ -895,6 +895,39 @@ TEST_F(TestDtypeConsistency, ProdInt8EpilogueMulKeepsWrapOutputPath) {
   EXPECT_TRUE(has_uint8_to_int8_cast);
 }
 
+TEST_F(TestDtypeConsistency, ProdInt8EpilogueMulKeepsWrapOutputWhenProdIsSecondInput) {
+  auto graph = af::testing::AscGraphBuilder("test_prod_int8_epilogue_mul_second_input")
+                   .Loops({af::testing::Sym("s0")})
+                   .Data("data0", 0, {af::testing::Sym("s0")}, {af::ops::One}, ge::DT_INT8)
+                   .Data("data1", 0, {af::testing::Sym("s0")}, {af::ops::One}, ge::DT_INT8)
+                   .Load("load0", "data0")
+                   .Load("load1", "data1")
+                   .Prod("prod", "load1", {0})
+                   .Mul("mul", "load0", "prod")
+                   .Store("store0", "mul")
+                   .Output("output0", "store0", 0, ge::DT_INT8)
+                   .Build();
+
+  std::vector<optimize::NodeDtypeRequirement> requirements;
+  EXPECT_EQ(optimize::DtypeConsistency::CollectDtypeRequirements(graph, requirements), af::SUCCESS);
+  EXPECT_EQ(optimize::DtypeConsistency::ApplyDtypeConversions(graph, requirements), af::SUCCESS);
+  EXPECT_EQ(optimize::DtypeConsistency::CancelRedundantCast(graph), af::SUCCESS);
+
+  bool has_int16_to_uint8_cast = false;
+  bool has_uint8_to_int8_cast = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (!af::ops::IsOps<Cast>(node)) {
+      continue;
+    }
+    has_int16_to_uint8_cast = has_int16_to_uint8_cast || (node->inputs[0].attr.dtype == ge::DT_INT16 &&
+                                                          node->outputs[0].attr.dtype == ge::DT_UINT8);
+    has_uint8_to_int8_cast = has_uint8_to_int8_cast ||
+                             (node->inputs[0].attr.dtype == ge::DT_UINT8 && node->outputs[0].attr.dtype == ge::DT_INT8);
+  }
+  EXPECT_TRUE(has_int16_to_uint8_cast);
+  EXPECT_TRUE(has_uint8_to_int8_cast);
+}
+
 TEST_F(TestDtypeConsistency, MulInt8DoesNotWrapOutputWithoutProd) {
   auto graph = af::testing::AscGraphBuilder("test_mul_int8_without_prod")
                    .Loops({af::testing::Sym("s0")})

@@ -3395,12 +3395,11 @@ class MulAscIrCodegenImplV2 : public AscIrCodegenV2 {
     if (node_outputs().empty() || node_outputs[0].attr.dtype != ge::DataType::DT_INT8) {
       return {};
     }
-    const auto first_input = node.GetInDataAnchor(0);
-    const auto first_input_owner =
-        first_input == nullptr || first_input->GetPeerOutAnchor() == nullptr
-            ? nullptr
-            : std::dynamic_pointer_cast<AscNode>(first_input->GetPeerOutAnchor()->GetOwnerNode());
-    if (first_input_owner == nullptr || first_input_owner->GetType() != "Prod") {
+    const auto input_nodes = node.GetInDataNodes();
+    const auto producer = std::find_if(input_nodes.begin(), input_nodes.end(), [](const NodePtr &input_node) {
+      return input_node != nullptr && input_node->GetType() == "Prod";
+    });
+    if (producer == input_nodes.end()) {
       return {};
     }
     return {{ge::DataType::DT_UINT8, ge::DataType::DT_INT8}};
