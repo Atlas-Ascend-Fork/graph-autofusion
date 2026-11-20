@@ -248,6 +248,7 @@ class TilingCodeGenImpl {
   // 生成ub/corenum相关的tiling的上限值
   void InitTilingUpperBound(const std::vector<Expr> &hardware_args, const ArgsManager &args_manager,
                             const HardwareDef &hardware_def, std::map<std::string, bool> &visited);
+  bool IsMulticoreUBTradeoffEnabled(const ModelInfo &model_info) const;
   af::Status GenSmallShapeTiling(const ModelInfo &model_info);
   // 生成求解器的基类
   virtual af::Status GenSolverBaseClass() = 0;

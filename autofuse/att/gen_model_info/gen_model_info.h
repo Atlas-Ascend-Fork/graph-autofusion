@@ -31,6 +31,7 @@ struct ModelInfoSetupContext {
   size_t asc_graph_id;
   size_t impl_graph_id;
   size_t schedule_group_id;
+  bool enable_matmul_m_common_tradeoff{false};
 };
 
 af::Status GenerateModelInfo(const af::AscGraph &graph, ModelInfo &model_info, TuningSpacePtr &tuning_space,

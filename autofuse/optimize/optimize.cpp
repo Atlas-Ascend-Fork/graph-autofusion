@@ -1459,6 +1459,7 @@ Status Optimizer::InitializeScheduledResults(std::vector<ascir::ScheduledResult>
                                       ? ascgen_utils::GetTemplateSemanticName(schedule_task.optimize_graph)
                                       : schedule_task.semantic_name;
   schedule_result.enable_workspace_alignment = schedule_task.enable_workspace_alignment;
+  schedule_result.matmul_m_common_group_ids = schedule_task.matmul_m_common_group_ids;
   scheduled_results_cur.emplace_back(schedule_result);
   return af::SUCCESS;
 }

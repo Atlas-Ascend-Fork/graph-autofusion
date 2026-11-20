@@ -506,90 +506,120 @@ TEST_F(CubeScheduleCaseGeneratorTest, PartitionCreatedNodesHaveCompleteApiInfo) 
   EXPECT_GT(cube_load_count, 0UL);
 }
 
+void AddMBroadcastNode(af::AscGraph &graph, const af::AscNodePtr &mm, const af::AscNodePtr &broadcast,
+                       const std::vector<af::Expression> &full_shape) {
+  af::ascir_op::Broadcast first_op("cube_m_broadcast");
+  graph.AddNode(first_op);
+  auto first = graph.FindNode("cube_m_broadcast");
+  first->outputs[0].attr = broadcast->outputs[0].attr;
+  first->outputs[0].attr.repeats = {full_shape[0], af::ops::One};
+  first->outputs[0].attr.strides = {af::ops::One, af::ops::Zero};
+  first->attr.sched = broadcast->attr.sched;
+  first->attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  ASSERT_EQ(af::GraphUtils::RemoveEdge(mm->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(mm->GetOutDataAnchor(0), first->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(first->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+}
+
+void CheckCommonTradeoffScope(const std::vector<ScheduleTask> &tasks, bool broadcast_m) {
+  for (const auto &task : tasks) {
+    const bool expect_tradeoff = task.cube_type == ascir::CubeTemplateType::kCommon && broadcast_m;
+    if (expect_tradeoff) {
+      // The Common task contains the broadcast vector group and its paired cube group.
+      EXPECT_EQ(task.matmul_m_common_group_ids.size(), 2UL);
+    } else {
+      EXPECT_TRUE(task.matmul_m_common_group_ids.empty());
+    }
+  }
+}
+
+void BuildOutputBroadcastGraph(af::AscGraph &graph, int mask) {
+  const bool broadcast_m = (mask & 2) != 0;
+  const bool broadcast_n = (mask & 1) != 0;
+  ConstructMatMulAndAdd(graph);
+  auto mm = graph.FindNode("matmul");
+  auto add = graph.FindNode("add");
+  ASSERT_NE(mm, nullptr);
+  ASSERT_NE(add, nullptr);
+  const auto full_shape = add->outputs[0].attr.repeats;
+  mm->outputs[0].attr.repeats = {broadcast_m ? af::ops::One : full_shape[0],
+                                 broadcast_n ? af::ops::One : full_shape[1]};
+  mm->outputs[0].attr.strides = {broadcast_m ? af::ops::Zero : mm->outputs[0].attr.repeats[1],
+                                 broadcast_n ? af::ops::Zero : af::ops::One};
+  af::ascir_op::Broadcast broadcast_op("cube_n_broadcast");
+  graph.AddNode(broadcast_op);
+  auto broadcast = graph.FindNode("cube_n_broadcast");
+  broadcast->outputs[0].attr = add->outputs[0].attr;
+  broadcast->attr.sched = add->attr.sched;
+  broadcast->attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  ASSERT_EQ(af::GraphUtils::RemoveEdge(mm->GetOutDataAnchor(0), add->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(mm->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(broadcast->GetOutDataAnchor(0), add->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  if (mask == 3) {
+    AddMBroadcastNode(graph, mm, broadcast, full_shape);
+  }
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
+}
+
+void CheckOutputBroadcastTasks(const std::vector<ScheduleTask> &tasks, af::AscGraph &graph, int mask) {
+  const bool broadcast_m = (mask & 2) != 0;
+  auto mm = graph.FindNode("matmul");
+  auto broadcast = graph.FindNode("cube_n_broadcast");
+  ASSERT_NE(mm, nullptr);
+  ASSERT_NE(broadcast, nullptr);
+  const auto full_shape = broadcast->outputs[0].attr.repeats;
+  bool found_ub_broadcast = false;
+  bool found_common_broadcast = false;
+  CheckCommonTradeoffScope(tasks, broadcast_m);
+  for (const auto &task : tasks) {
+    if (task.cube_type != ascir::CubeTemplateType::kUBFuse && task.cube_type != ascir::CubeTemplateType::kCommon) {
+      continue;
+    }
+    for (const auto &subgraph : task.grouped_graphs) {
+      const auto brc = subgraph.FindNode("cube_n_broadcast");
+      if (brc == nullptr) {
+        continue;
+      }
+      // The real Broadcast stays visible to allocation and resource solving.
+      EXPECT_EQ(brc->outputs[0].attr.repeats, full_shape);
+      if (task.cube_type == ascir::CubeTemplateType::kUBFuse) {
+        found_ub_broadcast = true;
+        EXPECT_EQ(ascir::GetCvBroadcastShape(*brc), full_shape);
+        EXPECT_EQ(ascir::IsCvMBroadcast(*brc), broadcast_m);
+        if (mask == 3) {
+          EXPECT_EQ(subgraph.FindNode("cube_m_broadcast"), nullptr);
+          EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*brc), ascgen_utils::template_semantic::kBroadcastFold);
+        }
+        if (broadcast_m) {
+          optimize::autoschedule::AxisGroup group;
+          ASSERT_EQ(optimize::autoschedule::TilingGroup::GenTilingGroup(subgraph, group, false), af::SUCCESS);
+          const auto m_axis = ascir::GetCvBroadcastMAxis(*brc);
+          EXPECT_NE(std::find(group.n_group.begin(), group.n_group.end(), m_axis), group.n_group.end());
+          EXPECT_EQ(std::find(group.y_group.begin(), group.y_group.end(), m_axis), group.y_group.end());
+        }
+      } else {
+        found_common_broadcast = true;
+        EXPECT_TRUE(ascir::GetCvBroadcastShape(*brc).empty());
+        if (mask == 3) {
+          EXPECT_NE(subgraph.FindNode("cube_m_broadcast"), nullptr);
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(found_ub_broadcast);
+  EXPECT_TRUE(found_common_broadcast);
+  EXPECT_TRUE(ascir::GetCvBroadcastShape(*broadcast).empty());
+  EXPECT_EQ(mm->outputs[0].attr.repeats[broadcast_m ? 0 : 1], af::ops::One);
+}
+
 TEST_F(CubeScheduleCaseGeneratorTest, OutputBroadcastKeepsExplicitBufferAndCommonCandidate) {
   for (const int mask : {1, 2, 3}) {
-    const bool broadcast_m = (mask & 2) != 0;
-    const bool broadcast_n = (mask & 1) != 0;
     af::AscGraph graph("matmul_n_broadcast");
-    ConstructMatMulAndAdd(graph);
-    auto mm = graph.FindNode("matmul");
-    auto add = graph.FindNode("add");
-    ASSERT_NE(mm, nullptr);
-    ASSERT_NE(add, nullptr);
-    const auto full_shape = add->outputs[0].attr.repeats;
-    mm->outputs[0].attr.repeats = {broadcast_m ? af::ops::One : full_shape[0],
-                                   broadcast_n ? af::ops::One : full_shape[1]};
-    mm->outputs[0].attr.strides = {broadcast_m ? af::ops::Zero : mm->outputs[0].attr.repeats[1],
-                                   broadcast_n ? af::ops::Zero : af::ops::One};
-    af::ascir_op::Broadcast broadcast_op("cube_n_broadcast");
-    graph.AddNode(broadcast_op);
-    auto broadcast = graph.FindNode("cube_n_broadcast");
-    broadcast->outputs[0].attr = add->outputs[0].attr;
-    broadcast->attr.sched = add->attr.sched;
-    broadcast->attr.api.compute_type = af::ComputeType::kComputeBroadcast;
-    ASSERT_EQ(af::GraphUtils::RemoveEdge(mm->GetOutDataAnchor(0), add->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
-    ASSERT_EQ(af::GraphUtils::AddEdge(mm->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
-    ASSERT_EQ(af::GraphUtils::AddEdge(broadcast->GetOutDataAnchor(0), add->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
-    if (mask == 3) {
-      af::ascir_op::Broadcast first_op("cube_m_broadcast");
-      graph.AddNode(first_op);
-      auto first = graph.FindNode("cube_m_broadcast");
-      first->outputs[0].attr = broadcast->outputs[0].attr;
-      first->outputs[0].attr.repeats = {full_shape[0], af::ops::One};
-      first->outputs[0].attr.strides = {af::ops::One, af::ops::Zero};
-      first->attr.sched = broadcast->attr.sched;
-      first->attr.api.compute_type = af::ComputeType::kComputeBroadcast;
-      ASSERT_EQ(af::GraphUtils::RemoveEdge(mm->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
-      ASSERT_EQ(af::GraphUtils::AddEdge(mm->GetOutDataAnchor(0), first->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
-      ASSERT_EQ(af::GraphUtils::AddEdge(first->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
-    }
-    ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
-
+    BuildOutputBroadcastGraph(graph, mask);
     std::vector<ScheduleTask> tasks;
     optimize::CubeFusionCaseGenerator generator;
     ASSERT_EQ(generator.GeneratorTask(graph, tasks, OptimizerOptions{}), af::SUCCESS);
-    bool found_ub_broadcast = false;
-    bool found_common_broadcast = false;
-    for (const auto &task : tasks) {
-      if (task.cube_type != ascir::CubeTemplateType::kUBFuse && task.cube_type != ascir::CubeTemplateType::kCommon) {
-        continue;
-      }
-      for (const auto &subgraph : task.grouped_graphs) {
-        const auto brc = subgraph.FindNode("cube_n_broadcast");
-        if (brc == nullptr) {
-          continue;
-        }
-        // The real Broadcast stays visible to allocation and resource solving.
-        EXPECT_EQ(brc->outputs[0].attr.repeats, full_shape);
-        if (task.cube_type == ascir::CubeTemplateType::kUBFuse) {
-          found_ub_broadcast = true;
-          EXPECT_EQ(ascir::GetCvBroadcastShape(*brc), full_shape);
-          EXPECT_EQ(ascir::IsCvMBroadcast(*brc), broadcast_m);
-          if (mask == 3) {
-            EXPECT_EQ(subgraph.FindNode("cube_m_broadcast"), nullptr);
-            EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*brc),
-                      ascgen_utils::template_semantic::kBroadcastFold);
-          }
-          if (broadcast_m) {
-            optimize::autoschedule::AxisGroup group;
-            ASSERT_EQ(optimize::autoschedule::TilingGroup::GenTilingGroup(subgraph, group, false), af::SUCCESS);
-            const auto m_axis = ascir::GetCvBroadcastMAxis(*brc);
-            EXPECT_NE(std::find(group.n_group.begin(), group.n_group.end(), m_axis), group.n_group.end());
-            EXPECT_EQ(std::find(group.y_group.begin(), group.y_group.end(), m_axis), group.y_group.end());
-          }
-        } else {
-          found_common_broadcast = true;
-          EXPECT_TRUE(ascir::GetCvBroadcastShape(*brc).empty());
-          if (mask == 3) {
-            EXPECT_NE(subgraph.FindNode("cube_m_broadcast"), nullptr);
-          }
-        }
-      }
-    }
-    EXPECT_TRUE(found_ub_broadcast);
-    EXPECT_TRUE(found_common_broadcast);
-    EXPECT_TRUE(ascir::GetCvBroadcastShape(*broadcast).empty());
-    EXPECT_EQ(mm->outputs[0].attr.repeats[broadcast_m ? 0 : 1], af::ops::One);
+    CheckOutputBroadcastTasks(tasks, graph, mask);
   }
 }
 

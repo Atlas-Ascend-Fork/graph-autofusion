@@ -13,6 +13,7 @@
 
 #include "ascendc_ir/ascendc_ir_core/ascendc_ir.h"
 #include "common/checker.h"
+#include <unordered_set>
 
 namespace {
 constexpr char kTemplateIdAttr[] = "af.internal.template.id";
@@ -103,6 +104,7 @@ struct ScheduledResult {
   CubeTemplateType cube_type{CubeTemplateType::kDefault};
   std::string semantic_name{};
   bool enable_workspace_alignment{false};
+  std::unordered_set<size_t> matmul_m_common_group_ids{};
 };
 
 struct GmTensorSizes {

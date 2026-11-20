@@ -428,6 +428,103 @@ bool HasBroadCastNode(const ascir::ImplGraph &impl_graph) {
   return false;
 }
 
+bool GetStaticMatMulSourceN(const af::AscNodePtr &node, int64_t &source_n) {
+  if (!af::ops::IsOps<af::ascir_op::MatMul>(node) || node->outputs().size() != 1UL) {
+    return false;
+  }
+  const auto &shape = node->outputs[0].attr.repeats;
+  return shape.size() == 2UL && shape[0] == kSymbolOne && shape[1].GetConstValue(source_n) && source_n >= 1;
+}
+
+bool IsStaticMatMulMBroadcastTarget(const af::AscNodePtr &node, int64_t source_n) {
+  if (!af::ops::IsOps<af::ascir_op::Broadcast>(node) || node->outputs().size() != 1UL) {
+    return false;
+  }
+  const auto &target = node->outputs[0].attr.repeats;
+  int64_t target_m = 0;
+  int64_t target_n = 0;
+  if (target.size() != 2UL || !target[0].GetConstValue(target_m) || !target[1].GetConstValue(target_n)) {
+    return false;
+  }
+  return target_m > 1 && target_n > 0 && (source_n == 1 || target_n == source_n);
+}
+
+void CollectStaticMatMulMBroadcastNodes(const af::AscGraph &graph, std::unordered_set<std::string> &broadcast_names) {
+  for (const auto &node : graph.GetAllNodes()) {
+    int64_t source_n = 0;
+    if (!GetStaticMatMulSourceN(node, source_n)) {
+      continue;
+    }
+    std::queue<af::NodePtr> pending;
+    pending.push(node);
+    std::unordered_set<af::NodePtr> visited;
+    while (!pending.empty()) {
+      const auto producer = pending.front();
+      pending.pop();
+      for (const auto &consumer : producer->GetOutDataNodes()) {
+        if (!visited.insert(consumer).second) {
+          continue;
+        }
+        const auto next = std::dynamic_pointer_cast<af::AscNode>(consumer);
+        if (next == nullptr || next->outputs().size() != 1UL ||
+            (!af::ops::IsOps<af::ascir_op::Broadcast>(next) && !af::ops::IsOps<af::ascir_op::Cast>(next))) {
+          continue;
+        }
+        if (IsStaticMatMulMBroadcastTarget(next, source_n)) {
+          broadcast_names.insert(next->GetName());
+        }
+        pending.push(next);
+      }
+    }
+  }
+}
+
+std::unordered_set<size_t> CollectStaticMatMulMBroadcastGroupIds(
+    const std::vector<::ascir::ImplGraph> &grouped_graphs, const std::unordered_set<std::string> &broadcast_names) {
+  std::unordered_set<size_t> group_ids;
+  std::unordered_set<std::string> workspace_names;
+  if (broadcast_names.empty()) {
+    return group_ids;
+  }
+  for (size_t i = 0UL; i < grouped_graphs.size(); ++i) {
+    bool contains_broadcast = false;
+    for (const auto &node : grouped_graphs[i].GetAllNodes()) {
+      if (broadcast_names.count(node->GetName()) != 0UL) {
+        contains_broadcast = true;
+        break;
+      }
+    }
+    if (!contains_broadcast) {
+      continue;
+    }
+    group_ids.insert(i);
+    for (const auto &node : grouped_graphs[i].GetAllNodes()) {
+      if (af::ops::IsOps<af::ascir_op::Workspace>(node)) {
+        workspace_names.insert(node->GetName());
+      }
+    }
+  }
+  if (workspace_names.empty()) {
+    return group_ids;
+  }
+  // The Common cube group and vector group are split by disjoint Workspace nodes
+  // that share the same name, so mark the cube group paired with the broadcast
+  // vector group as well. This keeps the existing tradeoff scope on the matched
+  // Cube+Vector chain without touching unrelated chains in the same task.
+  for (size_t i = 0UL; i < grouped_graphs.size(); ++i) {
+    if (group_ids.count(i) != 0UL) {
+      continue;
+    }
+    for (const auto &node : grouped_graphs[i].GetAllNodes()) {
+      if (af::ops::IsOps<af::ascir_op::Workspace>(node) && workspace_names.count(node->GetName()) != 0UL) {
+        group_ids.insert(i);
+        break;
+      }
+    }
+  }
+  return group_ids;
+}
+
 // Keep the final Broadcast visible to UB allocation and tiling.
 Status MarkCubeOutputBroadcast(af::AscGraph &graph, const af::AscNodePtr &load, bool &requires_common) {
   if (load == nullptr || load->outputs().size() != 1UL || load->inputs().size() != 1UL) {
@@ -896,6 +993,8 @@ Status CubeFusionCaseGenerator::GeneratorTask(ascir::HintGraph &optimize_graph, 
   if (!ScheduleUtils::HasComputeType(optimize_graph, af::ComputeType::kComputeCube)) {
     return af::GRAPH_SUCCESS;
   }
+  std::unordered_set<std::string> matmul_m_broadcast_names;
+  CollectStaticMatMulMBroadcastNodes(optimize_graph, matmul_m_broadcast_names);
   GE_CHK_STATUS_RET(GenerateGeneralCase(optimize_graph, optimize_graphs), "GenerateScheduleCases failed");
   score_funcs.resize(optimize_graphs.size());
   if (partition_) {
@@ -914,6 +1013,8 @@ Status CubeFusionCaseGenerator::GeneratorTask(ascir::HintGraph &optimize_graph, 
     if (task.grouped_graphs.size() > 1U) {
       task.cube_type = ascir::CubeTemplateType::kCommon;
       MoveCubeGraphsToEnd(task.grouped_graphs);
+      task.matmul_m_common_group_ids =
+          CollectStaticMatMulMBroadcastGroupIds(task.grouped_graphs, matmul_m_broadcast_names);
       for (auto grouped_graph : task.grouped_graphs) {
         if (ScheduleUtils::HasComputeType(grouped_graph, af::ComputeType::kComputeCube)) {
           GE_CHK_STATUS_RET(UpdateHintGraphAttr(grouped_graph), "UpdateHintGraphAttr failed");

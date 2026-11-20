@@ -1429,7 +1429,7 @@ af::Status TilingCodeGenImpl::GenSmallShapeTiling(const ModelInfo &model_info) {
       auto reordered_hardware_args = ReorderHardwareArgs(hardware_args, args_manager, pair.first);
       InitTilingUpperBound(reordered_hardware_args, args_manager, pair.first, visited);
       // 如果设置了阈值，那么ubsize不超过阈值*原始UB大小，否则ubsize不超过原始UB大小
-      if (AutoFuseConfig::GetAttStrategyConfig().enable_multicore_ub_tradeoff != "true") {
+      if (!IsMulticoreUBTradeoffEnabled(model_info)) {
         tiling_func_.AddLine(
             "    if ((Getub_size(tiling_data) < 0) || (tiling_data.get_ub_size() < "
             "static_cast<double>(Getub_size(tiling_data)))) {");

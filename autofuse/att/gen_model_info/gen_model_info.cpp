@@ -562,6 +562,7 @@ void FillModelInfoList(att::TilingModelInfo &model_info_list, const ModelInfoSet
       context.schedule_result.schedule_groups[context.schedule_group_id].runtime_shape_vars;
   for (auto &model_info : model_info_list) {
     model_info.dynamic_size_var_names = context.dynamic_size_var_names;
+    model_info.enable_matmul_m_common_tradeoff = context.enable_matmul_m_common_tradeoff;
     // These dimensions describe runtime guards, not searchable axes. Keep
     // them as input parameters so tiling caches also preserve their values.
     for (const auto &var : runtime_shape_vars) {
@@ -626,10 +627,14 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
         GenerateModelInfoWithContext(schedule_groups[schedule_group_id], model_info_list, options,
                                      out_schedule_groups.enable_group_parallel, context, schedule_result.semantic_name),
         "Get model info failed, impl graph id = %ld, group id = %ld.", impl_graph_id, schedule_group_id);
+    const bool enable_matmul_m_common_tradeoff =
+        schedule_result.cube_type == ascir::CubeTemplateType::kCommon &&
+        ascgen_utils::IsFrontendStaticSchedResult(schedule_results) &&
+        schedule_result.matmul_m_common_group_ids.count(schedule_group_id) != 0UL;
     const ModelInfoSetupContext setup_context{
         schedule_results,      schedule_result,        schedule_groups[schedule_group_id],
         all_graph_score_funcs, dynamic_size_var_names, asc_graph_id,
-        impl_graph_id,         schedule_group_id};
+        impl_graph_id,         schedule_group_id,      enable_matmul_m_common_tradeoff};
     FillModelInfoList(model_info_list, setup_context);
     const auto &ident = model_info_list[0].schedule_group_ident;
     GELOGI(
