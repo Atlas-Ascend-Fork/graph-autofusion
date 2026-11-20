@@ -25,9 +25,7 @@
 #include <vector>
 
 // Read-only scheduling view; does not change nodes, graph links or event resources.
-std::vector<SuperKernelBaseNode *> FilterCancelledNodes(
-    const std::vector<SuperKernelBaseNode *> &nodes,
-    std::unordered_map<uint32_t, uint64_t> *lastTaskByStreamAfterFilter = nullptr);
+std::vector<SuperKernelBaseNode *> FilterCancelledNodes(const std::vector<SuperKernelBaseNode *> &nodes);
 
 struct StreamPostPlan {
   bool needFrontWait = false;

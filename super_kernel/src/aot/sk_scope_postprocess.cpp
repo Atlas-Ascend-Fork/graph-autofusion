@@ -97,12 +97,7 @@ bool ShouldCancelNotify(const SuperKernelBaseNode &node) {
 
 }  // namespace
 
-std::vector<SuperKernelBaseNode *> FilterCancelledNodes(
-    const std::vector<SuperKernelBaseNode *> &nodes,
-    std::unordered_map<uint32_t, uint64_t> *lastTaskByStreamAfterFilter) {
-  if (lastTaskByStreamAfterFilter != nullptr) {
-    lastTaskByStreamAfterFilter->clear();
-  }
+std::vector<SuperKernelBaseNode *> FilterCancelledNodes(const std::vector<SuperKernelBaseNode *> &nodes) {
   // Constraints:
   // 1) Within one scope, each event has at most one NOTIFY and may have multiple WAIT nodes.
   // 2) All WAIT nodes for that event are recorded in syncInfos.correspondingWaitNodeIds.
@@ -150,9 +145,6 @@ std::vector<SuperKernelBaseNode *> FilterCancelledNodes(
     }
     if (!curNode->IsScopeNode()) {
       filteredNodes.push_back(curNode);
-      if (lastTaskByStreamAfterFilter != nullptr) {
-        (*lastTaskByStreamAfterFilter)[curNode->GetStreamIdxInGraph()] = curNode->GetNodeId();
-      }
     }
   }
   SK_LOGI("scope processing filtered nodes: %zu -> %zu (%zu cancelled)", nodes.size(), filteredNodes.size(),
@@ -532,9 +524,11 @@ bool ApplyEventMemoryResource(SuperKernelGraph &graph, SuperKernelBaseNode *even
   return addr != nullptr;
 }
 
-uint32_t GetKernelNodeCount(const std::vector<SuperKernelBaseNode *> &nodes) {
+uint32_t CollectFilteredTaskInfo(const std::vector<SuperKernelBaseNode *> &nodes,
+                                 std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter) {
   uint32_t kernelCnt = 0;
   for (auto &node : nodes) {
+    lastTaskByStreamAfterFilter[node->GetStreamIdxInGraph()] = node->GetNodeId();
     if (node->GetNodeType() == SkNodeType::NODE_KERNEL) {
       kernelCnt++;
     }
@@ -722,17 +716,16 @@ bool SuperKernelScopePostProcessor::PostProcess(SuperKernelScopeInfo &scopeInfo)
   SK_LOGI("scope processing begin: streamCount=%u, nodeCount=%zu", streamCount, scopeInfo.GetNodes().size());
 
   // Step 2: Filter cancelled nodes
-  std::unordered_map<uint32_t, uint64_t> lastTaskByStreamAfterFilter;
-  std::vector<SuperKernelBaseNode *> filteredNodes =
-      FilterCancelledNodes(scopeInfo.GetNodes(), &lastTaskByStreamAfterFilter);
+  std::vector<SuperKernelBaseNode *> filteredNodes = FilterCancelledNodes(scopeInfo.GetNodes());
   if (filteredNodes.empty()) {
     SK_LOGI("scope unprocessable: no node remains after cancelling notify/wait pairs");
     scopeInfo.MutableExtInfo().processStatus = ScopeProcessStatus::NO_TARGET_NODE;
     return false;
   }
 
-  // Step 3: Skip scope when no kernel remains after filtering
-  if (GetKernelNodeCount(filteredNodes) == 0) {
+  // Step 3: Collect stream tails and skip scope when no kernel remains after filtering
+  std::unordered_map<uint32_t, uint64_t> lastTaskByStreamAfterFilter;
+  if (CollectFilteredTaskInfo(filteredNodes, lastTaskByStreamAfterFilter) == 0) {
     SK_LOGI("scope unprocessable: no kernel node remains after filtering");
     scopeInfo.MutableExtInfo().processStatus = ScopeProcessStatus::NO_TARGET_NODE;
     return false;
