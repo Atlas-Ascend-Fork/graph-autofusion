@@ -5,6 +5,7 @@ file(GLOB_RECURSE OPTIMIZE_TEST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 add_executable(optimize_st
         test.cpp
         ${OPTIMIZE_TEST_FILES}
+        ${CODE_ROOT_DIR}/tests/ut/optimize/task_generator/test_indirect_load_schedule_case_generator.cpp
         ${CODE_ROOT_DIR}/common/autofuse_backend_spec_api.cpp
         ${CODE_ROOT_DIR}/tests/framework/easy_asc_graph/asc_graph_builder.cpp
         # Schedule 校验契约由 UT 维护，ST 复用同一组用例以保证 ST 增量覆盖率覆盖失败分支。
