@@ -1275,6 +1275,7 @@ TEST(GeneratorUT, ReuseGroupPgoCopiesPrimaryGroupTiling) {
   TilingModelInfo reuse_group{CreateModelInfo()};
   primary_group[0].schedule_group_ident = {0UL, 0UL, 0UL};
   reuse_group[0].schedule_group_ident = {0UL, 0UL, 1UL};
+  reuse_group[0].tiling_case_id = 7U;
   ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 0UL}, primary_group), af::SUCCESS);
   ASSERT_EQ(ReuseGroupUtils::InitReuseScheduleGroup({0UL, 0UL, 1UL}, reuse_group), af::SUCCESS);
   auto shared_reuse_group = primary_group[0].reuse_schedule_group;
@@ -1309,7 +1310,11 @@ TEST(GeneratorUT, ReuseGroupPgoCopiesPrimaryGroupTiling) {
             std::string::npos);
   const auto pgo_by_core_num_begin = tail_source.find("bool GetScheduleResult0PGOByCoreNum");
   const auto pgo_by_core_num_end = tail_source.find("using ScheduleResultFunctionPGOByCoreNum", pgo_by_core_num_begin);
-  EXPECT_NE(reuse_source.find("void CopyPgoReuseSelection("), std::string::npos);
+  EXPECT_NE(reuse_source.find("bool CopyPgoReuseSelection("), std::string::npos);
+  EXPECT_NE(reuse_source.find("tiling_data.set_tiling_key(7U);"), std::string::npos);
+  const auto profile_start = reuse_source.find("bool PGOProfileReuseGroup(");
+  ASSERT_NE(profile_start, std::string::npos);
+  EXPECT_NE(reuse_source.find("if (!RestoreReuseTilingKey(reuse_tiling_data))", profile_start), std::string::npos);
   EXPECT_NE(tail_source.find("AscGraph0ScheduleResult0G1::CopyPgoReuseSelection("), std::string::npos);
   ASSERT_NE(pgo_by_core_num_begin, std::string::npos);
   ASSERT_NE(pgo_by_core_num_end, std::string::npos);
