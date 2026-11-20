@@ -1258,3 +1258,29 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_ThreeStreamsWithThreeNodesEa
   EXPECT_EQ(scopeInfo.extInfo_.skMainNodeId, INVALID_TASK_ID);
   EXPECT_EQ(scopeInfo.extInfo_.processStatus, ScopeProcessStatus::RESOURCE_INSUFFICIENT);
 }
+
+TEST_F(SuperKernelScopePostprocessTest, ProcessSubStreamSyncEvents_MissingOwnerPreservesNoTargetNode) {
+  for (bool frontWait : {false, true}) {
+    SCOPED_TRACE(frontWait);
+    SuperKernelScopeInfo scopeInfo;
+    ScopeStreamInfo stream;
+    stream.streamIdx = 1;
+    stream.tailNodeIdx = 52;
+    scopeInfo.scopeStreamInfos_.resize(2);
+    scopeInfo.scopeStreamInfos_[1] = stream;
+    ScopeExtInfo extInfo;
+    extInfo.customParamsList.resize(2);
+    std::vector<StreamPostPlan> plans(2);
+    plans[1].needFrontWait = frontWait;
+    plans[1].needBackBlock = !frontWait;
+    const std::unordered_map<uint32_t, uint64_t> lastTaskByStreamAfterFilter = {{0, 40}};
+    SuperKernelScopePostProcessor postProcessor(*graph);
+
+    EXPECT_FALSE(postProcessor.ProcessSubStreamSyncEvents(scopeInfo, extInfo, plans, 0, {1}, frontWait ? 1 : 0,
+                                                          lastTaskByStreamAfterFilter));
+    EXPECT_EQ(extInfo.processStatus, ScopeProcessStatus::NO_TARGET_NODE);
+    EXPECT_TRUE(extInfo.eventNodes.empty());
+    EXPECT_TRUE(extInfo.customParamsList[0].empty());
+    EXPECT_TRUE(extInfo.customParamsList[1].empty());
+  }
+}
