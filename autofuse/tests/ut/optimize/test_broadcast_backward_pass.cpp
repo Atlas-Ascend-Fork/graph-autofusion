@@ -522,6 +522,52 @@ TEST(BroadcastBackwardPass, SkipsUnsupportedAllScalarInputs) {
   EXPECT_FALSE(HasNode(graph, "compute_broadcast_backward_common"));
 }
 
+TEST(BroadcastBackwardPass, MovesColumnBroadcastWhenDivisorRemainsARowTensor) {
+  ScopedTestPlatform platform("3510");
+  const auto s0 = Sym("s0");
+  const auto s1 = Sym("s1");
+  auto graph = AscGraphBuilder("broadcast_backward_row_divisor")
+                   .Loops({s0, s1})
+                   .Data("data", 0)
+                   .Load("load", "data", kCompactRepeats, kCompactStrides)
+                   .Scalar("scalar", "512.0")
+                   .Broadcast("row_divisor", "scalar", {s0, af::sym::kSymbolOne})
+                   .Broadcast("divisor", "row_divisor", {s0, s1})
+                   .Broadcast("numerator", "load", {s0, s1})
+                   .Op<af::ascir_op::TrueDiv>("compute", {"numerator", "divisor"})
+                   .Store("store", "compute")
+                   .Store("row_store", "row_divisor")
+                   .Output("output", "store")
+                   .Output("row_output", "row_store", 1)
+                   .Build();
+  CompleteApiInfo(graph);
+  const auto scalar = FindNode(graph, "scalar");
+  ASSERT_NE(scalar, nullptr);
+  scalar->outputs[0].attr.axis.clear();
+  scalar->outputs[0].attr.repeats.clear();
+  scalar->outputs[0].attr.strides.clear();
+
+  optimize::BroadcastBackwardPass pass;
+  ASSERT_EQ(pass.RunPass(graph), af::SUCCESS);
+  EXPECT_TRUE(IsConnected(graph, "scalar", "row_divisor"));
+  EXPECT_TRUE(IsConnected(graph, "row_divisor", "row_store"));
+  EXPECT_TRUE(IsConnected(graph, "row_divisor", "compute"));
+  EXPECT_TRUE(IsConnected(graph, "load", "compute"));
+  EXPECT_TRUE(IsEdgeAttrConsistent(graph, "row_divisor", "compute"));
+  EXPECT_TRUE(IsEdgeAttrConsistent(graph, "load", "compute"));
+
+  const auto compute = FindNode(graph, "compute");
+  ASSERT_NE(compute, nullptr);
+  ExpectStaticEq(compute->outputs[0].attr.repeats, {s0, af::sym::kSymbolOne});
+  const auto next = compute->GetOutDataNodes();
+  ASSERT_EQ(next.size(), 1U);
+  const auto broadcast = next.at(0);
+  EXPECT_EQ(broadcast->GetType(), af::ascir_op::Broadcast::Type);
+  const auto name = broadcast->GetName();
+  EXPECT_TRUE(IsEdgeAttrConsistent(graph, "compute", name.c_str()));
+  EXPECT_TRUE(IsConnected(graph, name.c_str(), "store"));
+}
+
 TEST(BroadcastBackwardPass, SkipsScalarBranchWithResidualBroadcastAxis) {
   const auto s0 = Sym("s0");
   const auto s1 = Sym("s1");

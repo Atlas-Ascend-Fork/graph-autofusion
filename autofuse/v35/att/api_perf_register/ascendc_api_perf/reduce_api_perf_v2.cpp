@@ -9,7 +9,9 @@
  */
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <numeric>
 #include "common/checker.h"
@@ -26,6 +28,8 @@ constexpr int64_t kVectorBlockBytes = 256;
 constexpr int64_t kB64RegTraitNumTwoElements = 64;
 constexpr int64_t kReduceVfHeadCost = 64;
 constexpr uint32_t kReduceMaxMainRPower = 15U;
+// ReduceRAImpl uses a 16-bit stride; wider inner axes take the concat path.
+constexpr int64_t kMaxNormalRaStride = std::numeric_limits<uint16_t>::max();
 
 // 调用关系：
 // ReduceMin/Max/Any/AllPerf -> ReduceApiPerf -> ValidateReduceContext/ValidateReduceDtype
@@ -1368,14 +1372,28 @@ af::Status BuildRaNormalAlignedCost(const ReduceApiPerfContext &context, const R
   const Expr dim_a = nd.input_dims[1];
   const Expr vl_size = GetNormalVlSize(nd.input_dtype[0]);
   if (!dim_a.IsConstExpr()) {
-    return BuildRaNormalOverVlAlignedCost(context, model, perf, cost);
+    // ReduceRAImpl selects these branches from the actual inner width, including tiling symbols.
+    Expr concat_cost = CreateExpr(0);
+    Expr less_cost = CreateExpr(0);
+    Expr over_cost = CreateExpr(0);
+    GE_ASSERT_SUCCESS(BuildRaNormalConcatAlignedCost(context, model, concat_cost));
+    GE_ASSERT_SUCCESS(BuildRaNormalLessThanVlAlignedCost(context, model, perf, less_cost));
+    GE_ASSERT_SUCCESS(BuildRaNormalOverVlAlignedCost(context, model, perf, over_cost));
+    Expr vector_cost = CreateExpr(0);
+    GE_ASSERT_SUCCESS(SelectByLessEqual("reduce_ra_normal_vector_width_case", dim_a, vl_size, less_cost, over_cost,
+                                        perf, vector_cost));
+    Expr inner_cost = CreateExpr(0);
+    GE_ASSERT_SUCCESS(SelectByLessEqual("reduce_ra_normal_small_inner_case", dim_a, vl_size / kSymTwo, concat_cost,
+                                        vector_cost, perf, inner_cost));
+    return SelectByLessEqual("reduce_ra_normal_inner_width_case", dim_a, CreateExpr(kMaxNormalRaStride), inner_cost,
+                             concat_cost, perf, cost);
   }
 
   int64_t dim_a_val = 0;
   int64_t vl_size_val = 0;
   dim_a.GetConstValue(dim_a_val);
   vl_size.GetConstValue(vl_size_val);
-  if (dim_a_val <= vl_size_val / 2 || dim_a_val > 65535) {
+  if (dim_a_val <= vl_size_val / 2 || dim_a_val > kMaxNormalRaStride) {
     return BuildRaNormalConcatAlignedCost(context, model, cost);
   }
   if (dim_a_val <= vl_size_val) {

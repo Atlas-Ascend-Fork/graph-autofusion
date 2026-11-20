@@ -268,6 +268,10 @@ class TilingCodeGenImpl {
   // 更新最优模板
   virtual af::Status GenUpdateBetterTiling();
   // 根据目标表达式和ub占用率选择更好的模板
+  void GenLowUbTilingComparison(double ub_threshold_perf_val_effect);
+  void GenPgoCoreResultTail(size_t asc_graph_id, size_t impl_graph_id,
+                            const std::map<size_t, std::pair<std::string, std::string>> &graph_info,
+                            uint32_t group_index);
   virtual af::Status GenSelectBetterTilingBasedOnObjAndUbRatio();
   // 寻找最优模板，enable_group_parallel_optimize 表示是否启用 Group 并发性能优化，group_num 表示当前 ScheduleResult
   // 包含的 Group 数量
@@ -489,6 +493,7 @@ class TilingCodeGenImpl {
   af::Status GenTemplateSemanticInfos();
   // 由tilingkey获取对应的性能公式
   af::Status GenGetPerf();
+  void GenPgoWorkspaceCollectorHead();
   // 由tilingkey获取对应的日志信息
   af::Status GenGetSummary();
   af::Status GenReuseGroupTilingWrapperGetTiling(
@@ -498,7 +503,7 @@ class TilingCodeGenImpl {
   void GenCopyPgoReuseSelection();
   // 复用组委托主组 GetTiling 只会注册主组的 workspace id，需按选中的 tiling key 补注册本组 id。
   af::Status GenReuseGroupOwnWorkspaceRegistration();
-  af::Status GenReuseGroupTilingWrapperGetPerf(
+  af::Status GenReuseGroupTilingWrapperQueries(
       const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
       std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
   void GenReuseGroupTilingWrapperFinalObservation(const std::string &reuse_prefix);

@@ -257,6 +257,7 @@ void SolverPassManager::InitSolverGen(AxesReorderSolverGen &solver_gen) {
   solver_gen.SetIsInductorScene(is_inductor_scene_);
   solver_gen.SetAutofusePGOStepMax(pgo_step_max_);
   solver_gen.SetHighPerfTiling(enable_high_perf_);
+  solver_gen.SetEnableCoreSearch(!args_manager_.HasDynamicInputShape());
   solver_gen.SetEnableEqualOrder(enable_equal_order_);
   solver_gen.Arrange();
   solver_gen.SetInputOutputDef(GetInputOutputDef());

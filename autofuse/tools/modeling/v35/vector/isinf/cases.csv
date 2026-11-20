@@ -1,0 +1,17 @@
+combo,count,repeat,loop_count
+bool_float,64,1,1
+bool_float,128,2,1
+bool_float,256,4,1
+bool_float,512,8,1
+bool_float,1024,16,1
+bool_float,2048,32,1
+bool_float,4096,64,1
+bool_float,8192,128,1
+bool_half,128,1,1
+bool_half,256,2,1
+bool_half,512,4,1
+bool_half,1024,8,1
+bool_half,2048,16,1
+bool_half,4096,32,1
+bool_half,8192,64,1
+bool_half,16384,128,1

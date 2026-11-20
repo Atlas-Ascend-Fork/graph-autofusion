@@ -1,0 +1,36 @@
+{
+  "platform": "v35",
+  "case_inventory": "../../cases-narrow-source.csv",
+  "samples": "samples.csv",
+  "reproduction": "../../../../../../../tools/modeling/v35/dma/README.md",
+  "fitting": "../../../../../../../tools/modeling/v35/mte2/README.md",
+  "metric": "aiv_total_cycles * aiv_mte2_ratio / Block Num, slope across independent API counts",
+  "protocols": {
+    "S01": "1/2/4/10 calls; 3 warmup, 10 active; 8 GiB pool",
+    "S02": "1/2/4/10 calls; 3 warmup, 10 active; 49 GiB pool",
+    "S03": "1/2/3/4 calls; 1 warmup, 4 active; 49 GiB pool; frozen-fit validation"
+  },
+  "cache": "NORMAL SetL2CacheHint, disjoint GM cachelines per core, API call and launch; point cache flush",
+  "parameters": {
+    "startup": 267.664177,
+    "position_cost": 4.98188927,
+    "contention_cost": 4.53423011
+  },
+  "sources": {
+    "S01": {
+      "file": "measurements.json",
+      "sha256": "8ed1e5f30ba5a050062e5cf1c57f9f6735e78c1268b459f12d76c456874bea99",
+      "original_roles": "Preserved in external source; only the initial five in-domain train rows fitted coefficients"
+    },
+    "S02": {
+      "file": "long-measurements.json",
+      "sha256": "77c7bf3505b2036e92c34dce592d9871ebbba4449971e156a82c11cf91d71adb",
+      "original_roles": "Preserved in external source; only the initial five in-domain train rows fitted coefficients"
+    },
+    "S03": {
+      "file": "extended/measurements.json",
+      "sha256": "5b3d5e2547d92652258714ad0e83c155445c8a7b36483abf32341c23610d4922",
+      "original_roles": "Preserved in external source; only the initial five in-domain train rows fitted coefficients"
+    }
+  }
+}

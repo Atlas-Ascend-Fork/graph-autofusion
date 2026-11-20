@@ -1,0 +1,16 @@
+{
+  "source_base": "70f4010e86c3b8936dbbf5dc32f1b02aa480d965",
+  "product_base": "e273b978a11fbaa5ebad8bd58919bdec8ffe38e7",
+  "codegen_sha256": "41d11e66bc198619da8e2a92e7eb53b5ca26590884e26a458015b58d60200550",
+  "collector_binary_sha256": "f8213c06401dbe5fc9ad2adc7ec051cb09c982adbe4ee9698e54808af644e407",
+  "platform": "v35; Ascend950PR_9579; 56 AIV; CANN 9.3.0",
+  "torch": "2.12.0+cu130",
+  "torch_npu": "2.12.0.post2",
+  "pgo": "Independent replay of previously searched Top10; frozen full tiling and device implementation checked. No new search after calibration.",
+  "date": "2026-11-19",
+  "collector_sources": {
+    "src/loop_load.asc": "e5233001844be20a28a21396ddef79d68defc6aef7b4715cd2e27fd6a43ff58a",
+    "src/host_parallel.h": "67887a1b9b6bd15769ee24a789154e57fbb3fd56e08562a00bde2ca9faf556f6",
+    "CMakeLists.txt": "2f562f335af4e3f4415d4390b968a845bd8578aa51e99eb476f7f68240b8151d"
+  }
+}

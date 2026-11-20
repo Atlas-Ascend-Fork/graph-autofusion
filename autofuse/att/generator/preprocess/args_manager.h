@@ -63,6 +63,7 @@ class ArgsManager {
    * @return 运行时输入
    */
   std::vector<Expr> GetInputVars() const;
+  bool HasDynamicInputShape() const;
   /**
    * @brief 获取运行时输入参数
    * @return 运行时输入的有效值范围
