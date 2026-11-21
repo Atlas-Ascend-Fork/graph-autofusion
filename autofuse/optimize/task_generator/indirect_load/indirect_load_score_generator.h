@@ -44,6 +44,12 @@ enum class GroupCandidateForm {
 struct MemberScoreLeaves {
   af::Expression slice_bytes;    // info.input_slice_bytes（payload 后缀字节）
   af::Expression lookup_extent;  // info.index_varying_extent（gather 侧 lookup 次数）
+  // 尾轴窗口口径（info.has_tail_window 时有效）：结构回退平局在该形态下以整行窗口为
+  // staging 单位替代退化为 dtype 字节的 input_slice_bytes；has_tail_window 为"已填充"
+  // 哨兵，false 时两表达式不消费。capable（embedding）路径恒为非尾轴成员，不消费。
+  bool has_tail_window = false;
+  af::Expression window_bytes;         // info.window_bytes（单窗口 staging 字节）
+  af::Expression window_lookup_count;  // info.window_lookup_count（单窗口 lookup 次数）
 };
 
 struct GroupAccessStats {
@@ -60,6 +66,9 @@ struct GroupAccessStats {
 
 // 组访问统计（G 轴形态与负载叶子），供组候选生成消费。
 GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &members);
+
+// 打分叶子的单一构造点：保证窗口口径在单 gather 与组路径间一致填充。
+MemberScoreLeaves MakeMemberScoreLeaves(const ascgen_utils::indirect_load::IndirectLoadAccessInfo &info);
 // IndirectLoad 候选打分：embedding fast-path 能力门控 / 统一打分与结构回退 ScoreFunc 代码生成（自
 // indirect_load_schedule_case_generator.cpp 纯搬迁，语义不变）。
 bool IsEmbeddingFastPathCapable(const TemplateCase &template_case,

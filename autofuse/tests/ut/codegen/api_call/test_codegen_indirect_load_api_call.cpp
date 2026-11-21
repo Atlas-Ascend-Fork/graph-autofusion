@@ -4655,3 +4655,53 @@ TEST(IndirectLoadApiCallTest, ResolveFusedMemberInputTensorFailsLoudlyOnMultiInp
   const auto *resolved = codegen::ResolveFusedMemberInputTensor(tpipe, g.graph.FindNode("indirect_load"));
   EXPECT_EQ(resolved, nullptr);
 }
+
+// 同名节点 post-reduce 与 GM 输出两路由候选在同源文件共存的守护测试
+// （SimtDefinitionSuffix 隔离）。
+TEST(IndirectLoadApiCallTest, GenerateFuncDefinitionSameNodeDistinctRoutesCoexist) {
+  const std::string guard_prefix = "#ifndef AUTOFUSE_INDIRECT_LOAD_SIMT_CONTEXT_DEFINED_";
+  ILTestGraph post_reduce_graph("simt_route_post_reduce");
+  ILTestGraph gm_output_graph("simt_route_gm_output");
+  std::string post_reduce_def;
+  std::string gm_output_def;
+  GenerateSimtPostReduceFuncDefinition(post_reduce_graph, post_reduce_def);
+  GenerateSimtFuncDefinition(gm_output_graph, gm_output_def);
+
+  // 模拟同一源文件：同一 graph node 的 post-reduce 候选先发射、GM 输出候选后发射。
+  const std::string source = post_reduce_def + gm_output_def;
+
+  // 两条路由的 Context/Body 定义在拼接后的源文件中同时存活。
+  EXPECT_NE(source.find("struct IndirectLoadSimtContext_indirect_load_post_reduce"), std::string::npos);
+  EXPECT_NE(source.find("struct IndirectLoadSimtBody_indirect_load_post_reduce"), std::string::npos);
+  EXPECT_NE(source.find("struct IndirectLoadSimtContext_indirect_load_gm_output"), std::string::npos);
+  EXPECT_NE(source.find("struct IndirectLoadSimtBody_indirect_load_gm_output"), std::string::npos);
+
+  // 两条路由的 Context guard 名互不相同：后缀退化回常量时二者合一，第二条定义被
+  // 同名 guard 整体抑制。
+  const auto context_guard_of = [&guard_prefix](const std::string &definition) {
+    const auto begin = definition.find(guard_prefix);
+    EXPECT_NE(begin, std::string::npos);
+    const auto token_begin = begin + guard_prefix.size();
+    const auto token_end = definition.find('\n', token_begin);
+    EXPECT_NE(token_end, std::string::npos);
+    return definition.substr(token_begin, token_end - token_begin);
+  };
+  const std::string post_reduce_guard = context_guard_of(post_reduce_def);
+  const std::string gm_output_guard = context_guard_of(gm_output_def);
+  EXPECT_NE(post_reduce_guard, gm_output_guard);
+
+  // 各路由 Body 的 using Context 指向各自同名 Context，不被统一或交叉引用。
+  EXPECT_NE(post_reduce_def.find("using Context = IndirectLoadSimtContext_indirect_load_post_reduce;"),
+            std::string::npos);
+  EXPECT_NE(gm_output_def.find("using Context = IndirectLoadSimtContext_indirect_load_gm_output;"), std::string::npos);
+  EXPECT_EQ(post_reduce_def.find("using Context = IndirectLoadSimtContext_indirect_load_gm_output;"),
+            std::string::npos);
+  EXPECT_EQ(gm_output_def.find("using Context = IndirectLoadSimtContext_indirect_load_post_reduce;"),
+            std::string::npos);
+
+  // Body guard 同样随路由区分，且 Context/Body guard 对齐同一路由名。
+  EXPECT_NE(post_reduce_def.find("#ifndef AUTOFUSE_INDIRECT_LOAD_SIMT_BODY_DEFINED_indirect_load_post_reduce"),
+            std::string::npos);
+  EXPECT_NE(gm_output_def.find("#ifndef AUTOFUSE_INDIRECT_LOAD_SIMT_BODY_DEFINED_indirect_load_gm_output"),
+            std::string::npos);
+}

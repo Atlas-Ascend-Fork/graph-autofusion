@@ -96,6 +96,10 @@ class IndirectLoadRegApiCall final : public ApiCall {
   // 且无 prepass 的形态——prepass_active 复用 CanUseSimtIndexPrepass 结果，
   // prepass 场景首版保守排除，第二阶段单独评估）。
   bool SimtSupportsDualOffsetBody(bool prepass_active) const;
+  // SIMT evaluator definitions are emitted into one source file.  Post-reduce and
+  // GM-output variants of the same graph node have different Context layouts and
+  // must not share generated type names or preprocessor guards.
+  std::string SimtDefinitionSuffix() const;
   std::vector<std::string> CollectSimtRuntimeSizeExprs(
       const std::string &input_dtype, const std::string &index_dtype, const std::string &offset_type,
       const TPipe &tpipe, bool use_prepass, const ascgen_utils::indirect_load::SimtIndexPrepassPlan &prepass_plan,

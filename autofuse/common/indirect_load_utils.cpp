@@ -728,6 +728,42 @@ bool IsSimdEmbeddingAccess(const TemplateLogicalView &logical_view, const Indire
 }
 }  // namespace
 
+namespace {
+// [访问分析辅助] Embedding-like 判定：gather 轴后必须存在非空且承载真实数据的
+// payload 后缀（全零 stride 的广播后缀会使 payload 不变性证明空洞化），index 在
+// payload 内轴零 stride（视图证据或源头回溯证据），input/output 后缀均连续且
+// gather 轴步长静态可证为正。任一条件不满足即回落 generic。
+bool IsEmbeddingLikeAccess(const af::AscNodePtr &node, const LogicalTensorView &input, const LogicalTensorView &index,
+                           const LogicalTensorView &output, size_t rank, size_t axis_index,
+                           bool input_suffix_has_payload, bool input_axis_stride_is_positive) {
+  const bool has_payload_suffix = axis_index + 1UL < rank && input_suffix_has_payload;
+  // 视图层证据（inner 轴零 stride）与源头回溯证据为「或」关系：点序输出即使值沿
+  // payload 轴重复，其源视图仍可提供稠密性证明。
+  const bool index_invariant_on_payload = HasZeroStrideOnInputPayload(input, index, axis_index) ||
+                                          IsIndexPayloadInvariantFromSources(node, input, index, axis_index);
+  return has_payload_suffix && index_invariant_on_payload && IsContiguousPayloadSuffix(input, axis_index) &&
+         IsContiguousSuffix(output, axis_index) && input_axis_stride_is_positive;
+}
+
+// [访问分析辅助] 尾轴 gather 的整行窗口口径填充：SIMD dense facade 以外层坐标固定的
+// 整行窗口为 staging 单位，供结构回退平局按真实 staging 经济性评分。仅窗口 stride
+// 静态可证为正时填充（动态 stride 保守不启用）；index 沿 axis 维零 stride 时单窗口
+// 仅 1 个有效 lookup，计 0 保持既有 SIMT 倾向。
+void FillTailWindowMetrics(const LogicalTensorView &input, const LogicalTensorView &index,
+                           const af::Expression &dtype_bytes, size_t rank, size_t axis_index,
+                           bool input_axis_stride_is_positive, IndirectLoadAccessInfo &info) {
+  if (axis_index + 1UL != rank || !input_axis_stride_is_positive) {
+    return;
+  }
+  info.has_tail_window = true;
+  info.window_bytes = input.sizes[axis_index] * input.strides[axis_index] * dtype_bytes;
+  info.window_lookup_count =
+      af::SymbolicUtils::StaticCheckEq(index.strides[axis_index], af::sym::kSymbolZero) == af::TriBool::kTrue
+          ? af::sym::kSymbolZero
+          : index.sizes[axis_index];
+}
+}  // namespace
+
 af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateLogicalView &logical_view,
                                      IndirectLoadAccessInfo &info) {
   GE_ASSERT_NOTNULL(node);
@@ -775,21 +811,12 @@ af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateL
   // embedding_like，恢复 SIMT 结构化通道。
   const bool input_axis_stride_is_positive =
       IsAxisStrideProvablyPositive(input.strides[axis_index], input_axis_dense_stride);
-  // An Embedding-like access must have a non-empty payload suffix after the
-  // gather axis.  Without this guard, a last-axis gather vacuously satisfies
-  // the zero-stride/contiguous-payload checks and is misclassified as
-  // Embedding-like, although it has no payload to copy as a unit.  The suffix
-  // must also carry real data: when every suffix dimension of the input is
-  // zero-stride (broadcast), the payload-invariance proof is vacuous and the
-  // index may legitimately vary along the inner axes, which the Embedding
-  // address policy cannot express.
-  const bool has_payload_suffix = axis_index + 1UL < rank && input_suffix_has_payload;
-  const bool embedding_like = has_payload_suffix && index_has_zero_stride_on_inner_axes &&
-                              IsContiguousPayloadSuffix(input, axis_index) && IsContiguousSuffix(output, axis_index) &&
-                              input_axis_stride_is_positive;
+  const bool embedding_like = IsEmbeddingLikeAccess(node, input, index, output, rank, axis_index,
+                                                    input_suffix_has_payload, input_axis_stride_is_positive);
   info.kind = embedding_like ? IndirectLoadAccessInfo::Kind::kEmbeddingLike : IndirectLoadAccessInfo::Kind::kGeneric;
   info.can_use_simt_structured = embedding_like;
   info.can_use_simd_embedding = IsSimdEmbeddingAccess(logical_view, info);
+  FillTailWindowMetrics(input, index, dtype_bytes, rank, axis_index, input_axis_stride_is_positive, info);
   // [SK窗口可行性] 源头收敛：视图层证据（inner 轴零 stride）或生产链回溯的源头
   // 视图证据。源头收敛时 gather 引用成组（按行/列），SK 行窗口只需装载被引用
   // 分片；源头不收敛（逐元素独立引用）时 SK 窗口必须覆盖 axis 维全部，退化为
@@ -799,7 +826,6 @@ af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateL
       index_has_zero_stride_on_inner_axes || IsIndexPayloadInvariantFromSources(node, input, index, axis_index);
   return af::SUCCESS;
 }
-
 namespace {
 using NodePath = std::vector<af::AscNodePtr>;
 using NodeSet = std::unordered_set<const af::AscNode *>;
