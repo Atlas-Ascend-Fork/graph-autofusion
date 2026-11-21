@@ -1,9 +1,0 @@
-case_id,model,role,dtype,dims,gm_stride_elements,ub_stride_elements,blocks,policy,source
-S01/VEC/tail_0,Gather bank and mask diagnostics,holdout,float32,16x40,,24,,VEC,S01
-S01/VEC/tail_1,Gather bank and mask diagnostics,holdout,float32,24x80,,56,,VEC,S01
-S01/VEC/tail_2,Gather bank and mask diagnostics,holdout,float32,19x112,,24,,VEC,S01
-S01/VEC/tail_3,Gather bank and mask diagnostics,holdout,float32,32x144,,56,,VEC,S01
-S01/VEC/tail_4,Gather bank and mask diagnostics,holdout,float32,24x208,,32,,VEC,S01
-S01/VEC/tail_5,Gather bank and mask diagnostics,holdout,float32,16x288,,40,,VEC,S01
-S01/VEC/tail_6,Gather bank and mask diagnostics,holdout,float32,32x344,,64,,VEC,S01
-S01/VEC/tail_7,Gather bank and mask diagnostics,holdout,float32,24x416,,56,,VEC,S01

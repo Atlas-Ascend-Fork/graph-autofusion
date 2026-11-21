@@ -10,7 +10,6 @@
 
 #include "generator/preprocess/args_manager.h"
 
-#include <algorithm>
 #include <string>
 #include <queue>
 #include <array>
@@ -488,11 +487,6 @@ std::vector<Expr> ArgsManager::GetInputVars() const {
     }
   }
   return input_vars;
-}
-
-bool ArgsManager::HasDynamicInputShape() const {
-  return std::any_of(vars_infos_.begin(), vars_infos_.end(),
-                     [](const auto &entry) { return entry.second.is_input_var && !entry.first.FreeSymbols().empty(); });
 }
 
 std::vector<std::pair<Expr, std::pair<int64_t, int64_t>>> ArgsManager::GetInputVarsRange() const {

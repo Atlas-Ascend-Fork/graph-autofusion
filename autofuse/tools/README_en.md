@@ -7,23 +7,17 @@ Licensed under the CANN Open Software License Agreement Version 2.0.
 
 These tools support Autofuse development, debugging, and issue analysis. They are not runtime APIs. Use each command's `--help` output as the authoritative reference for options.
 
-See the [modeling tool index](modeling/README.md) for collection, fitting and replay tools, including [GetOpHeadCost](modeling/v35/common/op_head_cost/README.md) and [IsInf](modeling/v35/vector/isinf/README_en.md).
-
-## MTE2 calibration replay
-
-The [Load / NDDMA offline tool](modeling/v35/mte2/README.md) checks archived errors and refits selected models.
-
 ## NDDMA: modeling and ad-hoc prediction/collection
 
-Tool directory: [`modeling/v35/nddma/`](modeling/v35/nddma/README_en.md).
+Tool directory: [`nddma/`](nddma/README_en.md).
 
 - Purpose: Round1–5 collection, fitting and analysis, plus single-configuration prediction and measurement.
 - Inputs: shape, GM/UB strides, core count and dtype, or measurement CSVs and model JSONs.
 - Commands (from the repository root):
 
   ```bash
-  python3 autofuse/tools/modeling/v35/nddma/Modeling/Data_collection/common/tools/predict_nddma_ad_hoc.py --help
-  python3 autofuse/tools/modeling/v35/nddma/Modeling/Data_collection/common/tools/run_nddma_ad_hoc.py --help
+  python3 autofuse/tools/nddma/Modeling/Data_collection/common/tools/predict_nddma_ad_hoc.py --help
+  python3 autofuse/tools/nddma/Modeling/Data_collection/common/tools/run_nddma_ad_hoc.py --help
   ```
 
 - Results: cycle predictions, formula terms, fitted parameters and measurement analysis. Historical snapshot metrics are marked invalid; collection requires CANN and an Ascend device.

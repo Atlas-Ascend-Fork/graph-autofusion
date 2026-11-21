@@ -737,21 +737,7 @@ Status CheckNodeSupportsScalarInput(const NodePtr &compute_node, int32_t input_i
   return SUCCESS;
 }
 
-bool KeepsBroadcastTensor(const NodePtr &input_node, const std::vector<NodePtr> &moved_brc_nodes) {
-  if (moved_brc_nodes.empty() || moved_brc_nodes.back() != input_node) {
-    return false;
-  }
-  NodePtr producer;
-  if (GetPeerOutNodeSafe(moved_brc_nodes.front(), producer, 0) != SUCCESS || producer == nullptr ||
-      producer->GetType() != kBroadcastType) {
-    return false;
-  }
-  AscTensorAttr *attr = nullptr;
-  return GetOutputTensorAttr(producer, attr) == SUCCESS && !ascgen_utils::IsScalarInput(attr->repeats);
-}
-
-bool CheckScalarInputSupport(const NodePtr &next_node, const std::vector<NodePtr> &brc_nodes,
-                             const std::vector<std::vector<NodePtr>> &removed_brcs) {
+bool CheckScalarInputSupport(const NodePtr &next_node, const std::vector<NodePtr> &brc_nodes) {
   GE_ASSERT_NOTNULL(std::dynamic_pointer_cast<AscNode>(next_node));
 
   auto in_data_anchor_size = next_node->GetAllInDataAnchorsSize();
@@ -760,14 +746,6 @@ bool CheckScalarInputSupport(const NodePtr &next_node, const std::vector<NodePtr
     GE_ASSERT_SUCCESS(GetPeerOutNodeSafe(next_node, input_node, i));
 
     if (IsScalarInput(input_node)) {
-      // Only the broadcasts selected by this transaction are detached from the input.
-      // A retained broadcast can still supply a tensor even when its source is a scalar.
-      const auto keeps_tensor = [&input_node](const std::vector<NodePtr> &broadcasts) {
-        return KeepsBroadcastTensor(input_node, broadcasts);
-      };
-      if (keeps_tensor(brc_nodes) || std::any_of(removed_brcs.begin(), removed_brcs.end(), keeps_tensor)) {
-        continue;
-      }
       std::vector<int64_t> brc_axes;
       if (!brc_nodes.empty()) {
         GE_ASSERT_SUCCESS(GetBrcAxises(brc_nodes, brc_axes));
@@ -855,7 +833,7 @@ bool IsMulInputsCanBackward(NodePtr &cur_node, NodePtr &next_node, std::vector<N
     remove_brc_nodes_list.push_back(temp_brc_nodes);
   }
 
-  if (!CheckScalarInputSupport(next_node, brc_nodes, remove_brc_nodes_list)) {
+  if (!CheckScalarInputSupport(next_node, brc_nodes)) {
     return false;
   }
 

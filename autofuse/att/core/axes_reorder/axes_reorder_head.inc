@@ -184,7 +184,6 @@ struct AxesReorderSolverInput {
   double ub_threshold = 0.2f;
   double corenum_threshold = 0.4f;
   double perf_threshold = 0000.0f;
-  bool preserve_reduce_store_penalty_seed = false;
   Variable **input_vars = nullptr;
   TilingVariable **tiling_vars = nullptr;
   TilingVariable **pure_mc_vars = nullptr;
@@ -247,7 +246,7 @@ public:
 #endif
   ~AxesReorderSolver() {}
   bool Run(const bool is_trade_off, const bool block_loop_auto_tune, const bool enable_auto_tune,
-           const bool enable_equal_order = false, const bool enable_core_search = true);
+           const bool enable_equal_order = false);
   bool IsEmptyTensor() const { return is_empty_tensor_; }
 #if AF_AXES_EXPLICIT_EVAL
   const EvalContext &GetEvaluationContext() const { return eval_context_; }
@@ -332,8 +331,7 @@ protected:
 
 private:
 #if AF_AXES_EXPLICIT_EVAL
-  bool RunImpl(bool is_trade_off, bool block_loop_auto_tune, bool enable_auto_tune, bool enable_equal_order,
-               bool enable_core_search);
+  bool RunImpl(bool is_trade_off, bool block_loop_auto_tune, bool enable_auto_tune, bool enable_equal_order);
 #endif
   inline bool FindNextUpperBlockDim(const uint32_t block_dim, uint32_t &next_lower_block_dim) const;
   inline bool FindNextLowerBlockDim(const uint32_t block_dim, uint32_t &next_upper_block_dim) const;
@@ -341,9 +339,7 @@ private:
                                   TilingVariable *local_buffer_vars) const;
   inline void RestoreInputTilingVars(const TilingVariable *tiling_vars, const TilingVariable *pure_mc_vars,
                                      const TilingVariable *local_buffer_vars) const;
-  inline TilingVariable *FindWorkloadBalanceVar(TilingVariable *const *vars) const;
   inline bool WorkloadBalance();
-  bool AutoTuning(bool has_threshold_seed, bool enable_equal_order);
   inline bool IsSatisfyCons(TilingVariable *var, int64_t value, ConstraintType cons_type, double ratio = 1.0);
   inline bool BinaryFindUpperBoundSatisfiedUBLimit(TilingVariable *var, int64_t lower_bound,
                                                    int64_t &result);
@@ -377,11 +373,7 @@ private:
 #if AF_AXES_EQUAL_ORDER
   inline bool GetTiling(const bool is_tuning, const bool block_loop_auto_tune, const bool enable_workload_balance, const bool enable_equal_order);
   inline bool GetMaxBlockDimTiling(const uint32_t block_dim, const bool enable_equal_order);
-  inline bool TuneCoreCounts(bool enable_equal_order);
-  inline bool TuneNeighboringCoreCounts(const bool enable_equal_order);
-  inline bool CompareCoreNeighbors(double current_perf, uint32_t block_dim, uint32_t next_lower_block_dim, uint32_t next_upper_block_dim, bool enable_equal_order);
-  inline bool CompareUpperCoreCount(double current_perf, uint32_t block_dim, uint32_t next_lower_block_dim, uint32_t next_upper_block_dim, double next_lower_perf, bool enable_equal_order);
-
+  inline bool AutoTuning(const bool is_trade_off, const bool enable_equal_order);
   inline void FindBetterSolutionByUpperBlockDim(double next_upper_perf, uint32_t next_upper_block_dim, const bool enable_equal_order);
   inline void FindBetterSolutionByLowerBlockDim(double next_lower_perf, uint32_t next_lower_block_dim, const bool enable_equal_order);
   bool NaiveLocalBufTiling(const bool enable_equal_order);
@@ -389,11 +381,7 @@ private:
 #else
   inline bool GetTiling(const bool is_tuning, const bool block_loop_auto_tune, const bool enable_workload_balance);
   inline bool GetMaxBlockDimTiling(const uint32_t block_dim);
-  inline bool TuneCoreCounts();
-  inline bool TuneNeighboringCoreCounts();
-  inline bool CompareCoreNeighbors(double current_perf, uint32_t block_dim, uint32_t next_lower_block_dim, uint32_t next_upper_block_dim);
-  inline bool CompareUpperCoreCount(double current_perf, uint32_t block_dim, uint32_t next_lower_block_dim, uint32_t next_upper_block_dim, double next_lower_perf);
-
+  inline bool AutoTuning(const bool is_trade_off);
   inline void FindBetterSolutionByUpperBlockDim(double next_upper_perf, uint32_t next_upper_block_dim);
   inline void FindBetterSolutionByLowerBlockDim(double next_lower_perf, uint32_t next_lower_block_dim);
   bool NaiveLocalBufTiling();

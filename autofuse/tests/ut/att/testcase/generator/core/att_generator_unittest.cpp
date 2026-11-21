@@ -34,11 +34,9 @@
 #include "tiling_data_gen/tiling_data_generator.h"
 #include "base/att_const_values.h"
 #include "base/base_types.h"
-#include "gen_model_info/api_perf_register/v1/perf_param_v1.h"
 #include "autofuse_config/auto_fuse_config.h"
 #include "util/base_types_printer.h"
 #include "util/duration.h"
-#include "v35/att/api_perf_register/perf_param_v2.h"
 #include "generator/solver_pass_gen/axes_reorder_solver/axes_reorder_solver_gen.h"
 
 const std::string op_name = "OpTest";
@@ -177,33 +175,6 @@ ScheduleResultSourceCase MakeTwoGroupScheduleResultSourceCase(const bool enable_
   return test_case;
 }
 }  // namespace
-
-TEST(GeneratorUT, LowUbPrefersObjectiveForTwoSingleBlockCandidatesInSingleGroup) {
-  TilingCodeGenConfig config;
-  TilingModelInfo model_infos{CreateModelInfo()};
-  TilingScheduleConfigTableV1 v1_config;
-  TilingScheduleConfigTableV2 v2_config;
-  model_infos.front().tiling_schedule_config_table = &v2_config;
-  ScoreFuncs score_funcs;
-  const std::string guard = "tmp_tiling.get_block_dim() != 1U || tiling_data.get_block_dim() != 1U";
-
-  MockHighPerfTilingCodeGenImpl single_group("test", config, model_infos, score_funcs, true);
-  ASSERT_EQ(single_group.GenSelectBetterTilingBasedOnObjAndUbRatio(), af::SUCCESS);
-  const auto source = single_group.tiling_func_.GetOutputStr();
-  EXPECT_NE(source.find("!IsEqual(cur_ub_ratio, ub_ratio) && (" + guard + ")"), std::string::npos);
-  EXPECT_NE(source.find("if (cur_obj < obj)"), std::string::npos);
-
-  MockHighPerfTilingCodeGenImpl multi_group("test", config, model_infos, score_funcs, false);
-  ASSERT_EQ(multi_group.GenSelectBetterTilingBasedOnObjAndUbRatio(), af::SUCCESS);
-  EXPECT_EQ(multi_group.tiling_func_.GetOutputStr().find(guard), std::string::npos);
-
-  model_infos.front().tiling_schedule_config_table = &v1_config;
-  MockHighPerfTilingCodeGenImpl v1_single_group("test", config, model_infos, score_funcs, true);
-  ASSERT_EQ(v1_single_group.GenSelectBetterTilingBasedOnObjAndUbRatio(), af::SUCCESS);
-  const auto v1_source = v1_single_group.tiling_func_.GetOutputStr();
-  EXPECT_EQ(v1_source.find(guard), std::string::npos);
-  EXPECT_NE(v1_source.find("&& !IsEqual(cur_ub_ratio, ub_ratio))"), std::string::npos);
-}
 
 TEST(GeneratorUT, GenUpdatePerfAddsSerializedEdgeToNonParallelObjective) {
   const auto test_case = MakeTwoGroupScheduleResultSourceCase(false);

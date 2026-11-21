@@ -1,6 +1,0 @@
-factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,packing_extra
-h0_holdout_m2_n4096_c48,packed_narrow_fp32,holdout,float32,4,48,NDDMA,2,2x4096,1x2,4096x1,32768,32768,32768,1,0,0
-h1_holdout_m4_n6144_c56,packed_narrow_fp32,holdout,float32,4,56,NDDMA,2,4x6144,1x4,6144x1,98304,98304,98304,1,0,0
-h2_holdout_m6_n4096_c40,packed_narrow_fp32,holdout,float32,4,40,NDDMA,2,6x4096,1x6,4096x1,98304,98304,98304,1,0,0
-h3_holdout_m8_n2560_c48,packed_narrow_fp32,holdout,float32,4,48,NDDMA,2,8x2560,1x8,2560x1,81920,81920,81920,1,0,0
-h4_holdout_m8_n3840_c56,packed_narrow_fp32,holdout,float32,4,56,NDDMA,2,8x3840,1x8,3840x1,122880,122880,122880,1,0,0

@@ -30,79 +30,14 @@ std::vector<int64_t> GetNddmaVectorizedAxis(const af::AscNodePtr &node) {
   return node->outputs[0].attr.vectorized_axis;
 }
 
-// Calibrate the physical-dense outer permutation implemented by one LoopMode Load.
-// Keep the raw GM/UB strides here: the scalar DMA stride alone loses the loop address advance.
-af::Status SelectAlignedLoopLoad(const TensorShapeInfo &shape, const NodeInfo &node, PerfOutputInfo &perf,
-                                 bool narrow_row = false) {
-  using namespace dma_calibration_v2;
-  if (node.is_cv_ub_fusion || shape.data_type != "float32" || shape.data_type_size != sizeof(float) ||
-      shape.repeats.size() != 3U || shape.gm_strides.size() != 3U || shape.strides.size() != 3U) {
-    return af::SUCCESS;
-  }
-  const auto &zero = af::sym::kSymbolZero;
-  const auto &one = af::sym::kSymbolOne;
-  const Expr &m = shape.repeats[0];
-  const Expr &n = shape.repeats[1];
-  const Expr &width = shape.repeats[2];
-  const Expr cores = CreateExpr("block_dim");
-  const auto outside = [&](const Expr &value, const Range &range) {
-    return af::sym::Max(zero, af::sym::Max(CreateExpr(range.lower) - value, value - CreateExpr(range.upper)));
-  };
-  // GM [W, M*W, 1], UB [(N+p)*W, W, 1], p=0 or 1.
-  // All dimensions exceed one, so Codegen retains exactly one hardware loop.
-  // Both calibrated row widths are DMA-block aligned, with no Normal/Compact padding difference.
-  const Expr outer_gap = shape.strides[0] - n * width;
-  const auto &rows_domain = narrow_row ? kLoadNarrowLoopRows : kLoadLoopRows;
-  const auto &width_domain = narrow_row ? kLoadNarrowLoopWidth : kLoadLoopWidth;
-  const Expr alignment = CreateExpr(narrow_row ? kLoadNarrowLoopWidth.lower
-                                               : tiling_schedule_config_table_v2.GetCacheLineSize() / sizeof(float));
-  Expr violation = zero;
-  for (const auto &part :
-       {outside(m, kLoadLoopOuter), outside(n, rows_domain), outside(width, width_domain),
-        outside(cores, kLoadLoopCores), af::sym::Abs(af::sym::Mod(width, alignment)),
-        af::sym::Abs(shape.gm_strides[0] - width), af::sym::Abs(shape.gm_strides[1] - m * width),
-        af::sym::Abs(shape.gm_strides[2] - one), af::sym::Abs(shape.strides[1] - width),
-        af::sym::Abs(shape.strides[2] - one), af::sym::Min(af::sym::Abs(outer_gap), af::sym::Abs(outer_gap - width))}) {
-    if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
-      return af::SUCCESS;
-    }
-    violation = violation + part;
-  }
-  Expr fitted;
-  GE_ASSERT_SUCCESS(GetPerf({narrow_row ? "LoadNarrowLoopPayload" : "LoadAlignedLoopPayload", shape.data_type,
-                             shape.data_type, shape.repeats, zero},
-                            fitted));
-  const Expr result = CreateExpr(narrow_row ? "load_narrow_loop_payload_node" : "load_aligned_loop_payload_node");
-  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, perf.pipe_res.at(PipeType::AIV_MTE2));
-  guard.SetVariable(result);
-  perf.ternary_ops[result] = std::move(guard);
-  perf.pipe_res[PipeType::AIV_MTE2] = result;
-  return af::SUCCESS;
-}
-
-bool HasDirectStoreConsumer(const af::AscNodePtr &node) {
-  constexpr int32_t kDoubleBufferCount = 2;
-  if (node == nullptr || node->outputs().size() != 1U) {
-    return false;
-  }
-  const auto &tensor = node->outputs[0];
-  if (tensor.attr.mem.alloc_type != af::AllocType::kAllocTypeQueue ||
-      tensor.attr.mem.position != af::Position::kPositionVecIn || tensor.attr.que.id == af::kIdNone ||
-      tensor.attr.que.buf_num != kDoubleBufferCount) {
-    return false;
-  }
-  const auto peers = node->GetOutDataNodes();
-  return peers.size() == 1U && (*peers.begin())->GetType() == kStore;
-}
-
-std::vector<bool> GetNddmaTileInner(const NodeInfo &node, const TensorShapeInfo &shape_info) {
+std::vector<bool> GetNddmaTileInner(const NodeInfo &node, size_t rank) {
   std::vector<bool> tile_inner;
-  if (!node.outputs.empty() && node.outputs[0] != nullptr &&
-      node.outputs[0]->dim_info.size() == shape_info.repeats.size()) {
-    tile_inner.reserve(node.outputs[0]->dim_info.size());
-    for (const auto *axis : node.outputs[0]->dim_info) {
-      tile_inner.push_back(axis != nullptr && axis->axis_type == AxisPosition::INNER && !axis->is_bind_multi_core);
-    }
+  if (node.outputs.empty() || node.outputs[0] == nullptr || node.outputs[0]->dim_info.size() != rank) {
+    return tile_inner;
+  }
+  tile_inner.reserve(node.outputs[0]->dim_info.size());
+  for (const auto *axis : node.outputs[0]->dim_info) {
+    tile_inner.push_back(axis != nullptr && axis->axis_type == AxisPosition::INNER && !axis->is_bind_multi_core);
   }
   return tile_inner;
 }
@@ -135,7 +70,7 @@ af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &n
     LogNddmaFallback(node_detail.name, shape_info.data_type, nullptr, result);
     return af::SUCCESS;
   }
-  const auto tile_inner = GetNddmaTileInner(node, shape_info);
+  const auto tile_inner = GetNddmaTileInner(node, shape_info.repeats.size());
   const auto build_reason =
       BuildNddmaDescriptor(shape_info, GetNddmaVectorizedAxis(node.node_ptr), descriptor, tile_inner);
   if (build_reason != NddmaFallbackReason::kNone) {
@@ -145,8 +80,7 @@ af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &n
     return af::SUCCESS;
   }
   node_detail.nddma_descriptor = descriptor;
-  GE_ASSERT_SUCCESS(EvaluateNddmaModel(descriptor, shape_info.data_type, CreateExpr("block_dim"), result,
-                                       HasDirectStoreConsumer(node.node_ptr)));
+  GE_ASSERT_SUCCESS(EvaluateNddmaModel(descriptor, shape_info.data_type, CreateExpr("block_dim"), result));
   result.raw_rank = shape_info.repeats.size();
   if (!result.selected) {
     LogNddmaFallback(node_detail.name, shape_info.data_type, &descriptor, result);
@@ -155,8 +89,8 @@ af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &n
   perf_res.pipe_res[PipeType::AIV_MTE2] = result.cycles;
   perf_res.ternary_ops.insert(result.ternary_ops.begin(), result.ternary_ops.end());
   selected = true;
-  GELOGD("[ATT NDDMA] estimate: node=%s, model_expression=%s, raw_rank=%zu, effective_rank=%zu",
-         node_detail.name.c_str(), result.model_name.c_str(), result.raw_rank, result.effective_rank);
+  GELOGD("[ATT NDDMA] selected: node=%s, model=%s, raw_rank=%zu, effective_rank=%zu", node_detail.name.c_str(),
+         result.model_name.c_str(), result.raw_rank, result.effective_rank);
   return af::SUCCESS;
 }
 
@@ -208,8 +142,6 @@ af::Status LoadApi([[maybe_unused]] const std::vector<TensorShapeInfo> &input_sh
   dma_info.output_dtype = {merged_output_shapes.data_type};
   GE_ASSERT_SUCCESS(SetDims(merged_output_shapes, dma_info));
   GE_ASSERT_SUCCESS(GetDmaPerf(merged_output_shapes, dma_info, perf_res, kMaxDmaLen));
-  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res));
-  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res, true));
   return af::SUCCESS;
 }
 

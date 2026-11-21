@@ -1,4 +1,0 @@
-factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,packing_extra
-frozen_c20_n896_w8_load_normal,dense-row-api-equivalence,frozen_holdout,float32,4,20,LOAD_NORMAL,2,896x8,8x1,8x1,28672,28672,28672,0,0,0
-frozen_c44_n1408_w8_load_normal,dense-row-api-equivalence,frozen_holdout,float32,4,44,LOAD_NORMAL,2,1408x8,8x1,8x1,45056,45056,45056,0,0,0
-frozen_c54_n1152_w8_load_normal,dense-row-api-equivalence,frozen_holdout,float32,4,54,LOAD_NORMAL,2,1152x8,8x1,8x1,36864,36864,36864,0,0,0

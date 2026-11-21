@@ -1,9 +1,0 @@
-case_id,measured_cycles,model_predict_cycles,estimate_scope,relative_error
-S01/VEC/tail_0,248.98080909090913,268.0,component reference; not full product Transpose,0.07638818019161663
-S01/VEC/tail_1,630.5663333333332,623.0,component reference; not full product Transpose,-0.011999266268047728
-S01/VEC/tail_2,647.2055181818182,665.0,component reference; not full product Transpose,0.02749432957273214
-S01/VEC/tail_3,1369.0879272727273,1346.0,component reference; not full product Transpose,-0.016863728627509882
-S01/VEC/tail_4,5208.528096969697,5189.0,component reference; not full product Transpose,-0.003749254416244441
-S01/VEC/tail_5,1344.1260636363636,1336.0,component reference; not full product Transpose,-0.006045611238561625
-S01/VEC/tail_6,11350.233575757573,11307.0,component reference; not full product Transpose,-0.003809047229645869
-S01/VEC/tail_7,2810.334142424243,2774.0,component reference; not full product Transpose,-0.01292876241146919
