@@ -688,13 +688,20 @@ get_coverage() {
       -o cov/tmp.info
 
     echo ${ASCEND_INSTALL_PATH}
+    # 过滤三方缓存头与 build 生成物(非项目源码, 会膨胀 .info 并拖慢汇总)
     lcov -r cov/tmp.info "${ASCEND_INSTALL_PATH}/*" '*/output/*' '*/base/metadef/*' '*/nlohmann/*' \
         "*/${BUILD_RELATIVE_PATH}/opensrc/*" "*/${BUILD_RELATIVE_PATH}/proto/*" '*/third_party/*' '/usr/*' \
+        '*/lib_cache/*' '*/_deps/*' "${BUILD_RELATIVE_PATH}/*" "*/${BUILD_RELATIVE_PATH}/*" \
         ${lcov_ignore_params} --ignore-errors unused \
         ${lcov_rc_param} \
         ${lcov_parallel_params} \
         -o cov/coverage.info
-    genhtml cov/coverage.info --output-directory cov/coverage_report ${genhtml_ignore_errors}
+    # CI 只消费 coverage.info, HTML 报告仅本地生成
+    if [ "${ATOMGIT_ACTIONS:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
+        echo "[cov] CI env: skip genhtml HTML report (only coverage.info is consumed/uploaded)"
+    else
+        genhtml cov/coverage.info --output-directory cov/coverage_report ${genhtml_ignore_errors}
+    fi
 }
 
 codegen_e2e_st() {
@@ -1411,7 +1418,7 @@ build_ut() {
       build_ut_common || { echo "test ut common failed."; exit 1; }
       build_test || { echo "test build failed."; exit 1; }
       py_module_ut || { echo "run py module ut failed."; exit 1; }
-      run_mlir_targets check-ut check-lit || { echo "MLIR UT/lit tests failed."; exit 1; }
+      # MLIR 已拆至独立套件(--module=autofuse_mlir / -m mlir)
       ;;
     "all")
       build_ut_att || { echo "failed to build and run att ut."; exit 1; }
@@ -1480,7 +1487,7 @@ build_st() {
       build_st_common || { echo "run common st failed."; exit 1; }
       build_st_optimize || { echo "run optimize st failed."; exit 1; }
       py_module_st || { echo "run py module st failed."; exit 1; }
-      run_mlir_targets check-st check-e2e || { echo "MLIR ST/e2e tests failed."; exit 1; }
+      # MLIR 已拆至独立套件(--module=autofuse_mlir / -m mlir)
       ;;
     "all")
       build_st_att || { echo "failed to build and run att st."; exit 1; }

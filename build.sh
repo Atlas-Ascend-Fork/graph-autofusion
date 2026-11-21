@@ -63,7 +63,7 @@ else
   PYTHON_CMD="python3"
 fi
 
-SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e" "autofuse_v35_1" "autofuse_v35_2" "autofuse_v35_3")
+SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e" "autofuse_v35_1" "autofuse_v35_2" "autofuse_v35_3" "autofuse_mlir")
 declare -A MODULE_ACTION_HANDLERS=(
   ["multistream:py_ut"]="multistream_py_ut"
   ["multistream:py_st"]="multistream_py_st"
@@ -79,6 +79,8 @@ declare -A MODULE_ACTION_HANDLERS=(
   ["autofuse_v35_1:all_st"]="autofuse_module_test_suite"
   ["autofuse_v35_2:all_st"]="autofuse_module_test_suite"
   ["autofuse_v35_3:all_st"]="autofuse_module_test_suite"
+  # MLIR 套件经 -m mlir 一次跑完 check-ut/lit/st/e2e, 单入口即可
+  ["autofuse_mlir:all_st"]="autofuse_module_test_suite"
 )
 
 # print usage message
@@ -312,6 +314,13 @@ normalize_test_selection() {
   local selected_modules=()
   if [[ "${TARGET_MODULE}" == "all" ]]; then
     selected_modules=("${SUPPORTED_MODULES[@]}")
+    # MLIR 套件不随 --module=all 联动(与 -m all 历史行为一致), 需显式指定
+    local _modules_no_mlir=()
+    local _m
+    for _m in "${selected_modules[@]}"; do
+      [[ "${_m}" == "autofuse_mlir" ]] || _modules_no_mlir+=("${_m}")
+    done
+    selected_modules=("${_modules_no_mlir[@]}")
   else
     selected_modules=("${TARGET_MODULE}")
   fi
@@ -593,6 +602,13 @@ build_package() {
   echo "package: ${output_run_path}"
 }
 
+# CI 门禁只上传 coverage_*.info, HTML 报告仅本地生成
+cov_html_opt() {
+  if [ "${ATOMGIT_ACTIONS:-}" != "true" ] && [ "${CI:-}" != "true" ]; then
+    echo "--cov-report=html"
+  fi
+}
+
 superkernel_py_ut() {
   echo "---------------- Start UT ----------------"
   cd ${BASEPATH}/super_kernel &&
@@ -604,7 +620,7 @@ superkernel_py_ut() {
                                      --cov-config=scripts/sk_ut_cfg.toml \
                                      --cov=superkernel \
                                      --cov-report=term-missing \
-                                     --cov-report=html \
+                                     $(cov_html_opt) \
                                      --cov-report=xml
   else
     PYTHONPATH="${BASEPATH}/super_kernel/src/jit${PYTHONPATH:+:${PYTHONPATH}}" \
@@ -622,7 +638,7 @@ superkernel_py_st() {
       ${PYTHON_CMD} -m pytest tests/st -m st -n auto --cov-config=scripts/sk_st_cfg.toml \
                                      --cov=superkernel \
                                      --cov-report=term-missing \
-                                     --cov-report=html \
+                                     $(cov_html_opt) \
                                      --cov-report=xml
   else
     PYTHONPATH="${BASEPATH}/super_kernel/src/jit${PYTHONPATH:+:${PYTHONPATH}}" \
@@ -696,6 +712,7 @@ autofuse_module_test_suite() {
     autofuse_ascendc_api) test_module="ascendc_api" ;;
     autofuse_e2e) test_module="e2e" ;;
     autofuse_v35_1|autofuse_v35_2|autofuse_v35_3) test_module="${module#autofuse_}" ;;
+    autofuse_mlir) test_module="mlir" ;;
     *)
       echo "ERROR: Unsupported autofuse test module: ${module}."
       return 1
@@ -712,6 +729,10 @@ autofuse_module_test_suite() {
   if [ "X${ENABLE_COVERAGE}" == "Xon" ]; then
     test_args+=("-c")
   fi
+  # mlir 模式按 ENABLE_UT/ST 组装目标集, 补 -u 一次跑完
+  if [[ "${module}" == "autofuse_mlir" && "${test_option}" == "-s" ]]; then
+    test_args+=("-u")
+  fi
   BUILD_TYPE="${BUILD_TYPE}" bash "${BASEPATH}/scripts/test/run_autofuse_test.sh" "${test_args[@]}"
 }
 
@@ -725,7 +746,7 @@ multistream_py_ut() {
                                      --cov-config=scripts/ms_ut_cfg.toml \
                                      --cov=. \
                                      --cov-report=term-missing \
-                                     --cov-report=html \
+                                     $(cov_html_opt) \
                                      --cov-report=xml \
                                      --cov-report=lcov:"${BASEPATH}/coverage_multistream.info"
   else
@@ -743,7 +764,7 @@ multistream_py_st() {
                                      --cov-config=scripts/ms_st_cfg.toml \
                                      --cov=. \
                                      --cov-report=term-missing \
-                                     --cov-report=html \
+                                     $(cov_html_opt) \
                                      --cov-report=xml
   else
     "${PYTHON_CMD}" -m pytest tests/st -m st --junitxml="${BASEPATH}/build_out/multistream_st/junit.xml"
@@ -812,6 +833,17 @@ PYEOF
         touch "${BASEPATH}/cov/coverage.info"
       fi
       exit 200
+    fi
+    # MLIR 门控: 改动命中 MLIR 依赖目录(mlir 本体/cmake 引导/aihac 重编的核心源码目录)才执行;
+    # 未命中按跳过约定 exit 200; 未传 -f 时保守执行
+    if [ "${TARGET_MODULE}" = "autofuse_mlir" ] && [ -n "${CHANGED_FILES:-}" ]; then
+      if ! echo "${CHANGED_FILES}" | grep -qE '^(autofuse/mlir/|cmake/|autofuse/inc/|autofuse/ascir/|autofuse/optimize/|autofuse/codegen/|autofuse/common/|autofuse/graph_metadef/)'; then
+        echo "[mlir-gate] no MLIR-related paths in change set, skipping MLIR suite (LLVM build + lit tests)."
+        mkdir -p "${BASEPATH}/cov"
+        touch "${BASEPATH}/cov/coverage.info"
+        exit 200
+      fi
+      echo "[mlir-gate] MLIR-related paths changed, run MLIR suite"
     fi
   fi
 

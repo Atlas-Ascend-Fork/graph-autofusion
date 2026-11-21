@@ -236,7 +236,12 @@ generate_coverage "${_capture_dir}" "${_cov_file}" "${_cann_path}"
 progress 2 4 "Filtering AOT C++ coverage data"
 filter_coverage   "${_cov_file}" "${_cov_file}_filtered"
 progress 3 4 "Generating AOT C++ coverage html report"
-generate_html     "${_cov_file}_filtered" "${_out}"
+# CI 只消费 tracefile, HTML 报告仅本地生成
+if [ "${ATOMGIT_ACTIONS:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
+  logging "CI env: skip genhtml HTML report (only the filtered tracefile is consumed/uploaded)"
+else
+  generate_html     "${_cov_file}_filtered" "${_out}"
+fi
 progress 4 4 "Summarizing AOT C++ coverage results"
 print_summary     "${_cov_file}_filtered" "${_out}"
 print_low_coverage_files "${_cov_file}_filtered" "${CPP_UT_COVERAGE_EXPECTED}"
