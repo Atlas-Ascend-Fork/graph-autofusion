@@ -21,6 +21,7 @@ namespace att {
 struct OptionInfo {
   std::string name;
   std::string default_value;
+  std::string expected;
 
   bool (*validate_func)(const std::string &value);
 };
@@ -28,7 +29,7 @@ struct OptionInfo {
 class OptionRegister {
  public:
   void RegisterOption(const std::string &name, const std::string &default_value,
-                      bool (*validate_func)(const std::string &value));
+                      bool (*validate_func)(const std::string &value), const std::string &expected = "");
 
   bool ValidateAndInitInnerOptions(std::map<std::string, std::string> &inner_options,
                                    const std::map<std::string, std::string> &options);

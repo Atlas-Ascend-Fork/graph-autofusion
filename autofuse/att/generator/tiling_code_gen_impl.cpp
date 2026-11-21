@@ -5112,7 +5112,7 @@ void TilingCodeGenImpl::GenFillOtherGroupsGetTiling(
     const std::map<std::string, std::set<std::string>> &hardware_map) {
   auto current_group_iter = graph_info.find(group_info.first);
   if (current_group_iter == graph_info.end()) {
-    GELOGE(ge::GRAPH_FAILED, "Current graph id not found in graph info.");
+    GELOGE(ge::GRAPH_FAILED, "Current graph id[%zu] not found in graph info.", group_info.first);
     return;
   }
   const std::string candidate_begin_name = "candidate_begin_index" + std::to_string(group_info.first);
