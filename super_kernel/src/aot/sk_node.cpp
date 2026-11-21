@@ -968,10 +968,10 @@ bool SuperKernelKernelNode::InitNode(const SuperKernelOptionsManager *opts) {
     return false;
   }
   if (std::ostringstream argsLog; AppendKernelArgsLogFields(argsLog, kernelParams, false)) {
-    SK_LOGI("Kernel args comparison: nodeId=%lu%s, copiedDevArgs=%p, copiedDevArgsSize=%zu", nodeId,
+    SK_LOGI("Kernel args and device copy: nodeId=%lu%s, copiedDevArgs=%p, copiedDevArgsSize=%zu", nodeId,
             argsLog.str().c_str(), copiedDevArgs, copiedDevArgsSize);
   } else {
-    SK_LOGE("Unsupported kernel argsType in args comparison: nodeId=%lu, argsType=%u", nodeId,
+    SK_LOGE("Unsupported kernel argsType when logging kernel args: nodeId=%lu, argsType=%u", nodeId,
             static_cast<uint32_t>(kernelParams.argsType));
   }
 
