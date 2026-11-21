@@ -289,6 +289,61 @@ class FunctionLoopGenerator {
     return path;
   }
 
+  // A copy on the final reduce-to-store edge inherits the reduce schedule.
+  // Place it immediately before the store once all escaped accumulation axes finish.
+  static void placeFinalReduceCopy(Operation &op) {
+    if (!isa<afir::Ub2ubOp>(op) || !op.getResult(0).hasOneUse()) {
+      return;
+    }
+    Operation *store = *op.getResult(0).getUsers().begin();
+    Operation *reduce = op.getOperand(0).getDefiningOp();
+    if (store != op.getNextNode() || !isa<afir::StoreOp>(store) || store->getOperand(0) != op.getResult(0) ||
+        !isa_and_nonnull<afir::MinOp, afir::MaxOp, afir::SumOp, afir::MeanOp, afir::ProdOp, afir::AnyOp, afir::AllOp>(
+            reduce)) {
+      return;
+    }
+    auto copySched = op.getAttrOfType<afir::ScheduleAttr>(afir::kSchedAttrName);
+    auto storeSched = store->getAttrOfType<afir::ScheduleAttr>(afir::kSchedAttrName);
+    if (!copySched || !storeSched || copySched.getExecCondition() != afir::ExecCondition::NoCache ||
+        copySched != reduce->getAttr(afir::kSchedAttrName) || copySched.getAxis() != storeSched.getAxis()) {
+      return;
+    }
+    ArrayRef<int64_t> axes = copySched.getAxis();
+    auto outer = llvm::find(axes, storeSched.getLoopAxis());
+    auto inner = llvm::find(axes, copySched.getLoopAxis());
+    if (inner == axes.end() || outer >= inner) {
+      return;
+    }
+    auto accumulation = afir::analyzeReduceAccumulation(reduce);
+    if (failed(accumulation) || !std::all_of(std::next(outer), std::next(inner), [&](int64_t axis) {
+          return llvm::is_contained(accumulation->accumulationAxes, axis);
+        })) {
+      return;
+    }
+    op.setAttr(afir::kSchedAttrName,
+               afir::ScheduleAttr::get(op.getContext(), axes, *outer, afir::ExecCondition::NoCache));
+  }
+
+  void placeMaterializationBoundaries(Block &block) {
+    // The signature pass leaves output materialization immediately after the
+    // AFIR store. Move that boundary marker with its producer so tensor SSA
+    // values do not escape an scf.for region.
+    for (Operation &operation : block) {
+      auto destination = dyn_cast<bufferization::MaterializeInDestinationOp>(operation);
+      if (!destination) {
+        continue;
+      }
+      Operation *producer = destination.getSource().getDefiningOp();
+      auto placement = operationPlacement.find(producer);
+      if (placement == operationPlacement.end()) {
+        continue;
+      }
+      placement->second->items.emplace_back(&operation);
+      boundaryOperations.insert(&operation);
+      operationPlacement[&operation] = placement->second;
+    }
+  }
+
   LogicalResult buildLoopTree(Block &block) {
     SmallVector<int64_t> currentPath;
     SmallVector<LoopTreeNode *> loopNodeStack{&root};
@@ -303,6 +358,7 @@ class FunctionLoopGenerator {
         operationPlacement[&operation] = loopNodeStack.back();
         continue;
       }
+      placeFinalReduceCopy(operation);
       FailureOr<SmallVector<int64_t>> operationLoopPath = getScheduledLoopAxes(&operation);
       if (failed(operationLoopPath)) {
         return failure();
@@ -329,23 +385,7 @@ class FunctionLoopGenerator {
       scheduledOperations.insert(&operation);
     }
 
-    // The signature pass leaves output materialization immediately after the
-    // AFIR store. Move that boundary marker with its producer so tensor SSA
-    // values do not escape an scf.for region.
-    for (Operation &operation : block) {
-      auto destination = dyn_cast<bufferization::MaterializeInDestinationOp>(operation);
-      if (!destination) {
-        continue;
-      }
-      Operation *producer = destination.getSource().getDefiningOp();
-      auto placement = operationPlacement.find(producer);
-      if (placement == operationPlacement.end()) {
-        continue;
-      }
-      placement->second->items.emplace_back(&operation);
-      boundaryOperations.insert(&operation);
-      operationPlacement[&operation] = placement->second;
-    }
+    placeMaterializationBoundaries(block);
     return success();
   }
 

@@ -31,6 +31,8 @@ void registerAFIRMaterializeTilingParamsPass();
 
 // 缓存复用周期（`afir.sched` 的 `exec_condition`）→ 循环体里的 `scf.if`。排在资源物化与
 // 同步之后、实现选择之前；理由见 ExecConditionPass.cpp 顶部那段。
+// Preserve Reduce cache input dependencies before SSA is disconnected by queues.
+std::unique_ptr<Pass> createAFIRCacheDependencyPass();
 std::unique_ptr<Pass> createAFIRExecConditionPass();
 void registerAFIRExecConditionPass();
 

@@ -31,6 +31,8 @@
 #include "dialect/AFIR/Transforms/AFIRPasses.h"
 
 #include "dialect/AFIR/Analysis/TransferPlan.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
+#include "dialect/AFIR/Support/SymbolicExpressionDetail.h"
 #include "dialect/AFIR/IR/AFIR.h"
 #include "support/CapabilityShortfall.h"
 
@@ -42,6 +44,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMapping.h"
+#include "llvm/ADT/SetVector.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
@@ -50,9 +54,167 @@ using namespace mlir;
 namespace mlir::afir {
 namespace {
 
+constexpr unsigned kVisitedOperationInlineCapacity = 16;
+
 ExecCondition getExecCondition(Operation *op) {
   auto sched = op->getAttrOfType<ScheduleAttr>(kSchedAttrName);
   return sched ? sched.getExecCondition() : ExecCondition::NoCache;
+}
+
+// A Reduce cache is valid only while all upstream Load addresses are unchanged.
+// Record logical source axes while SSA still connects Load/Cast/Broadcast. Queue
+// allocation later replaces those edges with independent alloc/dequeue values.
+LogicalResult collectCacheSourceAxes(Operation *op, llvm::SetVector<int64_t> &axes,
+                                     llvm::SmallPtrSetImpl<Operation *> &visited) {
+  if (!visited.insert(op).second) {
+    return success();
+  }
+  if (isa<LoadOp>(op)) {
+    FailureOr<TensorDescAttr> desc = getLocalDescriptor(op, TransferPlanSide::Automatic);
+    if (failed(desc) || desc->getAxis().size() != desc->getStrides().size()) {
+      return failure();
+    }
+    for (auto [axis, stride] : llvm::zip_equal(desc->getAxis(), desc->getStrides())) {
+      if (!llvm::is_contained(desc->getVectorizedAxis(), axis) &&
+          proveEqual(stride, ExprAttr::get(op->getContext(), StringAttr::get(op->getContext(), "0"))) !=
+              detail::TruthValue::True) {
+        axes.insert(axis);
+      }
+    }
+    return success();
+  }
+  if (op->hasAttr(kReductionDomainAttrName) || isa<MaxOp, MinOp, SumOp, MeanOp, ProdOp, AnyOp, AllOp>(op)) {
+    // A reduction accumulator is not a pure function of the current input tile.
+    return failure();
+  }
+  FailureOr<OperandPartition> partition = getOperandPartition(op);
+  if (failed(partition) || partition->inputCount == 0) {
+    return failure();
+  }
+  for (Value input : partition->inputs(op)) {
+    if (isa_and_nonnull<arith::ConstantOp>(input.getDefiningOp())) {
+      continue;
+    }
+    Operation *producer = input.getDefiningOp();
+    if (!producer || failed(collectCacheSourceAxes(producer, axes, visited))) {
+      return failure();
+    }
+  }
+  return success();
+}
+
+struct AFIRCacheDependencyPass : public PassWrapper<AFIRCacheDependencyPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AFIRCacheDependencyPass)
+  StringRef getArgument() const final {
+    return "afir-cache-dependencies";
+  }
+  StringRef getDescription() const final {
+    return "Analyze Reduce cache inputs before resource materialization";
+  }
+  void runOnOperation() override {
+    for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
+      bool hasReduce = false;
+      func.walk([&](Operation *op) {
+        hasReduce |=
+            op->hasAttr(kReductionDomainAttrName) || isa<MaxOp, MinOp, SumOp, MeanOp, ProdOp, AnyOp, AllOp>(op);
+      });
+      if (!hasReduce) {
+        continue;
+      }
+      func.walk([&](Operation *op) {
+        if (!isAfirOperation(op) || isInsideVectorFunc(op) || getExecCondition(op) == ExecCondition::NoCache) {
+          return;
+        }
+        llvm::SetVector<int64_t> axes;
+        llvm::SmallPtrSet<Operation *, kVisitedOperationInlineCapacity> visited;
+        if (failed(collectCacheSourceAxes(op, axes, visited))) {
+          // Unknown/stateful input: execute every iteration instead of guessing
+          // an invariant. This does not change any resource or sync lifetime.
+          axes.clear();
+          axes.insert(op->getAttrOfType<ScheduleAttr>(kSchedAttrName).getLoopAxis());
+        }
+        op->setAttr(kCacheRefreshAxesAttrName, DenseI64ArrayAttr::get(op->getContext(), axes.getArrayRef()));
+      });
+    }
+  }
+};
+
+// Re-evaluate an axis projection at the previous iteration. LoopGenerate already
+// defines the authoritative merged/split-axis arithmetic, including block phase.
+// Reusing that projection avoids inferring a period from unrelated vector axes.
+FailureOr<Value> previousAxisValue(Value value, scf::ForOp loop, OpBuilder &builder, IRMapping &mapping) {
+  if (mapping.contains(value)) {
+    return mapping.lookup(value);
+  }
+  Operation *def = value.getDefiningOp();
+  if (!def || !loop->isAncestor(def)) {
+    return value;
+  }
+  SmallVector<Value> operands;
+  bool changed = false;
+  for (Value operand : def->getOperands()) {
+    FailureOr<Value> previous = previousAxisValue(operand, loop, builder, mapping);
+    if (failed(previous)) {
+      return failure();
+    }
+    changed |= *previous != operand;
+    operands.push_back(*previous);
+  }
+  if (!changed) {
+    return value;
+  }
+  if (def->getName().getDialectNamespace() != "arith" || def->getNumRegions() != 0) {
+    return failure();
+  }
+  for (auto [oldValue, newValue] : llvm::zip_equal(def->getOperands(), operands)) {
+    mapping.map(oldValue, newValue);
+  }
+  Operation *cloned = builder.clone(*def, mapping);
+  cloned->removeAttr(kAxisBindingAttrName);
+  return mapping.lookup(value);
+}
+
+FailureOr<Value> materializeReduceCacheGuard(Operation *op, scf::ForOp loop, DenseI64ArrayAttr axes,
+                                             OpBuilder &builder) {
+  Location loc = op->getLoc();
+  Value index = loop.getInductionVar();
+  Value first = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, index, loop.getLowerBound());
+  if (axes.empty()) {
+    return first;
+  }
+  // Keep the first-iteration projection in range as well: no negative division
+  // or remainder is required when the loop starts at zero.
+  Value previous = builder.create<arith::SubIOp>(loc, index, loop.getStep());
+  previous = builder.create<arith::SelectOp>(loc, first, index, previous);
+  IRMapping mapping;
+  mapping.map(index, previous);
+  Value guard = first;
+  auto func = op->getParentOfType<func::FuncOp>();
+  for (int64_t axis : axes.asArrayRef()) {
+    Value current;
+    for (Operation *parent = op->getParentOp(); parent; parent = parent->getParentOp()) {
+      auto enclosing = dyn_cast<scf::ForOp>(parent);
+      if (enclosing && hasAxisBinding(enclosing, axis, AxisValueRole::Loop)) {
+        current = enclosing.getInductionVar();
+        break;
+      }
+    }
+    if (!current) {
+      current = findAxisValue(func, op, axis, AxisValueRole::AxisIndex);
+    }
+    if (!current) {
+      return failure();
+    }
+    FailureOr<Value> before = previousAxisValue(current, loop, builder, mapping);
+    if (failed(before)) {
+      return failure();
+    }
+    if (*before != current) {
+      Value changed = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, current, *before);
+      guard = builder.create<arith::OrIOp>(loc, guard, changed);
+    }
+  }
+  return guard;
 }
 
 // 守卫谓词放在循环体开头，一个 (循环, 取值) 只生成一份——legacy 那边也是每个循环一个
@@ -195,7 +357,11 @@ LogicalResult guardOperation(Operation *op, ExecCondition condition, GuardCache 
   if (failed(checkGuardableDestinations(op, condition))) {
     return failure();
   }
-  FailureOr<Value> guard = guards.get(op, *plan, condition, loop);
+  OpBuilder guardBuilder(op);
+  auto refreshAxes = op->getAttrOfType<DenseI64ArrayAttr>(kCacheRefreshAxesAttrName);
+  FailureOr<Value> guard = refreshAxes ? materializeReduceCacheGuard(op, loop, refreshAxes, guardBuilder)
+                                       : guards.get(op, *plan, condition, loop);
+  op->removeAttr(kCacheRefreshAxesAttrName);
   if (failed(guard)) {
     return emitCapabilityShortfall(op) << "UnsupportedOperation: cannot build the cache guard for exec_condition "
                                        << stringifyExecCondition(condition);
@@ -266,11 +432,16 @@ struct AFIRExecConditionPass : public PassWrapper<AFIRExecConditionPass, Operati
 
 }  // namespace
 
+std::unique_ptr<Pass> createAFIRCacheDependencyPass() {
+  return std::make_unique<AFIRCacheDependencyPass>();
+}
+
 std::unique_ptr<Pass> createAFIRExecConditionPass() {
   return std::make_unique<AFIRExecConditionPass>();
 }
 
 void registerAFIRExecConditionPass() {
+  PassRegistration<AFIRCacheDependencyPass>();
   PassRegistration<AFIRExecConditionPass>();
 }
 

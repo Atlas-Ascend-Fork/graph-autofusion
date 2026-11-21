@@ -104,11 +104,11 @@ class AFIRRejectUnknownAttributes : public TraitBase<ConcreteType, AFIRRejectUnk
 
   static bool isKnownAFIR(StringRef name) {
     static constexpr StringLiteral known[] = {
-        afir::kSchedAttrName,           afir::kAxisBindingAttrName,    afir::kSymbolicShapeAttrName,
-        afir::kShapeExprAttrName,       afir::kDimSymbolsAttrName,     afir::kVarRelationsAttrName,
-        afir::kShapeGuardsAttrName,     afir::kShapeAssertsAttrName,   afir::kBufferDescAttrName,
-        afir::kReductionDomainAttrName, afir::kReduceScratchRolesAttr, afir::kReduceScratchScopeAttr,
-        afir::kScalarReadSyncAttrName};
+        afir::kSchedAttrName,           afir::kAxisBindingAttrName,     afir::kSymbolicShapeAttrName,
+        afir::kShapeExprAttrName,       afir::kDimSymbolsAttrName,      afir::kVarRelationsAttrName,
+        afir::kShapeGuardsAttrName,     afir::kShapeAssertsAttrName,    afir::kBufferDescAttrName,
+        afir::kReductionDomainAttrName, afir::kReduceScratchRolesAttr,  afir::kReduceScratchScopeAttr,
+        afir::kScalarReadSyncAttrName,  afir::kCacheRefreshAxesAttrName};
     return llvm::is_contained(known, name);
   }
 

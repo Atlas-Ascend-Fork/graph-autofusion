@@ -91,6 +91,7 @@ void kernelABIPreparationDialects(DialectRegistry &registry) {
 
 // 阶段 B：不依赖 session，将 AFIR 转换为带已物化 AscendC 资源的 IR。
 void addAFIRMaterialization(OpPassManager &passManager) {
+  passManager.addPass(afir::createAFIRCacheDependencyPass());
   passManager.addPass(createAscendCLoopGeneratePass());
   // Scratch uses are scoped only after the actual loop tree is known. Physical IDs stay unchanged.
   passManager.addPass(afir::createAFIRScopeReduceScratchPass());

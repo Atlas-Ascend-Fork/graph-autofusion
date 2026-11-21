@@ -1903,6 +1903,76 @@ TEST(ScheduleToAfirTest, BridgesEveryGraphOutputAndOrdersAbiByIoIndex) {
   EXPECT_EQ(permutation[3], 2U);
 }
 
+// Partitioned Loads may retain separate Data nodes for the same external input.
+TEST(ScheduleToAfirTest, SharedExternalInputPreservesIndependentLoads) {
+  auto graph = af::testing::AscGraphBuilder("shared_external_input")
+                   .Loops({af::testing::Sym(8), af::testing::Sym(8)})
+                   .Data("x", 0, af::DT_FLOAT16)
+                   .Data("copy_x", 0, af::DT_FLOAT16)
+                   .Load("load_x", "x")
+                   .Load("load_copy", "copy_x")
+                   .Add("add", "load_x", "load_copy")
+                   .Store("store", "add")
+                   .Output("out", "store", 0, af::DT_FLOAT16)
+                   .Build();
+  AssignTensorIds(graph);
+  graph.FindNode("load_x")->outputs()[0]->attr.vectorized_axis = {0, 1};
+  graph.FindNode("load_copy")->outputs()[0]->attr.vectorized_axis = {0, 1};
+  graph.FindNode("load_x")->outputs()[0]->attr.vectorized_strides = {af::Symbol(8), af::Symbol(1)};
+  graph.FindNode("load_copy")->outputs()[0]->attr.vectorized_strides = {af::Symbol(16), af::Symbol(1)};
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(std::move(graph));
+  ascir::ScheduledResult scheduled;
+  scheduled.schedule_groups.push_back(std::move(group));
+  ascir::FusedScheduledResult fused;
+  fused.fused_graph_name = "shared_external_input";
+  fused.node_idx_to_scheduled_results = {{scheduled}};
+  mlir::MLIRContext context;
+  auto module = mlir::afir::bridge::PlanToAfir(context, fused, scheduled, 0, 0);
+  ASSERT_TRUE(module);
+  auto function = *module->getOps<mlir::func::FuncOp>().begin();
+  ASSERT_EQ(function.getNumArguments(), 2U);  // One external input and one output.
+  llvm::SmallVector<mlir::afir::LoadOp> loads;
+  module->walk([&](mlir::afir::LoadOp load) { loads.push_back(load); });
+  ASSERT_EQ(loads.size(), 2U);
+  EXPECT_EQ(loads[0]->getOperand(0), function.getArgument(0));
+  EXPECT_EQ(loads[1]->getOperand(0), function.getArgument(0));
+  EXPECT_NE(loads[0]->getResult(0), loads[1]->getResult(0));
+  EXPECT_NE(loads[0]->getAttr("afir.result_descs"), loads[1]->getAttr("afir.result_descs"));
+  module->walk([&](mlir::afir::AddOp add) { EXPECT_NE(add.getLhs(), add.getRhs()); });
+  EXPECT_TRUE(succeeded(mlir::verify(*module)));
+}
+
+TEST(ScheduleToAfirTest, RejectsSharedExternalInputWithIncompatibleDtype) {
+  auto graph = af::testing::AscGraphBuilder("conflicting_external_input")
+                   .Loops({af::testing::Sym(8), af::testing::Sym(8)})
+                   .Data("x", 0, af::DT_FLOAT16)
+                   .Data("copy_x", 0, af::DT_FLOAT)
+                   .Load("load_x", "x")
+                   .Load("load_copy", "copy_x")
+                   .Store("store_x", "load_x")
+                   .Output("out_x", "store_x", 0, af::DT_FLOAT16)
+                   .Store("store_copy", "load_copy")
+                   .Output("out_copy", "store_copy", 1, af::DT_FLOAT)
+                   .Build();
+  AssignTensorIds(graph);
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(std::move(graph));
+  ascir::ScheduledResult scheduled;
+  scheduled.schedule_groups.push_back(std::move(group));
+  ascir::FusedScheduledResult fused;
+  fused.fused_graph_name = "conflicting_external_input";
+  fused.node_idx_to_scheduled_results = {{scheduled}};
+  mlir::MLIRContext context;
+  std::string message;
+  mlir::ScopedDiagnosticHandler handler(&context, [&](mlir::Diagnostic &diagnostic) {
+    llvm::raw_string_ostream output(message);
+    diagnostic.print(output);
+  });
+  EXPECT_FALSE(mlir::afir::bridge::PlanToAfir(context, fused, scheduled, 0, 0));
+  EXPECT_NE(message.find("incompatible external input index 0"), std::string::npos) << message;
+}
+
 // 两个 Output 节点共用同一个 io index 必须被拦下，否则 ABI 排序的键不唯一，
 // 两个输出会按发现顺序静默决定先后。
 TEST(ScheduleToAfirTest, RejectsDuplicateOutputIoIndex) {
@@ -2284,8 +2354,7 @@ InnerBroadcastPlanOutcome RunSharedBufferInnerBroadcastPlan(const std::string &n
 
 // 内层广播会让小 tile 的外层行距也变成 1，而 full-shape tile 的外层行距是 128。
 // 这不是资源冲突：非队列 buffer 上的两个成员先后复用同一块存储，各自按自己的视图
-// 读写。该用例钉住 `DifferenceIsExplainedByBroadcast` 对“非广播外轴 stride 差异 +
-// 后续内层广播轴”的识别，避免 Form-B diamond 被误报 BindingConflict。
+// 读写。该用例覆盖内层广播引起的外层行距差异，避免合法时间复用被误报 BindingConflict。
 TEST(ScheduleToAfirTest, InnerBroadcastTileSharingNonQueueBufferIsSupported) {
   const auto outcome = RunSharedBufferInnerBroadcastPlan("shared_buffer_inner_broadcast_tile", 128);
   ASSERT_TRUE(outcome.succeeded) << outcome.message;
@@ -2293,17 +2362,15 @@ TEST(ScheduleToAfirTest, InnerBroadcastTileSharingNonQueueBufferIsSupported) {
   EXPECT_EQ(outcome.message.find("broadcast tile and a full-shape tile"), std::string::npos) << outcome.message;
 }
 
-// 内层确实有广播轴，但 full-shape 一侧的外层行距不等于小 tile 行距乘广播 extent：
-// 999 不是 1 × 128。这里必须报 BindingConflict，不能因为“后面有广播轴”任意放行。
-TEST(ScheduleToAfirTest, InnerBroadcastWithWrongOuterPitchIsConflict) {
+// Independent buffer tensors may use different valid pitches, unrelated to broadcasting.
+TEST(ScheduleToAfirTest, IndependentBufferMembersWithDifferentOuterPitchAreSupported) {
   const auto outcome = RunSharedBufferInnerBroadcastPlan("shared_buffer_inner_broadcast_bad_pitch", 999);
-  EXPECT_FALSE(outcome.succeeded);
-  EXPECT_NE(outcome.message.find("BindingConflict"), std::string::npos) << outcome.message;
+  EXPECT_TRUE(outcome.succeeded) << outcome.message;
+  EXPECT_EQ(outcome.message.find("BindingConflict"), std::string::npos) << outcome.message;
 }
 
-// 非广播外轴的 stride 差异不能只靠“后面曾经有广播”解释；这里没有任何广播轴，
-// 因此两张视图是真冲突，必须保持 BindingConflict。
-TEST(ScheduleToAfirTest, OuterStrideDifferenceWithoutInnerBroadcastIsConflict) {
+// Temporal buffer reuse does not require the two tensors to have broadcast-related layouts.
+TEST(ScheduleToAfirTest, IndependentBufferMembersWithoutBroadcastMayHaveDifferentStrides) {
   auto graph = af::testing::AscGraphBuilder("shared_buffer_outer_stride_mismatch")
                    .Loops({af::testing::Sym(8), af::testing::Sym(8)})
                    .Data("x", 0, af::DT_FLOAT16)
@@ -2341,7 +2408,7 @@ TEST(ScheduleToAfirTest, OuterStrideDifferenceWithoutInnerBroadcastIsConflict) {
       attr.buf.id = 0;
       attr.axis = {0, 1};
       attr.repeats = {af::Symbol(8), af::Symbol(8)};
-      attr.strides = {af::Symbol(node->GetName() == "load_x" ? 1 : 2), af::Symbol(1)};
+      attr.strides = {af::Symbol(node->GetName() == "load_x" ? 8 : 16), af::Symbol(1)};
     }
   }
 
@@ -2362,23 +2429,29 @@ TEST(ScheduleToAfirTest, OuterStrideDifferenceWithoutInnerBroadcastIsConflict) {
   });
   auto module =
       mlir::afir::bridge::PlanToAfir(context, fusedResult, fusedResult.node_idx_to_scheduled_results[0][0], 0, 0);
-  EXPECT_FALSE(module);
-  EXPECT_NE(message.find("BindingConflict"), std::string::npos) << message;
+  EXPECT_TRUE(module) << message;
+  EXPECT_EQ(message.find("BindingConflict"), std::string::npos) << message;
 }
 
-InnerBroadcastPlanOutcome RunSharedBufferVectorizedPitchPlan(const std::string &name,
-                                                             int64_t secondLogicalOuterStride) {
-  auto graph = af::testing::AscGraphBuilder(name)
-                   .Loops({af::testing::Sym(8), af::testing::Sym(8)})
-                   .Data("x", 0, af::DT_FLOAT16)
-                   .Data("b", 1, af::DT_FLOAT16)
-                   .Load("load_x", "x")
-                   .Load("load_b", "b")
-                   .Store("store_x", "load_x")
-                   .Output("y0", "store_x", 0, af::DT_FLOAT16)
-                   .Store("store_b", "load_b")
-                   .Output("y1", "store_b", 1, af::DT_FLOAT16)
-                   .Build();
+InnerBroadcastPlanOutcome RunSharedBufferVectorizedPitchPlan(const std::string &name, int64_t secondLogicalOuterStride,
+                                                             bool sameTensor = false, bool repeatSecondMember = false) {
+  af::testing::AscGraphBuilder builder(name);
+  builder.Loops({af::testing::Sym(8), af::testing::Sym(8)})
+      .Data("x", 0, af::DT_FLOAT16)
+      .Data("b", 1, af::DT_FLOAT16)
+      .Load("load_x", "x")
+      .Load("load_b", "b")
+      .Store("store_x", "load_x")
+      .Output("y0", "store_x", 0, af::DT_FLOAT16)
+      .Store("store_b", "load_b")
+      .Output("y1", "store_b", 1, af::DT_FLOAT16);
+  if (repeatSecondMember) {
+    builder.Data("c", 2, af::DT_FLOAT16)
+        .Load("load_c", "c")
+        .Store("store_c", "load_c")
+        .Output("y2", "store_c", 2, af::DT_FLOAT16);
+  }
+  auto graph = builder.Build();
   AssignTensorIds(graph);
   graph.SetTilingKey(0);
   for (const auto &node : graph.GetAllNodes()) {
@@ -2392,7 +2465,7 @@ InnerBroadcastPlanOutcome RunSharedBufferVectorizedPitchPlan(const std::string &
       tensor.strides = {af::Symbol(8), af::Symbol(1)};
       continue;
     }
-    if (node->GetName() != "load_x" && node->GetName() != "load_b") {
+    if (node->GetName() != "load_x" && node->GetName() != "load_b" && node->GetName() != "load_c") {
       continue;
     }
     node->attr.sched.axis = {0, 1};
@@ -2403,9 +2476,18 @@ InnerBroadcastPlanOutcome RunSharedBufferVectorizedPitchPlan(const std::string &
       attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
       attr.mem.reuse_id = -1;
       attr.buf.id = 0;
+      if (node->GetName() == "load_b" && sameTensor) {
+        attr.mem.tensor_id = graph.FindNode("load_x")->outputs()[0]->attr.mem.tensor_id;
+      }
+      if (node->GetName() == "load_c") {
+        attr.mem.tensor_id = graph.FindNode("load_b")->outputs()[0]->attr.mem.tensor_id;
+      }
       attr.axis = {0, 1};
       attr.repeats = {af::Symbol(8), af::Symbol(8)};
-      attr.strides = {af::Symbol(node->GetName() == "load_x" ? 8 : secondLogicalOuterStride), af::Symbol(1)};
+      attr.strides = {af::Symbol(node->GetName() == "load_x"   ? 8
+                                 : node->GetName() == "load_c" ? secondLogicalOuterStride + 1
+                                                               : secondLogicalOuterStride),
+                      af::Symbol(1)};
       attr.vectorized_axis = {1};
       attr.vectorized_strides = {af::Symbol(node->GetName() == "load_x" ? 1 : 8)};
     }
@@ -2439,10 +2521,23 @@ TEST(ScheduleToAfirTest, SameLogicalTileWithDifferentVectorizedPitchIsSupported)
   EXPECT_EQ(outcome.message.find("BindingConflict"), std::string::npos) << outcome.message;
 }
 
-// vectorized pitch 不同本身不足以放行：logical stride 也不同时，这是两张不同的逻辑 tile，
-// 不能按“padded / unpadded 视图”复用同一块非队列 buffer。
-TEST(ScheduleToAfirTest, DifferentLogicalTileWithDifferentVectorizedPitchIsConflict) {
+// Logical and vectorized strides remain properties of each independent tensor.
+TEST(ScheduleToAfirTest, IndependentBufferMembersMayHaveDifferentLogicalAndVectorizedPitches) {
   const auto outcome = RunSharedBufferVectorizedPitchPlan("shared_buffer_different_logical_tile", 9);
+  EXPECT_TRUE(outcome.succeeded) << outcome.message;
+  EXPECT_EQ(outcome.message.find("BindingConflict"), std::string::npos) << outcome.message;
+}
+
+// A repeated identity is not an independent allocation member.
+TEST(ScheduleToAfirTest, RepeatedBufferTensorRejectsConflictingLogicalView) {
+  const auto outcome = RunSharedBufferVectorizedPitchPlan("shared_buffer_repeated_tensor", 9, true);
+  EXPECT_FALSE(outcome.succeeded);
+  EXPECT_NE(outcome.message.find("BindingConflict"), std::string::npos) << outcome.message;
+}
+
+// Compare repeated members with their own first view, not only the resource's first tensor.
+TEST(ScheduleToAfirTest, RepeatedSecondBufferMemberRejectsConflictingView) {
+  const auto outcome = RunSharedBufferVectorizedPitchPlan("shared_buffer_second_member_conflict", 9, false, true);
   EXPECT_FALSE(outcome.succeeded);
   EXPECT_NE(outcome.message.find("BindingConflict"), std::string::npos) << outcome.message;
 }

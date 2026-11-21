@@ -59,6 +59,7 @@ inline constexpr llvm::StringLiteral kReductionDomainAttrName = "afir.reduction_
 // afir-scalar-read-sync 在计算算子尚未下降时生成此属性，下降阶段直接读取。
 // 空项表示该输入不满足标注条件，或无法确定同步来源；需要标量读取的实现据此判为不支持。
 // 分析时序和标注范围见 conversion/AFIRToAscendC/AFIRScalarReadSync.cpp 的文件头。
+inline constexpr llvm::StringLiteral kCacheRefreshAxesAttrName = "afir.cache_refresh_axes";
 inline constexpr llvm::StringLiteral kScalarReadSyncAttrName = "afir.scalar_read_sync";
 inline constexpr llvm::StringLiteral kReduceScratchRolesAttr = "afir.scratch_roles";
 inline constexpr llvm::StringLiteral kReduceScratchScopeAttr = "afir.scratch_scope";
