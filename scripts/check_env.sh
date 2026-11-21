@@ -13,11 +13,11 @@
 # graph-autofusion 编译环境依赖检查脚本
 #
 # 仓库:   https://gitcode.com/cann/graph-autofusion
-# 依据:   https://gitcode.com/cann/graph-autofusion/blob/master/doc/build.md
+# 依据:   https://gitcode.com/cann/graph-autofusion/blob/master/docs/zh/build.md
 #         super_kernel/requirements-dev.txt
 # 用法:   bash scripts/check_env.sh
 #
-# 本脚本所有检查项和版本约束严格来源于 docs/build.md 和
+# 本脚本所有检查项和版本约束严格来源于 docs/zh/build.md 和
 # super_kernel/requirements-dev.txt，如文档更新请同步修改。
 # ==============================================================================
 
@@ -34,7 +34,7 @@ WARNING_COUNT=0
 PASS_COUNT=0
 
 # ==============================================================================
-# 版本要求 (严格来源于 docs/build.md)
+# 版本要求 (严格来源于 docs/zh/build.md)
 #
 # build.md 原文:
 #   - Python3 >= 3.8.0
@@ -119,7 +119,7 @@ echo ""
 echo "=================================================================="
 echo "  graph-autofusion 编译环境依赖检查"
 echo "  仓库: https://gitcode.com/cann/graph-autofusion"
-echo "  依据: docs/build.md + super_kernel/requirements-dev.txt"
+echo "  依据: docs/zh/build.md + super_kernel/requirements-dev.txt"
 echo "  时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  系统: $(uname -s) $(uname -m)"
 echo "=================================================================="
@@ -571,7 +571,7 @@ log_info "CPU 核心数: $CPU_CORES"
 echo ""
 echo "=================================================================="
 echo "  graph-autofusion 环境检查完成"
-echo "  依据: docs/build.md + super_kernel/requirements-dev.txt"
+echo "  依据: docs/zh/build.md + super_kernel/requirements-dev.txt"
 echo "=================================================================="
 echo ""
 
@@ -597,7 +597,7 @@ if [ $ERROR_COUNT -gt 0 ]; then
     echo "           ./Ascend-cann-xxx-ops_xxx.run --install"
     echo "    环境: source \${ascend_install_path}/cann/bin/setenv.bash"
     echo ""
-    echo "  详细说明: docs/build.md"
+    echo "  详细说明: docs/zh/build.md"
     echo ""
     exit 1
 elif [ $WARNING_COUNT -gt 0 ]; then

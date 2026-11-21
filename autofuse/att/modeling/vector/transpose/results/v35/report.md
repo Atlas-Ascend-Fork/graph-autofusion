@@ -1,7 +1,7 @@
 # Transpose 模型验证报告
 
 > 本报告基于 [samples.csv](samples.csv) 的实测数据（46 条）。model_predict_cycles 来自
-> [design.md](../../../design.md) 公式（`TransposePerf` 实现）在 stride_count=1、
+> [design.md](../design.md) 公式（`TransposePerf` 实现）在 stride_count=1、
 > gather_count=2、repeat_elm=64 口径下的推导值，再乘以 outer_loop。
 > 误差定义：`error = (predict - measured) / measured * 100%`，正值表示高估。
 

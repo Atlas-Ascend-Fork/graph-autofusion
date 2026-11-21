@@ -1,7 +1,7 @@
 # Transpose Model Validation Report
 
 > This report is based on measured data from [samples.csv](samples.csv) (46 cases). model_predict_cycles
-> come from the closed-form formulas in [design.md](../../../design.md) under the assumptions
+> come from the closed-form formulas in [design.md](../design_en.md) under the assumptions
 > stride_count=1, gather_count=2, repeat_elm=64, multiplied by outer_loop.
 > Error definition: `error = (predict - measured) / measured * 100%`; positive means overestimation.
 

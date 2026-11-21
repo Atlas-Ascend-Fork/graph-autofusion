@@ -1003,17 +1003,25 @@ bool IsStaticGraph(const af::AscGraph &origin_graph) {
 
 // 静态打分用尾轴字节数：尾轴被切分后 repeats.back() 是求解变量（非常量），
 // 优先回溯原始轴求常量；回溯失败或非常量时回退 repeats 尾轴常量。
-bool GetStaticTailAxisSize(const af::AscGraph &nddma_graph, const af::AscNodePtr &nddma_node, uint32_t &size) {
+bool GetStaticTailAxisSize(const af::AscGraph &nddma_graph, const af::AscNodePtr &nddma_node, uint64_t &size) {
   af::Expression tail_dim_expr;
   if (ScheduleUtils::GetOriginTailDimExpr(nddma_graph, nddma_node, tail_dim_expr) && tail_dim_expr.IsConstExpr()) {
     int64_t last_dim = 0;
     if (tail_dim_expr.GetConstValue(last_dim)) {
-      const auto dsize = static_cast<uint32_t>(af::GetSizeByDataType(nddma_node->outputs[0].attr.dtype));
-      size = static_cast<uint32_t>(last_dim) * dsize;
-      return true;
+      const auto dsize = af::GetSizeByDataType(nddma_node->outputs[0].attr.dtype);
+      if (last_dim > 0 && dsize > 0) {
+        size = static_cast<uint64_t>(last_dim) * static_cast<uint64_t>(dsize);
+        return true;
+      }
+      return false;
     }
   }
-  return ScheduleUtils::GetTailAxisDataSize(nddma_node, size);
+  uint32_t fallback_size = 0;
+  if (!ScheduleUtils::GetTailAxisDataSize(nddma_node, fallback_size)) {
+    return false;
+  }
+  size = fallback_size;
+  return true;
 }
 
 std::string GetStaticScoreFunc(const af::AscGraph &nddma_graph, const af::AscNodePtr &nddma_node,
@@ -1023,7 +1031,7 @@ std::string GetStaticScoreFunc(const af::AscGraph &nddma_graph, const af::AscNod
   const int low_score = -1;
   const uint32_t align_bytes = 32;
   const uint32_t large_tail_size = 4096;
-  uint32_t tail_size = 0;
+  uint64_t tail_size = 0;
   const bool has_tail_size = GetStaticTailAxisSize(nddma_graph, nddma_node, tail_size);
   // case1: B8,B16类型时，若尾轴对齐，低分
   if (IsValidDataType(nddma_node) && has_tail_size && tail_size % align_bytes == 0) {
