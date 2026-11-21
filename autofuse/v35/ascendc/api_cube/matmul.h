@@ -61,6 +61,26 @@ constexpr CubeFormat format_y = CubeFormat::NZ;
 #else
 constexpr CubeFormat format_y = CubeFormat::ND;
 #endif
+#ifdef INDUCTOR_TILING_DATA
+#define MMV3_IMPL_CLASS_TRANS(tilingData, tilingGM, transA, transB, workspace, templateClass, ...)   \
+  do {                                                                                               \
+    uint64_t tilingdata_offset =                                                                     \
+        (sizeof(MatMulV3TilingData) > TILINGDATA_OFFSET)                                             \
+            ? 0                                                                                      \
+            : MMV3DivFloor(GetCurrentBlockIdx(), MMV3DivCeil(GetBlockNum(), TILINGDATA_SPLIT_NUM)) * \
+                  TILINGDATA_OFFSET;                                                                 \
+    const MatMulV3TilingData &tilingData = *reinterpret_cast<const MatMulV3TilingData *>(            \
+        reinterpret_cast<const uint8_t *>(&(tilingGM.matmul_tiling_data)) + tilingdata_offset);      \
+    using cType = MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_Y>;                       \
+    using biasType = MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_BIAS>;                 \
+    TPipe pipe;                                                                                      \
+    using aType = MatmulType<AscendC::TPosition::GM, format_x1, DTYPE_X1, transA>;                   \
+    using bType = MatmulType<AscendC::TPosition::GM, format_x2, DTYPE_X2, transB>;                   \
+    templateClass<aType, bType, cType, biasType, __VA_ARGS__> op;                                    \
+    op.Init(aGM, bGM, cGM, biasGM, offsetWGM, workspace, &tilingData, &pipe);                        \
+    op.Process();                                                                                    \
+  } while (0)
+#else
 #define MMV3_IMPL_CLASS_TRANS(tilingData, tilingGM, transA, transB, workspace, templateClass, ...)   \
   do {                                                                                               \
     uint64_t tilingdata_offset =                                                                     \
@@ -78,10 +98,23 @@ constexpr CubeFormat format_y = CubeFormat::ND;
     op.Init(aGM, bGM, cGM, biasGM, offsetWGM, workspace, &tilingData, &pipe);                        \
     op.Process();                                                                                    \
   } while (0)
+#endif
+#ifdef INDUCTOR_TILING_DATA
+template <typename CVTilingT, int8_t API_LEVEL, int8_t A_TRANS, int8_t B_TRANS, int8_t BATCH_MODEL, int8_t MODEL,
+          int8_t FULL_LOAD, int8_t L0C2OUT_MODEL>
+#else
 template <int8_t API_LEVEL, int8_t A_TRANS, int8_t B_TRANS, int8_t BATCH_MODEL, int8_t MODEL, int8_t FULL_LOAD,
           int8_t L0C2OUT_MODEL>
+#endif
+#ifdef INDUCTOR_TILING_DATA
+__aicore__ inline __attribute__((always_inline)) void mat_mul_v3(
+#else
 __global__ __aicore__ void mat_mul_v3(
-#ifdef CV_UB_FUSION
+#endif
+#ifdef INDUCTOR_TILING_DATA
+    GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR offsetWGM, GM_ADDR cGM, GM_ADDR workspaceGM,
+    const CVTilingT &tilingGM)
+#elif defined(CV_UB_FUSION)
     GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR offsetWGM, GM_ADDR cGM, GM_ADDR workspaceGM, GM_ADDR tilingGM,
     AutoFusionVector::Params *param)
 #else
@@ -103,7 +136,7 @@ __global__ __aicore__ void mat_mul_v3(
 #endif
 
   REGISTER_TILING_DEFAULT(MatMulV3TilingDataCopy);
-#if (defined(CV_UB_FUSION) || defined(CV_SAFETY_FUSION))
+#if (defined(INDUCTOR_TILING_DATA) || defined(CV_UB_FUSION) || defined(CV_SAFETY_FUSION))
 #else
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 #endif

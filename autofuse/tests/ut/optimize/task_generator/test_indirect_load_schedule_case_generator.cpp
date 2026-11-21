@@ -2329,6 +2329,53 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceAllowsElementwiseFanoutToT
   EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
 }
 
+// R-before-gather 形态下归约结果同时供给物化 Store 与并行 Elementwise 链（如
+// SliceEmbeddingReduce 用例中 max 结果既作为独立输出保留又被 add 树消费）：
+// SK 消费子图走通用调度，候选必须保留；SIMD/SIMT 仍按既有单消费者约束拒绝。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SkKeepsCandidateWhenReduceFansOutToStoreAndElementwise) {
+  auto graph = BuildPostReduceGraph("RRR", true);
+  const auto sum = graph.FindNode("sum");
+  ASSERT_NE(sum, nullptr);
+  const auto attr = sum->outputs[0].attr;
+  af::ascir_op::Abs parallel_abs("parallel_branch_abs");
+  SetVectorApi(parallel_abs);
+  SetNodeView(parallel_abs, af::DT_FLOAT16, attr.axis, attr.repeats, attr.strides);
+  graph.AddNode(parallel_abs);
+  af::ascir_op::Store parallel_store("parallel_branch_store");
+  parallel_store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  SetNodeView(parallel_store, af::DT_FLOAT16, attr.axis, attr.repeats, attr.strides);
+  graph.AddNode(parallel_store);
+  af::ascir_op::Output parallel_output("parallel_branch_output");
+  parallel_output.ir_attr.SetIndex(1);
+  SetNodeView(parallel_output, af::DT_FLOAT16, attr.axis, attr.repeats, attr.strides);
+  graph.AddNode(parallel_output);
+  const auto abs_node = graph.FindNode("parallel_branch_abs");
+  const auto store_node = graph.FindNode("parallel_branch_store");
+  const auto output_node = graph.FindNode("parallel_branch_output");
+  ASSERT_NE(abs_node, nullptr);
+  ASSERT_NE(store_node, nullptr);
+  ASSERT_NE(output_node, nullptr);
+  ASSERT_EQ(af::GraphUtils::AddEdge(sum->GetOutDataAnchor(0), abs_node->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(abs_node->GetOutDataAnchor(0), store_node->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(store_node->GetOutDataAnchor(0), output_node->GetInDataAnchor(0)),
+            af::GRAPH_SUCCESS);
+  ASSERT_EQ(sum->GetOutDataNodesSize(), 2UL);
+
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd), graphs.end());
+  EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
+  const auto sk_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK);
+  ASSERT_NE(sk_iter, graphs.end());
+  // 双直连分支必须都在 SK 候选图中存活：物化 Store（含独立 Output）与 Elementwise 链各自终止于 Store。
+  EXPECT_NE(sk_iter->FindNode("store"), nullptr);
+  EXPECT_NE(sk_iter->FindNode("parallel_branch_abs"), nullptr);
+  EXPECT_NE(sk_iter->FindNode("parallel_branch_store"), nullptr);
+  EXPECT_NE(sk_iter->FindNode("parallel_branch_output"), nullptr);
+}
+
 TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceSkipsCommonZeroStrideAxes) {
   for (const std::string suffix : {"RBR", "BRA"}) {
     auto graph = BuildPostReduceGraph(suffix);

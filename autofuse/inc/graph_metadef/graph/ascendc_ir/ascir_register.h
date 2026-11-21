@@ -31,6 +31,7 @@ class AscirRegister {
   AscirRegister &DynamicInput(const std::string &input_name);
   AscirRegister &DynamicInput(const char_t *input_name, const char_t *datatype_symbol);
   AscirRegister &OptionalInput(const std::string &input_name);
+  AscirRegister &OptionalInput(const char_t *input_name, const char_t *datatype_symbol);
   AscirRegister &Outputs(std::vector<ge::AscendString> &&output_names);
   AscirRegister &Output(const char_t *output_name, const char_t *datatype_symbol);
   AscirRegister &DynamicOutput(const std::string &output_name);

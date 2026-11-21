@@ -9,6 +9,7 @@
  */
 
 #include "dtype_consistency.h"
+#include "v35/ascir/ascir_codegen_v2.h"
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
 #include "common_utils.h"
@@ -120,7 +121,12 @@ Status DtypeConsistency::CollectDtypeRequirements(af::AscGraph &graph,
     auto codegen_impl = ascgen_utils::GetAscIrCodegenImpl(node->GetType());
     GE_ASSERT_NOTNULL(codegen_impl, "Cannot find impl for ir type:[%s].", node->GetTypePtr());
     auto [input_dtypes, output_dtypes] = codegen_impl->GetConversionDtype(*node);
-    requirements.push_back({node, input_dtypes, output_dtypes, codegen_impl->GetOutputConversionPath(*node)});
+    auto *codegen_impl_v2 = dynamic_cast<af::ascir::AscIrCodegenV2 *>(codegen_impl.get());
+    std::vector<std::vector<af::DataType>> output_cast_paths;
+    if (codegen_impl_v2 != nullptr) {
+      output_cast_paths = codegen_impl_v2->GetOutputConversionPath(*node);
+    }
+    requirements.push_back({node, input_dtypes, output_dtypes, output_cast_paths});
   }
   return af::SUCCESS;
 }

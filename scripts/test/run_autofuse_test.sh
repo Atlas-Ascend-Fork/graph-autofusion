@@ -862,6 +862,7 @@ codegen_e2e_st() {
                         reduce_prod_float_store_test_e2e_v2 \
                         reduce_prod_int32_1025_store_test_e2e_v2 \
                         reduce_prod_int64_1025_store_test_e2e_v2 \
+                        reduce_prod_int64_129800_store_test_e2e_v2 \
                         reduce_prod_float_1025_store_test_e2e_v2 \
                         reduce_prod_int8_ra_store_test_e2e_v2 \
                         load_lshift_store_test_e2e_v2 \
@@ -1193,6 +1194,16 @@ build_backend() {
                       rand_store_test_e2e_v2 \
                       randn_store_test_e2e_v2 \
                       randint_store_test_e2e_v2 \
+                      rand_seed_store_test_u32_e2e_v2 \
+                      rand_seed_store_test_i32_e2e_v2 \
+                      rand_seed_store_test_fp16_e2e_v2 \
+                      rand_seed_store_test_bf16_e2e_v2 \
+                      rand_seed_store_test_fp32_e2e_v2 \
+                      randn_seed_store_test_u32_e2e_v2 \
+                      randn_seed_store_test_i32_e2e_v2 \
+                      randn_seed_store_test_fp16_e2e_v2 \
+                      randn_seed_store_test_bf16_e2e_v2 \
+                      randn_seed_store_test_fp32_e2e_v2 \
                       load_cast_brc_realign_test_e2e_v2"
   fi
   if [[ "X${v35_mode}" = "Xv35" && -n "${v35_shard}" ]]; then

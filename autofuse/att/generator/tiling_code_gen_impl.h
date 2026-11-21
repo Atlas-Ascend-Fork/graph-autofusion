@@ -105,7 +105,8 @@ class TilingCodeGenImpl {
 
   // schedule group相关
   af::Status ObtainInnerParams(std::map<std::string, std::set<std::string>> &hardware_map,
-                               FusedGraphNamespaceMap &namespace_map);
+                               FusedGraphNamespaceMap &namespace_map,
+                               std::map<std::string, std::set<std::string>> *input_vars = nullptr);
   // 生成sche group的tiling函数初始化部分
   af::Status GenGetTilingForAllInitLines(bool pgo = false);
   af::Status GenGetResultSummary(const size_t asc_graph_id);
@@ -146,7 +147,7 @@ class TilingCodeGenImpl {
   void GenUpdateWorkspace(const size_t asc_graph_id);
   void GenWorkspaceOffsetHelpers();
   void GenWorkspaceOffsetReset(const std::string &tiling_data_name);
-  void GenWorkspaceOffsetFinalize(const std::string &tiling_data_name);
+  void GenWorkspaceOffsetFinalize(const std::string &tiling_data_name, bool check_capacity = false);
   // 生成DoGroupTiling公共函数，支持首次Tiling和二次Tiling
   af::Status GenDoGroupTilingFunction(const size_t asc_graph_id, const size_t impl_graph_id,
                                       const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
@@ -165,8 +166,10 @@ class TilingCodeGenImpl {
 
   void GenScheduleResultGetTilingCalling(const std::string &index, const std::string &ident = "");
   af::Status GenGetAllSchedulesResults(const AscGraphNamepspaceMap &namespace_map);
+  af::Status GenPGOCollectWorkspaceSizes(size_t asc_graph_id, size_t impl_graph_id);
   void GenPGOUpdateTilingInfo(const size_t asc_graph_id, const size_t impl_graph_id,
-                              const std::map<size_t, std::pair<std::string, std::string>> &graph_info);
+                              const std::map<size_t, std::pair<std::string, std::string>> &graph_info,
+                              const std::string &on_workspace_failure);
   void GenFillOtherGroupsGetTiling(const size_t asc_graph_id, const size_t impl_graph_id,
                                    const std::map<size_t, std::pair<std::string, std::string>> &graph_info,
                                    const std::pair<size_t, std::pair<std::string, std::string>> &group_info,
@@ -192,7 +195,8 @@ class TilingCodeGenImpl {
   std::string GenLaunchLikeInputOutputDef(bool is_define = true);
   std::string GenPgoTensorArgsDef(bool is_define = true) const;
   void GenPGOMultiGroupBlockDimList(const FusedGraphNamespaceMap &namespace_map, std::string &block_dim_list_arg);
-  af::Status GenCastReuseTilingDataCode(const ReuseScheduleGroupInfo &reuse_info, const ReuseScheduleGroupInfo &info);
+  af::Status GenCastReuseTilingDataCode(const ReuseScheduleGroupInfo &reuse_info, const ReuseScheduleGroupInfo &info,
+                                        bool map_explicit_case = false);
   bool IsScheduleResultEnableParallel(const size_t asc_graph_id, const size_t impl_graph_id) const;
   bool GenUpdateCurPerfAndBlockByGroupIfNeeded(const size_t asc_graph_id,
                                                const AscGraphNamepspaceMap &asc_graph_map) const;
@@ -248,6 +252,7 @@ class TilingCodeGenImpl {
   // 生成ub/corenum相关的tiling的上限值
   void InitTilingUpperBound(const std::vector<Expr> &hardware_args, const ArgsManager &args_manager,
                             const HardwareDef &hardware_def, std::map<std::string, bool> &visited);
+  bool IsMulticoreUBTradeoffEnabled(const ModelInfo &model_info) const;
   af::Status GenSmallShapeTiling(const ModelInfo &model_info);
   // 生成求解器的基类
   virtual af::Status GenSolverBaseClass() = 0;
@@ -294,7 +299,8 @@ class TilingCodeGenImpl {
                                const uint32_t group_index, const size_t asc_graph_id, const size_t impl_graph_id);
   void GenPGOByCoreNumFunctionHead(size_t impl_graph_id);
   bool TryGenPGOByCoreNumReuseTiling(size_t asc_graph_id, size_t impl_graph_id, size_t group_id, uint32_t group_index);
-  void GenPGOByCoreNumGetAllSchedulesResults(const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map);
+  void GenPGOByCoreNumGetAllSchedulesResults(const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map,
+                                             const std::map<std::string, std::set<std::string>> &input_vars);
   // 该函数用于构造tiling data的set与get内容
   virtual af::Status GenExtraParamCode(const ModelInfo &model_info, std::string &pass_code);
   virtual af::Status GenGetSetTilingImpl(const ModelInfo &model_info);
@@ -488,6 +494,8 @@ class TilingCodeGenImpl {
   af::Status GenReuseGroupTilingWrapperGetTiling(
       const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
       std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter);
+  af::Status GenRestoreReuseTilingKey(const ReuseScheduleGroupInfo &primary, const ReuseScheduleGroupInfo &current);
+  void GenCopyPgoReuseSelection();
   // 复用组委托主组 GetTiling 只会注册主组的 workspace id，需按选中的 tiling key 补注册本组 id。
   af::Status GenReuseGroupOwnWorkspaceRegistration();
   af::Status GenReuseGroupTilingWrapperGetPerf(

@@ -842,6 +842,41 @@ SubAxis *FindAAxis(NodeInfo &node_info) {
 | ATT | `att/util/att_utils.cpp` | `CollectReduceAxisNames` |
 | ATT | `att/gen_model_info/expr_gen/generate_tiling_expr.cpp` | `FindAAxis` |
 
+## Rand/Randn 算子说明
+
+### 1. 输入与输出契约
+
+`Rand` 与 `Randn` 在 v35 路径下新增可选输入 `seed` 与 `offset`，用于替代旧版固定随机流：
+
+- `seed`：`int64`，可为编译期标量、运行时标量或逐元素张量，主要路径为标量广播；
+- `offset`：`int32`，必须为逐元素张量，表示输出元素的线性下标，例如 `rand(2,3)` 对应 `[0,1,2,3,4,5]`；
+- 两输入必须同时连接或同时不连接，只连接其中一个会被 `IsNodeValid` 拒绝。
+
+两算子的输出 dtype 完全一致，新旧签名均支持：
+
+| 签名 | Rand 路径 | Randn 路径 |
+|------|-----------|------------|
+| 旧签名，0 输入 | 固定 key/counter 的 raw-word 或 uniform SIMT 路径 | 固定 key/counter 的 raw-word 或 normal SIMT 路径 |
+| 新签名，seed+offset | 逐元素 SIMT uniform 路径 | 逐元素 SIMT normal 路径 |
+
+输出 dtype 支持范围为 `uint32`、`int32`、`fp16`、`bf16`、`fp32`。新旧签名均不支持 `fp64`。
+
+### 2. 旧图兼容与 dtype 语义
+
+- 未连接 `seed`/`offset` 的旧图保持旧签名，`inputs()` 仍为空，`StartNode` 语义不变；
+- 连接 `seed`/`offset` 后走新签名，`seed` 使用独立 `int64` sym，`offset` 使用独立 `int32` sym，不与输出 dtype sym 共用；
+- Python 前端的 `Rand`/`Randn` 增加 `seed=None, offset=None` 可选参数，未传参时不连接输入锚点，保持旧图兼容；
+- 新旧签名的 dtype 校验共用同一实现，避免 Rand 与 Randn 行为不一致。
+
+### 3. 测试与验证范围
+
+E2E 用例对 Rand 与 Randn 使用相同 dtype 变体集合，覆盖 `uint32`、`int32`、`fp16`、`bf16`、`fp32`，并验证：
+
+1. 未连接 `seed`/`offset` 时固定随机流结果不变；
+2. 连接 `seed`/`offset` 时逐元素随机流与 golden 结果一致；
+3. 只连接一个可选输入时图校验失败；
+4. 旧图与新图在 dtype 推导、序列化和 Python 前端路径上均保持兼容。
+
 ## 相关链接
 
 - 返回 [AutoFuse 架构介绍](../../introduction/architecture.md)

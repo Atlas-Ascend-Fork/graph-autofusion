@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <memory>
 #include "ascir_ops.h"
+#include "v35/ascir/ascir_codegen_v2.h"
 #include "codegen_kernel.h"
 #include "utils/api_call_factory.h"
 #include "../reg_api_call/reg_reduce_api_call.h"
@@ -1327,7 +1328,9 @@ TEST_F(RegReduceApicallTest, ReduceProdIntegerDtypeConversions) {
     ASSERT_NE(codegen_impl, nullptr);
 
     const auto [input_dtypes, output_dtypes] = codegen_impl->GetConversionDtype(*prod_node);
-    const auto output_cast_paths = codegen_impl->GetOutputConversionPath(*prod_node);
+    auto *codegen_impl_v2 = dynamic_cast<af::ascir::AscIrCodegenV2 *>(codegen_impl.get());
+    ASSERT_NE(codegen_impl_v2, nullptr);
+    const auto output_cast_paths = codegen_impl_v2->GetOutputConversionPath(*prod_node);
     ASSERT_EQ(input_dtypes.size(), 1U);
     ASSERT_EQ(output_dtypes.size(), 1U);
     EXPECT_EQ(input_dtypes[0], exec_dtype);

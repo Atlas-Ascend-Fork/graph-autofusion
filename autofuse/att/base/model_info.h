@@ -329,6 +329,7 @@ struct ModelInfo {
   std::vector<Expr> sizes{};                  // 图原始Sizes信息
   vector<CacheLineConfig> cache_line_config;  // ub->gm/gm->ub节点的cache配置信息
   const TilingScheduleConfigTable *tiling_schedule_config_table{nullptr};
+  bool enable_matmul_m_common_tradeoff{false};
   TilingScheduleConfig tiling_schedule_config;            // Model 级别的 Tiling 调度配置
   bool is_enable_equal_order_tiling{false};               // 使能等order tiling算法
   std::vector<RuntimeReorderRule> runtime_reorder_rules;  // 运行时按shape调整单模板内轴优先级

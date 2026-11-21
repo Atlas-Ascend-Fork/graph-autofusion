@@ -184,11 +184,6 @@ class AscIrCodegen {
     return conversion_dtype;
   }
 
-  virtual std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) {
-    (void)node;
-    return {};
-  }
-
   virtual bool IsNodeValid(const AscNode &node) const {
     (void)node;
     return true;
@@ -198,6 +193,10 @@ class AscIrCodegen {
   virtual int64_t GetSimtDcacheSize(const AscNode &node) const {
     (void)node;
     return 0;
+  }
+
+  virtual std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, [[maybe_unused]] bool is_cv_fusion) const {
+    return LoadApiHeaderFiles(is_dynamic);
   }
 };
 
@@ -249,6 +248,7 @@ class AscIrDef {
   void Init(const char *type, const char *def_file_path, int64_t line) const;
 
   const std::vector<std::pair<std::string, IrInputType>> &GetInputDefs() const;
+  const std::string &GetInputIrSymName(const std::string &ir_name) const;
   const std::vector<std::pair<std::string, IrOutputType>> &GetOutputDefs() const;
   bool HasDynamicOutput() const;
   void AppendInput(const string &name, IrInputType type) const;

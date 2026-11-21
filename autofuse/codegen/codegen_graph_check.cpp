@@ -116,6 +116,12 @@ bool CollectInputDtypes(const ascir::NodeView &node, std::vector<ge::DataType> &
         GE_ASSERT_TRUE(ProcessDynamicInput(node, index, count, input_dtypes), "ProcessDynamicInput failed, node = %s",
                        node->GetNamePtr());
         break;
+      case af::IrInputType::kIrInputOptional:
+        if (count != 0U) {
+          GE_ASSERT_TRUE(ProcessRequiredInput(node, index, count, input_dtypes),
+                         "ProcessRequiredInput failed, node = %s", node->GetNamePtr());
+        }
+        break;
       default:
         GELOGE(af::FAILED, "%s %s unsupported input type %ld at ir index %zu", op_desc->GetNamePtr(),
                op_desc->GetTypePtr(), static_cast<int64_t>(ir_input_type), ir_input_index);

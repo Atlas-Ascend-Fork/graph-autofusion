@@ -52,6 +52,7 @@ struct ScheduleTask {
   // AutoScheduler 据此将其并入对应组 runtime_shape_vars 保活(结构体字段存在 + 运行期值填充),
   // 否则 host tiling 侧编译报 no member。
   std::vector<SizeVarSet> score_group_shape_vars{};
+  std::unordered_set<size_t> matmul_m_common_group_ids{};
 };
 
 class Optimizer {

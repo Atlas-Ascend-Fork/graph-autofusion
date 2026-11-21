@@ -460,6 +460,7 @@ struct TilingFuncCall {
 };
 
 struct CubeTilingOptions {
+  std::vector<ascir::TensorId> input_tensor_ids;
   bool has_b_view{false};
   bool is_batch{false};
   bool is_cv_fuse{false};
@@ -653,6 +654,21 @@ class Kernel {
                                     std::unordered_set<const std::string *> &kernel_files);
   Status AppendWorkspaceTensorInit(std::stringstream &ss, const std::string &workspace_buffer_arg_override) const;
   Status GenL2CacheHintCode(std::stringstream &ss) const;
+  struct CvKernelContext;
+  static Status AppendCvKernelTilingPrologue(CvKernelContext &ctx);
+  static Status GenInductorFixpipKernel(CvKernelContext &ctx, bool has_b_view);
+  static Status AppendCvKernelFusionBranch(CvKernelContext &ctx);
+  static Status GenCvKernelCommonCase(CvKernelContext &ctx, size_t graph_id, size_t result_id);
+  static Status PrepareCvKernelImpl(Kernel &kernel, CvKernelContext &ctx, const ascir::ImplGraph &graph,
+                                    ascir::CubeTemplateType cv_fusion_type, size_t tiling_case_id,
+                                    bool enable_group_parallel);
+  static Status GenCvKernelImpl(CvKernelContext &ctx, size_t graph_id, size_t result_id, size_t group_id,
+                                size_t impl_id, bool &vector_no_db_flag, bool &enable_parallel_compile,
+                                std::vector<std::string> &func_calls);
+  static Status CollectCvKernelGroupCalls(CvKernelContext &ctx, size_t graph_id, size_t result_id,
+                                          std::vector<std::vector<std::string>> &per_group_func_calls,
+                                          bool &enable_parallel_compile);
+  static Status GenCvKernelScheduledResult(CvKernelContext &ctx, size_t graph_id, size_t result_id);
   static Status GenCVKernelFuncWithMulGroup(const ascir::FusedScheduledResult &fused_schedule_result,
                                             const CodegenConfig &config, std::stringstream &ss, std::stringstream &ss1,
                                             bool use_list_tensor);

@@ -3395,12 +3395,11 @@ class MulAscIrCodegenImplV2 : public AscIrCodegenV2 {
     if (node_outputs().empty() || node_outputs[0].attr.dtype != ge::DataType::DT_INT8) {
       return {};
     }
-    const auto first_input = node.GetInDataAnchor(0);
-    const auto first_input_owner =
-        first_input == nullptr || first_input->GetPeerOutAnchor() == nullptr
-            ? nullptr
-            : std::dynamic_pointer_cast<AscNode>(first_input->GetPeerOutAnchor()->GetOwnerNode());
-    if (first_input_owner == nullptr || first_input_owner->GetType() != "Prod") {
+    const auto input_nodes = node.GetInDataNodes();
+    const auto producer = std::find_if(input_nodes.begin(), input_nodes.end(), [](const NodePtr &input_node) {
+      return input_node != nullptr && input_node->GetType() == "Prod";
+    });
+    if (producer == input_nodes.end()) {
       return {};
     }
     return {{ge::DataType::DT_UINT8, ge::DataType::DT_INT8}};
@@ -5386,6 +5385,18 @@ class MatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
               "matmul.h"};
     }
   }
+  std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, bool is_cv_fusion) const override {
+    if (is_cv_fusion) {
+      return LoadApiHeaderFiles(is_dynamic);
+    }
+    return {"mat_mul_tiling_key.h",
+            "matmul_include_headers.h",
+            "mat_mul_tensor_include_headers.h",
+            "mat_mul_pingpong_basic_cmct.h",
+            "mat_mul_tensor_common_scheduler.h",
+            "mat_mul_tensor_common.h",
+            "matmul.h"};
+  }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "utils/std/algorithm.h",
@@ -5428,6 +5439,18 @@ class BatchMatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
               "mat_mul_pingpong_tensor_cv.h",     "mat_mul_tensor_common_scheduler.h",
               "mat_mul_tensor_common.h",          "batch_matmul.h"};
     }
+  }
+  std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, bool is_cv_fusion) const override {
+    if (is_cv_fusion) {
+      return LoadApiHeaderFiles(is_dynamic);
+    }
+    return {"batch_mat_mul_v3_tiling_key.h",
+            "batch_matmul_include_headers.h",
+            "mat_mul_tensor_include_headers.h",
+            "mat_mul_pingpong_basic_cmct.h",
+            "mat_mul_tensor_common_scheduler.h",
+            "mat_mul_tensor_common.h",
+            "batch_matmul.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -5881,6 +5904,64 @@ class SoftmaxAscIrCodegenImplV2 : public AscIrCodegenV2 {
 };
 
 /*********************************************************************************/
+class RandSeedOffsetAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] int64_t GetSimtDcacheSize(const AscNode &node) const override {
+    return node.GetInDataNodes().empty() ? 0 : kSimtDcacheSize;
+  }
+
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    if (node.GetInDataNodes().empty()) {
+      return {};
+    }
+    return CalcVoidTmpSizeV2(node);
+  }
+
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "RandSeedOffsetApiCall";
+  }
+
+  [[nodiscard]] std::string GetApiName() const override {
+    return "RandSeedOffset";
+  }
+
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"random_reg_base.h"};
+  }
+
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {"simt_api/cpp/kernel_simt_intf.h", "adv_api/math/philox.h"};
+  }
+
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    AscNodeInputs inputs = node.inputs;
+    const auto input_num = inputs.Size();
+    GE_ASSERT_TRUE(input_num == 0U || input_num == 2U, "Node %s[%s] seed/offset must be both connected or both absent",
+                   node.GetTypePtr(), node.GetNamePtr());
+    const auto output_dtype = GetSimtOutputDtype(node);
+    if (input_num == 2U) {
+      const std::set<ge::DataType> supported_dtypes = {DT_UINT32, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_BF16};
+      GE_ASSERT_TRUE(supported_dtypes.find(output_dtype) != supported_dtypes.end(),
+                     "Node %s[%s] unsupported dtype %d in seeded signature, fp64 is not supported yet, see "
+                     "docs/zh/autofuse/design/features/rand.md",
+                     node.GetTypePtr(), node.GetNamePtr(), static_cast<int32_t>(output_dtype));
+      GE_ASSERT_TRUE(inputs[0].attr.dtype == DT_INT64, "Node %s[%s] seed dtype must be int64", node.GetTypePtr(),
+                     node.GetNamePtr());
+      GE_ASSERT_TRUE(inputs[1].attr.dtype == DT_INT32, "Node %s[%s] offset dtype must be int32", node.GetTypePtr(),
+                     node.GetNamePtr());
+      GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node, {true, {0}}),
+                        "Node %s[%s] check shape consistency failed", node.GetTypePtr(), node.GetNamePtr());
+    } else {
+      const std::set<ge::DataType> supported_dtypes = {DT_UINT32, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_BF16};
+      GE_ASSERT_TRUE(supported_dtypes.find(output_dtype) != supported_dtypes.end(),
+                     "Node %s[%s] unsupported dtype %d in legacy signature, fp64 is not supported yet, see "
+                     "docs/zh/autofuse/design/features/rand.md",
+                     node.GetTypePtr(), node.GetNamePtr(), static_cast<int32_t>(output_dtype));
+    }
+    return true;
+  }
+};
+
 class RandAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
   [[nodiscard]] std::string GetApiCallName() const override {

@@ -6,6 +6,7 @@ set(BACKEND_E2E_RUNTIME_LD_LIBRARY_PATH
 function(do_backend_e2e_st_test)
     set(one_value_arg
         WORKDIR # Workdir
+        SUFFIX
         )
     set(mul_value_arg
         CODEGEN # Codegen library source file
@@ -19,7 +20,11 @@ function(do_backend_e2e_st_test)
         )
 
     set(TEST_NAME ${ARGV0})
+    if(NOT DEFINED ARG_SUFFIX)
+        set(ARG_SUFFIX "")
+    endif()
     cmake_parse_arguments(PARSE_ARGV 1 ARG "${flag_arg}" "${one_value_arg}" "${mul_value_arg}")
+    set(TEST_NAME ${TEST_NAME}${ARG_SUFFIX})
 
     if(NOT ARG_TILING_KEY)
         set(ARG_TILING_KEY 0)

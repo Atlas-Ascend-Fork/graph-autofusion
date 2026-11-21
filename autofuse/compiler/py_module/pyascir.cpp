@@ -895,24 +895,9 @@ class OpsOperator {
         return -1;
       }
     }
-    // Ascir only need start node to pass graph as in_param
-    if (ops_type.input_defs.empty()) {
-      PY_ASSERT_NOTNULL(graph_object);
-      if (PyObject_IsInstance(graph_object, ge::PtrToPtr<PyTypeObject, PyObject>(&pyascir::HintGraph::type)) != 0) {
-        auto graph = ge::PtrToPtr<PyObject, pyascir::HintGraph::Object>(graph_object);
-        PY_ASSERT_NOTNULL(graph->graph, "The input param graph is nullptr.");
-        graph->graph->AddNode(*op);
-      } else if (PyObject_IsInstance(graph_object, ge::PtrToPtr<PyTypeObject, PyObject>(&pyascir::FusedGraph::type)) !=
-                 0) {
-        auto graph = ge::PtrToPtr<PyObject, pyascir::FusedGraph::Object>(graph_object);
-        PY_ASSERT_NOTNULL(graph->graph, "The input param graph is nullptr.");
-        auto node = graph->graph->AddNode(af::OpDescUtils::GetOpDescFromOperator(*op));
-        af::NodeUtilsEx::SetNodeToOperator(*op, node);
-      } else {
-        PyErr_SetString(PyExc_TypeError, "The start node requires the graph to be passed in as an input parameter.");
-        delete op;
-        return -1;
-      }
+    if (!AttachStartNodeToGraph(ops_type, graph_object, op)) {
+      delete op;
+      return -1;
     }
     auto self = ge::PtrToPtr<PyObject, Object>(self_pyobject);
     self->op_base.name = PyUnicode_FromString(name_ptr);
@@ -932,17 +917,61 @@ class OpsOperator {
       }
       return 0;
     }
+    if (!SetupFixedOutputs(self, op, ops_type, name_ptr, op_type.GetString())) {
+      delete op;
+      self->op = nullptr;
+      self->op_base.op = nullptr;
+      self->attr = Py_None;
+      return -1;
+    }
+    return 0;
+  }
+
+  static bool IsStartNode(const OpsOperatorTypeObject &ops_type) {
+    return ops_type.input_defs.empty() ||
+           std::all_of(ops_type.input_defs.begin(), ops_type.input_defs.end(),
+                       [](const auto &input_def) { return input_def.second == af::kIrInputOptional; });
+  }
+
+  static bool AttachStartNodeToGraph(const OpsOperatorTypeObject &ops_type, PyObject *graph_object, OpType *op) {
+    if (!IsStartNode(ops_type)) {
+      return true;
+    }
+    PY_ASSERT_NOTNULL(graph_object);
+    const auto is_hint_graph =
+        PyObject_IsInstance(graph_object, ge::PtrToPtr<PyTypeObject, PyObject>(&pyascir::HintGraph::type));
+    if (is_hint_graph != 0) {
+      auto graph = ge::PtrToPtr<PyObject, pyascir::HintGraph::Object>(graph_object);
+      PY_ASSERT_NOTNULL(graph->graph, "The input param graph is nullptr.");
+      graph->graph->AddNode(*op);
+      return true;
+    }
+    const auto is_fused_graph =
+        PyObject_IsInstance(graph_object, ge::PtrToPtr<PyTypeObject, PyObject>(&pyascir::FusedGraph::type));
+    if (is_fused_graph != 0) {
+      auto graph = ge::PtrToPtr<PyObject, pyascir::FusedGraph::Object>(graph_object);
+      PY_ASSERT_NOTNULL(graph->graph, "The input param graph is nullptr.");
+      auto node = graph->graph->AddNode(af::OpDescUtils::GetOpDescFromOperator(*op));
+      af::NodeUtilsEx::SetNodeToOperator(*op, node);
+      return true;
+    }
+    PyErr_SetString(PyExc_TypeError, "The start node requires the graph to be passed in as an input parameter.");
+    return false;
+  }
+
+  static bool SetupFixedOutputs(Object *self, OpType *op, const OpsOperatorTypeObject &ops_type, const char *name,
+                                const char *op_type) {
     for (size_t i = 0UL; i < op->GetOutputsSize(); ++i) {
       PY_ASSERT(i < ops_type.output_defs.size());
       PY_ASSERT(ops_type.output_defs[i].second != af::kIrOutputDynamic,
-                "Op %s's %s output idx %zu is dynamic but is not inited", name_ptr, op_type.GetString(), i);
+                "Op %s's %s output idx %zu is dynamic but is not inited", name, op_type, i);
       auto attr_group = af::AscTensorAttr::GetTensorAttrPtr(op, i);
       PY_ASSERT_NOTNULL(attr_group);
       auto output = OpsOperatorOutput::FromOp(i, op, *attr_group);
       PY_ASSERT_NOTNULL(output);
       self->input_outputs[self->input_output_num++] = output;
     }
-    return 0;
+    return true;
   }
 
   static OpsOperatorTypeObject CreateTypeObject() {

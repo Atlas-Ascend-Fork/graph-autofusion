@@ -2681,8 +2681,38 @@ TEST(IndirectLoadApiCallTest, GenerateSimtPostReduceKeepsParallelStoreChain) {
   EXPECT_NE(definition.find("__gm__ half *output"), std::string::npos);
   EXPECT_NE(definition.find("__ubuf__ half *output"), std::string::npos);
   EXPECT_NE(definition.find("[output_index] = outputs.output"), std::string::npos);
-  EXPECT_NE(definition.find("targets.output1[(local_index / ("), std::string::npos);
+  // [后置 Reduce 行对齐写回加速] 动态行宽不再直译为软件除模：商经 Context 预算的
+  // magic/shift 乘移除法（local_target_div_N）求出，索引按「商 * 行距 + 余数」展开。
+  EXPECT_NE(definition.find("targets.output1[local_target_div_0 * KernelUtils::SizeAlign("), std::string::npos);
   EXPECT_NE(definition.find("KernelUtils::SizeAlign"), std::string::npos);
+}
+
+TEST(IndirectLoadApiCallTest, GeneratesPostReduceStoreRowAlignViaRuntimeMagicDiv) {
+  // [后置 Reduce 行对齐写回加速] 动态 shape（符号行宽）下逐元素
+  // (local_index / inner) * SizeAlign(inner, 8) + local_index % inner 直译是软件除模
+  // （AIV 无硬件除法器），与融合算子规模无关地拖慢 Store（同图定/动态实测 49us/68us）。
+  // 行尾补齐量 pad 由 Context 初始化处预算一次，对齐判定由调用点完成；非对齐形态才走
+  // magic/shift 乘移除法，取余展开为 local_index - 商 * inner。
+  ILTestGraph g("simt_post_reduce_magic_div");
+  std::string definition;
+  GenerateSimtPostReduceFuncDefinition(g, definition);
+
+  // 定义段：Context 尾部追加行宽 magic/shift 字段（64 位 body 与 32 位 body 各一套，
+  // 聚合初始化零值兜底）与行尾补齐量 pad。
+  EXPECT_NE(definition.find("uint64_t output_inner_div_magic;"), std::string::npos);
+  EXPECT_NE(definition.find("uint64_t output_inner_div_shift;"), std::string::npos);
+  EXPECT_NE(definition.find("uint64_t output_inner_div_magic32;"), std::string::npos);
+  EXPECT_NE(definition.find("uint64_t output_inner_div_shift32;"), std::string::npos);
+  EXPECT_NE(definition.find("uint64_t output_inner_pad;"), std::string::npos);
+  // 定义段：对齐判定以模板布尔参数下发到 body（调用点选择实例），body 内零逐元素分支。
+  EXPECT_NE(definition.find("template <bool kAlignedLocalRow>"), std::string::npos);
+  EXPECT_NE(definition.find("if constexpr (kAlignedLocalRow) {"), std::string::npos);
+  EXPECT_NE(definition.find("targets.output0[local_index] = outputs.output0;"), std::string::npos);
+  // 定义段：非对齐形态不再直译运行期除模；商经魔法乘移只求一次（取余复用商变量）。
+  EXPECT_EQ(definition.find("local_index % (static_cast<uint32_t>(context.output_inner_size))"), std::string::npos);
+  EXPECT_EQ(definition.find("local_index % (static_cast<uint64_t>(context.output_inner_size))"), std::string::npos);
+  EXPECT_NE(definition.find("Simt::UintDiv("), std::string::npos);
+  EXPECT_NE(definition.find("local_target_div_0 * KernelUtils::SizeAlign("), std::string::npos);
 }
 
 // ==================== SIMT post-reduce Init =============

@@ -40,6 +40,112 @@ ascir.utils.set_platform("2201", 1, 245760)
 # pyascir 构图能力暂不支持
 class TestAscir:
     @staticmethod
+    def test_rand_and_randn_seed_offset_api():
+        import pyautofuse
+
+        origin_pyautofuse = sys.modules.get("autofuse.pyautofuse")
+        sys.modules["autofuse.pyautofuse"] = pyautofuse
+        ascir_mod = pyautofuse.ascir
+        ascir_mod.utils.set_platform("3510", 1, 245760)
+        try:
+            source_path = os.path.abspath(
+                os.path.join(PYF_PATH, "../../..", "compiler", "python", "ascir_api.py")
+            )
+            spec = importlib.util.spec_from_file_location(
+                "source_ascir_api", source_path
+            )
+            source_ascir_api = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(source_ascir_api)
+            finally:
+                if origin_pyautofuse is None:
+                    sys.modules.pop("autofuse.pyautofuse", None)
+                else:
+                    sys.modules["autofuse.pyautofuse"] = origin_pyautofuse
+
+            graph = ascir_mod.HintGraph("rand_seed_offset")
+            size = graph.create_size("size")
+            axis = graph.create_axis("axis", size)
+            seed_data = source_ascir_api.Data(graph, dtype=ascir_mod.dtypes.int64)
+            seed = source_ascir_api.Load(
+                graph,
+                seed_data,
+                axis=[axis],
+                size=[size],
+                stride=[ascir_mod.SizeExpr(1)],
+            )
+            offset_data = source_ascir_api.Data(graph, dtype=ascir_mod.dtypes.int32)
+            offset = source_ascir_api.Load(
+                graph,
+                offset_data,
+                axis=[axis],
+                size=[size],
+                stride=[ascir_mod.SizeExpr(1)],
+            )
+            for dtype in (
+                ascir_mod.dtypes.uint32,
+                ascir_mod.dtypes.int32,
+                ascir_mod.dtypes.float16,
+                ascir_mod.dtypes.bfloat16,
+                ascir_mod.dtypes.float32,
+            ):
+                rand = source_ascir_api.Rand(
+                    graph,
+                    dtype=dtype,
+                    axis=[axis],
+                    size=[size],
+                    stride=[ascir_mod.SizeExpr(1)],
+                    seed=seed,
+                    offset=offset,
+                )
+                randn = source_ascir_api.Randn(
+                    graph,
+                    dtype=dtype,
+                    axis=[axis],
+                    size=[size],
+                    stride=[ascir_mod.SizeExpr(1)],
+                    seed=seed,
+                    offset=offset,
+                )
+                assert rand.dtype == dtype
+                assert randn.dtype == dtype
+                assert "Rand" in ascir_mod.utils.debug_str(graph)
+
+            rand = source_ascir_api.Rand(
+                graph,
+                dtype=ascir_mod.dtypes.float32,
+                axis=[axis],
+                size=[size],
+                stride=[ascir_mod.SizeExpr(1)],
+            )
+            randn = source_ascir_api.Randn(
+                graph,
+                dtype=ascir_mod.dtypes.uint32,
+                axis=[axis],
+                size=[size],
+                stride=[ascir_mod.SizeExpr(1)],
+            )
+            assert rand.dtype == ascir_mod.dtypes.float32
+            assert randn.dtype == ascir_mod.dtypes.uint32
+
+            with pytest.raises(ValueError):
+                source_ascir_api.Rand(
+                    graph,
+                    dtype=ascir_mod.dtypes.float32,
+                    axis=[axis],
+                    seed=seed,
+                )
+            with pytest.raises(ValueError):
+                source_ascir_api.Randn(
+                    graph,
+                    dtype=ascir_mod.dtypes.uint32,
+                    axis=[axis],
+                    offset=offset,
+                )
+        finally:
+            ascir_mod.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
     def test_graph_create_size_expr_by_long():
         s0 = ascir.SizeExpr()
         assert s0 == 1

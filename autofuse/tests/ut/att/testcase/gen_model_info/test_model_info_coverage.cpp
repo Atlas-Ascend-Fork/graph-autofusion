@@ -151,6 +151,38 @@ TEST_F(ModelInfoCoverageTest, RuntimeShapeMetadataBecomesAnInputWithoutChangingS
   EXPECT_EQ(std::find(searchable.begin(), searchable.end(), k), searchable.end());
 }
 
+TEST_F(ModelInfoCoverageTest, MatmulMTradeoffAppliesOnlyToStaticCommonModels) {
+  for (const auto cube_type : {ascir::CubeTemplateType::kDefault, ascir::CubeTemplateType::kCommon}) {
+    for (const bool is_static : {false, true}) {
+      const auto graph = MakeScheduledGraph("matmul_m_tradeoff");
+      auto schedules = ScheduleGraphs({graph});
+      schedules.frontend_shape_vars_collected = true;
+      if (!is_static) {
+        schedules.frontend_shape_vars = {af::Symbol("dynamic_k")};
+      }
+      auto &schedule = schedules.node_idx_to_scheduled_results[0][0];
+      schedule.cube_type = cube_type;
+      schedule.matmul_m_common_group_ids = {0};
+      FusedParsedScheduleResult models;
+      ASSERT_EQ(GetModelInfoMap(schedules, {}, models), af::SUCCESS);
+      EXPECT_EQ(models[0][0].groups_tiling_model_info[0][0].enable_matmul_m_common_tradeoff,
+                is_static && cube_type == ascir::CubeTemplateType::kCommon);
+    }
+  }
+}
+
+TEST_F(ModelInfoCoverageTest, MatmulMTradeoffAppliesOnlyToMarkedGroup) {
+  const auto graph = MakeScheduledGraph("matmul_m_tradeoff_group");
+  auto schedules = ScheduleGraphs({graph});
+  schedules.frontend_shape_vars_collected = true;
+  auto &schedule = schedules.node_idx_to_scheduled_results[0][0];
+  schedule.cube_type = ascir::CubeTemplateType::kCommon;
+  schedule.matmul_m_common_group_ids = {1};
+  FusedParsedScheduleResult models;
+  ASSERT_EQ(GetModelInfoMap(schedules, {}, models), af::SUCCESS);
+  EXPECT_FALSE(models[0][0].groups_tiling_model_info[0][0].enable_matmul_m_common_tradeoff);
+}
+
 TEST_F(ModelInfoCoverageTest, RejectsEmptyAndOverlongPathsAndNormalizesExistingDirectory) {
   EXPECT_TRUE(GetRealPath("").empty());
   EXPECT_TRUE(GetRealPath(std::string(4096, 'x')).empty());

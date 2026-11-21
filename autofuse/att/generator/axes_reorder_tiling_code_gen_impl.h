@@ -36,7 +36,7 @@ class AxesReorderTilingCodeGenImpl : public TilingCodeGenImpl {
 
  private:
   // 辅助函数：配置SolverPassManager的公共参数
-  void ConfigureSolverPassManagerCommon(SolverPassManager &solver_pass_manager);
+  void ConfigureSolverPassManagerCommon(SolverPassManager &solver_pass_manager, const ModelInfo &model_info);
 };
 }  // namespace att
 #endif

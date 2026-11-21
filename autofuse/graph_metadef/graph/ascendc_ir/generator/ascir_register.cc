@@ -33,6 +33,13 @@ AscirRegister &AscirRegister::OptionalInput(const std::string &input_name) {
   return *this;
 }
 
+AscirRegister &AscirRegister::OptionalInput(const char_t *input_name, const char_t *datatype_symbol) {
+  ir_def_.AppendInput(input_name, IrInputType::kIrInputOptional);
+  ir_def_.StoreInputIrSymName(input_name, datatype_symbol);
+  ir_def_.MutableDataTypeSymbolStore().SetInputSymbol(input_name, kIrInputOptional, datatype_symbol);
+  return *this;
+}
+
 AscirRegister &AscirRegister::Outputs(std::vector<ge::AscendString> &&output_names) {
   for (const auto &output_name : output_names) {
     ir_def_.AppendOutput(output_name.GetString(), IrOutputType::kIrOutputRequired);

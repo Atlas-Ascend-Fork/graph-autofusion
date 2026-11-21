@@ -30,6 +30,18 @@ std::vector<int64_t> GetNddmaVectorizedAxis(const af::AscNodePtr &node) {
   return node->outputs[0].attr.vectorized_axis;
 }
 
+std::vector<bool> GetNddmaTileInner(const NodeInfo &node, size_t rank) {
+  std::vector<bool> tile_inner;
+  if (node.outputs.empty() || node.outputs[0] == nullptr || node.outputs[0]->dim_info.size() != rank) {
+    return tile_inner;
+  }
+  tile_inner.reserve(node.outputs[0]->dim_info.size());
+  for (const auto *axis : node.outputs[0]->dim_info) {
+    tile_inner.push_back(axis != nullptr && axis->axis_type == AxisPosition::INNER && !axis->is_bind_multi_core);
+  }
+  return tile_inner;
+}
+
 af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &node, NodeDetail &node_detail,
                             PerfOutputInfo &perf_res, bool &selected) {
   selected = false;
@@ -58,14 +70,7 @@ af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &n
     LogNddmaFallback(node_detail.name, shape_info.data_type, nullptr, result);
     return af::SUCCESS;
   }
-  std::vector<bool> tile_inner;
-  if (!node.outputs.empty() && node.outputs[0] != nullptr &&
-      node.outputs[0]->dim_info.size() == shape_info.repeats.size()) {
-    tile_inner.reserve(node.outputs[0]->dim_info.size());
-    for (const auto *axis : node.outputs[0]->dim_info) {
-      tile_inner.push_back(axis != nullptr && axis->axis_type == AxisPosition::INNER && !axis->is_bind_multi_core);
-    }
-  }
+  const auto tile_inner = GetNddmaTileInner(node, shape_info.repeats.size());
   const auto build_reason =
       BuildNddmaDescriptor(shape_info, GetNddmaVectorizedAxis(node.node_ptr), descriptor, tile_inner);
   if (build_reason != NddmaFallbackReason::kNone) {
