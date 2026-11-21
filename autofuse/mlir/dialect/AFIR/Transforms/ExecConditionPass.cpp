@@ -54,6 +54,8 @@ using namespace mlir;
 namespace mlir::afir {
 namespace {
 
+constexpr unsigned kVisitedOperationInlineCapacity = 16;
+
 ExecCondition getExecCondition(Operation *op) {
   auto sched = op->getAttrOfType<ScheduleAttr>(kSchedAttrName);
   return sched ? sched.getExecCondition() : ExecCondition::NoCache;
@@ -124,7 +126,7 @@ struct AFIRCacheDependencyPass : public PassWrapper<AFIRCacheDependencyPass, Ope
           return;
         }
         llvm::SetVector<int64_t> axes;
-        llvm::SmallPtrSet<Operation *, 16> visited;
+        llvm::SmallPtrSet<Operation *, kVisitedOperationInlineCapacity> visited;
         if (failed(collectCacheSourceAxes(op, axes, visited))) {
           // Unknown/stateful input: execute every iteration instead of guessing
           // an invariant. This does not change any resource or sync lifetime.

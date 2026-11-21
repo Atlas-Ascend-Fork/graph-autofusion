@@ -324,6 +324,26 @@ class FunctionLoopGenerator {
                afir::ScheduleAttr::get(op.getContext(), axes, *outer, afir::ExecCondition::NoCache));
   }
 
+  void placeMaterializationBoundaries(Block &block) {
+    // The signature pass leaves output materialization immediately after the
+    // AFIR store. Move that boundary marker with its producer so tensor SSA
+    // values do not escape an scf.for region.
+    for (Operation &operation : block) {
+      auto destination = dyn_cast<bufferization::MaterializeInDestinationOp>(operation);
+      if (!destination) {
+        continue;
+      }
+      Operation *producer = destination.getSource().getDefiningOp();
+      auto placement = operationPlacement.find(producer);
+      if (placement == operationPlacement.end()) {
+        continue;
+      }
+      placement->second->items.emplace_back(&operation);
+      boundaryOperations.insert(&operation);
+      operationPlacement[&operation] = placement->second;
+    }
+  }
+
   LogicalResult buildLoopTree(Block &block) {
     SmallVector<int64_t> currentPath;
     SmallVector<LoopTreeNode *> loopNodeStack{&root};
@@ -365,23 +385,7 @@ class FunctionLoopGenerator {
       scheduledOperations.insert(&operation);
     }
 
-    // The signature pass leaves output materialization immediately after the
-    // AFIR store. Move that boundary marker with its producer so tensor SSA
-    // values do not escape an scf.for region.
-    for (Operation &operation : block) {
-      auto destination = dyn_cast<bufferization::MaterializeInDestinationOp>(operation);
-      if (!destination) {
-        continue;
-      }
-      Operation *producer = destination.getSource().getDefiningOp();
-      auto placement = operationPlacement.find(producer);
-      if (placement == operationPlacement.end()) {
-        continue;
-      }
-      placement->second->items.emplace_back(&operation);
-      boundaryOperations.insert(&operation);
-      operationPlacement[&operation] = placement->second;
-    }
+    placeMaterializationBoundaries(block);
     return success();
   }
 
