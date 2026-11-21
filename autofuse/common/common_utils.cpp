@@ -1911,8 +1911,22 @@ af::Status DtypeName(ge::DataType dtype, std::string &dtype_name) {
       [ge::DT_UINT1] = "",          [ge::DT_INT2] = "",           [ge::DT_UINT2] = "",
       [ge::DT_COMPLEX32] = "",
   };
+  static const std::string kSupportedDtypeValues = []() {
+    std::string values;
+    for (size_t i = 0UL; i < sizeof(kTypeNames) / sizeof(kTypeNames[0]); ++i) {
+      if (kTypeNames[i].empty()) {
+        continue;
+      }
+      if (!values.empty()) {
+        values += ", ";
+      }
+      values += std::to_string(i);
+    }
+    return values;
+  }();
   GE_CHK_BOOL_RET_STATUS((dtype < (sizeof(kTypeNames) / sizeof(kTypeNames[0])) && kTypeNames[dtype] != ""), af::FAILED,
-                         "Unsupported data type:%d", static_cast<int32_t>(dtype));
+                         "Unsupported data type:%d, supported dtype values:[%s]", static_cast<int32_t>(dtype),
+                         kSupportedDtypeValues.c_str());
   dtype_name = kTypeNames[dtype];
   return af::SUCCESS;
 }
