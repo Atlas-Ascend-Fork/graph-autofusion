@@ -350,7 +350,7 @@ class SuperOperatorInfos:
                     CommonUtility().ascendc_raise_python_err(
                         ERR_CODE,
                         (
-                            f"send op {event_send[send_id].kernel_name_for_multi_stream} can not same with recv op \
+                            f"send op {event_send[send_id].kernel_name_for_multi_stream} cannot be the same as recv op \
 {event_recv[send_id].kernel_name_for_multi_stream}"
                         ),
                     )
@@ -914,7 +914,7 @@ class SuperOperatorInfos:
             CommonUtility().ascendc_raise_python_err(
                 ERR_CODE,
                 f"ERROR: ratio of super kernel debug-aic-num {self.debug_aic_num} to "
-                f"debug-aiv-num {self.debug_aiv_num} is invalid.",
+                f"debug-aiv-num {self.debug_aiv_num} is invalid. Should be 1:0 or 0:1 or 1:1 or 1:2.",
             )
 
     def get_finale_type_and_block_num(

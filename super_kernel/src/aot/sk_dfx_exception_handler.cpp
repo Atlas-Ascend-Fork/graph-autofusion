@@ -391,7 +391,7 @@ bool SuperKernelExceptionHandler::GetExceptionRegInfo(const aclrtExceptionInfo &
   // errRegInfo memory allocated by rtGetExceptionRegInfo is managed by RTS, should not be manually freed
   rtError_t rtRet = rtGetExceptionRegInfo(&exception, &exceptionRegInfo.errRegInfo, &exceptionRegInfo.coreNum);
   if (rtRet != 0) {
-    SK_LOGE("Call rtGetExceptionRegInfo for error register information failed. ret: %d", static_cast<int32_t>(rtRet));
+    SK_LOGE("Failed to call rtGetExceptionRegInfo for error register information. ret: %d", static_cast<int32_t>(rtRet));
     return false;
   }
   SK_LOGI("Get error register information. coreNum=%u", exceptionRegInfo.coreNum);
@@ -1296,7 +1296,7 @@ uint32_t SuperKernelExceptionHandler::ProcessExceptionDump(aclrtExceptionInfo *e
                                                            uint32_t exceptionDumpSize, uint32_t *exceptionDumpRealSize,
                                                            Adx::ExceptionDumpMode *mode) {
   if (exceptionDumpSize < 1) {
-    SK_DLOGE("ExceptionDumpCallBack: exceptionDumpSize too small");
+    SK_DLOGE("ExceptionDumpCallBack: exceptionDumpSize=%u is too small, expected >= 1", exceptionDumpSize);
     return ACL_ERROR_INVALID_PARAM;
   }
 

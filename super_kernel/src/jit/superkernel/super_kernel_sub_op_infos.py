@@ -402,8 +402,8 @@ param_offset={self.wait_param_offset + index}\n"
                         ERR_CODE,
                         (
                             f"sub operator {self.kernel_name} early-start mode set:{self.early_start_set_flag}, \
-wait:{self.early_start_wait_flag}, donot match with super kernel early-start mode: False, please check whether sub\
-operator inherits super kernel opton."
+wait:{self.early_start_wait_flag}, do not match with super kernel early-start mode: False, please check whether sub \
+operator inherits super kernel option."
                         ),
                     )
                 if (
@@ -414,8 +414,8 @@ operator inherits super kernel opton."
                         ERR_CODE,
                         (
                             f"sub operator {self.kernel_name} split_mode: {self.split_mode_in_json}, \
-donot match with super kernel split_mode: {self.split_mode} please check whether sub\
-operator inherits super kernel opton."
+does not match super kernel split_mode: {self.split_mode}; please check whether sub \
+operator inherits super kernel option."
                         ),
                     )
         except Exception as err:
@@ -502,7 +502,7 @@ dy_block_num = ((uint64_t){kernel_type.value}) << 32 | (*blockNumAddr);
             )
         else:
             CommonUtility().ascendc_raise_python_err(
-                ERR_CODE, (f"kernel type {kernel_type} do not support!")
+                ERR_CODE, (f"kernel type {kernel_type} is not supported!")
             )
         return case_block
 
@@ -747,7 +747,7 @@ param_base[{dynamic_extra_param_offset + 1}], param_base[{dynamic_extra_param_of
         CommonUtility().ascendc_raise_python_err(
             ERR_CODE,
             (
-                f"The binary {binary_file} of {self.kernel_name} do not found .text section"
+                f"The binary {binary_file} of {self.kernel_name} does not contain a .text section"
             ),
         )
         return 0
@@ -1292,5 +1292,5 @@ param_base[{dynamic_extra_param_offset + 1}], param_base[{dynamic_extra_param_of
             )
         else:
             CommonUtility().ascendc_raise_python_err(
-                ERR_CODE, (f"kernel type {self.kernel_type} do not support!")
+                ERR_CODE, (f"kernel type {self.kernel_type} is not supported!")
             )

@@ -31,7 +31,7 @@ void ReportErrorMessageInner(const std::string &code, const char *fmt, ...) {
   va_start(argList, fmt);
   auto ret = vsnprintf_s(buf.data(), LIMIT_PREDEFINED_MESSAGE, LIMIT_PREDEFINED_MESSAGE - 1U, fmt, argList);
   if (ret == -1) {
-    SK_DLOGE("Construct error message failed, maybe the length of error message exceed limits: %zu",
+    SK_DLOGE("Failed to construct error message; its length may exceed the limit of %zu",
              LIMIT_PREDEFINED_MESSAGE);
   }
   va_end(argList);
@@ -197,7 +197,8 @@ LogContextGuard::LogContextGuard(const std::string &modelId) {
   active_ = true;
 
   if (!FileHandleManager::Instance().InitializeDefault(modelId)) {
-    SK_DLOGE("Failed to initialize default log file for model: %s", modelId.c_str());
+    const std::string dirPath = GetSkMetaPath(modelId);
+    SK_DLOGE("Failed to initialize default log file for model: %s, directory: %s", modelId.c_str(), dirPath.c_str());
   }
 }
 
@@ -287,7 +288,7 @@ bool FileLogger::Initialize(const LoggerConfig &config) {
   // Use the current model ID to create sk_meta directory structure.
   std::string logDir = CreateSkMetaDirectory(effectiveConfig.modelId);
   if (logDir.empty()) {
-    SK_DLOGE("Failed to create sk_meta directory");
+    SK_DLOGE("Failed to create sk_meta directory: %s", GetSkMetaPath(effectiveConfig.modelId).c_str());
     return false;
   }
 
@@ -300,7 +301,8 @@ bool FileLogger::Initialize(const LoggerConfig &config) {
   std::string defaultPath = logDir + "/super_kernel.log";
 
   if (!FileHandleManager::Instance().RegisterFile(handleName, defaultPath)) {
-    SK_DLOGE("Failed to register log file for model: %s", modelIdForLog.c_str());
+    SK_DLOGE("Failed to register log file for model: %s, handle: %s, path: %s", modelIdForLog.c_str(),
+             handleName.c_str(), defaultPath.c_str());
     return false;
   }
 
@@ -393,7 +395,7 @@ std::unique_ptr<LogContextGuard> FileLogger::CreateContext(const std::string &fi
   std::string sanitizedModelId = SanitizePathComponent(modelId);
   std::string dirPath = GetSkMetaBasePath() + "/" + sanitizedModelId;
   if (!CreateDirectoryRecursive(dirPath)) {
-    SK_DLOGE("Failed to create directory for context");
+    SK_DLOGE("Failed to create directory for context: %s", dirPath.c_str());
     return nullptr;
   }
 

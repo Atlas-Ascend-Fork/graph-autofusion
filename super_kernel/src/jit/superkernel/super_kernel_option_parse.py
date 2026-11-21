@@ -114,7 +114,7 @@ class NumberParser(OptionParser):
             CommonUtility().ascendc_raise_python_err(
                 ERR_CODE,
                 f"[Super Kernel] Invalid compile option: {self.key} "
-                f"option should between (0, 64], {number} is invalid.",
+                f"option should be in (0, 64], {number} is invalid.",
             )
         return number
 
@@ -221,7 +221,7 @@ def parse_super_kernel_options(
         if "=" not in pair:
             CommonUtility.print_compile_log(
                 "",
-                f"Invalid compile option: {pair} do not match option={{value}}.",
+                f"Invalid compile option: {pair} does not match option=<value> format.",
                 AscendCLogLevel.LOG_WARNING,
             )
             continue

@@ -142,8 +142,8 @@ static bool FindElfSymbolTables(const char *binAddr, size_t binSize, ElfSymbolTa
 
   const Elf64_Shdr &shstrtabHdr = shHdr[ehdr->e_shstrndx];
   if (!ValidateElfSectionRange(binSize, shstrtabHdr.sh_offset, shstrtabHdr.sh_size)) {
-    SK_LOGE("Invalid ELF: shstrtab offset=0x%lx size=0x%lx exceed binSize",
-            static_cast<uint64_t>(shstrtabHdr.sh_offset), static_cast<uint64_t>(shstrtabHdr.sh_size));
+    SK_LOGE("Invalid ELF: shstrtab offset=0x%lx size=0x%lx exceed binSize=%zu",
+            static_cast<uint64_t>(shstrtabHdr.sh_offset), static_cast<uint64_t>(shstrtabHdr.sh_size), binSize);
     return false;
   }
 
@@ -295,7 +295,7 @@ aclError GetDeviceCoreNums(int64_t &cubeNum, int64_t &vecNum) {
     return ACL_ERROR_INVALID_PARAM;
   }
   if (cubeNum <= 0) {
-    SK_LOGE("[DeviceCores] Invalid cube core num: %ld", cubeNum);
+    SK_LOGE("[DeviceCores] Invalid cube core num: %ld, expected > 0", cubeNum);
     return ACL_ERROR_INVALID_PARAM;
   }
   vecNum = 0;
@@ -305,7 +305,7 @@ aclError GetDeviceCoreNums(int64_t &cubeNum, int64_t &vecNum) {
     return ACL_ERROR_INVALID_PARAM;
   }
   if (vecNum <= 0) {
-    SK_LOGE("[DeviceCores] Invalid vec core num: %ld", vecNum);
+    SK_LOGE("[DeviceCores] Invalid vec core num: %ld, expected > 0", vecNum);
     return ACL_ERROR_INVALID_PARAM;
   }
   SK_LOGI("[DeviceCores] Get core nums: cube=%ld, vec=%ld", cubeNum, vecNum);
