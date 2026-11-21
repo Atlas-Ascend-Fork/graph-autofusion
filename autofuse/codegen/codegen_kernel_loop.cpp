@@ -249,7 +249,7 @@ Status ConnectApiCallInputs(const ascir::NodeView &node, const std::map<ascir::T
     ApiTensor *input_tensor = &input_call->second->outputs[input_index];
     input_tensor->reads.push_back(&call);
     call.inputs.emplace_back(input_tensor);
-    GELOGI("node[%s] input tensor id[%ld] from call type[%s] outputs[%d], read by call type[%s]", node->GetNamePtr(),
+    GELOGD("node[%s] input tensor id[%ld] from call type[%s] outputs[%d], read by call type[%s]", node->GetNamePtr(),
            input->attr.mem.tensor_id, input_call->second->type.c_str(), input_index, call.type.c_str());
   }
   if (contiguous_bufs_preferred) {
@@ -527,7 +527,7 @@ Status Loop::ConstructFromNodes(ascir::NodeViewVisitorConst nodes, const Tiler &
       continue;
     }
 
-    GELOGI("node:%s, ComputeUnit:%u\r\n", node->GetNamePtr(), static_cast<uint32_t>(node->attr.api.unit));
+    GELOGD("node:%s, ComputeUnit:%u\r\n", node->GetNamePtr(), static_cast<uint32_t>(node->attr.api.unit));
     GE_ASSERT_SUCCESS(MoveToNodeLoop(node, current_axis, current_loop));
 
     auto call = CreateApiCallObject(node);
@@ -550,7 +550,7 @@ Status Loop::ConstructFromNodes(ascir::NodeViewVisitorConst nodes, const Tiler &
                              ? (is_fixed_indirect_load_parameter ||
                                 IsNodeSplitB(node, tiler, call->enable_cache_with_condition, current_loop->is_ar))
                              : IsValidCacheCondition(call->exec_condition);
-    GELOGI(
+    GELOGD(
         "Node[%s][%s] cache eligibility: has_reduce[%d], enable_cache[%d], fixed_indirect_load_param[%d], "
         "exec_condition[%u], reduce_cache_condition[%s]",
         node->GetNamePtr(), node->GetTypePtr(), static_cast<int32_t>(this->is_graph_has_reduce_node),
@@ -1622,7 +1622,7 @@ Status ApiCall::Init(const ascir::NodeView &node) {
       t.write = this;
     }
   }
-  GE_CHK_STATUS_RET(ParseAttr(node));
+  GE_CHK_STATUS_RET(ParseAttr(node), "Codegen parse attr for node[%s] failed", node->GetNamePtr());
   this->node = node;
   this->graph_name = node->GetOwnerComputeGraph()->GetName();
   this->node_name = node->GetNamePtr();
@@ -1689,10 +1689,11 @@ Status ApiCall::PostProcess(const TPipe &tpipe, const std::vector<ascir::AxisId>
           first_gen_get_value = false;
         }
         std::string tmp;
-        GE_CHK_STATUS_RET(ub.InitUbScalar(tmp));
+        GE_CHK_STATUS_RET(ub.InitUbScalar(tmp), "Codegen init UB scalar for node[%s] failed", node_name.c_str());
         ss << tmp;
         if (ub.need_duplicate_value_of_ub_scalar && !is_all_outputs_ub_scalar) {
-          GE_CHK_STATUS_RET(ub.GenDuplicateValueOfUbScalar(tmp));
+          GE_CHK_STATUS_RET(ub.GenDuplicateValueOfUbScalar(tmp),
+                            "Codegen generate duplicate value of UB scalar for node[%s] failed", node_name.c_str());
           ss << tmp;
         }
       }
@@ -1707,7 +1708,8 @@ Status ApiCall::PostProcess(const TPipe &tpipe, const std::vector<ascir::AxisId>
       const auto &ub = output.get();
       if (ub.need_gen_get_value_of_ub_scalar && ub.need_duplicate_value_of_ub_scalar) {
         std::string tmp;
-        GE_CHK_STATUS_RET(ub.GenDuplicateValueOfUbScalar(tmp));
+        GE_CHK_STATUS_RET(ub.GenDuplicateValueOfUbScalar(tmp),
+                          "Codegen generate duplicate value of UB scalar for node[%s] failed", node_name.c_str());
         ss << tmp;
       }
     }
@@ -1875,7 +1877,10 @@ BoolType ApiCall::AllocShareOutputs(const TPipe &tpipe, const ApiTensor &out, co
       }
     } else {
       // 需要按给定顺序计算offset
-      GE_CHK_BOOL_RET_SPECIAL_STATUS(DefineShareOffsets(tpipe, out, t, ss), BoolType::FAILED);
+      if (DefineShareOffsets(tpipe, out, t, ss)) {
+        GELOGE(af::FAILED, "Codegen define share offsets for node[%s] failed", node_name.c_str());
+        return BoolType::FAILED;
+      }
       auto cur_var_name = t.que_share_offset.name;
       std::string offset = "0";
       if (out.share_order > 0) {

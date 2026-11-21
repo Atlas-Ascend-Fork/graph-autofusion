@@ -13,6 +13,7 @@
 #include <set>
 #include <sstream>
 #include <fstream>
+#include <limits>
 
 #ifdef ENABLE_AUTOFUSE_MLIR
 #include "bridge/CodegenOrchestration/CodegenOrchestration.h"
@@ -427,7 +428,11 @@ Status Codegen::GenerateForInductor(const ascir::FusedScheduledResult &fused_sch
   if (tiling_lib_.IsInductorPgoEnabled() && !ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) &&
       ascgen_utils::IsStaticSchedResult(fused_schedule_result) &&
       tiling_lib_.ShouldFallbackPgo(fused_schedule_result)) {
-    GELOGW("Tiling key count exceeds 10000, fallback to non-PGO Inductor codegen");
+    uint64_t tiling_key_count = 0U;
+    const bool exact_count = ascgen_utils::TryCalcTilingKeyCount(
+        fused_schedule_result, std::numeric_limits<uint64_t>::max(), tiling_key_count);
+    const std::string count_text = exact_count ? std::to_string(tiling_key_count) : "greater than UINT64_MAX";
+    GELOGW("Tiling key count %s exceeds 10000, fallback to non-PGO Inductor codegen", count_text.c_str());
     Codegen fallback(*this);
     fallback.tiling_lib_.DisableInductorPgo();
     return fallback.GenerateForInductor(fused_schedule_result, result, launch_decouple);
@@ -552,7 +557,7 @@ Status Codegen::GenerateKernel(const ascir::FusedScheduledResult &fused_schedule
   CodegenConfig config = {is_inductor, using_att_calc_qbt_size_, launch_decouple};
   if (is_inductor) {
     use_list_tensor = false;
-    GE_LOGW_IF(io_num >= kKernelMaxIoNum, "Too many io, io num is %zu", io_num);
+    GE_LOGW_IF(io_num >= kKernelMaxIoNum, "Too many io, io num is %zu, expected io num < %zu", io_num, kKernelMaxIoNum);
   }
   std::string graph_name = ascgen_utils::GenValidName(fused_schedule_result.fused_graph_name.GetString());
   GELOGI("kernel_name = %s, num_inputs = %zu, num_outputs = %zu, use list tensor desc = %d", graph_name.c_str(),

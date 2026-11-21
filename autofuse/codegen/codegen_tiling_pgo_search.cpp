@@ -404,7 +404,8 @@ std::string TilingLib::GenPGOGetTilingKey(const std::string tiling) const {
   ss << "    std::istringstream iss0(line);" << std::endl;
   ss << "    int flag = -1;" << std::endl;
   ss << "    if (!(iss0 >> flag) || (flag != 0 && flag != 1)) {" << std::endl;
-  ss << "      OP_LOGW(OP_NAME, \"Invalid PGO config flag.\");" << std::endl;
+  ss << "      OP_LOGW(OP_NAME, \"Invalid PGO config flag: raw=%s, parsed=%d, expected 0 or 1.\", line.c_str(), flag);"
+     << std::endl;
   ss << "      return false;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    OP_LOGD(OP_NAME, \"best_config %d.\", flag);" << std::endl;
@@ -422,7 +423,10 @@ std::string TilingLib::GenPGOGetTilingKey(const std::string tiling) const {
   ss << "    }" << std::endl;
   ss << "    const size_t expect_num = (sizeof(tiling_data) + sizeof(int32_t) - 1) / sizeof(int32_t);" << std::endl;
   ss << "    if (!iss1.eof() || tiling_i32.size() != expect_num) {" << std::endl;
-  ss << "      OP_LOGW(OP_NAME, \"Invalid PGO tiling data length.\");" << std::endl;
+  ss << "      OP_LOGW(OP_NAME, \"Invalid PGO tiling data length or parse error: actual %zu, expected %zu.\", "
+        "tiling_i32.size(), "
+        "expect_num);"
+     << std::endl;
   ss << "      return false;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    if (memcpy_s(&tiling_data, sizeof(tiling_data), tiling_i32.data(), sizeof(tiling_data)) != EOK) {"

@@ -271,15 +271,33 @@ bool ValidateInductorPgoManifest(InductorPgoArtifacts &artifacts) {
   bool requires_mspti = true;
   uint32_t bundle_schema_version = 0;
   uint32_t result_protocol_version = 0;
-  if (!GetJsonUint(json, "bundle_schema_version", bundle_schema_version) ||
-      !GetJsonString(json, "cache_root", 0U, cache_root) ||
-      !GetJsonString(json, "generation", 0U, generation) ||
-      !GetJsonUint(json, "result_protocol_version", result_protocol_version) ||
-      !GetJsonString(json, "profiling_backend", 0U, profiling_backend) ||
-      !GetJsonBool(json, "requires_mspti", requires_mspti) ||
-      !GetJsonString(json, "ld_preload", 0U, ld_preload)) {
-    OP_LOGE(OP_NAME, "Invalid Inductor PGO manifest fields: %s", artifacts.manifest.c_str());
+  const auto invalid_field = [&](const char *field, const char *expected) {
+    const size_t field_pos = json.find(std::string("\"") + field + "\"");
+    const std::string actual = field_pos == std::string::npos ? "<missing>" : json.substr(field_pos, 128U);
+    OP_LOGE(OP_NAME, "Invalid manifest field %s in %s: got %s, expected %s", field,
+            artifacts.manifest.c_str(), actual.c_str(), expected);
     return false;
+  };
+  if (!GetJsonUint(json, "bundle_schema_version", bundle_schema_version)) {
+    return invalid_field("bundle_schema_version", "unsigned 32-bit integer");
+  }
+  if (!GetJsonString(json, "cache_root", 0U, cache_root)) {
+    return invalid_field("cache_root", "string");
+  }
+  if (!GetJsonString(json, "generation", 0U, generation)) {
+    return invalid_field("generation", "string");
+  }
+  if (!GetJsonUint(json, "result_protocol_version", result_protocol_version)) {
+    return invalid_field("result_protocol_version", "unsigned 32-bit integer");
+  }
+  if (!GetJsonString(json, "profiling_backend", 0U, profiling_backend)) {
+    return invalid_field("profiling_backend", "string");
+  }
+  if (!GetJsonBool(json, "requires_mspti", requires_mspti)) {
+    return invalid_field("requires_mspti", "boolean");
+  }
+  if (!GetJsonString(json, "ld_preload", 0U, ld_preload)) {
+    return invalid_field("ld_preload", "string");
   }
   const bool valid = (bundle_schema_version == kPgoBundleSchemaVersion) && (generation == kPgoGeneration) &&
       (result_protocol_version == kPgoTopnProtocolVersion) && (cache_root == kPgoCacheRootName) &&

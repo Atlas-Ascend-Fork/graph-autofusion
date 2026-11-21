@@ -805,7 +805,11 @@ std::map<std::string, std::string> TilingLib::Generate(const ascir::FusedSchedul
                                                        const std::map<std::string, std::string> &shape_info,
                                                        const std::string &pgo_dir, const std::string &core_num) const {
   if (ShouldFallbackPgo(fused_schedule_result)) {
-    GELOGW("Tiling key count exceeds 10000, fallback to non-PGO codegen");
+    uint64_t tiling_key_count = 0U;
+    const bool exact_count = ascgen_utils::TryCalcTilingKeyCount(
+        fused_schedule_result, std::numeric_limits<uint64_t>::max(), tiling_key_count);
+    const std::string count_text = exact_count ? std::to_string(tiling_key_count) : "greater than UINT64_MAX";
+    GELOGW("Tiling key count %s exceeds 10000, fallback to non-PGO codegen", count_text.c_str());
     TilingLib fallback(*this);
     fallback.DisableInductorPgo();
     return fallback.Generate(fused_schedule_result, shape_info, pgo_dir, core_num);

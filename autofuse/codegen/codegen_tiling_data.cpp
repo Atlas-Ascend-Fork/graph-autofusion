@@ -222,11 +222,14 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
     ss << "#endif" << std::endl;
   };
   if (ascgen_utils::IsJustCubeFixpip(fused_schedule_result) && !is_inductor) {
-    GE_ASSERT(fused_schedule_result.node_idx_to_scheduled_results.size() == 1U, "Cube Fixpip results just one.");
+    GE_ASSERT(fused_schedule_result.node_idx_to_scheduled_results.size() == 1U,
+              "Cube Fixpip results count=%zu, expect 1.", fused_schedule_result.node_idx_to_scheduled_results.size());
     GE_ASSERT(fused_schedule_result.node_idx_to_scheduled_results[0].size() == 1U,
-              "Cube Fixpip scheduled_results just one.");
+              "Cube Fixpip scheduled_results count=%zu, expect 1.",
+              fused_schedule_result.node_idx_to_scheduled_results[0].size());
     GE_ASSERT(fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.size() == 1U,
-              "Cube Fixpip schedule groups just one.");
+              "Cube Fixpip schedule groups count=%zu, expect 1.",
+              fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.size());
     ss1 << this->ClassBegin(this->kernel_name, this->class_name) << std::endl;
     ss1 << GetCommonTilingField(false, fused_schedule_result) << std::endl;
     GE_ASSERT_SUCCESS(
@@ -257,7 +260,7 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
       auto scheduled_results = elemwise_schedule_result.node_idx_to_scheduled_results[i];
       for (size_t j = 0U; j < scheduled_results.size(); j++) {
         GE_ASSERT_SUCCESS(this->ProcessMultiGroup(j, i, scheduled_results[j].schedule_groups, ss1, ss2));
-        GELOGI("TilingCaseId:ProcessMultiGroup\n");
+        GELOGD("TilingCaseId:ProcessMultiGroup\n");
       }
     }
   }
@@ -644,7 +647,7 @@ af::Status codegen::TilingData::ProcessSingleGroup(const ascir::ScheduleGroup &s
     GetTqueAndTbufId(graph, q_ids, b_ids);
     GetTmpBufName(graph, b_ids);
     GE_ASSERT_SUCCESS(AddApiTilingData(graph, ss, i));
-    GELOGI("TilingCaseId:ProcessSingleGroup, tilingcaseNum:%d\n", schedule_group.impl_graphs.size());
+    GELOGD("TilingCaseId:ProcessSingleGroup, tilingcaseNum:%zu\n", schedule_group.impl_graphs.size());
   }
   for (const auto &var : schedule_group.runtime_shape_vars) {
     if (size_var_names.emplace(std::string(var.Str().get())).second) {
@@ -690,7 +693,7 @@ af::Status codegen::TilingData::ProcessMultiGroup(uint64_t pos, const int graph_
       GetTqueAndTbufId(graph, q_ids, b_ids);
       GetTmpBufName(graph, b_ids);
       GE_ASSERT_SUCCESS(AddApiTilingData(graph, ss2, j));
-      GELOGI("TilingCaseId:ProcessMultiGroup, i_%d, i_num:%d, j_%d, j_num:%d\n", i, schedule_groups.size(), j,
+      GELOGD("TilingCaseId:ProcessMultiGroup, i_%zu, i_num:%zu, j_%zu, j_num:%zu\n", i, schedule_groups.size(), j,
              schedule_groups[i].impl_graphs.size());
     }
     for (const auto &var : schedule_groups[i].runtime_shape_vars) {

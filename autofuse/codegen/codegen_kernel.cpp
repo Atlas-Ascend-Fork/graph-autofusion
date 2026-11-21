@@ -1174,7 +1174,8 @@ Status codegen::PositionValue(ascir::Position position, std::string &result) {
 
   auto it = position_values.find(static_cast<size_t>(position));
   if (it == position_values.end()) {
-    GELOGE(af::FAILED, "Codegen position value[%d] invalid", static_cast<int32_t>(position));
+    GELOGE(af::FAILED, "Codegen position value[%d] invalid, valid values are [GM, VECIN, VECCALC, VECOUT]",
+           static_cast<int32_t>(position));
     return af::FAILED;
   }
 
@@ -3308,12 +3309,12 @@ Status Kernel::AppendConstTensorInit(std::stringstream &ss) const {
       GELOGE(af::FAILED, "Codegen concat tensor id[%ld] not found", this->constant_tensors[i]);
       return af::FAILED;
     }
-    GELOGI("const_value_expr: %s", tensor->second.const_value_expr.Str().get());
+    GELOGD("const_value_expr: %s", tensor->second.const_value_expr.Str().get());
 
     string const_value = tensor->second.const_value.empty() ? tiler.Size(tensor->second.const_value_expr, true)
                                                             : tensor->second.const_value;
     ss << tensor->second.DefineConst(const_value.c_str()) << std::endl;
-    GELOGI("Define ss value: %s", ss.str().c_str());
+    GELOGD("Define ss value: %s", ss.str().c_str());
   }
   return af::SUCCESS;
 }
@@ -3327,7 +3328,7 @@ Status Kernel::AppendUbScalarTensorInit(std::stringstream &ss) const {
     std::string def_ub_scalar;
     GE_CHK_STATUS_RET(tensor->second.DefineUbScalar(def_ub_scalar));
     ss << def_ub_scalar;
-    GELOGI("Define ub_scalar var: %s", def_ub_scalar.c_str());
+    GELOGD("Define ub_scalar var: %s", def_ub_scalar.c_str());
   }
   return af::SUCCESS;
 }
@@ -3342,7 +3343,7 @@ Status Kernel::AppendWorkspaceTensorInit(std::stringstream &ss,
 
   auto it_ws_tensors = this->workspace_tensors.begin();
   for (size_t i = 0UL; i < this->workspaces.size(); i++) {
-    GELOGI("Define workspace tensor id: %ld", it_ws_tensors->first);
+    GELOGD("Define workspace tensor id: %ld", it_ws_tensors->first);
     auto tensor = this->tpipe.tensors.find(it_ws_tensors->first);
     if (tensor == this->tpipe.tensors.end()) {
       GELOGE(af::FAILED, "Codegen workspace tensor id[%ld] not found", it_ws_tensors->first);
@@ -5893,12 +5894,12 @@ Status Kernel::GlobalTensorDefine(std::string &result) const {
     auto tensor = this->tpipe.tensors.find(this->constant_tensors[i]);
     GE_ASSERT_TRUE((tensor != this->tpipe.tensors.end()), "Codegen concat tensor id[%ld] not found",
                    this->constant_tensors[i]);
-    GELOGI("const_value_expr: %s", tensor->second.const_value_expr.Str().get());
+    GELOGD("const_value_expr: %s", tensor->second.const_value_expr.Str().get());
 
     string const_value = tensor->second.const_value.empty() ? tiler.Size(tensor->second.const_value_expr, true)
                                                             : tensor->second.const_value;
     ss << "    " << tensor->second.DefineConst(const_value.c_str()) << std::endl;
-    GELOGI("Define ss value: %s", ss.str().c_str());
+    GELOGD("Define ss value: %s", ss.str().c_str());
   }
 
   for (std::size_t i = 0; i < this->ub_scalar_tensors.size(); i++) {
@@ -5909,7 +5910,7 @@ Status Kernel::GlobalTensorDefine(std::string &result) const {
     std::string def_ub_scalar;
     GE_CHK_STATUS_RET(tensor->second.DefineUbScalar(def_ub_scalar));
     ss << "    " << def_ub_scalar;
-    GELOGI("Define ub_scalar var: %s", def_ub_scalar.c_str());
+    GELOGD("Define ub_scalar var: %s", def_ub_scalar.c_str());
   }
   ss << std::endl;
   result = ss.str();

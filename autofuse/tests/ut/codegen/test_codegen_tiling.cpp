@@ -5798,7 +5798,7 @@ TEST_F(TestCodegenTiling, TfPgoGeneratedSourceContractShouldRemainStable) {
   EXPECT_EQ(source.find("int PgoBeginCandidate(void *collector, AutofuseTilingData *tiling_data, "
                         "uint32_t workspace_size)"),
             std::string::npos);
-  EXPECT_NE(source.find("DLOGI(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
+  EXPECT_NE(source.find("DLOGE(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
   EXPECT_EQ(source.find("get_tiling_data_repr_fn(tiling_data)"), std::string::npos);
   EXPECT_EQ(source.find("kInductorPgoRunnerAbi"), std::string::npos);
   EXPECT_EQ(source.find("kPgoTopnMagic"), std::string::npos);
@@ -5961,7 +5961,7 @@ TEST_F(TestCodegenTiling, TopnWrapperPrintsCompleteFinalTilingDataInChunks) {
 
   EXPECT_NE(tiling_impl.find("GenerateTopnSolutions enter: topn=%ld, input_configs.size=%zu operator=%s"),
             std::string::npos);
-  EXPECT_NE(tiling_impl.find("output[%zu]: perf=%.6f is_default=%d block_dim=%ld"), std::string::npos);
+  EXPECT_NE(tiling_impl.find("output[%zu]: modeled_perf=%.6f cycles is_default=%d block_dim=%ld"), std::string::npos);
   EXPECT_NE(tiling_impl.find("output[%zu] repr[%zu..%zu]: %.*s"), std::string::npos);
   EXPECT_EQ(tiling_impl.find("block_dim=%ld repr=%s"), std::string::npos);
 }
@@ -7336,13 +7336,13 @@ void AssertDlopenRunnerProfiling(const std::string &runner) {
   ASSERT_NE(unsupported_branch, std::string::npos);
   EXPECT_LT(unsupported_branch, unsupported_warning);
   EXPECT_NE(runner.find("result = kPgoProfileUnsupported;"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGI(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGI(\"PgoBeginCandidate failed, status: %d\", begin_status)"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGI(\"AutofusePgoCollectorRecordLaunch failed, status: %d\", record_status)"),
+  EXPECT_NE(runner.find("DLOGE(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
+  EXPECT_NE(runner.find("DLOGE(\"PgoBeginCandidate failed, status: %d\", begin_status)"), std::string::npos);
+  EXPECT_NE(runner.find("DLOGE(\"AutofusePgoCollectorRecordLaunch failed, status: %d\", record_status)"),
             std::string::npos);
-  EXPECT_NE(runner.find("DLOGI(\"WrapperOnlyLaunch failed, ERROR: %d\", launch_status)"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGI(\"AutofusePgoCollectorEnd failed, status: %d\", end_status)"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGI(\"AutofusePgoCollectorFinalizeBatch failed, status: %d\", finalize_status)"),
+  EXPECT_NE(runner.find("DLOGE(\"WrapperOnlyLaunch failed, ERROR: %d\", launch_status)"), std::string::npos);
+  EXPECT_NE(runner.find("DLOGE(\"AutofusePgoCollectorEnd failed, status: %d\", end_status)"), std::string::npos);
+  EXPECT_NE(runner.find("DLOGE(\"AutofusePgoCollectorFinalizeBatch failed, status: %d\", finalize_status)"),
             std::string::npos);
   EXPECT_EQ(runner.find("AutofusePgoCollectorGetDurationNs"), std::string::npos);
   const auto batch_loop = runner.find("while (it != profiles->end())");
@@ -9248,4 +9248,175 @@ TEST_F(TestCodegenTiling, DynamicBmmInputViewPreservesSymbolicStrides) {
   EXPECT_EQ(api->semantic_feature, ascgen_utils::template_semantic::kAdaptive);
   b->outputs[0].attr.strides[1] = k * n;
   EXPECT_EQ(codegen::GetBmmInputView(cube), nullptr);
+}
+
+TEST_F(TestCodegenTiling, GeneratedRunnerRejectsInvalidArgumentsWithActionableLogs) {
+  std::stringstream helpers;
+  GenInductorPgoArgValidators(helpers);
+  GenInductorPgoArgParser(helpers);
+  const std::string source = R"(
+#include <algorithm>
+#include <cassert>
+#include <cerrno>
+#include <cctype>
+#include <cstdint>
+#include <cstdlib>
+#include <cstdio>
+#include <string>
+#include <vector>
+#include <unistd.h>
+constexpr int SUCCESS = 0;
+constexpr int FAILED = 1;
+constexpr int64_t kMaxPgoTopn = 1024;
+std::string diagnostic;
+#define DLOGE(...) do { char message[2048]; std::snprintf(message, sizeof(message), __VA_ARGS__); diagnostic = message; } while (false)
+struct InductorPgoRunnerArgs {
+  int32_t device_id = 0;
+  uint32_t aiv_num = 0;
+  uint32_t ub_size = 0;
+  int64_t topn = 0;
+  std::string kernel_name, tiling_file, kernel_file, result_file;
+};
+)" + helpers.str() + R"(
+int main() {
+  const std::vector<std::string> valid = {"runner", "0", "1", "257", "kernel", "/proc/self/exe", "/proc/self/exe", "result", "1"};
+  auto parse = [](std::vector<std::string> values) {
+    std::vector<char *> argv;
+    for (auto &value : values) { argv.push_back(value.data()); }
+    InductorPgoRunnerArgs args;
+    diagnostic.clear();
+    return ParseInductorPgoRunnerArgs(static_cast<int>(argv.size()), argv.data(), args);
+  };
+  assert(parse(valid) == SUCCESS);
+  const struct { size_t index; const char *value; const char *name; } cases[] = {
+    {1, "-1", "device_id"}, {1, "2147483648", "device_id"}, {1, "abc", "device_id"},
+    {2, "0", "aiv_num"}, {2, "4294967296", "aiv_num"},
+    {3, "256", "ub_size"}, {3, "4294967296", "ub_size"},
+    {8, "0", "topn"}, {8, "1025", "topn"}, {8, "1x", "topn"}
+  };
+  for (const auto &test : cases) {
+    auto values = valid;
+    values[test.index] = test.value;
+    assert(parse(values) == FAILED);
+    assert(diagnostic.find(std::string(test.name) + "=" + test.value) != std::string::npos);
+    assert(diagnostic.find("expected integer in [") != std::string::npos);
+  }
+  const char *names[] = {"kernel_name", "tiling_file", "kernel_file", "result_file"};
+  for (size_t i = 4; i <= 7; ++i) {
+    auto values = valid;
+    values[i] = "";
+    assert(parse(values) == FAILED);
+    assert(diagnostic.find(names[i - 4]) != std::string::npos);
+  }
+  return 0;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, GeneratedManifestLogsMissingOrMalformedField) {
+  std::stringstream helpers;
+  GenInductorPgoProxyFileHelpers(helpers);
+  std::stringstream manifest;
+  GenInductorPgoProxyManifest(manifest);
+  const auto json_start = helpers.str().find("bool GetJsonString(");
+  const auto validation_end = manifest.str().find("bool ResolveInductorPgoArtifactsUncached(");
+  ASSERT_NE(json_start, std::string::npos);
+  ASSERT_NE(validation_end, std::string::npos);
+  const std::string source = R"(
+#include <cassert>
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
+#include <cstdio>
+#include <string>
+#include <vector>
+std::string diagnostic;
+std::string manifest_json;
+#define OP_NAME "test"
+#define OP_LOGE(name, ...) do { char message[2048]; std::snprintf(message, sizeof(message), __VA_ARGS__); diagnostic = message; } while (false)
+constexpr uint32_t kPgoBundleSchemaVersion = 1;
+constexpr uint32_t kPgoTopnProtocolVersion = 2;
+constexpr size_t kMaxPgoManifestSize = 4096;
+const char *kPgoGeneration = "generation";
+const char *kPgoCacheRootName = "cache";
+struct InductorPgoArtifacts { std::string manifest = "test_manifest.json", tiling_so, runner, kernel, ld_preload; };
+bool ReadPgoFile(const std::string &, size_t, std::vector<uint8_t> &bytes) {
+  bytes.assign(manifest_json.begin(), manifest_json.end());
+  return true;
+}
+bool ValidateArtifactHash(const std::string &, const std::string &, const std::string &) { return true; }
+)" + helpers.str().substr(json_start) +
+                             manifest.str().substr(0, validation_end) + R"(
+int main() {
+  const std::vector<std::string> names = {"bundle_schema_version", "cache_root", "generation", "result_protocol_version", "profiling_backend", "requires_mspti", "ld_preload"};
+  const std::vector<std::string> fields = {"\"bundle_schema_version\":1", "\"cache_root\":\"cache\"", "\"generation\":\"generation\"", "\"result_protocol_version\":2", "\"profiling_backend\":\"mspti_equivalent\"", "\"requires_mspti\":false", "\"ld_preload\":\"\""};
+  for (size_t count = 0; count <= fields.size(); ++count) {
+    manifest_json = "{";
+    for (size_t i = 0; i < count; ++i) { manifest_json += (i == 0 ? "" : ",") + fields[i]; }
+    manifest_json += "}";
+    InductorPgoArtifacts artifacts;
+    diagnostic.clear();
+    if (count == fields.size()) { assert(ValidateInductorPgoManifest(artifacts)); }
+    else {
+      assert(!ValidateInductorPgoManifest(artifacts));
+      assert(diagnostic.find(names[count]) != std::string::npos);
+      assert(diagnostic.find("<missing>") != std::string::npos);
+      assert(diagnostic.find("test_manifest.json") != std::string::npos);
+      assert(diagnostic.find("expected") != std::string::npos);
+    }
+  }
+  manifest_json = "{\"bundle_schema_version\":\"invalid\"}";
+  InductorPgoArtifacts artifacts;
+  assert(!ValidateInductorPgoManifest(artifacts));
+  assert(diagnostic.find("invalid") != std::string::npos);
+  assert(diagnostic.find("unsigned 32-bit integer") != std::string::npos);
+  return 0;
+}
+)";
+  ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, GeneratedTensorArgumentDiagnosticsHandleNullAndInvalidCounts) {
+  const auto fused = GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
+  std::stringstream generated;
+  GenPgoLaunchParamsInit(fused, generated, false);
+  const std::string validation_end = "    return FAILED;\n  }\n";
+  const auto end = generated.str().find(validation_end);
+  ASSERT_NE(end, std::string::npos);
+  const std::string source = R"LOG(
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <string>
+using aclError = int;
+constexpr int ACL_SUCCESS = 0;
+constexpr int FAILED = 1;
+std::string diagnostic;
+#define DLOGE(...) do { char message[2048]; std::snprintf(message, sizeof(message), __VA_ARGS__); diagnostic = message; } while (false)
+struct PgoTensorArgs { void **inputs; uint32_t input_num; void **outputs; uint32_t output_num; };
+)LOG" + generated.str().substr(0, end + validation_end.size()) +
+                             R"LOG(
+  return ACL_SUCCESS;
+}
+int main() {
+  assert(LaunchParamsInit(nullptr) == FAILED);
+  assert(diagnostic.find("input_num=0") != std::string::npos);
+  void *tensors[1] = {nullptr};
+  PgoTensorArgs args = {tensors, 1, tensors, 1};
+  assert(LaunchParamsInit(&args) == ACL_SUCCESS);
+  args.input_num = 0;
+  assert(LaunchParamsInit(&args) == FAILED);
+  assert(diagnostic.find("input_num=0 (expected >= 1)") != std::string::npos);
+  args.input_num = 1;
+  args.output_num = 0;
+  assert(LaunchParamsInit(&args) == FAILED);
+  assert(diagnostic.find("output_num=0 (expected >= 1)") != std::string::npos);
+  args.output_num = 1;
+  args.inputs = nullptr;
+  assert(LaunchParamsInit(&args) == FAILED);
+  return 0;
+}
+)LOG";
+  ASSERT_TRUE(CompileAndRunCode(source));
 }
