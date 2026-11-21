@@ -90,7 +90,7 @@ target_compile_definitions(model_specialization PRIVATE
 
 target_include_directories(model_specialization
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include/model_specialization>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../super_kernel/include/super_kernel>
         $<INSTALL_INTERFACE:${CMAKE_SYSTEM_PROCESSOR}-linux/include/model_specialization>
         $<INSTALL_INTERFACE:${CMAKE_SYSTEM_PROCESSOR}-linux/include/super_kernel>
@@ -140,7 +140,7 @@ install(TARGETS model_specialization aclrtc_compile_worker
     LIBRARY DESTINATION ${CMAKE_SYSTEM_PROCESSOR}-linux/lib64 COMPONENT graph-autofusion
     RUNTIME DESTINATION ${CMAKE_SYSTEM_PROCESSOR}-linux/lib64 COMPONENT graph-autofusion
 )
-install(FILES aclmodel_specialization.h
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/model_specialization/aclmodel_specialization.h
     DESTINATION ${CMAKE_SYSTEM_PROCESSOR}-linux/include/model_specialization
     COMPONENT graph-autofusion
 )

@@ -22,6 +22,7 @@ add_dependencies(model_specialization_stest model_specialization)
 target_include_directories(model_specialization_stest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/include/model_specialization
     ${GRAPH_AUTOFUSION_ROOT_DIR}/model_specialization/src
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/common
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/include/super_kernel
