@@ -81,7 +81,7 @@ TEST_F(TestSkLogContext, FileLogger_RegistrationFailureReportsHandleAndPath) {
   config.modelId = modelId;
   EXPECT_FALSE(sk::logger::FileLogger::Instance().Initialize(config));
   EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find("Failed to register log file for model: " + modelId +
-                                                             ", handle: " + modelId + ", path: " + targetPath),
+                                                            ", handle: " + modelId + ", path: " + targetPath),
             std::string::npos);
 }
 

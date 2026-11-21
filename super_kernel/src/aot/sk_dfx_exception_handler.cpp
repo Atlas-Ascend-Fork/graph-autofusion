@@ -391,7 +391,8 @@ bool SuperKernelExceptionHandler::GetExceptionRegInfo(const aclrtExceptionInfo &
   // errRegInfo memory allocated by rtGetExceptionRegInfo is managed by RTS, should not be manually freed
   rtError_t rtRet = rtGetExceptionRegInfo(&exception, &exceptionRegInfo.errRegInfo, &exceptionRegInfo.coreNum);
   if (rtRet != 0) {
-    SK_LOGE("Failed to call rtGetExceptionRegInfo for error register information. ret: %d", static_cast<int32_t>(rtRet));
+    SK_LOGE("Failed to call rtGetExceptionRegInfo for error register information. ret: %d",
+            static_cast<int32_t>(rtRet));
     return false;
   }
   SK_LOGI("Get error register information. coreNum=%u", exceptionRegInfo.coreNum);
