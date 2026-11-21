@@ -37,8 +37,8 @@ BufferImpl::BufferImpl(const std::size_t buffer_size, const std::uint8_t default
       proto_msg->set_bt(std::string(buffer_size, static_cast<char_t>(default_val)));
       buffer_ = proto_msg->mutable_bt();
     } catch (std::bad_alloc &) {
-      REPORT_INNER_ERR_MSG("E18888", "failed to alloc buffer memory, buffer size %zu", buffer_size);
-      GELOGE(af::MEMALLOC_FAILED, "[New][Memory] failed to alloc buffer memory, buffer size %zu", buffer_size);
+      REPORT_INNER_ERR_MSG("E18888", "failed to alloc buffer memory, buffer size %zu bytes", buffer_size);
+      GELOGE(af::MEMALLOC_FAILED, "[New][Memory] failed to alloc buffer memory, buffer size %zu bytes", buffer_size);
       buffer_ = nullptr;
     }
   }
@@ -51,8 +51,8 @@ void BufferImpl::CopyFrom(const std::uint8_t *const data, const std::size_t buff
       proto_msg->set_bt(data, buffer_size);
       buffer_ = proto_msg->mutable_bt();
     } catch (std::bad_alloc &) {
-      REPORT_INNER_ERR_MSG("E18888", "Failed to alloc buffer memory, buffer size %zu", buffer_size);
-      GELOGE(af::MEMALLOC_FAILED, "[New][Memory] Failed to alloc buffer memory, buffer size %zu", buffer_size);
+      REPORT_INNER_ERR_MSG("E18888", "Failed to alloc buffer memory, buffer size %zu bytes", buffer_size);
+      GELOGE(af::MEMALLOC_FAILED, "[New][Memory] Failed to alloc buffer memory, buffer size %zu bytes", buffer_size);
       buffer_ = nullptr;
     }
   }

@@ -786,11 +786,11 @@ Status ModelSerializeImp::UnserializeGraph(std::map<std::string, ComputeGraphPtr
   GELOGI("Start to unserialize graph, graph num[%d]", graphs_proto.size());
   // 初始化子图表
   for (int32_t idx = 0; idx < graphs_proto.size(); ++idx) {
-    GELOGD("Unserialize graph, id: %ld, graph_name: %s", idx, graphs_proto[idx].name().c_str());
+    GELOGD("Unserialize graph, id: %d, graph_name: %s", idx, graphs_proto[idx].name().c_str());
     af::ModelSerializeImp impl;
     impl.SetAirModelPath(air_path_);
     GE_ASSERT_TRUE(impl.UnserializeGraph(graphs[graphs_proto[idx].name()], graphs_proto[idx]),
-                   "Unserialize graph: %ld failed, graph_name: %s", idx, graphs_proto[idx].name().c_str());
+                   "Unserialize graph: %d failed, graph_name: %s", idx, graphs_proto[idx].name().c_str());
   }
   return af::SUCCESS;
 }

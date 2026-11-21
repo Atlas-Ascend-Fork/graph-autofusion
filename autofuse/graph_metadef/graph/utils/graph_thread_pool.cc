@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <functional>
+#include <exception>
 #include <stdexcept>
 
 #include "register/register_types.h"
@@ -39,8 +40,10 @@ FMK_FUNC_HOST_VISIBILITY FMK_FUNC_DEV_VISIBILITY GraphThreadPool::~GraphThreadPo
     if (thd.joinable()) {
       try {
         thd.join();
+      } catch (const std::exception &e) {
+        GELOGW("Catch exception when processing task in thread pool, reason: %s", e.what());
       } catch (...) {
-        GELOGW("exception");
+        GELOGW("Catch unknown exception when processing task in thread pool");
       }
     }
   }

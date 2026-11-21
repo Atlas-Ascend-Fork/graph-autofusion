@@ -224,7 +224,7 @@ graphStatus SerializeNodeInputs(const AscNodePtr &node, ascendc_ir::proto::AscNo
     GE_ASSERT_TRUE(end <= op_desc->GetAllInputsSize());
     int64_t input_nums = static_cast<int64_t>(end - start);
     ir_def.add_input_nums(input_nums);
-    GELOGD("Add input nums[%d, end:%zu, start:%zu] for node[%s:%s, %d]", input_nums, end, start, op_desc->GetNamePtr(),
+    GELOGD("Add input nums[%ld, end:%zu, start:%zu] for node[%s:%s, %d]", input_nums, end, start, op_desc->GetNamePtr(),
            op_desc->GetTypePtr(), ir_id);
     for (auto id = static_cast<int32_t>(start); id < static_cast<int32_t>(end); id++) {
       const auto input_src = node_def.add_input_src();
@@ -268,7 +268,7 @@ graphStatus SerializeNodeOutputs(const OpDescPtr &op_desc, ascendc_ir::proto::Ir
     GE_ASSERT_TRUE(end <= op_desc->GetOutputsSize());
     int64_t output_nums = static_cast<int64_t>(end - start);
     ir_def.add_output_nums(output_nums);
-    GELOGD("Add output nums[%d, end:%zu, start:%zu] for node[%s:%s, %d]", output_nums, end, start,
+    GELOGD("Add output nums[%ld, end:%zu, start:%zu] for node[%s:%s, %d]", output_nums, end, start,
            op_desc->GetNamePtr(), op_desc->GetTypePtr(), output_ir_id);
     output_ir_id++;
     cur_output_id = end;

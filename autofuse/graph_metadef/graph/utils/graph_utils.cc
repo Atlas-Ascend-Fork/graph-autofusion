@@ -1023,7 +1023,7 @@ GraphUtils::ConvertFileConstToConst(const ComputeGraphPtr &graph) {
     GE_ASSERT_GRAPH_SUCCESS(op_desc->DelAttr(kLocation4Recover));
     int64_t attr_length = 0;
     GE_ASSERT_TRUE(AttrUtils::GetInt(op_desc, kLength4Recover, attr_length));
-    GE_ASSERT_TRUE(attr_length > 0);
+    GE_ASSERT_TRUE(attr_length > 0, "attr_length %ld must be greater than 0.", attr_length);
     // Issue #276: upper bound check to prevent OOM from malformed graph files
     constexpr int64_t kMaxFileLength = 2LL * 1024LL * 1024LL * 1024LL;
     GE_ASSERT_TRUE(attr_length <= kMaxFileLength, "attr_length %ld exceeds maximum allowed size %ld.", attr_length,
@@ -4877,7 +4877,7 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY graphStatus GraphUtils::GetSuppor
   constexpr size_t kInplaceAbilitySize = 2U;
   for (auto &inplace_index : output_inplace_index_list) {
     if (inplace_index.size() != kInplaceAbilitySize) {
-      GELOGW("The size %u of inplace index is invalid, must be equal to 2.", inplace_index.size());
+      GELOGW("The size %zu of inplace index is invalid, must be equal to 2.", inplace_index.size());
       return af::GRAPH_FAILED;
     }
     GE_ASSERT_TRUE(ge::IntegerChecker<int32_t>::Compat(inplace_index[0]));
@@ -5027,8 +5027,10 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY graphStatus GraphUtils::GenDumpOn
   ss << "_graph_" << compute_graph->GetGraphID() << "_" << GetSanitizedName(suffix) << ".pbtxt";
   std::string dump_file_name = ss.str();
   if ((dump_file_name.length()) >= kNameMax) {
+    const size_t original_length = dump_file_name.length();
     dump_file_name = dump_file_name.substr(0U, kNameMax - 7U) + ".pbtxt";
-    GELOGW("[Check][Param] File name is too long!, file:%s", dump_file_name.c_str());
+    GELOGW("[Check][Param] File name is too long!, length:%zu, max:%zu, file:%s", original_length, kNameMax,
+           dump_file_name.c_str());
   }
   std::string proto_file = stream_file_name.str() + dump_file_name;
 

@@ -1057,7 +1057,7 @@ graphStatus TensorDataImpl::SetData(const uint8_t *const data, const size_t size
   }
 
   if (MallocAlignedPtr(size) == nullptr) {
-    GELOGE(MEMALLOC_FAILED, "[Malloc][Memory] failed, size=%zu", size);
+    GELOGE(MEMALLOC_FAILED, "[Malloc][Memory] failed, size=%zu bytes", size);
     return GRAPH_FAILED;
   }
 
@@ -1066,8 +1066,8 @@ graphStatus TensorDataImpl::SetData(const uint8_t *const data, const size_t size
   auto src_addr = ge::PtrToValue(data);
   while (remain_size > SECUREC_MEM_MAX_LEN) {
     if (memcpy_s(ge::ValueToPtr(dst_addr), SECUREC_MEM_MAX_LEN, ge::ValueToPtr(src_addr), SECUREC_MEM_MAX_LEN) != EOK) {
-      REPORT_INNER_ERR_MSG("E18888", "memcpy failed, size = %lu", SECUREC_MEM_MAX_LEN);
-      GELOGE(INTERNAL_ERROR, "[Memcpy][Data] failed, size = %lu", SECUREC_MEM_MAX_LEN);
+      REPORT_INNER_ERR_MSG("E18888", "memcpy failed, size = %lu bytes", SECUREC_MEM_MAX_LEN);
+      GELOGE(INTERNAL_ERROR, "[Memcpy][Data] failed, size = %lu bytes", SECUREC_MEM_MAX_LEN);
       return GRAPH_FAILED;
     }
     remain_size -= SECUREC_MEM_MAX_LEN;
@@ -1075,8 +1075,8 @@ graphStatus TensorDataImpl::SetData(const uint8_t *const data, const size_t size
     src_addr += SECUREC_MEM_MAX_LEN;
   }
   if (memcpy_s(ge::ValueToPtr(dst_addr), remain_size, ge::ValueToPtr(src_addr), remain_size) != EOK) {
-    REPORT_INNER_ERR_MSG("E18888", "memcpy failed, size=%zu", remain_size);
-    GELOGE(INTERNAL_ERROR, "[Memcpy][Data] failed, size=%zu", remain_size);
+    REPORT_INNER_ERR_MSG("E18888", "memcpy failed, size=%zu bytes", remain_size);
+    GELOGE(INTERNAL_ERROR, "[Memcpy][Data] failed, size=%zu bytes", remain_size);
     return GRAPH_FAILED;
   }
   return GRAPH_SUCCESS;
@@ -1320,7 +1320,7 @@ GeTensorImpl::GeTensorImpl(const GeTensorDesc &tensor_desc, std::shared_ptr<Alig
 GeTensorImpl::GeTensorImpl(const GeTensorDesc &tensor_desc, const size_t size) : GeTensorImpl() {
   DescReference() = tensor_desc;
   if (tensor_data_.MallocAlignedPtr(size) == nullptr) {
-    GELOGW("[Malloc][Memory] Malloc memory failed, size=%zu", size);
+    GELOGW("[Malloc][Memory] Malloc memory failed, size=%zu bytes", size);
   }
 }
 

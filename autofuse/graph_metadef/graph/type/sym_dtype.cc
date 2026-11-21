@@ -374,7 +374,9 @@ graphStatus SymDtype::Eval(const OpDesc &op, std::vector<DataType> &dtypes) cons
       GE_WARN_ASSERT(input_dtypes.size() == dtypes.size(), "Infer dtype size mismatch %zu vs. %zu", input_dtypes.size(),
                      dtypes.size());
       for (size_t i = 0U; i < input_dtypes.size(); i++) {
-        GE_WARN_ASSERT(input_dtypes[i] == dtypes[i], "Sym list-dtype mismatch");
+        GE_WARN_ASSERT(input_dtypes[i] == dtypes[i], "Sym %s list-dtype mismatch at index %zu: input=%s, expected=%s",
+                       id_.c_str(), i, TypeUtils::DataTypeToSerialString(input_dtypes[i]).c_str(),
+                       TypeUtils::DataTypeToSerialString(dtypes[i]).c_str());
       }
     }
   }
