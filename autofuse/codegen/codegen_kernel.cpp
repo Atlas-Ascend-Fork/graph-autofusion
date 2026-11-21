@@ -1308,24 +1308,64 @@ TBuf::TBuf(ascir::BufId buf_id, const ascir::Position pos, std::string &position
       size(this->name + "_size"),
       buf(Type("LocalTensor<uint8_t>"), name + "_buf") {}
 
+namespace {
+// TBuf 合并后所有 buffer 共用的 TBuf 名，以及每个 buffer 的字节偏移变量名
+constexpr char kMergedTBufName[] = "b_all";
+constexpr size_t kMergeTBufMinCount = 32U;   // buffer 数达到该阈值才合并，避免影响普通图
+constexpr size_t kDedupScalarMinCount = 2U;  // scalar blk tensor 数达到该阈值才做去重
+
+std::string MergedTBufOffsetName(const ascir::BufId buf_id) {
+  return "__off_b" + std::to_string(buf_id);
+}
+
+// TPipe::InitBuffer 会把每个 buffer 的长度按 32B 向上对齐后再累加地址，
+// 这里保持同样的对齐粒度，使合并后每个 buffer 的起始地址与原实现逐字节一致
+std::string TBufBlkAlignedSizeExpr(const ascir::BufId buf_id) {
+  return "KernelUtils::BlkAlign<uint8_t>(t->b" + std::to_string(buf_id) + "_size)";
+}
+}  // namespace
+
+std::string TBuf::GetTensorExpr(const std::string &dtype_name, const std::string &merged_buf,
+                                const std::string &offset_expr) const {
+  if (merged_buf.empty()) {
+    return this->name + ".Get<" + dtype_name + ">()";
+  }
+  // GetWithOffset<T>(size, bufOffset)：size 是元素个数，bufOffset 是 32B 对齐的字节偏移。
+  // size 由 blk 对齐后的字节数换算，保证 LocalTensor 的 dataLen 与原 Get<T>() 一致
+  // （否则 GetSize() 会小一个尾部碎片，依赖 GetSize() 的 API 会少算元素）。
+  return merged_buf + ".GetWithOffset<" + dtype_name + ">(" + TBufBlkAlignedSizeExpr(this->id) + " / sizeof(" +
+         dtype_name + "), " + offset_expr + ")";
+}
+
 std::string TBuf::AllocBuf(const bool with_define) const {
+  return this->AllocBuf(with_define, "", "");
+}
+
+std::string TBuf::AllocBuf(std::string buf_name, std::string dtype_name, const bool with_define) const {
+  return this->AllocBuf(buf_name, dtype_name, with_define, "", "");
+}
+
+std::string TBuf::AllocBuf(const bool with_define, const std::string &merged_buf,
+                           const std::string &offset_expr) const {
   stringstream ss;
   if (with_define) {
     ss << this->buf.AsArg();
   } else {
     ss << this->buf.Str();
   }
-  ss << " = " << this->name << ".Get<uint8_t>();";
+  ss << " = " << this->GetTensorExpr("uint8_t", merged_buf, offset_expr) << ";";
   return ss.str();
 }
 
-std::string TBuf::AllocBuf(std::string buf_name, std::string dtype_name, const bool with_define) const {
+std::string TBuf::AllocBuf(std::string buf_name, std::string dtype_name, const bool with_define,
+                           const std::string &merged_buf, const std::string &offset_expr) const {
   stringstream ss;
   if (with_define) {
-    ss << "LocalTensor<" << dtype_name << "> " << buf_name << " = " << this->name << ".Get<" << dtype_name << ">();";
+    ss << "LocalTensor<" << dtype_name << "> " << buf_name;
   } else {
-    ss << buf_name << " = " << this->name << ".Get<" << dtype_name << ">();";
+    ss << buf_name;
   }
+  ss << " = " << this->GetTensorExpr(dtype_name, merged_buf, offset_expr) << ";";
   return ss.str();
 }
 
@@ -1964,13 +2004,18 @@ Status TPipe::AddTensor(const ascir::TensorAttr &tensor_attr, const ascir::SizeE
 }
 
 std::string TPipe::AllocTmpBuf(const TBuf &buf, const bool with_define) const {
+  return this->AllocTmpBuf(buf, with_define, "", "");
+}
+
+std::string TPipe::AllocTmpBuf(const TBuf &buf, const bool with_define, const std::string &merged_buf,
+                               const std::string &offset_expr) const {
   stringstream ss;
   if (with_define) {
     ss << this->tmp_buf.AsArg();
   } else {
     ss << this->tmp_buf.Str();
   }
-  ss << "_" << to_string(buf.id) << " = " << buf.name << ".Get<uint8_t>();" << std::endl;
+  ss << "_" << to_string(buf.id) << " = " << buf.GetTensorExpr("uint8_t", merged_buf, offset_expr) << ";" << std::endl;
   return ss.str();
 }
 
@@ -2453,11 +2498,24 @@ Status TPipe::LocalTQueAlloc(std::string &result) const {
 Status TPipe::BlkTensorAllocAndInit(std::string &result) const {
   // 遍历所有需要生成blk tensor 的 tensor id
   stringstream ss;
+  // 常量值相同的 scalar blk tensor 共享同一份 TBuf + Duplicate，其余直接别名复用。
+  // 这类 tensor 只作为只读输入使用，别名与原实现严格等价，但能避免 scalar TBuf 数量爆炸。
+  const auto canonical = this->ScalarBlkTensorCanonicalMap();
   for (auto &id : this->need_gen_blk_tensors) {
     auto tensor_ptr = this->GetTensor(id);
     GE_CHK_BOOL_RET_STATUS(tensor_ptr != nullptr, af::FAILED, "BlkTensorAllocAndInit need_gen_blk_tensors failed");
     std::string scalar_t_buf_name = tensor_ptr->name + "_tbuf";
     std::string scalar_local_blk_tensor_name = "local_blk_tensor_of_" + tensor_ptr->name;
+    const auto canonical_id = canonical.find(id);
+    if (canonical_id != canonical.cend() && canonical_id->second != id) {
+      const auto first_ptr = this->GetTensor(canonical_id->second);
+      GE_CHK_BOOL_RET_STATUS(first_ptr != nullptr, af::FAILED, "BlkTensorAllocAndInit dedup tensor failed");
+      ss << "LocalTensor<" << tensor_ptr->type << "> " << scalar_local_blk_tensor_name << " = local_blk_tensor_of_"
+         << first_ptr->name << ";" << std::endl;
+      continue;
+    }
+    // const_value 可能为空，此时需要由 const_value_expr 生成常量表达式，不能直接使用空串
+    const auto const_value = this->ScalarBlkTensorConstValue(*tensor_ptr);
     ss << "TBuf<TPosition::VECCALC> " << scalar_t_buf_name << ";" << std::endl;
     if (using_global_tpipe_) {
       ss << "GetTPipePtr()->InitBuffer(" << scalar_t_buf_name << ", 32);" << std::endl;
@@ -2466,9 +2524,6 @@ Status TPipe::BlkTensorAllocAndInit(std::string &result) const {
     }
     ss << "LocalTensor<" << tensor_ptr->type << "> " << scalar_local_blk_tensor_name << " = " << scalar_t_buf_name
        << ".Get<" << tensor_ptr->type << ">();" << std::endl;
-
-    const auto const_value =
-        tensor_ptr->const_value.empty() ? tiler.Size(tensor_ptr->const_value_expr, true) : tensor_ptr->const_value;
     ss << "Duplicate(" << scalar_local_blk_tensor_name << "[0], static_cast<" << tensor_ptr->type << ">(" << const_value
        << "), static_cast<uint64_t>(32/"
        << "sizeof(" << tensor_ptr->type << "))" << Int64DupScratchArg(tensor_ptr->dtype) << ");" << std::endl;
@@ -2523,40 +2578,185 @@ std::string TPipe::GenDuplicateBufAlloc(
   return ss.str();
 }
 
+bool TPipe::ShouldMergeTBufs() const {
+  if (this->cv_fusion_type == ascir::CubeTemplateType::kUBFuse || !using_att_calc_qbt_size_) {
+    return false;
+  }
+  if (this->bufs.size() < kMergeTBufMinCount) {
+    return false;
+  }
+  for (const auto &pair : this->bufs) {
+    if (pair.second.position != af::Position::kPositionVecCalc) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TPipe::ShouldDedupScalarBlkTensors() const {
+  if (this->cv_fusion_type == ascir::CubeTemplateType::kUBFuse) {
+    return false;
+  }
+  return this->need_gen_blk_tensors.size() >= kDedupScalarMinCount;
+}
+
+// scalar blk tensor 的 Duplicate 常量实参：优先用已折叠的 const_value，为空时回退到 const_value_expr。
+std::string TPipe::ScalarBlkTensorConstValue(const Tensor &tensor) const {
+  return tensor.const_value.empty() ? tiler.Size(tensor.const_value_expr, true) : tensor.const_value;
+}
+
+// 常量值相同的 scalar blk tensor 只保留一份 TBuf + Duplicate：返回 id -> 首个同常量 tensor 的 id。
+// 关闭去重时返回空 map，调用方退化为"每个 tensor 独立分配"的原行为。
+std::map<ascir::TensorId, ascir::TensorId> TPipe::ScalarBlkTensorCanonicalMap() const {
+  std::map<ascir::TensorId, ascir::TensorId> canonical;
+  if (!this->ShouldDedupScalarBlkTensors()) {
+    return canonical;
+  }
+  std::map<std::string, ascir::TensorId> first_of_const;
+  for (const auto &id : this->need_gen_blk_tensors) {
+    const auto tensor_ptr = this->GetTensor(id);
+    if (tensor_ptr == nullptr) {
+      continue;
+    }
+    const auto const_value = this->ScalarBlkTensorConstValue(*tensor_ptr);
+    // Duplicate 的实参（dtype + 常量值 + 必要时的 int64 临时 buffer）即去重 key
+    stringstream duplicate_args;
+    duplicate_args << "static_cast<" << tensor_ptr->type << ">(" << const_value << "), static_cast<uint64_t>(32/"
+                   << "sizeof(" << tensor_ptr->type << "))" << Int64DupScratchArg(tensor_ptr->dtype);
+    const auto inserted = first_of_const.emplace(duplicate_args.str(), id);
+    canonical.emplace(id, inserted.first->second);
+  }
+  return canonical;
+}
+
+// 按 LocalTBufAllocLoopTwice 的实际分配顺序收集 buf id：先连续 buf，再非 tmp 复用 buf，最后 tmp 复用 buf
+Status TPipe::TBufAllocOrder(std::vector<ascir::BufId> &order) const {
+  order.clear();
+  std::set<ascir::BufId> allocated;
+  for (const auto buf_id : this->contiguous_buf_ids) {
+    const auto it = this->bufs.find(buf_id);
+    GE_ASSERT_TRUE(it != this->bufs.cend(), "Codegen merged tbuf buf not found, buf_id = %ld", buf_id);
+    order.emplace_back(buf_id);
+    allocated.emplace(buf_id);
+  }
+  for (const auto &pair : this->bufs) {
+    if (allocated.count(pair.first) > 0U || pair.second.tmp_buf_reuse) {
+      continue;
+    }
+    order.emplace_back(pair.first);
+  }
+  for (const auto &pair : this->bufs) {
+    if (pair.second.tmp_buf_reuse) {
+      order.emplace_back(pair.first);
+    }
+  }
+  return af::SUCCESS;
+}
+
+Status TPipe::MergedTBufPreamble(const std::vector<ascir::BufId> &order, std::string &result) const {
+  GE_CHK_BOOL_RET_STATUS(!order.empty(), af::FAILED, "Codegen merged tbuf order is empty");
+  stringstream ss;
+  for (size_t i = 0U; i < order.size(); i++) {
+    ss << "uint32_t " << MergedTBufOffsetName(order[i]) << " = ";
+    if (i == 0U) {
+      ss << "0u";
+    } else {
+      ss << MergedTBufOffsetName(order[i - 1U]) << " + " << TBufBlkAlignedSizeExpr(order[i - 1U]);
+    }
+    ss << ";" << std::endl;
+  }
+  const std::string total_size = MergedTBufOffsetName(order.back()) + " + " + TBufBlkAlignedSizeExpr(order.back());
+  ss << "TBuf<TPosition::VECCALC> " << kMergedTBufName << ";" << std::endl;
+  if (using_global_tpipe_) {
+    ss << "GetTPipePtr()->InitBuffer(" << kMergedTBufName << ", " << total_size << ");" << std::endl;
+  } else {
+    ss << "tpipe.InitBuffer(" << kMergedTBufName << ", " << total_size << ");" << std::endl;
+  }
+  result = ss.str();
+  return af::SUCCESS;
+}
+
 Status TPipe::LocalTBufAlloc(const TBuf &buf, std::string &result, const bool with_define) const {
+  return this->LocalTBufAlloc(buf, result, with_define, "", "");
+}
+
+Status TPipe::LocalTBufAlloc(const TBuf &buf, std::string &result, const bool with_define,
+                             const std::string &merged_buf, const std::string &offset_expr) const {
   stringstream ss;
   std::string reuse_dtype_name = "";
   std::vector<const Tensor *> reuse_buf_tensors;
   bool is_buf_reuse = true;
   stringstream tensor_size_max;
+  const bool is_merged = !merged_buf.empty();
 
   GE_CHK_STATUS_RET(ParseTBufReuse(buf, reuse_dtype_name, is_buf_reuse, reuse_buf_tensors, tensor_size_max),
                     "Codegen parse tbuf reuse failed");
-
   if (this->cv_fusion_type == ascir::CubeTemplateType::kUBFuse) {
     ss << buf.size.DefineConst(tensor_size_max.str()) << std::endl;
   } else if (!using_att_calc_qbt_size_) {
     ss << buf.size.DefineConst(tensor_size_max.str()) << std::endl;
-    ss << buf.Define() << std::endl;
+    if (!is_merged) {
+      ss << buf.Define() << std::endl;
+    }
   } else {
     ss << "// " << buf.size.DefineConst(tensor_size_max.str()) << std::endl;
-    ss << buf.Define() << std::endl;
+    if (!is_merged) {
+      ss << buf.Define() << std::endl;
+    }
   }
-  std::string init;
-  GE_CHK_STATUS_RET(this->InitTBufBuffer(buf, init), "Codegen init tbuf buffer failed");
-  ss << init << std::endl;
+  if (!is_merged) {
+    std::string init;
+    GE_CHK_STATUS_RET(this->InitTBufBuffer(buf, init), "Codegen init tbuf buffer failed");
+    ss << init << std::endl;
+  }
 
+  GE_CHK_STATUS_RET(this->AllocTBufTensor(buf, with_define, is_buf_reuse, is_merged, merged_buf, offset_expr,
+                                          reuse_dtype_name, reuse_buf_tensors, ss),
+                    "Codegen tensor allocation failed");
+  result = ss.str();
+  return af::SUCCESS;
+}
+
+Status TPipe::AllocTBufTensor(const TBuf &buf, const bool with_define, const bool is_buf_reuse, const bool is_merged,
+                              const std::string &merged_buf, const std::string &offset_expr,
+                              const std::string &reuse_dtype_name, const std::vector<const Tensor *> &reuse_buf_tensors,
+                              std::stringstream &ss) const {
   if (!is_buf_reuse) {
-    ss << buf.AllocBuf(with_define) << std::endl;
-  } else {
-    ss << buf.AllocBuf(reuse_buf_tensors[0]->name, reuse_dtype_name, with_define) << std::endl;
-    reuse_buf_tensors[0]->no_need_realloc = true;
-    for (size_t i = 1UL; i < reuse_buf_tensors.size(); i++) {
-      reuse_buf_tensors[i]->no_need_realloc = true;
-      if (with_define) {
-        ss << "LocalTensor<" << reuse_dtype_name << "> ";
-      }
-      ss << reuse_buf_tensors[i]->name << " = " << reuse_buf_tensors[0]->name << ";" << std::endl;
+    ss << (is_merged ? buf.AllocBuf(with_define, merged_buf, offset_expr) : buf.AllocBuf(with_define)) << std::endl;
+    return af::SUCCESS;
+  }
+  const auto &first_tensor = reuse_buf_tensors[0];
+  ss << (is_merged ? buf.AllocBuf(first_tensor->name, reuse_dtype_name, with_define, merged_buf, offset_expr)
+                   : buf.AllocBuf(first_tensor->name, reuse_dtype_name, with_define))
+     << std::endl;
+  for (size_t i = 0UL; i < reuse_buf_tensors.size(); i++) {
+    reuse_buf_tensors[i]->no_need_realloc = true;
+    if (i == 0UL) {
+      continue;
+    }
+    if (with_define) {
+      ss << "LocalTensor<" << reuse_dtype_name << "> ";
+    }
+    ss << reuse_buf_tensors[i]->name << " = " << first_tensor->name << ";" << std::endl;
+  }
+  return af::SUCCESS;
+}
+
+Status TPipe::LocalTBufAllocMerged(const std::vector<ascir::BufId> &order, const bool with_define,
+                                   std::string &result) const {
+  stringstream ss;
+  std::string tmp;
+  GE_CHK_STATUS_RET(this->MergedTBufPreamble(order, tmp), "Codegen merged tbuf preamble failed");
+  ss << tmp;
+  for (const auto buf_id : order) {
+    const auto it = this->bufs.find(buf_id);
+    GE_ASSERT_TRUE(it != this->bufs.cend(), "Codegen merged tbuf buf not found, buf_id = %ld", buf_id);
+    const auto &buf = it->second;
+    GE_CHK_STATUS_RET(this->LocalTBufAlloc(buf, tmp, with_define, kMergedTBufName, MergedTBufOffsetName(buf_id)),
+                      "Codegen TBuf alloc failed(merged).");
+    ss << tmp;
+    if (buf.tmp_buf_reuse) {
+      ss << this->AllocTmpBuf(buf, with_define, kMergedTBufName, MergedTBufOffsetName(buf_id));
     }
   }
   result = ss.str();
@@ -2566,6 +2766,15 @@ Status TPipe::LocalTBufAlloc(const TBuf &buf, std::string &result, const bool wi
 Status TPipe::LocalTBufAllocLoopTwice(std::string &result, const bool with_define) const {
   stringstream ss;
   std::string tmp;
+  if (this->ShouldMergeTBufs()) {
+    std::vector<ascir::BufId> order;
+    GE_CHK_STATUS_RET(this->TBufAllocOrder(order), "Codegen merged tbuf alloc order failed");
+    GE_CHK_STATUS_RET(this->LocalTBufAllocMerged(order, with_define, tmp), "Codegen merged tbuf alloc failed");
+    ss << tmp;
+    ss << std::endl;
+    result = ss.str();
+    return af::SUCCESS;
+  }
   // 优先分配需要连续的TBuf, 不会与tmp buf进行复用
   for (const auto buf_id : this->contiguous_buf_ids) {
     const auto it = this->bufs.find(buf_id);
@@ -5943,12 +6152,17 @@ std::string TPipe::GenDuplicateBufAssign(
 Status TPipe::BlkTensorDefine(std::string &result) const {
   // 遍历所有需要生成blk tensor 的 tensor id
   stringstream ss;
+  // 同常量 tensor 只在首个 tensor 上声明 TBuf，其余复用（见 ScalarBlkTensorCanonicalMap）
+  const auto canonical = this->ScalarBlkTensorCanonicalMap();
   for (auto &id : this->need_gen_blk_tensors) {
     auto tensor_ptr = this->GetTensor(id);
     GE_CHK_BOOL_RET_STATUS(tensor_ptr != nullptr, af::FAILED, "BlkTensorAllocAndInit need_gen_blk_tensors failed");
     std::string scalar_t_buf_name = tensor_ptr->name + "_tbuf";
     std::string scalar_local_blk_tensor_name = "local_blk_tensor_of_" + tensor_ptr->name;
-    ss << "    TBuf<TPosition::VECCALC> " << scalar_t_buf_name << ";" << std::endl;
+    const auto canonical_id = canonical.find(id);
+    if (canonical_id == canonical.cend() || canonical_id->second == id) {
+      ss << "    TBuf<TPosition::VECCALC> " << scalar_t_buf_name << ";" << std::endl;
+    }
     ss << "    LocalTensor<" << tensor_ptr->type << "> " << scalar_local_blk_tensor_name << ";" << std::endl;
   }
   ss << std::endl;
@@ -5959,11 +6173,20 @@ Status TPipe::BlkTensorDefine(std::string &result) const {
 Status TPipe::BlkTensorAssign(std::string &result) const {
   // 遍历所有需要生成blk tensor 的 tensor id
   stringstream ss;
+  // 同常量 tensor 只对首个 tensor 做 InitBuffer + Duplicate，其余直接别名（见 ScalarBlkTensorCanonicalMap）
+  const auto canonical = this->ScalarBlkTensorCanonicalMap();
   for (auto &id : this->need_gen_blk_tensors) {
     auto tensor_ptr = this->GetTensor(id);
     GE_CHK_BOOL_RET_STATUS(tensor_ptr != nullptr, af::FAILED, "BlkTensorAllocAndInit need_gen_blk_tensors failed");
     std::string scalar_t_buf_name = tensor_ptr->name + "_tbuf";
     std::string scalar_local_blk_tensor_name = "local_blk_tensor_of_" + tensor_ptr->name;
+    const auto canonical_id = canonical.find(id);
+    if (canonical_id != canonical.cend() && canonical_id->second != id) {
+      const auto first_ptr = this->GetTensor(canonical_id->second);
+      GE_CHK_BOOL_RET_STATUS(first_ptr != nullptr, af::FAILED, "BlkTensorAssign dedup tensor failed");
+      ss << scalar_local_blk_tensor_name << " = local_blk_tensor_of_" << first_ptr->name << ";" << std::endl;
+      continue;
+    }
     if (using_global_tpipe_) {
       ss << "GetTPipePtr()->InitBuffer(" << scalar_t_buf_name << ", 32);" << std::endl;
     } else {
