@@ -101,7 +101,8 @@ const char *FusionFailReasonDetail(FusionFailReason reason) {
   }
 }
 
-bool AppendKernelArgsToLog(std::ostream &log, const aclmdlRIKernelTaskParams &kernelParams, bool includePlaceholders) {
+bool AppendKernelArgsLogFields(std::ostream &log, const aclmdlRIKernelTaskParams &kernelParams,
+                               bool includePlaceholders) {
   const auto argsType = static_cast<uint32_t>(kernelParams.argsType);
   log << ", argsType=" << argsType;
   switch (argsType) {
@@ -123,18 +124,6 @@ bool AppendKernelArgsToLog(std::ostream &log, const aclmdlRIKernelTaskParams &ke
     default:
       return false;
   }
-}
-
-void LogKernelArgsComparison(uint64_t nodeId, const aclmdlRIKernelTaskParams &kernelParams, void *copiedDevArgs,
-                             size_t copiedDevArgsSize) {
-  std::ostringstream oss;
-  if (!AppendKernelArgsToLog(oss, kernelParams, false)) {
-    SK_LOGE("Unsupported kernel argsType in args comparison: nodeId=%lu, argsType=%u", nodeId,
-            static_cast<uint32_t>(kernelParams.argsType));
-    return;
-  }
-  SK_LOGI("Kernel args comparison: nodeId=%lu%s, copiedDevArgs=%p, copiedDevArgsSize=%zu", nodeId, oss.str().c_str(),
-          copiedDevArgs, copiedDevArgsSize);
 }
 
 }  // namespace
@@ -878,7 +867,7 @@ void SuperKernelBaseNode::LogNodeUpdateResult(const aclmdlRITaskParams *paramsTo
       oss << ", opInfoPtr=" << paramsToLog->opInfoPtr << ", opInfoSize=" << paramsToLog->opInfoSize
           << ", funcHandle=" << kernelParams.funcHandle
           << ", numBlocks=" << static_cast<uint32_t>(kernelParams.numBlocks);
-      if (!AppendKernelArgsToLog(oss, kernelParams, true)) {
+      if (!AppendKernelArgsLogFields(oss, kernelParams, true)) {
         SK_LOGE("Unsupported kernel argsType in node update result: nodeId=%lu, argsType=%u", nodeId,
                 static_cast<uint32_t>(kernelParams.argsType));
         return;
@@ -978,7 +967,13 @@ bool SuperKernelKernelNode::InitNode(const SuperKernelOptionsManager *opts) {
     SK_LOGE("Failed to get copied device task args, ret=%d", rtRet);
     return false;
   }
-  LogKernelArgsComparison(nodeId, kernelParams, copiedDevArgs, copiedDevArgsSize);
+  if (std::ostringstream argsLog; AppendKernelArgsLogFields(argsLog, kernelParams, false)) {
+    SK_LOGI("Kernel args comparison: nodeId=%lu%s, copiedDevArgs=%p, copiedDevArgsSize=%zu", nodeId,
+            argsLog.str().c_str(), copiedDevArgs, copiedDevArgsSize);
+  } else {
+    SK_LOGE("Unsupported kernel argsType in args comparison: nodeId=%lu, argsType=%u", nodeId,
+            static_cast<uint32_t>(kernelParams.argsType));
+  }
 
   if (!GetScopeKernelInfo(kernelParams, copiedDevArgs, &scopeKernelInfo)) {
     SK_LOGE("Failed to get scope kernel information for kernel node %lu", nodeId);
