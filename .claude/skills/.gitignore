@@ -42,6 +42,8 @@ att-perf-selection-analysis/**/*.pyc
 !af-code-reviewer/*
 !af-prune-graph-metadef/
 !af-prune-graph-metadef/**
+!af-ascendc-extend-adapter/
+!af-ascendc-extend-adapter/**
 
 # SuperKernel tuning skills
 !superkernel-auto-tune/
