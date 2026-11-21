@@ -1,0 +1,4 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,packing_extra
+train_c16_n1024_w8_load_normal,dense-row-api-equivalence,train,float32,4,16,LOAD_NORMAL,2,1024x8,8x1,8x1,32768,32768,32768,0,0,0
+train_c32_n512_w8_load_normal,dense-row-api-equivalence,train,float32,4,32,LOAD_NORMAL,2,512x8,8x1,8x1,16384,16384,16384,0,0,0
+train_c48_n512_w8_load_normal,dense-row-api-equivalence,train,float32,4,48,LOAD_NORMAL,2,512x8,8x1,8x1,16384,16384,16384,0,0,0

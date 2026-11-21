@@ -230,7 +230,7 @@ ASCIR→AscendC API→Micro API 的分层和 V1/V2 注册机制是有意设计�
 | `MultiCoreTiling` | 多核切分 | 识别 `mc_related` 轴，结合物理核数、尾块和 UB 负载确定 BlockDim | 可并行执行且存在外层工作量的融合图；小 Shape 或无可分核轴时收益有限。 |
 | 双阈值算法 | LocalBuffer/MultiCore 协同 | 联合 `att_ub_threshold` 与 `att_corenum_threshold`，在单核 UB 利用率和核数利用率之间权衡 | UB 占用与并行度冲突的中大型算子；不是独立求解器，依赖前两阶段结果。 |
 | 同等优先级 Tiling | AxesReorder 特殊分支 | 对两根同优先级轴联合搜索，并结合对齐和双阈值策略 | 当前主要用于 Transpose 的 Load/Store 双尾轴；仅支持两根轴，三根及以上不处理。 |
-| `AutoTuning` | 求解后微调 | 按性能公式对 BlockDim/邻近 Tile 做步长搜索，改善多核头开销场景 | `att_accuracy_level>0` 且未开启多核 UB trade-off 时启用；属于编译期调优，不是硬件 PGO。 |
+| `AutoTuning` | 求解后微调 | 按性能公式对 BlockDim/邻近 Tile 做步长搜索，改善多核头开销场景 | 默认路径在静态 shape 且 `att_accuracy_level > 0` 时搜索核数。动态高精度路径保留负载均衡；PGO 阈值重求解沿用高精度调优。 |
 | `HighPerf`/`GeneralSolver` | 实验求解器 | 不依赖轴排序，采用 LocateRegion 指数粗调、FineTune 线性精调和早停，性能上限较高但耗时和模型敏感度更大 | 性能极致要求且模型可信的实验场景；正式版本不承诺，后续可能废弃。 |
 
 这些算法不是互相替代的多个入口，而是“求解器模式 + 切分阶段 + 特殊策略”的组合：`AxesReorder` 或 `HighPerf` 决定总体搜索方式，LocalBuffer/MultiCore 负责资源可行域，双阈值、同等优先级和 AutoTuning 负责特定冲突场景的局部优化。
@@ -285,6 +285,27 @@ flowchart TD
 #### Torch/GE 路径与边界
 
 两条前端路径共用求解器；差异只体现在 GE 可直接执行动态 Tiling，而 Inductor 可能要求枚举多个候选并静态编译。动态 Shape 允许多个候选 key，但每个具体符号实例仍必须唯一。候选空间过大时通过融合范围、LocalBuffer 二分、双阈值和缓存控制编译时间，这是有意的搜索边界；HighPerf 后续可能废弃，属于实验能力。当前同等优先级策略仅覆盖 Transpose 双轴，不能推广到任意多轴或 Cube 专用切分。
+
+#### 算法开关
+
+| 开关 | 默认 | 作用 | 生效位置与边界 |
+| --- | --- | --- | --- |
+| `autofuse_att_algorithm` | `AxesReorder` | 选择 ATT 总体求解器，可选 `AxesReorder`、`HighPerf`、`Golden` | 初始化 `TilingCodeGenConfig` 时生效；`HighPerf`/`Golden` 仍属实验能力 |
+| `att_accuracy_level` | `1` | `0` 关闭初解后的自动调优；`1` 开启 | `0` 时生成的 `enable_auto_tune=false`，`Run` 在核数搜索前直接返回初解 |
+| `att_ub_threshold` | `20` | 双阈值初解的 UB 利用率阈值（百分比，0–100） | 与 `att_corenum_threshold` 联合决定单核 UB 与多核的权衡初解 |
+| `att_corenum_threshold` | `40` | 双阈值初解的核数利用率阈值（百分比，0–100） | `corenum_threshold < 1.0` 时表示核数惩罚比例生效，影响 Reduce Store 种子保护 |
+| `att_enable_multicore_ub_tradeoff` | `false` | 开启多核 UB 权衡/动态求解路径 | 开启后关闭 Reduce Store 惩罚种子保护，AutoTuning 走动态 tradeoff 配置 |
+| `att_enable_small_shape_strategy` | `false` | 开启小 Shape 快速求解策略 | 仅影响小 Shape 的候选枚举，不改变模型公式 |
+| `autofuse_enable_tiling_cache` | `false` | 开启 tiling 缓存 | 复用已求解的 tiling；缓存命中不重新求解 |
+| `att_profiling` | `false` | 输出 ATT profiling/候选诊断信息 | 仅诊断日志，不改变候选选择 |
+| `autofuse_enable_pgo` | 按场景 | 开启 PGO 候选实测与重求解 | PGO 重求解默认保留核数搜索，不读取动态 shape 的跳过设置 |
+
+除 DFX 开关外，生成代码中还有两个内部算法门控（不对用户开放）：
+
+- `enable_core_search`：`AxesReorder` 生成器在静态 shape 时置 `true`，任一输入 size 含自由符号（动态 shape）时置 `false`，此时 `Run` 只做 `WorkloadBalance`；PGO 重求解调用只传 4 个参数，默认仍为 `true`。
+- `preserve_reduce_store_penalty_seed`：仅在 Reduce 分核 Store 地址冲突惩罚配置（`is_penalty_config`）、未开启 multicore UB tradeoff/group parallel，且没有待执行的 PGO search 配置时置 `true`。当双阈值初解成功且 `corenum_threshold < 1.0` 时，跳过额外核数探测，保留带惩罚的初解种子，避免探测重置阈值。
+
+这些门控由 solver 生成器写入 `AxesReorderSolverInput` 或 `Run` 调用参数，不是运行时环境变量；如需调整，应修改对应的 solver 生成条件并补充 UT。
 
 ### 5.4 代码生成与 TilingData
 

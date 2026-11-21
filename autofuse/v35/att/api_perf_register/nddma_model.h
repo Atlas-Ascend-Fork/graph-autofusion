@@ -104,6 +104,7 @@ struct NddmaNormalizedDesc {
 struct NddmaModelResult {
   bool selected{false};
   Expr cycles;
+  // Symbolic selection across model families uses an explicit NDDMA_RUNTIME_DISPATCH label.
   std::string model_name{"NDDMA_1D_MULTICORE_V2"};
   NddmaFallbackReason fallback_reason{NddmaFallbackReason::kNone};
   size_t raw_rank{0U};
@@ -119,7 +120,7 @@ NddmaFallbackReason BuildNddmaDescriptor(const TensorShapeInfo &shape_info, cons
 NddmaFallbackReason NormalizeNddmaDescriptor(const NddmaDescriptorInfo &descriptor, NddmaNormalizedDesc &normalized);
 
 af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::string &dtype, const Expr &block_dim,
-                              NddmaModelResult &result);
+                              NddmaModelResult &result, bool direct_store = false);
 
 void LogNddmaFallback(const std::string &node_name, const std::string &dtype, const NddmaDescriptorInfo *descriptor,
                       const NddmaModelResult &result);

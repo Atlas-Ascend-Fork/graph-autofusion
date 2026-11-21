@@ -9,6 +9,7 @@
  */
 
 #include <memory>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -119,6 +120,66 @@ Expr ResolvedPipeExpr(const PerfOutputInfo &perf, PipeType pipe_type) {
   auto pipe_expr = iter->second.Replace(ConcursiveReplaceVars(perf.ternary_ops));
   pipe_expr.Simplify();
   return pipe_expr;
+}
+
+bool GetReduceConstant(Expr value, double &result) {
+  value.Simplify();
+  if (value.GetExprType() == af::ExprType::kExprConstantInteger) {
+    int64_t integer = 0;
+    if (!value.GetConstValue(integer)) {
+      return false;
+    }
+    result = static_cast<double>(integer);
+    return true;
+  }
+  return value.IsConstExpr() && value.GetConstValue(result);
+}
+
+double EvaluateReduceCycles(const PerfOutputInfo &perf, std::vector<std::pair<Expr, Expr>> bindings = {}) {
+  for (size_t pass = 0; pass <= perf.ternary_ops.size(); ++pass) {
+    for (const auto &item : perf.ternary_ops) {
+      auto choice = item.second.DeepCopyIfCase();
+      choice->Replace(bindings);
+      bool resolved = true;
+      while (!choice->IsLeaf()) {
+        double left = 0.0;
+        double right = 0.0;
+        if (!GetReduceConstant(choice->GetCondLeft(), left) || !GetReduceConstant(choice->GetCondRight(), right)) {
+          resolved = false;
+          break;
+        }
+        bool condition = false;
+        switch (choice->GetCondType()) {
+          case CondType::K_EQ:
+            condition = left == right;
+            break;
+          case CondType::K_LT:
+            condition = left < right;
+            break;
+          case CondType::K_GT:
+            condition = left > right;
+            break;
+          case CondType::K_LE:
+            condition = left <= right;
+            break;
+          case CondType::K_GE:
+            condition = left >= right;
+            break;
+        }
+        choice = condition ? choice->GetChoiceA() : choice->GetChoiceB();
+      }
+      double value = 0.0;
+      if (resolved && GetReduceConstant(choice->GetExpr(), value)) {
+        bindings.emplace_back(item.first, CreateExpr(value));
+      }
+    }
+    double value = 0.0;
+    if (GetReduceConstant(perf.pipe_res.at(PipeType::AIV_VEC).Replace(bindings), value)) {
+      return value;
+    }
+  }
+  ADD_FAILURE() << "Unresolved Reduce expression";
+  return std::numeric_limits<double>::quiet_NaN();
 }
 
 const PerfBreakdownItem *FindBreakdownItem(const PerfOutputInfo &perf, const std::string &name) {
@@ -691,6 +752,43 @@ TEST_F(UTestReduceMinMaxApiPerfV2, RaB64SymbolicDimRIncludesTreeReduceCost) {
   EXPECT_NE(perf_expr.find("z0t_size"), std::string::npos);
 }
 
+TEST_F(UTestReduceMinMaxApiPerfV2, RaNormalSymbolicInnerAxisMatchesRuntimeBranches) {
+  const Expr inner = CreateExpr("reduce_inner_size");
+  for (const auto &dtype : {kFloat32, kFloat16, kBfloat16}) {
+    for (bool reuse : {false, true}) {
+      PerfOutputInfo symbolic;
+      ASSERT_EQ(ascendcapi_v2::ReduceMaxPerf(MakeRaContext(dtype, {CreateExpr(64), inner}, reuse), symbolic),
+                af::SUCCESS);
+      for (int64_t width : {8, 32, 40, 64, 72, 128, 136, 65535, 65536}) {
+        SCOPED_TRACE(dtype + ":" + std::to_string(width) + ":" + std::to_string(reuse));
+        PerfOutputInfo fixed;
+        ASSERT_EQ(ascendcapi_v2::ReduceMaxPerf(MakeRaContext(dtype, {CreateExpr(64), CreateExpr(width)}, reuse), fixed),
+                  af::SUCCESS);
+        EXPECT_DOUBLE_EQ(EvaluateReduceCycles(symbolic, {{inner, CreateExpr(width)}}), EvaluateReduceCycles(fixed));
+      }
+    }
+  }
+}
+
+TEST_F(UTestReduceMinMaxApiPerfV2, RaNormalSymbolicShapeKeepsInnerWidthDispatch) {
+  const Expr reduce = CreateExpr("reduce_extent");
+  const Expr inner = CreateExpr("reduce_inner");
+  for (bool reuse : {false, true}) {
+    PerfOutputInfo symbolic;
+    ASSERT_EQ(ascendcapi_v2::ReduceSumPerf(MakeRaContext(kFloat32, {reduce, inner}, reuse), symbolic), af::SUCCESS);
+    for (int64_t r : {1278, 2048}) {
+      for (int64_t a : {8, 32, 64, 72}) {
+        SCOPED_TRACE(std::to_string(r) + ":" + std::to_string(a) + ":" + std::to_string(reuse));
+        PerfOutputInfo fixed_inner;
+        ASSERT_EQ(ascendcapi_v2::ReduceSumPerf(MakeRaContext(kFloat32, {reduce, CreateExpr(a)}, reuse), fixed_inner),
+                  af::SUCCESS);
+        EXPECT_DOUBLE_EQ(EvaluateReduceCycles(symbolic, {{reduce, CreateExpr(r)}, {inner, CreateExpr(a)}}),
+                         EvaluateReduceCycles(fixed_inner, {{reduce, CreateExpr(r)}}));
+      }
+    }
+  }
+}
+
 TEST_F(UTestReduceMinMaxApiPerfV2, RaNormalSymbolicDimRIncludesTreeReduceCost) {
   const Expr z0t_size = CreateExpr("z0t_size");
   auto concat_context = MakeRaContext(kFloat16, {CreateExpr(136) * z0t_size, CreateExpr(64)});
@@ -762,7 +860,13 @@ TEST_F(UTestReduceMinMaxApiPerfV2, Bfloat16NormalReduceUsesHalfVectorRepeat) {
 
   const std::string aligned_formula = TernaryChoiceString(perf, true);
   EXPECT_NE(aligned_formula.find("Rational(1 , 128)"), std::string::npos) << aligned_formula;
-  EXPECT_EQ(aligned_formula.find("Rational(1 , 64)"), std::string::npos) << aligned_formula;
+  // Concat folds can legitimately contain 1/64 after simplification; compare the actual dtype paths.
+  for (int64_t width : {8, 64, 128, 144}) {
+    PerfOutputInfo half_perf;
+    ASSERT_EQ(ascendcapi_v2::ReduceMaxPerf(MakeRaContext(kFloat16, {CreateExpr(136), CreateExpr(width)}), half_perf),
+              af::SUCCESS);
+    EXPECT_DOUBLE_EQ(EvaluateReduceCycles(perf, {{z1t_size, CreateExpr(width)}}), EvaluateReduceCycles(half_perf));
+  }
 }
 
 TEST_F(UTestReduceMinMaxApiPerfV2, RaB64SmallLastUsesOneVectorBlock) {

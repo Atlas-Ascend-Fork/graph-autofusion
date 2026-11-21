@@ -324,10 +324,6 @@ inline std::vector<std::string> GenScheduleResultBlockDimCode(
   return block_dim_code;
 }
 
-inline bool HasSymbol(const Expr &expr) {
-  return !expr.FreeSymbols().empty();
-}
-
 void GetRelatedInfo(const ArgsManager &args_manager, const Expr &expr, ExprExprMap &param_map, bool &related) {
   related = false;
   param_map.clear();
@@ -2063,13 +2059,8 @@ af::Status TilingCodeGenImpl::GenIsStaticShape() {
   for (const auto &model_info : tiling_model_info_) {
     ArgsManager args_manager(model_info);
     GE_ASSERT_TRUE(args_manager.Process(false), "Args manager process failed.");
-    const auto &input_vars = args_manager.GetInputVars();
-    for (const auto &input_var : input_vars) {
-      if (HasSymbol(input_var)) {
-        GELOGD("Got dynamic shape model as input var: %s has symbol.", af::SymbolicUtils::ToString(input_var).c_str());
-        is_static_graph = false;
-        break;
-      }
+    if (args_manager.HasDynamicInputShape()) {
+      is_static_graph = false;
     }
   }
   tiling_func_.AddLine(R"(extern "C" bool IsStaticShape() {)");
@@ -3110,6 +3101,30 @@ uint32_t TilingCodeGenImpl::GetGroupNumForCurrentScheduleResult(
   }
   return 1;  // 默认单 Group
 }
+void TilingCodeGenImpl::GenLowUbTilingComparison(double ub_threshold_perf_val_effect) {
+  // Use the objective to compare two single-block candidates below the UB threshold.
+  const bool compare_single_block_objective =
+      is_uniq_group_ && tiling_model_info_[0].tiling_schedule_config_table->PreferObjectiveForLowUbSingleBlock();
+  const std::string multi_block_guard =
+      compare_single_block_objective ? " && (tmp_tiling.get_block_dim() != 1U || tiling_data.get_block_dim() != 1U)"
+                                     : "";
+  tiling_func_.AddLine("    } else if (cur_ub_ratio < " + std::to_string(ub_threshold_perf_val_effect) +
+                       " && ub_ratio < " + std::to_string(ub_threshold_perf_val_effect) +
+                       " && !IsEqual(cur_ub_ratio, ub_ratio)" + multi_block_guard + ") {");
+  tiling_func_.AddLine("        if (cur_ub_ratio > ub_ratio) {");
+  tiling_func_.AddLine(GenCallUpdateBetterTiling(is_uniq_group_, hardware_has_ub_));
+  tiling_func_.AddLine("        } else {");
+  tiling_func_.AddLine("          tilingCaseImplPtr->GetTilingData(tmp_tiling, tiling_data);");
+  tiling_func_.AddLine("        }");
+  tiling_func_.AddLine("    } else {");
+  tiling_func_.AddLine("      if (cur_obj < obj) {");
+  tiling_func_.AddLine(GenCallUpdateBetterTiling(is_uniq_group_, hardware_has_ub_));
+  tiling_func_.AddLine("      } else {");
+  tiling_func_.AddLine("        tilingCaseImplPtr->GetTilingData(tmp_tiling, tiling_data);");
+  tiling_func_.AddLine("      }");
+  tiling_func_.AddLine("    }");
+}
+
 af::Status TilingCodeGenImpl::GenSelectBetterTilingBasedOnObjAndUbRatio() {
   double ub_threshold_perf_val_effect = 0.0;
   double perf_effect_val = 0.0;
@@ -3118,6 +3133,12 @@ af::Status TilingCodeGenImpl::GenSelectBetterTilingBasedOnObjAndUbRatio() {
     ub_threshold_perf_val_effect = tiling_model_info_[0].tiling_schedule_config_table->GetUbThresholdPerfValEffect();
     perf_effect_val = tiling_model_info_[0].tiling_schedule_config_table->GetPerfEffectVal();
     std::string perf_effect_val_str = std::to_string(perf_effect_val);
+    const double relative_gap =
+        tiling_model_info_[0].tiling_schedule_config_table->GetCrossUbThresholdMaxRelativeCostGap();
+    const std::string cross_ub_guard =
+        relative_gap < 0.0
+            ? ""
+            : " && std::abs(cur_obj - obj) <= " + std::to_string(relative_gap) + " * std::min(cur_obj, obj)";
     tiling_func_.AddLine("    if (obj < 0) {");
     tiling_func_.AddLine(GenCallUpdateBetterTiling(is_uniq_group_, hardware_has_ub_));
     tiling_func_.AddLine("      return true;");
@@ -3129,26 +3150,12 @@ af::Status TilingCodeGenImpl::GenSelectBetterTilingBasedOnObjAndUbRatio() {
     tiling_func_.AddLine("    } else if ((obj - cur_obj > " + perf_effect_val_str + ")) {");
     tiling_func_.AddLine(GenCallUpdateBetterTiling(is_uniq_group_, hardware_has_ub_));
     tiling_func_.AddLine("    } else if (cur_ub_ratio < " + std::to_string(ub_threshold_perf_val_effect) +
-                         " && ub_ratio >= " + std::to_string(ub_threshold_perf_val_effect) + ") {");
+                         " && ub_ratio >= " + std::to_string(ub_threshold_perf_val_effect) + cross_ub_guard + ") {");
     tiling_func_.AddLine("        tilingCaseImplPtr->GetTilingData(tmp_tiling, tiling_data);");
     tiling_func_.AddLine("    } else if (cur_ub_ratio >= " + std::to_string(ub_threshold_perf_val_effect) +
-                         " && ub_ratio < " + std::to_string(ub_threshold_perf_val_effect) + ") {");
+                         " && ub_ratio < " + std::to_string(ub_threshold_perf_val_effect) + cross_ub_guard + ") {");
     tiling_func_.AddLine(GenCallUpdateBetterTiling(is_uniq_group_, hardware_has_ub_));
-    tiling_func_.AddLine("    } else if (cur_ub_ratio < " + std::to_string(ub_threshold_perf_val_effect) +
-                         " && ub_ratio < " + std::to_string(ub_threshold_perf_val_effect) +
-                         " && !IsEqual(cur_ub_ratio, ub_ratio)) {");
-    tiling_func_.AddLine("        if (cur_ub_ratio > ub_ratio) {");
-    tiling_func_.AddLine(GenCallUpdateBetterTiling(is_uniq_group_, hardware_has_ub_));
-    tiling_func_.AddLine("        } else {");
-    tiling_func_.AddLine("          tilingCaseImplPtr->GetTilingData(tmp_tiling, tiling_data);");
-    tiling_func_.AddLine("        }");
-    tiling_func_.AddLine("    } else {");
-    tiling_func_.AddLine("      if (cur_obj < obj) {");
-    tiling_func_.AddLine(GenCallUpdateBetterTiling(is_uniq_group_, hardware_has_ub_));
-    tiling_func_.AddLine("      } else {");
-    tiling_func_.AddLine("        tilingCaseImplPtr->GetTilingData(tmp_tiling, tiling_data);");
-    tiling_func_.AddLine("      }");
-    tiling_func_.AddLine("    }");
+    GenLowUbTilingComparison(ub_threshold_perf_val_effect);
   } else {
     tiling_func_.AddLine(GenCallUpdateBetterTiling(is_uniq_group_, hardware_has_ub_));
     tiling_func_.AddLine("    sub_case_flag = is_sub_case;");

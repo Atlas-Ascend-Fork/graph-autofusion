@@ -1,0 +1,71 @@
+case_id,dtype,reuse,reduce_extent,inner_extent,expectation,entry
+ra_float32_0_8,float32,0,64,8,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_0_32,float32,0,64,32,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_0_40,float32,0,64,40,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_0_64,float32,0,64,64,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_0_72,float32,0,64,72,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_0_128,float32,0,64,128,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_0_136,float32,0,64,136,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_0_65536,float32,0,64,65536,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_8,float32,1,64,8,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_32,float32,1,64,32,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_40,float32,1,64,40,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_64,float32,1,64,64,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_72,float32,1,64,72,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_128,float32,1,64,128,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_136,float32,1,64,136,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_65536,float32,1,64,65536,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_8,float16,0,64,8,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_32,float16,0,64,32,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_40,float16,0,64,40,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_64,float16,0,64,64,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_72,float16,0,64,72,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_128,float16,0,64,128,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_136,float16,0,64,136,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_65536,float16,0,64,65536,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_8,float16,1,64,8,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_32,float16,1,64,32,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_40,float16,1,64,40,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_64,float16,1,64,64,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_72,float16,1,64,72,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_128,float16,1,64,128,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_136,float16,1,64,136,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_65536,float16,1,64,65536,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_8,bfloat16,0,64,8,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_32,bfloat16,0,64,32,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_40,bfloat16,0,64,40,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_64,bfloat16,0,64,64,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_72,bfloat16,0,64,72,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_128,bfloat16,0,64,128,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_136,bfloat16,0,64,136,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_65536,bfloat16,0,64,65536,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_8,bfloat16,1,64,8,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_32,bfloat16,1,64,32,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_40,bfloat16,1,64,40,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_64,bfloat16,1,64,64,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_72,bfloat16,1,64,72,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_128,bfloat16,1,64,128,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_136,bfloat16,1,64,136,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_65536,bfloat16,1,64,65536,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_f32_symbolic_r_0_1278_8,float32,0,1278,8,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_0_1278_32,float32,0,1278,32,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_0_1278_64,float32,0,1278,64,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_0_1278_72,float32,0,1278,72,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_0_2048_8,float32,0,2048,8,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_0_2048_32,float32,0,2048,32,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_0_2048_64,float32,0,2048,64,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_0_2048_72,float32,0,2048,72,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_1_1278_8,float32,1,1278,8,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_1_1278_32,float32,1,1278,32,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_1_1278_64,float32,1,1278,64,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_1_1278_72,float32,1,1278,72,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_1_2048_8,float32,1,2048,8,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_1_2048_32,float32,1,2048,32,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_1_2048_64,float32,1,2048,64,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_f32_symbolic_r_1_2048_72,float32,1,2048,72,symbolic R/A == symbolic R with fixed A,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicShapeKeepsInnerWidthDispatch
+ra_float32_0_65535,float32,0,64,65535,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float32_1_65535,float32,1,64,65535,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_0_65535,float16,0,64,65535,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_float16_1_65535,float16,1,64,65535,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_0_65535,bfloat16,0,64,65535,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches
+ra_bfloat16_1_65535,bfloat16,1,64,65535,symbolic inner == constant inner,UTestReduceMinMaxApiPerfV2.RaNormalSymbolicInnerAxisMatchesRuntimeBranches

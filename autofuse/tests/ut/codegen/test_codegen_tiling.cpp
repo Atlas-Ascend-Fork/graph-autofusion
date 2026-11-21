@@ -6407,7 +6407,8 @@ TEST_F(TestCodegenTiling, UpdateWorkspaceEmitsAllAscGraphWorkspaceIds) {
   EXPECT_NE(code.find("tiling_data.set_workspace22(it22->second);"), std::string::npos);
 }
 
-TEST_F(TestCodegenTiling, ReuseGroupRegistersOwnWorkspaceIds) {
+namespace {
+att::TilingModelInfo MakeWorkspaceReuseModels() {
   att::TilingModelInfo models(2);
   models[0].schedule_group_ident = {2UL, 3UL, 4UL};
   models[0].tiling_case_id = 7U;
@@ -6415,9 +6416,16 @@ TEST_F(TestCodegenTiling, ReuseGroupRegistersOwnWorkspaceIds) {
   models[1].schedule_group_ident = {2UL, 3UL, 4UL};
   models[1].tiling_case_id = 7U;
   models[1].workspace_size_map[17] = af::Expression::Parse("z0t_size");
-  att::TilingCodeGenConfig config;
+  return models;
+}
+}  // namespace
+
+TEST_F(TestCodegenTiling, ReuseGroupRegistersOwnWorkspaceIds) {
+  auto models = MakeWorkspaceReuseModels();
+  att::TilingCodeGenConfig config{};
   config.tiling_data_type_name = "Data";
   att::HighPerfTilingCodeGenImpl generator("test", config, models, {}, false);
+  generator.with_reuse_info_ = true;
   generator.SetFinalTilingObservationMetadata(1UL, 2UL, {{"", 0}});
   att::ReuseScheduleGroupInfo primary;
   primary.tiling_keys = {0U};
@@ -6444,7 +6452,9 @@ using PrimaryTilingData = Data;
 // 本测试只校验 workspace id 注册，cache 不参与，前置声明补齐即可编译。
 struct GroupLevelCache;
 template<class TI, class TO> TO &RefToRef(TI &value) { return value; }
+struct GroupLevelCache {};
 namespace Primary {
+using GroupLevelCache = ::GroupLevelCache;
 // 生成器对多组场景的组级 GetTiling 恒带 GroupLevelCache* 形参（与复用数据解耦），
 // wrapper 转发时透传 cache；本测试只校验 workspace id 注册，cache 直通 nullptr。
 bool GetTiling(Data &data, std::unordered_map<int64_t, uint64_t> &, int32_t, GroupLevelCache *) {

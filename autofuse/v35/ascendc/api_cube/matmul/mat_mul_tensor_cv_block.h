@@ -412,6 +412,8 @@ class TensorCVBlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, 
   }
 
  private:
+  static constexpr uint16_t L1_BUFFER_ID_BASE = 0;
+  static constexpr uint16_t L0_BUFFER_ID_BASE = 4;
   static constexpr uint64_t SPLIT_M_ALIGN = 2;
 
   template <typename TensorUB>

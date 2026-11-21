@@ -336,6 +336,8 @@ af::Status AddGenOneInnerDimTransposeIndexPerf(const std::string &data_dtype, co
 
 af::Status AddGenTwoInnerDimTransposeIndexPerf(const std::string &data_dtype, const Expr &tail_repeat,
                                                Expr &max_latency, Expr &all_vf_instruct_cost) {
+  // GenTwoInnerDimTransposeIndex writes RangeType<T>, which is int16 or int32.
+  const auto index_dtype = kDataTypeSizeMap.at(data_dtype).Compare(kDataTypeSizeMap.at(kInt16)) > 0 ? kInt32 : kInt16;
   // Actual 17 + 17 repeat, Duplicate(2)、Add(1 repeat) are not recorded.
   // GenTwoInnerDimTransposeIndex: the first vector is calculated before the tail repeat loop.
   // MicroAPI::Arange generates the index sequence; no exact Reg::Arange performance-table entry exists, so use
@@ -348,8 +350,7 @@ af::Status AddGenTwoInnerDimTransposeIndexPerf(const std::string &data_dtype, co
   GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kSub, data_dtype, max_latency, all_vf_instruct_cost, kSymOne));
   GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMuls, data_dtype, max_latency, all_vf_instruct_cost, kSymTwo));
   GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kAdd, data_dtype, max_latency, all_vf_instruct_cost, kSymOne));
-  // MicroAPI::DataCopy stores generated indices; no exact performance-table entry exists, so use kPlaceholder.
-  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kStore, kUInt8, max_latency, all_vf_instruct_cost, kSymOne));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kStore, index_dtype, max_latency, all_vf_instruct_cost, kSymOne));
   GE_ASSERT_SUCCESS(
       VfPerfUtils::AddVfInstructPerf(kUpdateMask, data_dtype, max_latency, all_vf_instruct_cost, tail_repeat));
   GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kAdds, data_dtype, max_latency, all_vf_instruct_cost, tail_repeat));
@@ -363,8 +364,8 @@ af::Status AddGenTwoInnerDimTransposeIndexPerf(const std::string &data_dtype, co
   GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kAdd, data_dtype, max_latency, all_vf_instruct_cost, tail_repeat));
   GE_ASSERT_SUCCESS(
       VfPerfUtils::AddVfInstructPerf(kMuls, data_dtype, max_latency, all_vf_instruct_cost, tail_repeat * kSymTwo));
-  // MicroAPI::DataCopy stores generated indices; no exact performance-table entry exists, so use kPlaceholder.
-  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kStore, kUInt8, max_latency, all_vf_instruct_cost, tail_repeat));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kStore, index_dtype, max_latency, all_vf_instruct_cost, tail_repeat));
   return af::SUCCESS;
 }
 
@@ -425,14 +426,15 @@ af::Status AddTransposeOneOuterDimExtendPerf(const std::string &data_dtype, cons
 }
 
 af::Status AddTransposeTwoOuterDimExtendPerf(const std::string &data_dtype, const Expr &outer_dim0,
-                                             const Expr &outer_dim1, const Expr &repeat_time, const Expr &gather_count,
-                                             Expr &max_latency, Expr &all_vf_instruct_cost) {
+                                             const Expr &outer_dim1, const Expr &repeat_time,
+                                             const Expr &gather_repeats, Expr &max_latency,
+                                             Expr &all_vf_instruct_cost) {
   // Actual 3 repeat, UpdateMask(1 repeat) is not recorded.
   // TransposeTwoOuterDimExtendImpl: Gather/Store are inside the dst_dim0 * dst_dim1 loops.
   const Expr movement_count = repeat_time * outer_dim0 * outer_dim1;
   GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kLoad, data_dtype, max_latency, all_vf_instruct_cost, repeat_time));
   GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kGather2, data_dtype, max_latency, all_vf_instruct_cost,
-                                                   movement_count * gather_count));
+                                                   outer_dim0 * outer_dim1 * gather_repeats));
   GE_ASSERT_SUCCESS(
       VfPerfUtils::AddVfInstructPerf(kStore, kFloat32, max_latency, all_vf_instruct_cost, movement_count));
   return af::SUCCESS;
@@ -464,12 +466,12 @@ af::Status AddTransposeDim2Inner1Perf(const NodeDetail &node_info, const std::st
 }
 
 af::Status AddTransposeDim3Inner1Perf(const NodeDetail &node_info, const std::string &data_dtype,
-                                      const Expr &repeat_time, const Expr &gather_count, Expr &max_latency,
+                                      const Expr &repeat_time, const Expr &gather_repeats, Expr &max_latency,
                                       Expr &all_vf_instruct_cost) {
   const auto &params = node_info.transpose_node_params;
   GE_ASSERT_SUCCESS(AddGenOneInnerDimTransposeIndexPerf(data_dtype, repeat_time, max_latency, all_vf_instruct_cost));
   GE_ASSERT_SUCCESS(AddTransposeTwoOuterDimExtendPerf(data_dtype, params.output_dims[0], params.output_dims[1],
-                                                      repeat_time, gather_count, max_latency, all_vf_instruct_cost));
+                                                      repeat_time, gather_repeats, max_latency, all_vf_instruct_cost));
   return af::SUCCESS;
 }
 
@@ -500,7 +502,8 @@ af::Status AddTransposeDim4Inner2Perf(const NodeDetail &node_info, const std::st
   const auto &params = node_info.transpose_node_params;
   GE_ASSERT_SUCCESS(AddGenTwoInnerDimTransposeIndexPerf(data_dtype, tail_repeat, max_latency, all_vf_instruct_cost));
   GE_ASSERT_SUCCESS(AddTransposeTwoOuterDimExtendPerf(data_dtype, params.output_dims[0], params.output_dims[1],
-                                                      repeat_time, gather_count, max_latency, all_vf_instruct_cost));
+                                                      repeat_time, repeat_time * gather_count, max_latency,
+                                                      all_vf_instruct_cost));
   return af::SUCCESS;
 }
 
@@ -647,6 +650,27 @@ Expr ApplyTransposeUnitOuterModel(const NodeDetail &node_info, const Expr &legac
   return selected;
 }
 
+Expr GetAlignedShortTailGatherRepeats(const Expr &lanes, const Expr &stride, const Expr &fallback,
+                                      PerfOutputInfo &perf) {
+  constexpr uint64_t kUbRowBytes = 32U;
+  const Expr row = CreateExpr(kUbRowBytes / sizeof(float));
+  const Expr bank_span = CreateExpr(kTransposeBankSpanBytes / sizeof(float));
+  const Expr outside_domain = af::sym::Max(lanes - row, CreateExpr(0)) + af::sym::Mod(stride, bank_span);
+  const auto aligned_short_tail = af::SymbolicUtils::StaticCheckEq(outside_domain, CreateExpr(0));
+  if (aligned_short_tail == af::TriBool::kTrue) {
+    return lanes;
+  }
+  if (aligned_short_tail == af::TriBool::kFalse) {
+    return fallback;
+  }
+  Expr repeats;
+  GetPerfVar("transpose_short_tail_gather", repeats, perf.ternary_ops);
+  TernaryOp select(CondType::K_EQ, outside_domain, CreateExpr(0), lanes, fallback);
+  select.SetVariable(repeats);
+  perf.ternary_ops[repeats] = std::move(select);
+  return repeats;
+}
+
 }  // namespace
 
 Expr GetTransposeGatherCount(const NodeDetail &node_info, const std::string &data_dtype, PerfOutputInfo &perf) {
@@ -659,6 +683,35 @@ Expr GetTransposeGatherCount(const NodeDetail &node_info, const std::string &dat
   perf.ternary_ops[stride_count] =
       TernaryOp(CondType::K_EQ, stride_remainder, CreateExpr(0), alignment, stride_remainder);
   return (params.inner_dim == 1U || params.inner_dim == 2U) ? kSymTwo * stride_count : stride_count + CreateExpr(1);
+}
+
+bool UsesTransposeBankPeriod(const NodeDetail &node_info, uint64_t &stride) {
+  const auto &params = node_info.transpose_node_params;
+  const auto &input_dtype = node_info.input_dtype[0];
+  return params.total_dim == 3U && params.inner_dim == 1U && input_dtype == "float32" &&
+         !params.input_strides.empty() && params.input_strides.back().GetConstValue(stride) && stride >= 24U &&
+         stride <= 64U && stride % 8U == 0U;
+}
+
+Expr AdjustAlignedTransposeGather(const NodeDetail &node_info, const Expr &cal_count, const Expr &gather_repeats,
+                                  PerfOutputInfo &perf) {
+  const auto &strides = node_info.transpose_node_params.input_strides;
+  if (node_info.input_dtype[0] == kFloat32 &&
+      af::SymbolicUtils::StaticCheckEq(strides.front(), CreateExpr(1)) == af::TriBool::kTrue) {
+    return GetAlignedShortTailGatherRepeats(cal_count, strides.back(), gather_repeats, perf);
+  }
+  return gather_repeats;
+}
+
+Expr GetTransposeDim3GatherRepeats(const NodeDetail &node_info, const RepeatParams &repeat_params,
+                                   const Expr &cal_count, const Expr &gather_count, bool use_bank_period,
+                                   PerfOutputInfo &perf) {
+  const auto &repeat_time = repeat_params.repeat_time;
+  Expr gather_repeats = (use_bank_period ? cal_count / repeat_params.repeat_elm : repeat_time) * gather_count;
+  if (!use_bank_period) {
+    gather_repeats = AdjustAlignedTransposeGather(node_info, cal_count, gather_repeats, perf);
+  }
+  return gather_repeats;
 }
 
 af::Status TransposePerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
@@ -675,17 +728,27 @@ af::Status TransposePerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
       af::sym::Ceiling(af::sym::Max(cal_count - repeat_params.repeat_elm, CreateExpr(0)) / repeat_params.repeat_elm);
   const Expr outer_count = GetTransposeOuterCount(params);
   const std::string &input_dtype = node_info.input_dtype[0];
-  const Expr gather_count = GetTransposeGatherCount(node_info, input_dtype, perf);
+  uint64_t stride = 0U;
+  const bool use_bank_period = UsesTransposeBankPeriod(node_info, stride);
+  const Expr gather_count =
+      use_bank_period ? kSymTwo * CreateExpr(ascgen_utils::Gcd(stride, kTransposeBankSpanBytes / sizeof(float)))
+                      : GetTransposeGatherCount(node_info, input_dtype, perf);
   uint32_t latency = 0U;
   Expr all_vf_instruct_cost = CreateExpr(0);
   Expr max_latency = CreateExpr(0);
 
   if (params.total_dim == 2U && params.inner_dim == 1U) {
-    GE_ASSERT_SUCCESS(AddTransposeDim2Inner1Perf(node_info, input_dtype, repeat_time, gather_count, max_latency,
+    // TransposeOneOuterDimExtendImpl passes the short-tail mask to Gather.
+    const Expr gather_per_repeat = AdjustAlignedTransposeGather(node_info, cal_count, gather_count, perf);
+    GE_ASSERT_SUCCESS(AddTransposeDim2Inner1Perf(node_info, input_dtype, repeat_time, gather_per_repeat, max_latency,
                                                  all_vf_instruct_cost));
     latency = kTransposeDim2Inner1MaxLatency;
   } else if (params.total_dim == 3U && params.inner_dim == 1U) {
-    GE_ASSERT_SUCCESS(AddTransposeDim3Inner1Perf(node_info, input_dtype, repeat_time, gather_count, max_latency,
+    // The aligned FP32 path has gcd(stride, 32) requests per bank for a full bank group.
+    // Masked lanes contribute to Gather traffic only when active.
+    const Expr gather_repeats =
+        GetTransposeDim3GatherRepeats(node_info, repeat_params, cal_count, gather_count, use_bank_period, perf);
+    GE_ASSERT_SUCCESS(AddTransposeDim3Inner1Perf(node_info, input_dtype, repeat_time, gather_repeats, max_latency,
                                                  all_vf_instruct_cost));
     latency = kTransposeDim3Inner1MaxLatency;
   } else if (params.total_dim == 3U && params.inner_dim == 2U) {

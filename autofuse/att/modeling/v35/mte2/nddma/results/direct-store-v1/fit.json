@@ -1,0 +1,224 @@
+{
+  "train_only": true,
+  "threshold": 4456448,
+  "coefficient": 0.0038940645164791633,
+  "loss": 0.13096127128275054,
+  "predictions": [
+    {
+      "id": "p00_train_m4_n1024_c16",
+      "role": "train",
+      "applies": true,
+      "measured": 1094.3642067307692,
+      "isolated_model": 1354.0460681853926,
+      "predicted": 1354.0460681853926,
+      "relative_error": 0.23729016341861153
+    },
+    {
+      "id": "p01_train_m4_n2048_c32",
+      "role": "train",
+      "applies": true,
+      "measured": 2170.2007226762817,
+      "isolated_model": 2514.0498351582114,
+      "predicted": 2514.0498351582114,
+      "relative_error": 0.15844115656633662
+    },
+    {
+      "id": "p02_train_m4_n4096_c48",
+      "role": "train",
+      "applies": true,
+      "measured": 5007.919379113248,
+      "isolated_model": 4960.300498667142,
+      "predicted": 4960.300498667142,
+      "relative_error": -0.00950871546469223
+    },
+    {
+      "id": "p03_train_m4_n6144_c48",
+      "role": "train",
+      "applies": true,
+      "measured": 8370.179777991452,
+      "isolated_model": 7343.429597394426,
+      "predicted": 8364.23524600234,
+      "relative_error": -0.0007102036212822682
+    },
+    {
+      "id": "p04_train_m12_n512_c16",
+      "role": "train",
+      "applies": false,
+      "measured": 1807.5581549679491,
+      "isolated_model": 1934.047951671802,
+      "predicted": 1934.047951671802,
+      "relative_error": 0.06997827226537878
+    },
+    {
+      "id": "p05_train_m12_n1024_c32",
+      "role": "train",
+      "applies": false,
+      "measured": 3677.023924679487,
+      "isolated_model": 3674.05360213103,
+      "predicted": 3674.05360213103,
+      "relative_error": -0.000807806152285595
+    },
+    {
+      "id": "p06_train_m12_n2048_c48",
+      "role": "train",
+      "applies": false,
+      "measured": 8792.223965651709,
+      "isolated_model": 7343.429597394426,
+      "predicted": 7343.429597394426,
+      "relative_error": -0.16478133108497228
+    },
+    {
+      "id": "p07_train_m6_n768_c16",
+      "role": "train",
+      "applies": true,
+      "measured": 1276.9846259615385,
+      "isolated_model": 1499.046539056995,
+      "predicted": 1499.046539056995,
+      "relative_error": 0.1738955258981676
+    },
+    {
+      "id": "p08_train_m6_n2304_c32",
+      "role": "train",
+      "applies": true,
+      "measured": 3608.746987339744,
+      "isolated_model": 4109.055014745837,
+      "predicted": 4109.055014745837,
+      "relative_error": 0.13863760168315498
+    },
+    {
+      "id": "p09_train_m6_n4608_c48",
+      "role": "train",
+      "applies": true,
+      "measured": 11551.237819497865,
+      "isolated_model": 8237.103009417158,
+      "predicted": 11554.721367392878,
+      "relative_error": 0.0003015735585611967
+    },
+    {
+      "id": "p10_holdout_m2_n1536_c24",
+      "role": "holdout",
+      "applies": true,
+      "measured": 929.6670881410258,
+      "isolated_model": 1064.045126442188,
+      "predicted": 1064.045126442188,
+      "relative_error": 0.1445442567724604
+    },
+    {
+      "id": "p11_holdout_m2_n5120_c56",
+      "role": "holdout",
+      "applies": true,
+      "measured": 3085.9087659798533,
+      "isolated_model": 3212.404652610208,
+      "predicted": 3212.404652610208,
+      "relative_error": 0.04099145380605207
+    },
+    {
+      "id": "p12_holdout_m8_n1536_c24",
+      "role": "holdout",
+      "applies": true,
+      "measured": 3270.1363806623935,
+      "isolated_model": 3674.05360213103,
+      "predicted": 3674.05360213103,
+      "relative_error": 0.12351693460161428
+    },
+    {
+      "id": "p13_holdout_m8_n3072_c40",
+      "role": "holdout",
+      "applies": true,
+      "measured": 7701.0213532051275,
+      "isolated_model": 7248.747250221955,
+      "predicted": 7248.747250221955,
+      "relative_error": -0.05872910647039542
+    },
+    {
+      "id": "p14_holdout_m8_n3584_c56",
+      "role": "holdout",
+      "applies": true,
+      "measured": 13323.90712403846,
+      "isolated_model": 8645.456885125948,
+      "predicted": 16301.499249685301,
+      "relative_error": 0.2234774002795914
+    },
+    {
+      "id": "p15_holdout_m16_n1024_c40",
+      "role": "holdout",
+      "applies": false,
+      "measured": 5138.490756217949,
+      "isolated_model": 4897.178933885495,
+      "predicted": 4897.178933885495,
+      "relative_error": -0.04696161456366321
+    },
+    {
+      "id": "p16_holdout_m16_n1536_c56",
+      "role": "holdout",
+      "applies": false,
+      "measured": 13132.010192078753,
+      "isolated_model": 7438.1119445668955,
+      "predicted": 7438.1119445668955,
+      "relative_error": -0.4335892345671819
+    },
+    {
+      "id": "p17_known_m8_n3952_c56",
+      "role": "known",
+      "applies": true,
+      "measured": 16107.23109798535,
+      "isolated_model": 9513.23606115277,
+      "predicted": 19737.242635491406,
+      "relative_error": 0.22536533532197778
+    },
+    {
+      "id": "p18_known_m8_n1584_c56",
+      "role": "known",
+      "applies": true,
+      "measured": 4328.372791712453,
+      "isolated_model": 3929.265711067146,
+      "predicted": 3929.265711067146,
+      "relative_error": -0.09220718728513366
+    },
+    {
+      "id": "h0_holdout_m2_n4096_c48",
+      "role": "holdout",
+      "applies": true,
+      "measured": 2117.885667040599,
+      "isolated_model": 2577.171399939858,
+      "predicted": 2577.171399939858,
+      "relative_error": 0.2168604944293504
+    },
+    {
+      "id": "h1_holdout_m4_n6144_c56",
+      "role": "holdout",
+      "applies": true,
+      "measured": 12692.571563690475,
+      "isolated_model": 7438.1119445668955,
+      "predicted": 11521.334538998552,
+      "relative_error": -0.09227736229925787
+    },
+    {
+      "id": "h2_holdout_m6_n4096_c40",
+      "role": "holdout",
+      "applies": true,
+      "measured": 7632.569901153847,
+      "isolated_model": 7248.747250221955,
+      "predicted": 7248.747250221955,
+      "relative_error": -0.05028747275198464
+    },
+    {
+      "id": "h3_holdout_m8_n2560_c48",
+      "role": "holdout",
+      "applies": true,
+      "measured": 6778.027693108975,
+      "isolated_model": 6151.865048030784,
+      "predicted": 6151.865048030784,
+      "relative_error": -0.09238124620157451
+    },
+    {
+      "id": "h4_holdout_m8_n3840_c56",
+      "role": "holdout",
+      "applies": true,
+      "measured": 14827.67788324176,
+      "isolated_model": 9249.129355405476,
+      "predicted": 18691.581605028678,
+      "relative_error": 0.2605872444905146
+    }
+  ]
+}

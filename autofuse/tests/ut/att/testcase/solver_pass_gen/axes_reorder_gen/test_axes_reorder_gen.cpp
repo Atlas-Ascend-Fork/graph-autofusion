@@ -1032,6 +1032,36 @@ TEST_F(TestAxesReorderSolverGen, GenSolverFuncImpl_WithUBAndVariables) {
   EXPECT_TRUE(actual.find("solver.Run(true, ") != std::string::npos);
 }
 
+TEST_F(TestAxesReorderSolverGen, PreserveReduceStorePenaltyOnlyForDefaultThresholdSeed) {
+  for (const bool penalty : {false, true}) {
+    for (const bool tradeoff : {false, true}) {
+      for (const bool parallel : {false, true}) {
+        for (const bool pgo : {false, true}) {
+          for (const bool inductor : {false, true}) {
+            AxesReorderSolverGen solver("penalty_test", "TilingData");
+            TilingScheduleConfig config;
+            config.is_penalty_config = penalty;
+            solver.SetTilingScheduleConfig(config);
+            solver.SetEnableMulticoreUBTradeoff(tradeoff);
+            solver.SetEnableParallel(parallel);
+            solver.SetEnableAutofusePGO(pgo);
+            solver.SetIsInductorScene(inductor);
+            const auto code = solver.GenSolverFuncImpl();
+            const std::string assignment = "input.preserve_reduce_store_penalty_seed = ";
+            if (!penalty || tradeoff || parallel) {
+              EXPECT_EQ(code.find(assignment), std::string::npos);
+              continue;
+            }
+            const std::string pgo_guard = pgo ? "PgoConfig::Instance().need_change_solver_run != 1 && " : "";
+            const std::string pending_guard = (pgo || inductor) ? "pending_search_cfg_ == nullptr;" : "true;";
+            EXPECT_NE(code.find(assignment + pgo_guard + pending_guard), std::string::npos);
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST_F(TestAxesReorderSolverGen, test_not_contain_heavy_op) {
   // Case 3: Normal case with UB and variables
   AxesReorderSolverGen solver("case_test", "TilingData");

@@ -222,6 +222,7 @@ ConcatApiCall::ConcatTiling ConcatRegApiCall::B64ToB32(const ConcatTiling &tilin
   ConcatTiling tiling_b32 = tiling;
   tiling_b32.total_rows_expr = tiling.total_rows_expr;
   tiling_b32.dst_col_size_expr = tiling.dst_col_size_expr * kB64ToB32;
+  tiling_b32.dst_row_stride = tiling.dst_row_stride * kB64ToB32;
   for (auto &src_col_size : tiling_b32.src_col_size_exprs) {
     src_col_size = src_col_size * kB64ToB32;
   }
@@ -242,6 +243,7 @@ ConcatApiCall::ConcatTiling ConcatRegApiCall::B8ToB16(const ConcatTiling &tiling
   const auto &kB16ToB8 = af::Symbol(2);
   tiling_b16.total_rows_expr = tiling.total_rows_expr;
   tiling_b16.dst_col_size_expr = tiling.dst_col_size_expr / kB16ToB8;
+  tiling_b16.dst_row_stride = tiling.dst_row_stride / kB16ToB8;
   for (auto &src_col_size : tiling_b16.src_col_size_exprs) {
     src_col_size = src_col_size / kB16ToB8;
   }
@@ -308,7 +310,11 @@ void ConcatRegApiCall::DefineConcatTiling(const ConcatTiling &tiling, const Tile
   auto tiling_data_type = GetTilingDataType(tiling);
   ss << "const " << tiling_data_type << "<" << tiling.src_col_size_exprs.size() << "> concat_tiling {" << std::endl;
   ss << "  .num_rows = static_cast<uint32_t>(" << tiler.ActualSize(tiling.total_rows_expr) << ")," << std::endl;
-  ss << "  .num_dst_cols = " << GenSizeWithUint32Cast(tiler, tiling.dst_col_size_expr, true) << "," << std::endl;
+  if (tiling.any_padded) {
+    ss << "  .dst_row_stride = " << GenSizeWithUint32Cast(tiler, tiling.dst_row_stride, true) << "," << std::endl;
+  } else {
+    ss << "  .num_dst_cols = " << GenSizeWithUint32Cast(tiler, tiling.dst_col_size_expr, true) << "," << std::endl;
+  }
   ss << "  .num_srcs_cols = {";
   for (const auto &src_col_size : tiling.src_col_size_exprs) {
     ss << GenSizeWithUint32Cast(tiler, src_col_size, true) << ", ";
