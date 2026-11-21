@@ -1347,7 +1347,7 @@ Status Optimizer::OptimizeForHintGraph(af::AscGraph &hint_graph,
  * @param impl_graph
  * @return
  */
-Status Optimizer::LoadOpSeqAdjust(const af::AscGraph &impl_graph) {
+Status Optimizer::LoadOpSeqAdjust(af::AscGraph &impl_graph) {
   std::map<int64_t, int64_t> need_forward_nodes_id;
   int64_t first_load_id = kInvalidNodeId;
   GE_ASSERT_SUCCESS(SearchNodesNeedForward(impl_graph, need_forward_nodes_id, first_load_id));
@@ -1355,6 +1355,14 @@ Status Optimizer::LoadOpSeqAdjust(const af::AscGraph &impl_graph) {
   const auto &compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
   GE_ASSERT_NOTNULL(compute_graph);
   compute_graph->ReorderByNodeId();
+  // [外提 Load 保序] 本函数会改写 node id 并按 id 重排，可能把被前移的非外提 Load 插到
+  // 两个外提 Load（HoistInvariantLoads 标记 loop_axis=BlockOuter 的 Load）之间。codegen
+  // 按节点序构建循环树，外提 call 一旦落在一个同层循环之后，会在同一层重复下降、拆出
+  // 两个同轴循环：表现为 block_dim_offset 重复定义、循环 A 内声明的 q_buf/local_N 在
+  // 循环 B 中使用（未声明），生成 kernel 编译不过（如 ..._inline_S*G*C* 候选）。
+  // 因此按 id 重排后需恢复"外提 Load 及其前驱全部前置"的不变式；图中无外提 Load 时该
+  // 调用为 no-op，不影响原有 load 前移收益。
+  (void)ScheduleUtils::SortHoistedLoadsFirst(impl_graph);
   return af::SUCCESS;
 }
 
@@ -1561,7 +1569,7 @@ void Optimizer::TryEnableGroupParallel(FusedScheduledResult &fused_scheduled_res
   }
 }
 
-void Optimizer::ExecSeqAdvancedOfLoad(const FusedScheduledResult &fused_scheduled_result) {
+void Optimizer::ExecSeqAdvancedOfLoad(FusedScheduledResult &fused_scheduled_result) {
   for (auto &scheduled_results : fused_scheduled_result.node_idx_to_scheduled_results) {
     for (auto &schedule_result : scheduled_results) {
       if (schedule_result.cube_type == ascir::CubeTemplateType::kUBFuse) {

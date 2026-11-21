@@ -559,5 +559,90 @@ TEST_F(AscIrCodegenCalcTest, IsNodeValid_TrinaryOps) {
   EXPECT_TRINARY_VALID(MaskedFill, x, mask, value);
 }
 
+// 回归用例：int64 Compare 的 tmp 需求必须按 repeats 换算“一次调用处理的行数”。
+// 现场问题：vectorized_axis 中把 degenerate 轴(repeat==1, 向量化 stride==0)放在索引 1 时，
+// 旧公式 repeats[axis_ids[0]] * vectorized_strides[1] 会把整项乘成 0，tiling 于是给该算子
+// 分配 0 字节 tmp；device 侧 CompareExtendInt64GtGeLe 按 repeat_times 切分 tmp 时越过 UB，
+// 触发 aivec "VEC 指令读写 UB 越界"（tf_af_broadcast_support_int64_0002）。
+TEST_F(AscIrCodegenCalcTest, CalcTmpBufSize_Int64CompareWithDegenerateVectorizedAxis) {
+  af::AscGraph graph("t_le_int64_degenerate");
+  const auto z0 = graph.CreateAxis("z0", af::Symbol(1));
+  const auto z1 = graph.CreateAxis("z1", af::Symbol(10));
+  const auto z2 = graph.CreateAxis("z2", af::Symbol(2));
+  const auto z3 = graph.CreateAxis("z3", af::Symbol(23));
+  const std::vector<af::AxisId> axes{z0.id, z1.id, z2.id, z3.id};
+  const std::vector<af::Expression> repeats{af::Symbol(1), af::Symbol(10), af::Symbol(2), af::Symbol(23)};
+  const std::vector<af::Expression> strides{af::Symbol(460), af::Symbol(46), af::Symbol(2), af::Symbol(1)};
+  // vectorized_axis 取 axis 顺序，索引 1 落在 z1(repeat==1) 上，其向量化 stride 为 0
+  const std::vector<af::Expression> vec_strides{af::Symbol(46), af::Symbol(0), af::Symbol(2), af::Symbol(1)};
+
+  af::ascir_op::Data x1("x1", graph);
+  af::ascir_op::Data x2("x2", graph);
+  af::ascir_op::Load load1("load1");
+  af::ascir_op::Load load2("load2");
+  af::ascir_op::Le le("le");
+  af::ascir_op::Store store("store");
+  af::ascir_op::Output y("y");
+
+  x1.attr.sched.axis = axes;
+  x1.y.dtype = af::DT_INT64;
+  *x1.y.axis = axes;
+  *x1.y.repeats = repeats;
+  *x1.y.strides = strides;
+  x2.attr.sched.axis = axes;
+  x2.y.dtype = af::DT_INT64;
+  *x2.y.axis = axes;
+  *x2.y.repeats = repeats;
+  *x2.y.strides = strides;
+  load1.x = x1.y;
+  load1.attr.sched.axis = axes;
+  load1.y.dtype = af::DT_INT64;
+  *load1.y.axis = axes;
+  *load1.y.repeats = repeats;
+  *load1.y.strides = strides;
+  *load1.y.vectorized_axis = axes;
+  *load1.y.vectorized_strides = vec_strides;
+  load2.x = x2.y;
+  load2.attr.sched.axis = axes;
+  load2.y.dtype = af::DT_INT64;
+  *load2.y.axis = axes;
+  *load2.y.repeats = repeats;
+  *load2.y.strides = strides;
+  *load2.y.vectorized_axis = axes;
+  *load2.y.vectorized_strides = vec_strides;
+  le.x1 = load1.y;
+  le.x2 = load2.y;
+  le.attr.sched.axis = axes;
+  le.y.dtype = af::DT_UINT8;
+  *le.y.axis = axes;
+  *le.y.repeats = repeats;
+  *le.y.strides = strides;
+  *le.y.vectorized_axis = axes;
+  store.x = le.y;
+  store.attr.sched.axis = axes;
+  store.y.dtype = af::DT_UINT8;
+  *store.y.axis = axes;
+  *store.y.repeats = repeats;
+  *store.y.strides = strides;
+  y.x = store.y;
+  y.attr.sched.axis = axes;
+  y.y.dtype = af::DT_UINT8;
+  *y.y.axis = axes;
+  *y.y.repeats = repeats;
+  *y.y.strides = strides;
+
+  auto node = graph.FindNode("le");
+  ASSERT_NE(node, nullptr);
+  af::ascir::LeAscIrCodegenImpl impl;
+  const auto bufs = impl.CalcTmpBufSize(*node);
+  ASSERT_EQ(bufs.size(), 1U);
+  ASSERT_NE(bufs[0], nullptr);
+  int64_t size_bytes = -1;
+  ASSERT_TRUE(bufs[0]->size.Simplify().GetConstValue(size_bytes));
+  // rows = repeats[z0] * repeats[z1] * repeats[z2] = 1 * 10 * 2 = 20；末轴 Align(23, 32) = 32
+  // 需求 = 40 * rows * Align(last_axis, 32) = 40 * 20 * 32 = 25600，旧公式会得到 0
+  EXPECT_EQ(size_bytes, 40 * 20 * 32);
+}
+
 }  // namespace ascir
 }  // namespace af

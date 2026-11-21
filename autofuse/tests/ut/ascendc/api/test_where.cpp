@@ -1024,4 +1024,174 @@ TEST_F(TestApiWhereUT, Where_int16_normal) {
   WhereNormalTest<int16_t>(71, (ONE_BLK_SIZE - sizeof(int16_t)) / sizeof(int16_t));
   WhereNormalTest<int16_t>(71, (ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) / sizeof(int16_t));
 }
+// ST-7：真机 vsel 谓词位序探针——用固定模式谓词观察 Select 按 word 的选择结果，
+// 钉死谓词 bit 与 32bit word 的映射关系。
+TEST_F(TestApiWhereUT, ST7_SelectPredicateBitOrder) {
+  constexpr uint32_t kLanes = 64;  // float lanes = 32bit words
+  auto *s0 = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kLanes));
+  auto *s1 = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kLanes));
+  auto *out = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kLanes));
+  auto *pred_dbg = static_cast<uint8_t *>(AscendC::GmAlloc(16));
+  for (uint32_t i = 0; i < kLanes; i++) {
+    s0[i] = 100.0f + i;   // src0 标识：100+i
+    s1[i] = -100.0f - i;  // src1 标识：-100-i
+  }
+  auto kernel = [s0, s1, out, pred_dbg] {
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> x1buf, x2buf, ybuf, tmp;
+    tpipe.InitBuffer(x1buf, sizeof(float) * kLanes);
+    tpipe.InitBuffer(x2buf, sizeof(float) * kLanes);
+    tpipe.InitBuffer(ybuf, sizeof(float) * kLanes);
+    tpipe.InitBuffer(tmp, TMP_UB_SIZE);
+    auto a = x1buf.Get<float>();
+    auto b = x2buf.Get<float>();
+    auto y = ybuf.Get<float>();
+    auto scratch = tmp.Get<uint8_t>();
+    for (uint32_t i = 0; i < kLanes; i++) {
+      a.SetValue(i, 100.0f + i);
+      b.SetValue(i, -100.0f - i);
+    }
+    // 谓词：0x33 0x33 ... = bit 模式 00110011...
+    // 若谓词按 word 1bit：word j 的谓词 = bit j → word 2,3,6,7,10,11,... 选 src1，其余 src0
+    // 若按 2bit/word 或其他映射，输出模式不同，据此判定真实位序
+    LocalTensor<uint8_t> pred = scratch[0].template ReinterpretCast<uint8_t>();
+    pred.SetSize(16);
+    for (uint32_t i = 0; i < 16; i++) {
+      pred.SetValue(i, 0x33);
+    }
+    UbToGm(pred_dbg, pred, 16);
+    const BinaryRepeatParams rpt = {1, 1, 1, 8, 8, 8};
+    Select<float, uint8_t, true>(y, pred, a, b, SELMODE::VSEL_TENSOR_TENSOR_MODE, kLanes, 1, rpt);
+    UbToGm(out, y, kLanes);
+  };
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1);
+  printf("[ST7] pred:");
+  for (uint32_t i = 0; i < 4; i++) printf(" %02X", pred_dbg[i]);
+  printf("\n[ST7] out:");
+  for (uint32_t i = 0; i < 32; i++) printf(" %.0f", out[i]);
+  printf("\n");
+  // 谓词位序（真机实测）：word j ↔ 字节 j/8 的 bit 7-(j%8)，即字节内高位在前
+  uint32_t diff = 0;
+  for (uint32_t i = 0; i < kLanes; i++) {
+    const uint8_t byte = pred_dbg[i / 8];
+    const bool bit = ((byte >> (7 - (i % 8))) & 1U) != 0;
+    const float exp = bit ? -100.0f - i : 100.0f + i;
+    if (out[i] != exp) {
+      diff++;
+    }
+  }
+  EXPECT_EQ(diff, 0);
+  AscendC::GmFree(s0);
+  AscendC::GmFree(s1);
+  AscendC::GmFree(out);
+  AscendC::GmFree(pred_dbg);
+}
+
+// ST-8：谓词 word->bit 映射测绘——逐 bit 置位观察每个 word 的选择，一次性输出完整映射表。
+TEST_F(TestApiWhereUT, ST8_PredicateWordBitMap) {
+  constexpr uint32_t kLanes = 64;
+  auto *s0 = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kLanes));
+  auto *s1 = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kLanes));
+  auto *out = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kLanes));
+  auto *pred_dbg = static_cast<uint8_t *>(AscendC::GmAlloc(16));
+  auto *bit2word = static_cast<uint32_t *>(AscendC::GmAlloc(sizeof(uint32_t) * 64));  // bit -> word
+  for (uint32_t i = 0; i < kLanes; i++) {
+    s0[i] = 1.0f;         // src0 标识
+    s1[i] = 1000.0f + i;  // src1 标识 = 该 word 被"选中 src1"时可见 word 序号
+  }
+  for (uint32_t w = 0; w < 64; w++) {
+    bit2word[w] = UINT32_MAX;
+  }
+  auto kernel = [s0, s1, out, pred_dbg] {
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> x1buf, x2buf, ybuf, tmp;
+    tpipe.InitBuffer(x1buf, sizeof(float) * kLanes);
+    tpipe.InitBuffer(x2buf, sizeof(float) * kLanes);
+    tpipe.InitBuffer(ybuf, sizeof(float) * kLanes);
+    tpipe.InitBuffer(tmp, TMP_UB_SIZE);
+    auto a = x1buf.Get<float>();
+    auto b = x2buf.Get<float>();
+    auto y = ybuf.Get<float>();
+    auto scratch = tmp.Get<uint8_t>();
+    for (uint32_t i = 0; i < kLanes; i++) {
+      a.SetValue(i, 1.0f);
+      b.SetValue(i, 1000.0f + i);
+    }
+    LocalTensor<uint8_t> pred = scratch[0].template ReinterpretCast<uint8_t>();
+    pred.SetSize(16);
+    for (uint32_t i = 0; i < 16; i++) {
+      pred.SetValue(i, 0);
+    }
+    const BinaryRepeatParams rpt = {1, 1, 1, 8, 8, 8};
+    Select<float, uint8_t, true>(y, pred, a, b, SELMODE::VSEL_TENSOR_TENSOR_MODE, kLanes, 1, rpt);
+    UbToGm(out, y, kLanes);
+  };
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  // 全 0 基线
+  ICPU_RUN_KF(kernel, 1);
+  printf("[ST8] baseline out[0]=%.0f\n", out[0]);
+
+  // 逐 bit 置位：bit 0..63，观察哪个 word 变成 src1
+  for (uint32_t bit = 0; bit < 64; bit++) {
+    // 写谓词缓冲：只置 bit
+    // bit 位于字节 bit/8 的 1<<(bit%8)（LSB-first 探测；MSB 由结果反推）
+    // 直接在 GmToUb 前 reset pred：
+    // 由于 kernel 里 pred 每次 run 会重置，这里改用 GM 传入
+    // 简化：把 pred 构造移出 kernel——重写 kernel 内联
+    auto kernel_bit = [bit, out, s0, s1]() {
+      TPipe tpipe;
+      TBuf<TPosition::VECCALC> x1buf, x2buf, ybuf, tmp;
+      tpipe.InitBuffer(x1buf, sizeof(float) * kLanes);
+      tpipe.InitBuffer(x2buf, sizeof(float) * kLanes);
+      tpipe.InitBuffer(ybuf, sizeof(float) * kLanes);
+      tpipe.InitBuffer(tmp, TMP_UB_SIZE);
+      auto a = x1buf.Get<float>();
+      auto b = x2buf.Get<float>();
+      auto y = ybuf.Get<float>();
+      auto scratch = tmp.Get<uint8_t>();
+      for (uint32_t i = 0; i < kLanes; i++) {
+        a.SetValue(i, 1.0f);
+        b.SetValue(i, 1000.0f + i);
+      }
+      LocalTensor<uint8_t> pred = scratch[0].template ReinterpretCast<uint8_t>();
+      pred.SetSize(16);
+      for (uint32_t i = 0; i < 16; i++) {
+        pred.SetValue(i, 0);
+      }
+      pred.SetValue(bit / 8, static_cast<uint8_t>(1U << (bit % 8)));
+      const BinaryRepeatParams rpt = {1, 1, 1, 8, 8, 8};
+      Select<float, uint8_t, true>(y, pred, a, b, SELMODE::VSEL_TENSOR_TENSOR_MODE, kLanes, 1, rpt);
+      UbToGm(out, y, kLanes);
+    };
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+    ICPU_RUN_KF(kernel_bit, 1);
+    // 被该 bit 置位而翻转为 src0 的 word（值 = 1.0 < 1000）；其它 word 保持 src1
+    for (uint32_t w = 0; w < kLanes; w++) {
+      if (out[w] < 1000.0f) {
+        bit2word[bit] = w;
+      }
+    }
+  }
+  // 输出映射表：bit -> word
+  printf("[ST8] bit->word map:");
+  for (uint32_t bit = 0; bit < 64; bit++) {
+    printf(" %u->%u", bit, bit2word[bit]);
+  }
+  printf("\n");
+  // 全部 bit 应有唯一映射
+  uint32_t unmapped = 0;
+  for (uint32_t bit = 0; bit < 64; bit++) {
+    if (bit2word[bit] == UINT32_MAX) {
+      unmapped++;
+    }
+  }
+  EXPECT_EQ(unmapped, 0);
+  AscendC::GmFree(s0);
+  AscendC::GmFree(s1);
+  AscendC::GmFree(out);
+  AscendC::GmFree(pred_dbg);
+  AscendC::GmFree(bit2word);
+}
+
 }  // namespace af

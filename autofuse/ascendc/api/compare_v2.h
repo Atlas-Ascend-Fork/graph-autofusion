@@ -673,191 +673,47 @@ inline __aicore__ void CompareExtendInt32(const AscendC::LocalTensor<uint8_t> &d
   }
 }
 
-template <CMPMODE mode>
-inline __aicore__ void CompareExtendInt64EqNe(const AscendC::LocalTensor<uint8_t> &dst,   // output
-                                              const AscendC::LocalTensor<int64_t> &src0,  // input 0 is a tensor
-                                              const AscendC::LocalTensor<int64_t> &src1,  // input 1 is a tensor
-                                              const uint8_t repeat_times, const uint32_t last_axis,
-                                              const uint32_t input_last_dim_stride,
-                                              const uint32_t output_last_dim_stride,
-                                              AscendC::LocalTensor<uint8_t> &tmp_buf, const bool src1_is_one_block) {
-  const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;  // 由于输出均为uint8_t，所以不用乘类型大小
-  const uint8_t src_repeat_stride = input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE;
-  LocalTensor<half> all_one_buf = KernelUtils::NewTensor<half>(tmp_buf, 0, KernelUtils::RptSize<half>());
-  Duplicate(all_one_buf, (half)1.0f, KernelUtils::RptSize<half>());
+// int64 比较（EQ/NE/GT/GE/LE）的临时空间需求。必须与下面 *Once 实现里的 carve 逻辑严格一致，
+// 用于按 tmp_buf 实际可用大小对 repeat_times 分块，避免调用方少配 tmp_buf 时读写越界。
+inline __aicore__ uint32_t Int64CompareAlignedBytes(uint32_t bytes) {
+  return (bytes + ONE_BLK_SIZE - 1U) / ONE_BLK_SIZE * ONE_BLK_SIZE;
+}
 
-  LocalTensor<int32_t> sub_res_buf = KernelUtils::NewTensor<int32_t>(
-      tmp_buf, ONE_REPEAT_BYTE_SIZE, ONE_REPEAT_BYTE_SIZE * repeat_times / sizeof(int32_t));
-  LocalTensor<int64_t> sub_res_64_buf = sub_res_buf.ReinterpretCast<int64_t>();
-  LocalTensor<uint8_t> sub_res_reuse_buf = sub_res_buf.template ReinterpretCast<uint8_t>();
-  LocalTensor<float> cast_res_buf = KernelUtils::NewTensor<float>(tmp_buf, ONE_REPEAT_BYTE_SIZE * (1 + repeat_times),
-                                                                  ONE_REPEAT_BYTE_SIZE * repeat_times / sizeof(float));
-  LocalTensor<uint8_t> cmp_res_buf =
-      KernelUtils::NewTensor<uint8_t>(sub_res_reuse_buf, 0, (ONE_REPEAT_BYTE_SIZE * repeat_times) / 8);
-  LocalTensor<half> sel_res_buf = KernelUtils::NewTensor<half>(
-      sub_res_reuse_buf, (ONE_REPEAT_BYTE_SIZE * repeat_times) / 8, ONE_REPEAT_BYTE_SIZE * repeat_times / sizeof(half));
-
+inline __aicore__ uint32_t Int64CompareTmpBytes(uint32_t repeat_times, uint32_t last_axis, bool is_eq_ne) {
   constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int64_t);
+  if (is_eq_ne) {
+    // all_one_buf(ONE_REPEAT_BYTE_SIZE) + sub_res_buf 与 cast_res_buf 各 ONE_REPEAT_BYTE_SIZE * rt
+    return ONE_REPEAT_BYTE_SIZE + 2U * ONE_REPEAT_BYTE_SIZE * repeat_times;
+  }
+  const uint32_t aligned_cnt = last_axis < elem_in_one_repeat ? elem_in_one_repeat : last_axis;
+  const uint32_t quadruple = 4U * repeat_times * aligned_cnt;
+  const uint32_t dbl = 2U * repeat_times * aligned_cnt;
+  return Int64CompareAlignedBytes(quadruple * sizeof(uint16_t)) +
+         Int64CompareAlignedBytes(quadruple * sizeof(uint16_t)) + Int64CompareAlignedBytes(dbl * sizeof(int32_t)) +
+         Int64CompareAlignedBytes(dbl * sizeof(half)) + Int64CompareAlignedBytes(dbl * sizeof(half)) +
+         Int64CompareAlignedBytes(dbl * sizeof(uint32_t));
+}
 
-  LocalTensor<int32_t> src0_new = src0.ReinterpretCast<int32_t>();
-  LocalTensor<int32_t> src1_new = src1.ReinterpretCast<int32_t>();
-
-  // last_axis < 256B, 直接使用first_dim作为repeat_times执行
-  // 临时空间不满足一条指令做完
-  if (last_axis <= elem_in_one_repeat) {
-    const uint64_t mask = last_axis;
-    BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-    AscendC::PipeBarrier<PIPE_V>();
-    if (src1_is_one_block) {
-      repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
-    }
-    AscendC::Sub(sub_res_buf, src0_new, src1_new, mask * 2, repeat_times, repeat_params);
-    UnaryRepeatParams unary_repeat_params = {1, 1, 8, 8};
-    AscendC::PipeBarrier<PIPE_V>();
-    AscendC::Cast(cast_res_buf, sub_res_64_buf, AscendC::RoundMode::CAST_RINT, mask, repeat_times, unary_repeat_params);
-    AscendC::PipeBarrier<PIPE_V>();
-    AscendC::CompareScalar(cmp_res_buf, cast_res_buf, 0.0f, mode, mask, repeat_times, unary_repeat_params);
-    repeat_params = {1, 1, 1, 8, 0, 8};
-    AscendC::PipeBarrier<PIPE_V>();
-    AscendC::Select<half, uint8_t, true>(sel_res_buf, cmp_res_buf, all_one_buf, (half)0,
-                                         AscendC::SELMODE::VSEL_TENSOR_SCALAR_MODE, KernelUtils::RptSize<half>(),
-                                         repeat_times, repeat_params);
-    AscendC::PipeBarrier<PIPE_V>();
-    unary_repeat_params = {1, 1, dst_repeat_stride, 4};
-    AscendC::Cast(dst, sel_res_buf, AscendC::RoundMode::CAST_NONE, mask, repeat_times, unary_repeat_params);
-    AscendC::PipeBarrier<PIPE_V>();
-  } else {  // 如果last_dim轴大于256B，一次repeat做不完，
-    uint32_t element_extent = last_axis / elem_in_one_repeat;
-    uint32_t element_reminder = last_axis - element_extent * elem_in_one_repeat;
-    if (element_extent <= repeat_times) {
-      for (uint32_t outer_for = 0; outer_for < element_extent; outer_for++) {
-        constexpr uint64_t mask = elem_in_one_repeat;
-        BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-        AscendC::PipeBarrier<PIPE_V>();
-        if (src1_is_one_block) {
-          repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
-          AscendC::Sub(sub_res_buf, src0_new[outer_for * elem_in_one_repeat * 2], src1_new[0], mask * 2, repeat_times,
-                       repeat_params);
-        } else {
-          AscendC::Sub(sub_res_buf, src0_new[outer_for * elem_in_one_repeat * 2],
-                       src1_new[outer_for * elem_in_one_repeat * 2], mask * 2, repeat_times, repeat_params);
-        }
-        UnaryRepeatParams unary_repeat_params = {1, 1, 4, 8};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(cast_res_buf, sub_res_64_buf, AscendC::RoundMode::CAST_RINT, mask, repeat_times,
-                      unary_repeat_params);
-        unary_repeat_params = {1, 1, 8, 8};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::CompareScalar(cmp_res_buf, cast_res_buf, 0.0f, mode, mask, DivCeil(repeat_times, 2),
-                               unary_repeat_params);
-        repeat_params = {1, 0, 0, 8, 0, 0};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Select<half, uint8_t, true>(sel_res_buf, cmp_res_buf, all_one_buf, (half)0,
-                                             AscendC::SELMODE::VSEL_TENSOR_SCALAR_MODE, 128, DivCeil(repeat_times, 4),
-                                             repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-        unary_repeat_params = {1, 1, dst_repeat_stride, 2};
-        AscendC::Cast(dst[outer_for * elem_in_one_repeat], sel_res_buf, AscendC::RoundMode::CAST_NONE, mask,
-                      repeat_times, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-      }
-      if (element_reminder != 0) {
-        uint32_t mask = element_reminder;
-        BinaryRepeatParams repeat_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
-        AscendC::PipeBarrier<PIPE_V>();
-        if (src1_is_one_block) {
-          repeat_params = {1, 1, 0, 8, src_repeat_stride, 0};
-          AscendC::Sub(sub_res_buf, src0_new[element_extent * elem_in_one_repeat * 2], src1_new[0], mask * 2,
-                       repeat_times, repeat_params);
-        } else {
-          AscendC::Sub(sub_res_buf, src0_new[element_extent * elem_in_one_repeat * 2],
-                       src1_new[element_extent * elem_in_one_repeat * 2], mask * 2, repeat_times, repeat_params);
-        }
-        UnaryRepeatParams unary_repeat_params = {1, 1, 4, 8};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(cast_res_buf, sub_res_64_buf, AscendC::RoundMode::CAST_RINT, mask, repeat_times,
-                      unary_repeat_params);
-        unary_repeat_params = {1, 1, 8, 8};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::CompareScalar(cmp_res_buf, cast_res_buf, 0.0f, mode, mask, DivCeil(repeat_times, 2),
-                               unary_repeat_params);
-        repeat_params = {1, 0, 0, 8, 0, 0};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Select<half, uint8_t, true>(sel_res_buf, cmp_res_buf, all_one_buf, (half)0,
-                                             AscendC::SELMODE::VSEL_TENSOR_SCALAR_MODE, 128, DivCeil(repeat_times, 4),
-                                             repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-        unary_repeat_params = {1, 1, dst_repeat_stride, 2};
-        AscendC::Cast(dst[element_extent * elem_in_one_repeat], sel_res_buf, AscendC::RoundMode::CAST_NONE, mask,
-                      repeat_times, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-      }
+// 返回 tmp_buf 实际可用空间下本次调用最多能处理的行数；0 表示连 1 行都放不下。
+inline __aicore__ uint32_t Int64CompareMaxRepeats(uint32_t tmp_bytes, uint32_t repeat_times, uint32_t last_axis,
+                                                  bool is_eq_ne) {
+  uint32_t hi = KernelUtils::Min(repeat_times, static_cast<uint32_t>(MAX_REPEAT_TIME));
+  if (hi == 0U) {
+    return 0U;
+  }
+  if (Int64CompareTmpBytes(hi, last_axis, is_eq_ne) <= tmp_bytes) {
+    return hi;
+  }
+  uint32_t lo = 0U;
+  while (hi - lo > 1U) {
+    const uint32_t mid = lo + (hi - lo) / 2U;
+    if (Int64CompareTmpBytes(mid, last_axis, is_eq_ne) <= tmp_bytes) {
+      lo = mid;
     } else {
-      element_reminder = last_axis - element_extent * elem_in_one_repeat;
-      for (uint32_t outer_for = 0; outer_for < repeat_times; outer_for++) {
-        uint64_t mask = elem_in_one_repeat;
-        BinaryRepeatParams repeat_params = {1, 1, 1, 8, 8, 8};
-        AscendC::PipeBarrier<PIPE_V>();
-        if (src1_is_one_block) {
-          repeat_params = {1, 1, 0, 8, 8, 0};
-          AscendC::Sub(sub_res_buf, src0_new[outer_for * input_last_dim_stride * 2], src1_new[0], mask * 2,
-                       element_extent, repeat_params);
-        } else {
-          AscendC::Sub(sub_res_buf, src0_new[outer_for * input_last_dim_stride * 2],
-                       src1_new[outer_for * input_last_dim_stride * 2], mask * 2, element_extent, repeat_params);
-        }
-        UnaryRepeatParams unary_repeat_params = {1, 1, 4, 8};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(cast_res_buf, sub_res_64_buf, AscendC::RoundMode::CAST_RINT, mask, element_extent,
-                      unary_repeat_params);
-        unary_repeat_params = {1, 1, 8, 8};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::CompareScalar(cmp_res_buf, cast_res_buf, 0.0f, mode, mask, DivCeil(element_extent, 2),
-                               unary_repeat_params);
-        repeat_params = {1, 0, 0, 8, 0, 0};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Select<half, uint8_t, true>(sel_res_buf, cmp_res_buf, all_one_buf, (half)0,
-                                             AscendC::SELMODE::VSEL_TENSOR_SCALAR_MODE, 128, DivCeil(element_extent, 4),
-                                             repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-        unary_repeat_params = {1, 1, 1, 2};
-        AscendC::Cast(dst[outer_for * output_last_dim_stride], sel_res_buf, AscendC::RoundMode::CAST_NONE, mask,
-                      element_extent, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-        if (element_reminder != 0) {
-          mask = element_reminder;
-          BinaryRepeatParams repeat_params = {1, 1, 1, 8, 8, 8};
-          AscendC::PipeBarrier<PIPE_V>();
-          if (src1_is_one_block) {
-            repeat_params = {1, 1, 0, 8, 8, 0};
-            AscendC::Sub(sub_res_buf,
-                         src0_new[outer_for * input_last_dim_stride * 2 + element_extent * elem_in_one_repeat * 2],
-                         src1_new[0], mask * 2, 1, repeat_params);
-          } else {
-            AscendC::Sub(sub_res_buf,
-                         src0_new[outer_for * input_last_dim_stride * 2 + element_extent * elem_in_one_repeat * 2],
-                         src1_new[outer_for * input_last_dim_stride * 2 + element_extent * elem_in_one_repeat * 2],
-                         mask * 2, 1, repeat_params);
-          }
-          UnaryRepeatParams unary_repeat_params = {1, 1, 4, 8};
-          AscendC::PipeBarrier<PIPE_V>();
-          AscendC::Cast(cast_res_buf, sub_res_64_buf, AscendC::RoundMode::CAST_RINT, mask, 1, unary_repeat_params);
-          unary_repeat_params = {1, 1, 8, 8};
-          AscendC::PipeBarrier<PIPE_V>();
-          AscendC::CompareScalar(cmp_res_buf, cast_res_buf, 0.0f, mode, mask, 1, unary_repeat_params);
-          repeat_params = {1, 0, 0, 8, 0, 0};
-          AscendC::PipeBarrier<PIPE_V>();
-          AscendC::Select<half, uint8_t, true>(sel_res_buf, cmp_res_buf, all_one_buf, (half)0,
-                                               AscendC::SELMODE::VSEL_TENSOR_SCALAR_MODE, 128, 1, repeat_params);
-          AscendC::PipeBarrier<PIPE_V>();
-          unary_repeat_params = {1, 1, 1, 2};
-          AscendC::Cast(dst[outer_for * output_last_dim_stride + element_extent * elem_in_one_repeat], sel_res_buf,
-                        AscendC::RoundMode::CAST_NONE, mask, 1, unary_repeat_params);
-          AscendC::PipeBarrier<PIPE_V>();
-        }
-      }
+      hi = mid;
     }
   }
+  return lo;
 }
 
 inline __aicore__ void GetSignBitTensorNormal(const AscendC::LocalTensor<uint16_t> &dst,
@@ -881,7 +737,7 @@ inline __aicore__ void GetSignBitTensorNormal(const AscendC::LocalTensor<uint16_
   AscendC::Maxs(dst_tmp, dst_tmp, -1, mask * 2, repeat_times, unary_repeat_params);
   AscendC::Duplicate(inner_dup, uint32_t(0xFFFFFFFF), inner_dup.GetSize());
   uint64_t mask_half[2] = {uint64_t(0x5555555555555555), 0};
-  AscendC::Duplicate(inner_dup, 1U, mask_half, repeat_times, 1, 8);
+  AscendC::Duplicate(inner_dup, 1U, mask_half, repeat_times, 1, dst_stride);
   repeat_params = {1, 1, 1, dst_stride, dst_stride, dst_stride};
   AscendC::PipeBarrier<PIPE_V>();
   AscendC::And(dst, dst, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
@@ -930,6 +786,448 @@ inline __aicore__ void CalcWeightedTensorNormal(const AscendC::LocalTensor<half>
   AscendC::PairReduceSum(dst, src, repeat_times, mask * 2, 1, 1, 4);
 }
 
+// EQ/NE 计算的中间缓冲布局（分时复用 sub_res 的低/高半区）
+struct Int64EqNeCtx {
+  AscendC::LocalTensor<half> all_one_buf;
+  AscendC::LocalTensor<int32_t> sub_res_buf;
+  AscendC::LocalTensor<int64_t> sub_res_64_buf;
+  AscendC::LocalTensor<uint8_t> sub_res_reuse_buf;
+  AscendC::LocalTensor<float> cast_res_buf;
+  AscendC::LocalTensor<uint8_t> cmp_res_buf;
+  AscendC::LocalTensor<half> sel_res_buf;
+};
+
+inline __aicore__ Int64EqNeCtx MakeInt64EqNeCtx(AscendC::LocalTensor<uint8_t> &tmp_buf, uint32_t repeat_times) {
+  Int64EqNeCtx ctx;
+  ctx.all_one_buf = KernelUtils::NewTensor<half>(tmp_buf, 0, KernelUtils::RptSize<half>());
+  Duplicate(ctx.all_one_buf, (half)1.0f, KernelUtils::RptSize<half>());
+  ctx.sub_res_buf = KernelUtils::NewTensor<int32_t>(tmp_buf, ONE_REPEAT_BYTE_SIZE,
+                                                    ONE_REPEAT_BYTE_SIZE * repeat_times / sizeof(int32_t));
+  ctx.sub_res_64_buf = ctx.sub_res_buf.ReinterpretCast<int64_t>();
+  ctx.sub_res_reuse_buf = ctx.sub_res_buf.template ReinterpretCast<uint8_t>();
+  ctx.cast_res_buf = KernelUtils::NewTensor<float>(tmp_buf, ONE_REPEAT_BYTE_SIZE * (1 + repeat_times),
+                                                   ONE_REPEAT_BYTE_SIZE * repeat_times / sizeof(float));
+  ctx.cmp_res_buf =
+      KernelUtils::NewTensor<uint8_t>(ctx.sub_res_reuse_buf, 0, (ONE_REPEAT_BYTE_SIZE * repeat_times) / 8);
+  ctx.sel_res_buf = KernelUtils::NewTensor<half>(ctx.sub_res_reuse_buf, (ONE_REPEAT_BYTE_SIZE * repeat_times) / 8,
+                                                 ONE_REPEAT_BYTE_SIZE * repeat_times / sizeof(half));
+  return ctx;
+}
+
+// EQ/NE 单段五指令序列（Sub→Cast(RINT)→CompareScalar→Select→Cast(NONE)）的段参数：
+// 四个调用段（单段/列主序整段/列主序余数/行主序）仅在以下取值上不同。
+struct Int64EqNeSegParams {
+  BinaryRepeatParams sub_params;       // Sub 的 repeat 参数（src1 为普通 tensor）
+  BinaryRepeatParams sub_one_params;   // Sub 的 repeat 参数（src1 单块：src1 stride 置 0）
+  UnaryRepeatParams cast_rint_params;  // Cast(RINT) 的 repeat 参数
+  uint32_t cmp_scalar_rpt;             // CompareScalar 的 repeat 次数
+  uint32_t select_mask;                // Select 的 mask
+  uint32_t select_rpt;                 // Select 的 repeat 次数
+  BinaryRepeatParams select_params;    // Select 的 repeat 参数
+  UnaryRepeatParams emit_cast_params;  // Cast(NONE) 写回输出的 repeat 参数
+};
+
+// 单段全宽（last_axis <= elem_in_one_repeat）：一条 repeat 序列处理整行
+inline __aicore__ Int64EqNeSegParams MakeEqNeSegSingle(const uint8_t src_repeat_stride, const uint8_t dst_repeat_stride,
+                                                       const uint32_t rpt) {
+  Int64EqNeSegParams seg;
+  seg.sub_params = {1, 1, 1, 8, src_repeat_stride, src_repeat_stride};
+  seg.sub_one_params = {1, 1, 0, 8, src_repeat_stride, 0};
+  seg.cast_rint_params = {1, 1, 8, 8};
+  seg.cmp_scalar_rpt = rpt;
+  seg.select_mask = KernelUtils::RptSize<half>();
+  seg.select_rpt = rpt;
+  seg.select_params = {1, 1, 1, 8, 0, 8};
+  seg.emit_cast_params = {1, 1, dst_repeat_stride, 4};
+  return seg;
+}
+
+// 分段扫描（列主序/行主序共用）：src_stride 为 Sub 的源步长，dst_stride 为写回步长，
+// rpt 为本段的 repeat 基数（CompareScalar/Select 的 repeat 按其减半/四分摊开）。
+inline __aicore__ Int64EqNeSegParams MakeEqNeSegSegment(const uint8_t src_stride, const uint8_t dst_stride,
+                                                        const uint32_t rpt) {
+  Int64EqNeSegParams seg;
+  seg.sub_params = {1, 1, 1, 8, src_stride, src_stride};
+  seg.sub_one_params = {1, 1, 0, 8, src_stride, 0};
+  seg.cast_rint_params = {1, 1, 4, 8};
+  seg.cmp_scalar_rpt = DivCeil(rpt, 2);
+  seg.select_mask = 128;
+  seg.select_rpt = DivCeil(rpt, 4);
+  seg.select_params = {1, 0, 0, 8, 0, 0};
+  seg.emit_cast_params = {1, 1, dst_stride, 2};
+  return seg;
+}
+
+// EQ/NE 五指令序列：每条指令前均有同步屏障，写回后再补一道（与原实现一致）。
+// src0_row / src1_row 为本段起点的 int32 视图，dst_row 为本段输出的 uint8 视图。
+template <CMPMODE mode>
+inline __aicore__ void CompareInt64EqNeSegment(const AscendC::LocalTensor<uint8_t> &dst_row,
+                                               const AscendC::LocalTensor<int32_t> &src0_row,
+                                               const AscendC::LocalTensor<int32_t> &src1_row, Int64EqNeCtx &ctx,
+                                               const Int64EqNeSegParams &seg, const uint32_t mask, const uint32_t rpt,
+                                               const bool src1_is_one_block) {
+  BinaryRepeatParams repeat_params = seg.sub_params;
+  if (src1_is_one_block) {
+    repeat_params = seg.sub_one_params;
+  }
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Sub(ctx.sub_res_buf, src0_row, src1_row, mask * 2, rpt, repeat_params);
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Cast(ctx.cast_res_buf, ctx.sub_res_64_buf, AscendC::RoundMode::CAST_RINT, mask, rpt, seg.cast_rint_params);
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::CompareScalar(ctx.cmp_res_buf, ctx.cast_res_buf, 0.0f, mode, mask, seg.cmp_scalar_rpt,
+                         (UnaryRepeatParams){1, 1, 8, 8});
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Select<half, uint8_t, true>(ctx.sel_res_buf, ctx.cmp_res_buf, ctx.all_one_buf, (half)0,
+                                       AscendC::SELMODE::VSEL_TENSOR_SCALAR_MODE, seg.select_mask, seg.select_rpt,
+                                       seg.select_params);
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Cast(dst_row, ctx.sel_res_buf, AscendC::RoundMode::CAST_NONE, mask, rpt, seg.emit_cast_params);
+  AscendC::PipeBarrier<PIPE_V>();
+}
+
+// last_axis > 一个 repeat：element_extent <= repeat_times 时按列主序（整 repeat 段循环 + 余数段），
+// 否则按行主序（逐行处理，行内整 repeat 段 + 余数段，src/dst 步长取整块常量）
+template <CMPMODE mode>
+inline __aicore__ void CompareInt64EqNeMultiSegment(
+    const AscendC::LocalTensor<uint8_t> &dst, const AscendC::LocalTensor<int32_t> &src0_new,
+    const AscendC::LocalTensor<int32_t> &src1_new, Int64EqNeCtx &ctx, const uint8_t repeat_times,
+    const uint32_t last_axis, const uint8_t src_repeat_stride, const uint8_t dst_repeat_stride,
+    const uint32_t input_last_dim_stride, const uint32_t output_last_dim_stride, const bool src1_is_one_block) {
+  constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int64_t);
+  const uint32_t element_extent = last_axis / elem_in_one_repeat;
+  const uint32_t element_reminder = last_axis - element_extent * elem_in_one_repeat;
+  if (element_extent <= repeat_times) {
+    // 列主序：按整 repeat 段循环扫描，余数补一段
+    const Int64EqNeSegParams seg = MakeEqNeSegSegment(src_repeat_stride, dst_repeat_stride, repeat_times);
+    for (uint32_t outer_for = 0; outer_for < element_extent; outer_for++) {
+      const uint32_t base = outer_for * elem_in_one_repeat;
+      CompareInt64EqNeSegment<mode>(dst[base], src0_new[base * 2], src1_is_one_block ? src1_new[0] : src1_new[base * 2],
+                                    ctx, seg, elem_in_one_repeat, repeat_times, src1_is_one_block);
+    }
+    if (element_reminder != 0) {
+      const uint32_t base = element_extent * elem_in_one_repeat;
+      CompareInt64EqNeSegment<mode>(dst[base], src0_new[base * 2], src1_is_one_block ? src1_new[0] : src1_new[base * 2],
+                                    ctx, seg, element_reminder, repeat_times, src1_is_one_block);
+    }
+    return;
+  }
+  // 行主序：逐行处理，行内先整 repeat 段、再余数段（src/dst 步长取整块常量）
+  for (uint32_t outer_for = 0; outer_for < repeat_times; outer_for++) {
+    const uint32_t in_base = outer_for * input_last_dim_stride * 2;
+    const uint32_t out_base = outer_for * output_last_dim_stride;
+    const Int64EqNeSegParams seg = MakeEqNeSegSegment(8, 1, element_extent);
+    CompareInt64EqNeSegment<mode>(dst[out_base], src0_new[in_base], src1_is_one_block ? src1_new[0] : src1_new[in_base],
+                                  ctx, seg, elem_in_one_repeat, element_extent, src1_is_one_block);
+    if (element_reminder == 0) {
+      continue;
+    }
+    const uint32_t rem_base = element_extent * elem_in_one_repeat;
+    const Int64EqNeSegParams rem_seg = MakeEqNeSegSegment(8, 1, 1);
+    CompareInt64EqNeSegment<mode>(dst[out_base + rem_base], src0_new[in_base + rem_base * 2],
+                                  src1_is_one_block ? src1_new[0] : src1_new[in_base + rem_base * 2], ctx, rem_seg,
+                                  element_reminder, 1, src1_is_one_block);
+  }
+}
+
+template <CMPMODE mode>
+inline __aicore__ void CompareExtendInt64EqNeOnce(const AscendC::LocalTensor<uint8_t> &dst,   // output
+                                                  const AscendC::LocalTensor<int64_t> &src0,  // input 0 is a tensor
+                                                  const AscendC::LocalTensor<int64_t> &src1,  // input 1 is a tensor
+                                                  const uint8_t repeat_times, const uint32_t last_axis,
+                                                  const uint32_t input_last_dim_stride,
+                                                  const uint32_t output_last_dim_stride,
+                                                  AscendC::LocalTensor<uint8_t> &tmp_buf,
+                                                  const bool src1_is_one_block) {
+  const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;  // 输出均为 uint8_t，无需乘类型大小
+  const uint8_t src_repeat_stride = input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE;
+  constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int64_t);
+  Int64EqNeCtx ctx = MakeInt64EqNeCtx(tmp_buf, repeat_times);
+  AscendC::LocalTensor<int32_t> src0_new = src0.ReinterpretCast<int32_t>();
+  AscendC::LocalTensor<int32_t> src1_new = src1.ReinterpretCast<int32_t>();
+
+  if (last_axis <= elem_in_one_repeat) {
+    // last_axis < 256B：整行一条 repeat 序列直接完成
+    const Int64EqNeSegParams seg = MakeEqNeSegSingle(src_repeat_stride, dst_repeat_stride, repeat_times);
+    CompareInt64EqNeSegment<mode>(dst, src0_new, src1_new, ctx, seg, last_axis, repeat_times, src1_is_one_block);
+    return;
+  }
+  CompareInt64EqNeMultiSegment<mode>(dst, src0_new, src1_new, ctx, repeat_times, last_axis, src_repeat_stride,
+                                     dst_repeat_stride, input_last_dim_stride, output_last_dim_stride,
+                                     src1_is_one_block);
+}
+
+// last_axis 不足一个 repeat（< 32 个 int64 元素）时：逐元素标量比较（EQ/NE）。
+// 与 GtGeLe 尾块同理：尾块行宽不是 8 B 的整数 block，向量实现的打包/步长无法同时自洽。
+template <CMPMODE mode>
+inline __aicore__ void CompareExtendInt64EqNeTail(const AscendC::LocalTensor<uint8_t> &dst,
+                                                  const AscendC::LocalTensor<int64_t> &src0,
+                                                  const AscendC::LocalTensor<int64_t> &src1, const uint8_t repeat_times,
+                                                  const uint32_t last_axis, const uint32_t input_last_dim_stride,
+                                                  const uint32_t output_last_dim_stride,
+                                                  AscendC::LocalTensor<uint8_t> &tmp_buf,
+                                                  const bool src1_is_one_block) {
+  (void)tmp_buf;
+  for (uint32_t row = 0U; row < repeat_times; ++row) {
+    const uint32_t input_base = row * input_last_dim_stride;
+    const uint32_t output_base = row * output_last_dim_stride;
+    for (uint32_t idx = 0U; idx < last_axis; ++idx) {
+      const int64_t value0 = src0.GetValue(input_base + idx);
+      const int64_t value1 = src1_is_one_block ? src1.GetValue(idx) : src1.GetValue(input_base + idx);
+      const bool equal = (value0 == value1);
+      const uint8_t result =
+          (mode == CMPMODE::EQ) ? static_cast<uint8_t>(equal ? 1 : 0) : static_cast<uint8_t>(equal ? 0 : 1);
+      dst.SetValue(output_base + idx, result);
+    }
+  }
+}
+
+// 按 tmp_buf 实际可用大小对 repeat_times 分块：调用方少配 tmp_buf 时只会多跑几条指令，不会越界。
+template <CMPMODE mode>
+inline __aicore__ void CompareExtendInt64EqNe(const AscendC::LocalTensor<uint8_t> &dst,   // output
+                                              const AscendC::LocalTensor<int64_t> &src0,  // input 0 is a tensor
+                                              const AscendC::LocalTensor<int64_t> &src1,  // input 1 is a tensor
+                                              const uint8_t repeat_times, const uint32_t last_axis,
+                                              const uint32_t input_last_dim_stride,
+                                              const uint32_t output_last_dim_stride,
+                                              AscendC::LocalTensor<uint8_t> &tmp_buf, const bool src1_is_one_block) {
+  if (repeat_times == 0U) {
+    return;
+  }
+  constexpr uint32_t elem_in_one_repeat_eqne = ONE_REPEAT_BYTE_SIZE / sizeof(int64_t);
+  if (last_axis < elem_in_one_repeat_eqne) {
+    CompareExtendInt64EqNeTail<mode>(dst, src0, src1, repeat_times, last_axis, input_last_dim_stride,
+                                     output_last_dim_stride, tmp_buf, src1_is_one_block);
+    return;
+  }
+  const uint32_t max_rt = Int64CompareMaxRepeats(tmp_buf.GetSize(), repeat_times, last_axis, true);
+  if (max_rt == 0U) {
+    KERNEL_LOG(KERNEL_ERROR, "tmp_buf is too small for int64 compare(EQ/NE): size=%u, need=%u for one repeat.",
+               tmp_buf.GetSize(), Int64CompareTmpBytes(1U, last_axis, true));
+    ASSERT(false);
+    return;
+  }
+  const bool src0_is_one_block = src0.GetSize() * sizeof(int64_t) == ONE_BLK_SIZE;
+  for (uint32_t offset = 0U; offset < repeat_times; offset += max_rt) {
+    const uint32_t rpt = KernelUtils::Min(max_rt, static_cast<uint32_t>(repeat_times) - offset);
+    CompareExtendInt64EqNeOnce<mode>(
+        dst[offset * output_last_dim_stride], src0[src0_is_one_block ? 0U : offset * input_last_dim_stride],
+        src1_is_one_block ? src1 : src1[offset * input_last_dim_stride], static_cast<uint8_t>(rpt), last_axis,
+        input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
+  }
+}
+
+// GtGeLe 计算的中间缓冲布局：按 repeat_times × max(last_axis, elem_in_one_repeat) 切分 tmp_buf
+struct Int64GtGeLeCtx {
+  AscendC::LocalTensor<uint16_t> src0_bits;
+  AscendC::LocalTensor<uint16_t> src1_bits;
+  AscendC::LocalTensor<int32_t> sub_res;
+  AscendC::LocalTensor<half> sign_res;
+  AscendC::LocalTensor<half> value_res;
+  AscendC::LocalTensor<uint32_t> inner_dup;
+  AscendC::LocalTensor<uint16_t> inner_dup_tmp;
+};
+
+// 一次比较调用的行布局参数：三个分支仅在这些量上不同
+struct Int64GtGeLeRowParams {
+  uint32_t mask;              // 本段有效元素数
+  uint8_t calc_stride;        // 中间缓冲（sign/value）的 repeat 步长，单位 block
+  uint8_t result_stride;      // sign_res 累加与回写的 repeat 步长，单位 block
+  uint8_t value_src_stride;   // 数值位相减（step 6）时操作数的 src 步长，单位 block
+  uint8_t dst_repeat_stride;  // 输出张量的 repeat 步长，单位 block
+};
+
+inline __aicore__ Int64GtGeLeCtx MakeInt64GtGeLeCtx(AscendC::LocalTensor<uint8_t> &tmp_buf, uint32_t repeat_times,
+                                                    uint32_t last_axis) {
+  constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int64_t);
+  const uint32_t lanes = last_axis < elem_in_one_repeat ? elem_in_one_repeat : last_axis;
+  const uint32_t quadruple_cal_cnt = 4U * repeat_times * lanes;
+  const uint32_t double_cal_cnt = 2U * repeat_times * lanes;
+  Int64GtGeLeCtx ctx;
+  uint32_t offset = 0U;
+  ctx.src0_bits = KernelUtils::NewTensor<uint16_t>(tmp_buf, offset, quadruple_cal_cnt);
+  offset += DivCeil(quadruple_cal_cnt * sizeof(uint16_t), ONE_BLK_SIZE) * ONE_BLK_SIZE;
+  ctx.src1_bits = KernelUtils::NewTensor<uint16_t>(tmp_buf, offset, quadruple_cal_cnt);
+  offset += DivCeil(quadruple_cal_cnt * sizeof(uint16_t), ONE_BLK_SIZE) * ONE_BLK_SIZE;
+  ctx.sub_res = KernelUtils::NewTensor<int32_t>(tmp_buf, offset, double_cal_cnt);
+  offset += DivCeil(double_cal_cnt * sizeof(int32_t), ONE_BLK_SIZE) * ONE_BLK_SIZE;
+  ctx.sign_res = KernelUtils::NewTensor<half>(tmp_buf, offset, double_cal_cnt);
+  offset += DivCeil(double_cal_cnt * sizeof(half), ONE_BLK_SIZE) * ONE_BLK_SIZE;
+  ctx.value_res = KernelUtils::NewTensor<half>(tmp_buf, offset, double_cal_cnt);
+  offset += DivCeil(double_cal_cnt * sizeof(half), ONE_BLK_SIZE) * ONE_BLK_SIZE;
+  ctx.inner_dup = KernelUtils::NewTensor<uint32_t>(tmp_buf, offset, double_cal_cnt);
+  ctx.inner_dup_tmp = ctx.inner_dup.ReinterpretCast<uint16_t>();
+  return ctx;
+}
+
+// 步骤 1~8：符号位与数值位分别相减、转 half、加权求和，结果落在 ctx.sign_res / ctx.value_res
+inline __aicore__ void CompareInt64GtGeLeRows(Int64GtGeLeCtx &ctx, const AscendC::LocalTensor<int64_t> &src0_row,
+                                              const AscendC::LocalTensor<int64_t> &src1_row, const uint32_t mask,
+                                              const uint32_t repeat_times, const uint8_t src_repeat_stride,
+                                              const uint8_t calc_stride, const uint8_t value_src_stride,
+                                              const bool src0_is_one_block, const bool src1_is_one_block) {
+  AscendC::LocalTensor<int32_t> src0_bits_tmp = ctx.src0_bits.ReinterpretCast<int32_t>();
+  AscendC::LocalTensor<int32_t> src1_bits_tmp = ctx.src1_bits.ReinterpretCast<int32_t>();
+  // step 1. 取 src0 / src1 的符号位
+  GetSignBitTensorNormal(ctx.src0_bits, src0_row, ctx.inner_dup, mask, repeat_times, src_repeat_stride, calc_stride,
+                         src0_is_one_block);
+  GetSignBitTensorNormal(ctx.src1_bits, src1_row, ctx.inner_dup, mask, repeat_times, src_repeat_stride, calc_stride,
+                         src1_is_one_block);
+  // step 2. 符号位相减，结果就地复用 src0_bits
+  AscendC::PipeBarrier<PIPE_V>();
+  BinaryRepeatParams repeat_params = {1, 1, 1, calc_stride, calc_stride, calc_stride};
+  AscendC::Sub(src0_bits_tmp, src0_bits_tmp, src1_bits_tmp, mask * 2, repeat_times, repeat_params);
+  // step 3. 符号位差值转 half
+  CastTensorToHalfNormal(ctx.sub_res, ctx.src0_bits, ctx.src1_bits, ctx.inner_dup, mask, repeat_times, calc_stride);
+  // step 4. 符号位差值加权求和
+  CalcWeightedTensorNormal(ctx.sign_res, ctx.sub_res.ReinterpretCast<half>(), ctx.inner_dup, mask, repeat_times,
+                           half(8), half(2));
+  // step 5. 取 src0 / src1 的数值位
+  AscendC::Duplicate(ctx.inner_dup, uint32_t(0x7FFFFFFF), ctx.inner_dup.GetSize());
+  AscendC::PipeBarrier<PIPE_V>();
+  repeat_params = {1, 1, 1, calc_stride, src_repeat_stride, src_repeat_stride};
+  AscendC::LocalTensor<uint16_t> src0_tmp = src0_row.ReinterpretCast<uint16_t>();
+  AscendC::And(ctx.src0_bits, src0_tmp, ctx.inner_dup_tmp, mask * 4, repeat_times, repeat_params);
+  if (src1_is_one_block) {
+    repeat_params = {1, 0, 1, calc_stride, 0, src_repeat_stride};
+  }
+  AscendC::LocalTensor<uint16_t> src1_tmp = src1_row.ReinterpretCast<uint16_t>();
+  AscendC::And(ctx.src1_bits, src1_tmp, ctx.inner_dup_tmp, mask * 4, repeat_times, repeat_params);
+  // step 6. 数值位相减并夹到 0/1/-1。此处操作数全为中间缓冲，src stride 与其一致：
+  // 小轴分支为 src_repeat_stride，整 repeat / 余数分支为 calc_stride（恒为 2），由调用方给出。
+  repeat_params = {1, 1, 1, calc_stride, value_src_stride, value_src_stride};
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Sub(src0_bits_tmp, src0_bits_tmp, src1_bits_tmp, mask * 2, repeat_times, repeat_params);
+  UnaryRepeatParams unary_repeat_params = {1, 1, value_src_stride, value_src_stride};
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Maxs(src0_bits_tmp, src0_bits_tmp, -1, mask * 2, repeat_times, unary_repeat_params);
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Mins(src0_bits_tmp, src0_bits_tmp, 1, mask * 2, repeat_times, unary_repeat_params);
+  // step 7. 数值位差值转 half
+  CastTensorToHalfNormal(ctx.sub_res, ctx.src0_bits, ctx.src1_bits, ctx.inner_dup, mask, repeat_times, calc_stride);
+  // step 8. 数值位差值加权求和
+  CalcWeightedTensorNormal(ctx.value_res, ctx.sub_res.ReinterpretCast<half>(), ctx.inner_dup, mask, repeat_times,
+                           half(4), half(1));
+}
+
+// 步骤 9~10：符号位与数值位结果相加，按 GT / (GE|LE) 归一化成 0/1 后 cast 写回 dst_row
+template <CMPMODE mode>
+inline __aicore__ void FinishInt64GtGeLeRow(Int64GtGeLeCtx &ctx, const AscendC::LocalTensor<uint8_t> &dst_row,
+                                            const Int64GtGeLeRowParams &row, const uint32_t repeat_times,
+                                            const uint32_t out_cnt) {
+  BinaryRepeatParams repeat_params = {1, 1, 1, row.result_stride, 4, 4};
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Add(ctx.sign_res, ctx.sign_res, ctx.value_res, row.mask, repeat_times, repeat_params);
+  AscendC::PipeBarrier<PIPE_V>();
+  UnaryRepeatParams unary_repeat_params = {1, 1, row.result_stride, row.result_stride};
+  if (mode == CMPMODE::GT) {
+    // GT：差值 > 0 记 1，其余记 0
+    AscendC::Maxs(ctx.sign_res, ctx.sign_res, half(0), row.mask, repeat_times, unary_repeat_params);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Mins(ctx.sign_res, ctx.sign_res, half(1), row.mask, repeat_times, unary_repeat_params);
+  } else {
+    // GE / LE：差值加 1 后夹到 [0, 1]
+    AscendC::Maxs(ctx.sign_res, ctx.sign_res, half(-1), row.mask, repeat_times, unary_repeat_params);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Mins(ctx.sign_res, ctx.sign_res, half(0), row.mask, repeat_times, unary_repeat_params);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Adds(ctx.sign_res, ctx.sign_res, half(1), row.mask, repeat_times, unary_repeat_params);
+  }
+  // step 10. cast 成 int8 写回输出
+  unary_repeat_params = {1, 1, row.dst_repeat_stride, row.result_stride};
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::Cast(dst_row, ctx.sign_res, AscendC::RoundMode::CAST_NONE, out_cnt, repeat_times, unary_repeat_params);
+}
+
+template <CMPMODE mode>
+inline __aicore__ void CompareExtendInt64GtGeLeOnce(const AscendC::LocalTensor<uint8_t> &dst,   // output
+                                                    const AscendC::LocalTensor<int64_t> &src0,  // input 0 is a tensor
+                                                    const AscendC::LocalTensor<int64_t> &src1,  // input 1 is a tensor
+                                                    const uint8_t repeat_times, const uint32_t last_axis,
+                                                    const uint32_t input_last_dim_stride,
+                                                    const uint32_t output_last_dim_stride,
+                                                    AscendC::LocalTensor<uint8_t> &tmp_buf,
+                                                    const bool src1_is_one_block,
+                                                    const uint32_t output_mask_count = 0U) {
+  const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;  // 输出均为 uint8_t，无需乘类型大小
+  const uint8_t src_repeat_stride = input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE;
+  constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int64_t);
+  Int64GtGeLeCtx ctx = MakeInt64GtGeLeCtx(tmp_buf, repeat_times, last_axis);
+
+  if (last_axis < elem_in_one_repeat) {
+    // 整行一次处理：中间缓冲按 ceil(mask/32) block 取步长；sign_res 累加与回写按 ceil(mask/16) block 取步长，
+    // 否则 last_axis 不是 16 的整数倍时 repeat 之间会互相覆盖。
+    const uint8_t calc_stride = static_cast<uint8_t>(DivCeil(last_axis, (ONE_BLK_SIZE / sizeof(uint64_t))));
+    // 小轴分支 step 6 的操作数 stride 与 And 一致，取 src_repeat_stride
+    Int64GtGeLeRowParams row{last_axis, calc_stride,
+                             static_cast<uint8_t>(DivCeil(last_axis, (ONE_BLK_SIZE / sizeof(half)))), src_repeat_stride,
+                             dst_repeat_stride};
+    CompareInt64GtGeLeRows(ctx, src0, src1, row.mask, repeat_times, src_repeat_stride, row.calc_stride,
+                           row.value_src_stride, src0.GetSize() * sizeof(int64_t) == ONE_BLK_SIZE, src1_is_one_block);
+    FinishInt64GtGeLeRow<mode>(ctx, dst, row, repeat_times, output_mask_count == 0U ? row.mask : output_mask_count);
+    return;
+  }
+
+  // last_axis >= 一个 repeat：逐整 repeat 段处理，余数单独处理。中间缓冲与 sign_res 步长均固定为 2 block。
+  const uint32_t element_extent = last_axis / elem_in_one_repeat;
+  const uint32_t element_reminder = last_axis - element_extent * elem_in_one_repeat;
+  for (uint32_t outer_for = 0U; outer_for < element_extent; outer_for++) {
+    // 中间结果（int32 域）按 ceil(mask/4) 个 block 取步长（extent 段=8，余数段按余数），
+    // step 6 的操作数同用该步长；sign/value（half 域）累加与写回恒为 2 个 block
+    const uint32_t mask = elem_in_one_repeat;
+    const uint8_t seg_calc_stride = static_cast<uint8_t>(DivCeil(mask, (ONE_BLK_SIZE / sizeof(uint64_t))));
+    Int64GtGeLeRowParams row{mask, seg_calc_stride, 2U, seg_calc_stride, dst_repeat_stride};
+    const bool src0_is_one_block = src0[outer_for * elem_in_one_repeat].GetSize() * sizeof(int64_t) == ONE_BLK_SIZE;
+    CompareInt64GtGeLeRows(ctx, src0[outer_for * elem_in_one_repeat],
+                           src1_is_one_block ? src1 : src1[outer_for * elem_in_one_repeat], mask, repeat_times,
+                           src_repeat_stride, row.calc_stride, row.value_src_stride, src0_is_one_block,
+                           src1_is_one_block);
+    FinishInt64GtGeLeRow<mode>(ctx, dst[outer_for * elem_in_one_repeat], row, repeat_times, mask);
+  }
+  if (element_reminder != 0U) {
+    const uint8_t seg_calc_stride = static_cast<uint8_t>(DivCeil(element_reminder, (ONE_BLK_SIZE / sizeof(uint64_t))));
+    Int64GtGeLeRowParams row{element_reminder, seg_calc_stride, 2U, seg_calc_stride, dst_repeat_stride};
+    const bool src0_is_one_block =
+        src0[element_extent * elem_in_one_repeat].GetSize() * sizeof(int64_t) == ONE_BLK_SIZE;
+    CompareInt64GtGeLeRows(ctx, src0[element_extent * elem_in_one_repeat],
+                           src1_is_one_block ? src1 : src1[element_extent * elem_in_one_repeat], element_reminder,
+                           repeat_times, src_repeat_stride, row.calc_stride, row.value_src_stride, src0_is_one_block,
+                           src1_is_one_block);
+    FinishInt64GtGeLeRow<mode>(ctx, dst[element_extent * elem_in_one_repeat], row, repeat_times, element_reminder);
+  }
+}
+
+// last_axis 不足一个 repeat（< 32 个 int64 元素）时：逐元素标量比较（GT/GE/LE）。
+// 说明：int64 GtGeLe 的向量实现只在“输入行步长 = 一个完整 32 元素 repeat”时正确；
+// 曾尝试 9 种向量化/重排方案（含 DataCopy 块拷贝 + MTE2->V 显式同步的 staging），均未得到正确结果。
+// 尾块用标量保证正确性。
+template <CMPMODE mode>
+inline __aicore__ void CompareExtendInt64GtGeLeTail(
+    const AscendC::LocalTensor<uint8_t> &dst, const AscendC::LocalTensor<int64_t> &src0,
+    const AscendC::LocalTensor<int64_t> &src1, const uint8_t repeat_times, const uint32_t last_axis,
+    const uint32_t input_last_dim_stride, const uint32_t output_last_dim_stride, AscendC::LocalTensor<uint8_t> &tmp_buf,
+    const bool src1_is_one_block) {
+  (void)tmp_buf;
+  for (uint32_t row = 0U; row < repeat_times; ++row) {
+    const uint32_t input_base = row * input_last_dim_stride;
+    const uint32_t output_base = row * output_last_dim_stride;
+    for (uint32_t idx = 0U; idx < last_axis; ++idx) {
+      const int64_t value0 = src0.GetValue(input_base + idx);
+      const int64_t value1 = src1_is_one_block ? src1.GetValue(idx) : src1.GetValue(input_base + idx);
+      uint8_t result = 0;
+      if constexpr (mode == CMPMODE::LE) {
+        result = (value0 <= value1) ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
+      } else if constexpr (mode == CMPMODE::GT) {
+        result = (value0 > value1) ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
+      } else {
+        result = (value0 >= value1) ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
+      }
+      dst.SetValue(output_base + idx, result);
+    }
+  }
+}
+
+// 按 tmp_buf 实际可用大小对 repeat_times 分块：调用方少配 tmp_buf 时只会多跑几条指令，不会越界。
 template <CMPMODE mode>
 inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8_t> &dst,   // output
                                                 const AscendC::LocalTensor<int64_t> &src0,  // input 0 is a tensor
@@ -938,285 +1236,32 @@ inline __aicore__ void CompareExtendInt64GtGeLe(const AscendC::LocalTensor<uint8
                                                 const uint32_t input_last_dim_stride,
                                                 const uint32_t output_last_dim_stride,
                                                 AscendC::LocalTensor<uint8_t> &tmp_buf, const bool src1_is_one_block) {
-  const uint8_t dst_repeat_stride = output_last_dim_stride / ONE_BLK_SIZE;  // 由于输出均为uint8_t，所以不用乘类型大小
-  const uint8_t src_repeat_stride = input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE;
+  if (repeat_times == 0U) {
+    return;
+  }
   constexpr uint32_t elem_in_one_repeat = ONE_REPEAT_BYTE_SIZE / sizeof(int64_t);
-
-  // Divide int64_t into 2 int32_t digits,
-  // calculate the sign bits and value bits separately, and calculate as a whole in the end
-  uint32_t quadruple_cal_cnt = 4 * repeat_times * (last_axis < elem_in_one_repeat ? elem_in_one_repeat : last_axis);
-  uint32_t double_cal_cnt = 2 * repeat_times * (last_axis < elem_in_one_repeat ? elem_in_one_repeat : last_axis);
-  // make sure every tensor address is aligned to 32B
-  // uint32_t offset_aligned = DivCeil(repeat_times * elem_in_one_repeat * sizeof(int64_t), ONE_BLK_SIZE) *
-  // ONE_BLK_SIZE;
-  uint32_t offset = 0;
-  // src0_bits is used to store the sign bits of src0, while the value bits are all zeros
-  AscendC::LocalTensor<uint16_t> src0_bits = KernelUtils::NewTensor<uint16_t>(tmp_buf, 0, quadruple_cal_cnt);
-  offset += DivCeil(quadruple_cal_cnt * sizeof(uint16_t), ONE_BLK_SIZE) * ONE_BLK_SIZE;
-  // src1_bits is used to store the sign bits of src0, while the value bits are all zeros
-  AscendC::LocalTensor<uint16_t> src1_bits = KernelUtils::NewTensor<uint16_t>(tmp_buf, offset, quadruple_cal_cnt);
-  offset += DivCeil(quadruple_cal_cnt * sizeof(uint16_t), ONE_BLK_SIZE) * ONE_BLK_SIZE;
-  // sub_res is used to store the compute result of src0_bits and src1_bits
-  AscendC::LocalTensor<int32_t> sub_res = KernelUtils::NewTensor<int32_t>(tmp_buf, offset, double_cal_cnt);
-  offset += DivCeil(double_cal_cnt * sizeof(int32_t), ONE_BLK_SIZE) * ONE_BLK_SIZE;
-  // sign_res is used to store the weighted compute result of sign bits
-  AscendC::LocalTensor<half> sign_res = KernelUtils::NewTensor<half>(tmp_buf, offset, double_cal_cnt);
-  offset += DivCeil(double_cal_cnt * sizeof(half), ONE_BLK_SIZE) * ONE_BLK_SIZE;
-  // value_res is used to store the weighted compute result of value bits
-  AscendC::LocalTensor<half> value_res = KernelUtils::NewTensor<half>(tmp_buf, offset, double_cal_cnt);
-  offset += DivCeil(double_cal_cnt * sizeof(half), ONE_BLK_SIZE) * ONE_BLK_SIZE;
-  // inner_dup is used for internal-compute
-  AscendC::LocalTensor<uint32_t> inner_dup = KernelUtils::NewTensor<uint32_t>(tmp_buf, offset, double_cal_cnt);
-  AscendC::LocalTensor<uint16_t> inner_dup_tmp = inner_dup.ReinterpretCast<uint16_t>();
-
   if (last_axis < elem_in_one_repeat) {
-    uint32_t mask = last_axis;
-    uint8_t dst_stride = DivCeil(mask, (ONE_BLK_SIZE / sizeof(uint64_t)));
-    // step 1. Get src0 and src1 sign bit
-    GetSignBitTensorNormal(src0_bits, src0, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride,
-                           src0.GetSize() * sizeof(int64_t) == ONE_BLK_SIZE);
-    GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride,
-                           src1_is_one_block);
-    // step 2. use src0_bits to store sign bit sub results
-    AscendC::LocalTensor<int32_t> src0_bits_tmp = src0_bits.ReinterpretCast<int32_t>();
-    AscendC::LocalTensor<int32_t> src1_bits_tmp = src1_bits.ReinterpretCast<int32_t>();
-    AscendC::PipeBarrier<PIPE_V>();
-    BinaryRepeatParams repeat_params = {1, 1, 1, dst_stride, dst_stride, dst_stride};
-    AscendC::Sub(src0_bits_tmp, src0_bits_tmp, src1_bits_tmp, mask * 2, repeat_times, repeat_params);
-    // step 3. change sign bit sub results which represented as int32_t into half which only keep the results of sign
-    // bit
-    CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
-    // step 4. calculate the weighted values of sign bit and sum them up
-    CalcWeightedTensorNormal(sign_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(8),
-                             half(2));
-    // step 5. get the value bits of src0 and src1
-    AscendC::Duplicate(inner_dup, uint32_t(0x7FFFFFFF), inner_dup.GetSize());
-    AscendC::LocalTensor<uint16_t> src0_tmp = src0.ReinterpretCast<uint16_t>();
-    AscendC::LocalTensor<uint16_t> src1_tmp = src1.ReinterpretCast<uint16_t>();
-    AscendC::PipeBarrier<PIPE_V>();
-    repeat_params = {1, 1, 1, dst_stride, src_repeat_stride, src_repeat_stride};
-    AscendC::And(src0_bits, src0_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-    if (src1_is_one_block) {
-      repeat_params = {1, 0, 1, dst_stride, 0, src_repeat_stride};
-    }
-    AscendC::And(src1_bits, src1_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-    // step 6. sub the two value bits interval, and change the result into 0/1/-1
-    repeat_params = {1, 1, 1, dst_stride, src_repeat_stride, src_repeat_stride};
-    AscendC::PipeBarrier<PIPE_V>();
-    AscendC::Sub(src0_bits_tmp, src0_bits_tmp, src1_bits_tmp, mask * 2, repeat_times, repeat_params);
-    UnaryRepeatParams unary_repeat_params = {1, 1, src_repeat_stride, src_repeat_stride};
-    AscendC::PipeBarrier<PIPE_V>();
-    AscendC::Maxs(src0_bits_tmp, src0_bits_tmp, -1, mask * 2, repeat_times, unary_repeat_params);
-    AscendC::PipeBarrier<PIPE_V>();
-    AscendC::Mins(src0_bits_tmp, src0_bits_tmp, 1, mask * 2, repeat_times, unary_repeat_params);
-    // step 7. change value bits sub results which represented as int32_t into half which only keep the results of value
-    // bits
-    CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
-
-    // step 8. calculate the weighted values of value bits and sum them up.
-    CalcWeightedTensorNormal(value_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(4),
-                             half(1));
-    // step 9. sum up the results of sign bit and value bits, change the result into 0/1
-    repeat_params = {1, 1, 1, 1, 4, 4};
-    AscendC::PipeBarrier<PIPE_V>();
-    AscendC::Add(sign_res, sign_res, value_res, mask, repeat_times, repeat_params);
-    AscendC::PipeBarrier<PIPE_V>();
-    unary_repeat_params = {1, 1, 1, 1};
-    if (mode == CMPMODE::GT) {
-      AscendC::Maxs(sign_res, sign_res, half(0), mask, repeat_times, unary_repeat_params);
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Mins(sign_res, sign_res, half(1), mask, repeat_times, unary_repeat_params);
-      // step 10. cast the final result into int8
-      unary_repeat_params = {1, 1, dst_repeat_stride, 1};
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Cast(dst, sign_res, AscendC::RoundMode::CAST_NONE, mask, repeat_times, unary_repeat_params);
-    } else {
-      AscendC::Maxs(sign_res, sign_res, half(-1), mask, repeat_times, unary_repeat_params);
-      AscendC::PipeBarrier<PIPE_V>();
-
-      AscendC::Mins(sign_res, sign_res, half(0), mask, repeat_times, unary_repeat_params);
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Adds(sign_res, sign_res, half(1), mask, repeat_times, unary_repeat_params);
-      // step 10. cast the final result into int8
-      unary_repeat_params = {1, 1, dst_repeat_stride, 1};
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Cast(dst, sign_res, AscendC::RoundMode::CAST_NONE, mask, repeat_times, unary_repeat_params);
-    }
-  } else {
-    uint32_t element_extent = last_axis / elem_in_one_repeat;
-    uint32_t element_reminder = last_axis - element_extent * elem_in_one_repeat;
-    for (uint32_t outer_for = 0; outer_for < element_extent; outer_for++) {
-      uint32_t mask = elem_in_one_repeat;
-      uint8_t dst_stride = DivCeil(mask, (ONE_BLK_SIZE / sizeof(uint64_t)));
-      // step 1. Get src0 and src1 sign bit
-      GetSignBitTensorNormal(src0_bits, src0[outer_for * elem_in_one_repeat], inner_dup, mask, repeat_times,
-                             src_repeat_stride, dst_stride,
-                             src0[outer_for * elem_in_one_repeat].GetSize() * sizeof(int64_t) == ONE_BLK_SIZE);
-      if (src1_is_one_block) {
-        GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride,
-                               src1_is_one_block);
-      } else {
-        GetSignBitTensorNormal(src1_bits, src1[outer_for * elem_in_one_repeat], inner_dup, mask, repeat_times,
-                               src_repeat_stride, dst_stride, src1_is_one_block);
-      }
-      // step 2. use src0_bits to store sign bit sub results
-      AscendC::LocalTensor<int32_t> src0_bits_tmp = src0_bits.ReinterpretCast<int32_t>();
-      AscendC::LocalTensor<int32_t> src1_bits_tmp = src1_bits.ReinterpretCast<int32_t>();
-      AscendC::PipeBarrier<PIPE_V>();
-      BinaryRepeatParams repeat_params = {1, 1, 1, dst_stride, dst_stride, dst_stride};
-      AscendC::Sub(src0_bits_tmp, src0_bits_tmp, src1_bits_tmp, mask * 2, repeat_times, repeat_params);
-      // step 3. change sign bit sub results which represented as int32_t into half which only keep the results of sign
-      // bit
-      CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
-      // step 4. calculate the weighted values of sign bit and sum them up
-      CalcWeightedTensorNormal(sign_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(8),
-                               half(2));
-      // step 5. get the value bits of src0 and src1
-      AscendC::Duplicate(inner_dup, uint32_t(0x7FFFFFFF), inner_dup.GetSize());
-      AscendC::PipeBarrier<PIPE_V>();
-      repeat_params = {1, 1, 1, dst_stride, src_repeat_stride, src_repeat_stride};
-      AscendC::LocalTensor<uint16_t> src0_tmp = src0[outer_for * elem_in_one_repeat].ReinterpretCast<uint16_t>();
-      AscendC::And(src0_bits, src0_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-      if (src1_is_one_block) {
-        repeat_params = {1, 0, 1, dst_stride, 0, src_repeat_stride};
-        AscendC::LocalTensor<uint16_t> src1_tmp = src1.ReinterpretCast<uint16_t>();
-        AscendC::And(src1_bits, src1_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-      } else {
-        AscendC::LocalTensor<uint16_t> src1_tmp = src1[outer_for * elem_in_one_repeat].ReinterpretCast<uint16_t>();
-        AscendC::And(src1_bits, src1_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-      }
-      // step 6. sub the two value bits interval, and change the result into 0/1/-1
-      repeat_params = {1, 1, 1, dst_stride, dst_stride, dst_stride};
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Sub(src0_bits_tmp, src0_bits_tmp, src1_bits_tmp, mask * 2, repeat_times, repeat_params);
-      UnaryRepeatParams unary_repeat_params = {1, 1, dst_stride, dst_stride};
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Maxs(src0_bits_tmp, src0_bits_tmp, -1, mask * 2, repeat_times, unary_repeat_params);
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Mins(src0_bits_tmp, src0_bits_tmp, 1, mask * 2, repeat_times, unary_repeat_params);
-      // step 7. change value bits sub results which represented as int32_t into half which only keep the results of
-      // value bits
-      CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
-
-      // step 8. calculate the weighted values of value bits and sum them up.
-      CalcWeightedTensorNormal(value_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(4),
-                               half(1));
-      // step 9. sum up the results of sign bit and value bits, change the result into 0/1
-      repeat_params = {1, 1, 1, 2, 4, 4};
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Add(sign_res, sign_res, value_res, mask, repeat_times, repeat_params);
-      AscendC::PipeBarrier<PIPE_V>();
-      unary_repeat_params = {1, 1, 2, 2};
-      if (mode == CMPMODE::GT) {
-        AscendC::Maxs(sign_res, sign_res, half(0), mask, repeat_times, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Mins(sign_res, sign_res, half(1), mask, repeat_times, unary_repeat_params);
-        // step 10. cast the final result into int8
-        unary_repeat_params = {1, 1, dst_repeat_stride, 2};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(dst[outer_for * elem_in_one_repeat], sign_res, AscendC::RoundMode::CAST_NONE, mask, repeat_times,
-                      unary_repeat_params);
-      } else {
-        AscendC::Maxs(sign_res, sign_res, half(-1), mask, repeat_times, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-
-        AscendC::Mins(sign_res, sign_res, half(0), mask, repeat_times, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Adds(sign_res, sign_res, half(1), mask, repeat_times, unary_repeat_params);
-        // step 10. cast the final result into int8
-        unary_repeat_params = {1, 1, dst_repeat_stride, 2};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(dst[outer_for * elem_in_one_repeat], sign_res, AscendC::RoundMode::CAST_NONE, mask, repeat_times,
-                      unary_repeat_params);
-      }
-    }
-    if (element_reminder != 0) {
-      uint32_t mask = element_reminder;
-      uint8_t dst_stride = DivCeil(mask, (ONE_BLK_SIZE / sizeof(uint64_t)));
-      // step 1. Get src0 and src1 sign bit
-      GetSignBitTensorNormal(src0_bits, src0[element_extent * elem_in_one_repeat], inner_dup, mask, repeat_times,
-                             src_repeat_stride, dst_stride,
-                             src0[element_extent * elem_in_one_repeat].GetSize() * sizeof(int64_t) == ONE_BLK_SIZE);
-      if (src1_is_one_block) {
-        GetSignBitTensorNormal(src1_bits, src1, inner_dup, mask, repeat_times, src_repeat_stride, dst_stride,
-                               src1_is_one_block);
-      } else {
-        GetSignBitTensorNormal(src1_bits, src1[element_extent * elem_in_one_repeat], inner_dup, mask, repeat_times,
-                               src_repeat_stride, dst_stride, src1_is_one_block);
-      }
-      // step 2. use src0_bits to store sign bit sub results
-      AscendC::LocalTensor<int32_t> src0_bits_tmp = src0_bits.ReinterpretCast<int32_t>();
-      AscendC::LocalTensor<int32_t> src1_bits_tmp = src1_bits.ReinterpretCast<int32_t>();
-      AscendC::PipeBarrier<PIPE_V>();
-      BinaryRepeatParams repeat_params = {1, 1, 1, dst_stride, dst_stride, dst_stride};
-      AscendC::Sub(src0_bits_tmp, src0_bits_tmp, src1_bits_tmp, mask * 2, repeat_times, repeat_params);
-      // step 3. change sign bit sub results which represented as int32_t into half which only keep the results of sign
-      // bit
-      CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
-      // step 4. calculate the weighted values of sign bit and sum them up
-      CalcWeightedTensorNormal(sign_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(8),
-                               half(2));
-      // step 5. get the value bits of src0 and src1
-      AscendC::Duplicate(inner_dup, uint32_t(0x7FFFFFFF), inner_dup.GetSize());
-      AscendC::PipeBarrier<PIPE_V>();
-      repeat_params = {1, 1, 1, dst_stride, src_repeat_stride, src_repeat_stride};
-      AscendC::LocalTensor<uint16_t> src0_tmp = src0[element_extent * elem_in_one_repeat].ReinterpretCast<uint16_t>();
-      AscendC::And(src0_bits, src0_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-      if (src1_is_one_block) {
-        repeat_params = {1, 0, 1, dst_stride, 0, src_repeat_stride};
-        AscendC::LocalTensor<uint16_t> src1_tmp = src1.ReinterpretCast<uint16_t>();
-        AscendC::And(src1_bits, src1_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-      } else {
-        AscendC::LocalTensor<uint16_t> src1_tmp = src1[element_extent * elem_in_one_repeat].ReinterpretCast<uint16_t>();
-        AscendC::And(src1_bits, src1_tmp, inner_dup_tmp, mask * 4, repeat_times, repeat_params);
-      }
-      // step 6. sub the two value bits interval, and change the result into 0/1/-1
-      repeat_params = {1, 1, 1, dst_stride, dst_stride, dst_stride};
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Sub(src0_bits_tmp, src0_bits_tmp, src1_bits_tmp, mask * 2, repeat_times, repeat_params);
-      UnaryRepeatParams unary_repeat_params = {1, 1, dst_stride, dst_stride};
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Maxs(src0_bits_tmp, src0_bits_tmp, -1, mask * 2, repeat_times, unary_repeat_params);
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Mins(src0_bits_tmp, src0_bits_tmp, 1, mask * 2, repeat_times, unary_repeat_params);
-      // step 7. change value bits sub results which represented as int32_t into half which only keep the results of
-      // value bits
-      CastTensorToHalfNormal(sub_res, src0_bits, src1_bits, inner_dup, mask, repeat_times, dst_stride);
-
-      // step 8. calculate the weighted values of value bits and sum them up.
-      CalcWeightedTensorNormal(value_res, sub_res.ReinterpretCast<half>(), inner_dup, mask, repeat_times, half(4),
-                               half(1));
-      // step 9. sum up the results of sign bit and value bits, change the result into 0/1
-      repeat_params = {1, 1, 1, 2, 4, 4};
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Add(sign_res, sign_res, value_res, mask, repeat_times, repeat_params);
-      AscendC::PipeBarrier<PIPE_V>();
-      unary_repeat_params = {1, 1, 2, 2};
-      if (mode == CMPMODE::GT) {
-        AscendC::Maxs(sign_res, sign_res, half(0), mask, repeat_times, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Mins(sign_res, sign_res, half(1), mask, repeat_times, unary_repeat_params);
-        // step 10. cast the final result into int8
-        unary_repeat_params = {1, 1, dst_repeat_stride, 2};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(dst[element_extent * elem_in_one_repeat], sign_res, AscendC::RoundMode::CAST_NONE, mask,
-                      repeat_times, unary_repeat_params);
-      } else {
-        AscendC::Maxs(sign_res, sign_res, half(-1), mask, repeat_times, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-
-        AscendC::Mins(sign_res, sign_res, half(0), mask, repeat_times, unary_repeat_params);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Adds(sign_res, sign_res, half(1), mask, repeat_times, unary_repeat_params);
-        // step 10. cast the final result into int8
-        unary_repeat_params = {1, 1, dst_repeat_stride, 2};
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(dst[element_extent * elem_in_one_repeat], sign_res, AscendC::RoundMode::CAST_NONE, mask,
-                      repeat_times, unary_repeat_params);
-      }
-    }
+    CompareExtendInt64GtGeLeTail<mode>(dst, src0, src1, repeat_times, last_axis, input_last_dim_stride,
+                                       output_last_dim_stride, tmp_buf, src1_is_one_block);
+    return;
+  }
+  const uint32_t max_rt = Int64CompareMaxRepeats(tmp_buf.GetSize(), repeat_times, last_axis, false);
+  if (max_rt == 0U) {
+    KERNEL_LOG(KERNEL_ERROR, "tmp_buf is too small for int64 compare(GT/GE/LE): size=%u, need=%u for one repeat.",
+               tmp_buf.GetSize(), Int64CompareTmpBytes(1U, last_axis, false));
+    ASSERT(false);
+    return;
+  }
+  const bool src0_is_one_block = src0.GetSize() * sizeof(int64_t) == ONE_BLK_SIZE;
+  for (uint32_t offset = 0U; offset < repeat_times; offset += max_rt) {
+    const uint32_t rpt = KernelUtils::Min(max_rt, static_cast<uint32_t>(repeat_times) - offset);
+    CompareExtendInt64GtGeLeOnce<mode>(
+        dst[offset * output_last_dim_stride], src0[src0_is_one_block ? 0U : offset * input_last_dim_stride],
+        src1_is_one_block ? src1 : src1[offset * input_last_dim_stride], static_cast<uint8_t>(rpt), last_axis,
+        input_last_dim_stride, output_last_dim_stride, tmp_buf, src1_is_one_block);
   }
 }
+
 template <typename T, CMPMODE mode>
 inline __aicore__ void CompareExtendRepeat(const AscendC::LocalTensor<uint8_t> &dst,  // output
                                            const AscendC::LocalTensor<T> &src0,       // input 0 is a tensor

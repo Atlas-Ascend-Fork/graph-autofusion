@@ -135,8 +135,8 @@ class Optimizer {
   Status AutoScheduler(const ::ascir::HintGraph &hint_graph, ScheduleTask &schedule_task,
                        std::vector<::ascir::ScheduledResult> &scheduled_results) const;
   static void TryEnableGroupParallel(::ascir::FusedScheduledResult &fused_scheduled_result);
-  static Status LoadOpSeqAdjust(const af::AscGraph &impl_graph);
-  static void ExecSeqAdvancedOfLoad(const ::ascir::FusedScheduledResult &fused_scheduled_result);
+  static Status LoadOpSeqAdjust(af::AscGraph &impl_graph);
+  static void ExecSeqAdvancedOfLoad(::ascir::FusedScheduledResult &fused_scheduled_result);
   OptimizerOptions options_;
 };
 }  // namespace optimize

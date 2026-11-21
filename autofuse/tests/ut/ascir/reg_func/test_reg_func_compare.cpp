@@ -773,7 +773,8 @@ TEST_F(CalcCompareTmpSizeTest, CalcGTTmpSize_INT64_ShouldReturnCorrectSize_WhenN
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcGtTmpSize(*node);
   ASSERT_EQ(result.size(), 1);
-  ASSERT_EQ(result[0]->size, sym::Align(s1, 32) * s0 * af::Symbol(8) * af::Symbol(5));
+  // GetTmpBuffer 会为 tmp 公式统一套 Min(size, MAX_TMP_BUFFER_SIZE) 截顶，与同文件其他用例断言方式一致
+  ASSERT_EQ(result[0]->size, sym::Min(sym::Align(s1, 32) * s0 * af::Symbol(8) * af::Symbol(5), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
 }
 /**
