@@ -13,6 +13,7 @@
 #include "ascendc_ir.h"
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
+#include "codegen/ascendc_api_registry.h"
 #include "codegen_kernel.h"
 #include "common_utils.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
@@ -38,6 +39,22 @@ TEST(IndirectLoadCodegenImplTest, LoadsApiHeadersInDeclarationOrder) {
                                              "indirect_load_simd_reg_base.h", "indirect_load_sk_reg_base.h",
                                              "indirect_load_simt_reg_base.h", "transpose_reg_base.h"};
   EXPECT_EQ(headers, expected);
+}
+
+// The affine fast path of BuildIndirectLoadSimdStridedOffsets builds the
+// offsets table row by row with VEC ops (Cast/Muls/Adds). When the row pitch
+// (slice_count * 4B) is not 32B-aligned, odd rows stay 16B-aligned only and
+// the kernel hits a vector core exception (errcode 340, rand_fuzz_0251:
+// index_select(dim=3) with 12 broadcast indices). The inlined simd reg_base
+// content must keep the alignment guard and fall back to the scalar path.
+TEST(IndirectLoadCodegenImplTest, StridedOffsetsAffineFastPathKeepsUbAlignmentGuard) {
+  const auto &content = AscendCApiRegistry::GetInstance().GetFileContent("indirect_load_simd_reg_base.h");
+  ASSERT_NE(content.find("BuildIndirectLoadSimdStridedOffsets"), std::string::npos);
+  EXPECT_NE(content.find("IndirectLoadSimdStridedVecAligned"), std::string::npos);
+  // Row pitch guard: slice_count must be a multiple of 32B / sizeof(int32_t).
+  EXPECT_NE(content.find("dst_align_elems"), std::string::npos);
+  // Source guard: index outer strides must be multiples of 32B / sizeof(Index).
+  EXPECT_NE(content.find("src_align_elems"), std::string::npos);
 }
 
 struct ILTestGraph {
